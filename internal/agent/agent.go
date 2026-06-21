@@ -41,38 +41,32 @@ func Argv(kind, model string, extra ...string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unknown agent kind %q", kind)
 	}
-	path, err := resolve(bin)
-	if err != nil {
-		return nil, err
-	}
-	return append(append([]string{path}, args...), extra...), nil
+	return append(append([]string{resolve(bin)}, args...), extra...), nil
 }
 
-// resolve finds bin's absolute path. It first tries the current PATH, then falls
-// back to the user's login shell — so launches work even when the daemon's own
-// PATH is minimal (e.g. nvm/asdf-managed binaries not on the daemon's PATH).
-func resolve(bin string) (string, error) {
-	if filepathIsExplicit(bin) {
-		if _, err := os.Stat(bin); err == nil {
-			return bin, nil
-		}
+// resolve returns the best command to launch bin with. It tries, in order, the
+// resolver's own PATH and the user's login shell; if both miss (common when the
+// daemon's PATH is minimal, or for lazy-loaded nvm/asdf binaries the login shell
+// won't surface), it DEGRADES TO THE BARE NAME rather than failing — the tmux
+// window we hand it to inherits the *server's* environment (set at `amux up`
+// from the user's terminal), which can still resolve it. Never errors.
+func resolve(bin string) string {
+	if strings.ContainsRune(bin, '/') {
+		return bin // explicit path or relative command — pass through
 	}
 	if p, err := exec.LookPath(bin); err == nil {
-		return p, nil
+		return p
 	}
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	out, err := exec.Command(shell, "-lic", "command -v "+bin).Output()
-	if p := strings.TrimSpace(string(out)); err == nil && p != "" {
-		return p, nil
+	if out, err := exec.Command(shell, "-lic", "command -v "+bin).Output(); err == nil {
+		if p := strings.TrimSpace(string(out)); p != "" && strings.ContainsRune(p, '/') {
+			return p
+		}
 	}
-	return "", fmt.Errorf("%s not found on PATH (also tried %s -lic); install it or set AMUX_<AGENT>_BIN", bin, shell)
-}
-
-func filepathIsExplicit(p string) bool {
-	return strings.ContainsRune(p, '/')
+	return bin // let the tmux window's (server) environment resolve it
 }
 
 func envOr(key, def string) string {
