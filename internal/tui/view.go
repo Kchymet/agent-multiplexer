@@ -48,7 +48,7 @@ func (m *model) viewRail() string {
 			if s.Title != s.ID && !strings.Contains(s.Status, s.ID) {
 				sub = s.ID + " · " + s.Status
 			}
-			b.WriteString(statusColor(s.Status).Render(indent + "   " + truncate(sub, w-6)))
+			b.WriteString(stateColor(s.State).Render(indent + "   " + truncate(sub, w-6)))
 			b.WriteByte('\n')
 		}
 	}

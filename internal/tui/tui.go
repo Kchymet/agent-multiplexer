@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -235,18 +234,23 @@ var (
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
 )
 
-func statusColor(status string) lipgloss.Style {
-	switch {
-	case strings.HasPrefix(status, "running"), strings.HasPrefix(status, "busy"):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // green: live
-	case strings.HasPrefix(status, "idle"):
-		return dimStyle
+// stateColor styles a session's status sub-line by its activity state: green
+// while working, amber when blocked on the user, blue when ready, dim when idle.
+func stateColor(state string) lipgloss.Style {
+	switch state {
+	case core.StateRunning:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // green: working
+	case core.StateWaiting:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple: prompt awaiting you
+	case core.StateReady:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")) // blue: ready
 	default:
-		return dimStyle
+		return dimStyle // idle / unknown
 	}
 }
 
-// glyph encodes the row: console ⚙, root ▸, loop ∞, running ●, idle ○.
+// glyph encodes the row: console ⚙, root ▸, loop ∞; otherwise the agent's
+// activity state — running/waiting ●, ready ◐, idle ○.
 func glyph(s core.Session) string {
 	switch {
 	case s.Mode == "console":
@@ -255,10 +259,14 @@ func glyph(s core.Session) string {
 		return "▸"
 	case s.Mode == "loop":
 		return "∞"
-	case s.WindowID != "":
+	}
+	switch s.State {
+	case core.StateRunning, core.StateWaiting:
 		return "●"
+	case core.StateReady:
+		return "◐"
 	default:
-		return "○"
+		return "○" // idle / unknown
 	}
 }
 

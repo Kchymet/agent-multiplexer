@@ -152,15 +152,30 @@ func AttachRail(ctx context.Context, window string, railCmd ...string) error {
 // focusWorkPane selects the first non-rail pane in window so focus is on the
 // agent/shell, not the dashboard rail.
 func focusWorkPane(ctx context.Context, window string) {
+	if p := WorkPane(ctx, window); p != "" {
+		_, _ = Run(ctx, "select-pane", "-t", p)
+	}
+}
+
+// WorkPane returns the id of window's first non-rail pane (the agent/shell), or
+// "" if none can be found.
+func WorkPane(ctx context.Context, window string) string {
 	out, err := Run(ctx, "list-panes", "-t", window, "-F", "#{@amx}|#{pane_id}")
 	if err != nil {
-		return
+		return ""
 	}
 	for _, line := range strings.Split(out, "\n") {
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) == 2 && parts[0] != "rail" && parts[1] != "" {
-			_, _ = Run(ctx, "select-pane", "-t", parts[1])
-			return
+			return parts[1]
 		}
 	}
+	return ""
+}
+
+// CapturePane returns the visible text of pane target (the rendered screen, not
+// scrollback). A capture failure yields "".
+func CapturePane(ctx context.Context, target string) string {
+	out, _ := Run(ctx, "capture-pane", "-p", "-t", target)
+	return out
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"amux/internal/claudecfg"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -30,9 +31,10 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	var out []core.Session
 
 	// Control console, pinned first.
+	consoleState := agentState(ctx, running[console.ID], console.Dir(), console.SessionID)
 	out = append(out, core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
-		Mode: "console", Status: stateOf(running[console.ID]) + " · configure amux",
+		Mode: "console", State: consoleState, Status: consoleState + " · configure amux",
 		Cwd: console.Dir(), WindowID: running[console.ID], CanAttach: true, CanKill: false,
 	})
 
@@ -45,28 +47,30 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		if err != nil {
 			return nil, err
 		}
-		anyRunning := false
-		for _, s := range subs {
-			if running[s.ID] != "" {
-				anyRunning = true
+		// State each sub once; the root inherits its most demanding child's state
+		// (waiting > running > ready > idle), so a blocked agent surfaces upward.
+		subStates := make([]string, len(subs))
+		rootState := core.StateIdle
+		for i, s := range subs {
+			subStates[i] = agentState(ctx, running[s.ID], s.Dir, s.ClaudeID)
+			if stateRank(subStates[i]) > stateRank(rootState) {
+				rootState = subStates[i]
 			}
-		}
-		rootWin := ""
-		if anyRunning {
-			rootWin = "running" // sentinel: at least one sub is live (for glyph)
 		}
 		out = append(out, core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", IsRoot: true, Mode: r.Mode,
-			Status:    fmt.Sprintf("%s · %d agent%s", stateOf(rootWin), len(subs), plural(len(subs))),
+			State:     rootState,
+			Status:    fmt.Sprintf("%s · %d agent%s", rootState, len(subs), plural(len(subs))),
 			Cwd:       r.Dir,
 			CanAttach: true, // Enter opens all sub-sessions
 			CanKill:   true, // delete the whole root
 		})
-		for _, s := range subs {
+		for i, s := range subs {
 			out = append(out, core.Session{
 				ID: s.ID, Title: subLabel(s), Source: "workspace", RootID: s.RootID,
 				Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
-				Status:    stateOf(running[s.ID]) + subSuffix(s),
+				State:     subStates[i],
+				Status:    subStates[i] + subSuffix(s),
 				Cwd:       s.Dir,
 				WindowID:  running[s.ID],
 				CanAttach: true,
@@ -97,11 +101,47 @@ func subSuffix(s store.Session) string {
 	return ""
 }
 
-func stateOf(win string) string {
-	if win != "" {
-		return "running"
+// agentState classifies a session's activity:
+//   - StateIdle:    no live tmux window (the agent isn't running)
+//   - StateRunning: window live and the agent has an active turn
+//   - StateWaiting: window live, turn done, blocked on a prompt awaiting input
+//   - StateReady:   window live, turn done, ready for the next message
+//
+// Sessions without a pinned Claude id can't be introspected, so a live window
+// is assumed to be running (the prior behavior for those).
+func agentState(ctx context.Context, win, dir, claudeID string) string {
+	if win == "" {
+		return core.StateIdle
 	}
-	return "idle"
+	if claudeID == "" {
+		return core.StateRunning
+	}
+	if claudecfg.TurnActive(dir, claudeID) {
+		return core.StateRunning
+	}
+	// Turn finished: distinguish "blocked on a prompt" from "ready" by looking at
+	// what the agent's pane is actually showing.
+	if pane := tmuxctl.WorkPane(ctx, win); pane != "" {
+		if claudecfg.PromptBlocked(tmuxctl.CapturePane(ctx, pane)) {
+			return core.StateWaiting
+		}
+	}
+	return core.StateReady
+}
+
+// stateRank orders states by how much they want the user's attention, highest
+// first, so a root can inherit its most demanding child's state.
+func stateRank(state string) int {
+	switch state {
+	case core.StateWaiting:
+		return 3
+	case core.StateRunning:
+		return 2
+	case core.StateReady:
+		return 1
+	default: // idle / unknown
+		return 0
+	}
 }
 
 func plural(n int) string {
