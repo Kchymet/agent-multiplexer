@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 
 	"amux/internal/core"
@@ -58,6 +59,9 @@ type DB struct{ sql *sql.DB }
 // Open opens (creating if needed) the store, applies the schema, and imports any
 // legacy JSON registry once.
 func Open() (*DB, error) {
+	if err := os.MkdirAll(core.DataDir(), 0o755); err != nil {
+		return nil, err
+	}
 	dsn := "file:" + core.DBPath() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
 	sqldb, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -72,6 +76,7 @@ func Open() (*DB, error) {
 		// Non-fatal: a failed import shouldn't block usage.
 		_ = err
 	}
+	_ = d.BackfillWorkspaceRepos()
 	return d, nil
 }
 

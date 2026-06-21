@@ -25,6 +25,56 @@ func SubDir(rootID, subID, repo, branch string) string {
 	return filepath.Join(RootDir(rootID), label)
 }
 
+// AgentDir is an agent's base directory; it holds one worktree subdir per repo
+// the agent works on, so the agent operates across its own worktrees only.
+func AgentDir(rootID, agentID string) string {
+	return filepath.Join(core.SessionsDir(), rootID, agentID)
+}
+
+// SplitRepos parses a comma-separated repo list (trimming blanks).
+func SplitRepos(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// JoinRepos serializes a repo list.
+func JoinRepos(repos []string) string { return strings.Join(repos, ",") }
+
+// BackfillWorkspaceRepos gives each root (workspace) an attached-repo list — the
+// union of its agents' repos — for roots that don't have one yet. Idempotent.
+func (d *DB) BackfillWorkspaceRepos() error {
+	roots, err := d.Roots()
+	if err != nil {
+		return err
+	}
+	for _, r := range roots {
+		if strings.TrimSpace(r.Repo) != "" {
+			continue
+		}
+		subs, _ := d.Children(r.ID)
+		seen := map[string]bool{}
+		var union []string
+		for _, s := range subs {
+			for _, rp := range SplitRepos(s.Repo) {
+				if !seen[rp] {
+					seen[rp] = true
+					union = append(union, rp)
+				}
+			}
+		}
+		if len(union) > 0 {
+			r.Repo = JoinRepos(union)
+			_ = d.PutSession(r)
+		}
+	}
+	return nil
+}
+
 // legacy mirrors the old JSON registry shape (pre-SQLite).
 type legacy struct {
 	Repos []struct {

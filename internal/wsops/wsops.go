@@ -1,12 +1,14 @@
 // Package wsops holds session lifecycle operations shared by the daemon (rail
-// actions) and the CLI. Sessions are a one-level hierarchy: a root container and
-// its sub-sessions, each binding one agent to one worktree.
+// actions) and the CLI. A workspace (root) is a template that attaches repos but
+// checks out nothing itself; its agents (subs) each work on a subset of those
+// repos, one worktree per repo under the agent's own directory.
 package wsops
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"amux/internal/agent"
@@ -17,19 +19,19 @@ import (
 	"amux/internal/tmuxctl"
 )
 
-// SubSpec describes a sub-session to create under a root.
-type SubSpec struct {
-	Repo   string // tracked repo name; "" => no worktree, agent runs in its own dir
-	Branch string // git branch (defaults to amux/<rootID> when a repo is given)
-	Agent  string // defaults to "claude"
-	Model  string // optional model override
-	Mode   string // task | loop (defaults to task)
-	Prompt string // initial prompt for this agent
+// AgentSpec describes an agent to create under a workspace.
+type AgentSpec struct {
+	Repos  []string // subset of the workspace's repos this agent works on
+	Agent  string   // defaults to "claude"
+	Model  string   // optional model override
+	Mode   string   // task | loop (defaults to task)
+	Prompt string   // initial prompt
 }
 
-// CreateRoot creates a root container plus its initial sub-sessions and returns
-// the root id. A root always has at least one sub (a default agent if none given).
-func CreateRoot(ctx context.Context, name string, subs []SubSpec) (string, error) {
+// CreateWorkspace creates a workspace (root) that attaches repos but checks out
+// nothing itself, optionally with a default agent that uses all of them. Returns
+// the workspace id.
+func CreateWorkspace(ctx context.Context, name string, repos []string, withDefaultAgent bool) (string, error) {
 	db, err := store.Open()
 	if err != nil {
 		return "", err
@@ -37,74 +39,90 @@ func CreateRoot(ctx context.Context, name string, subs []SubSpec) (string, error
 	defer db.Close()
 
 	rootID := db.NewID()
-	dir := store.RootDir(rootID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
 	if err := db.PutSession(store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name),
-		Mode: store.ModeTask, Dir: dir, Created: store.Now(),
+		Mode: store.ModeTask, Repo: store.JoinRepos(repos), Created: store.Now(),
 	}); err != nil {
 		return "", err
 	}
-	if len(subs) == 0 {
-		subs = []SubSpec{{Agent: "claude", Mode: store.ModeTask}} // default agent
-	}
-	for _, sp := range subs {
-		if _, err := addSub(ctx, db, rootID, sp); err != nil {
+	if withDefaultAgent {
+		if _, err := addAgent(ctx, db, rootID, AgentSpec{Repos: repos, Agent: "claude", Mode: store.ModeTask}); err != nil {
 			return rootID, err
 		}
 	}
 	return rootID, nil
 }
 
-// AddSub adds a sub-session to an existing root.
-func AddSub(ctx context.Context, rootID string, sp SubSpec) (store.Session, error) {
+// AddAgent adds an agent (sub-session) to a workspace.
+func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session, error) {
 	db, err := store.Open()
 	if err != nil {
 		return store.Session{}, err
 	}
 	defer db.Close()
-	if root, ok, _ := db.GetSession(rootID); !ok || !root.IsRoot() {
-		return store.Session{}, fmt.Errorf("no such root %q", rootID)
+	root, ok, _ := db.GetSession(rootID)
+	if !ok || !root.IsRoot() {
+		return store.Session{}, fmt.Errorf("no such workspace %q", rootID)
 	}
-	return addSub(ctx, db, rootID, sp)
+	return addAgent(ctx, db, rootID, spec)
 }
 
-func addSub(ctx context.Context, db *store.DB, rootID string, sp SubSpec) (store.Session, error) {
-	subID := db.NewID()
-	sub := store.Session{
-		ID: subID, RootID: rootID,
-		Agent: defaultStr(sp.Agent, "claude"), Model: sp.Model,
-		Mode: defaultStr(sp.Mode, store.ModeTask),
-		Repo: sp.Repo, Prompt: sp.Prompt,
-		ClaudeID: store.NewUUID(), Created: store.Now(),
-	}
-	if sp.Repo != "" {
-		repo, ok, err := db.Repo(sp.Repo)
-		if err != nil || !ok {
-			return store.Session{}, fmt.Errorf("unknown repo %q", sp.Repo)
-		}
-		sub.Branch = defaultStr(sp.Branch, "amux/"+rootID)
-		sub.Dir = store.SubDir(rootID, subID, sp.Repo, sub.Branch)
-		if err := git.AddWorktree(ctx, repo.GitDir, sub.Dir, sub.Branch); err != nil {
-			return store.Session{}, err
-		}
-	} else {
-		// No repo: a plain agent in its own dir under the root.
-		sub.Dir = store.SubDir(rootID, subID, "", "")
-		if err := os.MkdirAll(sub.Dir, 0o755); err != nil {
-			return store.Session{}, err
-		}
-	}
-	if err := db.PutSession(sub); err != nil {
+func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) (store.Session, error) {
+	agentID := db.NewID()
+	dir := store.AgentDir(rootID, agentID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return store.Session{}, err
 	}
-	return sub, nil
+	branch := "amux/" + rootID + "/" + agentID
+	for _, repoName := range spec.Repos {
+		repo, ok, err := db.Repo(repoName)
+		if err != nil || !ok {
+			return store.Session{}, fmt.Errorf("unknown repo %q", repoName)
+		}
+		if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(dir, repoName), branch); err != nil {
+			return store.Session{}, err
+		}
+	}
+	a := store.Session{
+		ID: agentID, RootID: rootID,
+		Agent: defaultStr(spec.Agent, "claude"), Model: spec.Model,
+		Mode: defaultStr(spec.Mode, store.ModeTask),
+		Repo: store.JoinRepos(spec.Repos), Branch: branch, Dir: dir,
+		ClaudeID: store.NewUUID(), Prompt: spec.Prompt, Created: store.Now(),
+	}
+	if err := db.PutSession(a); err != nil {
+		return store.Session{}, err
+	}
+	return a, nil
 }
 
-// OpenByID opens a session. The reserved console id opens the control console;
-// a root opens all its sub-sessions (switching to the first); a sub opens itself.
+// AttachRepo adds a repo to a workspace's attached set (template only; existing
+// agents are unchanged — assign it to an agent by creating/adding one).
+func AttachRepo(rootID, repo string) error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	root, ok, _ := db.GetSession(rootID)
+	if !ok || !root.IsRoot() {
+		return fmt.Errorf("no such workspace %q", rootID)
+	}
+	if _, ok, _ := db.Repo(repo); !ok {
+		return fmt.Errorf("unknown repo %q", repo)
+	}
+	repos := store.SplitRepos(root.Repo)
+	for _, r := range repos {
+		if r == repo {
+			return nil // already attached
+		}
+	}
+	root.Repo = store.JoinRepos(append(repos, repo))
+	return db.PutSession(root)
+}
+
+// OpenByID opens a session: the console, a workspace (opens all its agents), or
+// an agent (its window).
 func OpenByID(ctx context.Context, id string) error {
 	if id == console.ID {
 		if err := console.Ensure(); err != nil {
@@ -125,22 +143,24 @@ func OpenByID(ctx context.Context, id string) error {
 		return fmt.Errorf("no such session %q", id)
 	}
 	if s.IsRoot() {
-		subs, err := db.Children(id)
+		agents, err := db.Children(id)
 		if err != nil {
 			return err
 		}
-		for i, sub := range subs {
-			if err := launch(ctx, sub); err != nil {
+		if len(agents) == 0 {
+			return fmt.Errorf("workspace %q has no agents yet (add one with `a`)", id)
+		}
+		for _, a := range agents {
+			if err := launch(ctx, a); err != nil {
 				return err
 			}
-			_ = i
 		}
 		return nil
 	}
 	return launch(ctx, s)
 }
 
-// launch opens (or switches to) one session's agent window.
+// launch opens (or switches to) one agent's window.
 func launch(ctx context.Context, s store.Session) error {
 	if win := tmuxctl.WorkspaceWindows(ctx)[s.ID]; win != "" {
 		_ = tmuxctl.SwitchClient(ctx, win)
@@ -153,7 +173,6 @@ func launch(ctx context.Context, s store.Session) error {
 		_ = claudecfg.TrustDir(s.Dir)
 	}
 
-	// Resume the agent's session on reopen; first launch starts fresh.
 	prompt := strings.TrimSpace(s.Prompt)
 	var extra []string
 	switch {
@@ -191,14 +210,14 @@ func launch(ctx context.Context, s store.Session) error {
 }
 
 func windowName(s store.Session) string {
-	if s.Repo != "" {
-		return s.Repo
+	if repos := store.SplitRepos(s.Repo); len(repos) > 0 {
+		return strings.Join(repos, "+")
 	}
 	return s.Display()
 }
 
-// DeleteByID deletes a session. The console can't be deleted (window is closed);
-// a root removes all its sub-sessions; a sub removes just itself.
+// DeleteByID deletes a session. The console can't be deleted (window closed); a
+// workspace removes all its agents; an agent removes just itself.
 func DeleteByID(ctx context.Context, id string) error {
 	if id == console.ID {
 		if win := tmuxctl.WorkspaceWindows(ctx)[id]; win != "" {
@@ -216,29 +235,28 @@ func DeleteByID(ctx context.Context, id string) error {
 		return fmt.Errorf("no such session %q", id)
 	}
 	if s.IsRoot() {
-		subs, _ := db.Children(id)
-		for _, sub := range subs {
-			removeSub(ctx, db, sub)
+		agents, _ := db.Children(id)
+		for _, a := range agents {
+			removeAgent(ctx, db, a)
 		}
-		_ = os.RemoveAll(s.Dir)
+		_ = os.RemoveAll(store.RootDir(id))
 		return db.DeleteSession(id)
 	}
-	removeSub(ctx, db, s)
+	removeAgent(ctx, db, s)
 	return nil
 }
 
-func removeSub(ctx context.Context, db *store.DB, sub store.Session) {
-	if win := tmuxctl.WorkspaceWindows(ctx)[sub.ID]; win != "" {
+func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
+	if win := tmuxctl.WorkspaceWindows(ctx)[a.ID]; win != "" {
 		_ = tmuxctl.KillWindow(ctx, win)
 	}
-	if sub.Repo != "" && sub.Branch != "" {
-		if repo, ok, _ := db.Repo(firstRepo(sub.Repo)); ok {
-			_ = git.RemoveWorktree(ctx, repo.GitDir, sub.Dir, sub.Branch)
+	for _, repoName := range store.SplitRepos(a.Repo) {
+		if repo, ok, _ := db.Repo(repoName); ok {
+			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, repoName), a.Branch)
 		}
-	} else {
-		_ = os.RemoveAll(sub.Dir)
 	}
-	_ = db.DeleteSession(sub.ID)
+	_ = os.RemoveAll(a.Dir)
+	_ = db.DeleteSession(a.ID)
 }
 
 // Rename sets a session's display name.
@@ -261,11 +279,4 @@ func defaultStr(v, def string) string {
 		return def
 	}
 	return v
-}
-
-func firstRepo(repo string) string {
-	if i := strings.IndexByte(repo, ','); i >= 0 {
-		return repo[:i]
-	}
-	return repo
 }

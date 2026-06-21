@@ -272,19 +272,24 @@ func cmdSession(args []string) error {
 		}
 		return sessionAdd(ctx, args[1])
 	case "create":
+		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
+		// Creates a workspace that attaches the repos, plus a default agent using all.
 		repos, cfg := parseCreateFlags(args[1:])
-		var subs []wsops.SubSpec
-		if len(repos) == 0 {
-			subs = []wsops.SubSpec{{Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt}}
-		}
-		for _, r := range repos {
-			subs = append(subs, wsops.SubSpec{Repo: r, Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt})
-		}
-		rootID, err := wsops.CreateRoot(ctx, cfg.name, subs)
+		rootID, err := wsops.CreateWorkspace(ctx, cfg.name, repos, true)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created session %s with %d agent(s)\n", rootID, len(subs))
+		fmt.Printf("created workspace %s (repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
+		return nil
+	case "attach":
+		// amux session attach <root-id> <repo> — attach a tracked repo to a workspace
+		if len(args) < 3 {
+			return fmt.Errorf("usage: amux session attach <root-id> <repo>")
+		}
+		if err := wsops.AttachRepo(args[1], args[2]); err != nil {
+			return err
+		}
+		fmt.Printf("attached %s to workspace %s\n", args[2], args[1])
 		return nil
 	case "open":
 		if len(args) < 2 {
@@ -319,57 +324,62 @@ func sessionList() error {
 		return err
 	}
 	for _, r := range roots {
-		fmt.Printf("%-8s %s\n", r.ID, r.Display())
+		fmt.Printf("%-8s %-20s repos: %s\n", r.ID, r.Display(), orNone(strings.ReplaceAll(r.Repo, ",", ", ")))
 		subs, _ := db.Children(r.ID)
 		for _, s := range subs {
-			info := s.Repo
-			if s.Branch != "" {
-				info += " · " + s.Branch
-			}
-			fmt.Printf("  %-8s %-8s %-6s %s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode, info)
+			fmt.Printf("  %-8s %-8s %-6s %s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode,
+				strings.ReplaceAll(s.Repo, ",", "+"))
 		}
 	}
 	return nil
 }
 
 // sessionNew is the interactive create page (run in a tmux popup): name the
-// session, drill in to add one or more agents (each a repo+branch or a plain
-// agent), then Create.
+// workspace, attach repos, optionally configure specific agents over a subset of
+// those repos (otherwise a default agent uses all), then Create.
 func sessionNew(ctx context.Context) error {
 	in := bufio.NewReader(os.Stdin)
 	name := ""
-	var subs []wsops.SubSpec
+	var repos []string
+	var agents []wsops.AgentSpec
 
 	for {
 		menu := []string{
-			fmt.Sprintf("Name       › %s", orOptional(name)),
-			"+ add agent",
+			fmt.Sprintf("Name   › %s", orOptional(name)),
+			fmt.Sprintf("Repos  › %s", orNone(strings.Join(repos, ", "))),
+			"+ add agent (a subset of these repos)",
 		}
-		for i, s := range subs {
-			menu = append(menu, fmt.Sprintf("  agent %d: %s", i+1, describeSub(s)))
+		for i, a := range agents {
+			menu = append(menu, fmt.Sprintf("  agent %d: %s", i+1, describeAgent(a)))
 		}
-		menu = append(menu, "────────────────", "✓ Create session", "✗ Cancel")
+		menu = append(menu, "────────────────", "✓ Create workspace", "✗ Cancel")
 
-		choice, err := fzfMenu("new session", menu)
+		choice, err := fzfMenu("new workspace", menu)
 		if err != nil {
 			return nil // Esc
 		}
 		switch {
 		case strings.HasPrefix(choice, "Name"):
-			name = promptLine(in, "Session name (optional)")
+			name = promptLine(in, "Workspace name (optional)")
+		case strings.HasPrefix(choice, "Repos"):
+			repos = pickRepos(ctx, in, "attach repos (TAB)")
 		case strings.HasPrefix(choice, "+ add agent"):
-			if sp, ok := configureSub(ctx, in); ok {
-				subs = append(subs, sp)
+			if a, ok := configureAgent(ctx, in, repos); ok {
+				agents = append(agents, a)
 			}
 		case strings.HasPrefix(strings.TrimSpace(choice), "agent "):
-			// selecting an agent removes it
-			if i := agentIndex(choice); i >= 0 && i < len(subs) {
-				subs = append(subs[:i], subs[i+1:]...)
+			if i := agentIndex(choice); i >= 0 && i < len(agents) {
+				agents = append(agents[:i], agents[i+1:]...)
 			}
 		case strings.HasPrefix(choice, "✓"):
-			rootID, err := wsops.CreateRoot(ctx, name, subs)
+			rootID, err := wsops.CreateWorkspace(ctx, name, repos, len(agents) == 0)
 			if err != nil {
 				return err
+			}
+			for _, a := range agents {
+				if _, err := wsops.AddAgent(ctx, rootID, a); err != nil {
+					return err
+				}
 			}
 			return wsops.OpenByID(ctx, rootID)
 		case strings.HasPrefix(choice, "✗"):
@@ -380,62 +390,79 @@ func sessionNew(ctx context.Context) error {
 
 func sessionAdd(ctx context.Context, rootID string) error {
 	in := bufio.NewReader(os.Stdin)
-	sp, ok := configureSub(ctx, in)
+	var avail []string
+	if db, err := store.Open(); err == nil {
+		if root, ok, _ := db.GetSession(rootID); ok {
+			avail = store.SplitRepos(root.Repo)
+		}
+		db.Close()
+	}
+	a, ok := configureAgent(ctx, in, avail)
 	if !ok {
 		return nil
 	}
-	sub, err := wsops.AddSub(ctx, rootID, sp)
+	sub, err := wsops.AddAgent(ctx, rootID, a)
 	if err != nil {
 		return err
 	}
 	return wsops.OpenByID(ctx, sub.ID)
 }
 
-// configureSub walks the user through one agent's settings.
-func configureSub(ctx context.Context, in *bufio.Reader) (wsops.SubSpec, bool) {
-	repo := pickRepoForSub(ctx, in)
-	sp := wsops.SubSpec{Agent: "claude", Repo: repo}
-	if repo != "" {
-		sp.Branch = promptLine(in, "Branch (optional, default amux/<id>)")
+// configureAgent walks the user through one agent: which repos (a subset of the
+// workspace's, or any tracked repo if the workspace has none yet), mode, model,
+// prompt.
+func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (wsops.AgentSpec, bool) {
+	var repos []string
+	if len(available) > 0 {
+		repos, _ = fzfMultiSelect("repos for this agent (TAB)", available)
+	} else {
+		repos = pickRepos(ctx, in, "repos for this agent (TAB)")
 	}
-	sp.Mode = pickMode()
-	sp.Model = promptLine(in, "Model (optional, e.g. opus / sonnet)")
-	sp.Prompt = promptLine(in, "Initial prompt (optional)")
-	return sp, true
+	a := wsops.AgentSpec{Agent: "claude", Repos: repos}
+	a.Mode = pickMode()
+	a.Model = promptLine(in, "Model (optional, e.g. opus / sonnet)")
+	a.Prompt = promptLine(in, "Initial prompt (optional)")
+	return a, true
 }
 
-// pickRepoForSub lets the user choose a tracked repo, no repo, or clone one.
-func pickRepoForSub(ctx context.Context, in *bufio.Reader) string {
-	const none = "○  no repo (plain agent)"
+// pickRepos multi-selects tracked repos, offering to clone/add new ones.
+func pickRepos(ctx context.Context, in *bufio.Reader, prompt string) []string {
 	const clone = "➕  add / clone a repo…"
 	for {
 		db, err := store.Open()
 		if err != nil {
-			return ""
+			return nil
 		}
-		repos, _ := db.Repos()
+		tracked, _ := db.Repos()
 		db.Close()
-		items := []string{none, clone}
-		for _, r := range repos {
+		items := []string{clone}
+		for _, r := range tracked {
 			items = append(items, r.Name)
 		}
-		choice, err := fzfSelect("repo for this agent", items)
+		picks, err := fzfMultiSelect(prompt, items)
 		if err != nil {
-			return "" // cancel -> plain agent
+			return nil
 		}
-		switch choice {
-		case none:
-			return ""
-		case clone:
-			db2, _ := store.Open()
-			if db2 != nil {
+		var sel []string
+		doClone := false
+		for _, p := range picks {
+			if p == clone {
+				doClone = true
+			} else {
+				sel = append(sel, p)
+			}
+		}
+		if doClone {
+			if db2, e := store.Open(); e == nil {
 				_, _ = pickAndCloneRepos(ctx, db2, in)
 				db2.Close()
 			}
-			continue
-		default:
-			return choice
+			if len(sel) > 0 {
+				return sel
+			}
+			continue // reopen with the freshly-cloned repo available
 		}
+		return sel
 	}
 }
 
@@ -450,20 +477,23 @@ func pickMode() string {
 	return store.ModeLoop
 }
 
-func describeSub(s wsops.SubSpec) string {
-	repo := s.Repo
-	if repo == "" {
-		repo = "(plain agent)"
+func describeAgent(a wsops.AgentSpec) string {
+	repos := "(plain agent)"
+	if len(a.Repos) > 0 {
+		repos = strings.Join(a.Repos, "+")
 	}
-	parts := []string{repo}
-	if s.Branch != "" {
-		parts = append(parts, s.Branch)
-	}
-	parts = append(parts, s.Mode)
-	if s.Model != "" {
-		parts = append(parts, s.Model)
+	parts := []string{repos, a.Mode}
+	if a.Model != "" {
+		parts = append(parts, a.Model)
 	}
 	return strings.Join(parts, " · ")
+}
+
+func orNone(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(none)"
+	}
+	return s
 }
 
 func agentIndex(line string) int {
