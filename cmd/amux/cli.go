@@ -268,9 +268,21 @@ func cmdSession(args []string) error {
 		return sessionNew(ctx)
 	case "add":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux session add <root-id>")
+			return fmt.Errorf("usage: amux session add <root-id> [repo...]")
 		}
-		return sessionAdd(ctx, args[1])
+		if len(args) == 2 {
+			return sessionAdd(ctx, args[1]) // interactive
+		}
+		// Non-interactive: amux session add <root> <repo>... [--mode m] [--model M] [--prompt t]
+		repos, cfg := parseCreateFlags(args[2:])
+		sub, err := wsops.AddAgent(ctx, args[1], wsops.AgentSpec{
+			Agent: "claude", Repos: repos, Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("added agent %s to %s (repos: %s)\n", sub.ID, args[1], orNone(strings.Join(repos, ", ")))
+		return nil
 	case "create":
 		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
 		// Creates a workspace that attaches the repos, plus a default agent using all.
