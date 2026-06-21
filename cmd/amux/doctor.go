@@ -22,7 +22,7 @@ import (
 // required dependency is missing.
 func cmdDoctor() error {
 	ctx := context.Background()
-	fmt.Println("amux doctor\n")
+	fmt.Print("amux doctor\n\n")
 
 	deps := []struct {
 		bin, verArg, note string
