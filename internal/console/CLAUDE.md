@@ -27,11 +27,13 @@ Repositories (tracked as local bare clones):
 - `amux repo add` (no arg) — fuzzy-find GitHub repos via `gh` (pick owner/org, then multi-select)
 - `amux repo ls` · `amux repo rm <name>`
 
-Workspaces:
-- `amux workspace new` — interactive config page (repos, mode, prompt, name)
-- `amux workspace create <repo>... [--name n] [--prompt t] [--mode task|loop]`
-- `amux workspace open <id>` · `amux workspace rm <id>` · `amux workspace rename <id> <name>`
-- `amux workspace ls`
+Sessions (a root container holds one or more agent sub-sessions, each with its
+own worktree — same repo/different branches, per-repo, or mixed; per-agent model):
+- `amux session new` — config page: name + add agents (repo/branch/mode/model)
+- `amux session add <root-id>` — add an agent (sub-session) to a root
+- `amux session create <repo>... [--name n] [--prompt t] [--mode task|loop] [--model m]`
+- `amux session open <id>` · `amux session rm <id>` · `amux session rename <id> <name>`
+- `amux session ls`
 
 Other: `amux status` · `amux name "<text>"` · `amux init` (rewrite the tmux config)
 
@@ -50,11 +52,11 @@ Other: `amux status` · `amux name "<text>"` · `amux init` (rewrite the tmux co
 - `~/.config/amux/amux.sh` — the shell shim (auto-launch on terminal open).
 - The wrapper that `AMUX_CLAUDE_BIN` points at — autonomy policy.
 - This `CLAUDE.md` — your own instructions; tailor how this console behaves.
-- `~/.local/share/amux/registry.json` — repos + workspaces (prefer the CLI).
+- `~/.local/share/amux/amux.db` — SQLite store of repos + sessions (prefer the CLI).
 
 ## Keybinds (inside the amux tmux server; prefix = `C-a`)
 - `Alt+h` / `C-a h` → rail · `Alt+l` / `C-a l` → back · `Alt+a` toggle
-- in the rail: `Enter` open · `n` new workspace · `x` `x` delete · `R` refresh
+- in the rail: `Enter` open · `n` new session · `a` add agent · `x` `x` delete · `R` refresh
 - `C-a g` dashboard · `C-a a` new-workspace popup · `C-a C` this console · `C-a d` detach
 
 Help the user customize any of the above. Keep every action to amux configuration

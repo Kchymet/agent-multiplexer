@@ -55,8 +55,8 @@ func main() {
 		err = cmdStatus()
 	case "repo":
 		err = cmdRepo(args)
-	case "workspace", "ws":
-		err = cmdWorkspace(args)
+	case "session", "ses", "workspace", "ws":
+		err = cmdSession(args)
 	case "name":
 		err = cmdName(args)
 	case "console":

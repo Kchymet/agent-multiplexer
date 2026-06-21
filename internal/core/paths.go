@@ -56,8 +56,14 @@ func DataDir() string {
 // ReposDir holds the local bare clones used as worktree sources.
 func ReposDir() string { return filepath.Join(DataDir(), "repos") }
 
-// WorkspacesDir holds per-workspace directories of repo worktrees.
+// WorkspacesDir holds legacy per-workspace directories (pre-hierarchy).
 func WorkspacesDir() string { return filepath.Join(DataDir(), "workspaces") }
+
+// SessionsDir holds per-root-session directories of sub-session worktrees.
+func SessionsDir() string { return filepath.Join(DataDir(), "sessions") }
+
+// DBPath is the SQLite session store.
+func DBPath() string { return filepath.Join(DataDir(), "amux.db") }
 
 // ConsoleDir is the neutral root for the amux control console agent (no repo
 // code lives here — just the console's CLAUDE.md).

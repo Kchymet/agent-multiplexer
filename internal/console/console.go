@@ -42,15 +42,15 @@ func Ensure() error {
 	return os.WriteFile(p, claudeMD, 0o644)
 }
 
-// Workspace returns the synthetic workspace describing the console (not stored
-// in the registry).
-func Workspace() store.Workspace {
-	return store.Workspace{
-		ID:        ID,
-		Name:      "amux console",
-		Agent:     "claude",
-		Mode:      "console",
-		Dir:       Dir(),
-		SessionID: SessionID,
+// Session returns the synthetic session describing the console (not stored in
+// the DB).
+func Session() store.Session {
+	return store.Session{
+		ID:       ID,
+		Name:     "amux console",
+		Agent:    "claude",
+		Mode:     "console",
+		Dir:      Dir(),
+		ClaudeID: SessionID,
 	}
 }

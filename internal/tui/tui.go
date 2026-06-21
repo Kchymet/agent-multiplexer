@@ -155,7 +155,18 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.sendCmd(core.Action{Action: "open", ID: s.ID})
 		}
 	case "n":
-		return m, newWorkspaceCmd
+		return m, newSessionCmd
+	case "a":
+		if s := m.selected(); s != nil && s.ID != "console" {
+			root := s.RootID
+			if s.IsRoot {
+				root = s.ID
+			}
+			if root != "" {
+				return m, addAgentCmd(root)
+			}
+		}
+		m.status = "select a session to add an agent to"
 	case "x":
 		s := m.selected()
 		if s == nil {
@@ -174,21 +185,27 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// newWorkspaceCmd opens the interactive workspace creator in a tmux popup. The
-// popup has its own TTY, so fzf and prompts work; the rail keeps running beneath.
-func newWorkspaceCmd() tea.Msg {
+// newSessionCmd opens the interactive session creator in a tmux popup.
+func newSessionCmd() tea.Msg { return popup("session", "new") }
+
+// addAgentCmd opens the add-agent flow for a root in a tmux popup.
+func addAgentCmd(rootID string) tea.Cmd {
+	return func() tea.Msg { return popup("session", "add", rootID) }
+}
+
+// popup runs `amux <args...>` in a tmux popup (its own TTY for fzf/prompts); the
+// rail keeps running beneath. Fire-and-forget, reaped to avoid zombies.
+func popup(args ...string) tea.Msg {
 	self, err := os.Executable()
 	if err != nil {
 		return actionDoneMsg{err}
 	}
-	c := exec.Command("tmux", "-L", core.TmuxSocket,
-		"display-popup", "-E", "-w", "80%", "-h", "80%",
-		"--", self, "workspace", "new")
-	// Fire-and-forget: tmux renders the popup; we don't block the rail on it.
+	full := append([]string{"-L", core.TmuxSocket, "display-popup", "-E", "-w", "80%", "-h", "80%", "--", self}, args...)
+	c := exec.Command("tmux", full...)
 	if err := c.Start(); err != nil {
 		return actionDoneMsg{err}
 	}
-	go func() { _ = c.Wait() }() // reap so repeated `n` doesn't leak zombies
+	go func() { _ = c.Wait() }()
 	return actionDoneMsg{nil}
 }
 
@@ -229,11 +246,13 @@ func statusColor(status string) lipgloss.Style {
 	}
 }
 
-// glyph encodes the session: console uses ⚙, loops ∞, tasks ●(running)/○(idle).
+// glyph encodes the row: console ⚙, root ▸, loop ∞, running ●, idle ○.
 func glyph(s core.Session) string {
 	switch {
 	case s.Mode == "console":
 		return "⚙"
+	case s.IsRoot:
+		return "▸"
 	case s.Mode == "loop":
 		return "∞"
 	case s.WindowID != "":

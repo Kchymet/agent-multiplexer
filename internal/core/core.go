@@ -18,10 +18,12 @@ const (
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
-	Source    string `json:"source"`         // claude | hermes | tmux | workspace
-	Kind      string `json:"kind"`           // agent kind, e.g. claude
-	Mode      string `json:"mode,omitempty"` // task (short) | loop (long)
-	Status    string `json:"status"`         // busy | idle | queued | ...
+	Source    string `json:"source"`           // claude | hermes | tmux | workspace
+	Kind      string `json:"kind"`             // agent kind, e.g. claude
+	Mode      string `json:"mode,omitempty"`   // task (short) | loop (long)
+	RootID    string `json:"rootId,omitempty"` // parent root for sub-sessions
+	IsRoot    bool   `json:"isRoot,omitempty"` // true => a root container row
+	Status    string `json:"status"`           // busy | idle | queued | ...
 	Cwd       string `json:"cwd"`
 	WindowID  string `json:"windowId"` // tmux @id if locally attached, else ""
 	Pid       int    `json:"pid,omitempty"`

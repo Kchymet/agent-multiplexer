@@ -22,7 +22,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		return ok()
 	case "delete", "kill":
-		if err := wsops.Delete(ctx, a.ID); err != nil {
+		if err := wsops.DeleteByID(ctx, a.ID); err != nil {
 			return fail("%v", err)
 		}
 		d.triggerPoll()

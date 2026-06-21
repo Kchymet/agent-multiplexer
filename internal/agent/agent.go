@@ -10,13 +10,14 @@ import (
 	"strings"
 )
 
-// Argv returns the absolute argv to run for kind, with any extra trailing args.
+// Argv returns the absolute argv to run for kind (with an optional model
+// override), plus any extra trailing args.
 //
 // The launch binary is overridable per kind via AMUX_<KIND>_BIN (e.g.
 // AMUX_CLAUDE_BIN). amux stays a thin launcher: point that at your own wrapper
 // to own autonomy (e.g. branch on $AMUX_MODE to add --permission-mode acceptEdits
 // or start a /loop). amux never injects those itself.
-func Argv(kind string, extra ...string) ([]string, error) {
+func Argv(kind, model string, extra ...string) ([]string, error) {
 	var bin string
 	var args []string
 	switch kind {
@@ -28,9 +29,15 @@ func Argv(kind string, extra ...string) ([]string, error) {
 		if pm := envOr("AMUX_PERMISSION_MODE", "auto"); pm != "" && pm != "none" {
 			args = append(args, "--permission-mode", pm)
 		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
 	case "hermes":
 		bin = envOr("AMUX_HERMES_BIN", "hermes")
 		args = []string{"chat"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
 	default:
 		return nil, fmt.Errorf("unknown agent kind %q", kind)
 	}

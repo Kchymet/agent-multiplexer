@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"amux/internal/console"
 	"amux/internal/core"
@@ -10,8 +11,8 @@ import (
 	"amux/internal/tmuxctl"
 )
 
-// Workspace is the rail's primary source: it lists tracked workspaces and marks
-// which are currently open (have a tagged tmux window).
+// Workspace is the rail's source: the control console, then each root session
+// with its sub-sessions nested underneath.
 type Workspace struct{}
 
 func NewWorkspace() *Workspace { return &Workspace{} }
@@ -19,57 +20,88 @@ func NewWorkspace() *Workspace { return &Workspace{} }
 func (w *Workspace) Name() string { return "workspace" }
 
 func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
-	reg, err := store.Load()
+	db, err := store.Open()
 	if err != nil {
 		return nil, err
 	}
+	defer db.Close()
+
 	running := tmuxctl.WorkspaceWindows(ctx)
+	var out []core.Session
 
-	sessions := make([]core.Session, 0, len(reg.Workspaces)+1)
-
-	// The amux control console is always pinned first.
-	cstate := "idle"
-	if running[console.ID] != "" {
-		cstate = "running"
-	}
-	sessions = append(sessions, core.Session{
-		ID:        console.ID,
-		Title:     "amux console",
-		Source:    "workspace",
-		Kind:      "claude",
-		Mode:      "console",
-		Status:    cstate + " · configure amux",
-		Cwd:       console.Dir(),
-		WindowID:  running[console.ID],
-		CanAttach: true,
-		CanKill:   false, // the console can't be deleted
+	// Control console, pinned first.
+	out = append(out, core.Session{
+		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
+		Mode: "console", Status: stateOf(running[console.ID]) + " · configure amux",
+		Cwd: console.Dir(), WindowID: running[console.ID], CanAttach: true, CanKill: false,
 	})
 
-	for _, ws := range reg.Workspaces {
-		win := running[ws.ID]
-		state := "idle"
-		if win != "" {
-			state = "running"
-		}
-		mode := ws.Mode
-		if mode == "" {
-			mode = store.ModeTask
-		}
-		sessions = append(sessions, core.Session{
-			ID:        ws.ID,
-			Title:     ws.Display(), // name if set, else id
-			Source:    "workspace",
-			Kind:      ws.Agent,
-			Mode:      mode,
-			Status:    fmt.Sprintf("%s · %s · %d repo%s", mode, state, len(ws.Repos), plural(len(ws.Repos))),
-			Cwd:       ws.Dir,
-			WindowID:  win,
-			StartedAt: ws.Created,
-			CanAttach: true, // Enter opens (running) or starts (idle) the workspace
-			CanKill:   true, // x deletes the workspace
-		})
+	roots, err := db.Roots()
+	if err != nil {
+		return nil, err
 	}
-	return sessions, nil
+	for _, r := range roots {
+		subs, err := db.Children(r.ID)
+		if err != nil {
+			return nil, err
+		}
+		anyRunning := false
+		for _, s := range subs {
+			if running[s.ID] != "" {
+				anyRunning = true
+			}
+		}
+		rootWin := ""
+		if anyRunning {
+			rootWin = "running" // sentinel: at least one sub is live (for glyph)
+		}
+		out = append(out, core.Session{
+			ID: r.ID, Title: r.Display(), Source: "workspace", IsRoot: true, Mode: r.Mode,
+			Status:    fmt.Sprintf("%s · %d agent%s", stateOf(rootWin), len(subs), plural(len(subs))),
+			Cwd:       r.Dir,
+			CanAttach: true, // Enter opens all sub-sessions
+			CanKill:   true, // delete the whole root
+		})
+		for _, s := range subs {
+			out = append(out, core.Session{
+				ID: s.ID, Title: subLabel(s), Source: "workspace", RootID: s.RootID,
+				Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+				Status:    stateOf(running[s.ID]) + subSuffix(s),
+				Cwd:       s.Dir,
+				WindowID:  running[s.ID],
+				CanAttach: true,
+				CanKill:   true,
+			})
+		}
+	}
+	return out, nil
+}
+
+func subLabel(s store.Session) string {
+	if strings.TrimSpace(s.Name) != "" {
+		return s.Name
+	}
+	if s.Repo != "" {
+		return s.Repo
+	}
+	return s.ID
+}
+
+func subSuffix(s store.Session) string {
+	if s.Branch != "" {
+		return " · " + s.Branch
+	}
+	if s.Model != "" {
+		return " · " + s.Model
+	}
+	return ""
+}
+
+func stateOf(win string) string {
+	if win != "" {
+		return "running"
+	}
+	return "idle"
 }
 
 func plural(n int) string {
@@ -77,4 +109,11 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+func defaultStr(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }

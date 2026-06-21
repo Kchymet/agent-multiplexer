@@ -1,13 +1,12 @@
-// Package wsops holds workspace lifecycle operations shared by the daemon (rail
-// actions) and the CLI (popup flows): creating, opening/switching, renaming, and
-// deleting. Workspaces are identified by id; names are optional display labels.
+// Package wsops holds session lifecycle operations shared by the daemon (rail
+// actions) and the CLI. Sessions are a one-level hierarchy: a root container and
+// its sub-sessions, each binding one agent to one worktree.
 package wsops
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"amux/internal/agent"
@@ -18,184 +17,255 @@ import (
 	"amux/internal/tmuxctl"
 )
 
-// Open switches to the workspace's window if it's running, otherwise starts the
-// agent in the workspace dir, tags the window with the workspace id, and
-// switches to it.
-func Open(ctx context.Context, ws store.Workspace) error {
-	if win := tmuxctl.WorkspaceWindows(ctx)[ws.ID]; win != "" {
-		_ = tmuxctl.SwitchClient(ctx, win) // best-effort (needs a client)
-		return nil
-	}
-	if _, err := os.Stat(ws.Dir); err != nil {
-		return fmt.Errorf("workspace dir missing: %s", ws.Dir)
-	}
-	// Pre-trust the dir so Claude Code skips its interactive "trust this folder?"
-	// dialog (amux created this dir; best-effort).
-	if ws.Agent == "" || ws.Agent == "claude" {
-		_ = claudecfg.TrustDir(ws.Dir)
-	}
-	// Resume the agent's session on reopen so progress survives restarts; only
-	// the first launch starts fresh (seeded with the initial prompt).
-	var extra []string
-	prompt := strings.TrimSpace(ws.InitialPrompt)
-	switch {
-	case ws.SessionID != "" && claudecfg.SessionExists(ws.Dir, ws.SessionID):
-		extra = []string{"--resume", ws.SessionID}
-	case ws.SessionID != "":
-		extra = []string{"--session-id", ws.SessionID}
-		if prompt != "" {
-			extra = append(extra, prompt)
-		}
-	case claudecfg.AnySession(ws.Dir):
-		extra = []string{"--continue"} // legacy workspace: resume most recent
-	default:
-		if prompt != "" {
-			extra = []string{prompt}
-		}
-	}
-	argv, err := agent.Argv(ws.Agent, extra...)
-	if err != nil {
-		return err
-	}
-	mode := ws.Mode
-	if mode == "" {
-		mode = store.ModeTask
-	}
-	// amux is a UI layer: it signals the session's intent to the agent and lets
-	// the agent (or a cloud orchestrator) own autonomy. The agent's launch
-	// command (overridable via AMUX_CLAUDE_BIN) can branch on AMUX_MODE.
-	env := []string{
-		"AMUX_WORKSPACE=" + ws.ID,
-		"AMUX_MODE=" + mode,
-		"AMUX_AGENT=" + ws.Agent,
-	}
-	win, err := tmuxctl.NewWindow(ctx, ws.Dir, ws.Display(), env, argv...)
-	if err != nil {
-		return err
-	}
-	_ = tmuxctl.TagWorkspace(ctx, win, ws.ID)
-	_ = tmuxctl.SwitchClient(ctx, win)
-	return nil
+// SubSpec describes a sub-session to create under a root.
+type SubSpec struct {
+	Repo   string // tracked repo name; "" => no worktree, agent runs in its own dir
+	Branch string // git branch (defaults to amux/<rootID> when a repo is given)
+	Agent  string // defaults to "claude"
+	Model  string // optional model override
+	Mode   string // task | loop (defaults to task)
+	Prompt string // initial prompt for this agent
 }
 
-// OpenByID loads the workspace and opens it. The reserved console id opens the
-// built-in amux control console instead of a registry workspace.
+// CreateRoot creates a root container plus its initial sub-sessions and returns
+// the root id. A root always has at least one sub (a default agent if none given).
+func CreateRoot(ctx context.Context, name string, subs []SubSpec) (string, error) {
+	db, err := store.Open()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	rootID := db.NewID()
+	dir := store.RootDir(rootID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := db.PutSession(store.Session{
+		ID: rootID, RootID: "", Name: strings.TrimSpace(name),
+		Mode: store.ModeTask, Dir: dir, Created: store.Now(),
+	}); err != nil {
+		return "", err
+	}
+	if len(subs) == 0 {
+		subs = []SubSpec{{Agent: "claude", Mode: store.ModeTask}} // default agent
+	}
+	for _, sp := range subs {
+		if _, err := addSub(ctx, db, rootID, sp); err != nil {
+			return rootID, err
+		}
+	}
+	return rootID, nil
+}
+
+// AddSub adds a sub-session to an existing root.
+func AddSub(ctx context.Context, rootID string, sp SubSpec) (store.Session, error) {
+	db, err := store.Open()
+	if err != nil {
+		return store.Session{}, err
+	}
+	defer db.Close()
+	if root, ok, _ := db.GetSession(rootID); !ok || !root.IsRoot() {
+		return store.Session{}, fmt.Errorf("no such root %q", rootID)
+	}
+	return addSub(ctx, db, rootID, sp)
+}
+
+func addSub(ctx context.Context, db *store.DB, rootID string, sp SubSpec) (store.Session, error) {
+	subID := db.NewID()
+	sub := store.Session{
+		ID: subID, RootID: rootID,
+		Agent: defaultStr(sp.Agent, "claude"), Model: sp.Model,
+		Mode: defaultStr(sp.Mode, store.ModeTask),
+		Repo: sp.Repo, Prompt: sp.Prompt,
+		ClaudeID: store.NewUUID(), Created: store.Now(),
+	}
+	if sp.Repo != "" {
+		repo, ok, err := db.Repo(sp.Repo)
+		if err != nil || !ok {
+			return store.Session{}, fmt.Errorf("unknown repo %q", sp.Repo)
+		}
+		sub.Branch = defaultStr(sp.Branch, "amux/"+rootID)
+		sub.Dir = store.SubDir(rootID, subID, sp.Repo, sub.Branch)
+		if err := git.AddWorktree(ctx, repo.GitDir, sub.Dir, sub.Branch); err != nil {
+			return store.Session{}, err
+		}
+	} else {
+		// No repo: a plain agent in its own dir under the root.
+		sub.Dir = store.SubDir(rootID, subID, "", "")
+		if err := os.MkdirAll(sub.Dir, 0o755); err != nil {
+			return store.Session{}, err
+		}
+	}
+	if err := db.PutSession(sub); err != nil {
+		return store.Session{}, err
+	}
+	return sub, nil
+}
+
+// OpenByID opens a session. The reserved console id opens the control console;
+// a root opens all its sub-sessions (switching to the first); a sub opens itself.
 func OpenByID(ctx context.Context, id string) error {
 	if id == console.ID {
 		if err := console.Ensure(); err != nil {
 			return err
 		}
-		return Open(ctx, console.Workspace())
+		return launch(ctx, console.Session())
 	}
-	reg, err := store.Load()
+	db, err := store.Open()
 	if err != nil {
 		return err
 	}
-	ws, ok := reg.WorkspaceByID(id)
-	if !ok {
-		return fmt.Errorf("no such workspace %q", id)
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		return err
 	}
-	return Open(ctx, ws)
+	if !ok {
+		return fmt.Errorf("no such session %q", id)
+	}
+	if s.IsRoot() {
+		subs, err := db.Children(id)
+		if err != nil {
+			return err
+		}
+		for i, sub := range subs {
+			if err := launch(ctx, sub); err != nil {
+				return err
+			}
+			_ = i
+		}
+		return nil
+	}
+	return launch(ctx, s)
 }
 
-// Delete closes the workspace window, removes every repo worktree and its
-// branch, deletes the workspace dir, and drops it from the registry.
-func Delete(ctx context.Context, id string) error {
+// launch opens (or switches to) one session's agent window.
+func launch(ctx context.Context, s store.Session) error {
+	if win := tmuxctl.WorkspaceWindows(ctx)[s.ID]; win != "" {
+		_ = tmuxctl.SwitchClient(ctx, win)
+		return nil
+	}
+	if _, err := os.Stat(s.Dir); err != nil {
+		return fmt.Errorf("session dir missing: %s", s.Dir)
+	}
+	if s.Agent == "" || s.Agent == "claude" {
+		_ = claudecfg.TrustDir(s.Dir)
+	}
+
+	// Resume the agent's session on reopen; first launch starts fresh.
+	prompt := strings.TrimSpace(s.Prompt)
+	var extra []string
+	switch {
+	case s.ClaudeID != "" && claudecfg.SessionExists(s.Dir, s.ClaudeID):
+		extra = []string{"--resume", s.ClaudeID}
+	case s.ClaudeID != "":
+		extra = []string{"--session-id", s.ClaudeID}
+		if prompt != "" {
+			extra = append(extra, prompt)
+		}
+	case claudecfg.AnySession(s.Dir):
+		extra = []string{"--continue"}
+	default:
+		if prompt != "" {
+			extra = []string{prompt}
+		}
+	}
+	argv, err := agent.Argv(s.Agent, s.Model, extra...)
+	if err != nil {
+		return err
+	}
+	env := []string{
+		"AMUX_WORKSPACE=" + s.ID,
+		"AMUX_ROOT=" + s.RootID,
+		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
+		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
+	}
+	win, err := tmuxctl.NewWindow(ctx, s.Dir, windowName(s), env, argv...)
+	if err != nil {
+		return err
+	}
+	_ = tmuxctl.TagWorkspace(ctx, win, s.ID)
+	_ = tmuxctl.SwitchClient(ctx, win)
+	return nil
+}
+
+func windowName(s store.Session) string {
+	if s.Repo != "" {
+		return s.Repo
+	}
+	return s.Display()
+}
+
+// DeleteByID deletes a session. The console can't be deleted (window is closed);
+// a root removes all its sub-sessions; a sub removes just itself.
+func DeleteByID(ctx context.Context, id string) error {
 	if id == console.ID {
-		// The console can't be deleted; just close its window if open.
 		if win := tmuxctl.WorkspaceWindows(ctx)[id]; win != "" {
 			_ = tmuxctl.KillWindow(ctx, win)
 		}
 		return nil
 	}
-	reg, err := store.Load()
+	db, err := store.Open()
 	if err != nil {
 		return err
 	}
-	ws, ok := reg.WorkspaceByID(id)
-	if !ok {
-		return fmt.Errorf("no such workspace %q", id)
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil || !ok {
+		return fmt.Errorf("no such session %q", id)
 	}
-	if win := tmuxctl.WorkspaceWindows(ctx)[id]; win != "" {
+	if s.IsRoot() {
+		subs, _ := db.Children(id)
+		for _, sub := range subs {
+			removeSub(ctx, db, sub)
+		}
+		_ = os.RemoveAll(s.Dir)
+		return db.DeleteSession(id)
+	}
+	removeSub(ctx, db, s)
+	return nil
+}
+
+func removeSub(ctx context.Context, db *store.DB, sub store.Session) {
+	if win := tmuxctl.WorkspaceWindows(ctx)[sub.ID]; win != "" {
 		_ = tmuxctl.KillWindow(ctx, win)
 	}
-	branch := "amux/" + ws.ID
-	for _, repoName := range ws.Repos {
-		if repo, ok := reg.Repo(repoName); ok {
-			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(ws.Dir, repoName), branch)
+	if sub.Repo != "" && sub.Branch != "" {
+		if repo, ok, _ := db.Repo(firstRepo(sub.Repo)); ok {
+			_ = git.RemoveWorktree(ctx, repo.GitDir, sub.Dir, sub.Branch)
 		}
+	} else {
+		_ = os.RemoveAll(sub.Dir)
 	}
-	_ = os.RemoveAll(ws.Dir)
-	reg.RemoveWorkspace(id)
-	return reg.Save()
+	_ = db.DeleteSession(sub.ID)
 }
 
-// Rename sets a workspace's display name.
+// Rename sets a session's display name.
 func Rename(id, name string) error {
-	reg, err := store.Load()
+	db, err := store.Open()
 	if err != nil {
 		return err
 	}
-	ws, ok := reg.WorkspaceByID(id)
-	if !ok {
-		return fmt.Errorf("no such workspace %q", id)
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil || !ok {
+		return fmt.Errorf("no such session %q", id)
 	}
-	ws.Name = strings.TrimSpace(name)
-	reg.AddWorkspace(ws)
-	return reg.Save()
+	s.Name = strings.TrimSpace(name)
+	return db.PutSession(s)
 }
 
-// Config is the user-chosen settings for a new workspace.
-type Config struct {
-	Name          string // optional display name
-	Agent         string // "claude"
-	Mode          string // store.ModeTask | store.ModeLoop
-	Repos         []string
-	InitialPrompt string
+func defaultStr(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }
 
-// Create materializes worktrees for the selected repos and registers a new
-// workspace with a generated id. It does not open it (callers decide when).
-func Create(ctx context.Context, cfg Config) (store.Workspace, error) {
-	reg, err := store.Load()
-	if err != nil {
-		return store.Workspace{}, err
+func firstRepo(repo string) string {
+	if i := strings.IndexByte(repo, ','); i >= 0 {
+		return repo[:i]
 	}
-	if cfg.Agent == "" {
-		cfg.Agent = "claude"
-	}
-	if cfg.Mode == "" {
-		cfg.Mode = store.ModeTask
-	}
-	id := reg.NewID()
-	dir := store.WorkspaceDir(id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return store.Workspace{}, err
-	}
-	branch := "amux/" + id
-	for _, rn := range cfg.Repos {
-		repo, ok := reg.Repo(rn)
-		if !ok {
-			return store.Workspace{}, fmt.Errorf("unknown repo %q", rn)
-		}
-		if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(dir, rn), branch); err != nil {
-			return store.Workspace{}, err
-		}
-	}
-	ws := store.Workspace{
-		ID:            id,
-		Name:          strings.TrimSpace(cfg.Name),
-		Agent:         cfg.Agent,
-		Mode:          cfg.Mode,
-		Repos:         cfg.Repos,
-		Dir:           dir,
-		InitialPrompt: cfg.InitialPrompt,
-		SessionID:     store.NewUUID(), // pin the session so reopens resume it
-		Created:       store.Now(),
-	}
-	reg.AddWorkspace(ws)
-	if err := reg.Save(); err != nil {
-		return store.Workspace{}, err
-	}
-	return ws, nil
+	return repo
 }

@@ -38,12 +38,14 @@ separate from your default tmux and `~/.tmux.conf`.
   an org you belong to), then a repo. If `gh` isn't authenticated, amux prompts
   you to `gh auth login` rather than falling back. Reachable from `amux repo add`
   (no argument) or the "clone a new repo…" entry in the workspace picker.
-- **Workspace** — an agent + a chosen set of repos, identified by a short **id**.
-  Each repo becomes a git worktree (branch `amux/<id>`) under
-  `~/.local/share/amux/workspaces/<id>/`, and the agent opens there. A **name** is
-  optional — the agent can set it later with `amux name "<summary>"`, and the rail
-  shows it attached to the id. Workspaces are **persistent**: closing the window
-  keeps the workspace; `x` (twice) deletes it and removes its worktrees/branches.
+- **Session** — a **root** container (a short **id**, optional name) holding one
+  or more **sub-sessions**. Each sub-session binds **one agent to one worktree**:
+  a repo on a branch (`amux/<id>`) under `~/.local/share/amux/sessions/<root>/`,
+  or a plain agent with no repo. Sub-sessions under one root can be the **same
+  repo on different branches**, **different repos**, or a mix — and each can use a
+  **different agent/model**. The rail nests sub-sessions under their root. A name
+  is optional (`amux name "<summary>"`); sessions are **persistent** and resume
+  across restarts. `x` (twice) deletes — a root removes all its sub-sessions.
 - **Mode** — a workspace is either a **task** (short-running, tied to a temporary
   task) or a **loop** (long-running, nearly autonomous). Shown in the rail with a
   distinct glyph (`●`/`○` for tasks, `∞` for loops).
@@ -107,9 +109,10 @@ worktree is usable without prompts:
   "add a repo…" entry), **Mode** (task/loop), an optional **Prompt**, and an
   optional **Name**, then choose *Create*. Only repos are required. The initial
   prompt seeds the agent on launch (Claude's positional prompt).
-- **Registry** — repos and workspaces persist in `~/.local/share/amux/registry.json`
-  (atomic writes). Agent launch resolves the binary to an absolute path so a
-  spawned window works even with a minimal server PATH.
+- **Store** — repos and sessions persist in a **SQLite** DB at
+  `~/.local/share/amux/amux.db` (sessions carry a `root_id`; WAL mode lets the
+  daemon read while the CLI writes). A pre-existing JSON `registry.json` is
+  imported once and kept aside as `registry.json.migrated`.
 
 ## Install
 
@@ -154,9 +157,10 @@ create a dedicated iTerm profile whose command is `amux up`.
 | key         | action                                            |
 |-------------|---------------------------------------------------|
 | `↑/↓`,`k/j` | move selection                                    |
-| `Enter`     | open / switch to the selected workspace           |
-| `n`         | new workspace (fzf repo picker in a popup)         |
-| `x` `x`     | delete the workspace (twice to confirm)           |
+| `Enter`     | open a sub-session / open all of a root's agents  |
+| `n`         | new session (config page in a popup)              |
+| `a`         | add an agent (sub-session) to the selected root   |
+| `x` `x`     | delete (root removes all its sub-sessions)        |
 | `R`         | force refresh                                      |
 | `q`         | quit this dashboard pane                           |
 
@@ -173,10 +177,11 @@ amux dash                # full-screen workspace dashboard
 amux repo add <src>      # track a repo: git URL | local path | OWNER/REPO (via gh)
 amux repo add            # no arg: fuzzy-find a GitHub repo (gh) and clone it
 amux repo ls | rm <name> # list / untrack repositories
-amux workspace new       # config page: repos, mode, prompt, name → create & open
-amux workspace create <repo>... [--name n] [--prompt t] [--mode task|loop]   # scripting
-amux workspace open <id> | rm <id> | rename <id> <name>
-amux name <text>         # set the current workspace's name (run by the agent)
+amux session new         # config page: name + add agents (repo/branch/mode/model) → open
+amux session add <root>  # add an agent (sub-session) to a root
+amux session create <repo>... [--name n] [--prompt t] [--mode task|loop] [--model m]
+amux session open <id> | rm <id> | rename <id> <name> | ls
+amux name <text>         # set the current session's name (run by the agent)
 amux console             # open the amux control console (configure amux)
 amux status              # print workspaces as text (scripting)
 amux init                # (re)write the isolated tmux config
@@ -188,7 +193,7 @@ amux daemon              # run the daemon in the foreground (usually automatic)
 ```
 cmd/amux/            entrypoint, subcommands, repo/workspace CLI, embedded conf
 internal/core/       Session model, wire protocol, paths
-internal/store/      JSON registry of repos + workspaces (atomic writes)
+internal/store/      SQLite store: repos + sessions (root_id hierarchy) + migration
 internal/git/        bare clone + worktree helpers
 internal/gh/         GitHub CLI wrapper (list/clone remote repos)
 internal/agent/      agent-kind -> absolute argv resolver (+ permission mode)

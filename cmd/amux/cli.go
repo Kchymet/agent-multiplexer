@@ -19,28 +19,25 @@ import (
 )
 
 // cmdConsole opens (or switches to) the built-in amux control console.
-func cmdConsole() error {
-	return wsops.OpenByID(context.Background(), console.ID)
-}
+func cmdConsole() error { return wsops.OpenByID(context.Background(), console.ID) }
 
-// cmdName sets the display name of the workspace whose window the caller is in.
-// Intended for the agent to rename its own session: `amux name "<summary>"`.
+// cmdName sets the display name of the session whose window the caller is in.
 func cmdName(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: amux name <display name>")
 	}
-	name := strings.Join(args, " ")
 	ctx := context.Background()
 	id, err := tmuxctl.Run(ctx, "display-message", "-p", "#{@amx_ws}")
 	if err != nil || strings.TrimSpace(id) == "" {
-		return fmt.Errorf("not inside an amux workspace window")
+		return fmt.Errorf("not inside an amux session window")
 	}
 	id = strings.TrimSpace(id)
+	name := strings.Join(args, " ")
 	if err := wsops.Rename(id, name); err != nil {
 		return err
 	}
-	_, _ = tmuxctl.Run(ctx, "rename-window", name) // reflect in the tmux status bar
-	fmt.Printf("workspace %s renamed to %q\n", id, name)
+	_, _ = tmuxctl.Run(ctx, "rename-window", name)
+	fmt.Printf("session %s renamed to %q\n", id, name)
 	return nil
 }
 
@@ -51,12 +48,17 @@ func cmdRepo(args []string) error {
 		return fmt.Errorf("usage: amux repo <add|ls|rm> ...")
 	}
 	ctx := context.Background()
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
 	switch args[0] {
 	case "add":
 		switch {
 		case len(args) < 2:
-			// No source given: fuzzy-find remote repos via gh (multi-select).
-			repos, err := pickAndCloneRepos(ctx, bufio.NewReader(os.Stdin))
+			repos, err := pickAndCloneRepos(ctx, db, bufio.NewReader(os.Stdin))
 			if err != nil {
 				return err
 			}
@@ -65,31 +67,30 @@ func cmdRepo(args []string) error {
 			}
 			return nil
 		case looksLikeGHRepo(args[1]):
-			// OWNER/REPO shorthand: clone via gh (uses GitHub auth).
-			repo, err := addRepoGH(ctx, args[1])
+			r, err := addRepoGH(ctx, db, args[1])
 			if err != nil {
 				return err
 			}
-			fmt.Printf("tracked %s  <-  %s\n", repo.Name, repo.Source)
+			fmt.Printf("tracked %s  <-  %s\n", r.Name, r.Source)
 			return nil
 		default:
-			repo, err := addRepo(ctx, args[1])
+			r, err := addRepo(ctx, db, args[1])
 			if err != nil {
 				return err
 			}
-			fmt.Printf("tracked %s  <-  %s\n", repo.Name, repo.Source)
+			fmt.Printf("tracked %s  <-  %s\n", r.Name, r.Source)
 			return nil
 		}
 	case "ls", "list":
-		reg, err := store.Load()
+		repos, err := db.Repos()
 		if err != nil {
 			return err
 		}
-		if len(reg.Repos) == 0 {
+		if len(repos) == 0 {
 			fmt.Println("(no repositories tracked — `amux repo add <url|path>`)")
 			return nil
 		}
-		for _, r := range reg.Repos {
+		for _, r := range repos {
 			fmt.Printf("%-24s %s\n", r.Name, r.Source)
 		}
 		return nil
@@ -97,17 +98,15 @@ func cmdRepo(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux repo rm <name>")
 		}
-		reg, err := store.Load()
+		r, ok, err := db.Repo(args[1])
 		if err != nil {
 			return err
 		}
-		repo, ok := reg.Repo(args[1])
 		if !ok {
 			return fmt.Errorf("no such repo %q", args[1])
 		}
-		_ = os.RemoveAll(repo.GitDir)
-		reg.RemoveRepo(args[1])
-		if err := reg.Save(); err != nil {
+		_ = os.RemoveAll(r.GitDir)
+		if err := db.DeleteRepo(args[1]); err != nil {
 			return err
 		}
 		fmt.Printf("removed %s\n", args[1])
@@ -117,17 +116,11 @@ func cmdRepo(args []string) error {
 	}
 }
 
-// registerClone clones into the bare repo store via clone() and registers the
-// repo under name (idempotent: returns the existing repo if already tracked).
-func registerClone(name, source string, clone func(gitDir string) error) (store.Repo, error) {
+func registerClone(db *store.DB, name, source string, clone func(gitDir string) error) (store.Repo, error) {
 	if name == "" {
 		return store.Repo{}, fmt.Errorf("could not derive a repo name from %q", source)
 	}
-	reg, err := store.Load()
-	if err != nil {
-		return store.Repo{}, err
-	}
-	if existing, ok := reg.Repo(name); ok {
+	if existing, ok, _ := db.Repo(name); ok {
 		return existing, nil
 	}
 	if err := os.MkdirAll(core.ReposDir(), 0o755); err != nil {
@@ -137,14 +130,12 @@ func registerClone(name, source string, clone func(gitDir string) error) (store.
 	if err := clone(gitDir); err != nil {
 		return store.Repo{}, err
 	}
-	repo := store.Repo{Name: name, Source: source, GitDir: gitDir}
-	reg.AddRepo(repo)
-	return repo, reg.Save()
+	r := store.Repo{Name: name, Source: source, GitDir: gitDir}
+	return r, db.PutRepo(r)
 }
 
-// addRepo clones a URL or local path into the bare repo store and registers it.
-func addRepo(ctx context.Context, source string) (store.Repo, error) {
-	return registerClone(git.NameFromSource(source), source, func(gitDir string) error {
+func addRepo(ctx context.Context, db *store.DB, source string) (store.Repo, error) {
+	return registerClone(db, git.NameFromSource(source), source, func(gitDir string) error {
 		src := expandHome(source)
 		if git.LooksLocal(src) {
 			abs, _ := filepath.Abs(src)
@@ -157,15 +148,12 @@ func addRepo(ctx context.Context, source string) (store.Repo, error) {
 	})
 }
 
-// addRepoGH clones a GitHub repo (OWNER/REPO) via gh and registers it.
-func addRepoGH(ctx context.Context, nameWithOwner string) (store.Repo, error) {
-	return registerClone(git.NameFromSource(nameWithOwner), nameWithOwner, func(gitDir string) error {
+func addRepoGH(ctx context.Context, db *store.DB, nameWithOwner string) (store.Repo, error) {
+	return registerClone(db, git.NameFromSource(nameWithOwner), nameWithOwner, func(gitDir string) error {
 		return gh.CloneBare(ctx, nameWithOwner, gitDir)
 	})
 }
 
-// looksLikeGHRepo reports whether s is an OWNER/REPO shorthand (not a URL or a
-// local path), so `amux repo add owner/repo` clones via gh.
 func looksLikeGHRepo(s string) bool {
 	if strings.Contains(s, "://") || strings.Contains(s, "@") {
 		return false
@@ -174,7 +162,7 @@ func looksLikeGHRepo(s string) bool {
 		return false
 	}
 	if _, err := os.Stat(s); err == nil {
-		return false // an existing local path
+		return false
 	}
 	parts := strings.Split(s, "/")
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
@@ -182,14 +170,10 @@ func looksLikeGHRepo(s string) bool {
 
 const manualEntryItem = "✎  enter a URL or local path…"
 
-// pickAndCloneRepos fuzzy-finds remote repos via gh: it selects an owner (the
-// user's account or an org), then MULTI-selects repos in that owner, and clones
-// each. If gh is not authenticated it prompts to authenticate (rather than
-// falling back).
-func pickAndCloneRepos(ctx context.Context, in *bufio.Reader) ([]store.Repo, error) {
+func pickAndCloneRepos(ctx context.Context, db *store.DB, in *bufio.Reader) ([]store.Repo, error) {
 	if !gh.Installed() {
 		fmt.Println("GitHub CLI (gh) is not installed — see https://cli.github.com")
-		r, err := manualEntry(ctx, in)
+		r, err := manualEntry(ctx, db, in)
 		return wrap(r, err)
 	}
 	if !gh.Authed(ctx) {
@@ -205,8 +189,6 @@ func pickAndCloneRepos(ctx context.Context, in *bufio.Reader) ([]store.Repo, err
 			return nil, fmt.Errorf("still not authenticated")
 		}
 	}
-
-	// 1) pick an owner (your account + orgs you belong to).
 	owners, err := gh.Owners(ctx)
 	if err != nil || len(owners) == 0 {
 		return nil, fmt.Errorf("could not list GitHub owners: %v", err)
@@ -216,48 +198,39 @@ func pickAndCloneRepos(ctx context.Context, in *bufio.Reader) ([]store.Repo, err
 		return nil, err
 	}
 	if owner == manualEntryItem {
-		r, err := manualEntry(ctx, in)
+		r, err := manualEntry(ctx, db, in)
 		return wrap(r, err)
 	}
-
-	// 2) multi-select repos within that owner.
-	repos, err := gh.ListReposFor(ctx, owner)
+	remotes, err := gh.ListReposFor(ctx, owner)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s repos: %w", owner, err)
 	}
-	if len(repos) == 0 {
+	if len(remotes) == 0 {
 		return nil, fmt.Errorf("no repositories found for %s", owner)
 	}
 	items := []string{manualEntryItem}
-	for _, r := range repos {
+	for _, r := range remotes {
 		items = append(items, r.NameWithOwner)
 	}
 	picks, err := fzfMultiSelect("repos in "+owner, items)
 	if err != nil {
 		return nil, err
 	}
-
 	var result []store.Repo
-	manualWanted := false
 	for _, p := range picks {
 		if p == manualEntryItem {
-			manualWanted = true
+			if r, err := manualEntry(ctx, db, in); err == nil {
+				result = append(result, r)
+			}
 			continue
 		}
 		fmt.Printf("Cloning %s…\n", p)
-		r, err := addRepoGH(ctx, p)
+		r, err := addRepoGH(ctx, db, p)
 		if err != nil {
 			fmt.Printf("  failed: %v\n", err)
 			continue
 		}
 		result = append(result, r)
-	}
-	if manualWanted {
-		if r, err := manualEntry(ctx, in); err == nil {
-			result = append(result, r)
-		} else {
-			fmt.Printf("  %v\n", err)
-		}
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("nothing selected")
@@ -265,7 +238,6 @@ func pickAndCloneRepos(ctx context.Context, in *bufio.Reader) ([]store.Repo, err
 	return result, nil
 }
 
-// wrap turns a single (repo, err) into the slice signature.
 func wrap(r store.Repo, err error) ([]store.Repo, error) {
 	if err != nil {
 		return nil, err
@@ -273,20 +245,19 @@ func wrap(r store.Repo, err error) ([]store.Repo, error) {
 	return []store.Repo{r}, nil
 }
 
-// manualEntry prompts for a git URL or local path and clones it.
-func manualEntry(ctx context.Context, in *bufio.Reader) (store.Repo, error) {
+func manualEntry(ctx context.Context, db *store.DB, in *bufio.Reader) (store.Repo, error) {
 	fmt.Print("Git URL or local path: ")
 	line, _ := in.ReadString('\n')
 	src := strings.TrimSpace(line)
 	if src == "" {
 		return store.Repo{}, fmt.Errorf("no source given")
 	}
-	return addRepo(ctx, src)
+	return addRepo(ctx, db, src)
 }
 
-// ---- workspace commands --------------------------------------------------
+// ---- session commands ----------------------------------------------------
 
-func cmdWorkspace(args []string) error {
+func cmdSession(args []string) error {
 	ctx := context.Background()
 	sub := "new"
 	if len(args) > 0 {
@@ -294,206 +265,246 @@ func cmdWorkspace(args []string) error {
 	}
 	switch sub {
 	case "new":
-		return workspaceNew(ctx)
-	case "create":
-		// Non-interactive: amux workspace create <repo>... [--name n] [--prompt t] [--mode task|loop]
-		repos, cfg := parseCreateFlags(args[1:])
-		if len(repos) == 0 {
-			return fmt.Errorf("usage: amux workspace create <repo>... [--name n] [--prompt t] [--mode task|loop]")
+		return sessionNew(ctx)
+	case "add":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux session add <root-id>")
 		}
-		cfg.Repos = repos
-		ws, err := wsops.Create(ctx, cfg)
+		return sessionAdd(ctx, args[1])
+	case "create":
+		repos, cfg := parseCreateFlags(args[1:])
+		var subs []wsops.SubSpec
+		if len(repos) == 0 {
+			subs = []wsops.SubSpec{{Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt}}
+		}
+		for _, r := range repos {
+			subs = append(subs, wsops.SubSpec{Repo: r, Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt})
+		}
+		rootID, err := wsops.CreateRoot(ctx, cfg.name, subs)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created workspace %s (%s) at %s\n", ws.ID, ws.Display(), ws.Dir)
+		fmt.Printf("created session %s with %d agent(s)\n", rootID, len(subs))
 		return nil
 	case "open":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workspace open <id>")
+			return fmt.Errorf("usage: amux session open <id>")
 		}
 		return wsops.OpenByID(ctx, args[1])
 	case "rm", "delete":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workspace rm <id>")
+			return fmt.Errorf("usage: amux session rm <id>")
 		}
-		return wsops.Delete(ctx, args[1])
+		return wsops.DeleteByID(ctx, args[1])
 	case "rename":
 		if len(args) < 3 {
-			return fmt.Errorf("usage: amux workspace rename <id> <name>")
+			return fmt.Errorf("usage: amux session rename <id> <name>")
 		}
 		return wsops.Rename(args[1], strings.Join(args[2:], " "))
 	case "ls", "list":
-		reg, err := store.Load()
-		if err != nil {
-			return err
-		}
-		for _, w := range reg.Workspaces {
-			fmt.Printf("%-8s %-22s %-6s %-8s %s\n", w.ID, w.Display(), w.Mode, w.Agent, strings.Join(w.Repos, ", "))
-		}
-		return nil
+		return sessionList()
 	default:
-		return fmt.Errorf("unknown workspace subcommand %q", sub)
+		return fmt.Errorf("unknown session subcommand %q", sub)
 	}
 }
 
-// workspaceNew is the interactive create flow: a single configuration page (an
-// fzf menu) you drill into to set repos, mode, an optional prompt, and an
-// optional name, then Create. Designed to run inside a tmux popup (needs a TTY).
-func workspaceNew(ctx context.Context) error {
+func sessionList() error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	roots, err := db.Roots()
+	if err != nil {
+		return err
+	}
+	for _, r := range roots {
+		fmt.Printf("%-8s %s\n", r.ID, r.Display())
+		subs, _ := db.Children(r.ID)
+		for _, s := range subs {
+			info := s.Repo
+			if s.Branch != "" {
+				info += " · " + s.Branch
+			}
+			fmt.Printf("  %-8s %-8s %-6s %s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode, info)
+		}
+	}
+	return nil
+}
+
+// sessionNew is the interactive create page (run in a tmux popup): name the
+// session, drill in to add one or more agents (each a repo+branch or a plain
+// agent), then Create.
+func sessionNew(ctx context.Context) error {
 	in := bufio.NewReader(os.Stdin)
-	cfg := wsops.Config{Agent: "claude", Mode: store.ModeTask}
+	name := ""
+	var subs []wsops.SubSpec
 
 	for {
 		menu := []string{
-			fmt.Sprintf("Repos    › %s", reposSummary(cfg.Repos)),
-			fmt.Sprintf("Mode     › %s", modeSummary(cfg.Mode)),
-			fmt.Sprintf("Prompt   › %s", orDash(cfg.InitialPrompt)),
-			fmt.Sprintf("Name     › %s", orOptional(cfg.Name)),
-			"────────────────",
-			"✓ Create workspace",
-			"✗ Cancel",
+			fmt.Sprintf("Name       › %s", orOptional(name)),
+			"+ add agent",
 		}
-		choice, err := fzfMenu("new workspace", menu)
-		if err != nil { // Esc
-			return nil
+		for i, s := range subs {
+			menu = append(menu, fmt.Sprintf("  agent %d: %s", i+1, describeSub(s)))
+		}
+		menu = append(menu, "────────────────", "✓ Create session", "✗ Cancel")
+
+		choice, err := fzfMenu("new session", menu)
+		if err != nil {
+			return nil // Esc
 		}
 		switch {
-		case strings.HasPrefix(choice, "Repos"):
-			cfg.Repos = editRepos(ctx, in, cfg.Repos)
-		case strings.HasPrefix(choice, "Mode"):
-			cfg.Mode = editMode(cfg.Mode)
-		case strings.HasPrefix(choice, "Prompt"):
-			cfg.InitialPrompt = promptLine(in, "Initial prompt for the agent (optional)")
 		case strings.HasPrefix(choice, "Name"):
-			cfg.Name = promptLine(in, "Display name (optional — the agent can set this later)")
-		case strings.HasPrefix(choice, "✓"):
-			if len(cfg.Repos) == 0 {
-				fmt.Print("Select at least one repo first. (press Enter) ")
-				_, _ = in.ReadString('\n')
-				continue
+			name = promptLine(in, "Session name (optional)")
+		case strings.HasPrefix(choice, "+ add agent"):
+			if sp, ok := configureSub(ctx, in); ok {
+				subs = append(subs, sp)
 			}
-			ws, err := wsops.Create(ctx, cfg)
+		case strings.HasPrefix(strings.TrimSpace(choice), "agent "):
+			// selecting an agent removes it
+			if i := agentIndex(choice); i >= 0 && i < len(subs) {
+				subs = append(subs[:i], subs[i+1:]...)
+			}
+		case strings.HasPrefix(choice, "✓"):
+			rootID, err := wsops.CreateRoot(ctx, name, subs)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Created workspace %s\n", ws.Display())
-			return wsops.Open(ctx, ws)
+			return wsops.OpenByID(ctx, rootID)
 		case strings.HasPrefix(choice, "✗"):
 			return nil
 		}
 	}
 }
 
-// editRepos runs the repo multi-select (with the gh/clone "new repo" entry).
-// Cancelling keeps the current selection.
-func editRepos(ctx context.Context, in *bufio.Reader, current []string) []string {
-	const cloneSentinel = "➕  add / clone a repo…"
+func sessionAdd(ctx context.Context, rootID string) error {
+	in := bufio.NewReader(os.Stdin)
+	sp, ok := configureSub(ctx, in)
+	if !ok {
+		return nil
+	}
+	sub, err := wsops.AddSub(ctx, rootID, sp)
+	if err != nil {
+		return err
+	}
+	return wsops.OpenByID(ctx, sub.ID)
+}
+
+// configureSub walks the user through one agent's settings.
+func configureSub(ctx context.Context, in *bufio.Reader) (wsops.SubSpec, bool) {
+	repo := pickRepoForSub(ctx, in)
+	sp := wsops.SubSpec{Agent: "claude", Repo: repo}
+	if repo != "" {
+		sp.Branch = promptLine(in, "Branch (optional, default amux/<id>)")
+	}
+	sp.Mode = pickMode()
+	sp.Model = promptLine(in, "Model (optional, e.g. opus / sonnet)")
+	sp.Prompt = promptLine(in, "Initial prompt (optional)")
+	return sp, true
+}
+
+// pickRepoForSub lets the user choose a tracked repo, no repo, or clone one.
+func pickRepoForSub(ctx context.Context, in *bufio.Reader) string {
+	const none = "○  no repo (plain agent)"
+	const clone = "➕  add / clone a repo…"
 	for {
-		reg, err := store.Load()
+		db, err := store.Open()
 		if err != nil {
-			return current
+			return ""
 		}
-		items := []string{cloneSentinel}
-		for _, r := range reg.Repos {
+		repos, _ := db.Repos()
+		db.Close()
+		items := []string{none, clone}
+		for _, r := range repos {
 			items = append(items, r.Name)
 		}
-		picked, err := fzfMultiSelect("repos", items)
+		choice, err := fzfSelect("repo for this agent", items)
 		if err != nil {
-			return current // cancel keeps current
+			return "" // cancel -> plain agent
 		}
-		clone := false
-		var sel []string
-		for _, p := range picked {
-			if p == cloneSentinel {
-				clone = true
-				continue
+		switch choice {
+		case none:
+			return ""
+		case clone:
+			db2, _ := store.Open()
+			if db2 != nil {
+				_, _ = pickAndCloneRepos(ctx, db2, in)
+				db2.Close()
 			}
-			sel = append(sel, p)
+			continue
+		default:
+			return choice
 		}
-		if clone {
-			if _, err := pickAndCloneRepos(ctx, in); err != nil {
-				fmt.Printf("%v\n(press Enter) ", err)
-				_, _ = in.ReadString('\n')
-			}
-			continue // reopen with the updated list
-		}
-		return sel
 	}
 }
 
-// editMode lets the user pick the session mode.
-func editMode(current string) string {
-	const (
-		task = "task  — short-running, tied to a temporary task"
-		loop = "loop  — long-running, (nearly) autonomous loop"
-	)
-	choice, err := fzfMenu("mode", []string{task, loop})
-	if err != nil {
-		return current // keep
+func pickMode() string {
+	choice, err := fzfMenu("mode", []string{
+		"task  — short-running, tied to a temporary task",
+		"loop  — long-running, (nearly) autonomous loop",
+	})
+	if err != nil || strings.HasPrefix(choice, "task") {
+		return store.ModeTask
 	}
-	if strings.HasPrefix(choice, "loop") {
-		return store.ModeLoop
-	}
-	return store.ModeTask
+	return store.ModeLoop
 }
 
-func promptLine(in *bufio.Reader, label string) string {
-	fmt.Printf("%s: ", label)
-	line, _ := in.ReadString('\n')
-	return strings.TrimSpace(line)
-}
-
-func reposSummary(repos []string) string {
-	if len(repos) == 0 {
-		return "(none — required)"
+func describeSub(s wsops.SubSpec) string {
+	repo := s.Repo
+	if repo == "" {
+		repo = "(plain agent)"
 	}
-	return strings.Join(repos, ", ")
-}
-
-func modeSummary(mode string) string {
-	if mode == store.ModeLoop {
-		return "loop (long-running, autonomous)"
+	parts := []string{repo}
+	if s.Branch != "" {
+		parts = append(parts, s.Branch)
 	}
-	return "task (short-running)"
-}
-
-func orDash(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "—"
+	parts = append(parts, s.Mode)
+	if s.Model != "" {
+		parts = append(parts, s.Model)
 	}
-	return s
+	return strings.Join(parts, " · ")
 }
 
-func orOptional(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "(optional)"
+func agentIndex(line string) int {
+	line = strings.TrimSpace(line)
+	var n int
+	if _, err := fmt.Sscanf(line, "agent %d:", &n); err != nil {
+		return -1
 	}
-	return s
+	return n - 1
 }
 
-// parseCreateFlags splits repo names from --name/--prompt/--mode flags.
-func parseCreateFlags(args []string) ([]string, wsops.Config) {
-	cfg := wsops.Config{Agent: "claude", Mode: store.ModeTask}
+// ---- shared helpers ------------------------------------------------------
+
+type createCfg struct{ name, prompt, mode, model string }
+
+func parseCreateFlags(args []string) ([]string, createCfg) {
+	cfg := createCfg{mode: store.ModeTask}
 	var repos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--name" && i+1 < len(args):
-			cfg.Name = args[i+1]
+			cfg.name = args[i+1]
 			i++
 		case strings.HasPrefix(a, "--name="):
-			cfg.Name = strings.TrimPrefix(a, "--name=")
+			cfg.name = strings.TrimPrefix(a, "--name=")
 		case a == "--prompt" && i+1 < len(args):
-			cfg.InitialPrompt = args[i+1]
+			cfg.prompt = args[i+1]
 			i++
 		case strings.HasPrefix(a, "--prompt="):
-			cfg.InitialPrompt = strings.TrimPrefix(a, "--prompt=")
+			cfg.prompt = strings.TrimPrefix(a, "--prompt=")
 		case a == "--mode" && i+1 < len(args):
-			cfg.Mode = args[i+1]
+			cfg.mode = args[i+1]
 			i++
 		case strings.HasPrefix(a, "--mode="):
-			cfg.Mode = strings.TrimPrefix(a, "--mode=")
+			cfg.mode = strings.TrimPrefix(a, "--mode=")
+		case a == "--model" && i+1 < len(args):
+			cfg.model = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--model="):
+			cfg.model = strings.TrimPrefix(a, "--model=")
 		default:
 			repos = append(repos, a)
 		}
@@ -501,28 +512,14 @@ func parseCreateFlags(args []string) ([]string, wsops.Config) {
 	return repos, cfg
 }
 
-// fzfMultiSelect pipes items into fzf --multi and returns the chosen lines.
-// A non-zero/empty result (user pressed Esc) is reported as an error so callers
-// abort cleanly.
 func fzfMultiSelect(prompt string, items []string) ([]string, error) {
-	cmd := exec.Command("fzf",
-		"--multi",
-		"--prompt", prompt+"> ",
-		"--height", "100%",
-		"--border",
-		"--header", "TAB to multi-select, ENTER to confirm, ESC to cancel",
-	)
-	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
+	out, err := runFzf(items, "--multi", "--prompt", prompt+"> ", "--height", "100%", "--border",
+		"--header", "TAB to multi-select, ENTER to confirm, ESC to cancel")
 	if err != nil {
-		if _, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("selection cancelled")
-		}
-		return nil, fmt.Errorf("fzf not available: %w", err)
+		return nil, err
 	}
 	var lines []string
-	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		if l = strings.TrimSpace(l); l != "" {
 			lines = append(lines, l)
 		}
@@ -530,15 +527,20 @@ func fzfMultiSelect(prompt string, items []string) ([]string, error) {
 	return lines, nil
 }
 
-// fzfMenu is a single-select that preserves item order (for config menus).
+func fzfSelect(prompt string, items []string) (string, error) {
+	out, err := runFzf(items, "--prompt", prompt+"> ", "--height", "100%", "--border",
+		"--header", "type to filter, ENTER to select, ESC to cancel")
+	return strings.TrimSpace(out), err
+}
+
 func fzfMenu(prompt string, items []string) (string, error) {
-	cmd := exec.Command("fzf",
-		"--no-sort",
-		"--prompt", prompt+"> ",
-		"--height", "100%",
-		"--border",
-		"--header", "↑/↓ then ENTER to choose, ESC to cancel",
-	)
+	out, err := runFzf(items, "--no-sort", "--prompt", prompt+"> ", "--height", "100%", "--border",
+		"--header", "↑/↓ then ENTER, ESC to cancel")
+	return strings.TrimSpace(out), err
+}
+
+func runFzf(items []string, args ...string) (string, error) {
+	cmd := exec.Command("fzf", args...)
 	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -548,28 +550,27 @@ func fzfMenu(prompt string, items []string) (string, error) {
 		}
 		return "", fmt.Errorf("fzf not available: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return string(out), nil
 }
 
-// fzfSelect pipes items into fzf (single-select) and returns the chosen line.
-// A cancel (Esc) is reported as an error.
-func fzfSelect(prompt string, items []string) (string, error) {
-	cmd := exec.Command("fzf",
-		"--prompt", prompt+"> ",
-		"--height", "100%",
-		"--border",
-		"--header", "type to filter, ENTER to select, ESC to cancel",
-	)
-	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if _, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("selection cancelled")
-		}
-		return "", fmt.Errorf("fzf not available: %w", err)
+func promptLine(in *bufio.Reader, label string) string {
+	fmt.Printf("%s: ", label)
+	line, _ := in.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func orOptional(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(optional)"
 	}
-	return strings.TrimSpace(string(out)), nil
+	return s
+}
+
+func defaultStr(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }
 
 func expandHome(p string) string {

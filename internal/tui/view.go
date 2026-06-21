@@ -29,26 +29,34 @@ func (m *model) viewRail() string {
 		b.WriteByte('\n')
 	}
 	for i, s := range m.sessions {
-		line := fmt.Sprintf("%s %s", glyph(s), truncate(s.Title, w-4))
-		if i == m.cursor {
+		indent := ""
+		if s.RootID != "" { // sub-session: nest under its root
+			indent = "  "
+		}
+		line := fmt.Sprintf("%s%s %s", indent, glyph(s), truncate(s.Title, w-4-len(indent)))
+		switch {
+		case i == m.cursor:
 			b.WriteString(selStyle.Width(w).Render(line))
-		} else {
+		case s.IsRoot:
+			b.WriteString(titleStyle.Render(line))
+		default:
 			b.WriteString(line)
 		}
 		b.WriteByte('\n')
-		// Sub-line: attach the id when a display name is set, plus status.
-		sub := s.Status
-		if s.Title != s.ID {
-			sub = s.ID + " · " + s.Status
+		if !s.IsRoot { // status sub-line for leaf rows
+			sub := s.Status
+			if s.Title != s.ID && !strings.Contains(s.Status, s.ID) {
+				sub = s.ID + " · " + s.Status
+			}
+			b.WriteString(statusColor(s.Status).Render(indent + "   " + truncate(sub, w-6)))
+			b.WriteByte('\n')
 		}
-		b.WriteString(statusColor(s.Status).Render("   " + truncate(sub, w-4)))
-		b.WriteByte('\n')
 	}
 
 	b.WriteByte('\n')
 	b.WriteString(dimStyle.Render(strings.Repeat("─", w)))
 	b.WriteByte('\n')
-	b.WriteString(dimStyle.Render(" ↵ open    n new\n x×2 del   R ↻"))
+	b.WriteString(dimStyle.Render(" ↵ open   n new   a +agent\n x×2 del  R ↻"))
 	b.WriteByte('\n')
 	b.WriteString(m.statusLine(w))
 	return b.String()
