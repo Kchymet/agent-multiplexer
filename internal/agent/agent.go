@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // Argv returns the absolute argv to run for kind, with any extra trailing args.
@@ -27,11 +28,38 @@ func Argv(kind string, extra ...string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unknown agent kind %q", kind)
 	}
-	path, err := exec.LookPath(bin)
+	path, err := resolve(bin)
 	if err != nil {
-		return nil, fmt.Errorf("%s not found on PATH — launch amux from a shell where %q works", bin, bin)
+		return nil, err
 	}
 	return append(append([]string{path}, args...), extra...), nil
+}
+
+// resolve finds bin's absolute path. It first tries the current PATH, then falls
+// back to the user's login shell — so launches work even when the daemon's own
+// PATH is minimal (e.g. nvm/asdf-managed binaries not on the daemon's PATH).
+func resolve(bin string) (string, error) {
+	if filepathIsExplicit(bin) {
+		if _, err := os.Stat(bin); err == nil {
+			return bin, nil
+		}
+	}
+	if p, err := exec.LookPath(bin); err == nil {
+		return p, nil
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	out, err := exec.Command(shell, "-lic", "command -v "+bin).Output()
+	if p := strings.TrimSpace(string(out)); err == nil && p != "" {
+		return p, nil
+	}
+	return "", fmt.Errorf("%s not found on PATH (also tried %s -lic); install it or set AMUX_<AGENT>_BIN", bin, shell)
+}
+
+func filepathIsExplicit(p string) bool {
+	return strings.ContainsRune(p, '/')
 }
 
 func envOr(key, def string) string {

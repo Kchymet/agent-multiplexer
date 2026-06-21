@@ -47,23 +47,33 @@ func cmdRepo(args []string) error {
 	ctx := context.Background()
 	switch args[0] {
 	case "add":
-		var repo store.Repo
-		var err error
 		switch {
 		case len(args) < 2:
-			// No source given: fuzzy-find a remote repo via gh (or prompt).
-			repo, err = pickAndCloneRepo(ctx, bufio.NewReader(os.Stdin))
+			// No source given: fuzzy-find remote repos via gh (multi-select).
+			repos, err := pickAndCloneRepos(ctx, bufio.NewReader(os.Stdin))
+			if err != nil {
+				return err
+			}
+			for _, r := range repos {
+				fmt.Printf("tracked %s  <-  %s\n", r.Name, r.Source)
+			}
+			return nil
 		case looksLikeGHRepo(args[1]):
 			// OWNER/REPO shorthand: clone via gh (uses GitHub auth).
-			repo, err = addRepoGH(ctx, args[1])
+			repo, err := addRepoGH(ctx, args[1])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("tracked %s  <-  %s\n", repo.Name, repo.Source)
+			return nil
 		default:
-			repo, err = addRepo(ctx, args[1])
+			repo, err := addRepo(ctx, args[1])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("tracked %s  <-  %s\n", repo.Name, repo.Source)
+			return nil
 		}
-		if err != nil {
-			return err
-		}
-		fmt.Printf("tracked %s  <-  %s\n", repo.Name, repo.Source)
-		return nil
 	case "ls", "list":
 		reg, err := store.Load()
 		if err != nil {
@@ -166,62 +176,95 @@ func looksLikeGHRepo(s string) bool {
 
 const manualEntryItem = "✎  enter a URL or local path…"
 
-// pickAndCloneRepo fuzzy-finds a remote repo via gh: it selects an owner (the
-// user's account or an org), then a repo in that owner, and clones it. If gh is
-// not authenticated it prompts to authenticate (rather than falling back).
-func pickAndCloneRepo(ctx context.Context, in *bufio.Reader) (store.Repo, error) {
+// pickAndCloneRepos fuzzy-finds remote repos via gh: it selects an owner (the
+// user's account or an org), then MULTI-selects repos in that owner, and clones
+// each. If gh is not authenticated it prompts to authenticate (rather than
+// falling back).
+func pickAndCloneRepos(ctx context.Context, in *bufio.Reader) ([]store.Repo, error) {
 	if !gh.Installed() {
 		fmt.Println("GitHub CLI (gh) is not installed — see https://cli.github.com")
-		return manualEntry(ctx, in)
+		r, err := manualEntry(ctx, in)
+		return wrap(r, err)
 	}
 	if !gh.Authed(ctx) {
 		fmt.Print("Not signed in to GitHub. Authenticate now? [Y/n] ")
 		line, _ := in.ReadString('\n')
 		if ans := strings.ToLower(strings.TrimSpace(line)); ans == "n" || ans == "no" {
-			return store.Repo{}, fmt.Errorf("GitHub authentication required")
+			return nil, fmt.Errorf("GitHub authentication required")
 		}
 		if err := gh.Login(ctx); err != nil {
-			return store.Repo{}, fmt.Errorf("gh auth login failed: %w", err)
+			return nil, fmt.Errorf("gh auth login failed: %w", err)
 		}
 		if !gh.Authed(ctx) {
-			return store.Repo{}, fmt.Errorf("still not authenticated")
+			return nil, fmt.Errorf("still not authenticated")
 		}
 	}
 
 	// 1) pick an owner (your account + orgs you belong to).
 	owners, err := gh.Owners(ctx)
 	if err != nil || len(owners) == 0 {
-		return store.Repo{}, fmt.Errorf("could not list GitHub owners: %v", err)
+		return nil, fmt.Errorf("could not list GitHub owners: %v", err)
 	}
 	owner, err := fzfSelect("owner / org", append([]string{manualEntryItem}, owners...))
 	if err != nil {
-		return store.Repo{}, err
+		return nil, err
 	}
 	if owner == manualEntryItem {
-		return manualEntry(ctx, in)
+		r, err := manualEntry(ctx, in)
+		return wrap(r, err)
 	}
 
-	// 2) pick a repo within that owner.
+	// 2) multi-select repos within that owner.
 	repos, err := gh.ListReposFor(ctx, owner)
 	if err != nil {
-		return store.Repo{}, fmt.Errorf("listing %s repos: %w", owner, err)
+		return nil, fmt.Errorf("listing %s repos: %w", owner, err)
 	}
 	if len(repos) == 0 {
-		return store.Repo{}, fmt.Errorf("no repositories found for %s", owner)
+		return nil, fmt.Errorf("no repositories found for %s", owner)
 	}
 	items := []string{manualEntryItem}
 	for _, r := range repos {
 		items = append(items, r.NameWithOwner)
 	}
-	choice, err := fzfSelect("repo in "+owner, items)
+	picks, err := fzfMultiSelect("repos in "+owner, items)
 	if err != nil {
-		return store.Repo{}, err
+		return nil, err
 	}
-	if choice == manualEntryItem {
-		return manualEntry(ctx, in)
+
+	var result []store.Repo
+	manualWanted := false
+	for _, p := range picks {
+		if p == manualEntryItem {
+			manualWanted = true
+			continue
+		}
+		fmt.Printf("Cloning %s…\n", p)
+		r, err := addRepoGH(ctx, p)
+		if err != nil {
+			fmt.Printf("  failed: %v\n", err)
+			continue
+		}
+		result = append(result, r)
 	}
-	fmt.Printf("Cloning %s…\n", choice)
-	return addRepoGH(ctx, choice)
+	if manualWanted {
+		if r, err := manualEntry(ctx, in); err == nil {
+			result = append(result, r)
+		} else {
+			fmt.Printf("  %v\n", err)
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("nothing selected")
+	}
+	return result, nil
+}
+
+// wrap turns a single (repo, err) into the slice signature.
+func wrap(r store.Repo, err error) ([]store.Repo, error) {
+	if err != nil {
+		return nil, err
+	}
+	return []store.Repo{r}, nil
 }
 
 // manualEntry prompts for a git URL or local path and clones it.
@@ -363,7 +406,7 @@ func editRepos(ctx context.Context, in *bufio.Reader, current []string) []string
 			sel = append(sel, p)
 		}
 		if clone {
-			if _, err := pickAndCloneRepo(ctx, in); err != nil {
+			if _, err := pickAndCloneRepos(ctx, in); err != nil {
 				fmt.Printf("%v\n(press Enter) ", err)
 				_, _ = in.ReadString('\n')
 			}
