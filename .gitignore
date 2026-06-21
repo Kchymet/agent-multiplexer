@@ -1,0 +1,6 @@
+/bin/
+*.log
+*.sock
+
+# Local, machine-specific Claude Code settings (not shared).
+.claude/settings.local.json
