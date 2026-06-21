@@ -34,9 +34,24 @@ func Open(ctx context.Context, ws store.Workspace) error {
 	if ws.Agent == "" || ws.Agent == "claude" {
 		_ = claudecfg.TrustDir(ws.Dir)
 	}
+	// Resume the agent's session on reopen so progress survives restarts; only
+	// the first launch starts fresh (seeded with the initial prompt).
 	var extra []string
-	if p := strings.TrimSpace(ws.InitialPrompt); p != "" {
-		extra = append(extra, p)
+	prompt := strings.TrimSpace(ws.InitialPrompt)
+	switch {
+	case ws.SessionID != "" && claudecfg.SessionExists(ws.Dir, ws.SessionID):
+		extra = []string{"--resume", ws.SessionID}
+	case ws.SessionID != "":
+		extra = []string{"--session-id", ws.SessionID}
+		if prompt != "" {
+			extra = append(extra, prompt)
+		}
+	case claudecfg.AnySession(ws.Dir):
+		extra = []string{"--continue"} // legacy workspace: resume most recent
+	default:
+		if prompt != "" {
+			extra = []string{prompt}
+		}
 	}
 	argv, err := agent.Argv(ws.Agent, extra...)
 	if err != nil {
@@ -175,6 +190,7 @@ func Create(ctx context.Context, cfg Config) (store.Workspace, error) {
 		Repos:         cfg.Repos,
 		Dir:           dir,
 		InitialPrompt: cfg.InitialPrompt,
+		SessionID:     store.NewUUID(), // pin the session so reopens resume it
 		Created:       store.Now(),
 	}
 	reg.AddWorkspace(ws)

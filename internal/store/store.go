@@ -42,7 +42,10 @@ type Workspace struct {
 	Repos         []string `json:"repos"`          // repo names
 	Dir           string   `json:"dir"`            // holds one worktree per repo
 	InitialPrompt string   `json:"initialPrompt,omitempty"`
-	Created       int64    `json:"created"`
+	// SessionID pins the agent's conversation so reopening (or restarting amux)
+	// resumes the same session instead of starting fresh.
+	SessionID string `json:"sessionId,omitempty"`
+	Created   int64  `json:"created"`
 }
 
 // Display is the human label: the name if set, otherwise the id.
@@ -150,6 +153,15 @@ func (r *Registry) RemoveWorkspace(id string) bool {
 		}
 	}
 	return false
+}
+
+// NewUUID returns a random RFC-4122 v4 UUID (for pinning agent session ids).
+func NewUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // NewID returns a short unique workspace id (not colliding with existing ones).

@@ -9,10 +9,58 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
 var mu sync.Mutex // serialize our own read-modify-write
+
+// projectsRoot is where Claude Code stores per-directory session transcripts.
+func projectsRoot() string {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return filepath.Join(d, "projects")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "projects")
+}
+
+// munge maps an absolute path to Claude Code's project-dir name ('/' and '.'
+// become '-'), e.g. /home/u/.local/x -> -home-u--local-x.
+func munge(cwd string) string {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		abs = cwd
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '/' || r == '.' {
+			return '-'
+		}
+		return r
+	}, abs)
+}
+
+// SessionExists reports whether a saved session with uuid exists for cwd.
+func SessionExists(cwd, uuid string) bool {
+	if uuid == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(projectsRoot(), munge(cwd), uuid+".jsonl"))
+	return err == nil
+}
+
+// AnySession reports whether cwd has any saved Claude session transcript.
+func AnySession(cwd string) bool {
+	ents, err := os.ReadDir(filepath.Join(projectsRoot(), munge(cwd)))
+	if err != nil {
+		return false
+	}
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			return true
+		}
+	}
+	return false
+}
 
 // ConfigPath is ~/.claude.json (honoring CLAUDE_CONFIG_DIR if set).
 func ConfigPath() string {
