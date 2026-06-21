@@ -244,8 +244,10 @@ func stateColor(state string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple: prompt awaiting you
 	case core.StateReady:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")) // blue: ready
+	case core.StateUnknown:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow: live, status unknown
 	default:
-		return dimStyle // idle / unknown
+		return dimStyle // idle
 	}
 }
 
@@ -259,14 +261,16 @@ func glyph(s core.Session) string {
 		return "▸"
 	case s.Mode == "loop":
 		return "∞"
+	case s.Mode == "external":
+		return "◇" // a Claude session amux didn't launch
 	}
 	switch s.State {
-	case core.StateRunning, core.StateWaiting:
+	case core.StateRunning, core.StateWaiting, core.StateUnknown:
 		return "●"
 	case core.StateReady:
 		return "◐"
 	default:
-		return "○" // idle / unknown
+		return "○" // idle
 	}
 }
 

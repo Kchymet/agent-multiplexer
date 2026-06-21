@@ -1,18 +1,18 @@
-// Package claudecfg makes minimal, safe edits to Claude Code's user config
-// (~/.claude.json) on amux's behalf. Today that's pre-trusting directories amux
-// creates so Claude Code doesn't show the interactive "trust this folder?"
-// dialog for a freshly-spawned workspace.
+// Package claudecfg makes minimal, safe edits to Claude Code's user config on
+// amux's behalf: pre-trusting directories amux creates (so no "trust this
+// folder?" dialog) and installing the status hooks that report each agent's
+// activity back to the rail.
 package claudecfg
 
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+
+	"amux/internal/core"
 )
 
 var mu sync.Mutex // serialize our own read-modify-write
@@ -62,111 +62,6 @@ func AnySession(cwd string) bool {
 		}
 	}
 	return false
-}
-
-// TurnActive reports whether the Claude session uuid for cwd is mid-turn — the
-// agent is working on a response rather than sitting idle waiting for input. It
-// inspects the transcript's last conversational message: the turn is finished
-// only when that message is an assistant reply that ended its turn (plain text,
-// no pending tool call). A user message (a fresh prompt or a returned tool
-// result) or an assistant message that paused to call a tool both mean a reply
-// is still in flight. Best-effort: an unreadable or unparsable transcript
-// reports false (treated as idle).
-func TurnActive(cwd, uuid string) bool {
-	if uuid == "" {
-		return false
-	}
-	line, ok := lastMessageLine(filepath.Join(projectsRoot(), munge(cwd), uuid+".jsonl"))
-	if !ok {
-		return false
-	}
-	var e struct {
-		Message struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(line, &e); err != nil {
-		return false
-	}
-	if e.Message.Role != "assistant" {
-		return true // a user prompt or tool result: the agent owes a reply
-	}
-	for _, b := range e.Message.Content {
-		if b.Type == "tool_use" {
-			return true // the assistant paused to call a tool: the turn continues
-		}
-	}
-	return false // the assistant ended its turn: idle
-}
-
-// selectPrompt matches Claude Code's interactive selection cursor on a numbered
-// option ("❯ 1.", "❯ 2." …). That cursor is shown only when Claude is blocked
-// waiting for the user to choose — never at a plain ready input box or mid-turn.
-var selectPrompt = regexp.MustCompile(`(?m)^\s*❯\s*\d+\.`)
-
-// PromptBlocked reports whether pane (the captured visible text of a Claude Code
-// pane) shows a prompt that is blocking on the user — a permission or selection
-// dialog — as opposed to a finished, ready-for-input session. It keys off the
-// numbered selection cursor and the permission question, neither of which
-// appears at a plain ready prompt. Callers should only consult this once the
-// transcript already shows the turn is not active, to avoid racing a spinner.
-func PromptBlocked(pane string) bool {
-	return strings.Contains(pane, "Do you want to proceed?") ||
-		selectPrompt.MatchString(pane)
-}
-
-// lastMessageLine returns the last line of the JSONL transcript at path whose
-// entry is a conversational message ("user" or "assistant"), skipping the
-// non-message bookkeeping entries (mode, permission-mode, queue-operation, …)
-// that can trail the conversation. It reads from the end in a growing window so
-// long transcripts aren't read whole on every poll.
-func lastMessageLine(path string) ([]byte, bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, false
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, false
-	}
-	size := fi.Size()
-	for window := int64(64 << 10); ; window *= 4 {
-		if window > size {
-			window = size
-		}
-		buf := make([]byte, window)
-		if _, err := f.ReadAt(buf, size-window); err != nil && err != io.EOF {
-			return nil, false
-		}
-		lines := bytes.Split(buf, []byte{'\n'})
-		// When the window starts mid-file its first element is a partial line; skip it.
-		first := 0
-		if window < size {
-			first = 1
-		}
-		for i := len(lines) - 1; i >= first; i-- {
-			ln := bytes.TrimSpace(lines[i])
-			if len(ln) == 0 {
-				continue
-			}
-			var t struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(ln, &t) != nil {
-				continue
-			}
-			if t.Type == "user" || t.Type == "assistant" {
-				return ln, true
-			}
-		}
-		if window >= size {
-			return nil, false
-		}
-	}
 }
 
 // ConfigPath is ~/.claude.json (honoring CLAUDE_CONFIG_DIR if set).
@@ -222,4 +117,102 @@ func TrustDir(dir string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// SettingsPath is Claude Code's user settings.json (honoring CLAUDE_CONFIG_DIR).
+// This is where hook configuration lives — distinct from ConfigPath's .claude.json.
+func SettingsPath() string {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return filepath.Join(d, "settings.json")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "settings.json")
+}
+
+// hookEvents maps each Claude Code hook event amux listens on to the activity
+// state it implies. Driven by hooks rather than by scraping the transcript or
+// pane, this is the authoritative source of an agent's status.
+var hookEvents = []struct{ event, state string }{
+	{"SessionStart", core.StateReady},       // launched, no turn yet
+	{"UserPromptSubmit", core.StateRunning}, // a turn began
+	{"Notification", core.StateWaiting},     // needs the user (permission / idle prompt)
+	{"Stop", core.StateReady},               // finished the turn
+	{"SessionEnd", core.StateIdle},          // agent exited
+}
+
+// InstallHooks points Claude Code's status hooks at amuxPath ("amux hook
+// <state>"), writing them into the user settings.json. It is idempotent and
+// preserves any non-amux hooks: existing amux entries are replaced (so a moved
+// binary or changed event set is corrected), other hooks are left untouched.
+// Best-effort — callers proceed on error (status just falls back to "unknown").
+func InstallHooks(amuxPath string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	path := SettingsPath()
+	root := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.UseNumber()
+		_ = dec.Decode(&root)
+	}
+
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok || hooks == nil {
+		hooks = map[string]any{}
+		root["hooks"] = hooks
+	}
+	for _, he := range hookEvents {
+		var groups []any
+		if existing, ok := hooks[he.event].([]any); ok {
+			for _, g := range existing {
+				if !isAmuxHookGroup(g) { // keep the user's own hooks
+					groups = append(groups, g)
+				}
+			}
+		}
+		groups = append(groups, map[string]any{
+			"hooks": []any{map[string]any{
+				"type":    "command",
+				"command": amuxPath + " hook " + he.state,
+			}},
+		})
+		hooks[he.event] = groups
+	}
+
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".amux.tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// isAmuxHookGroup reports whether a hook group is one amux installed, recognized
+// by an "amux hook" command — so reinstalling replaces it instead of stacking.
+func isAmuxHookGroup(g any) bool {
+	m, ok := g.(map[string]any)
+	if !ok {
+		return false
+	}
+	hs, ok := m["hooks"].([]any)
+	if !ok {
+		return false
+	}
+	for _, h := range hs {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") && strings.Contains(cmd, "amux") {
+			return true
+		}
+	}
+	return false
 }

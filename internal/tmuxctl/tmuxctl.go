@@ -172,10 +172,3 @@ func WorkPane(ctx context.Context, window string) string {
 	}
 	return ""
 }
-
-// CapturePane returns the visible text of pane target (the rendered screen, not
-// scrollback). A capture failure yields "".
-func CapturePane(ctx context.Context, target string) string {
-	out, _ := Run(ctx, "capture-pane", "-p", "-t", target)
-	return out
-}

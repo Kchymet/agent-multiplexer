@@ -1,6 +1,7 @@
 package claudecfg
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,80 +38,75 @@ func TestSessionLookup(t *testing.T) {
 	}
 }
 
-// TestTurnActive checks that the transcript's last conversational message drives
-// the idle/active decision, skipping trailing non-message bookkeeping entries.
-func TestTurnActive(t *testing.T) {
+// TestInstallHooks verifies the status hooks are written for each event, point
+// at the given binary, are idempotent (no stacking on reinstall), and preserve
+// the user's own hooks on the same event.
+func TestInstallHooks(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	cwd := "/home/u/work"
-	proj := filepath.Join(dir, "projects", munge(cwd))
-	if err := os.MkdirAll(proj, 0o755); err != nil {
+	path := SettingsPath()
+
+	// Pre-existing user hook on an event we also manage; it must survive.
+	seed := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/my-own-thing"}]}]}}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	write := func(uuid string, lines ...string) {
-		var s string
-		for _, l := range lines {
-			s += l + "\n"
-		}
-		if err := os.WriteFile(filepath.Join(proj, uuid+".jsonl"), []byte(s), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := InstallHooks("/opt/amux"); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooks("/opt/amux"); err != nil { // reinstall: must not stack
+		t.Fatal(err)
 	}
 
-	const (
-		userMsg     = `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`
-		toolResult  = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}`
-		asstText    = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}`
-		asstToolUse = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}],"stop_reason":"tool_use"}}`
-		bookkeeping = `{"type":"queue-operation"}`
-	)
-
-	cases := []struct {
-		name string
-		uuid string
-		want bool
-		body []string
-	}{
-		{"finished turn is idle", "a0000000-0000-4000-8000-000000000001", false, []string{userMsg, asstText}},
-		{"finished turn under bookkeeping is idle", "a0000000-0000-4000-8000-000000000002", false, []string{userMsg, asstText, bookkeeping}},
-		{"pending prompt is active", "a0000000-0000-4000-8000-000000000003", true, []string{asstText, userMsg}},
-		{"pending tool call is active", "a0000000-0000-4000-8000-000000000004", true, []string{userMsg, asstToolUse}},
-		{"returned tool result is active", "a0000000-0000-4000-8000-000000000005", true, []string{asstToolUse, toolResult}},
-	}
-	for _, c := range cases {
-		write(c.uuid, c.body...)
-		if got := TurnActive(cwd, c.uuid); got != c.want {
-			t.Errorf("%s: TurnActive=%v want %v", c.name, got, c.want)
+	hooks := readHooks(t, path)
+	for _, he := range hookEvents {
+		groups, _ := hooks[he.event].([]any)
+		amux := 0
+		for _, g := range groups {
+			if cmd := groupCommand(g); cmd == "/opt/amux hook "+he.state {
+				amux++
+			}
+		}
+		if amux != 1 {
+			t.Errorf("event %s: got %d amux hook groups, want exactly 1", he.event, amux)
 		}
 	}
 
-	if TurnActive(cwd, "") {
-		t.Error("empty uuid should be idle")
+	// The user's own Stop hook must still be present alongside ours.
+	var foundUser bool
+	for _, g := range hooks["Stop"].([]any) {
+		if groupCommand(g) == "/usr/bin/my-own-thing" {
+			foundUser = true
+		}
 	}
-	if TurnActive(cwd, "ffffffff-0000-4000-8000-000000000000") {
-		t.Error("missing transcript should be idle")
+	if !foundUser {
+		t.Error("user's existing Stop hook was clobbered")
 	}
 }
 
-// TestPromptBlocked checks that a blocking selection/permission prompt is
-// detected while a ready input box or working spinner is not.
-func TestPromptBlocked(t *testing.T) {
-	cases := []struct {
-		name string
-		pane string
-		want bool
-	}{
-		{"permission selection", "Bash(rm -rf x)\nDo you want to proceed?\n❯ 1. Yes\n  2. No", true},
-		{"edit selection cursor", "Edit file.go\n  1. Yes\n❯ 2. No, tell Claude what to do", true},
-		{"ready input box", "│ > Try \"how does X work\"                     │\n  ? for shortcuts", false},
-		{"working spinner", "✻ Forming… (12s · esc to interrupt)", false},
-		{"plain output", "Here's the summary of what I changed.\nDone.", false},
-		{"empty", "", false},
+func readHooks(t *testing.T, path string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		if got := PromptBlocked(c.pane); got != c.want {
-			t.Errorf("%s: PromptBlocked=%v want %v", c.name, got, c.want)
-		}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
 	}
+	hooks, _ := root["hooks"].(map[string]any)
+	return hooks
+}
+
+// groupCommand returns the first command string inside a hook group, or "".
+func groupCommand(g any) string {
+	m, _ := g.(map[string]any)
+	hs, _ := m["hooks"].([]any)
+	if len(hs) == 0 {
+		return ""
+	}
+	hm, _ := hs[0].(map[string]any)
+	cmd, _ := hm["command"].(string)
+	return cmd
 }

@@ -21,6 +21,10 @@ const (
 	StateReady   = "ready"   // window live, turn finished, ready for the next message
 	StateWaiting = "waiting" // window live, blocked on a prompt awaiting user input
 	StateRunning = "running" // window live and the agent has an active turn
+	// StateUnknown is a live window with no hook data yet (a session predating
+	// the hooks, or one that hasn't fired its first event). Shown as a less
+	// certain "running" so it reads as live without claiming granular knowledge.
+	StateUnknown = "unknown"
 )
 
 // Session is a normalized agent session surfaced from any Source.

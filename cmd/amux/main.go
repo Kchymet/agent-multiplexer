@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -51,6 +53,8 @@ func main() {
 		err = tui.Run(true)
 	case "rail-attach":
 		err = cmdRailAttach(args)
+	case "hook":
+		err = cmdHook(args)
 	case "status":
 		err = cmdStatus()
 	case "repo":
@@ -64,7 +68,9 @@ func main() {
 	case "do":
 		err = cmdDo(args)
 	case "init":
-		err = ensureConf(true)
+		if err = ensureConf(true); err == nil {
+			ensureHooks(true)
+		}
 	case "version", "--version", "-v":
 		fmt.Println("amux", version)
 	case "help", "-h", "--help":
@@ -112,6 +118,7 @@ func cmdUp() error {
 	if err := ensureConf(false); err != nil {
 		return err
 	}
+	ensureHooks(false) // one-time: install Claude status hooks during first setup
 	if err := ensureDaemon(self); err != nil {
 		// Non-fatal: the dashboard will show "offline" and reconnect.
 		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
@@ -192,6 +199,27 @@ func cmdRailAttach(args []string) error {
 	return tmuxctl.AttachRail(ctx, args[0], self, "rail")
 }
 
+// cmdHook is invoked by Claude Code's status hooks ("amux hook <state>", wired
+// up by claudecfg.InstallHooks). It reads the hook payload from stdin to learn
+// the Claude session id, then records the activity state for the daemon's poll
+// loop to surface in the rail. It must never disrupt the agent, so it swallows
+// all errors and exits 0.
+func cmdHook(args []string) error {
+	if len(args) < 1 {
+		return nil
+	}
+	state := args[0]
+	var payload struct {
+		SessionID string `json:"session_id"`
+		Cwd       string `json:"cwd"`
+	}
+	if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
+		_ = json.Unmarshal(b, &payload)
+	}
+	_ = core.WriteHookState(payload.SessionID, state, payload.Cwd)
+	return nil
+}
+
 // cmdDo sends a single control action to the daemon and prints the result.
 // Usage: amux do <attach|kill|resume|new|refresh> [id] [kind]
 func cmdDo(args []string) error {
@@ -248,9 +276,9 @@ func cmdStatus() error {
 			return nil
 		}
 		for _, s := range f.Snapshot.Sessions {
-			state := "idle"
-			if s.WindowID != "" {
-				state = "running"
+			state := s.State
+			if state == "" {
+				state = core.StateIdle
 			}
 			fmt.Printf("%-20s %-8s %-8s %s\n", s.Title, s.Kind, state, s.Cwd)
 		}

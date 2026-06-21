@@ -81,3 +81,9 @@ func PidPath() string {
 func LogPath() string {
 	return filepath.Join(StateDir(), "daemon.log")
 }
+
+// HooksInstalledPath marks that amux has installed Claude Code's status hooks,
+// so setup only writes them once instead of on every launch.
+func HooksInstalledPath() string {
+	return filepath.Join(StateDir(), "hooks.installed")
+}

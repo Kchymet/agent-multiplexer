@@ -3,14 +3,20 @@ package source
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"time"
 
-	"amux/internal/claudecfg"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
 	"amux/internal/tmuxctl"
 )
+
+// untrackedTTL bounds how long a Claude session amux didn't launch stays on the
+// rail after its last hook event, so one that crashed without a SessionEnd
+// eventually drops off instead of lingering forever.
+const untrackedTTL = 12 * time.Hour
 
 // Workspace is the rail's source: the control console, then each root session
 // with its sub-sessions nested underneath.
@@ -30,11 +36,16 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	running := tmuxctl.WorkspaceWindows(ctx)
 	var out []core.Session
 
+	// Claude sessions amux manages, by id and by dir, so untracked enumeration
+	// can skip them (the dir check also catches legacy sessions with no pinned id).
+	tracked := map[string]bool{console.SessionID: true}
+	trackedDirs := map[string]bool{console.Dir(): true}
+
 	// Control console, pinned first.
-	consoleState := agentState(ctx, running[console.ID], console.Dir(), console.SessionID)
+	consoleState := agentState(running[console.ID], console.SessionID)
 	out = append(out, core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
-		Mode: "console", State: consoleState, Status: consoleState + " · configure amux",
+		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
 		Cwd: console.Dir(), WindowID: running[console.ID], CanAttach: true, CanKill: false,
 	})
 
@@ -52,7 +63,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		subStates := make([]string, len(subs))
 		rootState := core.StateIdle
 		for i, s := range subs {
-			subStates[i] = agentState(ctx, running[s.ID], s.Dir, s.ClaudeID)
+			subStates[i] = agentState(running[s.ID], s.ClaudeID)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
 			}
@@ -60,17 +71,23 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		out = append(out, core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", IsRoot: true, Mode: r.Mode,
 			State:     rootState,
-			Status:    fmt.Sprintf("%s · %d agent%s", rootState, len(subs), plural(len(subs))),
+			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(rootState), len(subs), plural(len(subs))),
 			Cwd:       r.Dir,
 			CanAttach: true, // Enter opens all sub-sessions
 			CanKill:   true, // delete the whole root
 		})
 		for i, s := range subs {
+			if s.ClaudeID != "" {
+				tracked[s.ClaudeID] = true
+			}
+			if s.Dir != "" {
+				trackedDirs[s.Dir] = true
+			}
 			out = append(out, core.Session{
 				ID: s.ID, Title: subLabel(s), Source: "workspace", RootID: s.RootID,
 				Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 				State:     subStates[i],
-				Status:    subStates[i] + subSuffix(s),
+				Status:    stateLabel(subStates[i]) + subSuffix(s),
 				Cwd:       s.Dir,
 				WindowID:  running[s.ID],
 				CanAttach: true,
@@ -78,7 +95,56 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			})
 		}
 	}
+
+	// Claude sessions amux didn't launch (now visible because the status hooks
+	// are user-level), shown read-only after the tracked rows.
+	out = append(out, untrackedRows(tracked, trackedDirs)...)
 	return out, nil
+}
+
+// untrackedRows lists Claude sessions amux didn't launch: any with reported hook
+// activity whose id (and dir) isn't tracked. They have no tmux window here, so
+// they're informational only; ended (idle) and stale sessions are dropped.
+func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
+	var out []core.Session
+	now := time.Now().UnixMilli()
+	for id, rec := range core.AllHookStates() {
+		if tracked[id] || trackedDirs[rec.Cwd] || rec.State == core.StateIdle {
+			continue // ours (by id or dir), or a session that has ended
+		}
+		if rec.Updated > 0 && now-rec.Updated > untrackedTTL.Milliseconds() {
+			continue // stale: likely crashed without a SessionEnd
+		}
+		out = append(out, core.Session{
+			ID:        shortID(id),
+			Title:     untrackedTitle(rec.Cwd, id),
+			Source:    "workspace",
+			Kind:      "claude",
+			Mode:      "external",
+			State:     rec.State,
+			Status:    stateLabel(rec.State) + " · untracked",
+			Cwd:       rec.Cwd,
+			StartedAt: rec.Updated,
+		})
+	}
+	return out
+}
+
+// shortID abbreviates a session uuid for display.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// untrackedTitle labels an untracked session by its working directory, falling
+// back to its short id.
+func untrackedTitle(cwd, id string) string {
+	if b := filepath.Base(cwd); b != "" && b != "." && b != string(filepath.Separator) {
+		return b
+	}
+	return shortID(id)
 }
 
 func subLabel(s store.Session) string {
@@ -101,32 +167,35 @@ func subSuffix(s store.Session) string {
 	return ""
 }
 
-// agentState classifies a session's activity:
+// agentState classifies a session's activity. The fine-grained states come from
+// Claude Code's hooks (see claudecfg.InstallHooks), which write the current
+// state per session as the agent's turn lifecycle fires:
 //   - StateIdle:    no live tmux window (the agent isn't running)
-//   - StateRunning: window live and the agent has an active turn
-//   - StateWaiting: window live, turn done, blocked on a prompt awaiting input
-//   - StateReady:   window live, turn done, ready for the next message
-//
-// Sessions without a pinned Claude id can't be introspected, so a live window
-// is assumed to be running (the prior behavior for those).
-func agentState(ctx context.Context, win, dir, claudeID string) string {
+//   - StateRunning: a turn is in flight
+//   - StateWaiting: blocked on a prompt awaiting the user
+//   - StateReady:   turn finished / freshly launched, ready for input
+//   - StateUnknown: window live but no hook data yet (a pre-hook session, or one
+//     that hasn't fired its first event) — shown as a less certain "running".
+func agentState(win, claudeID string) string {
 	if win == "" {
 		return core.StateIdle
 	}
-	if claudeID == "" {
-		return core.StateRunning
-	}
-	if claudecfg.TurnActive(dir, claudeID) {
-		return core.StateRunning
-	}
-	// Turn finished: distinguish "blocked on a prompt" from "ready" by looking at
-	// what the agent's pane is actually showing.
-	if pane := tmuxctl.WorkPane(ctx, win); pane != "" {
-		if claudecfg.PromptBlocked(tmuxctl.CapturePane(ctx, pane)) {
-			return core.StateWaiting
+	if rec, ok := core.HookState(claudeID); ok {
+		switch rec.State {
+		case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
+			return rec.State
 		}
 	}
-	return core.StateReady
+	return core.StateUnknown
+}
+
+// stateLabel is the word shown to the user. Unknown reads as "running": the
+// agent is live, we just lack granular hook data (the rail tints it differently).
+func stateLabel(state string) string {
+	if state == core.StateUnknown {
+		return core.StateRunning
+	}
+	return state
 }
 
 // stateRank orders states by how much they want the user's attention, highest
@@ -134,12 +203,14 @@ func agentState(ctx context.Context, win, dir, claudeID string) string {
 func stateRank(state string) int {
 	switch state {
 	case core.StateWaiting:
-		return 3
+		return 4
 	case core.StateRunning:
+		return 3
+	case core.StateUnknown:
 		return 2
 	case core.StateReady:
 		return 1
-	default: // idle / unknown
+	default: // idle
 		return 0
 	}
 }
