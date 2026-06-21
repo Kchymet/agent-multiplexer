@@ -57,6 +57,8 @@ func main() {
 		err = cmdHook(args)
 	case "status":
 		err = cmdStatus()
+	case "doctor", "health", "check":
+		err = cmdDoctor()
 	case "repo":
 		err = cmdRepo(args)
 	case "session", "ses", "workspace", "ws":
@@ -100,6 +102,7 @@ usage: amux <command>
   workspace rm <id>  delete a workspace (removes its worktrees + branches)
   name <text>        set the current workspace's display name (for the agent)
   status             print workspaces and exit
+  doctor             health check: dependencies (fzf/claude/gh/…) + runtime
   init               (re)write the isolated tmux config
   daemon             run the daemon in the foreground (usually automatic)
   version            print version
