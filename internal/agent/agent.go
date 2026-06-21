@@ -22,6 +22,12 @@ func Argv(kind string, extra ...string) ([]string, error) {
 	switch kind {
 	case "", "claude":
 		bin = envOr("AMUX_CLAUDE_BIN", "claude")
+		// Default to the safe auto-accept permission mode (a classifier blocks
+		// escalations — this is NOT --dangerously-skip-permissions). Override
+		// with AMUX_PERMISSION_MODE=default|acceptEdits|plan|… or "none" to omit.
+		if pm := envOr("AMUX_PERMISSION_MODE", "auto"); pm != "" && pm != "none" {
+			args = append(args, "--permission-mode", pm)
+		}
 	case "hermes":
 		bin = envOr("AMUX_HERMES_BIN", "hermes")
 		args = []string{"chat"}

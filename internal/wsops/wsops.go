@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"amux/internal/agent"
+	"amux/internal/claudecfg"
+	"amux/internal/console"
 	"amux/internal/git"
 	"amux/internal/store"
 	"amux/internal/tmuxctl"
@@ -26,6 +28,11 @@ func Open(ctx context.Context, ws store.Workspace) error {
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
 		return fmt.Errorf("workspace dir missing: %s", ws.Dir)
+	}
+	// Pre-trust the dir so Claude Code skips its interactive "trust this folder?"
+	// dialog (amux created this dir; best-effort).
+	if ws.Agent == "" || ws.Agent == "claude" {
+		_ = claudecfg.TrustDir(ws.Dir)
 	}
 	var extra []string
 	if p := strings.TrimSpace(ws.InitialPrompt); p != "" {
@@ -56,8 +63,15 @@ func Open(ctx context.Context, ws store.Workspace) error {
 	return nil
 }
 
-// OpenByID loads the workspace and opens it.
+// OpenByID loads the workspace and opens it. The reserved console id opens the
+// built-in amux control console instead of a registry workspace.
 func OpenByID(ctx context.Context, id string) error {
+	if id == console.ID {
+		if err := console.Ensure(); err != nil {
+			return err
+		}
+		return Open(ctx, console.Workspace())
+	}
 	reg, err := store.Load()
 	if err != nil {
 		return err
@@ -72,6 +86,13 @@ func OpenByID(ctx context.Context, id string) error {
 // Delete closes the workspace window, removes every repo worktree and its
 // branch, deletes the workspace dir, and drops it from the registry.
 func Delete(ctx context.Context, id string) error {
+	if id == console.ID {
+		// The console can't be deleted; just close its window if open.
+		if win := tmuxctl.WorkspaceWindows(ctx)[id]; win != "" {
+			_ = tmuxctl.KillWindow(ctx, win)
+		}
+		return nil
+	}
 	reg, err := store.Load()
 	if err != nil {
 		return err

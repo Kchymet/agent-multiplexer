@@ -229,15 +229,18 @@ func statusColor(status string) lipgloss.Style {
 	}
 }
 
-// glyph encodes mode + running state: loops use ∞, tasks use ●(running)/○(idle).
+// glyph encodes the session: console uses ⚙, loops ∞, tasks ●(running)/○(idle).
 func glyph(s core.Session) string {
-	if s.Mode == "loop" {
+	switch {
+	case s.Mode == "console":
+		return "⚙"
+	case s.Mode == "loop":
 		return "∞"
-	}
-	if s.WindowID != "" {
+	case s.WindowID != "":
 		return "●"
+	default:
+		return "○"
 	}
-	return "○"
 }
 
 func truncate(s string, n int) string {

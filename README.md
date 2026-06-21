@@ -47,6 +47,12 @@ separate from your default tmux and `~/.tmux.conf`.
 - **Mode** — a workspace is either a **task** (short-running, tied to a temporary
   task) or a **loop** (long-running, nearly autonomous). Shown in the rail with a
   distinct glyph (`●`/`○` for tasks, `∞` for loops).
+- **Control console** (`⚙`, pinned first in the rail) — a built-in session that
+  runs an agent in a neutral directory, preconfigured (via its `CLAUDE.md`) to help
+  you configure and operate amux. It is scoped to amux **configuration + CLI only**
+  — it won't touch workspace code or the amux source. Open it from the rail, with
+  `C-a C`, or `amux console`. Edit `~/.local/share/amux/console/CLAUDE.md` to tailor
+  how it behaves.
 
 ## Philosophy: amux is a UI layer
 
@@ -72,6 +78,20 @@ export AMUX_CLAUDE_BIN="$HOME/.config/amux/claude-launch.sh"   # in your shell r
 ```
 
 amux ships **no** autonomy policy of its own; `mode` is intent + display only.
+
+### Launch defaults: trusted + auto
+
+For agents amux spawns, it sets two sensible (overridable) defaults so a fresh
+worktree is usable without prompts:
+
+- **Trusted by default** — amux pre-marks each directory it creates as trusted in
+  `~/.claude.json` (`projects.<dir>.hasTrustDialogAccepted`), so Claude Code skips
+  its interactive "trust this folder?" dialog. (amux only trusts dirs it created.)
+- **Auto permission mode** — agents launch with `--permission-mode auto`: a
+  classifier auto-approves safe operations and blocks escalations. This is **not**
+  `--dangerously-skip-permissions`/`bypassPermissions`. Override per kind with
+  `AMUX_PERMISSION_MODE=default|acceptEdits|plan|auto` (or `none` to omit), or take
+  full control with an `AMUX_CLAUDE_BIN` wrapper.
 
 ## How it works
 
@@ -142,7 +162,8 @@ create a dedicated iTerm profile whose command is `amux up`.
 
 Inside the isolated tmux server: prefix is `C-a`; `prefix + h` / `prefix + l`
 (or `Alt+h` / `Alt+l`) move between the rail and your work; `prefix + g` opens
-the full-screen dashboard; `prefix + a` opens the new-workspace creator.
+the full-screen dashboard; `prefix + a` opens the new-workspace creator;
+`prefix + C` opens the control console; `prefix + d` detaches.
 
 ## Commands
 
@@ -156,6 +177,7 @@ amux workspace new       # config page: repos, mode, prompt, name → create & o
 amux workspace create <repo>... [--name n] [--prompt t] [--mode task|loop]   # scripting
 amux workspace open <id> | rm <id> | rename <id> <name>
 amux name <text>         # set the current workspace's name (run by the agent)
+amux console             # open the amux control console (configure amux)
 amux status              # print workspaces as text (scripting)
 amux init                # (re)write the isolated tmux config
 amux daemon              # run the daemon in the foreground (usually automatic)
@@ -169,7 +191,9 @@ internal/core/       Session model, wire protocol, paths
 internal/store/      JSON registry of repos + workspaces (atomic writes)
 internal/git/        bare clone + worktree helpers
 internal/gh/         GitHub CLI wrapper (list/clone remote repos)
-internal/agent/      agent-kind -> absolute argv resolver
+internal/agent/      agent-kind -> absolute argv resolver (+ permission mode)
+internal/claudecfg/  safe edits to ~/.claude.json (pre-trust spawned dirs)
+internal/console/    the control console: neutral dir + preconfigured CLAUDE.md
 internal/wsops/      workspace open/create/delete (shared by daemon + CLI)
 internal/source/     Source interface + workspace.go (claude/hermes/tmux stubs)
 internal/daemon/     registry poll, unix-socket server, actions, client

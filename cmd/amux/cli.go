@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/gh"
 	"amux/internal/git"
@@ -16,6 +17,11 @@ import (
 	"amux/internal/tmuxctl"
 	"amux/internal/wsops"
 )
+
+// cmdConsole opens (or switches to) the built-in amux control console.
+func cmdConsole() error {
+	return wsops.OpenByID(context.Background(), console.ID)
+}
 
 // cmdName sets the display name of the workspace whose window the caller is in.
 // Intended for the agent to rename its own session: `amux name "<summary>"`.

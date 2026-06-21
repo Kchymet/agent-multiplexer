@@ -59,6 +59,8 @@ func main() {
 		err = cmdWorkspace(args)
 	case "name":
 		err = cmdName(args)
+	case "console":
+		err = cmdConsole()
 	case "do":
 		err = cmdDo(args)
 	case "init":

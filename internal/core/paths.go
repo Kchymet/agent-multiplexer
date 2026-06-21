@@ -59,6 +59,10 @@ func ReposDir() string { return filepath.Join(DataDir(), "repos") }
 // WorkspacesDir holds per-workspace directories of repo worktrees.
 func WorkspacesDir() string { return filepath.Join(DataDir(), "workspaces") }
 
+// ConsoleDir is the neutral root for the amux control console agent (no repo
+// code lives here — just the console's CLAUDE.md).
+func ConsoleDir() string { return filepath.Join(DataDir(), "console") }
+
 // RegistryPath is the JSON file tracking repos and workspaces.
 func RegistryPath() string { return filepath.Join(DataDir(), "registry.json") }
 

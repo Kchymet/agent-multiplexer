@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
 	"amux/internal/tmuxctl"
@@ -24,7 +25,26 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	}
 	running := tmuxctl.WorkspaceWindows(ctx)
 
-	sessions := make([]core.Session, 0, len(reg.Workspaces))
+	sessions := make([]core.Session, 0, len(reg.Workspaces)+1)
+
+	// The amux control console is always pinned first.
+	cstate := "idle"
+	if running[console.ID] != "" {
+		cstate = "running"
+	}
+	sessions = append(sessions, core.Session{
+		ID:        console.ID,
+		Title:     "amux console",
+		Source:    "workspace",
+		Kind:      "claude",
+		Mode:      "console",
+		Status:    cstate + " · configure amux",
+		Cwd:       console.Dir(),
+		WindowID:  running[console.ID],
+		CanAttach: true,
+		CanKill:   false, // the console can't be deleted
+	})
+
 	for _, ws := range reg.Workspaces {
 		win := running[ws.ID]
 		state := "idle"

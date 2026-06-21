@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"amux/internal/console"
 	"amux/internal/core"
 )
 
@@ -27,5 +28,7 @@ func ensureConf(force bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	// Make sure the control console's directory + CLAUDE.md exist too.
+	_ = console.Ensure()
 	return os.WriteFile(path, embeddedConf, 0o644)
 }
