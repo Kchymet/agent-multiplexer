@@ -110,3 +110,35 @@ func groupCommand(g any) string {
 	cmd, _ := hm["command"].(string)
 	return cmd
 }
+
+// TestPreferredModel covers the rational-default model reader: a configured
+// model is returned (trimmed), and every degenerate case (missing key, missing
+// file, malformed JSON) yields "" so callers fall back to Claude's own default.
+func TestPreferredModel(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string // "" means write no file at all
+		want    string
+	}{
+		{"configured", `{"model":"opus"}`, "opus"},
+		{"trimmed", `{"model":"  sonnet  "}`, "sonnet"},
+		{"empty value", `{"model":""}`, ""},
+		{"key absent", `{"theme":"dark"}`, ""},
+		{"missing file", "", ""},
+		{"malformed json", `{not json`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", dir)
+			if tc.content != "" {
+				if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := PreferredModel(); got != tc.want {
+				t.Errorf("PreferredModel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

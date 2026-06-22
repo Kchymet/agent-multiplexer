@@ -550,7 +550,9 @@ func agentIndex(line string) int {
 type createCfg struct{ name, prompt, mode, model string }
 
 func parseCreateFlags(args []string) ([]string, createCfg) {
-	cfg := createCfg{mode: store.ModeTask}
+	// Same rational defaults as the interactive flow: task mode and the user's
+	// preferred Claude model. An explicit --mode/--model below overrides these.
+	cfg := createCfg{mode: store.ModeTask, model: claudecfg.PreferredModel()}
 	var repos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
