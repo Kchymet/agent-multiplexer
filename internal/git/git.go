@@ -33,9 +33,26 @@ func NameFromSource(source string) string {
 	return s
 }
 
-// CloneBare creates a bare clone of source at gitDir (a worktree source).
+// CloneBare creates a bare clone of source at gitDir (a worktree source) and
+// configures it to track the remote's branches under refs/remotes/origin/* so
+// later fetches can update them and worktrees can be based on the remote tip.
 func CloneBare(ctx context.Context, source, gitDir string) error {
-	_, err := run(ctx, "", "clone", "--bare", source, gitDir)
+	if _, err := run(ctx, "", "clone", "--bare", source, gitDir); err != nil {
+		return err
+	}
+	_, _ = run(ctx, "", "--git-dir", gitDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	_, _ = run(ctx, "", "--git-dir", gitDir, "fetch", "--prune", "origin")
+	_, _ = run(ctx, "", "--git-dir", gitDir, "remote", "set-head", "origin", "-a")
+	return nil
+}
+
+// Fetch updates the bare repo from origin (best-effort). It ensures the
+// remote-tracking refspec exists first, so a plain `--bare` clone starts
+// tracking refs/remotes/origin/* too.
+func Fetch(ctx context.Context, gitDir string) error {
+	_, _ = run(ctx, "", "--git-dir", gitDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	_, err := run(ctx, "", "--git-dir", gitDir, "fetch", "--prune", "origin")
+	_, _ = run(ctx, "", "--git-dir", gitDir, "remote", "set-head", "origin", "-a")
 	return err
 }
 
@@ -48,8 +65,29 @@ func DefaultBranch(ctx context.Context, gitDir string) string {
 	return out
 }
 
-// AddWorktree creates a worktree at path on a new branch from the bare repo.
+// remoteDefaultRef is the ref new work should be based on: origin's default
+// branch (e.g. origin/main) when known, else the bare repo's local default.
+func remoteDefaultRef(ctx context.Context, gitDir string) string {
+	if out, err := run(ctx, "", "--git-dir", gitDir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil && out != "" {
+		return out // e.g. "origin/main"
+	}
+	def := DefaultBranch(ctx, gitDir)
+	if _, err := run(ctx, "", "--git-dir", gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+def); err == nil {
+		return "origin/" + def
+	}
+	return def
+}
+
+// AddWorktree fetches the latest from origin, then creates a worktree at path on
+// a new branch based on the remote's default branch — so every agent starts from
+// the latest remote, not a stale snapshot. Falls back to the bare HEAD when
+// there's no reachable remote (e.g. an empty or local-only repo).
 func AddWorktree(ctx context.Context, gitDir, path, branch string) error {
+	_ = Fetch(ctx, gitDir) // best-effort: stay current with the remote
+	start := remoteDefaultRef(ctx, gitDir)
+	if _, err := run(ctx, "", "--git-dir", gitDir, "worktree", "add", "-b", branch, path, start); err == nil {
+		return nil
+	}
 	_, err := run(ctx, "", "--git-dir", gitDir, "worktree", "add", "-b", branch, path)
 	return err
 }

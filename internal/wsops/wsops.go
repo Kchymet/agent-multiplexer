@@ -83,6 +83,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 			return store.Session{}, err
 		}
 	}
+	writeAgentGuide(dir, branch)
 	a := store.Session{
 		ID: agentID, RootID: rootID,
 		Agent: defaultStr(spec.Agent, "claude"), Model: spec.Model,
@@ -94,6 +95,35 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		return store.Session{}, err
 	}
 	return a, nil
+}
+
+// writeAgentGuide drops a CLAUDE.md into the agent's directory (its cwd) telling
+// the agent to stay sandboxed to this dir and to keep its branch current with the
+// remote. The agent dir is not a git repo, so this never dirties a worktree.
+func writeAgentGuide(dir, branch string) {
+	guide := fmt.Sprintf(`# amux agent — sandboxed workspace
+
+This directory is your sandbox. It contains a git **worktree per repository** you
+are assigned (the subdirectories here).
+
+## Stay in your sandbox
+- Only read and edit files **inside this directory** (your worktrees). Do not
+  touch anything outside it: other agents' worktrees, the amux data dir, or any
+  parent/clone of these repos.
+- You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
+  commit on the default branch (main/master), and do not push to it.
+
+## Keep current with the remote
+Each repo here is a worktree of a shared clone of its remote. Before starting,
+and regularly as you work, refresh your branch from the remote — run inside each
+repo subdirectory:
+
+    git fetch origin && git rebase origin/HEAD
+
+Resolve conflicts on your branch. This keeps you building on the latest remote,
+not a stale snapshot.
+`, branch)
+	_ = os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(guide), 0o644)
 }
 
 // AttachRepo adds a repo to a workspace's attached set (template only; existing
