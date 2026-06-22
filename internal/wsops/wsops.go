@@ -195,17 +195,16 @@ func OpenByID(ctx context.Context, id string) error {
 	return launch(ctx, s)
 }
 
-// launch opens (or switches to) one agent's dedicated tmux session. The agent
-// is hosted in its own rail-free session (core.AgentSession) so the native TUI
-// can embed it cleanly; switch-client also works for the classic entrypoint.
-func launch(ctx context.Context, s store.Session) error {
+// EnsureAgentSession starts the agent's dedicated, rail-free tmux session
+// (core.AgentSession) if it isn't already running, and returns its name. It does
+// NOT switch any client — the native TUI embeds the returned session directly.
+func EnsureAgentSession(ctx context.Context, s store.Session) (string, error) {
 	sess := core.AgentSession(s.ID)
 	if tmuxctl.HasSession(ctx, sess) {
-		_ = tmuxctl.SwitchClient(ctx, sess)
-		return nil
+		return sess, nil
 	}
 	if _, err := os.Stat(s.Dir); err != nil {
-		return fmt.Errorf("session dir missing: %s", s.Dir)
+		return "", fmt.Errorf("session dir missing: %s", s.Dir)
 	}
 	if s.Agent == "" || s.Agent == "claude" {
 		_ = claudecfg.TrustDir(s.Dir)
@@ -230,7 +229,7 @@ func launch(ctx context.Context, s store.Session) error {
 	}
 	argv, err := agent.Argv(s.Agent, s.Model, extra...)
 	if err != nil {
-		return err
+		return "", err
 	}
 	env := []string{
 		"AMUX_WORKSPACE=" + s.ID,
@@ -239,6 +238,16 @@ func launch(ctx context.Context, s store.Session) error {
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
 	if err := tmuxctl.NewDetachedSession(ctx, sess, s.Dir, env, argv...); err != nil {
+		return "", err
+	}
+	return sess, nil
+}
+
+// launch opens (or switches the attached client to) one agent's dedicated tmux
+// session — used by the classic entrypoint and the CLI.
+func launch(ctx context.Context, s store.Session) error {
+	sess, err := EnsureAgentSession(ctx, s)
+	if err != nil {
 		return err
 	}
 	_ = tmuxctl.SwitchClient(ctx, sess)

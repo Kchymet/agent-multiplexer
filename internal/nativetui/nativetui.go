@@ -6,6 +6,7 @@
 package nativetui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,9 +15,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/store"
 	"amux/internal/vterm"
+	"amux/internal/wsops"
 )
 
 const sidebarWidth = 26
@@ -193,24 +197,38 @@ func (m *model) selected() *core.Session {
 	return &m.sessions[m.cursor]
 }
 
-// attachSelected embeds the selected agent's dedicated tmux session in the main
-// pane and focuses it. The session is private to that agent (rail-free, sized to
-// this client), so there's nothing to negotiate or leak.
+// attachSelected embeds the selected agent in the main pane and focuses it,
+// launching its dedicated session first if it isn't running. The session is
+// private to that agent (rail-free, sized to this client), so there's nothing to
+// negotiate or leak.
 func (m *model) attachSelected() tea.Cmd {
 	s := m.selected()
-	if s == nil || s.WindowID == "" {
-		m.status = "not a running agent"
+	if s == nil {
+		return nil
+	}
+	if !attachable(s) {
+		m.status = "select an agent"
 		return nil
 	}
 	if m.attached == s.ID && m.term != nil { // already showing it — just focus
 		m.focus = focusAgent
 		return nil
 	}
+
+	target := s.WindowID // its session, if already live
+	if target == "" {
+		name, err := startAgent(s.ID) // launch the dedicated session
+		if err != nil {
+			m.status = "launch failed: " + err.Error()
+			return nil
+		}
+		target = name
+	}
+
 	if m.term != nil { // switch: drop the previous embed
 		_ = m.term.Close()
 		m.term = nil
 	}
-
 	t := vterm.New(m.mainWidth(), m.paneRows())
 	t.OnData(func() {
 		select {
@@ -218,8 +236,7 @@ func (m *model) attachSelected() tea.Cmd {
 		default:
 		}
 	})
-	// s.WindowID holds the agent's dedicated session name (see source.sessOf).
-	cmd := exec.Command("tmux", "-L", core.TmuxSocket, "attach", "-t", "="+s.WindowID)
+	cmd := exec.Command("tmux", "-L", core.TmuxSocket, "attach", "-t", "="+target)
 	cmd.Env = append(envWithout(os.Environ(), "TMUX"), "TERM=xterm-256color")
 	if err := t.Start(cmd); err != nil {
 		m.status = "attach failed: " + err.Error()
@@ -229,6 +246,41 @@ func (m *model) attachSelected() tea.Cmd {
 	m.attached = s.ID
 	m.focus = focusAgent
 	return nil
+}
+
+// attachable reports whether a row hosts an agent we can embed (the console or a
+// workspace's sub-agent) — not a workspace container, repo, or detached row.
+func attachable(s *core.Session) bool {
+	if s.ID == console.ID {
+		return true
+	}
+	return s.Section == core.SectionWorkspaces && !s.IsRoot && s.RootID != ""
+}
+
+// startAgent ensures the agent's dedicated session is running and returns its
+// name (launching/resuming it if needed).
+func startAgent(id string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	if id == console.ID {
+		if err := console.Ensure(); err != nil {
+			return "", err
+		}
+		return wsops.EnsureAgentSession(ctx, console.Session())
+	}
+	db, err := store.Open()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("no such agent %q", id)
+	}
+	return wsops.EnsureAgentSession(ctx, s)
 }
 
 func (m *model) mainWidth() int {
