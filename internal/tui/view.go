@@ -26,20 +26,34 @@ func (m *model) viewRail() string {
 	b.WriteString(headerStyle.Width(w).Render(" amux"))
 	b.WriteByte('\n')
 
-	if len(m.sessions) == 0 {
-		b.WriteString(dimStyle.Render(" no workspaces\n press n to create"))
-		b.WriteByte('\n')
-	}
-	section := ""
+	// Pinned, sectionless rows first (the control console).
 	for i, s := range m.sessions {
-		if s.Section != section {
-			section = s.Section
-			if label := sectionLabel(section); label != "" {
-				b.WriteString(sectionStyle.Width(w).Render(label))
-				b.WriteByte('\n')
+		if s.Section == "" {
+			m.writeRailRow(&b, i, s, w)
+		}
+	}
+
+	// The three sections, always shown in order and visually separated by a
+	// blank line and a full-width header bar — even when a section is empty.
+	for _, sec := range []struct{ key, label, empty string }{
+		{core.SectionWorkspaces, " WORKSPACES", "no workspaces — n to create"},
+		{core.SectionRepos, " REPOS", "no repos — r to add"},
+		{core.SectionDetached, " DETACHED", "none"},
+	} {
+		b.WriteByte('\n')
+		b.WriteString(sectionStyle.Width(w).Render(sec.label))
+		b.WriteByte('\n')
+		any := false
+		for i, s := range m.sessions {
+			if s.Section == sec.key {
+				m.writeRailRow(&b, i, s, w)
+				any = true
 			}
 		}
-		m.writeRailRow(&b, i, s, w)
+		if !any {
+			b.WriteString(dimStyle.Render("   " + truncate(sec.empty, w-3)))
+			b.WriteByte('\n')
+		}
 	}
 
 	b.WriteByte('\n')
@@ -115,7 +129,8 @@ func (m *model) viewFull() string {
 		if s.Section != section {
 			section = s.Section
 			if label := sectionLabel(section); label != "" {
-				b.WriteString(sectionStyle.Render("  " + label))
+				b.WriteByte('\n')
+				b.WriteString(sectionStyle.Width(w).Render(label))
 				b.WriteByte('\n')
 			}
 		}

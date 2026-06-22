@@ -257,7 +257,7 @@ var (
 	selStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
 	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Background(lipgloss.Color("237"))
 )
 
 // stateColor styles a session's status sub-line by its activity state: green
