@@ -149,14 +149,27 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case "enter":
-		if s := m.selected(); s != nil {
+		s := m.selected()
+		if s == nil {
+			return m, nil
+		}
+		switch s.Section {
+		case core.SectionRepos:
+			m.status = "new workspace from " + s.Title + "…"
+			return m, newWorkspaceFromRepoCmd(s.ID)
+		case core.SectionDetached:
+			m.status = "detached session — open it from its own terminal"
+			return m, nil
+		default:
 			m.status = "opening " + s.ID + "…"
 			return m, m.sendCmd(core.Action{Action: "open", ID: s.ID})
 		}
 	case "n":
 		return m, newSessionCmd
+	case "r":
+		return m, addRepoCmd
 	case "a":
-		if s := m.selected(); s != nil && s.ID != "console" {
+		if s := m.selected(); s != nil && s.Section == core.SectionWorkspaces {
 			root := s.RootID
 			if s.IsRoot {
 				root = s.ID
@@ -165,10 +178,14 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, addAgentCmd(root)
 			}
 		}
-		m.status = "select a session to add an agent to"
+		m.status = "select a workspace to add an agent to"
 	case "x":
 		s := m.selected()
 		if s == nil {
+			return m, nil
+		}
+		if !s.CanKill {
+			m.status = "nothing to delete here"
 			return m, nil
 		}
 		if m.confirmDelete == s.ID {
@@ -191,6 +208,14 @@ func newSessionCmd() tea.Msg { return popup("session", "new") }
 func addAgentCmd(rootID string) tea.Cmd {
 	return func() tea.Msg { return popup("session", "add", rootID) }
 }
+
+// newWorkspaceFromRepoCmd opens the new-workspace page seeded with a repo.
+func newWorkspaceFromRepoCmd(repo string) tea.Cmd {
+	return func() tea.Msg { return popup("session", "new", repo) }
+}
+
+// addRepoCmd opens the interactive repo-add flow in a tmux popup.
+func addRepoCmd() tea.Msg { return popup("repo", "add") }
 
 // popup runs `amux <args...>` in a tmux popup (its own TTY for fzf/prompts); the
 // rail keeps running beneath. Fire-and-forget, reaped to avoid zombies.
@@ -227,11 +252,12 @@ func (m *model) selected() *core.Session {
 // ---- styles --------------------------------------------------------------
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	selStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	selStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
+	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
+	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
 )
 
 // stateColor styles a session's status sub-line by its activity state: green
@@ -255,6 +281,8 @@ func stateColor(state string) lipgloss.Style {
 // activity state — running/waiting ●, ready ◐, idle ○.
 func glyph(s core.Session) string {
 	switch {
+	case s.Kind == "repo":
+		return "⛁" // a tracked repository
 	case s.Mode == "console":
 		return "⚙"
 	case s.IsRoot:

@@ -265,7 +265,7 @@ func cmdSession(args []string) error {
 	}
 	switch sub {
 	case "new":
-		return sessionNew(ctx)
+		return sessionNew(ctx, args[1:]) // optional seed repos to pre-attach
 	case "add":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux session add <root-id> [repo...]")
@@ -349,10 +349,10 @@ func sessionList() error {
 // sessionNew is the interactive create page (run in a tmux popup): name the
 // workspace, attach repos, optionally configure specific agents over a subset of
 // those repos (otherwise a default agent uses all), then Create.
-func sessionNew(ctx context.Context) error {
+func sessionNew(ctx context.Context, seedRepos []string) error {
 	in := bufio.NewReader(os.Stdin)
 	name := ""
-	var repos []string
+	repos := append([]string(nil), seedRepos...) // pre-attach repos (e.g. from the rail)
 	var agents []wsops.AgentSpec
 
 	for {

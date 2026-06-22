@@ -69,7 +69,8 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			}
 		}
 		out = append(out, core.Session{
-			ID: r.ID, Title: r.Display(), Source: "workspace", IsRoot: true, Mode: r.Mode,
+			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkspaces,
+			IsRoot: true, Mode: r.Mode,
 			State:     rootState,
 			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(rootState), len(subs), plural(len(subs))),
 			Cwd:       r.Dir,
@@ -84,8 +85,8 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				trackedDirs[s.Dir] = true
 			}
 			out = append(out, core.Session{
-				ID: s.ID, Title: subLabel(s), Source: "workspace", RootID: s.RootID,
-				Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+				ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionWorkspaces,
+				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s),
 				Cwd:       s.Dir,
@@ -96,8 +97,18 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 	}
 
-	// Claude sessions amux didn't launch (now visible because the status hooks
-	// are user-level), shown read-only after the tracked rows.
+	// Tracked repositories: a quick launcher — Enter starts a workspace from one.
+	if repos, err := db.Repos(); err == nil {
+		for _, r := range repos {
+			out = append(out, core.Session{
+				ID: r.Name, Title: repoTitle(r), Source: "workspace", Section: core.SectionRepos,
+				Kind: "repo", Cwd: r.GitDir,
+			})
+		}
+	}
+
+	// Claude sessions amux didn't launch (visible because the status hooks are
+	// user-level), shown read-only at the bottom.
 	out = append(out, untrackedRows(tracked, trackedDirs)...)
 	return out, nil
 }
@@ -119,6 +130,7 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 			ID:        shortID(id),
 			Title:     untrackedTitle(rec.Cwd, id),
 			Source:    "workspace",
+			Section:   core.SectionDetached,
 			Kind:      "claude",
 			Mode:      "external",
 			State:     rec.State,
@@ -128,6 +140,30 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 		})
 	}
 	return out
+}
+
+// repoTitle shows a tracked repo as "org/repo" for remote sources, falling back
+// to its bare name for local paths or anything without a clear owner segment.
+func repoTitle(r store.Repo) string {
+	s := r.Source
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "~") {
+		return r.Name // local path: no meaningful owner
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:] // drop scheme
+	}
+	s = strings.ReplaceAll(s, ":", "/") // normalize scp-style git@host:org/repo
+	s = strings.TrimSuffix(strings.TrimRight(s, "/"), ".git")
+	var parts []string
+	for _, p := range strings.Split(s, "/") {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	return r.Name
 }
 
 // shortID abbreviates a session uuid for display.

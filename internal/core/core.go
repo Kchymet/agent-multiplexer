@@ -27,17 +27,26 @@ const (
 	StateUnknown = "unknown"
 )
 
+// Rail sections, top to bottom (Session.Section). The console is sectionless and
+// pinned above them all.
+const (
+	SectionWorkspaces = "workspaces" // the workspace switcher + nested agents
+	SectionRepos      = "repos"      // tracked repositories (launch a workspace)
+	SectionDetached   = "detached"   // Claude sessions amux didn't launch
+)
+
 // Session is a normalized agent session surfaced from any Source.
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
-	Source    string `json:"source"`           // claude | hermes | tmux | workspace
-	Kind      string `json:"kind"`             // agent kind, e.g. claude
-	Mode      string `json:"mode,omitempty"`   // task (short) | loop (long)
-	RootID    string `json:"rootId,omitempty"` // parent root for sub-sessions
-	IsRoot    bool   `json:"isRoot,omitempty"` // true => a root container row
-	State     string `json:"state,omitempty"`  // idle | ready | waiting | running
-	Status    string `json:"status"`           // human label, e.g. "ready · main"
+	Source    string `json:"source"`            // claude | hermes | tmux | workspace
+	Kind      string `json:"kind"`              // agent kind, e.g. claude
+	Mode      string `json:"mode,omitempty"`    // task (short) | loop (long)
+	RootID    string `json:"rootId,omitempty"`  // parent root for sub-sessions
+	IsRoot    bool   `json:"isRoot,omitempty"`  // true => a root container row
+	Section   string `json:"section,omitempty"` // rail grouping: workspaces | repos | detached
+	State     string `json:"state,omitempty"`   // idle | ready | waiting | running
+	Status    string `json:"status"`            // human label, e.g. "ready · main"
 	Cwd       string `json:"cwd"`
 	WindowID  string `json:"windowId"` // tmux @id if locally attached, else ""
 	Pid       int    `json:"pid,omitempty"`
