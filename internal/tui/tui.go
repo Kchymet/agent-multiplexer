@@ -5,6 +5,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/tmuxctl"
 )
 
 // Run starts the TUI. full selects the dashboard layout (alt-screen); otherwise
@@ -24,6 +26,14 @@ func Run(full bool) error {
 	var opts []tea.ProgramOption
 	if full {
 		opts = append(opts, tea.WithAltScreen())
+	} else {
+		// The rail lives in an agent's window; learn which one so it can highlight
+		// that agent by default, and report focus so it knows when the user steps
+		// into the switcher to scroll (vs. just sitting in their work).
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		m.windowID = tmuxctl.CurrentWindow(ctx)
+		cancel()
+		opts = append(opts, tea.WithReportFocus())
 	}
 	p := tea.NewProgram(m, opts...)
 	_, err := p.Run()
@@ -39,6 +49,8 @@ type model struct {
 	status        string
 	connected     bool
 	confirmDelete string // workspace name awaiting a second `x` to confirm deletion
+	windowID      string // this rail's own tmux window id (the focused agent's)
+	scrolling     bool   // user is navigating the switcher; highlight the cursor, not the focused agent
 }
 
 // ---- messages ------------------------------------------------------------
@@ -125,6 +137,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.BlurMsg:
+		// Stepping back into your work ends switcher navigation: snap the
+		// highlight back to the agent this rail's window belongs to.
+		m.scrolling = false
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -141,10 +159,12 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
+		m.beginScroll()
 		if m.cursor > 0 {
 			m.cursor--
 		}
 	case "down", "j":
+		m.beginScroll()
 		if m.cursor < len(m.sessions)-1 {
 			m.cursor++
 		}
@@ -153,6 +173,9 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s == nil {
 			return m, nil
 		}
+		// Acting on a selection ends switcher navigation; the highlight returns
+		// to following the focused window.
+		m.scrolling = false
 		switch s.Section {
 		case core.SectionRepos:
 			m.status = "new workspace from " + s.Title + "…"
@@ -243,10 +266,48 @@ func (m *model) clampCursor() {
 }
 
 func (m *model) selected() *core.Session {
-	if m.cursor < 0 || m.cursor >= len(m.sessions) {
+	i := m.highlight()
+	if i < 0 || i >= len(m.sessions) {
 		return nil
 	}
-	return &m.sessions[m.cursor]
+	return &m.sessions[i]
+}
+
+// highlight is the index of the row to highlight (and act on). While the user is
+// scrolling the switcher it's the cursor; otherwise it follows the agent this
+// rail's window belongs to, falling back to the cursor when none matches.
+func (m *model) highlight() int {
+	if !m.scrolling {
+		if fi := m.focusIndex(); fi >= 0 {
+			return fi
+		}
+	}
+	return m.cursor
+}
+
+// focusIndex is the row whose tmux window is this rail's own — the focused agent
+// — or -1 if this rail isn't tied to a window or no row matches it.
+func (m *model) focusIndex() int {
+	if m.windowID == "" {
+		return -1
+	}
+	for i := range m.sessions {
+		if m.sessions[i].WindowID == m.windowID {
+			return i
+		}
+	}
+	return -1
+}
+
+// beginScroll switches the rail into switcher-navigation mode, seeding the
+// cursor at the currently focused agent so movement continues from there.
+func (m *model) beginScroll() {
+	if !m.scrolling {
+		m.scrolling = true
+		if fi := m.focusIndex(); fi >= 0 {
+			m.cursor = fi
+		}
+	}
 }
 
 // ---- styles --------------------------------------------------------------

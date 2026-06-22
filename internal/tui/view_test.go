@@ -39,3 +39,54 @@ func TestViewRailSectionOrder(t *testing.T) {
 		t.Error("repo row should not render a status sub-line")
 	}
 }
+
+func TestHighlightFollowsFocusedWindow(t *testing.T) {
+	m := &model{
+		windowID: "@7",
+		sessions: []core.Session{
+			{ID: "console", Title: "amux console"},
+			{ID: "a1", Title: "alpha", Section: core.SectionWorkspaces, WindowID: "@3"},
+			{ID: "a2", Title: "beta", Section: core.SectionWorkspaces, WindowID: "@7"},
+		},
+	}
+
+	// Idle (not scrolling): highlight the agent whose window is this rail's own.
+	if got := m.highlight(); got != 2 {
+		t.Fatalf("idle highlight = %d, want 2 (the focused window)", got)
+	}
+	if s := m.selected(); s == nil || s.ID != "a2" {
+		t.Fatalf("idle selected = %v, want a2", s)
+	}
+
+	// Scrolling the switcher: highlight follows the cursor instead, seeded at the
+	// focused row so movement continues from there.
+	m.beginScroll()
+	if m.cursor != 2 {
+		t.Fatalf("beginScroll cursor = %d, want 2 (seeded at focus)", m.cursor)
+	}
+	m.cursor = 0
+	if got := m.highlight(); got != 0 {
+		t.Fatalf("scrolling highlight = %d, want 0 (the cursor)", got)
+	}
+
+	// Leaving the switcher restores focus-following.
+	m.scrolling = false
+	if got := m.highlight(); got != 2 {
+		t.Fatalf("post-scroll highlight = %d, want 2 (back to focus)", got)
+	}
+}
+
+// When the rail isn't tied to a window (e.g. the full dashboard), the highlight
+// falls back to the cursor — preserving the original behavior.
+func TestHighlightFallsBackToCursor(t *testing.T) {
+	m := &model{
+		cursor: 1,
+		sessions: []core.Session{
+			{ID: "a1", Title: "alpha", WindowID: "@3"},
+			{ID: "a2", Title: "beta", WindowID: "@7"},
+		},
+	}
+	if got := m.highlight(); got != 1 {
+		t.Fatalf("no-window highlight = %d, want 1 (the cursor)", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -52,6 +53,21 @@ func PaneWindows(ctx context.Context) map[int]string {
 		}
 	}
 	return m
+}
+
+// CurrentWindow returns the window id of the pane this process is running in,
+// resolved from $TMUX_PANE, or "" if it isn't inside the isolated server. The
+// rail uses this to know which agent's window it belongs to.
+func CurrentWindow(ctx context.Context) string {
+	pane := os.Getenv("TMUX_PANE")
+	if pane == "" {
+		return ""
+	}
+	out, err := Run(ctx, "display-message", "-p", "-t", pane, "#{window_id}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 // SwitchClient jumps the attached client to the given window/target.
