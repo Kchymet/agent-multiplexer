@@ -29,6 +29,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/nativetui"
 	"amux/internal/tmuxctl"
 	"amux/internal/tui"
 	"amux/internal/vtdemo"
@@ -38,8 +39,13 @@ var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print
+		// usage (those carry an arg, so they fall through to the switch below).
+		if err := cmdNative(); err != nil {
+			fmt.Fprintln(os.Stderr, "amux:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
@@ -208,6 +214,24 @@ func cmdRailAttach(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return tmuxctl.AttachRail(ctx, args[0], self, "rail")
+}
+
+// cmdNative launches the native Bubble Tea TUI (bare `amux`). It ensures the
+// daemon is up for state, then runs the TUI; tmux still hosts the agents, so
+// quitting the TUI just detaches and the agents keep running.
+func cmdNative() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := ensureConf(false); err != nil {
+		return err
+	}
+	ensureHooks(false)
+	if err := ensureDaemon(self); err != nil {
+		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
+	}
+	return nativetui.Run()
 }
 
 // cmdReload restarts the daemon and re-attaches every rail with the current
