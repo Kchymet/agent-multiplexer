@@ -31,6 +31,7 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/tmuxctl"
 	"amux/internal/tui"
+	"amux/internal/vtdemo"
 )
 
 var version = "0.1.0"
@@ -57,6 +58,8 @@ func main() {
 		err = cmdRailAttach(args)
 	case "reload":
 		err = cmdReload()
+	case "_vtdemo": // hidden: embedded-terminal fidelity check (Phase 0 spike)
+		err = vtdemo.Run(args)
 	case "hook":
 		err = cmdHook(args)
 	case "status":
