@@ -288,7 +288,9 @@ func cmdSession(args []string) error {
 		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
 		// Creates a workspace that attaches the repos, plus a default agent using all.
 		repos, cfg := parseCreateFlags(args[1:])
-		rootID, err := wsops.CreateWorkspace(ctx, cfg.name, repos, true)
+		rootID, err := wsops.CreateWorkspace(ctx, cfg.name, repos, &wsops.AgentSpec{
+			Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt,
+		})
 		if err != nil {
 			return err
 		}
@@ -385,7 +387,13 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 				agents = append(agents[:i], agents[i+1:]...)
 			}
 		case strings.HasPrefix(choice, "✓"):
-			rootID, err := wsops.CreateWorkspace(ctx, name, repos, len(agents) == 0)
+			// No explicitly-configured agents → one default agent over all repos,
+			// using the same rational defaults as the add-agent screen.
+			var defaultAgent *wsops.AgentSpec
+			if len(agents) == 0 {
+				defaultAgent = &wsops.AgentSpec{Agent: "claude", Mode: store.ModeTask, Model: claudecfg.PreferredModel()}
+			}
+			rootID, err := wsops.CreateWorkspace(ctx, name, repos, defaultAgent)
 			if err != nil {
 				return err
 			}
@@ -550,7 +558,9 @@ func agentIndex(line string) int {
 type createCfg struct{ name, prompt, mode, model string }
 
 func parseCreateFlags(args []string) ([]string, createCfg) {
-	cfg := createCfg{mode: store.ModeTask}
+	// Same rational defaults as the interactive flow: task mode and the user's
+	// preferred Claude model. An explicit --mode/--model below overrides these.
+	cfg := createCfg{mode: store.ModeTask, model: claudecfg.PreferredModel()}
 	var repos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
