@@ -149,6 +149,34 @@ func AttachRail(ctx context.Context, window string, railCmd ...string) error {
 	return nil
 }
 
+// ReloadRails kills every rail pane in the isolated server and re-attaches a
+// fresh one (running railCmd) to each window — so a newly installed binary's UI
+// takes effect without restarting the agent panes. A missing server is a no-op.
+func ReloadRails(ctx context.Context, railCmd ...string) error {
+	out, err := Run(ctx, "list-panes", "-a", "-F", "#{@amx}|#{pane_id}")
+	if err != nil {
+		return nil // server not up: nothing to reload
+	}
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) == 2 && parts[0] == "rail" && parts[1] != "" {
+			_, _ = Run(ctx, "kill-pane", "-t", parts[1])
+		}
+	}
+	windows, err := Run(ctx, "list-windows", "-a", "-F", "#{window_id}")
+	if err != nil {
+		return err
+	}
+	for _, w := range strings.Split(windows, "\n") {
+		if w = strings.TrimSpace(w); w != "" {
+			if err := AttachRail(ctx, w, railCmd...); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // focusWorkPane selects the first non-rail pane in window so focus is on the
 // agent/shell, not the dashboard rail.
 func focusWorkPane(ctx context.Context, window string) {

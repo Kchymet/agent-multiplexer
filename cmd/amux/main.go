@@ -22,6 +22,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,6 +55,8 @@ func main() {
 		err = tui.Run(true)
 	case "rail-attach":
 		err = cmdRailAttach(args)
+	case "reload":
+		err = cmdReload()
 	case "hook":
 		err = cmdHook(args)
 	case "status":
@@ -102,6 +106,7 @@ usage: amux <command>
   workspace rm <id>  delete a workspace (removes its worktrees + branches)
   name <text>        set the current workspace's display name (for the agent)
   status             print workspaces and exit
+  reload             restart the daemon + reload the rails (after an install)
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
   init               (re)write the isolated tmux config
   daemon             run the daemon in the foreground (usually automatic)
@@ -200,6 +205,53 @@ func cmdRailAttach(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return tmuxctl.AttachRail(ctx, args[0], self, "rail")
+}
+
+// cmdReload restarts the daemon and re-attaches every rail with the current
+// binary, so a freshly installed amux takes effect without disturbing the agent
+// panes. (`amux up` only re-attaches to the existing session, leaving the old
+// daemon and rail processes running the previous binary.)
+func cmdReload() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	stopDaemon()
+	if err := ensureDaemon(self); err != nil {
+		return err
+	}
+	if err := tmuxctl.ReloadRails(ctx, self, "rail"); err != nil {
+		return err
+	}
+	fmt.Println("reloaded: daemon restarted, rails re-attached")
+	return nil
+}
+
+// stopDaemon signals the running daemon (if any) to exit and waits briefly for
+// it to release its socket, so ensureDaemon then starts a fresh one.
+func stopDaemon() {
+	b, err := os.ReadFile(core.PidPath())
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	if p, err := os.FindProcess(pid); err == nil {
+		_ = p.Signal(syscall.SIGTERM)
+	}
+	for i := 0; i < 60; i++ {
+		c, err := daemon.Dial()
+		if err != nil {
+			return // no longer answering — it's down
+		}
+		_ = c.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // cmdHook is invoked by Claude Code's status hooks ("amux hook <state>", wired
