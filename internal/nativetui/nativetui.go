@@ -6,7 +6,6 @@
 package nativetui
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,18 +16,10 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/daemon"
-	"amux/internal/tmuxctl"
 	"amux/internal/vterm"
 )
 
-const (
-	sidebarWidth = 26
-	// viewSession is a private, grouped session the TUI attaches its embedded
-	// client to. Grouped with main, it shares the agent windows but keeps its
-	// own current window, size, and (session-scoped) status bar — so nothing the
-	// TUI does leaks into the user's real `main` client.
-	viewSession = "amux-view"
-)
+const sidebarWidth = 26
 
 // Run starts the native TUI and blocks until the user quits (which detaches —
 // agents keep running in the tmux server). It refuses to run inside the amux
@@ -37,7 +28,6 @@ func Run() error {
 	if sock, inside := insideAmux(); inside {
 		return fmt.Errorf("can't run the native TUI from inside amux (TMUX=%s) — detach first (Alt-q / C-a d), then run `amux` from your normal shell", sock)
 	}
-	defer killView()
 	m := &model{dataCh: make(chan struct{}, 1), status: "connecting…"}
 	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	if m.term != nil {
@@ -203,49 +193,39 @@ func (m *model) selected() *core.Session {
 	return &m.sessions[m.cursor]
 }
 
-// attachSelected points the embedded tmux client at the selected agent's window
-// (creating the embedded client on first use) and focuses the agent pane.
+// attachSelected embeds the selected agent's dedicated tmux session in the main
+// pane and focuses it. The session is private to that agent (rail-free, sized to
+// this client), so there's nothing to negotiate or leak.
 func (m *model) attachSelected() tea.Cmd {
 	s := m.selected()
 	if s == nil || s.WindowID == "" {
 		m.status = "not a running agent"
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if m.term == nil {
-		// Create the isolated, grouped view session and embed a client to it.
-		_, _ = tmuxctl.Run(ctx, "kill-session", "-t", viewSession) // clear any stale one
-		if _, err := tmuxctl.Run(ctx, "new-session", "-d", "-s", viewSession, "-t", core.SessionName); err != nil {
-			m.status = "view session failed: " + err.Error()
-			return nil
-		}
-		_, _ = tmuxctl.Run(ctx, "set", "-t", viewSession, "status", "off")
-		_, _ = tmuxctl.Run(ctx, "set", "-t", viewSession, "aggressive-resize", "on")
-
-		t := vterm.New(m.mainWidth(), m.paneRows())
-		t.OnData(func() {
-			select {
-			case m.dataCh <- struct{}{}:
-			default:
-			}
-		})
-		cmd := exec.Command("tmux", "-L", core.TmuxSocket, "attach", "-t", viewSession)
-		cmd.Env = append(envWithout(os.Environ(), "TMUX"), "TERM=xterm-256color")
-		if err := t.Start(cmd); err != nil {
-			m.status = "attach failed: " + err.Error()
-			return nil
-		}
-		m.term = t
+	if m.attached == s.ID && m.term != nil { // already showing it — just focus
+		m.focus = focusAgent
+		return nil
+	}
+	if m.term != nil { // switch: drop the previous embed
+		_ = m.term.Close()
+		m.term = nil
 	}
 
-	// Point the view session at this agent's window (isolated: doesn't move the
-	// user's real `main` client) and focus the agent's work pane.
-	_, _ = tmuxctl.Run(ctx, "select-window", "-t", viewSession+":"+s.WindowID)
-	if pane := tmuxctl.WorkPane(ctx, s.WindowID); pane != "" {
-		_, _ = tmuxctl.Run(ctx, "select-pane", "-t", pane)
+	t := vterm.New(m.mainWidth(), m.paneRows())
+	t.OnData(func() {
+		select {
+		case m.dataCh <- struct{}{}:
+		default:
+		}
+	})
+	// s.WindowID holds the agent's dedicated session name (see source.sessOf).
+	cmd := exec.Command("tmux", "-L", core.TmuxSocket, "attach", "-t", "="+s.WindowID)
+	cmd.Env = append(envWithout(os.Environ(), "TMUX"), "TERM=xterm-256color")
+	if err := t.Start(cmd); err != nil {
+		m.status = "attach failed: " + err.Error()
+		return nil
 	}
+	m.term = t
 	m.attached = s.ID
 	m.focus = focusAgent
 	return nil
@@ -264,16 +244,6 @@ func (m *model) paneRows() int {
 		return m.h - 1
 	}
 	return 24
-}
-
-// ---- tmux side-effects ----
-
-// killView tears down the private view session on exit. Grouped sessions are
-// independent, so this never touches main or the agents.
-func killView() {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, _ = tmuxctl.Run(ctx, "kill-session", "-t", viewSession)
 }
 
 func envWithout(env []string, key string) []string {

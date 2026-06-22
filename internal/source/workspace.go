@@ -33,7 +33,16 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	}
 	defer db.Close()
 
-	running := tmuxctl.WorkspaceWindows(ctx)
+	// Agents are hosted in dedicated tmux sessions (core.AgentSession); an agent
+	// is "live" iff its session exists. sessOf returns that session name (the
+	// attach target the native TUI uses) when live, else "".
+	live := tmuxctl.LiveSessions(ctx)
+	sessOf := func(id string) string {
+		if s := core.AgentSession(id); live[s] {
+			return s
+		}
+		return ""
+	}
 	var out []core.Session
 
 	// Claude sessions amux manages, by id and by dir, so untracked enumeration
@@ -42,11 +51,11 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	trackedDirs := map[string]bool{console.Dir(): true}
 
 	// Control console, pinned first.
-	consoleState := agentState(running[console.ID], console.SessionID)
+	consoleState := agentState(sessOf(console.ID), console.SessionID)
 	out = append(out, core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
-		Cwd: console.Dir(), WindowID: running[console.ID], CanAttach: true, CanKill: false,
+		Cwd: console.Dir(), WindowID: sessOf(console.ID), CanAttach: true, CanKill: false,
 	})
 
 	roots, err := db.Roots()
@@ -63,7 +72,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		subStates := make([]string, len(subs))
 		rootState := core.StateIdle
 		for i, s := range subs {
-			subStates[i] = agentState(running[s.ID], s.ClaudeID)
+			subStates[i] = agentState(sessOf(s.ID), s.ClaudeID)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
 			}
@@ -90,7 +99,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s),
 				Cwd:       s.Dir,
-				WindowID:  running[s.ID],
+				WindowID:  sessOf(s.ID),
 				CanAttach: true,
 				CanKill:   true,
 			})

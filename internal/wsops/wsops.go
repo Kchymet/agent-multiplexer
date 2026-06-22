@@ -14,6 +14,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/console"
+	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/store"
 	"amux/internal/tmuxctl"
@@ -194,10 +195,13 @@ func OpenByID(ctx context.Context, id string) error {
 	return launch(ctx, s)
 }
 
-// launch opens (or switches to) one agent's window.
+// launch opens (or switches to) one agent's dedicated tmux session. The agent
+// is hosted in its own rail-free session (core.AgentSession) so the native TUI
+// can embed it cleanly; switch-client also works for the classic entrypoint.
 func launch(ctx context.Context, s store.Session) error {
-	if win := tmuxctl.WorkspaceWindows(ctx)[s.ID]; win != "" {
-		_ = tmuxctl.SwitchClient(ctx, win)
+	sess := core.AgentSession(s.ID)
+	if tmuxctl.HasSession(ctx, sess) {
+		_ = tmuxctl.SwitchClient(ctx, sess)
 		return nil
 	}
 	if _, err := os.Stat(s.Dir); err != nil {
@@ -234,29 +238,18 @@ func launch(ctx context.Context, s store.Session) error {
 		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
-	win, err := tmuxctl.NewWindow(ctx, s.Dir, windowName(s), env, argv...)
-	if err != nil {
+	if err := tmuxctl.NewDetachedSession(ctx, sess, s.Dir, env, argv...); err != nil {
 		return err
 	}
-	_ = tmuxctl.TagWorkspace(ctx, win, s.ID)
-	_ = tmuxctl.SwitchClient(ctx, win)
+	_ = tmuxctl.SwitchClient(ctx, sess)
 	return nil
-}
-
-func windowName(s store.Session) string {
-	if repos := store.SplitRepos(s.Repo); len(repos) > 0 {
-		return strings.Join(repos, "+")
-	}
-	return s.Display()
 }
 
 // DeleteByID deletes a session. The console can't be deleted (window closed); a
 // workspace removes all its agents; an agent removes just itself.
 func DeleteByID(ctx context.Context, id string) error {
 	if id == console.ID {
-		if win := tmuxctl.WorkspaceWindows(ctx)[id]; win != "" {
-			_ = tmuxctl.KillWindow(ctx, win)
-		}
+		_ = tmuxctl.KillSession(ctx, core.AgentSession(id))
 		return nil
 	}
 	db, err := store.Open()
@@ -281,9 +274,7 @@ func DeleteByID(ctx context.Context, id string) error {
 }
 
 func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
-	if win := tmuxctl.WorkspaceWindows(ctx)[a.ID]; win != "" {
-		_ = tmuxctl.KillWindow(ctx, win)
-	}
+	_ = tmuxctl.KillSession(ctx, core.AgentSession(a.ID))
 	for _, repoName := range store.SplitRepos(a.Repo) {
 		if repo, ok, _ := db.Repo(repoName); ok {
 			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, repoName), a.Branch)
