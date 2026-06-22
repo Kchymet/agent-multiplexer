@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func run(ctx context.Context, dir string, args ...string) (string, error) {
@@ -16,6 +18,9 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// Never block on an interactive credential/host prompt (the daemon and tmux
+	// popups have no usable TTY) — fail fast instead so callers can fall back.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -oBatchMode=yes")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -50,6 +55,8 @@ func CloneBare(ctx context.Context, source, gitDir string) error {
 // remote-tracking refspec exists first, so a plain `--bare` clone starts
 // tracking refs/remotes/origin/* too.
 func Fetch(ctx context.Context, gitDir string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	_, _ = run(ctx, "", "--git-dir", gitDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 	_, err := run(ctx, "", "--git-dir", gitDir, "fetch", "--prune", "origin")
 	_, _ = run(ctx, "", "--git-dir", gitDir, "remote", "set-head", "origin", "-a")

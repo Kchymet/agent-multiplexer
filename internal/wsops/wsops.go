@@ -73,7 +73,11 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return store.Session{}, err
 	}
-	branch := "amux/" + rootID + "/" + agentID
+	// Flat branch name (hyphen, not slash) so it never collides with a legacy
+	// per-workspace branch `amux/<root>` — git refs can't have both `amux/<root>`
+	// and `amux/<root>/<agent>` (file/directory conflict), which broke adding a
+	// second agent to older workspaces.
+	branch := "amux/" + rootID + "-" + agentID
 	for _, repoName := range spec.Repos {
 		repo, ok, err := db.Repo(repoName)
 		if err != nil || !ok {
