@@ -29,9 +29,11 @@ type AgentSpec struct {
 }
 
 // CreateWorkspace creates a workspace (root) that attaches repos but checks out
-// nothing itself, optionally with a default agent that uses all of them. Returns
-// the workspace id.
-func CreateWorkspace(ctx context.Context, name string, repos []string, withDefaultAgent bool) (string, error) {
+// nothing itself. When defaultAgent is non-nil it also creates one default agent
+// from that spec (its model, mode, and prompt are honored); a spec with no repos
+// defaults to all of the workspace's. Pass nil to create no agent. Returns the
+// workspace id.
+func CreateWorkspace(ctx context.Context, name string, repos []string, defaultAgent *AgentSpec) (string, error) {
 	db, err := store.Open()
 	if err != nil {
 		return "", err
@@ -45,8 +47,12 @@ func CreateWorkspace(ctx context.Context, name string, repos []string, withDefau
 	}); err != nil {
 		return "", err
 	}
-	if withDefaultAgent {
-		if _, err := addAgent(ctx, db, rootID, AgentSpec{Repos: repos, Agent: "claude", Mode: store.ModeTask}); err != nil {
+	if defaultAgent != nil {
+		spec := *defaultAgent
+		if len(spec.Repos) == 0 {
+			spec.Repos = repos
+		}
+		if _, err := addAgent(ctx, db, rootID, spec); err != nil {
 			return rootID, err
 		}
 	}
