@@ -26,10 +26,12 @@ func (m *model) viewRail() string {
 	b.WriteString(headerStyle.Width(w).Render(" amux"))
 	b.WriteByte('\n')
 
+	hi := m.highlight()
+
 	// Pinned, sectionless rows first (the control console).
 	for i, s := range m.sessions {
 		if s.Section == "" {
-			m.writeRailRow(&b, i, s, w)
+			m.writeRailRow(&b, i, hi, s, w)
 		}
 	}
 
@@ -46,7 +48,7 @@ func (m *model) viewRail() string {
 		any := false
 		for i, s := range m.sessions {
 			if s.Section == sec.key {
-				m.writeRailRow(&b, i, s, w)
+				m.writeRailRow(&b, i, hi, s, w)
 				any = true
 			}
 		}
@@ -66,15 +68,16 @@ func (m *model) viewRail() string {
 }
 
 // writeRailRow renders one row: a glyph + title line, and (for everything but a
-// repo) a colored status sub-line beneath it.
-func (m *model) writeRailRow(b *strings.Builder, i int, s core.Session, w int) {
+// repo) a colored status sub-line beneath it. hi is the index of the highlighted
+// row (the focused agent, or the cursor while scrolling the switcher).
+func (m *model) writeRailRow(b *strings.Builder, i, hi int, s core.Session, w int) {
 	indent := ""
 	if s.RootID != "" { // sub-session: nest under its workspace
 		indent = "  "
 	}
 	line := fmt.Sprintf("%s%s %s", indent, glyph(s), truncate(s.Title, w-4-len(indent)))
 	switch {
-	case i == m.cursor:
+	case i == hi:
 		b.WriteString(selStyle.Width(w).Render(line))
 	case s.IsRoot:
 		b.WriteString(titleStyle.Render(line))
@@ -124,6 +127,7 @@ func (m *model) viewFull() string {
 	if len(m.sessions) == 0 {
 		b.WriteString(dimStyle.Render("\n  no workspaces — press n to create one\n"))
 	}
+	hi := m.highlight()
 	section := ""
 	for i, s := range m.sessions {
 		if s.Section != section {
@@ -135,7 +139,7 @@ func (m *model) viewFull() string {
 			}
 		}
 		cursor := "  "
-		if i == m.cursor {
+		if i == hi {
 			cursor = "▶ "
 		}
 		name := s.Title
@@ -150,7 +154,7 @@ func (m *model) viewFull() string {
 			truncate(s.Kind, 8),
 			truncate(s.Status, max(0, w-50)),
 		)
-		if i == m.cursor {
+		if i == hi {
 			b.WriteString(selStyle.Width(w).Render(row))
 		} else {
 			b.WriteString(row)
