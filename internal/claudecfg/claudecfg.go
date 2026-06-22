@@ -73,6 +73,25 @@ func ConfigPath() string {
 	return filepath.Join(home, ".claude.json")
 }
 
+// PreferredModel returns the user's configured Claude Code model (the top-level
+// "model" key in ~/.claude.json), or "" if unset or unreadable. amux uses it as
+// the rational default when interactively configuring a new agent, so the user
+// doesn't have to retype their usual model every time. Best-effort — callers
+// treat "" as "let Claude pick its own default".
+func PreferredModel() string {
+	b, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		return ""
+	}
+	var root struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(b, &root) != nil {
+		return ""
+	}
+	return strings.TrimSpace(root.Model)
+}
+
 // TrustDir marks dir as trusted in ~/.claude.json. Best-effort: on any error the
 // caller should proceed (Claude will just show the trust dialog once). The whole
 // file is round-tripped with json.Number so large integer fields aren't mangled,

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"amux/internal/claudecfg"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/gh"
@@ -420,21 +421,48 @@ func sessionAdd(ctx context.Context, rootID string) error {
 	return wsops.OpenByID(ctx, sub.ID)
 }
 
-// configureAgent walks the user through one agent: which repos (a subset of the
-// workspace's, or any tracked repo if the workspace has none yet), mode, model,
-// prompt.
+// configureAgent presents one review screen for a new agent, pre-filled with
+// rational defaults — all of the workspace's repos, "task" mode, and the user's
+// preferred Claude model — so the common case is a single ENTER on "Add agent".
+// Any field can be edited first; the menu loops until the user confirms or cancels.
 func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (wsops.AgentSpec, bool) {
-	var repos []string
-	if len(available) > 0 {
-		repos, _ = fzfMultiSelect("repos for this agent (TAB)", available)
-	} else {
-		repos = pickRepos(ctx, in, "repos for this agent (TAB)")
+	a := wsops.AgentSpec{
+		Agent: "claude",
+		Repos: append([]string(nil), available...), // default: the whole workspace
+		Mode:  store.ModeTask,                       // default: task-style work
+		Model: claudecfg.PreferredModel(),           // default: your usual model
 	}
-	a := wsops.AgentSpec{Agent: "claude", Repos: repos}
-	a.Mode = pickMode()
-	a.Model = promptLine(in, "Model (optional, e.g. opus / sonnet)")
-	a.Prompt = promptLine(in, "Initial prompt (optional)")
-	return a, true
+	for {
+		menu := []string{
+			fmt.Sprintf("Repos  › %s", orNone(strings.Join(a.Repos, ", "))),
+			fmt.Sprintf("Mode   › %s", a.Mode),
+			fmt.Sprintf("Model  › %s", orDefault(a.Model)),
+			fmt.Sprintf("Prompt › %s", orOptional(a.Prompt)),
+			"────────────────", "✓ Add agent", "✗ Cancel",
+		}
+		choice, err := fzfMenu("configure agent", menu)
+		if err != nil {
+			return wsops.AgentSpec{}, false // Esc
+		}
+		switch {
+		case strings.HasPrefix(choice, "Repos"):
+			if len(available) > 0 {
+				a.Repos, _ = fzfMultiSelect("repos for this agent (TAB)", available)
+			} else {
+				a.Repos = pickRepos(ctx, in, "repos for this agent (TAB)")
+			}
+		case strings.HasPrefix(choice, "Mode"):
+			a.Mode = pickMode()
+		case strings.HasPrefix(choice, "Model"):
+			a.Model = promptLine(in, "Model (e.g. opus / sonnet, blank for default)")
+		case strings.HasPrefix(choice, "Prompt"):
+			a.Prompt = promptLine(in, "Initial prompt (optional)")
+		case strings.HasPrefix(choice, "✓"):
+			return a, true
+		case strings.HasPrefix(choice, "✗"):
+			return wsops.AgentSpec{}, false
+		}
+	}
 }
 
 // pickRepos multi-selects tracked repos, offering to clone/add new ones.
@@ -604,6 +632,13 @@ func promptLine(in *bufio.Reader, label string) string {
 func orOptional(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "(optional)"
+	}
+	return s
+}
+
+func orDefault(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(claude default)"
 	}
 	return s
 }
