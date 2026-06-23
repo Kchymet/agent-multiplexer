@@ -6,6 +6,7 @@
 package vterm
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -54,7 +55,22 @@ func (t *Terminal) Start(cmd *exec.Cmd) error {
 	t.cmd = cmd
 	t.ptmx = ptmx
 	go t.pump()
+	go t.forwardResponses()
 	return nil
+}
+
+// forwardResponses copies the emulator's replies to terminal queries (Device
+// Attributes, cursor-position reports, etc.) back to the child via the PTY.
+//
+// The emulator answers such queries by writing into an internal io.Pipe. That
+// pipe is unbuffered, so if nobody drains it the very first query (tmux/Claude
+// both send a Primary Device Attributes request on startup) blocks the parser
+// inside emu.Write — and pump holds t.mu across emu.Write, so a blocked write
+// wedges Render and freezes the whole UI. emu.Read only touches the response
+// pipe (never the screen state), so this runs lock-free alongside pump. It ends
+// when the emulator or PTY is closed.
+func (t *Terminal) forwardResponses() {
+	_, _ = io.Copy(t.ptmx, t.emu)
 }
 
 func (t *Terminal) pump() {
@@ -120,8 +136,12 @@ func (t *Terminal) Closed() bool {
 	return t.closed
 }
 
-// Close tears down the PTY and kills the child if still running.
+// Close tears down the PTY and kills the child if still running. Closing the
+// emulator unblocks the forwardResponses goroutine (emu.Read returns EOF).
 func (t *Terminal) Close() error {
+	if t.emu != nil {
+		_ = t.emu.Close()
+	}
 	if t.ptmx != nil {
 		_ = t.ptmx.Close()
 	}
