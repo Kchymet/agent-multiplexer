@@ -78,6 +78,10 @@ type connectedMsg struct{ c *daemon.Client }
 type frameMsg struct{ f daemon.Frame }
 type disconnectedMsg struct{}
 type termDataMsg struct{}
+type agentStartedMsg struct {
+	id, target string
+	err        error
+}
 
 func (m *model) Init() tea.Cmd { return tea.Batch(connectCmd, waitData(m.dataCh)) }
 
@@ -144,6 +148,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = focusSidebar
 		}
 		return m, waitData(m.dataCh)
+
+	case agentStartedMsg:
+		if msg.err != nil {
+			m.status = "launch failed: " + msg.err.Error()
+			return m, nil
+		}
+		return m, m.embed(msg.id, msg.target)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -215,16 +226,23 @@ func (m *model) attachSelected() tea.Cmd {
 		return nil
 	}
 
-	target := s.WindowID // its session, if already live
-	if target == "" {
-		name, err := startAgent(s.ID) // launch the dedicated session
-		if err != nil {
-			m.status = "launch failed: " + err.Error()
-			return nil
-		}
-		target = name
+	if s.WindowID != "" { // already live — embed immediately (fast)
+		return m.embed(s.ID, s.WindowID)
 	}
+	// Not running yet: cold-starting the dedicated tmux session + agent takes
+	// seconds, so launch it off the UI thread. Running it inline froze the whole
+	// switcher until the agent was up. The agentStartedMsg embeds it when ready.
+	m.status = "launching " + s.Title + "…"
+	id := s.ID
+	return func() tea.Msg {
+		target, err := startAgent(id)
+		return agentStartedMsg{id: id, target: target, err: err}
+	}
+}
 
+// embed attaches the given live tmux session in the main pane and focuses it.
+// It only spawns a client in a PTY, so it's fast enough to run on the UI thread.
+func (m *model) embed(id, target string) tea.Cmd {
 	if m.term != nil { // switch: drop the previous embed
 		_ = m.term.Close()
 		m.term = nil
@@ -243,8 +261,9 @@ func (m *model) attachSelected() tea.Cmd {
 		return nil
 	}
 	m.term = t
-	m.attached = s.ID
+	m.attached = id
 	m.focus = focusAgent
+	m.status = ""
 	return nil
 }
 
