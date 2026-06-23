@@ -76,6 +76,50 @@ func SwitchClient(ctx context.Context, target string) error {
 	return err
 }
 
+// HasSession reports whether a session named name exists (exact match).
+func HasSession(ctx context.Context, name string) bool {
+	_, err := Run(ctx, "has-session", "-t", "="+name)
+	return err == nil
+}
+
+// NewDetachedSession creates a detached session named name running cmd in cwd
+// with the given environment (KEY=VALUE strings). Unlike NewWindow it adds no
+// rail pane — it's a dedicated, isolated host the native TUI embeds directly.
+func NewDetachedSession(ctx context.Context, name, cwd string, env []string, cmd ...string) error {
+	args := []string{"new-session", "-d", "-s", name}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	for _, e := range env {
+		args = append(args, "-e", e)
+	}
+	args = append(args, "--")
+	args = append(args, cmd...)
+	_, err := Run(ctx, args...)
+	return err
+}
+
+// KillSession kills a session by name.
+func KillSession(ctx context.Context, name string) error {
+	_, err := Run(ctx, "kill-session", "-t", "="+name)
+	return err
+}
+
+// LiveSessions returns the set of session names currently on the server.
+func LiveSessions(ctx context.Context) map[string]bool {
+	m := map[string]bool{}
+	out, err := Run(ctx, "list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return m
+	}
+	for _, name := range strings.Split(out, "\n") {
+		if name = strings.TrimSpace(name); name != "" {
+			m[name] = true
+		}
+	}
+	return m
+}
+
 // WorkspaceWindows maps workspace name -> window id for windows tagged with the
 // @amx_ws window option (i.e. the open workspaces).
 func WorkspaceWindows(ctx context.Context) map[string]string {

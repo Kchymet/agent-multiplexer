@@ -35,6 +35,11 @@ const (
 	SectionDetached   = "detached"   // Claude sessions amux didn't launch
 )
 
+// AgentSession is the dedicated, rail-free tmux session name that hosts one
+// agent (keyed by its amux id). The native TUI attaches an embedded client to
+// this session; because it's not shared, sizing/rendering stay clean.
+func AgentSession(id string) string { return "amx-" + id }
+
 // Session is a normalized agent session surfaced from any Source.
 type Session struct {
 	ID        string `json:"id"`

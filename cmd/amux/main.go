@@ -29,16 +29,23 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/nativetui"
 	"amux/internal/tmuxctl"
 	"amux/internal/tui"
+	"amux/internal/vtdemo"
 )
 
 var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print
+		// usage (those carry an arg, so they fall through to the switch below).
+		if err := cmdNative(); err != nil {
+			fmt.Fprintln(os.Stderr, "amux:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
@@ -57,6 +64,8 @@ func main() {
 		err = cmdRailAttach(args)
 	case "reload":
 		err = cmdReload()
+	case "_vtdemo": // hidden: embedded-terminal fidelity check (Phase 0 spike)
+		err = vtdemo.Run(args)
 	case "hook":
 		err = cmdHook(args)
 	case "status":
@@ -131,6 +140,7 @@ func cmdUp() error {
 		// Non-fatal: the dashboard will show "offline" and reconnect.
 		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
 	}
+	setupRails(self) // rails belong to the classic `amux up` entrypoint only
 	tmuxBin, err := exec.LookPath("tmux")
 	if err != nil {
 		return fmt.Errorf("tmux not found on PATH: %w", err)
@@ -141,6 +151,31 @@ func cmdUp() error {
 		"new-session", "-A", "-s", core.SessionName,
 	}
 	return syscall.Exec(tmuxBin, argv, os.Environ())
+}
+
+// setupRails attaches the side-pane rail to the classic `amux up` session and
+// installs a session-scoped hook so windows opened during that session keep
+// getting rails — without the old global "every window" hook, so the native
+// TUI (and any other tmux usage) leaves windows rail-free. Best-effort.
+func setupRails(self string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	unsetGlobalRailHooks(ctx) // migrate servers that still carry the old global hooks
+	// Ensure `main` exists (detached) so we can target it before the attach.
+	_, _ = tmuxctl.Run(ctx, "new-session", "-A", "-d", "-s", core.SessionName)
+	// Rail new windows created during this session.
+	_, _ = tmuxctl.Run(ctx, "set-hook", "-t", core.SessionName, "after-new-window",
+		fmt.Sprintf("run-shell \"%s rail-attach #{window_id}\"", self))
+	// Rail the windows that already exist.
+	out, err := tmuxctl.Run(ctx, "list-windows", "-t", core.SessionName, "-F", "#{window_id}")
+	if err != nil {
+		return
+	}
+	for _, w := range strings.Split(out, "\n") {
+		if w = strings.TrimSpace(w); w != "" {
+			_ = tmuxctl.AttachRail(ctx, w, self, "rail")
+		}
+	}
 }
 
 func cmdDaemon() error {
@@ -205,6 +240,34 @@ func cmdRailAttach(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return tmuxctl.AttachRail(ctx, args[0], self, "rail")
+}
+
+// cmdNative launches the native Bubble Tea TUI (bare `amux`). It ensures the
+// daemon is up for state, then runs the TUI; tmux still hosts the agents, so
+// quitting the TUI just detaches and the agents keep running.
+func cmdNative() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := ensureConf(false); err != nil {
+		return err
+	}
+	ensureHooks(false)
+	if err := ensureDaemon(self); err != nil {
+		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	unsetGlobalRailHooks(ctx) // native TUI is the sidebar; don't rail windows
+	cancel()
+	return nativetui.Run()
+}
+
+// unsetGlobalRailHooks removes the legacy global rail hooks from a running
+// server, so rails are no longer added to every new window. Best-effort.
+func unsetGlobalRailHooks(ctx context.Context) {
+	_, _ = tmuxctl.Run(ctx, "set-hook", "-gu", "after-new-window")
+	_, _ = tmuxctl.Run(ctx, "set-hook", "-gu", "after-new-session")
 }
 
 // cmdReload restarts the daemon and re-attaches every rail with the current
