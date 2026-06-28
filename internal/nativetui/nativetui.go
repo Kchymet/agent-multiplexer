@@ -208,6 +208,17 @@ func (m *model) selected() *core.Session {
 	return &m.sessions[m.cursor]
 }
 
+// firstChild returns the first sub-agent belonging to the given root, or nil if
+// it has none. Subs always follow their root in the emitted session order.
+func (m *model) firstChild(rootID string) *core.Session {
+	for i := range m.sessions {
+		if m.sessions[i].RootID == rootID {
+			return &m.sessions[i]
+		}
+	}
+	return nil
+}
+
 // attachSelected embeds the selected agent in the main pane and focuses it,
 // launching its dedicated session first if it isn't running. The session is
 // private to that agent (rail-free, sized to this client), so there's nothing to
@@ -217,8 +228,16 @@ func (m *model) attachSelected() tea.Cmd {
 	if s == nil {
 		return nil
 	}
+	// A workspace root isn't itself attachable — it's a container. Opening it
+	// should open its agent (roots always have ≥1), so the natural choice of
+	// selecting the workspace row "just works" instead of dead-ending.
+	if s.IsRoot {
+		if sub := m.firstChild(s.ID); sub != nil {
+			s = sub
+		}
+	}
 	if !attachable(s) {
-		m.status = "select an agent"
+		m.status = "select an agent under a workspace"
 		return nil
 	}
 	if m.attached == s.ID && m.term != nil { // already showing it — just focus
