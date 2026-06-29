@@ -56,6 +56,10 @@ func main() {
 		err = cmdUp()
 	case "daemon":
 		err = cmdDaemon()
+	case "serve":
+		err = cmdServe(args)
+	case "harness":
+		err = cmdHarness()
 	case "rail":
 		err = tui.Run(false)
 	case "dash":

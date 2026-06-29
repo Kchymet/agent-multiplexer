@@ -29,6 +29,16 @@ func SocketPath() string {
 	return filepath.Join(runtimeDir(), "amux.sock")
 }
 
+// MuxSocketPath is the unix socket the multiplexer server (`amux serve`) listens
+// on locally. Override with $AMUX_MUX_SOCK. Remote servers are reached over TCP
+// via $AMUX_SERVER instead.
+func MuxSocketPath() string {
+	if p := os.Getenv("AMUX_MUX_SOCK"); p != "" {
+		return p
+	}
+	return filepath.Join(runtimeDir(), "amux-mux.sock")
+}
+
 // ConfigDir is where the isolated tmux config lives.
 func ConfigDir() string {
 	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
