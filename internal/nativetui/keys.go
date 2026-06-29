@@ -5,6 +5,11 @@ import tea "github.com/charmbracelet/bubbletea"
 // keyToBytes translates a Bubble Tea key event into the bytes a terminal sends
 // to a child process, so keystrokes can be forwarded to the embedded agent.
 func keyToBytes(k tea.KeyMsg) []byte {
+	// Meta/Alt combos that aren't bound to navigation are sent as ESC + the base
+	// key, the way a terminal encodes them (e.g. Alt+b → ESC b).
+	if k.Alt && k.Type == tea.KeyRunes {
+		return append([]byte{0x1b}, []byte(string(k.Runes))...)
+	}
 	switch k.Type {
 	case tea.KeyRunes:
 		return []byte(string(k.Runes))
@@ -38,6 +43,8 @@ func keyToBytes(k tea.KeyMsg) []byte {
 		return []byte("\x1b[5~")
 	case tea.KeyPgDown:
 		return []byte("\x1b[6~")
+	case tea.KeyCtrlA:
+		return []byte{0x01}
 	case tea.KeyCtrlC:
 		return []byte{0x03}
 	case tea.KeyCtrlD:

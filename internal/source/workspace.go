@@ -62,10 +62,27 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Repo-scoped (single-member) workgroups don't get their own row — their agent
+	// renders nested under the repo header in the REPOS section. Collect them by
+	// repo while passing over the roots; work-scoped roots render inline here.
+	repoAgents := map[string][]store.Session{}
 	for _, r := range roots {
 		subs, err := db.Children(r.ID)
 		if err != nil {
 			return nil, err
+		}
+		if r.Scope == store.ScopeRepo {
+			repo := firstRepo(r.Repo)
+			for _, s := range subs {
+				if s.ClaudeID != "" {
+					tracked[s.ClaudeID] = true
+				}
+				if s.Dir != "" {
+					trackedDirs[s.Dir] = true
+				}
+				repoAgents[repo] = append(repoAgents[repo], s)
+			}
+			continue
 		}
 		// State each sub once; the root inherits its most demanding child's state
 		// (waiting > running > ready > idle), so a blocked agent surfaces upward.
@@ -78,7 +95,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			}
 		}
 		out = append(out, core.Session{
-			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkspaces,
+			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
 			IsRoot: true, Mode: r.Mode,
 			State:     rootState,
 			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(rootState), len(subs), plural(len(subs))),
@@ -94,7 +111,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				trackedDirs[s.Dir] = true
 			}
 			out = append(out, core.Session{
-				ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionWorkspaces,
+				ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s),
@@ -106,13 +123,27 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 	}
 
-	// Tracked repositories: a quick launcher — Enter starts a workspace from one.
+	// Tracked repositories, each a container for its repo-scoped agents (nested
+	// directly beneath, so a single-repo agent shows here, never under WORKGROUPS).
 	if repos, err := db.Repos(); err == nil {
 		for _, r := range repos {
 			out = append(out, core.Session{
 				ID: r.Name, Title: repoTitle(r), Source: "workspace", Section: core.SectionRepos,
-				Kind: "repo", Cwd: r.GitDir,
+				Kind: "repo", Cwd: r.GitDir, CanAttach: true,
 			})
+			for _, s := range repoAgents[r.Name] {
+				st := agentState(sessOf(s.ID), s.ClaudeID)
+				out = append(out, core.Session{
+					ID: s.ID, Title: repoAgentLabel(s), Source: "workspace", Section: core.SectionRepos,
+					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+					State:     st,
+					Status:    stateLabel(st) + subSuffix(s),
+					Cwd:       s.Dir,
+					WindowID:  sessOf(s.ID),
+					CanAttach: true,
+					CanKill:   true,
+				})
+			}
 		}
 	}
 
@@ -190,6 +221,25 @@ func untrackedTitle(cwd, id string) string {
 		return b
 	}
 	return shortID(id)
+}
+
+// firstRepo returns the first repo in a comma-separated list (a repo-scoped
+// workgroup carries exactly one).
+func firstRepo(list string) string {
+	if r := store.SplitRepos(list); len(r) > 0 {
+		return r[0]
+	}
+	return ""
+}
+
+// repoAgentLabel labels a repo-scoped agent nested under its repo header. The
+// header already shows the repo, so fall back to the short id (not the repo) to
+// keep the rows distinct when several agents share a repo.
+func repoAgentLabel(s store.Session) string {
+	if n := strings.TrimSpace(s.Name); n != "" {
+		return n
+	}
+	return shortID(s.ID)
 }
 
 func subLabel(s store.Session) string {

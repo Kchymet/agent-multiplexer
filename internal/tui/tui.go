@@ -192,7 +192,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m, addRepoCmd
 	case "a":
-		if s := m.selected(); s != nil && s.Section == core.SectionWorkspaces {
+		if s := m.selected(); s != nil && s.Section == core.SectionWorkgroups {
 			root := s.RootID
 			if s.IsRoot {
 				root = s.ID

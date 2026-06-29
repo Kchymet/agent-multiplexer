@@ -27,6 +27,18 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.triggerPoll()
 		return ok()
+	case "new-repo-agent": // a.ID is the repo name
+		if _, err := wsops.CreateRepoWorkgroup(ctx, a.ID, wsops.AgentSpec{}); err != nil {
+			return fail("%v", err)
+		}
+		d.triggerPoll()
+		return ok()
+	case "move": // a.ID is the agent; a.Target is the destination root ("" = new work-scoped)
+		if err := wsops.MoveAgent(ctx, a.ID, a.Target); err != nil {
+			return fail("%v", err)
+		}
+		d.triggerPoll()
+		return ok()
 	default:
 		return fail("unknown action %q", a.Action)
 	}

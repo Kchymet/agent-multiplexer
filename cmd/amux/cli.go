@@ -106,6 +106,14 @@ func cmdRepo(args []string) error {
 		if !ok {
 			return fmt.Errorf("no such repo %q", args[1])
 		}
+		// Refuse if any agent/workgroup still uses this repo (its worktrees live in
+		// the bare clone we'd delete); list them so the user can remove them first.
+		if users, err := repoUsers(db, args[1]); err != nil {
+			return err
+		} else if len(users) > 0 {
+			return fmt.Errorf("repo %q is in use by: %s\n  delete those first (amux workgroup rm <id>)",
+				args[1], strings.Join(users, ", "))
+		}
 		_ = os.RemoveAll(r.GitDir)
 		if err := db.DeleteRepo(args[1]); err != nil {
 			return err
@@ -296,6 +304,39 @@ func cmdSession(args []string) error {
 		}
 		fmt.Printf("created workspace %s (repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
 		return nil
+	case "repo":
+		// amux workgroup repo <repo> [--name n] [--prompt t] [--mode m] [--model M]
+		// Creates a single-repo (repo-scoped) workgroup + its one agent.
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--mode m] [--model M]")
+		}
+		_, cfg := parseCreateFlags(args[2:])
+		a, err := wsops.CreateRepoWorkgroup(ctx, args[1], wsops.AgentSpec{
+			Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("created repo-scoped agent %s on %s\n", a.ID, args[1])
+		return nil
+	case "move":
+		// amux workgroup move <agentID> [<targetRootID> | --new]
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux workgroup move <agentID> [<targetRootID>|--new]")
+		}
+		target := ""
+		if len(args) > 2 && args[2] != "--new" {
+			target = args[2]
+		}
+		if err := wsops.MoveAgent(ctx, args[1], target); err != nil {
+			return err
+		}
+		if target == "" {
+			fmt.Printf("moved agent %s into a new work-scoped workgroup\n", args[1])
+		} else {
+			fmt.Printf("moved agent %s into workgroup %s\n", args[1], target)
+		}
+		return nil
 	case "attach":
 		// amux session attach <root-id> <repo> — attach a tracked repo to a workspace
 		if len(args) < 3 {
@@ -339,7 +380,8 @@ func sessionList() error {
 		return err
 	}
 	for _, r := range roots {
-		fmt.Printf("%-8s %-20s repos: %s\n", r.ID, r.Display(), orNone(strings.ReplaceAll(r.Repo, ",", ", ")))
+		fmt.Printf("%-8s %-6s %-20s repos: %s\n", r.ID, defaultStr(r.Scope, store.ScopeWork), r.Display(),
+			orNone(strings.ReplaceAll(r.Repo, ",", ", ")))
 		subs, _ := db.Children(r.ID)
 		for _, s := range subs {
 			fmt.Printf("  %-8s %-8s %-6s %s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode,
@@ -347,6 +389,27 @@ func sessionList() error {
 		}
 	}
 	return nil
+}
+
+// repoUsers returns the ids of agents (sub-sessions) whose worktrees include repo.
+func repoUsers(db *store.DB, repo string) ([]string, error) {
+	sessions, err := db.AllSessions()
+	if err != nil {
+		return nil, err
+	}
+	var users []string
+	for _, s := range sessions {
+		if s.IsRoot() {
+			continue
+		}
+		for _, r := range store.SplitRepos(s.Repo) {
+			if r == repo {
+				users = append(users, s.ID)
+				break
+			}
+		}
+	}
+	return users, nil
 }
 
 // sessionNew is the interactive create page (run in a tmux popup): name the
@@ -437,8 +500,8 @@ func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (
 	a := wsops.AgentSpec{
 		Agent: "claude",
 		Repos: append([]string(nil), available...), // default: the whole workspace
-		Mode:  store.ModeTask,                       // default: task-style work
-		Model: claudecfg.PreferredModel(),           // default: your usual model
+		Mode:  store.ModeTask,                      // default: task-style work
+		Model: claudecfg.PreferredModel(),          // default: your usual model
 	}
 	for {
 		menu := []string{

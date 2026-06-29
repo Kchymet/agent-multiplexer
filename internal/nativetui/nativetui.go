@@ -57,12 +57,20 @@ type model struct {
 	client   *daemon.Client
 	sessions []core.Session
 	cursor   int
-	focus    focus                       // sidebar or agent pane
-	terms    map[string]*vterm.Terminal  // live agent terminals, keyed by session id
-	attached string                      // session id currently shown in the main pane
+	focus    focus                      // sidebar or agent pane
+	terms    map[string]*vterm.Terminal // live agent terminals, keyed by session id
+	attached string                     // session id currently shown in the main pane
+	confirm  *confirmState              // a pending confirmation modal, or nil
 	dataCh   chan struct{}
 	w, h     int
 	status   string
+}
+
+// confirmState is a pending yes/no confirmation modal: the question shown, and
+// the daemon action to dispatch if the user confirms.
+type confirmState struct {
+	message string
+	action  core.Action
 }
 
 type focus int
@@ -77,6 +85,7 @@ type connectedMsg struct{ c *daemon.Client }
 type frameMsg struct{ f daemon.Frame }
 type disconnectedMsg struct{}
 type termDataMsg struct{}
+type actionSentMsg struct{ err error }
 
 // agentReadyMsg carries a resolved agent launch spec back to the UI goroutine,
 // where the vterm is actually started. Resolving the spec (trust dir, resume
@@ -154,6 +163,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reapClosed()
 		return m, waitData(m.dataCh)
 
+	case actionSentMsg:
+		if msg.err != nil {
+			m.status = "action failed: " + msg.err.Error()
+		}
+		return m, nil
+
 	case agentReadyMsg:
 		if msg.err != nil {
 			m.status = "launch failed: " + msg.err.Error()
@@ -182,21 +197,48 @@ func (m *model) reapClosed() {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// When the agent pane is focused, forward keys to it — except the escape
-	// hatch that returns focus to the sidebar.
-	if m.focus == focusAgent && m.cur() != nil {
-		if k.Type == tea.KeyCtrlA { // prefix: pop back to the switcher
-			m.focus = focusSidebar
-			return m, nil
+	// A confirmation modal is modal: it captures every key until answered.
+	if m.confirm != nil {
+		switch k.String() {
+		case "y", "enter":
+			a := m.confirm.action
+			m.confirm = nil
+			m.status = ""
+			return m, m.sendCmd(a)
+		case "n", "esc", "q", "ctrl+c":
+			m.confirm = nil
+			m.status = "cancelled"
 		}
+		return m, nil
+	}
+
+	// Alt/Option jumps work everywhere — even with the agent focused — so you can
+	// always move between the rail and the agent without a prefix.
+	switch k.String() {
+	case "alt+h":
+		m.focus = focusSidebar
+		return m, nil
+	case "alt+l":
+		m.focusAgent()
+		return m, nil
+	case "alt+a":
+		m.toggleFocus()
+		return m, nil
+	case "alt+q":
+		return m, tea.Quit
+	}
+
+	// Agent focused: forward every other key straight to the agent.
+	if m.focus == focusAgent && m.cur() != nil {
 		if b := keyToBytes(k); len(b) > 0 {
 			_, _ = m.cur().Write(b)
 		}
 		return m, nil
 	}
 
+	// Sidebar focus.
 	switch k.String() {
-	case "q", "ctrl+c", "alt+q":
+	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
 		m.move(-1)
@@ -204,12 +246,54 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 	case "enter", "l", "right":
 		return m, m.attachSelected()
-	case "tab":
-		if m.cur() != nil {
-			m.focus = focusAgent
+	case "a": // add an agent on the selected repo header (new repo-scoped workgroup)
+		if s := m.selected(); s != nil && s.Kind == "repo" {
+			m.status = "starting an agent on " + s.Title + "…"
+			return m, m.sendCmd(core.Action{Action: "new-repo-agent", ID: s.ID})
 		}
+		m.status = "select a repo to add an agent"
+	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
+		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID {
+			m.confirm = &confirmState{
+				message: "Move " + s.Title + " into a new work-scoped workgroup?",
+				action:  core.Action{Action: "move", ID: s.ID},
+			}
+			return m, nil
+		}
+		m.status = "select an agent to move"
+	case "tab":
+		m.focusAgent()
 	}
 	return m, nil
+}
+
+// sendCmd dispatches a daemon action (create/move/…). Writes are serialized on
+// the client; the result returns as a frame the read loop already handles, and
+// the resulting poll refreshes the rail.
+func (m *model) sendCmd(a core.Action) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		if c == nil {
+			return actionSentMsg{fmt.Errorf("not connected")}
+		}
+		return actionSentMsg{c.Send(a)}
+	}
+}
+
+// focusAgent moves focus to the agent pane if one is embedded.
+func (m *model) focusAgent() {
+	if m.cur() != nil {
+		m.focus = focusAgent
+	}
+}
+
+// toggleFocus flips between the sidebar and the agent pane.
+func (m *model) toggleFocus() {
+	if m.focus == focusAgent {
+		m.focus = focusSidebar
+		return
+	}
+	m.focusAgent()
 }
 
 func (m *model) move(d int) {
@@ -246,16 +330,24 @@ func (m *model) attachSelected() tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	// A workspace root isn't itself attachable — it's a container. Opening it
-	// should open its agent (roots always have ≥1), so the natural choice of
-	// selecting the workspace row "just works" instead of dead-ending.
-	if s.IsRoot {
+	// A repo header is a container for its repo-scoped agents: open the first one,
+	// or create one if it has none (auto-creates the repo-scoped workgroup).
+	if s.Kind == "repo" {
+		if sub := m.firstChild(s.ID); sub != nil {
+			s = sub
+		} else {
+			m.status = "starting an agent on " + s.Title + "…"
+			return m.sendCmd(core.Action{Action: "new-repo-agent", ID: s.ID})
+		}
+	} else if s.IsRoot {
+		// A workgroup root isn't itself attachable — open its first agent so the
+		// natural choice of selecting the workgroup row "just works".
 		if sub := m.firstChild(s.ID); sub != nil {
 			s = sub
 		}
 	}
 	if !attachable(s) {
-		m.status = "select an agent under a workspace"
+		m.status = "select an agent"
 		return nil
 	}
 	if t := m.terms[s.ID]; t != nil && !t.Closed() { // already running — just show it
@@ -298,13 +390,14 @@ func (m *model) embed(msg agentReadyMsg) {
 	m.status = ""
 }
 
-// attachable reports whether a row hosts an agent we can embed (the console or a
-// workspace's sub-agent) — not a workspace container, repo, or detached row.
+// attachable reports whether a row hosts an agent we can embed: the console, a
+// work-scoped workgroup's sub-agent, or a repo-scoped agent nested under a repo
+// header — but not a workgroup container, a repo header, or a detached row.
 func attachable(s *core.Session) bool {
 	if s.ID == console.ID {
 		return true
 	}
-	return s.Section == core.SectionWorkspaces && !s.IsRoot && s.RootID != ""
+	return !s.IsRoot && s.RootID != "" && s.Kind != "repo"
 }
 
 // agentCommand resolves an agent's launch spec (working dir, extra env, argv) by
@@ -339,9 +432,11 @@ func (m *model) mainWidth() int {
 	return w
 }
 
+// paneRows is the height of the body (sidebar / agent pane), leaving room for
+// the top header bar (1) and the footer rule + help (2).
 func (m *model) paneRows() int {
-	if m.h > 1 {
-		return m.h - 1
+	if r := m.h - 3; r > 1 {
+		return r
 	}
 	return 24
 }

@@ -74,7 +74,7 @@ func main() {
 		err = cmdDoctor()
 	case "repo":
 		err = cmdRepo(args)
-	case "session", "ses", "workspace", "ws":
+	case "workgroup", "wg", "session", "ses", "workspace", "ws":
 		err = cmdSession(args)
 	case "name":
 		err = cmdName(args)
@@ -110,11 +110,13 @@ usage: amux <command>
   dash               open the full-screen workspace dashboard
   repo add <src>     track a repo (clone a git URL, or register a local path)
   repo ls | rm       list / untrack repositories
-  workspace new      create a workspace via a config page, then open it
-  workspace open <id> open/switch to a workspace
-  workspace rm <id>  delete a workspace (removes its worktrees + branches)
-  name <text>        set the current workspace's display name (for the agent)
-  status             print workspaces and exit
+  workgroup new      create a work-scoped workgroup via a config page, then open
+  workgroup repo <r> start a single-repo (repo-scoped) agent on a tracked repo
+  workgroup move <a> [<root>|--new]  re-parent an agent into a work-scoped workgroup
+  workgroup open <id> open/switch to a workgroup
+  workgroup rm <id>  delete a workgroup (removes its worktrees + branches)
+  name <text>        set the current workgroup's display name (for the agent)
+  status             print workgroups and exit
   reload             restart the daemon + reload the rails (after an install)
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
   init               (re)write the isolated tmux config

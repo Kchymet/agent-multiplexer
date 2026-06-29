@@ -128,7 +128,7 @@ func (d *DB) importLegacy() error {
 		// root container
 		_ = d.PutSession(Session{
 			ID: w.ID, RootID: "", Name: w.Name, Mode: mode,
-			Dir: w.Dir, Created: w.Created,
+			Dir: w.Dir, Created: w.Created, Scope: ScopeWork,
 		})
 		// one sub preserving the legacy combined dir + claude session
 		_ = d.PutSession(Session{
@@ -153,4 +153,10 @@ func defaultStr(v, def string) string {
 const (
 	ModeTask = "task"
 	ModeLoop = "loop"
+)
+
+// Workgroup scopes (root sessions only).
+const (
+	ScopeWork = "work" // cross-repo workgroup: root + N agents
+	ScopeRepo = "repo" // single-repo, single-member workgroup nested under its repo
 )

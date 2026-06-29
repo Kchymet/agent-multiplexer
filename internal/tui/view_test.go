@@ -12,16 +12,16 @@ func TestViewRailSectionOrder(t *testing.T) {
 		width: core.RailWidth,
 		sessions: []core.Session{
 			{ID: "console", Title: "amux console", Mode: "console", State: core.StateReady, Status: "ready · configure amux"},
-			{ID: "ab12cd", Title: "my-app", Section: core.SectionWorkspaces, IsRoot: true, State: core.StateRunning, Status: "running · 1 agent"},
-			{ID: "ef34gh", Title: "fix-bug", Section: core.SectionWorkspaces, RootID: "ab12cd", State: core.StateRunning, Status: "running · main"},
+			{ID: "ab12cd", Title: "my-app", Section: core.SectionWorkgroups, IsRoot: true, State: core.StateRunning, Status: "running · 1 agent"},
+			{ID: "ef34gh", Title: "fix-bug", Section: core.SectionWorkgroups, RootID: "ab12cd", State: core.StateRunning, Status: "running · main"},
 			{ID: "agent-multiplexer", Title: "Kchymet/agent-multiplexer", Section: core.SectionRepos, Kind: "repo"},
 			{ID: "5d87c7eb", Title: "some-proj", Section: core.SectionDetached, Mode: "external", State: core.StateRunning, Status: "running · untracked"},
 		},
 	}
 	out := m.viewRail()
 
-	// Sections must appear top-to-bottom: console, WORKSPACES, REPOS, DETACHED.
-	markers := []string{"amux console", "WORKSPACES", "my-app", "fix-bug", "REPOS", "Kchymet/agent-multiplexer", "DETACHED", "some-proj"}
+	// Sections must appear top-to-bottom: console, WORKGROUPS, REPOS, DETACHED.
+	markers := []string{"amux console", "WORKGROUPS", "my-app", "fix-bug", "REPOS", "Kchymet/agent-multiplexer", "DETACHED", "some-proj"}
 	prev := -1
 	for _, mk := range markers {
 		i := strings.Index(out, mk)
@@ -45,8 +45,8 @@ func TestHighlightFollowsFocusedWindow(t *testing.T) {
 		windowID: "@7",
 		sessions: []core.Session{
 			{ID: "console", Title: "amux console"},
-			{ID: "a1", Title: "alpha", Section: core.SectionWorkspaces, WindowID: "@3"},
-			{ID: "a2", Title: "beta", Section: core.SectionWorkspaces, WindowID: "@7"},
+			{ID: "a1", Title: "alpha", Section: core.SectionWorkgroups, WindowID: "@3"},
+			{ID: "a2", Title: "beta", Section: core.SectionWorkgroups, WindowID: "@7"},
 		},
 	}
 

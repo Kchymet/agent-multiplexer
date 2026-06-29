@@ -43,7 +43,7 @@ func CreateWorkspace(ctx context.Context, name string, repos []string, defaultAg
 
 	rootID := db.NewID()
 	if err := db.PutSession(store.Session{
-		ID: rootID, RootID: "", Name: strings.TrimSpace(name),
+		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
 		Mode: store.ModeTask, Repo: store.JoinRepos(repos), Created: store.Now(),
 	}); err != nil {
 		return "", err
@@ -58,6 +58,29 @@ func CreateWorkspace(ctx context.Context, name string, repos []string, defaultAg
 		}
 	}
 	return rootID, nil
+}
+
+// CreateRepoWorkgroup creates a single-member, repo-scoped workgroup for one repo
+// plus its one agent. The wrapping root is hidden in the rail — the agent renders
+// directly under the repo header. Returns the agent session.
+func CreateRepoWorkgroup(ctx context.Context, repo string, spec AgentSpec) (store.Session, error) {
+	db, err := store.Open()
+	if err != nil {
+		return store.Session{}, err
+	}
+	defer db.Close()
+	if _, ok, _ := db.Repo(repo); !ok {
+		return store.Session{}, fmt.Errorf("unknown repo %q", repo)
+	}
+	rootID := db.NewID()
+	if err := db.PutSession(store.Session{
+		ID: rootID, RootID: "", Scope: store.ScopeRepo,
+		Mode: defaultStr(spec.Mode, store.ModeTask), Repo: repo, Created: store.Now(),
+	}); err != nil {
+		return store.Session{}, err
+	}
+	spec.Repos = []string{repo}
+	return addAgent(ctx, db, rootID, spec)
 }
 
 // AddAgent adds an agent (sub-session) to a workspace.
@@ -162,6 +185,75 @@ func AttachRepo(rootID, repo string) error {
 	return db.PutSession(root)
 }
 
+// MoveAgent re-parents an agent into another workgroup. With an empty targetRootID
+// it creates a new work-scoped workgroup seeded with the agent's repos. Only the
+// agent's root_id changes — its worktree dir and branch are left where they are
+// (they embed the old root id but are read from the stored values, so they keep
+// working; physically moving git worktrees is avoided). An old single-member
+// repo-scoped workgroup left empty is dropped (its container dir is left on disk
+// because the moved agent's worktree still lives under it and is in use).
+func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	a, ok, err := db.GetSession(agentID)
+	if err != nil || !ok {
+		return fmt.Errorf("no such agent %q", agentID)
+	}
+	if a.IsRoot() {
+		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
+	}
+	oldRoot := a.RootID
+
+	if strings.TrimSpace(targetRootID) == "" {
+		newRoot, err := CreateWorkspace(ctx, defaultStr(a.Name, a.Repo), store.SplitRepos(a.Repo), nil)
+		if err != nil {
+			return err
+		}
+		targetRootID = newRoot
+	} else {
+		target, ok, _ := db.GetSession(targetRootID)
+		if !ok || !target.IsRoot() {
+			return fmt.Errorf("no such workgroup %q", targetRootID)
+		}
+		if target.Scope == store.ScopeRepo {
+			return fmt.Errorf("cannot move into a repo-scoped workgroup; choose a work-scoped one (or omit a target to make a new one)")
+		}
+	}
+	if targetRootID == oldRoot {
+		return nil
+	}
+
+	a.RootID = targetRootID
+	if err := db.PutSession(a); err != nil {
+		return err
+	}
+	// Union the agent's repos into the destination so it lists them.
+	if target, ok, _ := db.GetSession(targetRootID); ok {
+		seen := map[string]bool{}
+		set := store.SplitRepos(target.Repo)
+		for _, r := range set {
+			seen[r] = true
+		}
+		for _, r := range store.SplitRepos(a.Repo) {
+			if !seen[r] {
+				set = append(set, r)
+				seen[r] = true
+			}
+		}
+		target.Repo = store.JoinRepos(set)
+		_ = db.PutSession(target)
+	}
+	// Drop the old workgroup if it's now empty (always true for a moved-out
+	// single-member repo-scoped one).
+	if kids, _ := db.Children(oldRoot); len(kids) == 0 {
+		_ = db.DeleteSession(oldRoot)
+	}
+	return nil
+}
+
 // OpenByID opens a session: the console, a workspace (opens all its agents), or
 // an agent (its window).
 func OpenByID(ctx context.Context, id string) error {
@@ -236,12 +328,28 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		return "", nil, nil, err
 	}
 	env = []string{
-		"AMUX_WORKSPACE=" + s.ID,
+		"AMUX_WORKGROUP=" + s.ID,
+		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
+		"AMUX_SCOPE=" + agentScope(s.RootID),
 		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
 	return s.Dir, env, argv, nil
+}
+
+// agentScope returns the scope ("work"|"repo") of an agent's workgroup root, or
+// "" if it can't be resolved (best-effort, for the AMUX_SCOPE hint).
+func agentScope(rootID string) string {
+	db, err := store.Open()
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	if root, ok, _ := db.GetSession(rootID); ok {
+		return root.Scope
+	}
+	return ""
 }
 
 // EnsureAgentSession starts the agent's dedicated, rail-free tmux session
@@ -295,7 +403,10 @@ func DeleteByID(ctx context.Context, id string) error {
 		for _, a := range agents {
 			removeAgent(ctx, db, a)
 		}
-		_ = os.RemoveAll(store.RootDir(id))
+		// Non-recursive: remove the container dir only if empty. A re-parented agent
+		// can still physically live under this root's tree (move is DB-only), so we
+		// must never blow the whole tree away.
+		_ = os.Remove(store.RootDir(id))
 		return db.DeleteSession(id)
 	}
 	removeAgent(ctx, db, s)

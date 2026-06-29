@@ -30,8 +30,8 @@ const (
 // Rail sections, top to bottom (Session.Section). The console is sectionless and
 // pinned above them all.
 const (
-	SectionWorkspaces = "workspaces" // the workspace switcher + nested agents
-	SectionRepos      = "repos"      // tracked repositories (launch a workspace)
+	SectionWorkgroups = "workgroups" // cross-repo workgroups + nested agents
+	SectionRepos      = "repos"      // tracked repos + their single-repo agents
 	SectionDetached   = "detached"   // Claude sessions amux didn't launch
 )
 
@@ -70,10 +70,11 @@ type Snapshot struct {
 
 // Action is the client -> daemon control request.
 type Action struct {
-	Action string `json:"action"`         // attach | new | kill | resume | refresh
-	ID     string `json:"id,omitempty"`   // target session id
-	Kind   string `json:"kind,omitempty"` // for "new": agent kind to spawn
-	Cwd    string `json:"cwd,omitempty"`  // for "new": working directory
+	Action string `json:"action"`           // attach | new | kill | resume | refresh | new-repo-agent | move
+	ID     string `json:"id,omitempty"`     // target session id (or repo name for new-repo-agent)
+	Kind   string `json:"kind,omitempty"`   // for "new": agent kind to spawn
+	Cwd    string `json:"cwd,omitempty"`    // for "new": working directory
+	Target string `json:"target,omitempty"` // for "move": destination root id ("" = new work-scoped)
 }
 
 // Result is the daemon -> client action response.

@@ -38,7 +38,7 @@ func (m *model) viewRail() string {
 	// The three sections, always shown in order and visually separated by a
 	// blank line and a full-width header bar — even when a section is empty.
 	for _, sec := range []struct{ key, label, empty string }{
-		{core.SectionWorkspaces, " WORKSPACES", "no workspaces — n to create"},
+		{core.SectionWorkgroups, " WORKGROUPS", "no workgroups — n to create"},
 		{core.SectionRepos, " REPOS", "no repos — r to add"},
 		{core.SectionDetached, " DETACHED", "none"},
 	} {
@@ -100,8 +100,8 @@ func (m *model) writeRailRow(b *strings.Builder, i, hi int, s core.Session, w in
 // sectionLabel is the header shown above a section, or "" for the pinned console.
 func sectionLabel(section string) string {
 	switch section {
-	case core.SectionWorkspaces:
-		return " WORKSPACES"
+	case core.SectionWorkgroups:
+		return " WORKGROUPS"
 	case core.SectionRepos:
 		return " REPOS"
 	case core.SectionDetached:

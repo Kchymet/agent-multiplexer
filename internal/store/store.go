@@ -40,6 +40,7 @@ type Session struct {
 	ClaudeID string // pinned claude conversation id (resume across restarts)
 	Prompt   string // initial prompt
 	Created  int64
+	Scope    string // roots only: work (cross-repo) | repo (single-repo, single-member)
 }
 
 // IsRoot reports whether s is a root container.
@@ -83,7 +84,7 @@ func Open() (*DB, error) {
 func (d *DB) Close() error { return d.sql.Close() }
 
 func (d *DB) migrate() error {
-	_, err := d.sql.Exec(`
+	if _, err := d.sql.Exec(`
 CREATE TABLE IF NOT EXISTS repos (
   name    TEXT PRIMARY KEY,
   source  TEXT NOT NULL,
@@ -101,10 +102,38 @@ CREATE TABLE IF NOT EXISTS sessions (
   dir       TEXT NOT NULL DEFAULT '',
   claude_id TEXT NOT NULL DEFAULT '',
   prompt    TEXT NOT NULL DEFAULT '',
-  created   INTEGER NOT NULL DEFAULT 0
+  created   INTEGER NOT NULL DEFAULT 0,
+  scope     TEXT NOT NULL DEFAULT 'work'
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
-`)
+`); err != nil {
+		return err
+	}
+	// Idempotently add columns introduced after the initial schema, so existing
+	// DBs gain them (CREATE TABLE IF NOT EXISTS won't alter an existing table).
+	return d.addColumn("sessions", "scope", "TEXT NOT NULL DEFAULT 'work'")
+}
+
+// addColumn adds col to table if it isn't already present.
+func (d *DB) addColumn(table, col, def string) error {
+	rows, err := d.sql.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == col {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = d.sql.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
 	return err
 }
 
@@ -154,14 +183,14 @@ func (d *DB) DeleteRepo(name string) error {
 
 func (d *DB) PutSession(s Session) error {
 	_, err := d.sql.Exec(
-		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   root_id=excluded.root_id, name=excluded.name, agent=excluded.agent,
 		   model=excluded.model, mode=excluded.mode, repo=excluded.repo,
 		   branch=excluded.branch, dir=excluded.dir, claude_id=excluded.claude_id,
-		   prompt=excluded.prompt, created=excluded.created`,
-		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created)
+		   prompt=excluded.prompt, created=excluded.created, scope=excluded.scope`,
+		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope)
 	return err
 }
 
@@ -171,7 +200,7 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 	for rows.Next() {
 		var s Session
 		if err := rows.Scan(&s.ID, &s.RootID, &s.Name, &s.Agent, &s.Model, &s.Mode,
-			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created); err != nil {
+			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -179,13 +208,13 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 	return out, rows.Err()
 }
 
-const sessionCols = `id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created`
+const sessionCols = `id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope`
 
 func (d *DB) GetSession(id string) (Session, bool, error) {
 	var s Session
 	err := d.sql.QueryRow(`SELECT `+sessionCols+` FROM sessions WHERE id=?`, id).
 		Scan(&s.ID, &s.RootID, &s.Name, &s.Agent, &s.Model, &s.Mode,
-			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created)
+			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope)
 	if err == sql.ErrNoRows {
 		return Session{}, false, nil
 	}
