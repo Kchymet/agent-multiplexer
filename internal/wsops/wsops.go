@@ -460,6 +460,20 @@ func Apply(ctx context.Context, a core.Action) error {
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
 		return err
+	case "add-agent":
+		repos := store.SplitRepos(a.Fields["repos"])
+		if len(repos) == 0 {
+			repos = rootRepos(a.ID) // blank = the whole workgroup's repos
+		}
+		_, err := AddAgent(ctx, a.ID, AgentSpec{
+			Agent:  "claude",
+			Repos:  repos,
+			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
+		})
+		return err
+	case "add-repo":
+		_, err := AddRepoSource(ctx, a.Fields["source"])
+		return err
 	case "new-workgroup":
 		repos := store.SplitRepos(a.Fields["repos"])
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])

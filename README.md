@@ -170,10 +170,14 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Alt+l` / `Alt+h` | focus the agent pane / the rail |
 | `Alt+a` | toggle focus between rail and agent |
 | `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |
-| `a` | new agent on the selected repo (settings form) |
+| `a` | add an agent — on a repo, a repo-scoped agent; on a workgroup, another agent (settings form) |
 | `w` | new work-scoped workgroup (settings form, optional Linear) |
+| `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
 | `m` | move the selected agent to a new workgroup (confirm) |
+| `r` | rename the selected agent/workgroup (display name) |
 | `x` | archive / restore the selected agent |
+| `D` | permanently delete the selected agent/workgroup — worktrees + branch (confirm) |
+| `Ctrl+r` | force a state refresh (the daemon also auto-polls) |
 | `q` / `Alt+q` | quit |
 
 ## Commands

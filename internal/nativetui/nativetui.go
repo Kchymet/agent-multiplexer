@@ -320,15 +320,29 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 	case "enter", "l", "right":
 		return m, m.attachSelected()
-	case "a": // add an agent on the selected repo header (opens a settings form)
-		if s := m.selected(); s != nil && s.Kind == "repo" {
+	case "a": // add an agent — on a repo header, a repo-scoped agent; on a workgroup, another agent
+		s := m.selected()
+		switch {
+		case s == nil:
+			m.status = "select a repo or workgroup to add an agent"
+		case s.Kind == "repo":
 			m.openNewRepoAgentForm(s.ID, s.Title)
-			return m, nil
+		case s.Section == core.SectionWorkgroups:
+			if root := m.rootOf(s); root != nil {
+				m.openAddAgentForm(root.ID, root.Title)
+			}
+		default:
+			m.status = "select a repo or workgroup to add an agent"
 		}
-		m.status = "select a repo to add an agent"
+		return m, nil
 	case "w": // new work-scoped workgroup (opens a settings form)
 		m.openNewWorkgroupForm()
 		return m, nil
+	case "R": // track a new repository (opens a one-field form)
+		m.openAddRepoForm()
+		return m, nil
+	case "ctrl+r": // force a state refresh (the daemon also auto-polls)
+		return m, m.sendCmd(core.Action{Action: "refresh"})
 	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
 		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
@@ -348,6 +362,19 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.sendCmd(core.Action{Action: "archive", ID: s.ID})
 		}
 		m.status = "select an agent to archive"
+	case "D": // permanently delete the selected agent/workgroup (worktrees + branch), with a confirm
+		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
+			what := "agent"
+			if s.IsRoot {
+				what = "workgroup"
+			}
+			m.confirm = &confirmState{
+				message: "Permanently delete " + what + " " + s.Title + "?\nThis removes its worktrees and branch — it can't be undone.",
+				action:  core.Action{Action: "delete", ID: s.ID},
+			}
+			return m, nil
+		}
+		m.status = "select an agent or workgroup to delete"
 	case "r": // rename the selected agent/workgroup (set a display name; id is unchanged)
 		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
 			m.openRenameForm(s.ID, s.Title)
@@ -402,6 +429,24 @@ func (m *model) selected() *core.Session {
 		return nil
 	}
 	return &m.sessions[m.cursor]
+}
+
+// rootOf returns the workgroup root row for a selected workgroup-section row:
+// the row itself if it is the root, otherwise the root its RootID points at.
+// Returns nil if no matching root is in the snapshot.
+func (m *model) rootOf(s *core.Session) *core.Session {
+	if s.IsRoot {
+		return s
+	}
+	if s.RootID == "" {
+		return nil
+	}
+	for i := range m.sessions {
+		if m.sessions[i].ID == s.RootID {
+			return &m.sessions[i]
+		}
+	}
+	return nil
 }
 
 // firstChild returns the first sub-agent belonging to the given root, or nil if

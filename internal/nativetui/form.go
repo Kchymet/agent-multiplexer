@@ -28,6 +28,40 @@ func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 	}
 }
 
+// openAddAgentForm opens the settings form for an additional agent on an
+// existing workgroup (root id). The repos field is left blank by default, which
+// the daemon expands to the whole workgroup's repos; fill it to scope the agent
+// to a subset.
+func (m *model) openAddAgentForm(rootID, rootTitle string) {
+	m.form = &formState{
+		title:  "Add agent · " + rootTitle,
+		action: "add-agent",
+		id:     rootID,
+		submit: "Add agent",
+		insert: true,
+		fields: []*formField{
+			{key: "prompt", label: "Prompt"},
+			{key: "repos", label: "Repos (blank = all)"},
+			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
+			{key: "model", label: "Model"},
+		},
+	}
+}
+
+// openAddRepoForm opens a one-field form to track a new repository from a
+// GitHub owner/name, a git URL, or a local path.
+func (m *model) openAddRepoForm() {
+	m.form = &formState{
+		title:  "Add repo",
+		action: "add-repo",
+		submit: "Track repo",
+		insert: true,
+		fields: []*formField{
+			{key: "source", label: "URL / owner/name / path"},
+		},
+	}
+}
+
 // openNewWorkgroupForm opens the settings form for a new work-scoped workgroup.
 func (m *model) openNewWorkgroupForm() {
 	m.form = &formState{

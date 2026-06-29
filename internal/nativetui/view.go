@@ -124,26 +124,49 @@ func padTo(s string, w int) string {
 
 func (m *model) renderSidebar() string {
 	var top []string
-	section := "\x00"
+
+	// Pinned, sectionless rows first (the control console).
 	for i, s := range m.sessions {
-		if s.Section != section {
-			section = s.Section
-			if lbl := sectionLabel(section); lbl != "" {
-				top = append(top, "") // blank line separates sections
-				top = append(top, sectionStyle.Width(sidebarWidth).Render(lbl))
+		if s.Section == "" {
+			top = append(top, m.renderRow(i, s))
+		}
+	}
+
+	// WORKGROUPS and REPOS are always shown — with an empty-state hint when they
+	// have no rows — so creating the first one is discoverable. ARCHIVED and
+	// DETACHED only appear when populated (they have nothing to create).
+	for _, sec := range []struct{ key, empty string }{
+		{core.SectionWorkgroups, "no workgroups — w to create"},
+		{core.SectionRepos, "no repos — R to add"},
+		{core.SectionArchived, ""},
+		{core.SectionDetached, ""},
+	} {
+		any := false
+		for i, s := range m.sessions {
+			if s.Section == sec.key {
+				if !any {
+					top = append(top, "", sectionStyle.Width(sidebarWidth).Render(sectionLabel(sec.key)))
+					any = true
+				}
+				top = append(top, m.renderRow(i, s))
 			}
 		}
-		top = append(top, m.renderRow(i, s))
+		if !any && sec.empty != "" {
+			top = append(top, "", sectionStyle.Width(sidebarWidth).Render(sectionLabel(sec.key)))
+			top = append(top, dimStyle.Render(" "+truncate(sec.empty, sidebarWidth-1)))
+		}
 	}
 
 	// Pin the rail's command hints to the bottom, padding the gap between the
-	// session list and the hints so they sit on the bottom border.
+	// session list and the hints so they sit on the bottom border. Rows can be two
+	// lines tall (title + status sub-line), so we count rendered lines, not slots.
 	foot := m.railHints()
 	rows := m.paneRows()
-	if len(top)+len(foot) > rows && rows-len(foot) >= 0 {
-		top = top[:rows-len(foot)]
+	footLines := lineCount(foot)
+	for lineCount(top) > rows-footLines {
+		top = top[:len(top)-1] // drop overflow rows; MaxHeight is the final backstop
 	}
-	for len(top)+len(foot) < rows {
+	for lineCount(top)+footLines < rows {
 		top = append(top, "")
 	}
 	lines := append(top, foot...)
@@ -163,6 +186,16 @@ func (m *model) railHints() []string {
 	}
 }
 
+// lineCount totals the rendered lines across entries, each of which may itself
+// span multiple lines (a row with a status sub-line).
+func lineCount(entries []string) int {
+	n := 0
+	for _, e := range entries {
+		n += 1 + strings.Count(e, "\n")
+	}
+	return n
+}
+
 func (m *model) renderRow(i int, s core.Session) string {
 	indent := ""
 	if s.RootID != "" {
@@ -173,13 +206,49 @@ func (m *model) renderRow(i int, s core.Session) string {
 		mark = "▸" // currently embedded
 	}
 	label := truncate(fmt.Sprintf("%s%s%s %s", mark, indent, glyph(s), s.Title), sidebarWidth)
+	var line string
 	switch {
 	case i == m.cursor:
-		return selStyle.Width(sidebarWidth).Render(label)
+		line = selStyle.Width(sidebarWidth).Render(label)
 	case s.IsRoot:
-		return titleStyle.Render(label)
+		line = titleStyle.Render(label)
 	default:
-		return label
+		line = label
+	}
+	if sub := m.rowStatus(s, indent); sub != "" {
+		line += "\n" + sub
+	}
+	return line
+}
+
+// rowStatus is the state-colored status sub-line shown beneath an agent row
+// (green working, purple awaiting you, blue ready, dim idle), or "" for rows
+// with nothing to detail — repos, containers, and rows without a status.
+func (m *model) rowStatus(s core.Session, indent string) string {
+	if s.Kind == "repo" || s.IsRoot || s.Status == "" {
+		return ""
+	}
+	sub := s.Status
+	if s.Title != s.ID && !strings.Contains(s.Status, s.ID) {
+		sub = s.ID + " · " + s.Status // leaf rows show their short id
+	}
+	return stateColor(s.State).Render(indent + "  " + truncate(sub, sidebarWidth-3-len(indent)))
+}
+
+// stateColor styles a status sub-line by activity: green working, purple blocked
+// on the user, blue ready, yellow live-but-unknown, dim idle.
+func stateColor(state string) lipgloss.Style {
+	switch state {
+	case core.StateRunning:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // green
+	case core.StateWaiting:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple
+	case core.StateReady:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")) // blue
+	case core.StateUnknown:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
+	default:
+		return dimStyle // idle
 	}
 }
 
@@ -226,7 +295,7 @@ func (m *model) renderHelp() string {
 	case m.focus == focusAgent:
 		return hints("agent", []hint{{"⌥ 1/2/3", "tabs"}, {"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
 	default:
-		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"w", "+group"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"q", "quit"}})
+		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}})
 	}
 }
 
