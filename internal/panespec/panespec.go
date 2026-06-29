@@ -66,6 +66,13 @@ func scope(dir string, tab int, argv []string) []string {
 	for _, p := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/nix", "/home/linuxbrew", "/run"} {
 		args = append(args, "--ro-bind-try", p, p)
 	}
+	// Network is shared (not unshared), but DNS needs the *real* resolv.conf: on
+	// WSL2 /etc/resolv.conf is a symlink to /mnt/wsl/... which the binds above
+	// don't reach. Bind the symlink target at its own path so /etc/resolv.conf
+	// (already present via the /etc bind) resolves through it.
+	if real, err := filepath.EvalSymlinks("/etc/resolv.conf"); err == nil && real != "/etc/resolv.conf" {
+		args = append(args, "--ro-bind-try", real, real)
+	}
 	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
 	// Empty $HOME, then add back only the worktree and the tool's own files.
 	args = append(args, "--tmpfs", home, "--bind", dir, dir, "--chdir", dir)
