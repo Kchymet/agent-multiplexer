@@ -79,6 +79,7 @@ type model struct {
 	attached string                      // agent id currently shown in the main pane
 	tab      int                         // which tab of the attached agent is shown
 	confirm  *confirmState               // a pending confirmation modal, or nil
+	form     *formState                  // a pending form modal, or nil
 	dataCh   chan struct{}
 	w, h     int
 	status   string
@@ -223,6 +224,10 @@ func (m *model) reapClosed() {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A form modal captures every key until submitted or cancelled.
+	if m.form != nil {
+		return m.handleForm(k)
+	}
 	// A confirmation modal is modal: it captures every key until answered.
 	if m.confirm != nil {
 		switch k.String() {
@@ -278,12 +283,15 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(1)
 	case "enter", "l", "right":
 		return m, m.attachSelected()
-	case "a": // add an agent on the selected repo header (new repo-scoped workgroup)
+	case "a": // add an agent on the selected repo header (opens a settings form)
 		if s := m.selected(); s != nil && s.Kind == "repo" {
-			m.status = "starting an agent on " + s.Title + "…"
-			return m, m.sendCmd(core.Action{Action: "new-repo-agent", ID: s.ID})
+			m.openNewRepoAgentForm(s.ID, s.Title)
+			return m, nil
 		}
 		m.status = "select a repo to add an agent"
+	case "w": // new work-scoped workgroup (opens a settings form)
+		m.openNewWorkgroupForm()
+		return m, nil
 	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
 		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
@@ -378,8 +386,8 @@ func (m *model) attachSelected() tea.Cmd {
 		if sub := m.firstChild(s.ID); sub != nil {
 			s = sub
 		} else {
-			m.status = "starting an agent on " + s.Title + "…"
-			return m.sendCmd(core.Action{Action: "new-repo-agent", ID: s.ID})
+			m.openNewRepoAgentForm(s.ID, s.Title)
+			return nil
 		}
 	} else if s.IsRoot {
 		// A workgroup root isn't itself attachable — open its first agent so the

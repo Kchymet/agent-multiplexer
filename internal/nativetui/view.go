@@ -184,6 +184,9 @@ func (m *model) renderRow(i int, s core.Session) string {
 }
 
 func (m *model) renderMain() string {
+	if m.form != nil {
+		return m.renderForm()
+	}
 	if m.confirm != nil {
 		return m.renderDialog()
 	}
@@ -223,7 +226,7 @@ func (m *model) renderHelp() string {
 	case m.focus == focusAgent:
 		return hints("agent", []hint{{"⌥ 1/2/3", "tabs"}, {"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
 	default:
-		return ""
+		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"w", "+group"}, {"m", "move"}, {"x", "done"}, {"q", "quit"}})
 	}
 }
 

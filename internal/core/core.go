@@ -71,11 +71,12 @@ type Snapshot struct {
 
 // Action is the client -> daemon control request.
 type Action struct {
-	Action string `json:"action"`           // attach | new | kill | resume | refresh | new-repo-agent | move
-	ID     string `json:"id,omitempty"`     // target session id (or repo name for new-repo-agent)
-	Kind   string `json:"kind,omitempty"`   // for "new": agent kind to spawn
-	Cwd    string `json:"cwd,omitempty"`    // for "new": working directory
-	Target string `json:"target,omitempty"` // for "move": destination root id ("" = new work-scoped)
+	Action string            `json:"action"`           // attach | new | kill | resume | refresh | new-repo-agent | move
+	ID     string            `json:"id,omitempty"`     // target session id (or repo name for new-repo-agent)
+	Kind   string            `json:"kind,omitempty"`   // for "new": agent kind to spawn
+	Cwd    string            `json:"cwd,omitempty"`    // for "new": working directory
+	Target string            `json:"target,omitempty"` // for "move": destination root id ("" = new work-scoped)
+	Fields map[string]string `json:"fields,omitempty"` // form-driven actions (new-repo-agent, new-workgroup)
 }
 
 // Result is the daemon -> client action response.
