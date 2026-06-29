@@ -439,6 +439,8 @@ func Apply(ctx context.Context, a core.Action) error {
 		return MoveAgent(ctx, a.ID, a.Target)
 	case "archive":
 		return ToggleArchived(ctx, a.ID)
+	case "rename":
+		return Rename(a.ID, a.Fields["name"])
 	case "new-repo-agent":
 		_, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],

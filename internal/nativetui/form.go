@@ -44,6 +44,22 @@ func (m *model) openNewWorkgroupForm() {
 	}
 }
 
+// openRenameForm opens a one-field form to set a session's display name. The
+// name is purely cosmetic — the session keeps its id — so the field starts empty
+// (a blank submit clears any existing name, reverting the rail to the id).
+func (m *model) openRenameForm(id, title string) {
+	m.form = &formState{
+		title:  "Rename · " + title,
+		action: "rename",
+		id:     id,
+		submit: "Rename",
+		insert: true,
+		fields: []*formField{
+			{key: "name", label: "Display name"},
+		},
+	}
+}
+
 // formField is one editable field: a free-text field with a vim cursor, or (when
 // options is non-empty) a cycle-through-options select.
 type formField struct {

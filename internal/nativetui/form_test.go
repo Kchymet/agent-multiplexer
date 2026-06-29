@@ -53,6 +53,28 @@ func TestVimFormEditing(t *testing.T) {
 	}
 }
 
+// The rename form carries a single name field and dispatches the "rename"
+// action (with the typed name) for the targeted session, leaving its id alone.
+func TestRenameFormSubmit(t *testing.T) {
+	m := &model{}
+	m.openRenameForm("a1b2c3", "old-label")
+	if got := m.form.action; got != "rename" {
+		t.Fatalf("action: got %q, want rename", got)
+	}
+	if got := m.form.id; got != "a1b2c3" {
+		t.Fatalf("id: got %q, want a1b2c3", got)
+	}
+	for _, k := range []string{"new", "<sp>", "name"} {
+		m.handleForm(key(k))
+	}
+	if got := m.form.fields[0].value; got != "new name" {
+		t.Fatalf("name field: got %q, want %q", got, "new name")
+	}
+	if got := m.form.values()["name"]; got != "new name" {
+		t.Fatalf("submitted name: got %q, want %q", got, "new name")
+	}
+}
+
 // Esc leaves insert mode; subsequent letters are commands, not text.
 func TestVimNormalModeNotTyped(t *testing.T) {
 	m := &model{}

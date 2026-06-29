@@ -226,7 +226,7 @@ func (m *model) renderHelp() string {
 	case m.focus == focusAgent:
 		return hints("agent", []hint{{"⌥ 1/2/3", "tabs"}, {"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
 	default:
-		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"w", "+group"}, {"m", "move"}, {"x", "done"}, {"q", "quit"}})
+		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"w", "+group"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"q", "quit"}})
 	}
 }
 
