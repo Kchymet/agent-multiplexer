@@ -118,8 +118,10 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   the bare clone its worktree is sourced from. Writable: the agent's **worktree**
   (to edit) and **its repo's bare clone** (so git can commit to its branch). Only
   what each tool needs is bound back (Claude's config/auth + status hook, the
-  editor's config). Network works (DNS included). It's a filesystem scope, not a
-  hardened jail (network/pids are shared); `AMUX_JAIL=off` disables it.
+  editor's config, and the shell's rc/theme — e.g. `~/.zshrc` + oh-my-zsh — so the
+  terminal keeps your prompt/aliases/plugins). Network works (DNS included). It's a
+  filesystem scope, not a hardened jail (network/pids are shared); `AMUX_JAIL=off`
+  disables it.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
   collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
   or `amux wg unarchive <id>`).

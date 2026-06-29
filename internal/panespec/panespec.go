@@ -158,8 +158,25 @@ func configBinds(tab int, home string) [][]string {
 			{"--ro-bind-try", j(home, "."+name), j(home, "."+name)},
 			{"--ro-bind-try", j(home, "."+name+"rc"), j(home, "."+name+"rc")},
 		}
+	case TabTerminal:
+		// The user's shell config (read-only) so the terminal picks up their
+		// prompt theme, aliases, plugins (e.g. oh-my-zsh) — without exposing the
+		// rest of $HOME. Frameworks/plugins are sourced from these or from system
+		// dirs already bound read-only (e.g. /home/linuxbrew).
+		var binds [][]string
+		for _, p := range []string{
+			".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+			".oh-my-zsh", ".p10k.zsh", ".zsh", ".config/zsh", ".fzf.zsh", ".fzf",
+			".bashrc", ".bash_profile", ".bash_login", ".profile", ".bash_aliases", ".inputrc",
+		} {
+			binds = append(binds, []string{"--ro-bind-try", j(home, p), j(home, p)})
+		}
+		// History, writable so the shell can append to it.
+		binds = append(binds, []string{"--bind-try", j(home, ".zsh_history"), j(home, ".zsh_history")})
+		binds = append(binds, []string{"--bind-try", j(home, ".bash_history"), j(home, ".bash_history")})
+		return binds
 	}
-	return nil // terminal: a clean shell, scoped to the worktree
+	return nil
 }
 
 // homeSubtree returns home/<first component> if p is under home, else "". Used to
