@@ -174,6 +174,14 @@ func configBinds(tab int, home string) [][]string {
 		// History, writable so the shell can append to it.
 		binds = append(binds, []string{"--bind-try", j(home, ".zsh_history"), j(home, ".zsh_history")})
 		binds = append(binds, []string{"--bind-try", j(home, ".bash_history"), j(home, ".bash_history")})
+		// Docker, in the terminal only (the human shell), not the agent pane. On
+		// WSL2 the CLI is a symlink into /mnt/wsl (Docker Desktop); bind that so it
+		// resolves. The CLI defaults to /var/run/docker.sock, but the scope has no
+		// /var — the real socket is /run/docker.sock (bound), so re-expose it at
+		// the default path. NB: docker reaches the host daemon, bypassing the
+		// worktree scope — kept off the agent pane on purpose.
+		binds = append(binds, []string{"--ro-bind-try", "/mnt/wsl", "/mnt/wsl"})
+		binds = append(binds, []string{"--ro-bind-try", "/run/docker.sock", "/var/run/docker.sock"})
 		return binds
 	}
 	return nil
