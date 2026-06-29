@@ -196,9 +196,47 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.embed(msg)
 		return m, nil
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
+	return m, nil
+}
+
+// handleMouse routes a mouse event. Wheel scrolling over the sidebar moves the
+// workspace selection; anything landing in the main pane is forwarded to the
+// embedded agent (translated into that pane's own coordinates) so you can scroll
+// or click an agent just by pointing at it — focus follows a button press. Events
+// over the borders/help line, or while a modal is up, are ignored.
+func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.form != nil || m.confirm != nil {
+		return m, nil
+	}
+	if tea.MouseEvent(ev).IsWheel() && ev.X < sidebarWidth {
+		switch ev.Button {
+		case tea.MouseButtonWheelUp:
+			m.move(-1)
+		case tea.MouseButtonWheelDown:
+			m.move(1)
+		}
+		return m, nil
+	}
+	t := m.cur()
+	if t == nil {
+		return m, nil
+	}
+	// Strip the sidebar+divider (left) and the top border (above) to get the
+	// agent pane's own 0-based coordinates.
+	x, y := ev.X-(sidebarWidth+1), ev.Y-1
+	if x < 0 || y < 0 || x >= m.mainWidth() || y >= m.paneRows() {
+		return m, nil
+	}
+	if ev.Action == tea.MouseActionPress && !tea.MouseEvent(ev).IsWheel() {
+		m.focus = focusAgent
+	}
+	t.MouseEvent(mouseToVT(ev, x, y))
 	return m, nil
 }
 

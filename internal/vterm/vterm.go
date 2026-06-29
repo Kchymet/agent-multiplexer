@@ -114,6 +114,22 @@ func (t *Terminal) Write(p []byte) (int, error) {
 	return t.ptmx.Write(p)
 }
 
+// MouseEvent forwards a mouse event (wheel scroll, click, or motion) to the
+// child. The emulator encodes it only if the child has enabled mouse reporting —
+// exactly like a real terminal: mouse-aware programs (the agent TUI, a pager, an
+// editor with mouse on) receive it; others are unaffected. Coordinates are
+// 0-based from the terminal's top-left. The encoded bytes flow to the child via
+// the same reply pipe forwardResponses already drains. We hold t.mu because
+// SendMouse reads emulator mode state that pump mutates under the same lock.
+func (t *Terminal) MouseEvent(ev vt.Mouse) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return
+	}
+	t.emu.SendMouse(ev)
+}
+
 // Resize resizes both the emulator and the underlying PTY (SIGWINCH).
 func (t *Terminal) Resize(cols, rows int) {
 	if cols <= 0 || rows <= 0 {
