@@ -1,12 +1,12 @@
 // Package nativetui is amux's native Bubble Tea front-end: a sidebar switcher
 // (workspaces / repos / detached) on the left and the selected agent embedded
-// on the right. tmux still hosts the agents (so they survive the TUI closing) —
-// this is a custom client that renders one agent via an embedded vterm and adds
-// our own chrome + keybindings instead of tmux's panes/windows.
+// on the right. Each agent runs directly in an embedded vterm (its own PTY) —
+// no tmux. Switching agents keeps the others running in the background; quitting
+// the app ends the live terminals (the Claude conversation is preserved and
+// resumes on reopen).
 package nativetui
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,17 +25,16 @@ import (
 
 const sidebarWidth = 26
 
-// Run starts the native TUI and blocks until the user quits (which detaches —
-// agents keep running in the tmux server). It refuses to run inside the amux
-// tmux server, where embedding a tmux client would nest and hang.
+// Run starts the native TUI and blocks until the user quits. Quitting closes
+// every embedded agent terminal (they're hosted in-process, not by tmux).
 func Run() error {
 	if sock, inside := insideAmux(); inside {
 		return fmt.Errorf("can't run the native TUI from inside amux (TMUX=%s) — detach first (Alt-q / C-a d), then run `amux` from your normal shell", sock)
 	}
-	m := &model{dataCh: make(chan struct{}, 1), status: "connecting…"}
+	m := &model{terms: map[string]*vterm.Terminal{}, dataCh: make(chan struct{}, 1), status: "connecting…"}
 	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
-	if m.term != nil {
-		_ = m.term.Close()
+	for _, t := range m.terms {
+		_ = t.Close()
 	}
 	return err
 }
@@ -58,9 +57,9 @@ type model struct {
 	client   *daemon.Client
 	sessions []core.Session
 	cursor   int
-	focus    focus // sidebar or agent pane
-	term     *vterm.Terminal
-	attached string // session id currently embedded
+	focus    focus                       // sidebar or agent pane
+	terms    map[string]*vterm.Terminal  // live agent terminals, keyed by session id
+	attached string                      // session id currently shown in the main pane
 	dataCh   chan struct{}
 	w, h     int
 	status   string
@@ -78,9 +77,16 @@ type connectedMsg struct{ c *daemon.Client }
 type frameMsg struct{ f daemon.Frame }
 type disconnectedMsg struct{}
 type termDataMsg struct{}
-type agentStartedMsg struct {
-	id, target string
-	err        error
+
+// agentReadyMsg carries a resolved agent launch spec back to the UI goroutine,
+// where the vterm is actually started. Resolving the spec (trust dir, resume
+// detection, binary lookup) can touch disk, so it runs off-thread.
+type agentReadyMsg struct {
+	id   string
+	dir  string
+	env  []string
+	argv []string
+	err  error
 }
 
 func (m *model) Init() tea.Cmd { return tea.Batch(connectCmd, waitData(m.dataCh)) }
@@ -107,12 +113,15 @@ func waitData(ch chan struct{}) tea.Cmd {
 	return func() tea.Msg { <-ch; return termDataMsg{} }
 }
 
+// cur returns the terminal currently shown in the main pane, or nil.
+func (m *model) cur() *vterm.Terminal { return m.terms[m.attached] }
+
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		if m.term != nil {
-			m.term.Resize(m.mainWidth(), m.paneRows())
+		for _, t := range m.terms {
+			t.Resize(m.mainWidth(), m.paneRows())
 		}
 		return m, nil
 
@@ -142,19 +151,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case termDataMsg:
-		if m.term != nil && m.term.Closed() {
-			m.term = nil
-			m.attached = ""
-			m.focus = focusSidebar
-		}
+		m.reapClosed()
 		return m, waitData(m.dataCh)
 
-	case agentStartedMsg:
+	case agentReadyMsg:
 		if msg.err != nil {
 			m.status = "launch failed: " + msg.err.Error()
 			return m, nil
 		}
-		return m, m.embed(msg.id, msg.target)
+		m.embed(msg)
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -162,16 +168,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// reapClosed drops any agent terminal whose process has exited.
+func (m *model) reapClosed() {
+	for id, t := range m.terms {
+		if t.Closed() {
+			delete(m.terms, id)
+			if m.attached == id {
+				m.attached = ""
+				m.focus = focusSidebar
+			}
+		}
+	}
+}
+
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// When the agent pane is focused, forward keys to it — except the escape
 	// hatch that returns focus to the sidebar.
-	if m.focus == focusAgent && m.term != nil {
+	if m.focus == focusAgent && m.cur() != nil {
 		if k.Type == tea.KeyCtrlA { // prefix: pop back to the switcher
 			m.focus = focusSidebar
 			return m, nil
 		}
 		if b := keyToBytes(k); len(b) > 0 {
-			_, _ = m.term.Write(b)
+			_, _ = m.cur().Write(b)
 		}
 		return m, nil
 	}
@@ -186,7 +205,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "l", "right":
 		return m, m.attachSelected()
 	case "tab":
-		if m.term != nil {
+		if m.cur() != nil {
 			m.focus = focusAgent
 		}
 	}
@@ -219,10 +238,9 @@ func (m *model) firstChild(rootID string) *core.Session {
 	return nil
 }
 
-// attachSelected embeds the selected agent in the main pane and focuses it,
-// launching its dedicated session first if it isn't running. The session is
-// private to that agent (rail-free, sized to this client), so there's nothing to
-// negotiate or leak.
+// attachSelected shows the selected agent in the main pane. If it's already
+// running in the background it just refocuses it; otherwise it resolves the
+// launch spec off-thread and embeds a fresh terminal when ready.
 func (m *model) attachSelected() tea.Cmd {
 	s := m.selected()
 	if s == nil {
@@ -240,32 +258,25 @@ func (m *model) attachSelected() tea.Cmd {
 		m.status = "select an agent under a workspace"
 		return nil
 	}
-	if m.attached == s.ID && m.term != nil { // already showing it — just focus
+	if t := m.terms[s.ID]; t != nil && !t.Closed() { // already running — just show it
+		m.attached = s.ID
 		m.focus = focusAgent
+		m.status = ""
 		return nil
 	}
 
-	if s.WindowID != "" { // already live — embed immediately (fast)
-		return m.embed(s.ID, s.WindowID)
-	}
-	// Not running yet: cold-starting the dedicated tmux session + agent takes
-	// seconds, so launch it off the UI thread. Running it inline froze the whole
-	// switcher until the agent was up. The agentStartedMsg embeds it when ready.
 	m.status = "launching " + s.Title + "…"
 	id := s.ID
 	return func() tea.Msg {
-		target, err := startAgent(id)
-		return agentStartedMsg{id: id, target: target, err: err}
+		dir, env, argv, err := agentCommand(id)
+		return agentReadyMsg{id: id, dir: dir, env: env, argv: argv, err: err}
 	}
 }
 
-// embed attaches the given live tmux session in the main pane and focuses it.
-// It only spawns a client in a PTY, so it's fast enough to run on the UI thread.
-func (m *model) embed(id, target string) tea.Cmd {
-	if m.term != nil { // switch: drop the previous embed
-		_ = m.term.Close()
-		m.term = nil
-	}
+// embed starts the agent process directly in a new vterm and shows it. The child
+// inherits the app's environment (PATH etc.), minus $TMUX, plus the agent's
+// AMUX_* vars — this is the same environment a manual shell launch gets.
+func (m *model) embed(msg agentReadyMsg) {
 	t := vterm.New(m.mainWidth(), m.paneRows())
 	t.OnData(func() {
 		select {
@@ -273,17 +284,18 @@ func (m *model) embed(id, target string) tea.Cmd {
 		default:
 		}
 	})
-	cmd := exec.Command("tmux", "-L", core.TmuxSocket, "attach", "-t", "="+target)
-	cmd.Env = append(envWithout(os.Environ(), "TMUX"), "TERM=xterm-256color")
+	cmd := exec.Command(msg.argv[0], msg.argv[1:]...)
+	cmd.Dir = msg.dir
+	base := envWithout(envWithout(os.Environ(), "TMUX"), "TERM")
+	cmd.Env = append(append(base, msg.env...), "TERM=xterm-256color")
 	if err := t.Start(cmd); err != nil {
-		m.status = "attach failed: " + err.Error()
-		return nil
+		m.status = "launch failed: " + err.Error()
+		return
 	}
-	m.term = t
-	m.attached = id
+	m.terms[msg.id] = t
+	m.attached = msg.id
 	m.focus = focusAgent
 	m.status = ""
-	return nil
 }
 
 // attachable reports whether a row hosts an agent we can embed (the console or a
@@ -295,30 +307,28 @@ func attachable(s *core.Session) bool {
 	return s.Section == core.SectionWorkspaces && !s.IsRoot && s.RootID != ""
 }
 
-// startAgent ensures the agent's dedicated session is running and returns its
-// name (launching/resuming it if needed).
-func startAgent(id string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
+// agentCommand resolves an agent's launch spec (working dir, extra env, argv) by
+// id, preparing the console first when needed.
+func agentCommand(id string) (dir string, env, argv []string, err error) {
 	if id == console.ID {
-		if err := console.Ensure(); err != nil {
-			return "", err
+		if err = console.Ensure(); err != nil {
+			return "", nil, nil, err
 		}
-		return wsops.EnsureAgentSession(ctx, console.Session())
+		return wsops.AgentCommand(console.Session())
 	}
 	db, err := store.Open()
 	if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
 	defer db.Close()
 	s, ok, err := db.GetSession(id)
 	if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
 	if !ok {
-		return "", fmt.Errorf("no such agent %q", id)
+		return "", nil, nil, fmt.Errorf("no such agent %q", id)
 	}
-	return wsops.EnsureAgentSession(ctx, s)
+	return wsops.AgentCommand(s)
 }
 
 func (m *model) mainWidth() int {

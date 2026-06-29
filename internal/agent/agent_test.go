@@ -1,6 +1,10 @@
 package agent
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // When the binary can't be resolved in the resolver's own PATH or via the login
 // shell, Argv must degrade to the bare name (so the tmux window's server env can
@@ -17,6 +21,31 @@ func TestArgvDegradesToBareName(t *testing.T) {
 	}
 	if len(argv) == 0 || argv[0] != "claude-amux-does-not-exist-xyz" {
 		t.Fatalf("want bare-name degrade, got %v", argv)
+	}
+}
+
+// When a binary isn't on PATH or surfaced by the login shell (e.g. nvm kept off
+// PATH for fast shell startup), the resolver must still find it in a known nvm
+// version dir — preferring the newest version — so amux can exec it directly.
+func TestResolveFindsNvmBinaryOffPath(t *testing.T) {
+	home := t.TempDir()
+	for _, ver := range []string{"v9.9.9", "v10.0.0", "v24.16.0"} {
+		dir := filepath.Join(home, ".nvm", "versions", "node", ver, "bin")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin") // nvm not on PATH
+	t.Setenv("SHELL", "/bin/sh")      // a non-interactive sh won't surface it either
+
+	got := resolve("claude")
+	want := filepath.Join(home, ".nvm", "versions", "node", "v24.16.0", "bin", "claude")
+	if got != want {
+		t.Fatalf("resolve(claude) = %q, want newest nvm version %q", got, want)
 	}
 }
 

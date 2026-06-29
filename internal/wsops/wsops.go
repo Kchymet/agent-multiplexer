@@ -201,16 +201,14 @@ func OpenByID(ctx context.Context, id string) error {
 	return launch(ctx, s)
 }
 
-// EnsureAgentSession starts the agent's dedicated, rail-free tmux session
-// (core.AgentSession) if it isn't already running, and returns its name. It does
-// NOT switch any client — the native TUI embeds the returned session directly.
-func EnsureAgentSession(ctx context.Context, s store.Session) (string, error) {
-	sess := core.AgentSession(s.ID)
-	if tmuxctl.HasSession(ctx, sess) {
-		return sess, nil
-	}
+// AgentCommand resolves everything needed to run an agent: its working dir, the
+// extra environment (KEY=VALUE) to set, and the argv. It decides resume vs
+// continue vs fresh the same way regardless of how the caller runs it — the
+// native TUI execs this directly in an embedded PTY, while EnsureAgentSession
+// hands it to tmux for the classic entrypoints.
+func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	if _, err := os.Stat(s.Dir); err != nil {
-		return "", fmt.Errorf("session dir missing: %s", s.Dir)
+		return "", nil, nil, fmt.Errorf("session dir missing: %s", s.Dir)
 	}
 	if s.Agent == "" || s.Agent == "claude" {
 		_ = claudecfg.TrustDir(s.Dir)
@@ -233,17 +231,33 @@ func EnsureAgentSession(ctx context.Context, s store.Session) (string, error) {
 			extra = []string{prompt}
 		}
 	}
-	argv, err := agent.Argv(s.Agent, s.Model, extra...)
+	argv, err = agent.Argv(s.Agent, s.Model, extra...)
 	if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
-	env := []string{
+	env = []string{
 		"AMUX_WORKSPACE=" + s.ID,
 		"AMUX_ROOT=" + s.RootID,
 		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
-	if err := tmuxctl.NewDetachedSession(ctx, sess, s.Dir, env, argv...); err != nil {
+	return s.Dir, env, argv, nil
+}
+
+// EnsureAgentSession starts the agent's dedicated, rail-free tmux session
+// (core.AgentSession) if it isn't already running, and returns its name. Used by
+// the classic tmux entrypoints (`amux up`, `amux session open`); the native TUI
+// no longer goes through tmux — it execs AgentCommand directly.
+func EnsureAgentSession(ctx context.Context, s store.Session) (string, error) {
+	sess := core.AgentSession(s.ID)
+	if tmuxctl.HasSession(ctx, sess) {
+		return sess, nil
+	}
+	dir, env, argv, err := AgentCommand(s)
+	if err != nil {
+		return "", err
+	}
+	if err := tmuxctl.NewDetachedSession(ctx, sess, dir, env, argv...); err != nil {
 		return "", err
 	}
 	return sess, nil

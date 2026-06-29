@@ -61,13 +61,13 @@ func (m *model) renderRow(i int, s core.Session) string {
 }
 
 func (m *model) renderMain() string {
-	if m.term == nil {
-		return lipgloss.NewStyle().
-			Width(m.mainWidth()).Height(m.paneRows()).
-			Align(lipgloss.Center, lipgloss.Center).
-			Render(dimStyle.Render("select an agent and press ↵"))
+	if t := m.cur(); t != nil {
+		return t.Render()
 	}
-	return m.term.Render()
+	return lipgloss.NewStyle().
+		Width(m.mainWidth()).Height(m.paneRows()).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(dimStyle.Render("select an agent and press ↵"))
 }
 
 func (m *model) renderFooter() string {
