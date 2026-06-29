@@ -45,11 +45,35 @@ func (m *model) renderTopBorder() string {
 	left := borderSeg(sidebarWidth, m.borderStyle(focusSidebar), label, railHint)
 
 	workHint := ""
-	if m.cur() != nil {
-		workHint = dimStyle.Render("◂") + keyStyle.Render(" ⌥ h ")
+	if m.attached != "" {
+		workHint = m.tabStrip()
 	}
 	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, "")
 	return left + sepStyle.Render("┬") + right
+}
+
+// tabStrip renders the attached agent's tab row (Alt+1/2/3): the active tab is
+// highlighted, launched-but-inactive tabs are bright, unopened ones dim.
+func (m *model) tabStrip() string {
+	var b strings.Builder
+	b.WriteString(" ")
+	for i := 0; i < tabCount; i++ {
+		if i > 0 {
+			b.WriteString(dimStyle.Render("  "))
+		}
+		num := fmt.Sprintf("%d", i+1)
+		label := num + " " + tabNames[i]
+		switch {
+		case i == m.tab:
+			b.WriteString(selStyle.Render(" " + label + " "))
+		case m.terms[paneKey{m.attached, i}] != nil:
+			b.WriteString(keyStyle.Render(num) + " " + tabNames[i])
+		default:
+			b.WriteString(keyStyle.Render(num) + dimStyle.Render(" "+tabNames[i]))
+		}
+	}
+	b.WriteString(" ")
+	return b.String()
 }
 
 // renderBottomBorder closes the frame with a ┴ under the divider, each side in
@@ -197,7 +221,7 @@ func (m *model) renderHelp() string {
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:
-		return hints("agent", []hint{{"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
+		return hints("agent", []hint{{"⌥ 1/2/3", "tabs"}, {"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
 	default:
 		return ""
 	}

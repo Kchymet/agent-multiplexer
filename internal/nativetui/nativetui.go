@@ -31,12 +31,29 @@ func Run() error {
 	if sock, inside := insideAmux(); inside {
 		return fmt.Errorf("can't run the native TUI from inside amux (TMUX=%s) — detach first (Alt-q / C-a d), then run `amux` from your normal shell", sock)
 	}
-	m := &model{terms: map[string]*vterm.Terminal{}, dataCh: make(chan struct{}, 1), status: "connecting…"}
+	m := &model{terms: map[paneKey]*vterm.Terminal{}, dataCh: make(chan struct{}, 1), status: "connecting…"}
 	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	for _, t := range m.terms {
 		_ = t.Close()
 	}
 	return err
+}
+
+// Each agent owns a row of tabs, switched with Alt+1/2/3: the agent itself, an
+// editor (nvim by default, $AMUX_EDITOR), and a shell — the latter two run in the
+// agent's worktree dir. paneKey identifies one tab of one agent.
+const (
+	tabAgent = iota
+	tabEditor
+	tabTerminal
+	tabCount
+)
+
+var tabNames = [tabCount]string{"agent", "editor", "term"}
+
+type paneKey struct {
+	id  string
+	tab int
 }
 
 // insideAmux reports whether we're running inside the isolated amux tmux server
@@ -57,10 +74,11 @@ type model struct {
 	client   *daemon.Client
 	sessions []core.Session
 	cursor   int
-	focus    focus                      // sidebar or agent pane
-	terms    map[string]*vterm.Terminal // live agent terminals, keyed by session id
-	attached string                     // session id currently shown in the main pane
-	confirm  *confirmState              // a pending confirmation modal, or nil
+	focus    focus                       // sidebar or agent pane
+	terms    map[paneKey]*vterm.Terminal // live panes, keyed by (agent id, tab)
+	attached string                      // agent id currently shown in the main pane
+	tab      int                         // which tab of the attached agent is shown
+	confirm  *confirmState               // a pending confirmation modal, or nil
 	dataCh   chan struct{}
 	w, h     int
 	status   string
@@ -92,6 +110,7 @@ type actionSentMsg struct{ err error }
 // detection, binary lookup) can touch disk, so it runs off-thread.
 type agentReadyMsg struct {
 	id   string
+	tab  int
 	dir  string
 	env  []string
 	argv []string
@@ -122,8 +141,8 @@ func waitData(ch chan struct{}) tea.Cmd {
 	return func() tea.Msg { <-ch; return termDataMsg{} }
 }
 
-// cur returns the terminal currently shown in the main pane, or nil.
-func (m *model) cur() *vterm.Terminal { return m.terms[m.attached] }
+// cur returns the terminal for the currently shown agent+tab, or nil.
+func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab}] }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -183,17 +202,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// reapClosed drops any agent terminal whose process has exited.
+// reapClosed drops any pane whose process has exited. If the pane currently
+// shown died, fall back to the agent tab, else detach to the sidebar.
 func (m *model) reapClosed() {
-	for id, t := range m.terms {
+	for k, t := range m.terms {
 		if t.Closed() {
-			delete(m.terms, id)
-			if m.attached == id {
-				m.attached = ""
-				m.focus = focusSidebar
-			}
+			delete(m.terms, k)
 		}
 	}
+	if m.attached == "" || m.cur() != nil {
+		return
+	}
+	if t := m.terms[paneKey{m.attached, tabAgent}]; t != nil && !t.Closed() {
+		m.tab = tabAgent
+		return
+	}
+	m.attached = ""
+	m.tab = tabAgent
+	m.focus = focusSidebar
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -226,6 +252,12 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "alt+q":
 		return m, tea.Quit
+	case "alt+1":
+		return m, m.switchTab(tabAgent)
+	case "alt+2":
+		return m, m.switchTab(tabEditor)
+	case "alt+3":
+		return m, m.switchTab(tabTerminal)
 	}
 
 	// Agent focused: forward every other key straight to the agent.
@@ -360,24 +392,46 @@ func (m *model) attachSelected() tea.Cmd {
 		m.status = "select an agent"
 		return nil
 	}
-	if t := m.terms[s.ID]; t != nil && !t.Closed() { // already running — just show it
-		m.attached = s.ID
+	m.attached = s.ID
+	m.tab = tabAgent
+	if t := m.terms[paneKey{s.ID, tabAgent}]; t != nil && !t.Closed() { // already running
 		m.focus = focusAgent
 		m.status = ""
 		return nil
 	}
-
 	m.status = "launching " + s.Title + "…"
-	id := s.ID
+	return m.launchPane(s.ID, tabAgent)
+}
+
+// switchTab shows tab t of the attached agent, launching its pane (editor/term)
+// on first use. Works even while the agent is focused (Alt+1/2/3).
+func (m *model) switchTab(t int) tea.Cmd {
+	if m.attached == "" {
+		m.status = "open an agent first"
+		return nil
+	}
+	m.tab = t
+	m.focus = focusAgent
+	if term := m.terms[paneKey{m.attached, t}]; term != nil && !term.Closed() {
+		m.status = ""
+		return nil
+	}
+	m.status = "opening " + tabNames[t] + "…"
+	return m.launchPane(m.attached, t)
+}
+
+// launchPane resolves a pane's launch spec off-thread (it touches disk), then an
+// agentReadyMsg embeds it on the UI goroutine.
+func (m *model) launchPane(id string, tab int) tea.Cmd {
 	return func() tea.Msg {
-		dir, env, argv, err := agentCommand(id)
-		return agentReadyMsg{id: id, dir: dir, env: env, argv: argv, err: err}
+		dir, env, argv, err := paneCommand(id, tab)
+		return agentReadyMsg{id: id, tab: tab, dir: dir, env: env, argv: argv, err: err}
 	}
 }
 
-// embed starts the agent process directly in a new vterm and shows it. The child
+// embed starts a pane's process directly in a new vterm and shows it. The child
 // inherits the app's environment (PATH etc.), minus $TMUX, plus the agent's
-// AMUX_* vars — this is the same environment a manual shell launch gets.
+// AMUX_* vars — the same environment a manual shell launch gets.
 func (m *model) embed(msg agentReadyMsg) {
 	t := vterm.New(m.mainWidth(), m.paneRows())
 	t.OnData(func() {
@@ -394,8 +448,9 @@ func (m *model) embed(msg agentReadyMsg) {
 		m.status = "launch failed: " + err.Error()
 		return
 	}
-	m.terms[msg.id] = t
+	m.terms[paneKey{msg.id, msg.tab}] = t
 	m.attached = msg.id
+	m.tab = msg.tab
 	m.focus = focusAgent
 	m.status = ""
 }
@@ -435,6 +490,36 @@ func agentCommand(id string) (dir string, env, argv []string, err error) {
 		return "", nil, nil, fmt.Errorf("no such agent %q", id)
 	}
 	return wsops.AgentCommand(s)
+}
+
+// paneCommand resolves the launch spec for one tab of an agent: the agent itself
+// (the resolved Claude argv), an editor, or a shell — the latter two run in the
+// agent's worktree dir, "jailed" to it via cwd.
+func paneCommand(id string, tab int) (dir string, env, argv []string, err error) {
+	dir, env, argv, err = agentCommand(id)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	switch tab {
+	case tabEditor:
+		argv = []string{editorBin()}
+	case tabTerminal:
+		argv = []string{shellBin()}
+	}
+	return dir, env, argv, nil
+}
+
+// editorBin is the configured editor, defaulting to nvim.
+func editorBin() string { return envOr("AMUX_EDITOR", "nvim") }
+
+// shellBin is the user's shell, defaulting to a sane fallback.
+func shellBin() string { return envOr("SHELL", "/bin/bash") }
+
+func envOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
 }
 
 func (m *model) mainWidth() int {
