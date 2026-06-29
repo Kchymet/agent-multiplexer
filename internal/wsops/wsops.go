@@ -424,6 +424,53 @@ func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
 	_ = db.DeleteSession(a.ID)
 }
 
+// Apply executes a control action against the session model — the shared
+// dispatch used by the daemon, the multiplexer server, and any client driver, so
+// they can't drift. Transport concerns (subscribe/refresh) are no-ops here.
+func Apply(ctx context.Context, a core.Action) error {
+	switch a.Action {
+	case "", "refresh", "subscribe":
+		return nil
+	case "open", "attach":
+		return OpenByID(ctx, a.ID)
+	case "delete", "kill":
+		return DeleteByID(ctx, a.ID)
+	case "move":
+		return MoveAgent(ctx, a.ID, a.Target)
+	case "archive":
+		return ToggleArchived(ctx, a.ID)
+	case "new-repo-agent":
+		_, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
+			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
+		})
+		return err
+	case "new-workgroup":
+		repos := store.SplitRepos(a.Fields["repos"])
+		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
+		var def *AgentSpec
+		if len(repos) > 0 || prompt != "" {
+			def = &AgentSpec{Prompt: prompt}
+		}
+		_, err := CreateWorkspace(ctx, a.Fields["name"], repos, def)
+		return err
+	}
+	return fmt.Errorf("unknown action %q", a.Action)
+}
+
+// baselinePrompt weaves a Linear issue link and a description into one prompt for
+// a new workgroup's first agent. MVP: the issue URL is handed to the agent in its
+// prompt (no Linear API sync yet).
+func baselinePrompt(description, linear string) string {
+	var parts []string
+	if linear = strings.TrimSpace(linear); linear != "" {
+		parts = append(parts, "Linear issue to work on: "+linear)
+	}
+	if d := strings.TrimSpace(description); d != "" {
+		parts = append(parts, d)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // SetArchived marks an agent (or workgroup) done/archived, or restores it. An
 // archived session drops off the active rail but stays in the store; its tmux
 // session (if any) is stopped so it isn't holding a live process.

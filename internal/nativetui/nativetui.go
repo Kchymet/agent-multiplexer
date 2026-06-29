@@ -18,9 +18,8 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
-	"amux/internal/store"
+	"amux/internal/panespec"
 	"amux/internal/vterm"
-	"amux/internal/wsops"
 )
 
 const sidebarWidth = 26
@@ -432,7 +431,7 @@ func (m *model) switchTab(t int) tea.Cmd {
 // agentReadyMsg embeds it on the UI goroutine.
 func (m *model) launchPane(id string, tab int) tea.Cmd {
 	return func() tea.Msg {
-		dir, env, argv, err := paneCommand(id, tab)
+		dir, env, argv, err := panespec.Resolve(id, tab)
 		return agentReadyMsg{id: id, tab: tab, dir: dir, env: env, argv: argv, err: err}
 	}
 }
@@ -474,100 +473,6 @@ func attachable(s *core.Session) bool {
 		return true // archived agents can still be opened to review or resume
 	}
 	return !s.IsRoot && s.RootID != "" && s.Kind != "repo"
-}
-
-// agentCommand resolves an agent's launch spec (working dir, extra env, argv) by
-// id, preparing the console first when needed.
-func agentCommand(id string) (dir string, env, argv []string, err error) {
-	if id == console.ID {
-		if err = console.Ensure(); err != nil {
-			return "", nil, nil, err
-		}
-		return wsops.AgentCommand(console.Session())
-	}
-	db, err := store.Open()
-	if err != nil {
-		return "", nil, nil, err
-	}
-	defer db.Close()
-	s, ok, err := db.GetSession(id)
-	if err != nil {
-		return "", nil, nil, err
-	}
-	if !ok {
-		return "", nil, nil, fmt.Errorf("no such agent %q", id)
-	}
-	return wsops.AgentCommand(s)
-}
-
-// paneCommand resolves the launch spec for one tab of an agent: the agent itself
-// (the resolved Claude argv), an editor, or a shell — the latter two run in the
-// agent's worktree dir, "jailed" to it via cwd.
-func paneCommand(id string, tab int) (dir string, env, argv []string, err error) {
-	dir, env, argv, err = agentCommand(id)
-	if err != nil {
-		return "", nil, nil, err
-	}
-	switch tab {
-	case tabEditor:
-		argv = []string{editorBin()}
-	case tabTerminal:
-		argv = terminalArgv(dir)
-	}
-	return dir, env, argv, nil
-}
-
-// editorBin is the configured editor, defaulting to nvim.
-func editorBin() string { return envOr("AMUX_EDITOR", "nvim") }
-
-// shellBin is the user's shell, defaulting to a sane fallback.
-func shellBin() string { return envOr("SHELL", "/bin/bash") }
-
-// terminalArgv returns the argv for the terminal tab. By default the shell is
-// jailed to the agent's worktree with bubblewrap: the whole system is read-only,
-// only the worktree (and a private /tmp) is writable, HOME is the worktree, and
-// nothing outside it is even visible — so the shell can't wander into other
-// agents, repos, or the user's home. Falls back to a plain shell if bwrap is
-// missing or AMUX_JAIL=off.
-func terminalArgv(dir string) []string {
-	if envOr("AMUX_JAIL", "on") != "off" {
-		if bw, err := exec.LookPath("bwrap"); err == nil {
-			return jailArgv(bw, dir)
-		}
-	}
-	return []string{shellBin()}
-}
-
-// jailArgv builds a bubblewrap command confining the shell to dir.
-func jailArgv(bwrap, dir string) []string {
-	args := []string{
-		bwrap,
-		"--die-with-parent",
-		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
-	}
-	// System trees, read-only (so tools/libraries work but can't be modified).
-	// --ro-bind-try skips any that don't exist on this host.
-	for _, p := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/nix", "/home/linuxbrew", "/run"} {
-		args = append(args, "--ro-bind-try", p, p)
-	}
-	args = append(args,
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--tmpfs", "/tmp",
-		"--bind", dir, dir, // the worktree: the only writable, visible work area
-		"--chdir", dir,
-		"--setenv", "HOME", dir,
-		"--setenv", "AMUX_JAILED", "1",
-		shellBin(),
-	)
-	return args
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
 }
 
 func (m *model) mainWidth() int {
