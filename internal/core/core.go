@@ -33,6 +33,7 @@ const (
 	SectionWorkgroups = "workgroups" // cross-repo workgroups + nested agents
 	SectionRepos      = "repos"      // tracked repos + their single-repo agents
 	SectionDetached   = "detached"   // Claude sessions amux didn't launch
+	SectionArchived   = "archived"   // agents marked done/archived (reversible)
 )
 
 // AgentSession is the dedicated, rail-free tmux session name that hosts one

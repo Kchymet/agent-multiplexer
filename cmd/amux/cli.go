@@ -362,6 +362,24 @@ func cmdSession(args []string) error {
 			return fmt.Errorf("usage: amux session rename <id> <name>")
 		}
 		return wsops.Rename(args[1], strings.Join(args[2:], " "))
+	case "archive", "done":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux workgroup archive <id>")
+		}
+		if err := wsops.SetArchived(ctx, args[1], true); err != nil {
+			return err
+		}
+		fmt.Printf("archived %s\n", args[1])
+		return nil
+	case "unarchive", "restore":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux workgroup unarchive <id>")
+		}
+		if err := wsops.SetArchived(ctx, args[1], false); err != nil {
+			return err
+		}
+		fmt.Printf("restored %s\n", args[1])
+		return nil
 	case "ls", "list":
 		return sessionList()
 	default:
@@ -384,8 +402,12 @@ func sessionList() error {
 			orNone(strings.ReplaceAll(r.Repo, ",", ", ")))
 		subs, _ := db.Children(r.ID)
 		for _, s := range subs {
-			fmt.Printf("  %-8s %-8s %-6s %s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode,
-				strings.ReplaceAll(s.Repo, ",", "+"))
+			tag := ""
+			if s.Archived {
+				tag = " [archived]"
+			}
+			fmt.Printf("  %-8s %-8s %-6s %s%s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode,
+				strings.ReplaceAll(s.Repo, ",", "+"), tag)
 		}
 	}
 	return nil

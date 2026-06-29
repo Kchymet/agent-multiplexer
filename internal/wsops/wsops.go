@@ -424,6 +424,40 @@ func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
 	_ = db.DeleteSession(a.ID)
 }
 
+// SetArchived marks an agent (or workgroup) done/archived, or restores it. An
+// archived session drops off the active rail but stays in the store; its tmux
+// session (if any) is stopped so it isn't holding a live process.
+func SetArchived(ctx context.Context, id string, archived bool) error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil || !ok {
+		return fmt.Errorf("no such session %q", id)
+	}
+	s.Archived = archived
+	if archived {
+		_ = tmuxctl.KillSession(ctx, core.AgentSession(id))
+	}
+	return db.PutSession(s)
+}
+
+// ToggleArchived flips a session's archived flag (the native TUI's one-key mark).
+func ToggleArchived(ctx context.Context, id string) error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	cur := false
+	if s, ok, _ := db.GetSession(id); ok {
+		cur = s.Archived
+	}
+	db.Close()
+	return SetArchived(ctx, id, !cur)
+}
+
 // Rename sets a session's display name.
 func Rename(id, name string) error {
 	db, err := store.Open()

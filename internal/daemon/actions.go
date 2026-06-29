@@ -39,6 +39,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.triggerPoll()
 		return ok()
+	case "archive": // toggle done/archived for the agent in a.ID
+		if err := wsops.ToggleArchived(ctx, a.ID); err != nil {
+			return fail("%v", err)
+		}
+		d.triggerPoll()
+		return ok()
 	default:
 		return fail("unknown action %q", a.Action)
 	}

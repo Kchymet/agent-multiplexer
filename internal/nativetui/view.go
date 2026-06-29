@@ -229,6 +229,8 @@ func sectionLabel(section string) string {
 		return " WORKGROUPS"
 	case core.SectionRepos:
 		return " REPOS"
+	case core.SectionArchived:
+		return " ARCHIVED"
 	case core.SectionDetached:
 		return " DETACHED"
 	}

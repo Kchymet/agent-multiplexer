@@ -65,30 +65,50 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// Repo-scoped (single-member) workgroups don't get their own row — their agent
 	// renders nested under the repo header in the REPOS section. Collect them by
 	// repo while passing over the roots; work-scoped roots render inline here.
+	// Archived agents/workgroups are pulled aside into a collapsed ARCHIVED section.
 	repoAgents := map[string][]store.Session{}
+	var archived []store.Session
+	track := func(s store.Session) {
+		if s.ClaudeID != "" {
+			tracked[s.ClaudeID] = true
+		}
+		if s.Dir != "" {
+			trackedDirs[s.Dir] = true
+		}
+	}
 	for _, r := range roots {
 		subs, err := db.Children(r.ID)
 		if err != nil {
 			return nil, err
 		}
 		if r.Scope == store.ScopeRepo {
-			repo := firstRepo(r.Repo)
 			for _, s := range subs {
-				if s.ClaudeID != "" {
-					tracked[s.ClaudeID] = true
+				track(s)
+				if s.Archived || r.Archived {
+					archived = append(archived, s)
+					continue
 				}
-				if s.Dir != "" {
-					trackedDirs[s.Dir] = true
-				}
-				repoAgents[repo] = append(repoAgents[repo], s)
+				repoAgents[firstRepo(r.Repo)] = append(repoAgents[firstRepo(r.Repo)], s)
 			}
 			continue
 		}
-		// State each sub once; the root inherits its most demanding child's state
-		// (waiting > running > ready > idle), so a blocked agent surfaces upward.
-		subStates := make([]string, len(subs))
+		// Work-scoped: an archived workgroup (or sub) is set aside; the rest render
+		// inline, the root inheriting its most demanding child's state.
+		var active []store.Session
+		for _, s := range subs {
+			track(s)
+			if s.Archived || r.Archived {
+				archived = append(archived, s)
+				continue
+			}
+			active = append(active, s)
+		}
+		if r.Archived {
+			continue
+		}
+		subStates := make([]string, len(active))
 		rootState := core.StateIdle
-		for i, s := range subs {
+		for i, s := range active {
 			subStates[i] = agentState(sessOf(s.ID), s.ClaudeID)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
@@ -98,18 +118,12 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
 			IsRoot: true, Mode: r.Mode,
 			State:     rootState,
-			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(rootState), len(subs), plural(len(subs))),
+			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(rootState), len(active), plural(len(active))),
 			Cwd:       r.Dir,
 			CanAttach: true, // Enter opens all sub-sessions
 			CanKill:   true, // delete the whole root
 		})
-		for i, s := range subs {
-			if s.ClaudeID != "" {
-				tracked[s.ClaudeID] = true
-			}
-			if s.Dir != "" {
-				trackedDirs[s.Dir] = true
-			}
+		for i, s := range active {
 			out = append(out, core.Session{
 				ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
@@ -145,6 +159,17 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				})
 			}
 		}
+	}
+
+	// Archived agents, collapsed at the bottom — out of the way but reviewable and
+	// restorable (press the archive key again, or `amux wg unarchive <id>`).
+	for _, s := range archived {
+		out = append(out, core.Session{
+			ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionArchived,
+			Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+			State: core.StateIdle, Status: "archived" + subSuffix(s),
+			Cwd: s.Dir, CanAttach: true, CanKill: true,
+		})
 	}
 
 	// Claude sessions amux didn't launch (visible because the status hooks are

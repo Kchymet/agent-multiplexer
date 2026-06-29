@@ -253,7 +253,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select a repo to add an agent"
 	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
-		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID {
+		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
 				message: "Move " + s.Title + " into a new work-scoped workgroup?",
 				action:  core.Action{Action: "move", ID: s.ID},
@@ -261,6 +261,16 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = "select an agent to move"
+	case "x": // mark the selected agent done/archived (or restore an archived one)
+		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
+			if s.Section == core.SectionArchived {
+				m.status = "restoring " + s.Title + "…"
+			} else {
+				m.status = "archiving " + s.Title + "…"
+			}
+			return m, m.sendCmd(core.Action{Action: "archive", ID: s.ID})
+		}
+		m.status = "select an agent to archive"
 	case "tab":
 		m.focusAgent()
 	}
@@ -396,6 +406,9 @@ func (m *model) embed(msg agentReadyMsg) {
 func attachable(s *core.Session) bool {
 	if s.ID == console.ID {
 		return true
+	}
+	if s.Section == core.SectionArchived {
+		return true // archived agents can still be opened to review or resume
 	}
 	return !s.IsRoot && s.RootID != "" && s.Kind != "repo"
 }

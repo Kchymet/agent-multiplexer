@@ -41,6 +41,7 @@ type Session struct {
 	Prompt   string // initial prompt
 	Created  int64
 	Scope    string // roots only: work (cross-repo) | repo (single-repo, single-member)
+	Archived bool   // marked done/archived: hidden from the active rail (reversible)
 }
 
 // IsRoot reports whether s is a root container.
@@ -103,7 +104,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   claude_id TEXT NOT NULL DEFAULT '',
   prompt    TEXT NOT NULL DEFAULT '',
   created   INTEGER NOT NULL DEFAULT 0,
-  scope     TEXT NOT NULL DEFAULT 'work'
+  scope     TEXT NOT NULL DEFAULT 'work',
+  archived  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
 `); err != nil {
@@ -111,7 +113,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
 	}
 	// Idempotently add columns introduced after the initial schema, so existing
 	// DBs gain them (CREATE TABLE IF NOT EXISTS won't alter an existing table).
-	return d.addColumn("sessions", "scope", "TEXT NOT NULL DEFAULT 'work'")
+	if err := d.addColumn("sessions", "scope", "TEXT NOT NULL DEFAULT 'work'"); err != nil {
+		return err
+	}
+	return d.addColumn("sessions", "archived", "INTEGER NOT NULL DEFAULT 0")
 }
 
 // addColumn adds col to table if it isn't already present.
@@ -183,14 +188,15 @@ func (d *DB) DeleteRepo(name string) error {
 
 func (d *DB) PutSession(s Session) error {
 	_, err := d.sql.Exec(
-		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   root_id=excluded.root_id, name=excluded.name, agent=excluded.agent,
 		   model=excluded.model, mode=excluded.mode, repo=excluded.repo,
 		   branch=excluded.branch, dir=excluded.dir, claude_id=excluded.claude_id,
-		   prompt=excluded.prompt, created=excluded.created, scope=excluded.scope`,
-		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope)
+		   prompt=excluded.prompt, created=excluded.created, scope=excluded.scope,
+		   archived=excluded.archived`,
+		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope, b2i(s.Archived))
 	return err
 }
 
@@ -199,26 +205,38 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 	var out []Session
 	for rows.Next() {
 		var s Session
+		var archived int64
 		if err := rows.Scan(&s.ID, &s.RootID, &s.Name, &s.Agent, &s.Model, &s.Mode,
-			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope); err != nil {
+			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope, &archived); err != nil {
 			return nil, err
 		}
+		s.Archived = archived != 0
 		out = append(out, s)
 	}
 	return out, rows.Err()
 }
 
-const sessionCols = `id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope`
+const sessionCols = `id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived`
 
 func (d *DB) GetSession(id string) (Session, bool, error) {
 	var s Session
+	var archived int64
 	err := d.sql.QueryRow(`SELECT `+sessionCols+` FROM sessions WHERE id=?`, id).
 		Scan(&s.ID, &s.RootID, &s.Name, &s.Agent, &s.Model, &s.Mode,
-			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope)
+			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope, &archived)
 	if err == sql.ErrNoRows {
 		return Session{}, false, nil
 	}
+	s.Archived = archived != 0
 	return s, err == nil, err
+}
+
+// b2i maps a bool to the 0/1 integer SQLite stores.
+func b2i(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // AllSessions returns every session (roots and subs), roots before their subs.
