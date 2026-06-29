@@ -77,7 +77,7 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Session model / store** | `internal/store` | SQLite store (`~/.local/share/amux/amux.db`): repos, sessions (a one-level `root_id` tree), `scope` (work/repo) and `archived` flags, idempotent migrations. |
 | **Rail state** | `internal/source` | Derives the rail snapshot (`[]core.Session`) from the store: console, workgroups + nested agents, repos + their agents, archived, detached. |
 | **Lifecycle ops** | `internal/wsops` | Create/add/move/archive/delete workgroups & agents, worktree setup, and the shared action dispatch (`Apply`). Used by the server, daemon, and CLI. |
-| **Pane spec** | `internal/panespec` | Resolves what to run for a tab (agent / editor / jailed shell), shared by the TUI and the server. |
+| **Pane spec** | `internal/panespec` | Resolves what to run for a tab (agent / editor / shell) and scopes every pane to the agent's worktree (bubblewrap), shared by the TUI and the server. |
 | **Shared types** | `internal/core` | The normalized `Session`, the `Action` wire type, well-known paths/sockets. |
 | **Agent resolver** | `internal/agent` | Maps an agent kind to an absolute argv (+ permission mode); robustly finds `claude` even when version managers keep it off PATH. |
 | **Embedded terminal** | `internal/vterm` | A VT emulator over a PTY (and, for the client path, over a byte stream) so a full-screen agent renders inside a pane. |
@@ -111,9 +111,14 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   `m` moves one into a new work-scoped workgroup (with a confirmation dialog).
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
   **1** the agent (Claude), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
-  **3** a terminal — a shell **jailed** to the agent's worktree via bubblewrap
-  (system read-only, only the worktree + a private `/tmp` writable, nothing outside
-  visible). Set `AMUX_JAIL=off` for a plain shell.
+  **3** a terminal. **All three are scoped to the agent's worktree** with a
+  bubblewrap mount namespace: the system is read-only, only the worktree (+ a
+  private `/tmp`) is writable, and the rest of your home — other repos, other
+  agents' worktrees, the store, your files — is replaced by an empty tmpfs, so an
+  agent can't read outside its worktree. Only what each tool needs to run is bound
+  back (Claude's config/auth + status hook, the editor's config). It's a
+  filesystem scope, not a hardened jail (network/pids are shared);
+  `AMUX_JAIL=off` disables it.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
   collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
   or `amux wg unarchive <id>`).
