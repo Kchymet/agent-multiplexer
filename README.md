@@ -194,9 +194,74 @@ amux status                # print rail state as text
 amux up | dash             # legacy tmux rail / dashboard
 ```
 
+## Platform support
+
+amux is developed and run on **WSL2** (the day-to-day environment). Everything
+else is either build-verified (`make cross` compiles linux+darwin, amd64+arm64)
+or relies on a shared, platform-agnostic code path — but has **not been run and
+exercised on that platform**. The matrix marks the difference explicitly: ✅ is
+something we have actually used here; ⚠️ is something we *expect* to work but have
+**not directly validated**.
+
+Two things are OS-specific by design:
+
+- **The filesystem jail is Linux-only.** It shells out to `bwrap` (bubblewrap),
+  which exists on Linux/WSL but not macOS. Where `bwrap` is absent the scope is
+  **silently skipped** — panes still run, just unscoped to the worktree
+  (`AMUX_JAIL=off` is the explicit form). Docker-in-the-pane and `proctree`
+  process mapping are likewise Linux-only.
+- **tmux is only for the legacy rail** (`amux up` / `dash`). The default native
+  TUI hosts every pane in-process over a PTY and needs no tmux at all.
+
+| Capability | Win (WSL) | Win (WSL+tmux) | Mac (iTerm2) | Mac (iTerm2+tmux) | Linux |
+|------------|:---------:|:--------------:|:------------:|:-----------------:|:-----:|
+| Native TUI (`amux`) | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Client/server (`amux serve` / `harness`) | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Worktrees + bare-clone store | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Agent / editor / terminal tabs | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Filesystem jail (`bwrap`) | ✅ | ✅ | ➖ | ➖ | ⚠️ |
+| Docker inside the terminal pane | ✅ | ✅ | ⚠️¹ | ⚠️¹ | ⚠️ |
+| Process-tree mapping (`proctree`) | ✅ | ✅ | ➖ | ➖ | ⚠️ |
+| Legacy tmux rail (`amux up` / `dash`) | ❌² | ⚠️ | ❌² | ⚠️ | ⚠️ |
+
+**Legend** — ✅ run & exercised here (WSL2)  ·  ⚠️ expected to work (shared code
+path / build-verified) but **not directly validated**  ·  ➖ not applicable
+(degrades gracefully — pane runs unjailed)  ·  ❌ unavailable.
+
+¹ Would run unjailed (no `bwrap` on macOS) and needs Docker Desktop — untested.
+² The legacy rail requires tmux; without it, use the default native TUI.
+
+### Notes on testing
+
+Be clear-eyed about what the ✅ / ⚠️ above actually mean:
+
+- **Directly validated (WSL2 only).** The native TUI, git worktrees, the
+  `bwrap` filesystem jail, docker-inside-the-terminal-pane, and the
+  agent/editor/terminal tabs have all been run and used on WSL2 (recent commits
+  fix WSL2-specific resolv.conf/docker paths). The Go test suite — `go test
+  ./...`, including the `internal/mux` end-to-end client/server test — passes; it
+  runs **with the jail disabled** (`AMUX_JAIL=off`), so it does not cover the
+  `bwrap` path.
+- **macOS: never executed.** It is only **cross-compiled** (`make cross`),
+  never launched. No TUI, pane, git, or tmux behavior has been observed on a
+  Mac. The jail (`bwrap`) does not exist there, so panes would run **unscoped**;
+  this fallback is in the code but unverified on macOS.
+- **Bare/native Linux: not directly validated.** We develop on WSL2, which is a
+  Linux kernel but differs in meaningful ways (e.g. `/etc/resolv.conf`
+  symlinking, networking, Docker integration). The code paths are shared, so a
+  desktop/server Linux install *should* behave like WSL — but we have not run it
+  there.
+- **Legacy tmux rail (`amux up` / `dash`): not currently exercised.** It is kept
+  compiling alongside the native TUI but is not part of the day-to-day flow and
+  has not been re-validated against the current code on any platform.
+
+If you run amux on macOS or native Linux and confirm a row, please send the
+result so we can promote a ⚠️ to ✅ (or file what broke).
+
 ## Install
 
-Requires Go 1.24+, tmux 3.x, and (for the jailed terminal) `bwrap`.
+Requires Go 1.24+, tmux 3.x (only for the legacy `amux up`/`dash` rail), and
+(for the jailed terminal, Linux/WSL only) `bwrap`.
 
 ```sh
 make install
