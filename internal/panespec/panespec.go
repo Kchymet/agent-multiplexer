@@ -63,7 +63,13 @@ func scope(dir string, tab int, argv []string) []string {
 	}
 
 	args := []string{bw, "--die-with-parent", "--unshare-user"}
-	for _, p := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/nix", "/home/linuxbrew", "/run"} {
+	// Required core for a functional sandbox: binaries/libraries (/usr) and system
+	// config (/etc — provides resolv.conf for DNS and passwd for user resolution).
+	args = append(args, "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc")
+	// Non-merged-/usr systems also need these as real dirs; on merged systems they
+	// are symlinks already covered by /usr, so -try skips whatever's absent. /opt,
+	// /nix, /home/linuxbrew (brew prefix), and /run cover this host's toolchain.
+	for _, p := range []string{"/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew", "/run"} {
 		args = append(args, "--ro-bind-try", p, p)
 	}
 	// Network is shared (not unshared), but DNS needs the *real* resolv.conf: on
