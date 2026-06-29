@@ -1,216 +1,209 @@
 # amux
 
-An **AI-native terminal control plane**. Open your terminal and land directly in
-a dedicated, isolated tmux server whose persistent side-pane is a **workspace
-switcher**. A workspace bundles an agent (Claude) with a set of tracked
-repositories, each materialized as a git **worktree**, all opened together in one
-window. Create, switch, and delete workspaces without leaving the view.
+An **AI-native terminal control plane** for orchestrating coding agents across
+many repositories. `amux` opens into a native full-screen UI: a switcher rail on
+the left, the selected agent embedded on the right. Agents are grouped into
+**workgroups**, each agent gets its own git **worktree** and a row of **tabs**
+(the agent, an editor, a jailed shell), and the whole thing is split into a
+**client/server** architecture so one UI can drive a local multiplexer *and* any
+number of remote ones.
 
 ```
-┌──────────────────────────────┬───────────────────────────────────────────────┐
-│ amux · workspaces            │ claude  (workspace: payments-fix)               │
-│ ● payments-fix               │ > …                                             │
-│   running · 2 repos          │   (worktrees: api/  web/)                        │
-│ ○ refactor-auth              │                                                 │
-│   idle · 1 repo              │                                                 │
-│ ○ spike-graphql              │                                                 │
-│   idle · 3 repos             │                                                 │
-│ ──────────────────────────── │                                                 │
-│ ↵ open    n new              │                                                 │
-│ x×2 del   R ↻                │                                                 │
-└──────────────────────────────┴───────────────────────────────────────────────┘
-   rail = workspace switcher       the workspace's agent
+┌ amux ──────────────── ⌥ l ▸┬ 1 agent  2 editor  3 term ──────────────────────┐
+│ ⚙ amux console            │ ✻ Working… (payments-fix)                          │
+│                           │ > implement the idempotency key on POST /charges   │
+│ WORKGROUPS                │                                                    │
+│ ▸ payments-fix            │   (worktrees: api/  web/)                          │
+│   ● idempotency           │                                                    │
+│   ◐ web-banner            │                                                    │
+│ REPOS                     │                                                    │
+│ ⛁ acme/api                │                                                    │
+│   ● hotfix-auth           │                                                    │
+│ ⛁ acme/web                │                                                    │
+│ ──────────────────────────┴────────────────────────────────────────────────  │
+│ ↵ open  ↑↓ move           │ a +agent · w +group · m move · x done · q quit     │
+└───────────────────────────┴────────────────────────────────────────────────────┘
+   rail = workgroup / repo switcher       the focused agent's current tab
 ```
 
 ## Why
 
-You juggle agents across many repos with no single place to see or switch between
-them. amux gives you one: workspaces (agent + repos-as-worktrees) listed in a
-persistent rail, running in their **own tmux server** (`tmux -L amux`), fully
-separate from your default tmux and `~/.tmux.conf`.
+You run many agents across many repos with no single place to see, switch, and
+control them. amux is that place: a switcher rail plus an embedded view of the
+focused agent, with first-class worktrees, per-agent editor/terminal tabs, and a
+backend you can run locally or on a remote box.
+
+---
+
+## System design
+
+amux is split into three roles connected by two wire protocols. The UI owns no
+agent processes; the **multiplexer server** owns the model and routes I/O; the
+**agent harness** owns the actual PTYs. (See `docs/client-server.md`.)
+
+```
+        UI ⇄ Server protocol                     Server ⇄ Harness protocol
+          (muxproto, line-JSON)                    (harnessproto, line-JSON)
+┌──────────────┐   unix / TCP    ┌────────────────────────┐   stdio / pipe   ┌───────────────┐
+│   UI client  │ ───────────────▶│   Multiplexer Server   │ ────────────────▶│ Agent Harness │
+│ (native TUI) │◀─ snapshots,    │      (amux serve)      │◀─ pane output,   │  (amux harness)│
+│  renders     │   pane output   │  • store  (SQLite)     │   exit           │  • PTY per pane│
+│  vterms      │ ─ actions,      │  • source (rail state) │ ─ spawn, input,  │  • claude /    │
+│  forwards    │   pane input ──▶│  • wsops  (lifecycle)  │   resize, kill ─▶│    editor /    │
+│  keystrokes  │                 │  • panespec (pane spec)│                  │    jailed shell│
+└──────────────┘                 └────────────────────────┘                  └───────────────┘
+   one UI can connect to a local server and many remote servers at once
+```
+
+- **Local & remote** — `amux serve` listens on a local unix socket and, if asked
+  (`amux serve tcp:0.0.0.0:7077`), on TCP. A UI points at a server with
+  `AMUX_SERVER` (`host:port`, or empty for local). A remote server orchestrates
+  agents on *its* machine; the UI just renders bytes.
+- **Why a harness** — putting pane execution behind a protocol is what lets the
+  server run agents locally, in a jail, in a container, or over ssh on another
+  host, without the server (or UI) caring.
+
+### Components
+
+| Component | Package | Responsibility |
+|-----------|---------|----------------|
+| **UI / native TUI** | `internal/nativetui` | The full-screen client: rail switcher, embedded agent panes (vterm), per-agent tabs, modal forms/confirms, all keybindings. Renders; owns no agent lifecycle. |
+| **Multiplexer server** | `internal/mux` | The backend (`amux serve`). Serves `muxproto` to UI clients over unix/TCP, broadcasts rail snapshots, applies lifecycle actions, and multiplexes pane I/O between clients and a harness. |
+| **Agent harness** | `internal/harness` | Owns the real processes (`amux harness`). Spawns each pane in a PTY, streams its output, accepts input/resize/kill. The unit that can run jailed/remote. |
+| **UI ⇄ Server protocol** | `internal/muxproto` | Message types + helpers for hello/welcome, subscribe/snapshot, action/result, and pane open/input/resize/close/output/exit. |
+| **Server ⇄ Harness protocol** | `internal/harnessproto` | Message types for spawn/input/resize/kill and ready/output/exit. |
+| **Wire transport** | `internal/wire` | Shared line-framed JSON codec used by both protocols over any stream (unix/TCP/stdio/pipe). |
+| **UI client lib** | `internal/muxclient` | Dials a local/remote server and exposes its state stream + per-pane I/O to a UI. |
+| **Session model / store** | `internal/store` | SQLite store (`~/.local/share/amux/amux.db`): repos, sessions (a one-level `root_id` tree), `scope` (work/repo) and `archived` flags, idempotent migrations. |
+| **Rail state** | `internal/source` | Derives the rail snapshot (`[]core.Session`) from the store: console, workgroups + nested agents, repos + their agents, archived, detached. |
+| **Lifecycle ops** | `internal/wsops` | Create/add/move/archive/delete workgroups & agents, worktree setup, and the shared action dispatch (`Apply`). Used by the server, daemon, and CLI. |
+| **Pane spec** | `internal/panespec` | Resolves what to run for a tab (agent / editor / jailed shell), shared by the TUI and the server. |
+| **Shared types** | `internal/core` | The normalized `Session`, the `Action` wire type, well-known paths/sockets. |
+| **Agent resolver** | `internal/agent` | Maps an agent kind to an absolute argv (+ permission mode); robustly finds `claude` even when version managers keep it off PATH. |
+| **Embedded terminal** | `internal/vterm` | A VT emulator over a PTY (and, for the client path, over a byte stream) so a full-screen agent renders inside a pane. |
+| **Control console** | `internal/console` | The built-in `⚙` agent scoped to amux config/CLI. |
+| **Git / GitHub** | `internal/git`, `internal/gh` | Bare clones + worktrees; `gh`-driven repo discovery/clone. |
+| **Claude config** | `internal/claudecfg` | Safe edits to `~/.claude.json` (pre-trust spawned dirs), status hooks, model defaults. |
+| **Legacy daemon / tmux** | `internal/daemon`, `internal/tmuxctl`, `internal/tui` | The original tmux-rail front-end and its poller (`amux up`/`dash`), kept working alongside the native TUI. |
+
+> Status: the protocols, server, harness, and client are complete and covered by
+> an end-to-end test (`internal/mux`). The default `amux` native TUI still spawns
+> panes locally; migrating it onto the client (so the default app is a thin client
+> of `amux serve`) is the final wiring step.
+
+---
 
 ## Concepts
 
-- **Repository** — a tracked repo. `amux repo add` clones it as a local **bare**
-  clone (the worktree source) under `~/.local/share/amux/repos/`. Sources can be
-  a git URL, a local path, an `OWNER/REPO` shorthand, or — via the **GitHub CLI**
-  (`gh`) — fuzzy-found from your remotes: first pick an **owner** (your account or
-  an org you belong to), then a repo. If `gh` isn't authenticated, amux prompts
-  you to `gh auth login` rather than falling back. Reachable from `amux repo add`
-  (no argument) or the "clone a new repo…" entry in the workspace picker.
-- **Session** — a **root** container (a short **id**, optional name) holding one
-  or more **sub-sessions**. Each sub-session binds **one agent to one worktree**:
-  a repo on a branch (`amux/<id>`) under `~/.local/share/amux/sessions/<root>/`,
-  or a plain agent with no repo. Sub-sessions under one root can be the **same
-  repo on different branches**, **different repos**, or a mix — and each can use a
-  **different agent/model**. The rail nests sub-sessions under their root. A name
-  is optional (`amux name "<summary>"`); sessions are **persistent** and resume
-  across restarts. `x` (twice) deletes — a root removes all its sub-sessions.
-- **Mode** — a workspace is either a **task** (short-running, tied to a temporary
-  task) or a **loop** (long-running, nearly autonomous). Shown in the rail with a
-  distinct glyph (`●`/`○` for tasks, `∞` for loops).
-- **Control console** (`⚙`, pinned first in the rail) — a built-in session that
-  runs an agent in a neutral directory, preconfigured (via its `CLAUDE.md`) to help
-  you configure and operate amux. It is scoped to amux **configuration + CLI only**
-  — it won't touch workspace code or the amux source. Open it from the rail, with
-  `C-a C`, or `amux console`. Edit `~/.local/share/amux/console/CLAUDE.md` to tailor
-  how it behaves.
+- **Repository** — a tracked repo, cloned as a local **bare** clone (the worktree
+  source) under `~/.local/share/amux/repos/`. Add with `amux repo add <url|path|OWNER/REPO>`,
+  or no-arg to fuzzy-find from your GitHub remotes via `gh`.
+- **Workgroup** — a container of agents, in one of two **scopes**:
+  - **repo-scoped** — pinned to a single repo, **single-member** (one agent).
+    Rendered under **REPOS**, nested beneath its repo header (the container is
+    hidden — you just see repo → agents). Auto-created when you start an agent on
+    a repo.
+  - **work-scoped** — spans any number of repos and holds N agents. Rendered under
+    **WORKGROUPS**. Create with the `w` form (name, repos, a baseline description,
+    and an optional **Linear** issue woven into the first agent's prompt).
+- **Agent** — one agent (Claude) with its own subdirectory and a git **worktree
+  per repo** it works on. An agent appears under WORKGROUPS *or* REPOS, never both;
+  `m` moves one into a new work-scoped workgroup (with a confirmation dialog).
+- **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
+  **1** the agent (Claude), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
+  **3** a terminal — a shell **jailed** to the agent's worktree via bubblewrap
+  (system read-only, only the worktree + a private `/tmp` writable, nothing outside
+  visible). Set `AMUX_JAIL=off` for a plain shell.
+- **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
+  collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
+  or `amux wg unarchive <id>`).
+- **Mode** — an agent runs as a **task** (short) or **loop** (long/autonomous),
+  shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.
+- **Control console** (`⚙`) — a built-in agent scoped to amux config + CLI only.
 
-## Philosophy: amux is a UI layer
+## Philosophy: amux is a UI/orchestration layer, not an autonomy policy
 
-amux switches, displays, and launches — it does **not** orchestrate. Any
-autonomy (auto-accept edits, looping, retries) belongs to the **agent itself**
-(local) or to a **cloud orchestrator**, never to amux. To make that work amux
-exports the session's intent on the agent's window and gets out of the way:
+amux switches, displays, launches, and routes — it does **not** decide how an
+agent behaves. Autonomy (auto-accept, looping, retries) belongs to the **agent**
+or your **launch wrapper**. amux exports intent and gets out of the way:
 
-| env var          | meaning                                   |
-|------------------|-------------------------------------------|
-| `AMUX_MODE`      | `task` (short) or `loop` (long/autonomous)|
-| `AMUX_WORKSPACE` | the workspace id                          |
-| `AMUX_AGENT`     | the agent kind (`claude`)                 |
+| env var            | meaning                                              |
+|--------------------|------------------------------------------------------|
+| `AMUX_MODE`        | `task` or `loop`                                     |
+| `AMUX_WORKGROUP`   | the agent's workgroup id (`AMUX_WORKSPACE` = alias)  |
+| `AMUX_ROOT`        | the root/workgroup id                                |
+| `AMUX_SCOPE`       | `work` or `repo`                                     |
+| `AMUX_AGENT`       | the agent kind (`claude`)                            |
 
-The launch binary is overridable with `AMUX_CLAUDE_BIN`, so you point amux at
-your own wrapper that decides how to run based on `$AMUX_MODE` — e.g. add
-`--permission-mode acceptEdits` and start a `/loop` for `loop` sessions. A
-reference wrapper is `scripts/claude-launch.example.sh`:
+Override the launch binary with `AMUX_CLAUDE_BIN` (point it at a wrapper that
+branches on `$AMUX_MODE`). Agents launch **pre-trusted** and with
+`--permission-mode auto` (a safe classifier, *not* `--dangerously-skip-permissions`);
+override with `AMUX_PERMISSION_MODE`. See `scripts/claude-launch.example.sh`.
+
+## Client/server usage
 
 ```sh
-cp scripts/claude-launch.example.sh ~/.config/amux/claude-launch.sh
-export AMUX_CLAUDE_BIN="$HOME/.config/amux/claude-launch.sh"   # in your shell rc
+amux                       # native TUI (default; local)
+amux serve                 # run the multiplexer server (local unix socket)
+amux serve tcp:0.0.0.0:7077  # also accept remote UIs over TCP
+amux harness               # run an agent harness over stdio (remote/decoupled)
+AMUX_SERVER=host:7077 amux # point a UI at a remote server  (planned TUI wiring)
 ```
 
-amux ships **no** autonomy policy of its own; `mode` is intent + display only.
+## Keys (native TUI)
 
-### Launch defaults: trusted + auto
+Navigation is **Alt/Option-only** (no prefix):
 
-For agents amux spawns, it sets two sensible (overridable) defaults so a fresh
-worktree is usable without prompts:
+| key | action |
+|-----|--------|
+| `↑/↓`, `k/j` | move the rail cursor |
+| `Enter` | open the selected agent (or a repo's first/new agent) |
+| `Alt+l` / `Alt+h` | focus the agent pane / the rail |
+| `Alt+a` | toggle focus between rail and agent |
+| `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |
+| `a` | new agent on the selected repo (settings form) |
+| `w` | new work-scoped workgroup (settings form, optional Linear) |
+| `m` | move the selected agent to a new workgroup (confirm) |
+| `x` | archive / restore the selected agent |
+| `q` / `Alt+q` | quit |
 
-- **Trusted by default** — amux pre-marks each directory it creates as trusted in
-  `~/.claude.json` (`projects.<dir>.hasTrustDialogAccepted`), so Claude Code skips
-  its interactive "trust this folder?" dialog. (amux only trusts dirs it created.)
-- **Auto permission mode** — agents launch with `--permission-mode auto`: a
-  classifier auto-approves safe operations and blocks escalations. This is **not**
-  `--dangerously-skip-permissions`/`bypassPermissions`. Override per kind with
-  `AMUX_PERMISSION_MODE=default|acceptEdits|plan|auto` (or `none` to omit), or take
-  full control with an `AMUX_CLAUDE_BIN` wrapper.
+## Commands
 
-## How it works
-
-- **Isolated tmux server** — everything runs under the `amux` socket with its own
-  config (`~/.config/amux/amux.conf`). Your existing tmux setup is never touched.
-- **Daemon** — one background process reads the registry (~2s), tracks which
-  workspaces are running (via a `@amx_ws` window tag), and serves state + control
-  actions (open / delete) over a unix socket.
-- **Rail** — a narrow workspace-switcher pane auto-added to the left of *every*
-  window via a tmux hook. A thin client of the daemon, so N rails ≠ N pollers.
-- **New workspace flow** — `n` opens a tmux popup with a **configuration page**
-  (an fzf menu): drill into **Repos** (multi-select, with an inline gh/clone
-  "add a repo…" entry), **Mode** (task/loop), an optional **Prompt**, and an
-  optional **Name**, then choose *Create*. Only repos are required. The initial
-  prompt seeds the agent on launch (Claude's positional prompt).
-- **Store** — repos and sessions persist in a **SQLite** DB at
-  `~/.local/share/amux/amux.db` (sessions carry a `root_id`; WAL mode lets the
-  daemon read while the CLI writes). A pre-existing JSON `registry.json` is
-  imported once and kept aside as `registry.json.migrated`.
+```
+amux                       # native TUI
+amux serve [listen...]     # multiplexer server (unix + optional tcp:/unix: specs)
+amux harness               # agent harness over stdio
+amux repo add <src>        # track a repo: git URL | local path | OWNER/REPO (gh)
+amux repo ls | rm <name>   # list / untrack repos (rm refuses if agents use it)
+amux workgroup repo <repo> # start a repo-scoped agent (alias: wg)
+amux workgroup new         # work-scoped workgroup config page
+amux workgroup move <agent> [<root>|--new]
+amux workgroup archive | unarchive <id>
+amux workgroup open|rm|rename|ls
+amux console               # open the control console
+amux status                # print rail state as text
+amux up | dash             # legacy tmux rail / dashboard
+```
 
 ## Install
 
-Requires Go 1.24+ and tmux 3.x.
+Requires Go 1.24+, tmux 3.x, and (for the jailed terminal) `bwrap`.
 
 ```sh
 make install
 ```
 
-This builds the binary to `~/.local/bin/amux`, writes the isolated tmux
-config, and installs the shell shim. Then add the printed line to your shell rc:
+Builds `~/.local/bin/amux`, writes the isolated tmux config, and installs the
+shell shim. Run `amux` from a normal terminal. (`AMUX_SKIP=1` disables any
+auto-launch shim.)
 
-```sh
-[ -f "$HOME/.config/amux/amux.sh" ] && . "$HOME/.config/amux/amux.sh"
-```
+## Roadmap
 
-Make sure `~/.local/bin` is on your `PATH`. Open a new terminal and you're in.
-
-> Escape hatch: `AMUX_SKIP=1` in the environment disables auto-launch, so a
-> plain shell / your default tmux is always reachable (`AMUX_SKIP=1 zsh`).
-
-### Windows Terminal (WSL2)
-
-Add a dedicated profile so opening the terminal drops you straight into amux,
-leaving your other profiles intact. In Windows Terminal *Settings → Add a new
-profile*, set the command line to your login shell (which sources the shim), e.g.
-
-```
-wsl.exe -d <your-distro> -- zsh -lic 'exec amux up'
-```
-
-Then set this profile as the default. (Equivalently, just keep your normal WSL
-profile — sourcing the shim from `~/.zshrc` already auto-launches amux.)
-
-### macOS
-
-The shell shim covers iTerm2 / Terminal automatically — no extra step. Optionally
-create a dedicated iTerm profile whose command is `amux up`.
-
-## Keys (rail & dashboard)
-
-| key         | action                                            |
-|-------------|---------------------------------------------------|
-| `↑/↓`,`k/j` | move selection                                    |
-| `Enter`     | open a sub-session / open all of a root's agents  |
-| `n`         | new session (config page in a popup)              |
-| `a`         | add an agent (sub-session) to the selected root   |
-| `x` `x`     | delete (root removes all its sub-sessions)        |
-| `R`         | force refresh                                      |
-| `q`         | quit this dashboard pane                           |
-
-Inside the isolated tmux server: prefix is `C-a`; `prefix + h` / `prefix + l`
-(or `Alt+h` / `Alt+l`) move between the rail and your work; `prefix + g` opens
-the full-screen dashboard; `prefix + a` opens the new-workspace creator;
-`prefix + C` opens the control console; `prefix + d` detaches.
-
-## Commands
-
-```
-amux up                  # start daemon + isolated server, then attach
-amux dash                # full-screen workspace dashboard
-amux repo add <src>      # track a repo: git URL | local path | OWNER/REPO (via gh)
-amux repo add            # no arg: fuzzy-find a GitHub repo (gh) and clone it
-amux repo ls | rm <name> # list / untrack repositories
-amux session new         # config page: name + add agents (repo/branch/mode/model) → open
-amux session add <root>  # add an agent (sub-session) to a root
-amux session create <repo>... [--name n] [--prompt t] [--mode task|loop] [--model m]
-amux session open <id> | rm <id> | rename <id> <name> | ls
-amux name <text>         # set the current session's name (run by the agent)
-amux console             # open the amux control console (configure amux)
-amux status              # print workspaces as text (scripting)
-amux init                # (re)write the isolated tmux config
-amux daemon              # run the daemon in the foreground (usually automatic)
-```
-
-## Layout
-
-```
-cmd/amux/            entrypoint, subcommands, repo/workspace CLI, embedded conf
-internal/core/       Session model, wire protocol, paths
-internal/store/      SQLite store: repos + sessions (root_id hierarchy) + migration
-internal/git/        bare clone + worktree helpers
-internal/gh/         GitHub CLI wrapper (list/clone remote repos)
-internal/agent/      agent-kind -> absolute argv resolver (+ permission mode)
-internal/claudecfg/  safe edits to ~/.claude.json (pre-trust spawned dirs)
-internal/console/    the control console: neutral dir + preconfigured CLAUDE.md
-internal/wsops/      workspace open/create/delete (shared by daemon + CLI)
-internal/source/     Source interface + workspace.go (claude/hermes/tmux stubs)
-internal/daemon/     registry poll, unix-socket server, actions, client
-internal/tmuxctl/    thin `tmux -L amux` wrapper (+ @amx_ws tagging)
-internal/tui/        Bubble Tea model: rail (switcher) + dash (full)
-scripts/amux.sh      shell shim
-```
-
-## Limitations / roadmap
-
-- One agent kind for now (**Claude**); the `agent` resolver and `Agent` field are
-  ready for Hermes (`internal/agent`).
-- Worktrees branch from the bare clone's HEAD; pulling upstream updates into the
-  store isn't wired yet.
-- No per-repo branch choice yet (all repos in a workspace share `amux/<name>`).
+- **Thin-client TUI** — migrate the native TUI onto `muxclient` so the default app
+  is a client of `amux serve` (vterm fed by the server, keystrokes forwarded), and
+  it can attach to remote servers.
+- **Remote auth/TLS** — v1 TCP is unauthenticated; bind it to trusted networks.
+- **Linear** — currently the issue URL is woven into the agent's prompt; a real
+  Linear API/sync is a follow-up.
+- **One agent kind** (Claude) wired today; the resolver is ready for others.
+- Upstream pulls into the bare-clone store; per-repo branch selection.
