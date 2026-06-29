@@ -512,7 +512,7 @@ func paneCommand(id string, tab int) (dir string, env, argv []string, err error)
 	case tabEditor:
 		argv = []string{editorBin()}
 	case tabTerminal:
-		argv = []string{shellBin()}
+		argv = terminalArgv(dir)
 	}
 	return dir, env, argv, nil
 }
@@ -522,6 +522,46 @@ func editorBin() string { return envOr("AMUX_EDITOR", "nvim") }
 
 // shellBin is the user's shell, defaulting to a sane fallback.
 func shellBin() string { return envOr("SHELL", "/bin/bash") }
+
+// terminalArgv returns the argv for the terminal tab. By default the shell is
+// jailed to the agent's worktree with bubblewrap: the whole system is read-only,
+// only the worktree (and a private /tmp) is writable, HOME is the worktree, and
+// nothing outside it is even visible — so the shell can't wander into other
+// agents, repos, or the user's home. Falls back to a plain shell if bwrap is
+// missing or AMUX_JAIL=off.
+func terminalArgv(dir string) []string {
+	if envOr("AMUX_JAIL", "on") != "off" {
+		if bw, err := exec.LookPath("bwrap"); err == nil {
+			return jailArgv(bw, dir)
+		}
+	}
+	return []string{shellBin()}
+}
+
+// jailArgv builds a bubblewrap command confining the shell to dir.
+func jailArgv(bwrap, dir string) []string {
+	args := []string{
+		bwrap,
+		"--die-with-parent",
+		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+	}
+	// System trees, read-only (so tools/libraries work but can't be modified).
+	// --ro-bind-try skips any that don't exist on this host.
+	for _, p := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/nix", "/home/linuxbrew", "/run"} {
+		args = append(args, "--ro-bind-try", p, p)
+	}
+	args = append(args,
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--tmpfs", "/tmp",
+		"--bind", dir, dir, // the worktree: the only writable, visible work area
+		"--chdir", dir,
+		"--setenv", "HOME", dir,
+		"--setenv", "AMUX_JAILED", "1",
+		shellBin(),
+	)
+	return args
+}
 
 func envOr(key, def string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
