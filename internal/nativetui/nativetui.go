@@ -310,6 +310,12 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.sendCmd(core.Action{Action: "archive", ID: s.ID})
 		}
 		m.status = "select an agent to archive"
+	case "r": // rename the selected agent/workgroup (set a display name; id is unchanged)
+		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
+			m.openRenameForm(s.ID, s.Title)
+			return m, nil
+		}
+		m.status = "select a session to rename"
 	case "tab":
 		m.focusAgent()
 	}

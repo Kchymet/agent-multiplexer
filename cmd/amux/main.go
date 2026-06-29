@@ -118,6 +118,7 @@ usage: amux <command>
   workgroup repo <r> start a single-repo (repo-scoped) agent on a tracked repo
   workgroup move <a> [<root>|--new]  re-parent an agent into a work-scoped workgroup
   workgroup open <id> open/switch to a workgroup
+  workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)
   workgroup rm <id>  delete a workgroup (removes its worktrees + branches)
   name <text>        set the current workgroup's display name (for the agent)
   status             print workgroups and exit
