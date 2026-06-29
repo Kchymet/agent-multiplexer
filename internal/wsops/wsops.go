@@ -299,24 +299,25 @@ func OpenByID(ctx context.Context, id string) error {
 // native TUI execs this directly in an embedded PTY, while EnsureAgentSession
 // hands it to tmux for the classic entrypoints.
 func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
-	if _, err := os.Stat(s.Dir); err != nil {
-		return "", nil, nil, fmt.Errorf("session dir missing: %s", s.Dir)
+	dir = agentWorkdir(s)
+	if _, err := os.Stat(dir); err != nil {
+		return "", nil, nil, fmt.Errorf("session dir missing: %s", dir)
 	}
 	if s.Agent == "" || s.Agent == "claude" {
-		_ = claudecfg.TrustDir(s.Dir)
+		_ = claudecfg.TrustDir(dir)
 	}
 
 	prompt := strings.TrimSpace(s.Prompt)
 	var extra []string
 	switch {
-	case s.ClaudeID != "" && claudecfg.SessionExists(s.Dir, s.ClaudeID):
+	case s.ClaudeID != "" && claudecfg.SessionExists(dir, s.ClaudeID):
 		extra = []string{"--resume", s.ClaudeID}
 	case s.ClaudeID != "":
 		extra = []string{"--session-id", s.ClaudeID}
 		if prompt != "" {
 			extra = append(extra, prompt)
 		}
-	case claudecfg.AnySession(s.Dir):
+	case claudecfg.AnySession(dir):
 		extra = []string{"--continue"}
 	default:
 		if prompt != "" {
@@ -335,7 +336,20 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
-	return s.Dir, env, argv, nil
+	return dir, env, argv, nil
+}
+
+// agentWorkdir is the directory an agent's panes run in. An agent dir holds one
+// git-worktree subdir per assigned repo, so with a single repo we drop straight
+// into that worktree (one level deeper) — the agent, and its sandbox scope, then
+// sit on the repo itself instead of a wrapper dir whose only content is that one
+// subdir. With several repos there's no single worktree to pick, so we stay at
+// the agent dir, which holds them all side by side.
+func agentWorkdir(s store.Session) string {
+	if repos := store.SplitRepos(s.Repo); len(repos) == 1 {
+		return filepath.Join(s.Dir, repos[0])
+	}
+	return s.Dir
 }
 
 // agentScope returns the scope ("work"|"repo") of an agent's workgroup root, or
