@@ -147,7 +147,7 @@ func configBinds(tab int, home string) [][]string {
 		if exe, err := os.Executable(); err == nil {
 			binds = append(binds, []string{"--ro-bind-try", exe, exe})
 		}
-		return binds
+		return append(binds, gitBinds(home)...)
 	case TabEditor:
 		name := filepath.Base(editorBin())
 		return [][]string{
@@ -182,9 +182,24 @@ func configBinds(tab int, home string) [][]string {
 		// worktree scope — kept off the agent pane on purpose.
 		binds = append(binds, []string{"--ro-bind-try", "/mnt/wsl", "/mnt/wsl"})
 		binds = append(binds, []string{"--ro-bind-try", "/run/docker.sock", "/var/run/docker.sock"})
-		return binds
+		return append(binds, gitBinds(home)...)
 	}
 	return nil
+}
+
+// gitBinds mounts the user's git + GitHub-CLI auth read-only so agents inherit
+// the host's authentication instead of each one having to log in: ~/.gitconfig
+// (identity + the `gh auth git-credential` helper for HTTPS) and ~/.config/gh
+// (the gh token in hosts.yml). The gh binary itself is already on the read-only
+// system path. NB: this hands the agent your GitHub token — it can act on GitHub
+// as you (push, open PRs, etc.), which is the point.
+func gitBinds(home string) [][]string {
+	j := filepath.Join
+	return [][]string{
+		{"--ro-bind-try", j(home, ".gitconfig"), j(home, ".gitconfig")},
+		{"--ro-bind-try", j(home, ".config", "git"), j(home, ".config", "git")},
+		{"--ro-bind-try", j(home, ".config", "gh"), j(home, ".config", "gh")},
+	}
 }
 
 // homeSubtree returns home/<first component> if p is under home, else "". Used to
