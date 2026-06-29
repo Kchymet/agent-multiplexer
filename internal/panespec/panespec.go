@@ -38,7 +38,32 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 	case TabTerminal:
 		argv = []string{shellBin()}
 	}
-	return dir, env, scope(dir, tab, argv), nil
+	return dir, env, scope(dir, tab, argv, agentRepoSources(agentID)), nil
+}
+
+// agentRepoSources returns the bare-clone git dirs backing an agent's worktrees.
+// They live under the read-only amux tree but must be writable so git can commit
+// (it writes objects/refs/index there), so the scope re-binds them read-write.
+func agentRepoSources(agentID string) []string {
+	if agentID == console.ID {
+		return nil
+	}
+	db, err := store.Open()
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	s, ok, _ := db.GetSession(agentID)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, name := range store.SplitRepos(s.Repo) {
+		if r, ok, _ := db.Repo(name); ok && r.GitDir != "" {
+			out = append(out, r.GitDir)
+		}
+	}
+	return out
 }
 
 // scope wraps a pane's command in a bubblewrap mount namespace confined to the
@@ -49,7 +74,7 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 // and its own runtime; the editor gets its config; the shell gets nothing. This
 // is a filesystem scope, not a hardened jail (network and pids are shared), and
 // it's skipped if AMUX_JAIL=off or bwrap is missing.
-func scope(dir string, tab int, argv []string) []string {
+func scope(dir string, tab int, argv []string, rwSources []string) []string {
 	if len(argv) == 0 || envOr("AMUX_JAIL", "on") == "off" {
 		return argv
 	}
@@ -80,8 +105,18 @@ func scope(dir string, tab int, argv []string) []string {
 		args = append(args, "--ro-bind-try", real, real)
 	}
 	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
-	// Empty $HOME, then add back only the worktree and the tool's own files.
-	args = append(args, "--tmpfs", home, "--bind", dir, dir, "--chdir", dir)
+	// Empty $HOME, then add back the amux data tree read-only (the worktrees are
+	// sourced from here — each worktree's .git points back to a bare clone under
+	// ~/.local/share/amux/repos, so git needs to read it), and finally the agent's
+	// own worktree read-write on top so it can edit its files.
+	args = append(args, "--tmpfs", home)
+	args = append(args, "--ro-bind-try", core.DataDir(), core.DataDir())
+	args = append(args, "--bind", dir, dir)
+	// The agent's own bare clones, read-write, so git can commit to its branch.
+	for _, src := range rwSources {
+		args = append(args, "--bind-try", src, src)
+	}
+	args = append(args, "--chdir", dir)
 	// The pane binary itself, if it lives under $HOME (e.g. claude under ~/.nvm),
 	// would be hidden by the tmpfs — bind its subtree read-only so it still runs.
 	if sub := homeSubtree(home, argv[0]); sub != "" {

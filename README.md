@@ -112,13 +112,14 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
   **1** the agent (Claude), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
   **3** a terminal. **All three are scoped to the agent's worktree** with a
-  bubblewrap mount namespace: the system is read-only, only the worktree (+ a
-  private `/tmp`) is writable, and the rest of your home — other repos, other
-  agents' worktrees, the store, your files — is replaced by an empty tmpfs, so an
-  agent can't read outside its worktree. Only what each tool needs to run is bound
-  back (Claude's config/auth + status hook, the editor's config). It's a
-  filesystem scope, not a hardened jail (network/pids are shared);
-  `AMUX_JAIL=off` disables it.
+  bubblewrap mount namespace: the system is read-only, the rest of your home —
+  other projects, your files, secrets — is replaced by an empty tmpfs, and the
+  amux data tree (`~/.local/share/amux`) is mounted **read-only** so git can read
+  the bare clone its worktree is sourced from. Writable: the agent's **worktree**
+  (to edit) and **its repo's bare clone** (so git can commit to its branch). Only
+  what each tool needs is bound back (Claude's config/auth + status hook, the
+  editor's config). Network works (DNS included). It's a filesystem scope, not a
+  hardened jail (network/pids are shared); `AMUX_JAIL=off` disables it.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
   collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
   or `amux wg unarchive <id>`).
