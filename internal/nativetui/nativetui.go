@@ -1,15 +1,15 @@
 // Package nativetui is amux's native Bubble Tea front-end: a sidebar switcher
-// (workspaces / repos / detached) on the left and the selected agent embedded
-// on the right. Each agent runs directly in an embedded vterm (its own PTY) —
-// no tmux. Switching agents keeps the others running in the background; quitting
-// the app ends the live terminals (the Claude conversation is preserved and
-// resumes on reopen).
+// (workspaces / repos / detached) on the left and the selected agent's screen on
+// the right. Agents run in the daemon's engine, not in this process; the TUI
+// opens a pane on the daemon and mirrors the streamed output through a vterm.
+// Switching agents keeps the others running; quitting (or restarting) the TUI
+// leaves every agent running in the daemon — reopening reattaches and replays.
 package nativetui
 
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,19 +18,24 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
-	"amux/internal/panespec"
 	"amux/internal/vterm"
 )
 
 const sidebarWidth = 26
 
-// Run starts the native TUI and blocks until the user quits. Quitting closes
-// every embedded agent terminal (they're hosted in-process, not by tmux).
+// Run starts the native TUI and blocks until the user quits. Quitting only tears
+// down this process's mirror terminals; the agents keep running in the daemon's
+// engine (the socket closing just detaches the panes).
 func Run() error {
 	if sock, inside := insideAmux(); inside {
 		return fmt.Errorf("can't run the native TUI from inside amux (TMUX=%s) — detach first (Alt-q / C-a d), then run `amux` from your normal shell", sock)
 	}
-	m := &model{terms: map[paneKey]*vterm.Terminal{}, dataCh: make(chan struct{}, 1), status: "connecting…"}
+	m := &model{
+		terms:  map[paneKey]*vterm.Terminal{},
+		byPane: map[string]paneKey{},
+		dataCh: make(chan struct{}, 1),
+		status: "connecting…",
+	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	for _, t := range m.terms {
 		_ = t.Close()
@@ -74,7 +79,8 @@ type model struct {
 	sessions []core.Session
 	cursor   int
 	focus    focus                       // sidebar or agent pane
-	terms    map[paneKey]*vterm.Terminal // live panes, keyed by (agent id, tab)
+	terms    map[paneKey]*vterm.Terminal // mirror terminals, keyed by (agent id, tab)
+	byPane   map[string]paneKey          // daemon pane id -> the term it feeds
 	attached string                      // agent id currently shown in the main pane
 	tab      int                         // which tab of the attached agent is shown
 	pending  string                      // id of a just-created session to auto-attach once it lands in a snapshot
@@ -105,18 +111,6 @@ type frameMsg struct{ f daemon.Frame }
 type disconnectedMsg struct{}
 type termDataMsg struct{}
 type actionSentMsg struct{ err error }
-
-// agentReadyMsg carries a resolved agent launch spec back to the UI goroutine,
-// where the vterm is actually started. Resolving the spec (trust dir, resume
-// detection, binary lookup) can touch disk, so it runs off-thread.
-type agentReadyMsg struct {
-	id   string
-	tab  int
-	dir  string
-	env  []string
-	argv []string
-	err  error
-}
 
 func (m *model) Init() tea.Cmd { return tea.Batch(connectCmd, waitData(m.dataCh)) }
 
@@ -185,6 +179,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			}
 		}
+		if p := msg.f.Pane; p != nil {
+			m.handlePaneFrame(p)
+		}
 		if cmd := m.tryPendingAttach(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -201,14 +198,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = "action failed: " + msg.err.Error()
 		}
-		return m, nil
-
-	case agentReadyMsg:
-		if msg.err != nil {
-			m.status = "launch failed: " + msg.err.Error()
-			return m, nil
-		}
-		m.embed(msg)
 		return m, nil
 
 	case tea.MouseMsg:
@@ -260,7 +249,9 @@ func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m *model) reapClosed() {
 	for k, t := range m.terms {
 		if t.Closed() {
+			_ = t.Close()
 			delete(m.terms, k)
+			delete(m.byPane, paneIDOf(k.id, k.tab))
 		}
 	}
 	if m.attached == "" || m.cur() != nil {
@@ -585,40 +576,85 @@ func (m *model) switchTab(t int) tea.Cmd {
 	return m.launchPane(m.attached, t)
 }
 
-// launchPane resolves a pane's launch spec off-thread (it touches disk), then an
-// agentReadyMsg embeds it on the UI goroutine.
+// launchPane opens a tab of an agent on the daemon and mirrors its streamed
+// output in a fresh vterm. The agent process is started (or reattached to) by
+// the daemon's engine — not here — so it outlives this TUI. Input, the
+// emulator's query replies, and resizes route back to the daemon via the pane
+// id. The pane.open is sent off the UI goroutine so a socket write can't block
+// rendering.
 func (m *model) launchPane(id string, tab int) tea.Cmd {
-	return func() tea.Msg {
-		dir, env, argv, err := panespec.Resolve(id, tab)
-		return agentReadyMsg{id: id, tab: tab, dir: dir, env: env, argv: argv, err: err}
+	if m.terms == nil {
+		m.terms = map[paneKey]*vterm.Terminal{}
 	}
-}
-
-// embed starts a pane's process directly in a new vterm and shows it. The child
-// inherits the app's environment (PATH etc.), minus $TMUX, plus the agent's
-// AMUX_* vars — the same environment a manual shell launch gets.
-func (m *model) embed(msg agentReadyMsg) {
-	t := vterm.New(m.mainWidth(), m.paneRows())
+	if m.byPane == nil {
+		m.byPane = map[string]paneKey{}
+	}
+	c := m.client
+	cols, rows := m.mainWidth(), m.paneRows()
+	pid := paneIDOf(id, tab)
+	t := vterm.NewRemote(cols, rows,
+		func(b []byte) {
+			if c != nil {
+				_ = c.PaneInput(pid, b)
+			}
+		},
+		func(cols, rows int) {
+			if c != nil {
+				_ = c.PaneResize(pid, cols, rows)
+			}
+		},
+	)
 	t.OnData(func() {
 		select {
 		case m.dataCh <- struct{}{}:
 		default:
 		}
 	})
-	cmd := exec.Command(msg.argv[0], msg.argv[1:]...)
-	cmd.Dir = msg.dir
-	base := envWithout(envWithout(os.Environ(), "TMUX"), "TERM")
-	cmd.Env = append(append(base, msg.env...), "TERM=xterm-256color")
-	if err := t.Start(cmd); err != nil {
-		m.status = "launch failed: " + err.Error()
-		return
-	}
-	m.terms[paneKey{msg.id, msg.tab}] = t
-	m.attached = msg.id
-	m.tab = msg.tab
+	key := paneKey{id, tab}
+	m.terms[key] = t
+	m.byPane[pid] = key
+	m.attached = id
+	m.tab = tab
 	m.focus = focusAgent
 	m.status = ""
+	return func() tea.Msg {
+		if c == nil {
+			return actionSentMsg{fmt.Errorf("daemon offline")}
+		}
+		return actionSentMsg{c.PaneOpen(pid, id, tab, cols, rows)}
+	}
 }
+
+// handlePaneFrame applies a streamed pane frame to its mirror terminal: output
+// bytes feed the emulator; an exit marks the term closed and forgets the pane,
+// then reaps it (falling focus back to the agent tab or the sidebar).
+func (m *model) handlePaneFrame(p *core.PaneFrame) {
+	key, ok := m.byPane[p.PaneID]
+	if !ok {
+		return
+	}
+	t := m.terms[key]
+	switch p.Type {
+	case core.FramePaneOutput:
+		if t != nil {
+			t.Feed(p.Data)
+		}
+	case core.FramePaneExit:
+		if p.Error != "" {
+			m.status = "pane exited: " + p.Error
+		}
+		if t != nil {
+			t.MarkClosed()
+		}
+		delete(m.byPane, p.PaneID)
+		m.reapClosed()
+	}
+}
+
+// paneIDOf is the per-(agent,tab) stream id the daemon echoes on pane frames.
+// It's stable, so reopening a tab reuses the same id (the daemon replaces the
+// prior subscription).
+func paneIDOf(id string, tab int) string { return id + "\x1f" + strconv.Itoa(tab) }
 
 // attachable reports whether a row hosts an agent we can embed: the console, a
 // work-scoped workgroup's sub-agent, or a repo-scoped agent nested under a repo
@@ -650,12 +686,3 @@ func (m *model) paneRows() int {
 	return 24
 }
 
-func envWithout(env []string, key string) []string {
-	out := env[:0:0]
-	for _, e := range env {
-		if !strings.HasPrefix(e, key+"=") {
-			out = append(out, e)
-		}
-	}
-	return out
-}

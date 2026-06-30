@@ -44,10 +44,33 @@ func (c *Client) Send(a core.Action) error {
 	return err
 }
 
-// Frame is a decoded inbound message: exactly one of Snapshot/Result is set.
+// PaneOpen asks the daemon to attach this connection to a tab of an agent,
+// streaming its output back as pane frames. The caller mints paneID (unique
+// within the connection).
+func (c *Client) PaneOpen(paneID, agentID string, tab, cols, rows int) error {
+	return c.Send(core.Action{Action: core.ActionPaneOpen, PaneID: paneID, ID: agentID, Tab: tab, Cols: cols, Rows: rows})
+}
+
+// PaneInput forwards input bytes to an attached pane.
+func (c *Client) PaneInput(paneID string, data []byte) error {
+	return c.Send(core.Action{Action: core.ActionPaneInput, PaneID: paneID, Data: data})
+}
+
+// PaneResize forwards a resize to an attached pane.
+func (c *Client) PaneResize(paneID string, cols, rows int) error {
+	return c.Send(core.Action{Action: core.ActionPaneResize, PaneID: paneID, Cols: cols, Rows: rows})
+}
+
+// PaneClose detaches a pane (the agent keeps running in the daemon's engine).
+func (c *Client) PaneClose(paneID string) error {
+	return c.Send(core.Action{Action: core.ActionPaneClose, PaneID: paneID})
+}
+
+// Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane is set.
 type Frame struct {
 	Snapshot *core.Snapshot
 	Result   *core.Result
+	Pane     *core.PaneFrame
 }
 
 // Next blocks until the next frame arrives (or the connection errors).
@@ -75,6 +98,12 @@ func (c *Client) Next() (Frame, error) {
 			return Frame{}, err
 		}
 		return Frame{Result: &r}, nil
+	case core.FramePaneOutput, core.FramePaneExit:
+		var p core.PaneFrame
+		if err := json.Unmarshal(line, &p); err != nil {
+			return Frame{}, err
+		}
+		return Frame{Pane: &p}, nil
 	default:
 		// Unknown frame: return an empty frame so the caller can keep reading.
 		return Frame{}, nil

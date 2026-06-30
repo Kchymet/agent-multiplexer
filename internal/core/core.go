@@ -69,14 +69,33 @@ type Snapshot struct {
 	UpdatedAt int64     `json:"updatedAt"`
 }
 
-// Action is the client -> daemon control request.
+// Pane action verbs (Action.Action). Unlike the lifecycle verbs these are
+// streamed per connection: the daemon attaches the connection to an engine-owned
+// agent pane and routes its I/O. Detaching (PaneClose / disconnect) never stops
+// the agent — only delete/archive do.
+const (
+	ActionPaneOpen   = "pane.open"   // start streaming a tab of an agent (ID=agent id, Tab, PaneID, Cols, Rows)
+	ActionPaneInput  = "pane.input"  // forward input bytes to a pane (PaneID, Data)
+	ActionPaneResize = "pane.resize" // resize a pane (PaneID, Cols, Rows)
+	ActionPaneClose  = "pane.close"  // detach a pane (PaneID) — does not kill the agent
+)
+
+// Action is the client -> daemon control request. It carries both the lifecycle
+// verbs and the pane.* streaming verbs; the pane fields apply only to the latter.
 type Action struct {
-	Action string            `json:"action"`           // attach | delete | refresh | new-repo-agent | add-agent | new-workgroup | add-repo | move | archive | rename
-	ID     string            `json:"id,omitempty"`     // target session id (repo name for new-repo-agent; root id for add-agent)
+	Action string            `json:"action"`           // lifecycle verb (attach|delete|…) or a pane.* verb
+	ID     string            `json:"id,omitempty"`     // target session id (repo name for new-repo-agent; root id for add-agent; agent id for pane.open)
 	Kind   string            `json:"kind,omitempty"`   // for "new": agent kind to spawn
 	Cwd    string            `json:"cwd,omitempty"`    // for "new": working directory
 	Target string            `json:"target,omitempty"` // for "move": destination root id ("" = new work-scoped)
 	Fields map[string]string `json:"fields,omitempty"` // form-driven actions (new-repo-agent, add-agent, new-workgroup, add-repo, rename)
+
+	// Pane streaming fields (pane.* verbs only).
+	PaneID string `json:"paneId,omitempty"` // client-minted stream id, scoped to the connection
+	Tab    int    `json:"tab,omitempty"`    // pane.open: which tab (agent|editor|terminal)
+	Cols   int    `json:"cols,omitempty"`   // pane.open/resize
+	Rows   int    `json:"rows,omitempty"`   // pane.open/resize
+	Data   []byte `json:"data,omitempty"`   // pane.input bytes (base64 over JSON)
 }
 
 // Result is the daemon -> client action response.
@@ -85,4 +104,20 @@ type Result struct {
 	OK    bool   `json:"ok"`
 	NewID string `json:"newId,omitempty"` // id of a session the action created (so a client can switch to it)
 	Error string `json:"error,omitempty"`
+}
+
+// Pane frame types (PaneFrame.Type), streamed daemon -> client for an attached
+// pane.
+const (
+	FramePaneOutput = "pane.output" // pane produced output (PaneID, Data)
+	FramePaneExit   = "pane.exit"   // pane's process ended (PaneID, Error)
+)
+
+// PaneFrame is a daemon -> client message carrying one agent pane's output or its
+// exit. PaneID echoes the id the client minted in pane.open.
+type PaneFrame struct {
+	Type   string `json:"type"`
+	PaneID string `json:"paneId"`
+	Data   []byte `json:"data,omitempty"`  // pane.output bytes (base64 over JSON)
+	Error  string `json:"error,omitempty"` // pane.exit error, if any
 }
