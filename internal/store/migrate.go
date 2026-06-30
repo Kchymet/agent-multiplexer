@@ -155,6 +155,16 @@ const (
 	ModeLoop = "loop"
 )
 
+// Claude model aliases offered when creating a session. Opus is the default.
+const (
+	ModelOpus   = "opus"
+	ModelSonnet = "sonnet"
+	ModelHaiku  = "haiku"
+)
+
+// Models is the ordered list of selectable models, opus first (the default).
+var Models = []string{ModelOpus, ModelSonnet, ModelHaiku}
+
 // Workgroup scopes (root sessions only).
 const (
 	ScopeWork = "work" // cross-repo workgroup: root + N agents
