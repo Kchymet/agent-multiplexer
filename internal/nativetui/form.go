@@ -19,11 +19,10 @@ func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 		action: "new-repo-agent",
 		id:     repoID,
 		submit: "Create agent",
-		insert: true,
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "model", label: "Model"},
+			{key: "model", label: "Model", value: store.ModelOpus, options: store.Models},
 		},
 	}
 }
@@ -38,12 +37,11 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 		action: "add-agent",
 		id:     rootID,
 		submit: "Add agent",
-		insert: true,
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos (blank = all)"},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "model", label: "Model"},
+			{key: "model", label: "Model", value: store.ModelOpus, options: store.Models},
 		},
 	}
 }
@@ -55,7 +53,6 @@ func (m *model) openAddRepoForm() {
 		title:  "Add repo",
 		action: "add-repo",
 		submit: "Track repo",
-		insert: true,
 		fields: []*formField{
 			{key: "source", label: "URL / owner/name / path"},
 		},
@@ -68,7 +65,6 @@ func (m *model) openNewWorkgroupForm() {
 		title:  "New workgroup",
 		action: "new-workgroup",
 		submit: "Create workgroup",
-		insert: true,
 		fields: []*formField{
 			{key: "name", label: "Name"},
 			{key: "repos", label: "Repos (comma)"},
@@ -87,7 +83,6 @@ func (m *model) openRenameForm(id, title string) {
 		action: "rename",
 		id:     id,
 		submit: "Rename",
-		insert: true,
 		fields: []*formField{
 			{key: "name", label: "Display name"},
 		},
@@ -337,7 +332,11 @@ func (fs *formState) move(d int) {
 	fs.cursor = (fs.cursor + d + n) % n
 	fs.pending = ""
 	if f := fs.active(); f != nil && !f.isSelect() {
-		f.cursor = f.end() // land ready to append
+		if fs.insert {
+			f.cursor = f.end() // land ready to append
+		} else {
+			f.clampNormal() // normal mode: keep the cursor on a real rune
+		}
 	}
 }
 
@@ -444,21 +443,22 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Select field or the submit button.
+	// Select field or the submit button. Vim motions navigate between fields
+	// (j/k) and cycle a select's options (h/l), alongside the arrow keys.
 	switch k.String() {
 	case "esc", "ctrl+c":
 		m.cancelForm()
-	case "tab", "down":
+	case "tab", "down", "j":
 		fs.next()
-	case "shift+tab", "up":
+	case "shift+tab", "up", "k":
 		fs.prev()
 	case "enter":
 		return m.formEnter()
-	case "left":
+	case "left", "h":
 		if field != nil {
 			field.cycle(false)
 		}
-	case "right", " ":
+	case "right", "l", " ":
 		if field != nil {
 			field.cycle(true)
 		}
@@ -574,7 +574,7 @@ func (m *model) formHint() string {
 		if fs.insert {
 			return titleStyle.Render("-- INSERT --") + dimStyle.Render("  Esc normal · Enter next")
 		}
-		return titleStyle.Render("-- NORMAL --") + dimStyle.Render("  i insert · Esc cancel")
+		return titleStyle.Render("-- NORMAL --") + dimStyle.Render("  i insert · j/k move · Esc cancel")
 	}
-	return dimStyle.Render("Tab next · ←/→ change · Enter submit · Esc cancel")
+	return dimStyle.Render("j/k move · h/l change · Enter submit · Esc cancel")
 }
