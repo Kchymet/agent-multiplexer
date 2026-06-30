@@ -442,38 +442,48 @@ func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
 // dispatch used by the daemon, the multiplexer server, and any client driver, so
 // they can't drift. Transport concerns (subscribe/refresh) are no-ops here.
 func Apply(ctx context.Context, a core.Action) error {
+	_, err := ApplyResult(ctx, a)
+	return err
+}
+
+// ApplyResult is Apply plus the id of any session the action created: the new
+// agent for new-repo-agent/add-agent, or the workgroup root for new-workgroup.
+// It lets a caller switch to (and thereby actually start) the agent it just
+// created instead of leaving it initialized-but-not-running. The id is "" for
+// actions that create nothing.
+func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	switch a.Action {
 	case "", "refresh", "subscribe":
-		return nil
+		return "", nil
 	case "open", "attach":
-		return OpenByID(ctx, a.ID)
+		return "", OpenByID(ctx, a.ID)
 	case "delete", "kill":
-		return DeleteByID(ctx, a.ID)
+		return "", DeleteByID(ctx, a.ID)
 	case "move":
-		return MoveAgent(ctx, a.ID, a.Target)
+		return "", MoveAgent(ctx, a.ID, a.Target)
 	case "archive":
-		return ToggleArchived(ctx, a.ID)
+		return "", ToggleArchived(ctx, a.ID)
 	case "rename":
-		return Rename(a.ID, a.Fields["name"])
+		return "", Rename(a.ID, a.Fields["name"])
 	case "new-repo-agent":
-		_, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
+		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
-		return err
+		return s.ID, err
 	case "add-agent":
 		repos := store.SplitRepos(a.Fields["repos"])
 		if len(repos) == 0 {
 			repos = rootRepos(a.ID) // blank = the whole workgroup's repos
 		}
-		_, err := AddAgent(ctx, a.ID, AgentSpec{
+		s, err := AddAgent(ctx, a.ID, AgentSpec{
 			Agent:  "claude",
 			Repos:  repos,
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
-		return err
+		return s.ID, err
 	case "add-repo":
 		_, err := AddRepoSource(ctx, a.Fields["source"])
-		return err
+		return "", err
 	case "new-workgroup":
 		repos := store.SplitRepos(a.Fields["repos"])
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
@@ -481,10 +491,10 @@ func Apply(ctx context.Context, a core.Action) error {
 		if len(repos) > 0 || prompt != "" {
 			def = &AgentSpec{Prompt: prompt}
 		}
-		_, err := CreateWorkspace(ctx, a.Fields["name"], repos, def)
-		return err
+		// Return the workgroup root; the client resolves it to the first agent.
+		return CreateWorkspace(ctx, a.Fields["name"], repos, def)
 	}
-	return fmt.Errorf("unknown action %q", a.Action)
+	return "", fmt.Errorf("unknown action %q", a.Action)
 }
 
 // baselinePrompt weaves a Linear issue link and a description into one prompt for

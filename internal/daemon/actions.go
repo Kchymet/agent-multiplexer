@@ -16,11 +16,14 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		return ok()
 	default:
-		if err := wsops.Apply(ctx, a); err != nil {
+		newID, err := wsops.ApplyResult(ctx, a)
+		if err != nil {
 			return fail("%v", err)
 		}
 		d.triggerPoll()
-		return ok()
+		r := ok()
+		r.NewID = newID
+		return r
 	}
 }
 
