@@ -73,7 +73,9 @@ func main() {
 	case "hook":
 		err = cmdHook(args)
 	case "status":
-		err = cmdStatus()
+		err = cmdStatus(args)
+	case "refresh":
+		err = cmdRefresh()
 	case "doctor", "health", "check":
 		err = cmdDoctor()
 	case "repo":
@@ -121,12 +123,28 @@ usage: amux <command>
   workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)
   workgroup rm <id>  delete a workgroup (removes its worktrees + branches)
   name <text>        set the current workgroup's display name (for the agent)
-  status             print workgroups and exit
+  status [--json]    print workgroups and exit (--json for the raw snapshot)
+  do <action> ...    drive a daemon action (see "amux do" actions below)
+  refresh            ask the daemon to re-poll its sources now
   reload             restart the daemon + reload the rails (after an install)
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
   init               (re)write the isolated tmux config
   daemon             run the daemon in the foreground (usually automatic)
   version            print version
+
+amux do <action> drives the daemon's control API from scripts (no direct store
+access). Positional [id]/[kind] still work; flags reach the rest:
+
+  --target, -t <root>   destination root id (for "move")
+  --kind <kind>         agent kind (for "new")
+  --cwd <dir>           working directory (for "new")
+  --field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
+
+  amux do attach <id>
+  amux do rename <id> -f name="api spike"
+  amux do move <id> --target <root>
+  amux do add-agent <root> -f repos=api,web -f prompt="port the auth flow"
+  amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"
 
 Set AMUX_SKIP=1 in your shell to bypass auto-launch.
 `)
@@ -345,44 +363,16 @@ func cmdHook(args []string) error {
 	return nil
 }
 
-// cmdDo sends a single control action to the daemon and prints the result.
-// Usage: amux do <attach|kill|resume|new|refresh> [id] [kind]
-func cmdDo(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: amux do <action> [id] [kind]")
-	}
-	a := core.Action{Action: args[0]}
-	if len(args) >= 2 {
-		a.ID = args[1]
-	}
-	if len(args) >= 3 {
-		a.Kind = args[2]
-	}
-	c, err := daemon.Dial()
-	if err != nil {
-		return fmt.Errorf("daemon offline: %w", err)
-	}
-	defer c.Close()
-	if err := c.Send(a); err != nil {
-		return err
-	}
-	for {
-		f, err := c.Next()
-		if err != nil {
-			return err
-		}
-		if f.Result != nil {
-			if !f.Result.OK {
-				return fmt.Errorf("%s", f.Result.Error)
-			}
-			fmt.Println("ok")
-			return nil
+// cmdStatus prints the current snapshot for scripting. With --json it emits the
+// raw snapshot (every Session field); otherwise an aligned plain-text table. It
+// reads the daemon's canonical state, never the store.
+func cmdStatus(args []string) error {
+	asJSON := false
+	for _, a := range args {
+		if a == "--json" || a == "-j" {
+			asJSON = true
 		}
 	}
-}
-
-// cmdStatus prints the current snapshot as plain text (no TUI) for scripting.
-func cmdStatus() error {
 	c, err := daemon.Dial()
 	if err != nil {
 		return fmt.Errorf("daemon offline: %w", err)
@@ -395,6 +385,14 @@ func cmdStatus() error {
 		}
 		if f.Snapshot == nil {
 			continue
+		}
+		if asJSON {
+			b, err := json.MarshalIndent(f.Snapshot, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(b))
+			return nil
 		}
 		if len(f.Snapshot.Sessions) == 0 {
 			fmt.Println("(no workspaces — `amux workspace new`)")

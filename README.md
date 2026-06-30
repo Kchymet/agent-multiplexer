@@ -194,8 +194,35 @@ amux workgroup move <agent> [<root>|--new]
 amux workgroup archive | unarchive <id>
 amux workgroup open|rm|rename|ls
 amux console               # open the control console
-amux status                # print rail state as text
+amux status [--json]       # print rail state as text (--json for the raw snapshot)
+amux refresh               # ask the daemon to re-poll its sources now
+amux do <action> ...       # drive any daemon action from scripts (see below)
 amux up | dash             # legacy tmux rail / dashboard
+```
+
+### Scripting the daemon: `amux do`
+
+`amux do` is the command-line entrypoint to the daemon's control API — the same
+action dispatch the rail and native TUI drive. It talks to the daemon over its
+socket (single writer, automatic re-poll) rather than opening the store directly,
+so scripts stay consistent with the live UI. The positional `[id]`/`[kind]` form
+is kept for back-compat; flags reach the rest of the action:
+
+```
+--target, -t <root>   destination root id (for "move")
+--kind <kind>         agent kind (for "new")
+--cwd <dir>           working directory (for "new")
+--field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
+```
+
+```
+amux do attach <id>
+amux do rename <id> -f name="api spike"
+amux do move <id> --target <root>          # omit --target to make a new workgroup
+amux do archive <id>
+amux do add-agent <root> -f repos=api,web -f prompt="port the auth flow"
+amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"
+amux do add-repo -f source=OWNER/REPO
 ```
 
 ## Platform support
