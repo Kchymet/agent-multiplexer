@@ -88,6 +88,68 @@ func TestEmptySectionHints(t *testing.T) {
 	}
 }
 
+// A just-created agent is auto-attached the moment it lands in a snapshot, so
+// creating an agent opens (and thereby starts) it instead of leaving it
+// initialized-but-never-run. A workgroup root resolves to its first agent.
+func TestTryPendingAttach(t *testing.T) {
+	t.Run("attaches a new agent directly", func(t *testing.T) {
+		m := &model{pending: "ag1", sessions: []core.Session{
+			{ID: "acme/api", Title: "acme/api", Kind: "repo", Section: core.SectionRepos},
+			{ID: "ag1", Title: "feature", RootID: "wg1", Section: core.SectionWorkgroups},
+		}}
+		cmd := m.tryPendingAttach()
+		if cmd == nil {
+			t.Fatal("expected a launch command")
+		}
+		if m.attached != "ag1" {
+			t.Fatalf("attached = %q, want ag1", m.attached)
+		}
+		if m.pending != "" {
+			t.Fatalf("pending = %q, want cleared", m.pending)
+		}
+		if m.cursor != 1 {
+			t.Fatalf("cursor = %d, want 1 (the new agent row)", m.cursor)
+		}
+	})
+
+	t.Run("resolves a workgroup root to its first agent", func(t *testing.T) {
+		m := &model{pending: "wg1", sessions: []core.Session{
+			{ID: "wg1", Title: "payments", IsRoot: true, Section: core.SectionWorkgroups},
+			{ID: "ag1", Title: "feature", RootID: "wg1", Section: core.SectionWorkgroups},
+		}}
+		if cmd := m.tryPendingAttach(); cmd == nil {
+			t.Fatal("expected a launch command")
+		}
+		if m.attached != "ag1" {
+			t.Fatalf("attached = %q, want ag1", m.attached)
+		}
+	})
+
+	t.Run("waits while the id is not yet in the snapshot", func(t *testing.T) {
+		m := &model{pending: "ag1", sessions: []core.Session{
+			{ID: "wg1", Title: "payments", IsRoot: true, Section: core.SectionWorkgroups},
+		}}
+		if cmd := m.tryPendingAttach(); cmd != nil {
+			t.Fatal("should not launch before the id appears")
+		}
+		if m.pending != "ag1" {
+			t.Fatalf("pending = %q, want retained", m.pending)
+		}
+	})
+
+	t.Run("clears when nothing is runnable", func(t *testing.T) {
+		m := &model{pending: "wg1", sessions: []core.Session{
+			{ID: "wg1", Title: "empty", IsRoot: true, Section: core.SectionWorkgroups},
+		}}
+		if cmd := m.tryPendingAttach(); cmd != nil {
+			t.Fatal("empty workgroup should not launch anything")
+		}
+		if m.pending != "" {
+			t.Fatalf("pending = %q, want cleared", m.pending)
+		}
+	})
+}
+
 // An agent row carries a state-colored status sub-line; repos and containers do not.
 func TestRowStatusSubline(t *testing.T) {
 	m := &model{}

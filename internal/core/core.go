@@ -83,5 +83,6 @@ type Action struct {
 type Result struct {
 	Type  string `json:"type"` // always "result"
 	OK    bool   `json:"ok"`
+	NewID string `json:"newId,omitempty"` // id of a session the action created (so a client can switch to it)
 	Error string `json:"error,omitempty"`
 }

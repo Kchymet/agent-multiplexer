@@ -77,6 +77,7 @@ type model struct {
 	terms    map[paneKey]*vterm.Terminal // live panes, keyed by (agent id, tab)
 	attached string                      // agent id currently shown in the main pane
 	tab      int                         // which tab of the attached agent is shown
+	pending  string                      // id of a just-created session to auto-attach once it lands in a snapshot
 	confirm  *confirmState               // a pending confirmation modal, or nil
 	form     *formState                  // a pending form modal, or nil
 	dataCh   chan struct{}
@@ -164,6 +165,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(time.Second, func(time.Time) tea.Msg { return connectCmd() })
 
 	case frameMsg:
+		var cmds []tea.Cmd
+		// An action result for a create action carries the new session's id; queue
+		// it for auto-attach so creating an agent immediately opens (and starts) it.
+		if r := msg.f.Result; r != nil {
+			switch {
+			case r.Error != "":
+				m.status = "action failed: " + r.Error
+			case r.NewID != "":
+				m.pending = r.NewID
+			}
+		}
 		if s := msg.f.Snapshot; s != nil {
 			m.sessions = s.Sessions
 			if m.cursor >= len(m.sessions) {
@@ -173,10 +185,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			}
 		}
-		if m.client != nil {
-			return m, readCmd(m.client)
+		if cmd := m.tryPendingAttach(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-		return m, nil
+		if m.client != nil {
+			cmds = append(cmds, readCmd(m.client))
+		}
+		return m, tea.Batch(cmds...)
 
 	case termDataMsg:
 		m.reapClosed()
@@ -497,6 +512,60 @@ func (m *model) attachSelected() tea.Cmd {
 	}
 	m.status = "launching " + s.Title + "…"
 	return m.launchPane(s.ID, tabAgent)
+}
+
+// tryPendingAttach attaches to a freshly created session once it shows up in a
+// snapshot, so creating an agent immediately opens and starts it instead of
+// leaving it initialized-but-never-run. A workgroup root or repo header resolves
+// to its first agent; anything with nothing runnable (e.g. an empty new
+// workgroup) just clears the pending attach. It's a no-op until the id lands.
+func (m *model) tryPendingAttach() tea.Cmd {
+	if m.pending == "" {
+		return nil
+	}
+	s := m.sessionByID(m.pending)
+	if s == nil {
+		return nil // not in this snapshot yet — wait for the next one
+	}
+	if s.Kind == "repo" || s.IsRoot {
+		s = m.firstChild(s.ID)
+	}
+	if s == nil || !attachable(s) {
+		m.pending = ""
+		return nil
+	}
+	m.pending = ""
+	m.selectByID(s.ID)
+	m.attached = s.ID
+	m.tab = tabAgent
+	if t := m.terms[paneKey{s.ID, tabAgent}]; t != nil && !t.Closed() { // already running
+		m.focus = focusAgent
+		m.status = ""
+		return nil
+	}
+	m.status = "launching " + s.Title + "…"
+	return m.launchPane(s.ID, tabAgent)
+}
+
+// sessionByID returns the snapshot row with the given id, or nil.
+func (m *model) sessionByID(id string) *core.Session {
+	for i := range m.sessions {
+		if m.sessions[i].ID == id {
+			return &m.sessions[i]
+		}
+	}
+	return nil
+}
+
+// selectByID moves the sidebar cursor onto the row with the given id (no-op if
+// it isn't present), so the auto-attached agent is also highlighted in the rail.
+func (m *model) selectByID(id string) {
+	for i := range m.sessions {
+		if m.sessions[i].ID == id {
+			m.cursor = i
+			return
+		}
+	}
 }
 
 // switchTab shows tab t of the attached agent, launching its pane (editor/term)
