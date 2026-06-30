@@ -46,7 +46,9 @@ func (m *model) renderTopBorder() string {
 
 	workHint := ""
 	if m.attached != "" {
-		workHint = m.tabStrip()
+		// Lead with the back-to-rail shortcut (◂ ⌥ h, anchored toward the
+		// divider on the left), then the agent's tab strip.
+		workHint = dimStyle.Render("◂") + keyStyle.Render(" ⌥ h ") + m.tabStrip()
 	}
 	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, "")
 	return left + sepStyle.Render("┬") + right
