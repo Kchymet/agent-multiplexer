@@ -16,6 +16,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		return ok()
 	default:
+		// Capture the agents to stop before the store record disappears (for a
+		// root delete, killEngineFor reads the children from the current snapshot).
+		switch a.Action {
+		case "delete", "kill", "archive":
+			d.killEngineFor(a.ID)
+		}
 		newID, err := wsops.ApplyResult(ctx, a)
 		if err != nil {
 			return fail("%v", err)

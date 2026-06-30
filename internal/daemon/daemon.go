@@ -17,14 +17,23 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/engine"
+	"amux/internal/engine/local"
+	"amux/internal/panespec"
 	"amux/internal/source"
 )
 
-// Daemon polls sources and serves state + actions over a unix socket.
+// Daemon polls sources and serves state + actions over a unix socket. It also
+// owns the agent engine: agents run inside the daemon-held engine, not the UI,
+// so closing or restarting a client never stops them.
 type Daemon struct {
 	sources  []source.Source
 	interval time.Duration
 	self     string // absolute path to the amux binary (for spawning rails)
+	engine   engine.Engine
+	// resolve turns an (agent id, tab) into a launch spec (working dir, env,
+	// sandboxed argv). Defaults to panespec.Resolve; overridable in tests.
+	resolve func(agentID string, tab int) (dir string, env, argv []string, err error)
 
 	mu       sync.RWMutex
 	sessions []core.Session
@@ -41,15 +50,36 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		sources:  sources,
 		interval: interval,
 		self:     self,
+		resolve:  panespec.Resolve,
 		subs:     map[chan core.Snapshot]struct{}{},
 		pollNow:  make(chan struct{}, 1),
 	}
 }
 
-// Default wires the source set. The rail is a workspace switcher, so the only
-// source is the workspace registry (annotated with which are running).
+// Default wires the source set and the local engine. The rail is a workspace
+// switcher, so the only source is the workspace registry — annotated with which
+// agents are running, where "running" now means "live in the engine" (the
+// daemon's own agents) as well as in the isolated tmux server (the classic
+// `amux up` path).
 func Default(self string) *Daemon {
-	return New(self, []source.Source{source.NewWorkspace()}, 2*time.Second)
+	eng := local.New()
+	ws := source.NewWorkspace()
+	ws.SetLiveness(func() map[string]bool { return liveAgents(eng) })
+	d := New(self, []source.Source{ws}, 2*time.Second)
+	d.engine = eng
+	return d
+}
+
+// liveAgents is the set of agent ids whose agent pane (TabAgent) is running in
+// the engine, for the workspace source's liveness annotation.
+func liveAgents(eng engine.Engine) map[string]bool {
+	m := map[string]bool{}
+	for _, k := range eng.Live() {
+		if k.Tab == 0 { // TabAgent
+			m[k.AgentID] = true
+		}
+	}
+	return m
 }
 
 // Run starts the poll loop and socket server until ctx is cancelled.
@@ -70,6 +100,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = ln.Close(); _ = os.Remove(sock) }()
+	// The engine's agents live in this process; stop them cleanly on shutdown.
+	// (Agents survive a UI restart — the daemon stays up — but not a daemon
+	// restart, e.g. `amux reload`; out-of-process hosting would lift that.)
+	if d.engine != nil {
+		defer d.engine.Shutdown()
+	}
 
 	go d.pollLoop(ctx)
 
@@ -191,6 +227,9 @@ func (d *Daemon) triggerPoll() {
 func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
+	cl := newConnState(conn)
+	defer cl.shutdown()
+
 	ch := make(chan core.Snapshot, 4)
 	d.subsMu.Lock()
 	d.subs[ch] = struct{}{}
@@ -201,21 +240,8 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		d.subsMu.Unlock()
 	}()
 
-	// Single writer goroutine serializes all frames to this conn.
-	out := make(chan any, 8)
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		enc := json.NewEncoder(conn)
-		for msg := range out {
-			if err := enc.Encode(msg); err != nil {
-				return
-			}
-		}
-	}()
-
 	// Send the current state immediately on connect.
-	out <- d.snapshot()
+	cl.send(d.snapshot())
 
 	// Push subsequent snapshots.
 	go func() {
@@ -223,15 +249,13 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-cl.done:
+				return
 			case snap, ok := <-ch:
 				if !ok {
 					return
 				}
-				select {
-				case out <- snap:
-				case <-writerDone:
-					return
-				}
+				cl.send(snap)
 			}
 		}
 	}()
@@ -241,17 +265,92 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	for {
 		var a core.Action
 		if err := dec.Decode(&a); err != nil {
-			close(out)
-			<-writerDone
-			return
+			return // deferred cl.shutdown detaches panes (without killing agents)
 		}
-		res := d.handle(ctx, a)
-		if a.Action != "" {
-			select {
-			case out <- res:
-			case <-writerDone:
-				return
+		switch a.Action {
+		case core.ActionPaneOpen:
+			d.paneOpen(ctx, cl, a)
+		case core.ActionPaneInput:
+			cl.paneInput(a.PaneID, a.Data)
+		case core.ActionPaneResize:
+			cl.paneResize(a.PaneID, a.Cols, a.Rows)
+		case core.ActionPaneClose:
+			cl.paneClose(a.PaneID)
+		default:
+			res := d.handle(ctx, a)
+			if a.Action != "" {
+				cl.send(res)
 			}
+		}
+	}
+}
+
+// paneOpen attaches this connection to a tab of an agent: it resolves the launch
+// spec (working dir, env, sandboxed argv), ensures the engine instance is running
+// (starting it on first open, reusing it on reattach), and subscribes the
+// connection so the instance replays its scrollback and then streams live output.
+func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
+	paneExit := func(msg string) {
+		cl.send(core.PaneFrame{Type: core.FramePaneExit, PaneID: a.PaneID, Error: msg})
+	}
+	if d.engine == nil {
+		paneExit("engine unavailable")
+		return
+	}
+	dir, env, argv, err := d.resolve(a.ID, a.Tab)
+	if err != nil {
+		paneExit(err.Error())
+		return
+	}
+	inst, err := d.engine.Ensure(ctx, engine.Spec{
+		Key:  engine.Key{AgentID: a.ID, Tab: a.Tab},
+		Dir:  dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
+	})
+	if err != nil {
+		paneExit(err.Error())
+		return
+	}
+	// Replace any prior subscription on this pane id, then subscribe afresh.
+	cl.paneClose(a.PaneID)
+	paneID := a.PaneID
+	cancel := inst.Subscribe(engine.Sink{
+		Output: func(b []byte) {
+			cl.send(core.PaneFrame{Type: core.FramePaneOutput, PaneID: paneID, Data: b})
+		},
+		Exit: func(msg string) {
+			cl.send(core.PaneFrame{Type: core.FramePaneExit, PaneID: paneID, Error: msg})
+			cl.dropRoute(paneID)
+		},
+	})
+	cl.addRoute(paneID, paneRoute{inst: inst, cancel: cancel})
+	// Size the instance to this client's viewport (it may have pre-existed at a
+	// different size from another client).
+	if a.Cols > 0 && a.Rows > 0 {
+		inst.Resize(a.Cols, a.Rows)
+	}
+	d.triggerPoll() // surface the now-live agent in the rail promptly
+}
+
+// killEngineFor stops the engine instances (all tabs) of an agent and, if id is a
+// workgroup root, its direct children — used when an agent is deleted or
+// archived so the process actually stops, not just the store record. It reads
+// the current snapshot (still pre-deletion when called from handle) to find
+// children.
+func (d *Daemon) killEngineFor(id string) {
+	if d.engine == nil {
+		return
+	}
+	ids := map[string]bool{id: true}
+	d.mu.RLock()
+	for _, s := range d.sessions {
+		if s.RootID == id {
+			ids[s.ID] = true
+		}
+	}
+	d.mu.RUnlock()
+	for aid := range ids {
+		for tab := 0; tab < 3; tab++ { // agent | editor | terminal
+			d.engine.Kill(engine.Key{AgentID: aid, Tab: tab})
 		}
 	}
 }

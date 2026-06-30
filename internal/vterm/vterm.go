@@ -1,8 +1,10 @@
-// Package vterm embeds a child process running in a PTY and renders its screen
-// through a VT emulator, so an interactive full-screen program (e.g. a tmux
-// client showing an agent) can be drawn inside a Bubble Tea pane. It is the
-// foundation of amux's native TUI: tmux still hosts the agents (so they survive
-// the TUI closing), and this renders a tmux client into our own chrome.
+// Package vterm renders a terminal screen through a VT emulator so an
+// interactive full-screen program (an agent, an editor, a shell) can be drawn
+// inside a Bubble Tea pane. The byte transport is pluggable: Start runs a local
+// child in a PTY, while NewRemote drives the emulator from a stream the embedder
+// feeds (Feed) and routes input back through callbacks. The native TUI uses the
+// remote mode so the agent process lives in the daemon's engine — surviving the
+// TUI closing — and only its screen is mirrored here.
 package vterm
 
 import (
@@ -28,6 +30,12 @@ type Terminal struct {
 	closed bool
 
 	onData func() // fired when new output is parsed, to prompt a re-render
+
+	// Remote mode (set by NewRemote): there is no local PTY; input and the
+	// emulator's query replies are routed through onInput, and resizes are
+	// propagated through onResize.
+	onInput  func([]byte)
+	onResize func(cols, rows int)
 }
 
 // New creates a terminal sized to cols×rows (falling back to 80×24).
@@ -39,6 +47,18 @@ func New(cols, rows int) *Terminal {
 		rows = 24
 	}
 	return &Terminal{emu: vt.NewEmulator(cols, rows), cols: cols, rows: rows}
+}
+
+// NewRemote creates a terminal with no local process: output is supplied by the
+// embedder via Feed, input (keystrokes, mouse encodings, and the emulator's own
+// query replies) is delivered to onInput, and resizes are reported to onResize.
+// This is how the native TUI mirrors a pane the daemon's engine actually hosts.
+func NewRemote(cols, rows int, onInput func([]byte), onResize func(cols, rows int)) *Terminal {
+	t := New(cols, rows)
+	t.onInput = onInput
+	t.onResize = onResize
+	go t.drainResponses() // emulator replies (DA, cursor reports, mouse) -> agent
+	return t
 }
 
 // OnData registers a callback fired (on the reader goroutine) whenever new
@@ -99,6 +119,40 @@ func (t *Terminal) notify() {
 	}
 }
 
+// Feed writes output bytes into the emulator (remote mode): the embedder calls
+// it with bytes streamed from the daemon, just as pump does for a local PTY.
+func (t *Terminal) Feed(p []byte) {
+	t.mu.Lock()
+	_, _ = t.emu.Write(p)
+	t.mu.Unlock()
+	t.notify()
+}
+
+// MarkClosed records that the remote process has exited, so Closed reports true
+// and the embedder can reap the pane.
+func (t *Terminal) MarkClosed() {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+	t.notify()
+}
+
+// drainResponses copies the emulator's replies to terminal queries to onInput
+// (remote mode), the equivalent of forwardResponses for a local PTY. It ends
+// when the emulator is closed.
+func (t *Terminal) drainResponses() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := t.emu.Read(buf)
+		if n > 0 && t.onInput != nil {
+			t.onInput(append([]byte(nil), buf[:n]...))
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // Render returns the current screen as a styled (ANSI) string.
 func (t *Terminal) Render() string {
 	t.mu.Lock()
@@ -106,8 +160,13 @@ func (t *Terminal) Render() string {
 	return t.emu.Render()
 }
 
-// Write sends input bytes to the child process (e.g. translated keystrokes).
+// Write sends input bytes to the agent (e.g. translated keystrokes): to onInput
+// in remote mode, or the local PTY otherwise.
 func (t *Terminal) Write(p []byte) (int, error) {
+	if t.onInput != nil {
+		t.onInput(p)
+		return len(p), nil
+	}
 	if t.ptmx == nil {
 		return 0, os.ErrClosed
 	}
@@ -142,6 +201,9 @@ func (t *Terminal) Resize(cols, rows int) {
 	t.mu.Unlock()
 	if ptmx != nil {
 		_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	}
+	if t.onResize != nil {
+		t.onResize(cols, rows)
 	}
 }
 
