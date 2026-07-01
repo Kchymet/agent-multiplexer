@@ -297,6 +297,17 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 
 	prompt := strings.TrimSpace(s.Prompt)
 	var extra []string
+	// Before deciding resume-vs-fresh, gap-fill the harness transcript from amux's
+	// captured backup: a mid-turn kill can leave Claude's own copy missing even
+	// though we hooked a backup, so restore it into the primary resume cwd where
+	// FindSession looks, turning what would be a fresh start back into a resume.
+	// Best-effort — RestoreTranscript no-ops when there's nothing better to restore
+	// and never clobbers a fresher copy, so a failure never blocks the launch.
+	if s.ClaudeID != "" {
+		if restored, _ := agent.HarnessFor(s.Agent).RestoreTranscript(agentWorkdir(s), s.ClaudeID); restored {
+			log.Printf("amux: gap-filled Claude transcript for %s from captured backup", s.ClaudeID)
+		}
+	}
 	switch {
 	case s.ClaudeID != "":
 		// A conversation is pinned. Its transcript may live under either working-dir

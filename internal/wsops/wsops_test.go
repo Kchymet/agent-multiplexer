@@ -96,6 +96,62 @@ func TestAgentCommandResume(t *testing.T) {
 	}
 }
 
+// TestAgentCommandGapFillRestore covers the restart gap-fill: when a pinned
+// conversation's own Claude transcript is missing but amux captured a backup, the
+// launch restores the backup into the resume cwd so the decision flips from a
+// fresh --session-id to --resume — and never clobbers a larger real transcript.
+func TestAgentCommandGapFillRestore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data")) // isolate the store
+	t.Setenv("AMUX_JAIL", "off")
+
+	agentDir := filepath.Join(home, "sessions", "root", "agent")
+	repoDir := filepath.Join(agentDir, "acme/api")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uuid := "22222222-2222-4222-8222-222222222222"
+	s := store.Session{ID: "agent", RootID: "root", Repo: "acme/api", Dir: agentDir, ClaudeID: uuid}
+
+	// A captured backup exists (from a hook) but Claude's own transcript is missing
+	// under every resume cwd — the mid-turn-kill gap. Gap-fill should restore it and
+	// flip the launch from a fresh --session-id to --resume in the worktree.
+	live := filepath.Join(t.TempDir(), "live.jsonl")
+	if err := os.WriteFile(live, []byte(`{"backup":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.CaptureTranscript(uuid, live, "Stop", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFlag(argv, "--resume") || hasFlag(argv, "--session-id") {
+		t.Fatalf("gap-fill: expected --resume from restored backup, got %v", argv)
+	}
+	if dir != repoDir {
+		t.Fatalf("gap-fill: launch dir = %q, want the worktree %q", dir, repoDir)
+	}
+
+	// A real, larger Claude transcript now exists: gap-fill must not shrink it back
+	// to the smaller backup (RestoreCapturedTranscript's no-data-loss guard).
+	realTranscript := []byte(`{"real":true,"and":"strictly longer than the backup blob"}`)
+	claudePath := filepath.Join(home, ".claude", "projects", munge(repoDir), uuid+".jsonl")
+	if err := os.WriteFile(claudePath, realTranscript, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(claudePath); string(got) != string(realTranscript) {
+		t.Fatalf("clobber: gap-fill overwrote the larger real transcript; got %q", got)
+	}
+}
+
 func hasFlag(argv []string, flag string) bool {
 	for _, a := range argv {
 		if a == flag {
