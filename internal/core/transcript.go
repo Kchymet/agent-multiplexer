@@ -42,6 +42,69 @@ func CaptureTranscript(sessionID, src, event, amuxID string) error {
 	return copyFileAtomic(src, filepath.Join(dir, sanitizeID(sessionID)+".jsonl"))
 }
 
+// CapturedTranscript returns the path to amux's captured backup of sessionID's
+// transcript (the file CaptureTranscript writes), its size, and whether it
+// currently exists on disk. A blank sessionID yields ok=false. Callers use it to
+// gap-fill a harness's own transcript that went missing across a restart.
+func CapturedTranscript(sessionID string) (path string, size int64, ok bool) {
+	if sessionID == "" {
+		return "", 0, false
+	}
+	path = filepath.Join(TranscriptDir(), sanitizeID(sessionID)+".jsonl")
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		return path, fi.Size(), true
+	}
+	return path, 0, false
+}
+
+// RestoreCapturedTranscript copies amux's captured backup of sessionID's
+// transcript to dst (atomically, creating dst's directory), so a harness whose
+// own transcript went missing across a restart resumes the real conversation
+// instead of starting fresh. It restores only when the backup would not lose
+// data: when dst is absent, when the backup is strictly larger (transcripts are
+// append-only, so larger means more complete), or when they are the same size
+// but the backup is newer. It never clobbers a dst that is larger or newer at
+// equal size, so a fresher harness transcript is always preserved. Returns
+// whether it wrote dst. A missing backup or blank sessionID is a no-op (false).
+func RestoreCapturedTranscript(sessionID, dst string) (bool, error) {
+	src, srcSize, ok := CapturedTranscript(sessionID)
+	if !ok || dst == "" {
+		return false, nil
+	}
+	if !shouldRestore(src, srcSize, dst) {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return false, err
+	}
+	if err := copyFileAtomic(src, dst); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// shouldRestore decides whether the backup at src (of size srcSize) should
+// overwrite dst without losing data. See RestoreCapturedTranscript for the rule.
+func shouldRestore(src string, srcSize int64, dst string) bool {
+	di, err := os.Stat(dst)
+	if err != nil || di.IsDir() {
+		return true // dst absent (or a stray dir): nothing to lose
+	}
+	if srcSize > di.Size() {
+		return true // backup is strictly more complete
+	}
+	if srcSize < di.Size() {
+		return false // dst has more: never shrink it
+	}
+	// Same size: restore only if the backup is newer (a harmless refresh of a
+	// near-identical file), never if dst is at least as fresh.
+	si, err := os.Stat(src)
+	if err != nil {
+		return false
+	}
+	return si.ModTime().After(di.ModTime())
+}
+
 // captureLogLine is one entry in a session's capture timeline.
 type captureLogLine struct {
 	Ts      int64  `json:"ts"`

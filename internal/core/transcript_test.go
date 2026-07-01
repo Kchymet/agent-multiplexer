@@ -80,3 +80,52 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// TestRestoreCapturedTranscript verifies gap-fill copies the captured backup to
+// dst only when it won't lose data: absent dst is filled, a strictly larger dst
+// is never shrunk, and a same-size dst is refreshed only when the backup is
+// newer. A missing backup or blank id is an inert no-op.
+func TestRestoreCapturedTranscript(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // TranscriptDir() is under $HOME; isolate
+
+	const sid = "22222222-2222-4222-8222-222222222222"
+	backup := []byte(`{"a":1}` + "\n" + `{"b":2}` + "\n")
+	if _, _, ok := CapturedTranscript(sid); ok {
+		t.Fatal("no backup should exist yet")
+	}
+
+	// No backup on disk: nothing to restore.
+	if restored, err := RestoreCapturedTranscript(sid, filepath.Join(t.TempDir(), "x.jsonl")); err != nil || restored {
+		t.Fatalf("no backup: restored=%v err=%v", restored, err)
+	}
+
+	// Lay down a backup via the capture path so keying matches production.
+	srcLive := filepath.Join(t.TempDir(), "live.jsonl")
+	if err := os.WriteFile(srcLive, backup, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CaptureTranscript(sid, srcLive, "Stop", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Absent dst: restored, contents equal the backup.
+	dst := filepath.Join(t.TempDir(), "proj", sanitizeID(sid)+".jsonl")
+	if restored, err := RestoreCapturedTranscript(sid, dst); err != nil || !restored {
+		t.Fatalf("absent dst: restored=%v err=%v", restored, err)
+	}
+	if string(mustRead(t, dst)) != string(backup) {
+		t.Fatal("restored content mismatch")
+	}
+
+	// A strictly larger dst (Claude wrote more) must never be shrunk.
+	bigger := append(append([]byte(nil), backup...), []byte(`{"c":3}`+"\n")...)
+	if err := os.WriteFile(dst, bigger, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := RestoreCapturedTranscript(sid, dst); err != nil || restored {
+		t.Fatalf("larger dst: restored=%v err=%v", restored, err)
+	}
+	if string(mustRead(t, dst)) != string(bigger) {
+		t.Fatal("a larger dst must be preserved")
+	}
+}
