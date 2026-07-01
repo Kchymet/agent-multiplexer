@@ -18,11 +18,13 @@ import (
 	"sync"
 	"time"
 
+	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
 	"amux/internal/panespec"
 	"amux/internal/source"
+	"amux/internal/store"
 	"amux/internal/wsops"
 )
 
@@ -90,7 +92,33 @@ func Default(self string) *Daemon {
 	ws.SetLiveness(func() map[string]bool { return liveAgents(eng) })
 	d := New(self, []source.Source{ws}, 2*time.Second)
 	d.engine = eng
+	// Let the engine defer terminating a mid-turn agent on graceful shutdown until
+	// it is safe. The probe closes over d, so it must be set after d is built.
+	eng.SetActivity(d.instanceActivity)
 	return d
+}
+
+// instanceActivity reports an engine instance's turn state for the engine's
+// graceful-shutdown wait, routed through the abstract agent.Harness so the engine
+// never reads Claude's hooks directly. It resolves the instance's agent id to its
+// harness session id and kind via the store, then asks that kind's harness. It is
+// best-effort: any error/not-found yields ActivityUnknown, which the engine
+// treats as safe to stop, so a missing signal never blocks a shutdown.
+func (d *Daemon) instanceActivity(k engine.Key) engine.Activity {
+	db, err := store.Open()
+	if err != nil {
+		return engine.ActivityUnknown
+	}
+	defer db.Close()
+	s, ok, err := db.GetSession(k.AgentID)
+	if err != nil || !ok {
+		return engine.ActivityUnknown
+	}
+	kind := s.Agent
+	if kind == "" {
+		kind = "claude"
+	}
+	return agent.HarnessFor(kind).Activity(s.ClaudeID)
 }
 
 // liveAgents is the set of agent ids whose agent pane (TabAgent) is running in
