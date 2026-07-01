@@ -132,6 +132,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s),
+				Task:      taskSummary(s.Prompt),
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
@@ -154,6 +155,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 					State:     st,
 					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s),
+					Task:      taskSummary(s.Prompt),
 					Cwd:       s.Dir,
 					CanAttach: true,
 					CanKill:   true,
@@ -168,7 +170,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		out = append(out, core.Session{
 			ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
-			State: core.StateIdle, Status: "archived" + subSuffix(s),
+			State: core.StateIdle, Status: "archived" + subSuffix(s), Task: taskSummary(s.Prompt),
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
 		})
 	}
@@ -266,6 +268,19 @@ func repoAgentLabel(s store.Session) string {
 		return n
 	}
 	return shortID(s.ID)
+}
+
+// taskSummary condenses an agent's initial prompt into a one-line rail label:
+// the first non-blank line with its internal whitespace collapsed. Width
+// truncation is left to the rail renderer. Empty for agents started without a
+// prompt.
+func taskSummary(prompt string) string {
+	for _, line := range strings.Split(prompt, "\n") {
+		if t := strings.Join(strings.Fields(line), " "); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 func subLabel(s store.Session) string {
