@@ -7,7 +7,7 @@ import (
 )
 
 // When the binary can't be resolved in the resolver's own PATH or via the login
-// shell, Argv must degrade to the bare name (so the tmux window's server env can
+// shell, Argv must degrade to the bare name (so the spawned pane's shell env can
 // resolve it) rather than failing.
 func TestArgvDegradesToBareName(t *testing.T) {
 	t.Setenv("AMUX_CLAUDE_BIN", "claude-amux-does-not-exist-xyz")

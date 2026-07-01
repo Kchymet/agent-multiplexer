@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -14,12 +12,11 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/gh"
 	"amux/internal/store"
-	"amux/internal/tmuxctl"
 )
 
 // cmdDoctor prints a health summary: required/optional CLI dependencies and the
-// amux runtime (daemon, database, isolated tmux server). Exits non-zero if a
-// required dependency is missing.
+// amux runtime (daemon, database). Exits non-zero if a required dependency is
+// missing.
 func cmdDoctor() error {
 	ctx := context.Background()
 	fmt.Print("amux doctor\n\n")
@@ -28,7 +25,6 @@ func cmdDoctor() error {
 		bin, verArg, note string
 		required          bool
 	}{
-		{"tmux", "-V", "isolated tmux server (needs 3.x)", true},
 		{"git", "--version", "bare clones & worktrees", true},
 		{"claude", "--version", "default agent", true},
 		{"fzf", "--version", "interactive pickers (new workspace/agent)", false},
@@ -68,7 +64,7 @@ func cmdDoctor() error {
 		_ = c.Close()
 		fmt.Printf("  ✓ daemon    running (socket %s)\n", core.SocketPath())
 	} else {
-		fmt.Printf("  · daemon    offline — starts on `amux up`\n")
+		fmt.Printf("  · daemon    offline — starts on `amux`\n")
 	}
 	if db, err := store.Open(); err == nil {
 		repos, _ := db.Repos()
@@ -84,14 +80,7 @@ func cmdDoctor() error {
 	} else {
 		fmt.Printf("  ✗ database  %v\n", err)
 	}
-	if tmuxctl.ServerRunning(ctx) {
-		fmt.Printf("  ✓ server    running (tmux -L %s)\n", core.TmuxSocket)
-	} else {
-		fmt.Printf("  · server    not running — starts on `amux up`\n")
-	}
-
 	fmt.Println("\nPaths")
-	fmt.Printf("  config   %s\n", core.ConfigDir())
 	fmt.Printf("  data     %s\n", core.DataDir())
 	fmt.Printf("  state    %s\n", core.StateDir())
 
@@ -104,9 +93,7 @@ func cmdDoctor() error {
 }
 
 // resolveCmd locates bin the way amux actually needs it, reporting how it was
-// found: this shell's PATH, the login shell (handles non-lazy nvm/asdf), or the
-// running tmux server's environment (where agents are spawned — this is what
-// matters with lazy-loaded nvm that a fresh shell can't surface).
+// found: this shell's PATH, or the login shell (handles non-lazy nvm/asdf).
 func resolveCmd(ctx context.Context, bin string) (path, via string) {
 	if p, err := exec.LookPath(bin); err == nil {
 		return p, ""
@@ -120,49 +107,7 @@ func resolveCmd(ctx context.Context, bin string) (path, via string) {
 			return p, "via login shell"
 		}
 	}
-	if p := inServerEnv(ctx, bin); p != "" {
-		return p, "via tmux server env"
-	}
 	return "", ""
-}
-
-// inServerEnv looks for bin on the PATH of a pane in the isolated tmux server
-// (Linux only, via /proc). Agents inherit this environment, so a binary found
-// here will launch even if this shell can't see it.
-func inServerEnv(ctx context.Context, bin string) string {
-	if runtime.GOOS != "linux" {
-		return ""
-	}
-	out, err := tmuxctl.Run(ctx, "list-panes", "-a", "-F", "#{pane_pid}")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(out, "\n") {
-		pid := strings.TrimSpace(line)
-		if pid == "" {
-			continue
-		}
-		data, err := os.ReadFile("/proc/" + pid + "/environ")
-		if err != nil {
-			continue
-		}
-		for _, kv := range strings.Split(string(data), "\x00") {
-			if !strings.HasPrefix(kv, "PATH=") {
-				continue
-			}
-			for _, dir := range strings.Split(kv[len("PATH="):], ":") {
-				if dir == "" {
-					continue
-				}
-				p := filepath.Join(dir, bin)
-				if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
-					return p
-				}
-			}
-		}
-		return "" // first pane's PATH is representative
-	}
-	return ""
 }
 
 func binVersion(bin, arg string) string {

@@ -17,7 +17,6 @@ import (
 	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/store"
-	"amux/internal/tmuxctl"
 )
 
 // AgentSpec describes an agent to create under a workspace.
@@ -254,50 +253,10 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	return nil
 }
 
-// OpenByID opens a session: the console, a workspace (opens all its agents), or
-// an agent (its window).
-func OpenByID(ctx context.Context, id string) error {
-	if id == console.ID {
-		if err := console.Ensure(); err != nil {
-			return err
-		}
-		return launch(ctx, console.Session())
-	}
-	db, err := store.Open()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	s, ok, err := db.GetSession(id)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("no such session %q", id)
-	}
-	if s.IsRoot() {
-		agents, err := db.Children(id)
-		if err != nil {
-			return err
-		}
-		if len(agents) == 0 {
-			return fmt.Errorf("workspace %q has no agents yet (add one with `a`)", id)
-		}
-		for _, a := range agents {
-			if err := launch(ctx, a); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return launch(ctx, s)
-}
-
 // AgentCommand resolves everything needed to run an agent: its working dir, the
 // extra environment (KEY=VALUE) to set, and the argv. It decides resume vs
 // continue vs fresh the same way regardless of how the caller runs it — the
-// native TUI execs this directly in an embedded PTY, while EnsureAgentSession
-// hands it to tmux for the classic entrypoints.
+// daemon's engine execs this in a PTY-backed process the native TUI attaches to.
 func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	dir = agentWorkdir(s)
 	if _, err := os.Stat(dir); err != nil {
@@ -366,41 +325,11 @@ func agentScope(rootID string) string {
 	return ""
 }
 
-// EnsureAgentSession starts the agent's dedicated, rail-free tmux session
-// (core.AgentSession) if it isn't already running, and returns its name. Used by
-// the classic tmux entrypoints (`amux up`, `amux session open`); the native TUI
-// no longer goes through tmux — it execs AgentCommand directly.
-func EnsureAgentSession(ctx context.Context, s store.Session) (string, error) {
-	sess := core.AgentSession(s.ID)
-	if tmuxctl.HasSession(ctx, sess) {
-		return sess, nil
-	}
-	dir, env, argv, err := AgentCommand(s)
-	if err != nil {
-		return "", err
-	}
-	if err := tmuxctl.NewDetachedSession(ctx, sess, dir, env, argv...); err != nil {
-		return "", err
-	}
-	return sess, nil
-}
-
-// launch opens (or switches the attached client to) one agent's dedicated tmux
-// session — used by the classic entrypoint and the CLI.
-func launch(ctx context.Context, s store.Session) error {
-	sess, err := EnsureAgentSession(ctx, s)
-	if err != nil {
-		return err
-	}
-	_ = tmuxctl.SwitchClient(ctx, sess)
-	return nil
-}
-
-// DeleteByID deletes a session. The console can't be deleted (window closed); a
-// workspace removes all its agents; an agent removes just itself.
+// DeleteByID deletes a session. The console can't be deleted (it's built in); a
+// workspace removes all its agents; an agent removes just itself. The daemon
+// stops any live engine instance before calling this (see killEngineFor).
 func DeleteByID(ctx context.Context, id string) error {
 	if id == console.ID {
-		_ = tmuxctl.KillSession(ctx, core.AgentSession(id))
 		return nil
 	}
 	db, err := store.Open()
@@ -428,7 +357,6 @@ func DeleteByID(ctx context.Context, id string) error {
 }
 
 func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
-	_ = tmuxctl.KillSession(ctx, core.AgentSession(a.ID))
 	for _, repoName := range store.SplitRepos(a.Repo) {
 		if repo, ok, _ := db.Repo(repoName); ok {
 			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, repoName), a.Branch)
@@ -455,8 +383,6 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	switch a.Action {
 	case "", "refresh", "subscribe":
 		return "", nil
-	case "open", "attach":
-		return "", OpenByID(ctx, a.ID)
 	case "delete", "kill":
 		return "", DeleteByID(ctx, a.ID)
 	case "move":
@@ -512,8 +438,9 @@ func baselinePrompt(description, linear string) string {
 }
 
 // SetArchived marks an agent (or workgroup) done/archived, or restores it. An
-// archived session drops off the active rail but stays in the store; its tmux
-// session (if any) is stopped so it isn't holding a live process.
+// archived session drops off the active rail but stays in the store; the daemon
+// stops its engine instance (see killEngineFor) so it isn't holding a live
+// process.
 func SetArchived(ctx context.Context, id string, archived bool) error {
 	db, err := store.Open()
 	if err != nil {
@@ -525,9 +452,6 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 		return fmt.Errorf("no such session %q", id)
 	}
 	s.Archived = archived
-	if archived {
-		_ = tmuxctl.KillSession(ctx, core.AgentSession(id))
-	}
 	return db.PutSession(s)
 }
 

@@ -1,8 +1,9 @@
-// Package daemon is the always-on core of amux. It owns the single poll
-// loop over all sources, holds canonical state, serves that state to rail/dash
-// clients over a unix socket, and executes control actions against the isolated
-// tmux server. Decoupling polling from rendering means the N side-pane rails
-// don't each shell out to `claude agents`.
+// Package daemon is the always-on core of amux. It owns the single poll loop
+// over all sources, holds canonical state, serves that state to clients over a
+// unix socket, and owns the engine that runs agent processes. Decoupling
+// polling from rendering means clients don't each shell out to `claude agents`,
+// and because the daemon (not a UI) owns the engine, closing a UI never stops an
+// agent.
 package daemon
 
 import (
@@ -56,11 +57,9 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	}
 }
 
-// Default wires the source set and the local engine. The rail is a workspace
-// switcher, so the only source is the workspace registry — annotated with which
-// agents are running, where "running" now means "live in the engine" (the
-// daemon's own agents) as well as in the isolated tmux server (the classic
-// `amux up` path).
+// Default wires the source set and the local engine. The dashboard is a
+// workspace switcher, so the only source is the workspace registry — annotated
+// with which agents are running, i.e. "live in the engine".
 func Default(self string) *Daemon {
 	eng := local.New()
 	ws := source.NewWorkspace()
@@ -163,23 +162,6 @@ func (d *Daemon) pollOnce(ctx context.Context) {
 		}(s)
 	}
 	wg.Wait()
-
-	// De-dupe: when a richer source (Claude) already represents a tmux window,
-	// drop the generic tmux entry for that same window.
-	owned := map[string]bool{}
-	for _, s := range all {
-		if s.Source != "tmux" && s.WindowID != "" {
-			owned[s.WindowID] = true
-		}
-	}
-	deduped := all[:0]
-	for _, s := range all {
-		if s.Source == "tmux" && owned[s.WindowID] {
-			continue
-		}
-		deduped = append(deduped, s)
-	}
-	all = deduped
 
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].Source != all[j].Source {

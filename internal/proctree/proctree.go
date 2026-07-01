@@ -1,5 +1,5 @@
 // Package proctree resolves process ancestry so a session's process id can be
-// mapped to the tmux pane that ultimately owns it. A `claude` process is often
+// mapped to the pane that ultimately owns it. A `claude` process is often
 // a child of the pane's shell, so a direct pid==pane_pid match is not enough;
 // we climb the parent chain until we hit a known pane pid.
 package proctree

@@ -18,8 +18,8 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Never block on an interactive credential/host prompt (the daemon and tmux
-	// popups have no usable TTY) — fail fast instead so callers can fall back.
+	// Never block on an interactive credential/host prompt (the daemon has no
+	// usable TTY) — fail fast instead so callers can fall back.
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -oBatchMode=yes")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

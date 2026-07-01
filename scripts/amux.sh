@@ -3,8 +3,8 @@
 #   [ -f "$HOME/.config/amux/amux.sh" ] && . "$HOME/.config/amux/amux.sh"
 #
 # On an interactive shell that is NOT already inside tmux, it replaces the shell
-# with the amux isolated server. Escape hatches:
-#   AMUX_SKIP=1   -> never auto-launch (plain shell / default tmux reachable)
+# with the amux native TUI. Escape hatches:
+#   AMUX_SKIP=1   -> never auto-launch (plain shell)
 #
 # It is intentionally defensive: if anything is missing it silently does nothing
 # so it can never lock you out of a shell.
@@ -16,7 +16,7 @@ _amux_autostart() {
     *) return ;;
   esac
 
-  # Respect opt-out and don't nest inside any tmux (default or amux).
+  # Respect opt-out and don't nest inside tmux (run `amux` by hand there).
   [ -n "$AMUX_SKIP" ] && return
   [ -n "$TMUX" ] && return
 
@@ -24,7 +24,7 @@ _amux_autostart() {
   command -v amux >/dev/null 2>&1 || return
   [ -t 1 ] || return
 
-  exec amux up
+  exec amux
 }
 
 _amux_autostart

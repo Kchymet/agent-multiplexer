@@ -10,7 +10,6 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
-	"amux/internal/tmuxctl"
 )
 
 // untrackedTTL bounds how long a Claude session amux didn't launch stays on the
@@ -22,8 +21,8 @@ const untrackedTTL = 12 * time.Hour
 // with its sub-sessions nested underneath.
 type Workspace struct {
 	// engineLive, if set, reports which agent ids are running in the daemon's
-	// engine. An agent is "live" if it's in the engine or in the isolated tmux
-	// server (the classic `amux up` path), so both hosting paths light up the rail.
+	// engine. An agent is "live" if it's in the engine, which is what lights it
+	// up on the rail.
 	engineLive func() map[string]bool
 }
 
@@ -41,21 +40,12 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	}
 	defer db.Close()
 
-	// An agent is "live" if it's hosted in the isolated tmux server (the classic
-	// `amux up` path) or running in the daemon's engine (the native TUI path).
-	// liveOf reports both: win is the tmux session name when tmux-hosted (the
-	// attach target classic clients use), else ""; alive covers either host.
-	live := tmuxctl.LiveSessions(ctx)
+	// An agent is "live" if it's running in the daemon's engine.
 	var engineLive map[string]bool
 	if w.engineLive != nil {
 		engineLive = w.engineLive()
 	}
-	liveOf := func(id string) (win string, alive bool) {
-		if s := core.AgentSession(id); live[s] {
-			return s, true
-		}
-		return "", engineLive[id]
-	}
+	liveOf := func(id string) bool { return engineLive[id] }
 	var out []core.Session
 
 	// Claude sessions amux manages, by id and by dir, so untracked enumeration
@@ -64,12 +54,11 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	trackedDirs := map[string]bool{console.Dir(): true}
 
 	// Control console, pinned first.
-	consoleWin, consoleAlive := liveOf(console.ID)
-	consoleState := agentState(consoleAlive, console.SessionID)
+	consoleState := agentState(liveOf(console.ID), console.SessionID)
 	out = append(out, core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
-		Cwd: console.Dir(), WindowID: consoleWin, CanAttach: true, CanKill: false,
+		Cwd: console.Dir(), CanAttach: true, CanKill: false,
 	})
 
 	roots, err := db.Roots()
@@ -121,12 +110,9 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			continue
 		}
 		subStates := make([]string, len(active))
-		subWins := make([]string, len(active))
 		rootState := core.StateIdle
 		for i, s := range active {
-			win, alive := liveOf(s.ID)
-			subWins[i] = win
-			subStates[i] = agentState(alive, s.ClaudeID)
+			subStates[i] = agentState(liveOf(s.ID), s.ClaudeID)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
 			}
@@ -147,7 +133,6 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s),
 				Cwd:       s.Dir,
-				WindowID:  subWins[i],
 				CanAttach: true,
 				CanKill:   true,
 			})
@@ -163,15 +148,13 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				Kind: "repo", Cwd: r.GitDir, CanAttach: true,
 			})
 			for _, s := range repoAgents[r.Name] {
-				win, alive := liveOf(s.ID)
-				st := agentState(alive, s.ClaudeID)
+				st := agentState(liveOf(s.ID), s.ClaudeID)
 				out = append(out, core.Session{
 					ID: s.ID, Title: repoAgentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 					State:     st,
 					Status:    stateLabel(st) + subSuffix(s),
 					Cwd:       s.Dir,
-					WindowID:  win,
 					CanAttach: true,
 					CanKill:   true,
 				})
@@ -197,8 +180,8 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 }
 
 // untrackedRows lists Claude sessions amux didn't launch: any with reported hook
-// activity whose id (and dir) isn't tracked. They have no tmux window here, so
-// they're informational only; ended (idle) and stale sessions are dropped.
+// activity whose id (and dir) isn't tracked. amux doesn't host them, so they're
+// informational only; ended (idle) and stale sessions are dropped.
 func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 	var out []core.Session
 	now := time.Now().UnixMilli()
@@ -308,7 +291,7 @@ func subSuffix(s store.Session) string {
 // agentState classifies a session's activity. The fine-grained states come from
 // Claude Code's hooks (see claudecfg.InstallHooks), which write the current
 // state per session as the agent's turn lifecycle fires:
-//   - StateIdle:    not running (no engine instance and no tmux window)
+//   - StateIdle:    not running (no engine instance)
 //   - StateRunning: a turn is in flight
 //   - StateWaiting: blocked on a prompt awaiting the user
 //   - StateReady:   turn finished / freshly launched, ready for input

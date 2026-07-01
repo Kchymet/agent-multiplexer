@@ -39,20 +39,6 @@ func MuxSocketPath() string {
 	return filepath.Join(runtimeDir(), "amux-mux.sock")
 }
 
-// ConfigDir is where the isolated tmux config lives.
-func ConfigDir() string {
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
-		return filepath.Join(d, "amux")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "amux")
-}
-
-// TmuxConfPath is the isolated server's config file.
-func TmuxConfPath() string {
-	return filepath.Join(ConfigDir(), "amux.conf")
-}
-
 // DataDir is where amux keeps durable data: the repo store, workspace
 // worktrees, and the registry. Honors $XDG_DATA_HOME.
 func DataDir() string {

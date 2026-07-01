@@ -1,7 +1,7 @@
 // Package source defines the adapter interface that feeds the daemon and the
-// concrete adapters for each agent backend. v1 ships the Claude adapter; the
-// Hermes and generic-tmux adapters are scaffolded behind the same interface so
-// they drop in without touching the daemon.
+// concrete adapters for each agent backend. The workspace adapter surfaces the
+// sessions amux manages; additional adapters (e.g. Hermes) drop in behind the
+// same interface without touching the daemon.
 package source
 
 import (

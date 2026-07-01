@@ -84,7 +84,7 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Control console** | `internal/console` | The built-in `⚙` agent scoped to amux config/CLI. |
 | **Git / GitHub** | `internal/git`, `internal/gh` | Bare clones + worktrees; `gh`-driven repo discovery/clone. |
 | **Claude config** | `internal/claudecfg` | Safe edits to `~/.claude.json` (pre-trust spawned dirs), status hooks, model defaults. |
-| **Legacy daemon / tmux** | `internal/daemon`, `internal/tmuxctl`, `internal/tui` | The original tmux-rail front-end and its poller (`amux up`/`dash`), kept working alongside the native TUI. |
+| **Daemon** | `internal/daemon` | Owns agent processes in an engine and polls sources so UIs can attach/detach without stopping agents. |
 
 > Status: the protocols, server, harness, and client are complete and covered by
 > an end-to-end test (`internal/mux`). The default `amux` native TUI still spawns
@@ -197,7 +197,6 @@ amux console               # open the control console
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
 amux do <action> ...       # drive any daemon action from scripts (see below)
-amux up | dash             # legacy tmux rail / dashboard
 ```
 
 ### Scripting the daemon: `amux do`
@@ -241,26 +240,23 @@ Two things are OS-specific by design:
   **silently skipped** — panes still run, just unscoped to the worktree
   (`AMUX_JAIL=off` is the explicit form). Docker-in-the-pane and `proctree`
   process mapping are likewise Linux-only.
-- **tmux is only for the legacy rail** (`amux up` / `dash`). The default native
-  TUI hosts every pane in-process over a PTY and needs no tmux at all.
+- **The native TUI needs no tmux.** It hosts every pane in-process over a PTY.
 
-| Capability | Win (WSL) | Win (WSL+tmux) | Mac (iTerm2) | Mac (iTerm2+tmux) | Linux |
-|------------|:---------:|:--------------:|:------------:|:-----------------:|:-----:|
-| Native TUI (`amux`) | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| Client/server (`amux serve` / `harness`) | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| Worktrees + bare-clone store | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| Agent / editor / terminal tabs | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| Filesystem jail (`bwrap`) | ✅ | ✅ | ➖ | ➖ | ⚠️ |
-| Docker inside the terminal pane | ✅ | ✅ | ⚠️¹ | ⚠️¹ | ⚠️ |
-| Process-tree mapping (`proctree`) | ✅ | ✅ | ➖ | ➖ | ⚠️ |
-| Legacy tmux rail (`amux up` / `dash`) | ❌² | ⚠️ | ❌² | ⚠️ | ⚠️ |
+| Capability | Win (WSL) | Mac (iTerm2) | Linux |
+|------------|:---------:|:------------:|:-----:|
+| Native TUI (`amux`) | ✅ | ⚠️ | ⚠️ |
+| Client/server (`amux serve` / `harness`) | ✅ | ⚠️ | ⚠️ |
+| Worktrees + bare-clone store | ✅ | ⚠️ | ⚠️ |
+| Agent / editor / terminal tabs | ✅ | ⚠️ | ⚠️ |
+| Filesystem jail (`bwrap`) | ✅ | ➖ | ⚠️ |
+| Docker inside the terminal pane | ✅ | ⚠️¹ | ⚠️ |
+| Process-tree mapping (`proctree`) | ✅ | ➖ | ⚠️ |
 
 **Legend** — ✅ run & exercised here (WSL2)  ·  ⚠️ expected to work (shared code
 path / build-verified) but **not directly validated**  ·  ➖ not applicable
-(degrades gracefully — pane runs unjailed)  ·  ❌ unavailable.
+(degrades gracefully — pane runs unjailed).
 
 ¹ Would run unjailed (no `bwrap` on macOS) and needs Docker Desktop — untested.
-² The legacy rail requires tmux; without it, use the default native TUI.
 
 ### Notes on testing
 
@@ -274,7 +270,7 @@ Be clear-eyed about what the ✅ / ⚠️ above actually mean:
   runs **with the jail disabled** (`AMUX_JAIL=off`), so it does not cover the
   `bwrap` path.
 - **macOS: never executed.** It is only **cross-compiled** (`make cross`),
-  never launched. No TUI, pane, git, or tmux behavior has been observed on a
+  never launched. No TUI, pane, or git behavior has been observed on a
   Mac. The jail (`bwrap`) does not exist there, so panes would run **unscoped**;
   this fallback is in the code but unverified on macOS.
 - **Bare/native Linux: not directly validated.** We develop on WSL2, which is a
@@ -282,25 +278,20 @@ Be clear-eyed about what the ✅ / ⚠️ above actually mean:
   symlinking, networking, Docker integration). The code paths are shared, so a
   desktop/server Linux install *should* behave like WSL — but we have not run it
   there.
-- **Legacy tmux rail (`amux up` / `dash`): not currently exercised.** It is kept
-  compiling alongside the native TUI but is not part of the day-to-day flow and
-  has not been re-validated against the current code on any platform.
 
 If you run amux on macOS or native Linux and confirm a row, please send the
 result so we can promote a ⚠️ to ✅ (or file what broke).
 
 ## Install
 
-Requires Go 1.24+, tmux 3.x (only for the legacy `amux up`/`dash` rail), and
-(for the jailed terminal, Linux/WSL only) `bwrap`.
+Requires Go 1.24+ and (for the jailed terminal, Linux/WSL only) `bwrap`.
 
 ```sh
 make install
 ```
 
-Builds `~/.local/bin/amux`, writes the isolated tmux config, and installs the
-shell shim. Run `amux` from a normal terminal. (`AMUX_SKIP=1` disables any
-auto-launch shim.)
+Builds `~/.local/bin/amux` and installs the shell shim. Run `amux` from a normal
+terminal. (`AMUX_SKIP=1` disables any auto-launch shim.)
 
 ## Roadmap
 

@@ -10,34 +10,28 @@ import (
 	"strings"
 
 	"amux/internal/claudecfg"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/gh"
 	"amux/internal/git"
 	"amux/internal/store"
-	"amux/internal/tmuxctl"
 	"amux/internal/wsops"
 )
 
-// cmdConsole opens (or switches to) the built-in amux control console.
-func cmdConsole() error { return wsops.OpenByID(context.Background(), console.ID) }
-
-// cmdName sets the display name of the session whose window the caller is in.
+// cmdName sets the display name of the agent the caller is running inside. Agents
+// launch with $AMUX_WORKGROUP set to their id (see wsops.AgentCommand), so this
+// works from an agent's own shell or terminal tab.
 func cmdName(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: amux name <display name>")
 	}
-	ctx := context.Background()
-	id, err := tmuxctl.Run(ctx, "display-message", "-p", "#{@amx_ws}")
-	if err != nil || strings.TrimSpace(id) == "" {
-		return fmt.Errorf("not inside an amux session window")
+	id := strings.TrimSpace(os.Getenv("AMUX_WORKGROUP"))
+	if id == "" {
+		return fmt.Errorf("not inside an amux agent ($AMUX_WORKGROUP unset)")
 	}
-	id = strings.TrimSpace(id)
 	name := strings.Join(args, " ")
 	if err := wsops.Rename(id, name); err != nil {
 		return err
 	}
-	_, _ = tmuxctl.Run(ctx, "rename-window", name)
 	fmt.Printf("session %s renamed to %q\n", id, name)
 	return nil
 }
@@ -347,11 +341,6 @@ func cmdSession(args []string) error {
 		}
 		fmt.Printf("attached %s to workspace %s\n", args[2], args[1])
 		return nil
-	case "open":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: amux session open <id>")
-		}
-		return wsops.OpenByID(ctx, args[1])
 	case "rm", "delete":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux session rm <id>")
@@ -434,9 +423,9 @@ func repoUsers(db *store.DB, repo string) ([]string, error) {
 	return users, nil
 }
 
-// sessionNew is the interactive create page (run in a tmux popup): name the
-// workspace, attach repos, optionally configure specific agents over a subset of
-// those repos (otherwise a default agent uses all), then Create.
+// sessionNew is the interactive create page: name the workspace, attach repos,
+// optionally configure specific agents over a subset of those repos (otherwise a
+// default agent uses all), then Create.
 func sessionNew(ctx context.Context, seedRepos []string) error {
 	in := bufio.NewReader(os.Stdin)
 	name := ""
@@ -487,7 +476,8 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 					return err
 				}
 			}
-			return wsops.OpenByID(ctx, rootID)
+			fmt.Printf("created workspace %s — open it in the dashboard (`amux`)\n", rootID)
+			return nil
 		case strings.HasPrefix(choice, "✗"):
 			return nil
 		}
@@ -511,7 +501,8 @@ func sessionAdd(ctx context.Context, rootID string) error {
 	if err != nil {
 		return err
 	}
-	return wsops.OpenByID(ctx, sub.ID)
+	fmt.Printf("added agent %s — open it in the dashboard (`amux`)\n", sub.ID)
+	return nil
 }
 
 // configureAgent presents one review screen for a new agent, pre-filled with

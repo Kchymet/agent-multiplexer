@@ -8,9 +8,7 @@ package nativetui
 
 import (
 	"fmt"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,9 +25,6 @@ const sidebarWidth = 26
 // down this process's mirror terminals; the agents keep running in the daemon's
 // engine (the socket closing just detaches the panes).
 func Run() error {
-	if sock, inside := insideAmux(); inside {
-		return fmt.Errorf("can't run the native TUI from inside amux (TMUX=%s) — detach first (Alt-q / C-a d), then run `amux` from your normal shell", sock)
-	}
 	m := &model{
 		terms:  map[paneKey]*vterm.Terminal{},
 		byPane: map[string]paneKey{},
@@ -58,20 +53,6 @@ var tabNames = [tabCount]string{"agent", "editor", "term"}
 type paneKey struct {
 	id  string
 	tab int
-}
-
-// insideAmux reports whether we're running inside the isolated amux tmux server
-// (so we must not embed a nested client). $TMUX is "<socket>,<pid>,<session>".
-func insideAmux() (string, bool) {
-	t := os.Getenv("TMUX")
-	if t == "" {
-		return "", false
-	}
-	sock := t
-	if i := strings.IndexByte(t, ','); i >= 0 {
-		sock = t[:i]
-	}
-	return sock, sock == core.TmuxSocket || strings.HasSuffix(sock, "/"+core.TmuxSocket)
 }
 
 type model struct {
