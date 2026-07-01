@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"amux/internal/core"
@@ -33,6 +35,12 @@ func cmdDo(args []string) error {
 	a, err := parseDoArgs(args)
 	if err != nil {
 		return err
+	}
+	// `do` drives control actions, which reply with a Result. The query verb
+	// replies with a Data frame instead, so routing it here would block waiting
+	// for a Result that never comes — point callers at the read commands.
+	if a.Action == core.ActionQuery {
+		return fmt.Errorf("%q is a read action; use `amux repo ls` / `amux session ls`", a.Action)
 	}
 	if err := sendAction(a); err != nil {
 		return err
@@ -146,28 +154,71 @@ func parseDoArgs(args []string) (core.Action, error) {
 	return a, nil
 }
 
-// sendAction dials the daemon, sends one action, and waits for its result frame.
-// Snapshot frames that arrive first are skipped. It returns the daemon's error
-// on a failed action, so callers surface the same message the rail would show.
-func sendAction(a core.Action) error {
+// dialDaemon ensures the daemon is running (launching it if it isn't) and returns
+// a connected client. Every CLI read and mutation goes through here, so the CLI
+// talks only to the local orchestrator and never opens the store itself.
+func dialDaemon() (*daemon.Client, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureDaemon(self); err != nil {
+		return nil, fmt.Errorf("daemon unavailable: %w", err)
+	}
 	c, err := daemon.Dial()
 	if err != nil {
-		return fmt.Errorf("daemon offline: %w", err)
+		return nil, fmt.Errorf("daemon offline: %w", err)
+	}
+	return c, nil
+}
+
+// sendAction sends one action and waits for its result. Snapshot frames that
+// arrive first are skipped. It returns the daemon's error on a failed action, so
+// callers surface the same message the rail would show.
+func sendAction(a core.Action) error {
+	_, err := sendActionID(a)
+	return err
+}
+
+// sendActionID is sendAction plus the id of any session the action created (the
+// daemon's Result.NewID), so a create command can start or switch to it.
+func sendActionID(a core.Action) (string, error) {
+	c, err := dialDaemon()
+	if err != nil {
+		return "", err
 	}
 	defer c.Close()
 	if err := c.Send(a); err != nil {
-		return err
+		return "", err
 	}
 	for {
 		f, err := c.Next()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if f.Result != nil {
 			if !f.Result.OK {
-				return fmt.Errorf("%s", f.Result.Error)
+				return "", fmt.Errorf("%s", f.Result.Error)
 			}
-			return nil
+			return f.Result.NewID, nil
 		}
 	}
+}
+
+// queryRows asks the daemon for a read model (QueryRepos, QuerySessions) and
+// decodes its rows into dst. It's the read half of the CLI's daemon bridge.
+func queryRows(name string, dst any) error {
+	c, err := dialDaemon()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	raw, err := c.Query(name)
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil // empty result set: leave dst as its zero value
+	}
+	return json.Unmarshal(raw, dst)
 }

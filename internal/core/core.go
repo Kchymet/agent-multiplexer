@@ -3,6 +3,8 @@
 // well-known names/paths that pin everything to the daemon's engine.
 package core
 
+import "encoding/json"
+
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one.
 const (
@@ -69,6 +71,14 @@ const (
 // CLI-created session comes up running the way the TUI starts one on open.
 const (
 	ActionStart = "start" // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
+	ActionQuery = "query" // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
+)
+
+// Query names for ActionQuery — the read models the daemon serves so clients
+// (the CLI, forms) never open the store themselves.
+const (
+	QueryRepos    = "repos"    // tracked repositories -> []RepoRow
+	QuerySessions = "sessions" // workgroups + their agents -> []WorkgroupRow
 )
 
 // Action is the client -> daemon control request. It carries both the lifecycle
@@ -79,6 +89,7 @@ type Action struct {
 	Kind   string            `json:"kind,omitempty"`   // for "new": agent kind to spawn
 	Cwd    string            `json:"cwd,omitempty"`    // for "new": working directory
 	Target string            `json:"target,omitempty"` // for "move": destination root id ("" = new work-scoped)
+	Query  string            `json:"query,omitempty"`  // for ActionQuery: which read model to return (QueryRepos|QuerySessions)
 	Fields map[string]string `json:"fields,omitempty"` // form-driven actions (new-repo-agent, add-agent, new-workgroup, add-repo, rename)
 
 	// Pane streaming fields (pane.* verbs only).
@@ -112,4 +123,46 @@ type PaneFrame struct {
 	PaneID string `json:"paneId"`
 	Data   []byte `json:"data,omitempty"`  // pane.output bytes (base64 over JSON)
 	Error  string `json:"error,omitempty"` // pane.exit error, if any
+}
+
+// FrameData is the daemon -> client reply to an ActionQuery: the requested read
+// model, marshalled as Rows. The CLI decodes Rows into the matching row type
+// (RepoRow / WorkgroupRow) so it never opens the store itself.
+const FrameData = "data"
+
+// Data carries one query's result. Query echoes the request; on success Rows
+// holds the JSON-encoded slice, otherwise Error explains the failure.
+type Data struct {
+	Type  string          `json:"type"`  // always FrameData
+	Query string          `json:"query"` // echoes Action.Query
+	OK    bool            `json:"ok"`
+	Rows  json.RawMessage `json:"rows,omitempty"`
+	Error string          `json:"error,omitempty"`
+}
+
+// RepoRow is one tracked repository, the QueryRepos element type. It's the
+// display subset of store.Repo — the CLI only prints name and source.
+type RepoRow struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+}
+
+// WorkgroupRow is one workgroup root plus its agents, the QuerySessions element
+// type. It flattens the store's root/child rows into what `session ls` prints,
+// so the CLI renders the listing without a store handle.
+type WorkgroupRow struct {
+	ID      string     `json:"id"`
+	Scope   string     `json:"scope"`   // work | repo
+	Display string     `json:"display"` // name if set, else id
+	Repos   string     `json:"repos"`   // comma-joined repo names
+	Agents  []AgentRow `json:"agents"`
+}
+
+// AgentRow is one agent (child session) under a WorkgroupRow.
+type AgentRow struct {
+	ID       string `json:"id"`
+	Agent    string `json:"agent"` // claude | hermes
+	Mode     string `json:"mode"`  // task | loop
+	Repos    string `json:"repos"` // comma-joined repo names
+	Archived bool   `json:"archived"`
 }
