@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/charmbracelet/x/ansi"
@@ -215,11 +216,55 @@ func (t *Terminal) drainResponses() {
 	}
 }
 
-// Render returns the current screen as a styled (ANSI) string.
+// Render returns the current screen as a styled (ANSI) string, normalized to an
+// exact cols×rows block: every line is space-padded to the full width and there
+// are exactly rows lines.
+//
+// The emulator's own Render right-trims trailing blank cells (and renders an
+// all-blank line as ""), so raw frames have a ragged right edge. When those are
+// composited (lipgloss.JoinHorizontal pads only to a block's widest line, not
+// the pane width) and diffed by Bubble Tea's line renderer (which erases to end
+// of line only when a line is shorter than the whole terminal, and skips lines
+// unchanged since the previous frame), cells the new frame doesn't cover keep
+// stale content — an earlier frame's text, or the terminal's pre-amux
+// scrollback. Emitting a solid rectangle makes every frame fully overwrite its
+// pane, which is what a real terminal does.
 func (t *Terminal) Render() string {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.emu.Render()
+	raw := t.emu.Render()
+	cols, rows := t.cols, t.rows
+	t.mu.Unlock()
+	return pad(raw, cols, rows)
+}
+
+// pad forces s into an exact cols×rows block. It relies on the emulator having
+// already reset any pen style before a line's trailing blanks, so the spaces we
+// append render on the default background.
+func pad(s string, cols, rows int) string {
+	if cols <= 0 || rows <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var b strings.Builder
+	for y := 0; y < rows; y++ {
+		if y > 0 {
+			b.WriteByte('\n')
+		}
+		line := ""
+		if y < len(lines) {
+			line = lines[y]
+		}
+		w := ansi.StringWidth(line)
+		if w > cols {
+			line = ansi.Truncate(line, cols, "")
+			w = ansi.StringWidth(line)
+		}
+		b.WriteString(line)
+		if w < cols {
+			b.WriteString(strings.Repeat(" ", cols-w))
+		}
+	}
+	return b.String()
 }
 
 // Write sends input bytes to the agent (e.g. translated keystrokes): to onInput
