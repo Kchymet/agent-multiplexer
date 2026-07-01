@@ -63,22 +63,31 @@ type Terminal struct {
 	onInput  func([]byte)
 	onResize func(cols, rows int)
 
-	// feed carries streamed output to a dedicated goroutine (remote mode) so the
-	// caller of Feed — the Bubble Tea Update goroutine — never blocks inside
-	// emu.Write. The emulator can stall mid-write when it answers a query (it
-	// writes the reply into an internal pipe that drainResponses must drain);
-	// keeping emu.Write off the UI goroutine means that backpressure can never
-	// wedge render or input. done stops the feed goroutine on Close.
-	feed chan []byte
-	done chan struct{}
-	once sync.Once
+	// Streamed output (remote mode) is coalesced into fbuf and parsed into the
+	// emulator by a dedicated goroutine, so the caller of Feed — the Bubble Tea
+	// Update goroutine — never blocks inside emu.Write and no bytes are dropped.
+	// Terminal output is a stateful byte stream: drop any of it (e.g. an erase
+	// sequence) and the emulator keeps stale cells that ghost through as "text
+	// shadowing". The emulator can stall mid-write when it answers a query (it
+	// writes the reply into a pipe drainResponses drains); keeping emu.Write off
+	// the UI goroutine means that backpressure can't wedge render or input. fwake
+	// nudges the goroutine; done stops it on Close.
+	fmu   sync.Mutex
+	fbuf  []byte
+	fwake chan struct{}
+	done  chan struct{}
+	once  sync.Once
 }
 
-// feedBuf bounds the remote-mode output queue. Streamed output is dropped only
-// if this fills, which shouldn't happen once the response pipe drains promptly
-// (see feed field docs); dropping a frame is recoverable — the agent keeps
-// redrawing and a reattach replays the scrollback.
-const feedBuf = 1024
+// feedCap bounds the coalesced backlog before the client, hopelessly behind,
+// resyncs rather than growing without bound: it keeps only the recent tail and
+// resets the emulator first (a full-screen agent repaints within a frame, so the
+// brief partial beats corruption). This fills only if emu.Write stalls
+// persistently, which the response-pipe drain is designed to prevent.
+const (
+	feedCap  = 4 << 20
+	feedKeep = 256 << 10
+)
 
 // New creates a terminal sized to cols×rows (falling back to 80×24).
 func New(cols, rows int) *Terminal {
@@ -136,7 +145,7 @@ func NewRemote(cols, rows int, onInput func([]byte), onResize func(cols, rows in
 	t := New(cols, rows)
 	t.onInput = onInput
 	t.onResize = onResize
-	t.feed = make(chan []byte, feedBuf)
+	t.fwake = make(chan struct{}, 1)
 	t.done = make(chan struct{})
 	go t.feedLoop()       // streamed output -> emulator, off the UI goroutine
 	go t.drainResponses() // emulator replies (DA, cursor reports, mouse) -> agent
@@ -144,17 +153,27 @@ func NewRemote(cols, rows int, onInput func([]byte), onResize func(cols, rows in
 }
 
 // feedLoop parses streamed output into the emulator on its own goroutine, so a
-// query reply that momentarily blocks emu.Write can never stall Feed's caller.
+// query reply that momentarily blocks emu.Write can never stall Feed's caller. It
+// drains the whole coalesced backlog per wake, in order.
 func (t *Terminal) feedLoop() {
 	for {
 		select {
 		case <-t.done:
 			return
-		case p := <-t.feed:
-			t.mu.Lock()
-			_, _ = t.emu.Write(p)
-			t.mu.Unlock()
-			t.notify()
+		case <-t.fwake:
+			for {
+				t.fmu.Lock()
+				b := t.fbuf
+				t.fbuf = nil
+				t.fmu.Unlock()
+				if len(b) == 0 {
+					break
+				}
+				t.mu.Lock()
+				_, _ = t.emu.Write(b)
+				t.mu.Unlock()
+				t.notify()
+			}
 		}
 	}
 }
@@ -219,14 +238,22 @@ func (t *Terminal) notify() {
 
 // Feed hands output bytes to the feed goroutine, which writes them into the
 // emulator (remote mode): the embedder calls it with bytes streamed from the
-// daemon, just as pump does for a local PTY. It never blocks the caller — the
-// bytes are copied and queued, and dropped only if the queue is full (see
-// feedBuf). The queue preserves order, so the emulator sees a faithful stream.
+// daemon, just as pump does for a local PTY. It never blocks the caller and never
+// drops — bytes are appended to the coalesced backlog in order. Only a backlog
+// past feedCap (a client hopelessly behind) is trimmed to its recent tail, with a
+// RIS prepended so the emulator clears before applying the retained repaint.
 func (t *Terminal) Feed(p []byte) {
-	b := append([]byte(nil), p...)
+	t.fmu.Lock()
+	t.fbuf = append(t.fbuf, p...)
+	if len(t.fbuf) > feedCap {
+		tail := t.fbuf[len(t.fbuf)-feedKeep:]
+		kept := make([]byte, 0, feedKeep+2)
+		kept = append(kept, 0x1b, 'c') // RIS: reset before the retained tail
+		t.fbuf = append(kept, tail...)
+	}
+	t.fmu.Unlock()
 	select {
-	case t.feed <- b:
-	case <-t.done:
+	case t.fwake <- struct{}{}:
 	default:
 	}
 }
