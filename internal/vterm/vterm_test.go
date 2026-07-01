@@ -10,6 +10,17 @@ import (
 	"github.com/charmbracelet/x/vt"
 )
 
+// lockedGet wraps a predicate that reads emulator/mode state so it runs under
+// t.mu — the invariant the production code (MouseEvent, noteMode) upholds. Feed
+// now parses on a background goroutine, so a test polling that state must lock.
+func (t *Terminal) lockedGet(f func() bool) func() bool {
+	return func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return f()
+	}
+}
+
 // waitFor polls f until it returns true or the deadline elapses.
 func waitFor(d time.Duration, f func() bool) bool {
 	deadline := time.Now().Add(d)
@@ -35,7 +46,9 @@ func TestAltScrollWithoutMouseTracking(t *testing.T) {
 	// Child enters the alternate screen (DECSET 1049) but never enables mouse
 	// tracking — the situation for less/vim/tmux-without-mouse.
 	term.Feed([]byte("\x1b[?1049h"))
-	if !waitFor(time.Second, term.emu.IsAltScreen) {
+	// Feed is async (the feed goroutine parses off the caller's thread), and the
+	// emulator/mode state is only safe to read under t.mu, so poll under the lock.
+	if !waitFor(time.Second, term.lockedGet(func() bool { return term.emu.IsAltScreen() })) {
 		t.Fatal("emulator did not enter alt screen")
 	}
 
@@ -63,7 +76,8 @@ func TestWheelForwardedWhenMouseTracked(t *testing.T) {
 	// Alt screen + button-event tracking (1002) + SGR encoding (1006): a
 	// mouse-aware TUI. It wants the raw event, not alternate-scroll keys.
 	term.Feed([]byte("\x1b[?1049h\x1b[?1002h\x1b[?1006h"))
-	if !waitFor(time.Second, term.mouseTracked) {
+	// Feed is async and mouseModes is guarded by t.mu; poll under the lock.
+	if !waitFor(time.Second, term.lockedGet(term.mouseTracked)) {
 		t.Fatal("mouse tracking not registered")
 	}
 
@@ -72,6 +86,41 @@ func TestWheelForwardedWhenMouseTracked(t *testing.T) {
 	// SGR wheel-up press at 1-based (5,3): CSI < 64 ; 5 ; 3 M.
 	if in := readInput(t, got); in != "\x1b[<64;5;3M" {
 		t.Fatalf("mouse-tracked wheel sent %q, want an SGR wheel-up report", in)
+	}
+}
+
+// TestFeedNeverBlocksWhenInputStalls is the client-side half of the freeze fix.
+// The emulator answers a query (DA1) by writing into a pipe that drainResponses
+// forwards to onInput. If onInput blocks (a wedged socket write), that pipe backs
+// up and the next emu.Write blocks. Feed runs on the Bubble Tea Update goroutine,
+// so it must not block on that backpressure: the feed goroutine owns emu.Write
+// and Feed only enqueues. This test wedges onInput and asserts Feed stays
+// prompt — the old synchronous Feed would deadlock the UI here.
+func TestFeedNeverBlocksWhenInputStalls(t *testing.T) {
+	block := make(chan struct{})
+	// onInput blocks forever after the first call, standing in for a stalled socket
+	// write. drainResponses will call it with the DA1 reply and never return.
+	term := NewRemote(80, 24, func([]byte) { <-block }, nil)
+	defer close(block)
+	defer term.Close()
+
+	done := make(chan struct{})
+	go func() {
+		// Each DA1 query makes the emulator write a reply into its response pipe.
+		// drainResponses forwards the first to onInput and blocks there; the pipe
+		// (unbuffered) then can't drain, so the next reply-producing emu.Write
+		// blocks. Feeding many queries — far past the queue depth — must still
+		// return promptly, because the feed goroutine (not Feed) owns emu.Write.
+		for i := 0; i < feedBuf*4; i++ {
+			term.Feed([]byte("\x1b[c"))
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Feed blocked while onInput was stalled — response-pipe backpressure wedged the UI goroutine")
 	}
 }
 

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"net"
@@ -33,7 +32,7 @@ func dialDaemon(t *testing.T, d *Daemon) (*Client, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { d.serve(ctx, srv); close(done) }()
-	c := &Client{conn: cli, r: bufio.NewReader(cli)}
+	c := newClient(cli)
 	return c, func() {
 		_ = cli.Close()
 		cancel()

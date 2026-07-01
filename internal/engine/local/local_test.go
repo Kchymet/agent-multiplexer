@@ -208,6 +208,50 @@ func TestShutdownTerminatesInParallel(t *testing.T) {
 	}
 }
 
+// A child that never drains its stdin eventually backs up the PTY input buffer,
+// so ptmx.Write blocks. Input must not block its caller (the daemon serve loop),
+// and inputLoop must not hold in.mu across that stalled write — otherwise pump,
+// Resize, and Alive would wedge too. This is the daemon-side half of the freeze
+// fix: before the per-instance input queue, Input wrote under in.mu and stalled
+// the whole serve loop when the child stopped reading.
+func TestInputNeverBlocksWhenChildIgnoresStdin(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+
+	key := engine.Key{AgentID: "stuck", Tab: 0}
+	spec := engine.Spec{Key: key, Argv: []string{"sh", "-c", "sleep 30"}, Cols: 80, Rows: 24}
+	inst, err := eng.Ensure(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	// Push far more than the PTY buffer can hold to guarantee a blocking write.
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	sent := make(chan struct{})
+	go func() {
+		for i := 0; i < 2048; i++ {
+			inst.Input(chunk)
+		}
+		close(sent)
+	}()
+	select {
+	case <-sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Input blocked while the child ignored its stdin")
+	}
+
+	// in.mu must stay free even while inputLoop is parked in a blocking ptmx.Write:
+	// Alive() takes in.mu, so it answering promptly proves the lock isn't held
+	// across the write.
+	ans := make(chan bool, 1)
+	go func() { ans <- inst.Alive() }()
+	select {
+	case <-ans:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Alive() blocked — inputLoop is holding in.mu across a blocking write")
+	}
+}
+
 // Input written to an instance reaches the process and its echo streams back.
 func TestLocalEngineInput(t *testing.T) {
 	eng := New()
