@@ -129,7 +129,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		for i, s := range active {
 			out = append(out, core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
-				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode, Repos: s.Repo,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s),
 				Cwd:       s.Dir,
@@ -151,7 +151,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				st := agentState(liveOf(s.ID), s.ClaudeID)
 				out = append(out, core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
-					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode, Repos: s.Repo,
 					State:     st,
 					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s),
 					Cwd:       s.Dir,

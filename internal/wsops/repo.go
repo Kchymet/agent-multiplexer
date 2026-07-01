@@ -127,20 +127,6 @@ func looksLikeGHRepo(s string) bool {
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
-// rootRepos returns the repos attached to a workgroup root, or nil. Used to
-// default an added agent to the whole workgroup when the form leaves repos blank.
-func rootRepos(rootID string) []string {
-	db, err := store.Open()
-	if err != nil {
-		return nil
-	}
-	defer db.Close()
-	if root, ok, _ := db.GetSession(rootID); ok {
-		return store.SplitRepos(root.Repo)
-	}
-	return nil
-}
-
 func expandHome(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		home, _ := os.UserHomeDir()

@@ -1,6 +1,7 @@
 package wsops
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,17 @@ import (
 	"amux/internal/core"
 	"amux/internal/store"
 )
+
+// isolateStore points the store + session dirs at a fresh temp HOME so a test can
+// exercise real store round-trips without touching the user's data.
+func isolateStore(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("AMUX_JAIL", "off")
+}
 
 func TestResumeCwds(t *testing.T) {
 	base := filepath.Join("sessions", "root1", "agent1")
@@ -146,5 +158,82 @@ func TestAgentWorkdir(t *testing.T) {
 				t.Errorf("agentWorkdir(repo=%q) = %q, want %q", tt.repo, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCreateWorkspaceRepoLessAgent verifies a workgroup can be created with a
+// repo-less default agent — no repos on the workgroup, none on the agent, and no
+// git worktrees needed.
+func TestCreateWorkspaceRepoLessAgent(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	rootID, err := CreateWorkspace(ctx, "cloud-orchestrator", &AgentSpec{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root, ok, _ := db.GetSession(rootID)
+	if !ok {
+		t.Fatalf("root %s not found", rootID)
+	}
+	if root.Repo != "" {
+		t.Errorf("workgroup should carry no repos, got %q", root.Repo)
+	}
+	kids, _ := db.Children(rootID)
+	if len(kids) != 1 {
+		t.Fatalf("want 1 agent, got %d", len(kids))
+	}
+	if kids[0].Repo != "" {
+		t.Errorf("repo-less agent should have no repos, got %q", kids[0].Repo)
+	}
+}
+
+// TestSetAgentReposSkipsUntracked verifies re-scoping an agent to an untracked
+// repo name is a no-op that never errors (defensive against stale/typo names) —
+// the reported "unknown repo" hard-fail is gone.
+func TestSetAgentReposSkipsUntracked(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := db.NewID()
+	agentID := db.NewID()
+	if err := db.PutSession(store.Session{ID: rootID, Scope: store.ScopeWork, Mode: store.ModeTask}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(store.Session{ID: agentID, RootID: rootID, Repo: "", Branch: "amux/x-y"}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if err := SetAgentRepos(ctx, agentID, []string{"nope"}); err != nil {
+		t.Fatalf("SetAgentRepos with an untracked repo should not error, got %v", err)
+	}
+
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	a, ok, _ := db.GetSession(agentID)
+	if !ok {
+		t.Fatal("agent vanished")
+	}
+	if a.Repo != "" {
+		t.Errorf("untracked repo should have been skipped, agent repos = %q", a.Repo)
+	}
+
+	// Re-scoping a workgroup root (not an agent) is an error.
+	if err := SetAgentRepos(ctx, rootID, nil); err == nil {
+		t.Error("SetAgentRepos on a root should error")
 	}
 }

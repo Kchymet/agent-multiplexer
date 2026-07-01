@@ -29,12 +29,12 @@ type AgentSpec struct {
 	Prompt string   // initial prompt
 }
 
-// CreateWorkspace creates a workspace (root) that attaches repos but checks out
-// nothing itself. When defaultAgent is non-nil it also creates one default agent
-// from that spec (its model, mode, and prompt are honored); a spec with no repos
-// defaults to all of the workspace's. Pass nil to create no agent. Returns the
-// workspace id.
-func CreateWorkspace(ctx context.Context, name string, repos []string, defaultAgent *AgentSpec) (string, error) {
+// CreateWorkspace creates a workgroup (root) — a pure container of agents that
+// checks out nothing itself and holds no repos of its own (a repo is an attribute
+// of an agent, via its worktrees). When defaultAgent is non-nil it also creates
+// one agent from that spec (its repos, model, mode, and prompt are honored). Pass
+// nil to create an empty workgroup. Returns the workgroup id.
+func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
 	db, err := store.Open()
 	if err != nil {
 		return "", err
@@ -44,16 +44,12 @@ func CreateWorkspace(ctx context.Context, name string, repos []string, defaultAg
 	rootID := db.NewID()
 	if err := db.PutSession(store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Mode: store.ModeTask, Repo: store.JoinRepos(repos), Created: store.Now(),
+		Mode: store.ModeTask, Created: store.Now(),
 	}); err != nil {
 		return "", err
 	}
 	if defaultAgent != nil {
-		spec := *defaultAgent
-		if len(spec.Repos) == 0 {
-			spec.Repos = repos
-		}
-		if _, err := addAgent(ctx, db, rootID, spec); err != nil {
+		if _, err := addAgent(ctx, db, rootID, *defaultAgent); err != nil {
 			return rootID, err
 		}
 	}
@@ -108,21 +104,28 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	// and `amux/<root>/<agent>` (file/directory conflict), which broke adding a
 	// second agent to older workspaces.
 	branch := "amux/" + rootID + "-" + agentID
+	// Repos are chosen from tracked ones (the fuzzy picker), but be defensive: a
+	// stale or mistyped name shouldn't abort the whole create — skip it with a
+	// warning and carry on with the repos that do resolve. An agent with zero
+	// repos is valid (it runs in its own sandbox dir; see agentWorkdir).
+	var repos []string
 	for _, repoName := range spec.Repos {
 		repo, ok, err := db.Repo(repoName)
 		if err != nil || !ok {
-			return store.Session{}, fmt.Errorf("unknown repo %q", repoName)
+			log.Printf("amux: skipping unknown repo %q while creating agent under %s", repoName, rootID)
+			continue
 		}
 		if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(dir, repoName), branch); err != nil {
 			return store.Session{}, err
 		}
+		repos = append(repos, repoName)
 	}
 	writeAgentGuide(dir, branch)
 	a := store.Session{
 		ID: agentID, RootID: rootID,
 		Agent: defaultStr(spec.Agent, "claude"), Model: spec.Model,
 		Mode: defaultStr(spec.Mode, store.ModeTask),
-		Repo: store.JoinRepos(spec.Repos), Branch: branch, Dir: dir,
+		Repo: store.JoinRepos(repos), Branch: branch, Dir: dir,
 		ClaudeID: store.NewUUID(), Prompt: spec.Prompt, Created: store.Now(),
 	}
 	if err := db.PutSession(a); err != nil {
@@ -191,29 +194,59 @@ func AgentIDsUnder(id string) ([]string, error) {
 	return ids, nil
 }
 
-// AttachRepo adds a repo to a workspace's attached set (template only; existing
-// agents are unchanged — assign it to an agent by creating/adding one).
-func AttachRepo(rootID, repo string) error {
+// SetAgentRepos changes an agent's repo scope to exactly want: it adds a worktree
+// for each newly-scoped tracked repo and removes the worktree of each dropped one,
+// then records the new set. Untracked names in want are skipped with a warning
+// (never fatal). This is how a repo is pulled into (or out of) an existing agent's
+// scope after it's created — repos are a dynamic attribute of the agent.
+func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 	db, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	root, ok, _ := db.GetSession(rootID)
-	if !ok || !root.IsRoot() {
-		return fmt.Errorf("no such workspace %q", rootID)
+	a, ok, err := db.GetSession(agentID)
+	if err != nil || !ok {
+		return fmt.Errorf("no such agent %q", agentID)
 	}
-	if _, ok, _ := db.Repo(repo); !ok {
-		return fmt.Errorf("unknown repo %q", repo)
+	if a.IsRoot() {
+		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
-	repos := store.SplitRepos(root.Repo)
-	for _, r := range repos {
-		if r == repo {
-			return nil // already attached
+
+	cur := map[string]bool{}
+	for _, r := range store.SplitRepos(a.Repo) {
+		cur[r] = true
+	}
+	wantSet := map[string]bool{}
+	var final []string
+	for _, r := range want {
+		if wantSet[r] {
+			continue
+		}
+		wantSet[r] = true
+		repo, ok, _ := db.Repo(r)
+		if !ok {
+			log.Printf("amux: skipping unknown repo %q while re-scoping agent %s", r, agentID)
+			continue
+		}
+		if !cur[r] {
+			if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch); err != nil {
+				return err
+			}
+		}
+		final = append(final, r)
+	}
+	// Remove worktrees for repos no longer in scope.
+	for r := range cur {
+		if wantSet[r] {
+			continue
+		}
+		if repo, ok, _ := db.Repo(r); ok {
+			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch)
 		}
 	}
-	root.Repo = store.JoinRepos(append(repos, repo))
-	return db.PutSession(root)
+	a.Repo = store.JoinRepos(final)
+	return db.PutSession(a)
 }
 
 // MoveAgent re-parents an agent into another workgroup. With an empty targetRootID
@@ -239,7 +272,7 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	oldRoot := a.RootID
 
 	if strings.TrimSpace(targetRootID) == "" {
-		newRoot, err := CreateWorkspace(ctx, defaultStr(a.Name, a.Repo), store.SplitRepos(a.Repo), nil)
+		newRoot, err := CreateWorkspace(ctx, defaultStr(a.Name, a.Repo), nil)
 		if err != nil {
 			return err
 		}
@@ -260,22 +293,6 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	a.RootID = targetRootID
 	if err := db.PutSession(a); err != nil {
 		return err
-	}
-	// Union the agent's repos into the destination so it lists them.
-	if target, ok, _ := db.GetSession(targetRootID); ok {
-		seen := map[string]bool{}
-		set := store.SplitRepos(target.Repo)
-		for _, r := range set {
-			seen[r] = true
-		}
-		for _, r := range store.SplitRepos(a.Repo) {
-			if !seen[r] {
-				set = append(set, r)
-				seen[r] = true
-			}
-		}
-		target.Repo = store.JoinRepos(set)
-		_ = db.PutSession(target)
 	}
 	// Drop the old workgroup if it's now empty (always true for a moved-out
 	// single-member repo-scoped one).
@@ -465,25 +482,24 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		return "", SetArchived(ctx, a.ID, a.Fields["archived"] == "true")
 	case "rename":
 		return "", Rename(a.ID, a.Fields["name"])
-	case "attach-repo":
-		// Attach an already-tracked repo to a workgroup (vs "add-repo", which
-		// tracks a brand-new repo from a source).
-		return "", AttachRepo(a.ID, a.Fields["repo"])
 	case "rm-repo":
 		return "", RemoveRepo(a.ID)
+	case "agent-set-repos":
+		// Re-scope an existing agent to exactly the given repos (fuzzy-picked),
+		// adding/removing worktrees to match. This is the "pull a repo into scope"
+		// action.
+		return "", SetAgentRepos(ctx, a.ID, store.SplitRepos(a.Fields["repos"]))
 	case "new-repo-agent":
 		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
 		return s.ID, err
 	case "add-agent":
-		repos := store.SplitRepos(a.Fields["repos"])
-		if len(repos) == 0 {
-			repos = rootRepos(a.ID) // blank = the whole workgroup's repos
-		}
+		// Repos come straight from the fuzzy picker; zero is allowed (repo-less
+		// agent). A workgroup no longer carries repos of its own to fall back to.
 		s, err := AddAgent(ctx, a.ID, AgentSpec{
 			Agent:  "claude",
-			Repos:  repos,
+			Repos:  store.SplitRepos(a.Fields["repos"]),
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
 		return s.ID, err
@@ -491,27 +507,27 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		_, err := AddRepoSource(ctx, a.Fields["source"])
 		return "", err
 	case "new-workgroup":
-		repos := store.SplitRepos(a.Fields["repos"])
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
+		repos := store.SplitRepos(a.Fields["repos"])
 		var def *AgentSpec
 		if len(repos) > 0 || prompt != "" {
-			def = &AgentSpec{Prompt: prompt}
+			def = &AgentSpec{Agent: "claude", Repos: repos, Prompt: prompt}
 		}
 		// Return the workgroup root; the client resolves it to the first agent.
-		return CreateWorkspace(ctx, a.Fields["name"], repos, def)
+		return CreateWorkspace(ctx, a.Fields["name"], def)
 	case "create-workspace":
-		// The CLI's `session create`/`new`: create a workgroup over the given
-		// repos, optionally seeding one default agent (Fields["defaultAgent"]=="1")
+		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
+		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
 		// with an explicit mode/model/prompt. When the interactive flow configures
 		// its own agents it passes defaultAgent="" and follows up with add-agent.
-		repos := store.SplitRepos(a.Fields["repos"])
 		var def *AgentSpec
 		if a.Fields["defaultAgent"] == "1" {
 			def = &AgentSpec{
-				Agent: "claude", Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
+				Agent: "claude", Repos: store.SplitRepos(a.Fields["repos"]),
+				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
 			}
 		}
-		return CreateWorkspace(ctx, a.Fields["name"], repos, def)
+		return CreateWorkspace(ctx, a.Fields["name"], def)
 	}
 	return "", fmt.Errorf("unknown action %q", a.Action)
 }
