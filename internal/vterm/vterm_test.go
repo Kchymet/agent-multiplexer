@@ -5,7 +5,85 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/x/vt"
 )
+
+// waitFor polls f until it returns true or the deadline elapses.
+func waitFor(d time.Duration, f func() bool) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if f() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return f()
+}
+
+// TestAltScrollWithoutMouseTracking proves the alternate-scroll fallback: a
+// full-screen child on the alternate screen that hasn't armed mouse tracking
+// still scrolls, because a vertical wheel is translated into cursor-key presses
+// and delivered on the child's stdin. Without the fallback the emulator drops
+// the wheel and nothing reaches the child — the reported bug.
+func TestAltScrollWithoutMouseTracking(t *testing.T) {
+	got := make(chan []byte, 8)
+	term := NewRemote(80, 24, func(b []byte) { got <- append([]byte(nil), b...) }, nil)
+	defer term.Close()
+
+	// Child enters the alternate screen (DECSET 1049) but never enables mouse
+	// tracking — the situation for less/vim/tmux-without-mouse.
+	term.Feed([]byte("\x1b[?1049h"))
+	if !waitFor(time.Second, term.emu.IsAltScreen) {
+		t.Fatal("emulator did not enter alt screen")
+	}
+
+	term.MouseEvent(vt.MouseWheel{Button: vt.MouseWheelUp})
+	term.MouseEvent(vt.MouseWheel{Button: vt.MouseWheelDown})
+
+	up := readInput(t, got)
+	if want := strings.Repeat("\x1b[A", altScrollLines); up != want {
+		t.Fatalf("wheel-up sent %q, want %q (%d cursor-up presses)", up, want, altScrollLines)
+	}
+	down := readInput(t, got)
+	if want := strings.Repeat("\x1b[B", altScrollLines); down != want {
+		t.Fatalf("wheel-down sent %q, want %q", down, want)
+	}
+}
+
+// TestWheelForwardedWhenMouseTracked proves that once the child enables mouse
+// reporting (here SGR button-event tracking), the raw wheel event is encoded and
+// forwarded instead of being turned into cursor keys.
+func TestWheelForwardedWhenMouseTracked(t *testing.T) {
+	got := make(chan []byte, 8)
+	term := NewRemote(80, 24, func(b []byte) { got <- append([]byte(nil), b...) }, nil)
+	defer term.Close()
+
+	// Alt screen + button-event tracking (1002) + SGR encoding (1006): a
+	// mouse-aware TUI. It wants the raw event, not alternate-scroll keys.
+	term.Feed([]byte("\x1b[?1049h\x1b[?1002h\x1b[?1006h"))
+	if !waitFor(time.Second, term.mouseTracked) {
+		t.Fatal("mouse tracking not registered")
+	}
+
+	term.MouseEvent(vt.MouseWheel{Button: vt.MouseWheelUp, X: 4, Y: 2})
+
+	// SGR wheel-up press at 1-based (5,3): CSI < 64 ; 5 ; 3 M.
+	if in := readInput(t, got); in != "\x1b[<64;5;3M" {
+		t.Fatalf("mouse-tracked wheel sent %q, want an SGR wheel-up report", in)
+	}
+}
+
+func readInput(t *testing.T, ch <-chan []byte) string {
+	t.Helper()
+	select {
+	case b := <-ch:
+		return string(b)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no input delivered to child")
+		return ""
+	}
+}
 
 // TestTerminalCapturesOutput proves the PTY → VT-emulator pipeline: a child's
 // output reaches the rendered screen. This is the core mechanism the native TUI
