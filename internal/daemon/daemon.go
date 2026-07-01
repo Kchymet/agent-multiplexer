@@ -302,13 +302,10 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	cl.paneClose(a.PaneID)
 	paneID := a.PaneID
 	cancel := inst.Subscribe(engine.Sink{
-		Output: func(b []byte) {
-			cl.send(core.PaneFrame{Type: core.FramePaneOutput, PaneID: paneID, Data: b})
-		},
-		Exit: func(msg string) {
-			cl.send(core.PaneFrame{Type: core.FramePaneExit, PaneID: paneID, Error: msg})
-			cl.dropRoute(paneID)
-		},
+		// Pane output is a stateful byte stream — it must not drop bytes, or the
+		// client's emulator corrupts (ghost text). paneOutput coalesces losslessly.
+		Output: func(b []byte) { cl.paneOutput(paneID, b) },
+		Exit:   func(msg string) { cl.paneExit(paneID, msg) },
 	})
 	cl.addRoute(paneID, paneRoute{inst: inst, cancel: cancel})
 	// Size the instance to this client's viewport (it may have pre-existed at a

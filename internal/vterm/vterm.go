@@ -231,6 +231,14 @@ func (t *Terminal) Feed(p []byte) {
 	}
 }
 
+// Reset clears the emulator to a blank screen via RIS (ESC c), discarding all
+// current cell state, scrollback, and modes. The daemon sends a pane.reset before
+// replaying a fresh repaint when a client fell too far behind to stream output
+// losslessly; without the clear, cells the repaint doesn't overwrite would ghost
+// (stale text showing through). It routes through the feed queue so it stays
+// ordered with the output that follows.
+func (t *Terminal) Reset() { t.Feed([]byte("\x1bc")) }
+
 // MarkClosed records that the remote process has exited, so Closed reports true
 // and the embedder can reap the pane.
 func (t *Terminal) MarkClosed() {

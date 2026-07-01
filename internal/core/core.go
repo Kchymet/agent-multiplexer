@@ -102,6 +102,7 @@ type Result struct {
 const (
 	FramePaneOutput = "pane.output" // pane produced output (PaneID, Data)
 	FramePaneExit   = "pane.exit"   // pane's process ended (PaneID, Error)
+	FramePaneReset  = "pane.reset"  // client must reset its emulator before the next output (PaneID)
 )
 
 // PaneFrame is a daemon -> client message carrying one agent pane's output or its

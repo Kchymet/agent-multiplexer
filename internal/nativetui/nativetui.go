@@ -620,6 +620,13 @@ func (m *model) handlePaneFrame(p *core.PaneFrame) {
 		if t != nil {
 			t.Feed(p.Data)
 		}
+	case core.FramePaneReset:
+		// The daemon fell too far behind to stream losslessly and is about to
+		// replay a fresh repaint; clear the emulator first so stale cells the
+		// repaint doesn't overwrite don't ghost through.
+		if t != nil {
+			t.Reset()
+		}
 	case core.FramePaneExit:
 		if p.Error != "" {
 			m.status = "pane exited: " + p.Error
@@ -666,4 +673,3 @@ func (m *model) paneRows() int {
 	}
 	return 24
 }
-
