@@ -459,8 +459,18 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		return "", MoveAgent(ctx, a.ID, a.Target)
 	case "archive":
 		return "", ToggleArchived(ctx, a.ID)
+	case "set-archived":
+		// Explicit archive/unarchive (the CLI's `archive`/`unarchive`), vs the
+		// TUI's one-key "archive" toggle above.
+		return "", SetArchived(ctx, a.ID, a.Fields["archived"] == "true")
 	case "rename":
 		return "", Rename(a.ID, a.Fields["name"])
+	case "attach-repo":
+		// Attach an already-tracked repo to a workgroup (vs "add-repo", which
+		// tracks a brand-new repo from a source).
+		return "", AttachRepo(a.ID, a.Fields["repo"])
+	case "rm-repo":
+		return "", RemoveRepo(a.ID)
 	case "new-repo-agent":
 		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
@@ -488,6 +498,19 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 			def = &AgentSpec{Prompt: prompt}
 		}
 		// Return the workgroup root; the client resolves it to the first agent.
+		return CreateWorkspace(ctx, a.Fields["name"], repos, def)
+	case "create-workspace":
+		// The CLI's `session create`/`new`: create a workgroup over the given
+		// repos, optionally seeding one default agent (Fields["defaultAgent"]=="1")
+		// with an explicit mode/model/prompt. When the interactive flow configures
+		// its own agents it passes defaultAgent="" and follows up with add-agent.
+		repos := store.SplitRepos(a.Fields["repos"])
+		var def *AgentSpec
+		if a.Fields["defaultAgent"] == "1" {
+			def = &AgentSpec{
+				Agent: "claude", Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
+			}
+		}
 		return CreateWorkspace(ctx, a.Fields["name"], repos, def)
 	}
 	return "", fmt.Errorf("unknown action %q", a.Action)

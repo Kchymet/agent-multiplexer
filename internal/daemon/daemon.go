@@ -264,6 +264,8 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 			cl.paneResize(a.PaneID, a.Cols, a.Rows)
 		case core.ActionPaneClose:
 			cl.paneClose(a.PaneID)
+		case core.ActionQuery:
+			d.query(cl, a)
 		default:
 			res := d.handle(ctx, a)
 			if a.Action != "" {

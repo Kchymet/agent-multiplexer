@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/gh"
-	"amux/internal/git"
-	"amux/internal/store"
-	"amux/internal/wsops"
 )
+
+// This file is the CLI surface for repos and workgroups. It is deliberately a
+// slim wrapper over the daemon: reads go through queryRows (QueryRepos /
+// QuerySessions) and mutations through sendAction, so the CLI never opens the
+// store or runs store/git side effects itself — the daemon (the single owner of
+// the store and the agent engine) does. Only genuinely client-side interaction
+// (fzf menus, the gh owner browser) lives here, since it needs a real TTY.
 
 // cmdName sets the display name of the agent the caller is running inside. Agents
 // launch with $AMUX_WORKGROUP set to their id (see wsops.AgentCommand), so this
@@ -30,11 +33,21 @@ func cmdName(args []string) error {
 		return fmt.Errorf("not inside an amux agent ($AMUX_WORKGROUP unset)")
 	}
 	name := strings.Join(args, " ")
-	if err := wsops.Rename(id, name); err != nil {
+	if err := sendAction(core.Action{Action: "rename", ID: id, Fields: map[string]string{"name": name}}); err != nil {
 		return err
 	}
 	fmt.Printf("session %s renamed to %q\n", id, name)
 	return nil
+}
+
+// agentCfg is one agent's configuration gathered in the interactive create flow,
+// then handed to the daemon as add-agent fields. It mirrors the daemon's
+// AgentSpec but keeps the CLI free of the store/wsops layer.
+type agentCfg struct {
+	Repos  []string
+	Mode   string
+	Model  string
+	Prompt string
 }
 
 // ---- repo commands -------------------------------------------------------
@@ -43,42 +56,22 @@ func cmdRepo(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: amux repo <add|ls|rm> ...")
 	}
-	ctx := context.Background()
-	db, err := store.Open()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
 	switch args[0] {
 	case "add":
-		switch {
-		case len(args) < 2:
-			repos, err := pickAndCloneRepos(ctx, db, bufio.NewReader(os.Stdin))
-			if err != nil {
-				return err
-			}
-			for _, r := range repos {
-				fmt.Printf("tracked %s  <-  %s\n", r.Name, r.Source)
-			}
-			return nil
-		case looksLikeGHRepo(args[1]):
-			r, err := addRepoGH(ctx, db, args[1])
-			if err != nil {
-				return err
-			}
-			fmt.Printf("tracked %s  <-  %s\n", r.Name, r.Source)
-			return nil
-		default:
-			r, err := addRepo(ctx, db, args[1])
-			if err != nil {
-				return err
-			}
-			fmt.Printf("tracked %s  <-  %s\n", r.Name, r.Source)
-			return nil
+		if len(args) < 2 {
+			return addReposInteractive(bufio.NewReader(os.Stdin))
 		}
+		// Non-interactive: the daemon's add-repo resolves a gh slug, git URL, or
+		// local path and clones it — the CLI just forwards the source string.
+		src := args[1]
+		fmt.Printf("tracking %s…\n", src)
+		if err := sendAction(core.Action{Action: "add-repo", Fields: map[string]string{"source": src}}); err != nil {
+			return err
+		}
+		fmt.Printf("tracked %s\n", src)
+		return nil
 	case "ls", "list":
-		repos, err := db.Repos()
+		repos, err := queryRepos()
 		if err != nil {
 			return err
 		}
@@ -94,23 +87,7 @@ func cmdRepo(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux repo rm <name>")
 		}
-		r, ok, err := db.Repo(args[1])
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("no such repo %q", args[1])
-		}
-		// Refuse if any agent/workgroup still uses this repo (its worktrees live in
-		// the bare clone we'd delete); list them so the user can remove them first.
-		if users, err := repoUsers(db, args[1]); err != nil {
-			return err
-		} else if len(users) > 0 {
-			return fmt.Errorf("repo %q is in use by: %s\n  delete those first (amux workgroup rm <id>)",
-				args[1], strings.Join(users, ", "))
-		}
-		_ = os.RemoveAll(r.GitDir)
-		if err := db.DeleteRepo(args[1]); err != nil {
+		if err := sendAction(core.Action{Action: "rm-repo", ID: args[1]}); err != nil {
 			return err
 		}
 		fmt.Printf("removed %s\n", args[1])
@@ -120,65 +97,42 @@ func cmdRepo(args []string) error {
 	}
 }
 
-func registerClone(db *store.DB, name, source string, clone func(gitDir string) error) (store.Repo, error) {
-	if name == "" {
-		return store.Repo{}, fmt.Errorf("could not derive a repo name from %q", source)
-	}
-	if existing, ok, _ := db.Repo(name); ok {
-		return existing, nil
-	}
-	if err := os.MkdirAll(core.ReposDir(), 0o755); err != nil {
-		return store.Repo{}, err
-	}
-	gitDir := filepath.Join(core.ReposDir(), name+".git")
-	if err := clone(gitDir); err != nil {
-		return store.Repo{}, err
-	}
-	r := store.Repo{Name: name, Source: source, GitDir: gitDir}
-	return r, db.PutRepo(r)
-}
-
-func addRepo(ctx context.Context, db *store.DB, source string) (store.Repo, error) {
-	return registerClone(db, git.NameFromSource(source), source, func(gitDir string) error {
-		src := expandHome(source)
-		if git.LooksLocal(src) {
-			abs, _ := filepath.Abs(src)
-			if !git.IsGitRepo(ctx, abs) {
-				return fmt.Errorf("%s is not a git repository", abs)
-			}
-			src = abs
-		}
-		return git.CloneBare(ctx, src, gitDir)
-	})
-}
-
-func addRepoGH(ctx context.Context, db *store.DB, nameWithOwner string) (store.Repo, error) {
-	return registerClone(db, git.NameFromSource(nameWithOwner), nameWithOwner, func(gitDir string) error {
-		return gh.CloneBare(ctx, nameWithOwner, gitDir)
-	})
-}
-
-func looksLikeGHRepo(s string) bool {
-	if strings.Contains(s, "://") || strings.Contains(s, "@") {
-		return false
-	}
-	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "~") {
-		return false
-	}
-	if _, err := os.Stat(s); err == nil {
-		return false
-	}
-	parts := strings.Split(s, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
-}
-
 const manualEntryItem = "✎  enter a URL or local path…"
 
-func pickAndCloneRepos(ctx context.Context, db *store.DB, in *bufio.Reader) ([]store.Repo, error) {
+// addReposInteractive drives the gh/fzf owner→repo browser to gather one or more
+// repo sources, then asks the daemon to clone and track each. The browsing needs
+// a TTY so it stays client-side; the cloning is the daemon's job.
+func addReposInteractive(in *bufio.Reader) error {
+	sources, err := pickRepoSources(context.Background(), in)
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		return fmt.Errorf("nothing selected")
+	}
+	var tracked int
+	for _, s := range sources {
+		fmt.Printf("tracking %s…\n", s)
+		if err := sendAction(core.Action{Action: "add-repo", Fields: map[string]string{"source": s}}); err != nil {
+			fmt.Printf("  failed: %v\n", err)
+			continue
+		}
+		fmt.Printf("tracked %s\n", s)
+		tracked++
+	}
+	if tracked == 0 {
+		return fmt.Errorf("nothing tracked")
+	}
+	return nil
+}
+
+// pickRepoSources returns repo source strings (gh "owner/name" slugs, or a
+// manually entered URL/path) chosen through the gh owner browser. It performs no
+// cloning — the daemon's add-repo does that.
+func pickRepoSources(ctx context.Context, in *bufio.Reader) ([]string, error) {
 	if !gh.Installed() {
 		fmt.Println("GitHub CLI (gh) is not installed — see https://cli.github.com")
-		r, err := manualEntry(ctx, db, in)
-		return wrap(r, err)
+		return manualSource(in)
 	}
 	if !gh.Authed(ctx) {
 		fmt.Print("Not signed in to GitHub. Authenticate now? [Y/n] ")
@@ -202,8 +156,7 @@ func pickAndCloneRepos(ctx context.Context, db *store.DB, in *bufio.Reader) ([]s
 		return nil, err
 	}
 	if owner == manualEntryItem {
-		r, err := manualEntry(ctx, db, in)
-		return wrap(r, err)
+		return manualSource(in)
 	}
 	remotes, err := gh.ListReposFor(ctx, owner)
 	if err != nil {
@@ -220,59 +173,39 @@ func pickAndCloneRepos(ctx context.Context, db *store.DB, in *bufio.Reader) ([]s
 	if err != nil {
 		return nil, err
 	}
-	var result []store.Repo
+	var sources []string
 	for _, p := range picks {
 		if p == manualEntryItem {
-			if r, err := manualEntry(ctx, db, in); err == nil {
-				result = append(result, r)
+			if extra, err := manualSource(in); err == nil {
+				sources = append(sources, extra...)
 			}
 			continue
 		}
-		fmt.Printf("Cloning %s…\n", p)
-		r, err := addRepoGH(ctx, db, p)
-		if err != nil {
-			fmt.Printf("  failed: %v\n", err)
-			continue
-		}
-		result = append(result, r)
+		sources = append(sources, p)
 	}
-	if len(result) == 0 {
+	if len(sources) == 0 {
 		return nil, fmt.Errorf("nothing selected")
 	}
-	return result, nil
+	return sources, nil
 }
 
-func wrap(r store.Repo, err error) ([]store.Repo, error) {
-	if err != nil {
-		return nil, err
-	}
-	return []store.Repo{r}, nil
-}
-
-func manualEntry(ctx context.Context, db *store.DB, in *bufio.Reader) (store.Repo, error) {
+func manualSource(in *bufio.Reader) ([]string, error) {
 	fmt.Print("Git URL or local path: ")
 	line, _ := in.ReadString('\n')
 	src := strings.TrimSpace(line)
 	if src == "" {
-		return store.Repo{}, fmt.Errorf("no source given")
+		return nil, fmt.Errorf("no source given")
 	}
-	return addRepo(ctx, db, src)
+	return []string{src}, nil
 }
 
 // startCreated asks the daemon to start the agent process(es) for a freshly
 // created session — a workgroup root (all its agents) or a single agent id —
 // mirroring the TUI, where creating a session and switching to it starts it. It's
-// best-effort: the session is already persisted, so a daemon that can't be
-// reached is a warning, not a failure of the create command.
+// best-effort: the session is already persisted, so a failure to start is a
+// warning, not a failure of the create command.
 func startCreated(id string) {
-	self, err := os.Executable()
-	if err == nil {
-		err = ensureDaemon(self)
-	}
-	if err == nil {
-		err = sendAction(core.Action{Action: core.ActionStart, ID: id})
-	}
-	if err != nil {
+	if err := sendAction(core.Action{Action: core.ActionStart, ID: id}); err != nil {
 		fmt.Fprintf(os.Stderr, "amux: created %s but could not start it (%v)\n", id, err)
 	}
 }
@@ -297,22 +230,23 @@ func cmdSession(args []string) error {
 		}
 		// Non-interactive: amux session add <root> <repo>... [--mode m] [--model M] [--prompt t]
 		repos, cfg := parseCreateFlags(args[2:])
-		sub, err := wsops.AddAgent(ctx, args[1], wsops.AgentSpec{
-			Agent: "claude", Repos: repos, Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt,
-		})
+		id, err := sendActionID(core.Action{Action: "add-agent", ID: args[1], Fields: map[string]string{
+			"repos": strings.Join(repos, ","), "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
+		}})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("added agent %s to %s (repos: %s)\n", sub.ID, args[1], orNone(strings.Join(repos, ", ")))
-		startCreated(sub.ID)
+		fmt.Printf("added agent %s to %s (repos: %s)\n", id, args[1], orNone(strings.Join(repos, ", ")))
+		startCreated(id)
 		return nil
 	case "create":
 		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
-		// Creates a workspace that attaches the repos, plus a default agent using all.
+		// Creates a workgroup that attaches the repos, plus a default agent using all.
 		repos, cfg := parseCreateFlags(args[1:])
-		rootID, err := wsops.CreateWorkspace(ctx, cfg.name, repos, &wsops.AgentSpec{
-			Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt,
-		})
+		rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: map[string]string{
+			"name": cfg.name, "repos": strings.Join(repos, ","),
+			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
+		}})
 		if err != nil {
 			return err
 		}
@@ -326,14 +260,14 @@ func cmdSession(args []string) error {
 			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--mode m] [--model M]")
 		}
 		_, cfg := parseCreateFlags(args[2:])
-		a, err := wsops.CreateRepoWorkgroup(ctx, args[1], wsops.AgentSpec{
-			Agent: "claude", Mode: cfg.mode, Model: cfg.model, Prompt: cfg.prompt,
-		})
+		id, err := sendActionID(core.Action{Action: "new-repo-agent", ID: args[1], Fields: map[string]string{
+			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
+		}})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created repo-scoped agent %s on %s\n", a.ID, args[1])
-		startCreated(a.ID)
+		fmt.Printf("created repo-scoped agent %s on %s\n", id, args[1])
+		startCreated(id)
 		return nil
 	case "move":
 		// amux workgroup move <agentID> [<targetRootID> | --new]
@@ -344,7 +278,7 @@ func cmdSession(args []string) error {
 		if len(args) > 2 && args[2] != "--new" {
 			target = args[2]
 		}
-		if err := wsops.MoveAgent(ctx, args[1], target); err != nil {
+		if err := sendAction(core.Action{Action: "move", ID: args[1], Target: target}); err != nil {
 			return err
 		}
 		if target == "" {
@@ -354,11 +288,11 @@ func cmdSession(args []string) error {
 		}
 		return nil
 	case "attach":
-		// amux session attach <root-id> <repo> — attach a tracked repo to a workspace
+		// amux session attach <root-id> <repo> — attach a tracked repo to a workgroup
 		if len(args) < 3 {
 			return fmt.Errorf("usage: amux session attach <root-id> <repo>")
 		}
-		if err := wsops.AttachRepo(args[1], args[2]); err != nil {
+		if err := sendAction(core.Action{Action: "attach-repo", ID: args[1], Fields: map[string]string{"repo": args[2]}}); err != nil {
 			return err
 		}
 		fmt.Printf("attached %s to workspace %s\n", args[2], args[1])
@@ -367,17 +301,21 @@ func cmdSession(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux session rm <id>")
 		}
-		return wsops.DeleteByID(ctx, args[1])
+		if err := sendAction(core.Action{Action: "delete", ID: args[1]}); err != nil {
+			return err
+		}
+		fmt.Printf("removed %s\n", args[1])
+		return nil
 	case "rename":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: amux session rename <id> <name>")
 		}
-		return wsops.Rename(args[1], strings.Join(args[2:], " "))
+		return sendAction(core.Action{Action: "rename", ID: args[1], Fields: map[string]string{"name": strings.Join(args[2:], " ")}})
 	case "archive", "done":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup archive <id>")
 		}
-		if err := wsops.SetArchived(ctx, args[1], true); err != nil {
+		if err := sendAction(core.Action{Action: "set-archived", ID: args[1], Fields: map[string]string{"archived": "true"}}); err != nil {
 			return err
 		}
 		fmt.Printf("archived %s\n", args[1])
@@ -386,7 +324,7 @@ func cmdSession(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup unarchive <id>")
 		}
-		if err := wsops.SetArchived(ctx, args[1], false); err != nil {
+		if err := sendAction(core.Action{Action: "set-archived", ID: args[1], Fields: map[string]string{"archived": "false"}}); err != nil {
 			return err
 		}
 		fmt.Printf("restored %s\n", args[1])
@@ -399,60 +337,33 @@ func cmdSession(args []string) error {
 }
 
 func sessionList() error {
-	db, err := store.Open()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	roots, err := db.Roots()
+	roots, err := querySessions()
 	if err != nil {
 		return err
 	}
 	for _, r := range roots {
-		fmt.Printf("%-8s %-6s %-20s repos: %s\n", r.ID, defaultStr(r.Scope, store.ScopeWork), r.Display(),
-			orNone(strings.ReplaceAll(r.Repo, ",", ", ")))
-		subs, _ := db.Children(r.ID)
-		for _, s := range subs {
+		fmt.Printf("%-8s %-6s %-20s repos: %s\n", r.ID, defaultStr(r.Scope, "work"), orID(r.Display, r.ID),
+			orNone(strings.ReplaceAll(r.Repos, ",", ", ")))
+		for _, s := range r.Agents {
 			tag := ""
 			if s.Archived {
 				tag = " [archived]"
 			}
 			fmt.Printf("  %-8s %-8s %-6s %s%s\n", s.ID, defaultStr(s.Agent, "claude"), s.Mode,
-				strings.ReplaceAll(s.Repo, ",", "+"), tag)
+				strings.ReplaceAll(s.Repos, ",", "+"), tag)
 		}
 	}
 	return nil
 }
 
-// repoUsers returns the ids of agents (sub-sessions) whose worktrees include repo.
-func repoUsers(db *store.DB, repo string) ([]string, error) {
-	sessions, err := db.AllSessions()
-	if err != nil {
-		return nil, err
-	}
-	var users []string
-	for _, s := range sessions {
-		if s.IsRoot() {
-			continue
-		}
-		for _, r := range store.SplitRepos(s.Repo) {
-			if r == repo {
-				users = append(users, s.ID)
-				break
-			}
-		}
-	}
-	return users, nil
-}
-
-// sessionNew is the interactive create page: name the workspace, attach repos,
+// sessionNew is the interactive create page: name the workgroup, attach repos,
 // optionally configure specific agents over a subset of those repos (otherwise a
 // default agent uses all), then Create.
 func sessionNew(ctx context.Context, seedRepos []string) error {
 	in := bufio.NewReader(os.Stdin)
 	name := ""
 	repos := append([]string(nil), seedRepos...) // pre-attach repos (e.g. from the rail)
-	var agents []wsops.AgentSpec
+	var agents []agentCfg
 
 	for {
 		menu := []string{
@@ -483,61 +394,80 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 				agents = append(agents[:i], agents[i+1:]...)
 			}
 		case strings.HasPrefix(choice, "✓"):
-			// No explicitly-configured agents → one default agent over all repos,
-			// using the same rational defaults as the add-agent screen.
-			var defaultAgent *wsops.AgentSpec
-			if len(agents) == 0 {
-				defaultAgent = &wsops.AgentSpec{Agent: "claude", Mode: store.ModeTask, Model: claudecfg.PreferredModel()}
-			}
-			rootID, err := wsops.CreateWorkspace(ctx, name, repos, defaultAgent)
-			if err != nil {
-				return err
-			}
-			for _, a := range agents {
-				if _, err := wsops.AddAgent(ctx, rootID, a); err != nil {
-					return err
-				}
-			}
-			startCreated(rootID)
-			fmt.Printf("created workspace %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
-			return nil
+			return createWorkspace(name, repos, agents)
 		case strings.HasPrefix(choice, "✗"):
 			return nil
 		}
 	}
 }
 
+// createWorkspace creates the workgroup over the daemon: when the user configured
+// no explicit agents we seed one default agent over all repos (matching the
+// add-agent screen's defaults); otherwise we create the bare workgroup and add
+// each configured agent.
+func createWorkspace(name string, repos []string, agents []agentCfg) error {
+	fields := map[string]string{"name": name, "repos": strings.Join(repos, ",")}
+	if len(agents) == 0 {
+		fields["defaultAgent"] = "1"
+		fields["mode"] = "task"
+		fields["model"] = claudecfg.PreferredModel()
+	}
+	rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: fields})
+	if err != nil {
+		return err
+	}
+	for _, a := range agents {
+		if _, err := sendActionID(core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{
+			"repos": strings.Join(a.Repos, ","), "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
+		}}); err != nil {
+			return err
+		}
+	}
+	startCreated(rootID)
+	fmt.Printf("created workspace %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
+	return nil
+}
+
 func sessionAdd(ctx context.Context, rootID string) error {
 	in := bufio.NewReader(os.Stdin)
-	var avail []string
-	if db, err := store.Open(); err == nil {
-		if root, ok, _ := db.GetSession(rootID); ok {
-			avail = store.SplitRepos(root.Repo)
-		}
-		db.Close()
-	}
+	avail := workgroupRepos(rootID)
 	a, ok := configureAgent(ctx, in, avail)
 	if !ok {
 		return nil
 	}
-	sub, err := wsops.AddAgent(ctx, rootID, a)
+	id, err := sendActionID(core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{
+		"repos": strings.Join(a.Repos, ","), "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
+	}})
 	if err != nil {
 		return err
 	}
-	startCreated(sub.ID)
-	fmt.Printf("added agent %s — it's starting; open it in the dashboard (`amux`)\n", sub.ID)
+	startCreated(id)
+	fmt.Printf("added agent %s — it's starting; open it in the dashboard (`amux`)\n", id)
+	return nil
+}
+
+// workgroupRepos returns the repos attached to a workgroup root, via the daemon.
+func workgroupRepos(rootID string) []string {
+	roots, err := querySessions()
+	if err != nil {
+		return nil
+	}
+	for _, r := range roots {
+		if r.ID == rootID {
+			return splitRepos(r.Repos)
+		}
+	}
 	return nil
 }
 
 // configureAgent presents one review screen for a new agent, pre-filled with
-// rational defaults — all of the workspace's repos, "task" mode, and the user's
+// rational defaults — all of the workgroup's repos, "task" mode, and the user's
 // preferred Claude model — so the common case is a single ENTER on "Add agent".
 // Any field can be edited first; the menu loops until the user confirms or cancels.
-func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (wsops.AgentSpec, bool) {
-	a := wsops.AgentSpec{
-		Agent: "claude",
-		Repos: append([]string(nil), available...), // default: the whole workspace
-		Mode:  store.ModeTask,                      // default: task-style work
+func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (agentCfg, bool) {
+	a := agentCfg{
+		Repos: append([]string(nil), available...), // default: the whole workgroup
+		Mode:  "task",                              // default: task-style work
 		Model: claudecfg.PreferredModel(),          // default: your usual model
 	}
 	for {
@@ -550,7 +480,7 @@ func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (
 		}
 		choice, err := fzfMenu("configure agent", menu)
 		if err != nil {
-			return wsops.AgentSpec{}, false // Esc
+			return agentCfg{}, false // Esc
 		}
 		switch {
 		case strings.HasPrefix(choice, "Repos"):
@@ -568,7 +498,7 @@ func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (
 		case strings.HasPrefix(choice, "✓"):
 			return a, true
 		case strings.HasPrefix(choice, "✗"):
-			return wsops.AgentSpec{}, false
+			return agentCfg{}, false
 		}
 	}
 }
@@ -577,12 +507,10 @@ func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (
 func pickRepos(ctx context.Context, in *bufio.Reader, prompt string) []string {
 	const clone = "➕  add / clone a repo…"
 	for {
-		db, err := store.Open()
+		tracked, err := queryRepos()
 		if err != nil {
 			return nil
 		}
-		tracked, _ := db.Repos()
-		db.Close()
 		items := []string{clone}
 		for _, r := range tracked {
 			items = append(items, r.Name)
@@ -601,10 +529,7 @@ func pickRepos(ctx context.Context, in *bufio.Reader, prompt string) []string {
 			}
 		}
 		if doClone {
-			if db2, e := store.Open(); e == nil {
-				_, _ = pickAndCloneRepos(ctx, db2, in)
-				db2.Close()
-			}
+			_ = addReposInteractive(in)
 			if len(sel) > 0 {
 				return sel
 			}
@@ -620,12 +545,12 @@ func pickMode() string {
 		"loop  — long-running, (nearly) autonomous loop",
 	})
 	if err != nil || strings.HasPrefix(choice, "task") {
-		return store.ModeTask
+		return "task"
 	}
-	return store.ModeLoop
+	return "loop"
 }
 
-func describeAgent(a wsops.AgentSpec) string {
+func describeAgent(a agentCfg) string {
 	repos := "(plain agent)"
 	if len(a.Repos) > 0 {
 		repos = strings.Join(a.Repos, "+")
@@ -637,11 +562,30 @@ func describeAgent(a wsops.AgentSpec) string {
 	return strings.Join(parts, " · ")
 }
 
+// splitRepos splits a comma-joined repo list, dropping blanks. It mirrors
+// store.SplitRepos so the CLI can parse a WorkgroupRow's repos without the store.
+func splitRepos(s string) []string {
+	var out []string
+	for _, r := range strings.Split(s, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func orNone(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "(none)"
 	}
 	return s
+}
+
+func orID(display, id string) string {
+	if strings.TrimSpace(display) == "" {
+		return id
+	}
+	return display
 }
 
 func agentIndex(line string) int {
@@ -653,6 +597,18 @@ func agentIndex(line string) int {
 	return n - 1
 }
 
+// ---- query helpers -------------------------------------------------------
+
+func queryRepos() ([]core.RepoRow, error) {
+	var rows []core.RepoRow
+	return rows, queryRows(core.QueryRepos, &rows)
+}
+
+func querySessions() ([]core.WorkgroupRow, error) {
+	var rows []core.WorkgroupRow
+	return rows, queryRows(core.QuerySessions, &rows)
+}
+
 // ---- shared helpers ------------------------------------------------------
 
 type createCfg struct{ name, prompt, mode, model string }
@@ -660,7 +616,7 @@ type createCfg struct{ name, prompt, mode, model string }
 func parseCreateFlags(args []string) ([]string, createCfg) {
 	// Same rational defaults as the interactive flow: task mode and the user's
 	// preferred Claude model. An explicit --mode/--model below overrides these.
-	cfg := createCfg{mode: store.ModeTask, model: claudecfg.PreferredModel()}
+	cfg := createCfg{mode: "task", model: claudecfg.PreferredModel()}
 	var repos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -758,12 +714,4 @@ func defaultStr(v, def string) string {
 		return def
 	}
 	return v
-}
-
-func expandHome(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, strings.TrimPrefix(p, "~"))
-	}
-	return p
 }

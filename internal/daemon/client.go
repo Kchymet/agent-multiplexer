@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -123,11 +124,37 @@ func (c *Client) PaneClose(paneID string) error {
 	return c.Send(core.Action{Action: core.ActionPaneClose, PaneID: paneID})
 }
 
-// Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane is set.
+// Query asks the daemon for a store-backed read model (QueryRepos, QuerySessions)
+// and returns its rows as raw JSON for the caller to unmarshal into the matching
+// row type. Snapshot frames that arrive first are skipped; a failed Data frame
+// surfaces the daemon's error. This is the read counterpart to Send: it keeps the
+// CLI from opening the store itself.
+func (c *Client) Query(name string) (json.RawMessage, error) {
+	if err := c.Send(core.Action{Action: core.ActionQuery, Query: name}); err != nil {
+		return nil, err
+	}
+	for {
+		f, err := c.Next()
+		if err != nil {
+			return nil, err
+		}
+		if f.Data == nil {
+			continue
+		}
+		if !f.Data.OK {
+			return nil, fmt.Errorf("%s", f.Data.Error)
+		}
+		return f.Data.Rows, nil
+	}
+}
+
+// Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane/Data
+// is set.
 type Frame struct {
 	Snapshot *core.Snapshot
 	Result   *core.Result
 	Pane     *core.PaneFrame
+	Data     *core.Data
 }
 
 // Next blocks until the next frame arrives (or the connection errors).
@@ -161,6 +188,12 @@ func (c *Client) Next() (Frame, error) {
 			return Frame{}, err
 		}
 		return Frame{Pane: &p}, nil
+	case core.FrameData:
+		var dm core.Data
+		if err := json.Unmarshal(line, &dm); err != nil {
+			return Frame{}, err
+		}
+		return Frame{Data: &dm}, nil
 	default:
 		// Unknown frame: return an empty frame so the caller can keep reading.
 		return Frame{}, nil

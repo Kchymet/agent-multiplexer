@@ -63,6 +63,54 @@ func AddRepoSource(ctx context.Context, source string) (store.Repo, error) {
 	return r, db.PutRepo(r)
 }
 
+// RemoveRepo untracks a repository: it refuses if any agent's worktree still
+// uses it (those worktrees live inside the bare clone we'd delete), then removes
+// the clone from disk and the store record. It's the daemon-side core of the
+// CLI's `repo rm`, so the CLI never opens the store to untrack a repo.
+func RemoveRepo(name string) error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	r, ok, err := db.Repo(name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("no such repo %q", name)
+	}
+	if users, err := repoUsers(db, name); err != nil {
+		return err
+	} else if len(users) > 0 {
+		return fmt.Errorf("repo %q is in use by: %s\n  delete those first (amux workgroup rm <id>)",
+			name, strings.Join(users, ", "))
+	}
+	_ = os.RemoveAll(r.GitDir)
+	return db.DeleteRepo(name)
+}
+
+// repoUsers returns the ids of agents (sub-sessions) whose worktrees include repo.
+func repoUsers(db *store.DB, repo string) ([]string, error) {
+	sessions, err := db.AllSessions()
+	if err != nil {
+		return nil, err
+	}
+	var users []string
+	for _, s := range sessions {
+		if s.IsRoot() {
+			continue
+		}
+		for _, r := range store.SplitRepos(s.Repo) {
+			if r == repo {
+				users = append(users, s.ID)
+				break
+			}
+		}
+	}
+	return users, nil
+}
+
 // looksLikeGHRepo reports whether s is a bare "owner/name" GitHub slug (cloned
 // via gh) rather than a URL or local path.
 func looksLikeGHRepo(s string) bool {
