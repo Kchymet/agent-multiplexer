@@ -96,6 +96,118 @@ func TestLocalEngineFanoutPersistenceReplay(t *testing.T) {
 	}
 }
 
+// waitDead polls until the instance stops reporting Alive, or fails.
+func waitDead(t *testing.T, in engine.Instance, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if !in.Alive() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("instance still alive")
+}
+
+// A graceful kill sends SIGTERM and lets the process flush and exit on its own,
+// so an agent (e.g. Claude) can write its session transcript before dying. Here
+// the process traps SIGTERM, prints a marker, and exits — the marker proves it
+// wasn't hard-killed, and the whole thing returns well within the grace period.
+func TestKillIsGracefulOnSIGTERM(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+
+	key := engine.Key{AgentID: "graceful", Tab: 0}
+	spec := engine.Spec{
+		Key:  key,
+		Argv: []string{"sh", "-c", "trap 'printf FLUSHED; exit 0' TERM; printf READY; while :; do sleep 0.02; done"},
+		Cols: 80, Rows: 24,
+	}
+	inst, err := eng.Ensure(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	waitFor(t, c, "READY", 3*time.Second)
+
+	start := time.Now()
+	inst.(*instance).terminate(4 * time.Second)
+	if elapsed := time.Since(start); elapsed >= 4*time.Second {
+		t.Fatalf("graceful exit should return before the grace period, took %v", elapsed)
+	}
+	if inst.Alive() {
+		t.Fatal("instance should be dead after terminate")
+	}
+	if !c.has("FLUSHED") {
+		t.Fatal("process was not allowed to flush on SIGTERM (no FLUSHED marker)")
+	}
+}
+
+// A process that ignores SIGTERM is escalated to SIGKILL after the grace period,
+// so a wedged agent can't block shutdown forever.
+func TestKillEscalatesToSIGKILL(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+
+	key := engine.Key{AgentID: "stubborn", Tab: 0}
+	spec := engine.Spec{
+		Key:  key,
+		Argv: []string{"sh", "-c", "trap '' TERM; printf READY; while :; do sleep 0.02; done"},
+		Cols: 80, Rows: 24,
+	}
+	inst, err := eng.Ensure(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	waitFor(t, c, "READY", 3*time.Second)
+
+	const grace = 300 * time.Millisecond
+	start := time.Now()
+	inst.(*instance).terminate(grace)
+	elapsed := time.Since(start)
+	if elapsed < grace {
+		t.Fatalf("should have waited the grace period before SIGKILL, took %v", elapsed)
+	}
+	if inst.Alive() {
+		t.Fatal("instance should be dead after SIGKILL")
+	}
+}
+
+// Shutdown terminates instances in parallel, so its total cost is ~one grace
+// period even with several stubborn (SIGTERM-ignoring) agents, not N of them.
+func TestShutdownTerminatesInParallel(t *testing.T) {
+	t.Setenv("AMUX_KILL_GRACE", "300ms")
+	eng := New()
+
+	const n = 4
+	for i := 0; i < n; i++ {
+		spec := engine.Spec{
+			Key:  engine.Key{AgentID: "p", Tab: i},
+			Argv: []string{"sh", "-c", "trap '' TERM; printf READY; while :; do sleep 0.02; done"},
+			Cols: 80, Rows: 24,
+		}
+		inst, err := eng.Ensure(context.Background(), spec)
+		if err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		c := &collector{}
+		inst.Subscribe(c.sink())
+		waitFor(t, c, "READY", 3*time.Second)
+	}
+
+	start := time.Now()
+	eng.Shutdown()
+	if elapsed := time.Since(start); elapsed > 2*300*time.Millisecond {
+		t.Fatalf("parallel shutdown of %d instances took %v; expected ~one grace period", n, elapsed)
+	}
+	for _, k := range eng.Live() {
+		t.Fatalf("instance %v still live after Shutdown", k)
+	}
+}
+
 // Input written to an instance reaches the process and its echo streams back.
 func TestLocalEngineInput(t *testing.T) {
 	eng := New()
