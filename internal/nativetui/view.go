@@ -231,8 +231,11 @@ func (m *model) rowStatus(s core.Session, indent string) string {
 		return ""
 	}
 	sub := s.Status
-	if s.Title != s.ID && !strings.Contains(s.Status, s.ID) {
-		sub = s.ID + " · " + s.Status // leaf rows show their short id
+	switch {
+	case s.Task != "":
+		sub = s.Task + " · " + s.Status // leaf rows show what the agent was asked to do
+	case s.Title != s.ID && !strings.Contains(s.Status, s.ID):
+		sub = s.ID + " · " + s.Status // no prompt to summarize: fall back to the short id
 	}
 	return stateColor(s.State).Render(indent + "  " + truncate(sub, sidebarWidth-3-len(indent)))
 }

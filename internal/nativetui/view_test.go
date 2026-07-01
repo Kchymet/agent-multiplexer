@@ -162,3 +162,20 @@ func TestRowStatusSubline(t *testing.T) {
 		t.Fatalf("repo row should have no sub-line, got %q", got)
 	}
 }
+
+// A leaf agent's sub-line shows its task summary (the initial prompt) rather
+// than its opaque session id, falling back to the id only when there's no task.
+func TestRowStatusShowsTask(t *testing.T) {
+	m := &model{}
+	withTask := core.Session{ID: "ag1", Title: "ag1", RootID: "wg1", Status: "ready · main", Task: "fix the login bug", State: core.StateReady, Section: core.SectionWorkgroups}
+	if got := m.rowStatus(withTask, " "); !strings.Contains(got, "fix the login bug") {
+		t.Fatalf("sub-line should show the task summary, got %q", got)
+	}
+	if got := m.rowStatus(withTask, " "); strings.Contains(got, "ag1") {
+		t.Fatalf("sub-line should not show the session id when a task is present, got %q", got)
+	}
+	noTask := core.Session{ID: "ag2", Title: "renamed", RootID: "wg1", Status: "ready · main", State: core.StateReady, Section: core.SectionWorkgroups}
+	if got := m.rowStatus(noTask, " "); !strings.Contains(got, "ag2") {
+		t.Fatalf("sub-line should fall back to the id without a task, got %q", got)
+	}
+}
