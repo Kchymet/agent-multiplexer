@@ -42,14 +42,63 @@ func killGrace() time.Duration {
 	return defaultKillGrace
 }
 
+// defaultShutdownGrace bounds how long a graceful Shutdown waits for a mid-turn
+// instance to return to a safe state before terminating it anyway. It caps the
+// extra shutdown latency; because instances wait concurrently (Shutdown fans out
+// one goroutine each), the whole shutdown still costs ~one budget, not one per
+// agent. Overridable via $AMUX_SHUTDOWN_GRACE (a Go duration).
+const defaultShutdownGrace = 30 * time.Second
+
+// shutdownGrace returns the wait-for-idle budget, honoring $AMUX_SHUTDOWN_GRACE.
+func shutdownGrace() time.Duration {
+	if v := os.Getenv("AMUX_SHUTDOWN_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultShutdownGrace
+}
+
+// idlePoll is how often shutdown re-checks an instance's activity while waiting
+// for it to leave a busy turn.
+const idlePoll = 100 * time.Millisecond
+
 // Engine is the local PTY-backed engine.
 type Engine struct {
 	mu    sync.Mutex
 	insts map[engine.Key]*instance
+	// activity, if set, reports whether an instance is mid-turn so a graceful
+	// Shutdown can defer terminating it until it is safe. nil means "always safe".
+	activity engine.ActivityFunc
 }
 
-// New creates a local engine.
-func New() *Engine { return &Engine{insts: map[engine.Key]*instance{}} }
+// Option configures an Engine at construction.
+type Option func(*Engine)
+
+// WithActivity supplies the activity probe the engine consults on a graceful
+// Shutdown to defer terminating mid-turn instances until they are safe to stop.
+func WithActivity(f engine.ActivityFunc) Option {
+	return func(e *Engine) { e.activity = f }
+}
+
+// New creates a local engine. Options are applied in order; New() with no
+// options yields the same engine amux has always used (no activity probe).
+func New(opts ...Option) *Engine {
+	e := &Engine{insts: map[engine.Key]*instance{}}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
+}
+
+// SetActivity sets the activity probe after construction. The daemon needs this
+// because the probe closes over the daemon, which only exists once the engine it
+// holds has been built — a chicken-and-egg the constructor option can't satisfy.
+func (e *Engine) SetActivity(f engine.ActivityFunc) {
+	e.mu.Lock()
+	e.activity = f
+	e.mu.Unlock()
+}
 
 func (e *Engine) Name() string { return "local" }
 
@@ -61,7 +110,7 @@ func (e *Engine) Ensure(_ context.Context, spec engine.Spec) (engine.Instance, e
 	if in, ok := e.insts[spec.Key]; ok && in.Alive() {
 		return in, nil
 	}
-	in, err := spawn(spec, e.remove)
+	in, err := spawn(spec, e.remove, e.activity)
 	if err != nil {
 		return nil, err
 	}
@@ -106,13 +155,15 @@ func (e *Engine) Shutdown() {
 	e.insts = map[engine.Key]*instance{}
 	e.mu.Unlock()
 	// Terminate in parallel so a shutdown (or `amux reload`) costs ~one grace
-	// period total, not one per instance.
+	// period total, not one per instance. Each instance also waits (concurrently)
+	// for its own turn to finish before terminating, so a busy agent isn't cut
+	// off mid-turn — see shutdown().
 	var wg sync.WaitGroup
 	for _, in := range insts {
 		wg.Add(1)
 		go func(in *instance) {
 			defer wg.Done()
-			in.kill()
+			in.shutdown()
 		}(in)
 	}
 	wg.Wait()
@@ -160,6 +211,10 @@ type instance struct {
 	inDone chan struct{}
 	inOnce sync.Once
 
+	// activity, if set, reports this instance's turn state so a graceful shutdown
+	// can wait for it to leave a busy turn before terminating. nil == always safe.
+	activity engine.ActivityFunc
+
 	onExit func(engine.Key, *instance)
 }
 
@@ -168,7 +223,7 @@ type instance struct {
 // further input is harmless (the child isn't reading it anyway).
 const inputBuf = 1024
 
-func spawn(spec engine.Spec, onExit func(engine.Key, *instance)) (*instance, error) {
+func spawn(spec engine.Spec, onExit func(engine.Key, *instance), activity engine.ActivityFunc) (*instance, error) {
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
 	cmd.Env = buildEnv(spec.Env)
@@ -184,14 +239,15 @@ func spawn(spec engine.Spec, onExit func(engine.Key, *instance)) (*instance, err
 		return nil, err
 	}
 	in := &instance{
-		key:    spec.Key,
-		ptmx:   ptmx,
-		cmd:    cmd,
-		subs:   map[int]*subscriber{},
-		done:   make(chan struct{}),
-		inCh:   make(chan []byte, inputBuf),
-		inDone: make(chan struct{}),
-		onExit: onExit,
+		key:      spec.Key,
+		ptmx:     ptmx,
+		cmd:      cmd,
+		subs:     map[int]*subscriber{},
+		done:     make(chan struct{}),
+		inCh:     make(chan []byte, inputBuf),
+		inDone:   make(chan struct{}),
+		activity: activity,
+		onExit:   onExit,
 	}
 	go in.pump()
 	go in.inputLoop()
@@ -341,8 +397,51 @@ func (in *instance) appendRing(p []byte) {
 
 // kill terminates the instance gracefully: SIGTERM the process group, wait up to
 // the grace period for it to flush and exit on its own, then SIGKILL if it
-// hasn't. It returns once the process has been reaped by pump.
+// hasn't. It returns once the process has been reaped by pump. Kill (delete or
+// archive) uses this directly — it is a deliberate destroy and must not stall on
+// a busy turn; only Shutdown adds the wait-for-idle below.
 func (in *instance) kill() { in.terminate(killGrace()) }
+
+// shutdown is the graceful-stop path Engine.Shutdown uses: it first waits (up to
+// shutdownGrace) for the instance to leave a busy turn — so an agent killed
+// mid-turn doesn't lose the conversation it hasn't yet persisted — then
+// terminates exactly as kill() does. The env-derived budgets are passed through
+// to shutdownWith so tests can inject small ones.
+func (in *instance) shutdown() { in.shutdownWith(shutdownGrace(), killGrace()) }
+
+// shutdownWith is shutdown() with explicit budgets: idleBudget bounds the
+// wait-for-idle, grace the subsequent SIGTERM→SIGKILL escalation.
+func (in *instance) shutdownWith(idleBudget, grace time.Duration) {
+	in.waitIdle(idleBudget)
+	in.terminate(grace)
+}
+
+// waitIdle blocks until the instance is safe to stop: its activity probe reports
+// anything other than ActivityBusy (Safe or Unknown), the process has already
+// exited, or the budget elapses — whichever comes first. A nil probe means
+// "always safe", so the wait is skipped and behavior is unchanged. Because each
+// instance waits on its own budget and Shutdown fans these out concurrently, the
+// whole shutdown costs ~one budget regardless of how many agents are busy.
+func (in *instance) waitIdle(budget time.Duration) {
+	if in.activity == nil || budget <= 0 {
+		return
+	}
+	deadline := time.After(budget)
+	tick := time.NewTicker(idlePoll)
+	defer tick.Stop()
+	for {
+		if in.activity(in.key) != engine.ActivityBusy {
+			return
+		}
+		select {
+		case <-in.done: // already exited on its own; nothing to wait for
+			return
+		case <-deadline:
+			return // budget exhausted — fall through to terminate as today
+		case <-tick.C:
+		}
+	}
+}
 
 // terminate is kill() with an explicit grace period (so tests can pick one).
 func (in *instance) terminate(grace time.Duration) {

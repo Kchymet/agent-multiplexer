@@ -176,6 +176,90 @@ func TestKillEscalatesToSIGKILL(t *testing.T) {
 	}
 }
 
+// A graceful shutdown defers terminating a mid-turn (ActivityBusy) instance
+// until its activity probe reports it safe, then terminates as usual. Here the
+// probe reports Busy for a short while, then flips to Safe; the process traps
+// SIGTERM and prints a marker, so we can assert termination didn't begin until
+// after the flip.
+func TestShutdownWaitsForIdle(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+
+	key := engine.Key{AgentID: "busy", Tab: 0}
+	spec := engine.Spec{
+		Key:  key,
+		Argv: []string{"sh", "-c", "trap 'exit 0' TERM; printf READY; while :; do sleep 0.02; done"},
+		Cols: 80, Rows: 24,
+	}
+	inst, err := eng.Ensure(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	waitFor(t, c, "READY", 3*time.Second)
+
+	// Busy for the first ~150ms, then safe.
+	var safeAt time.Time
+	const busyFor = 150 * time.Millisecond
+	inst.(*instance).activity = func(engine.Key) engine.Activity {
+		if safeAt.IsZero() {
+			safeAt = time.Now().Add(busyFor)
+		}
+		if time.Now().Before(safeAt) {
+			return engine.ActivityBusy
+		}
+		return engine.ActivitySafe
+	}
+
+	start := time.Now()
+	// Generous idle budget (it should return well before it), short kill grace.
+	inst.(*instance).shutdownWith(2*time.Second, 300*time.Millisecond)
+	waited := time.Since(start)
+	if inst.Alive() {
+		t.Fatal("instance should be dead after shutdown")
+	}
+	// It must have waited out the busy window before terminating, not stopped
+	// immediately.
+	if waited < busyFor {
+		t.Fatalf("shutdown terminated after %v; should have waited for the busy window (~%v)", waited, busyFor)
+	}
+}
+
+// A shutdown wait is bounded: an instance stuck ActivityBusy forever is still
+// terminated once the idle budget elapses, so a wedged turn can't block shutdown.
+func TestShutdownIdleWaitIsBounded(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+
+	key := engine.Key{AgentID: "stuck-busy", Tab: 0}
+	spec := engine.Spec{
+		Key:  key,
+		Argv: []string{"sh", "-c", "trap 'exit 0' TERM; printf READY; while :; do sleep 0.02; done"},
+		Cols: 80, Rows: 24,
+	}
+	inst, err := eng.Ensure(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	waitFor(t, c, "READY", 3*time.Second)
+
+	inst.(*instance).activity = func(engine.Key) engine.Activity { return engine.ActivityBusy }
+
+	const idleBudget = 200 * time.Millisecond
+	start := time.Now()
+	inst.(*instance).shutdownWith(idleBudget, 300*time.Millisecond)
+	waited := time.Since(start)
+	if inst.Alive() {
+		t.Fatal("instance should be dead after a bounded shutdown wait")
+	}
+	if waited < idleBudget {
+		t.Fatalf("shutdown returned after %v; should have waited out the idle budget (%v)", waited, idleBudget)
+	}
+}
+
 // Shutdown terminates instances in parallel, so its total cost is ~one grace
 // period even with several stubborn (SIGTERM-ignoring) agents, not N of them.
 func TestShutdownTerminatesInParallel(t *testing.T) {
