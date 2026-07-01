@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// Claude Code hooks bridge the agent's lifecycle into amux: the `amux hook`
-// subcommand writes a session's current activity here on each hook event, and
+// Claude Code hooks bridge the agent's lifecycle into amux: the
+// `amux agent hook` subcommand writes a session's current activity here on each
+// hook event (as does `amux agent status`), and
 // the daemon's poll loop reads it back to drive the rail status. Records are
 // keyed by the Claude session id (the same uuid amux pins as Session.ClaudeID).
 // Because the hooks are installed at the user level, every Claude session writes

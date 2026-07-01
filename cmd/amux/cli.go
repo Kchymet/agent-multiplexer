@@ -19,10 +19,11 @@ import (
 
 // cmdName sets the display name of the agent the caller is running inside. Agents
 // launch with $AMUX_WORKGROUP set to their id (see wsops.AgentCommand), so this
-// works from an agent's own shell or terminal tab.
+// works from an agent's own shell or terminal tab. Exposed as "amux agent name"
+// (and the "label" alias); "amux name" is kept as a deprecated top-level alias.
 func cmdName(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: amux name <display name>")
+		return fmt.Errorf("usage: amux agent name <display name>")
 	}
 	id := strings.TrimSpace(os.Getenv("AMUX_WORKGROUP"))
 	if id == "" {
