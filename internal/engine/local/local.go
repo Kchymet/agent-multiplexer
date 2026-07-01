@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 
@@ -23,6 +25,22 @@ import (
 // agent keeps redrawing, so the buffer only needs to bridge the gap until the
 // next repaint, not hold full history.
 const scrollbackBytes = 256 * 1024
+
+// defaultKillGrace is how long kill() waits after SIGTERM before escalating to
+// SIGKILL. Agents (e.g. Claude) flush their session transcript on SIGTERM, so a
+// hard kill would lose the conversation; the grace period lets them exit cleanly
+// first. Overridable via $AMUX_KILL_GRACE (a Go duration).
+const defaultKillGrace = 4 * time.Second
+
+// killGrace returns the SIGTERM→SIGKILL grace period, honoring $AMUX_KILL_GRACE.
+func killGrace() time.Duration {
+	if v := os.Getenv("AMUX_KILL_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultKillGrace
+}
 
 // Engine is the local PTY-backed engine.
 type Engine struct {
@@ -87,9 +105,17 @@ func (e *Engine) Shutdown() {
 	}
 	e.insts = map[engine.Key]*instance{}
 	e.mu.Unlock()
+	// Terminate in parallel so a shutdown (or `amux reload`) costs ~one grace
+	// period total, not one per instance.
+	var wg sync.WaitGroup
 	for _, in := range insts {
-		in.kill()
+		wg.Add(1)
+		go func(in *instance) {
+			defer wg.Done()
+			in.kill()
+		}(in)
 	}
+	wg.Wait()
 }
 
 // remove drops an exited instance from the table (called by the instance's pump
@@ -122,6 +148,10 @@ type instance struct {
 	exitErr    string
 	ptmxClosed bool
 
+	// done is closed by pump once the process has been reaped, so kill() can
+	// wait for a graceful exit before escalating to SIGKILL.
+	done chan struct{}
+
 	onExit func(engine.Key, *instance)
 }
 
@@ -145,6 +175,7 @@ func spawn(spec engine.Spec, onExit func(engine.Key, *instance)) (*instance, err
 		ptmx:   ptmx,
 		cmd:    cmd,
 		subs:   map[int]*subscriber{},
+		done:   make(chan struct{}),
 		onExit: onExit,
 	}
 	go in.pump()
@@ -250,6 +281,7 @@ func (in *instance) pump() {
 			if in.onExit != nil {
 				in.onExit(in.key, in)
 			}
+			close(in.done) // release kill() waiters: the process is reaped
 			return
 		}
 	}
@@ -264,12 +296,52 @@ func (in *instance) appendRing(p []byte) {
 	}
 }
 
-func (in *instance) kill() {
+// kill terminates the instance gracefully: SIGTERM the process group, wait up to
+// the grace period for it to flush and exit on its own, then SIGKILL if it
+// hasn't. It returns once the process has been reaped by pump.
+func (in *instance) kill() { in.terminate(killGrace()) }
+
+// terminate is kill() with an explicit grace period (so tests can pick one).
+func (in *instance) terminate(grace time.Duration) {
+	// Already exited? pump has closed the ptmx and reaped; nothing to do.
+	select {
+	case <-in.done:
+		return
+	default:
+	}
+
+	// Ask the agent to shut down cleanly so it flushes its session transcript.
+	// We leave the ptmx open so any final output still drains through pump and
+	// the child isn't disturbed by a master-side close (SIGHUP/EIO) mid-flush.
+	in.signal(syscall.SIGTERM)
+	select {
+	case <-in.done:
+		return
+	case <-time.After(grace):
+	}
+
+	// It ignored SIGTERM (or is wedged). Force it, and close the ptmx to unblock
+	// pump's Read in case the process is stuck without producing an EOF.
+	in.signal(syscall.SIGKILL)
 	in.mu.Lock()
-	in.closePtmx() // unblocks pump's Read; pump then reaps and notifies
+	in.closePtmx()
 	in.mu.Unlock()
-	if in.cmd.Process != nil {
-		_ = in.cmd.Process.Kill()
+	<-in.done
+}
+
+// signal delivers sig to the instance's process group. The pty puts the child in
+// its own session (Setsid), so its pgid equals its pid and negating it targets
+// the agent and any grandchildren it spawned; if the group send fails we fall
+// back to the process alone.
+func (in *instance) signal(sig syscall.Signal) {
+	in.mu.Lock()
+	p := in.cmd.Process
+	in.mu.Unlock()
+	if p == nil {
+		return
+	}
+	if err := syscall.Kill(-p.Pid, sig); err != nil {
+		_ = p.Signal(sig)
 	}
 }
 
