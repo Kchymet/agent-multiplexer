@@ -152,8 +152,21 @@ type instance struct {
 	// wait for a graceful exit before escalating to SIGKILL.
 	done chan struct{}
 
+	// Input is queued to inputLoop rather than written inline, so a child that
+	// stops draining its PTY input buffer can't block the daemon's serve loop (the
+	// caller of Input) or wedge in.mu while ptmx.Write stalls. inDone stops the
+	// loop when the instance exits or is killed.
+	inCh   chan []byte
+	inDone chan struct{}
+	inOnce sync.Once
+
 	onExit func(engine.Key, *instance)
 }
+
+// inputBuf bounds the per-instance input queue. Keystrokes and query replies are
+// tiny; this fills only if the child wedges its own stdin, in which case dropping
+// further input is harmless (the child isn't reading it anyway).
+const inputBuf = 1024
 
 func spawn(spec engine.Spec, onExit func(engine.Key, *instance)) (*instance, error) {
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
@@ -176,9 +189,12 @@ func spawn(spec engine.Spec, onExit func(engine.Key, *instance)) (*instance, err
 		cmd:    cmd,
 		subs:   map[int]*subscriber{},
 		done:   make(chan struct{}),
+		inCh:   make(chan []byte, inputBuf),
+		inDone: make(chan struct{}),
 		onExit: onExit,
 	}
 	go in.pump()
+	go in.inputLoop()
 	return in, nil
 }
 
@@ -208,15 +224,41 @@ func (in *instance) Subscribe(sink engine.Sink) func() {
 	}
 }
 
-// Input and Resize touch the PTY fd, so they take in.mu and bail once the fd is
-// closed — otherwise an ioctl/Fd() could race the close in pump/kill.
+// Input queues bytes for inputLoop without blocking the caller. A blocking
+// ptmx.Write (child not draining its input buffer) must never stall the serve
+// loop that calls this. Bytes are copied because the caller may reuse the slice;
+// order is preserved by the single FIFO queue drained by one goroutine. If the
+// queue is full the bytes are dropped (see inputBuf).
 func (in *instance) Input(p []byte) {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if in.ptmxClosed || in.ptmx == nil {
-		return
+	b := append([]byte(nil), p...)
+	select {
+	case in.inCh <- b:
+	case <-in.inDone:
+	default:
 	}
-	_, _ = in.ptmx.Write(p)
+}
+
+// inputLoop is the sole writer to the PTY input side. It performs the possibly
+// blocking ptmx.Write WITHOUT holding in.mu, so a stalled write blocks only this
+// goroutine — never pump, Resize, Subscribe, or the serve loop. It stops once the
+// PTY is closed (exit or kill).
+func (in *instance) inputLoop() {
+	for {
+		select {
+		case <-in.inDone:
+			return
+		case p := <-in.inCh:
+			in.mu.Lock()
+			ptmx, closed := in.ptmx, in.ptmxClosed
+			in.mu.Unlock()
+			if ptmx == nil || closed {
+				return
+			}
+			// Write after releasing in.mu. If the fd is closed concurrently, Go's
+			// *os.File returns an error without issuing the syscall, so this is safe.
+			_, _ = ptmx.Write(p)
+		}
+	}
 }
 
 func (in *instance) Resize(cols, rows int) {
@@ -228,12 +270,13 @@ func (in *instance) Resize(cols, rows int) {
 	_ = pty.Setsize(in.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
-// closePtmx closes the PTY at most once. Caller holds in.mu.
+// closePtmx closes the PTY at most once and stops inputLoop. Caller holds in.mu.
 func (in *instance) closePtmx() {
 	if in.ptmx != nil && !in.ptmxClosed {
 		in.ptmxClosed = true
 		_ = in.ptmx.Close()
 	}
+	in.inOnce.Do(func() { close(in.inDone) })
 }
 
 func (in *instance) Alive() bool {

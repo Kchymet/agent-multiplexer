@@ -10,13 +10,24 @@ import (
 	"amux/internal/core"
 )
 
+// outBuf bounds the client's outbound queue. Actions and pane input/responses
+// are small; this is deep enough that it only ever fills if the socket itself is
+// wedged (which the daemon's non-blocking serve loop is designed to prevent).
+const outBuf = 1024
+
 // Client is a connection to the daemon. It decodes the inbound frame stream
 // (snapshots and action results) one message at a time via Next, and sends
-// actions via Send.
+// actions via Send. Send never touches the socket directly: it hands the encoded
+// frame to a dedicated writer goroutine over a buffered channel, so a stalled
+// socket write can't block the caller (the Bubble Tea Update goroutine, or the
+// vterm response-drain goroutine that forwards the emulator's query replies).
 type Client struct {
 	conn net.Conn
 	r    *bufio.Reader
-	mu   sync.Mutex // serializes writes
+
+	out  chan []byte
+	done chan struct{}
+	once sync.Once
 }
 
 // Dial connects to the daemon socket (single attempt).
@@ -25,23 +36,69 @@ func Dial() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{conn: conn, r: bufio.NewReader(conn)}, nil
+	return newClient(conn), nil
 }
 
-// Close closes the connection.
-func (c *Client) Close() error { return c.conn.Close() }
+// newClient wraps a connection and starts its writer goroutine. Used by Dial and
+// by tests that dial over an in-memory pipe.
+func newClient(conn net.Conn) *Client {
+	c := &Client{
+		conn: conn,
+		r:    bufio.NewReader(conn),
+		out:  make(chan []byte, outBuf),
+		done: make(chan struct{}),
+	}
+	go c.writeLoop()
+	return c
+}
 
-// Send writes an action to the daemon.
+// writeLoop is the single writer for the connection: it drains the outbound
+// queue to the socket in FIFO order, so byte ordering of input (and query
+// replies) is preserved. A write error stops the loop; the reader side surfaces
+// the broken connection as an error from Next, which the UI turns into a
+// reconnect.
+func (c *Client) writeLoop() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case b := <-c.out:
+			if _, err := c.conn.Write(b); err != nil {
+				c.stop()
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) stop() { c.once.Do(func() { close(c.done) }) }
+
+// Close stops the writer and closes the connection.
+func (c *Client) Close() error {
+	c.stop()
+	return c.conn.Close()
+}
+
+// Send enqueues an action for the writer goroutine without blocking the caller.
+// It returns an error only if the action can't be marshalled or the connection
+// is already gone; if the outbound queue is full (a wedged socket) the frame is
+// dropped rather than stalling the UI, and the ensuing read error triggers a
+// reconnect. Ordering is preserved because every frame goes through the same
+// FIFO channel and single writer.
 func (c *Client) Send(a core.Action) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	b, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
 	b = append(b, '\n')
-	_, err = c.conn.Write(b)
-	return err
+	select {
+	case c.out <- b:
+		return nil
+	case <-c.done:
+		return net.ErrClosed
+	default:
+		return net.ErrClosed
+	}
 }
 
 // PaneOpen asks the daemon to attach this connection to a tab of an agent,

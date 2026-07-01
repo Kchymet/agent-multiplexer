@@ -62,7 +62,23 @@ type Terminal struct {
 	// propagated through onResize.
 	onInput  func([]byte)
 	onResize func(cols, rows int)
+
+	// feed carries streamed output to a dedicated goroutine (remote mode) so the
+	// caller of Feed — the Bubble Tea Update goroutine — never blocks inside
+	// emu.Write. The emulator can stall mid-write when it answers a query (it
+	// writes the reply into an internal pipe that drainResponses must drain);
+	// keeping emu.Write off the UI goroutine means that backpressure can never
+	// wedge render or input. done stops the feed goroutine on Close.
+	feed chan []byte
+	done chan struct{}
+	once sync.Once
 }
+
+// feedBuf bounds the remote-mode output queue. Streamed output is dropped only
+// if this fills, which shouldn't happen once the response pipe drains promptly
+// (see feed field docs); dropping a frame is recoverable — the agent keeps
+// redrawing and a reattach replays the scrollback.
+const feedBuf = 1024
 
 // New creates a terminal sized to cols×rows (falling back to 80×24).
 func New(cols, rows int) *Terminal {
@@ -120,8 +136,27 @@ func NewRemote(cols, rows int, onInput func([]byte), onResize func(cols, rows in
 	t := New(cols, rows)
 	t.onInput = onInput
 	t.onResize = onResize
+	t.feed = make(chan []byte, feedBuf)
+	t.done = make(chan struct{})
+	go t.feedLoop()       // streamed output -> emulator, off the UI goroutine
 	go t.drainResponses() // emulator replies (DA, cursor reports, mouse) -> agent
 	return t
+}
+
+// feedLoop parses streamed output into the emulator on its own goroutine, so a
+// query reply that momentarily blocks emu.Write can never stall Feed's caller.
+func (t *Terminal) feedLoop() {
+	for {
+		select {
+		case <-t.done:
+			return
+		case p := <-t.feed:
+			t.mu.Lock()
+			_, _ = t.emu.Write(p)
+			t.mu.Unlock()
+			t.notify()
+		}
+	}
 }
 
 // OnData registers a callback fired (on the reader goroutine) whenever new
@@ -182,13 +217,18 @@ func (t *Terminal) notify() {
 	}
 }
 
-// Feed writes output bytes into the emulator (remote mode): the embedder calls
-// it with bytes streamed from the daemon, just as pump does for a local PTY.
+// Feed hands output bytes to the feed goroutine, which writes them into the
+// emulator (remote mode): the embedder calls it with bytes streamed from the
+// daemon, just as pump does for a local PTY. It never blocks the caller — the
+// bytes are copied and queued, and dropped only if the queue is full (see
+// feedBuf). The queue preserves order, so the emulator sees a faithful stream.
 func (t *Terminal) Feed(p []byte) {
-	t.mu.Lock()
-	_, _ = t.emu.Write(p)
-	t.mu.Unlock()
-	t.notify()
+	b := append([]byte(nil), p...)
+	select {
+	case t.feed <- b:
+	case <-t.done:
+	default:
+	}
 }
 
 // MarkClosed records that the remote process has exited, so Closed reports true
@@ -364,8 +404,12 @@ func (t *Terminal) Closed() bool {
 }
 
 // Close tears down the PTY and kills the child if still running. Closing the
-// emulator unblocks the forwardResponses goroutine (emu.Read returns EOF).
+// emulator unblocks the forwardResponses goroutine (emu.Read returns EOF); the
+// done signal stops the remote-mode feed goroutine.
 func (t *Terminal) Close() error {
+	if t.done != nil {
+		t.once.Do(func() { close(t.done) })
+	}
 	if t.emu != nil {
 		_ = t.emu.Close()
 	}
