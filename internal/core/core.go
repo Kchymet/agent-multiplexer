@@ -39,7 +39,6 @@ type Session struct {
 	Section   string `json:"section,omitempty"` // rail grouping: workspaces | repos | detached
 	State     string `json:"state,omitempty"`   // idle | ready | waiting | running
 	Status    string `json:"status"`            // human label, e.g. "ready · main"
-	Task      string `json:"task,omitempty"`    // one-line summary of the agent's initial prompt
 	Cwd       string `json:"cwd"`
 	Pid       int    `json:"pid,omitempty"`
 	StartedAt int64  `json:"startedAt"`

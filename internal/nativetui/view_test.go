@@ -163,19 +163,19 @@ func TestRowStatusSubline(t *testing.T) {
 	}
 }
 
-// A leaf agent's sub-line shows its task summary (the initial prompt) rather
-// than its opaque session id, falling back to the id only when there's no task.
-func TestRowStatusShowsTask(t *testing.T) {
+// The task summary now titles a leaf agent row; its sub-line surfaces the id so
+// the session stays identifiable — except when the title already is the id (a
+// prompt-less agent), where repeating it would be noise.
+func TestRowStatusShowsID(t *testing.T) {
 	m := &model{}
-	withTask := core.Session{ID: "ag1", Title: "ag1", RootID: "wg1", Status: "ready · main", Task: "fix the login bug", State: core.StateReady, Section: core.SectionWorkgroups}
-	if got := m.rowStatus(withTask, " "); !strings.Contains(got, "fix the login bug") {
-		t.Fatalf("sub-line should show the task summary, got %q", got)
+	titled := core.Session{ID: "ag1-full-uuid", Title: "fix the login bug", RootID: "wg1", Status: "ready · main", State: core.StateReady, Section: core.SectionWorkgroups}
+	if got := m.rowStatus(titled, " "); !strings.Contains(got, "ag1-full-uuid") {
+		t.Fatalf("sub-line should surface the id beneath a task title, got %q", got)
 	}
-	if got := m.rowStatus(withTask, " "); strings.Contains(got, "ag1") {
-		t.Fatalf("sub-line should not show the session id when a task is present, got %q", got)
-	}
-	noTask := core.Session{ID: "ag2", Title: "renamed", RootID: "wg1", Status: "ready · main", State: core.StateReady, Section: core.SectionWorkgroups}
-	if got := m.rowStatus(noTask, " "); !strings.Contains(got, "ag2") {
-		t.Fatalf("sub-line should fall back to the id without a task, got %q", got)
+	// A prompt-less agent's title falls back to the short id, a prefix of the
+	// full id — the sub-line should not echo it back.
+	byID := core.Session{ID: "ag1-full-uuid", Title: "ag1-full", RootID: "wg1", Status: "ready · main", State: core.StateReady, Section: core.SectionWorkgroups}
+	if got := m.rowStatus(byID, " "); !strings.Contains(got, "ready · main") || strings.Contains(got, "ag1-full-uuid ·") {
+		t.Fatalf("sub-line should be just the status when the title is the id, got %q", got)
 	}
 }

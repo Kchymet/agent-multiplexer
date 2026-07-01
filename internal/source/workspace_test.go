@@ -64,3 +64,24 @@ func TestUntrackedRows(t *testing.T) {
 		t.Fatalf("unexpected untracked row: %+v", r)
 	}
 }
+
+// A leaf agent's rail title — the line you select between agents by — is its
+// task summary when it has one, an explicit name when renamed, and the short id
+// only for a prompt-less agent.
+func TestAgentLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		s    store.Session
+		want string
+	}{
+		{"task summary", store.Session{ID: "abcdef1234567890", Prompt: "Fix the login bug\nmore detail"}, "Fix the login bug"},
+		{"explicit name wins", store.Session{ID: "abcdef1234567890", Name: "backend", Prompt: "Fix the login bug"}, "backend"},
+		{"short id fallback", store.Session{ID: "abcdef1234567890"}, "abcdef12"},
+		{"blank prompt falls back", store.Session{ID: "abcdef1234567890", Prompt: "   \n\t"}, "abcdef12"},
+	}
+	for _, c := range cases {
+		if got := agentLabel(c.s); got != c.want {
+			t.Errorf("%s: agentLabel=%q want %q", c.name, got, c.want)
+		}
+	}
+}
