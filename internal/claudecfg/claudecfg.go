@@ -41,13 +41,46 @@ func munge(cwd string) string {
 	}, abs)
 }
 
+// sessionPresent reports whether uuid's session is on disk for cwd. Claude Code
+// writes the transcript as <projects>/<munge(cwd)>/<uuid>.jsonl; a <uuid>/
+// directory alongside it (Claude's per-session working area) is corroborating
+// evidence the session is known even if the .jsonl hasn't been flushed yet, so
+// either one counts.
+func sessionPresent(cwd, uuid string) bool {
+	base := filepath.Join(projectsRoot(), munge(cwd), uuid)
+	if fi, err := os.Stat(base + ".jsonl"); err == nil && !fi.IsDir() {
+		return true
+	}
+	if fi, err := os.Stat(base); err == nil && fi.IsDir() {
+		return true
+	}
+	return false
+}
+
 // SessionExists reports whether a saved session with uuid exists for cwd.
 func SessionExists(cwd, uuid string) bool {
 	if uuid == "" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(projectsRoot(), munge(cwd), uuid+".jsonl"))
-	return err == nil
+	return sessionPresent(cwd, uuid)
+}
+
+// FindSession looks for uuid's transcript under each candidate cwd in order and
+// returns the first cwd it lives under. Callers launch `claude --resume` with
+// that cwd so Claude's own path munge lands on the same project dir where the
+// transcript was written — necessary because amux's working-dir convention has
+// changed over time, so a session pinned under one convention can have its
+// transcript stored under another. ok is false if no candidate has it.
+func FindSession(uuid string, cwds ...string) (cwd string, ok bool) {
+	if uuid == "" {
+		return "", false
+	}
+	for _, c := range cwds {
+		if sessionPresent(c, uuid) {
+			return c, true
+		}
+	}
+	return "", false
 }
 
 // AnySession reports whether cwd has any saved Claude session transcript.

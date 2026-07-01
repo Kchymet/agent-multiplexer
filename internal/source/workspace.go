@@ -131,7 +131,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 				State:     subStates[i],
-				Status:    stateLabel(subStates[i]) + subSuffix(s),
+				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s),
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
@@ -153,7 +153,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 					ID: s.ID, Title: repoAgentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 					State:     st,
-					Status:    stateLabel(st) + subSuffix(s),
+					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s),
 					Cwd:       s.Dir,
 					CanAttach: true,
 					CanKill:   true,
@@ -276,6 +276,16 @@ func subLabel(s store.Session) string {
 		return s.Repo
 	}
 	return s.ID
+}
+
+// noticeSuffix appends any pending rail warning for a session (e.g. a pinned
+// conversation that couldn't be resumed) to its status line, so a silent
+// fallback becomes visible on the rail.
+func noticeSuffix(s store.Session) string {
+	if n := core.Notice(s.ClaudeID); n != "" {
+		return " · ⚠ " + n
+	}
+	return ""
 }
 
 func subSuffix(s store.Session) string {
