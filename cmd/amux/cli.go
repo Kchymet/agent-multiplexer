@@ -259,6 +259,24 @@ func manualEntry(ctx context.Context, db *store.DB, in *bufio.Reader) (store.Rep
 	return addRepo(ctx, db, src)
 }
 
+// startCreated asks the daemon to start the agent process(es) for a freshly
+// created session — a workgroup root (all its agents) or a single agent id —
+// mirroring the TUI, where creating a session and switching to it starts it. It's
+// best-effort: the session is already persisted, so a daemon that can't be
+// reached is a warning, not a failure of the create command.
+func startCreated(id string) {
+	self, err := os.Executable()
+	if err == nil {
+		err = ensureDaemon(self)
+	}
+	if err == nil {
+		err = sendAction(core.Action{Action: core.ActionStart, ID: id})
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "amux: created %s but could not start it (%v)\n", id, err)
+	}
+}
+
 // ---- session commands ----------------------------------------------------
 
 func cmdSession(args []string) error {
@@ -286,6 +304,7 @@ func cmdSession(args []string) error {
 			return err
 		}
 		fmt.Printf("added agent %s to %s (repos: %s)\n", sub.ID, args[1], orNone(strings.Join(repos, ", ")))
+		startCreated(sub.ID)
 		return nil
 	case "create":
 		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
@@ -298,6 +317,7 @@ func cmdSession(args []string) error {
 			return err
 		}
 		fmt.Printf("created workspace %s (repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
+		startCreated(rootID)
 		return nil
 	case "repo":
 		// amux workgroup repo <repo> [--name n] [--prompt t] [--mode m] [--model M]
@@ -313,6 +333,7 @@ func cmdSession(args []string) error {
 			return err
 		}
 		fmt.Printf("created repo-scoped agent %s on %s\n", a.ID, args[1])
+		startCreated(a.ID)
 		return nil
 	case "move":
 		// amux workgroup move <agentID> [<targetRootID> | --new]
@@ -477,7 +498,8 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 					return err
 				}
 			}
-			fmt.Printf("created workspace %s — open it in the dashboard (`amux`)\n", rootID)
+			startCreated(rootID)
+			fmt.Printf("created workspace %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
 			return nil
 		case strings.HasPrefix(choice, "✗"):
 			return nil
@@ -502,7 +524,8 @@ func sessionAdd(ctx context.Context, rootID string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("added agent %s — open it in the dashboard (`amux`)\n", sub.ID)
+	startCreated(sub.ID)
+	fmt.Printf("added agent %s — it's starting; open it in the dashboard (`amux`)\n", sub.ID)
 	return nil
 }
 

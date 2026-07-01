@@ -160,6 +160,37 @@ not a stale snapshot.
 	_ = os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(guide), 0o644)
 }
 
+// AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
+// workgroup root, all its agent children; otherwise id itself. It lets a caller
+// start the process(es) for a freshly-created session — root or agent — the same
+// way the TUI starts an agent when it's opened.
+func AgentIDsUnder(id string) ([]string, error) {
+	db, err := store.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("no such session %q", id)
+	}
+	if !s.IsRoot() {
+		return []string{id}, nil
+	}
+	kids, err := db.Children(id)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(kids))
+	for _, k := range kids {
+		ids = append(ids, k.ID)
+	}
+	return ids, nil
+}
+
 // AttachRepo adds a repo to a workspace's attached set (template only; existing
 // agents are unchanged — assign it to an agent by creating/adding one).
 func AttachRepo(rootID, repo string) error {

@@ -9,6 +9,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"amux/internal/engine/local"
 	"amux/internal/panespec"
 	"amux/internal/source"
+	"amux/internal/wsops"
 )
 
 // Daemon polls sources and serves state + actions over a unix socket. It also
@@ -35,6 +37,9 @@ type Daemon struct {
 	// resolve turns an (agent id, tab) into a launch spec (working dir, env,
 	// sandboxed argv). Defaults to panespec.Resolve; overridable in tests.
 	resolve func(agentID string, tab int) (dir string, env, argv []string, err error)
+	// agentsUnder resolves an id (agent or workgroup root) to the agent ids whose
+	// process should run. Defaults to wsops.AgentIDsUnder; overridable in tests.
+	agentsUnder func(id string) ([]string, error)
 
 	mu       sync.RWMutex
 	sessions []core.Session
@@ -48,12 +53,13 @@ type Daemon struct {
 // New builds a daemon. self is the absolute path to this binary.
 func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	return &Daemon{
-		sources:  sources,
-		interval: interval,
-		self:     self,
-		resolve:  panespec.Resolve,
-		subs:     map[chan core.Snapshot]struct{}{},
-		pollNow:  make(chan struct{}, 1),
+		sources:     sources,
+		interval:    interval,
+		self:        self,
+		resolve:     panespec.Resolve,
+		agentsUnder: wsops.AgentIDsUnder,
+		subs:        map[chan core.Snapshot]struct{}{},
+		pollNow:     make(chan struct{}, 1),
 	}
 }
 
@@ -285,8 +291,8 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		return
 	}
 	inst, err := d.engine.Ensure(ctx, engine.Spec{
-		Key:  engine.Key{AgentID: a.ID, Tab: a.Tab},
-		Dir:  dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
+		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
+		Dir: dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
 	})
 	if err != nil {
 		paneExit(err.Error())
@@ -311,6 +317,38 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		inst.Resize(a.Cols, a.Rows)
 	}
 	d.triggerPoll() // surface the now-live agent in the rail promptly
+}
+
+// startEngineFor starts the agent process — the TabAgent pane — for an agent, or
+// for every agent under it if id is a workgroup root, without any UI attached.
+// This mirrors the TUI, where creating a session and switching to it starts it;
+// it lets a CLI-created session come up running in the engine right away. Ensure
+// is idempotent, so starting an already-running agent is a no-op.
+func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
+	if d.engine == nil {
+		return fmt.Errorf("engine unavailable")
+	}
+	ids, err := d.agentsUnder(id)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("no agent to start for %q", id)
+	}
+	var firstErr error
+	for _, aid := range ids {
+		dir, env, argv, err := d.resolve(aid, panespec.TabAgent)
+		if err == nil {
+			_, err = d.engine.Ensure(ctx, engine.Spec{
+				Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
+				Dir: dir, Env: env, Argv: argv,
+			})
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // killEngineFor stops the engine instances (all tabs) of an agent and, if id is a

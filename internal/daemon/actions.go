@@ -15,6 +15,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	case "", "refresh":
 		d.triggerPoll()
 		return ok()
+	case core.ActionStart:
+		if err := d.startEngineFor(ctx, a.ID); err != nil {
+			return fail("%v", err)
+		}
+		d.triggerPoll()
+		return ok()
 	default:
 		// Capture the agents to stop before the store record disappears (for a
 		// root delete, killEngineFor reads the children from the current snapshot).

@@ -63,6 +63,14 @@ const (
 	ActionPaneClose  = "pane.close"  // detach a pane (PaneID) — does not kill the agent
 )
 
+// Lifecycle verbs that aren't pane.* streaming. Most are handled by
+// wsops.ApplyResult; "start" is engine-only (no store change): it launches an
+// agent's process in the daemon's engine without attaching a UI, so a
+// CLI-created session comes up running the way the TUI starts one on open.
+const (
+	ActionStart = "start" // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
+)
+
 // Action is the client -> daemon control request. It carries both the lifecycle
 // verbs and the pane.* streaming verbs; the pane fields apply only to the latter.
 type Action struct {
