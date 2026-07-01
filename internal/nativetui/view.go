@@ -258,6 +258,9 @@ func stateColor(state string) lipgloss.Style {
 }
 
 func (m *model) renderMain() string {
+	if m.picker != nil {
+		return m.renderPicker()
+	}
 	if m.form != nil {
 		return m.renderForm()
 	}
@@ -300,7 +303,7 @@ func (m *model) renderHelp() string {
 	case m.focus == focusAgent:
 		return hints("agent", []hint{{"⌥ 1/2/3", "tabs"}, {"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
 	default:
-		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}})
+		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}})
 	}
 }
 

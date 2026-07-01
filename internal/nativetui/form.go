@@ -39,7 +39,7 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 		submit: "Add agent",
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
-			{key: "repos", label: "Repos (blank = all)"},
+			{key: "repos", label: "Repos", picker: true},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
 			{key: "model", label: "Model", value: store.ModelOpus, options: store.Models},
 		},
@@ -67,7 +67,7 @@ func (m *model) openNewWorkgroupForm() {
 		submit: "Create workgroup",
 		fields: []*formField{
 			{key: "name", label: "Name"},
-			{key: "repos", label: "Repos (comma)"},
+			{key: "repos", label: "Repos (first agent)", picker: true},
 			{key: "prompt", label: "Description"},
 			{key: "linear", label: "Linear issue/URL"},
 		},
@@ -96,10 +96,12 @@ type formField struct {
 	label   string
 	value   string
 	options []string
-	cursor  int // rune index of the vim cursor (text fields)
+	picker  bool // repos-style field: activating it opens the fuzzy repo picker
+	cursor  int  // rune index of the vim cursor (text fields)
 }
 
 func (f *formField) isSelect() bool { return len(f.options) > 0 }
+func (f *formField) isPicker() bool { return f.picker }
 
 func (f *formField) cycle(forward bool) {
 	idx := 0
@@ -121,6 +123,12 @@ func (f *formField) cycle(forward bool) {
 func (f *formField) display() string {
 	if f.isSelect() {
 		return "‹ " + f.value + " ›"
+	}
+	if f.isPicker() {
+		if f.value == "" {
+			return dimStyle.Render("(none — ↵ to pick)")
+		}
+		return strings.ReplaceAll(f.value, ",", ", ")
 	}
 	if f.value == "" {
 		return dimStyle.Render("(empty)")
@@ -345,6 +353,25 @@ func (fs *formState) move(d int) {
 func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fs := m.form
 	field := fs.active()
+
+	// A picker field (repos) opens the fuzzy repo picker on activation; otherwise
+	// j/k/tab move between fields, like a select.
+	if field != nil && field.isPicker() {
+		switch k.String() {
+		case "esc", "ctrl+c":
+			m.cancelForm()
+		case "enter", " ", "i", "a":
+			p := newRepoPicker("Repos", m.sessions, store.SplitRepos(field.value))
+			p.field = field
+			m.openRepoPicker(p)
+		case "tab", "down", "j":
+			fs.next()
+		case "shift+tab", "up", "k":
+			fs.prev()
+		}
+		return m, nil
+	}
+
 	text := field != nil && !field.isSelect()
 
 	// A half-typed operator (d/c/r) consumes the next key.
@@ -514,15 +541,24 @@ func (m *model) formEnter() (tea.Model, tea.Cmd) {
 
 func (m *model) cancelForm() {
 	m.form = nil
+	m.pendingPicker = nil // drop any picker parked behind a track-new form
 	m.status = "cancelled"
 }
 
-// submitForm dispatches the form's action with its field values.
+// submitForm dispatches the form's action with its field values. When the form
+// is the add-repo form spawned from the picker's "track new repo" row, it reopens
+// that parked picker so the freshly-tracked repo can be selected (it lands in a
+// later snapshot; the picker's list refreshes live).
 func (m *model) submitForm() tea.Cmd {
 	fs := m.form
 	m.form = nil
 	m.status = fs.submit + "…"
-	return m.sendCmd(core.Action{Action: fs.action, ID: fs.id, Fields: fs.values()})
+	cmd := m.sendCmd(core.Action{Action: fs.action, ID: fs.id, Fields: fs.values()})
+	if fs.action == "add-repo" && m.pendingPicker != nil {
+		m.picker = m.pendingPicker
+		m.pendingPicker = nil
+	}
+	return cmd
 }
 
 // renderForm draws the form as a centered modal in the main pane.
@@ -546,7 +582,7 @@ func (m *model) renderForm() string {
 		if active {
 			marker = keyStyle.Render("▸ ")
 			label = f.label + ": "
-			if !f.isSelect() {
+			if !f.isSelect() && !f.isPicker() {
 				val = f.renderActive()
 			}
 		}
@@ -570,6 +606,9 @@ func (m *model) renderForm() string {
 // formHint is the footer line: the vim mode on a text field, else generic help.
 func (m *model) formHint() string {
 	fs := m.form
+	if f := fs.active(); f != nil && f.isPicker() {
+		return dimStyle.Render("↵ pick repos · j/k move · Esc cancel")
+	}
 	if f := fs.active(); f != nil && !f.isSelect() {
 		if fs.insert {
 			return titleStyle.Render("-- INSERT --") + dimStyle.Render("  Esc normal · Enter next")

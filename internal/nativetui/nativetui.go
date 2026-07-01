@@ -9,6 +9,7 @@ package nativetui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,9 +68,13 @@ type model struct {
 	pending  string                      // id of a just-created session to auto-attach once it lands in a snapshot
 	confirm  *confirmState               // a pending confirmation modal, or nil
 	form     *formState                  // a pending form modal, or nil
-	dataCh   chan struct{}
-	w, h     int
-	status   string
+	picker   *pickerState                // a pending fuzzy repo picker, or nil
+	// pendingPicker holds a picker parked while its "track a new repo" form is up,
+	// reopened once the repo is tracked.
+	pendingPicker *pickerState
+	dataCh        chan struct{}
+	w, h          int
+	status        string
 }
 
 // confirmState is a pending yes/no confirmation modal: the question shown, and
@@ -196,7 +201,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // or click an agent just by pointing at it — focus follows a button press. Events
 // over the borders/help line, or while a modal is up, are ignored.
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.form != nil || m.confirm != nil {
+	if m.form != nil || m.confirm != nil || m.picker != nil {
 		return m, nil
 	}
 	if tea.MouseEvent(ev).IsWheel() && ev.X < sidebarWidth {
@@ -248,6 +253,10 @@ func (m *model) reapClosed() {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The fuzzy repo picker is the top modal: it captures every key while open.
+	if m.picker != nil {
+		return m.handlePicker(k)
+	}
 	// A form modal captures every key until submitted or cancelled.
 	if m.form != nil {
 		return m.handleForm(k)
@@ -368,10 +377,30 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = "select a session to rename"
+	case "e": // edit which repos an agent works on (fuzzy-select; adds/removes worktrees)
+		if s := m.selected(); s != nil && attachable(s) {
+			p := newRepoPicker("Repos · "+s.Title, m.sessions, agentRepos(s))
+			p.action, p.id = "agent-set-repos", s.ID
+			m.openRepoPicker(p)
+			return m, nil
+		}
+		m.status = "select an agent to edit its repos"
 	case "tab":
 		m.focusAgent()
 	}
 	return m, nil
+}
+
+// agentRepos returns the repos a rail agent row currently works on, parsed from
+// its snapshot Repos field (comma-joined).
+func agentRepos(s *core.Session) []string {
+	var out []string
+	for _, r := range strings.Split(s.Repos, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // sendCmd dispatches a daemon action (create/move/…). Writes are serialized on

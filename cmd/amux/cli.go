@@ -241,7 +241,7 @@ func cmdSession(args []string) error {
 		return nil
 	case "create":
 		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
-		// Creates a workgroup that attaches the repos, plus a default agent using all.
+		// Creates a workgroup plus one default agent scoped to the given repos.
 		repos, cfg := parseCreateFlags(args[1:])
 		rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: map[string]string{
 			"name": cfg.name, "repos": strings.Join(repos, ","),
@@ -250,7 +250,7 @@ func cmdSession(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created workspace %s (repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
+		fmt.Printf("created workspace %s (agent repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
 		startCreated(rootID)
 		return nil
 	case "repo":
@@ -287,15 +287,17 @@ func cmdSession(args []string) error {
 			fmt.Printf("moved agent %s into workgroup %s\n", args[1], target)
 		}
 		return nil
-	case "attach":
-		// amux session attach <root-id> <repo> — attach a tracked repo to a workgroup
-		if len(args) < 3 {
-			return fmt.Errorf("usage: amux session attach <root-id> <repo>")
+	case "repos":
+		// amux session repos <agent-id> <repo>... — re-scope an agent to exactly
+		// these tracked repos (adds/removes worktrees to match).
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux session repos <agent-id> <repo>...")
 		}
-		if err := sendAction(core.Action{Action: "attach-repo", ID: args[1], Fields: map[string]string{"repo": args[2]}}); err != nil {
+		repos := args[2:]
+		if err := sendAction(core.Action{Action: "agent-set-repos", ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
 			return err
 		}
-		fmt.Printf("attached %s to workspace %s\n", args[2], args[1])
+		fmt.Printf("agent %s repos: %s\n", args[1], orNone(strings.Join(repos, ", ")))
 		return nil
 	case "rm", "delete":
 		if len(args) < 2 {
@@ -342,8 +344,7 @@ func sessionList() error {
 		return err
 	}
 	for _, r := range roots {
-		fmt.Printf("%-8s %-6s %-20s repos: %s\n", r.ID, defaultStr(r.Scope, "work"), orID(r.Display, r.ID),
-			orNone(strings.ReplaceAll(r.Repos, ",", ", ")))
+		fmt.Printf("%-8s %-6s %s\n", r.ID, defaultStr(r.Scope, "work"), orID(r.Display, r.ID))
 		for _, s := range r.Agents {
 			tag := ""
 			if s.Archived {
@@ -356,20 +357,23 @@ func sessionList() error {
 	return nil
 }
 
-// sessionNew is the interactive create page: name the workgroup, attach repos,
-// optionally configure specific agents over a subset of those repos (otherwise a
-// default agent uses all), then Create.
+// sessionNew is the interactive create page: name the workgroup, optionally
+// configure agents (each scoped to fuzzy-picked tracked repos, otherwise a
+// repo-less default agent), then Create. Repos are an attribute of an agent, not
+// the workgroup, so there's no workgroup-level repo list here.
 func sessionNew(ctx context.Context, seedRepos []string) error {
 	in := bufio.NewReader(os.Stdin)
 	name := ""
-	repos := append([]string(nil), seedRepos...) // pre-attach repos (e.g. from the rail)
 	var agents []agentCfg
+	// A seed repo (e.g. from the rail) pre-configures a first agent scoped to it.
+	if len(seedRepos) > 0 {
+		agents = append(agents, agentCfg{Repos: seedRepos, Mode: "task", Model: claudecfg.PreferredModel()})
+	}
 
 	for {
 		menu := []string{
 			fmt.Sprintf("Name   › %s", orOptional(name)),
-			fmt.Sprintf("Repos  › %s", orNone(strings.Join(repos, ", "))),
-			"+ add agent (a subset of these repos)",
+			"+ add agent",
 		}
 		for i, a := range agents {
 			menu = append(menu, fmt.Sprintf("  agent %d: %s", i+1, describeAgent(a)))
@@ -383,10 +387,8 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 		switch {
 		case strings.HasPrefix(choice, "Name"):
 			name = promptLine(in, "Workspace name (optional)")
-		case strings.HasPrefix(choice, "Repos"):
-			repos = pickRepos(ctx, in, "attach repos (TAB)")
 		case strings.HasPrefix(choice, "+ add agent"):
-			if a, ok := configureAgent(ctx, in, repos); ok {
+			if a, ok := configureAgent(ctx, in); ok {
 				agents = append(agents, a)
 			}
 		case strings.HasPrefix(strings.TrimSpace(choice), "agent "):
@@ -394,7 +396,7 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 				agents = append(agents[:i], agents[i+1:]...)
 			}
 		case strings.HasPrefix(choice, "✓"):
-			return createWorkspace(name, repos, agents)
+			return createWorkspace(name, agents)
 		case strings.HasPrefix(choice, "✗"):
 			return nil
 		}
@@ -402,11 +404,10 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 }
 
 // createWorkspace creates the workgroup over the daemon: when the user configured
-// no explicit agents we seed one default agent over all repos (matching the
-// add-agent screen's defaults); otherwise we create the bare workgroup and add
-// each configured agent.
-func createWorkspace(name string, repos []string, agents []agentCfg) error {
-	fields := map[string]string{"name": name, "repos": strings.Join(repos, ",")}
+// no explicit agents we seed one default (repo-less) agent; otherwise we create
+// the bare workgroup and add each configured agent, scoped to its picked repos.
+func createWorkspace(name string, agents []agentCfg) error {
+	fields := map[string]string{"name": name}
 	if len(agents) == 0 {
 		fields["defaultAgent"] = "1"
 		fields["mode"] = "task"
@@ -430,8 +431,7 @@ func createWorkspace(name string, repos []string, agents []agentCfg) error {
 
 func sessionAdd(ctx context.Context, rootID string) error {
 	in := bufio.NewReader(os.Stdin)
-	avail := workgroupRepos(rootID)
-	a, ok := configureAgent(ctx, in, avail)
+	a, ok := configureAgent(ctx, in)
 	if !ok {
 		return nil
 	}
@@ -446,29 +446,15 @@ func sessionAdd(ctx context.Context, rootID string) error {
 	return nil
 }
 
-// workgroupRepos returns the repos attached to a workgroup root, via the daemon.
-func workgroupRepos(rootID string) []string {
-	roots, err := querySessions()
-	if err != nil {
-		return nil
-	}
-	for _, r := range roots {
-		if r.ID == rootID {
-			return splitRepos(r.Repos)
-		}
-	}
-	return nil
-}
-
 // configureAgent presents one review screen for a new agent, pre-filled with
-// rational defaults — all of the workgroup's repos, "task" mode, and the user's
-// preferred Claude model — so the common case is a single ENTER on "Add agent".
-// Any field can be edited first; the menu loops until the user confirms or cancels.
-func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (agentCfg, bool) {
+// rational defaults — "task" mode and the user's preferred Claude model — so the
+// common case is a single ENTER on "Add agent". Its repos are fuzzy-picked from
+// the tracked set (none by default). The menu loops until the user confirms or
+// cancels.
+func configureAgent(ctx context.Context, in *bufio.Reader) (agentCfg, bool) {
 	a := agentCfg{
-		Repos: append([]string(nil), available...), // default: the whole workgroup
-		Mode:  "task",                              // default: task-style work
-		Model: claudecfg.PreferredModel(),          // default: your usual model
+		Mode:  "task",                     // default: task-style work
+		Model: claudecfg.PreferredModel(), // default: your usual model
 	}
 	for {
 		menu := []string{
@@ -484,11 +470,7 @@ func configureAgent(ctx context.Context, in *bufio.Reader, available []string) (
 		}
 		switch {
 		case strings.HasPrefix(choice, "Repos"):
-			if len(available) > 0 {
-				a.Repos, _ = fzfMultiSelect("repos for this agent (TAB)", available)
-			} else {
-				a.Repos = pickRepos(ctx, in, "repos for this agent (TAB)")
-			}
+			a.Repos = pickRepos(ctx, in, "repos for this agent (TAB)")
 		case strings.HasPrefix(choice, "Mode"):
 			a.Mode = pickMode()
 		case strings.HasPrefix(choice, "Model"):
@@ -560,18 +542,6 @@ func describeAgent(a agentCfg) string {
 		parts = append(parts, a.Model)
 	}
 	return strings.Join(parts, " · ")
-}
-
-// splitRepos splits a comma-joined repo list, dropping blanks. It mirrors
-// store.SplitRepos so the CLI can parse a WorkgroupRow's repos without the store.
-func splitRepos(s string) []string {
-	var out []string
-	for _, r := range strings.Split(s, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			out = append(out, r)
-		}
-	}
-	return out
 }
 
 func orNone(s string) string {

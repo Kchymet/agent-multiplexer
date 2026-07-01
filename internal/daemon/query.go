@@ -57,7 +57,7 @@ func (d *Daemon) readModel(q string) (any, error) {
 			if scope == "" {
 				scope = store.ScopeWork
 			}
-			wg := core.WorkgroupRow{ID: r.ID, Scope: scope, Display: r.Display(), Repos: r.Repo}
+			wg := core.WorkgroupRow{ID: r.ID, Scope: scope, Display: r.Display()}
 			subs, _ := db.Children(r.ID)
 			for _, s := range subs {
 				agent := s.Agent
