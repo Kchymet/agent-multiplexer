@@ -75,17 +75,33 @@ func TestFindSession(t *testing.T) {
 		t.Fatalf("both conventions present: got (%q, %v), want (%q, true)", cwd, ok, repoDir)
 	}
 
-	// A bare <uuid>/ session directory (no .jsonl) is corroborating evidence.
+	// A bare <uuid>/ session dir with only a subagents/ area (no transcript) must
+	// NOT count: it outlives a session killed before it flushed, and `claude
+	// --resume` on it fails ("No conversation found"), leaving the agent unable to
+	// open. Requiring an actual transcript lets the caller fall back to a fresh
+	// start instead. (Regression: an orphaned dir once read as resumable.)
 	other := "/home/u/.local/share/amux/sessions/root/agent2"
 	sessUUID := "22222222-2222-4222-8222-222222222222"
-	if err := os.MkdirAll(filepath.Join(proj, munge(other), sessUUID), 0o755); err != nil {
+	sessDir := filepath.Join(proj, munge(other), sessUUID)
+	if err := os.MkdirAll(filepath.Join(sessDir, "subagents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if cwd, ok := FindSession(sessUUID, other); !ok || cwd != other {
-		t.Fatalf("bare session dir: got (%q, %v), want (%q, true)", cwd, ok, other)
+	if err := os.WriteFile(filepath.Join(sessDir, "subagents", "agent-x.meta.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := FindSession(sessUUID, other); ok {
+		t.Fatal("a transcript-less <uuid>/ dir must not resolve (--resume would fail)")
+	}
+	if SessionExists(other, sessUUID) {
+		t.Fatal("SessionExists must be false without an actual transcript")
+	}
+
+	// But a transcript written inside the <uuid>/ working dir does count.
+	if err := os.WriteFile(filepath.Join(sessDir, sessUUID+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if !SessionExists(other, sessUUID) {
-		t.Fatal("SessionExists should honor a bare session dir too")
+		t.Fatal("a .jsonl inside the <uuid>/ dir should be honored")
 	}
 }
 

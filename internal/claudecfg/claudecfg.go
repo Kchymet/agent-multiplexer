@@ -41,18 +41,36 @@ func munge(cwd string) string {
 	}, abs)
 }
 
-// sessionPresent reports whether uuid's session is on disk for cwd. Claude Code
-// writes the transcript as <projects>/<munge(cwd)>/<uuid>.jsonl; a <uuid>/
-// directory alongside it (Claude's per-session working area) is corroborating
-// evidence the session is known even if the .jsonl hasn't been flushed yet, so
-// either one counts.
+// sessionPresent reports whether uuid's session is resumable on disk for cwd —
+// meaning an actual transcript exists. Claude Code writes it as
+// <projects>/<munge(cwd)>/<uuid>.jsonl.
+//
+// A bare <uuid>/ directory (Claude's per-session working area, holding e.g.
+// subagents/) does NOT count: it can outlive the transcript when the agent is
+// killed before flushing, and `claude --resume` on such a session fails outright
+// ("No conversation found") — which would leave the agent unable to open at all
+// instead of falling back to a fresh start. So we require the transcript itself:
+// the <uuid>.jsonl file, or a .jsonl inside the <uuid>/ working dir.
 func sessionPresent(cwd, uuid string) bool {
 	base := filepath.Join(projectsRoot(), munge(cwd), uuid)
 	if fi, err := os.Stat(base + ".jsonl"); err == nil && !fi.IsDir() {
 		return true
 	}
-	if fi, err := os.Stat(base); err == nil && fi.IsDir() {
-		return true
+	return dirHasTranscript(base)
+}
+
+// dirHasTranscript reports whether dir directly contains a .jsonl transcript.
+// Only the immediate entries are considered — a subagents/ subdir with its own
+// .jsonl files is not the session's own transcript and must not count.
+func dirHasTranscript(dir string) bool {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range ents {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			return true
+		}
 	}
 	return false
 }
