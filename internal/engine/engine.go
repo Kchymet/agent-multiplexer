@@ -24,6 +24,32 @@ type Key struct {
 	Tab     int
 }
 
+// Activity is an instance's turn state as far as a graceful stop cares: whether
+// stopping it now is safe or would interrupt work in flight. It is deliberately
+// abstract — an engine consults it (via ActivityFunc) without knowing how the
+// signal is produced. For a harness like Claude Code it maps from the agent's
+// reported hook state (see internal/agent.Harness), but any harness can supply
+// it however it likes.
+type Activity int
+
+const (
+	// ActivityUnknown means there is no signal for the instance; callers treat it
+	// as safe to stop (it never blocks a shutdown on a missing signal).
+	ActivityUnknown Activity = iota
+	// ActivitySafe means the instance is idle/between turns; stopping it now loses
+	// nothing.
+	ActivitySafe
+	// ActivityBusy means the instance is mid-turn; stopping it now may interrupt
+	// work the harness hasn't yet persisted, so a graceful stop should wait.
+	ActivityBusy
+)
+
+// ActivityFunc reports the current Activity of an instance by key. An engine
+// consults it on a graceful stop to defer terminating busy instances until they
+// are safe. A nil ActivityFunc (or one returning ActivityUnknown) means "always
+// safe to stop", preserving the stop-immediately behavior.
+type ActivityFunc func(Key) Activity
+
 // Spec is a fully-resolved request to run one instance: what to launch, where,
 // and the initial terminal size. The daemon resolves it (working dir, env, argv,
 // sandboxing) before handing it to the engine, so the engine needs no knowledge

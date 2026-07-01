@@ -76,6 +76,15 @@ func dirHasTranscript(dir string) bool {
 	return false
 }
 
+// TranscriptPath returns the path where Claude Code stores uuid's transcript for
+// cwd: <projects>/<munge(cwd)>/<uuid>.jsonl. It routes the munge convention
+// through this package so gap-fill (restoring a captured backup into the path
+// Claude expects) stays consistent with resume detection (sessionPresent), which
+// reads the very same location.
+func TranscriptPath(cwd, uuid string) string {
+	return filepath.Join(projectsRoot(), munge(cwd), uuid+".jsonl")
+}
+
 // SessionExists reports whether a saved session with uuid exists for cwd.
 func SessionExists(cwd, uuid string) bool {
 	if uuid == "" {
