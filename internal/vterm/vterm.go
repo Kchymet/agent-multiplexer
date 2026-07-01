@@ -13,9 +13,26 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
+
+// altScrollLines is how many cursor-key presses one wheel notch turns into when
+// falling back to alternate-scroll (see MouseEvent). Three lines per notch
+// matches what xterm and most terminals send.
+const altScrollLines = 3
+
+// mouseTrackModes are the DEC private modes a child sets to ask for mouse
+// reporting. If any is on, the child wants raw mouse events and we forward them
+// verbatim; if none is, wheel scrolling falls back to alternate-scroll keys.
+var mouseTrackModes = []ansi.Mode{
+	ansi.ModeMouseX10,
+	ansi.ModeMouseNormal,
+	ansi.ModeMouseHighlight,
+	ansi.ModeMouseButtonEvent,
+	ansi.ModeMouseAnyEvent,
+}
 
 // Terminal runs one child process in a PTY and maintains a rendered screen.
 // Its methods are safe to call from multiple goroutines: a background reader
@@ -30,6 +47,14 @@ type Terminal struct {
 	closed bool
 
 	onData func() // fired when new output is parsed, to prompt a re-render
+
+	// Mouse/cursor mode state the child has requested, tracked so MouseEvent can
+	// tell whether to forward raw mouse events or fall back to alternate-scroll.
+	// Mutated only from the emulator's mode callbacks, which fire synchronously
+	// inside emu.Write while pump/Feed hold t.mu — so they're guarded by the same
+	// lock without re-locking (the mutex isn't reentrant).
+	mouseModes    map[ansi.Mode]bool // mouse-tracking DEC modes currently enabled
+	appCursorKeys bool               // DECCKM: cursor keys use the SS3 (application) form
 
 	// Remote mode (set by NewRemote): there is no local PTY; input and the
 	// emulator's query replies are routed through onInput, and resizes are
@@ -46,7 +71,44 @@ func New(cols, rows int) *Terminal {
 	if rows <= 0 {
 		rows = 24
 	}
-	return &Terminal{emu: vt.NewEmulator(cols, rows), cols: cols, rows: rows}
+	t := &Terminal{
+		emu:        vt.NewEmulator(cols, rows),
+		cols:       cols,
+		rows:       rows,
+		mouseModes: make(map[ansi.Mode]bool),
+	}
+	// Watch the child's private-mode changes so MouseEvent knows whether it wants
+	// raw mouse events (any mouse-tracking mode) and which cursor-key form it
+	// expects (DECCKM). These callbacks run under t.mu (see field docs).
+	t.emu.SetCallbacks(vt.Callbacks{
+		EnableMode:  func(m ansi.Mode) { t.noteMode(m, true) },
+		DisableMode: func(m ansi.Mode) { t.noteMode(m, false) },
+	})
+	return t
+}
+
+// noteMode records a child mode change relevant to input translation. It runs
+// synchronously from emu.Write (via the emulator's mode callbacks), which
+// pump/Feed already hold t.mu across — so it must not re-lock.
+func (t *Terminal) noteMode(m ansi.Mode, on bool) {
+	switch m {
+	case ansi.ModeMouseX10, ansi.ModeMouseNormal, ansi.ModeMouseHighlight,
+		ansi.ModeMouseButtonEvent, ansi.ModeMouseAnyEvent:
+		t.mouseModes[m] = on
+	case ansi.ModeCursorKeys:
+		t.appCursorKeys = on
+	}
+}
+
+// mouseTracked reports whether the child has any mouse-reporting mode enabled,
+// meaning it wants raw mouse events forwarded rather than alternate-scroll keys.
+func (t *Terminal) mouseTracked() bool {
+	for _, m := range mouseTrackModes {
+		if t.mouseModes[m] {
+			return true
+		}
+	}
+	return false
 }
 
 // NewRemote creates a terminal with no local process: output is supplied by the
@@ -174,19 +236,61 @@ func (t *Terminal) Write(p []byte) (int, error) {
 }
 
 // MouseEvent forwards a mouse event (wheel scroll, click, or motion) to the
-// child. The emulator encodes it only if the child has enabled mouse reporting —
-// exactly like a real terminal: mouse-aware programs (the agent TUI, a pager, an
-// editor with mouse on) receive it; others are unaffected. Coordinates are
-// 0-based from the terminal's top-left. The encoded bytes flow to the child via
-// the same reply pipe forwardResponses already drains. We hold t.mu because
-// SendMouse reads emulator mode state that pump mutates under the same lock.
+// child. If the child has enabled mouse reporting, the emulator encodes the raw
+// event — exactly like a real terminal: mouse-aware programs (the agent TUI, a
+// pager, an editor with mouse on) receive it. The encoded bytes flow to the
+// child via the same reply pipe forwardResponses already drains.
+//
+// Otherwise, a vertical wheel over the alternate screen falls back to
+// alternate-scroll: like xterm's DECSET 1007 (on by default), it translates the
+// notch into cursor-key presses so full-screen programs that don't track the
+// mouse — less, man, vim, or tmux without `mouse on` — still scroll. Without
+// this the emulator silently drops the wheel and nothing scrolls.
+//
+// Coordinates are 0-based from the terminal's top-left. We hold t.mu because
+// SendMouse and the mode state both read fields pump mutates under the lock; the
+// synthesized keys are written after unlocking, on the normal input path.
 func (t *Terminal) MouseEvent(ev vt.Mouse) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.closed {
+		t.mu.Unlock()
 		return
 	}
-	t.emu.SendMouse(ev)
+	var keys []byte
+	if wheel, ok := ev.(vt.MouseWheel); ok && !t.mouseTracked() && t.emu.IsAltScreen() {
+		keys = altScrollKeys(wheel.Button, t.appCursorKeys)
+	} else {
+		t.emu.SendMouse(ev)
+	}
+	t.mu.Unlock()
+	if keys != nil {
+		_, _ = t.Write(keys)
+	}
+}
+
+// altScrollKeys returns the cursor-key bytes a vertical wheel notch maps to
+// under alternate-scroll, repeated altScrollLines times. app selects the SS3
+// (application cursor keys / DECCKM) form over the default CSI form. Horizontal
+// wheels have no standard mapping and return nil.
+func altScrollKeys(btn vt.MouseButton, app bool) []byte {
+	var arrow byte
+	switch btn {
+	case vt.MouseWheelUp:
+		arrow = 'A'
+	case vt.MouseWheelDown:
+		arrow = 'B'
+	default:
+		return nil
+	}
+	intro := byte('[')
+	if app {
+		intro = 'O'
+	}
+	seq := make([]byte, 0, altScrollLines*3)
+	for i := 0; i < altScrollLines; i++ {
+		seq = append(seq, 0x1b, intro, arrow)
+	}
+	return seq
 }
 
 // Resize resizes both the emulator and the underlying PTY (SIGWINCH).
