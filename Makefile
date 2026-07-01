@@ -3,20 +3,19 @@ CONFDIR ?= $(HOME)/.config/amux
 GOFLAGS ?=
 LDFLAGS := -s -w
 
-.PHONY: all build install uninstall test fmt vet clean cross run-dash
+.PHONY: all build install uninstall test fmt vet clean cross run
 
 all: build
 
 build:
 	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/amux ./cmd/amux
 
-# Install the binary, materialize the isolated tmux config, and drop the shell
-# shim into the config dir. Prints the one line to add to your shell rc.
+# Install the binary and drop the shell shim into the config dir. Prints the one
+# line to add to your shell rc. Claude status hooks install on first run.
 install: build
 	@mkdir -p $(BINDIR) $(CONFDIR)
 	install -m 0755 bin/amux $(BINDIR)/amux
 	cp scripts/amux.sh $(CONFDIR)/amux.sh
-	$(BINDIR)/amux init
 	@echo ""
 	@echo "Installed amux -> $(BINDIR)/amux"
 	@echo "Add this to your ~/.zshrc (and/or ~/.bashrc):"
@@ -48,5 +47,5 @@ cross:
 	GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/amux
 	@echo "cross build OK"
 
-run-dash: build
-	./bin/amux dash
+run: build
+	./bin/amux

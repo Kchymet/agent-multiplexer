@@ -14,10 +14,10 @@ neutral console directory, not in any project.
   belongs in a workspace and offer to create/open one instead.
 
 ## What amux is
-amux runs agent **workspaces** inside an isolated tmux server (`tmux -L amux`),
-shown in a persistent side panel ("rail") that is a workspace switcher. A
-workspace = an agent (Claude) + a set of tracked repositories, each checked out as
-a git **worktree**. Workspaces have a short **id** and an optional display name
+amux runs agent **workspaces** in a native full-screen TUI that hosts every pane
+in-process over a PTY. A persistent side panel ("rail") on the left is a workspace
+switcher. A workspace = an agent (Claude) + a set of tracked repositories, each
+checked out as a git **worktree**. Workspaces have a short **id** and an optional display name
 (the agent can set its own name with `amux name`). A workspace is a **task**
 (short-running) or a **loop** (long-running, more autonomous).
 
@@ -35,7 +35,7 @@ own worktree — same repo/different branches, per-repo, or mixed; per-agent mod
 - `amux session open <id>` · `amux session rm <id>` · `amux session rename <id> <name>`
 - `amux session ls`
 
-Other: `amux status` · `amux name "<text>"` · `amux init` (rewrite the tmux config)
+Other: `amux status` · `amux name "<text>"` · `amux refresh` (re-poll sources now)
 
 ## How agents are launched (you can tune this)
 - amux signals each agent's window via env: `AMUX_MODE` (task|loop), `AMUX_WORKSPACE`, `AMUX_AGENT`.
@@ -47,17 +47,15 @@ Other: `amux status` · `amux name "<text>"` · `amux init` (rewrite the tmux co
   branches on `$AMUX_MODE` to own autonomy (e.g. start a `/loop` for loop mode).
 
 ## Config files you may edit
-- `~/.config/amux/amux.conf` — isolated tmux config (keybinds, status line, pane
-  hints, the rail hook). Reload a running server with `Ctrl-a r`.
 - `~/.config/amux/amux.sh` — the shell shim (auto-launch on terminal open).
 - The wrapper that `AMUX_CLAUDE_BIN` points at — autonomy policy.
 - This `CLAUDE.md` — your own instructions; tailor how this console behaves.
 - `~/.local/share/amux/amux.db` — SQLite store of repos + sessions (prefer the CLI).
 
-## Keybinds (inside the amux tmux server; prefix = `C-a`)
-- `Alt+h` / `C-a h` → rail · `Alt+l` / `C-a l` → back · `Alt+a` toggle
-- in the rail: `Enter` open · `n` new session · `a` add agent · `x` `x` delete · `R` refresh
-- `C-a g` dashboard · `C-a a` new-workspace popup · `C-a C` this console · `C-a d` detach
+## Keybinds (native TUI; Alt/Option-only, no prefix)
+- `Alt+h` → rail · `Alt+l` → agent pane · `Alt+a` toggle focus · `Alt+1/2/3` agent/editor/terminal tab
+- in the rail: `↑↓`/`k j` move · `Enter` open · `a` add agent · `w` new workgroup · `R` track repo
+- `m` move agent · `r` rename · `x` archive/restore · `D` delete · `Ctrl+r` refresh · `q` quit
 
 Help the user customize any of the above. Keep every action to amux configuration
 and the amux CLI — never the contents of a workspace or the amux source.

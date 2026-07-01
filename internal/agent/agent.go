@@ -1,6 +1,6 @@
 // Package agent resolves the command to launch for an agent kind. Resolving to
-// an absolute path (against the resolver's PATH) means a spawned tmux window
-// gets a valid binary even if the tmux server's own PATH is minimal.
+// an absolute path (against the resolver's PATH) means the spawned process gets
+// a valid binary even when the launch environment's own PATH is minimal.
 package agent
 
 import (
