@@ -138,6 +138,12 @@ func cmdDaemon() error {
 	_ = os.WriteFile(core.PidPath(), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644)
 	defer os.Remove(core.PidPath())
 
+	// Ensure Claude's hooks are current here too, not only on TUI launch: agents
+	// run under the daemon, so a daemon restart (`amux reload`) is the natural
+	// point to pick up a new hook set (e.g. transcript capture). Versioned +
+	// idempotent, so this is a no-op once installed.
+	ensureHooks(false)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return daemon.Default(self).Run(ctx)
