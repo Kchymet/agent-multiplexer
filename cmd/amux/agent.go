@@ -30,6 +30,10 @@ func cmdAgent(args []string) error {
 		// verb. Both record activity state; they differ only in where identity
 		// comes from (stdin for hook, stdin/env/flag for status).
 		return cmdAgentStatus(args[1:])
+	case "capture":
+		// Claude-hook binding that snapshots the conversation transcript (identity
+		// and transcript path come from the hook JSON on stdin).
+		return cmdAgentCapture()
 	case "name", "label":
 		return cmdName(args[1:])
 	case "", "help", "-h", "--help":
@@ -110,6 +114,30 @@ func cmdAgentStatus(args []string) error {
 		cwd, _ = os.Getwd()
 	}
 	_ = core.WriteHookState(sessionID, state, cwd)
+	return nil
+}
+
+// cmdAgentCapture snapshots the agent's Claude transcript into amux's own
+// transcript dir, keyed by Claude's session id, on each hook event that carries a
+// transcript_path (see claudecfg.captureEvents). This is a diagnostic for the
+// "restarting" bug: it gives us a durable copy of the conversation, captured at
+// every turn/tool boundary, to compare against the transcript Claude Code
+// persists itself — so we can tell whether Claude's own copy was written and
+// lost, or never written. Like status reporting, it must never disrupt the agent,
+// so it swallows all errors and exits 0.
+func cmdAgentCapture() error {
+	var payload struct {
+		SessionID      string `json:"session_id"`
+		TranscriptPath string `json:"transcript_path"`
+		HookEventName  string `json:"hook_event_name"`
+	}
+	if stdinPiped() {
+		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
+			_ = json.Unmarshal(b, &payload)
+		}
+	}
+	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
+	_ = core.CaptureTranscript(sessionID, payload.TranscriptPath, payload.HookEventName, os.Getenv("AMUX_WORKGROUP"))
 	return nil
 }
 

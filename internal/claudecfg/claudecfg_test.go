@@ -151,7 +151,22 @@ func TestInstallHooks(t *testing.T) {
 		}
 	}
 
-	// The user's own Stop hook must still be present alongside ours.
+	// Each capture event gets exactly one "agent capture" group, no stacking.
+	for _, ev := range captureEvents {
+		groups, _ := hooks[ev].([]any)
+		capture := 0
+		for _, g := range groups {
+			if groupCommand(g) == "/opt/amux agent capture" {
+				capture++
+			}
+		}
+		if capture != 1 {
+			t.Errorf("event %s: got %d amux capture groups, want exactly 1", ev, capture)
+		}
+	}
+
+	// The user's own Stop hook must still be present alongside ours (Stop carries
+	// both a status hook and a capture hook, plus the user's).
 	var foundUser bool
 	for _, g := range hooks["Stop"].([]any) {
 		if groupCommand(g) == "/usr/bin/my-own-thing" {
