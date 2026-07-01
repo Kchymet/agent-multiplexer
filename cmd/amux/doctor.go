@@ -11,7 +11,6 @@ import (
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/gh"
-	"amux/internal/store"
 )
 
 // cmdDoctor prints a health summary: required/optional CLI dependencies and the
@@ -60,25 +59,28 @@ func cmdDoctor() error {
 	}
 
 	fmt.Println("\nRuntime")
+	daemonUp := false
 	if c, err := daemon.Dial(); err == nil {
 		_ = c.Close()
+		daemonUp = true
 		fmt.Printf("  ✓ daemon    running (socket %s)\n", core.SocketPath())
 	} else {
 		fmt.Printf("  · daemon    offline — starts on `amux`\n")
 	}
-	if db, err := store.Open(); err == nil {
-		repos, _ := db.Repos()
-		roots, _ := db.Roots()
-		all, _ := db.AllSessions()
-		_ = db.Close()
-		agents := len(all) - len(roots)
-		if agents < 0 {
-			agents = 0
+	// The daemon is the sole owner of the store, so ask it for the counts over
+	// the socket rather than opening the database here. With the daemon offline
+	// there's nothing to read — just show where the database lives.
+	if !daemonUp {
+		fmt.Printf("  · database  %s (start the daemon to read stats)\n", core.DBPath())
+	} else if repos, roots, err := doctorStats(); err != nil {
+		fmt.Printf("  ✗ database  %v\n", err)
+	} else {
+		agents := 0
+		for _, r := range roots {
+			agents += len(r.Agents)
 		}
 		fmt.Printf("  ✓ database  %s\n", core.DBPath())
 		fmt.Printf("              %d repos · %d workspaces · %d agents\n", len(repos), len(roots), agents)
-	} else {
-		fmt.Printf("  ✗ database  %v\n", err)
 	}
 	fmt.Println("\nPaths")
 	fmt.Printf("  data     %s\n", core.DataDir())
@@ -90,6 +92,21 @@ func cmdDoctor() error {
 	}
 	fmt.Println("\n✓ all required dependencies present")
 	return nil
+}
+
+// doctorStats reads the repo and workgroup counts from the daemon (the store
+// owner) for the health summary. It reuses the same read models the CLI's
+// `repo ls` / `session ls` go through, so doctor never opens the store itself.
+func doctorStats() ([]core.RepoRow, []core.WorkgroupRow, error) {
+	repos, err := queryRepos()
+	if err != nil {
+		return nil, nil, err
+	}
+	roots, err := querySessions()
+	if err != nil {
+		return nil, nil, err
+	}
+	return repos, roots, nil
 }
 
 // resolveCmd locates bin the way amux actually needs it, reporting how it was
