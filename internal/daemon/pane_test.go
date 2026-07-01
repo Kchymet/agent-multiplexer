@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -123,6 +124,67 @@ func TestStartActionLaunchesAgentHeadless(t *testing.T) {
 	readPaneMarker(t, c, "p1", "MARKER", 3*time.Second)
 	if inst2, ok := d.engine.Lookup(key); !ok || inst2 != inst {
 		t.Fatal("pane.open after start should reuse the same instance")
+	}
+}
+
+// waitLive blocks until key is alive in the engine, or fails after d.
+func waitLive(t *testing.T, eng engine.Engine, key engine.Key, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if inst, ok := eng.Lookup(key); ok && inst.Alive() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("instance %v never came alive", key)
+}
+
+// After a restart — the previously-live set is persisted, then a fresh daemon
+// starts — the daemon relaunches those agents in the engine on its own, with no
+// client attached, and skips agents that were deleted or archived while it was
+// down.
+func TestRestoreRelaunchesLiveAgents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live-agents.json")
+	ctx := context.Background()
+
+	// First daemon: two agents come up live, and the set is persisted to disk.
+	d1 := testDaemon(t)
+	d1.liveAgentsPath = path
+	for _, id := range []string{"a1", "gone"} {
+		if err := d1.startEngineFor(ctx, id); err != nil {
+			t.Fatalf("startEngineFor %s: %v", id, err)
+		}
+		waitLive(t, d1.engine, engine.Key{AgentID: id, Tab: 0}, 3*time.Second)
+	}
+	d1.persistLiveAgents()
+	d1.engine.Shutdown() // simulate the daemon stopping (kills the processes)
+
+	// Second daemon: fresh engine, reads the persisted set. Its snapshot has a1
+	// (still live) and an archived a2; "gone" was deleted (absent from sessions).
+	d2 := testDaemon(t)
+	d2.liveAgentsPath = path
+	d2.mu.Lock()
+	d2.sessions = []core.Session{
+		{ID: "a1"},
+		{ID: "a2", Section: core.SectionArchived},
+	}
+	d2.mu.Unlock()
+	d2.pendingRestore = d2.readLiveAgents()
+	if len(d2.pendingRestore) != 2 {
+		t.Fatalf("expected 2 persisted keys, got %v", d2.pendingRestore)
+	}
+
+	d2.restoreLiveAgents(ctx)
+
+	// a1 is relaunched with no subscriber attached (restore never subscribes).
+	waitLive(t, d2.engine, engine.Key{AgentID: "a1", Tab: 0}, 3*time.Second)
+	// "gone" (deleted) and any archived agent must NOT be resurrected.
+	if _, ok := d2.engine.Lookup(engine.Key{AgentID: "gone", Tab: 0}); ok {
+		t.Fatal("a deleted agent must not be restored")
+	}
+	if _, ok := d2.engine.Lookup(engine.Key{AgentID: "a2", Tab: 0}); ok {
+		t.Fatal("an archived agent must not be restored")
 	}
 }
 

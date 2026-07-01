@@ -78,6 +78,12 @@ func LogPath() string {
 	return filepath.Join(StateDir(), "daemon.log")
 }
 
+// LiveAgentsPath is the JSON file recording which engine instances were running,
+// so a daemon restart can relaunch them without a UI trigger.
+func LiveAgentsPath() string {
+	return filepath.Join(StateDir(), "live-agents.json")
+}
+
 // HooksInstalledPath marks that amux has installed Claude Code's status hooks,
 // so setup only writes them once instead of on every launch.
 func HooksInstalledPath() string {
