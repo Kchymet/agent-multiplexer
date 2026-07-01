@@ -48,18 +48,36 @@ type Daemon struct {
 	subs   map[chan core.Snapshot]struct{}
 
 	pollNow chan struct{}
+
+	// liveAgentsPath is where the live engine-instance set is persisted so a
+	// restart can relaunch it. Defaults to core.LiveAgentsPath(); overridable in
+	// tests.
+	liveAgentsPath string
+	persistMu      sync.Mutex
+	lastLive       string // marshaled last-written set, to skip redundant writes
+
+	// pendingRestore holds the live set read from disk at startup, relaunched
+	// once after the first poll resolves sessions/specs.
+	pendingRestore []engine.Key
+
+	// firstPoll is closed after the first pollOnce completes, so restore waits
+	// until sessions/specs are resolvable.
+	firstPoll     chan struct{}
+	firstPollOnce sync.Once
 }
 
 // New builds a daemon. self is the absolute path to this binary.
 func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	return &Daemon{
-		sources:     sources,
-		interval:    interval,
-		self:        self,
-		resolve:     panespec.Resolve,
-		agentsUnder: wsops.AgentIDsUnder,
-		subs:        map[chan core.Snapshot]struct{}{},
-		pollNow:     make(chan struct{}, 1),
+		sources:        sources,
+		interval:       interval,
+		self:           self,
+		resolve:        panespec.Resolve,
+		agentsUnder:    wsops.AgentIDsUnder,
+		subs:           map[chan core.Snapshot]struct{}{},
+		pollNow:        make(chan struct{}, 1),
+		liveAgentsPath: core.LiveAgentsPath(),
+		firstPoll:      make(chan struct{}),
 	}
 }
 
@@ -108,9 +126,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux reload`; out-of-process hosting would lift that.)
+	// Persist the live set before killing them, so the next startup relaunches it.
 	if d.engine != nil {
-		defer d.engine.Shutdown()
+		defer func() {
+			d.persistLiveAgents()
+			d.engine.Shutdown()
+		}()
 	}
+
+	// Read the previously-live set BEFORE any poll persists over the file, then
+	// relaunch it once sessions/specs are resolvable (after the first poll).
+	d.pendingRestore = d.readLiveAgents()
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-d.firstPoll:
+			d.restoreLiveAgents(ctx)
+		}
+	}()
 
 	go d.pollLoop(ctx)
 
@@ -180,6 +213,11 @@ func (d *Daemon) pollOnce(ctx context.Context) {
 	d.sessions = all
 	d.mu.Unlock()
 	d.broadcast()
+
+	// Snapshot the live engine set each poll so a crash leaves a recent record;
+	// then release restore, which waited for sessions/specs to resolve.
+	d.persistLiveAgents()
+	d.firstPollOnce.Do(func() { close(d.firstPoll) })
 }
 
 func (d *Daemon) snapshot() core.Snapshot {
@@ -348,6 +386,105 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 		}
 	}
 	return firstErr
+}
+
+// persistLiveAgents writes the current set of live engine keys to disk so a
+// daemon restart can relaunch them without a UI trigger. It skips the write when
+// the set is unchanged from the last one, so the per-poll call is cheap. Failures
+// are logged, never fatal — persistence is best-effort.
+func (d *Daemon) persistLiveAgents() {
+	if d.engine == nil || d.liveAgentsPath == "" {
+		return
+	}
+	keys := d.engine.Live()
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].AgentID != keys[j].AgentID {
+			return keys[i].AgentID < keys[j].AgentID
+		}
+		return keys[i].Tab < keys[j].Tab
+	})
+	buf, err := json.Marshal(keys)
+	if err != nil {
+		return
+	}
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+	if string(buf) == d.lastLive {
+		return
+	}
+	// Write atomically so a crash mid-write can't leave a truncated file.
+	tmp := d.liveAgentsPath + ".tmp"
+	if err := os.WriteFile(tmp, buf, 0o644); err != nil {
+		log.Printf("persist live agents: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, d.liveAgentsPath); err != nil {
+		log.Printf("persist live agents: %v", err)
+		return
+	}
+	d.lastLive = string(buf)
+}
+
+// readLiveAgents reads the persisted live set. A missing/garbage file yields nil
+// (nothing to restore), never an error — restore is best-effort.
+func (d *Daemon) readLiveAgents() []engine.Key {
+	if d.liveAgentsPath == "" {
+		return nil
+	}
+	buf, err := os.ReadFile(d.liveAgentsPath)
+	if err != nil {
+		return nil
+	}
+	var keys []engine.Key
+	if err := json.Unmarshal(buf, &keys); err != nil {
+		log.Printf("read live agents: %v", err)
+		return nil
+	}
+	return keys
+}
+
+// restoreLiveAgents relaunches the agent panes that were live when the daemon
+// last stopped, headlessly (no subscriber attached — the engine buffers output in
+// its scrollback ring until a UI attaches). It restores only the agent tab
+// (TabAgent), and only agents that still exist and aren't archived, so it never
+// resurrects deleted/archived sessions or auto-starts editor/shell tabs. Gated by
+// $AMUX_RESTORE (default on). Ensure is idempotent, so a race with any other
+// starter is harmless.
+func (d *Daemon) restoreLiveAgents(ctx context.Context) {
+	if v := os.Getenv("AMUX_RESTORE"); v == "0" || v == "false" {
+		return
+	}
+	restored := 0
+	for _, k := range d.pendingRestore {
+		if k.Tab != panespec.TabAgent {
+			continue // only the agent process is auto-restored, not editor/shell
+		}
+		if !d.restorable(k.AgentID) {
+			continue // deleted or archived while the daemon was down
+		}
+		if err := d.startEngineFor(ctx, k.AgentID); err != nil {
+			log.Printf("restore agent %s: %v", k.AgentID, err)
+			continue
+		}
+		restored++
+	}
+	if restored > 0 {
+		log.Printf("restored %d agent(s) from the previous run", restored)
+		d.triggerPoll() // surface the now-live agents in the rail
+	}
+}
+
+// restorable reports whether an agent id is present in the current snapshot and
+// not archived — i.e. safe to relaunch on restore.
+func (d *Daemon) restorable(agentID string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.sessions {
+		if s.ID == agentID {
+			return s.Section != core.SectionArchived
+		}
+	}
+	return false
 }
 
 // killEngineFor stops the engine instances (all tabs) of an agent and, if id is a
