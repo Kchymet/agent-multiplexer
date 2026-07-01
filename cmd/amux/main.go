@@ -182,7 +182,7 @@ func cmdNative() error {
 	if err != nil {
 		return err
 	}
-	ensureHooks(false)
+	cleanupGlobalHooks()
 	if err := ensureDaemon(self); err != nil {
 		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
 	}

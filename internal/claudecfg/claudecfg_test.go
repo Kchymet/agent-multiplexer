@@ -116,13 +116,16 @@ func writeTranscript(t *testing.T, projectsDir, munged, uuid string) {
 	}
 }
 
-// TestInstallHooks verifies the status hooks are written for each event, point
-// at the given binary, are idempotent (no stacking on reinstall), and preserve
-// the user's own hooks on the same event.
+// TestInstallHooks verifies the per-agent status hooks are written into the
+// launch dir's settings.local.json for each event, point at the given binary,
+// are idempotent (no stacking on reinstall), and preserve the user's own hooks
+// on the same event.
 func TestInstallHooks(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	path := SettingsPath()
+	path := ProjectSettingsLocalPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	// Pre-existing user hook on an event we also manage; it must survive.
 	seed := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/my-own-thing"}]}]}}`
@@ -130,10 +133,10 @@ func TestInstallHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallHooks("/opt/amux"); err != nil {
+	if err := InstallHooksIn(dir, "/opt/amux"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallHooks("/opt/amux"); err != nil { // reinstall: must not stack
+	if err := InstallHooksIn(dir, "/opt/amux"); err != nil { // reinstall: must not stack
 		t.Fatal(err)
 	}
 
@@ -176,6 +179,80 @@ func TestInstallHooks(t *testing.T) {
 	if !foundUser {
 		t.Error("user's existing Stop hook was clobbered")
 	}
+}
+
+// TestUninstallHooks verifies the legacy-global cleanup strips amux's own hook
+// groups from the user settings.json, drops events left empty, removes the hooks
+// map once nothing remains, preserves the user's own hooks, and no-ops when
+// there's nothing of amux's to remove.
+func TestUninstallHooks(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := SettingsPath()
+
+	// A settings.json polluted the old way: amux status + capture groups across
+	// events, plus one hook the user owns on Stop.
+	seed := `{
+	  "model": "opus",
+	  "hooks": {
+	    "SessionStart": [{"hooks":[{"type":"command","command":"/old/amux agent hook ready"}]}],
+	    "PostToolUse":  [{"hooks":[{"type":"command","command":"/old/amux agent capture"}]}],
+	    "Stop": [
+	      {"hooks":[{"type":"command","command":"/old/amux agent hook ready"}]},
+	      {"hooks":[{"type":"command","command":"/usr/bin/my-own-thing"}]}
+	    ]
+	  }
+	}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UninstallHooks(); err != nil {
+		t.Fatal(err)
+	}
+
+	hooks := readHooks(t, path)
+	// Events that held only amux hooks are gone entirely.
+	if _, ok := hooks["SessionStart"]; ok {
+		t.Error("SessionStart should be dropped (only amux hooks)")
+	}
+	if _, ok := hooks["PostToolUse"]; ok {
+		t.Error("PostToolUse should be dropped (only amux hooks)")
+	}
+	// Stop keeps the user's hook and loses amux's.
+	stop, _ := hooks["Stop"].([]any)
+	if len(stop) != 1 || groupCommand(stop[0]) != "/usr/bin/my-own-thing" {
+		t.Errorf("Stop should retain only the user's hook, got %v", stop)
+	}
+	// The top-level model key is untouched.
+	root := readRoot(t, path)
+	if root["model"] != "opus" {
+		t.Errorf("unrelated settings clobbered: model = %v", root["model"])
+	}
+
+	// Second run is a no-op: nothing of amux's remains, so the file must be
+	// byte-for-byte unchanged.
+	before, _ := os.ReadFile(path)
+	if err := UninstallHooks(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Error("second UninstallHooks rewrote the file; it should no-op")
+	}
+}
+
+func readRoot(t *testing.T, path string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func readHooks(t *testing.T, path string) map[string]any {

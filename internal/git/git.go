@@ -118,6 +118,40 @@ func IsGitRepo(ctx context.Context, path string) bool {
 	return err == nil && out == "true"
 }
 
+// Exclude adds pattern to the local, uncommitted excludes of the worktree at dir
+// (the file `git rev-parse --git-path info/exclude` resolves to — the per-repo
+// exclude, never a tracked .gitignore). amux uses it so a settings file it drops
+// into an agent's worktree never shows as untracked or gets swept into a commit.
+// Idempotent, and best-effort: a non-repo dir or any git error is returned for
+// the caller to ignore.
+func Exclude(ctx context.Context, dir, pattern string) error {
+	rel, err := run(ctx, dir, "rev-parse", "--git-path", "info/exclude")
+	if err != nil {
+		return err
+	}
+	excl := rel
+	if !filepath.IsAbs(excl) {
+		excl = filepath.Join(dir, rel)
+	}
+	if b, err := os.ReadFile(excl); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.TrimSpace(line) == pattern {
+				return nil // already excluded
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(excl), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(excl, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(pattern + "\n")
+	return err
+}
+
 // LooksLocal reports whether source is a local filesystem path (vs a URL).
 func LooksLocal(source string) bool {
 	if strings.Contains(source, "://") {

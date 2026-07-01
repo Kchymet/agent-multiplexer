@@ -306,7 +306,7 @@ func subSuffix(s store.Session) string {
 }
 
 // agentState classifies a session's activity. The fine-grained states come from
-// Claude Code's hooks (see claudecfg.InstallHooks), which write the current
+// Claude Code's hooks (see claudecfg.InstallHooksIn), which write the current
 // state per session as the agent's turn lifecycle fires:
 //   - StateIdle:    not running (no engine instance)
 //   - StateRunning: a turn is in flight

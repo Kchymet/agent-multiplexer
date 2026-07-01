@@ -356,6 +356,16 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 
 	if s.Agent == "" || s.Agent == "claude" {
 		_ = claudecfg.TrustDir(dir)
+		// Install the status/capture hooks into this agent's launch dir (not the
+		// user-wide settings.json), pointed at the stable installed binary. Claude
+		// loads settings.local.json only from the launch dir, so dir must be the
+		// cwd the pane runs in. When dir is a repo worktree (a single-repo agent
+		// drops into it), git-exclude the file so it never dirties the worktree.
+		if err := claudecfg.InstallHooksIn(dir, core.InstalledBinPath()); err == nil {
+			if git.IsGitRepo(context.Background(), dir) {
+				_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
+			}
+		}
 	}
 	argv, err = agent.Argv(s.Agent, s.Model, extra...)
 	if err != nil {

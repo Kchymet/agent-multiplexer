@@ -84,8 +84,13 @@ func LiveAgentsPath() string {
 	return filepath.Join(StateDir(), "live-agents.json")
 }
 
-// HooksInstalledPath marks that amux has installed Claude Code's status hooks,
-// so setup only writes them once instead of on every launch.
-func HooksInstalledPath() string {
-	return filepath.Join(StateDir(), "hooks.installed")
+// InstalledBinPath is the stable, user-local amux binary ($HOME/.local/bin/amux,
+// the Makefile's default install target). Claude Code's status hooks and the
+// agent sandbox reference this rather than the running daemon's os.Executable()
+// path: that path can be a throwaway dev build inside a session worktree which
+// later vanishes, breaking the hooks — whereas the install path is stable and is
+// exactly what the sandbox scope binds in (see panespec.configBinds).
+func InstalledBinPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "bin", "amux")
 }
