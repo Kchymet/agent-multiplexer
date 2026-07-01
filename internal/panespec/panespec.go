@@ -136,12 +136,16 @@ func configBinds(tab int, home string) [][]string {
 	j := filepath.Join
 	switch tab {
 	case TabAgent:
+		// Claude's amux hooks run inside the scope and must reach amux's state dirs:
+		// the hook-state dir (activity) and the transcript-capture dir (a durable
+		// copy of the conversation for the "restarting" diagnostic). --bind-try
+		// skips missing paths, so create the capture dir first.
+		_ = os.MkdirAll(core.TranscriptDir(), 0o755)
 		binds := [][]string{
 			{"--bind-try", j(home, ".claude.json"), j(home, ".claude.json")},
 			{"--bind-try", j(home, ".claude"), j(home, ".claude")},
-			// So Claude's amux status hook can run + record state from inside the
-			// scope: the amux binary (read-only) and its hook-state dir (writable).
 			{"--bind-try", core.HookStateDir(), core.HookStateDir()},
+			{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},
 			{"--ro-bind-try", j(home, ".local", "bin", "amux"), j(home, ".local", "bin", "amux")},
 		}
 		if exe, err := os.Executable(); err == nil {

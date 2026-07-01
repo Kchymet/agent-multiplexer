@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -210,6 +211,19 @@ var hookEvents = []struct{ event, state string }{
 	{"SessionEnd", core.StateIdle},          // agent exited
 }
 
+// captureEvents are the hook events on which amux snapshots the conversation
+// transcript (`amux agent capture`). They span turn start, every tool boundary,
+// subagent completion, compaction, and turn/session end, so a durable copy exists
+// even if the agent is killed mid-turn — the case the "restarting" bug loses.
+// Distinct from hookEvents, which drive activity state.
+var captureEvents = []string{
+	"UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop", "PreCompact", "SessionEnd",
+}
+
+// HooksVersion is bumped whenever the installed hook set changes, so the one-time
+// installer (see cmd/amux ensureHooks) re-runs and picks up the new hooks.
+const HooksVersion = "2"
+
 // InstallHooks points Claude Code's status hooks at amuxPath ("amux agent hook
 // <state>"), writing them into the user settings.json. It is idempotent and
 // preserves any non-amux hooks: existing amux entries are replaced (so a moved
@@ -232,22 +246,37 @@ func InstallHooks(amuxPath string) error {
 		hooks = map[string]any{}
 		root["hooks"] = hooks
 	}
+	// Build the amux commands per event: the status hook (activity state) and, on
+	// the capture events, the transcript-snapshot hook. Some events (Stop,
+	// SessionEnd, UserPromptSubmit) get both.
+	amuxCmds := map[string][]string{}
 	for _, he := range hookEvents {
+		amuxCmds[he.event] = append(amuxCmds[he.event], amuxPath+" agent hook "+he.state)
+	}
+	for _, ev := range captureEvents {
+		amuxCmds[ev] = append(amuxCmds[ev], amuxPath+" agent capture")
+	}
+	events := make([]string, 0, len(amuxCmds))
+	for ev := range amuxCmds {
+		events = append(events, ev)
+	}
+	sort.Strings(events) // stable settings.json output
+
+	for _, event := range events {
 		var groups []any
-		if existing, ok := hooks[he.event].([]any); ok {
+		if existing, ok := hooks[event].([]any); ok {
 			for _, g := range existing {
-				if !isAmuxHookGroup(g) { // keep the user's own hooks
+				if !isAmuxHookGroup(g) { // keep the user's own hooks; drop old amux ones
 					groups = append(groups, g)
 				}
 			}
 		}
-		groups = append(groups, map[string]any{
-			"hooks": []any{map[string]any{
-				"type":    "command",
-				"command": amuxPath + " agent hook " + he.state,
-			}},
-		})
-		hooks[he.event] = groups
+		for _, cmd := range amuxCmds[event] {
+			groups = append(groups, map[string]any{
+				"hooks": []any{map[string]any{"type": "command", "command": cmd}},
+			})
+		}
+		hooks[event] = groups
 	}
 
 	out, err := json.MarshalIndent(root, "", "  ")
@@ -282,7 +311,11 @@ func isAmuxHookGroup(g any) bool {
 		if !ok {
 			continue
 		}
-		if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") && strings.Contains(cmd, "amux") {
+		// Recognize both current forms — "amux agent hook <state>" and
+		// "amux agent capture" — and the legacy "amux hook <state>", so a reinstall
+		// replaces amux's own groups instead of stacking them.
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "amux") &&
+			(strings.Contains(cmd, " agent ") || strings.Contains(cmd, " hook ")) {
 			return true
 		}
 	}
