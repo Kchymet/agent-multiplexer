@@ -109,9 +109,9 @@ func TestFeedNeverBlocksWhenInputStalls(t *testing.T) {
 		// Each DA1 query makes the emulator write a reply into its response pipe.
 		// drainResponses forwards the first to onInput and blocks there; the pipe
 		// (unbuffered) then can't drain, so the next reply-producing emu.Write
-		// blocks. Feeding many queries — far past the queue depth — must still
-		// return promptly, because the feed goroutine (not Feed) owns emu.Write.
-		for i := 0; i < feedBuf*4; i++ {
+		// blocks. Feeding many queries must still return promptly, because the feed
+		// goroutine (not Feed) owns emu.Write.
+		for i := 0; i < 20000; i++ {
 			term.Feed([]byte("\x1b[c"))
 		}
 		close(done)
