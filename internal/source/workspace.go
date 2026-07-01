@@ -128,11 +128,10 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		})
 		for i, s := range active {
 			out = append(out, core.Session{
-				ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
+				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s),
-				Task:      taskSummary(s.Prompt),
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
@@ -151,11 +150,10 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			for _, s := range repoAgents[r.Name] {
 				st := agentState(liveOf(s.ID), s.ClaudeID)
 				out = append(out, core.Session{
-					ID: s.ID, Title: repoAgentLabel(s), Source: "workspace", Section: core.SectionRepos,
+					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
 					State:     st,
 					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s),
-					Task:      taskSummary(s.Prompt),
 					Cwd:       s.Dir,
 					CanAttach: true,
 					CanKill:   true,
@@ -168,9 +166,9 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// restorable (press the archive key again, or `amux wg unarchive <id>`).
 	for _, s := range archived {
 		out = append(out, core.Session{
-			ID: s.ID, Title: subLabel(s), Source: "workspace", Section: core.SectionArchived,
+			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
-			State: core.StateIdle, Status: "archived" + subSuffix(s), Task: taskSummary(s.Prompt),
+			State: core.StateIdle, Status: "archived" + subSuffix(s),
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
 		})
 	}
@@ -260,12 +258,16 @@ func firstRepo(list string) string {
 	return ""
 }
 
-// repoAgentLabel labels a repo-scoped agent nested under its repo header. The
-// header already shows the repo, so fall back to the short id (not the repo) to
-// keep the rows distinct when several agents share a repo.
-func repoAgentLabel(s store.Session) string {
+// agentLabel is the rail title for a leaf agent row — the line you read when
+// selecting between agents. Prefer an explicit name, then a one-line summary of
+// what the agent was asked to do, falling back to the short id for agents
+// started without a prompt.
+func agentLabel(s store.Session) string {
 	if n := strings.TrimSpace(s.Name); n != "" {
 		return n
+	}
+	if t := taskSummary(s.Prompt); t != "" {
+		return t
 	}
 	return shortID(s.ID)
 }
@@ -281,16 +283,6 @@ func taskSummary(prompt string) string {
 		}
 	}
 	return ""
-}
-
-func subLabel(s store.Session) string {
-	if strings.TrimSpace(s.Name) != "" {
-		return s.Name
-	}
-	if s.Repo != "" {
-		return s.Repo
-	}
-	return s.ID
 }
 
 // noticeSuffix appends any pending rail warning for a session (e.g. a pinned

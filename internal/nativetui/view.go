@@ -231,11 +231,11 @@ func (m *model) rowStatus(s core.Session, indent string) string {
 		return ""
 	}
 	sub := s.Status
-	switch {
-	case s.Task != "":
-		sub = s.Task + " · " + s.Status // leaf rows show what the agent was asked to do
-	case s.Title != s.ID && !strings.Contains(s.Status, s.ID):
-		sub = s.ID + " · " + s.Status // no prompt to summarize: fall back to the short id
+	// The title now carries the agent's task summary (or name); surface the id
+	// beneath it so the session stays identifiable. Skip it when the title is
+	// itself the id — a prompt-less agent whose title falls back to the short id.
+	if s.Title != s.ID && !strings.HasPrefix(s.ID, s.Title) && !strings.Contains(s.Status, s.ID) {
+		sub = s.ID + " · " + s.Status
 	}
 	return stateColor(s.State).Render(indent + "  " + truncate(sub, sidebarWidth-3-len(indent)))
 }
