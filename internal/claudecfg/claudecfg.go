@@ -229,20 +229,35 @@ var captureEvents = []string{
 	"UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop", "PreCompact", "SessionEnd",
 }
 
-// HooksVersion is bumped whenever the installed hook set changes, so the one-time
-// installer (see cmd/amux ensureHooks) re-runs and picks up the new hooks.
-const HooksVersion = "2"
+// ProjectSettingsLocalPath is the per-directory Claude Code settings file amux
+// writes an agent's status hooks into: <dir>/.claude/settings.local.json. amux
+// installs hooks here — scoped to each agent's own directory — rather than in the
+// user-wide settings.json, so a stale entry can never break every session at once
+// (the failure mode of the old global install). settings.local.json is the local
+// scope: Claude merges its hooks with the user's, and by convention it's the
+// personal/uncommitted file (amux also git-excludes it; see wsops.AgentCommand).
+func ProjectSettingsLocalPath(dir string) string {
+	return filepath.Join(dir, ".claude", "settings.local.json")
+}
 
-// InstallHooks points Claude Code's status hooks at amuxPath ("amux agent hook
-// <state>"), writing them into the user settings.json. It is idempotent and
-// preserves any non-amux hooks: existing amux entries are replaced (so a moved
-// binary or changed event set is corrected), other hooks are left untouched.
-// Best-effort — callers proceed on error (status just falls back to "unknown").
-func InstallHooks(amuxPath string) error {
+// InstallHooksIn points Claude Code's status hooks at amuxPath ("amux agent hook
+// <state>") for the agent whose launch directory is dir, writing them into that
+// dir's settings.local.json. Because Claude loads settings only from the launch
+// directory (never a parent), dir must be the agent's actual cwd. Idempotent and
+// preserves any non-amux hooks. Best-effort — callers proceed on error (status
+// just falls back to "unknown").
+func InstallHooksIn(dir, amuxPath string) error {
 	mu.Lock()
 	defer mu.Unlock()
+	return writeHooks(ProjectSettingsLocalPath(dir), amuxPath)
+}
 
-	path := SettingsPath()
+// writeHooks installs amux's status + capture hook groups into the settings.json
+// at settingsPath, pointed at amuxPath. It reads any existing file, replaces
+// amux's own hook groups (so a moved binary or changed event set is corrected)
+// while leaving other hooks untouched, and writes the result back atomically.
+func writeHooks(settingsPath, amuxPath string) error {
+	path := settingsPath
 	root := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
 		dec := json.NewDecoder(bytes.NewReader(b))
@@ -293,6 +308,70 @@ func InstallHooks(amuxPath string) error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".amux.tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// UninstallHooks removes amux's status/capture hook groups from Claude Code's
+// *user* settings.json. amux used to install its hooks there globally, pinned to
+// the running binary's path — which broke every session at once once that binary
+// (often a per-session dev build) vanished. Hooks now live per-agent (see
+// InstallHooksIn), so this strips the stale global entries, dropping any event
+// key and the hooks map itself once they're emptied. Idempotent: it writes
+// nothing when there's nothing of amux's to remove. Best-effort — callers
+// proceed on error.
+func UninstallHooks() error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	path := SettingsPath()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil // no user settings — nothing to clean
+	}
+	root := map[string]any{}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil {
+		return err
+	}
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok || hooks == nil {
+		return nil
+	}
+	changed := false
+	for event, v := range hooks {
+		groups, ok := v.([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(groups))
+		for _, g := range groups {
+			if isAmuxHookGroup(g) {
+				changed = true
+				continue
+			}
+			kept = append(kept, g)
+		}
+		if len(kept) == 0 {
+			delete(hooks, event) // drop the now-empty event rather than leave "Stop": []
+		} else {
+			hooks[event] = kept
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if len(hooks) == 0 {
+		delete(root, "hooks")
+	}
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
 		return err
 	}
 	tmp := path + ".amux.tmp"

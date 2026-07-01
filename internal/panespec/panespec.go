@@ -146,7 +146,7 @@ func configBinds(tab int, home string) [][]string {
 			{"--bind-try", j(home, ".claude"), j(home, ".claude")},
 			{"--bind-try", core.HookStateDir(), core.HookStateDir()},
 			{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},
-			{"--ro-bind-try", j(home, ".local", "bin", "amux"), j(home, ".local", "bin", "amux")},
+			{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
 		}
 		if exe, err := os.Executable(); err == nil {
 			binds = append(binds, []string{"--ro-bind-try", exe, exe})
