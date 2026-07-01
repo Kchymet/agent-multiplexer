@@ -38,6 +38,68 @@ func TestSessionLookup(t *testing.T) {
 	}
 }
 
+// TestFindSession verifies resume detection across amux's two working-dir
+// conventions: the transcript is found whether it was written under the agent
+// dir or the repo-worktree subdir, FindSession returns the cwd it actually lives
+// under (so the launch cwd's munge matches Claude's), and a bare <uuid>/ session
+// directory counts as corroborating evidence.
+func TestFindSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	proj := filepath.Join(dir, "projects")
+
+	agentDir := "/home/u/.local/share/amux/sessions/root/agent"
+	repoDir := filepath.Join(agentDir, "acme/api") // single-repo worktree (PR #8 convention)
+	uuid := "11111111-1111-4111-8111-111111111111"
+
+	// Nothing on disk yet: neither candidate resolves, and the empty uuid is inert.
+	if _, ok := FindSession(uuid, repoDir, agentDir); ok {
+		t.Fatal("no transcript yet, FindSession should not resolve")
+	}
+	if _, ok := FindSession("", repoDir, agentDir); ok {
+		t.Fatal("empty uuid should never resolve")
+	}
+
+	// A transcript written under the OLD (agent-dir) convention must be found even
+	// though the current launch cwd is the repo subdir — this is the resume bug.
+	writeTranscript(t, proj, munge(agentDir), uuid)
+	cwd, ok := FindSession(uuid, repoDir, agentDir)
+	if !ok || cwd != agentDir {
+		t.Fatalf("transcript under agent dir: got (%q, %v), want (%q, true)", cwd, ok, agentDir)
+	}
+
+	// When a transcript exists under the current (repo-subdir) convention too, the
+	// first candidate wins — callers pass the current launch cwd first.
+	writeTranscript(t, proj, munge(repoDir), uuid)
+	if cwd, ok := FindSession(uuid, repoDir, agentDir); !ok || cwd != repoDir {
+		t.Fatalf("both conventions present: got (%q, %v), want (%q, true)", cwd, ok, repoDir)
+	}
+
+	// A bare <uuid>/ session directory (no .jsonl) is corroborating evidence.
+	other := "/home/u/.local/share/amux/sessions/root/agent2"
+	sessUUID := "22222222-2222-4222-8222-222222222222"
+	if err := os.MkdirAll(filepath.Join(proj, munge(other), sessUUID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if cwd, ok := FindSession(sessUUID, other); !ok || cwd != other {
+		t.Fatalf("bare session dir: got (%q, %v), want (%q, true)", cwd, ok, other)
+	}
+	if !SessionExists(other, sessUUID) {
+		t.Fatal("SessionExists should honor a bare session dir too")
+	}
+}
+
+func writeTranscript(t *testing.T, projectsDir, munged, uuid string) {
+	t.Helper()
+	proj := filepath.Join(projectsDir, munged)
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, uuid+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestInstallHooks verifies the status hooks are written for each event, point
 // at the given binary, are idempotent (no stacking on reinstall), and preserve
 // the user's own hooks on the same event.

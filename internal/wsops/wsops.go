@@ -7,6 +7,7 @@ package wsops
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,19 +263,29 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	if _, err := os.Stat(dir); err != nil {
 		return "", nil, nil, fmt.Errorf("session dir missing: %s", dir)
 	}
-	if s.Agent == "" || s.Agent == "claude" {
-		_ = claudecfg.TrustDir(dir)
-	}
 
 	prompt := strings.TrimSpace(s.Prompt)
 	var extra []string
 	switch {
-	case s.ClaudeID != "" && claudecfg.SessionExists(dir, s.ClaudeID):
-		extra = []string{"--resume", s.ClaudeID}
 	case s.ClaudeID != "":
-		extra = []string{"--session-id", s.ClaudeID}
-		if prompt != "" {
-			extra = append(extra, prompt)
+		// A conversation is pinned. Its transcript may live under either working-dir
+		// convention (the current launch cwd, or the agent dir used before single-repo
+		// agents dropped into their worktree), so search both and, if found, resume
+		// under the exact cwd it lives under — that's the one Claude's own path munge
+		// will match. Only `--resume` when the transcript is really there; `--session-id`
+		// errors if the id is already known to Claude.
+		if cwd, ok := claudecfg.FindSession(s.ClaudeID, resumeCwds(s)...); ok {
+			dir = cwd
+			extra = []string{"--resume", s.ClaudeID}
+			core.ClearNotice(s.ClaudeID)
+		} else {
+			// Pinned but no transcript under any candidate path: don't silently start
+			// fresh — make the fallback visible in the log and on the rail.
+			warnResumeFailed(s)
+			extra = []string{"--session-id", s.ClaudeID}
+			if prompt != "" {
+				extra = append(extra, prompt)
+			}
 		}
 	case claudecfg.AnySession(dir):
 		extra = []string{"--continue"}
@@ -282,6 +293,10 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		if prompt != "" {
 			extra = []string{prompt}
 		}
+	}
+
+	if s.Agent == "" || s.Agent == "claude" {
+		_ = claudecfg.TrustDir(dir)
 	}
 	argv, err = agent.Argv(s.Agent, s.Model, extra...)
 	if err != nil {
@@ -309,6 +324,30 @@ func agentWorkdir(s store.Session) string {
 		return filepath.Join(s.Dir, repos[0])
 	}
 	return s.Dir
+}
+
+// resumeCwds lists the working directories a Claude transcript for this agent
+// could live under, so resume detection isn't fooled by amux having changed its
+// workdir convention (PR #8 moved single-repo agents one level down into their
+// worktree). The current launch dir comes first — preferred on a tie — then the
+// agent dir that older sessions used.
+func resumeCwds(s store.Session) []string {
+	cwds := []string{agentWorkdir(s)}
+	if s.Dir != "" && s.Dir != cwds[0] {
+		cwds = append(cwds, s.Dir)
+	}
+	return cwds
+}
+
+// warnResumeFailed surfaces — in the daemon log and on the rail — that a pinned
+// Claude conversation couldn't be resumed, so the user knows they've been
+// dropped into a fresh session rather than continuing where they left off. The
+// rail notice is keyed by the Claude id and cleared the next time the session
+// resumes successfully.
+func warnResumeFailed(s store.Session) {
+	log.Printf("amux: pinned Claude conversation %s (agent %s) has no transcript under %v; starting a new conversation with that id",
+		s.ClaudeID, s.ID, resumeCwds(s))
+	_ = core.WriteNotice(s.ClaudeID, "couldn't resume pinned conversation — started fresh")
 }
 
 // agentScope returns the scope ("work"|"repo") of an agent's workgroup root, or
