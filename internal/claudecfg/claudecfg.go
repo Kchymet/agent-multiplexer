@@ -159,7 +159,7 @@ var hookEvents = []struct{ event, state string }{
 	{"SessionEnd", core.StateIdle},          // agent exited
 }
 
-// InstallHooks points Claude Code's status hooks at amuxPath ("amux hook
+// InstallHooks points Claude Code's status hooks at amuxPath ("amux agent hook
 // <state>"), writing them into the user settings.json. It is idempotent and
 // preserves any non-amux hooks: existing amux entries are replaced (so a moved
 // binary or changed event set is corrected), other hooks are left untouched.
@@ -193,7 +193,7 @@ func InstallHooks(amuxPath string) error {
 		groups = append(groups, map[string]any{
 			"hooks": []any{map[string]any{
 				"type":    "command",
-				"command": amuxPath + " hook " + he.state,
+				"command": amuxPath + " agent hook " + he.state,
 			}},
 		})
 		hooks[he.event] = groups
@@ -214,7 +214,9 @@ func InstallHooks(amuxPath string) error {
 }
 
 // isAmuxHookGroup reports whether a hook group is one amux installed, recognized
-// by an "amux hook" command — so reinstalling replaces it instead of stacking.
+// by an "amux … hook …" command — so reinstalling replaces it instead of
+// stacking. The " hook " match covers both the current "amux agent hook <state>"
+// form and the legacy "amux hook <state>" one, so old installs migrate cleanly.
 func isAmuxHookGroup(g any) bool {
 	m, ok := g.(map[string]any)
 	if !ok {

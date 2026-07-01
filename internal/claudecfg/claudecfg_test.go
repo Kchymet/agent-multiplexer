@@ -64,7 +64,7 @@ func TestInstallHooks(t *testing.T) {
 		groups, _ := hooks[he.event].([]any)
 		amux := 0
 		for _, g := range groups {
-			if cmd := groupCommand(g); cmd == "/opt/amux hook "+he.state {
+			if cmd := groupCommand(g); cmd == "/opt/amux agent hook "+he.state {
 				amux++
 			}
 		}

@@ -6,6 +6,7 @@
 //
 //	(bare)   open the native dashboard TUI
 //	daemon   run the polling/serving daemon (foreground)
+//	agent    self-reporting run by an agent about itself (status/hook/name)
 //	status   print current sessions as text and exit
 //	version  print version
 package main
@@ -14,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -52,8 +52,10 @@ func main() {
 		err = cmdHarness()
 	case "_vtdemo": // hidden: embedded-terminal fidelity check (Phase 0 spike)
 		err = vtdemo.Run(args)
+	case "agent":
+		err = cmdAgent(args)
 	case "hook":
-		err = cmdHook(args)
+		err = cmdAgentStatus(args) // deprecated alias for "amux agent hook"
 	case "status":
 		err = cmdStatus(args)
 	case "refresh":
@@ -185,27 +187,6 @@ func cmdNative() error {
 		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
 	}
 	return nativetui.Run()
-}
-
-// cmdHook is invoked by Claude Code's status hooks ("amux hook <state>", wired
-// up by claudecfg.InstallHooks). It reads the hook payload from stdin to learn
-// the Claude session id, then records the activity state for the daemon's poll
-// loop to surface in the rail. It must never disrupt the agent, so it swallows
-// all errors and exits 0.
-func cmdHook(args []string) error {
-	if len(args) < 1 {
-		return nil
-	}
-	state := args[0]
-	var payload struct {
-		SessionID string `json:"session_id"`
-		Cwd       string `json:"cwd"`
-	}
-	if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
-		_ = json.Unmarshal(b, &payload)
-	}
-	_ = core.WriteHookState(payload.SessionID, state, payload.Cwd)
-	return nil
 }
 
 // cmdStatus prints the current snapshot for scripting. With --json it emits the
