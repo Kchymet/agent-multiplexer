@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -148,6 +149,33 @@ func TestForwardsQueryResponses(t *testing.T) {
 		t.Fatal("bytes after the DA1 query never rendered (response pipe not drained → pump blocked, render deadlocked)")
 	}
 }
+
+// TestRenderIsSolidRectangle guards the compositing fix: every rendered frame
+// must be exactly cols×rows with every line padded to the full width. The
+// emulator right-trims trailing blanks, which left ragged frames that let stale
+// cells (an earlier frame, or pre-amux scrollback) bleed through the Bubble Tea
+// line diff. Render must hand the layout a solid block instead.
+func TestRenderIsSolidRectangle(t *testing.T) {
+	const cols, rows = 40, 6
+	term := New(cols, rows)
+	// Feed a short line and leave the rest blank — the ragged case.
+	term.mu.Lock()
+	_, _ = term.emu.Write([]byte("hi\r\n\x1b[1mbold\x1b[0m"))
+	term.mu.Unlock()
+
+	lines := strings.Split(term.Render(), "\n")
+	if len(lines) != rows {
+		t.Fatalf("got %d lines, want %d", len(lines), rows)
+	}
+	for i, ln := range lines {
+		if w := ansiWidth(ln); w != cols {
+			t.Errorf("line %d width = %d, want %d (%q)", i, w, cols, ln)
+		}
+	}
+}
+
+// ansiWidth mirrors the width metric Render pads to.
+func ansiWidth(s string) int { return ansi.StringWidth(s) }
 
 // TestResize keeps the emulator usable after a resize.
 func TestResize(t *testing.T) {
