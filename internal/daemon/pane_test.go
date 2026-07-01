@@ -22,6 +22,7 @@ func testDaemon(t *testing.T) *Daemon {
 	d.resolve = func(agentID string, tab int) (string, []string, []string, error) {
 		return "", nil, []string{"sh", "-c", "printf MARKER; sleep 30"}, nil
 	}
+	d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
 	return d
 }
 
@@ -90,6 +91,58 @@ func TestPaneSurvivesDisconnectAndReplays(t *testing.T) {
 		t.Fatalf("reattach PaneOpen: %v", err)
 	}
 	readPaneMarker(t, c2, "p1", "MARKER", 3*time.Second)
+}
+
+// The "start" action launches an agent's process in the engine with no UI
+// attached — the way a CLI-created session comes up running. A later pane.open
+// reattaches to that same instance rather than spawning a second one.
+func TestStartActionLaunchesAgentHeadless(t *testing.T) {
+	d := testDaemon(t)
+	key := engine.Key{AgentID: "a1", Tab: 0}
+
+	c, closer := dialDaemon(t, d)
+	defer closer()
+
+	if err := c.Send(core.Action{Action: core.ActionStart, ID: "a1"}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// The result frame confirms the action ran; the process is now live in the
+	// engine even though nothing subscribed to its output.
+	waitResult(t, c, 3*time.Second)
+
+	inst, ok := d.engine.Lookup(key)
+	if !ok || !inst.Alive() {
+		t.Fatal("agent should be live in the engine after start, with no pane open")
+	}
+
+	// Opening a pane reattaches to the running instance (idempotent Ensure) and
+	// replays its scrollback — same instance, not a fresh spawn.
+	if err := c.PaneOpen("p1", "a1", 0, 80, 24); err != nil {
+		t.Fatalf("PaneOpen: %v", err)
+	}
+	readPaneMarker(t, c, "p1", "MARKER", 3*time.Second)
+	if inst2, ok := d.engine.Lookup(key); !ok || inst2 != inst {
+		t.Fatal("pane.open after start should reuse the same instance")
+	}
+}
+
+// waitResult reads frames until an action result arrives, failing on a not-ok one.
+func waitResult(t *testing.T, c *Client, d time.Duration) {
+	t.Helper()
+	_ = c.conn.SetReadDeadline(time.Now().Add(d))
+	defer c.conn.SetReadDeadline(time.Time{})
+	for {
+		f, err := c.Next()
+		if err != nil {
+			t.Fatalf("waiting for result: %v", err)
+		}
+		if f.Result != nil {
+			if !f.Result.OK {
+				t.Fatalf("action failed: %s", f.Result.Error)
+			}
+			return
+		}
+	}
 }
 
 // Deleting an agent stops its engine instance (the process actually ends).
