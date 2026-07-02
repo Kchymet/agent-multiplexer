@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"amux/internal/codexcfg"
+	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -157,22 +157,10 @@ func configBinds(tab int, agentKind string, home string) [][]string {
 		// durable copy of the conversation for the "restarting" diagnostic).
 		// --bind-try skips missing paths, so create the capture dir first.
 		_ = os.MkdirAll(core.TranscriptDir(), 0o755)
-		var binds [][]string
-		if agentKind == "codex" {
-			// Codex keeps auth (auth.json), config (config.toml), and its rollout
-			// transcripts under $CODEX_HOME (default ~/.codex), and writes rollouts
-			// there mid-session — so bind the whole tree writable. It lives under the
-			// tmpfs'd $HOME, so create it first or the writes land on ephemeral tmpfs.
-			ch := codexcfg.Home()
-			_ = os.MkdirAll(ch, 0o755)
-			binds = append(binds, []string{"--bind-try", ch, ch})
-		} else {
-			// Claude's config/auth, writable — it stores transcripts under ~/.claude.
-			binds = append(binds,
-				[]string{"--bind-try", j(home, ".claude.json"), j(home, ".claude.json")},
-				[]string{"--bind-try", j(home, ".claude"), j(home, ".claude")},
-			)
-		}
+		// The harness's own config/auth/state binds (Claude keeps state in
+		// ~/.claude(.json); Codex under $CODEX_HOME) — the one part that varies by
+		// kind. Everything below is shared by every agent pane regardless of harness.
+		binds := agent.HarnessFor(agentKind).AgentConfigBinds(home)
 		binds = append(binds,
 			[]string{"--bind-try", core.HookStateDir(), core.HookStateDir()},
 			[]string{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/gh"
@@ -20,16 +21,24 @@ func cmdDoctor() error {
 	ctx := context.Background()
 	fmt.Print("amux doctor\n\n")
 
-	deps := []struct {
+	type dep struct {
 		bin, verArg, note string
 		required          bool
-	}{
+	}
+	deps := []dep{
 		{"git", "--version", "bare clones & worktrees", true},
-		{"claude", "--version", "default agent", true},
 		{"fzf", "--version", "interactive pickers (new workspace/agent)", false},
 		{"gh", "--version", "browse & clone GitHub repos", false},
-		{"codex", "--version", "alternate agent (OpenAI Codex)", false},
-		{"hermes", "--version", "alternate agent", false},
+	}
+	// Agent binaries come from the registry, so adding a harness adds its check
+	// here automatically. The default (first-registered) harness is required; the
+	// rest are optional alternates.
+	for i, kind := range agent.Kinds() {
+		if i == 0 {
+			deps = append(deps, dep{kind, "--version", "default agent", true})
+		} else {
+			deps = append(deps, dep{kind, "--version", "alternate agent", false})
+		}
 	}
 
 	missingRequired := false

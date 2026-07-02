@@ -22,6 +22,30 @@ func isolateStore(t *testing.T) {
 	t.Setenv("AMUX_JAIL", "off")
 }
 
+// TestAgentEnvExportsSessionID pins the intent env every pane inherits: the
+// canonical harness kind and — the fix — the harness session id, so a harness
+// with no hook stream (unlike Claude) can still self-report via `amux agent
+// status`, which falls back to $AMUX_SESSION_ID.
+func TestAgentEnvExportsSessionID(t *testing.T) {
+	isolateStore(t)
+	env := AgentEnv(store.Session{ID: "a1", RootID: "r1", Agent: "", ClaudeID: "conv-123"})
+	get := func(key string) (string, bool) {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") {
+				return strings.TrimPrefix(kv, key+"="), true
+			}
+		}
+		return "", false
+	}
+	if v, ok := get("AMUX_SESSION_ID"); !ok || v != "conv-123" {
+		t.Errorf("AMUX_SESSION_ID = %q (present=%v), want conv-123", v, ok)
+	}
+	// Empty kind canonicalizes to the default harness, not the bare "".
+	if v, _ := get("AMUX_AGENT"); v != "claude" {
+		t.Errorf("AMUX_AGENT = %q, want claude (canonicalized default)", v)
+	}
+}
+
 func TestResumeCwds(t *testing.T) {
 	base := filepath.Join("sessions", "root1", "agent1")
 	tests := []struct {

@@ -114,11 +114,7 @@ func (d *Daemon) instanceActivity(k engine.Key) engine.Activity {
 	if err != nil || !ok {
 		return engine.ActivityUnknown
 	}
-	kind := s.Agent
-	if kind == "" {
-		kind = "claude"
-	}
-	return agent.HarnessFor(kind).Activity(s.ClaudeID)
+	return agent.HarnessFor(s.Agent).Activity(s.ClaudeID)
 }
 
 // liveAgents is the set of agent ids whose agent pane (TabAgent) is running in

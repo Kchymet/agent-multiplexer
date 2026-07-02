@@ -13,8 +13,6 @@ import (
 	"strings"
 
 	"amux/internal/agent"
-	"amux/internal/claudecfg"
-	"amux/internal/codexcfg"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
@@ -129,14 +127,11 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		repos = append(repos, repoName)
 	}
 	writeAgentGuide(dir, branch, spec.Agent)
-	kind := defaultStr(spec.Agent, "claude")
-	// Claude accepts a pre-minted --session-id, so pin one now for durable resume
-	// across restarts. Codex mints its own uuid on its first run and can't be told
-	// one up front, so leave it blank; AgentCommand adopts the real id afterward.
-	var claudeID string
-	if kind == "claude" {
-		claudeID = store.NewUUID()
-	}
+	kind := agent.Canonical(spec.Agent)
+	// A harness that accepts a pre-minted conversation id (Claude) gets one pinned
+	// now for durable resume across restarts. One that mints its own uuid on first
+	// run (Codex) returns "" and adopts the real id afterward — see PlanLaunch.
+	claudeID := agent.HarnessFor(kind).NewSessionID()
 	a := store.Session{
 		ID: agentID, RootID: rootID,
 		Agent: kind, Model: spec.Model,
@@ -365,85 +360,43 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		return "", nil, nil, fmt.Errorf("session dir missing: %s", dir)
 	}
 
+	h := agent.HarnessFor(s.Agent)
 	prompt := strings.TrimSpace(s.Prompt)
-	var extra []string
 	// Before deciding resume-vs-fresh, gap-fill the harness transcript from amux's
-	// captured backup: a mid-turn kill can leave Claude's own copy missing even
-	// though we hooked a backup, so restore it into the primary resume cwd where
-	// FindSession looks, turning what would be a fresh start back into a resume.
-	// Best-effort — RestoreTranscript no-ops when there's nothing better to restore
-	// and never clobbers a fresher copy, so a failure never blocks the launch.
+	// captured backup: a mid-turn kill can leave the harness's own copy missing
+	// even though we hooked a backup, so restore it into the primary resume cwd
+	// where resume detection looks, turning what would be a fresh start back into a
+	// resume. Best-effort — RestoreTranscript no-ops when there's nothing better to
+	// restore and never clobbers a fresher copy, so a failure never blocks launch.
 	if s.ClaudeID != "" {
-		if restored, _ := agent.HarnessFor(s.Agent).RestoreTranscript(dir, s.ClaudeID); restored {
+		if restored, _ := h.RestoreTranscript(dir, s.ClaudeID); restored {
 			log.Printf("amux: gap-filled transcript for %s from captured backup", s.ClaudeID)
 		}
 	}
-	switch {
-	case s.Agent == "codex":
-		// Codex owns its own session-id lifecycle (see codexLaunch): it can't be
-		// pinned up front, so we adopt or clear s.ClaudeID against what's on disk
-		// rather than running Claude's --resume/--session-id dance.
-		dir, extra = codexLaunch(s, dir, prompt)
-	case s.ClaudeID != "":
-		// A conversation is pinned. Its transcript may live under either working-dir
-		// convention (the current launch cwd, or the agent dir used before single-repo
-		// agents dropped into their worktree), so search both and, if found, resume
-		// under the exact cwd it lives under — that's the one Claude's own path munge
-		// will match. Only `--resume` when the transcript is really there; `--session-id`
-		// errors if the id is already known to Claude.
-		if cwd, ok := claudecfg.FindSession(s.ClaudeID, resumeCwds(s)...); ok {
-			dir = cwd
-			extra = []string{"--resume", s.ClaudeID}
-			core.ClearNotice(s.ClaudeID)
-		} else {
-			// Pinned but no transcript under any candidate path: don't silently start
-			// fresh — make the fallback visible in the log and on the rail.
-			warnResumeFailed(s)
-			extra = []string{"--session-id", s.ClaudeID}
-			if prompt != "" {
-				extra = append(extra, prompt)
-			}
-		}
-	case claudecfg.AnySession(dir):
-		extra = []string{"--continue"}
-	default:
-		if prompt != "" {
-			extra = []string{prompt}
-		}
-	}
+	// The kind-specific resume-vs-continue-vs-fresh decision, which may relocate the
+	// launch dir to wherever a transcript already lives. resumeCwds lists the cwds a
+	// transcript for this agent could live under (amux's workdir convention has
+	// shifted over time), preferred-first.
+	plan := h.PlanLaunch(agent.LaunchRequest{Session: s, Dir: dir, Prompt: prompt, ResumeCwds: resumeCwds(s)})
+	dir = plan.Dir
 
-	switch {
-	case s.Agent == "" || s.Agent == "claude":
-		_ = claudecfg.TrustDir(dir)
-		// Install the status/capture hooks into this agent's launch dir (not the
-		// user-wide settings.json), pointed at the stable installed binary. Claude
-		// loads settings.local.json only from the launch dir, so dir must be the
-		// cwd the pane runs in — normally the workspace root, which isn't a git repo
-		// so nothing needs excluding. When resuming a legacy conversation dir can be
-		// a repo worktree instead; git-exclude the file so it never dirties it.
-		if err := claudecfg.InstallHooksIn(dir, core.InstalledBinPath()); err == nil {
-			if git.IsGitRepo(context.Background(), dir) {
-				_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
-			}
-		}
-	case s.Agent == "codex":
-		// Codex has no hook mechanism to install; just pre-trust the launch dir so
-		// it doesn't prompt to trust the folder on startup.
-		_ = codexcfg.TrustDir(dir)
-	}
+	// Pre-launch filesystem side effects the harness needs in its launch dir
+	// (trusting the folder, installing amux's hooks). Best-effort by contract.
+	h.PrepareLaunchDir(dir)
+
 	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
-	// the running binary. Where it goes is the provider's call — Claude reads
-	// .claude/skills, others .agents/skills — so ask the harness. Best-effort: a
-	// failure just means the agent lacks the skills, never that it can't launch.
-	// The launch dir is normally the workspace root (not a git repo); if resuming
-	// into a worktree, git-exclude the tree so it never dirties the repo.
-	skillsDir := agent.HarnessFor(s.Agent).SkillsDir(dir)
+	// the running binary. Where it goes is the harness's call — Claude reads
+	// .claude/skills, others .agents/skills. Best-effort: a failure just means the
+	// agent lacks the skills, never that it can't launch. The launch dir is normally
+	// the workspace root (not a git repo); if resuming into a worktree, git-exclude
+	// the tree so it never dirties the repo.
+	skillsDir := h.SkillsDir(dir)
 	if err := skills.Install(skillsDir); err == nil && git.IsGitRepo(context.Background(), dir) {
 		if rel, err := filepath.Rel(dir, skillsDir); err == nil {
 			_ = git.Exclude(context.Background(), dir, rel+"/")
 		}
 	}
-	argv, err = agent.Argv(s.Agent, s.Model, extra...)
+	argv, err = h.Argv(s.Model, plan.Extra...)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -461,7 +414,12 @@ func AgentEnv(s store.Session) []string {
 		"AMUX_ROOT=" + s.RootID,
 		"AMUX_SCOPE=" + agentScope(s.RootID),
 		"AMUX_MODE=" + store.NormalizeMode(s.Mode),
-		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
+		"AMUX_AGENT=" + agent.Canonical(s.Agent),
+		// The harness session id, so a harness with no hook stream (unlike Claude,
+		// which gets its id from the hook payload on stdin) can still self-report via
+		// `amux agent status`, which falls back to $AMUX_SESSION_ID. Empty until a
+		// self-minting harness (Codex) has adopted its id — matching what's pinned.
+		"AMUX_SESSION_ID=" + s.ClaudeID,
 	}
 }
 
@@ -494,84 +452,6 @@ func resumeCwds(s store.Session) []string {
 		cwds = append(cwds, wd)
 	}
 	return cwds
-}
-
-// warnResumeFailed surfaces — in the daemon log and on the rail — that a pinned
-// conversation couldn't be resumed, so the user knows they've been dropped into a
-// fresh session rather than continuing where they left off. The rail notice is
-// keyed by the conversation id and cleared the next time the session resumes
-// successfully.
-func warnResumeFailed(s store.Session) {
-	log.Printf("amux: pinned %s conversation %s (agent %s) has no transcript under %v; starting a new conversation",
-		defaultStr(s.Agent, "claude"), s.ClaudeID, s.ID, resumeCwds(s))
-	_ = core.WriteNotice(s.ClaudeID, "couldn't resume pinned conversation — started fresh")
-}
-
-// codexLaunch decides how to start a Codex agent — resume an existing rollout or
-// start fresh — and keeps s.ClaudeID (the pinned rollout uuid) in step with what
-// is actually on disk. Codex mints its own uuid, so amux can't pin one up front:
-// the id is adopted after the first run and cleared if the rollout it names ever
-// disappears. It returns the launch dir (the workspace root; unlike Claude, Codex
-// finds a rollout by uuid regardless of cwd) and the trailing Codex args.
-func codexLaunch(s store.Session, dir, prompt string) (launchDir string, extra []string) {
-	// A pinned id resumes iff its rollout file still exists. `codex resume <id>`
-	// locates a session by uuid wherever its recorded cwd points (only the picker
-	// and --last filter by cwd), so existence is the exact question — gating on
-	// the rollout's recorded cwd would reject sessions Codex itself can resume.
-	// The generic RestoreTranscript above already gap-filled the rollout from any
-	// captured backup.
-	if s.ClaudeID != "" {
-		if _, ok := codexcfg.RolloutPath(s.ClaudeID); ok {
-			core.ClearNotice(s.ClaudeID)
-			return dir, []string{"resume", s.ClaudeID}
-		}
-		warnResumeFailed(s)
-	}
-	// No usable pin (fresh agent, or the pinned rollout is gone). Adopt the newest
-	// rollout recorded under this dir if there is one — persisting it so later
-	// launches resume it. When this replaces a lost pin, key the rail notice under
-	// the adopted id: the rail reads notices by the pinned id, so one left under
-	// the lost id would never render.
-	if id, ok := codexcfg.LatestSession(dir); ok {
-		if s.ClaudeID != "" && id != s.ClaudeID {
-			_ = core.WriteNotice(id, "couldn't resume pinned conversation — resumed the newest one instead")
-		}
-		persistClaudeID(s, id)
-		return dir, []string{"resume", id}
-	}
-	if s.ClaudeID != "" {
-		persistClaudeID(s, "")
-	}
-	return dir, freshExtra(prompt)
-}
-
-// freshExtra is the trailing args for a fresh interactive Codex run: the prompt as
-// a positional, or nothing when there's no prompt.
-func freshExtra(prompt string) []string {
-	if prompt != "" {
-		return []string{prompt}
-	}
-	return nil
-}
-
-// persistClaudeID records id (possibly "") as the session's pinned conversation
-// id. Codex adopts the uuid it minted only after its first run, and amux clears it
-// when the named rollout disappears, so this write keeps the store in step with
-// what `codex resume` will actually find. It re-reads the record so a concurrent
-// change to other fields isn't clobbered. Best-effort: a store failure just means
-// the next launch re-derives the id, never that the agent can't start.
-func persistClaudeID(s store.Session, id string) {
-	db, err := store.Open()
-	if err != nil {
-		return
-	}
-	defer db.Close()
-	cur, ok, err := db.GetSession(s.ID)
-	if err != nil || !ok {
-		return
-	}
-	cur.ClaudeID = id
-	_ = db.PutSession(cur)
 }
 
 // agentScope returns the scope ("work"|"repo") of an agent's workgroup root, or
@@ -780,11 +660,11 @@ func Rename(id, name string) error {
 	return db.PutSession(s)
 }
 
-// agentOf resolves an action's requested harness from its fields, defaulting to
-// "claude" when the field is absent — older clients (and actions that predate the
-// harness selector) send no "agent", and their agents must stay Claude.
+// agentOf resolves an action's requested harness from its fields, canonicalizing
+// an absent field to the default kind — older clients (and actions that predate
+// the harness selector) send no "agent", and their agents must stay the default.
 func agentOf(fields map[string]string) string {
-	return defaultStr(fields["agent"], "claude")
+	return agent.Canonical(fields["agent"])
 }
 
 func defaultStr(v, def string) string {

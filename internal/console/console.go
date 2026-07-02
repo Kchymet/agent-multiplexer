@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -48,7 +49,7 @@ func Session() store.Session {
 	return store.Session{
 		ID:       ID,
 		Name:     "amux console",
-		Agent:    "claude",
+		Agent:    agent.DefaultKind(),
 		Mode:     "console",
 		Dir:      Dir(),
 		ClaudeID: SessionID,

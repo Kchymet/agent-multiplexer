@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
@@ -132,7 +133,7 @@ func cmdProvide(args []string) error {
 			// and stream contract events. Read-only; a session with no record on disk
 			// simply emits nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(claudeRecordResolver(), 0)
+			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(runtimeRecordResolver(), 0)
 		}
 	}
 
@@ -203,13 +204,14 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 	}
 }
 
-// claudeRecordResolver resolves a published session id to its Claude Code
-// transcript path: first via the daemon's store (the pinned conversation id +
-// working dir), then by scanning the projects root for a session whose id is the
-// published id (untracked/console sessions publish the Claude uuid directly). It
-// returns ok=false when no on-disk record is found — the provider then advertises
-// runtime-events but emits nothing for that session (honest degradation).
-func claudeRecordResolver() runtimeevents.PathResolver {
+// runtimeRecordResolver resolves a published session id to the on-disk transcript
+// path the runtime-event stream tails. A tracked session is resolved through its
+// harness (RuntimeTranscriptPath) so only a harness with a supported reader
+// returns ok=true — a Codex session no longer reports ok=true for a phantom
+// Claude-shaped path. An untracked/console session publishes a Claude uuid
+// directly, so fall back to scanning Claude's projects root. ok=false means the
+// provider advertises runtime-events but honestly emits nothing for that session.
+func runtimeRecordResolver() runtimeevents.PathResolver {
 	return func(sessionID string) (string, bool) {
 		if sessionID == "" {
 			return "", false
@@ -217,15 +219,8 @@ func claudeRecordResolver() runtimeevents.PathResolver {
 		if db, err := store.Open(); err == nil {
 			s, ok, _ := db.GetSession(sessionID)
 			db.Close()
-			if ok && s.ClaudeID != "" {
-				// Prefer the dir the transcript actually lives under (amux's dir
-				// convention has shifted over time); fall back to the recorded dir.
-				if cwd, found := claudecfg.FindSession(s.ClaudeID, s.Dir); found {
-					return claudecfg.TranscriptPath(cwd, s.ClaudeID), true
-				}
-				if s.Dir != "" {
-					return claudecfg.TranscriptPath(s.Dir, s.ClaudeID), true
-				}
+			if ok {
+				return agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
 			}
 		}
 		// Untracked/console: the published id is itself the Claude conversation id.

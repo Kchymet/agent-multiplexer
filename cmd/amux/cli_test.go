@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"amux/internal/store"
+	"amux/internal/agent"
 )
 
 // TestParseCreateFlagsAgent covers the harness selector on the non-interactive
@@ -15,8 +15,8 @@ import (
 func TestParseCreateFlagsAgent(t *testing.T) {
 	t.Run("defaults to claude", func(t *testing.T) {
 		repos, cfg := parseCreateFlags([]string{"acme/api"})
-		if cfg.agent != "claude" {
-			t.Errorf("default agent = %q, want claude", cfg.agent)
+		if cfg.agent != agent.DefaultKind() {
+			t.Errorf("default agent = %q, want %q", cfg.agent, agent.DefaultKind())
 		}
 		if !reflect.DeepEqual(repos, []string{"acme/api"}) {
 			t.Errorf("repos = %v, want [acme/api]", repos)
@@ -28,8 +28,8 @@ func TestParseCreateFlagsAgent(t *testing.T) {
 		if cfg.agent != "codex" {
 			t.Errorf("agent = %q, want codex", cfg.agent)
 		}
-		if cfg.model != store.DefaultModel("codex") {
-			t.Errorf("model = %q, want the codex default %q", cfg.model, store.DefaultModel("codex"))
+		if want := agent.HarnessFor("codex").DefaultModel(); cfg.model != want {
+			t.Errorf("model = %q, want the codex default %q", cfg.model, want)
 		}
 	})
 
@@ -48,16 +48,17 @@ func TestParseCreateFlagsAgent(t *testing.T) {
 	})
 }
 
-// TestCycleHarness verifies the interactive Harness toggle walks store.Harnesses
-// and wraps, and that an unknown current value snaps back to the first harness.
+// TestCycleHarness verifies the interactive Harness toggle walks the registered
+// kinds and wraps, and that an unknown current value snaps back to the first.
 func TestCycleHarness(t *testing.T) {
-	if got := cycleHarness("claude"); got != "codex" {
-		t.Errorf("cycleHarness(claude) = %q, want codex", got)
+	kinds := agent.Kinds()
+	for i, k := range kinds {
+		want := kinds[(i+1)%len(kinds)]
+		if got := cycleHarness(k); got != want {
+			t.Errorf("cycleHarness(%q) = %q, want %q", k, got, want)
+		}
 	}
-	if got := cycleHarness("codex"); got != "claude" {
-		t.Errorf("cycleHarness(codex) = %q, want claude (wrap)", got)
-	}
-	if got := cycleHarness("bogus"); got != store.Harnesses[0] {
-		t.Errorf("cycleHarness(bogus) = %q, want %q", got, store.Harnesses[0])
+	if got := cycleHarness("bogus"); got != kinds[0] {
+		t.Errorf("cycleHarness(bogus) = %q, want %q", got, kinds[0])
 	}
 }
