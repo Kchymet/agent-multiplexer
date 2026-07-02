@@ -17,30 +17,33 @@ import (
 	"fmt"
 	"strings"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// The generic structured-event vocabulary (docs/remote-provider-sessions.md §4).
-// A consumer MUST pass an unknown type through rather than dropping it.
+// The generic structured-event vocabulary (docs/remote-provider-sessions.md §4)
+// is published in the harnessproto module (the single source of truth the harness
+// orchestrator imports). Re-export it here so this mapper keeps referring to the
+// Type* / dir* names unchanged. A consumer MUST pass an unknown type through
+// rather than dropping it.
 const (
-	TypePrompt            = "prompt"             // in:  {text}
-	TypeTurnStart         = "turn_start"         // out: {}
-	TypeText              = "text"               // out: {text, final?}
-	TypeThinking          = "thinking"           // out: {text}
-	TypeToolCall          = "tool_call"          // out: {item_id, title, kind, status, input, raw_input?}
-	TypeToolResult        = "tool_result"        // out: {item_id, status, output, diffs?, raw_output?}
-	TypePlan              = "plan"               // out: {items:[{text,status}]}
-	TypeUsage             = "usage"              // out: {used, size, cost?}
-	TypePermissionRequest = "permission_request" // out: {request_id, tool, action, options}
-	TypeNotice            = "notice"             // out: {level, text}
-	TypeTurnEnd           = "turn_end"           // out: {stop_reason}
-	TypeRaw               = "raw"                // out: {runtime, native_type, body}  (never dropped)
+	TypePrompt            = harnessproto.TypePrompt
+	TypeTurnStart         = harnessproto.TypeTurnStart
+	TypeText              = harnessproto.TypeText
+	TypeThinking          = harnessproto.TypeThinking
+	TypeToolCall          = harnessproto.TypeToolCall
+	TypeToolResult        = harnessproto.TypeToolResult
+	TypePlan              = harnessproto.TypePlan
+	TypeUsage             = harnessproto.TypeUsage
+	TypePermissionRequest = harnessproto.TypePermissionRequest
+	TypeNotice            = harnessproto.TypeNotice
+	TypeTurnEnd           = harnessproto.TypeTurnEnd
+	TypeRaw               = harnessproto.TypeRaw
 )
 
 const (
-	dirIn  = "in"
-	dirOut = "out"
-	dirMeta = "meta"
+	dirIn   = harnessproto.DirIn
+	dirOut  = harnessproto.DirOut
+	dirMeta = harnessproto.DirMeta
 )
 
 // runtimeName labels `raw` and usage events with the producing runtime.

@@ -14,7 +14,7 @@ import (
 
 	"github.com/creack/pty"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 type pane struct {

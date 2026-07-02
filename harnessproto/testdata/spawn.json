@@ -1,0 +1,1 @@
+{"type":"spawn","paneId":"p2","dir":"/tmp","env":["K=V"],"argv":["sh","-c","echo hi"],"cols":80,"rows":24}

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 const testPoll = 5 * time.Millisecond
@@ -127,6 +127,37 @@ func TestTailRotationTolerance(t *testing.T) {
 	got := collect(t, ch)
 	if len(got) != 2 || got[0].Type != TypeText {
 		t.Fatalf("post-rotation = %+v", got)
+	}
+}
+
+// TestTailInodeReuseResync reproduces the rotation hazard deterministically:
+// TestTailRotationTolerance only trips the bug when the OS happens to reuse the
+// freed inode (reliably on CI's tmpfs, rarely on a dev box). Here we overwrite
+// the record IN PLACE with different, longer content — same inode (so os.SameFile
+// cannot detect a rotation) and size still above the stale offset (so the size<
+// offset reset never fires). Without the line-boundary integrity guard the tail
+// reads from the middle of the new line and emits an "unparsable" raw event.
+func TestTailInodeReuseResync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	write(t, path, `{"type":"user","message":{"role":"user","content":"first"}}`+"\n")
+	ch, cancel := streamFor(t, path, 0)
+	defer cancel()
+	if got := collect(t, ch); len(got) != 2 {
+		t.Fatalf("pre-rewrite = %+v", got)
+	}
+	// Rewrite in place from offset 0 with a longer, different line — no remove, so
+	// the inode is unchanged and the new size exceeds our offset.
+	f, err := os.OpenFile(path, os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"assistant","message":{"id":"m9","content":[{"type":"text","text":"rewritten in place, longer than before"}],"stop_reason":"end_turn"}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	got := collect(t, ch)
+	if len(got) != 2 || got[0].Type != TypeText || got[1].Type != TypeTurnEnd {
+		t.Fatalf("post-rewrite = %+v, want [text, turn_end] with no unparsable raw", got)
 	}
 }
 

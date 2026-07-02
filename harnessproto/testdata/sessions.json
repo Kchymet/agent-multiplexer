@@ -1,0 +1,1 @@
+{"type":"sessions","sessions":[{"id":"s1","title":"fix the bug","source":"claude","kind":"claude","mode":"task","rootId":"wg1","repos":"amux","section":"workgroups","state":"waiting","status":"waiting · main","cwd":"/home/u/amux","startedAt":1720000000,"canAttach":true,"canKill":true,"canResume":false}]}

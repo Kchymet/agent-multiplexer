@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // DefaultPollInterval is how often a tail re-stats its record file for growth.
@@ -57,6 +57,16 @@ func tail(ctx context.Context, path string, newMapper func() LineMapper, afterSe
 			}
 			lastInfo = fi
 			if fi.Size() > offset {
+				// A --resume rewrite replaces the record with a different file. If the
+				// OS reuses the freed inode, os.SameFile above can't see the rotation
+				// and fi.Size() may exceed our stale offset, so we'd read from the
+				// middle of a fresh line. Guard by integrity: our offset always points
+				// just past a newline in the file we were reading; if the byte there is
+				// no longer a newline, the file underneath us changed — resync from the
+				// top (ordinals recount; the orchestrator dedups by ordinal).
+				if offset > 0 && !offsetOnLineBoundary(path, offset) {
+					offset, ordinal, mapper = 0, 0, newMapper()
+				}
 				newOffset, batch := readFrom(path, offset, mapper, &ordinal, afterSeq)
 				offset = newOffset
 				if len(batch.Events) > 0 {
@@ -110,6 +120,24 @@ func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afte
 		}
 	}
 	return consumed, batch
+}
+
+// offsetOnLineBoundary reports whether the byte immediately before offset is a
+// newline — i.e. offset still points just past a complete line in the current
+// file. readFrom only ever advances offset past a '\n', so a false here means the
+// file was replaced out from under us (a --resume rewrite that reused the inode).
+// Any read error is treated as "not a boundary" so the caller resyncs safely.
+func offsetOnLineBoundary(path string, offset int64) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], offset-1); err != nil {
+		return false
+	}
+	return b[0] == '\n'
 }
 
 // PathResolver resolves a published session id to its on-disk runtime record

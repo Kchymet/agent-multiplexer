@@ -4,8 +4,8 @@ import (
 	"os"
 
 	"amux/internal/harness"
-	"amux/internal/harnessproto"
 	"amux/internal/mux"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // cmdServe runs the multiplexer server (the backend). Extra args are additional

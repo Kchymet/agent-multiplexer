@@ -71,7 +71,7 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Multiplexer server** | `internal/mux` | The backend (`amux serve`). Serves `muxproto` to UI clients over unix/TCP, broadcasts rail snapshots, applies lifecycle actions, and multiplexes pane I/O between clients and a harness. |
 | **Agent harness** | `internal/harness` | Owns the real processes (`amux harness`). Spawns each pane in a PTY, streams its output, accepts input/resize/kill. The unit that can run jailed/remote. |
 | **UI ⇄ Server protocol** | `internal/muxproto` | Message types + helpers for hello/welcome, subscribe/snapshot, action/result, and pane open/input/resize/close/output/exit. |
-| **Server ⇄ Harness protocol** | `internal/harnessproto` | Message types for spawn/input/resize/kill and ready/output/exit. |
+| **Server ⇄ Harness protocol** | `harnessproto` (published module) | Message types for spawn/input/resize/kill and ready/output/exit. |
 | **Wire transport** | `internal/wire` | Shared line-framed JSON codec used by both protocols over any stream (unix/TCP/stdio/pipe). |
 | **UI client lib** | `internal/muxclient` | Dials a local/remote server and exposes its state stream + per-pane I/O to a UI. |
 | **Session model / store** | `internal/store` | SQLite store (`~/.local/share/amux/amux.db`): repos, sessions (a one-level `root_id` tree), `scope` (work/repo) and `archived` flags, idempotent migrations. |

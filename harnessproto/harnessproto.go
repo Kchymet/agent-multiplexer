@@ -2,15 +2,22 @@
 // the server tells a harness to spawn/feed/kill PTY-backed panes, and the harness
 // streams their output back. See docs/client-server.md. One JSON object per line;
 // pane bytes ride in Data ([]byte, base64-encoded by encoding/json).
+//
+// This is the published source of truth for the wire. It lives in its own nested
+// module (github.com/kchymet/agent-multiplexer/harnessproto) with a stdlib-only
+// dependency surface so external consumers — notably the harness orchestrator in
+// a separate repo — import these exact types, tags, verbs, and vocabulary rather
+// than maintaining a byte-for-byte hand copy. Renaming a JSON tag here changes the
+// golden fixtures in golden_test.go and breaks this module's own tests, so drift
+// fails PR CI in the repo that owns the wire.
 package harnessproto
 
 import (
+	"bufio"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
-
-	"amux/internal/core"
-	"amux/internal/wire"
+	"sync"
 )
 
 // Version is the current protocol version. v1 is the in-process/stdio harness
@@ -91,6 +98,18 @@ const (
 	VerbStart        = "start"
 )
 
+// SessionVerbs is the closed set of accepted session-action verbs. A consumer
+// (the orchestrator) uses it to reject a pane/terminal verb before a wasted
+// round-trip; the provider rejects anything outside it with ErrUnsupported.
+var SessionVerbs = map[string]bool{
+	VerbNewWorkgroup: true,
+	VerbAddAgent:     true,
+	VerbRename:       true,
+	VerbArchive:      true,
+	VerbUnarchive:    true,
+	VerbStart:        true,
+}
+
 // ErrUnsupported is the session-result error for a verb the provider does not
 // accept (spec §3).
 const ErrUnsupported = "unsupported"
@@ -102,28 +121,6 @@ const (
 	ErrRevoked    = "revoked"
 	ErrBadVersion = "unsupported-version"
 )
-
-// RuntimeEvent is one structured transcript event derived from a runtime's
-// on-disk session record (docs/remote-provider-sessions.md §4). The envelope is
-// intentionally generic — a stable, documented vocabulary of Type strings, an
-// optional coalescing ItemID, an optional Direction, and an opaque Payload — so
-// amux carries no orchestrator-specific schema. Consumers MUST pass an unknown
-// Type through rather than dropping it.
-type RuntimeEvent struct {
-	Type      string          `json:"type"`
-	ItemID    string          `json:"item_id,omitempty"`
-	Direction string          `json:"direction,omitempty"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-}
-
-// RuntimeEventBatch groups a seq-ordered slice of RuntimeEvents with the ordinal
-// of its last event. It is the internal handoff a runtime-events source hands the
-// provider to frame — not itself a wire type (the provider unpacks it into a
-// runtime-events HarnessMsg). Seq is per-session monotonic.
-type RuntimeEventBatch struct {
-	Seq    int64
-	Events []RuntimeEvent
-}
 
 // Capabilities advertises what a provider can run, for orchestrator scheduling.
 type Capabilities struct {
@@ -204,10 +201,10 @@ type HarnessMsg struct {
 	T            int64             `json:"t,omitempty"`     // ping: timestamp
 
 	// v2 "sessions" feature.
-	Sessions []core.Session `json:"sessions,omitempty"` // sessions: full inventory snapshot (Seq is per-connection monotonic)
-	ReqID    string         `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
-	OK       bool           `json:"ok,omitempty"`       // session-result: verb succeeded
-	NewID    string         `json:"newId,omitempty"`    // session-result: id of any session the verb created
+	Sessions []Session `json:"sessions,omitempty"` // sessions: full inventory snapshot (Seq is per-connection monotonic)
+	ReqID    string    `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
+	OK       bool      `json:"ok,omitempty"`       // session-result: verb succeeded
+	NewID    string    `json:"newId,omitempty"`    // session-result: id of any session the verb created
 
 	// v2 "runtime-events" feature (runtime-events frame). SessionID names the
 	// published session; Seq is per-session monotonic (the ordinal of the last
@@ -218,27 +215,56 @@ type HarnessMsg struct {
 	Events    []RuntimeEvent `json:"events,omitempty"`
 }
 
-// Conn is a typed harnessproto connection.
-type Conn struct{ w *wire.Conn }
+// Conn is a typed harnessproto connection: one JSON object per line over any byte
+// stream (unix socket, TCP under TLS, stdio, net.Pipe). Writes are serialized;
+// reads return whole lines regardless of length, so large base64 pane payloads
+// stream fine.
+type Conn struct {
+	rwc io.ReadWriteCloser
+	r   *bufio.Reader
+	mu  sync.Mutex // serializes concurrent writers
+}
 
-// NewConn wraps a stream for harnessproto.
-func NewConn(rwc io.ReadWriteCloser) *Conn { return &Conn{w: wire.New(rwc)} }
+// NewConn wraps a stream for harnessproto framing.
+func NewConn(rwc io.ReadWriteCloser) *Conn {
+	return &Conn{rwc: rwc, r: bufio.NewReaderSize(rwc, 64*1024)}
+}
 
-func (c *Conn) Close() error { return c.w.Close() }
+func (c *Conn) Close() error { return c.rwc.Close() }
+
+func (c *Conn) write(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err = c.rwc.Write(b)
+	return err
+}
+
+func (c *Conn) read(v any) error {
+	line, err := c.r.ReadBytes('\n')
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(line, v)
+}
 
 // Server-side helpers.
-func (c *Conn) WriteMux(m MuxMsg) error { return c.w.Write(m) }
+func (c *Conn) WriteMux(m MuxMsg) error { return c.write(m) }
 func (c *Conn) ReadHarness() (HarnessMsg, error) {
 	var m HarnessMsg
-	err := c.w.Read(&m)
+	err := c.read(&m)
 	return m, err
 }
 
 // Harness-side helpers.
-func (c *Conn) WriteHarness(m HarnessMsg) error { return c.w.Write(m) }
+func (c *Conn) WriteHarness(m HarnessMsg) error { return c.write(m) }
 func (c *Conn) ReadMux() (MuxMsg, error) {
 	var m MuxMsg
-	err := c.w.Read(&m)
+	err := c.read(&m)
 	return m, err
 }
 
