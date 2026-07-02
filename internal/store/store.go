@@ -31,7 +31,7 @@ type Session struct {
 	ID       string
 	RootID   string // "" => this is a root container
 	Name     string // optional display name (agent-settable)
-	Agent    string // claude | hermes
+	Agent    string // claude | codex | hermes
 	Model    string // optional per-session model override
 	Mode     string // task | loop
 	Repo     string // repo name (sub-sessions); may list several for migrated roots

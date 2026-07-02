@@ -28,6 +28,36 @@ func TestHarnessFor(t *testing.T) {
 	if restored, err := h.RestoreTranscript("/tmp", "sid"); err != nil || restored {
 		t.Fatalf("noop RestoreTranscript restored=%v err=%v", restored, err)
 	}
+
+	// Codex is a real harness (not the no-op), with its own kind.
+	if c := HarnessFor("codex"); c.Kind() != "codex" {
+		t.Fatalf("HarnessFor(codex).Kind()=%q, want codex", c.Kind())
+	}
+}
+
+// TestCodexActivity exercises the codex harness's rollout-freshness fallback:
+// no rollout is Unknown, a just-written rollout is Busy.
+func TestCodexActivity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate HookStateDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
+	h := HarnessFor("codex")
+
+	const sid = "44444444-4444-4444-8444-444444444444"
+	if got := h.Activity(sid); got != engine.ActivityUnknown {
+		t.Fatalf("no rollout Activity=%v, want Unknown", got)
+	}
+
+	dir := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "07", "02")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roll := filepath.Join(dir, "rollout-2026-07-02T10-00-00-"+sid+".jsonl")
+	if err := os.WriteFile(roll, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Activity(sid); got != engine.ActivityBusy {
+		t.Fatalf("fresh rollout Activity=%v, want Busy", got)
+	}
 }
 
 // TestClaudeActivity maps hook state to engine.Activity: running/waiting are

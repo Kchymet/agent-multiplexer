@@ -28,6 +28,7 @@ func cmdDoctor() error {
 		{"claude", "--version", "default agent", true},
 		{"fzf", "--version", "interactive pickers (new workspace/agent)", false},
 		{"gh", "--version", "browse & clone GitHub repos", false},
+		{"codex", "--version", "alternate agent (OpenAI Codex)", false},
 		{"hermes", "--version", "alternate agent", false},
 	}
 
