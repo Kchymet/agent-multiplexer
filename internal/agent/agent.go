@@ -1,10 +1,14 @@
-// Package agent resolves the command to launch for an agent kind. Resolving to
-// an absolute path (against the resolver's PATH) means the spawned process gets
-// a valid binary even when the launch environment's own PATH is minimal.
+// Package agent is amux's per-kind agent registry. One Harness value owns every
+// decision that varies by agent kind (claude/codex/hermes): how to launch it
+// (Argv), its model catalog, its resume-vs-fresh launch plan, its trust/hook
+// side effects, its sandbox config binds, its activity/turn-state read, and its
+// on-disk session listing. HarnessFor is the ONE switch on kind — every other
+// package asks the registry instead of branching on the string itself, so adding
+// a kind is a single new harness file, not a change scattered across nine
+// packages. See harness.go for the interface and the registry.
 package agent
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,61 +17,22 @@ import (
 )
 
 // Argv returns the absolute argv to run for kind (with an optional model
-// override), plus any extra trailing args.
+// override), plus any extra trailing args. It delegates to the kind's Harness —
+// HarnessFor is the only place kind is switched on.
 //
 // The launch binary is overridable per kind via AMUX_<KIND>_BIN (e.g.
 // AMUX_CLAUDE_BIN). amux stays a thin launcher: point that at your own wrapper
 // to own autonomy (e.g. branch on $AMUX_MODE to add --permission-mode acceptEdits
 // or start a /loop). amux never injects those itself.
 func Argv(kind, model string, extra ...string) ([]string, error) {
-	var bin string
-	var args []string
-	switch kind {
-	case "", "claude":
-		bin = envOr("AMUX_CLAUDE_BIN", "claude")
-		// Default to the safe auto-accept permission mode (a classifier blocks
-		// escalations — this is NOT --dangerously-skip-permissions). Override
-		// with AMUX_PERMISSION_MODE=default|acceptEdits|plan|… or "none" to omit.
-		if pm := envOr("AMUX_PERMISSION_MODE", "auto"); pm != "" && pm != "none" {
-			args = append(args, "--permission-mode", pm)
-		}
-		if model != "" {
-			args = append(args, "--model", model)
-		}
-	case "codex":
-		bin = envOr("AMUX_CODEX_BIN", "codex")
-		// Default to autonomous operation, mirroring claude's permission-mode
-		// convention: set a sandbox unless the user opts out with
-		// AMUX_CODEX_SANDBOX=none. Override the level with
-		// AMUX_CODEX_SANDBOX=read-only|workspace-write|danger-full-access.
-		if sb := envOr("AMUX_CODEX_SANDBOX", "workspace-write"); sb != "none" {
-			args = append(args, "--sandbox", sb)
-		}
-		if model != "" {
-			args = append(args, "--model", model)
-		}
-	case "hermes":
-		bin = envOr("AMUX_HERMES_BIN", "hermes")
-		args = []string{"chat"}
-		if model != "" {
-			args = append(args, "-m", model)
-		}
-	default:
-		return nil, fmt.Errorf("unknown agent kind %q", kind)
-	}
-	return append(append([]string{resolve(bin)}, args...), extra...), nil
+	return HarnessFor(kind).Argv(model, extra...)
 }
 
-// Known reports whether kind names an agent CLI Argv can launch. Creation paths
-// check it before persisting a session so a mistyped kind (which nothing can
-// edit after the fact) is rejected up front instead of minting a session that
-// errors on every launch.
-func Known(kind string) bool {
-	switch kind {
-	case "", "claude", "codex", "hermes":
-		return true
-	}
-	return false
+// finishArgv resolves bin to an absolute path and appends the harness args and
+// caller's trailing args. Shared by every harness's Argv so path resolution and
+// arg ordering stay identical across kinds.
+func finishArgv(bin string, args, extra []string) []string {
+	return append(append([]string{resolve(bin)}, args...), extra...)
 }
 
 // resolve returns the best command to launch bin with. It tries, in order: the

@@ -130,9 +130,12 @@ func (d *DB) importLegacy() error {
 			ID: w.ID, RootID: "", Name: w.Name, Mode: mode,
 			Dir: w.Dir, Created: w.Created, Scope: ScopeWork,
 		})
-		// one sub preserving the legacy combined dir + claude session
+		// one sub preserving the legacy combined dir + claude session. An empty
+		// agent is left empty (not defaulted): every reader canonicalizes "" to the
+		// default kind via the agent registry, so the persistence layer needn't know
+		// the default's spelling.
 		_ = d.PutSession(Session{
-			ID: d.NewID(), RootID: w.ID, Agent: defaultStr(w.Agent, "claude"), Mode: mode,
+			ID: d.NewID(), RootID: w.ID, Agent: w.Agent, Mode: mode,
 			Repo: strings.Join(w.Repos, ","), Dir: w.Dir,
 			ClaudeID: w.SessionID, Prompt: w.InitialPrompt, Created: w.Created,
 		})
@@ -155,46 +158,10 @@ const (
 	ModeLoop = "loop"
 )
 
-// Claude model aliases offered when creating a session. Opus is the default.
-const (
-	ModelOpus   = "opus"
-	ModelSonnet = "sonnet"
-	ModelHaiku  = "haiku"
-	ModelFable  = "fable"
-)
-
-// Models is the ordered list of selectable claude models, opus first (the
-// default). It is the model set for the default "claude" harness; ModelsFor
-// selects the right list per harness.
-var Models = []string{ModelOpus, ModelSonnet, ModelHaiku, ModelFable}
-
-// Harnesses is the ordered list of selectable agent harnesses. "claude" (Claude
-// Code) is the default and comes first; "codex" runs OpenAI's Codex CLI. Each
-// harness filters the offered model list — see ModelsFor.
-var Harnesses = []string{"claude", "codex"}
-
-// codexModels is the ordered list of selectable Codex models offered when the
-// codex harness is chosen. gpt-5.5 is the recommended default and comes first.
-var codexModels = []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
-
-// ModelsFor returns the selectable models for an agent harness, ordered with the
-// default first. "" and "claude" get the Claude list; "codex" gets the Codex
-// list. An unknown harness falls back to the Claude list, so callers always get
-// a usable, non-empty set.
-func ModelsFor(agent string) []string {
-	switch agent {
-	case "codex":
-		return codexModels
-	default:
-		return Models
-	}
-}
-
-// DefaultModel returns the default (first-offered) model for an agent harness —
-// what amux picks when the user doesn't choose one explicitly.
-func DefaultModel(agent string) string {
-	return ModelsFor(agent)[0]
-}
+// The agent-harness catalog (selectable harnesses + per-harness model lists) now
+// lives behind the agent registry (agent.Harnesses / agent.HarnessFor), not in
+// the persistence layer — store sits below the registry in the import graph and
+// no longer needs to know a kind's spelling or model set.
 
 // Workgroup scopes (root sessions only).
 const (

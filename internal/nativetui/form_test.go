@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"amux/internal/store"
+	"amux/internal/agent"
 )
 
 func key(s string) tea.KeyMsg {
@@ -90,8 +90,8 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	if !modelField.isSelect() {
 		t.Fatal("model field should be a selector")
 	}
-	if got := modelField.value; got != store.ModelOpus {
-		t.Fatalf("default model: got %q, want %q", got, store.ModelOpus)
+	if got := modelField.value; got != agent.HarnessFor("claude").DefaultModel() {
+		t.Fatalf("default model: got %q, want %q", got, agent.HarnessFor("claude").DefaultModel())
 	}
 
 	// Navigate from the prompt field down to the model selector with j, then
@@ -103,8 +103,8 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 		t.Fatal("j navigation did not land on the model field")
 	}
 	m.handleForm(key("l"))
-	if got := modelField.value; got != store.ModelSonnet {
-		t.Fatalf("after cycling: got %q, want %q", got, store.ModelSonnet)
+	if got := modelField.value; got != agent.HarnessFor("claude").Models()[1] {
+		t.Fatalf("after cycling: got %q, want %q", got, agent.HarnessFor("claude").Models()[1])
 	}
 }
 
@@ -130,11 +130,11 @@ func TestFormsCarryHarnessField(t *testing.T) {
 		if !f.isSelect() {
 			t.Fatalf("%s: harness field should be a selector", tc.name)
 		}
-		if got := f.value; got != "claude" {
+		if got := f.value; got != agent.DefaultKind() {
 			t.Fatalf("%s: default harness got %q, want claude", tc.name, got)
 		}
-		if !slices.Equal(f.options, store.Harnesses) {
-			t.Fatalf("%s: harness options got %v, want %v", tc.name, f.options, store.Harnesses)
+		if !slices.Equal(f.options, agent.Kinds()) {
+			t.Fatalf("%s: harness options got %v, want %v", tc.name, f.options, agent.Kinds())
 		}
 	}
 }
@@ -155,20 +155,20 @@ func TestHarnessCyclesModelOptions(t *testing.T) {
 	m.handleForm(key("l"))
 
 	model := m.form.field("model")
-	if !slices.Equal(model.options, store.ModelsFor("codex")) {
-		t.Fatalf("model options after codex: got %v, want %v", model.options, store.ModelsFor("codex"))
+	if !slices.Equal(model.options, agent.HarnessFor("codex").Models()) {
+		t.Fatalf("model options after codex: got %v, want %v", model.options, agent.HarnessFor("codex").Models())
 	}
-	if got := model.value; got != store.DefaultModel("codex") {
-		t.Fatalf("invalid model should reset: got %q, want %q", got, store.DefaultModel("codex"))
+	if got := model.value; got != agent.HarnessFor("codex").DefaultModel() {
+		t.Fatalf("invalid model should reset: got %q, want %q", got, agent.HarnessFor("codex").DefaultModel())
 	}
 
 	// Back to claude restores the claude list and its default.
 	m.handleForm(key("h"))
-	if !slices.Equal(model.options, store.ModelsFor("claude")) {
-		t.Fatalf("model options after claude: got %v, want %v", model.options, store.ModelsFor("claude"))
+	if !slices.Equal(model.options, agent.HarnessFor("claude").Models()) {
+		t.Fatalf("model options after claude: got %v, want %v", model.options, agent.HarnessFor("claude").Models())
 	}
-	if got := model.value; got != store.DefaultModel("claude") {
-		t.Fatalf("model should reset to claude default: got %q, want %q", got, store.DefaultModel("claude"))
+	if got := model.value; got != agent.HarnessFor("claude").DefaultModel() {
+		t.Fatalf("model should reset to claude default: got %q, want %q", got, agent.HarnessFor("claude").DefaultModel())
 	}
 }
 
@@ -178,11 +178,11 @@ func TestAgentFormSubmitsHarnessAndModel(t *testing.T) {
 	m := &model{}
 	m.openNewRepoAgentForm("repo", "Repo")
 	v := m.form.values()
-	if got := v["agent"]; got != "claude" {
+	if got := v["agent"]; got != agent.DefaultKind() {
 		t.Fatalf("agent field: got %q, want claude", got)
 	}
-	if got := v["model"]; got != store.DefaultModel("claude") {
-		t.Fatalf("model field: got %q, want %q", got, store.DefaultModel("claude"))
+	if got := v["model"]; got != agent.HarnessFor("claude").DefaultModel() {
+		t.Fatalf("model field: got %q, want %q", got, agent.HarnessFor("claude").DefaultModel())
 	}
 }
 

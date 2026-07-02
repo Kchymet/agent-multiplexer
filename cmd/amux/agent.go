@@ -9,8 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"amux/internal/claudecfg"
-	"amux/internal/codexcfg"
+	"amux/internal/agent"
 	"amux/internal/core"
 )
 
@@ -180,18 +179,16 @@ func cmdAgentSessions(args []string) error {
 		}
 	}
 
+	// Merge every registered harness's on-disk conversations, tagged by kind, so
+	// adding a harness surfaces its sessions here without touching this command.
 	var rows []sessionRow
-	for _, s := range claudecfg.ListSessions() {
-		rows = append(rows, sessionRow{
-			Harness: "claude", ID: s.ID, Cwd: s.Cwd, Project: s.Project,
-			Path: s.Path, Size: s.Size, Modified: s.Modified,
-		})
-	}
-	for _, s := range codexcfg.ListSessions() {
-		rows = append(rows, sessionRow{
-			Harness: "codex", ID: s.ID, Cwd: s.Cwd, Project: s.Project,
-			Path: s.Path, Size: s.Size, Modified: s.Modified,
-		})
+	for _, h := range agent.Harnesses() {
+		for _, s := range h.ListSessions() {
+			rows = append(rows, sessionRow{
+				Harness: h.Kind(), ID: s.ID, Cwd: s.Cwd, Project: s.Project,
+				Path: s.Path, Size: s.Size, Modified: s.Modified,
+			})
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Modified.After(rows[j].Modified) })
 

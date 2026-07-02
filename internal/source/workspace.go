@@ -11,7 +11,6 @@ import (
 	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/core"
-	"amux/internal/engine"
 	"amux/internal/store"
 )
 
@@ -63,9 +62,9 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	trackedDirs := map[string]bool{console.Dir(): true}
 
 	// Control console, pinned first.
-	consoleState := agentState(liveOf(console.ID), "claude", console.SessionID)
+	consoleState := agentState(liveOf(console.ID), agent.DefaultKind(), console.SessionID)
 	out = append(out, core.Session{
-		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
+		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
 	})
@@ -138,7 +137,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		for i, s := range active {
 			out = append(out, core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
-				RootID: s.RootID, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode, Repos: s.Repo,
+				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s),
 				Cwd:       s.Dir,
@@ -160,7 +159,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				st := agentState(liveOf(s.ID), s.Agent, s.ClaudeID)
 				out = append(out, core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
-					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode, Repos: s.Repo,
+					RootID: r.Name, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 					State:     st,
 					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s),
 					Cwd:       s.Dir,
@@ -178,7 +177,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	for _, s := range recentArchived(archived) {
 		out = append(out, core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
-			Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
+			Kind: agent.Canonical(s.Agent), Mode: s.Mode,
 			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
 		})
@@ -228,7 +227,7 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 			Title:     untrackedTitle(rec.Cwd, id),
 			Source:    "workspace",
 			Section:   core.SectionDetached,
-			Kind:      "claude",
+			Kind:      agent.DefaultKind(),
 			Mode:      "external",
 			State:     rec.State,
 			Status:    stateLabel(rec.State) + " · untracked",
@@ -354,23 +353,10 @@ func agentState(alive bool, kind, sessionID string) string {
 	if !alive {
 		return core.StateIdle
 	}
-	if kind == "" || kind == "claude" {
-		if rec, ok := core.HookState(sessionID); ok {
-			switch rec.State {
-			case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
-				return rec.State
-			}
-		}
-		return core.StateUnknown
-	}
-	switch agent.HarnessFor(kind).Activity(sessionID) {
-	case engine.ActivityBusy:
-		return core.StateRunning
-	case engine.ActivitySafe:
-		return core.StateReady
-	default:
-		return core.StateUnknown
-	}
+	// The rail state word is the harness's call: Claude reports its fine-grained
+	// hook states directly; a harness with no hook stream degrades honestly to
+	// running/ready via its coarse activity signal. HarnessFor is the one switch.
+	return agent.HarnessFor(kind).RailState(sessionID)
 }
 
 // stateLabel is the word shown to the user. Unknown reads as "running": the
@@ -404,11 +390,4 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
-}
-
-func defaultStr(v, def string) string {
-	if strings.TrimSpace(v) == "" {
-		return def
-	}
-	return v
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -60,12 +61,8 @@ func (d *Daemon) readModel(q string) (any, error) {
 			wg := core.WorkgroupRow{ID: r.ID, Scope: scope, Display: r.Display()}
 			subs, _ := db.Children(r.ID)
 			for _, s := range subs {
-				agent := s.Agent
-				if agent == "" {
-					agent = "claude"
-				}
 				wg.Agents = append(wg.Agents, core.AgentRow{
-					ID: s.ID, Agent: agent, Mode: s.Mode, Repos: s.Repo, Archived: s.Archived,
+					ID: s.ID, Agent: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo, Archived: s.Archived,
 				})
 			}
 			rows = append(rows, wg)

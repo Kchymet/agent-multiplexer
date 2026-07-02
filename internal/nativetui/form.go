@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -23,8 +24,8 @@ func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
-			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
+			harnessField(),
+			modelField(agent.DefaultKind()),
 		},
 	}
 }
@@ -43,8 +44,8 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos", picker: true},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
-			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
+			harnessField(),
+			modelField(agent.DefaultKind()),
 		},
 	}
 }
@@ -73,8 +74,8 @@ func (m *model) openNewWorkgroupForm() {
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos (first agent)", picker: true},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
-			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
+			harnessField(),
+			modelField(agent.DefaultKind()),
 			{key: "linear", label: "Linear issue/URL"},
 		},
 	}
@@ -361,10 +362,24 @@ func (fs *formState) syncDependents(changed *formField) {
 	if model == nil {
 		return
 	}
-	model.options = store.ModelsFor(changed.value)
+	h := agent.HarnessFor(changed.value)
+	model.options = h.Models()
 	if !slices.Contains(model.options, model.value) {
-		model.value = store.DefaultModel(changed.value)
+		model.value = h.DefaultModel()
 	}
+}
+
+// harnessField builds a form's Harness selector from the agent registry,
+// defaulting to the first-registered harness.
+func harnessField() *formField {
+	return &formField{key: "agent", label: "Harness", value: agent.DefaultKind(), options: agent.Kinds()}
+}
+
+// modelField builds a form's Model selector for a harness kind — its offered
+// models, defaulting to that harness's built-in default.
+func modelField(kind string) *formField {
+	h := agent.HarnessFor(kind)
+	return &formField{key: "model", label: "Model", value: h.DefaultModel(), options: h.Models()}
 }
 
 func (fs *formState) next() { fs.move(1) }
