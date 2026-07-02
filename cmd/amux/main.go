@@ -6,7 +6,7 @@
 //
 //	(bare)   open the native dashboard TUI
 //	daemon   run the polling/serving daemon (foreground)
-//	agent    self-reporting run by an agent about itself (status/hook/name)
+//	agent    self-reporting run by an agent about itself (status/hook/name/done)
 //	status   print current sessions as text and exit
 //	version  print version
 package main
