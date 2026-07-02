@@ -5,6 +5,7 @@
 package claudecfg
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"amux/internal/core"
 )
@@ -123,6 +125,94 @@ func AnySession(cwd string) bool {
 		}
 	}
 	return false
+}
+
+// SessionInfo describes one saved Claude Code session transcript discovered
+// under the projects root: its session id, the working directory it ran in, the
+// transcript path, and file metadata. It's what `amux agent sessions` reports so
+// an agent can reason across every conversation on the machine without needing
+// to know Claude Code's project-dir munge convention.
+type SessionInfo struct {
+	ID       string    `json:"id"`       // Claude session UUID (the transcript's base name)
+	Cwd      string    `json:"cwd"`      // originating working dir, read from the transcript (best-effort)
+	Project  string    `json:"project"`  // Claude Code's munged project-dir name (always present)
+	Path     string    `json:"path"`     // absolute path to the .jsonl transcript
+	Size     int64     `json:"size"`     // transcript size in bytes
+	Modified time.Time `json:"modified"` // transcript mtime (proxy for last activity)
+}
+
+// ListSessions enumerates every Claude Code session transcript across all
+// projects under the projects root, most-recently-modified first. It's
+// best-effort: unreadable project dirs and files are skipped rather than failing
+// the whole listing, so an agent always gets whatever is readable. Only the
+// per-project top-level <uuid>.jsonl transcripts are reported (mirroring
+// AnySession) — a session's subagents/ working area is not itself a session.
+func ListSessions() []SessionInfo {
+	root := projectsRoot()
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []SessionInfo
+	for _, p := range projects {
+		if !p.IsDir() {
+			continue
+		}
+		projDir := filepath.Join(root, p.Name())
+		ents, err := os.ReadDir(projDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			fi, err := e.Info()
+			if err != nil {
+				continue
+			}
+			path := filepath.Join(projDir, e.Name())
+			out = append(out, SessionInfo{
+				ID:       strings.TrimSuffix(e.Name(), ".jsonl"),
+				Cwd:      transcriptCwd(path),
+				Project:  p.Name(),
+				Path:     path,
+				Size:     fi.Size(),
+				Modified: fi.ModTime(),
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Modified.After(out[j].Modified)
+	})
+	return out
+}
+
+// transcriptCwd reads the originating working directory from a transcript's
+// first record that carries one. Claude Code stamps its JSONL lines with the
+// session's cwd; we return "" if it can't be read (the munge is lossy, so the
+// caller falls back to the project-dir name for display).
+func transcriptCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcript lines can be large
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var rec struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(line, &rec) == nil && rec.Cwd != "" {
+			return rec.Cwd
+		}
+	}
+	return ""
 }
 
 // ConfigPath is ~/.claude.json (honoring CLAUDE_CONFIG_DIR if set).

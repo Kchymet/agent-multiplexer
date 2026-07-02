@@ -144,11 +144,24 @@ This directory is your sandbox. It contains a git **worktree per repository** yo
 are assigned (the subdirectories here).
 
 ## Stay in your sandbox
-- Only read and edit files **inside this directory** (your worktrees). Do not
-  touch anything outside it: other agents' worktrees, the amux data dir, or any
-  parent/clone of these repos.
+- Keep all **edits** inside this directory (your worktrees). Do not write outside
+  it: other agents' worktrees, the amux data dir, or any parent/clone of these
+  repos. (Reading the shared Claude sessions below is the one exception.)
 - You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
   commit on the default branch (main/master), and do not push to it.
+
+## Reason across Claude sessions
+You can **read** the transcripts of every Claude Code session on this machine —
+your own, other agents', and the user's — to reason about work that spans
+conversations: recurring tasks, prior decisions, and what's already been done.
+List them (most recent first) with:
+
+    amux agent sessions
+
+Each row is a session; the indented line is the transcript path (a JSONL
+conversation log) you can open with your normal file tools. Add `+"`--json`"+` for
+machine-readable records. This is read-only context — never modify these files,
+and keep every edit inside your worktree.
 
 ## Keep current with the remote
 Each repo here is a worktree of a shared clone of its remote. Before starting,

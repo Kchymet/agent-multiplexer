@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestSessionLookup verifies the path munging matches Claude Code's project-dir
@@ -112,6 +113,58 @@ func writeTranscript(t *testing.T, projectsDir, munged, uuid string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(proj, uuid+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestListSessions verifies that ListSessions enumerates transcripts across all
+// projects (not just one), reads the originating cwd from the transcript, sorts
+// most-recently-modified first, and ignores non-transcript entries.
+func TestListSessions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	proj := filepath.Join(dir, "projects")
+
+	if got := ListSessions(); len(got) != 0 {
+		t.Fatalf("no projects dir yet: want 0 sessions, got %d", len(got))
+	}
+
+	// Two sessions under different projects; one carries a cwd in its transcript.
+	cwdA := "/home/u/work/api"
+	writeSession(t, proj, munge(cwdA), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", `{"cwd":"`+cwdA+`"}`)
+	writeSession(t, proj, munge("/home/u/work/web"), "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", `{"type":"summary"}`)
+	// A stray non-transcript file and a bare working-dir must be ignored.
+	if err := os.WriteFile(filepath.Join(proj, munge(cwdA), "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ListSessions()
+	if len(got) != 2 {
+		t.Fatalf("want 2 sessions across projects, got %d: %+v", len(got), got)
+	}
+
+	// Make session B strictly newer so ordering is deterministic, then re-list.
+	future := time.Now().Add(time.Hour)
+	pathB := filepath.Join(proj, munge("/home/u/work/web"), "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl")
+	if err := os.Chtimes(pathB, future, future); err != nil {
+		t.Fatal(err)
+	}
+	got = ListSessions()
+	if got[0].ID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" {
+		t.Fatalf("most-recent-first ordering: want session B first, got %q", got[0].ID)
+	}
+	if got[1].Cwd != cwdA {
+		t.Fatalf("cwd from transcript: want %q, got %q", cwdA, got[1].Cwd)
+	}
+}
+
+func writeSession(t *testing.T, projectsDir, munged, uuid, firstLine string) {
+	t.Helper()
+	proj := filepath.Join(projectsDir, munged)
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, uuid+".jsonl"), []byte(firstLine+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
