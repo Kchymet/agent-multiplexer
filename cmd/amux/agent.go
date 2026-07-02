@@ -158,7 +158,7 @@ func cmdAgentDone(args []string) error {
 		return nil
 	}
 	if err := sendAction(core.Action{
-		Action: "set-archived",
+		Action: core.ActionSetArchived,
 		ID:     id,
 		Fields: map[string]string{"archived": "true"},
 	}); err != nil {

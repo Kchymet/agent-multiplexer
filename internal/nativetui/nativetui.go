@@ -355,12 +355,12 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAddRepoForm()
 		return m, nil
 	case "ctrl+r": // force a state refresh (the daemon also auto-polls)
-		return m, m.sendCmd(core.Action{Action: "refresh"})
+		return m, m.sendCmd(core.Action{Action: core.ActionRefresh})
 	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
 		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
 				message: "Move " + s.Title + " into a new work-scoped workgroup?",
-				action:  core.Action{Action: "move", ID: s.ID},
+				action:  core.Action{Action: core.ActionMove, ID: s.ID},
 			}
 			return m, nil
 		}
@@ -372,7 +372,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "archiving " + s.Title + "…"
 			}
-			return m, m.sendCmd(core.Action{Action: "archive", ID: s.ID})
+			return m, m.sendCmd(core.Action{Action: core.ActionArchive, ID: s.ID})
 		}
 		m.status = "select an agent to archive"
 	case "D": // permanently delete the selected agent/workgroup (worktrees + branch), with a confirm
@@ -383,7 +383,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.confirm = &confirmState{
 				message: "Permanently delete " + what + " " + s.Title + "?\nThis removes its worktrees and branch — it can't be undone.",
-				action:  core.Action{Action: "delete", ID: s.ID},
+				action:  core.Action{Action: core.ActionDelete, ID: s.ID},
 			}
 			return m, nil
 		}
@@ -397,7 +397,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e": // edit which repos an agent works on (fuzzy-select; adds/removes worktrees)
 		if s := m.selected(); s != nil && attachable(s) {
 			p := newRepoPicker("Repos · "+s.Title, m.sessions, agentRepos(s))
-			p.action, p.id = "agent-set-repos", s.ID
+			p.action, p.id = core.ActionAgentSetRepos, s.ID
 			m.openRepoPicker(p)
 			return m, nil
 		}

@@ -12,7 +12,7 @@ import (
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	switch a.Action {
-	case "", "refresh":
+	case "", core.ActionRefresh:
 		d.triggerPoll()
 		return ok()
 	case core.ActionStart:
@@ -22,13 +22,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		return ok()
 	default:
-		// Capture the agents to stop before the store record disappears (for a
-		// root delete, killEngineFor reads the children from the current snapshot).
-		switch a.Action {
-		case "delete", "kill", "archive":
-			d.killEngineFor(a.ID)
-		}
-		newID, err := wsops.ApplyResult(ctx, a)
+		// One descriptor-driven path: Dispatch stops the engine (via killEngineFor)
+		// for the verbs whose descriptor says so — including set-archived, which the
+		// old inline switch missed, so the CLI's archive left the process running
+		// while the TUI's stopped it. killEngineFor runs before the store mutation so
+		// a root delete still reads its children from the pre-deletion snapshot.
+		newID, err := wsops.Dispatch(ctx, a, d.killEngineFor)
 		if err != nil {
 			return fail("%v", err)
 		}

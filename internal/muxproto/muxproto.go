@@ -73,6 +73,7 @@ type ServerMsg struct {
 	Server   string         `json:"server,omitempty"`   // welcome: server identity
 	Sessions []core.Session `json:"sessions,omitempty"` // snapshot
 	OK       bool           `json:"ok,omitempty"`       // result
+	NewID    string         `json:"newId,omitempty"`    // result: id of a session the action created (so a client can switch to it)
 	Error    string         `json:"error,omitempty"`    // result / pane.exit
 	PaneID   string         `json:"paneId,omitempty"`   // pane.output / pane.exit
 	Data     []byte         `json:"data,omitempty"`     // pane.output bytes

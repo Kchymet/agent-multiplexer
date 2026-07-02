@@ -517,6 +517,21 @@ func Apply(ctx context.Context, a core.Action) error {
 	return err
 }
 
+// Dispatch is THE control-action path: it stops the target's running process(es)
+// via stopEngine when the verb's descriptor calls for it, then applies the store
+// mutation, returning any created session id. The daemon passes its engine-kill,
+// the mux server its pane-teardown, a backend-less driver passes nil — so all
+// three run every verb through one place and can't drift. (The archive vs
+// set-archived engine-stop split that motivated this lived in exactly that gap.)
+// stopEngine runs before ApplyResult so it can read the still-present snapshot —
+// e.g. a root delete cascades to children that ApplyResult is about to remove.
+func Dispatch(ctx context.Context, a core.Action, stopEngine func(id string)) (string, error) {
+	if stopEngine != nil && core.DescriptorFor(a.Action).StopsEngine {
+		stopEngine(a.ID)
+	}
+	return ApplyResult(ctx, a)
+}
+
 // ApplyResult is Apply plus the id of any session the action created: the new
 // agent for new-repo-agent/add-agent, or the workgroup root for new-workgroup.
 // It lets a caller switch to (and thereby actually start) the agent it just
@@ -524,34 +539,34 @@ func Apply(ctx context.Context, a core.Action) error {
 // actions that create nothing.
 func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	switch a.Action {
-	case "", "refresh", "subscribe":
+	case "", core.ActionRefresh, core.ActionSubscribe:
 		return "", nil
-	case "delete", "kill":
+	case core.ActionDelete, core.ActionKill:
 		return "", DeleteByID(ctx, a.ID)
-	case "move":
+	case core.ActionMove:
 		return "", MoveAgent(ctx, a.ID, a.Target)
-	case "archive":
+	case core.ActionArchive:
 		return "", ToggleArchived(ctx, a.ID)
-	case "set-archived":
+	case core.ActionSetArchived:
 		// Explicit archive/unarchive (the CLI's `archive`/`unarchive`), vs the
 		// TUI's one-key "archive" toggle above.
 		return "", SetArchived(ctx, a.ID, a.Fields["archived"] == "true")
-	case "rename":
+	case core.ActionRename:
 		return "", Rename(a.ID, a.Fields["name"])
-	case "rm-repo":
+	case core.ActionRmRepo:
 		return "", RemoveRepo(a.ID)
-	case "agent-set-repos":
+	case core.ActionAgentSetRepos:
 		// Re-scope an existing agent to exactly the given repos (fuzzy-picked),
 		// adding/removing worktrees to match. This is the "pull a repo into scope"
 		// action.
 		return "", SetAgentRepos(ctx, a.ID, store.SplitRepos(a.Fields["repos"]))
-	case "new-repo-agent":
+	case core.ActionNewRepoAgent:
 		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Agent:  agentOf(a.Fields),
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
 		return s.ID, err
-	case "add-agent":
+	case core.ActionAddAgent:
 		// Repos come straight from the fuzzy picker; zero is allowed (repo-less
 		// agent). A workgroup no longer carries repos of its own to fall back to.
 		s, err := AddAgent(ctx, a.ID, AgentSpec{
@@ -560,10 +575,10 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
 		return s.ID, err
-	case "add-repo":
+	case core.ActionAddRepo:
 		_, err := AddRepoSource(ctx, a.Fields["source"])
 		return "", err
-	case "new-workgroup":
+	case core.ActionNewWorkgroup:
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
 		repos := store.SplitRepos(a.Fields["repos"])
 		var def *AgentSpec
@@ -572,7 +587,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		}
 		// Return the workgroup root; the client resolves it to the first agent.
 		return CreateWorkspace(ctx, a.Fields["name"], def)
-	case "create-workspace":
+	case core.ActionCreateWorkspace:
 		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
 		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
 		// with an explicit mode/model/prompt. When the interactive flow configures

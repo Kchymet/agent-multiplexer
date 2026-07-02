@@ -52,7 +52,7 @@ func cmdDo(args []string) error {
 // cmdRefresh asks the daemon to re-poll its sources now, rather than waiting for
 // the next tick. Handy after an out-of-band change so `amux status` reflects it.
 func cmdRefresh() error {
-	if err := sendAction(core.Action{Action: "refresh"}); err != nil {
+	if err := sendAction(core.Action{Action: core.ActionRefresh}); err != nil {
 		return err
 	}
 	fmt.Println("refreshed")

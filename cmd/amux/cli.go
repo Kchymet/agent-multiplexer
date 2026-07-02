@@ -34,7 +34,7 @@ func cmdName(args []string) error {
 		return fmt.Errorf("not inside an amux agent ($AMUX_WORKGROUP unset)")
 	}
 	name := strings.Join(args, " ")
-	if err := sendAction(core.Action{Action: "rename", ID: id, Fields: map[string]string{"name": name}}); err != nil {
+	if err := sendAction(core.Action{Action: core.ActionRename, ID: id, Fields: map[string]string{"name": name}}); err != nil {
 		return err
 	}
 	fmt.Printf("session %s renamed to %q\n", id, name)
@@ -67,7 +67,7 @@ func cmdRepo(args []string) error {
 		// local path and clones it — the CLI just forwards the source string.
 		src := args[1]
 		fmt.Printf("tracking %s…\n", src)
-		if err := sendAction(core.Action{Action: "add-repo", Fields: map[string]string{"source": src}}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": src}}); err != nil {
 			return err
 		}
 		fmt.Printf("tracked %s\n", src)
@@ -89,7 +89,7 @@ func cmdRepo(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux repo rm <name>")
 		}
-		if err := sendAction(core.Action{Action: "rm-repo", ID: args[1]}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionRmRepo, ID: args[1]}); err != nil {
 			return err
 		}
 		fmt.Printf("removed %s\n", args[1])
@@ -115,7 +115,7 @@ func addReposInteractive(in *bufio.Reader) error {
 	var tracked int
 	for _, s := range sources {
 		fmt.Printf("tracking %s…\n", s)
-		if err := sendAction(core.Action{Action: "add-repo", Fields: map[string]string{"source": s}}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": s}}); err != nil {
 			fmt.Printf("  failed: %v\n", err)
 			continue
 		}
@@ -232,7 +232,7 @@ func cmdSession(args []string) error {
 		}
 		// Non-interactive: amux session add <root> <repo>... [--mode m] [--model M] [--prompt t]
 		repos, cfg := parseCreateFlags(args[2:])
-		id, err := sendActionID(core.Action{Action: "add-agent", ID: args[1], Fields: map[string]string{
+		id, err := sendActionID(core.Action{Action: core.ActionAddAgent, ID: args[1], Fields: map[string]string{
 			"repos": strings.Join(repos, ","), "agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
 		}})
 		if err != nil {
@@ -245,7 +245,7 @@ func cmdSession(args []string) error {
 		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
 		// Creates a workgroup plus one default agent scoped to the given repos.
 		repos, cfg := parseCreateFlags(args[1:])
-		rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: map[string]string{
+		rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: map[string]string{
 			"name": cfg.name, "repos": strings.Join(repos, ","), "agent": cfg.agent,
 			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
 		}})
@@ -262,7 +262,7 @@ func cmdSession(args []string) error {
 			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--mode m] [--model M]")
 		}
 		_, cfg := parseCreateFlags(args[2:])
-		id, err := sendActionID(core.Action{Action: "new-repo-agent", ID: args[1], Fields: map[string]string{
+		id, err := sendActionID(core.Action{Action: core.ActionNewRepoAgent, ID: args[1], Fields: map[string]string{
 			"agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
 		}})
 		if err != nil {
@@ -280,7 +280,7 @@ func cmdSession(args []string) error {
 		if len(args) > 2 && args[2] != "--new" {
 			target = args[2]
 		}
-		if err := sendAction(core.Action{Action: "move", ID: args[1], Target: target}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionMove, ID: args[1], Target: target}); err != nil {
 			return err
 		}
 		if target == "" {
@@ -296,7 +296,7 @@ func cmdSession(args []string) error {
 			return fmt.Errorf("usage: amux session repos <agent-id> <repo>...")
 		}
 		repos := args[2:]
-		if err := sendAction(core.Action{Action: "agent-set-repos", ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionAgentSetRepos, ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
 			return err
 		}
 		fmt.Printf("agent %s repos: %s\n", args[1], orNone(strings.Join(repos, ", ")))
@@ -305,7 +305,7 @@ func cmdSession(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux session rm <id>")
 		}
-		if err := sendAction(core.Action{Action: "delete", ID: args[1]}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionDelete, ID: args[1]}); err != nil {
 			return err
 		}
 		fmt.Printf("removed %s\n", args[1])
@@ -314,12 +314,12 @@ func cmdSession(args []string) error {
 		if len(args) < 3 {
 			return fmt.Errorf("usage: amux session rename <id> <name>")
 		}
-		return sendAction(core.Action{Action: "rename", ID: args[1], Fields: map[string]string{"name": strings.Join(args[2:], " ")}})
+		return sendAction(core.Action{Action: core.ActionRename, ID: args[1], Fields: map[string]string{"name": strings.Join(args[2:], " ")}})
 	case "archive", "done":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup archive <id>")
 		}
-		if err := sendAction(core.Action{Action: "set-archived", ID: args[1], Fields: map[string]string{"archived": "true"}}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionSetArchived, ID: args[1], Fields: map[string]string{"archived": "true"}}); err != nil {
 			return err
 		}
 		fmt.Printf("archived %s\n", args[1])
@@ -328,7 +328,7 @@ func cmdSession(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup unarchive <id>")
 		}
-		if err := sendAction(core.Action{Action: "set-archived", ID: args[1], Fields: map[string]string{"archived": "false"}}); err != nil {
+		if err := sendAction(core.Action{Action: core.ActionSetArchived, ID: args[1], Fields: map[string]string{"archived": "false"}}); err != nil {
 			return err
 		}
 		fmt.Printf("restored %s\n", args[1])
@@ -416,12 +416,12 @@ func createWorkspace(name string, agents []agentCfg) error {
 		fields["mode"] = "task"
 		fields["model"] = defaultModelFor(agent.DefaultKind())
 	}
-	rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: fields})
+	rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: fields})
 	if err != nil {
 		return err
 	}
 	for _, a := range agents {
-		if _, err := sendActionID(core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{
+		if _, err := sendActionID(core.Action{Action: core.ActionAddAgent, ID: rootID, Fields: map[string]string{
 			"repos": strings.Join(a.Repos, ","), "agent": a.Agent, "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
 		}}); err != nil {
 			return err
@@ -438,7 +438,7 @@ func sessionAdd(ctx context.Context, rootID string) error {
 	if !ok {
 		return nil
 	}
-	id, err := sendActionID(core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{
+	id, err := sendActionID(core.Action{Action: core.ActionAddAgent, ID: rootID, Fields: map[string]string{
 		"repos": strings.Join(a.Repos, ","), "agent": a.Agent, "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
 	}})
 	if err != nil {
