@@ -11,6 +11,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/gh"
+	"amux/internal/store"
 )
 
 // This file is the CLI surface for repos and workgroups. It is deliberately a
@@ -554,13 +555,13 @@ func pickRepos(ctx context.Context, in *bufio.Reader, prompt string) []string {
 
 func pickMode() string {
 	choice, err := fzfMenu("mode", []string{
-		"task  — short-running, tied to a temporary task",
-		"loop  — long-running, (nearly) autonomous loop",
+		"task         — autonomous; runs a specific job to completion, then self-reports done",
+		"interactive  — human-driven; you drive it turn by turn and close it yourself",
 	})
 	if err != nil || strings.HasPrefix(choice, "task") {
-		return "task"
+		return store.ModeTask
 	}
-	return "loop"
+	return store.ModeInteractive
 }
 
 func describeAgent(a agentCfg) string {

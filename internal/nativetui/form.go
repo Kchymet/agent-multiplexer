@@ -23,7 +23,7 @@ func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 		submit: "Create agent",
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
+			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 		},
@@ -43,7 +43,7 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos", picker: true},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
+			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 		},
@@ -73,7 +73,7 @@ func (m *model) openNewWorkgroupForm() {
 			{key: "name", label: "Name"},
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos (first agent)", picker: true},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
+			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 			{key: "linear", label: "Linear issue/URL"},
