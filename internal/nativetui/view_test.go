@@ -1,6 +1,7 @@
 package nativetui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -85,6 +86,38 @@ func TestEmptySectionHints(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("sidebar missing empty hint %q:\n%s", want, out)
 		}
+	}
+}
+
+// When the rail has more rows than fit, moving the cursor below the fold
+// scrolls the viewport so the selected row stays visible (and rows above scroll
+// off the top).
+func TestRailScrollsToSelection(t *testing.T) {
+	var sessions []core.Session
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("ag%02d", i)
+		title := fmt.Sprintf("agent-%02d", i)
+		sessions = append(sessions, core.Session{ID: id, Title: title, Section: core.SectionWorkgroups})
+	}
+	// A short window so the list overflows.
+	m := &model{sessions: sessions, h: 12}
+
+	// Cursor at the top: the first row shows, the last is off-screen.
+	m.cursor = 0
+	top := m.renderSidebar()
+	if !strings.Contains(top, "agent-00") {
+		t.Fatalf("top view should show the first row:\n%s", top)
+	}
+
+	// Cursor at the bottom: the last row must now be visible, and the first must
+	// have scrolled away.
+	m.cursor = len(sessions) - 1
+	bot := m.renderSidebar()
+	if !strings.Contains(bot, "agent-39") {
+		t.Fatalf("selecting the last row should scroll it into view:\n%s", bot)
+	}
+	if strings.Contains(bot, "agent-00") {
+		t.Fatalf("first row should have scrolled off the top:\n%s", bot)
 	}
 }
 
