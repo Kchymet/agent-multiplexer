@@ -303,6 +303,15 @@ func writeHooks(settingsPath, amuxPath string) error {
 		hooks[event] = groups
 	}
 
+	// Default Claude to the fullscreen TUI renderer. It draws on the alternate
+	// screen and handles mouse-wheel scrolling; the default inline renderer does
+	// not, and inside an amux mirror pane (which forwards raw wheel events to a
+	// mouse-tracking child) that means the agent tab can't be scrolled at all.
+	// Set only when unset so a deliberate `/tui default` choice in this file wins.
+	if _, ok := root["tui"]; !ok {
+		root["tui"] = "fullscreen"
+	}
+
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return err
