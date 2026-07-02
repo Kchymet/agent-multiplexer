@@ -17,6 +17,7 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
+	"amux/internal/skills"
 	"amux/internal/store"
 )
 
@@ -120,7 +121,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		}
 		repos = append(repos, repoName)
 	}
-	writeAgentGuide(dir, branch)
+	writeAgentGuide(dir, branch, spec.Agent)
 	a := store.Session{
 		ID: agentID, RootID: rootID,
 		Agent: defaultStr(spec.Agent, "claude"), Model: spec.Model,
@@ -134,10 +135,13 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	return a, nil
 }
 
-// writeAgentGuide drops a CLAUDE.md into the agent's directory (its cwd) telling
-// the agent to stay sandboxed to this dir and to keep its branch current with the
-// remote. The agent dir is not a git repo, so this never dirties a worktree.
-func writeAgentGuide(dir, branch string) {
+// writeAgentGuide drops the sandbox guide into the agent's directory (its cwd),
+// telling the agent to stay sandboxed to this dir and to keep its branch current
+// with the remote. It's written to the file the agent's provider actually reads —
+// CLAUDE.md for Claude Code, AGENTS.md for others (see agent.Harness.GuideFile) —
+// so each CLI loads it natively. The agent dir is not a git repo, so this never
+// dirties a worktree.
+func writeAgentGuide(dir, branch, agentKind string) {
 	guide := fmt.Sprintf(`# amux agent — sandboxed workspace
 
 This directory is your sandbox. It contains a git **worktree per repository** you
@@ -172,8 +176,14 @@ repo subdirectory:
 
 Resolve conflicts on your branch. This keeps you building on the latest remote,
 not a stale snapshot.
+
+## Shipping your work
+When a change is ready for review, use the `+"`create-pr`"+` skill — it encodes this
+project's end-to-end PR flow (commit and push conventions, opening the PR, then
+babysitting it: watching CI, weighing review feedback on its merits, and
+resolving conflicts) so you take a change all the way to merged, not just opened.
 `, branch)
-	_ = os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(guide), 0o644)
+	_ = os.WriteFile(agent.HarnessFor(agentKind).GuideFile(dir), []byte(guide), 0o644)
 }
 
 // AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
@@ -387,6 +397,18 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 			if git.IsGitRepo(context.Background(), dir) {
 				_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
 			}
+		}
+	}
+	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
+	// the running binary. Where it goes is the provider's call — Claude reads
+	// .claude/skills, others .agents/skills — so ask the harness. Best-effort: a
+	// failure just means the agent lacks the skills, never that it can't launch.
+	// The launch dir is normally the workspace root (not a git repo); if resuming
+	// into a worktree, git-exclude the tree so it never dirties the repo.
+	skillsDir := agent.HarnessFor(s.Agent).SkillsDir(dir)
+	if err := skills.Install(skillsDir); err == nil && git.IsGitRepo(context.Background(), dir) {
+		if rel, err := filepath.Rel(dir, skillsDir); err == nil {
+			_ = git.Exclude(context.Background(), dir, rel+"/")
 		}
 	}
 	argv, err = agent.Argv(s.Agent, s.Model, extra...)

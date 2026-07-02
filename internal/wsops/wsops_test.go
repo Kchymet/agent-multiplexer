@@ -297,3 +297,30 @@ func TestSetAgentReposSkipsUntracked(t *testing.T) {
 		t.Error("SetAgentRepos on a root should error")
 	}
 }
+
+// TestWriteAgentGuide checks the guide lands in the file each provider actually
+// reads: CLAUDE.md for Claude (incl. the "" default), AGENTS.md for others.
+func TestWriteAgentGuide(t *testing.T) {
+	for _, tc := range []struct {
+		kind, file, other string
+	}{
+		{"", "CLAUDE.md", "AGENTS.md"},
+		{"claude", "CLAUDE.md", "AGENTS.md"},
+		{"codex", "AGENTS.md", "CLAUDE.md"},
+	} {
+		dir := t.TempDir()
+		writeAgentGuide(dir, "amux/root-agent", tc.kind)
+
+		b, err := os.ReadFile(filepath.Join(dir, tc.file))
+		if err != nil {
+			t.Errorf("kind %q: expected %s: %v", tc.kind, tc.file, err)
+			continue
+		}
+		if !strings.Contains(string(b), "amux/root-agent") {
+			t.Errorf("kind %q: %s missing the branch name", tc.kind, tc.file)
+		}
+		if _, err := os.Stat(filepath.Join(dir, tc.other)); err == nil {
+			t.Errorf("kind %q: unexpectedly wrote %s too", tc.kind, tc.other)
+		}
+	}
+}
