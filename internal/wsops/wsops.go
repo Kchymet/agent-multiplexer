@@ -183,14 +183,21 @@ machine-readable records. This is read-only context — never modify these files
 and keep every edit inside your worktree.
 
 ## Keep current with the remote
-Each repo here is a worktree of a shared clone of its remote. Before starting,
+Each repo here is a worktree of a shared clone of its remote, and other agents
+may be working the same repo in parallel on their own branches. Before starting,
 and regularly as you work, refresh your branch from the remote — run inside each
 repo subdirectory:
 
-    git fetch origin && git rebase origin/HEAD
+    git fetch origin && git merge --no-edit origin/HEAD
 
-Resolve conflicts on your branch. This keeps you building on the latest remote,
-not a stale snapshot.
+**Merge, don't rebase.** Once you've pushed your branch for a PR, rebasing
+rewrites commits the remote already has, so your next push is rejected as
+non-fast-forward — the only way through is a force-push, which needs a human to
+unblock. Merging only ever adds commits, so every push stays a fast-forward: you
+can update a PR without ever force-pushing or asking for help. The project
+squash-merges PRs, so the extra merge commits never reach the default branch.
+Resolve any conflicts on your branch. This keeps you building on the latest
+remote, not a stale snapshot.
 
 ## Shipping your work
 When a change is ready for review, use the `+"`create-pr`"+` skill — it encodes this
