@@ -179,7 +179,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		out = append(out, core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
-			State: core.StateIdle, Status: "archived" + subSuffix(s),
+			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
 		})
 	}
