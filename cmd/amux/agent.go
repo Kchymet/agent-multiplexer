@@ -43,6 +43,11 @@ func cmdAgent(args []string) error {
 		return cmdAgentSessions(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
+	case "done":
+		// Terminal self-report: the agent declares its task complete and archives
+		// its own session off the active rail. The self-scoped analog of the
+		// management verb `amux ws done <id>`, resolving the caller's own identity.
+		return cmdAgentDone(args[1:])
 	case "", "help", "-h", "--help":
 		agentUsage()
 		return nil
@@ -69,6 +74,9 @@ usage: amux agent <command>
                      JSON on stdin); amux wires this into Claude's settings.json
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
+  done               report the task complete: archive this agent's own session
+                     off the active rail (reversible — amux ws unarchive <id>).
+                     identity: $AMUX_WORKGROUP, else --id <id>
   sessions [--json]  list every agent session on this machine — Claude Code and
                      Codex, tagged by harness — most recent first, so you can
                      reason about work that spans conversations. Read a transcript
@@ -126,6 +134,60 @@ func cmdAgentStatus(args []string) error {
 	}
 	_ = core.WriteHookState(sessionID, state, cwd)
 	return nil
+}
+
+// cmdAgentDone is the terminal self-report: an agent declares its task finished
+// and archives its own session so it drops off the active rail. It is the
+// self-scoped form of the management verb `amux ws done <id>` — instead of taking
+// an id, it resolves the caller's own store id (the one the harness sets in the
+// agent's environment as $AMUX_WORKGROUP, see wsops.AgentCommand), so a one-off
+// agent that has integrated its artifact can mark itself done without knowing its
+// own id.
+//
+// Like every `amux agent` verb, reporting must never disrupt the agent: it
+// swallows a missing identity and any harness error and always exits 0. Archiving
+// is reversible (`amux ws unarchive <id>`); it hides the row and does not delete
+// the worktree or branch.
+func cmdAgentDone(args []string) error {
+	id := selfAgentID(args, os.Getenv)
+	if id == "" {
+		// Not an amux-launched agent (or the env was stripped): nothing to archive.
+		// A no-op, not an error — the agent shouldn't fail just because it wasn't
+		// started by amux.
+		fmt.Fprintln(os.Stderr, "amux agent done: not inside an amux-managed agent ($AMUX_WORKGROUP unset); nothing to mark done")
+		return nil
+	}
+	if err := sendAction(core.Action{
+		Action: "set-archived",
+		ID:     id,
+		Fields: map[string]string{"archived": "true"},
+	}); err != nil {
+		// The harness was unreachable. Report it, but don't fail the agent — the
+		// self-report is best-effort by contract.
+		fmt.Fprintf(os.Stderr, "amux agent done: could not reach the harness to archive %s: %v\n", id, err)
+		return nil
+	}
+	fmt.Printf("marked done: archived %s (reversible: amux ws unarchive %s)\n", id, id)
+	return nil
+}
+
+// selfAgentID resolves the store id of the agent issuing a self-scoped control
+// report (currently `done`). Precedence: an explicit --id flag, then the
+// $AMUX_WORKGROUP the harness sets on every launched agent, then its legacy
+// $AMUX_WORKSPACE alias. Empty when the caller isn't an amux-launched agent.
+//
+// This is the *store* session id (used by the archive/rename actions), distinct
+// from the Claude session id that the activity-report verbs (status/hook) key on.
+func selfAgentID(args []string, getenv func(string) string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--id" && i+1 < len(args):
+			return strings.TrimSpace(args[i+1])
+		case strings.HasPrefix(args[i], "--id="):
+			return strings.TrimSpace(strings.TrimPrefix(args[i], "--id="))
+		}
+	}
+	return firstNonEmpty(getenv("AMUX_WORKGROUP"), getenv("AMUX_WORKSPACE"))
 }
 
 // cmdAgentCapture snapshots the agent's Claude transcript into amux's own
