@@ -228,6 +228,34 @@ Refresh `updated` without changing any channel.
   Optional: liveness (§7) is the primary anti-staleness signal; heartbeats matter
   for runtimes the engine cannot observe directly.
 
+### 5.9 `report_done()`
+
+Declare the agent's task **complete**. This is a *terminal* lifecycle report, not
+an activity state (§8): a one-off agent that has finished its task and integrated
+its artifact calls this to retire itself from the active rail.
+
+- **CLI:** `amux agent done`
+- **Effect:** archives the agent's own session — it drops off the active rail into
+  the ARCHIVED section (§SectionArchived). Reversible: it hides the row, it does
+  **not** delete the worktree or branch (`amux ws unarchive <id>` restores it).
+- **Identity:** unlike the activity verbs, `done` acts on the *store* session id
+  (the id the archive/rename control actions take), which the harness sets on every
+  launched agent as `$AMUX_WORKGROUP`. Precedence: `--id <id>`, then
+  `$AMUX_WORKGROUP`, then its legacy `$AMUX_WORKSPACE` alias. When none resolves
+  the call is a silent no-op (the caller isn't an amux-launched agent).
+- **Bridges the two planes (like §5.2 `set_label`).** `done` is reported through
+  the control plane (the `set-archived` action, §9) because archival is durable
+  store state the harness owns, not a volatile activity channel. It remains
+  best-effort and MUST NOT disrupt the agent: a missing identity or an unreachable
+  harness is reported and swallowed, and the call still exits `0`.
+- **Idempotent:** marking an already-done session done again is a no-op.
+
+> Distinct from `status idle` (§5.1/§8): `idle` means "no live turn right now" and
+> flips back to `running` on the next message; `done` means "this session's job is
+> finished" and takes it off the active rail until a human restores it. Use `done`
+> only for genuinely task-driven, one-off sessions — never for a long-lived loop
+> session, which is meant to keep running.
+
 ---
 
 ## 6. Record schema (wire format)
@@ -330,6 +358,7 @@ Lifecycle → state mapping that runtimes SHOULD emit (matches the Claude bindin
 | blocked on the user (permission / idle prompt) | `status waiting` (or `attention <reason>`) |
 | turn finished | `status ready` |
 | process exiting | `status idle` |
+| task complete (one-off agent) | `done` (§5.9) — terminal, archives the session |
 
 ---
 
@@ -422,6 +451,8 @@ amux agent attention "permission: write /etc/hosts"      # ⇒ state waiting
 amux agent attention --clear
 amux agent status running
 amux agent status ready
+# the triage is finished and its fix is up for review — retire the session:
+amux agent done                                          # ⇒ archived off the rail
 ```
 
 Resulting record after the `attention` line:

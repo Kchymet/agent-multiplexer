@@ -170,16 +170,19 @@ active rail. This is reversible — it archives, it does not delete.
   session has more work queued, or the PR is one of several deliverables, don't
   archive; just report the PR.
 
-`amux` is on `PATH`, and your own session id is in the environment (`$AMUX_WORKSPACE`,
-alias `$AMUX_WORKGROUP`). Mark done with:
+`amux` is on `PATH`. Mark yourself done with the self-reporting verb — it resolves
+your own session from the environment, so you don't pass an id:
 
 ```sh
 if [ "$AMUX_MODE" = "task" ]; then
-  amux ws archive "$AMUX_WORKSPACE"   # reversible; alias: `amux ws done`
+  amux agent done   # archives your own session; reversible
 fi
 ```
 
-(`ws` also accepts `workgroup`/`session`. To undo: `amux ws unarchive <id>`.)
+`amux agent done` is best-effort and never fails your session: if it can't reach
+the harness it just prints a warning. It's the self-scoped form of the management
+verb `amux ws archive <id>` (alias `amux ws done <id>`), which you'd use to archive
+*another* agent by id. To undo either: `amux ws unarchive <id>`.
 
 Then report the outcome to the user: the PR URL and that the session was marked
 done. If you did **not** archive (loop session, or more work remains), say so and
