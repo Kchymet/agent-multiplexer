@@ -34,6 +34,18 @@ func Argv(kind, model string, extra ...string) ([]string, error) {
 		if model != "" {
 			args = append(args, "--model", model)
 		}
+	case "codex":
+		bin = envOr("AMUX_CODEX_BIN", "codex")
+		// Default to autonomous operation, mirroring claude's permission-mode
+		// convention: set a sandbox unless the user opts out with
+		// AMUX_CODEX_SANDBOX=none (or ""). Override the level with
+		// AMUX_CODEX_SANDBOX=read-only|workspace-write|danger-full-access.
+		if sb := envOr("AMUX_CODEX_SANDBOX", "workspace-write"); sb != "" && sb != "none" {
+			args = append(args, "--sandbox", sb)
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
 	case "hermes":
 		bin = envOr("AMUX_HERMES_BIN", "hermes")
 		args = []string{"chat"}
