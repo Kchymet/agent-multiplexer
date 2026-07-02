@@ -9,7 +9,10 @@ import (
 )
 
 // cmdServe runs the multiplexer server (the backend). Extra args are additional
-// listen specs, e.g. `amux serve tcp:0.0.0.0:7077` to allow remote UIs.
+// listen specs, e.g. `amux serve tcp:0.0.0.0:7077` for a trusted-network remote
+// UI, or `amux serve tls:0.0.0.0:7443` for TLS (cert/key from $AMUX_TLS_CERT /
+// $AMUX_TLS_KEY; set $AMUX_MUX_TOKEN to also require a bearer token). See
+// docs/client-server.md.
 func cmdServe(args []string) error { return mux.Run(args...) }
 
 // cmdHarness runs the agent harness over stdio — spawned by the server (or run

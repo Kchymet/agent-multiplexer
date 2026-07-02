@@ -41,13 +41,31 @@ per line; pane payload bytes are base64 in the `data` field (terminal I/O for a
 single viewer is low-throughput; a binary framing is a later optimization). Local
 links use a unix socket / stdio / `net.Pipe`; remote links use TCP. Every
 connection opens with a `hello`/`welcome` carrying a protocol `version` so peers
-can refuse mismatches. (Remote auth/TLS is a documented follow-up; bind v1 TCP to
-trusted networks.)
+can refuse mismatches — version negotiation fails loudly (`unsupported-version`).
+
+### Remote transport security
+
+A remote TCP link can run over **TLS** and require a **bearer token**, wrapping
+the raw `net.Conn` under the wire framing (message handling is unchanged):
+
+- **TLS** — `amux serve tls:HOST:PORT` presents the cert/key from `$AMUX_TLS_CERT`
+  / `$AMUX_TLS_KEY` (optional `$AMUX_TLS_CLIENT_CA` enables mutual TLS). A client
+  dials `tls:HOST:PORT` and verifies the server against the system roots plus an
+  optional private CA (`$AMUX_TLS_CA`), with an optional server-name override
+  (`$AMUX_TLS_SERVERNAME`). The shared helpers live in `internal/wiretls`.
+- **Token** — when `$AMUX_MUX_TOKEN` is set the server requires a matching token
+  in `hello` (constant-time compared; empty disables auth, for the trusted local
+  unix socket). The client sends the same env value. A mismatch is rejected with
+  a terminal `welcome` (`bad-token`) and the connection closes.
+
+The plaintext `tcp:` spec still exists for trusted networks; the TLS seam is the
+same one a provider uses to dial a remote orchestrator (see `remote-provider.md`).
 
 ## Protocol 1 — UI ⇄ Multiplexer Server (`internal/muxproto`)
 
 Client → Server (`ClientMsg.type`):
-- `hello` `{version}` — open; server replies `welcome`.
+- `hello` `{version,token}` — open; server replies `welcome`. `token` is blank
+  when auth is off.
 - `subscribe` — start receiving `snapshot` frames (the rail state).
 - `action` `{action,id,target,fields}` — lifecycle (open/delete/move/archive/
   new-repo-agent/new-workgroup/…); mirrors today's `core.Action`.
@@ -58,11 +76,22 @@ Client → Server (`ClientMsg.type`):
 - `pane.close` `{paneId}`.
 
 Server → Client (`ServerMsg.type`):
-- `welcome` `{version,server}` — server identity/capabilities.
+- `welcome` `{ok,version,server,error?}` — server identity/capabilities, or a
+  terminal rejection (`error` = `bad-token` | `unsupported-version`) before close.
 - `snapshot` `{sessions}` — the `[]core.Session` rail state (push on change).
 - `result` `{ok,error}` — action ack.
 - `pane.output` `{paneId,data}` — process output (base64).
+- `pane.reset` `{paneId}` — the server fell too far behind to stream losslessly
+  and is about to replay a fresh repaint; the client must clear its emulator for
+  the pane before applying subsequent output (else stale cells ghost through).
 - `pane.exit` `{paneId,error}` — the pane's process ended.
+
+Pane output is streamed **losslessly**: a terminal byte stream is stateful, so
+the server coalesces per-pane output rather than dropping bytes from the middle
+(which would corrupt the client's emulator). A client that falls catastrophically
+far behind (past a 4 MiB per-pane cap) is trimmed to the most recent 256 KiB tail
+preceded by `pane.reset`, bounding memory without silent corruption. Discrete
+frames (snapshots, results) remain droppable — each is a full state.
 
 ## Protocol 2 — Multiplexer Server ⇄ Agent Harness (`internal/harnessproto`)
 

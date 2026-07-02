@@ -45,3 +45,26 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("output mismatch: %+v", s2)
 	}
 }
+
+// TestTokenOK covers the server-side bearer check: an empty configured token
+// disables auth, otherwise the presented token must match exactly (the compare
+// is constant-time; here we only assert correctness).
+func TestTokenOK(t *testing.T) {
+	cases := []struct {
+		configured, presented string
+		want                  bool
+	}{
+		{"", "", true},
+		{"", "whatever", true},
+		{"tok", "tok", true},
+		{"tok", "nope", false},
+		{"tok", "", false},
+		{"tok", "to", false},
+		{"tok", "tokk", false},
+	}
+	for _, c := range cases {
+		if got := TokenOK(c.configured, c.presented); got != c.want {
+			t.Errorf("TokenOK(%q,%q)=%v want %v", c.configured, c.presented, got, c.want)
+		}
+	}
+}
