@@ -77,10 +77,6 @@ type Terminal struct {
 	fwake chan struct{}
 	done  chan struct{}
 	once  sync.Once
-
-	// scrub sanitizes string-sequence data before emu.Write (see scrubber). Its
-	// state spans chunk boundaries; pump and feedLoop both mutate it under t.mu.
-	scrub scrubber
 }
 
 // feedCap bounds the coalesced backlog before the client, hopelessly behind,
@@ -174,7 +170,6 @@ func (t *Terminal) feedLoop() {
 					break
 				}
 				t.mu.Lock()
-				t.scrub.scrub(b)
 				_, _ = t.emu.Write(b)
 				t.mu.Unlock()
 				t.notify()
@@ -221,7 +216,6 @@ func (t *Terminal) pump() {
 		n, err := t.ptmx.Read(buf)
 		if n > 0 {
 			t.mu.Lock()
-			t.scrub.scrub(buf[:n])
 			_, _ = t.emu.Write(buf[:n])
 			t.mu.Unlock()
 			t.notify()
