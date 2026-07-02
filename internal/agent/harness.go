@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"os"
 	"path/filepath"
+	"time"
 
 	"amux/internal/claudecfg"
+	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/engine"
 )
@@ -59,6 +62,8 @@ func HarnessFor(kind string) Harness {
 	switch kind {
 	case "", "claude":
 		return claudeHarness{}
+	case "codex":
+		return codexHarness{}
 	default:
 		return noopHarness{kind: kind}
 	}
@@ -105,6 +110,72 @@ func (claudeHarness) RestoreTranscript(cwd, sessionID string) (bool, error) {
 // from .claude/skills and its guide from CLAUDE.md (both under the launch dir).
 func (claudeHarness) SkillsDir(root string) string { return filepath.Join(root, ".claude", "skills") }
 func (claudeHarness) GuideFile(root string) string { return filepath.Join(root, "CLAUDE.md") }
+
+// codexHarness implements Harness for OpenAI's Codex CLI, mapping its on-disk
+// rollout convention (codexcfg + the core capture store) onto the abstract
+// primitives. Codex has no hook mechanism to report turn state the way Claude
+// does, so Activity falls back to rollout-file freshness — see its comment.
+type codexHarness struct{}
+
+func (codexHarness) Kind() string { return "codex" }
+
+// codexBusyWindow is how recently a rollout must have been written for Activity
+// to treat the session as mid-turn. It's a heuristic (see Activity), tuned to
+// err toward "busy" only briefly after the last write so a graceful stop waits
+// out an active turn without being blocked forever by a stale file.
+const codexBusyWindow = 45 * time.Second
+
+// Activity reports Codex's turn state. Codex exposes no hook signal, so this is
+// two-tier: first honor an explicit state if something recorded one in the same
+// store Claude's hooks use (a config.toml notify shim may write states later);
+// otherwise fall back to the rollout file's mtime — written within
+// codexBusyWindow reads as Busy (likely mid-turn), an older rollout as Safe
+// (idle), and no rollout at all as Unknown (no signal, never blocks a shutdown).
+func (codexHarness) Activity(sessionID string) engine.Activity {
+	if rec, ok := core.HookState(sessionID); ok {
+		switch rec.State {
+		case core.StateRunning, core.StateWaiting:
+			return engine.ActivityBusy
+		case core.StateReady, core.StateIdle:
+			return engine.ActivitySafe
+		}
+	}
+	path, ok := codexcfg.RolloutPath(sessionID)
+	if !ok {
+		return engine.ActivityUnknown
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return engine.ActivityUnknown
+	}
+	if time.Since(fi.ModTime()) < codexBusyWindow {
+		return engine.ActivityBusy
+	}
+	return engine.ActivitySafe
+}
+
+// RestoreTranscript gap-fills Codex's rollout for sessionID from amux's captured
+// backup. When a rollout already exists it restores into that path (the one
+// `codex resume` reads); when none does, it reconstructs a plausible rollout
+// path under today's sessions dir (filename embedding the uuid) so a subsequent
+// `codex resume <id>` can still discover the gap-filled transcript. Best-effort:
+// RestoreCapturedTranscript never clobbers a fresher rollout. cwd is unused —
+// Codex keys rollouts by uuid, not by munged cwd — but kept for the interface.
+func (codexHarness) RestoreTranscript(cwd, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	dst, ok := codexcfg.RolloutPath(sessionID)
+	if !ok {
+		dst = codexcfg.NewRolloutPath(sessionID)
+	}
+	return core.RestoreCapturedTranscript(sessionID, dst)
+}
+
+// SkillsDir / GuideFile: Codex reads the vendor-neutral Agent Skills layout —
+// project skills from .agents/skills and its guide from AGENTS.md (under root).
+func (codexHarness) SkillsDir(root string) string { return filepath.Join(root, ".agents", "skills") }
+func (codexHarness) GuideFile(root string) string { return filepath.Join(root, "AGENTS.md") }
 
 // noopHarness is the Harness for a kind with no durability primitives yet: it
 // reports no activity signal (always safe to stop) and never restores. It keeps
