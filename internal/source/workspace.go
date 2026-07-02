@@ -188,12 +188,20 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	return out, nil
 }
 
-// recentArchived returns the most recently archived sessions (by Created, newest
-// first), capped at maxArchivedRows. Older archived sessions are dropped from the
-// rail but remain in the store. It sorts a copy so the caller's slice is untouched.
+// recentArchived returns the most recently archived sessions (by ArchivedAt,
+// newest first), capped at maxArchivedRows. Older archived sessions are dropped
+// from the rail but remain in the store. It sorts a copy so the caller's slice is
+// untouched. Sessions archived before ArchivedAt was tracked have ArchivedAt 0 and
+// fall back to Created order, so they sort below any freshly archived ones.
 func recentArchived(archived []store.Session) []store.Session {
 	sorted := append([]store.Session(nil), archived...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Created > sorted[j].Created })
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ai, aj := sorted[i].ArchivedAt, sorted[j].ArchivedAt
+		if ai != aj {
+			return ai > aj
+		}
+		return sorted[i].Created > sorted[j].Created
+	})
 	if len(sorted) > maxArchivedRows {
 		sorted = sorted[:maxArchivedRows]
 	}

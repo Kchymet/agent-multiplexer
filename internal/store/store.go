@@ -42,6 +42,10 @@ type Session struct {
 	Created  int64
 	Scope    string // roots only: work (cross-repo) | repo (single-repo, single-member)
 	Archived bool   // marked done/archived: hidden from the active rail (reversible)
+	// ArchivedAt is the store.Now() timestamp at which Archived last became true,
+	// or 0 when not archived. Distinct from Created so the rail can order the
+	// ARCHIVED section by when agents were archived, not when they were made.
+	ArchivedAt int64
 }
 
 // IsRoot reports whether s is a root container.
@@ -103,9 +107,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   dir       TEXT NOT NULL DEFAULT '',
   claude_id TEXT NOT NULL DEFAULT '',
   prompt    TEXT NOT NULL DEFAULT '',
-  created   INTEGER NOT NULL DEFAULT 0,
-  scope     TEXT NOT NULL DEFAULT 'work',
-  archived  INTEGER NOT NULL DEFAULT 0
+  created     INTEGER NOT NULL DEFAULT 0,
+  scope       TEXT NOT NULL DEFAULT 'work',
+  archived    INTEGER NOT NULL DEFAULT 0,
+  archived_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
 `); err != nil {
@@ -116,7 +121,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
 	if err := d.addColumn("sessions", "scope", "TEXT NOT NULL DEFAULT 'work'"); err != nil {
 		return err
 	}
-	return d.addColumn("sessions", "archived", "INTEGER NOT NULL DEFAULT 0")
+	if err := d.addColumn("sessions", "archived", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0")
 }
 
 // addColumn adds col to table if it isn't already present.
@@ -188,15 +196,15 @@ func (d *DB) DeleteRepo(name string) error {
 
 func (d *DB) PutSession(s Session) error {
 	_, err := d.sql.Exec(
-		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   root_id=excluded.root_id, name=excluded.name, agent=excluded.agent,
 		   model=excluded.model, mode=excluded.mode, repo=excluded.repo,
 		   branch=excluded.branch, dir=excluded.dir, claude_id=excluded.claude_id,
 		   prompt=excluded.prompt, created=excluded.created, scope=excluded.scope,
-		   archived=excluded.archived`,
-		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope, b2i(s.Archived))
+		   archived=excluded.archived, archived_at=excluded.archived_at`,
+		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope, b2i(s.Archived), s.ArchivedAt)
 	return err
 }
 
@@ -207,7 +215,7 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 		var s Session
 		var archived int64
 		if err := rows.Scan(&s.ID, &s.RootID, &s.Name, &s.Agent, &s.Model, &s.Mode,
-			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope, &archived); err != nil {
+			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope, &archived, &s.ArchivedAt); err != nil {
 			return nil, err
 		}
 		s.Archived = archived != 0
@@ -216,14 +224,14 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 	return out, rows.Err()
 }
 
-const sessionCols = `id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived`
+const sessionCols = `id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at`
 
 func (d *DB) GetSession(id string) (Session, bool, error) {
 	var s Session
 	var archived int64
 	err := d.sql.QueryRow(`SELECT `+sessionCols+` FROM sessions WHERE id=?`, id).
 		Scan(&s.ID, &s.RootID, &s.Name, &s.Agent, &s.Model, &s.Mode,
-			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope, &archived)
+			&s.Repo, &s.Branch, &s.Dir, &s.ClaudeID, &s.Prompt, &s.Created, &s.Scope, &archived, &s.ArchivedAt)
 	if err == sql.ErrNoRows {
 		return Session{}, false, nil
 	}
