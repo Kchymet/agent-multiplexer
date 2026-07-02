@@ -26,17 +26,26 @@ const (
 
 // Resolve returns the launch spec (working dir, extra env KEY=VALUE, argv) for a
 // tab of the agent: 0 the agent (Claude), 1 an editor, 2 a shell. Every pane is
-// scoped to the agent's worktree (see scope) so an agent can't read outside it.
+// scoped to its working dir (see scope) so it can't read outside it.
+//
+// The Claude agent pane launches in the workspace root (where amux keeps the
+// agent's .claude config and CLAUDE.md), the dir AgentCommand returns. The editor
+// and terminal instead drop into the per-repo worktree subdir (AgentWorkdir), so
+// the human lands directly in the repo.
 func Resolve(agentID string, tab int) (dir string, env, argv []string, err error) {
-	dir, env, argv, err = agentCommand(agentID)
+	s, err := sessionFor(agentID)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	dir, env, argv, err = wsops.AgentCommand(s)
 	if err != nil {
 		return "", nil, nil, err
 	}
 	switch tab {
 	case TabEditor:
-		argv = []string{editorBin()}
+		dir, argv = wsops.AgentWorkdir(s), []string{editorBin()}
 	case TabTerminal:
-		argv = []string{shellBin()}
+		dir, argv = wsops.AgentWorkdir(s), []string{shellBin()}
 	}
 	return dir, env, scope(dir, tab, argv, agentRepoSources(agentID)), nil
 }
@@ -220,27 +229,29 @@ func homeSubtree(home, p string) string {
 	return filepath.Join(home, parts[0])
 }
 
-// agentCommand resolves the agent process spec by id (handling the console).
-func agentCommand(id string) (dir string, env, argv []string, err error) {
+// sessionFor resolves the session for an agent id, handling the built-in console
+// (synthetic, not in the store). Every pane of an agent — the Claude process, the
+// editor, the shell — derives its launch dir and argv from this one session.
+func sessionFor(id string) (store.Session, error) {
 	if id == console.ID {
-		if err = console.Ensure(); err != nil {
-			return "", nil, nil, err
+		if err := console.Ensure(); err != nil {
+			return store.Session{}, err
 		}
-		return wsops.AgentCommand(console.Session())
+		return console.Session(), nil
 	}
 	db, err := store.Open()
 	if err != nil {
-		return "", nil, nil, err
+		return store.Session{}, err
 	}
 	defer db.Close()
 	s, ok, err := db.GetSession(id)
 	if err != nil {
-		return "", nil, nil, err
+		return store.Session{}, err
 	}
 	if !ok {
-		return "", nil, nil, fmt.Errorf("no such agent %q", id)
+		return store.Session{}, fmt.Errorf("no such agent %q", id)
 	}
-	return wsops.AgentCommand(s)
+	return s, nil
 }
 
 // EditorBin is the configured editor, defaulting to nvim.
