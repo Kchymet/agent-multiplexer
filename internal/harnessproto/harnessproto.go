@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"io"
 
+	"amux/internal/core"
 	"amux/internal/wire"
 )
 
@@ -32,6 +33,12 @@ const (
 	MKill       = "kill"
 	MRegistered = "registered" // v2: accept/reject a register, negotiate version, resolve resume
 	MPong       = "pong"       // v2: heartbeat reply
+
+	// v2 "sessions" feature (opt-in, see docs/remote-provider-sessions.md):
+	// orchestrator -> provider. Never sent unless the provider advertised the
+	// "sessions" feature in register.
+	MSessionsSubscribe = "sessions-subscribe" // begin receiving the provider's session inventory
+	MSessionAction     = "session-action"     // a session lifecycle verb to execute
 )
 
 // Harness -> server message types. In v2 the "harness" role is the provider and
@@ -43,7 +50,32 @@ const (
 	HRegister = "register" // v2: first frame — offer versions, token, caps, resumable panes
 	HReset    = "reset"    // v2: replay buffer overflowed; frames before Seq are gone
 	HPing     = "ping"     // v2: heartbeat
+
+	// v2 "sessions" feature: provider -> orchestrator.
+	HSessions      = "sessions"       // full session-inventory snapshot (replaces the previous one)
+	HSessionResult = "session-result" // result of a session-action
 )
+
+// SessionsFeature is the feature string a provider advertises in
+// register.capabilities.features to opt into publishing its session inventory
+// and accepting session lifecycle verbs (docs/remote-provider-sessions.md §1).
+const SessionsFeature = "sessions"
+
+// Session lifecycle verbs the "sessions" feature accepts (spec §3). Anything
+// else — including any pane/terminal verb — is rejected with
+// session-result{ok:false,error:"unsupported"}.
+const (
+	VerbNewWorkgroup = "new-workgroup"
+	VerbAddAgent     = "add-agent"
+	VerbRename       = "rename"
+	VerbArchive      = "archive"
+	VerbUnarchive    = "unarchive"
+	VerbStart        = "start"
+)
+
+// ErrUnsupported is the session-result error for a verb the provider does not
+// accept (spec §3).
+const ErrUnsupported = "unsupported"
 
 // Terminal registration errors (MuxMsg.Error on a rejected registered): the
 // provider exits with the message instead of retrying.
@@ -100,6 +132,13 @@ type MuxMsg struct {
 
 	// v2 pong.
 	T int64 `json:"t,omitempty"` // pong: echoes the ping timestamp
+
+	// v2 "sessions" feature (session-action).
+	ReqID  string            `json:"reqId,omitempty"`  // session-action: correlation id, echoed in the result
+	Action string            `json:"action,omitempty"` // session-action: lifecycle verb
+	ID     string            `json:"id,omitempty"`     // session-action: target session id
+	Target string            `json:"target,omitempty"` // session-action: move destination (reserved)
+	Fields map[string]string `json:"fields,omitempty"` // session-action: form fields (mirror the daemon's own clients)
 }
 
 // HarnessMsg is a harness -> server message (v2: provider -> orchestrator).
@@ -119,6 +158,12 @@ type HarnessMsg struct {
 	Capabilities *Capabilities     `json:"capabilities,omitempty"`
 	Panes        []PaneOffer       `json:"panes,omitempty"` // register: resumable panes
 	T            int64             `json:"t,omitempty"`     // ping: timestamp
+
+	// v2 "sessions" feature.
+	Sessions []core.Session `json:"sessions,omitempty"` // sessions: full inventory snapshot (Seq is per-connection monotonic)
+	ReqID    string         `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
+	OK       bool           `json:"ok,omitempty"`       // session-result: verb succeeded
+	NewID    string         `json:"newId,omitempty"`    // session-result: id of any session the verb created
 }
 
 // Conn is a typed harnessproto connection.

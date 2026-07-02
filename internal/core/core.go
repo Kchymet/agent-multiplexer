@@ -31,15 +31,16 @@ const (
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
-	Source    string `json:"source"`            // claude | hermes | workspace
-	Kind      string `json:"kind"`              // agent kind, e.g. claude
-	Mode      string `json:"mode,omitempty"`    // task (short) | loop (long)
-	RootID    string `json:"rootId,omitempty"`  // parent root for sub-sessions
-	IsRoot    bool   `json:"isRoot,omitempty"`  // true => a root container row
-	Repos     string `json:"repos,omitempty"`   // agent rows: comma-joined repo names in scope
-	Section   string `json:"section,omitempty"` // rail grouping: workspaces | repos | detached
-	State     string `json:"state,omitempty"`   // idle | ready | waiting | running
-	Status    string `json:"status"`            // human label, e.g. "ready · main"
+	Source    string `json:"source"`             // claude | hermes | workspace
+	Kind      string `json:"kind"`               // agent kind, e.g. claude
+	Mode      string `json:"mode,omitempty"`     // task (short) | loop (long)
+	RootID    string `json:"rootId,omitempty"`   // parent root for sub-sessions
+	IsRoot    bool   `json:"isRoot,omitempty"`   // true => a root container row
+	Repos     string `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
+	Section   string `json:"section,omitempty"`  // rail grouping: workspaces | repos | detached
+	State     string `json:"state,omitempty"`    // idle | ready | waiting | running
+	Status    string `json:"status"`             // human label, e.g. "ready · main"
+	Archived  bool   `json:"archived,omitempty"` // set on rows in the archived section
 	Cwd       string `json:"cwd"`
 	Pid       int    `json:"pid,omitempty"`
 	StartedAt int64  `json:"startedAt"`

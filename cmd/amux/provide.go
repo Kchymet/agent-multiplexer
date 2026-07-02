@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,7 +12,11 @@ import (
 	"strings"
 	"syscall"
 
+	"amux/internal/core"
+	"amux/internal/daemon"
+	"amux/internal/engine"
 	"amux/internal/provider"
+	"amux/internal/source"
 	"amux/internal/wiretls"
 )
 
@@ -34,6 +40,8 @@ func cmdProvide(args []string) error {
 		caFile     = fs.String("ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
 		serverName = fs.String("server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
 		maxPanes   = fs.Int("max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
+		publishSes = fs.Bool("publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
+		readOnly   = fs.Bool("read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
 		labels     multiFlag
 		features   multiFlag
 	)
@@ -84,6 +92,9 @@ func cmdProvide(args []string) error {
 		}
 	}
 
+	publish := *publishSes || envBool("AMUX_PROVIDER_PUBLISH_SESSIONS")
+	readonly := *readOnly || envBool("AMUX_PROVIDER_SESSIONS_READONLY")
+
 	cfg := provider.Config{
 		Orchestrator: addr,
 		Token:        token,
@@ -95,6 +106,22 @@ func cmdProvide(args []string) error {
 		Features:     mergeFeatures(os.Getenv("AMUX_PROVIDER_FEATURES"), features),
 		Logf:         func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
 	}
+	if publish {
+		// The session rail is the daemon's own inventory: a store-backed poll,
+		// annotated with engine liveness (which lights up AAP-derived state) read
+		// from the file the running daemon persists — so publishing needs no second
+		// connection to the daemon. Lifecycle verbs, in contrast, run through the
+		// daemon socket so the daemon stays authoritative (it owns the engine and the
+		// re-poll that surfaces the change); with no daemon reachable they fail cleanly.
+		ws := source.NewWorkspace()
+		ws.SetLiveness(persistedLiveAgents)
+		cfg.PublishSessions = true
+		cfg.ReadOnlySessions = readonly
+		cfg.Sessions = ws.Poll
+		if !readonly {
+			cfg.ApplyAction = applyViaDaemon
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -102,6 +129,65 @@ func cmdProvide(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// envBool reports whether an env var is set to a truthy value (1/true/yes/on).
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// persistedLiveAgents reads the set of agent ids the running daemon last recorded
+// as live in its engine (the agent tab), so the published inventory can light up
+// AAP-derived state without a second connection to the daemon. A missing or
+// unreadable file yields an empty set (everything reads idle), never an error.
+func persistedLiveAgents() map[string]bool {
+	out := map[string]bool{}
+	buf, err := os.ReadFile(core.LiveAgentsPath())
+	if err != nil {
+		return out
+	}
+	var keys []engine.Key
+	if err := json.Unmarshal(buf, &keys); err != nil {
+		return out
+	}
+	for _, k := range keys {
+		if k.Tab == 0 { // TabAgent: the agent process, not editor/terminal
+			out[k.AgentID] = true
+		}
+	}
+	return out
+}
+
+// applyViaDaemon runs one lifecycle verb through the local daemon so the daemon
+// stays authoritative — it owns the engine (needed for "start") and re-polls to
+// surface the change. It dials fresh per call (verbs are infrequent), sends the
+// action, and returns the id of any session it created. Snapshot frames that
+// arrive first are skipped; a non-OK result surfaces the daemon's error.
+func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
+	c, err := daemon.Dial()
+	if err != nil {
+		return "", fmt.Errorf("daemon unreachable: %w", err)
+	}
+	defer c.Close()
+	if err := c.Send(a); err != nil {
+		return "", err
+	}
+	for {
+		f, err := c.Next()
+		if err != nil {
+			return "", err
+		}
+		if f.Result != nil {
+			if !f.Result.OK {
+				return "", errors.New(f.Result.Error)
+			}
+			return f.Result.NewID, nil
+		}
+	}
 }
 
 // multiFlag collects a repeatable string flag (--label, --feature).
