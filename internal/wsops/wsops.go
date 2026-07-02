@@ -285,8 +285,8 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch)
 		}
 	}
-	a.Repo = store.JoinRepos(final)
-	return db.PutSession(a)
+	// Field-scoped write: only the repo column changes here.
+	return db.SetRepoScope(a.ID, store.JoinRepos(final))
 }
 
 // MoveAgent re-parents an agent into another workgroup. With an empty targetRootID
@@ -330,8 +330,8 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 		return nil
 	}
 
-	a.RootID = targetRootID
-	if err := db.PutSession(a); err != nil {
+	// Field-scoped write: only the parent (root_id) changes when re-parenting.
+	if err := db.SetRootID(a.ID, targetRootID); err != nil {
 		return err
 	}
 	// Drop the old workgroup if it's now empty (always true for a moved-out
@@ -636,14 +636,16 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 	// agents were archived. Only stamp on a false→true transition; re-archiving
 	// an already-archived session leaves its original time intact. Clear on
 	// restore so a later re-archive gets a fresh timestamp.
+	archivedAt := s.ArchivedAt
 	switch {
 	case archived && !s.Archived:
-		s.ArchivedAt = store.Now()
+		archivedAt = store.Now()
 	case !archived:
-		s.ArchivedAt = 0
+		archivedAt = 0
 	}
-	s.Archived = archived
-	return db.PutSession(s)
+	// Field-scoped write: only the archived flag + timestamp, so a launch adopting a
+	// codex id (or a concurrent rename) isn't reverted by a full-row upsert.
+	return db.SetArchivedFlag(id, archived, archivedAt)
 }
 
 // ToggleArchived flips a session's archived flag (the native TUI's one-key mark).
@@ -667,12 +669,12 @@ func Rename(id, name string) error {
 		return err
 	}
 	defer db.Close()
-	s, ok, err := db.GetSession(id)
-	if err != nil || !ok {
+	if _, ok, err := db.GetSession(id); err != nil || !ok {
 		return fmt.Errorf("no such session %q", id)
 	}
-	s.Name = strings.TrimSpace(name)
-	return db.PutSession(s)
+	// Field-scoped write: only the name column, so a rename can't clobber a
+	// concurrent claude-id adoption or archive of the same row.
+	return db.SetName(id, strings.TrimSpace(name))
 }
 
 // agentOf resolves an action's requested harness from its fields, canonicalizing

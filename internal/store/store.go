@@ -208,6 +208,47 @@ func (d *DB) PutSession(s Session) error {
 	return err
 }
 
+// Field-scoped session updaters. Each writes a single logical field with one
+// UPDATE statement, so it touches only the column(s) named — not the whole row
+// like PutSession's upsert. That closes a lost-update race: a launch adopting a
+// codex id (SetClaudeID) concurrent with a rename (SetName) or archive
+// (SetArchivedFlag) from the TUI no longer last-write-wins the entire row and
+// silently reverts the other change. Each is a single autocommit statement, so
+// it's atomic; a missing id is a no-op (zero rows affected), never an error —
+// callers that need a not-found error check existence with GetSession first.
+
+// SetName updates a session's display name.
+func (d *DB) SetName(id, name string) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET name=? WHERE id=?`, name, id)
+	return err
+}
+
+// SetClaudeID updates a session's pinned conversation id (Claude's --session-id
+// or Codex's adopted rollout uuid).
+func (d *DB) SetClaudeID(id, claudeID string) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET claude_id=? WHERE id=?`, claudeID, id)
+	return err
+}
+
+// SetArchivedFlag updates a session's archived flag and its archive timestamp
+// together (one statement, so the pair can't tear).
+func (d *DB) SetArchivedFlag(id string, archived bool, archivedAt int64) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET archived=?, archived_at=? WHERE id=?`, b2i(archived), archivedAt, id)
+	return err
+}
+
+// SetRepoScope updates a session's repo list (its comma-joined worktree scope).
+func (d *DB) SetRepoScope(id, repo string) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET repo=? WHERE id=?`, repo, id)
+	return err
+}
+
+// SetRootID updates a session's parent workgroup (used when re-parenting an agent).
+func (d *DB) SetRootID(id, rootID string) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET root_id=? WHERE id=?`, rootID, id)
+	return err
+}
+
 func scanSessions(rows *sql.Rows) ([]Session, error) {
 	defer rows.Close()
 	var out []Session

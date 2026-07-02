@@ -68,8 +68,7 @@ func (d *DB) BackfillWorkspaceRepos() error {
 			}
 		}
 		if len(union) > 0 {
-			r.Repo = JoinRepos(union)
-			_ = d.PutSession(r)
+			_ = d.SetRepoScope(r.ID, JoinRepos(union)) // field-scoped, not a full-row upsert
 		}
 	}
 	return nil
