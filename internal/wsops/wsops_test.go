@@ -29,8 +29,8 @@ func TestResumeCwds(t *testing.T) {
 		repo string
 		want []string
 	}{
-		{"single repo checks worktree then agent dir", "acme/api",
-			[]string{filepath.Join(base, "acme/api"), base}},
+		{"single repo checks the workspace root then the worktree", "acme/api",
+			[]string{base, filepath.Join(base, "acme/api")}},
 		{"multi repo has only the agent dir", "acme/api,acme/web", []string{base}},
 		{"no repo has only the agent dir", "", []string{base}},
 	}
@@ -44,12 +44,13 @@ func TestResumeCwds(t *testing.T) {
 	}
 }
 
-// TestAgentCommandResume exercises the whole resume-vs-fresh decision: a
-// transcript written under the OLD (agent-dir) convention resumes even though a
-// single-repo agent now launches in its worktree subdir; the launch cwd is moved
-// to wherever the transcript lives; and a pinned id with no transcript anywhere
-// falls back to a fresh --session-id while surfacing a rail notice instead of
-// silently starting over.
+// TestAgentCommandResume exercises the whole resume-vs-fresh decision under the
+// workspace-root launch convention: a pinned id with no transcript anywhere falls
+// back to a fresh --session-id while surfacing a rail notice; a transcript written
+// only under the LEGACY worktree convention still resumes, with the launch cwd
+// moved down to the worktree so Claude's munge matches; and a transcript under the
+// workspace root (the current convention) is preferred, keeping resume in the root
+// even when a legacy worktree copy also exists.
 func TestAgentCommandResume(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -65,7 +66,8 @@ func TestAgentCommandResume(t *testing.T) {
 	uuid := "11111111-1111-4111-8111-111111111111"
 	s := store.Session{ID: "agent", RootID: "root", Repo: "acme/api", Dir: agentDir, ClaudeID: uuid}
 
-	// No transcript: falls back to a fresh session and records a rail notice.
+	// No transcript: falls back to a fresh session, launched in the workspace root,
+	// and records a rail notice.
 	dir, _, argv, err := AgentCommand(s)
 	if err != nil {
 		t.Fatal(err)
@@ -73,16 +75,16 @@ func TestAgentCommandResume(t *testing.T) {
 	if !hasFlag(argv, "--session-id") || hasFlag(argv, "--resume") {
 		t.Fatalf("no transcript: expected --session-id, got %v", argv)
 	}
-	if dir != repoDir {
-		t.Fatalf("no transcript: launch dir = %q, want the worktree %q", dir, repoDir)
+	if dir != agentDir {
+		t.Fatalf("no transcript: launch dir = %q, want the workspace root %q", dir, agentDir)
 	}
 	if core.Notice(uuid) == "" {
 		t.Fatal("no transcript: expected a rail notice about the failed resume")
 	}
 
-	// Transcript under the OLD agent-dir convention: resume, launched under the
-	// agent dir (so Claude's munge matches), and the stale notice is cleared.
-	writeTranscript(t, home, munge(agentDir), uuid)
+	// Transcript only under the LEGACY worktree convention: resume, with the launch
+	// cwd moved down to the worktree (so Claude's munge matches), notice cleared.
+	writeTranscript(t, home, munge(repoDir), uuid)
 	dir, _, argv, err = AgentCommand(s)
 	if err != nil {
 		t.Fatal(err)
@@ -90,21 +92,22 @@ func TestAgentCommandResume(t *testing.T) {
 	if !hasFlag(argv, "--resume") {
 		t.Fatalf("legacy transcript: expected --resume, got %v", argv)
 	}
-	if dir != agentDir {
-		t.Fatalf("legacy transcript: launch dir = %q, want the agent dir %q", dir, agentDir)
+	if dir != repoDir {
+		t.Fatalf("legacy transcript: launch dir = %q, want the worktree %q", dir, repoDir)
 	}
 	if core.Notice(uuid) != "" {
 		t.Fatal("legacy transcript: notice should be cleared on a successful resume")
 	}
 
-	// Transcript under the current worktree convention: resume there.
-	writeTranscript(t, home, munge(repoDir), uuid)
+	// Transcript also under the workspace root (current convention): prefer it, so
+	// resume lands in the root even though a legacy worktree copy exists too.
+	writeTranscript(t, home, munge(agentDir), uuid)
 	dir, _, _, err = AgentCommand(s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dir != repoDir {
-		t.Fatalf("worktree transcript: launch dir = %q, want %q", dir, repoDir)
+	if dir != agentDir {
+		t.Fatalf("root transcript: launch dir = %q, want the workspace root %q", dir, agentDir)
 	}
 }
 
@@ -129,7 +132,7 @@ func TestAgentCommandGapFillRestore(t *testing.T) {
 
 	// A captured backup exists (from a hook) but Claude's own transcript is missing
 	// under every resume cwd — the mid-turn-kill gap. Gap-fill should restore it and
-	// flip the launch from a fresh --session-id to --resume in the worktree.
+	// flip the launch from a fresh --session-id to --resume in the workspace root.
 	live := filepath.Join(t.TempDir(), "live.jsonl")
 	if err := os.WriteFile(live, []byte(`{"backup":true}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -145,14 +148,15 @@ func TestAgentCommandGapFillRestore(t *testing.T) {
 	if !hasFlag(argv, "--resume") || hasFlag(argv, "--session-id") {
 		t.Fatalf("gap-fill: expected --resume from restored backup, got %v", argv)
 	}
-	if dir != repoDir {
-		t.Fatalf("gap-fill: launch dir = %q, want the worktree %q", dir, repoDir)
+	if dir != agentDir {
+		t.Fatalf("gap-fill: launch dir = %q, want the workspace root %q", dir, agentDir)
 	}
 
-	// A real, larger Claude transcript now exists: gap-fill must not shrink it back
-	// to the smaller backup (RestoreCapturedTranscript's no-data-loss guard).
+	// A real, larger Claude transcript now exists in the launch dir: gap-fill must
+	// not shrink it back to the smaller backup (RestoreCapturedTranscript's
+	// no-data-loss guard).
 	realTranscript := []byte(`{"real":true,"and":"strictly longer than the backup blob"}`)
-	claudePath := filepath.Join(home, ".claude", "projects", munge(repoDir), uuid+".jsonl")
+	claudePath := filepath.Join(home, ".claude", "projects", munge(agentDir), uuid+".jsonl")
 	if err := os.WriteFile(claudePath, realTranscript, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -209,9 +213,9 @@ func TestAgentWorkdir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := agentWorkdir(store.Session{Dir: base, Repo: tt.repo})
+			got := AgentWorkdir(store.Session{Dir: base, Repo: tt.repo})
 			if got != tt.want {
-				t.Errorf("agentWorkdir(repo=%q) = %q, want %q", tt.repo, got, tt.want)
+				t.Errorf("AgentWorkdir(repo=%q) = %q, want %q", tt.repo, got, tt.want)
 			}
 		})
 	}

@@ -107,7 +107,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	// Repos are chosen from tracked ones (the fuzzy picker), but be defensive: a
 	// stale or mistyped name shouldn't abort the whole create — skip it with a
 	// warning and carry on with the repos that do resolve. An agent with zero
-	// repos is valid (it runs in its own sandbox dir; see agentWorkdir).
+	// repos is valid (it runs in its own sandbox dir; see AgentWorkdir).
 	var repos []string
 	for _, repoName := range spec.Repos {
 		repo, ok, err := db.Repo(repoName)
@@ -306,8 +306,16 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 // extra environment (KEY=VALUE) to set, and the argv. It decides resume vs
 // continue vs fresh the same way regardless of how the caller runs it — the
 // daemon's engine execs this in a PTY-backed process the native TUI attaches to.
+//
+// The Claude agent always launches in the workspace root (s.Dir) — the dir where
+// amux installs its .claude config and writes CLAUDE.md — so Claude loads them
+// (settings.local.json is read only from the launch dir, never a parent). This
+// holds even for a single-repo agent, whose repo is a worktree subdir under the
+// root; only the editor and terminal panes drop into that subdir (see
+// AgentWorkdir). Resuming a legacy conversation is the one exception: the launch
+// dir moves to wherever its transcript already lives (see resumeCwds).
 func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
-	dir = agentWorkdir(s)
+	dir = s.Dir
 	if _, err := os.Stat(dir); err != nil {
 		return "", nil, nil, fmt.Errorf("session dir missing: %s", dir)
 	}
@@ -321,7 +329,7 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// Best-effort — RestoreTranscript no-ops when there's nothing better to restore
 	// and never clobbers a fresher copy, so a failure never blocks the launch.
 	if s.ClaudeID != "" {
-		if restored, _ := agent.HarnessFor(s.Agent).RestoreTranscript(agentWorkdir(s), s.ClaudeID); restored {
+		if restored, _ := agent.HarnessFor(s.Agent).RestoreTranscript(dir, s.ClaudeID); restored {
 			log.Printf("amux: gap-filled Claude transcript for %s from captured backup", s.ClaudeID)
 		}
 	}
@@ -359,8 +367,9 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		// Install the status/capture hooks into this agent's launch dir (not the
 		// user-wide settings.json), pointed at the stable installed binary. Claude
 		// loads settings.local.json only from the launch dir, so dir must be the
-		// cwd the pane runs in. When dir is a repo worktree (a single-repo agent
-		// drops into it), git-exclude the file so it never dirties the worktree.
+		// cwd the pane runs in — normally the workspace root, which isn't a git repo
+		// so nothing needs excluding. When resuming a legacy conversation dir can be
+		// a repo worktree instead; git-exclude the file so it never dirties it.
 		if err := claudecfg.InstallHooksIn(dir, core.InstalledBinPath()); err == nil {
 			if git.IsGitRepo(context.Background(), dir) {
 				_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
@@ -382,13 +391,18 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	return dir, env, argv, nil
 }
 
-// agentWorkdir is the directory an agent's panes run in. An agent dir holds one
-// git-worktree subdir per assigned repo, so with a single repo we drop straight
-// into that worktree (one level deeper) — the agent, and its sandbox scope, then
-// sit on the repo itself instead of a wrapper dir whose only content is that one
-// subdir. With several repos there's no single worktree to pick, so we stay at
-// the agent dir, which holds them all side by side.
-func agentWorkdir(s store.Session) string {
+// AgentWorkdir is the directory the editor and terminal panes run in. An agent
+// dir holds one git-worktree subdir per assigned repo, so with a single repo we
+// drop the human straight into that worktree (one level deeper) instead of a
+// wrapper dir whose only content is that one subdir. With several (or zero) repos
+// there's no single worktree to pick, so we stay at the agent dir, which holds
+// them all side by side.
+//
+// The Claude agent pane is the exception: it always launches in the workspace
+// root (s.Dir), where amux installs its .claude config and CLAUDE.md, so Claude
+// loads them (settings.local.json is read only from the launch dir). See
+// AgentCommand.
+func AgentWorkdir(s store.Session) string {
 	if repos := store.SplitRepos(s.Repo); len(repos) == 1 {
 		return filepath.Join(s.Dir, repos[0])
 	}
@@ -397,13 +411,13 @@ func agentWorkdir(s store.Session) string {
 
 // resumeCwds lists the working directories a Claude transcript for this agent
 // could live under, so resume detection isn't fooled by amux having changed its
-// workdir convention (PR #8 moved single-repo agents one level down into their
-// worktree). The current launch dir comes first — preferred on a tie — then the
-// agent dir that older sessions used.
+// workdir convention over time. The current launch dir — the workspace root
+// (s.Dir) — comes first, preferred on a tie; then the per-repo worktree that
+// single-repo agents launched in under the older convention.
 func resumeCwds(s store.Session) []string {
-	cwds := []string{agentWorkdir(s)}
-	if s.Dir != "" && s.Dir != cwds[0] {
-		cwds = append(cwds, s.Dir)
+	cwds := []string{s.Dir}
+	if wd := AgentWorkdir(s); wd != s.Dir {
+		cwds = append(cwds, wd)
 	}
 	return cwds
 }
