@@ -317,6 +317,20 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(-1)
 	case "down", "j":
 		m.move(1)
+	case "ctrl+u": // half page up (vim/less style, clamps at the ends)
+		m.page(-m.halfPage())
+	case "ctrl+d": // half page down
+		m.page(m.halfPage())
+	case "pgup", "ctrl+b": // full page up
+		m.page(-m.pageStep())
+	case "pgdown", "ctrl+f": // full page down
+		m.page(m.pageStep())
+	case "home", "g": // jump to the first row
+		m.cursor = 0
+	case "end", "G": // jump to the last row
+		if n := len(m.sessions); n > 0 {
+			m.cursor = n - 1
+		}
 	case "enter", "l", "right":
 		return m, m.attachSelected()
 	case "a": // add an agent — on a repo header, a repo-scoped agent; on a workgroup, another agent
@@ -441,6 +455,42 @@ func (m *model) move(d int) {
 		return
 	}
 	m.cursor = (m.cursor + d + n) % n
+}
+
+// page moves the cursor by d rows and clamps to the list bounds (no wrap), the
+// way ctrl-d/ctrl-u and PgUp/PgDn behave in a pager. The render pass scrolls the
+// rail to follow the cursor.
+func (m *model) page(d int) {
+	n := len(m.sessions)
+	if n == 0 {
+		return
+	}
+	c := m.cursor + d
+	switch {
+	case c < 0:
+		c = 0
+	case c >= n:
+		c = n - 1
+	}
+	m.cursor = c
+}
+
+// halfPage is the row step for ctrl-u/ctrl-d — half the visible pane height, at
+// least one row.
+func (m *model) halfPage() int {
+	if p := m.paneRows() / 2; p > 1 {
+		return p
+	}
+	return 1
+}
+
+// pageStep is the row step for PgUp/PgDn — a full pane height less one row of
+// overlap for context, at least one row.
+func (m *model) pageStep() int {
+	if p := m.paneRows() - 1; p > 1 {
+		return p
+	}
+	return 1
 }
 
 func (m *model) selected() *core.Session {
