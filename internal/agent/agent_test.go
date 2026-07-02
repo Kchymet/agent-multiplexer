@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -46,6 +47,41 @@ func TestResolveFindsNvmBinaryOffPath(t *testing.T) {
 	want := filepath.Join(home, ".nvm", "versions", "node", "v24.16.0", "bin", "claude")
 	if got != want {
 		t.Fatalf("resolve(claude) = %q, want newest nvm version %q", got, want)
+	}
+}
+
+// Codex Argv: the default sandbox (workspace-write) plus --model when a model is
+// set, the AMUX_CODEX_BIN override, and AMUX_CODEX_SANDBOX=none omitting the
+// sandbox flag entirely. PATH/SHELL are dead ends so resolve() degrades to the
+// bare override name, keeping the argv comparison stable.
+func TestArgvCodex(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("SHELL", "/bin/sh")
+	t.Setenv("HOME", t.TempDir()) // no stray codex binary in known install spots
+	t.Setenv("AMUX_CODEX_BIN", "codex-amux-test")
+
+	cases := []struct {
+		name, sandbox, model string
+		want                 []string
+	}{
+		{"default sandbox + model", "", "gpt-5.5",
+			[]string{"codex-amux-test", "--sandbox", "workspace-write", "--model", "gpt-5.5"}},
+		{"explicit sandbox, no model", "read-only", "",
+			[]string{"codex-amux-test", "--sandbox", "read-only"}},
+		{"sandbox none omits flag", "none", "gpt-5.4",
+			[]string{"codex-amux-test", "--model", "gpt-5.4"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AMUX_CODEX_SANDBOX", tc.sandbox) // "" reads as unset -> the default
+			argv, err := Argv("codex", tc.model)
+			if err != nil {
+				t.Fatalf("Argv: %v", err)
+			}
+			if !reflect.DeepEqual(argv, tc.want) {
+				t.Fatalf("codex Argv = %v, want %v", argv, tc.want)
+			}
+		})
 	}
 }
 

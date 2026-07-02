@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"amux/internal/claudecfg"
+	"amux/internal/codexcfg"
 	"amux/internal/core"
 )
 
@@ -36,8 +39,8 @@ func cmdAgent(args []string) error {
 		// and transcript path come from the hook JSON on stdin).
 		return cmdAgentCapture()
 	case "sessions":
-		// List every Claude Code session on the machine so an agent can reason
-		// across conversations (not scoped to the caller — this is shared context).
+		// List every agent session on the machine (Claude Code + Codex) so an agent
+		// can reason across conversations (not scoped to the caller — shared context).
 		return cmdAgentSessions(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
@@ -67,10 +70,10 @@ usage: amux agent <command>
                      JSON on stdin); amux wires this into Claude's settings.json
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
-  sessions [--json]  list every Claude Code session on this machine (across all
-                     projects), most recent first, so you can reason about work
-                     that spans conversations. Read a transcript with your normal
-                     file tools; --json emits the full records for scripting.
+  sessions [--json]  list every agent session on this machine — Claude Code and
+                     Codex, tagged by harness — most recent first, so you can
+                     reason about work that spans conversations. Read a transcript
+                     with your normal file tools; --json emits the full records.
 
 Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned. Per-agent identity (authn +
@@ -150,12 +153,25 @@ func cmdAgentCapture() error {
 	return nil
 }
 
-// cmdAgentSessions lists every Claude Code session transcript on the machine so
-// an agent can reason about tasks that recur across conversations — what other
-// agents (or the user) worked on, prior decisions, common patterns. Unlike the
-// other agent verbs this is not scoped to the caller: it's shared read-only
-// context. Text output is one row per session (most recent first) with the path
-// to read; --json emits the full records for programmatic use.
+// sessionRow is one agent conversation for `amux agent sessions`, merging the
+// per-harness session listings into a single shape tagged with its harness so
+// text and --json output stay consistent across Claude Code and Codex.
+type sessionRow struct {
+	Harness  string    `json:"harness"` // claude | codex
+	ID       string    `json:"id"`
+	Cwd      string    `json:"cwd"`
+	Project  string    `json:"project"`
+	Path     string    `json:"path"`
+	Size     int64     `json:"size"`
+	Modified time.Time `json:"modified"`
+}
+
+// cmdAgentSessions lists every agent session on the machine — both Claude Code
+// and Codex — so an agent can reason about tasks that recur across conversations:
+// what other agents (or the user) worked on, prior decisions, common patterns.
+// Unlike the other agent verbs this is not scoped to the caller: it's shared
+// read-only context. Text output is one row per session (most recent first),
+// tagged with its harness, with the path to read; --json emits the full records.
 func cmdAgentSessions(args []string) error {
 	asJSON := false
 	for _, a := range args {
@@ -163,23 +179,38 @@ func cmdAgentSessions(args []string) error {
 			asJSON = true
 		}
 	}
-	sessions := claudecfg.ListSessions()
+
+	var rows []sessionRow
+	for _, s := range claudecfg.ListSessions() {
+		rows = append(rows, sessionRow{
+			Harness: "claude", ID: s.ID, Cwd: s.Cwd, Project: s.Project,
+			Path: s.Path, Size: s.Size, Modified: s.Modified,
+		})
+	}
+	for _, s := range codexcfg.ListSessions() {
+		rows = append(rows, sessionRow{
+			Harness: "codex", ID: s.ID, Cwd: s.Cwd, Project: s.Project,
+			Path: s.Path, Size: s.Size, Modified: s.Modified,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Modified.After(rows[j].Modified) })
+
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(sessions)
+		return enc.Encode(rows)
 	}
-	if len(sessions) == 0 {
-		fmt.Println("no Claude Code sessions found")
+	if len(rows) == 0 {
+		fmt.Println("no agent sessions found")
 		return nil
 	}
-	for _, s := range sessions {
+	for _, s := range rows {
 		loc := s.Cwd
 		if loc == "" {
-			loc = s.Project // munge is lossy; fall back to the project-dir name
+			loc = s.Project // cwd unreadable; fall back to the storage grouping
 		}
-		fmt.Printf("%s  %8s  %s\n    %s\n",
-			s.Modified.Format("2006-01-02 15:04"), humanSize(s.Size), loc, s.Path)
+		fmt.Printf("%s  %-6s  %8s  %s\n    %s\n",
+			s.Modified.Format("2006-01-02 15:04"), s.Harness, humanSize(s.Size), loc, s.Path)
 	}
 	return nil
 }
