@@ -17,8 +17,9 @@ import (
 //
 // The launch binary is overridable per kind via AMUX_<KIND>_BIN (e.g.
 // AMUX_CLAUDE_BIN). amux stays a thin launcher: point that at your own wrapper
-// to own autonomy (e.g. branch on $AMUX_MODE to add --permission-mode acceptEdits
-// or start a /loop). amux never injects those itself.
+// to own autonomy (e.g. branch on $AMUX_MODE — task vs interactive — to add
+// --permission-mode acceptEdits for a hands-off task). amux never injects those
+// itself.
 func Argv(kind, model string, extra ...string) ([]string, error) {
 	var bin string
 	var args []string

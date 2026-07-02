@@ -253,8 +253,9 @@ its artifact calls this to retire itself from the active rail.
 > Distinct from `status idle` (§5.1/§8): `idle` means "no live turn right now" and
 > flips back to `running` on the next message; `done` means "this session's job is
 > finished" and takes it off the active rail until a human restores it. Use `done`
-> only for genuinely task-driven, one-off sessions — never for a long-lived loop
-> session, which is meant to keep running.
+> only for genuinely task-driven, one-off sessions — never for an interactive
+> session (the human ends it) or a long-lived task loop, which is meant to keep
+> running.
 
 ---
 

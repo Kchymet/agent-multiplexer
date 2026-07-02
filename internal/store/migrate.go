@@ -121,10 +121,7 @@ func (d *DB) importLegacy() error {
 		_ = d.PutRepo(Repo{Name: r.Name, Source: r.Source, GitDir: r.GitDir})
 	}
 	for _, w := range lg.Workspaces {
-		mode := w.Mode
-		if mode == "" {
-			mode = ModeTask
-		}
+		mode := NormalizeMode(w.Mode)
 		// root container
 		_ = d.PutSession(Session{
 			ID: w.ID, RootID: "", Name: w.Name, Mode: mode,
@@ -149,11 +146,34 @@ func defaultStr(v, def string) string {
 	return v
 }
 
-// Session modes.
+// Session modes. The axis is who drives the session, not how long it runs:
+//   - ModeTask: an autonomous session handed a specific job. It runs to
+//     completion (implement a change, open a PR, babysit it) and self-reports
+//     done. A long-lived job (e.g. a PR-review loop) is still a task — it just
+//     never decides it's finished until stopped.
+//   - ModeInteractive: a human-driven session. The user drives it turn by turn;
+//     amux never auto-archives it (the human owns its lifecycle).
 const (
-	ModeTask = "task"
-	ModeLoop = "loop"
+	ModeTask        = "task"
+	ModeInteractive = "interactive"
 )
+
+// modeLoopLegacy is the retired "loop" mode value. It predates the
+// interactive/task split, where a loop is just a long-lived task; NormalizeMode
+// folds any stored "loop" row into ModeTask so legacy sessions keep working.
+const modeLoopLegacy = "loop"
+
+// NormalizeMode maps a stored/incoming mode string to a current mode value:
+// blank and the legacy "loop" fold into ModeTask; any other value (ModeTask,
+// ModeInteractive, or a future mode) passes through unchanged.
+func NormalizeMode(m string) string {
+	switch strings.TrimSpace(m) {
+	case "", ModeTask, modeLoopLegacy:
+		return ModeTask
+	default:
+		return m
+	}
+}
 
 // Claude model aliases offered when creating a session. Opus is the default.
 const (

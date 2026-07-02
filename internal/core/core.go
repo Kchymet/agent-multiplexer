@@ -154,7 +154,7 @@ type WorkgroupRow struct {
 type AgentRow struct {
 	ID       string `json:"id"`
 	Agent    string `json:"agent"` // claude | hermes
-	Mode     string `json:"mode"`  // task | loop
+	Mode     string `json:"mode"`  // task | interactive
 	Repos    string `json:"repos"` // comma-joined repo names
 	Archived bool   `json:"archived"`
 }

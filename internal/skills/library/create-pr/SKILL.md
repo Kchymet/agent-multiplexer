@@ -164,11 +164,13 @@ active rail. This is reversible — it archives, it does not delete.
 
 **Only do this when both hold:**
 
-- `$AMUX_MODE` is `task` — **never** archive a `loop` session (a loop is meant to
-  keep running; archiving it defeats its purpose).
-- The session is genuinely task-driven — it was spun up to deliver this PR. If the
-  session has more work queued, or the PR is one of several deliverables, don't
-  archive; just report the PR.
+- `$AMUX_MODE` is `task` — **never** archive an `interactive` session. The human
+  drives an interactive session and owns when it ends; archiving it out from under
+  them defeats its purpose.
+- This PR is the session's whole job. A task can be long-lived — a PR-review loop
+  that merges approved PRs is a `task`, but it's never "done" after one PR. If the
+  session has more work queued, keeps looping, or the PR is one of several
+  deliverables, don't archive; just report the PR.
 
 `amux` is on `PATH`. Mark yourself done with the self-reporting verb — it resolves
 your own session from the environment, so you don't pass an id:
@@ -185,8 +187,8 @@ verb `amux ws archive <id>` (alias `amux ws done <id>`), which you'd use to arch
 *another* agent by id. To undo either: `amux ws unarchive <id>`.
 
 Then report the outcome to the user: the PR URL and that the session was marked
-done. If you did **not** archive (loop session, or more work remains), say so and
-why.
+done. If you did **not** archive (interactive session, a long-lived loop, or more
+work remains), say so and why.
 
 ## Guardrails
 

@@ -31,20 +31,21 @@ Sessions (a root container holds one or more agent sub-sessions, each with its
 own worktree — same repo/different branches, per-repo, or mixed; per-agent model):
 - `amux session new` — config page: name + add agents (repo/branch/mode/model)
 - `amux session add <root-id>` — add an agent (sub-session) to a root
-- `amux session create <repo>... [--name n] [--prompt t] [--mode task|loop] [--model m]`
+- `amux session create <repo>... [--name n] [--prompt t] [--mode task|interactive] [--model m]`
 - `amux session open <id>` · `amux session rm <id>` · `amux session rename <id> <name>`
 - `amux session ls`
 
 Other: `amux status` · `amux name "<text>"` · `amux refresh` (re-poll sources now)
 
 ## How agents are launched (you can tune this)
-- amux signals each agent's window via env: `AMUX_MODE` (task|loop), `AMUX_WORKSPACE`, `AMUX_AGENT`.
+- amux signals each agent's window via env: `AMUX_MODE` (task|interactive), `AMUX_WORKSPACE`, `AMUX_AGENT`.
 - By default amux launches `claude --permission-mode auto` (smart auto-accept; this
   is NOT `--dangerously-skip-permissions`) in a trusted directory.
 - Override the permission mode with `AMUX_PERMISSION_MODE` (e.g. `default`,
   `acceptEdits`, `auto`, or `none` to omit).
 - Override the launch command with `AMUX_CLAUDE_BIN` — point it at a wrapper that
-  branches on `$AMUX_MODE` to own autonomy (e.g. start a `/loop` for loop mode).
+  branches on `$AMUX_MODE` to own autonomy (e.g. run a task mode agent hands-off,
+  or drop an interactive mode agent straight into a chat).
 
 ## Config files you may edit
 - `~/.config/amux/amux.sh` — the shell shim (auto-launch on terminal open).
