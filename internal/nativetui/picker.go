@@ -36,6 +36,12 @@ type pickerState struct {
 	selected map[string]bool
 	cursor   int // index into the currently-filtered list
 
+	// searching is the picker's mode. It starts false so vim motions (j/k/g/G)
+	// drive the list by default; the user presses "/" or "i" to opt into typing a
+	// fuzzy filter, matching the "vim by default, intent to type" convention used
+	// by the form editor's normal/insert modes.
+	searching bool
+
 	field  *formField // write target, or nil
 	action string     // dispatch target, or ""
 	id     string     // session id for the dispatched action
@@ -146,30 +152,87 @@ func (m *model) refreshPickerItems() {
 	p.items = items
 }
 
-// handlePicker processes a keystroke while the repo picker modal is open.
+// handlePicker processes a keystroke while the repo picker modal is open. It has
+// two modes: nav mode (default) drives the list with vim motions, and search mode
+// (entered with "/" or "i") types into the fuzzy filter. Keys that move the cursor
+// or commit work in both modes so a filter can be narrowed and navigated without
+// leaving search.
 func (m *model) handlePicker(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.refreshPickerItems()
 	p := m.picker
 	rows := p.filtered()
 	p.clampCursor(len(rows))
 
+	// Keys shared by both modes: cursor motion, select, commit, cancel.
 	switch k.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
+	case tea.KeyCtrlC:
 		m.picker = nil
 		return m, nil
 	case tea.KeyUp, tea.KeyCtrlP:
-		p.cursor--
-		p.clampCursor(len(rows))
+		p.moveCursor(-1, len(rows))
 		return m, nil
 	case tea.KeyDown, tea.KeyCtrlN:
-		p.cursor++
-		p.clampCursor(len(rows))
+		p.moveCursor(1, len(rows))
 		return m, nil
 	case tea.KeyTab, tea.KeySpace:
 		m.pickerToggle(rows)
 		return m, nil
 	case tea.KeyEnter:
 		return m.pickerActivate(rows)
+	}
+
+	if p.searching {
+		return m.handlePickerSearch(k, rows)
+	}
+	return m.handlePickerNav(k, rows)
+}
+
+// handlePickerNav handles keys in the default (vim) mode, where letters are motions
+// rather than filter text.
+func (m *model) handlePickerNav(k tea.KeyMsg, rows []repoItem) (tea.Model, tea.Cmd) {
+	p := m.picker
+	n := len(rows)
+	switch k.Type {
+	case tea.KeyEsc:
+		m.picker = nil
+		return m, nil
+	case tea.KeyCtrlD:
+		p.moveCursor(pickerHalfPage, n)
+		return m, nil
+	case tea.KeyCtrlU:
+		p.moveCursor(-pickerHalfPage, n)
+		return m, nil
+	case tea.KeyRunes:
+		if len(k.Runes) == 1 {
+			switch k.Runes[0] {
+			case 'j':
+				p.moveCursor(1, n)
+			case 'k':
+				p.moveCursor(-1, n)
+			case 'g':
+				p.cursor = 0
+			case 'G':
+				p.cursor = n - 1
+				p.clampCursor(n)
+			case 'q':
+				m.picker = nil
+			case '/', 'i':
+				p.searching = true
+			}
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// handlePickerSearch handles keys while typing the fuzzy filter. Esc returns to nav
+// mode with the filter intact so the results can be navigated with vim motions.
+func (m *model) handlePickerSearch(k tea.KeyMsg, rows []repoItem) (tea.Model, tea.Cmd) {
+	p := m.picker
+	switch k.Type {
+	case tea.KeyEsc:
+		p.searching = false
+		return m, nil
 	case tea.KeyBackspace:
 		if r := []rune(p.filter); len(r) > 0 {
 			p.filter = string(r[:len(r)-1])
@@ -182,6 +245,16 @@ func (m *model) handlePicker(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// pickerHalfPage is how far ctrl-d/ctrl-u jump the picker cursor, matching the
+// rail's half-page feel against the picker's render window.
+const pickerHalfPage = 6
+
+// moveCursor shifts the cursor by delta and clamps it to the row range.
+func (p *pickerState) moveCursor(delta, n int) {
+	p.cursor += delta
+	p.clampCursor(n)
 }
 
 // pickerToggle flips the selection of the row under the cursor (the track-new
@@ -251,7 +324,15 @@ func (m *model) renderPicker() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(p.title))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("filter: ") + p.filter + cursorStyle.Render(" "))
+	// The block cursor after the filter only shows in search mode, so the box
+	// visibly signals which mode is active (typing vs. vim navigation).
+	filterLine := dimStyle.Render("filter: ") + p.filter
+	if p.searching {
+		filterLine += cursorStyle.Render(" ")
+	} else if p.filter == "" {
+		filterLine += dimStyle.Render("(all)")
+	}
+	b.WriteString(filterLine)
 	b.WriteString("\n\n")
 
 	// A modest window so a long repo list stays inside the box.
@@ -274,10 +355,17 @@ func (m *model) renderPicker() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("type filter · "))
-	b.WriteString(keyStyle.Render("Space") + dimStyle.Render(" select · "))
-	b.WriteString(keyStyle.Render("↵") + dimStyle.Render(" done · "))
-	b.WriteString(keyStyle.Render("Esc") + dimStyle.Render(" cancel"))
+	if p.searching {
+		b.WriteString(dimStyle.Render("-- SEARCH --  type to filter · "))
+		b.WriteString(keyStyle.Render("Esc") + dimStyle.Render(" back to nav · "))
+		b.WriteString(keyStyle.Render("↵") + dimStyle.Render(" done"))
+	} else {
+		b.WriteString(keyStyle.Render("j/k") + dimStyle.Render(" move · "))
+		b.WriteString(keyStyle.Render("/") + dimStyle.Render(" search · "))
+		b.WriteString(keyStyle.Render("Space") + dimStyle.Render(" select · "))
+		b.WriteString(keyStyle.Render("↵") + dimStyle.Render(" done · "))
+		b.WriteString(keyStyle.Render("Esc") + dimStyle.Render(" cancel"))
+	}
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
