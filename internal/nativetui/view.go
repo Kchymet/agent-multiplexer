@@ -126,10 +126,14 @@ func padTo(s string, w int) string {
 
 func (m *model) renderSidebar() string {
 	var top []string
+	cursorEntry := -1 // index into top of the selected row, for scroll-follow
 
 	// Pinned, sectionless rows first (the control console).
 	for i, s := range m.sessions {
 		if s.Section == "" {
+			if i == m.cursor {
+				cursorEntry = len(top)
+			}
 			top = append(top, m.renderRow(i, s))
 		}
 	}
@@ -150,6 +154,9 @@ func (m *model) renderSidebar() string {
 					top = append(top, "", sectionStyle.Width(sidebarWidth).Render(sectionLabel(sec.key)))
 					any = true
 				}
+				if i == m.cursor {
+					cursorEntry = len(top)
+				}
 				top = append(top, m.renderRow(i, s))
 			}
 		}
@@ -159,19 +166,56 @@ func (m *model) renderSidebar() string {
 		}
 	}
 
-	// Pin the rail's command hints to the bottom, padding the gap between the
-	// session list and the hints so they sit on the bottom border. Rows can be two
-	// lines tall (title + status sub-line), so we count rendered lines, not slots.
+	// Pin the rail's command hints to the bottom. The session list occupies the
+	// space above them; when it overflows we scroll it (keeping the selected row
+	// visible) rather than dropping rows off the bottom. Rows can be two lines tall
+	// (title + status sub-line), so we work in rendered lines, not slots.
 	foot := m.railHints()
 	rows := m.paneRows()
 	footLines := lineCount(foot)
-	for lineCount(top) > rows-footLines {
-		top = top[:len(top)-1] // drop overflow rows; MaxHeight is the final backstop
+	avail := rows - footLines // lines available to the scrollable session list
+
+	// Flatten entries to lines, tracking where the selected row lands so we can
+	// scroll it into view.
+	var body []string
+	cursorStart, cursorSpan := 0, 0
+	for i, e := range top {
+		n := 1 + strings.Count(e, "\n")
+		if i == cursorEntry {
+			cursorStart = len(body)
+			cursorSpan = n
+		}
+		body = append(body, strings.Split(e, "\n")...)
 	}
-	for lineCount(top)+footLines < rows {
-		top = append(top, "")
+
+	if avail < 1 {
+		avail = 1
 	}
-	lines := append(top, foot...)
+	// Keep the selected row within the viewport, then clamp to the valid range.
+	if cursorEntry >= 0 {
+		if cursorStart < m.railScroll {
+			m.railScroll = cursorStart
+		}
+		if cursorStart+cursorSpan > m.railScroll+avail {
+			m.railScroll = cursorStart + cursorSpan - avail
+		}
+	}
+	if max := len(body) - avail; m.railScroll > max {
+		m.railScroll = max
+	}
+	if m.railScroll < 0 {
+		m.railScroll = 0
+	}
+
+	end := m.railScroll + avail
+	if end > len(body) {
+		end = len(body)
+	}
+	visible := append([]string(nil), body[m.railScroll:end]...)
+	for len(visible) < avail {
+		visible = append(visible, "")
+	}
+	lines := append(visible, foot...)
 	return lipgloss.NewStyle().
 		Width(sidebarWidth).MaxHeight(rows).
 		Render(strings.Join(lines, "\n"))

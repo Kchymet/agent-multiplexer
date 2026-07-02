@@ -60,6 +60,9 @@ type model struct {
 	client   *daemon.Client
 	sessions []core.Session
 	cursor   int
+	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
+	// so the selected row stays visible when the rail overflows its height.
+	railScroll int
 	focus    focus                       // sidebar or agent pane
 	terms    map[paneKey]*vterm.Terminal // mirror terminals, keyed by (agent id, tab)
 	byPane   map[string]paneKey          // daemon pane id -> the term it feeds
