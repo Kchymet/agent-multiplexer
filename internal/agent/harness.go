@@ -225,12 +225,9 @@ func persistConvID(sessionID, id string) {
 		return
 	}
 	defer db.Close()
-	cur, ok, err := db.GetSession(sessionID)
-	if err != nil || !ok {
-		return
-	}
-	cur.ClaudeID = id
-	_ = db.PutSession(cur)
+	// A single-column update: adopting the codex id must not clobber a concurrent
+	// rename/archive from the TUI (which a full-row PutSession of a stale read would).
+	_ = db.SetClaudeID(sessionID, id)
 }
 
 // noopHarness is the Harness for an unrecognized kind: it launches nothing amux
