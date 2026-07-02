@@ -38,15 +38,19 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 	if err != nil {
 		return "", nil, nil, err
 	}
-	dir, env, argv, err = wsops.AgentCommand(s)
-	if err != nil {
-		return "", nil, nil, err
-	}
+	// Only the agent tab runs AgentCommand: it has launch side effects (the
+	// resume-vs-fresh decision can rewrite the pinned conversation id, plus trust
+	// and hook installs) that must not fire from merely viewing another tab.
 	switch tab {
 	case TabEditor:
-		dir, argv = wsops.AgentWorkdir(s), []string{editorBin()}
+		dir, env, argv = wsops.AgentWorkdir(s), wsops.AgentEnv(s), []string{editorBin()}
 	case TabTerminal:
-		dir, argv = wsops.AgentWorkdir(s), []string{shellBin()}
+		dir, env, argv = wsops.AgentWorkdir(s), wsops.AgentEnv(s), []string{shellBin()}
+	default:
+		dir, env, argv, err = wsops.AgentCommand(s)
+		if err != nil {
+			return "", nil, nil, err
+		}
 	}
 	return dir, env, scope(dir, tab, s.Agent, argv, agentRepoSources(agentID)), nil
 }

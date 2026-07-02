@@ -25,9 +25,11 @@ func mkRollout(t *testing.T, home, y, m, d, uuid, cwd string) string {
 	return path
 }
 
-// TestRolloutDiscoveryAndCwd covers RolloutPath, FindSession's cwd matching, and
-// AnySession — the rollout-locating primitives the harness builds on.
-func TestRolloutDiscoveryAndCwd(t *testing.T) {
+// TestRolloutDiscovery covers RolloutPath — the rollout-locating primitive the
+// harness and launch path build on. It matches on the uuid embedded in the
+// filename alone (no meta parsing), so a rollout resolves wherever its recorded
+// cwd points, matching `codex resume <id>` semantics.
+func TestRolloutDiscovery(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	cwd := t.TempDir()
@@ -41,20 +43,8 @@ func TestRolloutDiscoveryAndCwd(t *testing.T) {
 	if _, ok := RolloutPath("22222222-2222-4222-8222-222222222222"); ok {
 		t.Fatal("RolloutPath matched an unknown uuid")
 	}
-
-	// FindSession returns a candidate only when it equals the recorded cwd.
-	if c, ok := FindSession(uuid, "/other", cwd); !ok || c != cwd {
-		t.Fatalf("FindSession = %q,%v want %q,true", c, ok, cwd)
-	}
-	if _, ok := FindSession(uuid, "/nope"); ok {
-		t.Fatal("FindSession matched a non-candidate cwd")
-	}
-
-	if !AnySession(cwd) {
-		t.Fatalf("AnySession(%q) = false", cwd)
-	}
-	if AnySession("/elsewhere") {
-		t.Fatal("AnySession(/elsewhere) = true")
+	if _, ok := RolloutPath(""); ok {
+		t.Fatal("RolloutPath matched a blank uuid")
 	}
 }
 

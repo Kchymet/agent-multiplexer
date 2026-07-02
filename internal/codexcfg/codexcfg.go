@@ -118,16 +118,28 @@ func looksLikeUUID(s string) bool {
 // RolloutPath returns the path to uuid's rollout file if one exists under the
 // sessions tree, mirroring claudecfg's transcript-locating role. ok is false for
 // a blank uuid or when no rollout is found.
+//
+// This sits on the daemon's poll path (codexHarness.Activity calls it per live
+// codex agent every tick), so unlike eachRollout it matches on filenames alone —
+// no per-file stat — and stops at the first hit. The uuid is embedded in the
+// rollout filename, which is all discovery needs.
 func RolloutPath(uuid string) (string, bool) {
 	if uuid == "" {
 		return "", false
 	}
-	for _, r := range eachRollout() {
-		if r.uuid == uuid {
-			return r.path, true
+	suffix := "-" + uuid + ".jsonl"
+	var found string
+	_ = filepath.WalkDir(sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil // skip an unreadable dir, keep walking siblings
 		}
-	}
-	return "", false
+		if strings.HasPrefix(d.Name(), "rollout-") && strings.HasSuffix(d.Name(), suffix) {
+			found = path
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found, found != ""
 }
 
 // NewRolloutPath builds a fresh, plausible rollout path for uuid under today's
@@ -141,42 +153,6 @@ func NewRolloutPath(uuid string) string {
 	name := "rollout-" + now.Format("2006-01-02T15-04-05") + "-" + uuid + ".jsonl"
 	return filepath.Join(sessionsRoot(),
 		now.Format("2006"), now.Format("01"), now.Format("02"), name)
-}
-
-// FindSession reports the first candidate cwd that uuid's rollout was recorded
-// under, mirroring claudecfg.FindSession: a session pinned under one working-dir
-// convention can have its rollout stored under another, so callers pass every
-// plausible cwd and launch `codex resume` with the one that matches. It is ok
-// only when a rollout for uuid exists AND its recorded cwd equals one of cwds;
-// earlier candidates win on a tie (they're tried in order).
-func FindSession(uuid string, cwds ...string) (cwd string, ok bool) {
-	if uuid == "" {
-		return "", false
-	}
-	path, found := RolloutPath(uuid)
-	if !found {
-		return "", false
-	}
-	rc := rolloutCwd(path)
-	if rc == "" {
-		return "", false
-	}
-	for _, c := range cwds {
-		if sameDir(c, rc) {
-			return c, true
-		}
-	}
-	return "", false
-}
-
-// AnySession reports whether cwd has any saved Codex rollout recorded under it.
-func AnySession(cwd string) bool {
-	for _, r := range eachRollout() {
-		if sameDir(rolloutCwd(r.path), cwd) {
-			return true
-		}
-	}
-	return false
 }
 
 // LatestSession returns the uuid of the newest (by mtime) rollout recorded under

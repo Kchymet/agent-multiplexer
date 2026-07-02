@@ -96,6 +96,12 @@ func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session
 }
 
 func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) (store.Session, error) {
+	// Reject unknown harness kinds before anything is persisted: no action can
+	// edit a session's kind after creation, so a typo'd --agent would otherwise
+	// mint a session that errors on every launch and can only be deleted.
+	if !agent.Known(spec.Agent) {
+		return store.Session{}, fmt.Errorf("unknown agent kind %q", spec.Agent)
+	}
 	agentID := db.NewID()
 	dir := store.AgentDir(rootID, agentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -434,7 +440,15 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	if err != nil {
 		return "", nil, nil, err
 	}
-	env = []string{
+	return dir, AgentEnv(s), argv, nil
+}
+
+// AgentEnv is the extra environment (KEY=VALUE) every pane of an agent gets —
+// the exported amux intent (see the README's philosophy table). It is separate
+// from AgentCommand so the editor and terminal panes can be resolved without
+// running the agent-launch side effects (resume decisions, trust, hook installs).
+func AgentEnv(s store.Session) []string {
+	return []string{
 		"AMUX_WORKGROUP=" + s.ID,
 		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
@@ -442,7 +456,6 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
-	return dir, env, argv, nil
 }
 
 // AgentWorkdir is the directory the editor and terminal panes run in. An agent
@@ -494,26 +507,34 @@ func warnResumeFailed(s store.Session) {
 // disappears. It returns the launch dir (the workspace root; unlike Claude, Codex
 // finds a rollout by uuid regardless of cwd) and the trailing Codex args.
 func codexLaunch(s store.Session, dir, prompt string) (launchDir string, extra []string) {
-	if s.ClaudeID == "" {
-		// No id yet (a fresh codex agent, or one whose stale id we cleared). Adopt
-		// the newest rollout recorded under this dir if there is one — persisting it
-		// so later launches resume it — otherwise start fresh with the prompt.
-		if id, ok := codexcfg.LatestSession(dir); ok {
-			persistClaudeID(s, id)
-			return dir, []string{"resume", id}
+	// A pinned id resumes iff its rollout file still exists. `codex resume <id>`
+	// locates a session by uuid wherever its recorded cwd points (only the picker
+	// and --last filter by cwd), so existence is the exact question — gating on
+	// the rollout's recorded cwd would reject sessions Codex itself can resume.
+	// The generic RestoreTranscript above already gap-filled the rollout from any
+	// captured backup.
+	if s.ClaudeID != "" {
+		if _, ok := codexcfg.RolloutPath(s.ClaudeID); ok {
+			core.ClearNotice(s.ClaudeID)
+			return dir, []string{"resume", s.ClaudeID}
 		}
-		return dir, freshExtra(prompt)
+		warnResumeFailed(s)
 	}
-	// An id is pinned. The generic RestoreTranscript above already gap-filled its
-	// rollout from any captured backup; resume only when the rollout really exists
-	// under a candidate cwd. Otherwise warn, clear the id so the next launch adopts
-	// the newest rollout instead of warning forever, and start fresh.
-	if _, ok := codexcfg.FindSession(s.ClaudeID, resumeCwds(s)...); ok {
-		core.ClearNotice(s.ClaudeID)
-		return dir, []string{"resume", s.ClaudeID}
+	// No usable pin (fresh agent, or the pinned rollout is gone). Adopt the newest
+	// rollout recorded under this dir if there is one — persisting it so later
+	// launches resume it. When this replaces a lost pin, key the rail notice under
+	// the adopted id: the rail reads notices by the pinned id, so one left under
+	// the lost id would never render.
+	if id, ok := codexcfg.LatestSession(dir); ok {
+		if s.ClaudeID != "" && id != s.ClaudeID {
+			_ = core.WriteNotice(id, "couldn't resume pinned conversation — resumed the newest one instead")
+		}
+		persistClaudeID(s, id)
+		return dir, []string{"resume", id}
 	}
-	warnResumeFailed(s)
-	persistClaudeID(s, "")
+	if s.ClaudeID != "" {
+		persistClaudeID(s, "")
+	}
 	return dir, freshExtra(prompt)
 }
 

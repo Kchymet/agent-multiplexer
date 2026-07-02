@@ -1,9 +1,12 @@
 package panespec
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/store"
 )
 
 // hasBind reports whether binds contains an entry mounting src (its second
@@ -37,6 +40,48 @@ func TestTerminalScopeStillBindsMntWsl(t *testing.T) {
 	binds := configBinds(TabTerminal, "claude", "/home/tester")
 	if !hasBind(binds, "/mnt/wsl") {
 		t.Errorf("TabTerminal scope missing /mnt/wsl bind; got %v", binds)
+	}
+}
+
+// Resolving the editor or terminal tab must not run the agent-launch side
+// effects: the codex resume decision can rewrite the pinned conversation id in
+// the store, and merely viewing a non-agent tab must never do that (a transient
+// rollout-discovery miss would otherwise wipe the pin).
+func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex")) // empty: pinned rollout is missing
+	t.Setenv("AMUX_JAIL", "off")
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pinned := "99999999-9999-4999-8999-999999999999"
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, ClaudeID: pinned}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	for _, tab := range []int{TabEditor, TabTerminal} {
+		if _, _, _, err := Resolve("a", tab); err != nil {
+			t.Fatalf("Resolve(tab=%d) = %v", tab, err)
+		}
+	}
+
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, ok, _ := db.GetSession("a")
+	if !ok || s.ClaudeID != pinned {
+		t.Fatalf("viewing editor/terminal tabs must not touch the pinned id, got %q", s.ClaudeID)
 	}
 }
 
