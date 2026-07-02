@@ -50,6 +50,8 @@ func main() {
 		err = cmdServe(args)
 	case "harness":
 		err = cmdHarness()
+	case "provide":
+		err = cmdProvide(args)
 	case "_vtdemo": // hidden: embedded-terminal fidelity check (Phase 0 spike)
 		err = vtdemo.Run(args)
 	case "agent":
@@ -104,6 +106,7 @@ usage: amux <command>
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
+  provide <addr>     dial a remote orchestrator and serve panes (provider mode)
   daemon             run the daemon in the foreground (usually automatic)
   version            print version
 

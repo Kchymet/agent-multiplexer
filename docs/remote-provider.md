@@ -1,14 +1,17 @@
 # amux as a remote compute provider
 
-Status: Protocol v2 primitives implemented; provider mode (the `amux provide`
-command that drives them) not yet wired.
+Status: Implemented. `amux provide` (package `internal/provider`) drives the v2
+protocol end to end.
 
 Landed: the TLS + bearer-token seam at the wire boundary (`internal/wiretls`,
 shared with the mux server — see `client-server.md`), the harnessproto v2 message
 types and codec (`register`/`registered`/`ping`/`pong`/`reset`, per-pane `seq`),
-version negotiation and a constant-time token check. Still to build (provider
-mode): the dial-out FSM, reconnect/backoff, per-pane replay buffers, and the
-`amux provide` CLI described under "Provider mode UX" below.
+version negotiation and a constant-time token check, and — in `internal/provider`
+— the dial-out FSM, jittered exponential reconnect/backoff, per-pane replay
+buffers (4 MiB cap / 256 KiB keep-tail + `reset`), pane survival across
+disconnects within the grace window, `PaneOffer`/`AdoptPane` resume with
+`afterSeq` replay, and the ping/pong heartbeat. See the `amux provide` command
+under "Provider mode UX" below.
 
 amux's harness already runs pane execution behind a protocol
 (`internal/harnessproto` — see `docs/client-server.md`): an orchestrating side
@@ -116,8 +119,9 @@ unchanged and still spoken by `amux harness`.
 - Grace expiry, or the orchestrator listing a pane under `kill`: the pane is
   terminated and its buffer discarded. A provider process restart loses all
   panes (PTYs are children); the next `register` simply offers none.
-- Operator stop drains: no new spawns, panes exit and report, then the
-  connection closes.
+- Operator stop (SIGINT/SIGTERM): the current implementation terminates panes
+  and closes the connection immediately, rather than draining (letting panes
+  exit and report first). Graceful drain-on-stop is a future refinement.
 
 ### Spawn conventions
 
@@ -127,19 +131,39 @@ its own directory. `paneId`s are minted by the orchestrator and stable across
 reconnect+adopt. First-class workspace provisioning (a `prepare` message) is
 a possible future extension, not part of v2.
 
-## Provider mode UX (planned shape)
+## Provider mode UX
 
 ```
-amux provide --orchestrator orch.example.com:7443 \
+amux provide orch.example.com:7443 \
              --token-file ~/.config/amux/provider.token \
              --label zone=home --label gpu=none \
-             [--ca /path/to/private-ca.pem] [--name mybox]
+             --feature cuda --feature bigdisk \
+             [--ca /path/to/private-ca.pem] [--name mybox] \
+             [--max-panes 8] [--server-name mybox.internal]
 ```
 
-Config may also live in amux's config file (orchestrator address, token path,
-labels, display name). `--name` defaults to the hostname. Logs report the
-FSM plainly: dialing, registered (with negotiated version and providerId),
-degraded, backoff, terminal errors.
+The orchestrator address is the positional argument (or `--orchestrator`); a
+`tls:` scheme prefix is accepted and stripped (provider mode is always TLS).
+Logs report the FSM plainly: dialing, registered (with negotiated version and
+providerId), disconnect/grace, backoff, and terminal errors.
+
+Configuration resolves from flags first, then these env vars (matching amux's
+`AMUX_*` convention):
+
+| Setting | Flag | Env var |
+|---|---|---|
+| Bearer token | `--token-file` (path; never argv) | `AMUX_PROVIDER_TOKEN` |
+| Display name | `--name` | `AMUX_PROVIDER_NAME` (default: hostname) |
+| Scheduling labels | `--label k=v` (repeatable) | `AMUX_PROVIDER_LABELS` (comma-separated `k=v`) |
+| Feature capabilities | `--feature s` (repeatable) | `AMUX_PROVIDER_FEATURES` (comma-separated) |
+| Max panes capability | `--max-panes` | `AMUX_PROVIDER_MAX_PANES` |
+| Private CA | `--ca` | `AMUX_TLS_CA` |
+| TLS server name | `--server-name` | `AMUX_TLS_SERVERNAME` |
+
+Flags and env vars merge for labels and features (flags win on conflict).
+Feature strings are opaque: amux never interprets or hardcodes them — the
+orchestrator matches on them by convention. `bwrap`, `os`, and `arch`
+capabilities are detected automatically (`bwrap` is probed on `$PATH`).
 
 ## Failure behavior summary
 
