@@ -63,6 +63,18 @@ type Config struct {
 	// to one second.
 	SessionPollInterval time.Duration
 
+	// RuntimeEvents opts into the "runtime-events" feature (docs/remote-provider-
+	// sessions.md §4): for a published session the provider streams structured
+	// transcript events derived from the local runtime's on-disk session record.
+	// Off by default; requires PublishSessions and a non-nil RuntimeEventStream.
+	// Read-only — there is no input path.
+	RuntimeEvents bool
+	// RuntimeEventStream produces seq-ordered event batches for one session,
+	// resumable from afterSeq, running until ctx is cancelled. ok=false ⇒ the
+	// session has no structured record (the feature is advertised but that session
+	// emits nothing — honest degradation). Required for "runtime-events".
+	RuntimeEventStream func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool)
+
 	// Dial, when set, overrides the default TLS dialer (used by tests to run over
 	// an in-memory pipe). Production leaves it nil.
 	Dial func(context.Context) (net.Conn, error)
@@ -184,6 +196,15 @@ type session struct {
 	// and then push on change.
 	subscribe chan struct{}
 	subOnce   sync.Once
+
+	// "runtime-events" feature: rtCtx is cancelled on session teardown to stop all
+	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session;
+	// rtWG waits the pumps out before the connection is considered torn down.
+	rtCtx    context.Context
+	rtCancel context.CancelFunc
+	rtMu     sync.Mutex
+	rtSubs   map[string]bool
+	rtWG     sync.WaitGroup
 }
 
 func (s *session) cancel() { s.once.Do(func() { close(s.done) }) }
@@ -253,12 +274,16 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 
 	sent := p.applyDirectives(m.Adopt, m.Kill)
 
+	rtCtx, rtCancel := context.WithCancel(ctx)
 	s := &session{
 		hc:        hc,
 		done:      make(chan struct{}),
 		wake:      make(chan struct{}, 1),
 		lastPong:  time.Now().UnixNano(),
 		subscribe: make(chan struct{}),
+		rtCtx:     rtCtx,
+		rtCancel:  rtCancel,
+		rtSubs:    map[string]bool{},
 	}
 	p.mu.Lock()
 	p.wake = s.wake
@@ -281,8 +306,10 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	case <-ctx.Done():
 	}
 	s.cancel()
+	rtCancel()      // stop the per-session runtime-events pumps
 	_ = conn.Close() // unblock the reader's ReadMux
 	wg.Wait()
+	s.rtWG.Wait()
 
 	p.mu.Lock()
 	if p.wake == s.wake {
@@ -329,26 +356,40 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 }
 
 // features is the advertised feature list: the opaque config strings plus, when
-// enabled, the "sessions" feature (opt-in publishing). A duplicate is never
-// appended, so an operator listing "sessions" in --feature is harmless.
+// enabled, the "sessions" and "runtime-events" features. A duplicate is never
+// appended, so an operator listing either in --feature is harmless.
 func (p *Provider) features() []string {
-	if !p.publishing() {
-		return p.cfg.Features
+	out := append([]string(nil), p.cfg.Features...)
+	if p.publishing() {
+		out = appendUnique(out, harnessproto.SessionsFeature)
 	}
-	for _, f := range p.cfg.Features {
-		if f == harnessproto.SessionsFeature {
-			return p.cfg.Features
+	if p.runtimeEventsActive() {
+		out = appendUnique(out, harnessproto.RuntimeEventsFeature)
+	}
+	return out
+}
+
+// appendUnique appends f unless it is already present.
+func appendUnique(list []string, f string) []string {
+	for _, x := range list {
+		if x == f {
+			return list
 		}
 	}
-	out := make([]string, 0, len(p.cfg.Features)+1)
-	out = append(out, p.cfg.Features...)
-	return append(out, harnessproto.SessionsFeature)
+	return append(list, f)
 }
 
 // publishing reports whether the "sessions" feature is active: opted in and with
 // an inventory source to publish.
 func (p *Provider) publishing() bool {
 	return p.cfg.PublishSessions && p.cfg.Sessions != nil
+}
+
+// runtimeEventsActive reports whether the "runtime-events" feature is active: it
+// rides on published sessions (it streams events for sessions the daemon
+// publishes) and needs an event source.
+func (p *Provider) runtimeEventsActive() bool {
+	return p.publishing() && p.cfg.RuntimeEvents && p.cfg.RuntimeEventStream != nil
 }
 
 // paneOffers lists surviving panes for the register resume offer.
@@ -418,6 +459,8 @@ func (p *Provider) readLoop(s *session) {
 			p.onSessionsSubscribe(s)
 		case harnessproto.MSessionAction:
 			p.handleSessionAction(s, m)
+		case harnessproto.MRuntimeEventsSubscribe:
+			p.onRuntimeEventsSubscribe(s, m)
 		}
 	}
 }

@@ -6,6 +6,7 @@ package harnessproto
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"io"
 
 	"amux/internal/core"
@@ -39,6 +40,12 @@ const (
 	// "sessions" feature in register.
 	MSessionsSubscribe = "sessions-subscribe" // begin receiving the provider's session inventory
 	MSessionAction     = "session-action"     // a session lifecycle verb to execute
+
+	// v2 "runtime-events" feature (opt-in, docs/remote-provider-sessions.md §4):
+	// orchestrator -> provider. Never sent unless the provider advertised
+	// "runtime-events". The orchestrator subscribes per published session (and
+	// resumes from afterSeq); read-only — there is no input counterpart.
+	MRuntimeEventsSubscribe = "runtime-events-subscribe" // begin receiving a session's structured transcript events
 )
 
 // Harness -> server message types. In v2 the "harness" role is the provider and
@@ -54,12 +61,23 @@ const (
 	// v2 "sessions" feature: provider -> orchestrator.
 	HSessions      = "sessions"       // full session-inventory snapshot (replaces the previous one)
 	HSessionResult = "session-result" // result of a session-action
+
+	// v2 "runtime-events" feature: provider -> orchestrator. A batch of structured
+	// transcript events for one published session, seq-ordered (docs/
+	// remote-provider-sessions.md §4).
+	HRuntimeEvents = "runtime-events"
 )
 
 // SessionsFeature is the feature string a provider advertises in
 // register.capabilities.features to opt into publishing its session inventory
 // and accepting session lifecycle verbs (docs/remote-provider-sessions.md §1).
 const SessionsFeature = "sessions"
+
+// RuntimeEventsFeature is the feature string a provider advertises to opt into
+// streaming structured transcript events for the sessions it publishes
+// (docs/remote-provider-sessions.md §1/§4). It is independent of and additive to
+// "sessions": a provider may advertise "sessions" alone (status-only inventory).
+const RuntimeEventsFeature = "runtime-events"
 
 // Session lifecycle verbs the "sessions" feature accepts (spec §3). Anything
 // else — including any pane/terminal verb — is rejected with
@@ -84,6 +102,28 @@ const (
 	ErrRevoked    = "revoked"
 	ErrBadVersion = "unsupported-version"
 )
+
+// RuntimeEvent is one structured transcript event derived from a runtime's
+// on-disk session record (docs/remote-provider-sessions.md §4). The envelope is
+// intentionally generic — a stable, documented vocabulary of Type strings, an
+// optional coalescing ItemID, an optional Direction, and an opaque Payload — so
+// amux carries no orchestrator-specific schema. Consumers MUST pass an unknown
+// Type through rather than dropping it.
+type RuntimeEvent struct {
+	Type      string          `json:"type"`
+	ItemID    string          `json:"item_id,omitempty"`
+	Direction string          `json:"direction,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+// RuntimeEventBatch groups a seq-ordered slice of RuntimeEvents with the ordinal
+// of its last event. It is the internal handoff a runtime-events source hands the
+// provider to frame — not itself a wire type (the provider unpacks it into a
+// runtime-events HarnessMsg). Seq is per-session monotonic.
+type RuntimeEventBatch struct {
+	Seq    int64
+	Events []RuntimeEvent
+}
 
 // Capabilities advertises what a provider can run, for orchestrator scheduling.
 type Capabilities struct {
@@ -139,6 +179,10 @@ type MuxMsg struct {
 	ID     string            `json:"id,omitempty"`     // session-action: target session id
 	Target string            `json:"target,omitempty"` // session-action: move destination (reserved)
 	Fields map[string]string `json:"fields,omitempty"` // session-action: form fields (mirror the daemon's own clients)
+
+	// v2 "runtime-events" feature (runtime-events-subscribe).
+	SessionID string `json:"sessionId,omitempty"` // runtime-events-subscribe: the published session to stream
+	AfterSeq  int64  `json:"afterSeq,omitempty"`  // runtime-events-subscribe: resume cursor (emit events with seq > afterSeq)
 }
 
 // HarnessMsg is a harness -> server message (v2: provider -> orchestrator).
@@ -164,6 +208,14 @@ type HarnessMsg struct {
 	ReqID    string         `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
 	OK       bool           `json:"ok,omitempty"`       // session-result: verb succeeded
 	NewID    string         `json:"newId,omitempty"`    // session-result: id of any session the verb created
+
+	// v2 "runtime-events" feature (runtime-events frame). SessionID names the
+	// published session; Seq is per-session monotonic (the ordinal of the last
+	// event in Events); Events is a seq-ordered batch of structured transcript
+	// events. A resuming consumer subscribes with afterSeq and receives only
+	// events whose ordinal exceeds it.
+	SessionID string         `json:"sessionId,omitempty"`
+	Events    []RuntimeEvent `json:"events,omitempty"`
 }
 
 // Conn is a typed harnessproto connection.

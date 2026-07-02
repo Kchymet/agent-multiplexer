@@ -12,11 +12,14 @@ import (
 	"strings"
 	"syscall"
 
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/engine"
 	"amux/internal/provider"
+	"amux/internal/runtimeevents"
 	"amux/internal/source"
+	"amux/internal/store"
 	"amux/internal/wiretls"
 )
 
@@ -42,6 +45,7 @@ func cmdProvide(args []string) error {
 		maxPanes   = fs.Int("max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
 		publishSes = fs.Bool("publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
 		readOnly   = fs.Bool("read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
+		rtEvents   = fs.Bool("runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
 		labels     multiFlag
 		features   multiFlag
 	)
@@ -94,6 +98,7 @@ func cmdProvide(args []string) error {
 
 	publish := *publishSes || envBool("AMUX_PROVIDER_PUBLISH_SESSIONS")
 	readonly := *readOnly || envBool("AMUX_PROVIDER_SESSIONS_READONLY")
+	runtimeEvents := *rtEvents || envBool("AMUX_PROVIDER_RUNTIME_EVENTS")
 
 	cfg := provider.Config{
 		Orchestrator: addr,
@@ -120,6 +125,14 @@ func cmdProvide(args []string) error {
 		cfg.Sessions = ws.Poll
 		if !readonly {
 			cfg.ApplyAction = applyViaDaemon
+		}
+		if runtimeEvents {
+			// Structured transcripts: tail each published session's on-disk runtime
+			// record (Claude Code JSONL, located via the conversation id amux pins)
+			// and stream contract events. Read-only; a session with no record on disk
+			// simply emits nothing (honest degradation).
+			cfg.RuntimeEvents = true
+			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(claudeRecordResolver(), 0)
 		}
 	}
 
@@ -187,6 +200,41 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 			}
 			return f.Result.NewID, nil
 		}
+	}
+}
+
+// claudeRecordResolver resolves a published session id to its Claude Code
+// transcript path: first via the daemon's store (the pinned conversation id +
+// working dir), then by scanning the projects root for a session whose id is the
+// published id (untracked/console sessions publish the Claude uuid directly). It
+// returns ok=false when no on-disk record is found — the provider then advertises
+// runtime-events but emits nothing for that session (honest degradation).
+func claudeRecordResolver() runtimeevents.PathResolver {
+	return func(sessionID string) (string, bool) {
+		if sessionID == "" {
+			return "", false
+		}
+		if db, err := store.Open(); err == nil {
+			s, ok, _ := db.GetSession(sessionID)
+			db.Close()
+			if ok && s.ClaudeID != "" {
+				// Prefer the dir the transcript actually lives under (amux's dir
+				// convention has shifted over time); fall back to the recorded dir.
+				if cwd, found := claudecfg.FindSession(s.ClaudeID, s.Dir); found {
+					return claudecfg.TranscriptPath(cwd, s.ClaudeID), true
+				}
+				if s.Dir != "" {
+					return claudecfg.TranscriptPath(s.Dir, s.ClaudeID), true
+				}
+			}
+		}
+		// Untracked/console: the published id is itself the Claude conversation id.
+		for _, info := range claudecfg.ListSessions() {
+			if info.ID == sessionID {
+				return info.Path, true
+			}
+		}
+		return "", false
 	}
 }
 

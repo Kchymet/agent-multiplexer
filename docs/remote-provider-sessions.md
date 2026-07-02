@@ -1,9 +1,10 @@
 # Remote provider: publishing sessions to your orchestrator
 
-Status: the `sessions` feature (§1–§3) is **implemented** (opt-in; see
-[Configuration](#6-configuration)). `runtime-events` (§4) remains specified but
-unimplemented — a daemon that advertises `sessions` does not advertise
-`runtime-events`. Extends `docs/remote-provider.md`.
+Status: the `sessions` feature (§1–§3) and the `runtime-events` feature (§4) are
+both **implemented** (opt-in; see [Configuration](#6-configuration)). A daemon
+advertises `runtime-events` only when it is enabled *alongside* `--publish-sessions`
+(it streams transcripts for the sessions `sessions` publishes). Extends
+`docs/remote-provider.md`.
 
 Provider mode (`amux provide`) lets a remote orchestrator use this machine as
 compute: it spawns panes here and streams their I/O. This document specifies an
@@ -112,33 +113,79 @@ local configuration (e.g. read-only publishing: inventory yes, verbs no).
 
 ## 4. Structured transcript events (`runtime-events`)
 
-When negotiated, the daemon may stream structured events for a published
-session — e.g. derived from an agent runtime's on-disk session record — so the
-orchestrator can render a transcript without any PTY access:
+When negotiated, the daemon streams structured events for a published session —
+derived by a daemon-side reader of the local runtime's on-disk session record —
+so the orchestrator can render a transcript without any PTY access.
+
+### 4.1 Subscribe (orchestrator → daemon)
+
+The orchestrator opts in per session, resuming from a cursor:
+
+```json
+{"type":"runtime-events-subscribe","sessionId":"a2","afterSeq":40}
+```
+
+The daemon streams nothing for a session until it receives this. `afterSeq` is a
+resume cursor: the daemon emits only events whose ordinal exceeds it (`0` = from
+the start). A daemon with no structured record for the named session simply emits
+nothing for it (honest degradation) — the feature stays advertised.
+
+### 4.2 Events (daemon → orchestrator)
 
 ```json
 {"type":"runtime-events","sessionId":"a2","seq":41,"events":[
   {"type":"text","item_id":"m3","direction":"out","payload":{"text":"…"}},
-  {"type":"tool_call","item_id":"t9","payload":{"name":"edit","input":{…}}}
+  {"type":"tool_call","item_id":"t9","direction":"out","payload":{"title":"edit","input":"…"}}
 ]}
 ```
 
 - The event envelope is intentionally generic: `type`, optional `item_id`,
-  optional `direction`, and an opaque `payload`. Producers SHOULD use a stable,
-  documented vocabulary; consumers MUST pass unknown event types through rather
-  than dropping them.
-- `seq` is per-session monotonic so a consumer can resume (`runtime-events-
-  subscribe {sessionId, afterSeq}`) without replaying everything.
-- Streaming is read-only by definition; there is no input counterpart in this
-  extension.
+  optional `direction` (`in`/`out`/`meta`), and an opaque `payload`. Producers
+  SHOULD use a stable, documented vocabulary; consumers MUST pass an unknown
+  `type` through rather than dropping it.
+- **Vocabulary the daemon emits** (a stable set; a consumer maps it onto its own
+  model): `turn_start`, `prompt` (`in`), `text`, `thinking`, `tool_call`,
+  `tool_result`, `plan`, `usage` (`meta`), `notice` (`meta`), `turn_end`, and
+  `raw`. `raw` carries `{runtime, native_type, body}` and is the passthrough for
+  any record entry the reader has no mapping for — **never dropped**.
+- `seq` is per-session monotonic — the ordinal of the **last** event in `events`;
+  the batch is ascending, so the first event's ordinal is `seq − len(events) + 1`.
+  A consumer resumes by subscribing with `afterSeq` = the highest ordinal it has
+  stored. Ordinals are assigned deterministically by record position, so a
+  consumer that keys on the ordinal ingests a re-sent prefix idempotently.
+- Read tolerance: the record file may not exist yet (nothing is emitted until it
+  appears), grows by append (only new complete lines are read; a partial trailing
+  line waits for its newline), or is rotated/truncated (detected by inode change
+  or a size shrink; the reader restarts from the top).
+- Streaming is read-only by definition; there is no input counterpart. It never
+  opens, reads, or writes a pane.
+
+### 4.3 Claude Code mapping (the first runtime)
+
+The daemon locates a Claude Code session's transcript from the conversation id it
+pins per session (`<projects>/<munged-cwd>/<uuid>.jsonl`) and maps each JSONL
+record to the vocabulary above:
+
+| JSONL record | event(s) |
+| --- | --- |
+| `user`, string content | `turn_start` + `prompt` (`in`) |
+| `user`, `tool_result` block | `tool_result` (file diffs recovered from the matching `tool_use` input) |
+| `assistant`, `text` block | `text` (`final`; `item_id` = message id + block index) |
+| `assistant`, `thinking` block | `thinking` |
+| `assistant`, `tool_use` block | `tool_call` (`kind` from tool name); `TodoWrite` → `plan` |
+| `assistant` `message.usage` | `usage` |
+| `assistant` non-tool `stop_reason` | `turn_end` |
+| `system` / `summary` | `notice` |
+| anything else (unparsable, or `mode`/`ai-title`/… state records) | `raw` (never dropped) |
+
+Codex's session/rollout files are a later runtime under the same envelope.
 
 ## 5. Compatibility
 
 - These are additive messages behind feature negotiation — protocol version 2
   is unchanged, and peers that don't negotiate the features never see them.
 - A daemon may implement `sessions` without `runtime-events` (status-only
-  inventory) — consumers should expect that and render inventory alone. The
-  current implementation does exactly this: it advertises `sessions` only.
+  inventory) — consumers should expect that and render inventory alone.
 
 ## 6. Configuration
 
@@ -148,6 +195,7 @@ The feature is off by default. Enable it on `amux provide`:
 | --- | --- | --- |
 | `--publish-sessions` | `AMUX_PROVIDER_PUBLISH_SESSIONS=1` | advertise `sessions`, publish inventory, accept lifecycle verbs |
 | `--read-only-sessions` | `AMUX_PROVIDER_SESSIONS_READONLY=1` | publish inventory but reject every verb with an error |
+| `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code first). Requires `--publish-sessions`. |
 
 With `--publish-sessions`, the published rail is the daemon's own session
 inventory — a store-backed poll annotated with engine liveness (read from the
@@ -157,3 +205,10 @@ so the daemon stays authoritative (it owns the engine that `start` needs and the
 re-poll that surfaces a change); if no daemon is reachable, verbs fail cleanly.
 Feature strings passed via `--feature`/`AMUX_PROVIDER_FEATURES` are orthogonal
 and still advertised alongside `sessions`.
+
+With `--runtime-events` (which requires `--publish-sessions`), the daemon also
+advertises `runtime-events` and, for each published session the orchestrator
+subscribes to, tails that session's on-disk runtime record and streams §4 events.
+For Claude Code it resolves the record from the conversation id the daemon pins
+per session; a session with no record on disk emits nothing. It is strictly
+read-only — no input path, no pane.
