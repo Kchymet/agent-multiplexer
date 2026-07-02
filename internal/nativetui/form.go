@@ -70,8 +70,9 @@ func (m *model) openNewWorkgroupForm() {
 		submit: "Create workgroup",
 		fields: []*formField{
 			{key: "name", label: "Name"},
+			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos (first agent)", picker: true},
-			{key: "prompt", label: "Description"},
+			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
 			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
 			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
 			{key: "linear", label: "Linear issue/URL"},
