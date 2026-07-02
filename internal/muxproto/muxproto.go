@@ -5,6 +5,7 @@
 package muxproto
 
 import (
+	"crypto/subtle"
 	"io"
 
 	"amux/internal/core"
@@ -38,13 +39,21 @@ const (
 	SSnapshot   = "snapshot"
 	SResult     = "result"
 	SPaneOutput = "pane.output"
+	SPaneReset  = "pane.reset" // client must clear its emulator before the next output (PaneID)
 	SPaneExit   = "pane.exit"
+)
+
+// Terminal welcome errors: the server rejects the connection and closes it.
+const (
+	ErrBadToken   = "bad-token"           // token missing or mismatched
+	ErrBadVersion = "unsupported-version" // no common protocol version
 )
 
 // ClientMsg is a UI -> server message. Type selects which fields apply.
 type ClientMsg struct {
 	Type    string            `json:"type"`
 	Version int               `json:"version,omitempty"` // hello
+	Token   string            `json:"token,omitempty"`   // hello: bearer credential (blank when auth is off)
 	Action  string            `json:"action,omitempty"`  // action: lifecycle verb (mirrors core.Action)
 	ID      string            `json:"id,omitempty"`      // action / pane target id
 	Target  string            `json:"target,omitempty"`  // action: move destination
@@ -91,4 +100,14 @@ func (c *Conn) ReadClient() (ClientMsg, error) {
 	var m ClientMsg
 	err := c.w.Read(&m)
 	return m, err
+}
+
+// TokenOK reports whether a presented token authenticates against the configured
+// one. An empty configured token disables auth (local, trusted transports). The
+// comparison is constant-time so a caller can't learn the token by timing.
+func TokenOK(configured, presented string) bool {
+	if configured == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(configured), []byte(presented)) == 1
 }
