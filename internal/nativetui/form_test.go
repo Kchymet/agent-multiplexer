@@ -1,6 +1,7 @@
 package nativetui
 
 import (
+	"slices"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -96,13 +97,92 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	// Navigate from the prompt field down to the model selector with j, then
 	// cycle forward with l. opus -> sonnet.
 	m.handleForm(key("j")) // prompt -> mode
-	m.handleForm(key("j")) // mode -> model
+	m.handleForm(key("j")) // mode -> agent (Harness)
+	m.handleForm(key("j")) // agent -> model
 	if m.form.active() != modelField {
 		t.Fatal("j navigation did not land on the model field")
 	}
 	m.handleForm(key("l"))
 	if got := modelField.value; got != store.ModelSonnet {
 		t.Fatalf("after cycling: got %q, want %q", got, store.ModelSonnet)
+	}
+}
+
+// Every agent-creating form offers a Harness selector defaulting to claude, so
+// the daemon receives an explicit harness pick (and the workgroup's first agent
+// honors it).
+func TestFormsCarryHarnessField(t *testing.T) {
+	cases := []struct {
+		name string
+		open func(*model)
+	}{
+		{"new-repo-agent", func(m *model) { m.openNewRepoAgentForm("repo", "Repo") }},
+		{"add-agent", func(m *model) { m.openAddAgentForm("root", "Root") }},
+		{"new-workgroup", func(m *model) { m.openNewWorkgroupForm() }},
+	}
+	for _, tc := range cases {
+		m := &model{}
+		tc.open(m)
+		f := m.form.field("agent")
+		if f == nil {
+			t.Fatalf("%s: no harness field", tc.name)
+		}
+		if !f.isSelect() {
+			t.Fatalf("%s: harness field should be a selector", tc.name)
+		}
+		if got := f.value; got != "claude" {
+			t.Fatalf("%s: default harness got %q, want claude", tc.name, got)
+		}
+		if !slices.Equal(f.options, store.Harnesses) {
+			t.Fatalf("%s: harness options got %v, want %v", tc.name, f.options, store.Harnesses)
+		}
+	}
+}
+
+// Cycling the Harness selector reconciles the dependent Model selector: codex's
+// models replace claude's, and the now-invalid opus default resets to codex's
+// default. Cycling back to claude restores the claude models (and default).
+func TestHarnessCyclesModelOptions(t *testing.T) {
+	m := &model{}
+	m.openNewRepoAgentForm("repo", "Repo")
+
+	// prompt -> mode -> agent (Harness), then cycle claude -> codex.
+	m.handleForm(key("j"))
+	m.handleForm(key("j"))
+	if m.form.active() != m.form.field("agent") {
+		t.Fatal("j navigation did not land on the harness field")
+	}
+	m.handleForm(key("l"))
+
+	model := m.form.field("model")
+	if !slices.Equal(model.options, store.ModelsFor("codex")) {
+		t.Fatalf("model options after codex: got %v, want %v", model.options, store.ModelsFor("codex"))
+	}
+	if got := model.value; got != store.DefaultModel("codex") {
+		t.Fatalf("invalid model should reset: got %q, want %q", got, store.DefaultModel("codex"))
+	}
+
+	// Back to claude restores the claude list and its default.
+	m.handleForm(key("h"))
+	if !slices.Equal(model.options, store.ModelsFor("claude")) {
+		t.Fatalf("model options after claude: got %v, want %v", model.options, store.ModelsFor("claude"))
+	}
+	if got := model.value; got != store.DefaultModel("claude") {
+		t.Fatalf("model should reset to claude default: got %q, want %q", got, store.DefaultModel("claude"))
+	}
+}
+
+// The agent-creating form serializes both the harness and model picks into the
+// action fields the daemon consumes.
+func TestAgentFormSubmitsHarnessAndModel(t *testing.T) {
+	m := &model{}
+	m.openNewRepoAgentForm("repo", "Repo")
+	v := m.form.values()
+	if got := v["agent"]; got != "claude" {
+		t.Fatalf("agent field: got %q, want claude", got)
+	}
+	if got := v["model"]; got != store.DefaultModel("claude") {
+		t.Fatalf("model field: got %q, want %q", got, store.DefaultModel("claude"))
 	}
 }
 

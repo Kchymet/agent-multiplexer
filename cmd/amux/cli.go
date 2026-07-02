@@ -9,8 +9,10 @@ import (
 	"strings"
 
 	"amux/internal/claudecfg"
+	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/gh"
+	"amux/internal/store"
 )
 
 // This file is the CLI surface for repos and workgroups. It is deliberately a
@@ -45,6 +47,7 @@ func cmdName(args []string) error {
 // AgentSpec but keeps the CLI free of the store/wsops layer.
 type agentCfg struct {
 	Repos  []string
+	Agent  string // harness: claude | codex (defaults to claude)
 	Mode   string
 	Model  string
 	Prompt string
@@ -231,7 +234,7 @@ func cmdSession(args []string) error {
 		// Non-interactive: amux session add <root> <repo>... [--mode m] [--model M] [--prompt t]
 		repos, cfg := parseCreateFlags(args[2:])
 		id, err := sendActionID(core.Action{Action: "add-agent", ID: args[1], Fields: map[string]string{
-			"repos": strings.Join(repos, ","), "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
+			"repos": strings.Join(repos, ","), "agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
 		}})
 		if err != nil {
 			return err
@@ -244,7 +247,7 @@ func cmdSession(args []string) error {
 		// Creates a workgroup plus one default agent scoped to the given repos.
 		repos, cfg := parseCreateFlags(args[1:])
 		rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: map[string]string{
-			"name": cfg.name, "repos": strings.Join(repos, ","),
+			"name": cfg.name, "repos": strings.Join(repos, ","), "agent": cfg.agent,
 			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
 		}})
 		if err != nil {
@@ -261,7 +264,7 @@ func cmdSession(args []string) error {
 		}
 		_, cfg := parseCreateFlags(args[2:])
 		id, err := sendActionID(core.Action{Action: "new-repo-agent", ID: args[1], Fields: map[string]string{
-			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
+			"agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
 		}})
 		if err != nil {
 			return err
@@ -367,7 +370,7 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 	var agents []agentCfg
 	// A seed repo (e.g. from the rail) pre-configures a first agent scoped to it.
 	if len(seedRepos) > 0 {
-		agents = append(agents, agentCfg{Repos: seedRepos, Mode: "task", Model: claudecfg.PreferredModel()})
+		agents = append(agents, agentCfg{Repos: seedRepos, Agent: "claude", Mode: "task", Model: defaultModelFor("claude")})
 	}
 
 	for {
@@ -410,8 +413,9 @@ func createWorkspace(name string, agents []agentCfg) error {
 	fields := map[string]string{"name": name}
 	if len(agents) == 0 {
 		fields["defaultAgent"] = "1"
+		fields["agent"] = "claude"
 		fields["mode"] = "task"
-		fields["model"] = claudecfg.PreferredModel()
+		fields["model"] = defaultModelFor("claude")
 	}
 	rootID, err := sendActionID(core.Action{Action: "create-workspace", Fields: fields})
 	if err != nil {
@@ -419,7 +423,7 @@ func createWorkspace(name string, agents []agentCfg) error {
 	}
 	for _, a := range agents {
 		if _, err := sendActionID(core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{
-			"repos": strings.Join(a.Repos, ","), "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
+			"repos": strings.Join(a.Repos, ","), "agent": a.Agent, "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
 		}}); err != nil {
 			return err
 		}
@@ -436,7 +440,7 @@ func sessionAdd(ctx context.Context, rootID string) error {
 		return nil
 	}
 	id, err := sendActionID(core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{
-		"repos": strings.Join(a.Repos, ","), "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
+		"repos": strings.Join(a.Repos, ","), "agent": a.Agent, "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
 	}})
 	if err != nil {
 		return err
@@ -453,15 +457,17 @@ func sessionAdd(ctx context.Context, rootID string) error {
 // cancels.
 func configureAgent(ctx context.Context, in *bufio.Reader) (agentCfg, bool) {
 	a := agentCfg{
-		Mode:  "task",                     // default: task-style work
-		Model: claudecfg.PreferredModel(), // default: your usual model
+		Agent: "claude",                  // default harness: Claude Code
+		Mode:  "task",                    // default: task-style work
+		Model: defaultModelFor("claude"), // default: your usual model
 	}
 	for {
 		menu := []string{
-			fmt.Sprintf("Repos  › %s", orNone(strings.Join(a.Repos, ", "))),
-			fmt.Sprintf("Mode   › %s", a.Mode),
-			fmt.Sprintf("Model  › %s", orDefault(a.Model)),
-			fmt.Sprintf("Prompt › %s", orOptional(a.Prompt)),
+			fmt.Sprintf("Repos   › %s", orNone(strings.Join(a.Repos, ", "))),
+			fmt.Sprintf("Harness › %s", a.Agent),
+			fmt.Sprintf("Mode    › %s", a.Mode),
+			fmt.Sprintf("Model   › %s", orDefault(a.Model)),
+			fmt.Sprintf("Prompt  › %s", orOptional(a.Prompt)),
 			"────────────────", "✓ Add agent", "✗ Cancel",
 		}
 		choice, err := fzfMenu("configure agent", menu)
@@ -471,10 +477,15 @@ func configureAgent(ctx context.Context, in *bufio.Reader) (agentCfg, bool) {
 		switch {
 		case strings.HasPrefix(choice, "Repos"):
 			a.Repos = pickRepos(ctx, in, "repos for this agent (TAB)")
+		case strings.HasPrefix(choice, "Harness"):
+			// Switching harness re-derives the model default, since Claude and Codex
+			// draw from different model sets (see defaultModelFor / store.ModelsFor).
+			a.Agent = cycleHarness(a.Agent)
+			a.Model = defaultModelFor(a.Agent)
 		case strings.HasPrefix(choice, "Mode"):
 			a.Mode = pickMode()
 		case strings.HasPrefix(choice, "Model"):
-			a.Model = promptLine(in, "Model (e.g. opus / sonnet, blank for default)")
+			a.Model = pickModel(a.Agent, a.Model)
 		case strings.HasPrefix(choice, "Prompt"):
 			a.Prompt = promptLine(in, "Initial prompt (optional)")
 		case strings.HasPrefix(choice, "✓"):
@@ -483,6 +494,27 @@ func configureAgent(ctx context.Context, in *bufio.Reader) (agentCfg, bool) {
 			return agentCfg{}, false
 		}
 	}
+}
+
+// cycleHarness advances to the next harness in store.Harnesses, wrapping around,
+// so the menu entry toggles through the offered set (claude → codex → claude).
+func cycleHarness(cur string) string {
+	for i, k := range store.Harnesses {
+		if k == cur {
+			return store.Harnesses[(i+1)%len(store.Harnesses)]
+		}
+	}
+	return store.Harnesses[0]
+}
+
+// pickModel offers the harness's selectable models (store.ModelsFor, default
+// first). Esc/blank keeps the current pick.
+func pickModel(agentKind, cur string) string {
+	choice, err := fzfMenu("model", store.ModelsFor(agentKind))
+	if err != nil || strings.TrimSpace(choice) == "" {
+		return cur
+	}
+	return choice
 }
 
 // pickRepos multi-selects tracked repos, offering to clone/add new ones.
@@ -537,7 +569,7 @@ func describeAgent(a agentCfg) string {
 	if len(a.Repos) > 0 {
 		repos = strings.Join(a.Repos, "+")
 	}
-	parts := []string{repos, a.Mode}
+	parts := []string{repos, defaultStr(a.Agent, "claude"), a.Mode}
 	if a.Model != "" {
 		parts = append(parts, a.Model)
 	}
@@ -581,12 +613,15 @@ func querySessions() ([]core.WorkgroupRow, error) {
 
 // ---- shared helpers ------------------------------------------------------
 
-type createCfg struct{ name, prompt, mode, model string }
+type createCfg struct{ name, prompt, mode, model, agent string }
 
 func parseCreateFlags(args []string) ([]string, createCfg) {
-	// Same rational defaults as the interactive flow: task mode and the user's
-	// preferred Claude model. An explicit --mode/--model below overrides these.
-	cfg := createCfg{mode: "task", model: claudecfg.PreferredModel()}
+	// Same rational defaults as the interactive flow: the claude harness and task
+	// mode. --agent/--mode/--model below override these; the model default is
+	// derived from the chosen harness after the scan (see below), so --agent codex
+	// gets a Codex model rather than a Claude one.
+	cfg := createCfg{mode: "task", agent: "claude"}
+	modelSet := false
 	var repos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -608,14 +643,42 @@ func parseCreateFlags(args []string) ([]string, createCfg) {
 			cfg.mode = strings.TrimPrefix(a, "--mode=")
 		case a == "--model" && i+1 < len(args):
 			cfg.model = args[i+1]
+			modelSet = true
 			i++
 		case strings.HasPrefix(a, "--model="):
 			cfg.model = strings.TrimPrefix(a, "--model=")
+			modelSet = true
+		case a == "--agent" && i+1 < len(args):
+			cfg.agent = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--agent="):
+			cfg.agent = strings.TrimPrefix(a, "--agent=")
 		default:
 			repos = append(repos, a)
 		}
 	}
+	if !modelSet {
+		cfg.model = defaultModelFor(cfg.agent)
+	}
 	return repos, cfg
+}
+
+// defaultModelFor is the model amux pre-fills for a harness: the user's configured
+// preference (Claude's from claudecfg, Codex's from codexcfg), falling back to the
+// harness's built-in default when they haven't set one. The offered choices come
+// from store.ModelsFor(agentKind).
+func defaultModelFor(agentKind string) string {
+	var pref string
+	switch agentKind {
+	case "codex":
+		pref = codexcfg.PreferredModel()
+	default:
+		pref = claudecfg.PreferredModel()
+	}
+	if strings.TrimSpace(pref) != "" {
+		return pref
+	}
+	return store.DefaultModel(agentKind)
 }
 
 func fzfMultiSelect(prompt string, items []string) ([]string, error) {

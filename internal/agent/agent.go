@@ -34,6 +34,18 @@ func Argv(kind, model string, extra ...string) ([]string, error) {
 		if model != "" {
 			args = append(args, "--model", model)
 		}
+	case "codex":
+		bin = envOr("AMUX_CODEX_BIN", "codex")
+		// Default to autonomous operation, mirroring claude's permission-mode
+		// convention: set a sandbox unless the user opts out with
+		// AMUX_CODEX_SANDBOX=none. Override the level with
+		// AMUX_CODEX_SANDBOX=read-only|workspace-write|danger-full-access.
+		if sb := envOr("AMUX_CODEX_SANDBOX", "workspace-write"); sb != "none" {
+			args = append(args, "--sandbox", sb)
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
 	case "hermes":
 		bin = envOr("AMUX_HERMES_BIN", "hermes")
 		args = []string{"chat"}
@@ -44,6 +56,18 @@ func Argv(kind, model string, extra ...string) ([]string, error) {
 		return nil, fmt.Errorf("unknown agent kind %q", kind)
 	}
 	return append(append([]string{resolve(bin)}, args...), extra...), nil
+}
+
+// Known reports whether kind names an agent CLI Argv can launch. Creation paths
+// check it before persisting a session so a mistyped kind (which nothing can
+// edit after the fact) is rejected up front instead of minting a session that
+// errors on every launch.
+func Known(kind string) bool {
+	switch kind {
+	case "", "claude", "codex", "hermes":
+		return true
+	}
+	return false
 }
 
 // resolve returns the best command to launch bin with. It tries, in order: the

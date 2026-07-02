@@ -30,8 +30,8 @@ type scrubState byte
 
 const (
 	scrubGround scrubState = iota
-	scrubEsc    // after ESC: the next byte selects the sequence kind
-	scrubString // inside a string sequence's data
+	scrubEsc               // after ESC: the next byte selects the sequence kind
+	scrubString            // inside a string sequence's data
 )
 
 // scrub rewrites b in place. The caller owns b (pump's read buffer, the feed

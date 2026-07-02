@@ -163,8 +163,38 @@ const (
 	ModelFable  = "fable"
 )
 
-// Models is the ordered list of selectable models, opus first (the default).
+// Models is the ordered list of selectable claude models, opus first (the
+// default). It is the model set for the default "claude" harness; ModelsFor
+// selects the right list per harness.
 var Models = []string{ModelOpus, ModelSonnet, ModelHaiku, ModelFable}
+
+// Harnesses is the ordered list of selectable agent harnesses. "claude" (Claude
+// Code) is the default and comes first; "codex" runs OpenAI's Codex CLI. Each
+// harness filters the offered model list — see ModelsFor.
+var Harnesses = []string{"claude", "codex"}
+
+// codexModels is the ordered list of selectable Codex models offered when the
+// codex harness is chosen. gpt-5.5 is the recommended default and comes first.
+var codexModels = []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
+
+// ModelsFor returns the selectable models for an agent harness, ordered with the
+// default first. "" and "claude" get the Claude list; "codex" gets the Codex
+// list. An unknown harness falls back to the Claude list, so callers always get
+// a usable, non-empty set.
+func ModelsFor(agent string) []string {
+	switch agent {
+	case "codex":
+		return codexModels
+	default:
+		return Models
+	}
+}
+
+// DefaultModel returns the default (first-offered) model for an agent harness —
+// what amux picks when the user doesn't choose one explicitly.
+func DefaultModel(agent string) string {
+	return ModelsFor(agent)[0]
+}
 
 // Workgroup scopes (root sessions only).
 const (

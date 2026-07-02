@@ -79,11 +79,12 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Lifecycle ops** | `internal/wsops` | Create/add/move/archive/delete workgroups & agents, worktree setup, and the shared action dispatch (`Apply`). Used by the server, daemon, and CLI. |
 | **Pane spec** | `internal/panespec` | Resolves what to run for a tab (agent / editor / shell) and scopes every pane to the agent's worktree (bubblewrap), shared by the TUI and the server. |
 | **Shared types** | `internal/core` | The normalized `Session`, the `Action` wire type, well-known paths/sockets. |
-| **Agent resolver** | `internal/agent` | Maps an agent kind to an absolute argv (+ permission mode); robustly finds `claude` even when version managers keep it off PATH. |
+| **Agent resolver** | `internal/agent` | Maps an agent kind (`claude`, `codex`) to an absolute argv (+ per-harness flags/config paths); robustly finds `claude`/`codex` even when version managers keep them off PATH. |
 | **Embedded terminal** | `internal/vterm` | A VT emulator over a PTY (and, for the client path, over a byte stream) so a full-screen agent renders inside a pane. |
 | **Control console** | `internal/console` | The built-in `⚙` agent scoped to amux config/CLI. |
 | **Git / GitHub** | `internal/git`, `internal/gh` | Bare clones + worktrees; `gh`-driven repo discovery/clone. |
 | **Claude config** | `internal/claudecfg` | Safe edits to `~/.claude.json` (pre-trust spawned dirs), status hooks, model defaults. |
+| **Codex config** | `internal/codexcfg` | The Codex-CLI counterpart: `$CODEX_HOME` layout, rollout-session discovery/resume, project trust in `config.toml`, model defaults. |
 | **Daemon** | `internal/daemon` | Owns agent processes in an engine and polls sources so UIs can attach/detach without stopping agents. |
 
 > Status: the protocols, server, harness, and client are complete and covered by
@@ -106,19 +107,21 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   - **work-scoped** — spans any number of repos and holds N agents. Rendered under
     **WORKGROUPS**. Create with the `w` form (name, repos, a baseline description,
     and an optional **Linear** issue woven into the first agent's prompt).
-- **Agent** — one agent (Claude) with its own subdirectory and a git **worktree
-  per repo** it works on. An agent appears under WORKGROUPS *or* REPOS, never both;
-  `m` moves one into a new work-scoped workgroup (with a confirmation dialog).
+- **Agent** — one agent (Claude Code or Codex, picked per agent by its **harness**)
+  with its own subdirectory and a git **worktree per repo** it works on. An agent
+  appears under WORKGROUPS *or* REPOS, never both; `m` moves one into a new
+  work-scoped workgroup (with a confirmation dialog).
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
-  **1** the agent (Claude), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
+  **1** the agent (Claude Code or Codex), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
   **3** a terminal. **All three are scoped to the agent's worktree** with a
   bubblewrap mount namespace: the system is read-only, the rest of your home —
   other projects, your files, secrets — is replaced by an empty tmpfs, and the
   amux data tree (`~/.local/share/amux`) is mounted **read-only** so git can read
   the bare clone its worktree is sourced from. Writable: the agent's **worktree**
   (to edit) and **its repo's bare clone** (so git can commit to its branch). Only
-  what each tool needs is bound back (Claude's config/auth + status hook, the
-  editor's config, the shell's rc/theme — e.g. `~/.zshrc` + oh-my-zsh — so the
+  what each tool needs is bound back (the harness's config/auth — Claude's
+  `~/.claude`/`~/.claude.json` + status hook, or Codex's `$CODEX_HOME` writable so
+  it can persist rollouts — the editor's config, the shell's rc/theme — e.g. `~/.zshrc` + oh-my-zsh — so the
   terminal keeps your prompt/aliases/plugins, and your **git/GitHub auth**
   (`~/.gitconfig` + `~/.config/gh`) so agents push and use `gh` without logging in
   again). Network works (DNS included). It's a filesystem scope, not a hardened
@@ -142,12 +145,16 @@ or your **launch wrapper**. amux exports intent and gets out of the way:
 | `AMUX_WORKGROUP`   | the agent's workgroup id (`AMUX_WORKSPACE` = alias)  |
 | `AMUX_ROOT`        | the root/workgroup id                                |
 | `AMUX_SCOPE`       | `work` or `repo`                                     |
-| `AMUX_AGENT`       | the agent kind (`claude`)                            |
+| `AMUX_AGENT`       | the agent kind (`claude` or `codex`)                 |
 
-Override the launch binary with `AMUX_CLAUDE_BIN` (point it at a wrapper that
-branches on `$AMUX_MODE`). Agents launch **pre-trusted** and with
-`--permission-mode auto` (a safe classifier, *not* `--dangerously-skip-permissions`);
-override with `AMUX_PERMISSION_MODE`. See `scripts/claude-launch.example.sh`.
+Override the launch binary per harness with `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN`
+(point either at a wrapper that branches on `$AMUX_MODE`). Claude agents launch
+**pre-trusted** and with `--permission-mode auto` (a safe classifier, *not*
+`--dangerously-skip-permissions`); override with `AMUX_PERMISSION_MODE`. See
+`scripts/claude-launch.example.sh`. Codex agents launch pre-trusted (project trust
+written to `$CODEX_HOME/config.toml`) inside a `--sandbox workspace-write` scope;
+override the sandbox level with `AMUX_CODEX_SANDBOX`
+(`read-only`|`workspace-write`|`danger-full-access`, or `none` to omit the flag).
 
 ## Client/server usage
 
@@ -301,5 +308,5 @@ terminal. (`AMUX_SKIP=1` disables any auto-launch shim.)
 - **Remote auth/TLS** — v1 TCP is unauthenticated; bind it to trusted networks.
 - **Linear** — currently the issue URL is woven into the agent's prompt; a real
   Linear API/sync is a follow-up.
-- **One agent kind** (Claude) wired today; the resolver is ready for others.
+- **Two agent kinds** (Claude Code + Codex) wired today, selectable per agent; the resolver is ready for others.
 - Upstream pulls into the bare-clone store; per-repo branch selection.

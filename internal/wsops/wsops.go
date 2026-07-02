@@ -14,6 +14,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/claudecfg"
+	"amux/internal/codexcfg"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
@@ -95,6 +96,12 @@ func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session
 }
 
 func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) (store.Session, error) {
+	// Reject unknown harness kinds before anything is persisted: no action can
+	// edit a session's kind after creation, so a typo'd --agent would otherwise
+	// mint a session that errors on every launch and can only be deleted.
+	if !agent.Known(spec.Agent) {
+		return store.Session{}, fmt.Errorf("unknown agent kind %q", spec.Agent)
+	}
 	agentID := db.NewID()
 	dir := store.AgentDir(rootID, agentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -122,12 +129,20 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		repos = append(repos, repoName)
 	}
 	writeAgentGuide(dir, branch, spec.Agent)
+	kind := defaultStr(spec.Agent, "claude")
+	// Claude accepts a pre-minted --session-id, so pin one now for durable resume
+	// across restarts. Codex mints its own uuid on its first run and can't be told
+	// one up front, so leave it blank; AgentCommand adopts the real id afterward.
+	var claudeID string
+	if kind == "claude" {
+		claudeID = store.NewUUID()
+	}
 	a := store.Session{
 		ID: agentID, RootID: rootID,
-		Agent: defaultStr(spec.Agent, "claude"), Model: spec.Model,
+		Agent: kind, Model: spec.Model,
 		Mode: defaultStr(spec.Mode, store.ModeTask),
 		Repo: store.JoinRepos(repos), Branch: branch, Dir: dir,
-		ClaudeID: store.NewUUID(), Prompt: spec.Prompt, Created: store.Now(),
+		ClaudeID: claudeID, Prompt: spec.Prompt, Created: store.Now(),
 	}
 	if err := db.PutSession(a); err != nil {
 		return store.Session{}, err
@@ -150,13 +165,13 @@ are assigned (the subdirectories here).
 ## Stay in your sandbox
 - Keep all **edits** inside this directory (your worktrees). Do not write outside
   it: other agents' worktrees, the amux data dir, or any parent/clone of these
-  repos. (Reading the shared Claude sessions below is the one exception.)
+  repos. (Reading the shared agent sessions below is the one exception.)
 - You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
   commit on the default branch (main/master), and do not push to it.
 
-## Reason across Claude sessions
-You can **read** the transcripts of every Claude Code session on this machine —
-your own, other agents', and the user's — to reason about work that spans
+## Reason across agent sessions
+You can **read** the transcripts of every agent session on this machine (Claude
+Code, Codex, …) — your own, other agents', and the user's — to reason about work that spans
 conversations: recurring tasks, prior decisions, and what's already been done.
 List them (most recent first) with:
 
@@ -353,10 +368,15 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// and never clobbers a fresher copy, so a failure never blocks the launch.
 	if s.ClaudeID != "" {
 		if restored, _ := agent.HarnessFor(s.Agent).RestoreTranscript(dir, s.ClaudeID); restored {
-			log.Printf("amux: gap-filled Claude transcript for %s from captured backup", s.ClaudeID)
+			log.Printf("amux: gap-filled transcript for %s from captured backup", s.ClaudeID)
 		}
 	}
 	switch {
+	case s.Agent == "codex":
+		// Codex owns its own session-id lifecycle (see codexLaunch): it can't be
+		// pinned up front, so we adopt or clear s.ClaudeID against what's on disk
+		// rather than running Claude's --resume/--session-id dance.
+		dir, extra = codexLaunch(s, dir, prompt)
 	case s.ClaudeID != "":
 		// A conversation is pinned. Its transcript may live under either working-dir
 		// convention (the current launch cwd, or the agent dir used before single-repo
@@ -385,7 +405,8 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		}
 	}
 
-	if s.Agent == "" || s.Agent == "claude" {
+	switch {
+	case s.Agent == "" || s.Agent == "claude":
 		_ = claudecfg.TrustDir(dir)
 		// Install the status/capture hooks into this agent's launch dir (not the
 		// user-wide settings.json), pointed at the stable installed binary. Claude
@@ -398,6 +419,10 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 				_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
 			}
 		}
+	case s.Agent == "codex":
+		// Codex has no hook mechanism to install; just pre-trust the launch dir so
+		// it doesn't prompt to trust the folder on startup.
+		_ = codexcfg.TrustDir(dir)
 	}
 	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
 	// the running binary. Where it goes is the provider's call — Claude reads
@@ -415,7 +440,15 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	if err != nil {
 		return "", nil, nil, err
 	}
-	env = []string{
+	return dir, AgentEnv(s), argv, nil
+}
+
+// AgentEnv is the extra environment (KEY=VALUE) every pane of an agent gets —
+// the exported amux intent (see the README's philosophy table). It is separate
+// from AgentCommand so the editor and terminal panes can be resolved without
+// running the agent-launch side effects (resume decisions, trust, hook installs).
+func AgentEnv(s store.Session) []string {
+	return []string{
 		"AMUX_WORKGROUP=" + s.ID,
 		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
@@ -423,7 +456,6 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
-	return dir, env, argv, nil
 }
 
 // AgentWorkdir is the directory the editor and terminal panes run in. An agent
@@ -458,14 +490,81 @@ func resumeCwds(s store.Session) []string {
 }
 
 // warnResumeFailed surfaces — in the daemon log and on the rail — that a pinned
-// Claude conversation couldn't be resumed, so the user knows they've been
-// dropped into a fresh session rather than continuing where they left off. The
-// rail notice is keyed by the Claude id and cleared the next time the session
-// resumes successfully.
+// conversation couldn't be resumed, so the user knows they've been dropped into a
+// fresh session rather than continuing where they left off. The rail notice is
+// keyed by the conversation id and cleared the next time the session resumes
+// successfully.
 func warnResumeFailed(s store.Session) {
-	log.Printf("amux: pinned Claude conversation %s (agent %s) has no transcript under %v; starting a new conversation with that id",
-		s.ClaudeID, s.ID, resumeCwds(s))
+	log.Printf("amux: pinned %s conversation %s (agent %s) has no transcript under %v; starting a new conversation",
+		defaultStr(s.Agent, "claude"), s.ClaudeID, s.ID, resumeCwds(s))
 	_ = core.WriteNotice(s.ClaudeID, "couldn't resume pinned conversation — started fresh")
+}
+
+// codexLaunch decides how to start a Codex agent — resume an existing rollout or
+// start fresh — and keeps s.ClaudeID (the pinned rollout uuid) in step with what
+// is actually on disk. Codex mints its own uuid, so amux can't pin one up front:
+// the id is adopted after the first run and cleared if the rollout it names ever
+// disappears. It returns the launch dir (the workspace root; unlike Claude, Codex
+// finds a rollout by uuid regardless of cwd) and the trailing Codex args.
+func codexLaunch(s store.Session, dir, prompt string) (launchDir string, extra []string) {
+	// A pinned id resumes iff its rollout file still exists. `codex resume <id>`
+	// locates a session by uuid wherever its recorded cwd points (only the picker
+	// and --last filter by cwd), so existence is the exact question — gating on
+	// the rollout's recorded cwd would reject sessions Codex itself can resume.
+	// The generic RestoreTranscript above already gap-filled the rollout from any
+	// captured backup.
+	if s.ClaudeID != "" {
+		if _, ok := codexcfg.RolloutPath(s.ClaudeID); ok {
+			core.ClearNotice(s.ClaudeID)
+			return dir, []string{"resume", s.ClaudeID}
+		}
+		warnResumeFailed(s)
+	}
+	// No usable pin (fresh agent, or the pinned rollout is gone). Adopt the newest
+	// rollout recorded under this dir if there is one — persisting it so later
+	// launches resume it. When this replaces a lost pin, key the rail notice under
+	// the adopted id: the rail reads notices by the pinned id, so one left under
+	// the lost id would never render.
+	if id, ok := codexcfg.LatestSession(dir); ok {
+		if s.ClaudeID != "" && id != s.ClaudeID {
+			_ = core.WriteNotice(id, "couldn't resume pinned conversation — resumed the newest one instead")
+		}
+		persistClaudeID(s, id)
+		return dir, []string{"resume", id}
+	}
+	if s.ClaudeID != "" {
+		persistClaudeID(s, "")
+	}
+	return dir, freshExtra(prompt)
+}
+
+// freshExtra is the trailing args for a fresh interactive Codex run: the prompt as
+// a positional, or nothing when there's no prompt.
+func freshExtra(prompt string) []string {
+	if prompt != "" {
+		return []string{prompt}
+	}
+	return nil
+}
+
+// persistClaudeID records id (possibly "") as the session's pinned conversation
+// id. Codex adopts the uuid it minted only after its first run, and amux clears it
+// when the named rollout disappears, so this write keeps the store in step with
+// what `codex resume` will actually find. It re-reads the record so a concurrent
+// change to other fields isn't clobbered. Best-effort: a store failure just means
+// the next launch re-derives the id, never that the agent can't start.
+func persistClaudeID(s store.Session, id string) {
+	db, err := store.Open()
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	cur, ok, err := db.GetSession(s.ID)
+	if err != nil || !ok {
+		return
+	}
+	cur.ClaudeID = id
+	_ = db.PutSession(cur)
 }
 
 // agentScope returns the scope ("work"|"repo") of an agent's workgroup root, or
@@ -561,6 +660,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		return "", SetAgentRepos(ctx, a.ID, store.SplitRepos(a.Fields["repos"]))
 	case "new-repo-agent":
 		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
+			Agent:  agentOf(a.Fields),
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
 		return s.ID, err
@@ -568,7 +668,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		// Repos come straight from the fuzzy picker; zero is allowed (repo-less
 		// agent). A workgroup no longer carries repos of its own to fall back to.
 		s, err := AddAgent(ctx, a.ID, AgentSpec{
-			Agent:  "claude",
+			Agent:  agentOf(a.Fields),
 			Repos:  store.SplitRepos(a.Fields["repos"]),
 			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
 		})
@@ -581,7 +681,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		repos := store.SplitRepos(a.Fields["repos"])
 		var def *AgentSpec
 		if len(repos) > 0 || prompt != "" {
-			def = &AgentSpec{Agent: "claude", Repos: repos, Prompt: prompt}
+			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Model: a.Fields["model"], Prompt: prompt}
 		}
 		// Return the workgroup root; the client resolves it to the first agent.
 		return CreateWorkspace(ctx, a.Fields["name"], def)
@@ -593,7 +693,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		var def *AgentSpec
 		if a.Fields["defaultAgent"] == "1" {
 			def = &AgentSpec{
-				Agent: "claude", Repos: store.SplitRepos(a.Fields["repos"]),
+				Agent: agentOf(a.Fields), Repos: store.SplitRepos(a.Fields["repos"]),
 				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
 			}
 		}
@@ -671,6 +771,13 @@ func Rename(id, name string) error {
 	}
 	s.Name = strings.TrimSpace(name)
 	return db.PutSession(s)
+}
+
+// agentOf resolves an action's requested harness from its fields, defaulting to
+// "claude" when the field is absent — older clients (and actions that predate the
+// harness selector) send no "agent", and their agents must stay Claude.
+func agentOf(fields map[string]string) string {
+	return defaultStr(fields["agent"], "claude")
 }
 
 func defaultStr(v, def string) string {

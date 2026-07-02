@@ -268,6 +268,295 @@ func TestRenameAgent(t *testing.T) {
 	}
 }
 
+// writeRollout drops a fake Codex rollout for uuid recorded under cwd into
+// $CODEX_HOME/sessions/2026/01/01, mirroring Codex's rollout-<ts>-<uuid>.jsonl
+// naming and the session_meta cwd line codexcfg reads. Returns the rollout path.
+func writeRollout(t *testing.T, codexHome, uuid, cwd string) string {
+	t.Helper()
+	dir := filepath.Join(codexHome, "sessions", "2026", "01", "01")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-01-01T00-00-00-"+uuid+".jsonl")
+	if err := os.WriteFile(path, []byte(`{"cwd":`+quote(cwd)+`}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func quote(s string) string { return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"` }
+
+// TestAgentCommandCodexFresh: a codex agent with no pinned id and no rollout on
+// disk launches fresh — the sandbox flag from agent.Argv plus the prompt as a
+// positional, and no `resume` subcommand.
+func TestAgentCommandCodexFresh(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, Prompt: "do the thing"}
+
+	_, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFlag(argv, "resume") {
+		t.Fatalf("fresh codex launch should not resume, got %v", argv)
+	}
+	if !hasFlag(argv, "--sandbox") {
+		t.Fatalf("codex launch missing --sandbox flag, got %v", argv)
+	}
+	if argv[len(argv)-1] != "do the thing" {
+		t.Fatalf("fresh codex launch should end with the prompt positional, got %v", argv)
+	}
+}
+
+// TestAgentCommandCodexAdopt: a codex agent with no pinned id but a rollout
+// already recorded under its dir adopts that id — resuming it and persisting the
+// id onto the store record so later launches find it.
+func TestAgentCommandCodexAdopt(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uuid := "33333333-3333-4333-8333-333333333333"
+	writeRollout(t, os.Getenv("CODEX_HOME"), uuid, dir)
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, Prompt: "hi"}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	_, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFlag(argv, "resume") || argv[len(argv)-1] != uuid {
+		t.Fatalf("codex adopt should resume the discovered id, got %v", argv)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, _ := db.GetSession("a")
+	if !ok || got.ClaudeID != uuid {
+		t.Fatalf("adopted id should persist to the store, got %q (ok=%v)", got.ClaudeID, ok)
+	}
+}
+
+// TestAgentCommandCodexResumePinned: a codex agent whose pinned id has a matching
+// rollout resumes it via `codex resume <id>`.
+func TestAgentCommandCodexResumePinned(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uuid := "44444444-4444-4444-8444-444444444444"
+	writeRollout(t, os.Getenv("CODEX_HOME"), uuid, dir)
+	s := store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, ClaudeID: uuid}
+
+	_, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFlag(argv, "resume") || argv[len(argv)-1] != uuid {
+		t.Fatalf("pinned codex resume expected `resume %s`, got %v", uuid, argv)
+	}
+}
+
+// TestAgentCommandCodexPinnedResumeFails: a codex agent with a pinned id whose
+// rollout is missing clears the id (so the next launch adopts a real one), warns
+// on the rail, and starts fresh with the prompt.
+func TestAgentCommandCodexPinnedResumeFails(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uuid := "55555555-5555-4555-8555-555555555555"
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, ClaudeID: uuid, Prompt: "resume me"}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	_, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFlag(argv, "resume") {
+		t.Fatalf("a failed pinned resume should launch fresh, got %v", argv)
+	}
+	if argv[len(argv)-1] != "resume me" {
+		t.Fatalf("fresh fallback should end with the prompt, got %v", argv)
+	}
+	if core.Notice(uuid) == "" {
+		t.Fatal("a failed pinned resume should record a rail notice")
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, _ := db.GetSession("a")
+	if !ok || got.ClaudeID != "" {
+		t.Fatalf("a failed pinned resume should clear the stored id, got %q", got.ClaudeID)
+	}
+}
+
+// TestAgentCommandCodexResumeIgnoresRecordedCwd: `codex resume <id>` locates a
+// session by uuid regardless of the cwd its rollout recorded, so a pinned id must
+// resume even when the recorded cwd doesn't match any of amux's candidate dirs
+// (e.g. the workdir convention changed under it).
+func TestAgentCommandCodexResumeIgnoresRecordedCwd(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uuid := "66666666-6666-4666-8666-666666666666"
+	writeRollout(t, os.Getenv("CODEX_HOME"), uuid, "/somewhere/unrelated")
+	s := store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, ClaudeID: uuid}
+
+	_, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFlag(argv, "resume") || argv[len(argv)-1] != uuid {
+		t.Fatalf("pinned resume must not depend on the rollout's recorded cwd, got %v", argv)
+	}
+}
+
+// TestAgentCommandCodexLostPinAdoptsNewest: when the pinned rollout is gone but
+// another conversation is recorded under the agent's dir, the launch adopts that
+// one (rather than dropping to a fresh session), persists the new pin, and keys
+// the rail notice under the adopted id — the id the rail reads notices by.
+func TestAgentCommandCodexLostPinAdoptsNewest(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lost := "77777777-7777-4777-8777-777777777777"
+	kept := "88888888-8888-4888-8888-888888888888"
+	writeRollout(t, os.Getenv("CODEX_HOME"), kept, dir)
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, ClaudeID: lost}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	_, _, argv, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFlag(argv, "resume") || argv[len(argv)-1] != kept {
+		t.Fatalf("a lost pin should adopt the newest rollout under the dir, got %v", argv)
+	}
+	if got := getSession(t, "a"); got.ClaudeID != kept {
+		t.Fatalf("adopted id should replace the lost pin in the store, got %q", got.ClaudeID)
+	}
+	if core.Notice(kept) == "" {
+		t.Fatal("the fallback notice should be keyed under the adopted id the rail reads")
+	}
+}
+
+// TestAddAgentRejectsUnknownKind: a typo'd harness kind must fail at creation —
+// nothing can edit a session's kind afterwards, so persisting it would mint an
+// agent that errors on every launch.
+func TestAddAgentRejectsUnknownKind(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	rootID, err := CreateWorkspace(ctx, "ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyResult(ctx, core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{"agent": "codx"}}); err == nil {
+		t.Fatal("add-agent with an unknown kind should error, not persist")
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	kids, _ := db.Children(rootID)
+	if len(kids) != 0 {
+		t.Fatalf("a rejected agent must not be persisted, found %d children", len(kids))
+	}
+}
+
+// TestApplyResultHonorsAgentField: add-agent with Fields["agent"]="codex" creates
+// a codex agent (not the hardcoded claude), while an absent field still defaults
+// to claude — the back-compat contract for older clients.
+func TestApplyResultHonorsAgentField(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	rootID, err := CreateWorkspace(ctx, "ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexID, err := ApplyResult(ctx, core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{"agent": "codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeID, err := ApplyResult(ctx, core.Action{Action: "add-agent", ID: rootID, Fields: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cx, _, _ := db.GetSession(codexID)
+	if cx.Agent != "codex" {
+		t.Errorf("add-agent agent=codex made a %q agent", cx.Agent)
+	}
+	if cx.ClaudeID != "" {
+		t.Errorf("a codex agent should not pin a claude id up front, got %q", cx.ClaudeID)
+	}
+	cl, _, _ := db.GetSession(claudeID)
+	if cl.Agent != "claude" {
+		t.Errorf("add-agent with no agent field should default to claude, got %q", cl.Agent)
+	}
+	if cl.ClaudeID == "" {
+		t.Errorf("a claude agent should pin a session id up front")
+	}
+}
+
 // getSession reads one session back from the store for an assertion.
 func getSession(t *testing.T, id string) store.Session {
 	t.Helper()
