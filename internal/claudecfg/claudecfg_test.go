@@ -179,6 +179,31 @@ func TestInstallHooks(t *testing.T) {
 	if !foundUser {
 		t.Error("user's existing Stop hook was clobbered")
 	}
+
+	// The fullscreen TUI renderer is defaulted on so the agent pane scrolls.
+	if got := readSetting(t, path, "tui"); got != "fullscreen" {
+		t.Errorf("tui = %q, want %q", got, "fullscreen")
+	}
+}
+
+// TestInstallHooksPreservesTUIOverride verifies a deliberate `tui` choice in the
+// settings file survives hook (re)installation rather than being forced back to
+// fullscreen.
+func TestInstallHooksPreservesTUIOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := ProjectSettingsLocalPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"tui":"default"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooksIn(dir, "/opt/amux"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSetting(t, path, "tui"); got != "default" {
+		t.Errorf("tui = %q, want %q (user override must survive)", got, "default")
+	}
 }
 
 // TestUninstallHooks verifies the legacy-global cleanup strips amux's own hook
@@ -267,6 +292,21 @@ func readHooks(t *testing.T, path string) map[string]any {
 	}
 	hooks, _ := root["hooks"].(map[string]any)
 	return hooks
+}
+
+// readSetting returns a top-level string setting from the settings file, or "".
+func readSetting(t *testing.T, path, key string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := root[key].(string)
+	return s
 }
 
 // groupCommand returns the first command string inside a hook group, or "".
