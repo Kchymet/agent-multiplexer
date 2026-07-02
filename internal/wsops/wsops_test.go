@@ -695,6 +695,15 @@ func TestWriteAgentGuide(t *testing.T) {
 		if !strings.Contains(string(b), "amux/root-agent") {
 			t.Errorf("kind %q: %s missing the branch name", tc.kind, tc.file)
 		}
+		// The guide must steer agents to merge, not rebase: rebasing a pushed
+		// branch forces a force-push to update its PR, which needs a human to
+		// unblock. Merging keeps every push a fast-forward.
+		if !strings.Contains(string(b), "git merge --no-edit origin/HEAD") {
+			t.Errorf("kind %q: %s should tell agents to merge the remote", tc.kind, tc.file)
+		}
+		if strings.Contains(string(b), "git rebase") {
+			t.Errorf("kind %q: %s should not tell agents to run git rebase (forces a force-push on a pushed PR)", tc.kind, tc.file)
+		}
 		if _, err := os.Stat(filepath.Join(dir, tc.other)); err == nil {
 			t.Errorf("kind %q: unexpectedly wrote %s too", tc.kind, tc.other)
 		}

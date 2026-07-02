@@ -26,15 +26,18 @@ You are in an amux worktree. The rules from your workspace guide (`CLAUDE.md`, o
 
 - **Stay on your branch.** Run `git branch --show-current` — it must be your
   `amux/…` branch. Never commit to, or push to, `master`/`main`.
-- **Rebase on the remote first**, inside the repo worktree (not the workspace
+- **Merge in the remote first**, inside the repo worktree (not the workspace
   root):
 
   ```sh
-  git fetch origin && git rebase origin/HEAD
+  git fetch origin && git merge --no-edit origin/HEAD
   ```
 
-  Resolve any conflicts now, on your branch, before you build a PR on a stale
-  base.
+  Merge — don't rebase. Once the branch is pushed, rebasing rewrites its history
+  and forces the next push to be a force-push (which a human has to unblock);
+  merging only adds commits, so every push stays a fast-forward. This repo
+  squash-merges, so the merge commits never land on the default branch. Resolve
+  any conflicts now, on your branch, before you build a PR on a stale base.
 - **Green before you open.** Build and run the project's checks. Read the repo's
   `Makefile`/CI config and run what it runs (e.g. `make check` / `go build ./...`
   / `go test ./...`). Do not open a PR on a red tree — a reviewer's first signal

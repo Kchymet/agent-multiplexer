@@ -107,21 +107,28 @@ why you won't.
 
 ### 4. Resolve merge conflicts / stale base
 
-If `mergeable` is `CONFLICTING` or the base has advanced, rebase onto the latest
-remote inside the repo worktree:
+If `mergeable` is `CONFLICTING` or the base has advanced, merge the latest remote
+into your branch inside the repo worktree:
 
 ```sh
-git fetch origin && git rebase origin/HEAD
-# resolve conflicts, keeping BOTH the intent of your change and incoming changes
-git rebase --continue
+git fetch origin && git merge --no-edit origin/HEAD
+# if it stops for conflicts: resolve them, keeping BOTH the intent of your
+# change and the incoming changes, then:
+git commit --no-edit
 ```
 
+Merge, don't rebase. The branch is already pushed, so rebasing rewrites history
+the remote has and the next push is rejected as non-fast-forward — the only way
+through is a force-push, which a human has to unblock. Merging only adds commits,
+so the push below stays an ordinary fast-forward. This repo squash-merges PRs, so
+the merge commits never reach the default branch.
+
 Re-run the project's checks after resolving (a clean merge can still break the
-build). Then update the remote branch. Because it's your own amux branch, a
-lease-guarded force-push is correct:
+build). Then update the remote branch with a plain, fast-forward push — never a
+force-push, so a PR update never needs a human to unblock it:
 
 ```sh
-git push --force-with-lease
+git push
 ```
 
 Never resolve a conflict by blindly discarding one side — understand both and
