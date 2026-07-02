@@ -27,7 +27,7 @@ type AgentSpec struct {
 	Repos  []string // subset of the workspace's repos this agent works on
 	Agent  string   // defaults to "claude"
 	Model  string   // optional model override
-	Mode   string   // task | loop (defaults to task)
+	Mode   string   // task | interactive (defaults to task)
 	Prompt string   // initial prompt
 }
 
@@ -73,7 +73,7 @@ func CreateRepoWorkgroup(ctx context.Context, repo string, spec AgentSpec) (stor
 	rootID := db.NewID()
 	if err := db.PutSession(store.Session{
 		ID: rootID, RootID: "", Scope: store.ScopeRepo,
-		Mode: defaultStr(spec.Mode, store.ModeTask), Repo: repo, Created: store.Now(),
+		Mode: store.NormalizeMode(spec.Mode), Repo: repo, Created: store.Now(),
 	}); err != nil {
 		return store.Session{}, err
 	}
@@ -140,7 +140,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	a := store.Session{
 		ID: agentID, RootID: rootID,
 		Agent: kind, Model: spec.Model,
-		Mode: defaultStr(spec.Mode, store.ModeTask),
+		Mode: store.NormalizeMode(spec.Mode),
 		Repo: store.JoinRepos(repos), Branch: branch, Dir: dir,
 		ClaudeID: claudeID, Prompt: spec.Prompt, Created: store.Now(),
 	}
@@ -460,7 +460,7 @@ func AgentEnv(s store.Session) []string {
 		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
 		"AMUX_SCOPE=" + agentScope(s.RootID),
-		"AMUX_MODE=" + defaultStr(s.Mode, store.ModeTask),
+		"AMUX_MODE=" + store.NormalizeMode(s.Mode),
 		"AMUX_AGENT=" + defaultStr(s.Agent, "claude"),
 	}
 }

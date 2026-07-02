@@ -404,8 +404,9 @@ func sectionLabel(section string) string {
 	return ""
 }
 
-// glyph mirrors the rail: console ⚙, repo ⛁, root ▸, loop ∞, external ◇,
-// otherwise the activity state — running/waiting ●, ready ◐, idle ○.
+// glyph mirrors the rail: console ⚙, repo ⛁, root ▸, external ◇, otherwise the
+// activity state — running/waiting ●, ready ◐, idle ○. task and interactive
+// agents share the activity glyphs; the mode is surfaced in listings, not here.
 func glyph(s core.Session) string {
 	switch {
 	case s.Kind == "repo":
@@ -414,8 +415,6 @@ func glyph(s core.Session) string {
 		return "⚙"
 	case s.IsRoot:
 		return "▸"
-	case s.Mode == "loop":
-		return "∞"
 	case s.Mode == "external":
 		return "◇"
 	}

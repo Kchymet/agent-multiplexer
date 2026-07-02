@@ -33,7 +33,7 @@ type Session struct {
 	Name     string // optional display name (agent-settable)
 	Agent    string // claude | codex | hermes
 	Model    string // optional per-session model override
-	Mode     string // task | loop
+	Mode     string // task | interactive
 	Repo     string // repo name (sub-sessions); may list several for migrated roots
 	Branch   string // git branch (sub-sessions)
 	Dir      string // worktree dir (sub-sessions) / container dir (roots)
