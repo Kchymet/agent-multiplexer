@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"amux/internal/codexcfg"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -47,7 +48,7 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 	case TabTerminal:
 		dir, argv = wsops.AgentWorkdir(s), []string{shellBin()}
 	}
-	return dir, env, scope(dir, tab, argv, agentRepoSources(agentID)), nil
+	return dir, env, scope(dir, tab, s.Agent, argv, agentRepoSources(agentID)), nil
 }
 
 // agentRepoSources returns the bare-clone git dirs backing an agent's worktrees.
@@ -83,7 +84,7 @@ func agentRepoSources(agentID string) []string {
 // and its own runtime; the editor gets its config; the shell gets nothing. This
 // is a filesystem scope, not a hardened jail (network and pids are shared), and
 // it's skipped if AMUX_JAIL=off or bwrap is missing.
-func scope(dir string, tab int, argv []string, rwSources []string) []string {
+func scope(dir string, tab int, agentKind string, argv []string, rwSources []string) []string {
 	if len(argv) == 0 || envOr("AMUX_JAIL", "on") == "off" {
 		return argv
 	}
@@ -131,7 +132,7 @@ func scope(dir string, tab int, argv []string, rwSources []string) []string {
 	if sub := homeSubtree(home, argv[0]); sub != "" {
 		args = append(args, "--ro-bind-try", sub, sub)
 	}
-	for _, b := range configBinds(tab, home) {
+	for _, b := range configBinds(tab, agentKind, home) {
 		args = append(args, b...)
 	}
 	args = append(args, "--")
@@ -139,24 +140,40 @@ func scope(dir string, tab int, argv []string, rwSources []string) []string {
 }
 
 // configBinds is the minimal per-tool config/state mounted into the scope so the
-// tool can run: Claude's config/auth (writable — it stores transcripts there) for
-// the agent, the editor's config/state for the editor, nothing for the shell.
-func configBinds(tab int, home string) [][]string {
+// tool can run: the agent harness's own config/auth/state (writable — each stores
+// its transcripts there) for the agent, the editor's config/state for the editor,
+// nothing for the shell. The agent binds depend on which harness runs: Claude
+// keeps its state in ~/.claude(.json), Codex under $CODEX_HOME.
+func configBinds(tab int, agentKind string, home string) [][]string {
 	j := filepath.Join
 	switch tab {
 	case TabAgent:
-		// Claude's amux hooks run inside the scope and must reach amux's state dirs:
-		// the hook-state dir (activity) and the transcript-capture dir (a durable
-		// copy of the conversation for the "restarting" diagnostic). --bind-try
-		// skips missing paths, so create the capture dir first.
+		// amux's hooks/gap-fill run inside the scope and must reach amux's state
+		// dirs: the hook-state dir (activity) and the transcript-capture dir (a
+		// durable copy of the conversation for the "restarting" diagnostic).
+		// --bind-try skips missing paths, so create the capture dir first.
 		_ = os.MkdirAll(core.TranscriptDir(), 0o755)
-		binds := [][]string{
-			{"--bind-try", j(home, ".claude.json"), j(home, ".claude.json")},
-			{"--bind-try", j(home, ".claude"), j(home, ".claude")},
-			{"--bind-try", core.HookStateDir(), core.HookStateDir()},
-			{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},
-			{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
+		var binds [][]string
+		if agentKind == "codex" {
+			// Codex keeps auth (auth.json), config (config.toml), and its rollout
+			// transcripts under $CODEX_HOME (default ~/.codex), and writes rollouts
+			// there mid-session — so bind the whole tree writable. It lives under the
+			// tmpfs'd $HOME, so create it first or the writes land on ephemeral tmpfs.
+			ch := codexcfg.Home()
+			_ = os.MkdirAll(ch, 0o755)
+			binds = append(binds, []string{"--bind-try", ch, ch})
+		} else {
+			// Claude's config/auth, writable — it stores transcripts under ~/.claude.
+			binds = append(binds,
+				[]string{"--bind-try", j(home, ".claude.json"), j(home, ".claude.json")},
+				[]string{"--bind-try", j(home, ".claude"), j(home, ".claude")},
+			)
 		}
+		binds = append(binds,
+			[]string{"--bind-try", core.HookStateDir(), core.HookStateDir()},
+			[]string{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},
+			[]string{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
+		)
 		if exe, err := os.Executable(); err == nil {
 			binds = append(binds, []string{"--ro-bind-try", exe, exe})
 		}

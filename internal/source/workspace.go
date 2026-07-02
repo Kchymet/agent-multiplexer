@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/engine"
 	"amux/internal/store"
 )
 
@@ -61,7 +63,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	trackedDirs := map[string]bool{console.Dir(): true}
 
 	// Control console, pinned first.
-	consoleState := agentState(liveOf(console.ID), console.SessionID)
+	consoleState := agentState(liveOf(console.ID), "claude", console.SessionID)
 	out = append(out, core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: "claude",
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
@@ -119,7 +121,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		subStates := make([]string, len(active))
 		rootState := core.StateIdle
 		for i, s := range active {
-			subStates[i] = agentState(liveOf(s.ID), s.ClaudeID)
+			subStates[i] = agentState(liveOf(s.ID), s.Agent, s.ClaudeID)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
 			}
@@ -155,7 +157,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				Kind: "repo", Cwd: r.GitDir, CanAttach: true,
 			})
 			for _, s := range repoAgents[r.Name] {
-				st := agentState(liveOf(s.ID), s.ClaudeID)
+				st := agentState(liveOf(s.ID), s.Agent, s.ClaudeID)
 				out = append(out, core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode, Repos: s.Repo,
@@ -334,26 +336,41 @@ func subSuffix(s store.Session) string {
 	return ""
 }
 
-// agentState classifies a session's activity. The fine-grained states come from
-// Claude Code's hooks (see claudecfg.InstallHooksIn), which write the current
-// state per session as the agent's turn lifecycle fires:
+// agentState classifies a session's activity. Claude's fine-grained states come
+// from its hooks (see claudecfg.InstallHooksIn), which write the current state per
+// session as the agent's turn lifecycle fires:
 //   - StateIdle:    not running (no engine instance)
 //   - StateRunning: a turn is in flight
 //   - StateWaiting: blocked on a prompt awaiting the user
 //   - StateReady:   turn finished / freshly launched, ready for input
 //   - StateUnknown: live but no hook data yet (a pre-hook session, or one that
 //     hasn't fired its first event) — shown as a less certain "running".
-func agentState(alive bool, claudeID string) string {
+//
+// A harness with no hook stream (e.g. Codex) can't report those turn states, so
+// rather than showing a stale hook state that will never arrive we ask its Harness
+// for a coarse activity signal (Codex infers one from rollout freshness) and map
+// it onto running/ready — degrading honestly to "the engine has a live instance".
+func agentState(alive bool, kind, sessionID string) string {
 	if !alive {
 		return core.StateIdle
 	}
-	if rec, ok := core.HookState(claudeID); ok {
-		switch rec.State {
-		case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
-			return rec.State
+	if kind == "" || kind == "claude" {
+		if rec, ok := core.HookState(sessionID); ok {
+			switch rec.State {
+			case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
+				return rec.State
+			}
 		}
+		return core.StateUnknown
 	}
-	return core.StateUnknown
+	switch agent.HarnessFor(kind).Activity(sessionID) {
+	case engine.ActivityBusy:
+		return core.StateRunning
+	case engine.ActivitySafe:
+		return core.StateReady
+	default:
+		return core.StateUnknown
+	}
 }
 
 // stateLabel is the word shown to the user. Unknown reads as "running": the
