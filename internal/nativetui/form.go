@@ -18,7 +18,7 @@ var cursorStyle = lipgloss.NewStyle().Reverse(true)
 func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 	m.form = &formState{
 		title:  "New agent · " + repoTitle,
-		action: "new-repo-agent",
+		action: core.ActionNewRepoAgent,
 		id:     repoID,
 		submit: "Create agent",
 		fields: []*formField{
@@ -37,7 +37,7 @@ func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 func (m *model) openAddAgentForm(rootID, rootTitle string) {
 	m.form = &formState{
 		title:  "Add agent · " + rootTitle,
-		action: "add-agent",
+		action: core.ActionAddAgent,
 		id:     rootID,
 		submit: "Add agent",
 		fields: []*formField{
@@ -55,7 +55,7 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 func (m *model) openAddRepoForm() {
 	m.form = &formState{
 		title:  "Add repo",
-		action: "add-repo",
+		action: core.ActionAddRepo,
 		submit: "Track repo",
 		fields: []*formField{
 			{key: "source", label: "URL / owner/name / path"},
@@ -67,7 +67,7 @@ func (m *model) openAddRepoForm() {
 func (m *model) openNewWorkgroupForm() {
 	m.form = &formState{
 		title:  "New workgroup",
-		action: "new-workgroup",
+		action: core.ActionNewWorkgroup,
 		submit: "Create workgroup",
 		fields: []*formField{
 			{key: "name", label: "Name"},
@@ -87,7 +87,7 @@ func (m *model) openNewWorkgroupForm() {
 func (m *model) openRenameForm(id, title string) {
 	m.form = &formState{
 		title:  "Rename · " + title,
-		action: "rename",
+		action: core.ActionRename,
 		id:     id,
 		submit: "Rename",
 		fields: []*formField{
@@ -605,7 +605,7 @@ func (m *model) submitForm() tea.Cmd {
 	m.form = nil
 	m.status = fs.submit + "…"
 	cmd := m.sendCmd(core.Action{Action: fs.action, ID: fs.id, Fields: fs.values()})
-	if fs.action == "add-repo" && m.pendingPicker != nil {
+	if fs.action == core.ActionAddRepo && m.pendingPicker != nil {
 		m.picker = m.pendingPicker
 		m.pendingPicker = nil
 	}

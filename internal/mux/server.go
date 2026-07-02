@@ -41,6 +41,7 @@ type Server struct {
 type route struct {
 	cl         *client
 	clientPane string
+	agent      string // agent id this pane belongs to, so a delete/archive can find it
 }
 
 // client is one connected UI. Two outbound paths share the single socket writer
@@ -216,8 +217,13 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 			cl.send(muxproto.ServerMsg{Type: muxproto.SSnapshot, Sessions: sess})
 		}
 	case muxproto.CAction:
-		err := wsops.Apply(context.Background(), core.Action{Action: m.Action, ID: m.ID, Target: m.Target, Fields: m.Fields})
-		res := muxproto.ServerMsg{Type: muxproto.SResult, OK: err == nil}
+		// One descriptor-driven path, shared with the daemon: Dispatch tears down the
+		// agent's live panes (killPanesFor — the mux analog of the daemon's engine
+		// kill) for a StopsEngine verb so a delete/archive doesn't leak a PTY, then
+		// applies the store mutation and returns any created id (previously discarded).
+		act := core.Action{Action: m.Action, ID: m.ID, Target: m.Target, Fields: m.Fields}
+		newID, err := wsops.Dispatch(context.Background(), act, s.killPanesFor)
+		res := muxproto.ServerMsg{Type: muxproto.SResult, OK: err == nil, NewID: newID}
 		if err != nil {
 			res.Error = err.Error()
 		}
@@ -249,7 +255,7 @@ func (s *Server) openPane(cl *client, m muxproto.ClientMsg) {
 	s.mu.Lock()
 	s.paneSeq++
 	hp := "h" + itoa(s.paneSeq)
-	s.routes[hp] = route{cl: cl, clientPane: m.PaneID}
+	s.routes[hp] = route{cl: cl, clientPane: m.PaneID, agent: m.Agent}
 	cl.panes[m.PaneID] = hp
 	s.mu.Unlock()
 	_ = s.hconn.WriteMux(harnessproto.MuxMsg{
@@ -267,6 +273,38 @@ func (s *Server) closePane(cl *client, clientPane string) {
 	delete(cl.obuf, clientPane) // drop any pending output for a detached pane
 	cl.obMu.Unlock()
 	if hp != "" {
+		_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: hp})
+	}
+}
+
+// killPanesFor tears down every live pane of an agent — the mux-server analog of
+// the daemon killing an agent's engine instance — so a StopsEngine verb
+// (delete/archive/…) doesn't leave a PTY-backed process running after the session
+// is gone. For a workgroup root it cascades to the root's agents (resolved via
+// wsops before the store record is removed). Sending MKill is enough: the harness
+// answers each with an HExit that readHarness routes to the owning client and uses
+// to drop the pane bookkeeping — the same path a naturally-exiting pane takes.
+func (s *Server) killPanesFor(id string) {
+	if id == "" {
+		return
+	}
+	ids, err := wsops.AgentIDsUnder(id)
+	if err != nil || len(ids) == 0 {
+		ids = []string{id} // fall back to the id itself (e.g. store lookup failed)
+	}
+	want := make(map[string]bool, len(ids))
+	for _, a := range ids {
+		want[a] = true
+	}
+	s.mu.Lock()
+	var kill []string
+	for hp, r := range s.routes {
+		if want[r.agent] {
+			kill = append(kill, hp)
+		}
+	}
+	s.mu.Unlock()
+	for _, hp := range kill {
 		_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: hp})
 	}
 }

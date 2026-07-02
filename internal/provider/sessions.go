@@ -140,15 +140,15 @@ func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 	switch m.Action {
 	case harnessproto.VerbNewWorkgroup:
-		return core.Action{Action: "new-workgroup", Fields: m.Fields}, true
+		return core.Action{Action: core.ActionNewWorkgroup, Fields: m.Fields}, true
 	case harnessproto.VerbAddAgent:
-		return core.Action{Action: "add-agent", ID: m.ID, Fields: m.Fields}, true
+		return core.Action{Action: core.ActionAddAgent, ID: m.ID, Fields: m.Fields}, true
 	case harnessproto.VerbRename:
-		return core.Action{Action: "rename", ID: m.ID, Fields: m.Fields}, true
+		return core.Action{Action: core.ActionRename, ID: m.ID, Fields: m.Fields}, true
 	case harnessproto.VerbArchive:
-		return core.Action{Action: "set-archived", ID: m.ID, Fields: map[string]string{"archived": "true"}}, true
+		return core.Action{Action: core.ActionSetArchived, ID: m.ID, Fields: map[string]string{"archived": "true"}}, true
 	case harnessproto.VerbUnarchive:
-		return core.Action{Action: "set-archived", ID: m.ID, Fields: map[string]string{"archived": "false"}}, true
+		return core.Action{Action: core.ActionSetArchived, ID: m.ID, Fields: map[string]string{"archived": "false"}}, true
 	case harnessproto.VerbStart:
 		return core.Action{Action: core.ActionStart, ID: m.ID}, true
 	default:

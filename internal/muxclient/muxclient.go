@@ -24,8 +24,11 @@ type Handlers struct {
 	// for paneID before applying subsequent output, so stale cells don't ghost.
 	OnPaneReset func(paneID string)
 	OnPaneExit  func(paneID string, errMsg string)
-	OnResult    func(ok bool, errMsg string)
-	OnClosed    func()
+	// OnResult reports an action's outcome. newID is the id of any session the
+	// action created (empty otherwise), so a mux-client UI can switch to it — the
+	// same affordance the daemon's core.Result.NewID gives its clients.
+	OnResult func(ok bool, newID, errMsg string)
+	OnClosed func()
 }
 
 // Client is a connection to one multiplexer server.
@@ -127,7 +130,7 @@ func (c *Client) readLoop() {
 			}
 		case muxproto.SResult:
 			if c.h.OnResult != nil {
-				c.h.OnResult(m.OK, m.Error)
+				c.h.OnResult(m.OK, m.NewID, m.Error)
 			}
 		}
 	}

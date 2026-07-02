@@ -67,6 +67,65 @@ const (
 	ActionQuery = "query" // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
 )
 
+// Lifecycle action verbs (Action.Action values) — the control vocabulary the CLI,
+// the TUI, the daemon, and the mux server all speak. Defined here, each with a
+// descriptor (see actionDescriptors), so every dispatch path derives behavior
+// from one table instead of re-deciding from raw strings and drifting — which
+// they did: the CLI's archive once skipped the engine stop the TUI's performed.
+const (
+	ActionRefresh         = "refresh"          // re-poll only; no store change
+	ActionSubscribe       = "subscribe"        // transport subscribe; a no-op in the store dispatch
+	ActionDelete          = "delete"           // permanently remove a session (worktrees + branch)
+	ActionKill            = "kill"             // alias of delete
+	ActionArchive         = "archive"          // TUI one-key toggle: archive⇄restore
+	ActionSetArchived     = "set-archived"     // CLI explicit archive/unarchive (Fields["archived"]=="true")
+	ActionMove            = "move"             // re-parent an agent into another workgroup (Target)
+	ActionRename          = "rename"           // set a session's display name (Fields["name"])
+	ActionRmRepo          = "rm-repo"          // stop tracking a repo
+	ActionAgentSetRepos   = "agent-set-repos"  // re-scope an agent to exactly Fields["repos"]
+	ActionNewRepoAgent    = "new-repo-agent"   // create a repo-scoped workgroup + its agent
+	ActionAddAgent        = "add-agent"        // add an agent to an existing workgroup
+	ActionAddRepo         = "add-repo"         // track a new repo (Fields["source"])
+	ActionNewWorkgroup    = "new-workgroup"    // create a work-scoped workgroup (+ optional first agent)
+	ActionCreateWorkspace = "create-workspace" // CLI create: workgroup + optional default agent
+)
+
+// ActionDescriptor declares what a lifecycle verb does, so every dispatch path
+// (daemon, mux server, CLI) reads one table instead of its own string switch.
+type ActionDescriptor struct {
+	// StopsEngine: applying this verb must stop the target's running process(es)
+	// first — the daemon kills the engine instance, the mux server tears down the
+	// agent's live panes — so a removed/archived session doesn't leak a PTY. For a
+	// verb targeting a workgroup root the stop cascades to its agents. Unarchive
+	// (also set-archived) targets an already-stopped session, so its stop is a
+	// harmless no-op — the flag stays per-verb, not per-field.
+	StopsEngine bool
+	// CreatesSession: the verb creates a new session and returns its id in
+	// Result.NewID, so a client can switch to (and start) it.
+	CreatesSession bool
+	// TargetsRoot: the created session (CreatesSession) is a workgroup root the
+	// client resolves to its first agent, rather than an agent id directly.
+	TargetsRoot bool
+}
+
+// actionDescriptors is the per-verb dispatch table. A verb absent here (refresh,
+// move, rename, rm-repo, agent-set-repos, add-repo) has the zero descriptor: no
+// engine stop, creates nothing.
+var actionDescriptors = map[string]ActionDescriptor{
+	ActionDelete:          {StopsEngine: true},
+	ActionKill:            {StopsEngine: true},
+	ActionArchive:         {StopsEngine: true},
+	ActionSetArchived:     {StopsEngine: true},
+	ActionNewRepoAgent:    {CreatesSession: true},
+	ActionAddAgent:        {CreatesSession: true},
+	ActionNewWorkgroup:    {CreatesSession: true, TargetsRoot: true},
+	ActionCreateWorkspace: {CreatesSession: true, TargetsRoot: true},
+}
+
+// DescriptorFor returns the dispatch descriptor for a lifecycle verb (the zero
+// descriptor for verbs with no special dispatch behavior).
+func DescriptorFor(action string) ActionDescriptor { return actionDescriptors[action] }
+
 // Query names for ActionQuery — the read models the daemon serves so clients
 // (the CLI, forms) never open the store themselves.
 const (
