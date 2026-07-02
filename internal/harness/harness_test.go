@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 func TestHarnessSpawnStreamsOutputAndExit(t *testing.T) {

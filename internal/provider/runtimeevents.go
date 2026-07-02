@@ -1,7 +1,7 @@
 package provider
 
 import (
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // runtimeevents.go implements the opt-in "runtime-events" feature (docs/remote-

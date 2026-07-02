@@ -93,7 +93,7 @@ far behind (past a 4 MiB per-pane cap) is trimmed to the most recent 256 KiB tai
 preceded by `pane.reset`, bounding memory without silent corruption. Discrete
 frames (snapshots, results) remain droppable — each is a full state.
 
-## Protocol 2 — Multiplexer Server ⇄ Agent Harness (`internal/harnessproto`)
+## Protocol 2 — Multiplexer Server ⇄ Agent Harness (`harnessproto`)
 
 Server → Harness (`MuxMsg.type`):
 - `hello` `{version}`.

@@ -1,0 +1,1 @@
+{"type":"register","versions":[1,2],"token":"hp_token","name":"mybox","labels":{"os":"linux","zone":"home"},"capabilities":{"maxPanes":8,"bwrap":true,"os":"linux","arch":"amd64","features":["pane-seq","sessions","runtime-events"]},"panes":[{"paneId":"p1","outSeq":42,"running":true}]}

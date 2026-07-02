@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 const testPoll = 5 * time.Millisecond

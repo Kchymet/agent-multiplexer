@@ -3,51 +3,42 @@
 // well-known names/paths that pin everything to the daemon's engine.
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
+)
+
+// Session, the agent activity states, and the rail sections are the published
+// wire subset: they live in the importable harnessproto module (the single source
+// of truth the harness orchestrator imports instead of hand-mirroring) and are
+// re-exported here so the rest of amux keeps referring to them as core.Session /
+// core.State* / core.Section* unchanged.
+
+// Session is a normalized agent session surfaced from any Source.
+type Session = harnessproto.Session
 
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one.
 const (
-	StateIdle    = "idle"    // no live agent process
-	StateReady   = "ready"   // live, turn finished, ready for the next message
-	StateWaiting = "waiting" // live, blocked on a prompt awaiting user input
-	StateRunning = "running" // live and the agent has an active turn
+	StateIdle    = harnessproto.StateIdle    // no live agent process
+	StateReady   = harnessproto.StateReady   // live, turn finished, ready for the next message
+	StateWaiting = harnessproto.StateWaiting // live, blocked on a prompt awaiting user input
+	StateRunning = harnessproto.StateRunning // live and the agent has an active turn
 	// StateUnknown is a live agent with no hook data yet (a session predating
 	// the hooks, or one that hasn't fired its first event). Shown as a less
 	// certain "running" so it reads as live without claiming granular knowledge.
-	StateUnknown = "unknown"
+	StateUnknown = harnessproto.StateUnknown
 )
 
 // Rail sections, top to bottom (Session.Section). The console is sectionless and
 // pinned above them all.
 const (
-	SectionWorkgroups = "workgroups" // cross-repo workgroups + nested agents
-	SectionRepos      = "repos"      // tracked repos + their single-repo agents
-	SectionDetached   = "detached"   // Claude sessions amux didn't launch
-	SectionArchived   = "archived"   // agents marked done/archived (reversible)
+	SectionWorkgroups = harnessproto.SectionWorkgroups // cross-repo workgroups + nested agents
+	SectionRepos      = harnessproto.SectionRepos      // tracked repos + their single-repo agents
+	SectionDetached   = harnessproto.SectionDetached   // Claude sessions amux didn't launch
+	SectionArchived   = harnessproto.SectionArchived   // agents marked done/archived (reversible)
 )
-
-// Session is a normalized agent session surfaced from any Source.
-type Session struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Source    string `json:"source"`             // claude | hermes | workspace
-	Kind      string `json:"kind"`               // agent kind, e.g. claude
-	Mode      string `json:"mode,omitempty"`     // task (short) | loop (long)
-	RootID    string `json:"rootId,omitempty"`   // parent root for sub-sessions
-	IsRoot    bool   `json:"isRoot,omitempty"`   // true => a root container row
-	Repos     string `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
-	Section   string `json:"section,omitempty"`  // rail grouping: workspaces | repos | detached
-	State     string `json:"state,omitempty"`    // idle | ready | waiting | running
-	Status    string `json:"status"`             // human label, e.g. "ready · main"
-	Archived  bool   `json:"archived,omitempty"` // set on rows in the archived section
-	Cwd       string `json:"cwd"`
-	Pid       int    `json:"pid,omitempty"`
-	StartedAt int64  `json:"startedAt"`
-	CanAttach bool   `json:"canAttach"`
-	CanKill   bool   `json:"canKill"`
-	CanResume bool   `json:"canResume"`
-}
 
 // Snapshot is the daemon -> client state push (one JSON object per line).
 type Snapshot struct {

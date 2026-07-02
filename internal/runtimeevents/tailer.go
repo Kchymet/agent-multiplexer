@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // DefaultPollInterval is how often a tail re-stats its record file for growth.

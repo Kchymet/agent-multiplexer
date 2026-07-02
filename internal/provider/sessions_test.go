@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"amux/internal/core"
-	"amux/internal/harnessproto"
 	"amux/internal/wiretls"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // mutableSource is a test session rail whose contents the test can swap under a

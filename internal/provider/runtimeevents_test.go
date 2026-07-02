@@ -6,7 +6,7 @@ import (
 	"net"
 	"testing"
 
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // fakeStream is a controllable RuntimeEventStream: it records the (sessionID,

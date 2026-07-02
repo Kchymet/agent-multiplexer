@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/harnessproto"
 	"amux/internal/wiretls"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // newFast builds a provider tuned for tests: tiny backoff, and heartbeat scaled

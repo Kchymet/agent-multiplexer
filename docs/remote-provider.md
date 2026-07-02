@@ -14,7 +14,7 @@ disconnects within the grace window, `PaneOffer`/`AdoptPane` resume with
 under "Provider mode UX" below.
 
 amux's harness already runs pane execution behind a protocol
-(`internal/harnessproto` — see `docs/client-server.md`): an orchestrating side
+(the published `harnessproto` module — see `docs/client-server.md`): an orchestrating side
 sends `spawn/input/resize/kill`, the executing side streams `output/exit`
 back, as line-framed JSON over any byte stream. This document specifies
 **provider mode**: the amux daemon dials out to a **remote orchestrator**,

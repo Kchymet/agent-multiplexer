@@ -16,11 +16,11 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/harness"
-	"amux/internal/harnessproto"
 	"amux/internal/muxproto"
 	"amux/internal/panespec"
 	"amux/internal/source"
 	"amux/internal/wsops"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Server is a running multiplexer server.

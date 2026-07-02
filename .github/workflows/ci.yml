@@ -1,0 +1,28 @@
+# PR-gating CI for amux. Until AGE-130 there was none — a wire-protocol change in
+# harnessproto could merge green here and only surface downstream (the harness
+# mirror) up to 24h later. This runs the root module and the nested harnessproto
+# module (the published wire protocol), so a JSON-tag/field change that breaks the
+# golden fixtures in harnessproto/golden_test.go fails this workflow on the PR.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+      - name: vet
+        run: make vet
+      - name: test
+        run: make test

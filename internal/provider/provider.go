@@ -25,8 +25,8 @@ import (
 	"github.com/creack/pty"
 
 	"amux/internal/core"
-	"amux/internal/harnessproto"
 	"amux/internal/wiretls"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Config is the provider's runtime configuration, assembled by the CLI from
@@ -306,7 +306,7 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	case <-ctx.Done():
 	}
 	s.cancel()
-	rtCancel()      // stop the per-session runtime-events pumps
+	rtCancel()       // stop the per-session runtime-events pumps
 	_ = conn.Close() // unblock the reader's ReadMux
 	wg.Wait()
 	s.rtWG.Wait()

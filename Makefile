@@ -3,6 +3,12 @@ CONFDIR ?= $(HOME)/.config/amux
 GOFLAGS ?=
 LDFLAGS := -s -w
 
+# Go modules in this repo. harnessproto is a nested, independently-published
+# module (the wire protocol harness imports), so it is NOT covered by the root
+# module's ./... — test/vet must recurse into it explicitly or a wire-tag change
+# there would merge green.
+GO_MODULES := . ./harnessproto
+
 .PHONY: all build install uninstall test fmt vet clean cross run
 
 all: build
@@ -28,13 +34,13 @@ uninstall:
 	rm -f $(BINDIR)/amux
 
 test:
-	go test ./...
+	@for m in $(GO_MODULES); do echo "== go test $$m =="; (cd $$m && go test ./...) || exit 1; done
 
 fmt:
 	gofmt -w .
 
 vet:
-	go vet ./...
+	@for m in $(GO_MODULES); do echo "== go vet $$m =="; (cd $$m && go vet ./...) || exit 1; done
 
 clean:
 	rm -rf bin

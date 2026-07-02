@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"amux/internal/core"
-	"amux/internal/harnessproto"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // This file implements the opt-in "sessions" feature (docs/remote-provider-sessions.md):
