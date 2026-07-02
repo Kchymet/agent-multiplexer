@@ -160,6 +160,16 @@ func configBinds(tab int, home string) [][]string {
 		if exe, err := os.Executable(); err == nil {
 			binds = append(binds, []string{"--ro-bind-try", exe, exe})
 		}
+		// On WSL2, Claude reaches the Windows clipboard (e.g. pasting an image) by
+		// invoking a Windows .exe via interop; those live under /mnt/c, and the
+		// launcher path-translates through the DrvFs mount. Without /mnt/c in the
+		// scope the .exe can't be found and the read fails ("can't find image on
+		// clipboard"). Bind it read-only; /mnt/wsl backs some interop helpers too.
+		// --ro-bind-try is a no-op off WSL, so this stays cross-platform.
+		binds = append(binds,
+			[]string{"--ro-bind-try", "/mnt/c", "/mnt/c"},
+			[]string{"--ro-bind-try", "/mnt/wsl", "/mnt/wsl"},
+		)
 		return append(binds, gitBinds(home)...)
 	case TabEditor:
 		name := filepath.Base(editorBin())
