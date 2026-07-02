@@ -3,7 +3,11 @@
 // well-known names/paths that pin everything to the daemon's engine.
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/kchymet/agent-multiplexer/proto"
+)
 
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one.
@@ -27,27 +31,10 @@ const (
 	SectionArchived   = "archived"   // agents marked done/archived (reversible)
 )
 
-// Session is a normalized agent session surfaced from any Source.
-type Session struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Source    string `json:"source"`             // claude | hermes | workspace
-	Kind      string `json:"kind"`               // agent kind, e.g. claude
-	Mode      string `json:"mode,omitempty"`     // task (short) | loop (long)
-	RootID    string `json:"rootId,omitempty"`   // parent root for sub-sessions
-	IsRoot    bool   `json:"isRoot,omitempty"`   // true => a root container row
-	Repos     string `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
-	Section   string `json:"section,omitempty"`  // rail grouping: workspaces | repos | detached
-	State     string `json:"state,omitempty"`    // idle | ready | waiting | running
-	Status    string `json:"status"`             // human label, e.g. "ready · main"
-	Archived  bool   `json:"archived,omitempty"` // set on rows in the archived section
-	Cwd       string `json:"cwd"`
-	Pid       int    `json:"pid,omitempty"`
-	StartedAt int64  `json:"startedAt"`
-	CanAttach bool   `json:"canAttach"`
-	CanKill   bool   `json:"canKill"`
-	CanResume bool   `json:"canResume"`
-}
+// Session is a normalized agent session surfaced from any Source. It is the wire
+// shape the remote-provider "sessions" feature publishes, so its single canonical
+// definition lives in the public proto module; this is an alias to it.
+type Session = proto.Session
 
 // Snapshot is the daemon -> client state push (one JSON object per line).
 type Snapshot struct {

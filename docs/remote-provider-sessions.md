@@ -13,6 +13,13 @@ daemon's own *session inventory* (workgroups and agents) to the orchestrator,
 and accepting a small set of lifecycle verbs back — so an orchestrator's UI can
 show and manage your local sessions remotely.
 
+The message shapes below (`sessions`/`sessions-subscribe`/`session-action`/
+`session-result`, the wire `Session`, and the `runtime-events` frames) are part of
+the public wire module, importable at `github.com/kchymet/agent-multiplexer/proto`
+— see `docs/remote-provider.md` § *Importing the wire types* for usage and the
+maintainer's `proto/vX.Y.Z` tagging steps. Import those types rather than
+re-deriving them.
+
 Everything below preserves provider mode's trust model:
 
 - **The daemon owns the connection.** All messages ride the existing dial-out

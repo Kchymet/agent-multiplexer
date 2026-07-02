@@ -25,6 +25,46 @@ agent processes onto.
 The orchestrator is any service that speaks this contract. amux contains no
 knowledge of, or code for, any particular orchestrator.
 
+## Importing the wire types
+
+The complete wire surface — every message type, the opt-in `sessions` and
+`runtime-events` shapes, and a self-contained line-JSON codec — is published as a
+standalone, dependency-free Go module, importable at:
+
+    github.com/kchymet/agent-multiplexer/proto
+
+An external orchestrator should import that package instead of hand-mirroring the
+message structs, so field tags and framing can never drift out of sync:
+
+```go
+import "github.com/kchymet/agent-multiplexer/proto"
+
+conn := proto.NewConn(rwc)              // line-framed JSON over any stream
+_ = conn.WriteMux(proto.MuxMsg{Type: proto.MRegistered, OK: true, Version: 2})
+msg, _ := conn.ReadHarness()            // proto.HarnessMsg
+```
+
+The module holds the one canonical definition of every wire type; amux's internal
+`internal/harnessproto` package and `core.Session` are thin aliases to it, so the
+daemon and any external consumer marshal byte-identical JSON. A golden JSON-keys
+test in the module locks the field tags as the contract.
+
+### Releasing (maintainer)
+
+`proto/` is a **nested module** in this repo, wired into the root build with a
+`replace … => ./proto` directive that stays in place permanently (the standard
+nested-module dev pattern — it does not affect external consumers, who fetch the
+tagged module directly). Nested modules tag with a **path-prefixed** tag, not a
+bare `vX.Y.Z`. After a change merges to the default branch, tag and push:
+
+    git tag proto/v0.1.0
+    git push origin proto/v0.1.0
+
+Consumers then pin it with `go get github.com/kchymet/agent-multiplexer/proto@v0.1.0`
+(Go resolves the `proto/v0.1.0` tag for the `/proto` subdirectory). Bump the
+`proto/vX.Y.Z` tag on every wire change; while pre-1.0, additive fields are minor
+bumps and any breaking change to an existing tag is a `v0.(N+1).0` bump.
+
 ```
    provider machine (amux)                      remote orchestrator
 ┌───────────────────────────┐   TCP + TLS    ┌──────────────────────┐
