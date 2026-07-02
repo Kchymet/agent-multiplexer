@@ -1,6 +1,7 @@
 package nativetui
 
 import (
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,7 +23,8 @@ func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "model", label: "Model", value: store.ModelOpus, options: store.Models},
+			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
+			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
 		},
 	}
 }
@@ -41,7 +43,8 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos", picker: true},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeLoop}},
-			{key: "model", label: "Model", value: store.ModelOpus, options: store.Models},
+			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
+			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
 		},
 	}
 }
@@ -69,6 +72,8 @@ func (m *model) openNewWorkgroupForm() {
 			{key: "name", label: "Name"},
 			{key: "repos", label: "Repos (first agent)", picker: true},
 			{key: "prompt", label: "Description"},
+			{key: "agent", label: "Harness", value: "claude", options: store.Harnesses},
+			{key: "model", label: "Model", value: store.DefaultModel("claude"), options: store.ModelsFor("claude")},
 			{key: "linear", label: "Linear issue/URL"},
 		},
 	}
@@ -333,6 +338,34 @@ func (fs *formState) active() *formField {
 	return fs.fields[fs.cursor]
 }
 
+// field returns the field with the given key, or nil when the form has none.
+func (fs *formState) field(key string) *formField {
+	for _, f := range fs.fields {
+		if f.key == key {
+			return f
+		}
+	}
+	return nil
+}
+
+// syncDependents refreshes fields whose choices depend on another select's
+// value, after that select changes. Today the only such pair is Harness → Model:
+// the chosen harness filters the model list to its own models, and a selection
+// that the new list no longer offers resets to the harness default.
+func (fs *formState) syncDependents(changed *formField) {
+	if changed == nil || changed.key != "agent" {
+		return
+	}
+	model := fs.field("model")
+	if model == nil {
+		return
+	}
+	model.options = store.ModelsFor(changed.value)
+	if !slices.Contains(model.options, model.value) {
+		model.value = store.DefaultModel(changed.value)
+	}
+}
+
 func (fs *formState) next() { fs.move(1) }
 func (fs *formState) prev() { fs.move(-1) }
 func (fs *formState) move(d int) {
@@ -484,10 +517,12 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "left", "h":
 		if field != nil {
 			field.cycle(false)
+			fs.syncDependents(field)
 		}
 	case "right", "l", " ":
 		if field != nil {
 			field.cycle(true)
+			fs.syncDependents(field)
 		}
 	}
 	return m, nil
