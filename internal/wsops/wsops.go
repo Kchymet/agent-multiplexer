@@ -630,6 +630,16 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 	if err != nil || !ok {
 		return fmt.Errorf("no such session %q", id)
 	}
+	// Stamp the archive time so the rail can order the ARCHIVED section by when
+	// agents were archived. Only stamp on a false→true transition; re-archiving
+	// an already-archived session leaves its original time intact. Clear on
+	// restore so a later re-archive gets a fresh timestamp.
+	switch {
+	case archived && !s.Archived:
+		s.ArchivedAt = store.Now()
+	case !archived:
+		s.ArchivedAt = 0
+	}
 	s.Archived = archived
 	return db.PutSession(s)
 }
