@@ -18,6 +18,9 @@ var (
 	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(accent)
 	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Background(lipgloss.Color("237"))
 	keyStyle     = lipgloss.NewStyle().Foreground(accent)
+	// sectionKeyStyle accents a hotkey inside a section bar, keeping the bar's
+	// background so the header reads as one solid strip.
+	sectionKeyStyle = keyStyle.Bold(true).Background(lipgloss.Color("237"))
 )
 
 func (m *model) View() string {
@@ -141,17 +144,17 @@ func (m *model) renderSidebar() string {
 	// WORKGROUPS and REPOS are always shown — with an empty-state hint when they
 	// have no rows — so creating the first one is discoverable. ARCHIVED and
 	// DETACHED only appear when populated (they have nothing to create).
-	for _, sec := range []struct{ key, empty string }{
-		{core.SectionWorkgroups, "no workgroups — w to create"},
-		{core.SectionRepos, "no repos — R to add"},
-		{core.SectionArchived, ""},
-		{core.SectionDetached, ""},
+	for _, sec := range []struct{ key, hotkey, empty string }{
+		{core.SectionWorkgroups, "w", "no workgroups — w to create"},
+		{core.SectionRepos, "R", "no repos — R to add"},
+		{core.SectionArchived, "", ""},
+		{core.SectionDetached, "", ""},
 	} {
 		any := false
 		for i, s := range m.sessions {
 			if s.Section == sec.key {
 				if !any {
-					top = append(top, "", sectionStyle.Width(sidebarWidth).Render(sectionLabel(sec.key)))
+					top = append(top, "", sectionHeader(sec.key, sec.hotkey))
 					any = true
 				}
 				if i == m.cursor {
@@ -161,7 +164,7 @@ func (m *model) renderSidebar() string {
 			}
 		}
 		if !any && sec.empty != "" {
-			top = append(top, "", sectionStyle.Width(sidebarWidth).Render(sectionLabel(sec.key)))
+			top = append(top, "", sectionHeader(sec.key, sec.hotkey))
 			top = append(top, dimStyle.Render(" "+truncate(sec.empty, sidebarWidth-1)))
 		}
 	}
@@ -369,6 +372,22 @@ func hints(label string, hs []hint) string {
 		b.WriteString(dimStyle.Render(" " + h.desc))
 	}
 	return b.String()
+}
+
+// sectionHeader renders a section's title bar. When hotkey is non-empty it
+// right-aligns an "add" hint (e.g. "w +") in the accent color, so the key to
+// create the first entry is always visible — not just in the empty state.
+func sectionHeader(section, hotkey string) string {
+	label := sectionLabel(section)
+	if hotkey == "" {
+		return sectionStyle.Width(sidebarWidth).Render(label)
+	}
+	hint := sectionKeyStyle.Render(hotkey) + sectionStyle.Render(" + ")
+	gap := sidebarWidth - lipgloss.Width(label) - lipgloss.Width(hint)
+	if gap < 1 {
+		return sectionStyle.Width(sidebarWidth).Render(label)
+	}
+	return sectionStyle.Render(label+strings.Repeat(" ", gap)) + hint
 }
 
 func sectionLabel(section string) string {
