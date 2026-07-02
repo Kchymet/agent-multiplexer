@@ -92,3 +92,26 @@ func TestClaudeRestoreTranscript(t *testing.T) {
 		t.Fatal("session should be resumable after gap-fill")
 	}
 }
+
+// TestHarnessSkillsAndGuide pins each provider's workspace-config layout: Claude
+// reads .claude/skills + CLAUDE.md; any other kind gets the vendor-neutral
+// .agents/skills + AGENTS.md.
+func TestHarnessSkillsAndGuide(t *testing.T) {
+	root := "/ws"
+	for _, tc := range []struct {
+		kind, skills, guide string
+	}{
+		{"", ".claude/skills", "CLAUDE.md"},
+		{"claude", ".claude/skills", "CLAUDE.md"},
+		{"codex", ".agents/skills", "AGENTS.md"},
+		{"hermes", ".agents/skills", "AGENTS.md"},
+	} {
+		h := HarnessFor(tc.kind)
+		if got, want := h.SkillsDir(root), filepath.Join(root, tc.skills); got != want {
+			t.Errorf("kind %q SkillsDir=%q, want %q", tc.kind, got, want)
+		}
+		if got, want := h.GuideFile(root), filepath.Join(root, tc.guide); got != want {
+			t.Errorf("kind %q GuideFile=%q, want %q", tc.kind, got, want)
+		}
+	}
+}

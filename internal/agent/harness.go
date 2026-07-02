@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"path/filepath"
+
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -36,6 +38,17 @@ type Harness interface {
 	// of starting fresh. It returns whether it restored a transcript, and never
 	// clobbers a fresher harness transcript.
 	RestoreTranscript(cwd, sessionID string) (bool, error)
+
+	// SkillsDir is the directory this harness discovers skills in, under the
+	// workspace root — each CLI reads its own place, so amux installs its skill
+	// library there. Claude Code reads <root>/.claude/skills; a provider with no
+	// native location falls back to the vendor-neutral <root>/.agents/skills.
+	SkillsDir(root string) string
+
+	// GuideFile is the agent-guide file this harness reads, under the workspace
+	// root, where amux writes the sandbox instructions. Claude Code reads
+	// <root>/CLAUDE.md; others fall back to the vendor-neutral <root>/AGENTS.md.
+	GuideFile(root string) string
 }
 
 // HarnessFor returns the Harness for an agent kind. "" and "claude" get the
@@ -88,6 +101,11 @@ func (claudeHarness) RestoreTranscript(cwd, sessionID string) (bool, error) {
 	return core.RestoreCapturedTranscript(sessionID, claudecfg.TranscriptPath(cwd, sessionID))
 }
 
+// SkillsDir / GuideFile: Claude Code's own conventions — it reads project skills
+// from .claude/skills and its guide from CLAUDE.md (both under the launch dir).
+func (claudeHarness) SkillsDir(root string) string { return filepath.Join(root, ".claude", "skills") }
+func (claudeHarness) GuideFile(root string) string { return filepath.Join(root, "CLAUDE.md") }
+
 // noopHarness is the Harness for a kind with no durability primitives yet: it
 // reports no activity signal (always safe to stop) and never restores. It keeps
 // callers free of nil checks — an unknown kind degrades to today's behavior.
@@ -96,3 +114,8 @@ type noopHarness struct{ kind string }
 func (n noopHarness) Kind() string                                 { return n.kind }
 func (noopHarness) Activity(string) engine.Activity                { return engine.ActivityUnknown }
 func (noopHarness) RestoreTranscript(string, string) (bool, error) { return false, nil }
+
+// SkillsDir / GuideFile: a provider with no declared convention gets the
+// vendor-neutral Agent Skills layout (.agents/skills, AGENTS.md) — e.g. Codex.
+func (noopHarness) SkillsDir(root string) string { return filepath.Join(root, ".agents", "skills") }
+func (noopHarness) GuideFile(root string) string { return filepath.Join(root, "AGENTS.md") }
