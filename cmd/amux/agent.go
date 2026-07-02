@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 )
 
@@ -34,6 +35,10 @@ func cmdAgent(args []string) error {
 		// Claude-hook binding that snapshots the conversation transcript (identity
 		// and transcript path come from the hook JSON on stdin).
 		return cmdAgentCapture()
+	case "sessions":
+		// List every Claude Code session on the machine so an agent can reason
+		// across conversations (not scoped to the caller — this is shared context).
+		return cmdAgentSessions(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
 	case "", "help", "-h", "--help":
@@ -62,6 +67,10 @@ usage: amux agent <command>
                      JSON on stdin); amux wires this into Claude's settings.json
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
+  sessions [--json]  list every Claude Code session on this machine (across all
+                     projects), most recent first, so you can reason about work
+                     that spans conversations. Read a transcript with your normal
+                     file tools; --json emits the full records for scripting.
 
 Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned. Per-agent identity (authn +
@@ -139,6 +148,54 @@ func cmdAgentCapture() error {
 	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
 	_ = core.CaptureTranscript(sessionID, payload.TranscriptPath, payload.HookEventName, os.Getenv("AMUX_WORKGROUP"))
 	return nil
+}
+
+// cmdAgentSessions lists every Claude Code session transcript on the machine so
+// an agent can reason about tasks that recur across conversations — what other
+// agents (or the user) worked on, prior decisions, common patterns. Unlike the
+// other agent verbs this is not scoped to the caller: it's shared read-only
+// context. Text output is one row per session (most recent first) with the path
+// to read; --json emits the full records for programmatic use.
+func cmdAgentSessions(args []string) error {
+	asJSON := false
+	for _, a := range args {
+		if a == "--json" {
+			asJSON = true
+		}
+	}
+	sessions := claudecfg.ListSessions()
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(sessions)
+	}
+	if len(sessions) == 0 {
+		fmt.Println("no Claude Code sessions found")
+		return nil
+	}
+	for _, s := range sessions {
+		loc := s.Cwd
+		if loc == "" {
+			loc = s.Project // munge is lossy; fall back to the project-dir name
+		}
+		fmt.Printf("%s  %8s  %s\n    %s\n",
+			s.Modified.Format("2006-01-02 15:04"), humanSize(s.Size), loc, s.Path)
+	}
+	return nil
+}
+
+// humanSize renders a byte count as a compact, human-readable string.
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGT"[exp])
 }
 
 // stdinPiped reports whether stdin is a pipe/file rather than a terminal, so we
