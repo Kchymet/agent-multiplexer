@@ -153,7 +153,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer func() { _ = ln.Close(); _ = os.Remove(sock) }()
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
-	// restart, e.g. `amux reload`; out-of-process hosting would lift that.)
+	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
 	// Persist the live set before killing them, so the next startup relaunches it.
 	if d.engine != nil {
 		defer func() {
