@@ -160,10 +160,11 @@ const (
 	ModelOpus   = "opus"
 	ModelSonnet = "sonnet"
 	ModelHaiku  = "haiku"
+	ModelFable  = "fable"
 )
 
 // Models is the ordered list of selectable models, opus first (the default).
-var Models = []string{ModelOpus, ModelSonnet, ModelHaiku}
+var Models = []string{ModelOpus, ModelSonnet, ModelHaiku, ModelFable}
 
 // Workgroup scopes (root sessions only).
 const (
