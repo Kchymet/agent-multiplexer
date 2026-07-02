@@ -688,7 +688,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		repos := store.SplitRepos(a.Fields["repos"])
 		var def *AgentSpec
 		if len(repos) > 0 || prompt != "" {
-			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Model: a.Fields["model"], Prompt: prompt}
+			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: prompt}
 		}
 		// Return the workgroup root; the client resolves it to the first agent.
 		return CreateWorkspace(ctx, a.Fields["name"], def)
