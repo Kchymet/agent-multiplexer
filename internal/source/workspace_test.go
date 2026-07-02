@@ -99,6 +99,24 @@ func TestRecentArchived(t *testing.T) {
 	if oldestKept != int64(5) { // Created 0..4 dropped
 		t.Fatalf("many: oldest kept is Created=%d, want 5", oldestKept)
 	}
+
+	// Ordering is by ArchivedAt, not Created: the oldest-created agent archived
+	// last sorts to the top. Sessions with an unset ArchivedAt (archived before it
+	// was tracked) fall back to Created order and sort below any stamped ones.
+	byArchived := []store.Session{
+		{ID: "old-created-archived-last", Created: 10, ArchivedAt: 300},
+		{ID: "new-created-archived-first", Created: 30, ArchivedAt: 100},
+		{ID: "mid", Created: 20, ArchivedAt: 200},
+		{ID: "legacy-newest-created", Created: 40, ArchivedAt: 0},
+		{ID: "legacy-oldest-created", Created: 5, ArchivedAt: 0},
+	}
+	got = recentArchived(byArchived)
+	want := []string{"old-created-archived-last", "mid", "new-created-archived-first", "legacy-newest-created", "legacy-oldest-created"}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("byArchived: got %v, want %v", ids(got), want)
+		}
+	}
 }
 
 func ids(ss []store.Session) []string {

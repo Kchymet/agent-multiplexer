@@ -199,6 +199,93 @@ func writeTranscript(t *testing.T, home, munged, uuid string) {
 	}
 }
 
+// TestRenameWorkgroup verifies a workgroup root can be renamed through the same
+// "rename" action the CLI (`amux workgroup rename`) and TUI (the `r` key) send:
+// the new name lands on the root and surfaces via Display(), which is what the
+// rail title and `session ls` render. An empty name clears back to the id, and
+// renaming an unknown id is an error rather than a silent no-op.
+func TestRenameWorkgroup(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	rootID, err := CreateWorkspace(ctx, "old-name", nil)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	if _, err := ApplyResult(ctx, core.Action{
+		Action: "rename", ID: rootID, Fields: map[string]string{"name": "  new-name  "},
+	}); err != nil {
+		t.Fatalf("rename action: %v", err)
+	}
+
+	root := getSession(t, rootID)
+	if root.Name != "new-name" {
+		t.Errorf("Name = %q, want %q (surrounding whitespace should be trimmed)", root.Name, "new-name")
+	}
+	if root.Display() != "new-name" {
+		t.Errorf("Display() = %q, want %q", root.Display(), "new-name")
+	}
+
+	// Clearing the name falls back to the id in the rail label.
+	if err := Rename(rootID, "   "); err != nil {
+		t.Fatalf("Rename to blank: %v", err)
+	}
+	if root := getSession(t, rootID); root.Name != "" || root.Display() != rootID {
+		t.Errorf("blank name: Name=%q Display()=%q, want name cleared and Display()=%q", root.Name, root.Display(), rootID)
+	}
+
+	if err := Rename("no-such-id", "x"); err == nil {
+		t.Error("renaming an unknown id should error")
+	}
+}
+
+// TestRenameAgent verifies the same rename path names an individual agent
+// (sub-session), not just a root — the TUI `r` key works on either.
+func TestRenameAgent(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	rootID, err := CreateWorkspace(ctx, "grp", &AgentSpec{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kids, _ := db.Children(rootID)
+	db.Close()
+	if len(kids) != 1 {
+		t.Fatalf("want 1 agent, got %d", len(kids))
+	}
+
+	if err := Rename(kids[0].ID, "api spike"); err != nil {
+		t.Fatalf("Rename agent: %v", err)
+	}
+	if a := getSession(t, kids[0].ID); a.Display() != "api spike" {
+		t.Errorf("agent Display() = %q, want %q", a.Display(), "api spike")
+	}
+}
+
+// getSession reads one session back from the store for an assertion.
+func getSession(t *testing.T, id string) store.Session {
+	t.Helper()
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("session %s not found", id)
+	}
+	return s
+}
+
 func TestAgentWorkdir(t *testing.T) {
 	base := filepath.Join("sessions", "root1", "agent1")
 	tests := []struct {

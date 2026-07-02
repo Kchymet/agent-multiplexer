@@ -49,6 +49,97 @@ func TestNewRepoPickerSeedsAndLists(t *testing.T) {
 	}
 }
 
+// drivePicker opens a repo picker over the given repo names and applies the keys,
+// returning the model so callers can assert on picker state.
+func drivePicker(names []string, keys ...string) *model {
+	var sessions []core.Session
+	for _, n := range names {
+		sessions = append(sessions, core.Session{ID: n, Kind: "repo"})
+	}
+	m := &model{sessions: sessions}
+	m.picker = newRepoPicker("Repos", sessions, nil)
+	for _, k := range keys {
+		m.handlePicker(key(k))
+	}
+	return m
+}
+
+// The picker opens in nav mode: j/k are motions, not filter text, so vim motions
+// drive the list by default and typing needs explicit intent.
+func TestPickerOpensInNavMode(t *testing.T) {
+	// names sort to: agent-multiplexer, harness, pipeline-engine
+	names := []string{"harness", "pipeline-engine", "agent-multiplexer"}
+
+	m := drivePicker(names, "j")
+	if m.picker.searching {
+		t.Fatal("picker should open in nav mode, not search")
+	}
+	if m.picker.filter != "" {
+		t.Fatalf("nav-mode letter should not filter, got %q", m.picker.filter)
+	}
+	if m.picker.cursor != 1 {
+		t.Fatalf("j should move cursor to 1, got %d", m.picker.cursor)
+	}
+
+	// k moves back up.
+	m.handlePicker(key("k"))
+	if m.picker.cursor != 0 {
+		t.Fatalf("k should move cursor to 0, got %d", m.picker.cursor)
+	}
+}
+
+// g/G jump to the first/last row (the last row is the track-new sentinel).
+func TestPickerGotoTopBottom(t *testing.T) {
+	names := []string{"a", "b", "c"}
+	m := drivePicker(names, "G")
+	rows := m.picker.filtered()
+	if m.picker.cursor != len(rows)-1 {
+		t.Fatalf("G should land on last row %d, got %d", len(rows)-1, m.picker.cursor)
+	}
+	m.handlePicker(key("g"))
+	if m.picker.cursor != 0 {
+		t.Fatalf("g should land on first row, got %d", m.picker.cursor)
+	}
+}
+
+// "/" opts into search mode where letters filter; Esc returns to nav with the
+// filter intact so the narrowed list can be navigated with vim motions.
+func TestPickerSearchModeAndBackToNav(t *testing.T) {
+	names := []string{"harness", "pipeline-engine", "agent-multiplexer"}
+
+	m := drivePicker(names, "/", "pipe")
+	if !m.picker.searching {
+		t.Fatal("/ should enter search mode")
+	}
+	if m.picker.filter != "pipe" {
+		t.Fatalf("search mode should type into filter, got %q", m.picker.filter)
+	}
+	if rows := m.picker.filtered(); len(rows) != 2 || rows[0].name != "pipeline-engine" {
+		t.Fatalf("filter should narrow to pipeline-engine, got %+v", rows)
+	}
+
+	// Esc leaves search mode but keeps the filter; a following letter is a motion.
+	m.handlePicker(key("<esc>"))
+	if m.picker.searching {
+		t.Fatal("esc should return to nav mode")
+	}
+	if m.picker.filter != "pipe" {
+		t.Fatalf("esc should keep the filter, got %q", m.picker.filter)
+	}
+	m.handlePicker(key("j"))
+	if m.picker.filter != "pipe" {
+		t.Fatalf("nav-mode letter after search should not filter, got %q", m.picker.filter)
+	}
+}
+
+// "i" is the other entry into search mode, mirroring the form editor's insert key.
+func TestPickerInsertKeyEntersSearch(t *testing.T) {
+	m := drivePicker([]string{"a", "b"}, "i")
+	if !m.picker.searching {
+		t.Fatal("i should enter search mode")
+	}
+}
+
 func TestPickerFilteredHasTrackNewAndChosenOrder(t *testing.T) {
 	sessions := []core.Session{
 		{ID: "harness", Kind: "repo"},
