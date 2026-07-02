@@ -159,13 +159,13 @@ are assigned (the subdirectories here).
 ## Stay in your sandbox
 - Keep all **edits** inside this directory (your worktrees). Do not write outside
   it: other agents' worktrees, the amux data dir, or any parent/clone of these
-  repos. (Reading the shared Claude sessions below is the one exception.)
+  repos. (Reading the shared agent sessions below is the one exception.)
 - You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
   commit on the default branch (main/master), and do not push to it.
 
-## Reason across Claude sessions
-You can **read** the transcripts of every Claude Code session on this machine —
-your own, other agents', and the user's — to reason about work that spans
+## Reason across agent sessions
+You can **read** the transcripts of every agent session on this machine (Claude
+Code, Codex, …) — your own, other agents', and the user's — to reason about work that spans
 conversations: recurring tasks, prior decisions, and what's already been done.
 List them (most recent first) with:
 

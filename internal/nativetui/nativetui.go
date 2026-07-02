@@ -63,15 +63,15 @@ type model struct {
 	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
 	// so the selected row stays visible when the rail overflows its height.
 	railScroll int
-	focus    focus                       // sidebar or agent pane
-	terms    map[paneKey]*vterm.Terminal // mirror terminals, keyed by (agent id, tab)
-	byPane   map[string]paneKey          // daemon pane id -> the term it feeds
-	attached string                      // agent id currently shown in the main pane
-	tab      int                         // which tab of the attached agent is shown
-	pending  string                      // id of a just-created session to auto-attach once it lands in a snapshot
-	confirm  *confirmState               // a pending confirmation modal, or nil
-	form     *formState                  // a pending form modal, or nil
-	picker   *pickerState                // a pending fuzzy repo picker, or nil
+	focus      focus                       // sidebar or agent pane
+	terms      map[paneKey]*vterm.Terminal // mirror terminals, keyed by (agent id, tab)
+	byPane     map[string]paneKey          // daemon pane id -> the term it feeds
+	attached   string                      // agent id currently shown in the main pane
+	tab        int                         // which tab of the attached agent is shown
+	pending    string                      // id of a just-created session to auto-attach once it lands in a snapshot
+	confirm    *confirmState               // a pending confirmation modal, or nil
+	form       *formState                  // a pending form modal, or nil
+	picker     *pickerState                // a pending fuzzy repo picker, or nil
 	// pendingPicker holds a picker parked while its "track a new repo" form is up,
 	// reopened once the repo is tracked.
 	pendingPicker *pickerState
