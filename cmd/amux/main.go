@@ -18,6 +18,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,7 +47,7 @@ func main() {
 	var err error
 	switch cmd {
 	case "daemon":
-		err = cmdDaemon()
+		err = cmdDaemon(args)
 	case "serve":
 		err = cmdServe(args)
 	case "harness":
@@ -107,7 +109,7 @@ usage: amux <command>
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
   provide <addr>     dial a remote orchestrator and serve panes (provider mode)
-  daemon             run the daemon in the foreground (usually automatic)
+  daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print version
 
 amux do <action> drives the daemon's control API from scripts (no direct store
@@ -127,7 +129,36 @@ Set AMUX_SKIP=1 in your shell to bypass auto-launch.
 `)
 }
 
-func cmdDaemon() error {
+// cmdDaemon dispatches the daemon lifecycle. Bare `amux daemon` runs the daemon
+// in the foreground (how ensureDaemon spawns it); the stop/start/restart
+// subcommands control an already-running detached daemon.
+func cmdDaemon(args []string) error {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "":
+		return daemonRun()
+	case "stop", "down":
+		return daemonStop(true)
+	case "start", "up":
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return daemonStart(self)
+	case "restart", "reload":
+		return daemonRestart()
+	default:
+		return fmt.Errorf("unknown daemon subcommand %q (want stop|start|restart)", sub)
+	}
+}
+
+// daemonRun runs the daemon in the foreground until signalled. It is the process
+// ensureDaemon/daemonStart spawn; it owns the engine, so its clean shutdown
+// (SIGTERM) stops the agents it hosts.
+func daemonRun() error {
 	// Single instance: if the socket already answers, another daemon owns it.
 	if c, err := daemon.Dial(); err == nil {
 		_ = c.Close()
@@ -144,6 +175,110 @@ func cmdDaemon() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return daemon.Default(self).Run(ctx)
+}
+
+// daemonStop turns the running daemon down. It signals the pidfile's process
+// with SIGTERM so the daemon shuts its engine down cleanly (stopping the agents
+// it hosts), then waits for the socket to go quiet, escalating to SIGKILL if the
+// daemon doesn't exit in time. With mustExist=false a not-running daemon is not
+// an error (used by restart, which then just starts a fresh one).
+func daemonStop(mustExist bool) error {
+	pid, err := daemonPid()
+	if err != nil {
+		if !mustExist {
+			// No pidfile, but the socket might still answer a stale daemon.
+			if c, derr := daemon.Dial(); derr == nil {
+				_ = c.Close()
+				return fmt.Errorf("daemon is answering %s but its pidfile is missing; stop it by hand", core.SocketPath())
+			}
+			return nil // nothing to stop
+		}
+		return err
+	}
+	if !processAlive(pid) {
+		_ = os.Remove(core.PidPath())
+		if mustExist {
+			fmt.Printf("daemon (pid %d) was not running; cleared stale pidfile\n", pid)
+		}
+		return nil
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("signal daemon (pid %d): %w", pid, err)
+	}
+	// Wait for a clean exit: the daemon stops its agents, removes the socket, and
+	// exits. Poll until the process is gone (up to ~12s to allow agent teardown).
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			fmt.Printf("daemon stopped (pid %d)\n", pid)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Didn't exit gracefully — force it so a restart can proceed.
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	fmt.Printf("daemon (pid %d) did not exit in time; sent SIGKILL\n", pid)
+	return nil
+}
+
+// daemonStart turns a daemon up if one isn't already answering, reusing the same
+// detached-spawn path bare `amux` uses.
+func daemonStart(self string) error {
+	if c, err := daemon.Dial(); err == nil {
+		_ = c.Close()
+		fmt.Println("daemon already running")
+		return nil
+	}
+	if err := ensureDaemon(self); err != nil {
+		return err
+	}
+	fmt.Println("daemon started")
+	return nil
+}
+
+// daemonRestart turns the daemon down and back up so it loads a freshly installed
+// binary. The daemon owns its agents' processes, so a restart stops them — this
+// is the deliberate, explicit way to do that.
+func daemonRestart() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := daemonStop(false); err != nil {
+		return err
+	}
+	// Ensure the socket is free before starting; daemonStop already waited on the
+	// process, but give the socket file a beat to disappear on slow filesystems.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := daemon.Dial(); err != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return daemonStart(self)
+}
+
+// daemonPid reads the daemon pidfile.
+func daemonPid() (int, error) {
+	b, err := os.ReadFile(core.PidPath())
+	if err != nil {
+		return 0, fmt.Errorf("no daemon pidfile (%s): %w", core.PidPath(), err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, fmt.Errorf("bad pid in %s: %w", core.PidPath(), err)
+	}
+	return pid, nil
+}
+
+// processAlive reports whether a process exists (signal 0 probes without
+// delivering a signal).
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
 }
 
 // ensureDaemon starts a detached daemon if the socket isn't already answering,
