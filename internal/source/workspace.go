@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,12 @@ import (
 // rail after its last hook event, so one that crashed without a SessionEnd
 // eventually drops off instead of lingering forever.
 const untrackedTTL = 12 * time.Hour
+
+// maxArchivedRows caps how many archived agents the rail shows. Archived agents
+// accumulate without bound, so the ARCHIVED section can grow to dwarf the active
+// rail; we surface only the most recently archived. Older ones stay in the store
+// and remain reachable via `amux wg`.
+const maxArchivedRows = 8
 
 // Workspace is the rail's source: the control console, then each root session
 // with its sub-sessions nested underneath.
@@ -163,8 +170,10 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	}
 
 	// Archived agents, collapsed at the bottom — out of the way but reviewable and
-	// restorable (press the archive key again, or `amux wg unarchive <id>`).
-	for _, s := range archived {
+	// restorable (press the archive key again, or `amux wg unarchive <id>`). Cap
+	// the list at the most recently archived so it can't overrun the active rail;
+	// the rest linger in the store, reachable via `amux wg`.
+	for _, s := range recentArchived(archived) {
 		out = append(out, core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: defaultStr(s.Agent, "claude"), Mode: s.Mode,
@@ -177,6 +186,18 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// user-level), shown read-only at the bottom.
 	out = append(out, untrackedRows(tracked, trackedDirs)...)
 	return out, nil
+}
+
+// recentArchived returns the most recently archived sessions (by Created, newest
+// first), capped at maxArchivedRows. Older archived sessions are dropped from the
+// rail but remain in the store. It sorts a copy so the caller's slice is untouched.
+func recentArchived(archived []store.Session) []store.Session {
+	sorted := append([]store.Session(nil), archived...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Created > sorted[j].Created })
+	if len(sorted) > maxArchivedRows {
+		sorted = sorted[:maxArchivedRows]
+	}
+	return sorted
 }
 
 // untrackedRows lists Claude sessions amux didn't launch: any with reported hook
