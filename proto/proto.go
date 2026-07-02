@@ -6,7 +6,7 @@
 // It is the canonical home of every message type on that link. External
 // orchestrators should import it at
 //
-//	github.com/kchymet/agent-multiplexer/proto
+//	github.com/Kchymet/agent-multiplexer/proto
 //
 // instead of hand-mirroring the message shapes. The framing is one JSON object
 // per line (see [Conn]); pane bytes ride in Data ([]byte, base64-encoded by

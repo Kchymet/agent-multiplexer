@@ -6,7 +6,7 @@ package core
 import (
 	"encoding/json"
 
-	"github.com/kchymet/agent-multiplexer/proto"
+	"github.com/Kchymet/agent-multiplexer/proto"
 )
 
 // Agent activity states, surfaced in Session.State. They form an attention

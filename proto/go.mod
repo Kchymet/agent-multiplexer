@@ -1,3 +1,3 @@
-module github.com/kchymet/agent-multiplexer/proto
+module github.com/Kchymet/agent-multiplexer/proto
 
 go 1.25.0

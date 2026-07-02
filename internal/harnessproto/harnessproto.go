@@ -4,13 +4,13 @@
 // pane bytes ride in Data ([]byte, base64-encoded by encoding/json).
 //
 // The wire surface now lives in the public, importable module
-// github.com/kchymet/agent-multiplexer/proto (docs/remote-provider.md). This
+// github.com/Kchymet/agent-multiplexer/proto (docs/remote-provider.md). This
 // package is a thin re-export of that single definition so amux's internal
 // callers keep their short import path while external orchestrators import proto
 // directly instead of hand-mirroring the message types.
 package harnessproto
 
-import "github.com/kchymet/agent-multiplexer/proto"
+import "github.com/Kchymet/agent-multiplexer/proto"
 
 // Protocol versions (see proto).
 const (

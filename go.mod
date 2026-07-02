@@ -3,19 +3,19 @@ module amux
 go 1.25.0
 
 require (
+	github.com/Kchymet/agent-multiplexer/proto v0.0.0-00010101000000-000000000000
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/vt v0.0.0-20260621010513-945fab64fd3e
 	github.com/creack/pty v1.1.24
-	github.com/kchymet/agent-multiplexer/proto v0.0.0-00010101000000-000000000000
 	modernc.org/sqlite v1.53.0
 )
 
 // The wire protocol is a nested module in this repo. Consumers fetch it at its
 // canonical path; in-repo builds resolve it from ./proto via this replace, which
 // is the standard nested-module dev pattern and is expected to stay.
-replace github.com/kchymet/agent-multiplexer/proto => ./proto
+replace github.com/Kchymet/agent-multiplexer/proto => ./proto
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
