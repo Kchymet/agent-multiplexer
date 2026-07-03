@@ -58,6 +58,19 @@ func WorkspacesDir() string { return filepath.Join(DataDir(), "workspaces") }
 // SessionsDir holds per-root-session directories of sub-session worktrees.
 func SessionsDir() string { return filepath.Join(DataDir(), "sessions") }
 
+// BranchFor is the git branch an agent commits on: amux/<root>-<agent>. This is
+// the single source of the branch scheme — every worktree, the agent guide, and
+// the doctor reconciliation derive the branch from here, so changing the scheme is
+// a one-line change (plus a doctor migration note for already-created branches).
+//
+// The name is flat (a hyphen, not a slash) so it never collides with a legacy
+// per-workspace branch amux/<root>: git refs can't have both amux/<root> and
+// amux/<root>/<agent> (a file/directory conflict), which broke adding a second
+// agent to older workspaces.
+func BranchFor(rootID, agentID string) string {
+	return "amux/" + rootID + "-" + agentID
+}
+
 // DBPath is the SQLite session store.
 func DBPath() string { return filepath.Join(DataDir(), "amux.db") }
 
