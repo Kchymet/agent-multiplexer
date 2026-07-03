@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"amux/internal/agent"
-	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -58,9 +57,9 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 			path, _ := agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
 			return path, nil
 		}
-		// Untracked/console: the id is itself a Claude conversation id — resolve it
-		// from Claude's own transcript listing (no amux-store row).
-		for _, info := range claudecfg.ListSessions() {
+		// Untracked/console: the id is itself a conversation id with no amux-store
+		// row — resolve it from the default harness's own transcript listing.
+		for _, info := range agent.HarnessFor(agent.DefaultKind()).ListSessions() {
 			if info.ID == a.ID {
 				return info.Path, nil
 			}

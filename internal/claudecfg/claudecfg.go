@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +43,55 @@ func munge(cwd string) string {
 		}
 		return r
 	}, abs)
+}
+
+// ProjectDirName is Claude Code's project-dir name for cwd — the load-bearing path
+// munge that resume detection, gap-fill, and transcript listing all depend on.
+// Exposed so a contract test and the doctor drift probe can verify amux's copy of
+// the convention against Claude's actual on-disk layout (see MungeDrift).
+func ProjectDirName(cwd string) string { return munge(cwd) }
+
+// MungeDrift detects divergence between Claude Code's project-dir naming scheme
+// and amux's copy of it: for every discovered transcript whose originating cwd we
+// can read, it flags any whose project-dir name isn't derivable from that cwd (or
+// any ancestor of it) by amux's path munge. A non-empty result means an upstream
+// Claude change broke the '/'/'.' → '-' scheme — resume, capture, and listing
+// would silently degrade — so the doctor probe surfaces it loudly instead of
+// best-effort silence.
+//
+// The ancestor allowance matters: amux launches an agent in a dir and the agent
+// may cd into a repo worktree beneath it, so Claude's project dir (keyed to the
+// launch cwd) is munge(cwd) or munge of an ancestor — that's a normal cwd shift,
+// not scheme drift, and must not be flagged. Only a project dir that matches no
+// level is genuine munge drift. Transcripts with an unreadable cwd are skipped.
+func MungeDrift() []string {
+	var out []string
+	for _, s := range ListSessions() {
+		if s.Cwd == "" || s.Project == "" {
+			continue
+		}
+		if !mungeMatchesAncestor(s.Cwd, s.Project) {
+			out = append(out, fmt.Sprintf("%s: stored under %q, not derivable from cwd %q by amux's path munge", s.ID, s.Project, s.Cwd))
+		}
+	}
+	return out
+}
+
+// mungeMatchesAncestor reports whether project equals munge(cwd) or munge of any
+// ancestor directory of cwd — i.e. whether the '/'/'.' → '-' scheme still explains
+// where Claude stored the transcript, allowing for amux's launch-dir-vs-recorded-cwd
+// shift.
+func mungeMatchesAncestor(cwd, project string) bool {
+	for p := cwd; ; {
+		if munge(p) == project {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return false
+		}
+		p = parent
+	}
 }
 
 // sessionPresent reports whether uuid's session is resumable on disk for cwd —
@@ -308,6 +358,40 @@ var hookEvents = []struct{ event, state string }{
 	{"Notification", core.StateWaiting},     // needs the user (permission / idle prompt)
 	{"Stop", core.StateReady},               // finished the turn
 	{"SessionEnd", core.StateIdle},          // agent exited
+}
+
+// HookEventState returns the activity state a Claude Code hook event implies, and
+// whether amux listens on that event. This is the authoritative status contract
+// (Claude runs `amux agent hook <state>` on each event); exposed so a contract
+// test pins the mapping and catches an upstream rename of a hook event.
+func HookEventState(event string) (state string, ok bool) {
+	for _, he := range hookEvents {
+		if he.event == event {
+			return he.state, true
+		}
+	}
+	return "", false
+}
+
+// HookEventNames returns, in order, the Claude hook events amux maps to a state.
+func HookEventNames() []string {
+	out := make([]string, len(hookEvents))
+	for i, he := range hookEvents {
+		out[i] = he.event
+	}
+	return out
+}
+
+// HookPayload is the JSON Claude Code pipes to amux's hook commands on stdin — the
+// load-bearing hook wire shape. amux reads the session id and cwd for status, and
+// the transcript path and event name for capture. Defined here (the Claude surface)
+// and consumed by the `amux agent hook`/`capture` handlers, so a contract test can
+// pin the field names against a recorded payload.
+type HookPayload struct {
+	SessionID      string `json:"session_id"`
+	Cwd            string `json:"cwd"`
+	TranscriptPath string `json:"transcript_path"`
+	HookEventName  string `json:"hook_event_name"`
 }
 
 // captureEvents are the hook events on which amux snapshots the conversation
