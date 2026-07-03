@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"amux/internal/agent"
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -14,7 +15,7 @@ import (
 // this is what lets the CLI list repos and workgroups without opening the DB
 // itself. Unknown queries and store errors come back as a failed Data frame.
 func (d *Daemon) query(cl *connState, a core.Action) {
-	rows, err := d.readModel(a.Query)
+	rows, err := d.readModel(a)
 	if err != nil {
 		cl.send(core.Data{Type: core.FrameData, Query: a.Query, OK: false, Error: err.Error()})
 		return
@@ -27,16 +28,44 @@ func (d *Daemon) query(cl *connState, a core.Action) {
 	cl.send(core.Data{Type: core.FrameData, Query: a.Query, OK: true, Rows: blob})
 }
 
-// readModel returns the store-backed slice named by q. It's split out so the
-// marshalling and framing in query stay uniform across query names.
-func (d *Daemon) readModel(q string) (any, error) {
+// readModel returns the read model named by a.Query. It's split out so the
+// marshalling and framing in query stay uniform across query names. The daemon is
+// the sole store owner, so this — and the poll loop — are the only readers.
+func (d *Daemon) readModel(a core.Action) (any, error) {
+	// QuerySnapshot serves the already-computed rail (no store read): it's the same
+	// inventory the poll loop caches and broadcasts, handed to a peer that would
+	// otherwise open the store itself.
+	if a.Query == core.QuerySnapshot {
+		return d.snapshot().Sessions, nil
+	}
+
 	db, err := store.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
-	switch q {
+	switch a.Query {
+	case core.QueryRuntimePath:
+		// Resolve a session id to its runtime transcript path via its harness, so
+		// the provider need not open the store to tail transcripts. Empty string
+		// (marshalled as "") means no supported record — honest degradation.
+		s, ok, err := db.GetSession(a.ID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			path, _ := agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
+			return path, nil
+		}
+		// Untracked/console: the id is itself a Claude conversation id — resolve it
+		// from Claude's own transcript listing (no amux-store row).
+		for _, info := range claudecfg.ListSessions() {
+			if info.ID == a.ID {
+				return info.Path, nil
+			}
+		}
+		return "", nil
 	case core.QueryRepos:
 		repos, err := db.Repos()
 		if err != nil {
@@ -69,6 +98,6 @@ func (d *Daemon) readModel(q string) (any, error) {
 		}
 		return rows, nil
 	default:
-		return nil, fmt.Errorf("unknown query %q", q)
+		return nil, fmt.Errorf("unknown query %q", a.Query)
 	}
 }

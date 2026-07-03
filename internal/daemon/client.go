@@ -130,7 +130,13 @@ func (c *Client) PaneClose(paneID string) error {
 // surfaces the daemon's error. This is the read counterpart to Send: it keeps the
 // CLI from opening the store itself.
 func (c *Client) Query(name string) (json.RawMessage, error) {
-	if err := c.Send(core.Action{Action: core.ActionQuery, Query: name}); err != nil {
+	return c.queryAction(core.Action{Action: core.ActionQuery, Query: name})
+}
+
+// queryAction is the general form of Query: it carries a full ActionQuery (so a
+// read model can take an id, e.g. QueryRuntimePath) and returns the raw rows.
+func (c *Client) queryAction(a core.Action) (json.RawMessage, error) {
+	if err := c.Send(a); err != nil {
 		return nil, err
 	}
 	for {
@@ -146,6 +152,35 @@ func (c *Client) Query(name string) (json.RawMessage, error) {
 		}
 		return f.Data.Rows, nil
 	}
+}
+
+// Snapshot returns the daemon's current session rail — the same inventory it
+// broadcasts to subscribers — so a peer (the provider) publishes it without
+// opening the store itself.
+func (c *Client) Snapshot() ([]core.Session, error) {
+	raw, err := c.queryAction(core.Action{Action: core.ActionQuery, Query: core.QuerySnapshot})
+	if err != nil {
+		return nil, err
+	}
+	var sessions []core.Session
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	return sessions, json.Unmarshal(raw, &sessions)
+}
+
+// RuntimePath resolves a session id to the on-disk transcript path a runtime-event
+// stream tails, via the daemon (empty when the session has no supported record).
+func (c *Client) RuntimePath(id string) (string, error) {
+	raw, err := c.queryAction(core.Action{Action: core.ActionQuery, Query: core.QueryRuntimePath, ID: id})
+	if err != nil {
+		return "", err
+	}
+	var path string
+	if len(raw) == 0 {
+		return "", nil
+	}
+	return path, json.Unmarshal(raw, &path)
 }
 
 // Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane/Data

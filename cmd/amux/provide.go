@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,15 +11,10 @@ import (
 	"strings"
 	"syscall"
 
-	"amux/internal/agent"
-	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
-	"amux/internal/engine"
 	"amux/internal/provider"
 	"amux/internal/runtimeevents"
-	"amux/internal/source"
-	"amux/internal/store"
 	"amux/internal/wiretls"
 )
 
@@ -113,17 +107,14 @@ func cmdProvide(args []string) error {
 		Logf:         func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
 	}
 	if publish {
-		// The session rail is the daemon's own inventory: a store-backed poll,
-		// annotated with engine liveness (which lights up AAP-derived state) read
-		// from the file the running daemon persists — so publishing needs no second
-		// connection to the daemon. Lifecycle verbs, in contrast, run through the
-		// daemon socket so the daemon stays authoritative (it owns the engine and the
-		// re-poll that surfaces the change); with no daemon reachable they fail cleanly.
-		ws := source.NewWorkspace()
-		ws.SetLiveness(persistedLiveAgents)
+		// The published inventory and transcript paths come from the daemon — the
+		// single store owner — over its socket, the same authority lifecycle verbs
+		// already use (applyViaDaemon). The provider process never opens the store
+		// itself; with no daemon reachable, publishing degrades cleanly (a poll error
+		// publishes nothing, a resolve miss emits no events).
 		cfg.PublishSessions = true
 		cfg.ReadOnlySessions = readonly
-		cfg.Sessions = ws.Poll
+		cfg.Sessions = sessionsViaDaemon
 		if !readonly {
 			cfg.ApplyAction = applyViaDaemon
 		}
@@ -133,7 +124,7 @@ func cmdProvide(args []string) error {
 			// and stream contract events. Read-only; a session with no record on disk
 			// simply emits nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(runtimeRecordResolver(), 0)
+			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(runtimePathViaDaemon(), 0)
 		}
 	}
 
@@ -154,26 +145,42 @@ func envBool(key string) bool {
 	return false
 }
 
-// persistedLiveAgents reads the set of agent ids the running daemon last recorded
-// as live in its engine (the agent tab), so the published inventory can light up
-// AAP-derived state without a second connection to the daemon. A missing or
-// unreadable file yields an empty set (everything reads idle), never an error.
-func persistedLiveAgents() map[string]bool {
-	out := map[string]bool{}
-	buf, err := os.ReadFile(core.LiveAgentsPath())
+// sessionsViaDaemon fetches the published session rail from the local daemon —
+// the store owner — instead of opening the store in this process. The daemon
+// serves its already-computed snapshot (engine liveness baked in), so the
+// inventory the provider publishes matches exactly what the daemon shows. It dials
+// fresh per poll; an unreachable daemon returns an error the provider handles by
+// publishing nothing that cycle.
+func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
+	c, err := daemon.Dial()
 	if err != nil {
-		return out
+		return nil, fmt.Errorf("daemon unreachable: %w", err)
 	}
-	var keys []engine.Key
-	if err := json.Unmarshal(buf, &keys); err != nil {
-		return out
-	}
-	for _, k := range keys {
-		if k.Tab == 0 { // TabAgent: the agent process, not editor/terminal
-			out[k.AgentID] = true
+	defer c.Close()
+	return c.Snapshot()
+}
+
+// runtimePathViaDaemon resolves a published session id to its on-disk transcript
+// path through the daemon (which resolves it via the session's harness), so the
+// provider tails transcripts without opening the store. ok=false — a missing
+// daemon, an error, or an empty path (no supported record) — means the provider
+// advertises runtime-events but honestly emits nothing for that session.
+func runtimePathViaDaemon() runtimeevents.PathResolver {
+	return func(sessionID string) (string, bool) {
+		if sessionID == "" {
+			return "", false
 		}
+		c, err := daemon.Dial()
+		if err != nil {
+			return "", false
+		}
+		defer c.Close()
+		path, err := c.RuntimePath(sessionID)
+		if err != nil || path == "" {
+			return "", false
+		}
+		return path, true
 	}
-	return out
 }
 
 // applyViaDaemon runs one lifecycle verb through the local daemon so the daemon
@@ -201,35 +208,6 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 			}
 			return f.Result.NewID, nil
 		}
-	}
-}
-
-// runtimeRecordResolver resolves a published session id to the on-disk transcript
-// path the runtime-event stream tails. A tracked session is resolved through its
-// harness (RuntimeTranscriptPath) so only a harness with a supported reader
-// returns ok=true — a Codex session no longer reports ok=true for a phantom
-// Claude-shaped path. An untracked/console session publishes a Claude uuid
-// directly, so fall back to scanning Claude's projects root. ok=false means the
-// provider advertises runtime-events but honestly emits nothing for that session.
-func runtimeRecordResolver() runtimeevents.PathResolver {
-	return func(sessionID string) (string, bool) {
-		if sessionID == "" {
-			return "", false
-		}
-		if db, err := store.Open(); err == nil {
-			s, ok, _ := db.GetSession(sessionID)
-			db.Close()
-			if ok {
-				return agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
-			}
-		}
-		// Untracked/console: the published id is itself the Claude conversation id.
-		for _, info := range claudecfg.ListSessions() {
-			if info.ID == sessionID {
-				return info.Path, true
-			}
-		}
-		return "", false
 	}
 }
 

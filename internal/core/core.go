@@ -126,11 +126,22 @@ var actionDescriptors = map[string]ActionDescriptor{
 // descriptor for verbs with no special dispatch behavior).
 func DescriptorFor(action string) ActionDescriptor { return actionDescriptors[action] }
 
-// Query names for ActionQuery — the read models the daemon serves so clients
-// (the CLI, forms) never open the store themselves.
+// Query names for ActionQuery — the read models the daemon serves so processes
+// that don't own the store (the CLI and forms, and the provider peer) read
+// through the daemon instead of opening SQLite themselves. (The daemon and the
+// standalone mux server own store access directly; the CLI/provider do not.)
 const (
 	QueryRepos    = "repos"    // tracked repositories -> []RepoRow
 	QuerySessions = "sessions" // workgroups + their agents -> []WorkgroupRow
+	// QuerySnapshot returns the daemon's current session rail ([]Session) — the same
+	// inventory it broadcasts to subscribers — so a peer process (the provider)
+	// publishes it without opening the store itself.
+	QuerySnapshot = "snapshot"
+	// QueryRuntimePath resolves Action.ID (a session id) to the on-disk transcript
+	// path a runtime-event stream tails, as a JSON string ("" when the session has
+	// no supported record). Lets the provider resolve transcripts via the daemon
+	// instead of reading the store directly.
+	QueryRuntimePath = "runtime-path"
 )
 
 // Action is the client -> daemon control request. It carries both the lifecycle
