@@ -55,6 +55,26 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+// TestAgentIDFromBranchRoundTrips pins that agentIDFromBranch is the inverse of
+// core.BranchFor for the agent id — the pair encode/decode the branch scheme, so
+// the reconciliation's blank-stored-branch fallback stays correct even if the
+// scheme changes. (It would catch agent ids gaining a hyphen, which the
+// LastIndex split assumes they don't.)
+func TestAgentIDFromBranchRoundTrips(t *testing.T) {
+	for _, tc := range []struct{ root, agent string }{
+		{"r1", "a1"},
+		{"3f9c61", "3581b6"},
+	} {
+		if got := agentIDFromBranch(core.BranchFor(tc.root, tc.agent)); got != tc.agent {
+			t.Errorf("agentIDFromBranch(BranchFor(%q,%q)) = %q, want %q", tc.root, tc.agent, got, tc.agent)
+		}
+	}
+	// A legacy amux/<root> branch names no agent.
+	if got := agentIDFromBranch("amux/f12442"); got != "" {
+		t.Errorf("agentIDFromBranch(legacy root branch) = %q, want empty", got)
+	}
+}
+
 // TestReconcileClean verifies no drift is reported when store and disk agree.
 func TestReconcileClean(t *testing.T) {
 	sessions := t.TempDir()
