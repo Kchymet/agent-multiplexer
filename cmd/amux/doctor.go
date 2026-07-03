@@ -111,6 +111,25 @@ func cmdDoctor() error {
 		reconcileSessions(ctx, repos, roots)
 	}
 
+	// Harness surface drift: each harness self-checks its load-bearing integration
+	// with an unversioned upstream CLI (Claude's project-dir path munge) and reports
+	// mismatches loudly, instead of resume/status/capture degrading in silence.
+	fmt.Println("\nHarness surface")
+	anyDrift := false
+	for _, h := range agent.Harnesses() {
+		findings := h.Doctor()
+		if len(findings) == 0 {
+			continue
+		}
+		anyDrift = true
+		for _, f := range findings {
+			fmt.Printf("  ⚠ %-8s %s\n", h.Kind(), f)
+		}
+	}
+	if !anyDrift {
+		fmt.Printf("  ✓ claude    project-dir path munge matches Claude's on-disk layout\n")
+	}
+
 	fmt.Println("\nPaths")
 	fmt.Printf("  data     %s\n", core.DataDir())
 	fmt.Printf("  state    %s\n", core.StateDir())

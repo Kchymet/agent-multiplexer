@@ -49,6 +49,20 @@ func TestRegistryLookups(t *testing.T) {
 	}
 }
 
+// TestHarnessDoctor: the Claude harness reports no drift against an empty (clean)
+// Claude config, and harnesses with no amux-managed surface report nothing.
+func TestHarnessDoctor(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // empty projects dir → no drift
+	if d := HarnessFor("claude").Doctor(); len(d) != 0 {
+		t.Errorf("claude Doctor on a clean config = %v, want none", d)
+	}
+	for _, kind := range []string{"codex", "hermes"} {
+		if d := HarnessFor(kind).Doctor(); d != nil {
+			t.Errorf("%s Doctor = %v, want nil", kind, d)
+		}
+	}
+}
+
 // TestHarnessModelCatalog pins each harness's model catalog and default, now
 // owned by the registry rather than the store: Claude leads with opus, Codex with
 // gpt-5.5, and Hermes enumerates none (amux passes no --model).

@@ -168,3 +168,6 @@ func (codexHarness) ListSessions() []SessionInfo {
 // runtime-event reader yet, so the provider honestly emits nothing for a Codex
 // session rather than advertising a phantom (Claude-shaped) stream.
 func (codexHarness) RuntimeTranscriptPath(store.Session) (string, bool) { return "", false }
+
+// Doctor: Codex has no amux-managed config surface to drift-check.
+func (codexHarness) Doctor() []string { return nil }

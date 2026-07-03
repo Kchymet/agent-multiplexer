@@ -91,6 +91,14 @@ type Harness interface {
 	// with a supported runtime-event reader return ok=true; others return false so
 	// the provider honestly emits nothing rather than advertising a phantom stream.
 	RuntimeTranscriptPath(s store.Session) (path string, ok bool)
+
+	// Doctor returns human-readable drift/health findings for this harness's
+	// integration surface — an empty slice when all is well. `amux doctor` prints
+	// them so an upstream CLI change that would silently degrade resume/status/
+	// capture surfaces loudly instead. Claude checks its project-dir path munge
+	// against Claude's actual on-disk layout; harnesses with no such surface return
+	// nothing.
+	Doctor() []string
 }
 
 // SessionInfo is one of a harness's on-disk conversations, in a kind-neutral
@@ -256,6 +264,7 @@ func (noopHarness) SkillsDir(root string) string                       { return 
 func (noopHarness) GuideFile(root string) string                       { return agentsGuideFile(root) }
 func (noopHarness) ListSessions() []SessionInfo                        { return nil }
 func (noopHarness) RuntimeTranscriptPath(store.Session) (string, bool) { return "", false }
+func (noopHarness) Doctor() []string                                   { return nil }
 
 // unknownKindError is returned by Argv for a kind no registered harness serves.
 type unknownKindError struct{ kind string }

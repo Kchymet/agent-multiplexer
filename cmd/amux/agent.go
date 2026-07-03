@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 )
 
@@ -111,14 +112,11 @@ func cmdAgentStatus(args []string) error {
 		return nil
 	}
 
-	// Claude Code pipes its hook event as JSON on stdin; other callers leave it
-	// empty. Only read when stdin is not a terminal, or a manually-typed
-	// `amux agent status running` would block on the tty forever. We use just
-	// session_id and cwd.
-	var payload struct {
-		SessionID string `json:"session_id"`
-		Cwd       string `json:"cwd"`
-	}
+	// Claude Code pipes its hook event as JSON on stdin (the claudecfg.HookPayload
+	// shape); other callers leave it empty. Only read when stdin is not a terminal,
+	// or a manually-typed `amux agent status running` would block on the tty
+	// forever. We use just session_id and cwd here.
+	var payload claudecfg.HookPayload
 	if stdinPiped() {
 		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
 			_ = json.Unmarshal(b, &payload)
@@ -199,11 +197,7 @@ func selfAgentID(args []string, getenv func(string) string) string {
 // lost, or never written. Like status reporting, it must never disrupt the agent,
 // so it swallows all errors and exits 0.
 func cmdAgentCapture() error {
-	var payload struct {
-		SessionID      string `json:"session_id"`
-		TranscriptPath string `json:"transcript_path"`
-		HookEventName  string `json:"hook_event_name"`
-	}
+	var payload claudecfg.HookPayload
 	if stdinPiped() {
 		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
 			_ = json.Unmarshal(b, &payload)

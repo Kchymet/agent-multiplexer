@@ -167,3 +167,9 @@ func (claudeHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
 	}
 	return "", false
 }
+
+// Doctor checks the load-bearing Claude project-dir path munge against Claude's
+// actual on-disk layout: a discovered transcript whose real project dir differs
+// from what amux computes means the munge convention drifted upstream (resume,
+// capture, and listing would silently degrade). Empty when they agree.
+func (claudeHarness) Doctor() []string { return claudecfg.MungeDrift() }

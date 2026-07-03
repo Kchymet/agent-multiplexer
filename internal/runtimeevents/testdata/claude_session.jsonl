@@ -1,0 +1,6 @@
+{"type":"user","message":{"role":"user","content":"list the files"}}
+{"type":"assistant","message":{"id":"msg_01","content":[{"type":"thinking","thinking":"I should list the directory."},{"type":"text","text":"Let me look."},{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls -la"}}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":20}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"a.txt\nb.txt"}]}}
+{"type":"assistant","message":{"id":"msg_02","content":[{"type":"text","text":"There are two files: a.txt and b.txt."}],"stop_reason":"end_turn","usage":{"input_tokens":150,"output_tokens":12,"cache_read_input_tokens":50}}}
+{"type":"summary","summary":"Listed files in the directory"}
+{"type":"future_unknown_record_type","note":"a record shape amux does not model"}
