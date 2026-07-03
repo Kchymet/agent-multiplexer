@@ -29,6 +29,23 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
+// ListBranches returns the local branch names in gitDir matching the glob
+// pattern under refs/heads (e.g. "amux/*"), for reconciliation. Best-effort: an
+// unreadable repo or no matches yields an empty slice, never an error.
+func ListBranches(ctx context.Context, gitDir, pattern string) []string {
+	out, err := run(ctx, gitDir, "for-each-ref", "--format=%(refname:short)", "refs/heads/"+pattern)
+	if err != nil || out == "" {
+		return nil
+	}
+	var branches []string
+	for _, line := range strings.Split(out, "\n") {
+		if b := strings.TrimSpace(line); b != "" {
+			branches = append(branches, b)
+		}
+	}
+	return branches
+}
+
 // NameFromSource derives a short repo name from a URL or local path.
 func NameFromSource(source string) string {
 	s := strings.TrimSuffix(strings.TrimRight(source, "/"), ".git")

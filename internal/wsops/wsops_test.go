@@ -709,7 +709,7 @@ func TestWriteAgentGuide(t *testing.T) {
 		{"codex", "AGENTS.md", "CLAUDE.md"},
 	} {
 		dir := t.TempDir()
-		writeAgentGuide(dir, "amux/root-agent", tc.kind)
+		writeAgentGuide(store.Session{Agent: tc.kind, Branch: "amux/root-agent", Repo: "acme/api", Dir: dir})
 
 		b, err := os.ReadFile(filepath.Join(dir, tc.file))
 		if err != nil {
@@ -718,6 +718,10 @@ func TestWriteAgentGuide(t *testing.T) {
 		}
 		if !strings.Contains(string(b), "amux/root-agent") {
 			t.Errorf("kind %q: %s missing the branch name", tc.kind, tc.file)
+		}
+		// The guide is templated from the session record, so its assigned repos show.
+		if !strings.Contains(string(b), "acme/api") {
+			t.Errorf("kind %q: %s missing the assigned repo", tc.kind, tc.file)
 		}
 		// The guide must steer agents to merge, not rebase: rebasing a pushed
 		// branch forces a force-push to update its PR, which needs a human to

@@ -105,11 +105,9 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return store.Session{}, err
 	}
-	// Flat branch name (hyphen, not slash) so it never collides with a legacy
-	// per-workspace branch `amux/<root>` — git refs can't have both `amux/<root>`
-	// and `amux/<root>/<agent>` (file/directory conflict), which broke adding a
-	// second agent to older workspaces.
-	branch := "amux/" + rootID + "-" + agentID
+	// The branch scheme lives in one place (core.BranchFor); everything else — the
+	// worktree, the agent guide, the doctor reconciliation — derives it from there.
+	branch := core.BranchFor(rootID, agentID)
 	// Repos are chosen from tracked ones (the fuzzy picker), but be defensive: a
 	// stale or mistyped name shouldn't abort the whole create — skip it with a
 	// warning and carry on with the repos that do resolve. An agent with zero
@@ -126,7 +124,6 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		}
 		repos = append(repos, repoName)
 	}
-	writeAgentGuide(dir, branch, spec.Agent)
 	kind := agent.Canonical(spec.Agent)
 	// A harness that accepts a pre-minted conversation id (Claude) gets one pinned
 	// now for durable resume across restarts. One that mints its own uuid on first
@@ -139,6 +136,9 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		Repo: store.JoinRepos(repos), Branch: branch, Dir: dir,
 		ClaudeID: claudeID, Prompt: spec.Prompt, Created: store.Now(),
 	}
+	// Write the guide from the session record so it's correct immediately; every
+	// launch rewrites it from the current record (see AgentCommand).
+	writeAgentGuide(a)
 	if err := db.PutSession(a); err != nil {
 		return store.Session{}, err
 	}
@@ -147,15 +147,22 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 
 // writeAgentGuide drops the sandbox guide into the agent's directory (its cwd),
 // telling the agent to stay sandboxed to this dir and to keep its branch current
-// with the remote. It's written to the file the agent's provider actually reads —
-// CLAUDE.md for Claude Code, AGENTS.md for others (see agent.Harness.GuideFile) —
-// so each CLI loads it natively. The agent dir is not a git repo, so this never
-// dirties a worktree.
-func writeAgentGuide(dir, branch, agentKind string) {
+// with the remote. It is templated from the live session record — the branch
+// (s.Branch, authoritative even after a move) and the assigned repos — and
+// rewritten at every launch (see AgentCommand), so an LLM agent never obeys stale
+// instructions after its scope changes. It's written to the file the agent's
+// provider actually reads — CLAUDE.md for Claude Code, AGENTS.md for others (see
+// agent.Harness.GuideFile). The agent dir is not a git repo, so this never dirties
+// a worktree.
+func writeAgentGuide(s store.Session) {
+	repos := "This agent has no repos attached — it works in its own sandbox dir."
+	if names := store.SplitRepos(s.Repo); len(names) > 0 {
+		repos = "You are assigned these repos (one worktree subdir each): " + strings.Join(names, ", ") + "."
+	}
 	guide := fmt.Sprintf(`# amux agent — sandboxed workspace
 
 This directory is your sandbox. It contains a git **worktree per repository** you
-are assigned (the subdirectories here).
+are assigned (the subdirectories here). %s
 
 ## Stay in your sandbox
 - Keep all **edits** inside this directory (your worktrees). Do not write outside
@@ -199,8 +206,8 @@ When a change is ready for review, use the `+"`create-pr`"+` skill — it encode
 project's end-to-end PR flow (commit and push conventions, opening the PR, then
 babysitting it: watching CI, weighing review feedback on its merits, and
 resolving conflicts) so you take a change all the way to merged, not just opened.
-`, branch)
-	_ = os.WriteFile(agent.HarnessFor(agentKind).GuideFile(dir), []byte(guide), 0o644)
+`, repos, s.Branch)
+	_ = os.WriteFile(agent.HarnessFor(s.Agent).GuideFile(s.Dir), []byte(guide), 0o644)
 }
 
 // AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
@@ -359,6 +366,11 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	if _, err := os.Stat(dir); err != nil {
 		return "", nil, nil, fmt.Errorf("session dir missing: %s", dir)
 	}
+
+	// Regenerate the agent guide from the current session record before each launch,
+	// so its branch and repo list reflect the latest state (a re-scope or a move) —
+	// an LLM agent that reloads its guide never obeys stale instructions.
+	writeAgentGuide(s)
 
 	h := agent.HarnessFor(s.Agent)
 	prompt := strings.TrimSpace(s.Prompt)
