@@ -297,8 +297,12 @@ Requires Go 1.24+ and (for the jailed terminal, Linux/WSL only) `bwrap`.
 make install
 ```
 
-Builds `~/.local/bin/amux` and installs the shell shim. Run `amux` from a normal
-terminal. (`AMUX_SKIP=1` disables any auto-launch shim.)
+Builds `~/.local/bin/amux`. Run `amux` from a normal terminal to launch the TUI —
+that is the standard way to invoke it.
+
+Auto-launching amux on terminal open is optional and off by default. If you want
+it, opt in by sourcing the shim (`scripts/amux.sh`) from your shell rc; set
+`AMUX_SKIP=1` in any shell to bypass it.
 
 ## Roadmap
 

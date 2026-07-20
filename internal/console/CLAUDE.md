@@ -48,7 +48,8 @@ Other: `amux status` · `amux name "<text>"` · `amux refresh` (re-poll sources 
   or drop an interactive mode agent straight into a chat).
 
 ## Config files you may edit
-- `~/.config/amux/amux.sh` — the shell shim (auto-launch on terminal open).
+- `~/.config/amux/amux.sh` — optional shell shim; source it from your rc to opt
+  into auto-launch on terminal open. Off by default — amux is normally CLI-invoked.
 - The wrapper that `AMUX_CLAUDE_BIN` points at — autonomy policy.
 - This `CLAUDE.md` — your own instructions; tailor how this console behaves.
 - `~/.local/share/amux/amux.db` — SQLite store of repos + sessions (prefer the CLI).
