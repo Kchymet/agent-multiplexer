@@ -32,6 +32,10 @@ import (
 //	amux do add-agent 9c1b -f repos=api,web -f prompt="port the auth flow"
 //	amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"
 func cmdDo(args []string) error {
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		doUsage()
+		return nil
+	}
 	a, err := parseDoArgs(args)
 	if err != nil {
 		return err
@@ -47,6 +51,30 @@ func cmdDo(args []string) error {
 	}
 	fmt.Println("ok")
 	return nil
+}
+
+func doUsage() {
+	fmt.Fprint(os.Stderr, `amux do — drive one daemon control action (the scripting entrypoint)
+
+usage: amux do <action> [id] [kind] [flags]
+
+The action verbs are the daemon's control vocabulary — the same ones the rail and
+the dashboard send: start, delete (kill), archive, set-archived, move, rename,
+add-repo, rm-repo, add-agent, agent-set-repos, new-repo-agent, new-workgroup,
+create-workspace, refresh. Reads go through `+"`amux repo ls` / `amux workgroup ls`"+`.
+
+flags:
+
+  --id <id>             target session id (alternative to the 2nd positional)
+  --target, -t <root>   destination root id (for "move"; empty = a new workgroup)
+  --kind <kind>         agent kind (for "new")
+  --cwd <dir>           working directory (for "new")
+  --field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
+
+  amux do rename <id> -f name="api spike"
+  amux do move <id> --target <root>
+  amux do add-agent <root> -f repos=api,web -f prompt="port the auth flow"
+`)
 }
 
 // cmdRefresh asks the daemon to re-poll its sources now, rather than waiting for
@@ -154,6 +182,11 @@ func parseDoArgs(args []string) (core.Action, error) {
 	return a, nil
 }
 
+// dial is how the CLI reaches the daemon. It's a variable over dialDaemon so
+// tests can drive the command dispatch against a deliberately unreachable daemon
+// instead of spawning (or worse, talking to) a real one.
+var dial = dialDaemon
+
 // dialDaemon ensures the daemon is running (launching it if it isn't) and returns
 // a connected client. Every CLI read and mutation goes through here, so the CLI
 // talks only to the local orchestrator and never opens the store itself.
@@ -183,7 +216,7 @@ func sendAction(a core.Action) error {
 // sendActionID is sendAction plus the id of any session the action created (the
 // daemon's Result.NewID), so a create command can start or switch to it.
 func sendActionID(a core.Action) (string, error) {
-	c, err := dialDaemon()
+	c, err := dial()
 	if err != nil {
 		return "", err
 	}
@@ -208,7 +241,7 @@ func sendActionID(a core.Action) (string, error) {
 // queryRows asks the daemon for a read model (QueryRepos, QuerySessions) and
 // decodes its rows into dst. It's the read half of the CLI's daemon bridge.
 func queryRows(name string, dst any) error {
-	c, err := dialDaemon()
+	c, err := dial()
 	if err != nil {
 		return err
 	}

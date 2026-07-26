@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/mattn/go-isatty"
+
 	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/gh"
@@ -58,6 +60,10 @@ func cmdRepo(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: amux repo <add|ls|rm> ...")
 	}
+	if isHelpFlag(args[0]) {
+		repoUsage()
+		return nil
+	}
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
@@ -99,12 +105,45 @@ func cmdRepo(args []string) error {
 	}
 }
 
+func repoUsage() {
+	fmt.Fprint(os.Stderr, `amux repo — track the repositories agents get worktrees of
+
+usage: amux repo <command>
+
+  add <src>          track a repo: a gh "owner/name" slug, a git URL, or a local
+                     path. With no <src>, browse your GitHub owners and pick
+                     (needs a terminal).
+  ls                 list tracked repositories  (alias: list)
+  rm <name>          stop tracking a repository  (alias: remove)
+`)
+}
+
 const manualEntryItem = "✎  enter a URL or local path…"
+
+// stdinIsTerminal reports whether the CLI has a terminal on stdin. It's a
+// variable so tests can drive the interactive verbs without one.
+var stdinIsTerminal = func() bool {
+	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+}
+
+// requireTerminal guards the interactive pages (the fzf menus and the typed
+// prompts behind them). Without a terminal — a pipe, a script, a hook — fzf has
+// no screen to draw on and every prompt reads EOF, so the flow would either hang
+// or silently run with blank answers. Saying so is the honest failure.
+func requireTerminal(what string) error {
+	if stdinIsTerminal() {
+		return nil
+	}
+	return fmt.Errorf("%s needs an interactive terminal; run it from a shell, or use a non-interactive form (--help lists them)", what)
+}
 
 // addReposInteractive drives the gh/fzf owner→repo browser to gather one or more
 // repo sources, then asks the daemon to clone and track each. The browsing needs
 // a TTY so it stays client-side; the cloning is the daemon's job.
 func addReposInteractive(in *bufio.Reader) error {
+	if err := requireTerminal("amux repo add (interactive)"); err != nil {
+		return err
+	}
 	sources, err := pickRepoSources(context.Background(), in)
 	if err != nil {
 		return err
@@ -216,13 +255,26 @@ func startCreated(id string) {
 
 func cmdSession(args []string) error {
 	ctx := context.Background()
-	sub := "new"
+	// Bare `amux workgroup` is the create page with nothing pre-attached — the
+	// same as `workgroup new` with no seed repos. rest carries the subcommand's
+	// own arguments, and is empty (not args[1:], which would be out of bounds)
+	// when there was no subcommand word at all.
+	sub, rest := "new", []string(nil)
 	if len(args) > 0 {
-		sub = args[0]
+		sub, rest = args[0], args[1:]
+	}
+	if isHelpFlag(sub) {
+		workgroupUsage()
+		return nil
 	}
 	switch sub {
 	case "new":
-		return sessionNew(ctx, args[1:]) // optional seed repos to pre-attach
+		return sessionNew(ctx, rest) // optional seed repos to pre-attach
+	case "open", "switch":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: amux workgroup open <id>")
+		}
+		return sessionOpen(rest[0])
 	case "add":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux session add <root-id> [repo...]")
@@ -340,6 +392,60 @@ func cmdSession(args []string) error {
 	}
 }
 
+func workgroupUsage() {
+	fmt.Fprint(os.Stderr, `amux workgroup — create, open, and manage workgroups and their agents
+(aliases: wg, session, ses, workspace, ws)
+
+usage: amux workgroup [command]
+
+  (bare)             the interactive create page (same as "new")
+  new [repo...]      create a workgroup through the config page, optionally
+                     pre-attaching an agent scoped to the given repos
+  create <repo>...   non-interactive: workgroup + one agent on those repos
+                     [--name n] [--prompt t] [--agent a] [--mode m] [--model M]
+  repo <repo>        create a single-repo (repo-scoped) agent on a tracked repo
+  add <root> [repo...]  add another agent to an existing workgroup
+  open <id>          open the dashboard on a workgroup or agent  (alias: switch)
+  ls                 list workgroups and their agents  (alias: list)
+  move <agent> [<root>|--new]  re-parent an agent into another workgroup
+  repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
+  rename <id> <name>  set a display name (the id is unchanged)
+  archive <id>       drop a session off the active rail  (alias: done)
+  unarchive <id>     put an archived session back  (alias: restore)
+  rm <id>            delete a session, its worktrees and branches  (alias: delete)
+`)
+}
+
+// sessionOpen opens the dashboard on one workgroup or agent — the CLI form of
+// picking it in the rail. The id is resolved against the daemon's session model
+// first, so a typo is a plain error here instead of a dashboard that opens on
+// nothing; the TUI then attaches to it (starting it, as opening a session does).
+func sessionOpen(id string) error {
+	roots, err := querySessions()
+	if err != nil {
+		return err
+	}
+	if !knownSessionID(roots, id) {
+		return fmt.Errorf("no workgroup or agent %q (see `amux workgroup ls`)", id)
+	}
+	return cmdNative(id)
+}
+
+// knownSessionID reports whether id names a workgroup root or one of its agents.
+func knownSessionID(roots []core.WorkgroupRow, id string) bool {
+	for _, r := range roots {
+		if r.ID == id {
+			return true
+		}
+		for _, a := range r.Agents {
+			if a.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func sessionList() error {
 	roots, err := querySessions()
 	if err != nil {
@@ -364,6 +470,9 @@ func sessionList() error {
 // repo-less default agent), then Create. Repos are an attribute of an agent, not
 // the workgroup, so there's no workgroup-level repo list here.
 func sessionNew(ctx context.Context, seedRepos []string) error {
+	if err := requireTerminal("amux workgroup new"); err != nil {
+		return err
+	}
 	in := bufio.NewReader(os.Stdin)
 	name := ""
 	var agents []agentCfg
@@ -433,6 +542,9 @@ func createWorkspace(name string, agents []agentCfg) error {
 }
 
 func sessionAdd(ctx context.Context, rootID string) error {
+	if err := requireTerminal("amux workgroup add (interactive)"); err != nil {
+		return err
+	}
 	in := bufio.NewReader(os.Stdin)
 	a, ok := configureAgent(ctx, in)
 	if !ok {
