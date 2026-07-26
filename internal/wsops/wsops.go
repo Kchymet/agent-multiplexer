@@ -1,7 +1,7 @@
 // Package wsops holds session lifecycle operations shared by the daemon (rail
-// actions) and the CLI. A workspace (root) is a template that attaches repos but
-// checks out nothing itself; its agents (subs) each work on a subset of those
-// repos, one worktree per repo under the agent's own directory.
+// actions) and the CLI. A workgroup (root) is a pure container: it checks out
+// nothing itself; its agents (subs) each work on a subset of the tracked repos,
+// one worktree per repo under the agent's own directory.
 package wsops
 
 import (
@@ -20,9 +20,9 @@ import (
 	"amux/internal/store"
 )
 
-// AgentSpec describes an agent to create under a workspace.
+// AgentSpec describes an agent to create under a workgroup.
 type AgentSpec struct {
-	Repos  []string // subset of the workspace's repos this agent works on
+	Repos  []string // the tracked repos this agent works on, one worktree each
 	Agent  string   // defaults to "claude"
 	Model  string   // optional model override
 	Mode   string   // task | interactive (defaults to task)
@@ -66,7 +66,7 @@ func CreateRepoWorkgroup(ctx context.Context, repo string, spec AgentSpec) (stor
 	}
 	defer db.Close()
 	if _, ok, _ := db.Repo(repo); !ok {
-		return store.Session{}, fmt.Errorf("unknown repo %q", repo)
+		return store.Session{}, fmt.Errorf("unknown repo %q\n  %s", repo, trackedRepos(db))
 	}
 	rootID := db.NewID()
 	if err := db.PutSession(store.Session{
@@ -79,7 +79,7 @@ func CreateRepoWorkgroup(ctx context.Context, repo string, spec AgentSpec) (stor
 	return addAgent(ctx, db, rootID, spec)
 }
 
-// AddAgent adds an agent (sub-session) to a workspace.
+// AddAgent adds an agent (sub-session) to a workgroup.
 func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session, error) {
 	db, err := store.Open()
 	if err != nil {
@@ -88,7 +88,7 @@ func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session
 	defer db.Close()
 	root, ok, _ := db.GetSession(rootID)
 	if !ok || !root.IsRoot() {
-		return store.Session{}, fmt.Errorf("no such workspace %q", rootID)
+		return store.Session{}, fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", rootID)
 	}
 	return addAgent(ctx, db, rootID, spec)
 }
@@ -98,7 +98,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	// edit a session's kind after creation, so a typo'd --agent would otherwise
 	// mint a session that errors on every launch and can only be deleted.
 	if !agent.Known(spec.Agent) {
-		return store.Session{}, fmt.Errorf("unknown agent kind %q", spec.Agent)
+		return store.Session{}, fmt.Errorf("unknown agent kind %q\n  known kinds: %s", spec.Agent, strings.Join(agent.Kinds(), ", "))
 	}
 	agentID := db.NewID()
 	dir := store.AgentDir(rootID, agentID)
@@ -159,7 +159,7 @@ func writeAgentGuide(s store.Session) {
 	if names := store.SplitRepos(s.Repo); len(names) > 0 {
 		repos = "You are assigned these repos (one worktree subdir each): " + strings.Join(names, ", ") + "."
 	}
-	guide := fmt.Sprintf(`# amux agent — sandboxed workspace
+	guide := fmt.Sprintf(`# amux agent — your sandbox
 
 This directory is your sandbox. It contains a git **worktree per repository** you
 are assigned (the subdirectories here). %s
@@ -225,7 +225,7 @@ func AgentIDsUnder(id string) ([]string, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("no such session %q", id)
+		return nil, fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
 	}
 	if !s.IsRoot() {
 		return []string{id}, nil
@@ -354,7 +354,7 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 // continue vs fresh the same way regardless of how the caller runs it — the
 // daemon's engine execs this in a PTY-backed process the native TUI attaches to.
 //
-// The Claude agent always launches in the workspace root (s.Dir) — the dir where
+// The Claude agent always launches in the agent's own root dir (s.Dir) — where
 // amux installs its .claude config and writes CLAUDE.md — so Claude loads them
 // (settings.local.json is read only from the launch dir, never a parent). This
 // holds even for a single-repo agent, whose repo is a worktree subdir under the
@@ -364,7 +364,7 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	dir = s.Dir
 	if _, err := os.Stat(dir); err != nil {
-		return "", nil, nil, fmt.Errorf("session dir missing: %s", dir)
+		return "", nil, nil, fmt.Errorf("agent dir missing: %s", dir)
 	}
 
 	// Regenerate the agent guide from the current session record before each launch,
@@ -400,7 +400,7 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// the running binary. Where it goes is the harness's call — Claude reads
 	// .claude/skills, others .agents/skills. Best-effort: a failure just means the
 	// agent lacks the skills, never that it can't launch. The launch dir is normally
-	// the workspace root (not a git repo); if resuming into a worktree, git-exclude
+	// the agent's own root dir (not a git repo); if resuming into a worktree, git-exclude
 	// the tree so it never dirties the repo.
 	skillsDir := h.SkillsDir(dir)
 	if err := skills.Install(skillsDir); err == nil && git.IsGitRepo(context.Background(), dir) {
@@ -442,8 +442,8 @@ func AgentEnv(s store.Session) []string {
 // there's no single worktree to pick, so we stay at the agent dir, which holds
 // them all side by side.
 //
-// The Claude agent pane is the exception: it always launches in the workspace
-// root (s.Dir), where amux installs its .claude config and CLAUDE.md, so Claude
+// The Claude agent pane is the exception: it always launches in the agent's own
+// root dir (s.Dir), where amux installs its .claude config and CLAUDE.md, so Claude
 // loads them (settings.local.json is read only from the launch dir). See
 // AgentCommand.
 func AgentWorkdir(s store.Session) string {
@@ -455,8 +455,8 @@ func AgentWorkdir(s store.Session) string {
 
 // resumeCwds lists the working directories a Claude transcript for this agent
 // could live under, so resume detection isn't fooled by amux having changed its
-// workdir convention over time. The current launch dir — the workspace root
-// (s.Dir) — comes first, preferred on a tie; then the per-repo worktree that
+// workdir convention over time. The current launch dir — the agent's own root
+// dir (s.Dir) — comes first, preferred on a tie; then the per-repo worktree that
 // single-repo agents launched in under the older convention.
 func resumeCwds(s store.Session) []string {
 	cwds := []string{s.Dir}
@@ -481,7 +481,7 @@ func agentScope(rootID string) string {
 }
 
 // DeleteByID deletes a session. The console can't be deleted (it's built in); a
-// workspace removes all its agents; an agent removes just itself. The daemon
+// workgroup removes all its agents; an agent removes just itself. The daemon
 // stops any live engine instance before calling this (see killEngineFor).
 func DeleteByID(ctx context.Context, id string) error {
 	if id == console.ID {
@@ -494,7 +494,7 @@ func DeleteByID(ctx context.Context, id string) error {
 	defer db.Close()
 	s, ok, err := db.GetSession(id)
 	if err != nil || !ok {
-		return fmt.Errorf("no such session %q", id)
+		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
 	}
 	if s.IsRoot() {
 		agents, _ := db.Children(id)
@@ -613,7 +613,11 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		}
 		return CreateWorkspace(ctx, a.Fields["name"], def)
 	}
-	return "", fmt.Errorf("unknown action %q", a.Action)
+	// A verb that reaches here is one no dispatch path claims. The CLI screens
+	// these before they leave the machine, so this is the answer for anything
+	// else on the socket — teach the vocabulary rather than just rejecting it.
+	return "", fmt.Errorf("unknown action %q\n  valid actions: %s",
+		a.Action, strings.Join(core.ControlActions(), ", "))
 }
 
 // baselinePrompt weaves a Linear issue link and a description into one prompt for
@@ -642,7 +646,7 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 	defer db.Close()
 	s, ok, err := db.GetSession(id)
 	if err != nil || !ok {
-		return fmt.Errorf("no such session %q", id)
+		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
 	}
 	// Stamp the archive time so the rail can order the ARCHIVED section by when
 	// agents were archived. Only stamp on a false→true transition; re-archiving
@@ -682,7 +686,7 @@ func Rename(id, name string) error {
 	}
 	defer db.Close()
 	if _, ok, err := db.GetSession(id); err != nil || !ok {
-		return fmt.Errorf("no such session %q", id)
+		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
 	}
 	// Field-scoped write: only the name column, so a rename can't clobber a
 	// concurrent claude-id adoption or archive of the same row.

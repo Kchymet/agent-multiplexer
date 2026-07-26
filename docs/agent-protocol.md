@@ -237,7 +237,7 @@ its artifact calls this to retire itself from the active rail.
 - **CLI:** `amux agent done`
 - **Effect:** archives the agent's own session — it drops off the active rail into
   the ARCHIVED section (§SectionArchived). Reversible: it hides the row, it does
-  **not** delete the worktree or branch (`amux ws unarchive <id>` restores it).
+  **not** delete the worktree or branch (`amux workgroup unarchive <id>` restores it).
 - **Identity:** unlike the activity verbs, `done` acts on the *store* session id
   (the id the archive/rename control actions take), which the harness sets on every
   launched agent as `$AMUX_WORKGROUP`. Precedence: `--id <id>`, then

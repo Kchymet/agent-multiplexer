@@ -16,7 +16,7 @@ import (
 
 // cmdAgent namespaces the commands an agent runs to describe *itself* to the
 // harness: reporting its activity state and setting its display name. Unlike the
-// management verbs (workgroup/session/do), which act on some other agent by id,
+// management verbs (workgroup/do), which act on some other agent by id,
 // these are scoped to the caller and resolve its own identity implicitly.
 //
 // Identity today is inferred, not authenticated: from the Claude hook payload on
@@ -46,8 +46,8 @@ func cmdAgent(args []string) error {
 		return cmdName(args[1:])
 	case "done":
 		// Terminal self-report: the agent declares its task complete and archives
-		// its own session off the active rail. The self-scoped analog of the
-		// management verb `amux ws done <id>`, resolving the caller's own identity.
+		// itself off the active rail. The self-scoped analog of the management
+		// verb `amux workgroup archive <id>`, resolving the caller's own identity.
 		return cmdAgentDone(args[1:])
 	case "", "help", "-h", "--help":
 		agentUsage()
@@ -75,8 +75,8 @@ usage: amux agent <command>
                      JSON on stdin); amux wires this into Claude's settings.json
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
-  done               report the task complete: archive this agent's own session
-                     off the active rail (reversible — amux ws unarchive <id>).
+  done               report the task complete: archive this agent off the active
+                     rail (reversible — amux workgroup unarchive <id>).
                      identity: $AMUX_WORKGROUP, else --id <id>
   sessions [--json]  list every agent session on this machine — Claude Code and
                      Codex, tagged by harness — most recent first, so you can
@@ -136,23 +136,23 @@ func cmdAgentStatus(args []string) error {
 
 // cmdAgentDone is the terminal self-report: an agent declares its task finished
 // and archives its own session so it drops off the active rail. It is the
-// self-scoped form of the management verb `amux ws done <id>` — instead of taking
-// an id, it resolves the caller's own store id (the one the harness sets in the
-// agent's environment as $AMUX_WORKGROUP, see wsops.AgentCommand), so a one-off
-// agent that has integrated its artifact can mark itself done without knowing its
-// own id.
+// self-scoped form of the management verb `amux workgroup archive <id>` —
+// instead of taking an id, it resolves the caller's own store id (the one the
+// harness sets in the agent's environment as $AMUX_WORKGROUP, see
+// wsops.AgentCommand), so a one-off agent that has integrated its artifact can
+// mark itself done without knowing its own id.
 //
 // Like every `amux agent` verb, reporting must never disrupt the agent: it
-// swallows a missing identity and any harness error and always exits 0. Archiving
-// is reversible (`amux ws unarchive <id>`); it hides the row and does not delete
-// the worktree or branch.
+// swallows a missing identity and any harness error and always exits 0.
+// Archiving is reversible (`amux workgroup unarchive <id>`); it hides the row
+// and does not delete the worktree or branch.
 func cmdAgentDone(args []string) error {
 	id := selfAgentID(args, os.Getenv)
 	if id == "" {
 		// Not an amux-launched agent (or the env was stripped): nothing to archive.
 		// A no-op, not an error — the agent shouldn't fail just because it wasn't
 		// started by amux.
-		fmt.Fprintln(os.Stderr, "amux agent done: not inside an amux-managed agent ($AMUX_WORKGROUP unset); nothing to mark done")
+		fmt.Fprintln(os.Stderr, "amux agent done: "+notInsideAgent("amux agent done", "amux workgroup archive <id>"))
 		return nil
 	}
 	if err := sendAction(core.Action{
@@ -165,7 +165,7 @@ func cmdAgentDone(args []string) error {
 		fmt.Fprintf(os.Stderr, "amux agent done: could not reach the harness to archive %s: %v\n", id, err)
 		return nil
 	}
-	fmt.Printf("marked done: archived %s (reversible: amux ws unarchive %s)\n", id, id)
+	fmt.Printf("marked done: archived %s (reversible: amux workgroup unarchive %s)\n", id, id)
 	return nil
 }
 

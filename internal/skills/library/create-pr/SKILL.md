@@ -183,8 +183,8 @@ fi
 
 `amux agent done` is best-effort and never fails your session: if it can't reach
 the harness it just prints a warning. It's the self-scoped form of the management
-verb `amux ws archive <id>` (alias `amux ws done <id>`), which you'd use to archive
-*another* agent by id. To undo either: `amux ws unarchive <id>`.
+verb `amux workgroup archive <id>`, which you'd use to archive *another* agent by
+id. To undo either: `amux workgroup unarchive <id>`.
 
 Then report the outcome to the user: the PR URL and that the session was marked
 done. If you did **not** archive (interactive session, a long-lived loop, or more

@@ -31,7 +31,7 @@ func cmdDoctor() error {
 	}
 	deps := []dep{
 		{"git", "--version", "bare clones & worktrees", true},
-		{"fzf", "--version", "interactive pickers (new workspace/agent)", false},
+		{"fzf", "--version", "interactive pickers (new workgroup/agent)", false},
 		{"gh", "--version", "browse & clone GitHub repos", false},
 	}
 	// Agent binaries come from the registry, so adding a harness adds its check
@@ -98,7 +98,7 @@ func cmdDoctor() error {
 			agents += len(wg.Agents)
 		}
 		fmt.Printf("  ✓ database  %s\n", core.DBPath())
-		fmt.Printf("              %d repos · %d workspaces · %d agents\n", len(repos), len(roots), agents)
+		fmt.Printf("              %d repos · %d workgroups · %d agents\n", len(repos), len(roots), agents)
 	}
 
 	// Reconcile the store against on-disk worktree dirs and branches: surface
@@ -107,7 +107,7 @@ func cmdDoctor() error {
 	// daemon's session model, never the store.
 	fmt.Println("\nReconciliation")
 	if !statsOK {
-		fmt.Printf("  · sessions  (start the daemon to reconcile store vs disk)\n")
+		fmt.Printf("  · agents    (start the daemon to reconcile store vs disk)\n")
 	} else {
 		reconcileSessions(ctx, repos, roots)
 	}
@@ -171,14 +171,14 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 	orphanDirs, missingDirs, orphanBranches := reconcile(core.SessionsDir(), roots, disk)
 
 	if len(orphanDirs)+len(missingDirs)+len(orphanBranches) == 0 {
-		fmt.Printf("  ✓ sessions  store and disk agree\n")
+		fmt.Printf("  ✓ agents    store and disk agree\n")
 		return
 	}
-	printCapped("worktree dir with no session", orphanDirs, func(d string) string {
+	printCapped("worktree dir with no agent", orphanDirs, func(d string) string {
 		return filepath.Join(core.SessionsDir(), d)
 	})
-	printCapped("session with no worktree dir", missingDirs, func(s string) string { return s })
-	printCapped("amux branch with no session", orphanBranches, func(s string) string { return s })
+	printCapped("agent with no worktree dir", missingDirs, func(s string) string { return s })
+	printCapped("amux branch with no agent", orphanBranches, func(s string) string { return s })
 	fmt.Printf("  (leftovers from an interrupted delete/move; safe to remove by hand)\n")
 }
 

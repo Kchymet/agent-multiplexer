@@ -90,6 +90,50 @@ const (
 	ActionCreateWorkspace = "create-workspace" // CLI create: workgroup + optional default agent
 )
 
+// controlActions is the vocabulary a caller may drive from outside the UI —
+// every lifecycle verb above plus "start" (engine-only). It is the single list
+// behind the "valid actions" an unknown-verb error teaches, so the CLI and the
+// daemon can never disagree about what `amux do` accepts. Order is the order we
+// print: the everyday verbs first, then the create/attach ones. The pane.*
+// streaming verbs and "query" are deliberately absent — they answer with frames
+// a one-shot caller can't consume.
+var controlActions = []string{
+	ActionRefresh,
+	ActionStart,
+	ActionRename,
+	ActionMove,
+	ActionArchive,
+	ActionSetArchived,
+	ActionDelete,
+	ActionKill,
+	ActionAddRepo,
+	ActionRmRepo,
+	ActionAgentSetRepos,
+	ActionAddAgent,
+	ActionNewRepoAgent,
+	ActionNewWorkgroup,
+	ActionCreateWorkspace,
+}
+
+// ControlActions returns the action verbs a caller may drive over the socket
+// (`amux do <action>`), in print order. Callers get a copy, so an error message
+// that annotates the list can't mutate the vocabulary.
+func ControlActions() []string {
+	out := make([]string, len(controlActions))
+	copy(out, controlActions)
+	return out
+}
+
+// KnownAction reports whether action is one of ControlActions().
+func KnownAction(action string) bool {
+	for _, a := range controlActions {
+		if a == action {
+			return true
+		}
+	}
+	return false
+}
+
 // ActionDescriptor declares what a lifecycle verb does, so every dispatch path
 // (daemon, mux server, CLI) reads one table instead of its own string switch.
 type ActionDescriptor struct {

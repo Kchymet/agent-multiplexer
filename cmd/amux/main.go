@@ -7,7 +7,7 @@
 //	(bare)   open the native dashboard TUI
 //	daemon   run the polling/serving daemon (foreground)
 //	agent    self-reporting run by an agent about itself (status/hook/name/done)
-//	status   print current sessions as text and exit
+//	status   print current workgroups as text and exit
 //	version  print version
 package main
 
@@ -96,16 +96,17 @@ func usage() {
 
 usage: amux <command>
 
-  (bare)             open the workspace dashboard (native TUI)
+  (bare)             open the workgroup dashboard (native TUI)
   repo add <src>     track a repo (clone a git URL, or register a local path)
   repo ls | rm       list / untrack repositories
   workgroup new      create a work-scoped workgroup via a config page, then open
   workgroup repo <r> start a single-repo (repo-scoped) agent on a tracked repo
   workgroup move <a> [<root>|--new]  re-parent an agent into a work-scoped workgroup
-  workgroup open <id> open/switch to a workgroup
   workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)
+  workgroup archive | unarchive <id>  mark a workgroup done / bring it back
   workgroup rm <id>  delete a workgroup (removes its worktrees + branches)
-  name <text>        set the current workgroup's display name (for the agent)
+  workgroup ls       list workgroups and their agents
+  agent name <text>  set the calling agent's display name (from its own tab)
   status [--json]    print workgroups and exit (--json for the raw snapshot)
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
@@ -118,10 +119,10 @@ usage: amux <command>
 amux do <action> drives the daemon's control API from scripts (no direct store
 access). Positional [id]/[kind] still work; flags reach the rest:
 
-  --target, -t <root>   destination root id (for "move")
-  --kind <kind>         agent kind (for "new")
-  --cwd <dir>           working directory (for "new")
+  --target, -t <root>   destination workgroup id (for "move")
   --field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
+
+An unknown action prints the full list of valid ones.
 
   amux do rename <id> -f name="api spike"
   amux do move <id> --target <root>
@@ -362,7 +363,7 @@ func cmdStatus(args []string) error {
 			return nil
 		}
 		if len(f.Snapshot.Sessions) == 0 {
-			fmt.Println("(no workspaces — `amux workspace new`)")
+			fmt.Println("(no workgroups — `amux workgroup new`)")
 			return nil
 		}
 		for _, s := range f.Snapshot.Sessions {
