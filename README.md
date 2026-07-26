@@ -194,6 +194,20 @@ fire. Fix: iTerm2 → Settings → Profiles → Keys → General → set "Left O
 (⌥) key" to "Esc+". In Terminal.app, enable Settings → Profiles → Keyboard →
 "Use Option as Meta key". `amux doctor` flags this when it can detect it.
 
+The global chords (the Alt ones — they work even while the agent is focused) are
+rebindable via `amux config`; the defaults live in `~/.config/amux/config.json`
+under `"keys"`:
+
+```sh
+amux config ls                          # every binding + which are custom
+amux config set keys.focus-rail ctrl+g  # rebind (opt+/option+/meta+ = alt+)
+amux config unset keys.focus-rail       # back to the default
+```
+
+A global chord must carry `ctrl` or `alt` (or be an f-key) — an unmodified key
+would be swallowed before it reaches the focused agent. Reopen the dashboard to
+apply changes.
+
 ## Commands
 
 ```
@@ -210,6 +224,7 @@ amux workgroup open|rm|rename|ls
 amux console               # open the control console
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
+amux config [ls|get|set|unset|path]  # show / change amux settings (TUI keybindings)
 amux do <action> ...       # drive any daemon action from scripts (see below)
 ```
 

@@ -17,6 +17,7 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/keymap"
 	"amux/internal/vterm"
 )
 
@@ -26,11 +27,18 @@ const sidebarWidth = 26
 // down this process's mirror terminals; the agents keep running in the daemon's
 // engine (the socket closing just detaches the panes).
 func Run() error {
+	// A broken keys section falls back to the defaults for the bad entries —
+	// never lock the user out of navigation — and surfaces on the status line.
+	keys, keysErr := keymap.Load()
 	m := &model{
+		keys:   keys,
 		terms:  map[paneKey]*vterm.Terminal{},
 		byPane: map[string]paneKey{},
 		dataCh: make(chan struct{}, 1),
 		status: "connecting…",
+	}
+	if keysErr != nil {
+		m.status = "keybindings: " + keysErr.Error()
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	for _, t := range m.terms {
@@ -59,6 +67,7 @@ type paneKey struct {
 type model struct {
 	client   *daemon.Client
 	sessions []core.Session
+	keys     keymap.Keymap // global hotkeys; zero value = built-in defaults
 	cursor   int
 	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
 	// so the selected row stays visible when the rail overflows its height.
@@ -279,25 +288,26 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Alt/Option jumps work everywhere — even with the agent focused — so you can
-	// always move between the rail and the agent without a prefix.
-	switch k.String() {
-	case "alt+h":
+	// Global jumps work everywhere — even with the agent focused — so you can
+	// always move between the rail and the agent without a prefix. The chords
+	// default to Alt/Option and are rebindable via `amux config set keys.<action>`.
+	switch m.keys.Action(k.String()) {
+	case keymap.FocusRail:
 		m.focus = focusSidebar
 		return m, nil
-	case "alt+l":
+	case keymap.FocusAgent:
 		m.focusAgent()
 		return m, nil
-	case "alt+a":
+	case keymap.ToggleFocus:
 		m.toggleFocus()
 		return m, nil
-	case "alt+q":
+	case keymap.Quit:
 		return m, tea.Quit
-	case "alt+1":
+	case keymap.TabAgent:
 		return m, m.switchTab(tabAgent)
-	case "alt+2":
+	case keymap.TabEditor:
 		return m, m.switchTab(tabEditor)
-	case "alt+3":
+	case keymap.TabTerm:
 		return m, m.switchTab(tabTerminal)
 	}
 

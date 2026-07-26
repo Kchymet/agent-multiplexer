@@ -66,6 +66,8 @@ func main() {
 		err = cmdRefresh()
 	case "doctor", "health", "check":
 		err = cmdDoctor()
+	case "config", "conf", "cfg":
+		err = cmdConfig(args)
 	case "repo":
 		err = cmdRepo(args)
 	case "workgroup", "wg", "session", "ses", "workspace", "ws":
@@ -108,6 +110,7 @@ usage: amux <command>
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
+  config [ls|get|set|unset|path]  show or change amux settings (TUI keybindings)
   provide <addr>     dial a remote orchestrator and serve panes (provider mode)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print version

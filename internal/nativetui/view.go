@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"amux/internal/core"
+	"amux/internal/keymap"
 )
 
 var (
@@ -44,21 +45,22 @@ func (m *model) View() string {
 // color.
 func (m *model) renderTopBorder() string {
 	label := titleStyle.Render(" amux ")
-	railHint := keyStyle.Render(" ⌥ l ") + dimStyle.Render("▸")
+	railHint := keyStyle.Render(" "+keyLabel(m.keys.Chord(keymap.FocusAgent))+" ") + dimStyle.Render("▸")
 	left := borderSeg(sidebarWidth, m.borderStyle(focusSidebar), label, railHint)
 
 	workHint := ""
 	if m.attached != "" {
-		// Lead with the back-to-rail shortcut (◂ ⌥ h, anchored toward the
-		// divider on the left), then the agent's tab strip.
-		workHint = dimStyle.Render("◂") + keyStyle.Render(" ⌥ h ") + m.tabStrip()
+		// Lead with the back-to-rail shortcut (◂ ⌥ h by default, anchored toward
+		// the divider on the left), then the agent's tab strip.
+		workHint = dimStyle.Render("◂") + keyStyle.Render(" "+keyLabel(m.keys.Chord(keymap.FocusRail))+" ") + m.tabStrip()
 	}
 	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, "")
 	return left + sepStyle.Render("┬") + right
 }
 
-// tabStrip renders the attached agent's tab row (Alt+1/2/3): the active tab is
-// highlighted, launched-but-inactive tabs are bright, unopened ones dim.
+// tabStrip renders the attached agent's tab row (Alt+1/2/3 by default): the
+// active tab is highlighted, launched-but-inactive tabs are bright, unopened
+// ones dim. Each tab's key hint is the base key of its configured chord.
 func (m *model) tabStrip() string {
 	var b strings.Builder
 	b.WriteString(" ")
@@ -66,7 +68,7 @@ func (m *model) tabStrip() string {
 		if i > 0 {
 			b.WriteString(dimStyle.Render("  "))
 		}
-		num := fmt.Sprintf("%d", i+1)
+		num := chordBase(m.keys.Chord(tabActions[i]))
 		label := num + " " + tabNames[i]
 		switch {
 		case i == m.tab:
@@ -348,10 +350,51 @@ func (m *model) renderHelp() string {
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:
-		return hints("agent", []hint{{"⌥ 1/2/3", "tabs"}, {"⌥ h", "rail"}, {"⌥ a", "toggle"}, {"⌥ q", "quit"}})
+		return hints("agent", []hint{
+			{m.tabsHint(), "tabs"},
+			{keyLabel(m.keys.Chord(keymap.FocusRail)), "rail"},
+			{keyLabel(m.keys.Chord(keymap.ToggleFocus)), "toggle"},
+			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
+		})
 	default:
 		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}})
 	}
+}
+
+// tabActions maps a tab index to its keymap action.
+var tabActions = [tabCount]string{keymap.TabAgent, keymap.TabEditor, keymap.TabTerm}
+
+// tabsHint is the compact help label for the three tab chords: "⌥ 1/2/3" when
+// they share modifiers, otherwise the full chords joined with "/".
+func (m *model) tabsHint() string {
+	c := [tabCount]string{}
+	for i, a := range tabActions {
+		c[i] = m.keys.Chord(a)
+	}
+	p0 := chordPrefix(c[0])
+	if p0 != "" && chordPrefix(c[1]) == p0 && chordPrefix(c[2]) == p0 {
+		return keyLabel(p0) + chordBase(c[0]) + "/" + chordBase(c[1]) + "/" + chordBase(c[2])
+	}
+	return keyLabel(c[0]) + "/" + keyLabel(c[1]) + "/" + keyLabel(c[2])
+}
+
+// keyLabel renders a chord for the UI: "alt+" as the ⌥ glyph, "ctrl+" as ^.
+func keyLabel(chord string) string {
+	s := strings.ReplaceAll(chord, "alt+", "⌥ ")
+	return strings.ReplaceAll(s, "ctrl+", "^")
+}
+
+// chordPrefix is everything up to and including the last "+" ("" for a bare key).
+func chordPrefix(chord string) string {
+	if i := strings.LastIndex(chord, "+"); i >= 0 {
+		return chord[:i+1]
+	}
+	return ""
+}
+
+// chordBase is the key after the modifiers ("alt+2" → "2").
+func chordBase(chord string) string {
+	return chord[len(chordPrefix(chord)):]
 }
 
 type hint struct{ key, desc string }
