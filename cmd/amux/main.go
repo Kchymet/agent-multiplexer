@@ -35,7 +35,7 @@ func main() {
 	if len(os.Args) < 2 {
 		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print
 		// usage (those carry an arg, so they fall through to the switch below).
-		if err := cmdNative(); err != nil {
+		if err := cmdNative(""); err != nil {
 			fmt.Fprintln(os.Stderr, "amux:", err)
 			os.Exit(1)
 		}
@@ -44,53 +44,72 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
-	var err error
-	switch cmd {
-	case "daemon":
-		err = cmdDaemon(args)
-	case "serve":
-		err = cmdServe(args)
-	case "harness":
-		err = cmdHarness()
-	case "provide":
-		err = cmdProvide(args)
-	case "_vtdemo": // hidden: embedded-terminal fidelity check (Phase 0 spike)
-		err = vtdemo.Run(args)
-	case "agent":
-		err = cmdAgent(args)
-	case "hook":
-		err = cmdAgentStatus(args) // deprecated alias for "amux agent hook"
-	case "status":
-		err = cmdStatus(args)
-	case "refresh":
-		err = cmdRefresh()
-	case "doctor", "health", "check":
-		err = cmdDoctor()
-	case "config", "conf", "cfg":
-		err = cmdConfig(args)
-	case "repo":
-		err = cmdRepo(args)
-	case "workgroup", "wg", "session", "ses", "workspace", "ws":
-		err = cmdSession(args)
-	case "name":
-		err = cmdName(args)
-	case "do":
-		err = cmdDo(args)
-	case "version", "--version", "-v":
-		fmt.Println("amux", version)
-	case "help", "-h", "--help":
-		usage()
-	default:
+	c := lookupCommand(cmd)
+	if c == nil {
 		fmt.Fprintf(os.Stderr, "amux: unknown command %q\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
-	if err != nil {
+	if err := c.run(args); err != nil {
 		fmt.Fprintln(os.Stderr, "amux:", err)
 		os.Exit(1)
 	}
 }
 
+// command is one top-level verb of the CLI: the word (plus any aliases) the user
+// types and the function it runs.
+type command struct {
+	names  []string // primary name first, then aliases
+	run    func(args []string) error
+	hidden bool // internal/diagnostic surface, deliberately absent from usage()
+}
+
+// commands is the whole top-level dispatch. It's a table rather than a switch so
+// the dispatch and the help text can be checked against each other: the contract
+// test walks usage() and this table in both directions, so a command that is
+// advertised but not dispatched (as `workgroup open` was) fails the tests instead
+// of the user's shell.
+var commands = []command{
+	{names: []string{"daemon"}, run: cmdDaemon},
+	{names: []string{"serve"}, run: cmdServe, hidden: true},
+	{names: []string{"harness"}, run: func([]string) error { return cmdHarness() }, hidden: true},
+	{names: []string{"provide"}, run: cmdProvide},
+	// hidden: embedded-terminal fidelity check (Phase 0 spike)
+	{names: []string{"_vtdemo"}, run: vtdemo.Run, hidden: true},
+	{names: []string{"agent"}, run: cmdAgent},
+	// deprecated alias for "amux agent hook"
+	{names: []string{"hook"}, run: cmdAgentStatus, hidden: true},
+	{names: []string{"status"}, run: cmdStatus},
+	{names: []string{"refresh"}, run: func([]string) error { return cmdRefresh() }},
+	{names: []string{"doctor", "health", "check"}, run: func([]string) error { return cmdDoctor() }},
+	{names: []string{"config", "conf", "cfg"}, run: cmdConfig},
+	{names: []string{"repo"}, run: cmdRepo},
+	{names: []string{"workgroup", "wg", "session", "ses", "workspace", "ws"}, run: cmdSession},
+	// deprecated top-level alias for "amux agent name"
+	{names: []string{"name"}, run: cmdName, hidden: true},
+	{names: []string{"do"}, run: cmdDo},
+	{names: []string{"version", "--version", "-v"}, run: func([]string) error { fmt.Println("amux", version); return nil }},
+	// hidden: help is what prints usage(), so it doesn't list itself
+	{names: []string{"help", "-h", "--help"}, run: func([]string) error { usage(); return nil }, hidden: true},
+}
+
+// lookupCommand resolves a command word (or one of its aliases) to its entry,
+// nil when amux has no such command.
+func lookupCommand(name string) *command {
+	for i := range commands {
+		for _, n := range commands[i].names {
+			if n == name {
+				return &commands[i]
+			}
+		}
+	}
+	return nil
+}
+
+// usage prints the top-level help. The command block below is parsed by the
+// dispatch contract test, which needs each entry to be "  <spec>  <description>"
+// — two or more spaces between the invocation and its prose — so it can tell a
+// subcommand word from the description that follows it.
 func usage() {
 	fmt.Fprint(os.Stderr, `amux — AI-native terminal control plane
 
@@ -100,8 +119,9 @@ usage: amux <command>
   repo add <src>     track a repo (clone a git URL, or register a local path)
   repo ls | rm       list / untrack repositories
   workgroup new      create a work-scoped workgroup via a config page, then open
-  workgroup repo <r> start a single-repo (repo-scoped) agent on a tracked repo
+  workgroup repo <r>  start a single-repo (repo-scoped) agent on a tracked repo
   workgroup move <a> [<root>|--new]  re-parent an agent into a work-scoped workgroup
+  workgroup open <id>  open the dashboard focused on a workgroup or agent
   workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)
   workgroup archive | unarchive <id>  mark a workgroup done / bring it back
   workgroup rm <id>  delete a workgroup (removes its worktrees + branches)
@@ -133,30 +153,76 @@ Set AMUX_SKIP=1 in your shell to bypass auto-launch.
 `)
 }
 
-// cmdDaemon dispatches the daemon lifecycle. Bare `amux daemon` runs the daemon
-// in the foreground (how ensureDaemon spawns it); the stop/start/restart
-// subcommands control an already-running detached daemon.
+// daemonSubcommands is the daemon lifecycle dispatch, keyed by verb (aliases
+// share a handler). The "" key is bare `amux daemon`: run the daemon in the
+// foreground, which is how ensureDaemon spawns it; the rest control an
+// already-running detached daemon. It's a table so the contract test can check
+// the advertised verbs without executing them — start/stop/restart drive real
+// processes.
+var daemonSubcommands = map[string]func() error{
+	"":        daemonRun,
+	"stop":    func() error { return daemonStop(true) },
+	"down":    func() error { return daemonStop(true) },
+	"start":   daemonStartSelf,
+	"up":      daemonStartSelf,
+	"restart": daemonRestart,
+	"reload":  daemonRestart,
+}
+
+// cmdDaemon dispatches the daemon lifecycle.
 func cmdDaemon(args []string) error {
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
 	}
-	switch sub {
-	case "":
-		return daemonRun()
-	case "stop", "down":
-		return daemonStop(true)
-	case "start", "up":
-		self, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		return daemonStart(self)
-	case "restart", "reload":
-		return daemonRestart()
-	default:
+	if isHelpFlag(sub) {
+		daemonUsage()
+		return nil
+	}
+	run, ok := daemonSubcommands[sub]
+	if !ok {
+		daemonUsage()
 		return fmt.Errorf("unknown daemon subcommand %q (want stop|start|restart)", sub)
 	}
+	return run()
+}
+
+func daemonUsage() {
+	fmt.Fprint(os.Stderr, `amux daemon — run and control the local daemon
+
+The daemon owns the store and the agent engine: it hosts every running agent, so
+stopping or restarting it stops the agents it hosts. Bare `+"`amux daemon`"+` runs one
+in the foreground (what auto-launch spawns); the verbs below control a detached
+one.
+
+usage: amux daemon [command]
+
+  (bare)             run the daemon in the foreground until signalled
+  stop               stop the running daemon cleanly  (alias: down)
+  start              start a detached daemon if none is answering  (alias: up)
+  restart            stop, then start — how a newly installed binary is loaded
+                     (alias: reload)
+`)
+}
+
+// daemonStartSelf starts a detached daemon running this binary.
+func daemonStartSelf() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return daemonStart(self)
+}
+
+// isHelpFlag reports whether a subcommand word is a request for the command's
+// own help, so every namespace (repo, workgroup, do, agent, daemon) answers
+// --help/-h/help the same way.
+func isHelpFlag(sub string) bool {
+	switch sub {
+	case "help", "-h", "--help":
+		return true
+	}
+	return false
 }
 
 // daemonRun runs the daemon in the foreground until signalled. It is the process
@@ -319,7 +385,10 @@ func ensureDaemon(self string) error {
 // cmdNative launches the native Bubble Tea TUI (bare `amux`). It ensures the
 // daemon is up for state, then runs the TUI; the daemon's engine hosts the
 // agents, so quitting the TUI just detaches and the agents keep running.
-func cmdNative() error {
+//
+// focusID, when set, is the workgroup or agent the dashboard opens on (what
+// `amux workgroup open <id>` passes); empty just opens the dashboard.
+func cmdNative(focusID string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -328,7 +397,7 @@ func cmdNative() error {
 	if err := ensureDaemon(self); err != nil {
 		fmt.Fprintln(os.Stderr, "amux: warning: daemon not started:", err)
 	}
-	return nativetui.Run()
+	return nativetui.Run(focusID)
 }
 
 // cmdStatus prints the current snapshot for scripting. With --json it emits the

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"amux/internal/core"
@@ -19,6 +20,10 @@ func cmdConfig(args []string) error {
 	sub := "ls"
 	if len(args) > 0 {
 		sub = args[0]
+	}
+	if isHelpFlag(sub) {
+		configUsage()
+		return nil
 	}
 	switch sub {
 	case "ls", "list":
@@ -75,6 +80,22 @@ func cmdConfig(args []string) error {
 	default:
 		return fmt.Errorf("unknown config subcommand %q (want ls|get|set|unset|path)", sub)
 	}
+}
+
+func configUsage() {
+	fmt.Fprint(os.Stderr, `amux config — show or change amux settings (the native TUI keybindings)
+
+usage: amux config <subcommand>
+
+  ls                 every binding, and which carry a custom chord
+  get keys.<action>  print one binding's effective chord
+  set keys.<action> <chord>  rebind (chords like ctrl+g, alt+p, f5)
+  unset keys.<action>  restore a binding's built-in default
+  path               print the config file path
+
+Settings live in the "keys" section of the config file (see path). A rebind
+applies the next time the dashboard opens.
+`)
 }
 
 // configList prints every binding; a load error (bad entries in config.json)

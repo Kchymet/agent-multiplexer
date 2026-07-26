@@ -26,16 +26,22 @@ const sidebarWidth = 26
 // Run starts the native TUI and blocks until the user quits. Quitting only tears
 // down this process's mirror terminals; the agents keep running in the daemon's
 // engine (the socket closing just detaches the panes).
-func Run() error {
+//
+// focusID, when non-empty, is a workgroup or agent id to open on: it is queued as
+// a pending attach, so the first snapshot that carries the id selects it and
+// launches its pane — the same path a freshly created session takes. An id that
+// never lands (or has nothing runnable) simply leaves the dashboard as it is.
+func Run(focusID string) error {
 	// A broken keys section falls back to the defaults for the bad entries —
 	// never lock the user out of navigation — and surfaces on the status line.
 	keys, keysErr := keymap.Load()
 	m := &model{
-		keys:   keys,
-		terms:  map[paneKey]*vterm.Terminal{},
-		byPane: map[string]paneKey{},
-		dataCh: make(chan struct{}, 1),
-		status: "connecting…",
+		keys:    keys,
+		terms:   map[paneKey]*vterm.Terminal{},
+		byPane:  map[string]paneKey{},
+		dataCh:  make(chan struct{}, 1),
+		status:  "connecting…",
+		pending: focusID,
 	}
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
