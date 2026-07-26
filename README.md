@@ -187,6 +187,13 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Ctrl+r` | force a state refresh (the daemon also auto-polls) |
 | `q` / `Alt+q` | quit |
 
+**macOS note:** the `Alt+…` bindings require the terminal to send Option as
+ESC-prefixed Meta. With iTerm2's default profile (Option key = "Normal"),
+`Option+l` types `¬` instead — inside or outside tmux — and the hotkeys never
+fire. Fix: iTerm2 → Settings → Profiles → Keys → General → set "Left Option
+(⌥) key" to "Esc+". In Terminal.app, enable Settings → Profiles → Keyboard →
+"Use Option as Meta key". `amux doctor` flags this when it can detect it.
+
 ## Commands
 
 ```
