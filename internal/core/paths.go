@@ -39,6 +39,20 @@ func MuxSocketPath() string {
 	return filepath.Join(runtimeDir(), "amux-mux.sock")
 }
 
+// ConfigDir is amux's user configuration directory (the shell shim and
+// config.json live here). Honors $XDG_CONFIG_HOME.
+func ConfigDir() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return filepath.Join(d, "amux")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "amux")
+}
+
+// ConfigPath is the user-editable settings file (keybindings today; any future
+// user preference belongs here too). `amux config` reads and writes it.
+func ConfigPath() string { return filepath.Join(ConfigDir(), "config.json") }
+
 // DataDir is where amux keeps durable data: the repo store, workspace
 // worktrees, and the registry. Honors $XDG_DATA_HOME.
 func DataDir() string {
