@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +129,16 @@ func cmdDoctor() error {
 	}
 	if !anyDrift {
 		fmt.Printf("  ✓ claude    project-dir path munge matches Claude's on-disk layout\n")
+	}
+
+	// Terminal hotkeys: the native TUI's Alt/Option bindings only work when the
+	// terminal encodes Option as ESC-prefixed Meta. Best-effort and never fatal;
+	// silent when there's nothing to say (non-macOS or an unrecognized terminal).
+	if lines := checkHotkeys(os.Getenv, iterm2OptionKeySends); len(lines) != 0 {
+		fmt.Println("\nTerminal")
+		for _, l := range lines {
+			fmt.Println(l)
+		}
 	}
 
 	fmt.Println("\nPaths")
@@ -255,6 +266,93 @@ func agentIDFromBranch(branch string) string {
 		return b[i+1:]
 	}
 	return ""
+}
+
+// iTerm2's per-profile "Option Key Sends" setting: 0 Normal (Option types
+// composed characters like ¬ and the TUI's Alt hotkeys never fire), 1 Meta,
+// 2 Esc+.
+const optionKeyNormal = 0
+
+// checkHotkeys reports whether the outer terminal likely delivers the native
+// TUI's Alt/Option hotkeys (Alt+h/l/a/q, Alt+1..3), which require Option to be
+// encoded as ESC-prefixed Meta. The outer terminal is detected via LC_TERMINAL
+// and TERM_PROGRAM — both survive into tmux sessions, so this sees through a
+// tmux layer. For iTerm2 the verdict is made definitive by reading the active
+// profile's (ITERM_PROFILE) "Option Key Sends" value via optionKeySends; if
+// that read fails the check degrades to an informational hint. Returns the
+// lines to print, or nil when there is nothing to say (non-macOS or an
+// unrecognized terminal).
+func checkHotkeys(getenv func(string) string, optionKeySends func(profile string) (int, error)) []string {
+	term := getenv("LC_TERMINAL")
+	if term == "" {
+		term = getenv("TERM_PROGRAM")
+	}
+	switch term {
+	case "iTerm2", "iTerm.app":
+		const fix = `iTerm2 → Settings → Profiles → Keys → General → set "Left Option (⌥) key" to "Esc+"`
+		v, err := optionKeySends(getenv("ITERM_PROFILE"))
+		switch {
+		case err != nil:
+			return []string{
+				"  · hotkeys   iTerm2 detected but its profile settings are unreadable",
+				"              if Alt/Option hotkeys (Alt+h/l/a/q, Alt+1..3) don't work: " + fix,
+			}
+		case v == optionKeyNormal:
+			return []string{
+				`  ⚠ hotkeys   iTerm2 Option key is "Normal" — Alt/Option hotkeys (Alt+h/l/a/q, Alt+1..3) never reach the TUI`,
+				"              fix: " + fix,
+			}
+		default:
+			return []string{"  ✓ hotkeys   iTerm2 sends Option as Esc+/Meta — Alt/Option hotkeys work"}
+		}
+	case "Apple_Terminal":
+		return []string{
+			"  · hotkeys   Terminal.app swallows Alt/Option hotkeys unless Option acts as Meta",
+			`              enable: Terminal → Settings → Profiles → Keyboard → "Use Option as Meta key"`,
+		}
+	}
+	return nil
+}
+
+// iterm2OptionKeySends reads the "Option Key Sends" value for the named iTerm2
+// profile from ~/Library/Preferences/com.googlecode.iterm2.plist via PlistBuddy.
+// Best-effort: any failure (no PlistBuddy, unreadable plist, profile or key not
+// found) returns an error and doctor falls back to a hint instead of a warning.
+func iterm2OptionKeySends(profile string) (int, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0, err
+	}
+	plist := filepath.Join(home, "Library", "Preferences", "com.googlecode.iterm2.plist")
+	// Profiles live in the "New Bookmarks" array; find the active one by name.
+	// The array only holds user-created profiles, so a capped scan is plenty.
+	for i := 0; i < 64; i++ {
+		name, err := plistBuddyPrint(plist, fmt.Sprintf(":New Bookmarks:%d:Name", i))
+		if err != nil {
+			break // ran off the end of the array, or the plist is unreadable
+		}
+		if name != profile {
+			continue
+		}
+		v, err := plistBuddyPrint(plist, fmt.Sprintf(":New Bookmarks:%d:Option Key Sends", i))
+		if err != nil {
+			return 0, err
+		}
+		return strconv.Atoi(v)
+	}
+	return 0, fmt.Errorf("profile %q not found in %s", profile, plist)
+}
+
+func plistBuddyPrint(plist, entry string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// PlistBuddy re-tokenizes the -c string on whitespace, so an entry path with
+	// a space ("New Bookmarks") must be quoted inside the command itself.
+	out, err := exec.CommandContext(ctx, "/usr/libexec/PlistBuddy", "-c", "Print '"+entry+"'", plist).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // doctorStats reads the repo and workgroup counts from the daemon (the store

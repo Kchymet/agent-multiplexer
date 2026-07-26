@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"amux/internal/core"
@@ -72,6 +73,103 @@ func TestAgentIDFromBranchRoundTrips(t *testing.T) {
 	// A legacy amux/<root> branch names no agent.
 	if got := agentIDFromBranch("amux/f12442"); got != "" {
 		t.Errorf("agentIDFromBranch(legacy root branch) = %q, want empty", got)
+	}
+}
+
+// TestCheckHotkeys drives the terminal Option/Meta hotkey check across the
+// detection matrix: iTerm2 (definitive via the stubbed profile lookup, in each
+// of its three outcomes), Terminal.app (hint only), and everything else
+// (silent). Env vars and the plist lookup are both stubbed, so the test runs
+// the same on every platform.
+func TestCheckHotkeys(t *testing.T) {
+	noLookup := func(string) (int, error) {
+		t.Error("optionKeySends called for a non-iTerm2 terminal")
+		return 0, nil
+	}
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		sends   int
+		sendErr error
+		lookup  func(string) (int, error) // overrides sends/sendErr when set
+		symbol  string                    // leading marker of the first line; "" = no output
+		want    string                    // substring the output must contain
+	}{
+		{name: "no terminal env", env: map[string]string{}, lookup: noLookup},
+		{name: "other terminal", env: map[string]string{"TERM_PROGRAM": "WezTerm"}, lookup: noLookup},
+		{
+			name:   "iTerm2 Normal warns with fix",
+			env:    map[string]string{"LC_TERMINAL": "iTerm2", "ITERM_PROFILE": "Default"},
+			sends:  0,
+			symbol: "⚠",
+			want:   `"Esc+"`,
+		},
+		{
+			name:   "iTerm2 Esc+ passes",
+			env:    map[string]string{"TERM_PROGRAM": "iTerm.app"},
+			sends:  2,
+			symbol: "✓",
+			want:   "hotkeys work",
+		},
+		{
+			name:   "iTerm2 Meta passes",
+			env:    map[string]string{"LC_TERMINAL": "iTerm2"},
+			sends:  1,
+			symbol: "✓",
+		},
+		{
+			name:    "iTerm2 unreadable plist degrades to hint",
+			env:     map[string]string{"LC_TERMINAL": "iTerm2"},
+			sendErr: os.ErrNotExist,
+			symbol:  "·",
+			want:    `"Esc+"`,
+		},
+		{
+			name:   "Apple_Terminal hints",
+			env:    map[string]string{"TERM_PROGRAM": "Apple_Terminal"},
+			lookup: noLookup,
+			symbol: "·",
+			want:   "Use Option as Meta key",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lookup := tc.lookup
+			if lookup == nil {
+				lookup = func(string) (int, error) { return tc.sends, tc.sendErr }
+			}
+			lines := checkHotkeys(func(k string) string { return tc.env[k] }, lookup)
+			if tc.symbol == "" {
+				if lines != nil {
+					t.Fatalf("expected silence, got %q", lines)
+				}
+				return
+			}
+			if len(lines) == 0 {
+				t.Fatalf("expected output starting with %q, got none", tc.symbol)
+			}
+			joined := strings.Join(lines, "\n")
+			if !strings.Contains(lines[0], tc.symbol) {
+				t.Errorf("first line = %q, want marker %q", lines[0], tc.symbol)
+			}
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("output %q missing %q", joined, tc.want)
+			}
+		})
+	}
+}
+
+// TestCheckHotkeysLooksUpActiveProfile pins that the iTerm2 branch asks the
+// plist lookup for the profile named by ITERM_PROFILE — the setting is
+// per-profile, so reading any other profile's value would be wrong.
+func TestCheckHotkeysLooksUpActiveProfile(t *testing.T) {
+	env := map[string]string{"LC_TERMINAL": "iTerm2", "ITERM_PROFILE": "Work"}
+	var got string
+	checkHotkeys(func(k string) string { return env[k] }, func(profile string) (int, error) {
+		got = profile
+		return 2, nil
+	})
+	if got != "Work" {
+		t.Errorf("optionKeySends profile = %q, want %q", got, "Work")
 	}
 }
 
