@@ -26,7 +26,7 @@ import (
 // need. Examples:
 //
 //	amux do refresh
-//	amux do attach 3f7a
+//	amux do start 3f7a
 //	amux do rename 3f7a -f name="api spike"
 //	amux do move 3f7a --target 9c1b
 //	amux do add-agent 9c1b -f repos=api,web -f prompt="port the auth flow"
@@ -36,17 +36,58 @@ func cmdDo(args []string) error {
 	if err != nil {
 		return err
 	}
-	// `do` drives control actions, which reply with a Result. The query verb
-	// replies with a Data frame instead, so routing it here would block waiting
-	// for a Result that never comes — point callers at the read commands.
-	if a.Action == core.ActionQuery {
-		return fmt.Errorf("%q is a read action; use `amux repo ls` / `amux session ls`", a.Action)
+	// `do` drives control actions, which reply with a Result. The query and pane.*
+	// verbs reply with Data/pane frames instead, so routing them here would block
+	// waiting for a Result that never comes — point callers elsewhere. Anything
+	// else unrecognized is a typo: answer with the whole vocabulary rather than
+	// making the caller go read the source.
+	switch {
+	case a.Action == core.ActionQuery:
+		return fmt.Errorf("%q is a read action; use `amux repo ls` / `amux workgroup ls`", a.Action)
+	case strings.HasPrefix(a.Action, "pane."):
+		return fmt.Errorf("%q is a streaming action, not scriptable; open the workgroup in the dashboard (`amux`)", a.Action)
+	case !core.KnownAction(a.Action):
+		return fmt.Errorf("unknown action %q\n%s", a.Action, actionList())
 	}
 	if err := sendAction(a); err != nil {
 		return err
 	}
 	fmt.Println("ok")
 	return nil
+}
+
+// actionGlosses annotates the daemon's action vocabulary for the unknown-action
+// error. Only the wording lives here — core.ControlActions() stays the single
+// source of *which* verbs exist, so a newly added verb still shows up in the
+// list (glossless) instead of silently going missing from the help.
+var actionGlosses = map[string]string{
+	core.ActionRefresh:         "re-poll the daemon's sources now",
+	core.ActionStart:           "start an agent's (or a whole workgroup's) process",
+	core.ActionRename:          "set a display name            -f name=…",
+	core.ActionMove:            "re-parent an agent            --target <workgroup> (omit for a new one)",
+	core.ActionArchive:         "toggle archived ⇄ restored",
+	core.ActionSetArchived:     "archive or restore explicitly -f archived=true|false",
+	core.ActionDelete:          "delete for good — worktrees + branch",
+	core.ActionKill:            "alias of delete",
+	core.ActionAddRepo:         "track a repo                  -f source=OWNER/REPO|url|path",
+	core.ActionRmRepo:          "untrack a repo                id is the repo name",
+	core.ActionAgentSetRepos:   "re-scope an agent's repos     -f repos=api,web",
+	core.ActionAddAgent:        "add an agent to a workgroup   id is the workgroup id",
+	core.ActionNewRepoAgent:    "start a repo-scoped agent     id is the repo name",
+	core.ActionNewWorkgroup:    "create a work-scoped workgroup",
+	core.ActionCreateWorkspace: "alias of new-workgroup (kept for older scripts)",
+}
+
+// actionList renders the vocabulary an unknown-action error teaches: every verb
+// the daemon accepts, with what it does and the flag it usually needs.
+func actionList() string {
+	var b strings.Builder
+	b.WriteString("valid actions:\n")
+	for _, a := range core.ControlActions() {
+		fmt.Fprintf(&b, "  %-16s %s\n", a, actionGlosses[a])
+	}
+	b.WriteString("  (`amux help` shows the flags in full)")
+	return b.String()
 }
 
 // cmdRefresh asks the daemon to re-poll its sources now, rather than waiting for
@@ -64,11 +105,12 @@ func cmdRefresh() error {
 // the old `do <action> [id] [kind]` form. Flags set the same fields and the ones
 // positionals can't reach:
 //
-//	--id ID              target session id (alternative to the 2nd positional)
-//	--target, -t ROOT    destination root id (for "move"; "" = new work-scoped)
-//	--kind KIND          agent kind (for "new")
-//	--cwd DIR            working directory (for "new")
+//	--id ID              target workgroup/agent id (alternative to the 2nd positional)
+//	--target, -t ROOT    destination workgroup id (for "move"; "" = new work-scoped)
 //	--field, -f key=val  form field, repeatable (add-agent, new-workgroup, …)
+//
+// --kind and --cwd are still parsed but no current action reads them, so they
+// are left out of the user-facing help rather than advertised as live knobs.
 //
 // A flag value may be given as `--flag value` or `--flag=value`.
 func parseDoArgs(args []string) (core.Action, error) {

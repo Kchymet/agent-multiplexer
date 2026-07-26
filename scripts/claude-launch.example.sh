@@ -9,7 +9,8 @@
 #
 # amux sets, on the agent's window:
 #   AMUX_MODE       task | loop
-#   AMUX_WORKSPACE  the workspace id
+#   AMUX_WORKGROUP  the agent's own amux id (AMUX_WORKSPACE = back-compat alias)
+#   AMUX_ROOT       the id of the workgroup it belongs to
 #   AMUX_AGENT      the agent kind (claude)
 #
 # Tune the two knobs below to taste; this is yours to edit.

@@ -78,7 +78,7 @@ func RemoveRepo(name string) error {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("no such repo %q", name)
+		return fmt.Errorf("no such repo %q\n  %s", name, trackedRepos(db))
 	}
 	if users, err := repoUsers(db, name); err != nil {
 		return err
@@ -88,6 +88,26 @@ func RemoveRepo(name string) error {
 	}
 	_ = os.RemoveAll(r.GitDir)
 	return db.DeleteRepo(name)
+}
+
+// trackedRepos renders the tracked-repo names for a "no such repo" error, so a
+// typo answers with the list to pick from instead of sending the user off to run
+// `amux repo ls`. With nothing tracked it says how to track the first one. Any
+// read failure degrades to a bare pointer — the error being reported is the
+// repo that isn't there, not our failure to enumerate.
+func trackedRepos(db *store.DB) string {
+	repos, err := db.Repos()
+	if err != nil {
+		return "see `amux repo ls` for the tracked repos"
+	}
+	if len(repos) == 0 {
+		return "no repos are tracked yet — add one with `amux repo add <url|path|OWNER/REPO>`"
+	}
+	names := make([]string, 0, len(repos))
+	for _, r := range repos {
+		names = append(names, r.Name)
+	}
+	return "tracked repos: " + strings.Join(names, ", ")
 }
 
 // repoUsers returns the ids of agents (sub-sessions) whose worktrees include repo.

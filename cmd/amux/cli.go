@@ -31,14 +31,27 @@ func cmdName(args []string) error {
 	}
 	id := strings.TrimSpace(os.Getenv("AMUX_WORKGROUP"))
 	if id == "" {
-		return fmt.Errorf("not inside an amux agent ($AMUX_WORKGROUP unset)")
+		return fmt.Errorf("%s", notInsideAgent("amux agent name", "amux workgroup rename <id> <name>"))
 	}
 	name := strings.Join(args, " ")
 	if err := sendAction(core.Action{Action: core.ActionRename, ID: id, Fields: map[string]string{"name": name}}); err != nil {
 		return err
 	}
-	fmt.Printf("session %s renamed to %q\n", id, name)
+	fmt.Printf("renamed agent %s to %q\n", id, name)
 	return nil
+}
+
+// notInsideAgent explains a failed self-scoped command: one that acts on
+// *whoever ran it* rather than on an id. Those commands know their caller only by
+// the $AMUX_WORKGROUP amux exports into every pane it launches, so from a plain
+// terminal there is no caller to act on. Naming the unset variable isn't enough —
+// say where the command does work, and give the by-id form for everywhere else.
+func notInsideAgent(cmd, byID string) string {
+	return "not inside an amux agent ($AMUX_WORKGROUP unset)\n" +
+		"  `" + cmd + "` acts on the agent that runs it, so it only works from that\n" +
+		"  agent's own terminal tab inside amux (where amux sets $AMUX_WORKGROUP to the\n" +
+		"  agent's id). From a plain shell, name the target instead: `" + byID + "`\n" +
+		"  (`amux workgroup ls` lists the ids)."
 }
 
 // agentCfg is one agent's configuration gathered in the interactive create flow,
@@ -95,7 +108,10 @@ func cmdRepo(args []string) error {
 		fmt.Printf("removed %s\n", args[1])
 		return nil
 	default:
-		return fmt.Errorf("unknown repo subcommand %q", args[0])
+		return fmt.Errorf("unknown repo subcommand %q\nvalid subcommands:\n"+
+			"  add <url|path|OWNER/REPO>  track a repo (no argument browses GitHub)\n"+
+			"  ls                         list tracked repos\n"+
+			"  rm <name>                  untrack a repo", args[0])
 	}
 }
 
@@ -212,7 +228,7 @@ func startCreated(id string) {
 	}
 }
 
-// ---- session commands ----------------------------------------------------
+// ---- workgroup commands --------------------------------------------------
 
 func cmdSession(args []string) error {
 	ctx := context.Background()
@@ -225,12 +241,12 @@ func cmdSession(args []string) error {
 		return sessionNew(ctx, args[1:]) // optional seed repos to pre-attach
 	case "add":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux session add <root-id> [repo...]")
+			return fmt.Errorf("usage: amux workgroup add <workgroup-id> [repo...]")
 		}
 		if len(args) == 2 {
 			return sessionAdd(ctx, args[1]) // interactive
 		}
-		// Non-interactive: amux session add <root> <repo>... [--mode m] [--model M] [--prompt t]
+		// Non-interactive: amux workgroup add <root> <repo>... [--mode m] [--model M] [--prompt t]
 		repos, cfg := parseCreateFlags(args[2:])
 		id, err := sendActionID(core.Action{Action: core.ActionAddAgent, ID: args[1], Fields: map[string]string{
 			"repos": strings.Join(repos, ","), "agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
@@ -242,7 +258,7 @@ func cmdSession(args []string) error {
 		startCreated(id)
 		return nil
 	case "create":
-		// amux session create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
+		// amux workgroup create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
 		// Creates a workgroup plus one default agent scoped to the given repos.
 		repos, cfg := parseCreateFlags(args[1:])
 		rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: map[string]string{
@@ -252,7 +268,7 @@ func cmdSession(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created workspace %s (agent repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
+		fmt.Printf("created workgroup %s (agent repos: %s)\n", rootID, orNone(strings.Join(repos, ", ")))
 		startCreated(rootID)
 		return nil
 	case "repo":
@@ -290,10 +306,10 @@ func cmdSession(args []string) error {
 		}
 		return nil
 	case "repos":
-		// amux session repos <agent-id> <repo>... — re-scope an agent to exactly
+		// amux workgroup repos <agent-id> <repo>... — re-scope an agent to exactly
 		// these tracked repos (adds/removes worktrees to match).
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux session repos <agent-id> <repo>...")
+			return fmt.Errorf("usage: amux workgroup repos <agent-id> <repo>...")
 		}
 		repos := args[2:]
 		if err := sendAction(core.Action{Action: core.ActionAgentSetRepos, ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
@@ -303,7 +319,7 @@ func cmdSession(args []string) error {
 		return nil
 	case "rm", "delete":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux session rm <id>")
+			return fmt.Errorf("usage: amux workgroup rm <id>")
 		}
 		if err := sendAction(core.Action{Action: core.ActionDelete, ID: args[1]}); err != nil {
 			return err
@@ -312,7 +328,7 @@ func cmdSession(args []string) error {
 		return nil
 	case "rename":
 		if len(args) < 3 {
-			return fmt.Errorf("usage: amux session rename <id> <name>")
+			return fmt.Errorf("usage: amux workgroup rename <id> <name>")
 		}
 		return sendAction(core.Action{Action: core.ActionRename, ID: args[1], Fields: map[string]string{"name": strings.Join(args[2:], " ")}})
 	case "archive", "done":
@@ -336,7 +352,17 @@ func cmdSession(args []string) error {
 	case "ls", "list":
 		return sessionList()
 	default:
-		return fmt.Errorf("unknown session subcommand %q", sub)
+		return fmt.Errorf("unknown workgroup subcommand %q\nvalid subcommands:\n"+
+			"  new                          create a workgroup on a config page (default)\n"+
+			"  create <repo>...             create one non-interactively, with a first agent\n"+
+			"  repo <repo>                  start a repo-scoped agent on a tracked repo\n"+
+			"  add <id> [repo...]           add another agent to a workgroup\n"+
+			"  move <agent> [<id>|--new]    re-parent an agent into another workgroup\n"+
+			"  repos <agent> <repo>...      re-scope an agent to exactly these repos\n"+
+			"  rename <id> <name>           set a display name (the id is unchanged)\n"+
+			"  archive | unarchive <id>     mark done / bring back (reversible)\n"+
+			"  rm <id>                      delete for good — worktrees + branch\n"+
+			"  ls                           list workgroups and their agents", sub)
 	}
 }
 
@@ -380,15 +406,15 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 		for i, a := range agents {
 			menu = append(menu, fmt.Sprintf("  agent %d: %s", i+1, describeAgent(a)))
 		}
-		menu = append(menu, "────────────────", "✓ Create workspace", "✗ Cancel")
+		menu = append(menu, "────────────────", "✓ Create workgroup", "✗ Cancel")
 
-		choice, err := fzfMenu("new workspace", menu)
+		choice, err := fzfMenu("new workgroup", menu)
 		if err != nil {
 			return nil // Esc
 		}
 		switch {
 		case strings.HasPrefix(choice, "Name"):
-			name = promptLine(in, "Workspace name (optional)")
+			name = promptLine(in, "Workgroup name (optional)")
 		case strings.HasPrefix(choice, "+ add agent"):
 			if a, ok := configureAgent(ctx, in); ok {
 				agents = append(agents, a)
@@ -428,7 +454,7 @@ func createWorkspace(name string, agents []agentCfg) error {
 		}
 	}
 	startCreated(rootID)
-	fmt.Printf("created workspace %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
+	fmt.Printf("created workgroup %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
 	return nil
 }
 

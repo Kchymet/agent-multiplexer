@@ -393,7 +393,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openRenameForm(s.ID, s.Title)
 			return m, nil
 		}
-		m.status = "select a session to rename"
+		m.status = "select a workgroup or agent to rename"
 	case "e": // edit which repos an agent works on (fuzzy-select; adds/removes worktrees)
 		if s := m.selected(); s != nil && attachable(s) {
 			p := newRepoPicker("Repos · "+s.Title, m.sessions, agentRepos(s))

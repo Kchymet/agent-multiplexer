@@ -133,6 +133,29 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.
 - **Control console** (`⚙`) — a built-in agent scoped to amux config + CLI only.
 
+### Identity: which id is which
+
+Three ids travel with a running agent. They look similar, they are **not**
+interchangeable, and the names are older than the vocabulary above — so:
+
+| id | set by | what it actually names |
+|----|--------|------------------------|
+| `AMUX_WORKGROUP` | amux, into every pane it launches | The **store id of the agent** whose pane you are in. Despite the name it is the *agent's* id, not its workgroup's — self-scoped commands (`amux agent name`, `amux agent done`) read it to find their caller. `AMUX_WORKSPACE` is a back-compat alias holding the same value. |
+| `AMUX_ROOT` | amux, alongside it | The **workgroup id** that agent belongs to — the container `amux workgroup ls` lists. |
+| `AMUX_SESSION_ID` | amux (pinned at create), adopted from the harness for kinds that mint their own | The **conversation id**: the Claude Code / Codex session uuid. It keys activity reports (`amux agent status`) and names the transcript file `amux agent sessions` prints. Empty until a self-minting harness (Codex) has adopted one. |
+
+- **The db id** is what the first two hold: a short hex id (e.g. `3f7a9c`) that
+  the store mints for *every* session row — workgroup roots and agents alike.
+  It is what every CLI `<id>` argument takes, and what `amux workgroup ls` prints
+  in its first column (workgroups flush left, their agents indented).
+- **The conversation id** is a uuid and belongs to the harness, not to amux. It
+  never appears as a CLI `<id>`; it appears in transcript paths.
+
+So: an id from `amux workgroup ls` addresses something in the rail — pass it to
+`amux workgroup …` or `amux do …`. A uuid addresses a transcript. If a command
+says `$AMUX_WORKGROUP unset`, it is a self-scoped command asking to be run from
+inside an agent's own terminal tab; from anywhere else, name the target by id.
+
 ## Philosophy: amux is a UI/orchestration layer, not an autonomy policy
 
 amux switches, displays, launches, and routes — it does **not** decide how an
@@ -142,10 +165,11 @@ or your **launch wrapper**. amux exports intent and gets out of the way:
 | env var            | meaning                                              |
 |--------------------|------------------------------------------------------|
 | `AMUX_MODE`        | `task` or `loop`                                     |
-| `AMUX_WORKGROUP`   | the agent's workgroup id (`AMUX_WORKSPACE` = alias)  |
-| `AMUX_ROOT`        | the root/workgroup id                                |
+| `AMUX_WORKGROUP`   | the agent's own store id (`AMUX_WORKSPACE` = alias)  |
+| `AMUX_ROOT`        | the workgroup id it belongs to                       |
 | `AMUX_SCOPE`       | `work` or `repo`                                     |
 | `AMUX_AGENT`       | the agent kind (`claude` or `codex`)                 |
+| `AMUX_SESSION_ID`  | the harness conversation id (see *Identity* above)   |
 
 Override the launch binary per harness with `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN`
 (point either at a wrapper that branches on `$AMUX_MODE`). Claude agents launch
@@ -195,12 +219,11 @@ amux serve [listen...]     # multiplexer server (unix + optional tcp:/unix: spec
 amux harness               # agent harness over stdio
 amux repo add <src>        # track a repo: git URL | local path | OWNER/REPO (gh)
 amux repo ls | rm <name>   # list / untrack repos (rm refuses if agents use it)
-amux workgroup repo <repo> # start a repo-scoped agent (alias: wg)
+amux workgroup repo <repo> # start a repo-scoped agent (short form: wg)
 amux workgroup new         # work-scoped workgroup config page
 amux workgroup move <agent> [<root>|--new]
 amux workgroup archive | unarchive <id>
-amux workgroup open|rm|rename|ls
-amux console               # open the control console
+amux workgroup rm|rename|ls
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
 amux do <action> ...       # drive any daemon action from scripts (see below)
@@ -212,17 +235,16 @@ amux do <action> ...       # drive any daemon action from scripts (see below)
 action dispatch the rail and native TUI drive. It talks to the daemon over its
 socket (single writer, automatic re-poll) rather than opening the store directly,
 so scripts stay consistent with the live UI. The positional `[id]`/`[kind]` form
-is kept for back-compat; flags reach the rest of the action:
+is kept for back-compat; flags reach the rest of the action. An unknown action
+answers with the full list of valid ones:
 
 ```
---target, -t <root>   destination root id (for "move")
---kind <kind>         agent kind (for "new")
---cwd <dir>           working directory (for "new")
+--target, -t <root>   destination workgroup id (for "move")
 --field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
 ```
 
 ```
-amux do attach <id>
+amux do start <id>
 amux do rename <id> -f name="api spike"
 amux do move <id> --target <root>          # omit --target to make a new workgroup
 amux do archive <id>
