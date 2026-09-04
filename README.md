@@ -249,7 +249,31 @@ amux status [--json]       # print rail state as text (--json for the raw snapsh
 amux refresh               # ask the daemon to re-poll its sources now
 amux config [ls|get|set|unset|path]  # show / change amux settings (TUI keybindings)
 amux do <action> ...       # drive any daemon action from scripts (see below)
+amux provide [<addr>]      # provider mode: serve panes to a remote orchestrator
+amux provide install | uninstall  # run provider mode as a user service
 ```
+
+### Lending this machine to a remote orchestrator
+
+Provider mode (`docs/remote-provider.md`) dials *out* to a remote orchestrator
+over TLS and serves agent panes to it, turning this machine into a compute node.
+Two commands set it up for good — no terminal left open, and it comes back after
+a reboot:
+
+```sh
+install -m 600 /dev/null ~/.config/amux/provider.token   # then write the token into it
+amux provide install --orchestrator orch.example.com:7443 \
+                     --token-file ~/.config/amux/provider.token --name laptop
+amux doctor   # Provider: config, token mode, service state, last heartbeat
+```
+
+`install` writes `~/.config/amux/provider.toml` and a user service — a systemd
+user unit on Linux/WSL2, a launchd agent on macOS — that runs a bare
+`amux provide` from that config. The bearer token never enters the config file or
+the command line: it stays in the 0600 file the config points at, so rotating it
+is one write. On Linux/WSL2 run `loginctl enable-linger $USER` so the service
+outlives your terminal; install and doctor both remind you. `amux provide
+uninstall` reverses it.
 
 ### Scripting the daemon: `amux do`
 
