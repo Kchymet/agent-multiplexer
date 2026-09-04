@@ -104,7 +104,8 @@ func TestRuntimeEventsSubscribeStreamsFrames(t *testing.T) {
 
 	// Feed a batch; it must arrive as a runtime-events frame.
 	fs.ch <- harnessproto.RuntimeEventBatch{
-		Seq: 5,
+		Seq:     5,
+		Runtime: harnessproto.RuntimeCodex,
 		Events: []harnessproto.RuntimeEvent{
 			{Type: "text", ItemID: "m1", Direction: "out", Payload: json.RawMessage(`{"text":"hi","final":true}`)},
 		},
@@ -112,6 +113,11 @@ func TestRuntimeEventsSubscribeStreamsFrames(t *testing.T) {
 	m := readRuntimeEvents(t, oc)
 	if m.SessionID != "sess-1" || m.Seq != 5 || len(m.Events) != 1 || m.Events[0].Type != "text" {
 		t.Fatalf("runtime-events frame = %+v", m)
+	}
+	// The batch's runtime rides on the frame, so the orchestrator never has to
+	// assume one.
+	if m.Runtime != harnessproto.RuntimeCodex {
+		t.Fatalf("frame runtime = %q, want codex", m.Runtime)
 	}
 	if fs.gotSess != "sess-1" || fs.gotAfter != 3 {
 		t.Fatalf("stream called with (%q,%d), want (sess-1,3)", fs.gotSess, fs.gotAfter)

@@ -120,11 +120,12 @@ func cmdProvide(args []string) error {
 		}
 		if runtimeEvents {
 			// Structured transcripts: tail each published session's on-disk runtime
-			// record (Claude Code JSONL, located via the conversation id amux pins)
-			// and stream contract events. Read-only; a session with no record on disk
-			// simply emits nothing (honest degradation).
+			// record — Claude Code's session JSONL or Codex's rollout, whichever the
+			// session's harness wrote — and stream contract events stamped with that
+			// runtime. Read-only; a session with no record on disk simply emits
+			// nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(runtimePathViaDaemon(), 0)
+			cfg.RuntimeEventStream = runtimeevents.Stream(runtimeRecordViaDaemon(), 0)
 		}
 	}
 
@@ -160,26 +161,27 @@ func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
 	return c.Snapshot()
 }
 
-// runtimePathViaDaemon resolves a published session id to its on-disk transcript
-// path through the daemon (which resolves it via the session's harness), so the
-// provider tails transcripts without opening the store. ok=false — a missing
-// daemon, an error, or an empty path (no supported record) — means the provider
-// advertises runtime-events but honestly emits nothing for that session.
-func runtimePathViaDaemon() runtimeevents.PathResolver {
-	return func(sessionID string) (string, bool) {
+// runtimeRecordViaDaemon resolves a published session id to its on-disk
+// transcript and the runtime that wrote it, through the daemon (which resolves it
+// via the session's harness), so the provider tails transcripts without opening
+// the store. ok=false — a missing daemon, an error, or an empty path (no
+// supported record) — means the provider advertises runtime-events but honestly
+// emits nothing for that session.
+func runtimeRecordViaDaemon() runtimeevents.Resolver {
+	return func(sessionID string) (runtimeevents.Record, bool) {
 		if sessionID == "" {
-			return "", false
+			return runtimeevents.Record{}, false
 		}
 		c, err := daemon.Dial()
 		if err != nil {
-			return "", false
+			return runtimeevents.Record{}, false
 		}
 		defer c.Close()
-		path, err := c.RuntimePath(sessionID)
-		if err != nil || path == "" {
-			return "", false
+		rec, err := c.RuntimeRecord(sessionID)
+		if err != nil || rec.Path == "" {
+			return runtimeevents.Record{}, false
 		}
-		return path, true
+		return runtimeevents.Record{Runtime: rec.Runtime, Path: rec.Path}, true
 	}
 }
 
