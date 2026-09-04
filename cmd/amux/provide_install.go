@@ -29,8 +29,11 @@ func cmdProvideInstall(args []string) error {
 	dryRun := fset.Bool("dry-run", false, "print the config file and service unit that would be written, then stop")
 	execFlag := fset.String("exec", "", "amux binary the service runs (default: the installed binary, else this one)")
 	// Install takes the same address-plus-flags shape as running the provider, so
-	// it needs the same any-order parse: `amux provide install orch:7443
-	// --token-file tok` must not drop the token file the way running once did.
+	// it needs the same any-order parse. Without it, `amux provide install
+	// orch:7443 --token-file tok` drops every flag after the address: unlike the
+	// run path — where a dropped --ca surfaced much later as a bad certificate —
+	// Validate catches the missing token and rejects a command line that is
+	// perfectly correct, which is a better failure but still the wrong one.
 	operands, err := parseFlagsAnyOrder(fset, args)
 	if err != nil {
 		return err
