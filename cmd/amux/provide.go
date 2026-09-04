@@ -95,6 +95,8 @@ Install-only flags:
   --dry-run          print the config file and service unit, write nothing
   --exec <path>      amux binary the service runs (default: the installed binary)
 
+Flags may come before or after the address, for install as well as for running.
+
 Running bare, settings resolve flags first, then the AMUX_PROVIDER_* / AMUX_TLS_*
 env vars, then the config file. `+"`"+`amux doctor`+"`"+` reports the config, the service, and
 the provider's last registration and heartbeat.

@@ -77,6 +77,38 @@ func TestInstallReplacesLabelsAndFeatures(t *testing.T) {
 	}
 }
 
+// TestInstallTakesTheAddressEitherWay: install has the same address-plus-flags
+// shape running the provider does, so it needs the same any-order parse — a
+// --token-file dropped here would write a config with no credential in it.
+func TestInstallAddressAndFlagsInAnyOrder(t *testing.T) {
+	for name, argv := range map[string][]string{
+		"address first": {"orch:7443", "--token-file", "/tmp/tok"},
+		"address last":  {"--token-file", "/tmp/tok", "orch:7443"},
+		"flag form":     {"--orchestrator", "orch:7443", "--token-file", "/tmp/tok"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fset := flag.NewFlagSet("provide install", flag.ContinueOnError)
+			fset.SetOutput(os.NewFile(0, os.DevNull))
+			var f provideFlags
+			f.register(fset)
+			operands, err := parseFlagsAnyOrder(fset, argv)
+			if err != nil {
+				t.Fatalf("parse %v: %v", argv, err)
+			}
+			addr, err := provideAddr(f.orch, operands)
+			if err != nil {
+				t.Fatalf("provideAddr: %v", err)
+			}
+			if addr != "orch:7443" {
+				t.Errorf("address = %q, want orch:7443", addr)
+			}
+			if f.tokenFile != "/tmp/tok" {
+				t.Errorf("token file = %q, want it read wherever it sits", f.tokenFile)
+			}
+		})
+	}
+}
+
 // TestEnsureTokenFile: the service reads the credential unattended, so install
 // tightens a loose mode rather than leaving it for doctor to complain about.
 func TestEnsureTokenFile(t *testing.T) {

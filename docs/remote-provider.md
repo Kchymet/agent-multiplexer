@@ -174,6 +174,9 @@ checking it.
 | macOS service | `~/Library/LaunchAgents/com.kchymet.amux.provide.plist` |
 | Status file | `~/.local/state/amux/provider-status.json` |
 
+`install` takes the address positionally too, with flags on either side of it,
+exactly as running the provider does.
+
 Re-running `install` merges over the existing config, so `amux provide install
 --name box` changes one setting and keeps the rest, and re-running it after
 `make install` re-points the service at the new binary and restarts it.

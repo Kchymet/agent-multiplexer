@@ -28,7 +28,14 @@ func cmdProvideInstall(args []string) error {
 	f.register(fset)
 	dryRun := fset.Bool("dry-run", false, "print the config file and service unit that would be written, then stop")
 	execFlag := fset.String("exec", "", "amux binary the service runs (default: the installed binary, else this one)")
-	if err := fset.Parse(args); err != nil {
+	// Install takes the same address-plus-flags shape as running the provider, so
+	// it needs the same any-order parse. Without it, `amux provide install
+	// orch:7443 --token-file tok` drops every flag after the address: unlike the
+	// run path — where a dropped --ca surfaced much later as a bad certificate —
+	// Validate catches the missing token and rejects a command line that is
+	// perfectly correct, which is a better failure but still the wrong one.
+	operands, err := parseFlagsAnyOrder(fset, args)
+	if err != nil {
 		return err
 	}
 
@@ -42,7 +49,14 @@ func cmdProvideInstall(args []string) error {
 		return fmt.Errorf("provide install: %w", err)
 	}
 	applyProvideFlags(&cfg, &f, fset)
-	if addr := fset.Arg(0); addr != "" {
+	// provideAddr rejects the two silent ways to get the address wrong (two
+	// different addresses, a surplus operand); an address given either way
+	// overrides whatever the existing config held.
+	addr, err := provideAddr(f.orch, operands)
+	if err != nil {
+		return err
+	}
+	if addr != "" {
 		cfg.Orchestrator = addr
 	}
 	// The service runs from a working directory it does not choose, so every path
