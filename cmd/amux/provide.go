@@ -23,8 +23,17 @@ import (
 // foreground, or install/uninstall it as a user service.
 //
 //	amux provide [<orchestrator-addr>] [flags]   run (reads the config file when bare)
+//	amux provide [flags] [<orchestrator-addr>]   the same run, flags on the other side
 //	amux provide install [flags]                 write the config + install the service
 //	amux provide uninstall                       remove the service
+//
+// Flags work on either side of the address (parseFlagsAnyOrder) — the first
+// phrasing above is the one people reach for, and it used to drop every flag
+// after the address without a word.
+//
+// Config resolves from flags, then the AMUX_PROVIDER_* / AMUX_TLS_* env vars,
+// then the config file `amux provide install` wrote. The token is never taken
+// from argv (a bearer credential): use --token-file or AMUX_PROVIDER_TOKEN.
 func cmdProvide(args []string) error {
 	sub := ""
 	if len(args) > 0 {
@@ -98,7 +107,10 @@ the provider's last registration and heartbeat.
 
 // provideFlags is the settings surface shared by running the provider and
 // installing it, so the flags mean exactly the same thing in both — the install
-// command is the run command with its arguments written down.
+// command is the run command with its arguments written down. It is a struct
+// registered on a FlagSet rather than a pile of pointers in cmdProvide so the
+// parse can be exercised on its own — which is what tells the flags-in-any-order
+// fix from a regression back to silently dropping them.
 type provideFlags struct {
 	orch       string
 	tokenFile  string
@@ -142,7 +154,8 @@ func provideRun(args []string) error {
 	fs := flag.NewFlagSet("provide", flag.ContinueOnError)
 	var f provideFlags
 	f.register(fs)
-	if err := fs.Parse(args); err != nil {
+	operands, err := parseFlagsAnyOrder(fs, args)
+	if err != nil {
 		return err
 	}
 
@@ -153,7 +166,13 @@ func provideRun(args []string) error {
 		return fmt.Errorf("provide: %w", err)
 	}
 
-	addr := firstNonEmpty(f.orch, fs.Arg(0), file.Orchestrator)
+	// The address may come from either side of the flags, from --orchestrator, or
+	// — for the bare `amux provide` the user service runs — from the config file.
+	addr, err := provideAddr(f.orch, operands)
+	if err != nil {
+		return err
+	}
+	addr = firstNonEmpty(addr, file.Orchestrator)
 	if addr == "" {
 		return fmt.Errorf("provide: need an orchestrator address (positional, --orchestrator, or `amux provide install`)")
 	}
@@ -219,11 +238,12 @@ func provideRun(args []string) error {
 		}
 		if runtimeEvents {
 			// Structured transcripts: tail each published session's on-disk runtime
-			// record (Claude Code JSONL, located via the conversation id amux pins)
-			// and stream contract events. Read-only; a session with no record on disk
-			// simply emits nothing (honest degradation).
+			// record — Claude Code's session JSONL or Codex's rollout, whichever the
+			// session's harness wrote — and stream contract events stamped with that
+			// runtime. Read-only; a session with no record on disk simply emits
+			// nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(runtimePathViaDaemon(), 0)
+			cfg.RuntimeEventStream = runtimeevents.Stream(runtimeRecordViaDaemon(), 0)
 		}
 	}
 
@@ -233,6 +253,25 @@ func provideRun(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// provideAddr picks the orchestrator address out of --orchestrator and whatever
+// operands were left over. One address is expected, from either spelling; the two
+// ways of getting that wrong both used to pass unnoticed, so both now say so:
+// a second, different address is ambiguous, and extra operands are the shape of a
+// typo (a missing `--`, a flag misspelled into a word). Returns "" when no address
+// was given at all — the caller decides what else may supply one.
+func provideAddr(orch string, operands []string) (string, error) {
+	if len(operands) > 1 {
+		return "", fmt.Errorf("provide: unexpected argument(s) after the orchestrator address %q: %s", operands[0], strings.Join(operands[1:], " "))
+	}
+	if len(operands) == 0 {
+		return orch, nil
+	}
+	if orch != "" && orch != operands[0] {
+		return "", fmt.Errorf("provide: two orchestrator addresses: --orchestrator %s and %s — give it once", orch, operands[0])
+	}
+	return operands[0], nil
 }
 
 // envBool reports whether an env var is set to a truthy value (1/true/yes/on).
@@ -259,26 +298,27 @@ func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
 	return c.Snapshot()
 }
 
-// runtimePathViaDaemon resolves a published session id to its on-disk transcript
-// path through the daemon (which resolves it via the session's harness), so the
-// provider tails transcripts without opening the store. ok=false — a missing
-// daemon, an error, or an empty path (no supported record) — means the provider
-// advertises runtime-events but honestly emits nothing for that session.
-func runtimePathViaDaemon() runtimeevents.PathResolver {
-	return func(sessionID string) (string, bool) {
+// runtimeRecordViaDaemon resolves a published session id to its on-disk
+// transcript and the runtime that wrote it, through the daemon (which resolves it
+// via the session's harness), so the provider tails transcripts without opening
+// the store. ok=false — a missing daemon, an error, or an empty path (no
+// supported record) — means the provider advertises runtime-events but honestly
+// emits nothing for that session.
+func runtimeRecordViaDaemon() runtimeevents.Resolver {
+	return func(sessionID string) (runtimeevents.Record, bool) {
 		if sessionID == "" {
-			return "", false
+			return runtimeevents.Record{}, false
 		}
 		c, err := daemon.Dial()
 		if err != nil {
-			return "", false
+			return runtimeevents.Record{}, false
 		}
 		defer c.Close()
-		path, err := c.RuntimePath(sessionID)
-		if err != nil || path == "" {
-			return "", false
+		rec, err := c.RuntimeRecord(sessionID)
+		if err != nil || rec.Path == "" {
+			return runtimeevents.Record{}, false
 		}
-		return path, true
+		return runtimeevents.Record{Runtime: rec.Runtime, Path: rec.Path}, true
 	}
 }
 

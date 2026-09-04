@@ -8,6 +8,7 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/store"
 )
 
 // TestHarnessFor maps kinds to harnesses: Claude for ""/"claude", a no-op
@@ -143,5 +144,36 @@ func TestHarnessSkillsAndGuide(t *testing.T) {
 		if got, want := h.GuideFile(root), filepath.Join(root, tc.guide); got != want {
 			t.Errorf("kind %q GuideFile=%q, want %q", tc.kind, got, want)
 		}
+	}
+}
+
+// TestCodexRuntimeTranscriptPath verifies the codex harness resolves a pinned
+// session to its rollout — the record internal/runtimeevents tails — and reports
+// false when no rollout exists, so the provider emits nothing rather than
+// advertising a phantom stream.
+func TestCodexRuntimeTranscriptPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	h := HarnessFor("codex")
+
+	const sid = "55555555-5555-4555-8555-555555555555"
+	if _, ok := h.RuntimeTranscriptPath(store.Session{Agent: "codex", ClaudeID: sid}); ok {
+		t.Fatal("no rollout on disk must resolve ok=false")
+	}
+	if _, ok := h.RuntimeTranscriptPath(store.Session{Agent: "codex"}); ok {
+		t.Fatal("an unpinned codex session must resolve ok=false")
+	}
+
+	dir := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "07", "02")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roll := filepath.Join(dir, "rollout-2026-07-02T10-00-00-"+sid+".jsonl")
+	if err := os.WriteFile(roll, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := h.RuntimeTranscriptPath(store.Session{Agent: "codex", ClaudeID: sid})
+	if !ok || got != roll {
+		t.Fatalf("RuntimeTranscriptPath = %q,%v, want %q,true", got, ok, roll)
 	}
 }
