@@ -6,8 +6,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"amux/internal/core"
+	"amux/internal/provider"
+	"amux/internal/providercfg"
 )
 
 // TestReconcile drives the pure reconciliation core: it flags worktree dirs and
@@ -185,5 +188,113 @@ func TestReconcileClean(t *testing.T) {
 	od, md, ob := reconcile(sessions, roots, disk)
 	if len(od)+len(md)+len(ob) != 0 {
 		t.Errorf("expected no drift, got dirs=%v missing=%v branches=%v", od, md, ob)
+	}
+}
+
+// TestReportProviderNotConfigured: provider mode is opt-in, so a machine that
+// never registered is healthy — doctor points at the command instead of raising
+// a finding.
+func TestReportProviderNotConfigured(t *testing.T) {
+	sandboxCLI(t)
+	out, err := captureOutput(t, func() error { reportProvider(); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "not configured") || !strings.Contains(out, "amux provide install") {
+		t.Errorf("Provider section = %q, want it to name the install command", out)
+	}
+	if strings.Contains(out, "✗") {
+		t.Errorf("an unconfigured provider reported a failure:\n%s", out)
+	}
+}
+
+// TestReportProviderReportsTheChain covers the configured-but-not-installed
+// case: the config and credential are reported, and the missing service is the
+// next step rather than an error.
+func TestReportProviderReportsTheChain(t *testing.T) {
+	sandboxCLI(t)
+	token := filepath.Join(t.TempDir(), "provider.token")
+	if err := os.WriteFile(token, []byte("s3cr3t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := providercfg.Config{
+		Orchestrator: "orch.example.com:7443", TokenFile: token, Name: "box",
+		PublishSessions: true, RuntimeEvents: true,
+	}
+	if err := providercfg.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureOutput(t, func() error { reportProvider(); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"orchestrator orch.example.com:7443",
+		"name box",
+		"sessions",
+		"runtime-events",
+		token,
+		"mode 0600",
+		"amux provide install", // the service is the missing step
+		"the provider has not run yet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Provider section missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "s3cr3t") {
+		t.Errorf("doctor printed the bearer token itself:\n%s", out)
+	}
+}
+
+// TestReportProviderFlagsALooseToken: the service reads the credential
+// unattended, so nobody is watching for a stray 0644.
+func TestReportProviderFlagsALooseToken(t *testing.T) {
+	sandboxCLI(t)
+	token := filepath.Join(t.TempDir(), "provider.token")
+	if err := os.WriteFile(token, []byte("s3cr3t"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := providercfg.Save(providercfg.Config{Orchestrator: "h:1", TokenFile: token}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureOutput(t, func() error { reportProvider(); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "want 0600") || !strings.Contains(out, "chmod 600") {
+		t.Errorf("a world-readable token was not flagged:\n%s", out)
+	}
+}
+
+// TestReportProviderStatusOutlivesItsProcess pins the one lie the status file
+// can tell: a "registered" record whose process is gone (SIGKILL, a reboot).
+// Doctor must contradict it rather than repeat it.
+func TestReportProviderStatusOutlivesItsProcess(t *testing.T) {
+	sandboxCLI(t)
+	token := filepath.Join(t.TempDir(), "provider.token")
+	if err := os.WriteFile(token, []byte("s3cr3t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := providercfg.Save(providercfg.Config{Orchestrator: "h:1", TokenFile: token}); err != nil {
+		t.Fatal(err)
+	}
+	// A pid that cannot be running: 0 is never a live user process.
+	if err := provider.WriteStatus(provider.StatusPath(), provider.Status{
+		PID: 0, State: provider.StateRegistered, ProviderID: "prov-1",
+		RegisteredAt: time.Now().Add(-time.Hour), HeartbeatAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureOutput(t, func() error { reportProvider(); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "is gone") {
+		t.Errorf("doctor repeated a stale `registered` record:\n%s", out)
+	}
+	if !strings.Contains(out, "prov-1") {
+		t.Errorf("status section dropped the providerId:\n%s", out)
 	}
 }

@@ -3,6 +3,10 @@
 Status: Implemented. `amux provide` (package `internal/provider`) drives the v2
 protocol end to end.
 
+`amux provide install` runs it as a user service (systemd on Linux/WSL2, launchd
+on macOS) from a config file, and `amux doctor` reports it — see "The two-command
+laptop setup" below.
+
 Landed: the TLS + bearer-token seam at the wire boundary (`internal/wiretls`,
 shared with the mux server — see `client-server.md`), the harnessproto v2 message
 types and codec (`register`/`registered`/`ping`/`pong`/`reset`, per-pane `seq`),
@@ -133,6 +137,88 @@ a possible future extension, not part of v2.
 
 ## Provider mode UX
 
+### The two-command laptop setup
+
+Registering a machine should not mean a terminal that has to stay open. Install
+the provider as a **user service** — a systemd user unit on Linux/WSL2, a launchd
+agent on macOS — and it starts at login, restarts on exit, and survives a reboot:
+
+```sh
+# 1. put the bearer token somewhere only you can read
+install -m 600 /dev/null ~/.config/amux/provider.token
+printf '%s' "$TOKEN" > ~/.config/amux/provider.token
+
+# 2. write the config and install the service
+amux provide install --orchestrator orch.example.com:7443 \
+                     --token-file ~/.config/amux/provider.token \
+                     --name laptop --label zone=home
+
+amux doctor          # Provider section: config, token, service, last heartbeat
+```
+
+`amux provide install` writes `~/.config/amux/provider.toml` and the service
+unit; `amux provide uninstall` stops and removes the service (the config file and
+token are kept, so reinstalling is one command). `amux provide` with no arguments
+reads the config file — that is exactly what the service runs.
+
+**The token is never in the config file or in argv.** The config names the *path*
+to a mode-0600 token file, so rotating the credential is a single write with no
+reinstall, and a config that leaks is not a credential that leaks. Install
+tightens the token file's mode if it is looser than 0600, and doctor keeps
+checking it.
+
+| | |
+|---|---|
+| Config file | `~/.config/amux/provider.toml` (honors `$XDG_CONFIG_HOME`) |
+| Linux/WSL2 service | `~/.config/systemd/user/amux-provide.service` |
+| macOS service | `~/Library/LaunchAgents/com.kchymet.amux.provide.plist` |
+| Status file | `~/.local/state/amux/provider-status.json` |
+
+Re-running `install` merges over the existing config, so `amux provide install
+--name box` changes one setting and keeps the rest, and re-running it after
+`make install` re-points the service at the new binary and restarts it.
+`--dry-run` prints the config and the unit without writing either.
+
+**Linux and WSL2: enable lingering.** A systemd *user* service only runs while
+you have a session, so without lingering the provider dies when your last
+terminal closes — the exact failure the service was meant to prevent:
+
+```sh
+loginctl enable-linger $USER
+```
+
+`amux provide install` and `amux doctor` both say so when it is off. WSL2 also
+needs systemd itself turned on — put
+
+```ini
+[boot]
+systemd=true
+```
+
+in `/etc/wsl.conf` and run `wsl --shutdown` from Windows. Install says so too if
+the user bus is not reachable.
+
+### The config file
+
+```toml
+# ~/.config/amux/provider.toml — written by `amux provide install`
+orchestrator = "orch.example.com:7443"
+token-file = "/home/you/.config/amux/provider.token"
+name = "laptop"
+max-panes = 8
+publish-sessions = true
+features = ["bigdisk", "cuda"]
+
+[labels]
+zone = "home"
+```
+
+The keys are the `amux provide` flag names verbatim, so the file reads like the
+command line it replaces. amux reads the subset of TOML it writes: a key it does
+not recognize is an error you see, never a setting silently dropped.
+
+### Running it by hand
+
 ```
 amux provide orch.example.com:7443 \
              --token-file ~/.config/amux/provider.token \
@@ -154,7 +240,7 @@ Logs report the FSM plainly: dialing, registered (with negotiated version and
 providerId), disconnect/grace, backoff, and terminal errors.
 
 Configuration resolves from flags first, then these env vars (matching amux's
-`AMUX_*` convention):
+`AMUX_*` convention), then the config file:
 
 | Setting | Flag | Env var |
 |---|---|---|
@@ -166,7 +252,35 @@ Configuration resolves from flags first, then these env vars (matching amux's
 | Private CA | `--ca` | `AMUX_TLS_CA` |
 | TLS server name | `--server-name` | `AMUX_TLS_SERVERNAME` |
 
-Flags and env vars merge for labels and features (flags win on conflict).
+Flags and env vars merge for labels and features (flags win on conflict), and the
+config file supplies whatever neither set — so the service's bare `amux provide`
+is fully configured by the file, while an ad-hoc run can still override any one
+setting.
+
+### Status file and doctor
+
+The provider loop writes `~/.local/state/amux/provider-status.json` on every
+state change: `dialing` → `registered` → `disconnected`/`rejected`/`stopped`,
+plus the negotiated `providerId`, the last successful registration, the last
+heartbeat, the live pane count, and the last error. A provider that is running
+but has never been accepted looks identical to a working one from the outside;
+this file is the difference, and `amux doctor`'s **Provider** section reads it:
+
+```
+Provider
+  ✓ config    /home/you/.config/amux/provider.toml
+              orchestrator orch.example.com:7443 · name laptop · sessions
+  ✓ token     /home/you/.config/amux/provider.token (mode 0600)
+  ✓ service   systemd (user) · active
+              /home/you/.config/systemd/user/amux-provide.service · enabled at login
+  ✓ status    registered (3s ago)
+              providerId prov-42 · registered 2m14s ago · heartbeat 3s ago · 2 panes
+```
+
+Nothing here can fail the health check — provider mode is opt-in, so "not
+configured" is a normal, healthy state. Doctor does contradict the one lie the
+file can tell: a `registered` record whose process is gone (a SIGKILL, a reboot)
+is reported as stale rather than repeated.
 Feature strings are opaque: amux never interprets or hardcodes them — the
 orchestrator matches on them by convention. `bwrap`, `os`, and `arch`
 capabilities are detected automatically (`bwrap` is probed on `$PATH`).
@@ -181,3 +295,5 @@ capabilities are detected automatically (`bwrap` is probed on `$PATH`).
 | Grace exceeded | kill orchestrator-owned panes, discard buffers |
 | Buffer overflow (slow link, chatty pane) | trim to tail + `reset`; other panes unaffected |
 | Malformed frame | close connection (line-JSON has no resync); reconnect recovers |
+| Provider process crashes | the user service restarts it after `RestartSec` (5s) |
+| Repeated terminal rejection | systemd's start limit gives up after 10 tries in 5 min; the service shows as failed and doctor reports it |
