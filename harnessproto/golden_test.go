@@ -55,6 +55,20 @@ var goldenFrames = []struct {
 		Type: MSessionAction, ReqID: "r1", Action: VerbAddAgent, ID: "wg1",
 		Fields: map[string]string{"kind": "claude"},
 	}},
+	{"session_action_prompt", MuxMsg{
+		Type: MSessionAction, ReqID: "r2", Action: VerbPrompt, ID: "a2",
+		Fields: map[string]string{FieldText: "run the tests"},
+	}},
+	{"session_action_permission", MuxMsg{
+		Type: MSessionAction, ReqID: "r3", Action: VerbPermission, ID: "a2",
+		Fields: map[string]string{
+			FieldRequestID: "perm-9", FieldDecision: DecisionDeny,
+			FieldReason: "writes outside the worktree",
+		},
+	}},
+	{"session_result_accepted", HarnessMsg{
+		Type: HSessionResult, ReqID: "r2", OK: true, Result: ResultAccepted,
+	}},
 	{"sessions", HarnessMsg{
 		Type: HSessions,
 		Sessions: []Session{{
