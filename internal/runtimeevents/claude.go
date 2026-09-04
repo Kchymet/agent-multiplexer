@@ -2,10 +2,16 @@
 // on-disk session record: it tails the record and maps each entry to the generic,
 // orchestrator-agnostic structured-event vocabulary the "runtime-events" feature
 // carries (docs/remote-provider-sessions.md §4). It is read-only — there is no
-// input path — and claude-first: Claude Code writes a per-session JSONL under its
-// projects dir, keyed by the conversation id amux pins per session; this package
-// maps those entries to events. Anything it can't map becomes a `raw` event so no
-// data is ever dropped.
+// input path.
+//
+// One reader per runtime, all emitting the same vocabulary:
+//
+//   - claude.go reads Claude Code's per-session JSONL under its projects dir,
+//     keyed by the conversation id amux pins per session.
+//   - codex.go reads Codex CLI's rollout JSONL under $CODEX_HOME/sessions,
+//     keyed by the rollout uuid.
+//
+// Anything a reader can't map becomes a `raw` event so no data is ever dropped.
 //
 // amux stays orchestrator-agnostic: the Type strings below are a stable,
 // documented vocabulary a producer emits (the orchestrator maps them onto its own
@@ -46,8 +52,8 @@ const (
 	dirMeta = harnessproto.DirMeta
 )
 
-// runtimeName labels `raw` and usage events with the producing runtime.
-const runtimeName = "claude"
+// runtimeName labels this reader's `raw` events with the producing runtime.
+const runtimeName = harnessproto.RuntimeClaude
 
 // ClaudeState carries decode state across lines of one session's JSONL: the open
 // tool_use inputs, so a later tool_result (in a following `user` entry) can
@@ -288,28 +294,8 @@ func usageEvent(usage json.RawMessage) harnessproto.RuntimeEvent {
 	}
 }
 
-func notice(level, text string) harnessproto.RuntimeEvent {
-	return harnessproto.RuntimeEvent{Type: TypeNotice, Direction: dirMeta,
-		Payload: mustMarshal(map[string]any{"level": level, "text": text})}
-}
-
 func rawEvent(nativeType string, body json.RawMessage) harnessproto.RuntimeEvent {
-	// body must be valid JSON to embed as-is; an unparsable line is preserved as a
-	// JSON string so the raw event never loses the original bytes.
-	var bodyVal any
-	if len(body) == 0 {
-		bodyVal = json.RawMessage(`{}`)
-	} else if json.Valid(body) {
-		bodyVal = body
-	} else {
-		bodyVal = string(body)
-	}
-	return harnessproto.RuntimeEvent{Type: TypeRaw, Direction: dirOut,
-		Payload: mustMarshal(map[string]any{
-			"runtime":     runtimeName,
-			"native_type": nativeType,
-			"body":        bodyVal,
-		})}
+	return rawEventFor(runtimeName, nativeType, body)
 }
 
 func planEvent(input json.RawMessage) harnessproto.RuntimeEvent {
@@ -419,43 +405,4 @@ func summarizeInput(input json.RawMessage) string {
 		}
 	}
 	return string(input)
-}
-
-func extractText(v json.RawMessage) string {
-	if len(v) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(v, &s) == nil {
-		return s
-	}
-	var arr []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(v, &arr) == nil {
-		parts := make([]string, 0, len(arr))
-		for _, b := range arr {
-			if b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
-}
-
-func rawOrNull(v json.RawMessage) any {
-	if len(v) == 0 || string(v) == "null" {
-		return nil
-	}
-	return v
-}
-
-func mustMarshal(v any) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return json.RawMessage(`{}`)
-	}
-	return b
 }

@@ -164,10 +164,17 @@ func (codexHarness) ListSessions() []SessionInfo {
 	return out
 }
 
-// RuntimeTranscriptPath returns false: Codex's rollout format has no supported
-// runtime-event reader yet, so the provider honestly emits nothing for a Codex
-// session rather than advertising a phantom (Claude-shaped) stream.
-func (codexHarness) RuntimeTranscriptPath(store.Session) (string, bool) { return "", false }
+// RuntimeTranscriptPath resolves a Codex session to its rollout jsonl — the
+// record internal/runtimeevents tails for structured events. Codex keys rollouts
+// by uuid rather than by cwd, so the pinned id is the whole lookup; a session
+// whose rollout is not on disk (never launched, or pruned) resolves to false and
+// the provider honestly emits nothing for it.
+func (codexHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
+	if s.ClaudeID == "" {
+		return "", false
+	}
+	return codexcfg.RolloutPath(s.ClaudeID)
+}
 
 // Doctor: Codex has no amux-managed config surface to drift-check.
 func (codexHarness) Doctor() []string { return nil }

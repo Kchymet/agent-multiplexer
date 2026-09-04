@@ -62,6 +62,7 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, batches <-cha
 			if err := s.hc.WriteHarness(harnessproto.HarnessMsg{
 				Type:      harnessproto.HRuntimeEvents,
 				SessionID: sessionID,
+				Runtime:   b.Runtime,
 				Seq:       b.Seq,
 				Events:    b.Events,
 			}); err != nil {

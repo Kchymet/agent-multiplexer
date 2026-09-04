@@ -1,1 +1,1 @@
-{"type":"runtime-events","seq":7,"sessionId":"s1","events":[{"type":"turn_start","direction":"out","payload":{}},{"type":"tool_call","item_id":"t1","direction":"out","payload":{"title":"Read"}}]}
+{"type":"runtime-events","seq":7,"sessionId":"s1","runtime":"claude","events":[{"type":"turn_start","direction":"out","payload":{}},{"type":"tool_call","item_id":"t1","direction":"out","payload":{"title":"Read"}}]}

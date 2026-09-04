@@ -79,7 +79,7 @@ var goldenFrames = []struct {
 		}},
 	}},
 	{"runtime_events", HarnessMsg{
-		Type: HRuntimeEvents, SessionID: "s1", Seq: 7,
+		Type: HRuntimeEvents, SessionID: "s1", Runtime: RuntimeClaude, Seq: 7,
 		Events: []RuntimeEvent{
 			{Type: TypeTurnStart, Direction: DirOut, Payload: json.RawMessage(`{}`)},
 			{Type: TypeToolCall, ItemID: "t1", Direction: DirOut, Payload: json.RawMessage(`{"title":"Read"}`)},

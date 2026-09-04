@@ -45,26 +45,21 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 	defer db.Close()
 
 	switch a.Query {
-	case core.QueryRuntimePath:
-		// Resolve a session id to its runtime transcript path via its harness, so
-		// the provider need not open the store to tail transcripts. Empty string
-		// (marshalled as "") means no supported record — honest degradation.
-		s, ok, err := db.GetSession(a.ID)
+	case core.QueryRuntimePath, core.QueryRuntimeRecord:
+		// Resolve a session id to its runtime transcript — and the runtime that
+		// wrote it — via its harness, so the provider need not open the store to
+		// tail transcripts. An empty path means no supported record; the provider
+		// then emits nothing for that session (honest degradation). The older
+		// QueryRuntimePath answers with just the path, so a provider built before
+		// QueryRuntimeRecord keeps working against a newer daemon.
+		rec, err := runtimeRecord(db, a.ID)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			path, _ := agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
-			return path, nil
+		if a.Query == core.QueryRuntimePath {
+			return rec.Path, nil
 		}
-		// Untracked/console: the id is itself a conversation id with no amux-store
-		// row — resolve it from the default harness's own transcript listing.
-		for _, info := range agent.HarnessFor(agent.DefaultKind()).ListSessions() {
-			if info.ID == a.ID {
-				return info.Path, nil
-			}
-		}
-		return "", nil
+		return rec, nil
 	case core.QueryRepos:
 		repos, err := db.Repos()
 		if err != nil {
@@ -100,4 +95,30 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 	default:
 		return nil, fmt.Errorf("unknown query %q", a.Query)
 	}
+}
+
+// runtimeRecord resolves a session id to its on-disk runtime transcript and the
+// runtime (agent kind) that wrote it. A tracked session answers through its own
+// harness; an untracked/console id is itself a conversation id with no store row,
+// so it resolves from the default harness's transcript listing. A session with no
+// supported record yields a zero-Path record rather than an error.
+func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		return core.RuntimeRecord{}, err
+	}
+	if ok {
+		path, _ := agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
+		if path == "" {
+			return core.RuntimeRecord{}, nil
+		}
+		return core.RuntimeRecord{Runtime: s.Agent, Path: path}, nil
+	}
+	kind := agent.DefaultKind()
+	for _, info := range agent.HarnessFor(kind).ListSessions() {
+		if info.ID == id {
+			return core.RuntimeRecord{Runtime: kind, Path: info.Path}, nil
+		}
+	}
+	return core.RuntimeRecord{}, nil
 }

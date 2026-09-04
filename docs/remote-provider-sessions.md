@@ -203,7 +203,7 @@ nothing for it (honest degradation) — the feature stays advertised.
 ### 4.2 Events (daemon → orchestrator)
 
 ```json
-{"type":"runtime-events","sessionId":"a2","seq":41,"events":[
+{"type":"runtime-events","sessionId":"a2","runtime":"codex","seq":41,"events":[
   {"type":"text","item_id":"m3","direction":"out","payload":{"text":"…"}},
   {"type":"tool_call","item_id":"t9","direction":"out","payload":{"title":"edit","input":"…"}}
 ]}
@@ -223,6 +223,12 @@ nothing for it (honest degradation) — the feature stays advertised.
   A consumer resumes by subscribing with `afterSeq` = the highest ordinal it has
   stored. Ordinals are assigned deterministically by record position, so a
   consumer that keys on the ordinal ingests a re-sent prefix idempotently.
+- `runtime` names the agent runtime whose record produced the batch — `"claude"`,
+  `"codex"`, … The set is open: a consumer that meets an unknown runtime renders
+  the events generically rather than dropping them. The field is **additive** and
+  omitted by a producer that predates it, so a consumer that needs a runtime
+  falls back to its own default when it is absent — it must not assume every
+  session is Claude.
 - Read tolerance: the record file may not exist yet (nothing is emitted until it
   appears), grows by append (only new complete lines are read; a partial trailing
   line waits for its newline), or is rotated/truncated (detected by inode change
@@ -248,7 +254,43 @@ record to the vocabulary above:
 | `system` / `summary` | `notice` |
 | anything else (unparsable, or `mode`/`ai-title`/… state records) | `raw` (never dropped) |
 
-Codex's session/rollout files are a later runtime under the same envelope.
+### 4.4 Codex CLI mapping
+
+The daemon locates a Codex session's rollout from the uuid it pins per session
+(`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`). A rollout line is
+an envelope — `{timestamp, ordinal, type, payload}` — around one of a handful of
+record kinds. Two of them carry the conversation and they overlap: `response_item`
+is the durable, model-facing item stream, and `event_msg` is Codex's UI-facing
+event stream, most of which restates a `response_item`. The reader takes
+`response_item` as the authority for content and `event_msg` only for what no
+item carries:
+
+| rollout record | event(s) |
+| --- | --- |
+| `response_item` `message`, role `user` (kind `user.text`) | `prompt` (`in`) |
+| `response_item` `message`, role `assistant` | `text` (`final`; `item_id` = message id) |
+| `response_item` `reasoning` | `thinking` (the summary text) |
+| `response_item` `function_call` / `custom_tool_call` / `local_shell_call` | `tool_call` (`item_id` = `call_id`, `kind` from tool name); `update_plan` → `plan` |
+| `response_item` `function_call_output` (& friends) | `tool_result` (`status` from the exit code Codex reports in the output) |
+| `event_msg` `task_started` / `turn_started` | `turn_start` |
+| `event_msg` `task_complete` / `turn_complete` / `turn_aborted` | `turn_end` |
+| `event_msg` `token_count` | `usage` (`size` = the model context window) |
+| `event_msg` `exec_approval_request` / `apply_patch_approval_request` / `request_user_input` | `permission_request` |
+| `event_msg` `error` / `stream_error` / `warning` | `notice` |
+| `session_meta` / `compacted` | `notice` |
+| anything else (`turn_context`, `world_state`, the context Codex injects as a user turn, a later record kind) | `raw` (never dropped) |
+
+Two deliberate exceptions to "never dropped", both de-duplication of records the
+reader already emitted from their `response_item` counterpart: the `event_msg`
+subtypes that restate an item (`item_started`/`item_updated`/`item_completed`,
+the streaming deltas, the `*_begin`/`*_end` tool pairs) and `token_usage_record`,
+which restates `token_count`. Mapping them too would double every message,
+reasoning block and command in the transcript. Anything *unrecognized* still
+becomes `raw`.
+
+Codex records a tool's effect only as that tool's own output — it has no
+per-call before/after the way Claude's `Edit`/`Write` inputs give — so a Codex
+`tool_result` carries an empty `diffs` list rather than a guess.
 
 ## 5. Compatibility
 
@@ -269,7 +311,7 @@ The feature is off by default. Enable it on `amux provide`:
 | --- | --- | --- |
 | `--publish-sessions` | `AMUX_PROVIDER_PUBLISH_SESSIONS=1` | advertise `sessions`, publish inventory, accept lifecycle verbs |
 | `--read-only-sessions` | `AMUX_PROVIDER_SESSIONS_READONLY=1` | publish inventory but reject every verb with an error — lifecycle (§3) and steering (§3.1) alike |
-| `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code first). Requires `--publish-sessions`. |
+| `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code and Codex CLI). Requires `--publish-sessions`. |
 
 With `--publish-sessions`, the published rail is the daemon's own session
 inventory — a store-backed poll annotated with engine liveness (read from the
@@ -282,7 +324,10 @@ and still advertised alongside `sessions`.
 
 With `--runtime-events` (which requires `--publish-sessions`), the daemon also
 advertises `runtime-events` and, for each published session the orchestrator
-subscribes to, tails that session's on-disk runtime record and streams §4 events.
-For Claude Code it resolves the record from the conversation id the daemon pins
-per session; a session with no record on disk emits nothing. It is strictly
-read-only — no input path, no pane.
+subscribes to, tails that session's on-disk runtime record and streams §4 events
+stamped with the runtime that wrote it. The record is resolved through the
+session's own harness — Claude Code's session JSONL, keyed by the conversation id
+the daemon pins per session, or Codex CLI's rollout, keyed by the pinned rollout
+uuid — so a mixed rail streams both. A session with no record on disk, or one
+whose runtime has no reader, emits nothing. It is strictly read-only — no input
+path, no pane.

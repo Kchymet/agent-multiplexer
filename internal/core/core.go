@@ -186,7 +186,20 @@ const (
 	// no supported record). Lets the provider resolve transcripts via the daemon
 	// instead of reading the store directly.
 	QueryRuntimePath = "runtime-path"
+	// QueryRuntimeRecord is QueryRuntimePath plus the runtime that wrote the
+	// record (-> RuntimeRecord), so the provider picks the right reader and can
+	// tell the orchestrator which runtime a session's events came from. Path is ""
+	// when the session has no supported record.
+	QueryRuntimeRecord = "runtime-record"
 )
+
+// RuntimeRecord is the QueryRuntimeRecord read model: a session's on-disk runtime
+// transcript and the runtime (agent kind) that wrote it. A zero Path means the
+// session has no record a runtime-event reader supports.
+type RuntimeRecord struct {
+	Runtime string `json:"runtime,omitempty"`
+	Path    string `json:"path,omitempty"`
+}
 
 // Action is the client -> daemon control request. It carries both the lifecycle
 // verbs and the pane.* streaming verbs; the pane fields apply only to the latter.

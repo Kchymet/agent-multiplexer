@@ -20,9 +20,22 @@ type RuntimeEvent struct {
 // provider to frame — not itself a wire type (the provider unpacks it into a
 // runtime-events HarnessMsg). Seq is per-session monotonic.
 type RuntimeEventBatch struct {
-	Seq    int64
-	Events []RuntimeEvent
+	Seq int64
+	// Runtime names the agent runtime whose record produced these events
+	// (Runtime* below). The provider stamps it on the runtime-events frame so a
+	// consumer never has to assume a runtime.
+	Runtime string
+	Events  []RuntimeEvent
 }
+
+// Runtime names for RuntimeEventBatch.Runtime / HarnessMsg.Runtime and the
+// `runtime` field of a `raw` event payload. The set is open — a consumer that
+// meets an unknown runtime renders the events generically rather than dropping
+// them — but these are the runtimes amux reads today.
+const (
+	RuntimeClaude = "claude" // Claude Code session JSONL
+	RuntimeCodex  = "codex"  // Codex CLI rollout JSONL
+)
 
 // The generic structured-event vocabulary (docs/remote-provider-sessions.md §4).
 // This is the published set of RuntimeEvent.Type strings: amux emits them and the
