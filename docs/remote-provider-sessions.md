@@ -4,8 +4,9 @@ Status: the `sessions` feature (§1–§3) and the `runtime-events` feature (§4
 both **implemented** (opt-in; see [Configuration](#6-configuration)). A daemon
 advertises `runtime-events` only when it is enabled *alongside* `--publish-sessions`
 (it streams transcripts for the sessions `sessions` publishes). The steering
-verbs (§3.1) are part of the `sessions` feature; a daemon that does not implement
-them answers `unsupported verb` (§3.2). Extends `docs/remote-provider.md`.
+verbs (§3.1) are part of the `sessions` feature and are implemented, delivered by
+keystroke to the agent's PTY; a daemon that does not implement a verb answers
+`unsupported verb` (§3.2). Extends `docs/remote-provider.md`.
 
 Provider mode (`amux provide`) lets a remote orchestrator use this machine as
 compute: it spawns panes here and streams their I/O. This document specifies an
@@ -144,6 +145,12 @@ access, still the daemon's choice of delivery mechanism, still rejectable.
 exactly `allow` or `deny` — a daemon MUST reject any other value rather than
 guess at a permission prompt.
 
+`request_id` is advisory in amux today: the daemon answers whatever prompt the
+runtime currently has open rather than matching the id, because amux does not yet
+emit `permission_request` events (§4) for a consumer to quote back — Claude
+Code's on-disk transcript does not record its TUI permission prompts. Send it
+anyway; it becomes load-bearing once there is a producer to correlate against.
+
 Steering is asynchronous by nature: writing a prompt to a running agent does not
 wait for the turn it starts. A successful steering result is therefore
 `result:"accepted"` — the daemon delivered the verb to the runtime — and the
@@ -160,6 +167,35 @@ keystrokes that runtime's permission prompt expects. That is an implementation
 detail of the daemon, not the wire — the orchestrator sends the same four verbs
 regardless of how a given runtime is driven, and a daemon delivering them over a
 runtime's API instead is still conforming.
+
+In amux the keystrokes are per-agent-kind data on the harness registry
+(`internal/agent`, `Harness.Keys`), not a switch in the daemon, so adding a
+runtime means describing its keys rather than editing the delivery path. Today:
+
+| | submit (`prompt`/`interject`) | `stop` | `permission` allow | `permission` deny |
+| --- | --- | --- | --- | --- |
+| Claude Code | `Enter` (queued when a turn is running) | `Ctrl+C` | `Enter` on the focused **Yes** | `Esc` (its documented decline) |
+| Codex | `Enter` (steers the running turn) | `Esc` (`chat.interrupt_turn`) | `y` (`approval.approve`) | `n` (`approval.decline`) |
+
+Three consequences a consumer should know.
+
+*These are each CLI's default bindings, and both are user-rebindable* (Claude
+Code's `keybindings.json`, Codex's `tui.keymap`), so a daemon whose runtime has
+been rebound steers wrong. The wire verb stays abstract precisely so that remains
+a local concern. Claude Code's interrupt is the sharp case: the documented
+interrupt key is `Esc`, but with `"editorMode": "vim"` set, `Esc` is swallowed by
+the composer to enter vim NORMAL mode and the turn keeps running — so amux sends
+`Ctrl+C`, which interrupts in both modes.
+
+*`stop` can be refused on a live agent.* Claude Code's `Ctrl+C` exits the CLI on
+a second press at an idle prompt, so amux sends it only while the agent is
+actually mid-turn and answers `ok:false` otherwise — a session must not be killed
+by the verb whose contract is to keep it alive. There is no turn to stop in that
+state anyway, so the refusal is also the honest answer.
+
+*`prompt` is the only verb that starts a stopped agent.* `interject`, `stop` and
+`permission` all act on a turn that must already be in flight, so on a stopped
+session they fail rather than surprise the caller by launching one.
 
 Steering verbs are verbs: `--read-only-sessions` (§6) rejects all four exactly as
 it rejects the lifecycle verbs.

@@ -62,6 +62,11 @@ type Daemon struct {
 	// once after the first poll resolves sessions/specs.
 	pendingRestore []engine.Key
 
+	// steerSettle is how long a `prompt` that had to start the agent waits for the
+	// runtime's TUI to paint before typing into it. Zero means steerStartSettle;
+	// tests set it small so they don't sleep.
+	steerSettle time.Duration
+
 	// firstPoll is closed after the first pollOnce completes, so restore waits
 	// until sessions/specs are resolvable.
 	firstPoll     chan struct{}

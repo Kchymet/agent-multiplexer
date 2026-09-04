@@ -9,7 +9,8 @@ import (
 )
 
 // handle executes a control action and returns a Result. State-changing actions
-// share wsops.Apply with the multiplexer server and CLI; refresh just re-polls.
+// share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
+// start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	switch a.Action {
 	case "", core.ActionRefresh:
@@ -20,6 +21,13 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			return fail("%v", err)
 		}
 		d.triggerPoll()
+		return ok()
+	case core.ActionSteer:
+		// Engine-only like start: it drives the agent inside a running session and
+		// changes no store state, so it never reaches wsops.
+		if err := d.steer(ctx, a); err != nil {
+			return fail("%v", err)
+		}
 		return ok()
 	default:
 		// One descriptor-driven path: Dispatch stops the engine (via killEngineFor)

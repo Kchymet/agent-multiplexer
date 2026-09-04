@@ -83,6 +83,9 @@ func (claudeHarness) PrepareLaunchDir(dir string) {
 	}
 }
 
+// Keys are Claude Code's interactive bindings (see claudeKeys).
+func (claudeHarness) Keys() Keys { return claudeKeys() }
+
 // AgentConfigBinds mounts Claude's config/auth writable — it stores transcripts
 // under ~/.claude and reads ~/.claude.json.
 func (claudeHarness) AgentConfigBinds(home string) [][]string {
