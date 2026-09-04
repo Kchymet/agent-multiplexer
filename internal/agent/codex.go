@@ -81,6 +81,9 @@ func (codexHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
 // folder on startup. Codex has no hook mechanism to install.
 func (codexHarness) PrepareLaunchDir(dir string) { _ = codexcfg.TrustDir(dir) }
 
+// Keys are Codex's interactive bindings (see codexKeys).
+func (codexHarness) Keys() Keys { return codexKeys() }
+
 // AgentConfigBinds binds the whole $CODEX_HOME tree writable — Codex keeps auth
 // (auth.json), config (config.toml), and its rollout transcripts there and writes
 // rollouts mid-session. It lives under the tmpfs'd $HOME, so create it first or

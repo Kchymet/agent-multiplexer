@@ -19,6 +19,7 @@ import (
 //
 //   - identity & catalog: Kind, Models, DefaultModel, PreferredModel
 //   - launch: Argv, NewSessionID, PlanLaunch, PrepareLaunchDir
+//   - steering: Keys
 //   - sandbox: AgentConfigBinds
 //   - rail/durability: Activity, RailState, RestoreTranscript
 //   - workspace layout: SkillsDir, GuideFile
@@ -54,6 +55,13 @@ type Harness interface {
 	// needs in its launch dir: trusting the folder and installing amux's hooks.
 	// Best-effort — a failure must never block the launch.
 	PrepareLaunchDir(dir string)
+
+	// Keys are the keystrokes that drive this harness's interactive TUI from
+	// outside: submit a line, interrupt a turn, answer a permission prompt. The
+	// daemon delivers them to the agent's PTY to serve the published steering
+	// verbs (docs/remote-provider-sessions.md §3.1). A zero Keys means the
+	// harness cannot be steered by keystroke and the verb is refused.
+	Keys() Keys
 
 	// AgentConfigBinds returns the bubblewrap binds specific to this harness's
 	// agent pane (its config/auth/state under $HOME), on top of the shared binds
@@ -255,6 +263,7 @@ func (noopHarness) NewSessionID() string { return "" }
 func (noopHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
 	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}
 }
+func (noopHarness) Keys() Keys                                         { return Keys{} }
 func (noopHarness) PrepareLaunchDir(string)                            {}
 func (noopHarness) AgentConfigBinds(string) [][]string                 { return nil }
 func (noopHarness) Activity(string) engine.Activity                    { return engine.ActivityUnknown }

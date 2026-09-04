@@ -95,9 +95,10 @@ func (p *Provider) publishOnce(ctx context.Context, s *session, seq int64, last 
 	return seq, b
 }
 
-// handleSessionAction executes one lifecycle verb and replies with a
-// session-result correlated by ReqID. It runs inline on the read loop, which
-// serializes verbs; the store operations themselves are quick.
+// handleSessionAction executes one verb and replies with a session-result
+// correlated by ReqID. It runs inline on the read loop, which serializes verbs;
+// the store operations are quick and a steering verb's PTY write is queued by
+// the engine rather than performed here, so neither stalls the loop.
 func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	if !p.publishing() {
 		return
@@ -108,6 +109,13 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 		res.Error = err.Error()
 	} else {
 		res.OK, res.NewID = true, newID
+		// A steering verb is delivered to a running agent, not completed: say
+		// "accepted" so the orchestrator waits for runtime-events or the next
+		// inventory snapshot instead of assuming the turn is done (spec §2).
+		res.Result = harnessproto.ResultApplied
+		if harnessproto.SteeringVerbs[m.Action] {
+			res.Result = harnessproto.ResultAccepted
+		}
 	}
 	if werr := s.hc.WriteHarness(res); werr != nil {
 		s.cancel()
@@ -128,8 +136,9 @@ var errUnsupportedVerb = errors.New(harnessproto.ErrUnsupportedVerb)
 
 // applySessionAction validates and executes a verb. The daemon is authoritative:
 // unknown/excluded verbs (including any pane/terminal verb) are rejected with
-// "unsupported", an accepted verb this daemon does not implement yet with
-// "unsupported verb", and read-only mode rejects every verb. Accepted verbs map to the
+// "unsupported", an accepted verb this daemon does not implement with
+// "unsupported verb", and read-only mode rejects every verb — steering verbs
+// (spec §3.1) exactly as much as lifecycle ones. Accepted verbs map to the
 // daemon's own lifecycle core.Actions and run through ApplyAction (wsops).
 func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 	act, ok := sessionActionFor(m)
@@ -148,7 +157,9 @@ func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 // sessionActionFor maps an accepted wire verb to the equivalent daemon
 // core.Action, or reports ok=false for anything outside the fixed set. archive/
 // unarchive normalize to the daemon's explicit set-archived so the result is
-// deterministic (not a toggle).
+// deterministic (not a toggle); the four steering verbs (spec §3.1) all become
+// one core.ActionSteer whose Fields name which, so the daemon has a single
+// engine-only entry point for "drive the agent inside this session".
 func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 	switch m.Action {
 	case harnessproto.VerbNewWorkgroup:
@@ -163,7 +174,28 @@ func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 		return core.Action{Action: core.ActionSetArchived, ID: m.ID, Fields: map[string]string{"archived": "false"}}, true
 	case harnessproto.VerbStart:
 		return core.Action{Action: core.ActionStart, ID: m.ID}, true
+	case harnessproto.VerbPrompt, harnessproto.VerbInterject,
+		harnessproto.VerbStop, harnessproto.VerbPermission:
+		return core.Action{Action: core.ActionSteer, ID: m.ID, Fields: steerFields(m)}, true
 	default:
 		return core.Action{}, false
 	}
+}
+
+// steerFields normalizes a steering session-action's wire fields into the
+// core.Action fields the daemon's steer handler reads. The wire and the daemon
+// deliberately spell the keys the same way (harnessproto.Field* / core.Steer*),
+// so this only has to name the verb and copy what that verb carries — an unknown
+// key on the wire is dropped rather than passed through to the runtime.
+func steerFields(m harnessproto.MuxMsg) map[string]string {
+	f := map[string]string{core.SteerVerb: m.Action}
+	for _, k := range []string{
+		harnessproto.FieldText, harnessproto.FieldRequestID,
+		harnessproto.FieldDecision, harnessproto.FieldReason,
+	} {
+		if v, ok := m.Fields[k]; ok {
+			f[k] = v
+		}
+	}
+	return f
 }

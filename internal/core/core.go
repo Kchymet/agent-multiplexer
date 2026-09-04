@@ -65,6 +65,33 @@ const (
 const (
 	ActionStart = "start" // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
 	ActionQuery = "query" // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
+	// ActionSteer drives the agent *inside* a running session rather than the
+	// session itself: send it a prompt, interject mid-turn, interrupt the turn, or
+	// answer its permission prompt. ID is the agent id and Fields[SteerVerb] names
+	// which (SteerPrompt|SteerInterject|SteerStop|SteerPermission). Like
+	// ActionStart it is engine-only — it changes no store state, so daemon.handle
+	// serves it and it never reaches wsops.
+	ActionSteer = "steer"
+)
+
+// ActionSteer field keys and the verbs they carry. They mirror the published
+// wire vocabulary (harnessproto's steering verbs and field keys) so the provider
+// maps a session-action onto a core.Action without inventing a second spelling,
+// and `amux do steer` speaks the same words as the remote orchestrator.
+const (
+	SteerVerb      = "verb"       // which steering verb (Steer* below)
+	SteerText      = "text"       // prompt/interject: the text to deliver
+	SteerDecision  = "decision"   // permission: SteerAllow | SteerDeny
+	SteerRequestID = "request_id" // permission: the request the decision answers (advisory)
+	SteerReason    = "reason"     // permission: optional free-text rationale
+
+	SteerPrompt     = "prompt"     // deliver a new user turn
+	SteerInterject  = "interject"  // deliver text while a turn is running
+	SteerStop       = "stop"       // interrupt the turn without killing the session
+	SteerPermission = "permission" // answer a pending permission prompt
+
+	SteerAllow = "allow"
+	SteerDeny  = "deny"
 )
 
 // Lifecycle action verbs (Action.Action values) — the control vocabulary the CLI,
@@ -91,7 +118,7 @@ const (
 )
 
 // controlActions is the vocabulary a caller may drive from outside the UI —
-// every lifecycle verb above plus "start" (engine-only). It is the single list
+// every lifecycle verb above plus "start" and "steer" (both engine-only). It is the single list
 // behind the "valid actions" an unknown-verb error teaches, so the CLI and the
 // daemon can never disagree about what `amux do` accepts. Order is the order we
 // print: the everyday verbs first, then the create/attach ones. The pane.*
@@ -100,6 +127,7 @@ const (
 var controlActions = []string{
 	ActionRefresh,
 	ActionStart,
+	ActionSteer,
 	ActionRename,
 	ActionMove,
 	ActionArchive,

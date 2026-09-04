@@ -256,20 +256,41 @@ func TestSessionActionExcludedVerb(t *testing.T) {
 	}
 }
 
-// TestSessionActionUnimplementedVerb proves the other rejection: a verb that IS
-// in the accepted set but has no handler here yet (the steering verbs) comes back
-// as "unsupported verb", not "unsupported". An orchestrator reads the difference
-// as "this daemon is older than the verb" rather than "never valid", so the two
-// strings must not collapse into one.
-func TestSessionActionUnimplementedVerb(t *testing.T) {
-	for _, verb := range []string{
-		harnessproto.VerbPrompt, harnessproto.VerbInterject,
-		harnessproto.VerbStop, harnessproto.VerbPermission,
-	} {
-		t.Run(verb, func(t *testing.T) {
-			if !harnessproto.SessionVerbs[verb] {
-				t.Fatalf("%q is not an accepted session verb", verb)
-			}
+// TestSteeringVerbsRouteToSteer proves the four steering verbs (spec §3.1) reach
+// the daemon as one core.ActionSteer naming which verb, with their wire fields
+// carried through under the same keys — and that a successful steer answers
+// "accepted", not "applied", because the agent has been handed the verb, not
+// finished it.
+func TestSteeringVerbsRouteToSteer(t *testing.T) {
+	cases := []struct {
+		verb   string
+		fields map[string]string
+		want   map[string]string
+	}{
+		{harnessproto.VerbPrompt,
+			map[string]string{harnessproto.FieldText: "run the tests"},
+			map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "run the tests"}},
+		{harnessproto.VerbInterject,
+			map[string]string{harnessproto.FieldText: "skip the flaky one"},
+			map[string]string{core.SteerVerb: core.SteerInterject, core.SteerText: "skip the flaky one"}},
+		{harnessproto.VerbStop, nil,
+			map[string]string{core.SteerVerb: core.SteerStop}},
+		{harnessproto.VerbPermission,
+			map[string]string{
+				harnessproto.FieldRequestID: "perm-9",
+				harnessproto.FieldDecision:  harnessproto.DecisionDeny,
+				harnessproto.FieldReason:    "writes outside the worktree",
+				"nosuchfield":               "dropped",
+			},
+			map[string]string{
+				core.SteerVerb:      core.SteerPermission,
+				core.SteerRequestID: "perm-9",
+				core.SteerDecision:  core.SteerDeny,
+				core.SteerReason:    "writes outside the worktree",
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.verb, func(t *testing.T) {
 			conns := make(chan net.Conn, 1)
 			rec := &recordingApply{}
 			src := &mutableSource{}
@@ -284,24 +305,98 @@ func TestSessionActionUnimplementedVerb(t *testing.T) {
 			oc := harnessproto.NewConn(<-conns)
 			accept(t, oc, 2, nil, 60)
 			if err := oc.WriteMux(harnessproto.MuxMsg{
-				Type: harnessproto.MSessionAction, ReqID: "r3", Action: verb, ID: "a1",
-				Fields: map[string]string{harnessproto.FieldText: "hi"},
+				Type: harnessproto.MSessionAction, ReqID: "r3", Action: tc.verb, ID: "a1",
+				Fields: tc.fields,
 			}); err != nil {
 				t.Fatal(err)
 			}
 			res := readResult(t, oc)
-			if res.ReqID != "r3" || res.OK || res.Error != harnessproto.ErrUnsupportedVerb {
-				t.Fatalf("result = %+v, want ok=false error=%q", res, harnessproto.ErrUnsupportedVerb)
+			if res.ReqID != "r3" || !res.OK {
+				t.Fatalf("result = %+v, want ok", res)
 			}
-			if _, called := rec.last(); called {
-				t.Fatal("unimplemented verb reached ApplyAction")
+			if res.Result != harnessproto.ResultAccepted {
+				t.Fatalf("result disposition = %q, want %q", res.Result, harnessproto.ResultAccepted)
+			}
+			got, called := rec.last()
+			if !called {
+				t.Fatal("steering verb never reached ApplyAction")
+			}
+			want := core.Action{Action: core.ActionSteer, ID: "a1", Fields: tc.want}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("apply got %+v, want %+v", got, want)
 			}
 		})
 	}
 }
 
+// TestLifecycleVerbsReportApplied is the other half of the disposition: a verb
+// that finished must not claim to be merely accepted, or an orchestrator would
+// wait forever for an asynchronous effect that already happened.
+func TestLifecycleVerbsReportApplied(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	rec := &recordingApply{}
+	src := &mutableSource{}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, ApplyAction: rec.apply,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "r4", Action: harnessproto.VerbArchive, ID: "a1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := readResult(t, oc)
+	if !res.OK || res.Result != harnessproto.ResultApplied {
+		t.Fatalf("result = %+v, want ok with %q", res, harnessproto.ResultApplied)
+	}
+}
+
+// TestSessionActionUnimplementedVerb keeps the two rejections distinct: a verb
+// that IS in the accepted set but has no handler here answers "unsupported verb",
+// not "unsupported", so an orchestrator reads "this daemon is older than the
+// verb" rather than "never valid". Every published verb is implemented today, so
+// the test registers a future one to exercise the branch.
+func TestSessionActionUnimplementedVerb(t *testing.T) {
+	const future = "teleport"
+	harnessproto.SessionVerbs[future] = true
+	t.Cleanup(func() { delete(harnessproto.SessionVerbs, future) })
+
+	conns := make(chan net.Conn, 1)
+	rec := &recordingApply{}
+	src := &mutableSource{}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, ApplyAction: rec.apply,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "r5", Action: future, ID: "a1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := readResult(t, oc)
+	if res.ReqID != "r5" || res.OK || res.Error != harnessproto.ErrUnsupportedVerb {
+		t.Fatalf("result = %+v, want ok=false error=%q", res, harnessproto.ErrUnsupportedVerb)
+	}
+	if _, called := rec.last(); called {
+		t.Fatal("unimplemented verb reached ApplyAction")
+	}
+}
+
 // TestReadOnlyRejectsVerbs proves read-only publishing accepts inventory but
-// rejects lifecycle verbs.
+// rejects every verb — the steering verbs of spec §3.1 exactly as much as the
+// lifecycle ones.
 func TestReadOnlyRejectsVerbs(t *testing.T) {
 	conns := make(chan net.Conn, 1)
 	src := &mutableSource{}
@@ -324,15 +419,32 @@ func TestReadOnlyRejectsVerbs(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := oc.WriteMux(harnessproto.MuxMsg{
-		Type: harnessproto.MSessionAction, ReqID: "r3", Action: harnessproto.VerbRename, ID: "a1",
-		Fields: map[string]string{"name": "x"},
-	}); err != nil {
-		t.Fatal(err)
+	// Every verb, lifecycle and steering alike: read-only means the orchestrator
+	// can watch this machine and change nothing on it, so a steering verb must not
+	// become a back door into a running agent.
+	verbs := []struct {
+		verb   string
+		fields map[string]string
+	}{
+		{harnessproto.VerbRename, map[string]string{"name": "x"}},
+		{harnessproto.VerbPrompt, map[string]string{harnessproto.FieldText: "go"}},
+		{harnessproto.VerbInterject, map[string]string{harnessproto.FieldText: "wait"}},
+		{harnessproto.VerbStop, nil},
+		{harnessproto.VerbPermission, map[string]string{
+			harnessproto.FieldRequestID: "perm-9", harnessproto.FieldDecision: harnessproto.DecisionAllow,
+		}},
 	}
-	res := readResult(t, oc)
-	if res.OK || res.Error == "" {
-		t.Fatalf("result = %+v, want a read-only rejection", res)
+	for _, v := range verbs {
+		if err := oc.WriteMux(harnessproto.MuxMsg{
+			Type: harnessproto.MSessionAction, ReqID: "r-" + v.verb, Action: v.verb, ID: "a1",
+			Fields: v.fields,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		res := readResult(t, oc)
+		if res.OK || res.Error == "" {
+			t.Fatalf("%s: result = %+v, want a read-only rejection", v.verb, res)
+		}
 	}
 }
 
