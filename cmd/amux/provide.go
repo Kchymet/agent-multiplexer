@@ -23,12 +23,17 @@ import (
 // foreground, or install/uninstall it as a user service.
 //
 //	amux provide [<orchestrator-addr>] [flags]   run (reads the config file when bare)
+//	amux provide [flags] [<orchestrator-addr>]   the same run, flags on the other side
 //	amux provide install [flags]                 write the config + install the service
 //	amux provide uninstall                       remove the service
 //
-// Flags work on either side of the address (parseFlagsAnyOrder), for running and
-// for installing alike — the address-first phrasing is the one people reach for,
-// and it used to drop every flag after the address without a word.
+// Flags work on either side of the address (parseFlagsAnyOrder) — the first
+// phrasing above is the one people reach for, and it used to drop every flag
+// after the address without a word.
+//
+// Config resolves from flags, then the AMUX_PROVIDER_* / AMUX_TLS_* env vars,
+// then the config file `amux provide install` wrote. The token is never taken
+// from argv (a bearer credential): use --token-file or AMUX_PROVIDER_TOKEN.
 func cmdProvide(args []string) error {
 	sub := ""
 	if len(args) > 0 {
@@ -90,7 +95,7 @@ Install-only flags:
   --dry-run          print the config file and service unit, write nothing
   --exec <path>      amux binary the service runs (default: the installed binary)
 
-Flags may come before or after the address, for install and for running alike.
+Flags may come before or after the address, for install as well as for running.
 
 Running bare, settings resolve flags first, then the AMUX_PROVIDER_* / AMUX_TLS_*
 env vars, then the config file. `+"`"+`amux doctor`+"`"+` reports the config, the service, and
@@ -100,6 +105,40 @@ the provider's last registration and heartbeat.
                        --token-file ~/.config/amux/provider.token
   amux doctor
 `)
+}
+
+// provideFlags is the settings surface shared by running the provider and
+// installing it, so the flags mean exactly the same thing in both — the install
+// command is the run command with its arguments written down. It is a struct
+// registered on a FlagSet rather than a pile of pointers in cmdProvide so the
+// parse can be exercised on its own — which is what tells the flags-in-any-order
+// fix from a regression back to silently dropping them.
+type provideFlags struct {
+	orch       string
+	tokenFile  string
+	name       string
+	caFile     string
+	serverName string
+	maxPanes   int
+	publishSes bool
+	readOnly   bool
+	rtEvents   bool
+	labels     multiFlag
+	features   multiFlag
+}
+
+func (f *provideFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
+	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
+	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
+	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
+	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
+	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
+	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
+	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
+	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
+	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
+	fs.Var(&f.features, "feature", "capability feature string (repeatable); merged with $AMUX_PROVIDER_FEATURES")
 }
 
 // provideRun runs provider mode in the foreground: dial out to a remote
@@ -124,18 +163,18 @@ func provideRun(args []string) error {
 
 	// A missing config file is normal (provider mode is opt-in and works fully
 	// from flags); a malformed one is not, and must not be silently ignored.
-	file, ferr := providercfg.Load()
-	if ferr != nil && !errors.Is(ferr, os.ErrNotExist) {
-		return fmt.Errorf("provide: %w", ferr)
+	file, err := providercfg.Load()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("provide: %w", err)
 	}
 
+	// The address may come from either side of the flags, from --orchestrator, or
+	// — for the bare `amux provide` the user service runs — from the config file.
 	addr, err := provideAddr(f.orch, operands)
 	if err != nil {
 		return err
 	}
-	if addr == "" {
-		addr = file.Orchestrator // the config file is what the user service runs on
-	}
+	addr = firstNonEmpty(addr, file.Orchestrator)
 	if addr == "" {
 		return fmt.Errorf("provide: need an orchestrator address (positional, --orchestrator, or `amux provide install`)")
 	}
@@ -216,40 +255,6 @@ func provideRun(args []string) error {
 		return err
 	}
 	return nil
-}
-
-// provideFlags is provider mode's settings surface, shared by running the
-// provider and installing it — so the flags mean exactly the same thing in both,
-// and `amux provide install` is the run command with its arguments written down.
-// It is a struct registered on a FlagSet rather than a pile of pointers in
-// cmdProvide so the parse can be exercised on its own — which is what tells the
-// flags-in-any-order fix from a regression back to silently dropping them.
-type provideFlags struct {
-	orch       string
-	tokenFile  string
-	name       string
-	caFile     string
-	serverName string
-	maxPanes   int
-	publishSes bool
-	readOnly   bool
-	rtEvents   bool
-	labels     multiFlag
-	features   multiFlag
-}
-
-func (f *provideFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
-	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
-	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
-	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
-	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
-	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
-	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
-	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
-	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
-	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
-	fs.Var(&f.features, "feature", "capability feature string (repeatable); merged with $AMUX_PROVIDER_FEATURES")
 }
 
 // provideAddr picks the orchestrator address out of --orchestrator and whatever

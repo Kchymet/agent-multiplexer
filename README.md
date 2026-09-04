@@ -249,7 +249,7 @@ amux status [--json]       # print rail state as text (--json for the raw snapsh
 amux refresh               # ask the daemon to re-poll its sources now
 amux config [ls|get|set|unset|path]  # show / change amux settings (TUI keybindings)
 amux do <action> ...       # drive any daemon action from scripts (see below)
-amux provide [<addr>] [flags]  # provider mode: serve panes to a remote orchestrator
+amux provide [<addr>] [flags]     # provider mode: serve panes to a remote orchestrator
 amux provide install | uninstall  # run provider mode as a user service
 ```
 
@@ -270,20 +270,23 @@ amux doctor   # Provider: config, token mode, service state, last heartbeat
 `install` writes `~/.config/amux/provider.toml` and a user service — a systemd
 user unit on Linux/WSL2, a launchd agent on macOS — that runs a bare
 `amux provide` from that config. The bearer token never enters the config file or
-the command line: it stays in the 0600 file the config points at (or
-`$AMUX_PROVIDER_TOKEN`), so rotating it is one write. On Linux/WSL2 run
-`loginctl enable-linger $USER` so the service outlives your terminal; install and
-doctor both remind you. `amux provide uninstall` reverses it.
+the command line: it stays in the 0600 file the config points at, so rotating it
+is one write. On Linux/WSL2 run `loginctl enable-linger $USER` so the service
+outlives your terminal; install and doctor both remind you. `amux provide
+uninstall` reverses it.
 
-To run it in the foreground instead, give the address on the command line. Flags
-read the same before or after it, and `install` accepts them the same way:
+To run it in the foreground instead, hand `amux provide` the address itself.
+Flags read the same before or after it:
 
-```
+```sh
 amux provide orch.example.com:7443 --token-file ~/.config/amux/provider.token \
              --ca private-ca.pem --label zone=home --publish-sessions
 amux provide --token-file ~/.config/amux/provider.token --ca private-ca.pem \
              --label zone=home --publish-sessions orch.example.com:7443
 ```
+
+The token is never taken from argv — it lives in the file `--token-file` names
+(mode 0600), or `$AMUX_PROVIDER_TOKEN`.
 
 ### Scripting the daemon: `amux do`
 

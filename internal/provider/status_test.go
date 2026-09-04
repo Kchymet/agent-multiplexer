@@ -80,6 +80,21 @@ func TestStatusReportsTheConnectionLifecycle(t *testing.T) {
 		}
 		return seen[len(seen)-1]
 	}
+	// statusWith finds the most recent report of a given state. Some states are
+	// passed through rather than rested in — the reconnect loop leaves
+	// "disconnected" for "dialing" after a millisecond of backoff — so asking
+	// whether a state was ever reported is the stable question; asking whether it
+	// is still the newest one is a race with the loop.
+	statusWith := func(state string) (Status, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		for i := len(seen) - 1; i >= 0; i-- {
+			if seen[i].State == state {
+				return seen[i], true
+			}
+		}
+		return Status{}, false
+	}
 
 	conns := make(chan net.Conn, 1)
 	p := newFast(Config{
@@ -108,8 +123,8 @@ func TestStatusReportsTheConnectionLifecycle(t *testing.T) {
 	// A dropped connection must not keep reporting "registered": that is exactly
 	// the case where a log tail looks healthy and the provider is not.
 	oc.Close()
-	waitFor(t, func() bool { return last().State == StateDisconnected })
-	if got := last(); got.RegisteredAt.IsZero() {
+	waitFor(t, func() bool { _, ok := statusWith(StateDisconnected); return ok })
+	if got, _ := statusWith(StateDisconnected); got.RegisteredAt.IsZero() {
 		t.Errorf("disconnect cleared RegisteredAt; a report can no longer say when it last worked: %+v", got)
 	}
 
