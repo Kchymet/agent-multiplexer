@@ -249,7 +249,24 @@ amux status [--json]       # print rail state as text (--json for the raw snapsh
 amux refresh               # ask the daemon to re-poll its sources now
 amux config [ls|get|set|unset|path]  # show / change amux settings (TUI keybindings)
 amux do <action> ...       # drive any daemon action from scripts (see below)
+amux provide <addr> [flags]  # provider mode: serve panes to a remote orchestrator
 ```
+
+### Lending this machine to a remote orchestrator
+
+`amux provide` dials *out* to a remote orchestrator over TLS and serves agent
+panes to it, turning this machine into a compute node (`docs/remote-provider.md`).
+Flags read the same before or after the address:
+
+```
+amux provide orch.example.com:7443 --token-file ~/.config/amux/provider.token \
+             --ca private-ca.pem --label zone=home --publish-sessions
+amux provide --token-file ~/.config/amux/provider.token --ca private-ca.pem \
+             --label zone=home --publish-sessions orch.example.com:7443
+```
+
+The token is never taken from argv — it lives in the file `--token-file` names
+(mode 0600), or `$AMUX_PROVIDER_TOKEN`.
 
 ### Scripting the daemon: `amux do`
 
