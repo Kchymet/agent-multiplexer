@@ -210,8 +210,12 @@ type HarnessMsg struct {
 	// published session; Seq is per-session monotonic (the ordinal of the last
 	// event in Events); Events is a seq-ordered batch of structured transcript
 	// events. A resuming consumer subscribes with afterSeq and receives only
-	// events whose ordinal exceeds it.
+	// events whose ordinal exceeds it. Runtime names the runtime whose record
+	// produced the batch (Runtime* — "claude", "codex", …); it is additive and
+	// omitted by a producer that predates it, so a consumer that needs a runtime
+	// falls back to its own default when the field is absent.
 	SessionID string         `json:"sessionId,omitempty"`
+	Runtime   string         `json:"runtime,omitempty"`
 	Events    []RuntimeEvent `json:"events,omitempty"`
 }
 
