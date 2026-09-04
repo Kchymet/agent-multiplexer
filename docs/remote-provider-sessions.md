@@ -3,8 +3,9 @@
 Status: the `sessions` feature (§1–§3) and the `runtime-events` feature (§4) are
 both **implemented** (opt-in; see [Configuration](#6-configuration)). A daemon
 advertises `runtime-events` only when it is enabled *alongside* `--publish-sessions`
-(it streams transcripts for the sessions `sessions` publishes). Extends
-`docs/remote-provider.md`.
+(it streams transcripts for the sessions `sessions` publishes). The steering
+verbs (§3.1) are part of the `sessions` feature; a daemon that does not implement
+them answers `unsupported verb` (§3.2). Extends `docs/remote-provider.md`.
 
 Provider mode (`amux provide`) lets a remote orchestrator use this machine as
 compute: it spawns panes here and streams their I/O. This document specifies an
@@ -85,6 +86,18 @@ creation verbs (`new-workgroup`, `add-agent`); `ok` and `error` follow JSON
 `omitempty`, so a bare success is `{"type":"session-result","reqId":"r7","ok":true}`
 and a failure carries `ok:false` with a non-empty `error`.
 
+`result` is the disposition of a *successful* verb, and distinguishes a verb
+whose effect is already done from one merely handed to a running agent:
+
+| `result` | meaning |
+| --- | --- |
+| `applied` | the verb ran to completion; its effect is in the next `sessions` snapshot. Every lifecycle verb (§3) is applied. |
+| `accepted` | the verb was delivered to the running agent; the effect is asynchronous — watch `runtime-events` (§4) or the session's `state` for it. Every steering verb (§3.1) is accepted. |
+
+The field is additive and `omitempty`: absent means `applied`, so a daemon
+predating it reads correctly and a bare `{"ok":true}` is unchanged on the wire.
+It is unset on a failure — `error` carries that.
+
 ## 3. Messages: orchestrator → daemon
 
 ```json
@@ -93,15 +106,17 @@ and a failure carries `ok:false` with a non-empty `error`.
  "id":"","target":"","fields":{"name":"payments-fix","repos":"api,web"}}
 ```
 
-Verbs (v1): `new-workgroup`, `add-agent`, `rename`, `archive`, `unarchive`,
-`start`. Semantics mirror the daemon's local lifecycle operations; `fields`
-carries the same form fields the daemon's own clients send. `id` targets an
-existing session (the workgroup for `add-agent`; the agent/workgroup for
+**Lifecycle verbs**: `new-workgroup`, `add-agent`, `rename`, `archive`,
+`unarchive`, `start`. Semantics mirror the daemon's local lifecycle operations;
+`fields` carries the same form fields the daemon's own clients send. `id` targets
+an existing session (the workgroup for `add-agent`; the agent/workgroup for
 `rename`/`archive`/`unarchive`/`start`) and is empty for `new-workgroup`.
 Internally `archive`/`unarchive` map to the daemon's explicit `set-archived`
 (deterministic, not a toggle) and `start` ensures the agent's engine process is
-running. Anything else — including any pane/terminal verb (`spawn`, `input`,
-`resize`, `kill`, `pane.*`) — MUST be rejected with
+running. They are all synchronous: a success is `result:"applied"` (§2).
+
+Anything outside the verb set below — including any pane/terminal verb (`spawn`,
+`input`, `resize`, `kill`, `pane.*`) — MUST be rejected with
 `session-result{ok:false, error:"unsupported"}`. This feature carries no pane
 verbs at all: it never opens, reads, or writes a pane of the daemon's own
 sessions. (Compute panes the orchestrator itself spawned via `spawn` on the
@@ -110,6 +125,61 @@ separate compute-provider path are unaffected.)
 Authorization: the connection itself is the credential (registered provider,
 token-authenticated at register). The daemon SHOULD additionally gate verbs by
 local configuration (e.g. read-only publishing: inventory yes, verbs no).
+
+### 3.1 Steering verbs
+
+The lifecycle verbs manage a session from the outside; these four steer the
+agent *inside* one that is already running, so an orchestrator can drive a turn
+without a terminal. They are session verbs like any other — still no pane
+access, still the daemon's choice of delivery mechanism, still rejectable.
+
+| Verb | `fields` | Meaning |
+| --- | --- | --- |
+| `prompt` | `text` | Deliver a new user turn to the session's agent. If the agent is not running, the daemon MAY start it with `text` as its initial prompt (the `start` path with a prompt) rather than failing. |
+| `interject` | `text` | Deliver text to the agent *while a turn is running* — a steer, not a new turn. |
+| `stop` | — | Interrupt the current turn **without killing the session**. The agent stays alive and ready for the next verb; this is not `kill`. |
+| `permission` | `request_id`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` echoes that event's `request_id`; `decision` is `allow` or `deny`; `reason` is optional free text. |
+
+`id` names the target session for all four, and is required. `decision` accepts
+exactly `allow` or `deny` — a daemon MUST reject any other value rather than
+guess at a permission prompt.
+
+Steering is asynchronous by nature: writing a prompt to a running agent does not
+wait for the turn it starts. A successful steering result is therefore
+`result:"accepted"` — the daemon delivered the verb to the runtime — and the
+observable effect arrives later on the `runtime-events` stream (§4) or as a
+change of the session's `state` in the next inventory snapshot (§2). A steering
+verb that could not be delivered (no such session, agent not running, unparseable
+`decision`, no pending request for that `request_id`) returns `ok:false` with a
+human-readable `error`.
+
+Delivery mechanism is the daemon's business, and v1 of this extension delivers by
+writing to the agent's PTY: `prompt`/`interject` write the text followed by
+Enter, `stop` sends the runtime's own interrupt key, and `permission` sends the
+keystrokes that runtime's permission prompt expects. That is an implementation
+detail of the daemon, not the wire — the orchestrator sends the same four verbs
+regardless of how a given runtime is driven, and a daemon delivering them over a
+runtime's API instead is still conforming.
+
+Steering verbs are verbs: `--read-only-sessions` (§6) rejects all four exactly as
+it rejects the lifecycle verbs.
+
+### 3.2 Verb negotiation
+
+The verb set grows over time and the daemon at the other end may be older than
+the orchestrator. There is no per-verb handshake — negotiation is by response:
+
+- A verb outside the accepted set (any pane/terminal verb, any typo) →
+  `session-result{ok:false, error:"unsupported"}`. It is never valid on this
+  protocol; do not retry it anywhere.
+- A verb *in* the set that this daemon does not implement →
+  `session-result{ok:false, error:"unsupported verb"}`. The verb is valid
+  protocol and an older daemon simply lacks it. An orchestrator SHOULD degrade
+  its UI for that session (hide or disable the control) rather than treat the
+  connection as broken, and MAY offer the verb again after the daemon upgrades.
+
+Both errors are exact strings. The protocol version stays 2 — the verb set is
+additive within the negotiated `sessions` feature (§5).
 
 ## 4. Structured transcript events (`runtime-events`)
 
@@ -226,6 +296,10 @@ per-call before/after the way Claude's `Edit`/`Write` inputs give — so a Codex
 
 - These are additive messages behind feature negotiation — protocol version 2
   is unchanged, and peers that don't negotiate the features never see them.
+- The `session-action` verb set is likewise additive: new verbs land without a
+  version bump, and a daemon that predates one answers `"unsupported verb"`
+  (§3.2). `session-result.result` is additive in the same way — absent means
+  `applied` (§2).
 - A daemon may implement `sessions` without `runtime-events` (status-only
   inventory) — consumers should expect that and render inventory alone.
 
@@ -236,7 +310,7 @@ The feature is off by default. Enable it on `amux provide`:
 | Flag | Env | Effect |
 | --- | --- | --- |
 | `--publish-sessions` | `AMUX_PROVIDER_PUBLISH_SESSIONS=1` | advertise `sessions`, publish inventory, accept lifecycle verbs |
-| `--read-only-sessions` | `AMUX_PROVIDER_SESSIONS_READONLY=1` | publish inventory but reject every verb with an error |
+| `--read-only-sessions` | `AMUX_PROVIDER_SESSIONS_READONLY=1` | publish inventory but reject every verb with an error — lifecycle (§3) and steering (§3.1) alike |
 | `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code and Codex CLI). Requires `--publish-sessions`. |
 
 With `--publish-sessions`, the published rail is the daemon's own session

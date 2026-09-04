@@ -118,13 +118,25 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 // is the exact wire error the spec mandates.
 var errUnsupported = errors.New(harnessproto.ErrUnsupported)
 
+// errUnsupportedVerb rejects a verb that *is* in harnessproto.SessionVerbs but
+// this daemon has no implementation for (spec §3.2) — the steering verbs, until
+// their handler lands. The two errors are deliberately distinct: "unsupported"
+// tells the orchestrator the verb is never valid, "unsupported verb" tells it
+// this daemon is simply older than the verb, so it degrades its UI instead of
+// treating the connection as broken.
+var errUnsupportedVerb = errors.New(harnessproto.ErrUnsupportedVerb)
+
 // applySessionAction validates and executes a verb. The daemon is authoritative:
 // unknown/excluded verbs (including any pane/terminal verb) are rejected with
-// "unsupported", and read-only mode rejects every verb. Accepted verbs map to the
+// "unsupported", an accepted verb this daemon does not implement yet with
+// "unsupported verb", and read-only mode rejects every verb. Accepted verbs map to the
 // daemon's own lifecycle core.Actions and run through ApplyAction (wsops).
 func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 	act, ok := sessionActionFor(m)
 	if !ok {
+		if harnessproto.SessionVerbs[m.Action] {
+			return "", errUnsupportedVerb
+		}
 		return "", errUnsupported
 	}
 	if p.cfg.ReadOnlySessions || p.cfg.ApplyAction == nil {
