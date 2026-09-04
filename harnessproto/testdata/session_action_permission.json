@@ -1,0 +1,1 @@
+{"type":"session-action","reqId":"r3","action":"permission","id":"a2","fields":{"decision":"deny","reason":"writes outside the worktree","request_id":"perm-9"}}

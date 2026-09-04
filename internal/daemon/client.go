@@ -183,6 +183,21 @@ func (c *Client) RuntimePath(id string) (string, error) {
 	return path, json.Unmarshal(raw, &path)
 }
 
+// RuntimeRecord resolves a session id to its on-disk transcript and the runtime
+// that wrote it, via the daemon. A zero record (empty Path) means the session has
+// no record a runtime-event reader supports.
+func (c *Client) RuntimeRecord(id string) (core.RuntimeRecord, error) {
+	raw, err := c.queryAction(core.Action{Action: core.ActionQuery, Query: core.QueryRuntimeRecord, ID: id})
+	if err != nil {
+		return core.RuntimeRecord{}, err
+	}
+	var rec core.RuntimeRecord
+	if len(raw) == 0 {
+		return rec, nil
+	}
+	return rec, json.Unmarshal(raw, &rec)
+}
+
 // Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane/Data
 // is set.
 type Frame struct {

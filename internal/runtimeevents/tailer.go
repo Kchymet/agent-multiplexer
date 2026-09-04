@@ -31,11 +31,12 @@ type LineMapper func(line []byte) []harnessproto.RuntimeEvent
 //   - Truncation / rotation (size shrinks below our offset): the tail resets to
 //     the file start and re-reads. Ordinals recount from 1; the orchestrator
 //     dedups by ordinal, so a stable prefix re-sends idempotently.
-func tail(ctx context.Context, path string, newMapper func() LineMapper, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
+func tail(ctx context.Context, rec Record, newMapper func() LineMapper, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
 	defer close(out)
 	if poll <= 0 {
 		poll = DefaultPollInterval
 	}
+	path := rec.Path
 	var (
 		offset   int64
 		ordinal  int64
@@ -68,6 +69,7 @@ func tail(ctx context.Context, path string, newMapper func() LineMapper, afterSe
 					offset, ordinal, mapper = 0, 0, newMapper()
 				}
 				newOffset, batch := readFrom(path, offset, mapper, &ordinal, afterSeq)
+				batch.Runtime = rec.Runtime
 				offset = newOffset
 				if len(batch.Events) > 0 {
 					select {
@@ -145,22 +147,66 @@ func offsetOnLineBoundary(path string, offset int64) bool {
 // the feature but emits nothing for it — honest degradation, §4).
 type PathResolver func(sessionID string) (path string, ok bool)
 
-// ClaudeStream builds a runtime-events source for Claude Code sessions: given a
-// resolver from session id to its JSONL path, it returns a function matching the
-// provider's RuntimeEventStream hook — for each subscribed session it tails the
-// JSONL from afterSeq and streams mapped event batches until ctx is cancelled.
-// ok=false when the session has no resolvable record.
-func ClaudeStream(resolve PathResolver, poll time.Duration) func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+// Record is one session's on-disk runtime record: which runtime wrote it and
+// where. Runtime is a harnessproto.Runtime* name; it selects the reader and is
+// stamped on every batch so the consumer never has to assume a runtime.
+type Record struct {
+	Runtime string
+	Path    string
+}
+
+// Resolver resolves a published session id to its runtime record. ok=false ⇒ the
+// session has no structured record (the provider advertises the feature but emits
+// nothing for it — honest degradation, §4).
+type Resolver func(sessionID string) (Record, bool)
+
+// mapperFor returns the per-session line mapper factory for a runtime, and
+// whether the runtime has a reader at all. A runtime with no reader yields
+// ok=false so the provider emits nothing for it rather than tailing a record it
+// would only turn into noise.
+func mapperFor(runtime string) (func() LineMapper, bool) {
+	switch runtime {
+	case harnessproto.RuntimeClaude:
+		return func() LineMapper {
+			st := &ClaudeState{}
+			return func(line []byte) []harnessproto.RuntimeEvent { return MapClaudeLine(line, st) }
+		}, true
+	case harnessproto.RuntimeCodex:
+		return func() LineMapper {
+			st := &CodexState{}
+			return func(line []byte) []harnessproto.RuntimeEvent { return MapCodexLine(line, st) }
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+// Stream builds the runtime-events source the provider's RuntimeEventStream hook
+// expects: given a resolver from session id to its runtime record, it picks the
+// reader for that record's runtime and tails it from afterSeq, streaming mapped
+// event batches until ctx is cancelled. ok=false when the session has no
+// resolvable record, or names a runtime this package has no reader for.
+func Stream(resolve Resolver, poll time.Duration) func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
 	return func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
-		path, ok := resolve(sessionID)
-		if !ok || path == "" {
+		rec, ok := resolve(sessionID)
+		if !ok || rec.Path == "" {
+			return nil, false
+		}
+		newMapper, ok := mapperFor(rec.Runtime)
+		if !ok {
 			return nil, false
 		}
 		ch := make(chan harnessproto.RuntimeEventBatch, 8)
-		go tail(ctx, path, func() LineMapper {
-			st := &ClaudeState{}
-			return func(line []byte) []harnessproto.RuntimeEvent { return MapClaudeLine(line, st) }
-		}, afterSeq, poll, ch)
+		go tail(ctx, rec, newMapper, afterSeq, poll, ch)
 		return ch, true
 	}
+}
+
+// ClaudeStream is Stream pinned to the Claude reader, for a caller that resolves
+// only Claude transcripts.
+func ClaudeStream(resolve PathResolver, poll time.Duration) func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+	return Stream(func(sessionID string) (Record, bool) {
+		path, ok := resolve(sessionID)
+		return Record{Runtime: harnessproto.RuntimeClaude, Path: path}, ok
+	}, poll)
 }

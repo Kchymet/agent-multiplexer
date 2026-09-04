@@ -98,9 +98,38 @@ const (
 	VerbStart        = "start"
 )
 
+// Session steering verbs (spec §3.1): they act on the agent *inside* a running
+// session rather than on the session's lifecycle. They are still session verbs —
+// they carry no pane access, and the daemon decides how to deliver them.
+//
+//   - VerbPrompt delivers a new user turn to the session's agent. FieldText
+//     carries the text. If the agent is not running the daemon MAY start it with
+//     the text as its initial prompt.
+//   - VerbInterject delivers text to the agent while a turn is already running
+//     (a steer, not a new turn). FieldText carries the text.
+//   - VerbStop interrupts the current turn without killing the session. It
+//     takes no fields; the session stays alive and ready for the next verb.
+//   - VerbPermission resolves a permission request the runtime surfaced on the
+//     runtime-events stream as a TypePermissionRequest event (§4).
+//     FieldRequestID echoes that event's request_id, FieldDecision is
+//     DecisionAllow or DecisionDeny, and FieldReason is optional free text.
+//
+// Steering is inherently asynchronous: a successful result means the daemon
+// delivered the verb to the runtime (ResultAccepted), not that the agent has
+// finished acting on it. See HarnessMsg.Result.
+const (
+	VerbPrompt     = "prompt"
+	VerbInterject  = "interject"
+	VerbStop       = "stop"
+	VerbPermission = "permission"
+)
+
 // SessionVerbs is the closed set of accepted session-action verbs. A consumer
 // (the orchestrator) uses it to reject a pane/terminal verb before a wasted
-// round-trip; the provider rejects anything outside it with ErrUnsupported.
+// round-trip; the provider rejects anything outside it with ErrUnsupported. A
+// verb *in* this set that a particular daemon does not implement is rejected
+// with ErrUnsupportedVerb instead — the distinction is how an orchestrator tells
+// "never valid" from "this daemon is older than this verb" (spec §3.2).
 var SessionVerbs = map[string]bool{
 	VerbNewWorkgroup: true,
 	VerbAddAgent:     true,
@@ -108,11 +137,67 @@ var SessionVerbs = map[string]bool{
 	VerbArchive:      true,
 	VerbUnarchive:    true,
 	VerbStart:        true,
+	VerbPrompt:       true,
+	VerbInterject:    true,
+	VerbStop:         true,
+	VerbPermission:   true,
 }
 
+// SteeringVerbs is the subset of SessionVerbs that steers the agent inside a
+// running session (as opposed to managing the session's lifecycle). A daemon
+// publishing read-only rejects these exactly as it rejects the lifecycle verbs;
+// the set exists so both peers can name the group without re-listing it.
+var SteeringVerbs = map[string]bool{
+	VerbPrompt:     true,
+	VerbInterject:  true,
+	VerbStop:       true,
+	VerbPermission: true,
+}
+
+// session-action field keys (MuxMsg.Fields) for the steering verbs. Lifecycle
+// verbs mirror the daemon's own form fields and have no published key set; these
+// four are protocol, so both peers spell them the same way.
+const (
+	FieldText      = "text"       // prompt / interject: the text to deliver
+	FieldRequestID = "request_id" // permission: the request_id from the permission_request event
+	FieldDecision  = "decision"   // permission: DecisionAllow | DecisionDeny
+	FieldReason    = "reason"     // permission: optional free-text rationale
+)
+
+// Permission decisions (the FieldDecision value on a VerbPermission action).
+// Anything else is rejected: the daemon must never guess at an ambiguous
+// decision on a permission prompt.
+const (
+	DecisionAllow = "allow"
+	DecisionDeny  = "deny"
+)
+
+// session-result dispositions (HarnessMsg.Result), distinguishing a verb whose
+// effect is already observable from one that was merely delivered. Absent (the
+// empty string) means ResultApplied — every lifecycle verb predating this field
+// is synchronous, so an older daemon's bare {ok:true} reads correctly.
+const (
+	// ResultApplied: the verb ran to completion and its effect is in the next
+	// sessions snapshot. The lifecycle verbs are all applied.
+	ResultApplied = "applied"
+	// ResultAccepted: the verb was delivered to the running agent and the effect
+	// is asynchronous — watch the runtime-events stream (or the session's state)
+	// for it. The steering verbs are accepted, not applied.
+	ResultAccepted = "accepted"
+)
+
 // ErrUnsupported is the session-result error for a verb the provider does not
-// accept (spec §3).
+// accept (spec §3) — one outside SessionVerbs, including every pane/terminal
+// verb. It means "never valid on this protocol", so an orchestrator should not
+// retry it against another daemon.
 const ErrUnsupported = "unsupported"
+
+// ErrUnsupportedVerb is the session-result error for a verb that *is* in
+// SessionVerbs but this daemon does not implement (spec §3.2) — typically a
+// daemon older than the verb. Distinct from ErrUnsupported: the verb is valid
+// protocol, so an orchestrator may offer it again after the daemon upgrades, and
+// should degrade its UI rather than treat the connection as broken.
+const ErrUnsupportedVerb = "unsupported verb"
 
 // Terminal registration errors (MuxMsg.Error on a rejected registered): the
 // provider exits with the message instead of retrying.
@@ -205,13 +290,22 @@ type HarnessMsg struct {
 	ReqID    string    `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
 	OK       bool      `json:"ok,omitempty"`       // session-result: verb succeeded
 	NewID    string    `json:"newId,omitempty"`    // session-result: id of any session the verb created
+	// Result is the disposition of a successful verb: ResultApplied (effect is
+	// complete) or ResultAccepted (delivered to the running agent; the effect is
+	// asynchronous). Empty means applied, so a daemon predating the field is read
+	// correctly. Unset on a failure — Error carries that.
+	Result string `json:"result,omitempty"` // session-result: applied | accepted
 
 	// v2 "runtime-events" feature (runtime-events frame). SessionID names the
 	// published session; Seq is per-session monotonic (the ordinal of the last
 	// event in Events); Events is a seq-ordered batch of structured transcript
 	// events. A resuming consumer subscribes with afterSeq and receives only
-	// events whose ordinal exceeds it.
+	// events whose ordinal exceeds it. Runtime names the runtime whose record
+	// produced the batch (Runtime* — "claude", "codex", …); it is additive and
+	// omitted by a producer that predates it, so a consumer that needs a runtime
+	// falls back to its own default when the field is absent.
 	SessionID string         `json:"sessionId,omitempty"`
+	Runtime   string         `json:"runtime,omitempty"`
 	Events    []RuntimeEvent `json:"events,omitempty"`
 }
 

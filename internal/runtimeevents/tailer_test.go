@@ -200,3 +200,59 @@ func TestClaudeStreamNoRecord(t *testing.T) {
 		t.Fatal("ClaudeStream must report ok=false when no record resolves")
 	}
 }
+
+// TestStreamPicksReaderPerRuntime is the runtime-dispatch contract: Stream reads
+// a session's record with the reader its runtime names, stamps every batch with
+// that runtime, and reports ok=false for a runtime it has no reader for (so the
+// provider emits nothing rather than mapping a record with the wrong grammar).
+func TestStreamPicksReaderPerRuntime(t *testing.T) {
+	dir := t.TempDir()
+	codexPath := filepath.Join(dir, "rollout.jsonl")
+	write(t, codexPath, `{"type":"response_item","payload":{"type":"message","role":"assistant","id":"m1","content":[{"type":"output_text","text":"hi"}]}}`+"\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := Stream(func(string) (Record, bool) {
+		return Record{Runtime: harnessproto.RuntimeCodex, Path: codexPath}, true
+	}, testPoll)
+	ch, ok := src(ctx, "sess", 0)
+	if !ok {
+		t.Fatal("Stream ok=false for a resolvable codex record")
+	}
+	select {
+	case b := <-ch:
+		if b.Runtime != harnessproto.RuntimeCodex {
+			t.Errorf("batch runtime = %q, want codex", b.Runtime)
+		}
+		if len(b.Events) != 1 || b.Events[0].Type != TypeText {
+			t.Fatalf("codex rollout should map to one text event, got %+v", b.Events)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no batch from the codex stream")
+	}
+
+	// A runtime with no reader resolves but does not stream.
+	other := Stream(func(string) (Record, bool) {
+		return Record{Runtime: "hermes", Path: codexPath}, true
+	}, testPoll)
+	if _, ok := other(ctx, "sess", 0); ok {
+		t.Error("Stream must report ok=false for a runtime with no reader")
+	}
+}
+
+// TestClaudeStreamStampsRuntime pins that the Claude path keeps labelling its
+// batches too, so a consumer never has to fall back to assuming a runtime.
+func TestClaudeStreamStampsRuntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	write(t, path, `{"type":"user","message":{"role":"user","content":"hi"}}`+"\n")
+	ch, cancel := streamFor(t, path, 0)
+	defer cancel()
+	select {
+	case b := <-ch:
+		if b.Runtime != harnessproto.RuntimeClaude {
+			t.Errorf("batch runtime = %q, want claude", b.Runtime)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no batch from the claude stream")
+	}
+}

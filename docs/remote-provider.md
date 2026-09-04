@@ -174,6 +174,9 @@ checking it.
 | macOS service | `~/Library/LaunchAgents/com.kchymet.amux.provide.plist` |
 | Status file | `~/.local/state/amux/provider-status.json` |
 
+`install` takes the address positionally too, with flags on either side of it,
+exactly as running the provider does.
+
 Re-running `install` merges over the existing config, so `amux provide install
 --name box` changes one setting and keeps the rest, and re-running it after
 `make install` re-points the service at the new binary and restarts it.
@@ -230,6 +233,12 @@ amux provide orch.example.com:7443 \
 
 The orchestrator address is the positional argument (or `--orchestrator`); a
 `tls:` scheme prefix is accepted and stripped (provider mode is always TLS).
+Flags may come before or after the address — `amux provide host:7443 --ca ca.pem`
+and `amux provide --ca ca.pem host:7443` are the same command. Giving the address
+twice, or leaving a stray word on the line, is an error rather than a silent
+choice — a flag that goes unread surfaces much later as something else entirely
+(an unread `--ca` looks exactly like a bad certificate).
+
 Logs report the FSM plainly: dialing, registered (with negotiated version and
 providerId), disconnect/grace, backoff, and terminal errors.
 

@@ -25,6 +25,10 @@ import (
 //	amux provide [<orchestrator-addr>] [flags]   run (reads the config file when bare)
 //	amux provide install [flags]                 write the config + install the service
 //	amux provide uninstall                       remove the service
+//
+// Flags work on either side of the address (parseFlagsAnyOrder), for running and
+// for installing alike — the address-first phrasing is the one people reach for,
+// and it used to drop every flag after the address without a word.
 func cmdProvide(args []string) error {
 	sub := ""
 	if len(args) > 0 {
@@ -86,6 +90,8 @@ Install-only flags:
   --dry-run          print the config file and service unit, write nothing
   --exec <path>      amux binary the service runs (default: the installed binary)
 
+Flags may come before or after the address, for install and for running alike.
+
 Running bare, settings resolve flags first, then the AMUX_PROVIDER_* / AMUX_TLS_*
 env vars, then the config file. `+"`"+`amux doctor`+"`"+` reports the config, the service, and
 the provider's last registration and heartbeat.
@@ -94,37 +100,6 @@ the provider's last registration and heartbeat.
                        --token-file ~/.config/amux/provider.token
   amux doctor
 `)
-}
-
-// provideFlags is the settings surface shared by running the provider and
-// installing it, so the flags mean exactly the same thing in both — the install
-// command is the run command with its arguments written down.
-type provideFlags struct {
-	orch       string
-	tokenFile  string
-	name       string
-	caFile     string
-	serverName string
-	maxPanes   int
-	publishSes bool
-	readOnly   bool
-	rtEvents   bool
-	labels     multiFlag
-	features   multiFlag
-}
-
-func (f *provideFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
-	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
-	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
-	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
-	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
-	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
-	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
-	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
-	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
-	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
-	fs.Var(&f.features, "feature", "capability feature string (repeatable); merged with $AMUX_PROVIDER_FEATURES")
 }
 
 // provideRun runs provider mode in the foreground: dial out to a remote
@@ -142,18 +117,25 @@ func provideRun(args []string) error {
 	fs := flag.NewFlagSet("provide", flag.ContinueOnError)
 	var f provideFlags
 	f.register(fs)
-	if err := fs.Parse(args); err != nil {
+	operands, err := parseFlagsAnyOrder(fs, args)
+	if err != nil {
 		return err
 	}
 
 	// A missing config file is normal (provider mode is opt-in and works fully
 	// from flags); a malformed one is not, and must not be silently ignored.
-	file, err := providercfg.Load()
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("provide: %w", err)
+	file, ferr := providercfg.Load()
+	if ferr != nil && !errors.Is(ferr, os.ErrNotExist) {
+		return fmt.Errorf("provide: %w", ferr)
 	}
 
-	addr := firstNonEmpty(f.orch, fs.Arg(0), file.Orchestrator)
+	addr, err := provideAddr(f.orch, operands)
+	if err != nil {
+		return err
+	}
+	if addr == "" {
+		addr = file.Orchestrator // the config file is what the user service runs on
+	}
 	if addr == "" {
 		return fmt.Errorf("provide: need an orchestrator address (positional, --orchestrator, or `amux provide install`)")
 	}
@@ -219,11 +201,12 @@ func provideRun(args []string) error {
 		}
 		if runtimeEvents {
 			// Structured transcripts: tail each published session's on-disk runtime
-			// record (Claude Code JSONL, located via the conversation id amux pins)
-			// and stream contract events. Read-only; a session with no record on disk
-			// simply emits nothing (honest degradation).
+			// record — Claude Code's session JSONL or Codex's rollout, whichever the
+			// session's harness wrote — and stream contract events stamped with that
+			// runtime. Read-only; a session with no record on disk simply emits
+			// nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.ClaudeStream(runtimePathViaDaemon(), 0)
+			cfg.RuntimeEventStream = runtimeevents.Stream(runtimeRecordViaDaemon(), 0)
 		}
 	}
 
@@ -233,6 +216,59 @@ func provideRun(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// provideFlags is provider mode's settings surface, shared by running the
+// provider and installing it — so the flags mean exactly the same thing in both,
+// and `amux provide install` is the run command with its arguments written down.
+// It is a struct registered on a FlagSet rather than a pile of pointers in
+// cmdProvide so the parse can be exercised on its own — which is what tells the
+// flags-in-any-order fix from a regression back to silently dropping them.
+type provideFlags struct {
+	orch       string
+	tokenFile  string
+	name       string
+	caFile     string
+	serverName string
+	maxPanes   int
+	publishSes bool
+	readOnly   bool
+	rtEvents   bool
+	labels     multiFlag
+	features   multiFlag
+}
+
+func (f *provideFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
+	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
+	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
+	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
+	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
+	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
+	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
+	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
+	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
+	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
+	fs.Var(&f.features, "feature", "capability feature string (repeatable); merged with $AMUX_PROVIDER_FEATURES")
+}
+
+// provideAddr picks the orchestrator address out of --orchestrator and whatever
+// operands were left over. One address is expected, from either spelling; the two
+// ways of getting that wrong both used to pass unnoticed, so both now say so:
+// a second, different address is ambiguous, and extra operands are the shape of a
+// typo (a missing `--`, a flag misspelled into a word). Returns "" when no address
+// was given at all — the caller decides what else may supply one.
+func provideAddr(orch string, operands []string) (string, error) {
+	if len(operands) > 1 {
+		return "", fmt.Errorf("provide: unexpected argument(s) after the orchestrator address %q: %s", operands[0], strings.Join(operands[1:], " "))
+	}
+	if len(operands) == 0 {
+		return orch, nil
+	}
+	if orch != "" && orch != operands[0] {
+		return "", fmt.Errorf("provide: two orchestrator addresses: --orchestrator %s and %s — give it once", orch, operands[0])
+	}
+	return operands[0], nil
 }
 
 // envBool reports whether an env var is set to a truthy value (1/true/yes/on).
@@ -259,26 +295,27 @@ func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
 	return c.Snapshot()
 }
 
-// runtimePathViaDaemon resolves a published session id to its on-disk transcript
-// path through the daemon (which resolves it via the session's harness), so the
-// provider tails transcripts without opening the store. ok=false — a missing
-// daemon, an error, or an empty path (no supported record) — means the provider
-// advertises runtime-events but honestly emits nothing for that session.
-func runtimePathViaDaemon() runtimeevents.PathResolver {
-	return func(sessionID string) (string, bool) {
+// runtimeRecordViaDaemon resolves a published session id to its on-disk
+// transcript and the runtime that wrote it, through the daemon (which resolves it
+// via the session's harness), so the provider tails transcripts without opening
+// the store. ok=false — a missing daemon, an error, or an empty path (no
+// supported record) — means the provider advertises runtime-events but honestly
+// emits nothing for that session.
+func runtimeRecordViaDaemon() runtimeevents.Resolver {
+	return func(sessionID string) (runtimeevents.Record, bool) {
 		if sessionID == "" {
-			return "", false
+			return runtimeevents.Record{}, false
 		}
 		c, err := daemon.Dial()
 		if err != nil {
-			return "", false
+			return runtimeevents.Record{}, false
 		}
 		defer c.Close()
-		path, err := c.RuntimePath(sessionID)
-		if err != nil || path == "" {
-			return "", false
+		rec, err := c.RuntimeRecord(sessionID)
+		if err != nil || rec.Path == "" {
+			return runtimeevents.Record{}, false
 		}
-		return path, true
+		return runtimeevents.Record{Runtime: rec.Runtime, Path: rec.Path}, true
 	}
 }
 
