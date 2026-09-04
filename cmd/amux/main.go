@@ -132,7 +132,8 @@ usage: amux <command>
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
   config [ls|get|set|unset|path]  show or change amux settings (TUI keybindings)
-  provide <addr>     dial a remote orchestrator and serve panes (provider mode)
+  provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
+  provide install | uninstall  run provider mode as a user service (survives reboot)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print version
 

@@ -75,6 +75,12 @@ type Config struct {
 	// emits nothing — honest degradation). Required for "runtime-events".
 	RuntimeEventStream func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool)
 
+	// OnStatus, when set, receives a snapshot every time the connection state
+	// changes (dial, register, disconnect, heartbeat, stop). The CLI wires it to
+	// the status file doctor reads; nil reports nothing. It is called from the
+	// dial and read loops, so it must not block.
+	OnStatus func(Status)
+
 	// Dial, when set, overrides the default TLS dialer (used by tests to run over
 	// an in-memory pipe). Production leaves it nil.
 	Dial func(context.Context) (net.Conn, error)
@@ -89,6 +95,9 @@ type Config struct {
 type Provider struct {
 	cfg      Config
 	versions []int
+
+	stMu   sync.Mutex // guards status; deliberately not mu (see setStatus)
+	status Status
 
 	mu    sync.Mutex
 	panes map[string]*pane
@@ -111,6 +120,7 @@ func New(cfg Config) *Provider {
 	}
 	return &Provider{
 		cfg:        cfg,
+		status:     Status{PID: os.Getpid(), Name: cfg.Name, Orchestrator: cfg.Orchestrator},
 		versions:   []int{harnessproto.Version, harnessproto.Version2},
 		panes:      map[string]*pane{},
 		backoffMin: time.Second,
@@ -134,13 +144,17 @@ func (p *Provider) Run(ctx context.Context) error {
 	backoff := p.backoffMin
 	for {
 		if err := ctx.Err(); err != nil {
+			p.stopped()
 			p.killAllPanes()
 			return err
 		}
+		p.setStatus(func(s *Status) { s.State = StateDialing })
 		conn, err := p.dial(ctx)
 		if err != nil {
 			p.cfg.Logf("dial %s failed: %v (backoff)", p.cfg.Orchestrator, err)
+			p.setStatus(func(s *Status) { s.State = StateDisconnected; s.LastError = err.Error() })
 			if !sleep(ctx, jitter(backoff)) {
+				p.stopped()
 				p.killAllPanes()
 				return ctx.Err()
 			}
@@ -150,17 +164,22 @@ func (p *Provider) Run(ctx context.Context) error {
 		registered, err := p.runSession(ctx, conn)
 		var te *terminalError
 		if asTerminal(err, &te) {
+			p.setStatus(func(s *Status) { s.State = StateRejected; s.LastError = te.Error() })
 			p.killAllPanes()
 			return fmt.Errorf("provider: %w", te)
 		}
 		if ctx.Err() != nil {
+			p.stopped()
 			p.killAllPanes()
 			return ctx.Err()
 		}
+		n := p.paneCount()
+		p.setStatus(func(s *Status) { s.State = StateDisconnected; s.Panes = n })
 		if registered {
 			backoff = p.backoffMin // a healthy connection resets the ladder
 		}
 		if !sleep(ctx, jitter(backoff)) {
+			p.stopped()
 			p.killAllPanes()
 			return ctx.Err()
 		}
@@ -271,6 +290,11 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	p.graceDur = time.Duration(grace) * p.graceScale
 	p.mu.Unlock()
 	p.cfg.Logf("registered: version=%d providerId=%s heartbeat=%ds grace=%ds", m.Version, m.ProviderID, hb, grace)
+	now := time.Now()
+	panes := p.paneCount()
+	p.setStatus(func(s *Status) {
+		s.State, s.ProviderID, s.RegisteredAt, s.LastError, s.Panes = StateRegistered, m.ProviderID, now, "", panes
+	})
 
 	sent := p.applyDirectives(m.Adopt, m.Kill)
 
@@ -455,6 +479,11 @@ func (p *Provider) readLoop(s *session) {
 			p.mu.Unlock()
 		case harnessproto.MPong:
 			atomic.StoreInt64(&s.lastPong, time.Now().UnixNano())
+			// The heartbeat is the liveness signal a report can actually trust: a
+			// registered-but-silent provider looks identical to a working one until
+			// this timestamp goes stale.
+			pong, panes := time.Now(), p.paneCount()
+			p.setStatus(func(st *Status) { st.HeartbeatAt, st.Panes = pong, panes })
 		case harnessproto.MSessionsSubscribe:
 			p.onSessionsSubscribe(s)
 		case harnessproto.MSessionAction:
@@ -763,4 +792,10 @@ func asTerminal(err error, dst **terminalError) bool {
 		*dst = te
 	}
 	return ok
+}
+
+// stopped records an operator stop (ctx cancelled) so the status file says the
+// provider was turned off deliberately, not that it died mid-connection.
+func (p *Provider) stopped() {
+	p.setStatus(func(s *Status) { s.State = StateStopped; s.Panes = 0 })
 }

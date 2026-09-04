@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,8 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/gh"
 	"amux/internal/git"
+	"amux/internal/provider"
+	"amux/internal/providercfg"
 )
 
 // cmdDoctor prints a health summary: required/optional CLI dependencies and the
@@ -130,6 +133,14 @@ func cmdDoctor() error {
 	if !anyDrift {
 		fmt.Printf("  ✓ claude    project-dir path munge matches Claude's on-disk layout\n")
 	}
+
+	// Provider mode: opt-in, so a machine that never registered says so quietly
+	// rather than failing the check. What it reports is the whole chain — config,
+	// credential, service, and whether the loop actually reached an orchestrator —
+	// because a provider that is installed but silently rejected looks, from the
+	// outside, exactly like one that works.
+	fmt.Println("\nProvider")
+	reportProvider()
 
 	// Terminal hotkeys: the native TUI's Alt/Option bindings only work when the
 	// terminal encodes Option as ESC-prefixed Meta. Best-effort and never fatal;
@@ -401,4 +412,140 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return s
+}
+
+// reportProvider prints doctor's Provider section: the config `amux provide
+// install` wrote, the token file's mode, the user service, and the provider
+// loop's own last registration and heartbeat. Never fatal — provider mode is
+// opt-in, so "not configured" is a normal, healthy state.
+func reportProvider() {
+	cfg, err := providercfg.Load()
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("  · config    not configured — `amux provide install --orchestrator host:port --token-file <path>`\n")
+		return
+	}
+	if err != nil {
+		fmt.Printf("  ✗ config    %v\n", err)
+		return
+	}
+	fmt.Printf("  ✓ config    %s\n", providercfg.Path())
+	detail := "orchestrator " + cfg.Orchestrator
+	if cfg.Name != "" {
+		detail += " · name " + cfg.Name
+	}
+	if cfg.PublishSessions {
+		feature := " · sessions"
+		if cfg.ReadOnlySessions {
+			feature += " (read-only)"
+		}
+		if cfg.RuntimeEvents {
+			feature += " + runtime-events"
+		}
+		detail += feature
+	}
+	fmt.Printf("              %s\n", detail)
+	reportProviderToken(cfg.TokenFile)
+	reportProviderService()
+	reportProviderStatus()
+}
+
+// reportProviderToken checks the bearer credential is present and not readable
+// by anyone else — the service reads it unattended, so nobody is watching for a
+// stray 0644.
+func reportProviderToken(path string) {
+	if path == "" {
+		fmt.Printf("  ⚠ token     no token-file in the config; the provider falls back to $AMUX_PROVIDER_TOKEN\n")
+		return
+	}
+	st, err := os.Stat(path)
+	switch {
+	case err != nil:
+		fmt.Printf("  ✗ token     %v\n", err)
+	case st.Mode().Perm() != 0o600:
+		fmt.Printf("  ⚠ token     %s is mode %04o, want 0600 — run: chmod 600 %s\n", path, st.Mode().Perm(), path)
+	default:
+		fmt.Printf("  ✓ token     %s (mode 0600)\n", path)
+	}
+}
+
+// reportProviderService reports the user service and, on Linux, whether linger
+// keeps it alive past logout.
+func reportProviderService() {
+	svc, err := providercfg.Service()
+	if err != nil {
+		fmt.Printf("  · service   %v — run `amux provide <addr>` in the foreground\n", err)
+		return
+	}
+	p := svc.Probe()
+	switch {
+	case !p.Installed:
+		fmt.Printf("  · service   no %s unit installed — run: amux provide install\n", svc.Kind())
+		return
+	case p.Active:
+		fmt.Printf("  ✓ service   %s · %s\n", svc.Kind(), p.Detail)
+	default:
+		fmt.Printf("  ⚠ service   %s · %s (not running)\n", svc.Kind(), p.Detail)
+	}
+	enabledAtBoot := "enabled at login"
+	if !p.Enabled {
+		enabledAtBoot = "NOT enabled at login"
+	}
+	fmt.Printf("              %s · %s\n", svc.Path(), enabledAtBoot)
+	if enabled, known := providercfg.Linger(); known && !enabled {
+		fmt.Printf("  ⚠ linger    off — the service stops when your last session closes; run: %s\n", providercfg.LingerHint())
+	}
+}
+
+// reportProviderStatus reads the status file the provider loop writes. It is the
+// only way to tell a registered provider from one that is running but has never
+// been accepted — the difference the log would show if anyone were reading it.
+func reportProviderStatus() {
+	st, err := provider.ReadStatus(provider.StatusPath())
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("  · status    the provider has not run yet (no %s)\n", provider.StatusPath())
+		return
+	}
+	if err != nil {
+		fmt.Printf("  ✗ status    %v\n", err)
+		return
+	}
+	mark := "·"
+	switch st.State {
+	case provider.StateRegistered:
+		mark = "✓"
+	case provider.StateRejected:
+		mark = "✗"
+	case provider.StateDisconnected, provider.StateDialing:
+		mark = "⚠"
+	}
+	// A "registered" record whose process is gone is a lie the file cannot
+	// retract on its own (SIGKILL, a reboot); say so instead of repeating it.
+	live := processAlive(st.PID)
+	if !live && st.State != provider.StateStopped {
+		mark = "⚠"
+	}
+	fmt.Printf("  %s status    %s (%s)\n", mark, st.State, ago(st.UpdatedAt))
+	line := fmt.Sprintf("registered %s · heartbeat %s", ago(st.RegisteredAt), ago(st.HeartbeatAt))
+	if st.ProviderID != "" {
+		line = "providerId " + st.ProviderID + " · " + line
+	}
+	fmt.Printf("              %s · %d panes\n", line, st.Panes)
+	if !live && st.State != provider.StateStopped {
+		fmt.Printf("              pid %d is gone — the provider died without recording a stop\n", st.PID)
+	}
+	if st.LastError != "" {
+		fmt.Printf("              last error: %s\n", st.LastError)
+	}
+}
+
+// ago renders a timestamp as a compact age, or "never" for a zero time.
+func ago(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t).Round(time.Second)
+	if d < 0 {
+		d = 0
+	}
+	return d.String() + " ago"
 }

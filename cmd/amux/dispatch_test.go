@@ -25,6 +25,11 @@ type helpBlock struct {
 	cmd    string
 	usage  func()
 	invoke bool
+	// verbs is the dispatch table checked by name for a block that is not safe to
+	// invoke — `daemon`'s verbs drive real processes, and `provide install` writes
+	// a system service. Their advertised subcommands are still checked, just
+	// against the table instead of by running them.
+	verbs map[string]bool
 }
 
 // helpBlocks is the advertised surface: the top-level usage plus each command
@@ -38,7 +43,18 @@ var helpBlocks = []helpBlock{
 	{cmd: "do", usage: doUsage, invoke: true},
 	{cmd: "config", usage: configUsage, invoke: true},
 	{cmd: "agent", usage: agentUsage, invoke: true},
-	{cmd: "daemon", usage: daemonUsage},
+	{cmd: "daemon", usage: daemonUsage, verbs: verbNames(daemonSubcommands)},
+	{cmd: "provide", usage: provideUsage, verbs: verbNames(provideSubcommands)},
+}
+
+// verbNames is the set of verbs a dispatch table accepts, for the blocks the
+// contract test checks by name rather than by invocation.
+func verbNames[V any](table map[string]V) map[string]bool {
+	out := make(map[string]bool, len(table))
+	for k := range table {
+		out[k] = true
+	}
+	return out
 }
 
 // TestAdvertisedCommandsDispatch walks every command named in the top-level
@@ -88,9 +104,10 @@ func TestAdvertisedSubcommandsDispatch(t *testing.T) {
 			continue
 		}
 		if !b.invoke {
-			// Not safe to run — `daemon start|stop|restart` drives real
-			// processes — so check its dispatch table by name instead.
-			if _, ok := daemonSubcommands[p.sub]; !ok {
+			// Not safe to run — `daemon start|stop|restart` drives real processes and
+			// `provide install` writes a user service — so check the dispatch table by
+			// name instead.
+			if !b.verbs[p.sub] {
 				t.Errorf("help advertises `amux %s %s` but %s does not dispatch it", p.cmd, p.sub, p.cmd)
 			}
 			continue
@@ -340,6 +357,7 @@ func sandboxCLI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", home+"/data")
+	t.Setenv("XDG_CONFIG_HOME", home+"/config")
 	t.Setenv("XDG_RUNTIME_DIR", home+"/run")
 	t.Setenv("AMUX_SOCK", home+"/run/absent.sock")
 	t.Setenv("AMUX_WORKGROUP", "")
