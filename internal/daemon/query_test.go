@@ -56,7 +56,9 @@ func TestQueryRuntimePathResolvesViaHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := claudecfg.TranscriptPath(dir, cid); got != want {
+	// With no transcript on disk yet, the path is where the agent's PRIVATE Claude
+	// home (not the user's) will write it.
+	if want := claudecfg.At(claudecfg.AgentHome(dir)).TranscriptPath(dir, cid); got != want {
 		t.Errorf("RuntimePath(a1) = %q, want %q", got, want)
 	}
 

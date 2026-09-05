@@ -43,6 +43,7 @@ var helpBlocks = []helpBlock{
 	{cmd: "do", usage: doUsage, invoke: true},
 	{cmd: "config", usage: configUsage, invoke: true},
 	{cmd: "agent", usage: agentUsage, invoke: true},
+	{cmd: "sandbox", usage: sandboxUsage, invoke: true},
 	{cmd: "daemon", usage: daemonUsage, verbs: verbNames(daemonSubcommands)},
 	{cmd: "provide", usage: provideUsage, verbs: verbNames(provideSubcommands)},
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -62,7 +63,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	trackedDirs := map[string]bool{console.Dir(): true}
 
 	// Control console, pinned first.
-	consoleState := agentState(liveOf(console.ID), agent.DefaultKind(), console.SessionID)
+	consoleState := agentState(liveOf(console.ID), console.Session())
 	out = append(out, core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
@@ -120,7 +121,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		subStates := make([]string, len(active))
 		rootState := core.StateIdle
 		for i, s := range active {
-			subStates[i] = agentState(liveOf(s.ID), s.Agent, s.ClaudeID)
+			subStates[i] = agentState(liveOf(s.ID), s)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
 			}
@@ -139,7 +140,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 				State:     subStates[i],
-				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s),
+				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s) + configSuffix(s),
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
@@ -156,12 +157,12 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				Kind: "repo", Cwd: r.GitDir, CanAttach: true,
 			})
 			for _, s := range repoAgents[r.Name] {
-				st := agentState(liveOf(s.ID), s.Agent, s.ClaudeID)
+				st := agentState(liveOf(s.ID), s)
 				out = append(out, core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 					State:     st,
-					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s),
+					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s) + configSuffix(s),
 					Cwd:       s.Dir,
 					CanAttach: true,
 					CanKill:   true,
@@ -325,6 +326,23 @@ func noticeSuffix(s store.Session) string {
 	return ""
 }
 
+// configSuffix flags an agent that has edited its private harness config (its
+// copy of the user's ~/.claude / $CODEX_HOME template) so the change is visible
+// on the rail as soon as the daemon's poll sees it — the feedback loop that lets
+// the user decide whether to propagate it (`amux sandbox drift`). Only edits
+// awaiting a decision count; a template the user changed under the agent is not
+// the agent's doing and is left to `amux sandbox drift` to list.
+func configSuffix(s store.Session) string {
+	spec, ok := agent.HarnessFor(s.Agent).Config(s)
+	if !ok {
+		return ""
+	}
+	if n := cfghome.Pending(cfghome.Summary(spec)); n > 0 {
+		return fmt.Sprintf(" · ⚙ %d config edit%s", n, plural(n))
+	}
+	return ""
+}
+
 func subSuffix(s store.Session) string {
 	if s.Branch != "" {
 		return " · " + s.Branch
@@ -349,14 +367,14 @@ func subSuffix(s store.Session) string {
 // rather than showing a stale hook state that will never arrive we ask its Harness
 // for a coarse activity signal (Codex infers one from rollout freshness) and map
 // it onto running/ready — degrading honestly to "the engine has a live instance".
-func agentState(alive bool, kind, sessionID string) string {
+func agentState(alive bool, s store.Session) string {
 	if !alive {
 		return core.StateIdle
 	}
 	// The rail state word is the harness's call: Claude reports its fine-grained
 	// hook states directly; a harness with no hook stream degrades honestly to
 	// running/ready via its coarse activity signal. HarnessFor is the one switch.
-	return agent.HarnessFor(kind).RailState(sessionID)
+	return agent.HarnessFor(s.Agent).RailState(s)
 }
 
 // stateLabel is the word shown to the user. Unknown reads as "running": the

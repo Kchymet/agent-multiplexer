@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -180,7 +181,11 @@ func TestAgentCommandGapFillRestore(t *testing.T) {
 	// not shrink it back to the smaller backup (RestoreCapturedTranscript's
 	// no-data-loss guard).
 	realTranscript := []byte(`{"real":true,"and":"strictly longer than the backup blob"}`)
-	claudePath := filepath.Join(home, ".claude", "projects", munge(agentDir), uuid+".jsonl")
+	// The transcript lives in the agent's private Claude home (not the user's).
+	claudePath := filepath.Join(claudecfg.AgentHome(agentDir), "projects", munge(agentDir), uuid+".jsonl")
+	if _, err := os.Stat(claudePath); err != nil {
+		t.Fatalf("gap-fill should restore into the agent's private home: %v", err)
+	}
 	if err := os.WriteFile(claudePath, realTranscript, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -735,5 +740,62 @@ func TestWriteAgentGuide(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, tc.other)); err == nil {
 			t.Errorf("kind %q: unexpectedly wrote %s too", tc.kind, tc.other)
 		}
+	}
+}
+
+// TestAgentCommandSeedsPrivateConfig pins the templated-config contract at
+// launch: the agent's private Claude home is seeded from the user's, every pane's
+// env points CLAUDE_CONFIG_DIR at it, trust is granted there — and the user's own
+// ~/.claude.json is never touched.
+func TestAgentCommandSeedsPrivateConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	user := filepath.Join(home, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", user)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("AMUX_JAIL", "off")
+	if err := os.MkdirAll(user, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(user, "settings.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(user, ".claude.json"), []byte(`{"hasCompletedOnboarding":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agentDir := filepath.Join(home, "sessions", "root", "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "agent", RootID: "root", Agent: "claude", Dir: agentDir, ClaudeID: "33333333-3333-4333-8333-333333333333"}
+	_, env, _, err := AgentCommand(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := claudecfg.AgentHome(agentDir)
+	found := false
+	for _, e := range env {
+		if e == "CLAUDE_CONFIG_DIR="+priv {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("env should point CLAUDE_CONFIG_DIR at the private home %q: %v", priv, env)
+	}
+	if b, err := os.ReadFile(filepath.Join(priv, "settings.json")); err != nil || string(b) != `{"theme":"dark"}` {
+		t.Fatalf("private home not seeded from the user's: %q %v", b, err)
+	}
+	// Trust landed in the copy, not the user's file.
+	if b, _ := os.ReadFile(filepath.Join(priv, ".claude.json")); !strings.Contains(string(b), agentDir) {
+		t.Errorf("agent dir should be trusted in the private .claude.json: %s", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(user, ".claude.json")); strings.Contains(string(b), agentDir) {
+		t.Errorf("the user's .claude.json must not be edited: %s", b)
+	}
+	// The editor/terminal env carries the same pointer, so `claude` run from the
+	// terminal tab uses the agent's config too.
+	if !strings.Contains(strings.Join(AgentEnv(s), " "), "CLAUDE_CONFIG_DIR="+priv) {
+		t.Error("AgentEnv should carry CLAUDE_CONFIG_DIR")
 	}
 }

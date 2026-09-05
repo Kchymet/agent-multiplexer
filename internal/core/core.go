@@ -308,9 +308,10 @@ type WorkgroupRow struct {
 // AgentRow is one agent (child session) under a WorkgroupRow.
 type AgentRow struct {
 	ID       string `json:"id"`
-	Agent    string `json:"agent"`  // claude | hermes
-	Mode     string `json:"mode"`   // task | interactive
-	Repos    string `json:"repos"`  // comma-joined repo names
-	Branch   string `json:"branch"` // the agent's git branch (for doctor reconciliation)
+	Agent    string `json:"agent"`         // claude | hermes
+	Mode     string `json:"mode"`          // task | interactive
+	Repos    string `json:"repos"`         // comma-joined repo names
+	Branch   string `json:"branch"`        // the agent's git branch (for doctor reconciliation)
+	Dir      string `json:"dir,omitempty"` // the agent's sandbox dir (holds its worktrees and private config homes)
 	Archived bool   `json:"archived"`
 }

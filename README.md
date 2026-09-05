@@ -83,7 +83,8 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Embedded terminal** | `internal/vterm` | A VT emulator over a PTY (and, for the client path, over a byte stream) so a full-screen agent renders inside a pane. |
 | **Control console** | `internal/console` | The built-in `⚙` agent scoped to amux config/CLI. |
 | **Git / GitHub** | `internal/git`, `internal/gh` | Bare clones + worktrees; `gh`-driven repo discovery/clone. |
-| **Claude config** | `internal/claudecfg` | Safe edits to `~/.claude.json` (pre-trust spawned dirs), status hooks, model defaults. |
+| **Claude config** | `internal/claudecfg` | A Claude Code home (`Home`): transcript lookups, pre-trust, status hooks, model defaults — and what of it is config vs state vs auth (`Template`). |
+| **Config templates** | `internal/cfghome` | Seeds each agent's private copy of your harness config, scans it for the agent's edits, and promotes/resets them (`amux sandbox`). See `docs/sandbox-config.md`. |
 | **Codex config** | `internal/codexcfg` | The Codex-CLI counterpart: `$CODEX_HOME` layout, rollout-session discovery/resume, project trust in `config.toml`, model defaults. |
 | **Daemon** | `internal/daemon` | Owns agent processes in an engine and polls sources so UIs can attach/detach without stopping agents. |
 
@@ -119,13 +120,22 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   amux data tree (`~/.local/share/amux`) is mounted **read-only** so git can read
   the bare clone its worktree is sourced from. Writable: the agent's **worktree**
   (to edit) and **its repo's bare clone** (so git can commit to its branch). Only
-  what each tool needs is bound back (the harness's config/auth — Claude's
-  `~/.claude`/`~/.claude.json` + status hook, or Codex's `$CODEX_HOME` writable so
-  it can persist rollouts — the editor's config, the shell's rc/theme — e.g. `~/.zshrc` + oh-my-zsh — so the
-  terminal keeps your prompt/aliases/plugins, and your **git/GitHub auth**
-  (`~/.gitconfig` + `~/.config/gh`) so agents push and use `gh` without logging in
-  again). Network works (DNS included). It's a filesystem scope, not a hardened
-  jail (network/pids are shared); `AMUX_JAIL=off` disables it.
+  what each tool needs is bound back: the editor's config, the shell's rc/theme —
+  e.g. `~/.zshrc` + oh-my-zsh — so the terminal keeps your prompt/aliases/plugins,
+  and your **git/GitHub auth** (`~/.gitconfig` + `~/.config/gh`) so agents push and
+  use `gh` without logging in again. Network works (DNS included). It's a
+  filesystem scope, not a hardened jail (network/pids are shared); `AMUX_JAIL=off`
+  disables it.
+- **Harness config is a private copy, not a mount.** Your `~/.claude` /
+  `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
+  (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
+  or history) under its own dir, and `CLAUDE_CONFIG_DIR` / `CODEX_HOME` point the
+  harness at it. The agent may edit its copy. Only the OAuth credential is shared
+  (symlinked to yours and bound back as a single file), so tokens never diverge.
+  amux compares each copy with the template and flags an agent's edits on the rail
+  (`⚙ N config edits`); `amux sandbox drift` lists them and `amux sandbox promote |
+  reset <id> <path>` propagates or discards each one — nothing propagates on its
+  own. See `docs/sandbox-config.md`.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
   collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
   or `amux wg unarchive <id>`).
@@ -170,13 +180,14 @@ or your **launch wrapper**. amux exports intent and gets out of the way:
 | `AMUX_SCOPE`       | `work` or `repo`                                     |
 | `AMUX_AGENT`       | the agent kind (`claude` or `codex`)                 |
 | `AMUX_SESSION_ID`  | the harness conversation id (see *Identity* above)   |
+| `CLAUDE_CONFIG_DIR` / `CODEX_HOME` | the agent's private copy of your harness config (`<agent dir>/.amux/claude|codex`) |
 
 Override the launch binary per harness with `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN`
 (point either at a wrapper that branches on `$AMUX_MODE`). Claude agents launch
 **pre-trusted** and with `--permission-mode auto` (a safe classifier, *not*
 `--dangerously-skip-permissions`); override with `AMUX_PERMISSION_MODE`. See
 `scripts/claude-launch.example.sh`. Codex agents launch pre-trusted (project trust
-written to `$CODEX_HOME/config.toml`) inside a `--sandbox workspace-write` scope;
+written to the agent's private copy of `config.toml`) inside a `--sandbox workspace-write` scope;
 override the sandbox level with `AMUX_CODEX_SANDBOX`
 (`read-only`|`workspace-write`|`danger-full-access`, or `none` to omit the flag).
 
@@ -248,6 +259,8 @@ amux workgroup rm|rename|ls
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
 amux config [ls|get|set|unset|path]  # show / change amux settings (TUI keybindings)
+amux sandbox drift [<id>]  # config edits agents made to their private copy of your harness config
+amux sandbox promote | reset <id> <path>  # propagate an agent's config edit to yours / discard it
 amux do <action> ...       # drive any daemon action from scripts (see below)
 amux provide [<addr>] [flags]     # provider mode: serve panes to a remote orchestrator
 amux provide install | uninstall  # run provider mode as a user service

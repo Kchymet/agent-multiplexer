@@ -85,7 +85,8 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 			subs, _ := db.Children(r.ID)
 			for _, s := range subs {
 				wg.Agents = append(wg.Agents, core.AgentRow{
-					ID: s.ID, Agent: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
+					Dir: s.Dir,
+					ID:  s.ID, Agent: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 					Branch: s.Branch, Archived: s.Archived,
 				})
 			}

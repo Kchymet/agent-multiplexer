@@ -2,8 +2,12 @@ package agent
 
 import (
 	"context"
+	"io/fs"
+	"log"
+	"os"
 	"path/filepath"
 
+	"amux/internal/cfghome"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -46,15 +50,44 @@ func (claudeHarness) Argv(model string, extra ...string) ([]string, error) {
 // pinning one at creation gives durable resume across restarts.
 func (claudeHarness) NewSessionID() string { return store.NewUUID() }
 
+// Config templates the user's Claude home into the agent's sandbox: the copy
+// lives at <agent dir>/.amux/claude and CLAUDE_CONFIG_DIR points Claude at it
+// (see claudecfg.Template for what is copied, compared, and shared).
+func (claudeHarness) Config(s store.Session) (cfghome.Spec, bool) {
+	if s.Dir == "" {
+		return cfghome.Spec{}, false
+	}
+	return claudecfg.Template(s.ID, claudecfg.AgentHome(s.Dir)), true
+}
+
+// home is the agent's private Claude home — where its transcripts, trust, and
+// settings live. An agent with no dir (a synthetic session in tests) falls back
+// to the user's home so lookups still resolve somewhere sensible.
+func (h claudeHarness) home(s store.Session) claudecfg.Home {
+	if sp, ok := h.Config(s); ok {
+		return claudecfg.At(sp.Dir)
+	}
+	return claudecfg.User()
+}
+
 // PlanLaunch decides resume vs continue vs fresh for a Claude session. A pinned
 // conversation resumes under the exact cwd its transcript lives under (that's the
 // one Claude's own path munge will match); only --resume when the transcript is
 // really there, since --session-id errors if the id is already known to Claude.
-func (claudeHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
+//
+// Transcripts live in the agent's private home. An agent created before homes
+// were private has its conversation in the user's home; the first launch after
+// the switch carries that project dir over (once), so the switch never costs a
+// conversation.
+func (h claudeHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
 	s := req.Session
+	home := h.home(s)
+	for _, cwd := range req.ResumeCwds {
+		carryOver(home, cwd)
+	}
 	switch {
 	case s.ClaudeID != "":
-		if cwd, ok := claudecfg.FindSession(s.ClaudeID, req.ResumeCwds...); ok {
+		if cwd, ok := home.FindSession(s.ClaudeID, req.ResumeCwds...); ok {
 			core.ClearNotice(s.ClaudeID)
 			return LaunchDecision{Dir: cwd, Extra: []string{"--resume", s.ClaudeID}}
 		}
@@ -62,20 +95,70 @@ func (claudeHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
 		// fresh — make the fallback visible in the log and on the rail.
 		warnResumeFailed(req)
 		return LaunchDecision{Dir: req.Dir, Extra: append([]string{"--session-id", s.ClaudeID}, freshExtra(req.Prompt)...)}
-	case claudecfg.AnySession(req.Dir):
+	case home.AnySession(req.Dir):
 		return LaunchDecision{Dir: req.Dir, Extra: []string{"--continue"}}
 	default:
 		return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}
 	}
 }
 
-// PrepareLaunchDir trusts the launch dir and installs amux's status/capture hooks
-// into it (not the user-wide settings.json), pointed at the stable installed
-// binary. Claude loads settings.local.json only from the launch dir. When the dir
-// is a git repo (resuming a legacy conversation into a worktree), git-exclude the
-// file so it never dirties the tree.
-func (claudeHarness) PrepareLaunchDir(dir string) {
-	_ = claudecfg.TrustDir(dir)
+// carryOver copies cwd's project dir (its transcripts and their per-session
+// working areas) from the user's home into home when home has none for cwd and
+// the user's does — the one-time migration of a conversation recorded before the
+// agent had a private home. A home that is the user's own is left alone.
+func carryOver(home claudecfg.Home, cwd string) {
+	user := claudecfg.User()
+	if home.Dir == user.Dir {
+		return
+	}
+	dst := home.ProjectDir(cwd)
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	src := user.ProjectDir(cwd)
+	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
+		return
+	}
+	if err := copyTree(src, dst); err != nil {
+		log.Printf("amux: carrying %s into the agent's config home: %v", src, err)
+		return
+	}
+	log.Printf("amux: carried transcripts for %s into the agent's private Claude home", cwd)
+}
+
+// copyTree copies the regular files under src to dst, preserving modes.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		mode := fs.FileMode(0o644)
+		if fi, err := d.Info(); err == nil {
+			mode = fi.Mode().Perm()
+		}
+		return os.WriteFile(target, b, mode)
+	})
+}
+
+// PrepareLaunch trusts the launch dir in the agent's own home and installs amux's
+// status/capture hooks into the launch dir (not the user-wide settings.json),
+// pointed at the stable installed binary. Claude loads settings.local.json only
+// from the launch dir. When the dir is a git repo (resuming a legacy conversation
+// into a worktree), git-exclude the file so it never dirties the tree.
+func (h claudeHarness) PrepareLaunch(s store.Session, dir string) {
+	_ = h.home(s).TrustDir(dir)
 	if err := claudecfg.InstallHooksIn(dir, core.InstalledBinPath()); err == nil {
 		if git.IsGitRepo(context.Background(), dir) {
 			_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
@@ -86,21 +169,11 @@ func (claudeHarness) PrepareLaunchDir(dir string) {
 // Keys are Claude Code's interactive bindings (see claudeKeys).
 func (claudeHarness) Keys() Keys { return claudeKeys() }
 
-// AgentConfigBinds mounts Claude's config/auth writable — it stores transcripts
-// under ~/.claude and reads ~/.claude.json.
-func (claudeHarness) AgentConfigBinds(home string) [][]string {
-	j := filepath.Join
-	return [][]string{
-		{"--bind-try", j(home, ".claude.json"), j(home, ".claude.json")},
-		{"--bind-try", j(home, ".claude"), j(home, ".claude")},
-	}
-}
-
 // Activity maps Claude's hook state to an engine.Activity: a turn in progress or
 // blocked on the user (running/waiting) is Busy; a finished turn or exited agent
 // (ready/idle) is Safe; anything else, or no record, is Unknown.
-func (claudeHarness) Activity(sessionID string) engine.Activity {
-	rec, ok := core.HookState(sessionID)
+func (claudeHarness) Activity(s store.Session) engine.Activity {
+	rec, ok := core.HookState(s.ClaudeID)
 	if !ok {
 		return engine.ActivityUnknown
 	}
@@ -117,8 +190,8 @@ func (claudeHarness) Activity(sessionID string) engine.Activity {
 // RailState returns Claude's fine-grained hook state directly (running/waiting/
 // ready/idle), or Unknown when no hook data has arrived yet — a granularity the
 // coarse Activity signal can't preserve.
-func (claudeHarness) RailState(sessionID string) string {
-	if rec, ok := core.HookState(sessionID); ok {
+func (claudeHarness) RailState(s store.Session) string {
+	if rec, ok := core.HookState(s.ClaudeID); ok {
 		switch rec.State {
 		case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
 			return rec.State
@@ -127,15 +200,16 @@ func (claudeHarness) RailState(sessionID string) string {
 	return core.StateUnknown
 }
 
-// RestoreTranscript copies amux's captured backup of sessionID's transcript into
-// the path Claude expects for cwd, when Claude's own copy is missing or staler.
-// Because that is the exact location resume detection reads, a successful restore
-// makes the subsequent launch resume the conversation via --resume.
-func (claudeHarness) RestoreTranscript(cwd, sessionID string) (bool, error) {
-	if cwd == "" || sessionID == "" {
+// RestoreTranscript copies amux's captured backup of the session's transcript
+// into the path Claude expects for cwd in the agent's home, when Claude's own
+// copy is missing or staler. Because that is the exact location resume detection
+// reads, a successful restore makes the subsequent launch resume the
+// conversation via --resume.
+func (h claudeHarness) RestoreTranscript(s store.Session, cwd string) (bool, error) {
+	if cwd == "" || s.ClaudeID == "" {
 		return false, nil
 	}
-	return core.RestoreCapturedTranscript(sessionID, claudecfg.TranscriptPath(cwd, sessionID))
+	return core.RestoreCapturedTranscript(s.ClaudeID, h.home(s).TranscriptPath(cwd, s.ClaudeID))
 }
 
 // SkillsDir / GuideFile: Claude Code's own conventions — .claude/skills and
@@ -143,36 +217,69 @@ func (claudeHarness) RestoreTranscript(cwd, sessionID string) (bool, error) {
 func (claudeHarness) SkillsDir(root string) string { return filepath.Join(root, ".claude", "skills") }
 func (claudeHarness) GuideFile(root string) string { return filepath.Join(root, "CLAUDE.md") }
 
-// ListSessions maps Claude Code's transcript listing into the kind-neutral shape.
-func (claudeHarness) ListSessions() []SessionInfo {
-	src := claudecfg.ListSessions()
-	out := make([]SessionInfo, 0, len(src))
-	for _, s := range src {
-		out = append(out, SessionInfo{
-			ID: s.ID, Cwd: s.Cwd, Project: s.Project, Path: s.Path, Size: s.Size, Modified: s.Modified,
-		})
+// homes is every Claude home on the machine: the user's own, then each agent's
+// private one.
+func (h claudeHarness) homes() []claudecfg.Home {
+	out := []claudecfg.Home{claudecfg.User()}
+	for _, d := range agentDirs(h.Kind()) {
+		out = append(out, claudecfg.At(claudecfg.AgentHome(d)))
 	}
 	return out
 }
 
-// RuntimeTranscriptPath resolves a Claude session to its transcript. It prefers
-// the dir the transcript actually lives under (amux's dir convention has shifted
-// over time), falling back to the recorded dir.
-func (claudeHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
+// ListSessions merges every Claude home's transcript listing (the user's and each
+// agent's) into the kind-neutral shape, most recent first.
+func (h claudeHarness) ListSessions() []SessionInfo {
+	var out []SessionInfo
+	seen := map[string]bool{}
+	for _, home := range h.homes() {
+		for _, s := range home.ListSessions() {
+			if seen[s.Path] {
+				continue
+			}
+			seen[s.Path] = true
+			out = append(out, SessionInfo{
+				ID: s.ID, Cwd: s.Cwd, Project: s.Project, Path: s.Path, Size: s.Size, Modified: s.Modified,
+			})
+		}
+	}
+	sortSessions(out)
+	return out
+}
+
+// RuntimeTranscriptPath resolves a Claude session to its transcript in the
+// agent's home. It prefers the dir the transcript actually lives under (amux's
+// dir convention has shifted over time), falling back to the recorded dir. An
+// agent that has not launched since config homes became private still has its
+// transcript in the user's home; that path is answered until the next launch
+// carries it over, so a live reader never loses the conversation in between.
+func (h claudeHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
 	if s.ClaudeID == "" {
 		return "", false
 	}
-	if cwd, found := claudecfg.FindSession(s.ClaudeID, s.Dir); found {
-		return claudecfg.TranscriptPath(cwd, s.ClaudeID), true
+	home := h.home(s)
+	if cwd, found := home.FindSession(s.ClaudeID, s.Dir); found {
+		return home.TranscriptPath(cwd, s.ClaudeID), true
+	}
+	if user := claudecfg.User(); user.Dir != home.Dir {
+		if cwd, found := user.FindSession(s.ClaudeID, s.Dir); found {
+			return user.TranscriptPath(cwd, s.ClaudeID), true
+		}
 	}
 	if s.Dir != "" {
-		return claudecfg.TranscriptPath(s.Dir, s.ClaudeID), true
+		return home.TranscriptPath(s.Dir, s.ClaudeID), true
 	}
 	return "", false
 }
 
 // Doctor checks the load-bearing Claude project-dir path munge against Claude's
-// actual on-disk layout: a discovered transcript whose real project dir differs
-// from what amux computes means the munge convention drifted upstream (resume,
-// capture, and listing would silently degrade). Empty when they agree.
-func (claudeHarness) Doctor() []string { return claudecfg.MungeDrift() }
+// actual on-disk layout in every home: a discovered transcript whose real project
+// dir differs from what amux computes means the munge convention drifted upstream
+// (resume, capture, and listing would silently degrade). Empty when they agree.
+func (h claudeHarness) Doctor() []string {
+	var out []string
+	for _, home := range h.homes() {
+		out = append(out, home.MungeDrift()...)
+	}
+	return out
+}
