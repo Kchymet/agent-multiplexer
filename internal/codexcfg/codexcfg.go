@@ -24,21 +24,48 @@ import (
 
 var mu sync.Mutex // serialize our own read-modify-write of config.toml
 
-// Home is Codex's config/data home: $CODEX_HOME, or ~/.codex when unset.
-func Home() string {
+// Home is one Codex config/data home — the tree $CODEX_HOME names: config.toml,
+// auth.json, AGENTS.md, prompts/, skills/, and the sessions/ rollout tree. As in
+// claudecfg, amux distinguishes the user's own home (UserHome — the template each
+// agent is seeded from) from an agent's private copy (At), which amux points
+// Codex at via CODEX_HOME.
+type Home string
+
+// UserHome is the user's own Codex home: $CODEX_HOME, or ~/.codex when unset.
+func UserHome() Home {
 	if d := os.Getenv("CODEX_HOME"); d != "" {
-		return d
+		return Home(d)
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".codex")
+	return Home(filepath.Join(home, ".codex"))
 }
 
-// sessionsRoot is where Codex stores per-day rollout files
-// ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl).
-func sessionsRoot() string { return filepath.Join(Home(), "sessions") }
+// At is the home at an explicit dir — what an agent launched with CODEX_HOME=dir
+// uses.
+func At(dir string) Home { return Home(dir) }
 
-// ConfigPath is $CODEX_HOME/config.toml — Codex's user config.
-func ConfigPath() string { return filepath.Join(Home(), "config.toml") }
+// Dir is the home's directory.
+func (h Home) Dir() string { return string(h) }
+
+// sessionsRoot is where this home stores per-day rollout files
+// (<home>/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl).
+func (h Home) sessionsRoot() string { return filepath.Join(h.Dir(), "sessions") }
+
+// ConfigPath is <home>/config.toml — Codex's user config.
+func (h Home) ConfigPath() string { return filepath.Join(h.Dir(), ConfigFile) }
+
+// AuthPath is <home>/auth.json — Codex's login credential. Auth, not config:
+// amux shares it across agents rather than copying it (see Template).
+func (h Home) AuthPath() string { return filepath.Join(h.Dir(), AuthFile) }
+
+// ConfigFile and AuthFile are the file names inside a home.
+const (
+	ConfigFile = "config.toml"
+	AuthFile   = "auth.json"
+)
+
+// ConfigPath is the user home's config.toml.
+func ConfigPath() string { return UserHome().ConfigPath() }
 
 // rolloutFile is one rollout jsonl discovered under the sessions tree.
 type rolloutFile struct {
@@ -52,9 +79,9 @@ type rolloutFile struct {
 // name. Best-effort: unreadable subtrees are skipped (siblings still walked) and
 // a missing tree yields nil, so discovery degrades gracefully rather than
 // failing. Callers filter/sort the results.
-func eachRollout() []rolloutFile {
+func (h Home) eachRollout() []rolloutFile {
 	var out []rolloutFile
-	_ = filepath.WalkDir(sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(h.sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip an unreadable dir, keep walking siblings
 		}
@@ -123,13 +150,17 @@ func looksLikeUUID(s string) bool {
 // codex agent every tick), so unlike eachRollout it matches on filenames alone —
 // no per-file stat — and stops at the first hit. The uuid is embedded in the
 // rollout filename, which is all discovery needs.
-func RolloutPath(uuid string) (string, bool) {
+func RolloutPath(uuid string) (string, bool) { return UserHome().RolloutPath(uuid) }
+
+// RolloutPath locates uuid's rollout within this home (see the package-level
+// RolloutPath).
+func (h Home) RolloutPath(uuid string) (string, bool) {
 	if uuid == "" {
 		return "", false
 	}
 	suffix := "-" + uuid + ".jsonl"
 	var found string
-	_ = filepath.WalkDir(sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(h.sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil // skip an unreadable dir, keep walking siblings
 		}
@@ -148,19 +179,25 @@ func RolloutPath(uuid string) (string, bool) {
 // <id>` will discover it when no rollout for uuid exists on disk yet. Discovery
 // keys on the uuid in the filename, so the timestamp portion is only cosmetic
 // and need not match Codex's to the letter.
-func NewRolloutPath(uuid string) string {
+func NewRolloutPath(uuid string) string { return UserHome().NewRolloutPath(uuid) }
+
+// NewRolloutPath is a fresh rollout path for uuid within this home.
+func (h Home) NewRolloutPath(uuid string) string {
 	now := time.Now()
 	name := "rollout-" + now.Format("2006-01-02T15-04-05") + "-" + uuid + ".jsonl"
-	return filepath.Join(sessionsRoot(),
+	return filepath.Join(h.sessionsRoot(),
 		now.Format("2006"), now.Format("01"), now.Format("02"), name)
 }
 
 // LatestSession returns the uuid of the newest (by mtime) rollout recorded under
 // cwd, so amux can resume the most recent conversation for a directory. ok is
 // false when cwd has no rollout.
-func LatestSession(cwd string) (uuid string, ok bool) {
+func LatestSession(cwd string) (uuid string, ok bool) { return UserHome().LatestSession(cwd) }
+
+// LatestSession is the newest rollout for cwd within this home.
+func (h Home) LatestSession(cwd string) (uuid string, ok bool) {
 	var best rolloutFile
-	for _, r := range eachRollout() {
+	for _, r := range h.eachRollout() {
 		if !sameDir(rolloutCwd(r.path), cwd) {
 			continue
 		}
@@ -188,10 +225,13 @@ type SessionInfo struct {
 // ListSessions enumerates every Codex rollout across the sessions tree,
 // most-recently-modified first. Best-effort: unreadable dirs and files are
 // skipped rather than failing the whole listing, mirroring claudecfg.ListSessions.
-func ListSessions() []SessionInfo {
+func ListSessions() []SessionInfo { return UserHome().ListSessions() }
+
+// ListSessions enumerates this home's rollouts, most recent first.
+func (h Home) ListSessions() []SessionInfo {
 	var out []SessionInfo
-	root := sessionsRoot()
-	for _, r := range eachRollout() {
+	root := h.sessionsRoot()
+	for _, r := range h.eachRollout() {
 		proj, err := filepath.Rel(root, filepath.Dir(r.path))
 		if err != nil {
 			proj = ""
@@ -270,8 +310,11 @@ func sameDir(a, b string) bool {
 // rational default when interactively configuring a new codex agent. Best-effort
 // — callers treat "" as "let amux pick the harness default". Top-level keys in
 // TOML precede any table, so we scan until the first table header.
-func PreferredModel() string {
-	b, err := os.ReadFile(ConfigPath())
+func PreferredModel() string { return UserHome().PreferredModel() }
+
+// PreferredModel is the top-level "model" of this home's config.toml, or "".
+func (h Home) PreferredModel() string {
+	b, err := os.ReadFile(h.ConfigPath())
 	if err != nil {
 		return ""
 	}
@@ -298,7 +341,11 @@ func PreferredModel() string {
 // idempotent — an already-trusted dir leaves the file byte-for-byte unchanged.
 // Best-effort: on any error the caller should proceed (Codex will just prompt
 // once). Written atomically so a concurrent Codex never sees a partial file.
-func TrustDir(dir string) error {
+func TrustDir(dir string) error { return UserHome().TrustDir(dir) }
+
+// TrustDir marks dir as trusted in this home's config.toml (see the
+// package-level TrustDir).
+func (h Home) TrustDir(dir string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -306,7 +353,7 @@ func TrustDir(dir string) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	path := ConfigPath()
+	path := h.ConfigPath()
 	var lines []string
 	if b, err := os.ReadFile(path); err == nil {
 		lines = strings.Split(string(b), "\n")

@@ -10,10 +10,15 @@ import (
 	"path/filepath"
 
 	"amux/internal/agent"
-	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
 )
+
+func init() {
+	// The console has a private config home like any agent; register its dir so
+	// harness listings (amux agent sessions) include its conversations.
+	agent.RegisterConsoleDir(Dir)
+}
 
 // ID is the reserved workspace id for the console (never a real workspace).
 const ID = "console"
@@ -34,8 +39,8 @@ func Ensure() error {
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
 	}
-	// Pre-trust the console dir so Claude Code never prompts for it.
-	_ = claudecfg.TrustDir(Dir())
+	// Trust is granted at launch, in the console's own config home (see
+	// agent.Harness.PrepareLaunch) — the user's ~/.claude.json is never edited.
 	p := filepath.Join(Dir(), "CLAUDE.md")
 	if _, err := os.Stat(p); err == nil {
 		return nil

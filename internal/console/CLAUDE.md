@@ -46,6 +46,14 @@ Other: `amux status` · `amux refresh` (re-poll sources now) · `amux doctor`
 (health check) · `amux do <action> …` (scripting; an unknown action prints the
 valid ones)
 
+Sandbox config (each agent runs Claude Code / Codex against a private copy of the
+user's `~/.claude` / `$CODEX_HOME`, seeded from it as a template; the agent may
+edit its copy, and amux reports what it changed):
+- `amux sandbox drift [<id>] [--json]` — config paths an agent's copy diverged on
+- `amux sandbox promote <id> <path>` — propagate the agent's change into the user's config
+- `amux sandbox reset <id> <path>` — discard it (re-copy the template's version)
+Never promote on your own initiative: a change to the user's config is their call.
+
 Opening a workgroup is a UI action, not a CLI one — the user opens it in the
 dashboard (`amux`), with `Enter` on the rail.
 
