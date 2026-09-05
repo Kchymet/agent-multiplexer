@@ -371,6 +371,36 @@ func (h Home) PreferredModel() string {
 	return strings.TrimSpace(root.Model)
 }
 
+// AdditionalModels returns the models Claude Code has cached as selectable for
+// this account beyond its built-in aliases — the "additionalModelOptionsCache"
+// entries of this home's .claude.json (a preview or org-enabled model Claude
+// learned of from the API, e.g. a full model id with a context-window suffix),
+// in Claude's own order, without blanks or duplicates. nil when none are cached
+// or the file is unreadable: best-effort, since Claude owns the key.
+func (h Home) AdditionalModels() []string {
+	b, err := os.ReadFile(h.ConfigPath())
+	if err != nil {
+		return nil
+	}
+	var root struct {
+		Options []struct {
+			Value string `json:"value"`
+		} `json:"additionalModelOptionsCache"`
+	}
+	if json.Unmarshal(b, &root) != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, o := range root.Options {
+		if v := strings.TrimSpace(o.Value); v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // TrustDir marks dir as trusted in ~/.claude.json. Best-effort: on any error the
 // caller should proceed (Claude will just show the trust dialog once). The whole
 // file is round-tripped with json.Number so large integer fields aren't mangled,
