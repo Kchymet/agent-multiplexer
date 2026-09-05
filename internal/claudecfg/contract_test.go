@@ -75,6 +75,75 @@ func TestHookEventStateContract(t *testing.T) {
 	}
 }
 
+// TestPermissionHookContract pins the Claude hook events amux drives its
+// permission journal from, and the verb each runs. This table is the entire
+// producer of the permission_request events a remote orchestrator answers
+// (docs/remote-provider-sessions.md §4.5) — Claude's transcript records no prompt
+// — so an upstream rename here silently costs a consumer the ability to approve
+// anything. Failing loudly is the point.
+func TestPermissionHookContract(t *testing.T) {
+	want := map[string]string{
+		"PermissionRequest": PermissionVerbRequest,
+		"PostToolUse":       core.PermissionAllow,
+		"PermissionDenied":  core.PermissionDeny,
+		"Stop":              PermissionVerbClear,
+		"SessionEnd":        PermissionVerbClear,
+	}
+	for event, wantVerb := range want {
+		got, ok := PermissionHookVerb(event)
+		if !ok {
+			t.Errorf("PermissionHookVerb(%q): not listed, want %q", event, wantVerb)
+			continue
+		}
+		if got != wantVerb {
+			t.Errorf("PermissionHookVerb(%q) = %q, want %q", event, got, wantVerb)
+		}
+	}
+	events := PermissionHookEvents()
+	if len(events) != len(want) {
+		t.Fatalf("PermissionHookEvents() has %d events, want %d: %v", len(events), len(want), events)
+	}
+	for _, e := range events {
+		if _, ok := want[e]; !ok {
+			t.Errorf("PermissionHookEvents() lists unexpected event %q", e)
+		}
+	}
+	if _, ok := PermissionHookVerb("SomeFutureEvent"); ok {
+		t.Error("PermissionHookVerb(unknown) reported ok=true")
+	}
+}
+
+// TestPermissionHookPayloadContract pins the extra fields the tool hook events
+// carry, against a recorded PermissionRequest payload. amux reads tool_name to
+// know what is being asked for and tool_input to summarize it onto the approve
+// card; a rename would leave every card blank.
+func TestPermissionHookPayloadContract(t *testing.T) {
+	b, err := os.ReadFile("testdata/permission_request_payload.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p HookPayload
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatalf("PermissionRequest payload no longer unmarshals into HookPayload: %v", err)
+	}
+	if p.HookEventName != "PermissionRequest" {
+		t.Errorf("hook_event_name = %q", p.HookEventName)
+	}
+	if p.SessionID == "" {
+		t.Error("session_id did not parse: the journal would have no session to key on")
+	}
+	if p.ToolName != "Bash" {
+		t.Errorf("tool_name = %q, want Bash", p.ToolName)
+	}
+	if got := SummarizeToolInput(p.ToolInput); got != "rm -rf build/" {
+		t.Errorf("SummarizeToolInput = %q, want the command", got)
+	}
+	// An input amux has no known field for still says something rather than nothing.
+	if got := SummarizeToolInput(json.RawMessage(`{"unknown":"x"}`)); got == "" {
+		t.Error("an unknown tool input must fall back to its JSON, not an empty action")
+	}
+}
+
 // TestMungeDrift verifies the doctor drift probe's engine: a transcript stored
 // under a project dir that matches ProjectDirName(cwd) is clean, while one stored
 // under a different dir — as would happen if Claude changed its munge scheme — is

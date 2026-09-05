@@ -145,11 +145,18 @@ access, still the daemon's choice of delivery mechanism, still rejectable.
 exactly `allow` or `deny` — a daemon MUST reject any other value rather than
 guess at a permission prompt.
 
-`request_id` is advisory in amux today: the daemon answers whatever prompt the
-runtime currently has open rather than matching the id, because amux does not yet
-emit `permission_request` events (§4) for a consumer to quote back — Claude
-Code's on-disk transcript does not record its TUI permission prompts. Send it
-anyway; it becomes load-bearing once there is a producer to correlate against.
+`request_id` is correlated, not decorative. The daemon matches it against the
+requests the runtime actually has open — the ones it published as
+`permission_request` events (§4.5) — and refuses an id that names none of them
+with `ok:false, error:"permission: no pending request …"`. That refusal is the
+point of the field: if the turn moves on between the orchestrator seeing a prompt
+and its `permission` arriving, the keystroke would otherwise land on a *different*
+prompt, allowing or denying an action nobody decided on. A refused verb is
+recoverable — re-read the stream and answer the request that is open now.
+
+An **empty** `request_id` still answers whatever prompt is open. That is the
+older, uncorrelated behavior, kept as the explicit way to say "whatever it is
+asking, allow it"; a caller that can name the request should.
 
 Steering is asynchronous by nature: writing a prompt to a running agent does not
 wait for the turn it starts. A successful steering result is therefore
@@ -258,9 +265,18 @@ nothing for it (honest degradation) — the feature stays advertised.
   `type` through rather than dropping it.
 - **Vocabulary the daemon emits** (a stable set; a consumer maps it onto its own
   model): `turn_start`, `prompt` (`in`), `text`, `thinking`, `tool_call`,
-  `tool_result`, `plan`, `usage` (`meta`), `notice` (`meta`), `turn_end`, and
-  `raw`. `raw` carries `{runtime, native_type, body}` and is the passthrough for
-  any record entry the reader has no mapping for — **never dropped**.
+  `tool_result`, `plan`, `usage` (`meta`), `permission_request`,
+  `permission_resolved`, `notice` (`meta`), `turn_end`, and `raw`. `raw` carries
+  `{runtime, native_type, body}` and is the passthrough for any record entry the
+  reader has no mapping for — **never dropped**.
+- `permission_request` carries `{request_id, tool, action, options}` and says the
+  session is blocked on a prompt; `permission_resolved` carries
+  `{request_id, decision}` and retires it. Both use the `request_id` as `item_id`,
+  so a consumer coalesces the pair into one card. A request is answerable — by the
+  `permission` verb (§3.1) — from the moment it is published until its
+  `permission_resolved` arrives, and never after. `decision` is `allow`, `deny`,
+  or `cleared`: the last means amux knows the prompt closed (the turn ended) but
+  not which way it went.
 - `seq` is per-session monotonic — the ordinal of the **last** event in `events`;
   the batch is ascending, so the first event's ordinal is `seq − len(events) + 1`.
   A consumer resumes by subscribing with `afterSeq` = the highest ordinal it has
@@ -297,6 +313,9 @@ record to the vocabulary above:
 | `system` / `summary` | `notice` |
 | anything else (unparsable, or `mode`/`ai-title`/… state records) | `raw` (never dropped) |
 
+Permission prompts are **not** in that table because they are not in the
+transcript: see §4.5.
+
 ### 4.4 Codex CLI mapping
 
 The daemon locates a Codex session's rollout from the uuid it pins per session
@@ -318,7 +337,10 @@ item carries:
 | `event_msg` `task_started` / `turn_started` | `turn_start` |
 | `event_msg` `task_complete` / `turn_complete` / `turn_aborted` | `turn_end` |
 | `event_msg` `token_count` | `usage` (`size` = the model context window) |
-| `event_msg` `exec_approval_request` / `apply_patch_approval_request` / `request_user_input` | `permission_request` |
+| `event_msg` `exec_approval_request` / `apply_patch_approval_request` / `request_user_input` | `permission_request` (`request_id` = `call_id`) |
+| `event_msg` `exec_command_begin` / `patch_apply_begin` / `mcp_tool_call_begin`, for a call with an approval open | `permission_resolved` (`allow` — the tool started, so it was approved) |
+| `response_item` `function_call_output` for a call with an approval still open | `permission_resolved` (`deny` — the call produced output without ever starting) |
+| a turn boundary with an approval still open | `permission_resolved` (`cleared`) |
 | `event_msg` `error` / `stream_error` / `warning` | `notice` |
 | `session_meta` / `compacted` | `notice` |
 | anything else (`turn_context`, `world_state`, the context Codex injects as a user turn, a later record kind) | `raw` (never dropped) |
@@ -331,9 +353,55 @@ which restates `token_count`. Mapping them too would double every message,
 reasoning block and command in the transcript. Anything *unrecognized* still
 becomes `raw`.
 
+Codex writes its approval prompts into the rollout, so its `permission_request`
+events come from the transcript reader alone — no journal (§4.5). It does not
+record the *answer*, so the resolution is inferred from what happens to the same
+`call_id` next, as the table above says.
+
 Codex records a tool's effect only as that tool's own output — it has no
 per-call before/after the way Claude's `Edit`/`Write` inputs give — so a Codex
 `tool_result` carries an empty `diffs` list rather than a guess.
+
+### 4.5 Permission prompts (the second record)
+
+Claude Code answers permission prompts in its TUI and writes none of them to the
+transcript: the prompt opens, the human picks, and nothing reaches disk. A reader
+of the transcript alone therefore cannot see that a session is blocked, and an
+orchestrator has no `request_id` to quote back at the `permission` verb (§3.1).
+
+So amux produces the record itself. Claude Code's hooks — which amux already
+installs per agent — carry the prompt's whole lifecycle, and each one appends a
+line to a per-session **permission journal** (`<state>/permissions/<id>.jsonl`):
+
+| Claude hook event | journal line |
+| --- | --- |
+| `PermissionRequest` (fires just before the prompt is drawn) | opens a request: a fresh `request_id`, the tool, and a one-line summary of what it wants |
+| `PostToolUse` (the tool ran, so its prompt was allowed) | resolves it `allow` |
+| `PermissionDenied` | resolves it `deny` |
+| `Stop` / `SessionEnd` (a turn cannot end with a prompt up) | resolves anything still open `cleared` |
+
+The journal is read as a **second source** of the same session's stream: the
+tailer polls it alongside the transcript, under one shared ordinal space, so
+`permission_request` and `permission_resolved` arrive interleaved with the rest
+of the conversation and a consumer resumes both with one `afterSeq`. The
+consequence for a resync (§4.2) is that a rotation of *either* file restarts
+both, since the ordinals are shared.
+
+The `options` a Claude `permission_request` offers are the ones amux can actually
+deliver to the prompt (`allow`, `deny`) — not every choice the TUI draws. A
+consumer must not be shown a button the daemon has no keystroke for.
+
+A runtime that records its own prompts needs none of this: Codex's rollout
+carries them, so its `permission_request` events come from the transcript reader
+and there is no journal (§4.4).
+
+Degradation is honest at every step. A session whose hooks are not installed
+simply has no journal, so it publishes no `permission_request` — and, since the
+`permission` verb refuses an id it cannot find open, a consumer learns that by
+being refused rather than by having a keystroke land somewhere unintended. An
+upstream rename of one of the resolving hooks leaves a request open until the
+turn boundary clears it; a contract test pins the event names so the drift is
+visible.
 
 ## 5. Compatibility
 

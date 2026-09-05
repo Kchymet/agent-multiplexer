@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"amux/internal/agent"
@@ -10,6 +11,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
+	"amux/internal/runtimeevents"
 	"amux/internal/store"
 )
 
@@ -71,6 +73,11 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 			h.Activity(sess) != engine.ActivityBusy {
 			return fmt.Errorf("agent %s has no turn running to stop", a.ID)
 		}
+		if verb == core.SteerPermission {
+			if err := checkPermissionRequest(h, sess, a.Fields[core.SteerRequestID]); err != nil {
+				return err
+			}
+		}
 		writeAll(in, payload)
 		return nil
 	}
@@ -110,6 +117,54 @@ func (d *Daemon) steerTarget(agentID string) (agent.Harness, store.Session, erro
 		return nil, store.Session{}, fmt.Errorf("no such session %s", agentID)
 	}
 	return agent.HarnessFor(s.Agent), s, nil
+}
+
+// checkPermissionRequest refuses a `permission` verb whose request_id does not
+// name a prompt the runtime currently has open. Without it the decision races:
+// if the turn moves on between the orchestrator seeing a prompt and its verb
+// arriving, the allow/deny keystroke lands on a *different* prompt and is applied
+// to an action nobody approved. Refusing is the only safe answer — the caller can
+// re-read the runtime-events stream and decide again.
+//
+// The open set is replayed through the same readers that publish the stream
+// (runtimeevents), so the daemon can only ever accept an id a consumer was
+// actually told about.
+//
+// An empty request_id is still accepted, as it was when the field shipped
+// advisory (AGE-160): a caller that quotes nothing is explicitly asking for
+// "whatever prompt is open", and this verb is its only way to say so.
+func checkPermissionRequest(h agent.Harness, s store.Session, requestID string) error {
+	if requestID == "" {
+		return nil
+	}
+	open := runtimeevents.OpenPermissions(permissionRecord(h, s))
+	ids := make([]string, 0, len(open))
+	for _, p := range open {
+		if p.RequestID == requestID {
+			return nil
+		}
+		ids = append(ids, p.RequestID)
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("permission: no pending request %q (the runtime has no prompt open)", requestID)
+	}
+	return fmt.Errorf("permission: no pending request %q (the runtime is waiting on %s)",
+		requestID, strings.Join(ids, ", "))
+}
+
+// permissionRecord names the on-disk records a session's permission prompts can
+// be read from: the runtime transcript, plus amux's own journal for a runtime
+// that resolves its prompts without recording them. It mirrors what the provider
+// hands the runtime-events reader (daemon.runtimeRecord), so both see one story.
+func permissionRecord(h agent.Harness, s store.Session) runtimeevents.Record {
+	path, ok := h.RuntimeTranscriptPath(s)
+	if !ok {
+		return runtimeevents.Record{}
+	}
+	perms, _ := h.RuntimePermissionPath(s)
+	return runtimeevents.Record{
+		Runtime: agent.Canonical(s.Agent), Path: path, Permissions: perms,
+	}
 }
 
 // lookupSession resolves a session id the way the rail and the pane resolver do:

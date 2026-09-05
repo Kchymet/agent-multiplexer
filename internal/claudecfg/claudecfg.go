@@ -492,15 +492,93 @@ func HookEventNames() []string {
 }
 
 // HookPayload is the JSON Claude Code pipes to amux's hook commands on stdin — the
-// load-bearing hook wire shape. amux reads the session id and cwd for status, and
-// the transcript path and event name for capture. Defined here (the Claude surface)
-// and consumed by the `amux agent hook`/`capture` handlers, so a contract test can
-// pin the field names against a recorded payload.
+// load-bearing hook wire shape. amux reads the session id and cwd for status, the
+// transcript path and event name for capture, and the tool name and input for the
+// permission journal. Defined here (the Claude surface) and consumed by the
+// `amux agent hook`/`capture`/`permission` handlers, so a contract test can pin
+// the field names against a recorded payload.
 type HookPayload struct {
 	SessionID      string `json:"session_id"`
 	Cwd            string `json:"cwd"`
 	TranscriptPath string `json:"transcript_path"`
 	HookEventName  string `json:"hook_event_name"`
+	// ToolName/ToolInput are carried by the tool events (PermissionRequest,
+	// PostToolUse, PermissionDenied) and empty on the rest.
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input"`
+}
+
+// permissionHooks maps each Claude Code hook event that moves a permission
+// prompt's lifecycle to the `amux agent permission` verb it runs. Claude answers
+// its prompts in the TUI and writes none of them to the transcript, so this table
+// is the entire producer of the permission_request / permission_resolved events
+// the runtime-events stream carries and the `permission` steering verb correlates
+// against (docs/remote-provider-sessions.md §4.5):
+//
+//   - PermissionRequest fires just before the prompt is drawn — the request opens.
+//   - PostToolUse means the tool actually ran, so the prompt gating it was allowed.
+//   - PermissionDenied is Claude's own event for a refused call.
+//   - Stop / SessionEnd prove no prompt can still be up (the turn ended), so
+//     anything still open is retired without claiming to know the answer.
+//
+// A Claude release that renames or drops one of these degrades honestly: the
+// request is opened but never resolved by that path, and the turn boundary still
+// clears it. The contract test pins the set so the drift is visible.
+var permissionHooks = []struct{ event, verb string }{
+	{"PermissionRequest", PermissionVerbRequest},
+	{"PostToolUse", core.PermissionAllow},
+	{"PermissionDenied", core.PermissionDeny},
+	{"Stop", PermissionVerbClear},
+	{"SessionEnd", PermissionVerbClear},
+}
+
+// The `amux agent permission` verbs that are not decisions: opening a request,
+// and retiring whatever is still open.
+const (
+	PermissionVerbRequest = "request"
+	PermissionVerbClear   = "clear"
+)
+
+// PermissionHookVerb returns the `amux agent permission` verb a Claude hook event
+// runs, and whether amux listens on that event for permissions at all. Exposed so
+// a contract test pins the mapping and catches an upstream rename.
+func PermissionHookVerb(event string) (verb string, ok bool) {
+	for _, ph := range permissionHooks {
+		if ph.event == event {
+			return ph.verb, true
+		}
+	}
+	return "", false
+}
+
+// PermissionHookEvents returns, in order, the Claude hook events that drive the
+// permission journal.
+func PermissionHookEvents() []string {
+	out := make([]string, len(permissionHooks))
+	for i, ph := range permissionHooks {
+		out[i] = ph.event
+	}
+	return out
+}
+
+// SummarizeToolInput reduces a tool's input to the one line a permission card
+// shows as the action being asked for — the command, the path, the query. It
+// falls back to the raw JSON rather than an empty string, so a tool amux does not
+// know still says something about what it wants to do.
+func SummarizeToolInput(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(input, &generic); err != nil {
+		return ""
+	}
+	for _, k := range []string{"command", "file_path", "path", "pattern", "query", "url", "prompt", "description"} {
+		if v, ok := generic[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return string(input)
 }
 
 // captureEvents are the hook events on which amux snapshots the conversation
@@ -553,15 +631,19 @@ func writeHooks(settingsPath, amuxPath string) error {
 		hooks = map[string]any{}
 		root["hooks"] = hooks
 	}
-	// Build the amux commands per event: the status hook (activity state) and, on
-	// the capture events, the transcript-snapshot hook. Some events (Stop,
-	// SessionEnd, UserPromptSubmit) get both.
+	// Build the amux commands per event: the status hook (activity state), the
+	// transcript-snapshot hook on the capture events, and the permission-journal
+	// hook on the events that move a prompt's lifecycle. Some events (Stop,
+	// SessionEnd, UserPromptSubmit, PostToolUse) get more than one.
 	amuxCmds := map[string][]string{}
 	for _, he := range hookEvents {
 		amuxCmds[he.event] = append(amuxCmds[he.event], amuxPath+" agent hook "+he.state)
 	}
 	for _, ev := range captureEvents {
 		amuxCmds[ev] = append(amuxCmds[ev], amuxPath+" agent capture")
+	}
+	for _, ph := range permissionHooks {
+		amuxCmds[ph.event] = append(amuxCmds[ph.event], amuxPath+" agent permission "+ph.verb)
 	}
 	events := make([]string, 0, len(amuxCmds))
 	for ev := range amuxCmds {

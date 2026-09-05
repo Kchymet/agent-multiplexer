@@ -113,6 +113,10 @@ const (
 //     runtime-events stream as a TypePermissionRequest event (§4).
 //     FieldRequestID echoes that event's request_id, FieldDecision is
 //     DecisionAllow or DecisionDeny, and FieldReason is optional free text.
+//     FieldRequestID is correlated, not decorative: a daemon MUST refuse an id
+//     that does not name the request the runtime currently has open (the prompt
+//     it named has since been answered, so the keystroke would land on a
+//     different one) rather than answering blind.
 //
 // Steering is inherently asynchronous: a successful result means the daemon
 // delivered the verb to the runtime (ResultAccepted), not that the agent has
@@ -171,6 +175,12 @@ const (
 	DecisionAllow = "allow"
 	DecisionDeny  = "deny"
 )
+
+// DecisionCleared is the resolution a TypePermissionResolved event carries when
+// the producer knows the prompt closed but not which way it went (the turn
+// ended, the session exited). It is NOT a decision a caller may send on a
+// VerbPermission action — the daemon accepts only DecisionAllow / DecisionDeny.
+const DecisionCleared = "cleared"
 
 // session-result dispositions (HarnessMsg.Result), distinguishing a verb whose
 // effect is already observable from one that was merely delivered. Absent (the

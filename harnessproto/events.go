@@ -52,9 +52,14 @@ const (
 	TypePlan              = "plan"               // out: {items:[{text,status}]}
 	TypeUsage             = "usage"              // out: {used, size, cost?}
 	TypePermissionRequest = "permission_request" // out: {request_id, tool, action, options}
-	TypeNotice            = "notice"             // out: {level, text}
-	TypeTurnEnd           = "turn_end"           // out: {stop_reason}
-	TypeRaw               = "raw"                // out: {runtime, native_type, body}  (never dropped)
+	// TypePermissionResolved closes a permission_request: the prompt it named is
+	// gone, so its request_id must never be answered again. `decision` is
+	// DecisionAllow, DecisionDeny, or DecisionCleared when the producer knows the
+	// prompt closed but not which way it went.
+	TypePermissionResolved = "permission_resolved" // out: {request_id, decision}
+	TypeNotice             = "notice"              // out: {level, text}
+	TypeTurnEnd            = "turn_end"            // out: {stop_reason}
+	TypeRaw                = "raw"                 // out: {runtime, native_type, body}  (never dropped)
 )
 
 // Event directions (RuntimeEvent.Direction).

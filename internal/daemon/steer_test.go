@@ -218,6 +218,91 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 	}
 }
 
+// TestSteerPermissionCorrelatesRequestID is the guarantee the request_id exists
+// for: a `permission` verb naming a prompt the runtime no longer has open is
+// refused, rather than having its allow/deny keystroke land on whatever prompt
+// happens to be up now. Without it a decision races the turn — the orchestrator
+// approves a `git push` and the keystroke approves the `rm -rf` that replaced it.
+func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	in := eng.running("a1")
+
+	allow := func(requestID string) error {
+		return d.steer(context.Background(), core.Action{
+			Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
+				core.SteerVerb:      core.SteerPermission,
+				core.SteerDecision:  core.SteerAllow,
+				core.SteerRequestID: requestID,
+			},
+		})
+	}
+	openRequest := func(id, tool string) {
+		t.Helper()
+		if err := core.AppendPermission(convID("a1"), core.PermissionRecord{
+			RequestID: id, Tool: tool, Action: tool + " something",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Nothing open at all: refused, and nothing reaches the pane.
+	err := allow("perm-gone")
+	if err == nil || !strings.Contains(err.Error(), `no pending request "perm-gone"`) {
+		t.Fatalf("stale id with no prompt open: err = %v, want a no-pending-request refusal", err)
+	}
+	if !strings.Contains(err.Error(), "no prompt open") {
+		t.Errorf("refusal %q should say the runtime has no prompt open", err)
+	}
+	if got := in.written(); got != "" {
+		t.Fatalf("a refused verb wrote %q to the pane", got)
+	}
+
+	// A different prompt is open: still refused, and the error names what is.
+	openRequest("perm-1", "Bash")
+	err = allow("perm-gone")
+	if err == nil || !strings.Contains(err.Error(), "waiting on perm-1") {
+		t.Fatalf("stale id while perm-1 is open: err = %v, want it to name perm-1", err)
+	}
+	if got := in.written(); got != "" {
+		t.Fatalf("a refused verb wrote %q to the pane", got)
+	}
+
+	// The id that is actually open is delivered.
+	if err := allow("perm-1"); err != nil {
+		t.Fatalf("matching id: %v", err)
+	}
+	if got := in.written(); got != "\r" {
+		t.Fatalf("pane received %q, want the allow keystroke", got)
+	}
+
+	// Once the prompt is answered its id is retired: the same verb replayed (a
+	// duplicate delivery, a slow orchestrator) must not answer the next prompt.
+	if _, ok := core.ResolvePermission(convID("a1"), "Bash", core.PermissionAllow); !ok {
+		t.Fatal("resolving the open request should have succeeded")
+	}
+	openRequest("perm-2", "Write")
+	if err := allow("perm-1"); err == nil || !strings.Contains(err.Error(), "waiting on perm-2") {
+		t.Fatalf("replayed id after resolution: err = %v, want a refusal naming perm-2", err)
+	}
+	if got := in.written(); got != "\r" {
+		t.Fatalf("pane received %q: the replay must not have been delivered", got)
+	}
+
+	// An empty request_id keeps the older, uncorrelated behavior: answer whatever
+	// is open. It is the explicit way to say "whatever it is asking".
+	if err := d.steer(context.Background(), core.Action{
+		Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
+			core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny,
+		},
+	}); err != nil {
+		t.Fatalf("empty request_id: %v", err)
+	}
+	if got := in.written(); got != "\r\x1b" {
+		t.Fatalf("pane received %q, want the allow then the uncorrelated deny", got)
+	}
+}
+
 // TestSteerRefusals proves every refusal is explicit and typed rather than a
 // silent no-op — a steering verb that can't be delivered must say so, because
 // the caller is a remote orchestrator with no view of this machine.
