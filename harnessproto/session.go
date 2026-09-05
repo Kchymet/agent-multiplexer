@@ -44,6 +44,27 @@ type Session struct {
 	// conservative fallback only in the former case. Additive (AGE-178): omitted
 	// entirely by a provider that predates it.
 	Caps *SessionCaps `json:"caps,omitempty"`
+
+	// ControlMode names HOW this session's steering verbs are delivered and where
+	// its runtime events come from — orthogonal to Caps, which says only *which*
+	// verbs work (docs/remote-provider-sessions.md §2.2). It is a value from the
+	// ControlMode* set (AGE-181):
+	//
+	//   - ControlModePTY ("pty"): steering is keystroke injection into the agent's
+	//     PTY and events are tailed from the runtime's on-disk transcript. This is
+	//     the original path, so an empty ControlMode MEANS pty — a consumer must
+	//     read "" as ControlModePTY, and a provider predating the field omits it.
+	//   - ControlModeStructured ("structured"): steering is a JSON-RPC round-trip to
+	//     an amux-supervised runtime App Server, and events are its live structured
+	//     stream. Correlated permissions and in-turn interject are native here, not
+	//     inferred, and the session has a durable server/thread identity a native
+	//     CLI can also attach to.
+	//
+	// A consumer never sends verbs differently by mode — the session-action route
+	// is identical — but it MAY surface a mode-specific affordance (e.g. "attach
+	// native CLI") and MAY trust a structured row's correlated permissions without
+	// the transcript-heuristic caveat. Additive/omitempty: unset ⇒ pty.
+	ControlMode string `json:"controlMode,omitempty"`
 }
 
 // SessionCaps is the per-session control surface a provider advertises for a
@@ -64,6 +85,21 @@ type SessionCaps struct {
 	Cancel     bool `json:"cancel"`     // interrupt the in-flight turn without killing the session
 	Permission bool `json:"permission"` // answer a correlated permission_request (see the type doc)
 }
+
+// Control modes for Session.ControlMode (AGE-181): how a published session's
+// steering verbs are delivered and where its runtime events are sourced. The set
+// is small and closed; a consumer that meets an unknown value treats the session
+// as pty (the conservative, keystroke-driven baseline).
+const (
+	// ControlModePTY is the original path: steer by keystroke into the agent's PTY,
+	// events tailed from the on-disk transcript. An EMPTY ControlMode means this —
+	// a provider predating the field omits it and a consumer must read "" as pty.
+	ControlModePTY = "pty"
+	// ControlModeStructured routes steering as JSON-RPC to an amux-supervised
+	// runtime App Server and sources events from its live structured stream, with a
+	// durable server/thread identity a native CLI can also attach to.
+	ControlModeStructured = "structured"
+)
 
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one. This

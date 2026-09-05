@@ -159,6 +159,42 @@ Both fields are additive and `omitempty`: absent `result` means `applied`, so a
 daemon predating them reads correctly and a bare `{"ok":true}` is unchanged on
 the wire. Neither is set on a failure — `error` carries that.
 
+### 2.2 Control mode
+
+`caps` says *which* steering verbs work; a third additive field, `controlMode`,
+says *how* they are delivered and where the session's runtime events come from.
+It is orthogonal to `caps` and does not change how a consumer sends a verb — the
+`session-action` route is identical in every mode — but it lets a consumer trust
+a structured session's correlated permissions without the transcript-heuristic
+caveat, and surface a mode-specific affordance (e.g. "attach a native CLI").
+
+```json
+{"id":"a2","kind":"codex","runtime":"codex","controlMode":"structured",
+ "caps":{"prompt":true,"interject":true,"cancel":true,"permission":true}}
+```
+
+| `controlMode` | delivery | event source |
+| --- | --- | --- |
+| `pty` (or absent) | keystrokes typed into the agent's PTY (§3.1) | the runtime's on-disk transcript, tailed (§4) |
+| `structured` | JSON-RPC to an amux-supervised runtime App Server | that server's live structured stream (§4), normalized to the same event vocabulary |
+
+**Backward compatibility.** `controlMode` is additive (`omitempty`). A provider
+that predates it omits it, and a consumer MUST read an empty value as `pty` — the
+original keystroke path — so nothing regresses. An unknown future value is also
+treated as `pty` (the conservative baseline).
+
+**Structured mode (AGE-181, Codex App Server).** amux runs a background
+`codex app-server` per session on a per-session Unix socket inside the session's
+private sandbox scope, and is itself the JSON-RPC client. The server's lifetime is
+owned by amux — never a UI pane — so closing the native Codex TUI or a remote
+client never stops the server or an in-flight turn. The server/thread identity is
+persisted by amux (socket path + thread id) so a daemon restart reconnects and
+resumes the same thread; it is deliberately **not** published on the wire, because
+the socket lives in the private scope. A remote consumer reaches the session
+through this contract exactly as for a pty session; a native CLI attaches locally.
+The design, lifetime, native-CLI attach syntax, and validation posture are in
+`docs/codex-app-server-supervision.md`.
+
 ## 3. Messages: orchestrator → daemon
 
 ```json
