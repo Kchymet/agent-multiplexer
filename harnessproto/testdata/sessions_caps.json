@@ -1,0 +1,1 @@
+{"type":"sessions","sessions":[{"id":"c1","title":"codex fix","source":"workspace","kind":"codex","mode":"task","section":"repos","state":"running","status":"running · api","cwd":"/home/u/api","startedAt":1720000001,"canAttach":true,"canKill":true,"canResume":false,"runtime":"codex","caps":{"prompt":true,"interject":true,"cancel":true,"permission":true}}]}

@@ -1,6 +1,7 @@
 package source
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -62,6 +63,138 @@ func TestUntrackedRows(t *testing.T) {
 	r := rows[0]
 	if r.Title != "proj" || r.State != core.StateRunning || r.Mode != "external" || r.CanAttach {
 		t.Fatalf("unexpected untracked row: %+v", r)
+	}
+	// An untracked (detached) row preserves its runtime identity but is NOT
+	// steerable: internal/daemon/steer.go can't resolve an external id, so its caps
+	// are an explicit non-nil ALL-FALSE block — the daemon would refuse every verb,
+	// so the row must not advertise one (AGE-178 root review).
+	if r.Runtime != "claude" {
+		t.Errorf("untracked row Runtime = %q, want claude (identity preserved)", r.Runtime)
+	}
+	if r.Caps == nil {
+		t.Fatalf("untracked row Caps must be non-nil (explicit all-false), got nil")
+	}
+	if *r.Caps != (core.SessionCaps{}) {
+		t.Errorf("untracked row Caps = %+v, want every verb false (steer.go rejects external ids)", r.Caps)
+	}
+}
+
+// TestWithCaps checks the AGE-178 per-session stamp gated on the effective control
+// path: a steerable row gets the honest per-kind caps (and keeps its own runtime
+// identity — a Codex row is never mislabeled Claude); a non-steerable row keeps
+// its identity but gets an explicit non-nil all-false block.
+func TestWithCaps(t *testing.T) {
+	allOn := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+
+	claude := withCaps(core.Session{ID: "a", Kind: "claude"}, true)
+	if claude.Runtime != "claude" {
+		t.Errorf("claude row Runtime = %q, want claude", claude.Runtime)
+	}
+	if claude.Caps == nil || *claude.Caps != allOn {
+		t.Errorf("steerable claude row Caps = %+v, want all-on", claude.Caps)
+	}
+
+	codex := withCaps(core.Session{ID: "b", Kind: "codex"}, true)
+	if codex.Runtime != "codex" {
+		t.Errorf("codex row Runtime = %q, want codex (identity must not collapse to claude)", codex.Runtime)
+	}
+	if codex.Caps == nil || !codex.Caps.Permission {
+		t.Errorf("steerable codex row Caps = %+v, want Permission on (rollout correlates)", codex.Caps)
+	}
+
+	// A non-steerable row of a fully-capable kind still reports every verb false —
+	// identity preserved, controls off, because the daemon can't drive it.
+	off := withCaps(core.Session{ID: "d", Kind: "claude"}, false)
+	if off.Runtime != "claude" {
+		t.Errorf("non-steerable row Runtime = %q, want claude (identity preserved)", off.Runtime)
+	}
+	if off.Caps == nil || *off.Caps != (core.SessionCaps{}) {
+		t.Errorf("non-steerable row Caps = %+v, want all-false non-nil", off.Caps)
+	}
+
+	// An empty Kind resolves to the default runtime, not the empty string.
+	def := withCaps(core.Session{ID: "c"}, true)
+	if def.Runtime == "" {
+		t.Error("empty-Kind row should resolve Runtime to the default, got empty")
+	}
+}
+
+// TestPollCapsByControlPath is the AGE-178 root-review regression: over a real
+// Poll, a tracked/active agent advertises its full control caps, while an
+// archived row and a detached/external row advertise an explicit non-nil
+// all-false block (identity preserved) — because internal/daemon/steer.go can
+// drive only the former. This is the end-to-end guard that the fix reflects the
+// effective control path, not the runtime name.
+func TestPollCapsByControlPath(t *testing.T) {
+	// Isolate both stores from the developer's real data: the DB (XDG_DATA_HOME)
+	// and the hook-state journal (HOME).
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("HOME", t.TempDir())
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// A work-scoped root with two children: one active, one archived.
+	root := store.Session{ID: "wg1", RootID: "", Name: "payments", Mode: store.ModeTask, Scope: store.ScopeWork, Created: 1}
+	active := store.Session{ID: "ag-active", RootID: "wg1", Agent: "claude", Mode: store.ModeTask, Created: 2}
+	archived := store.Session{ID: "ag-archived", RootID: "wg1", Agent: "claude", Mode: store.ModeTask, Created: 3}
+	for _, s := range []store.Session{root, active, archived} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatalf("put %s: %v", s.ID, err)
+		}
+	}
+	if err := db.SetArchivedFlag("ag-archived", true, 100); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	db.Close()
+
+	// A detached/external Claude session (hook activity, no store row).
+	if err := core.WriteHookState("ext-1", core.StateRunning, "/home/u/elsewhere"); err != nil {
+		t.Fatalf("hook state: %v", err)
+	}
+
+	rows, err := NewWorkspace().Poll(context.Background())
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	byID := map[string]core.Session{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	allOn := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+	off := core.SessionCaps{}
+
+	// Tracked, active agent — full caps.
+	if a, ok := byID["ag-active"]; !ok {
+		t.Fatal("active agent row missing from Poll")
+	} else if a.Caps == nil || *a.Caps != allOn {
+		t.Errorf("active agent Caps = %+v, want all-on", a.Caps)
+	}
+
+	// Archived agent — identity preserved, every verb off.
+	if a, ok := byID["ag-archived"]; !ok {
+		t.Fatal("archived agent row missing from Poll")
+	} else {
+		if a.Runtime != "claude" {
+			t.Errorf("archived agent Runtime = %q, want claude", a.Runtime)
+		}
+		if a.Caps == nil || *a.Caps != off {
+			t.Errorf("archived agent Caps = %+v, want all-false non-nil", a.Caps)
+		}
+	}
+
+	// Detached/external session — identity preserved, every verb off.
+	if a, ok := byID["ext-1"]; !ok {
+		t.Fatal("external session row missing from Poll")
+	} else {
+		if a.Runtime != "claude" {
+			t.Errorf("external session Runtime = %q, want claude", a.Runtime)
+		}
+		if a.Caps == nil || *a.Caps != off {
+			t.Errorf("external session Caps = %+v, want all-false non-nil", a.Caps)
+		}
 	}
 }
 

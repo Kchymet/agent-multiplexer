@@ -78,6 +78,16 @@ var goldenFrames = []struct {
 			CanAttach: true, CanKill: true,
 		}},
 	}},
+	{"sessions_caps", HarnessMsg{
+		Type: HSessions,
+		Sessions: []Session{{
+			ID: "c1", Title: "codex fix", Source: "workspace", Kind: RuntimeCodex, Mode: "task",
+			Section: SectionRepos, State: StateRunning, Status: "running · api",
+			Cwd: "/home/u/api", StartedAt: 1720000001, CanAttach: true, CanKill: true,
+			Runtime: RuntimeCodex,
+			Caps:    &SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true},
+		}},
+	}},
 	{"runtime_events", HarnessMsg{
 		Type: HRuntimeEvents, SessionID: "s1", Runtime: RuntimeClaude, Seq: 7,
 		Events: []RuntimeEvent{
