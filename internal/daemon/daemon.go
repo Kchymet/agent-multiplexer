@@ -462,25 +462,36 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	}
 	var firstErr error
 	for _, aid := range ids {
-		var err error
-		if sess, ok, _ := lookupSession(aid); ok && d.structuredControl(sess) {
-			_, err = d.ensureSupervisor(aid)
-		} else {
-			var dir string
-			var env, argv []string
-			dir, env, argv, err = d.resolve(aid, panespec.TabAgent)
-			if err == nil {
-				_, err = d.engine.Ensure(ctx, engine.Spec{
-					Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-					Dir: dir, Env: env, Argv: argv,
-				})
-			}
-		}
+		err := d.startAgent(ctx, aid)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// startAgent starts one session's process — the TabAgent pane, or the App Server
+// supervisor for a structured-control Codex session — without attaching a UI.
+// Ensure is idempotent, so a running session is a no-op. This is the single
+// session-start primitive: startEngineFor fans a root out to its members through
+// it, and a `prompt` to a stopped session starts exactly that session with it.
+func (d *Daemon) startAgent(ctx context.Context, aid string) error {
+	if d.engine == nil {
+		return fmt.Errorf("engine unavailable")
+	}
+	if sess, ok, _ := lookupSession(aid); ok && d.structuredControl(sess) {
+		_, err := d.ensureSupervisor(aid)
+		return err
+	}
+	dir, env, argv, err := d.resolve(aid, panespec.TabAgent)
+	if err != nil {
+		return err
+	}
+	_, err = d.engine.Ensure(ctx, engine.Spec{
+		Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
+		Dir: dir, Env: env, Argv: argv,
+	})
+	return err
 }
 
 // ensureSupervisor starts (or returns) the App Server supervisor for a structured

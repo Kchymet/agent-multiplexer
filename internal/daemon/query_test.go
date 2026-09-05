@@ -44,7 +44,7 @@ func TestQueryRuntimePathResolvesViaHarness(t *testing.T) {
 	}
 	const cid = "11111111-1111-4111-8111-111111111111"
 	dir := t.TempDir()
-	if err := db.PutSession(store.Session{ID: "a1", Agent: "claude", ClaudeID: cid, Dir: dir}); err != nil {
+	if err := db.PutSession(store.Session{ID: "a1", RootID: "wg1", Agent: "claude", ClaudeID: cid, Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

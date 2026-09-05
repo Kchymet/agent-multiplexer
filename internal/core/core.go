@@ -185,10 +185,11 @@ type ActionDescriptor struct {
 }
 
 // actionDescriptors is the per-verb dispatch table. A verb absent here (refresh,
-// move, rename, rm-repo, agent-set-repos, add-repo) has the zero descriptor: no
-// engine stop, creates nothing.
+// move, rename, agent-set-repos, add-repo) has the zero descriptor: no engine
+// stop, creates nothing.
 var actionDescriptors = map[string]ActionDescriptor{
 	ActionDelete:          {StopsEngine: true},
+	ActionRmRepo:          {StopsEngine: true}, // the repo's home session (id = repo name) goes with it
 	ActionKill:            {StopsEngine: true},
 	ActionArchive:         {StopsEngine: true},
 	ActionSetArchived:     {StopsEngine: true},
@@ -324,6 +325,13 @@ type WorkgroupRow struct {
 	Scope   string     `json:"scope"`   // work | repo
 	Display string     `json:"display"` // name if set, else id
 	Agents  []AgentRow `json:"agents"`
+	// Role is the root's own session role: coordinator for a work-scoped
+	// workgroup, repo for a repo's home session, "" for a hidden single-member
+	// repo root (which hosts no session). Dir is that session's sandbox (the
+	// container dir), "" when the root hosts none or predates default sessions.
+	Role  string `json:"role,omitempty"`
+	Agent string `json:"agent,omitempty"` // the root session's runtime kind
+	Dir   string `json:"dir,omitempty"`
 }
 
 // AgentRow is one agent (child session) under a WorkgroupRow.

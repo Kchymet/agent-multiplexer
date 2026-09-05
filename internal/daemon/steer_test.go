@@ -16,6 +16,7 @@ import (
 	"amux/internal/panespec"
 	"amux/internal/runtimeevents"
 	"amux/internal/store"
+	"amux/internal/wsops"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -708,5 +709,55 @@ func TestSteerStartupDelayPrecedesLaterPrompt(t *testing.T) {
 	in := inst.(*fakeInstance)
 	if len(in.sequences) != 2 || in.sequences[0][0].DelayBefore != d.steerSettle || in.sequences[1][0].DelayBefore != 0 {
 		t.Fatalf("startup ordering: %#v", in.sequences)
+	}
+}
+
+// TestSteerPromptStartsTheCoordinator pins what a prompt to a workgroup id means:
+// it reaches the workgroup's coordinator (the root's own session), starting that
+// one session when stopped — not the members, which is what `start <root>`
+// means. A prompt to a repo name likewise reaches the repo's home session.
+func TestSteerPromptStartsTheCoordinator(t *testing.T) {
+	d, eng := steerDaemon(t)
+	d.agentsUnder = wsops.AgentIDsUnder // the real root → members resolution
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []store.Session{
+		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Created: 1},
+		{ID: "a1", RootID: "wg1", Agent: "claude", Dir: t.TempDir(), ClaudeID: convID("a1"), Created: 2},
+	} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.PutRepo(store.Repo{Name: "api", Source: "octo/api", GitDir: filepath.Join(t.TempDir(), "api.git")}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	for _, id := range []string{"wg1", "api"} {
+		if err := d.steer(context.Background(), core.Action{
+			Action: core.ActionSteer, ID: id,
+			Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "status?"},
+		}); err != nil {
+			t.Fatalf("steer %s: %v", id, err)
+		}
+		waitStarted(t, d)
+		if _, ok := eng.Lookup(engine.Key{AgentID: id, Tab: panespec.TabAgent}); !ok {
+			t.Fatalf("no %s instance after a prompt to it", id)
+		}
+	}
+	for _, k := range eng.ensuredKeys() {
+		if k.AgentID == "a1" {
+			t.Fatal("a prompt to the workgroup started a member instead of the coordinator")
+		}
+	}
+	// `start <root>` is still the members.
+	if err := d.startEngineFor(context.Background(), "wg1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := eng.Lookup(engine.Key{AgentID: "a1", Tab: panespec.TabAgent}); !ok {
+		t.Fatal("start <root> did not start its member")
 	}
 }

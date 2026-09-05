@@ -8,6 +8,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/keymap"
+	"amux/internal/store"
 )
 
 var (
@@ -274,9 +275,16 @@ func (m *model) renderRow(i int, s core.Session) string {
 
 // rowStatus is the state-colored status sub-line shown beneath an agent row
 // (green working, purple awaiting you, blue ready, dim idle), or "" for rows
-// with nothing to detail — repos, containers, and rows without a status.
+// with nothing to detail — bare containers, idle container sessions, and rows
+// without a status.
 func (m *model) rowStatus(s core.Session, indent string) string {
-	if s.Kind == "repo" || s.IsRoot || s.Status == "" {
+	if s.Status == "" {
+		return ""
+	}
+	// A bare container (no session of its own) has nothing to detail; a container
+	// that is a default session (a coordinator, a repo home) shows its status only
+	// while it is live, so an idle rail isn't a column of "idle" under every header.
+	if (s.Kind == "repo" || s.IsRoot) && (s.Role == "" || s.State == core.StateIdle) {
 		return ""
 	}
 	sub := s.Status
@@ -450,11 +458,13 @@ func sectionLabel(section string) string {
 // glyph mirrors the rail: console ⚙, repo ⛁, root ▸, external ◇, otherwise the
 // activity state — running/waiting ●, ready ◐, idle ○. task and interactive
 // agents share the activity glyphs; the mode is surfaced in listings, not here.
+// A container row keeps its structural glyph even when its own session (the
+// coordinator, the repo home) is live — its status sub-line carries the state.
 func glyph(s core.Session) string {
 	switch {
 	case s.Kind == "repo":
 		return "⛁"
-	case s.Mode == "console":
+	case s.Mode == store.ModeConsole:
 		return "⚙"
 	case s.IsRoot:
 		return "▸"

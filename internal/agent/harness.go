@@ -340,10 +340,15 @@ func agentDirs(kind string) []string {
 	if err != nil {
 		return out
 	}
+	seen := map[string]bool{}
 	for _, s := range all {
-		if s.IsRoot() || s.Dir == "" || Canonical(s.Agent) != kind {
+		// A root with a dir is a container session (a workgroup's coordinator or
+		// a repo's home) with a private home of its own; a bare root has none. A
+		// legacy import records one dir on both the root and its agent — list it once.
+		if s.Dir == "" || Canonical(s.Agent) != kind || seen[s.Dir] {
 			continue
 		}
+		seen[s.Dir] = true
 		out = append(out, s.Dir)
 	}
 	return out

@@ -81,7 +81,7 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Shared types** | `internal/core` | The normalized `Session`, the `Action` wire type, well-known paths/sockets. |
 | **Agent resolver** | `internal/agent` | Maps an agent kind (`claude`, `codex`) to an absolute argv (+ per-harness flags/config paths); robustly finds `claude`/`codex` even when version managers keep them off PATH. |
 | **Embedded terminal** | `internal/vterm` | A VT emulator over a PTY (and, for the client path, over a byte stream) so a full-screen agent renders inside a pane. |
-| **Control console** | `internal/console` | The built-in `⚙` agent scoped to amux config/CLI. |
+| **Control console** | `internal/console` | The built-in `⚙` agent with machine-wide context (one of the default sessions; the others are resolved in `wsops`). |
 | **Git / GitHub** | `internal/git`, `internal/gh` | Bare clones + worktrees; `gh`-driven repo discovery/clone. |
 | **Claude config** | `internal/claudecfg` | A Claude Code home (`Home`): transcript lookups, pre-trust, status hooks, model defaults — and what of it is config vs state vs auth (`Template`). |
 | **Config templates** | `internal/cfghome` | Seeds each agent's private copy of your harness config, scans it for the agent's edits, and promotes/resets them (`amux sandbox`). See `docs/sandbox-config.md`. |
@@ -141,7 +141,18 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   or `amux wg unarchive <id>`).
 - **Mode** — an agent runs as a **task** (short) or **loop** (long/autonomous),
   shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.
-- **Control console** (`⚙`) — a built-in agent scoped to amux config + CLI only.
+- **Default sessions** — every container on the rail hosts one long-lived agent
+  scoped to it, so a workgroup or a repo can be opened, prompted, and read like
+  an agent (`Enter` on its row; `amux do steer <id>` with the workgroup id or the
+  repo name). Each gets its own sandbox, private harness config, pinned
+  conversation, and a guide regenerated from the live inventory at every launch:
+  - **Control console** (`⚙`, id `console`) — machine-wide context: every
+    workgroup, agent, and repo, their transcripts, and the CLI to operate them.
+  - **Workgroup coordinator** (`▸`, id = the workgroup id) — supervises that
+    workgroup's agents from the container dir that holds their sandboxes.
+  - **Repo home** (`⛁`, id = the repo name) — the long-lived context for a repo's
+    one-off agents; dispatches and steers them, reads the bare clone.
+  See `docs/default-sessions.md`.
 
 ### Identity: which id is which
 
@@ -216,7 +227,7 @@ Navigation is **Alt/Option-only** (no prefix):
 | key | action |
 |-----|--------|
 | `↑/↓`, `k/j` | move the rail cursor |
-| `Enter` | open the selected agent (or a repo's first/new agent) |
+| `Enter` | open the selected session — an agent, or a workgroup's coordinator / a repo's home |
 | `Alt+l` / `Alt+h` | focus the agent pane / the rail |
 | `Alt+a` | toggle focus between rail and agent |
 | `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |

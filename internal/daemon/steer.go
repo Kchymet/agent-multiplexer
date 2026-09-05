@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"amux/internal/agent"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/runtimeevents"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // This file serves core.ActionSteer: driving the agent *inside* a running
@@ -229,7 +229,10 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 		}()
 	}
 	journal(id, core.JournalInfo, "starting agent")
-	if err := d.startEngineFor(ctx, id); err != nil {
+	// Start exactly the steered session: a prompt to a workgroup id is a prompt to
+	// its coordinator, not a "start every member" (which is what `start <root>`
+	// means — see startEngineFor).
+	if err := d.startAgent(ctx, id); err != nil {
 		d.steerStartFailed(id, fmt.Errorf("start agent %s: %w", id, err))
 		return
 	}
@@ -326,22 +329,15 @@ func permissionRecord(h agent.Harness, s store.Session) runtimeevents.Record {
 	}
 }
 
-// lookupSession resolves a session id the way the rail and the pane resolver do:
-// the built-in console is a synthetic session (never a store row), so it answers
-// from the console package; everything else is read from the store. Every
-// daemon-side id → session lookup goes through here so a verb that reaches the
-// daemon by id — steering from a remote rail included — sees the same inventory
-// the daemon publishes.
+// lookupSession resolves a session id the way the rail and the pane resolver do
+// (wsops.ResolveSession): the built-in console is a synthetic session (never a
+// store row); a workgroup id resolves to its coordinator and a repo name to its
+// home session — the built-in default sessions — and everything else is read
+// from the store. Every daemon-side id → session lookup goes through here so a
+// verb that reaches the daemon by id — steering from a remote rail included —
+// sees the same inventory the daemon publishes.
 func lookupSession(id string) (store.Session, bool, error) {
-	if id == console.ID {
-		return console.Session(), true, nil
-	}
-	db, err := store.Open()
-	if err != nil {
-		return store.Session{}, false, fmt.Errorf("open store: %w", err)
-	}
-	defer db.Close()
-	return db.GetSession(id)
+	return wsops.ResolveSession(id)
 }
 
 // steerPayload turns a verb plus its fields into the byte writes that serve it,
