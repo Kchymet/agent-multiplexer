@@ -68,7 +68,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
-	}))
+	}, true)) // console resolves in steer.go — steerable
 
 	roots, err := db.Roots()
 	if err != nil {
@@ -144,7 +144,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
-			}))
+			}, true)) // tracked, active workgroup agent — steerable
 		}
 	}
 
@@ -166,7 +166,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 					Cwd:       s.Dir,
 					CanAttach: true,
 					CanKill:   true,
-				}))
+				}, true)) // tracked, active repo agent — steerable
 			}
 		}
 	}
@@ -181,7 +181,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			Kind: agent.Canonical(s.Agent), Mode: s.Mode,
 			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
-		}))
+		}, false)) // archived / observe-only — not steerable
 	}
 
 	// Claude sessions amux didn't launch (visible because the status hooks are
@@ -192,13 +192,29 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 
 // withCaps stamps an agent row with its runtime identity and the control
 // capabilities amux can serve for it (AGE-178), so a remote orchestrator gates
-// its affordances on the actual runtime rather than assuming Claude. It is
-// applied only to rows that are a real agent — never the repo/workgroup container
-// rows, whose Kind is a structural label ("repo", "") and carries no runtime. The
-// caps are a static per-kind property (agent.CapsFor), so this is a cheap stamp.
-func withCaps(s core.Session) core.Session {
+// its affordances on the row's *effective control path* rather than on the
+// runtime name alone. It is applied only to rows that are a real agent — never
+// the repo/workgroup container rows, whose Kind is a structural label ("repo",
+// "") and carries no runtime.
+//
+// Runtime identity is always preserved. Caps, however, are gated on `steerable`:
+// the daemon's steer handler (internal/daemon/steer.go) resolves only the console
+// and live *tracked* store sessions, so a detached/external row (untrackedRows —
+// no store row, rejected "no such session") and an archived/observe-only row can
+// NOT be driven even though their runtime's TUI keys exist. Those rows carry an
+// explicit non-nil ALL-FALSE SessionCaps: a consumer disables their controls
+// rather than offering an affordance the daemon would refuse. A steerable row
+// carries the honest per-kind caps (agent.CapsFor).
+//
+// These are the daemon-owned TUI control-path caps. Any broker-owned app-server
+// adapter capability (e.g. a CODEX_DRIVER app-server path) is a separate surface
+// the consumer layers on; it must not overwrite this daemon control path.
+func withCaps(s core.Session, steerable bool) core.Session {
 	s.Runtime = agent.Canonical(s.Kind)
-	caps := agent.CapsFor(s.Kind)
+	var caps core.SessionCaps
+	if steerable {
+		caps = agent.CapsFor(s.Kind)
+	}
 	s.Caps = &caps
 	return s
 }
@@ -247,7 +263,7 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 			Status:    stateLabel(rec.State) + " · untracked",
 			Cwd:       rec.Cwd,
 			StartedAt: rec.Updated,
-		}))
+		}, false)) // external/detached — steer.go can't resolve it, so not steerable
 	}
 	return out
 }
