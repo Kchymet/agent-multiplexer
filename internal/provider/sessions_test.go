@@ -317,6 +317,12 @@ func TestSteeringVerbsRouteToSteer(t *testing.T) {
 			if res.Result != harnessproto.ResultAccepted {
 				t.Fatalf("result disposition = %q, want %q", res.Result, harnessproto.ResultAccepted)
 			}
+			// The boolean rides with the disposition, never instead of it: a `prompt`
+			// to a stopped agent is answered before the runtime has even started, so a
+			// consumer has to be able to see "not finished" without matching strings.
+			if !res.Accepted {
+				t.Fatalf("result = %+v, want the accepted flag set alongside the disposition", res)
+			}
 			got, called := rec.last()
 			if !called {
 				t.Fatal("steering verb never reached ApplyAction")
@@ -354,6 +360,9 @@ func TestLifecycleVerbsReportApplied(t *testing.T) {
 	res := readResult(t, oc)
 	if !res.OK || res.Result != harnessproto.ResultApplied {
 		t.Fatalf("result = %+v, want ok with %q", res, harnessproto.ResultApplied)
+	}
+	if res.Accepted {
+		t.Fatalf("result = %+v, want the accepted flag clear on a finished verb", res)
 	}
 }
 

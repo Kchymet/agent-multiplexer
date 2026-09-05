@@ -303,9 +303,13 @@ func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
 // runtimeRecordViaDaemon resolves a published session id to its on-disk
 // transcript and the runtime that wrote it, through the daemon (which resolves it
 // via the session's harness), so the provider tails transcripts without opening
-// the store. ok=false — a missing daemon, an error, or an empty path (no
-// supported record) — means the provider advertises runtime-events but honestly
-// emits nothing for that session.
+// the store. ok=false — a missing daemon, an error, or a record naming no file at
+// all — means the provider advertises runtime-events but honestly emits nothing
+// for that session.
+//
+// A record with no transcript but an amux journal is still worth tailing: that is
+// a session which has not run yet, and an accepted `prompt` cold-starting it
+// reports its progress into that journal before any transcript exists.
 func runtimeRecordViaDaemon() runtimeevents.Resolver {
 	return func(sessionID string) (runtimeevents.Record, bool) {
 		if sessionID == "" {
@@ -317,11 +321,12 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 		}
 		defer c.Close()
 		rec, err := c.RuntimeRecord(sessionID)
-		if err != nil || rec.Path == "" {
+		if err != nil || (rec.Path == "" && rec.Journal == "") {
 			return runtimeevents.Record{}, false
 		}
 		return runtimeevents.Record{
-			Runtime: rec.Runtime, Path: rec.Path, Permissions: rec.Permissions,
+			Runtime: rec.Runtime, Path: rec.Path,
+			Permissions: rec.Permissions, Journal: rec.Journal,
 		}, true
 	}
 }

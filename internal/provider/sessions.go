@@ -109,12 +109,14 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 		res.Error = err.Error()
 	} else {
 		res.OK, res.NewID = true, newID
-		// A steering verb is delivered to a running agent, not completed: say
-		// "accepted" so the orchestrator waits for runtime-events or the next
-		// inventory snapshot instead of assuming the turn is done (spec §2).
+		// A steering verb is taken on, not completed: say "accepted" so the
+		// orchestrator waits for runtime-events or the next inventory snapshot
+		// instead of assuming the turn is done (spec §2). A `prompt` to a stopped
+		// agent is answered before the runtime has even started, so this is the
+		// only thing the reply can honestly claim.
 		res.Result = harnessproto.ResultApplied
 		if harnessproto.SteeringVerbs[m.Action] {
-			res.Result = harnessproto.ResultAccepted
+			res.Result, res.Accepted = harnessproto.ResultAccepted, true
 		}
 	}
 	if werr := s.hc.WriteHarness(res); werr != nil {

@@ -66,6 +66,13 @@ type Daemon struct {
 	// tests set it small so they don't sleep.
 	steerSettle time.Duration
 
+	// steerStarted, when non-nil, receives the session id of each deferred start
+	// behind an accepted `prompt` once it has finished, successfully or not.
+	// Production leaves it nil — the session journal is the report — and tests set
+	// a buffered channel to join work that deliberately outlives the verb that
+	// asked for it. The send never blocks the start.
+	steerStarted chan string
+
 	// firstPoll is closed after the first pollOnce completes, so restore waits
 	// until sessions/specs are resolvable.
 	firstPoll     chan struct{}

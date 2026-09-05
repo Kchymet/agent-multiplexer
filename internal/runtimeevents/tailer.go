@@ -225,6 +225,12 @@ type Record struct {
 	// events the `permission` verb correlates against. Empty when the runtime
 	// records its prompts itself (Codex) or none is written.
 	Permissions string
+	// Journal is amux's own session journal (core/journal.go), read as a further
+	// source: what amux did to the session, which the runtime never records —
+	// today the progress of a cold start an accepted `prompt` kicked off. Empty
+	// when the caller resolves no journal. Like Permissions it is additive: a
+	// consumer older than the field simply sees one source fewer.
+	Journal string
 }
 
 // Resolver resolves a published session id to its runtime record. ok=false ⇒ the
@@ -271,6 +277,12 @@ func sourcesFor(rec Record) ([]sourceSpec, bool) {
 			path: rec.Permissions, permission: true, newMapper: permissionMapper(rec.Runtime),
 		})
 	}
+	// amux's own journal is polled last so adding it leaves the ordinals of the
+	// records that predate it untouched: a replay still numbers the transcript
+	// first, then the permission journal, and only then these.
+	if rec.Journal != "" {
+		out = append(out, sourceSpec{path: rec.Journal, newMapper: journalMapper(rec.Runtime)})
+	}
 	return out, true
 }
 
@@ -279,10 +291,15 @@ func sourcesFor(rec Record) ([]sourceSpec, bool) {
 // reader for that record's runtime and tails it from afterSeq, streaming mapped
 // event batches until ctx is cancelled. ok=false when the session has no
 // resolvable record, or names a runtime this package has no reader for.
+//
+// A record with no transcript is still streamable when it names amux's own
+// journal: that is exactly the stopped agent an accepted `prompt` is starting,
+// and its "starting agent" notice has to reach the caller before the transcript
+// the events will later come from exists.
 func Stream(resolve Resolver, poll time.Duration) func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
 	return func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
 		rec, ok := resolve(sessionID)
-		if !ok || rec.Path == "" {
+		if !ok || (rec.Path == "" && rec.Journal == "") {
 			return nil, false
 		}
 		specs, ok := sourcesFor(rec)

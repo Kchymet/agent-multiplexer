@@ -104,7 +104,8 @@ const (
 //
 //   - VerbPrompt delivers a new user turn to the session's agent. FieldText
 //     carries the text. If the agent is not running the daemon MAY start it with
-//     the text as its initial prompt.
+//     the text as its initial prompt, and MAY answer before that start finishes
+//     (ResultAccepted) rather than holding the caller for a runtime cold start.
 //   - VerbInterject delivers text to the agent while a turn is already running
 //     (a steer, not a new turn). FieldText carries the text.
 //   - VerbStop interrupts the current turn without killing the session. It
@@ -119,8 +120,9 @@ const (
 //     different one) rather than answering blind.
 //
 // Steering is inherently asynchronous: a successful result means the daemon
-// delivered the verb to the runtime (ResultAccepted), not that the agent has
-// finished acting on it. See HarnessMsg.Result.
+// accepted the verb (ResultAccepted), not that the agent has finished acting on
+// it — and, for a VerbPrompt that has to start a stopped agent, not even that it
+// has been delivered yet. See HarnessMsg.Result and HarnessMsg.Accepted.
 const (
 	VerbPrompt     = "prompt"
 	VerbInterject  = "interject"
@@ -190,9 +192,17 @@ const (
 	// ResultApplied: the verb ran to completion and its effect is in the next
 	// sessions snapshot. The lifecycle verbs are all applied.
 	ResultApplied = "applied"
-	// ResultAccepted: the verb was delivered to the running agent and the effect
-	// is asynchronous — watch the runtime-events stream (or the session's state)
-	// for it. The steering verbs are accepted, not applied.
+	// ResultAccepted: the verb was validated and taken on, and its effect is
+	// asynchronous — watch the runtime-events stream (or the session's state) for
+	// it. The steering verbs are accepted, not applied.
+	//
+	// Accepted deliberately promises less than "delivered": a `prompt` to a
+	// stopped agent is acknowledged as soon as it is known to be deliverable, and
+	// the daemon then cold-starts the runtime (seconds) and types the text in
+	// afterwards, reporting its progress as `notice` events on the session. A
+	// daemon that answered only once the agent was up would blow past the
+	// client-side dispatch timeouts sitting in front of this relay for the most
+	// ordinary case there is — prompting an idle session.
 	ResultAccepted = "accepted"
 )
 
@@ -301,10 +311,19 @@ type HarnessMsg struct {
 	OK       bool      `json:"ok,omitempty"`       // session-result: verb succeeded
 	NewID    string    `json:"newId,omitempty"`    // session-result: id of any session the verb created
 	// Result is the disposition of a successful verb: ResultApplied (effect is
-	// complete) or ResultAccepted (delivered to the running agent; the effect is
+	// complete) or ResultAccepted (validated and taken on; the effect is
 	// asynchronous). Empty means applied, so a daemon predating the field is read
 	// correctly. Unset on a failure — Error carries that.
 	Result string `json:"result,omitempty"` // session-result: applied | accepted
+	// Accepted is the boolean form of Result == ResultAccepted, set on exactly the
+	// same results. It is not decoration: an accepted verb may now be answered
+	// *before* it is delivered — a `prompt` to a stopped agent acks and then cold-
+	// starts the runtime — so "did this succeed?" and "is the work finished?" have
+	// become genuinely different questions, and a consumer that must not block on
+	// the second one should be able to ask the first without string-matching a
+	// disposition vocabulary that may grow. Additive and omitempty: a consumer
+	// predating it reads Result exactly as before.
+	Accepted bool `json:"accepted,omitempty"` // session-result: work continues after this reply
 
 	// v2 "runtime-events" feature (runtime-events frame). SessionID names the
 	// published session; Seq is per-session monotonic (the ordinal of the last
