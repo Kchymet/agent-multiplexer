@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"amux/internal/agent"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -100,22 +101,34 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 
 // runtimeRecord resolves a session id to its on-disk runtime transcript and the
 // runtime (agent kind) that wrote it. A tracked session answers through its own
-// harness; an untracked/console id is itself a conversation id with no store row,
-// so it resolves from the default harness's transcript listing. A session with no
-// supported record yields a zero-Path record rather than an error.
+// harness, as does the console (published like an agent but synthetic rather than
+// a store row); an untracked id is itself a conversation id, so it resolves from
+// the default harness's transcript listing. An id that is none of those yields a
+// zero record rather than an error.
+//
+// A tracked session always names amux's own journal, transcript or not: the
+// journal is keyed by the amux session id, and a session that has never run —
+// exactly the one an accepted `prompt` is cold-starting — has nothing else to
+// stream. So a zero Path no longer means "nothing to read here".
 func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 	s, ok, err := db.GetSession(id)
 	if err != nil {
 		return core.RuntimeRecord{}, err
 	}
+	if !ok && id == console.ID {
+		// The console is published in the same inventory as every agent but is a
+		// synthetic session rather than a store row, so resolve it the way every
+		// other daemon-side lookup does (lookupSession) instead of answering
+		// "nothing to read" for a row the daemon itself advertises.
+		s, ok = console.Session(), true
+	}
 	if ok {
 		h := agent.HarnessFor(s.Agent)
 		path, _ := h.RuntimeTranscriptPath(s)
-		if path == "" {
-			return core.RuntimeRecord{}, nil
-		}
 		perms, _ := h.RuntimePermissionPath(s)
-		return core.RuntimeRecord{Runtime: s.Agent, Path: path, Permissions: perms}, nil
+		return core.RuntimeRecord{
+			Runtime: s.Agent, Path: path, Permissions: perms, Journal: core.JournalPath(id),
+		}, nil
 	}
 	kind := agent.DefaultKind()
 	h := agent.HarnessFor(kind)
@@ -125,7 +138,9 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 			// hooks key their journal on — so the harness can resolve one from a
 			// session carrying nothing else.
 			perms, _ := h.RuntimePermissionPath(store.Session{ClaudeID: id})
-			return core.RuntimeRecord{Runtime: kind, Path: info.Path, Permissions: perms}, nil
+			return core.RuntimeRecord{
+				Runtime: kind, Path: info.Path, Permissions: perms, Journal: core.JournalPath(id),
+			}, nil
 		}
 	}
 	return core.RuntimeRecord{}, nil

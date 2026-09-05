@@ -1,6 +1,7 @@
 package harnessproto
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"reflect"
@@ -99,7 +100,7 @@ func TestSteeringActionRoundTrip(t *testing.T) {
 
 	// And the results that answer them, including the disposition field.
 	results := []HarnessMsg{
-		{Type: HSessionResult, ReqID: "r1", OK: true, Result: ResultAccepted},
+		{Type: HSessionResult, ReqID: "r1", OK: true, Result: ResultAccepted, Accepted: true},
 		{Type: HSessionResult, ReqID: "r3", Error: ErrUnsupportedVerb},
 		{Type: HSessionResult, ReqID: "r4", Error: "no pending permission request perm-9"},
 	}
@@ -133,5 +134,37 @@ func TestSessionResultDispositionCompat(t *testing.T) {
 	}
 	if old.Result != "" {
 		t.Fatalf("pre-field result = %q, want empty (read as %q)", old.Result, ResultApplied)
+	}
+	if old.Accepted {
+		t.Fatal("pre-field result decoded as accepted; absent must mean applied")
+	}
+}
+
+// TestSessionResultAcceptedFlag pins the boolean form of the disposition. It
+// exists because an accepted verb may be answered before it has been delivered —
+// a `prompt` to a stopped agent acks and then cold-starts the runtime — so a
+// consumer needs to tell "succeeded" from "finished" without matching on a
+// vocabulary that may grow. It rides alongside `result`, never instead of it,
+// and stays omitempty so an applied verb is byte-identical to before.
+func TestSessionResultAcceptedFlag(t *testing.T) {
+	b, err := json.Marshal(HarnessMsg{
+		Type: HSessionResult, ReqID: "r8", OK: true, Result: ResultAccepted, Accepted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"session-result","reqId":"r8","ok":true,"result":"accepted","accepted":true}`
+	if string(b) != want {
+		t.Fatalf("accepted result = %s, want %s", b, want)
+	}
+
+	applied, err := json.Marshal(HarnessMsg{
+		Type: HSessionResult, ReqID: "r9", OK: true, Result: ResultApplied,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(applied, []byte("accepted")) {
+		t.Fatalf("applied result = %s, want no accepted field", applied)
 	}
 }

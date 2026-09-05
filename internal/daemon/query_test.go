@@ -101,7 +101,7 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 	if err := db.PutSession(store.Session{ID: "c1", Agent: "codex", ClaudeID: cid, Dir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	// A codex session with no rollout on disk: tracked, but no readable record.
+	// A codex session with no rollout on disk: tracked, but never run.
 	if err := db.PutSession(store.Session{ID: "c2", Agent: "codex", Dir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
@@ -128,11 +128,18 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 		t.Errorf("RuntimePath(c1) = %q, want %q", path, roll)
 	}
 
-	empty, err := c.RuntimeRecord("c2")
+	// A session that has never run has no transcript — but it does have amux's own
+	// journal, which is where an accepted `prompt` writes the progress of the cold
+	// start it kicked off. Answering "nothing to read" for it would leave the one
+	// case that most needs the events with no stream at all.
+	unrun, err := c.RuntimeRecord("c2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if empty.Path != "" || empty.Runtime != "" {
-		t.Errorf("RuntimeRecord(c2) = %+v, want a zero record", empty)
+	if unrun.Path != "" {
+		t.Errorf("RuntimeRecord(c2).Path = %q, want empty: there is no rollout", unrun.Path)
+	}
+	if unrun.Runtime != "codex" || unrun.Journal != core.JournalPath("c2") {
+		t.Errorf("RuntimeRecord(c2) = %+v, want codex with the session's journal", unrun)
 	}
 }
