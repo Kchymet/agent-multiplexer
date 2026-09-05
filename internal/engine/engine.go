@@ -14,7 +14,10 @@
 // transport behind Subscribe/Input differs.
 package engine
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Key identifies one running instance. An agent exposes several panes (the agent
 // process, an editor, a shell), so the key is the agent id plus its tab. It is
@@ -73,6 +76,13 @@ type Sink struct {
 	Exit   func(errMsg string)
 }
 
+// InputStep is one write in an atomic input sequence. DelayBefore is measured
+// after the previous write completes, not after the sequence is queued.
+type InputStep struct {
+	Bytes       []byte
+	DelayBefore time.Duration
+}
+
 // Instance is one running agent pane. Several subscribers may attach at once;
 // each gets a replay of recent output followed by the live stream, so a UI that
 // reconnects repaints immediately. Detaching a subscriber never stops the
@@ -86,6 +96,10 @@ type Instance interface {
 	Subscribe(Sink) (cancel func())
 	// Input forwards bytes (e.g. keystrokes) to the instance.
 	Input([]byte)
+	// InputSequence queues all steps together without blocking. Other input cannot
+	// interleave between steps. Delays and writes stop when the instance exits.
+	// Like Input, a full queue may drop the sequence; this is not a runtime receipt.
+	InputSequence([]InputStep)
 	// Resize sets the instance's terminal size.
 	Resize(cols, rows int)
 	// Alive reports whether the underlying process/workload is still running.

@@ -3,6 +3,8 @@ package local
 import (
 	"bytes"
 	"context"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -405,4 +407,104 @@ func TestLocalEngineInput(t *testing.T) {
 	inst.Subscribe(c.sink())
 	inst.Input([]byte("ping\n"))
 	waitFor(t, c, "ping", 3*time.Second)
+}
+
+// A real PTY reader observes the separation after a write, and later input may
+// not sneak into the gap. This catches implementations that sleep in the caller
+// or queue text and submit as unrelated entries.
+func TestInputSequenceSeparatesWritesAndPreservesOrder(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+	inst, err := eng.Ensure(context.Background(), engine.Spec{Key: engine.Key{AgentID: "sequence"}, Argv: []string{"sh", "-c", "stty raw -echo; printf READY; cat"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	waitFor(t, c, "READY", 3*time.Second)
+	start := time.Now()
+	inst.InputSequence([]engine.InputStep{{Bytes: []byte("PASTE")}, {Bytes: []byte("SUBMIT"), DelayBefore: 200 * time.Millisecond}})
+	inst.Input([]byte("LATER"))
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatal("queuing input blocked for the submit delay")
+	}
+	waitFor(t, c, "PASTE", 3*time.Second)
+	waitFor(t, c, "PASTESUBMITLATER", 3*time.Second)
+	if time.Since(start) < 200*time.Millisecond {
+		t.Fatal("submit reached PTY without the requested delay")
+	}
+}
+
+func TestInputSequenceCopiesAndDropsAtomically(t *testing.T) {
+	in := &instance{inCh: make(chan []engine.InputStep, 1), inDone: make(chan struct{})}
+	text := []byte("paste")
+	steps := []engine.InputStep{{Bytes: text}, {Bytes: []byte("submit"), DelayBefore: time.Second}}
+	in.InputSequence(steps)
+	text[0] = 'X'
+	steps[1].DelayBefore = 0
+	in.InputSequence([]engine.InputStep{{Bytes: []byte("dropped")}, {Bytes: []byte("also dropped")}})
+	got := <-in.inCh
+	if len(got) != 2 || string(got[0].Bytes) != "paste" || string(got[1].Bytes) != "submit" || got[1].DelayBefore != time.Second {
+		t.Fatalf("queued sequence changed: %#v", got)
+	}
+	if len(in.inCh) != 0 {
+		t.Fatal("full queue retained part of the next sequence")
+	}
+	close(in.inDone)
+	in.InputSequence([]engine.InputStep{{Bytes: []byte("dead")}})
+	if len(in.inCh) != 0 {
+		t.Fatal("dead instance accepted input")
+	}
+}
+
+func TestInputSequenceDelayCancelsOnExit(t *testing.T) {
+	in := &instance{inCh: make(chan []engine.InputStep, 1), inDone: make(chan struct{})}
+	in.InputSequence([]engine.InputStep{{Bytes: []byte("never"), DelayBefore: time.Hour}})
+	done := make(chan struct{})
+	go func() { in.inputLoop(); close(done) }()
+	deadline := time.Now().Add(time.Second)
+	for len(in.inCh) > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(in.inCh) > 0 {
+		t.Fatal("writer did not start the delayed sequence")
+	}
+	close(in.inDone)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("input writer survived instance shutdown")
+	}
+}
+
+// Delay must begin after a blocked write drains. A timer in the daemon would
+// expire while that write was blocked and let paste plus submit arrive together.
+func TestInputSequenceDelayStartsAfterBlockedWrite(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	in := &instance{ptmx: writer, inCh: make(chan []engine.InputStep, 1), inDone: make(chan struct{})}
+	defer close(in.inDone)
+	text := bytes.Repeat([]byte("p"), 1<<20)
+	in.InputSequence([]engine.InputStep{{Bytes: text}, {Bytes: []byte("!"), DelayBefore: 100 * time.Millisecond}})
+	go in.inputLoop()
+	// This pipe cannot hold the first write, and nobody is reading it yet.
+	time.Sleep(200 * time.Millisecond)
+	if _, err := io.CopyN(io.Discard, reader, int64(len(text))); err != nil {
+		t.Fatal(err)
+	}
+	drained := time.Now()
+	if err := reader.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var submit [1]byte
+	if _, err := io.ReadFull(reader, submit[:]); err != nil {
+		t.Fatal(err)
+	}
+	if submit[0] != '!' || time.Since(drained) < 80*time.Millisecond {
+		t.Fatal("submit delay elapsed while paste write was blocked")
+	}
 }

@@ -1,6 +1,9 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Keys is how one agent's interactive TUI is driven from outside: the byte
 // sequences that submit a line of input, interrupt a turn, and answer the
@@ -23,6 +26,10 @@ type Keys struct {
 	// `interject` — the runtime itself decides whether text arriving mid-turn
 	// starts a turn, queues, or steers.
 	Submit []byte
+	// PasteStart and PasteEnd frame programmatic text as a paste, preserving newlines.
+	PasteStart, PasteEnd []byte
+	// SubmitDelay lets the TUI finish handling a paste before Enter arrives.
+	SubmitDelay time.Duration
 	// Interrupt stops the current turn without killing the process (`stop`).
 	Interrupt []byte
 	// Allow answers a pending permission prompt affirmatively.
@@ -86,6 +93,8 @@ func claudeKeys() Keys {
 	return Keys{
 		Submit: keyEnter, Interrupt: keyCtrlC, Allow: keyEnter, Deny: keyEsc,
 		InterruptOnlyWhileBusy: true,
+		PasteStart:             []byte("\x1b[200~"), PasteEnd: []byte("\x1b[201~"),
+		SubmitDelay: 100 * time.Millisecond,
 	}
 }
 

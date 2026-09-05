@@ -59,10 +59,11 @@ func markBusy(t *testing.T, convID string) {
 
 // fakeInstance records what was written to it instead of owning a PTY.
 type fakeInstance struct {
-	key   engine.Key
-	mu    sync.Mutex
-	wrote [][]byte
-	dead  bool
+	key       engine.Key
+	mu        sync.Mutex
+	wrote     [][]byte
+	sequences [][]engine.InputStep
+	dead      bool
 }
 
 func (f *fakeInstance) Key() engine.Key              { return f.key }
@@ -73,6 +74,17 @@ func (f *fakeInstance) Input(p []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.wrote = append(f.wrote, append([]byte(nil), p...))
+}
+
+func (f *fakeInstance) InputSequence(steps []engine.InputStep) {
+	f.mu.Lock()
+	f.sequences = append(f.sequences, steps)
+	f.mu.Unlock()
+	if f.Alive() {
+		for _, step := range steps {
+			f.Input(step.Bytes)
+		}
+	}
 }
 
 // written joins the recorded writes, which is what the runtime's PTY would see.
@@ -174,10 +186,10 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 	}{
 		{"claude prompt", "claude",
 			map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "run the tests"},
-			"run the tests\r"},
+			"\x1b[200~run the tests\x1b[201~\r"},
 		{"claude interject", "claude",
 			map[string]string{core.SteerVerb: core.SteerInterject, core.SteerText: "skip the flaky one"},
-			"skip the flaky one\r"},
+			"\x1b[200~skip the flaky one\x1b[201~\r"},
 		{"claude stop", "claude",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x03"},
 		{"claude allow", "claude",
@@ -435,11 +447,11 @@ func TestSteerPromptStartsStoppedAgent(t *testing.T) {
 	in := inst.(*fakeInstance)
 	// The write is deferred until the TUI has had time to paint, so poll for it.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && in.written() != "go\r" {
+	for time.Now().Before(deadline) && in.written() != "\x1b[200~go\x1b[201~\r" {
 		time.Sleep(2 * time.Millisecond)
 	}
-	if got := in.written(); got != "go\r" {
-		t.Fatalf("pane received %q, want %q", got, "go\r")
+	if got := in.written(); got != "\x1b[200~go\x1b[201~\r" {
+		t.Fatalf("pane received %q, want %q", got, "\x1b[200~go\x1b[201~\r")
 	}
 }
 
@@ -459,8 +471,8 @@ func TestSteerReachesTheConsole(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("steer: %v", err)
 		}
-		if got := in.written(); got != "add a repo\r" {
-			t.Fatalf("pane received %q, want %q", got, "add a repo\r")
+		if got := in.written(); got != "\x1b[200~add a repo\x1b[201~\r" {
+			t.Fatalf("pane received %q, want %q", got, "\x1b[200~add a repo\x1b[201~\r")
 		}
 	})
 	t.Run("stopped", func(t *testing.T) {
@@ -478,11 +490,11 @@ func TestSteerReachesTheConsole(t *testing.T) {
 		}
 		in := inst.(*fakeInstance)
 		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) && in.written() != "go\r" {
+		for time.Now().Before(deadline) && in.written() != "\x1b[200~go\x1b[201~\r" {
 			time.Sleep(2 * time.Millisecond)
 		}
-		if got := in.written(); got != "go\r" {
-			t.Fatalf("pane received %q, want %q", got, "go\r")
+		if got := in.written(); got != "\x1b[200~go\x1b[201~\r" {
+			t.Fatalf("pane received %q, want %q", got, "\x1b[200~go\x1b[201~\r")
 		}
 	})
 }
@@ -509,7 +521,7 @@ func TestSteerPromptReportsStartFailure(t *testing.T) {
 func TestSteerDoesNotSurviveADeadPane(t *testing.T) {
 	d, _ := steerDaemon(t)
 	in := &fakeInstance{dead: true}
-	d.deferInput(in, [][]byte{[]byte("go"), []byte("\r")})
+	d.deferInput(in, []engine.InputStep{{Bytes: []byte("go")}, {Bytes: []byte("\r")}})
 	time.Sleep(20 * time.Millisecond)
 	if got := in.written(); got != "" {
 		t.Fatalf("wrote %q to a dead pane", got)
@@ -531,5 +543,48 @@ func TestKeystrokeMappingLivesInTheRegistry(t *testing.T) {
 			t.Errorf("steer.go contains %s — keystrokes and agent kinds belong in internal/agent, "+
 				"behind Harness.Keys, not in the daemon", banned)
 		}
+	}
+}
+
+func TestSteerPasteSequence(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	in := eng.running("a1")
+	for _, text := range []string{"first\nsecond", "next"} {
+		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(in.sequences) != 2 {
+		t.Fatalf("got %d sequences, want two atomic prompts", len(in.sequences))
+	}
+	for i, text := range []string{"first\nsecond", "next"} {
+		steps := in.sequences[i]
+		if len(steps) != 2 || string(steps[0].Bytes) != "\x1b[200~"+text+"\x1b[201~" || string(steps[1].Bytes) != "\r" || steps[1].DelayBefore != 100*time.Millisecond {
+			t.Fatalf("sequence %d: %#v", i, steps)
+		}
+	}
+	for _, text := range []string{"x\x1b[201~y", "x\x1b[200~y"} {
+		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}); err == nil {
+			t.Fatal("accepted embedded paste delimiter")
+		}
+	}
+	if len(in.sequences) != 2 {
+		t.Fatal("refused prompt sent input")
+	}
+}
+
+func TestSteerStartupDelayPrecedesLaterPrompt(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	for _, text := range []string{"first", "second"} {
+		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inst, _ := eng.Lookup(engine.Key{AgentID: "a1", Tab: panespec.TabAgent})
+	in := inst.(*fakeInstance)
+	if len(in.sequences) != 2 || in.sequences[0][0].DelayBefore != d.steerSettle || in.sequences[1][0].DelayBefore != 0 {
+		t.Fatalf("startup ordering: %#v", in.sequences)
 	}
 }
