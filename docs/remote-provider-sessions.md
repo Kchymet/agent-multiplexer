@@ -497,6 +497,21 @@ re-poll that surfaces a change); if no daemon is reachable, verbs fail cleanly.
 Feature strings passed via `--feature`/`AMUX_PROVIDER_FEATURES` are orthogonal
 and still advertised alongside `sessions`.
 
+Every relayed verb leaves one line on `amux provide`'s stderr, before the reply
+is written, so an operator can answer "did it reach this machine, and how long
+did it take here?" without instrumenting anything:
+
+```
+amux provide: session-action prompt id=a1 accepted in 4ms
+amux provide: session-action add-agent id=wg1 applied in 21ms (created a7)
+amux provide: session-action spawn id=a1 failed in 0s: unsupported
+```
+
+The line names the session, the verb, the disposition (§2) and the elapsed
+handling time. It deliberately carries no `fields` — that is where the prompt
+text and a permission decision's reason live, and the user's words do not belong
+in a log just because they passed through here.
+
 With `--runtime-events` (which requires `--publish-sessions`), the daemon also
 advertises `runtime-events` and, for each published session the orchestrator
 subscribes to, tails that session's on-disk runtime record and streams §4 events
