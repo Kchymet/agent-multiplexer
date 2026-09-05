@@ -55,7 +55,7 @@ func TestUntrackedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows := untrackedRows(map[string]bool{"tracked-1": true}, map[string]bool{"/home/u/mine": true})
+	rows := (&Workspace{}).untrackedRows(map[string]bool{"tracked-1": true}, map[string]bool{"/home/u/mine": true})
 
 	if len(rows) != 1 {
 		t.Fatalf("got %d untracked rows, want 1: %+v", len(rows), rows)
@@ -86,7 +86,7 @@ func TestUntrackedRows(t *testing.T) {
 func TestWithCaps(t *testing.T) {
 	allOn := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
 
-	claude := withCaps(core.Session{ID: "a", Kind: "claude"}, true)
+	claude := (&Workspace{}).withCaps(core.Session{ID: "a", Kind: "claude"}, true)
 	if claude.Runtime != "claude" {
 		t.Errorf("claude row Runtime = %q, want claude", claude.Runtime)
 	}
@@ -94,7 +94,7 @@ func TestWithCaps(t *testing.T) {
 		t.Errorf("steerable claude row Caps = %+v, want all-on", claude.Caps)
 	}
 
-	codex := withCaps(core.Session{ID: "b", Kind: "codex"}, true)
+	codex := (&Workspace{}).withCaps(core.Session{ID: "b", Kind: "codex"}, true)
 	if codex.Runtime != "codex" {
 		t.Errorf("codex row Runtime = %q, want codex (identity must not collapse to claude)", codex.Runtime)
 	}
@@ -104,7 +104,7 @@ func TestWithCaps(t *testing.T) {
 
 	// A non-steerable row of a fully-capable kind still reports every verb false —
 	// identity preserved, controls off, because the daemon can't drive it.
-	off := withCaps(core.Session{ID: "d", Kind: "claude"}, false)
+	off := (&Workspace{}).withCaps(core.Session{ID: "d", Kind: "claude"}, false)
 	if off.Runtime != "claude" {
 		t.Errorf("non-steerable row Runtime = %q, want claude (identity preserved)", off.Runtime)
 	}
@@ -113,9 +113,36 @@ func TestWithCaps(t *testing.T) {
 	}
 
 	// An empty Kind resolves to the default runtime, not the empty string.
-	def := withCaps(core.Session{ID: "c"}, true)
+	def := (&Workspace{}).withCaps(core.Session{ID: "c"}, true)
 	if def.Runtime == "" {
 		t.Error("empty-Kind row should resolve Runtime to the default, got empty")
+	}
+}
+
+// TestControlModeStamp checks the AGE-181 §2.2 stamp: a steerable row with a live
+// supervisor is "structured"; without the probe (or when not steerable) it stays
+// pty (the empty default), so the field never regresses an existing consumer.
+func TestControlModeStamp(t *testing.T) {
+	w := &Workspace{controlMode: func(id string) string {
+		if id == "sup" {
+			return "structured"
+		}
+		return ""
+	}}
+
+	if got := w.withCaps(core.Session{ID: "sup", Kind: "codex"}, true).ControlMode; got != "structured" {
+		t.Errorf("supervised steerable row ControlMode = %q, want structured", got)
+	}
+	if got := w.withCaps(core.Session{ID: "plain", Kind: "codex"}, true).ControlMode; got != "" {
+		t.Errorf("unsupervised row ControlMode = %q, want empty (pty)", got)
+	}
+	// A non-steerable row is never structured even if a stale probe said so.
+	if got := w.withCaps(core.Session{ID: "sup", Kind: "codex"}, false).ControlMode; got != "" {
+		t.Errorf("non-steerable row ControlMode = %q, want empty", got)
+	}
+	// No probe installed ⇒ every row is pty (no regression).
+	if got := (&Workspace{}).withCaps(core.Session{ID: "sup", Kind: "codex"}, true).ControlMode; got != "" {
+		t.Errorf("no-probe row ControlMode = %q, want empty", got)
 	}
 }
 

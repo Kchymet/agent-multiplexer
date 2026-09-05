@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -56,6 +57,13 @@ type Config struct {
 	ApprovalPolicy string        // "" ⇒ defaultApprovalPolicy
 	Sandbox        string        // "" ⇒ defaultSandbox
 	DialTimeout    time.Duration // "" ⇒ defaultDialTimeout
+	// EventLogPath, when set, is the per-session NDJSON record the supervisor
+	// appends every emitted runtime event to (one marshaled harnessproto.RuntimeEvent
+	// per line). It is the durable transport the out-of-process provider tails via
+	// the existing runtime-events reader (docs/codex-app-server-supervision.md): the
+	// provider cannot reach the daemon's in-memory hub, so the file is the bridge.
+	// Empty ⇒ events go only to the in-memory hub (tests, in-daemon consumers).
+	EventLogPath string
 }
 
 // Supervisor is a running (or resumable) App Server plus the amux-side client.
@@ -73,6 +81,10 @@ type Supervisor struct {
 	curTurn   string
 	turnDone  chan *turnResult
 	runCancel context.CancelFunc
+
+	logMu  sync.Mutex
+	logW   io.WriteCloser // EventLogPath sink, opened lazily on first emit
+	logErr bool           // a prior log write failed; stop retrying (never fatal)
 }
 
 // New builds a supervisor from cfg. It does not start anything — call Start (or
@@ -348,6 +360,7 @@ func (s *Supervisor) Close() error {
 		_ = rpc.close()
 	}
 	s.hub.close()
+	s.closeLog()
 	s.killProc()
 	return nil
 }
@@ -385,7 +398,7 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	threadID := s.threadID
 	s.mu.Unlock()
 
-	s.hub.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnStart, Direction: harnessproto.DirMeta, Payload: json.RawMessage(`{}`)})
+	s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnStart, Direction: harnessproto.DirMeta, Payload: json.RawMessage(`{}`)})
 
 	res, err := s.rpc.call(ctx, "turn/start", map[string]any{
 		"threadId": threadID,
@@ -393,7 +406,7 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	})
 	if err != nil {
 		s.clearTurn()
-		s.hub.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
+		s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
 			Payload: mustMarshal(map[string]any{"stop_reason": "error", "error": err.Error()})})
 		return err
 	}
@@ -404,13 +417,13 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	select {
 	case <-ctx.Done():
 		s.clearTurn()
-		s.hub.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
+		s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
 			Payload: mustMarshal(map[string]any{"stop_reason": "cancelled"})})
 		return ctx.Err()
 	case r := <-done:
 		s.clearTurn()
 		s.clearOpenApprovals("turn ended")
-		s.hub.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
+		s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
 			Payload: mustMarshal(map[string]any{"stop_reason": r.StopReason})})
 		return nil
 	}
@@ -475,7 +488,7 @@ func (s *Supervisor) Resolve(_ context.Context, requestID, decision string) erro
 	if err := s.rpc.respond(p.rawID, decisionToResult(decision)); err != nil {
 		return err
 	}
-	s.hub.emit(permissionResolved(requestID, decision))
+	s.emit(permissionResolved(requestID, decision))
 	return nil
 }
 
@@ -503,7 +516,7 @@ func (s *Supervisor) Subscribe(ctx context.Context, afterSeq int64) <-chan harne
 
 func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 	if method == unparsableMethod {
-		s.hub.emit(rawEvent("$unparsable", params))
+		s.emit(rawEvent("$unparsable", params))
 		return
 	}
 	if method == "thread/started" {
@@ -515,7 +528,7 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 	}
 	events, res := mapNotification(method, params, s.state)
 	for _, ev := range events {
-		s.hub.emit(ev)
+		s.emit(ev)
 	}
 	if res != nil {
 		s.deliverTurn(res)
@@ -529,7 +542,7 @@ func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.Ra
 	case method == "tool/requestUserInput":
 		s.handleUserInput(id, params)
 	default:
-		s.hub.emit(rawEvent(method, params))
+		s.emit(rawEvent(method, params))
 		_ = s.rpc.respondErr(id, -32601, "unsupported server request")
 	}
 }
@@ -561,7 +574,7 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 		itemID:   p.ItemID,
 	})
 
-	s.hub.emit(harnessproto.RuntimeEvent{
+	s.emit(harnessproto.RuntimeEvent{
 		Type:      harnessproto.TypePermissionRequest,
 		ItemID:    p.ItemID,
 		Direction: harnessproto.DirOut,
@@ -597,8 +610,8 @@ func (s *Supervisor) handleUserInput(id json.RawMessage, params json.RawMessage)
 	for _, q := range p.Questions {
 		qs = append(qs, q.Question)
 	}
-	s.hub.emit(notice("info", "request-user-input (not interactively answerable): "+strings.Join(qs, " | ")))
-	s.hub.emit(rawEvent("tool/requestUserInput", params))
+	s.emit(notice("info", "request-user-input (not interactively answerable): "+strings.Join(qs, " | ")))
+	s.emit(rawEvent("tool/requestUserInput", params))
 	_ = s.rpc.respond(id, map[string]any{"answers": []string{}})
 }
 
@@ -641,7 +654,7 @@ func (s *Supervisor) clearTurn() {
 func (s *Supervisor) clearOpenApprovals(string) {
 	for _, id := range s.approvals.open() {
 		if _, err := s.approvals.take(id); err == nil {
-			s.hub.emit(permissionResolved(id, harnessproto.DecisionCleared))
+			s.emit(permissionResolved(id, harnessproto.DecisionCleared))
 		}
 	}
 }
@@ -658,4 +671,61 @@ func permissionResolved(requestID, decision string) harnessproto.RuntimeEvent {
 // are not carried on the amux structured path in this pilot).
 func inputBlocks(text string) []map[string]any {
 	return []map[string]any{{"type": "text", "text": text}}
+}
+
+// ── event persistence ────────────────────────────────────────────────────────
+
+// emit records ev on the durable event log (when EventLogPath is set) and fans it
+// out to the in-memory hub. The log is the transport the out-of-process provider
+// tails via the existing runtime-events reader; the hub serves any in-daemon
+// subscriber. Every event the supervisor produces goes through here.
+func (s *Supervisor) emit(ev harnessproto.RuntimeEvent) {
+	s.writeLog(ev)
+	s.hub.emit(ev)
+}
+
+// writeLog appends one marshaled event as an NDJSON line to EventLogPath, opening
+// (and truncating) the file on first use. Best-effort: a failure disables further
+// logging rather than ever blocking the read loop or a verb — the durable log is a
+// transport, and losing it must never be worse than the turn it was carrying.
+func (s *Supervisor) writeLog(ev harnessproto.RuntimeEvent) {
+	if s.cfg.EventLogPath == "" {
+		return
+	}
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.logErr {
+		return
+	}
+	if s.logW == nil {
+		if err := os.MkdirAll(filepath.Dir(s.cfg.EventLogPath), 0o700); err != nil {
+			s.logErr = true
+			return
+		}
+		// Truncate: each supervisor lifetime is a fresh event seq space. The tailer
+		// resyncs on the size shrink and a consumer dedups by ordinal, exactly as it
+		// does for a rollout --resume rewrite.
+		f, err := os.OpenFile(s.cfg.EventLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			s.logErr = true
+			return
+		}
+		s.logW = f
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	if _, err := s.logW.Write(append(b, '\n')); err != nil {
+		s.logErr = true
+	}
+}
+
+func (s *Supervisor) closeLog() {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.logW != nil {
+		_ = s.logW.Close()
+		s.logW = nil
+	}
 }

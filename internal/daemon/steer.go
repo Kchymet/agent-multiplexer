@@ -54,6 +54,24 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 	if err != nil {
 		return err
 	}
+
+	// Structured control (AGE-181): a Codex session under the App Server supervisor
+	// is steered by JSON-RPC, not keystrokes. Route to the supervisor and skip the
+	// entire PTY path. A structured session whose supervisor is not live yet is
+	// started by `prompt` alone, mirroring the PTY "prompt starts a stopped agent"
+	// rule.
+	if d.codex != nil {
+		if sup, ok := d.codex.Get(a.ID); ok {
+			return d.steerStructured(ctx, a.ID, sup, verb, a.Fields)
+		}
+		if d.structuredControl(sess) {
+			if verb != core.SteerPrompt {
+				return fmt.Errorf("agent %s is not running (only %q starts a stopped agent)", a.ID, core.SteerPrompt)
+			}
+			return d.startStructuredForPrompt(ctx, sess, a.Fields)
+		}
+	}
+
 	keys := h.Keys()
 	if !keys.Steerable() {
 		return fmt.Errorf("agent kind %q has no steering keys", agent.Canonical(sess.Agent))
@@ -97,6 +115,100 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 	// and return: the relay that carried this verb answers immediately, and the
 	// progress arrives on the session's runtime-events stream instead.
 	go d.startForSteer(ctx, a.ID, key, payload)
+	return nil
+}
+
+// steerStructured serves a steering verb for a session under the App Server
+// supervisor (AGE-181). Delivery is JSON-RPC, not keystrokes, so this is a
+// complete alternative to the PTY payload path — same verbs, same "accepted"
+// semantics. `prompt` runs a whole turn, so it is dispatched asynchronously (its
+// progress arrives on the runtime-events stream) exactly like the PTY cold-start;
+// the shorter verbs answer synchronously with the supervisor's own error. The
+// permission verb correlates through the supervisor's approval tracker, which
+// rejects a stale or duplicate request id (§3.1), so no separate open-prompt check
+// is needed.
+// structuredSteerer is the supervisor surface steering needs — the four verbs,
+// nothing more. *codexapp.Supervisor satisfies it; a test injects a mock, so the
+// routing/dispatch is covered without a real App Server.
+type structuredSteerer interface {
+	Prompt(ctx context.Context, text string) error
+	Interject(ctx context.Context, text string) error
+	Cancel(ctx context.Context) error
+	Resolve(ctx context.Context, requestID, decision string) error
+}
+
+func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredSteerer, verb string, fields map[string]string) error {
+	switch verb {
+	case core.SteerPrompt:
+		text := fields[core.SteerText]
+		if text == "" {
+			return fmt.Errorf("%s: need %q", verb, core.SteerText)
+		}
+		go d.runStructuredPrompt(ctx, id, sup, text)
+		return nil
+	case core.SteerInterject:
+		text := fields[core.SteerText]
+		if text == "" {
+			return fmt.Errorf("%s: need %q", verb, core.SteerText)
+		}
+		return sup.Interject(ctx, text)
+	case core.SteerStop:
+		return sup.Cancel(ctx)
+	case core.SteerPermission:
+		switch fields[core.SteerDecision] {
+		case core.SteerAllow, core.SteerDeny:
+			return sup.Resolve(ctx, fields[core.SteerRequestID], fields[core.SteerDecision])
+		default:
+			return fmt.Errorf("permission: %q must be %q or %q, got %q",
+				core.SteerDecision, core.SteerAllow, core.SteerDeny, fields[core.SteerDecision])
+		}
+	default:
+		return fmt.Errorf("unknown steer verb %q", verb)
+	}
+}
+
+// runStructuredPrompt drives one turn on a live supervisor after the verb was
+// acknowledged. Like startForSteer it runs under the daemon's lifetime (not the
+// caller's connection) and reports any failure to the session journal — the
+// caller has already been told "accepted".
+func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structuredSteerer, text string) {
+	if d.steerStarted != nil {
+		defer func() {
+			select {
+			case d.steerStarted <- id:
+			default:
+			}
+		}()
+	}
+	if err := sup.Prompt(ctx, text); err != nil {
+		journal(id, core.JournalError, fmt.Sprintf("prompt: %v", err))
+	}
+}
+
+// startStructuredForPrompt starts a stopped structured session's App Server and
+// delivers the first prompt, all after the verb is acknowledged (a cold start
+// takes seconds). Progress and any failure reach the caller as journal/notice
+// events on the session's runtime-events stream, mirroring startForSteer.
+func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Session, fields map[string]string) error {
+	text := fields[core.SteerText]
+	if text == "" {
+		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
+	}
+	go func() {
+		journal(sess.ID, core.JournalInfo, "starting agent")
+		dir, env, _, err := d.resolve(sess.ID, panespec.TabAgent)
+		if err != nil {
+			d.steerStartFailed(sess.ID, fmt.Errorf("start agent %s: %w", sess.ID, err))
+			return
+		}
+		sup, err := d.codex.Ensure(sess.ID, dir, env)
+		if err != nil {
+			d.steerStartFailed(sess.ID, fmt.Errorf("start agent %s: %w", sess.ID, err))
+			return
+		}
+		d.triggerPoll()
+		d.runStructuredPrompt(ctx, sess.ID, sup, text)
+	}()
 	return nil
 }
 

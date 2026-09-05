@@ -5,9 +5,12 @@ import (
 	"fmt"
 
 	"amux/internal/agent"
+	"amux/internal/codexapp"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // query answers a client's ActionQuery by building the requested read model from
@@ -123,6 +126,19 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 		s, ok = console.Session(), true
 	}
 	if ok {
+		// A structured-control session (AGE-181) records its normalized events in a
+		// supervisor-written log, not the runtime's own transcript, so resolve it to
+		// that log with Structured set. The persisted identity is the marker: it is
+		// written when the session launches structured and outlives a stop, so the
+		// event history stays readable after the App Server exits.
+		if _, sok := codexapp.LoadIdentity(id); sok && agent.Canonical(s.Agent) == harnessproto.RuntimeCodex {
+			return core.RuntimeRecord{
+				Runtime:    harnessproto.RuntimeCodex,
+				Path:       codexapp.EventLogPathFor(id),
+				Structured: true,
+				Journal:    core.JournalPath(id),
+			}, nil
+		}
 		h := agent.HarnessFor(s.Agent)
 		path, _ := h.RuntimeTranscriptPath(s)
 		perms, _ := h.RuntimePermissionPath(s)

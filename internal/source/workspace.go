@@ -33,12 +33,19 @@ type Workspace struct {
 	// engine. An agent is "live" if it's in the engine, which is what lights it
 	// up on the rail.
 	engineLive func() map[string]bool
+	// controlMode, if set, reports a session's control mode (harnessproto
+	// ControlMode*) — "structured" for a session under the App Server supervisor,
+	// "" (pty) otherwise (AGE-181). nil ⇒ every row is pty, as before.
+	controlMode func(id string) string
 }
 
 func NewWorkspace() *Workspace { return &Workspace{} }
 
 // SetLiveness installs the engine-liveness probe (see Workspace.engineLive).
 func (w *Workspace) SetLiveness(f func() map[string]bool) { w.engineLive = f }
+
+// SetControlMode installs the control-mode probe (see Workspace.controlMode).
+func (w *Workspace) SetControlMode(f func(id string) string) { w.controlMode = f }
 
 func (w *Workspace) Name() string { return "workspace" }
 
@@ -64,7 +71,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 
 	// Control console, pinned first.
 	consoleState := agentState(liveOf(console.ID), console.Session())
-	out = append(out, withCaps(core.Session{
+	out = append(out, w.withCaps(core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
@@ -136,7 +143,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			CanKill:   true, // delete the whole root
 		})
 		for i, s := range active {
-			out = append(out, withCaps(core.Session{
+			out = append(out, w.withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 				State:     subStates[i],
@@ -158,7 +165,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			})
 			for _, s := range repoAgents[r.Name] {
 				st := agentState(liveOf(s.ID), s)
-				out = append(out, withCaps(core.Session{
+				out = append(out, w.withCaps(core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 					State:     st,
@@ -176,7 +183,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// the list at the most recently archived so it can't overrun the active rail;
 	// the rest linger in the store, reachable via `amux wg`.
 	for _, s := range recentArchived(archived) {
-		out = append(out, withCaps(core.Session{
+		out = append(out, w.withCaps(core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: agent.Canonical(s.Agent), Mode: s.Mode,
 			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
@@ -186,7 +193,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 
 	// Claude sessions amux didn't launch (visible because the status hooks are
 	// user-level), shown read-only at the bottom.
-	out = append(out, untrackedRows(tracked, trackedDirs)...)
+	out = append(out, w.untrackedRows(tracked, trackedDirs)...)
 	return out, nil
 }
 
@@ -209,13 +216,20 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 // These are the daemon-owned TUI control-path caps. Any broker-owned app-server
 // adapter capability (e.g. a CODEX_DRIVER app-server path) is a separate surface
 // the consumer layers on; it must not overwrite this daemon control path.
-func withCaps(s core.Session, steerable bool) core.Session {
+func (w *Workspace) withCaps(s core.Session, steerable bool) core.Session {
 	s.Runtime = agent.Canonical(s.Kind)
 	var caps core.SessionCaps
 	if steerable {
 		caps = agent.CapsFor(s.Kind)
 	}
 	s.Caps = &caps
+	// ControlMode says HOW those caps are delivered (§2.2): a supervised session is
+	// "structured", everything else pty (the empty default). Only a steerable row —
+	// one the daemon can actually drive — is ever structured; a detached/archived
+	// row stays pty even if a stale supervisor probe existed.
+	if steerable && w.controlMode != nil {
+		s.ControlMode = w.controlMode(s.ID)
+	}
 	return s
 }
 
@@ -242,7 +256,7 @@ func recentArchived(archived []store.Session) []store.Session {
 // untrackedRows lists Claude sessions amux didn't launch: any with reported hook
 // activity whose id (and dir) isn't tracked. amux doesn't host them, so they're
 // informational only; ended (idle) and stale sessions are dropped.
-func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
+func (w *Workspace) untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 	var out []core.Session
 	now := time.Now().UnixMilli()
 	for id, rec := range core.AllHookStates() {
@@ -252,7 +266,7 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 		if rec.Updated > 0 && now-rec.Updated > untrackedTTL.Milliseconds() {
 			continue // stale: likely crashed without a SessionEnd
 		}
-		out = append(out, withCaps(core.Session{
+		out = append(out, w.withCaps(core.Session{
 			ID:        shortID(id),
 			Title:     untrackedTitle(rec.Cwd, id),
 			Source:    "workspace",

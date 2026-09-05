@@ -27,6 +27,15 @@ func identityPath(sessionID string) string {
 	return filepath.Join(stateDir(), sanitize(sessionID)+".json")
 }
 
+// EventLogPathFor is the per-session NDJSON runtime-event record the supervisor
+// appends to and the provider's tailer reads (docs/codex-app-server-supervision.md).
+// It lives under amux's durable data dir (not the tmpfs runtime dir): it is a
+// transcript-like record a reconnecting reader resumes from, not an ephemeral
+// socket.
+func EventLogPathFor(sessionID string) string {
+	return filepath.Join(core.DataDir(), "codexapp", sanitize(sessionID)+".events.jsonl")
+}
+
 // SocketPathFor derives the per-session App Server Unix socket path. It lives in
 // the per-user runtime dir (tmpfs where available) under a codexapp subdir, kept
 // short so it stays within the OS's sun_path limit (~108 bytes). The name is

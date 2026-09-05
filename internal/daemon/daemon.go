@@ -15,16 +15,21 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
 	"amux/internal/panespec"
 	"amux/internal/source"
+	"amux/internal/store"
 	"amux/internal/wsops"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Daemon polls sources and serves state + actions over a unix socket. It also
@@ -41,6 +46,13 @@ type Daemon struct {
 	// agentsUnder resolves an id (agent or workgroup root) to the agent ids whose
 	// process should run. Defaults to wsops.AgentIDsUnder; overridable in tests.
 	agentsUnder func(id string) ([]string, error)
+
+	// codex supervises structured-control Codex sessions (AGE-181): a background
+	// App Server per session, owned by the daemon, independent of any pane. It is
+	// created in Run (bound to the daemon context) and is inert until a session is
+	// launched with AMUX_CODEX_CONTROL=app-server, so the default PTY path is
+	// unaffected. nil in tests that don't exercise structured control.
+	codex *codexapp.Manager
 
 	mu       sync.RWMutex
 	sessions []core.Session
@@ -100,9 +112,30 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 func Default(self string) *Daemon {
 	eng := local.New()
 	ws := source.NewWorkspace()
-	ws.SetLiveness(func() map[string]bool { return liveAgents(eng) })
 	d := New(self, []source.Source{ws}, 2*time.Second)
 	d.engine = eng
+	// Liveness is an agent running in the engine (a PTY pane) OR under the App
+	// Server supervisor (a structured session has no pane). Both are read at call
+	// time, so the probe works once Run installs the manager.
+	ws.SetLiveness(func() map[string]bool {
+		m := liveAgents(eng)
+		if d.codex != nil {
+			for id := range d.codex.Live() {
+				m[id] = true
+			}
+		}
+		return m
+	})
+	// Control mode annotates a row as structured when it has a live supervisor, so
+	// a consumer gates its affordances on the actual control path (§2.2).
+	ws.SetControlMode(func(id string) string {
+		if d.codex != nil {
+			if _, ok := d.codex.Get(id); ok {
+				return harnessproto.ControlModeStructured
+			}
+		}
+		return ""
+	})
 	// Let the engine defer terminating a mid-turn agent on graceful shutdown until
 	// it is safe. The probe closes over d, so it must be set after d is built.
 	eng.SetActivity(d.instanceActivity)
@@ -153,6 +186,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = ln.Close(); _ = os.Remove(sock) }()
+
+	// The structured-control supervisor manager is bound to the daemon's context:
+	// its App Servers live and die with the daemon, not with any pane or client.
+	// It stays inert unless a session is launched with AMUX_CODEX_CONTROL=app-server.
+	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
+	defer d.codex.Shutdown()
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
@@ -391,6 +430,11 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 // This mirrors the TUI, where creating a session and switching to it starts it;
 // it lets a CLI-created session come up running in the engine right away. Ensure
 // is idempotent, so starting an already-running agent is a no-op.
+//
+// A structured-control Codex session (AGE-181) is started as an App Server
+// supervisor instead of a PTY pane: the supervisor is the runtime, owned by the
+// daemon and independent of any pane. Everything else is a PTY pane exactly as
+// before.
 func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
@@ -406,16 +450,35 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	for _, aid := range ids {
 		dir, env, argv, err := d.resolve(aid, panespec.TabAgent)
 		if err == nil {
-			_, err = d.engine.Ensure(ctx, engine.Spec{
-				Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-				Dir: dir, Env: env, Argv: argv,
-			})
+			if sess, ok, _ := lookupSession(aid); ok && d.structuredControl(sess) {
+				_, err = d.codex.Ensure(aid, dir, env)
+			} else {
+				_, err = d.engine.Ensure(ctx, engine.Spec{
+					Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
+					Dir: dir, Env: env, Argv: argv,
+				})
+			}
 		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// structuredControl reports whether session s should run under the App Server
+// supervisor rather than a PTY pane. It is opt-in (AMUX_CODEX_CONTROL=app-server),
+// Codex-only, and requires the manager to exist — so the default PTY path is never
+// affected. This is the single gate that keeps structured mode dark by default.
+func (d *Daemon) structuredControl(s store.Session) bool {
+	return d.codex != nil && structuredCodexEnabled() && agent.Canonical(s.Agent) == harnessproto.RuntimeCodex
+}
+
+// structuredCodexEnabled reads the opt-in flag: AMUX_CODEX_CONTROL=app-server
+// selects the supervised App Server control path for Codex; anything else (the
+// default, unset) keeps the PTY path.
+func structuredCodexEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("AMUX_CODEX_CONTROL")), "app-server")
 }
 
 // persistLiveAgents writes the current set of live engine keys to disk so a
@@ -537,6 +600,12 @@ func (d *Daemon) killEngineFor(id string) {
 	for aid := range ids {
 		for tab := 0; tab < 3; tab++ { // agent | editor | terminal
 			d.engine.Kill(engine.Key{AgentID: aid, Tab: tab})
+		}
+		// A structured session runs under the supervisor, not a pane; stop it too so
+		// archive/delete actually terminates the App Server. Close keeps the persisted
+		// identity so an unarchive can resume the same thread.
+		if d.codex != nil {
+			d.codex.Close(aid)
 		}
 	}
 }

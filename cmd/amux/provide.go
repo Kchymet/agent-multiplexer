@@ -327,6 +327,7 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 		return runtimeevents.Record{
 			Runtime: rec.Runtime, Path: rec.Path,
 			Permissions: rec.Permissions, Journal: rec.Journal,
+			Structured: rec.Structured,
 		}, true
 	}
 }
