@@ -38,7 +38,7 @@ const steerStartSettle = 2 * time.Second
 // error the caller surfaces verbatim, so every refusal says why: an unsteerable
 // agent kind, a stopped agent, a missing field, an unparseable decision.
 //
-// It never blocks on the PTY: engine.Instance.Input queues bytes and returns, so
+// It never blocks on the PTY: engine.Instance.InputSequence queues and returns, so
 // a child that has stopped draining its input can't stall the connection loop
 // that called this.
 func (d *Daemon) steer(ctx context.Context, a core.Action) error {
@@ -79,7 +79,7 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 				return err
 			}
 		}
-		writeAll(in, payload)
+		in.InputSequence(payload)
 		return nil
 	}
 
@@ -112,7 +112,7 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 // sent the verb is gone the moment it reads the ack, and a start cancelled by
 // its disconnect would leave the session exactly as stuck as the timeout this
 // change exists to remove.
-func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload [][]byte) {
+func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload []engine.InputStep) {
 	if d.steerStarted != nil {
 		defer func() {
 			select {
@@ -133,7 +133,8 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 		return
 	}
 	// The runtime is a TUI that has to boot before it will accept typed input, so
-	// hand the write to a timer instead of sleeping on this goroutine.
+	// reserve a delay in the input FIFO instead of sleeping on this goroutine. The
+	// verb is already "accepted" at this point; this is not a readiness check.
 	d.deferInput(in, payload)
 }
 
@@ -237,24 +238,30 @@ func lookupSession(id string) (store.Session, bool, error) {
 }
 
 // steerPayload turns a verb plus its fields into the byte writes that serve it,
-// in order. Text is written separately from the submit key so the runtime sees a
-// typed line followed by Enter, the way a person sends one.
-func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([][]byte, error) {
+// in order. The harness supplies paste framing and a delay before submission;
+// separate immediate writes alone can coalesce into one TUI paste event.
+func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([]engine.InputStep, error) {
 	switch verb {
 	case core.SteerPrompt, core.SteerInterject:
 		text := fields[core.SteerText]
 		if text == "" {
 			return nil, fmt.Errorf("%s: need %q", verb, core.SteerText)
 		}
-		return [][]byte{[]byte(text), keys.Submit}, nil
+		// An embedded paste delimiter would escape the text frame and become
+		// keystrokes. Refuse it rather than silently changing the requested text.
+		if len(keys.PasteEnd) > 0 && (strings.Contains(text, string(keys.PasteStart)) || strings.Contains(text, string(keys.PasteEnd))) {
+			return nil, fmt.Errorf("%s: text contains a terminal paste delimiter", verb)
+		}
+		pasted := append(append(append([]byte(nil), keys.PasteStart...), []byte(text)...), keys.PasteEnd...)
+		return []engine.InputStep{{Bytes: pasted}, {Bytes: keys.Submit, DelayBefore: keys.SubmitDelay}}, nil
 	case core.SteerStop:
-		return [][]byte{keys.Interrupt}, nil
+		return []engine.InputStep{{Bytes: keys.Interrupt}}, nil
 	case core.SteerPermission:
 		switch fields[core.SteerDecision] {
 		case core.SteerAllow:
-			return [][]byte{keys.Allow}, nil
+			return []engine.InputStep{{Bytes: keys.Allow}}, nil
 		case core.SteerDeny:
-			return [][]byte{keys.Deny}, nil
+			return []engine.InputStep{{Bytes: keys.Deny}}, nil
 		default:
 			// Never guess at a permission prompt: an unparseable decision is refused
 			// rather than resolved in either direction.
@@ -266,24 +273,13 @@ func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([][]b
 	}
 }
 
-// writeAll queues each write to the instance in order. Input is non-blocking by
-// engine contract, so this returns immediately.
-func writeAll(in engine.Instance, payload [][]byte) {
-	for _, b := range payload {
-		in.Input(b)
-	}
-}
-
-// deferInput delivers payload once the runtime has had time to come up, without
-// holding the caller. It skips the write if the instance died in the meantime.
-func (d *Daemon) deferInput(in engine.Instance, payload [][]byte) {
+// deferInput reserves the startup wait in the same FIFO as subsequent input,
+// so a second prompt cannot overtake the prompt that started the runtime.
+func (d *Daemon) deferInput(in engine.Instance, payload []engine.InputStep) {
 	settle := d.steerSettle
 	if settle == 0 {
 		settle = steerStartSettle
 	}
-	time.AfterFunc(settle, func() {
-		if in.Alive() {
-			writeAll(in, payload)
-		}
-	})
+	payload[0].DelayBefore += settle
+	in.InputSequence(payload)
 }

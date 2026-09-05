@@ -3,6 +3,7 @@ package agent
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 // TestKeysPerKind pins each registered kind's steering keystrokes to the bytes
@@ -25,6 +26,7 @@ func TestKeysPerKind(t *testing.T) {
 		{"claude", Keys{
 			Submit: []byte("\r"), Interrupt: []byte("\x03"), Allow: []byte("\r"), Deny: []byte("\x1b"),
 			InterruptOnlyWhileBusy: true,
+			PasteStart:             []byte("\x1b[200~"), PasteEnd: []byte("\x1b[201~"), SubmitDelay: 100 * time.Millisecond,
 		}},
 		{"codex", Keys{
 			Submit: []byte("\r"), Interrupt: []byte("\x1b"), Allow: []byte("y"), Deny: []byte("n"),

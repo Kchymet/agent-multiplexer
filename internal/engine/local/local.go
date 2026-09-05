@@ -207,7 +207,7 @@ type instance struct {
 	// stops draining its PTY input buffer can't block the daemon's serve loop (the
 	// caller of Input) or wedge in.mu while ptmx.Write stalls. inDone stops the
 	// loop when the instance exits or is killed.
-	inCh   chan []byte
+	inCh   chan []engine.InputStep
 	inDone chan struct{}
 	inOnce sync.Once
 
@@ -244,7 +244,7 @@ func spawn(spec engine.Spec, onExit func(engine.Key, *instance), activity engine
 		cmd:      cmd,
 		subs:     map[int]*subscriber{},
 		done:     make(chan struct{}),
-		inCh:     make(chan []byte, inputBuf),
+		inCh:     make(chan []engine.InputStep, inputBuf),
 		inDone:   make(chan struct{}),
 		activity: activity,
 		onExit:   onExit,
@@ -286,9 +286,24 @@ func (in *instance) Subscribe(sink engine.Sink) func() {
 // order is preserved by the single FIFO queue drained by one goroutine. If the
 // queue is full the bytes are dropped (see inputBuf).
 func (in *instance) Input(p []byte) {
-	b := append([]byte(nil), p...)
+	in.InputSequence([]engine.InputStep{{Bytes: p}})
+}
+
+// InputSequence copies and queues a whole transaction, dropping it if the queue
+// is full. Overload cannot retain a paste but drop only its submit key (or vice
+// versa); acceptance is still best effort, as it is for Input.
+func (in *instance) InputSequence(steps []engine.InputStep) {
+	copied := make([]engine.InputStep, len(steps))
+	for i, step := range steps {
+		copied[i] = engine.InputStep{Bytes: append([]byte(nil), step.Bytes...), DelayBefore: step.DelayBefore}
+	}
 	select {
-	case in.inCh <- b:
+	case <-in.inDone:
+		return
+	default:
+	}
+	select {
+	case in.inCh <- copied:
 	case <-in.inDone:
 	default:
 	}
@@ -303,16 +318,29 @@ func (in *instance) inputLoop() {
 		select {
 		case <-in.inDone:
 			return
-		case p := <-in.inCh:
-			in.mu.Lock()
-			ptmx, closed := in.ptmx, in.ptmxClosed
-			in.mu.Unlock()
-			if ptmx == nil || closed {
-				return
+		case steps := <-in.inCh:
+			for _, step := range steps {
+				if step.DelayBefore > 0 {
+					timer := time.NewTimer(step.DelayBefore)
+					select {
+					case <-in.inDone:
+						timer.Stop()
+						return
+					case <-timer.C:
+					}
+				}
+				in.mu.Lock()
+				ptmx, closed := in.ptmx, in.ptmxClosed
+				in.mu.Unlock()
+				if ptmx == nil || closed {
+					return
+				}
+				// Write after releasing in.mu. If the fd is closed concurrently, Go's
+				// *os.File returns an error without issuing the syscall, so this is safe.
+				if _, err := ptmx.Write(step.Bytes); err != nil {
+					return
+				}
 			}
-			// Write after releasing in.mu. If the fd is closed concurrently, Go's
-			// *os.File returns an error without issuing the syscall, so this is safe.
-			_, _ = ptmx.Write(p)
 		}
 	}
 }
