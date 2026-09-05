@@ -1,0 +1,4 @@
+{"request_id":"perm-9f2a1c4e0b7d8a55","tool":"Bash","action":"rm -rf build/","options":["allow","deny"],"at":1788540920123}
+{"request_id":"perm-9f2a1c4e0b7d8a55","tool":"Bash","decision":"allow","at":1788540931456}
+{"request_id":"perm-4d81b0725f3ce619","tool":"Write","action":"/home/agent/work/notes.md","options":["allow","deny"],"at":1788540940789}
+{"tool":"Bash","note":"a line no version of this journal writes"}

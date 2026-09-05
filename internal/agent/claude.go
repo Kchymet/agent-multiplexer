@@ -272,6 +272,19 @@ func (h claudeHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
 	return "", false
 }
 
+// RuntimePermissionPath resolves a Claude session to amux's permission journal
+// for it. Claude Code answers permission prompts in its TUI and records none of
+// them in the transcript, so this journal — written by the hooks amux installs —
+// is the only place a prompt is durable, and the only reason a remote consumer
+// has a request_id to quote back. The path is answered whether or not the file
+// exists yet: the reader tolerates a record that has not appeared.
+func (h claudeHarness) RuntimePermissionPath(s store.Session) (string, bool) {
+	if s.ClaudeID == "" {
+		return "", false
+	}
+	return core.PermissionJournalPath(s.ClaudeID), true
+}
+
 // Doctor checks the load-bearing Claude project-dir path munge against Claude's
 // actual on-disk layout in every home: a discovered transcript whose real project
 // dir differs from what amux computes means the munge convention drifted upstream

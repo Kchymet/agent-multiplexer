@@ -34,12 +34,53 @@ const codexRuntimeName = harnessproto.RuntimeCodex
 // belongs to. It is NOT safe for concurrent use — one per session tail.
 type CodexState struct {
 	calls map[string]toolInfo // call_id -> {name,input}
+	// approvals are the call_ids of approval prompts announced and not yet
+	// resolved, oldest first. Codex records the prompt but not the answer, so the
+	// resolution is inferred from what happens next to the same call (below), and
+	// this is what makes a `permission_request` retirable rather than open forever.
+	approvals []string
 }
 
 func (st *CodexState) ensure() {
 	if st.calls == nil {
 		st.calls = map[string]toolInfo{}
 	}
+}
+
+// openApproval records that an approval prompt for callID is waiting.
+func (st *CodexState) openApproval(callID string) {
+	if callID == "" {
+		return
+	}
+	st.approvals = append(st.approvals, callID)
+}
+
+// resolveApproval closes the approval waiting on callID, if one is, and returns
+// the event retiring it. ok=false when that call never prompted — the common
+// case, since most calls run without asking.
+func (st *CodexState) resolveApproval(callID, decision string) (harnessproto.RuntimeEvent, bool) {
+	for i, id := range st.approvals {
+		if id == callID {
+			st.approvals = append(st.approvals[:i], st.approvals[i+1:]...)
+			return permissionResolved(id, decision), true
+		}
+	}
+	return harnessproto.RuntimeEvent{}, false
+}
+
+// clearApprovals retires every approval still open, for a turn boundary that
+// proves no prompt survived it. The decision is DecisionCleared: the rollout says
+// the turn ended, never how the human answered.
+func (st *CodexState) clearApprovals() []harnessproto.RuntimeEvent {
+	if len(st.approvals) == 0 {
+		return nil
+	}
+	out := make([]harnessproto.RuntimeEvent, 0, len(st.approvals))
+	for _, id := range st.approvals {
+		out = append(out, permissionResolved(id, harnessproto.DecisionCleared))
+	}
+	st.approvals = nil
+	return out
 }
 
 // codexLine is the outer rollout envelope; only the fields we branch on are
@@ -66,7 +107,7 @@ func MapCodexLine(line []byte, st *CodexState) []harnessproto.RuntimeEvent {
 	case "response_item":
 		return mapCodexItem(l.Payload, st)
 	case "event_msg":
-		return mapCodexEvent(l.Payload)
+		return mapCodexEvent(l.Payload, st)
 	case "session_meta":
 		return []harnessproto.RuntimeEvent{notice("info", codexSessionText(l.Payload))}
 	case "compacted":
@@ -130,7 +171,7 @@ func mapCodexItem(payload json.RawMessage, st *CodexState) []harnessproto.Runtim
 	case "function_call", "custom_tool_call", "local_shell_call":
 		return mapCodexCall(it, st)
 	case "function_call_output", "custom_tool_call_output", "local_shell_call_output":
-		return []harnessproto.RuntimeEvent{mapCodexCallOutput(it, st)}
+		return mapCodexCallOutput(it, st)
 	case "web_search_call":
 		return []harnessproto.RuntimeEvent{{
 			Type: TypeToolCall, ItemID: it.ID, Direction: dirOut,
@@ -223,14 +264,22 @@ func mapCodexCall(it codexItem, st *CodexState) []harnessproto.RuntimeEvent {
 	}}
 }
 
-func mapCodexCallOutput(it codexItem, st *CodexState) harnessproto.RuntimeEvent {
+func mapCodexCallOutput(it codexItem, st *CodexState) []harnessproto.RuntimeEvent {
 	id := it.CallID
 	if id == "" {
 		id = it.ID
 	}
 	delete(st.calls, id)
+	// An approval still open when the call reports its output means the tool never
+	// started: the prompt was declined. Retire the request with that answer before
+	// the result, so a consumer never sees a result for a request it still shows as
+	// waiting.
+	var out []harnessproto.RuntimeEvent
+	if ev, ok := st.resolveApproval(id, harnessproto.DecisionDeny); ok {
+		out = append(out, ev)
+	}
 	text, status := codexOutputText(it.Output)
-	return harnessproto.RuntimeEvent{
+	return append(out, harnessproto.RuntimeEvent{
 		Type: TypeToolResult, ItemID: id, Direction: dirOut,
 		Payload: mustMarshal(map[string]any{
 			"item_id": id,
@@ -242,7 +291,7 @@ func mapCodexCallOutput(it codexItem, st *CodexState) harnessproto.RuntimeEvent 
 			"diffs":      []map[string]any{},
 			"raw_output": rawOrNull(it.Output),
 		}),
-	}
+	})
 }
 
 // codexCallArgs normalizes a call's arguments to raw JSON. `function_call`
@@ -345,6 +394,11 @@ func codexPlanEvent(args json.RawMessage) harnessproto.RuntimeEvent {
 // reasoning block and every command in the transcript, so they are elided here
 // rather than passed through as `raw`. Everything NOT in this set and not mapped
 // below still becomes `raw`.
+//
+// The `*_begin` records are intercepted by the switch before it reaches this map,
+// because a tool starting is the only evidence Codex's rollout gives that an
+// approval prompt for it was allowed. They still contribute nothing of their own:
+// the interception emits a `permission_resolved` or nothing at all.
 var codexEventDuplicates = map[string]bool{
 	"item_started": true, "item_updated": true, "item_completed": true,
 	"user_message": true, "agent_message": true, "agent_message_delta": true,
@@ -393,7 +447,7 @@ type codexUsage struct {
 	Total int64 `json:"total_tokens"`
 }
 
-func mapCodexEvent(payload json.RawMessage) []harnessproto.RuntimeEvent {
+func mapCodexEvent(payload json.RawMessage, st *CodexState) []harnessproto.RuntimeEvent {
 	var e codexEvent
 	if json.Unmarshal(payload, &e) != nil || e.Type == "" {
 		return []harnessproto.RuntimeEvent{codexRaw("event_msg", payload)}
@@ -404,13 +458,15 @@ func mapCodexEvent(payload json.RawMessage) []harnessproto.RuntimeEvent {
 			Type: TypeTurnStart, Direction: dirOut, Payload: mustMarshal(map[string]any{}),
 		}}
 	case "task_complete", "turn_complete":
-		return []harnessproto.RuntimeEvent{codexTurnEnd("end_turn")}
+		// A turn cannot end with a prompt still up, so any approval still open was
+		// answered while we weren't looking: retire it before the boundary.
+		return append(st.clearApprovals(), codexTurnEnd("end_turn"))
 	case "turn_aborted":
 		reason := e.Reason
 		if reason == "" {
 			reason = "aborted"
 		}
-		return []harnessproto.RuntimeEvent{codexTurnEnd(reason)}
+		return append(st.clearApprovals(), codexTurnEnd(reason))
 	case "token_count":
 		return []harnessproto.RuntimeEvent{codexUsageEvent(e)}
 	case "error", "stream_error":
@@ -418,15 +474,27 @@ func mapCodexEvent(payload json.RawMessage) []harnessproto.RuntimeEvent {
 	case "warning", "deprecation_notice":
 		return []harnessproto.RuntimeEvent{notice("warn", codexNoticeText(e, "warning"))}
 	case "exec_approval_request":
+		st.openApproval(e.CallID)
 		return []harnessproto.RuntimeEvent{codexPermission(e, "exec_command", strings.Join(e.Command, " "))}
 	case "apply_patch_approval_request":
+		st.openApproval(e.CallID)
 		return []harnessproto.RuntimeEvent{codexPermission(e, "apply_patch", "apply patch")}
 	case "request_user_input", "elicitation_request":
 		action := e.Question
 		if action == "" {
 			action = e.Prompt
 		}
+		st.openApproval(e.CallID)
 		return []harnessproto.RuntimeEvent{codexPermission(e, e.Type, action)}
+	case "exec_command_begin", "patch_apply_begin", "mcp_tool_call_begin":
+		// These restate a response_item and are elided like the rest of the
+		// begin/end pairs — but the tool having *started* is the one signal Codex's
+		// rollout gives that an approval prompt for it was allowed, so a pending one
+		// is retired here.
+		if ev, ok := st.resolveApproval(e.CallID, harnessproto.DecisionAllow); ok {
+			return []harnessproto.RuntimeEvent{ev}
+		}
+		return nil
 	default:
 		if codexEventDuplicates[e.Type] {
 			return nil

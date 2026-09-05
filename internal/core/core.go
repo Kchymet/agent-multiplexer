@@ -82,7 +82,7 @@ const (
 	SteerVerb      = "verb"       // which steering verb (Steer* below)
 	SteerText      = "text"       // prompt/interject: the text to deliver
 	SteerDecision  = "decision"   // permission: SteerAllow | SteerDeny
-	SteerRequestID = "request_id" // permission: the request the decision answers (advisory)
+	SteerRequestID = "request_id" // permission: the request the decision answers; a stale one is refused
 	SteerReason    = "reason"     // permission: optional free-text rationale
 
 	SteerPrompt     = "prompt"     // deliver a new user turn
@@ -227,6 +227,12 @@ const (
 type RuntimeRecord struct {
 	Runtime string `json:"runtime,omitempty"`
 	Path    string `json:"path,omitempty"`
+	// Permissions is amux's own permission journal for the session, when its
+	// runtime resolves permission prompts without recording them (Claude Code).
+	// The reader tails it alongside Path so the prompts reach the stream at all;
+	// empty for a runtime that records its own (Codex). It is additive: a client
+	// older than the field simply reads the transcript alone.
+	Permissions string `json:"permissions,omitempty"`
 }
 
 // Action is the client -> daemon control request. It carries both the lifecycle

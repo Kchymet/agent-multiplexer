@@ -259,5 +259,11 @@ func (h codexHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
 	return "", false
 }
 
+// RuntimePermissionPath reports that Codex has no separate permission journal:
+// Codex records its approval prompts in the rollout itself, so the transcript
+// reader already produces permission_request events for them and a second source
+// would only duplicate them.
+func (codexHarness) RuntimePermissionPath(store.Session) (string, bool) { return "", false }
+
 // Doctor: Codex has no amux-managed config surface to drift-check.
 func (codexHarness) Doctor() []string { return nil }

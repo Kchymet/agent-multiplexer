@@ -32,18 +32,19 @@ import (
 // Type* / dir* names unchanged. A consumer MUST pass an unknown type through
 // rather than dropping it.
 const (
-	TypePrompt            = harnessproto.TypePrompt
-	TypeTurnStart         = harnessproto.TypeTurnStart
-	TypeText              = harnessproto.TypeText
-	TypeThinking          = harnessproto.TypeThinking
-	TypeToolCall          = harnessproto.TypeToolCall
-	TypeToolResult        = harnessproto.TypeToolResult
-	TypePlan              = harnessproto.TypePlan
-	TypeUsage             = harnessproto.TypeUsage
-	TypePermissionRequest = harnessproto.TypePermissionRequest
-	TypeNotice            = harnessproto.TypeNotice
-	TypeTurnEnd           = harnessproto.TypeTurnEnd
-	TypeRaw               = harnessproto.TypeRaw
+	TypePrompt             = harnessproto.TypePrompt
+	TypeTurnStart          = harnessproto.TypeTurnStart
+	TypeText               = harnessproto.TypeText
+	TypeThinking           = harnessproto.TypeThinking
+	TypeToolCall           = harnessproto.TypeToolCall
+	TypeToolResult         = harnessproto.TypeToolResult
+	TypePlan               = harnessproto.TypePlan
+	TypeUsage              = harnessproto.TypeUsage
+	TypePermissionRequest  = harnessproto.TypePermissionRequest
+	TypePermissionResolved = harnessproto.TypePermissionResolved
+	TypeNotice             = harnessproto.TypeNotice
+	TypeTurnEnd            = harnessproto.TypeTurnEnd
+	TypeRaw                = harnessproto.TypeRaw
 )
 
 const (

@@ -320,7 +320,9 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 		if err != nil || rec.Path == "" {
 			return runtimeevents.Record{}, false
 		}
-		return runtimeevents.Record{Runtime: rec.Runtime, Path: rec.Path}, true
+		return runtimeevents.Record{
+			Runtime: rec.Runtime, Path: rec.Path, Permissions: rec.Permissions,
+		}, true
 	}
 }
 

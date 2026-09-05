@@ -221,8 +221,22 @@ func TestInstallHooks(t *testing.T) {
 		}
 	}
 
+	// Each permission event gets exactly one "agent permission <verb>" group.
+	for _, ph := range permissionHooks {
+		groups, _ := hooks[ph.event].([]any)
+		perms := 0
+		for _, g := range groups {
+			if groupCommand(g) == "/opt/amux agent permission "+ph.verb {
+				perms++
+			}
+		}
+		if perms != 1 {
+			t.Errorf("event %s: got %d amux permission groups, want exactly 1", ph.event, perms)
+		}
+	}
+
 	// The user's own Stop hook must still be present alongside ours (Stop carries
-	// both a status hook and a capture hook, plus the user's).
+	// a status hook, a capture hook and a permission hook, plus the user's).
 	var foundUser bool
 	for _, g := range hooks["Stop"].([]any) {
 		if groupCommand(g) == "/usr/bin/my-own-thing" {

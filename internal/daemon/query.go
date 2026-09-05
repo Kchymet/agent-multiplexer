@@ -109,11 +109,13 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 		return core.RuntimeRecord{}, err
 	}
 	if ok {
-		path, _ := agent.HarnessFor(s.Agent).RuntimeTranscriptPath(s)
+		h := agent.HarnessFor(s.Agent)
+		path, _ := h.RuntimeTranscriptPath(s)
 		if path == "" {
 			return core.RuntimeRecord{}, nil
 		}
-		return core.RuntimeRecord{Runtime: s.Agent, Path: path}, nil
+		perms, _ := h.RuntimePermissionPath(s)
+		return core.RuntimeRecord{Runtime: s.Agent, Path: path, Permissions: perms}, nil
 	}
 	kind := agent.DefaultKind()
 	for _, info := range agent.HarnessFor(kind).ListSessions() {

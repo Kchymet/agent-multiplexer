@@ -38,6 +38,11 @@ func cmdAgent(args []string) error {
 		// Claude-hook binding that snapshots the conversation transcript (identity
 		// and transcript path come from the hook JSON on stdin).
 		return cmdAgentCapture()
+	case "permission":
+		// Claude-hook binding that journals the runtime's permission prompts, which
+		// the transcript never records (identity and tool come from the hook JSON on
+		// stdin).
+		return cmdAgentPermission(args[1:])
 	case "sessions":
 		// List every agent session on the machine (Claude Code + Codex) so an agent
 		// can reason across conversations (not scoped to the caller — shared context).
@@ -73,6 +78,10 @@ usage: amux agent <command>
                      else --session <id>
   hook <state>       Claude-hook binding of "status" (identity from the hook
                      JSON on stdin); amux wires this into Claude's settings.json
+  permission <verb>  Claude-hook binding that journals permission prompts:
+                     request | allow | deny | clear. amux wires this into
+                     Claude's settings.json; the journal is what gives a remote
+                     orchestrator a request_id to answer.
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
   done               report the task complete: archive this agent off the active
@@ -131,6 +140,59 @@ func cmdAgentStatus(args []string) error {
 		cwd, _ = os.Getwd()
 	}
 	_ = core.WriteHookState(sessionID, state, cwd)
+	return nil
+}
+
+// cmdAgentPermission journals the lifecycle of one permission prompt, the signal
+// Claude Code's transcript does not carry: the prompt opens in the TUI, the human
+// answers, and nothing reaches disk. amux's hooks are the only producer, so this
+// is what lets the runtime-events stream publish a `permission_request` with a
+// request_id and the daemon refuse a `permission` verb that names a prompt which
+// has since been answered (docs/remote-provider-sessions.md §4.5).
+//
+// The verbs mirror the hook events claudecfg binds (claudecfg.permissionHooks):
+// `request` opens one, `allow`/`deny` close it with that decision, and `clear`
+// retires whatever is still open at a turn boundary. Identity and the tool being
+// asked about come from the hook JSON on stdin. Like every `amux agent` verb it
+// must never disrupt the agent, so it swallows all errors and exits 0.
+func cmdAgentPermission(args []string) error {
+	verb := ""
+	if len(args) > 0 {
+		verb = args[0]
+	}
+	if verb == "" {
+		return nil
+	}
+
+	var payload claudecfg.HookPayload
+	if stdinPiped() {
+		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
+			_ = json.Unmarshal(b, &payload)
+		}
+	}
+	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
+	if sessionID == "" {
+		return nil // not an identifiable session: nothing to journal against
+	}
+
+	switch verb {
+	case claudecfg.PermissionVerbRequest:
+		_ = core.AppendPermission(sessionID, core.PermissionRecord{
+			RequestID: core.NewPermissionID(),
+			Tool:      payload.ToolName,
+			Action:    claudecfg.SummarizeToolInput(payload.ToolInput),
+			// The offered options are what amux can actually deliver to the prompt
+			// (agent.Keys), not every choice the TUI draws: a consumer must not be
+			// shown a button the daemon has no keystroke for.
+			Options: []string{core.PermissionAllow, core.PermissionDeny},
+		})
+	case core.PermissionAllow, core.PermissionDeny:
+		// These hooks fire on every tool call, prompted or not; resolving nothing is
+		// the common case and not an error.
+		_, _ = core.ResolvePermission(sessionID, payload.ToolName, verb)
+	case claudecfg.PermissionVerbClear:
+		_ = core.ClearPermissions(sessionID)
+	}
 	return nil
 }
 
