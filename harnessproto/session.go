@@ -26,6 +26,43 @@ type Session struct {
 	CanAttach bool   `json:"canAttach"`
 	CanKill   bool   `json:"canKill"`
 	CanResume bool   `json:"canResume"`
+
+	// Runtime names the runtime backing this session — a value from the Runtime*
+	// set (harnessproto/events.go: "claude" | "codex") — so a consumer gates
+	// affordances and picks a transcript renderer on the actual runtime rather than
+	// assuming one. Additive (AGE-178): a provider that predates this field leaves it
+	// empty, and a consumer falls back to Kind (the rail's agent-kind label, which
+	// has always carried the same string for agent rows) or a conservative default.
+	// It is set only for rows that are a real agent (not repo/workgroup containers).
+	Runtime string `json:"runtime,omitempty"`
+
+	// Caps advertises the control verbs the daemon can actually back for THIS
+	// session (docs/remote-provider-sessions.md §3.1), correlated to the live
+	// runtime — NOT inferred from whether a transcript exists. It is a pointer so a
+	// consumer can tell "old provider, capabilities unknown" (nil) from "known, and
+	// this verb is off" (a non-nil block with the flag false), and apply a
+	// conservative fallback only in the former case. Additive (AGE-178): omitted
+	// entirely by a provider that predates it.
+	Caps *SessionCaps `json:"caps,omitempty"`
+}
+
+// SessionCaps is the per-session control surface a provider advertises for a
+// published session (docs/remote-provider-sessions.md §3.1). Each flag reports
+// whether the daemon's matching steering verb (VerbPrompt / VerbInterject /
+// VerbStop / VerbPermission) can actually be served for this session — the honest
+// control capability, so a consumer disables an affordance it would only fail on.
+//
+// Permission is the one that must not be conflated with transcript support: it is
+// true only when the runtime raises CORRELATED permission_request events — a
+// request_id the VerbPermission verb can quote back and the daemon can match to
+// an open prompt (AGE-172) — not merely because the session has a durable
+// transcript. A runtime that streams a transcript but cannot correlate an
+// answerable approval round-trip reports Permission=false.
+type SessionCaps struct {
+	Prompt     bool `json:"prompt"`     // deliver a new user turn (may start a stopped agent)
+	Interject  bool `json:"interject"`  // deliver text while a turn is already running
+	Cancel     bool `json:"cancel"`     // interrupt the in-flight turn without killing the session
+	Permission bool `json:"permission"` // answer a correlated permission_request (see the type doc)
 }
 
 // Agent activity states, surfaced in Session.State. They form an attention

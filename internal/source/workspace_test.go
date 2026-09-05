@@ -63,6 +63,38 @@ func TestUntrackedRows(t *testing.T) {
 	if r.Title != "proj" || r.State != core.StateRunning || r.Mode != "external" || r.CanAttach {
 		t.Fatalf("unexpected untracked row: %+v", r)
 	}
+	// Even an untracked (detached) Claude row carries its runtime identity and
+	// control caps, so a remote orchestrator gates it honestly (AGE-178).
+	if r.Runtime != "claude" || r.Caps == nil || !r.Caps.Prompt {
+		t.Fatalf("untracked row missing runtime/caps: runtime=%q caps=%+v", r.Runtime, r.Caps)
+	}
+}
+
+// TestWithCaps checks the AGE-178 per-session stamp: an agent row gets its
+// runtime identity and the honest control caps for that kind; the stamp reads the
+// row's own Kind, so a Codex row is never mislabeled Claude.
+func TestWithCaps(t *testing.T) {
+	claude := withCaps(core.Session{ID: "a", Kind: "claude"})
+	if claude.Runtime != "claude" {
+		t.Errorf("claude row Runtime = %q, want claude", claude.Runtime)
+	}
+	if claude.Caps == nil || *claude.Caps != (core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}) {
+		t.Errorf("claude row Caps = %+v, want all-on", claude.Caps)
+	}
+
+	codex := withCaps(core.Session{ID: "b", Kind: "codex"})
+	if codex.Runtime != "codex" {
+		t.Errorf("codex row Runtime = %q, want codex (identity must not collapse to claude)", codex.Runtime)
+	}
+	if codex.Caps == nil || !codex.Caps.Permission {
+		t.Errorf("codex row Caps = %+v, want Permission on (rollout correlates)", codex.Caps)
+	}
+
+	// An empty Kind resolves to the default runtime, not the empty string.
+	def := withCaps(core.Session{ID: "c"})
+	if def.Runtime == "" {
+		t.Error("empty-Kind row should resolve Runtime to the default, got empty")
+	}
 }
 
 // The ARCHIVED rail section is capped at the most recently archived agents so it

@@ -64,11 +64,11 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 
 	// Control console, pinned first.
 	consoleState := agentState(liveOf(console.ID), console.Session())
-	out = append(out, core.Session{
+	out = append(out, withCaps(core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
 		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
-	})
+	}))
 
 	roots, err := db.Roots()
 	if err != nil {
@@ -136,7 +136,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			CanKill:   true, // delete the whole root
 		})
 		for i, s := range active {
-			out = append(out, core.Session{
+			out = append(out, withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 				State:     subStates[i],
@@ -144,7 +144,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
-			})
+			}))
 		}
 	}
 
@@ -158,7 +158,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			})
 			for _, s := range repoAgents[r.Name] {
 				st := agentState(liveOf(s.ID), s)
-				out = append(out, core.Session{
+				out = append(out, withCaps(core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 					State:     st,
@@ -166,7 +166,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 					Cwd:       s.Dir,
 					CanAttach: true,
 					CanKill:   true,
-				})
+				}))
 			}
 		}
 	}
@@ -176,18 +176,31 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// the list at the most recently archived so it can't overrun the active rail;
 	// the rest linger in the store, reachable via `amux wg`.
 	for _, s := range recentArchived(archived) {
-		out = append(out, core.Session{
+		out = append(out, withCaps(core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: agent.Canonical(s.Agent), Mode: s.Mode,
 			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
-		})
+		}))
 	}
 
 	// Claude sessions amux didn't launch (visible because the status hooks are
 	// user-level), shown read-only at the bottom.
 	out = append(out, untrackedRows(tracked, trackedDirs)...)
 	return out, nil
+}
+
+// withCaps stamps an agent row with its runtime identity and the control
+// capabilities amux can serve for it (AGE-178), so a remote orchestrator gates
+// its affordances on the actual runtime rather than assuming Claude. It is
+// applied only to rows that are a real agent — never the repo/workgroup container
+// rows, whose Kind is a structural label ("repo", "") and carries no runtime. The
+// caps are a static per-kind property (agent.CapsFor), so this is a cheap stamp.
+func withCaps(s core.Session) core.Session {
+	s.Runtime = agent.Canonical(s.Kind)
+	caps := agent.CapsFor(s.Kind)
+	s.Caps = &caps
+	return s
 }
 
 // recentArchived returns the most recently archived sessions (by ArchivedAt,
@@ -223,7 +236,7 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 		if rec.Updated > 0 && now-rec.Updated > untrackedTTL.Milliseconds() {
 			continue // stale: likely crashed without a SessionEnd
 		}
-		out = append(out, core.Session{
+		out = append(out, withCaps(core.Session{
 			ID:        shortID(id),
 			Title:     untrackedTitle(rec.Cwd, id),
 			Source:    "workspace",
@@ -234,7 +247,7 @@ func untrackedRows(tracked, trackedDirs map[string]bool) []core.Session {
 			Status:    stateLabel(rec.State) + " · untracked",
 			Cwd:       rec.Cwd,
 			StartedAt: rec.Updated,
-		})
+		}))
 	}
 	return out
 }

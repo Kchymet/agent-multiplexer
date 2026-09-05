@@ -18,6 +18,10 @@ import (
 // Session is a normalized agent session surfaced from any Source.
 type Session = harnessproto.Session
 
+// SessionCaps is the per-session control surface published alongside a Session
+// (Session.Caps): the honest set of steering verbs the daemon can serve for it.
+type SessionCaps = harnessproto.SessionCaps
+
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one.
 const (

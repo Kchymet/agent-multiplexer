@@ -78,6 +78,51 @@ One JSON object per line, same `wire` framing as all provider traffic.
 - The daemon MAY redact sessions (e.g. publish only non-archived, or nothing
   at all while still advertising the feature) — inventory content is policy.
 
+### 2.1 Per-session runtime and capabilities
+
+Two additive fields let a consumer gate its UI on what a session actually is and
+what its daemon can actually do, rather than assuming a runtime or inferring
+control support from the mere existence of a transcript:
+
+```json
+{"id":"a2","title":"idempotency","kind":"codex","runtime":"codex",
+ "state":"running","status":"running · api",
+ "caps":{"prompt":true,"interject":true,"cancel":true,"permission":true}}
+```
+
+- `runtime` names the runtime backing the session — `claude` or `codex` (the
+  `Runtime*` set of §4). It is set only on rows that are a real agent, never on
+  the structural container rows (a repo header, a workgroup root), whose `kind`
+  is a layout label. A consumer picks the transcript renderer and the affordance
+  set for this value.
+- `caps` is the honest control surface for the session — one boolean per steering
+  verb (§3.1): `prompt`, `interject`, `cancel`, `permission`. Each says whether
+  the daemon can serve that verb for *this* session, so a consumer disables an
+  affordance it would only fail on.
+  - `permission` is deliberately **not** "a transcript exists". It is true only
+    when the runtime raises *correlated* `permission_request` events — a
+    `request_id` the `permission` verb can quote back and the daemon can match to
+    an open prompt (§3.1, §4.5). A runtime that streams a transcript but records
+    no answerable prompt reports `permission:false`.
+
+**Backward compatibility.** Both fields are additive (`omitempty` on `runtime`, a
+nullable object for `caps`). A provider that predates them omits both. A consumer
+MUST then fall back conservatively: resolve the runtime from `kind` (which has
+always carried the same string for agent rows), and — because it cannot know the
+per-session control surface — apply its own safe default rather than assuming a
+verb works. The nullable `caps` is what makes this decidable: absent (`null`)
+means "unknown, fall back"; present with a flag `false` means "known, and this
+verb is off".
+
+**Release/consumer dependency order.** These wire types live in the published
+`harnessproto` module. A consumer in another repo (the harness orchestrator)
+pins `harnessproto` by version, so the ordering is: (1) the producer change —
+`harnessproto` plus the amux capability producer — merges and the module commit
+is available; (2) the consumer change bumps its `harnessproto` pin to that commit
+and reads the new fields. The two ship as separate PRs; until step (1) is merged,
+a consumer that wants to build against the new fields pins the producer branch
+commit and re-pins to the merged commit before its own merge.
+
 ```json
 {"type":"session-result","reqId":"r7","ok":true,"newId":"a9","error":""}
 ```
