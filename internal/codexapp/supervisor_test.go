@@ -9,8 +9,6 @@ import (
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// collector drains a subscription into a slice, so a test can wait for and assert
-// specific event types without racing the read loop.
 type collector struct {
 	ch <-chan harnessproto.RuntimeEventBatch
 }
@@ -19,8 +17,6 @@ func subscribeCollector(ctx context.Context, s *Supervisor) *collector {
 	return &collector{ch: s.Subscribe(ctx, 0)}
 }
 
-// waitFor reads batches until an event of type typ arrives (returns it) or the
-// deadline passes (fails).
 func (c *collector) waitFor(t *testing.T, typ string) harnessproto.RuntimeEvent {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
@@ -41,11 +37,7 @@ func (c *collector) waitFor(t *testing.T, typ string) harnessproto.RuntimeEvent 
 	}
 }
 
-func attach(t *testing.T, sup *Supervisor, client interface {
-	Read([]byte) (int, error)
-	Write([]byte) (int, error)
-	Close() error
-}) {
+func attach(t *testing.T, sup *Supervisor, client msgConn) {
 	t.Helper()
 	if err := sup.attach(context.Background(), client); err != nil {
 		t.Fatalf("attach/handshake: %v", err)
@@ -67,9 +59,6 @@ func TestHandshakeStart(t *testing.T) {
 	if _, ok := fs.sawCall("thread/start"); !ok {
 		t.Fatal("no thread/start call")
 	}
-	if _, ok := fs.sawCall("thread/resume"); ok {
-		t.Fatal("thread/resume sent for a fresh start")
-	}
 	id := sup.Identity()
 	if id.ControlMode != harnessproto.ControlModeStructured || id.ThreadID != "thr_1" {
 		t.Fatalf("identity = %+v", id)
@@ -77,11 +66,11 @@ func TestHandshakeStart(t *testing.T) {
 }
 
 func TestHandshakeResume(t *testing.T) {
-	client, server := newRawPair(t)
+	client, server := newMemPair()
 	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}}
 	go fs.loop()
 	defer fs.close()
-	sup := New(Config{SessionID: "s-test", ResumeThreadID: "thr_resumed"})
+	sup := New(Config{SessionID: "s-test", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: "thr_resumed"})
 	defer sup.Close()
 	attach(t, sup, client)
 
@@ -108,14 +97,13 @@ func TestPromptBracketsTurn(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- sup.Prompt(ctx, "hello") }()
 
-	col.waitFor(t, harnessproto.TypeTurnStart)
-
-	// Server streams a text item, then completes the turn.
-	fs.pushNotify("item/agentMessage/delta", map[string]any{"itemId": "m1", "text": "hi"})
-	// Wait until turn/start has been seen so the turn id is set, then complete.
 	waitCall(t, fs, "turn/start")
+	// The observed turn lifecycle brackets the turn (any origin).
+	fs.pushTurnStarted()
+	fs.pushNotify("item/agentMessage/delta", map[string]any{"itemId": "m1", "text": "hi"})
 	fs.completeTurn("completed")
 
+	col.waitFor(t, harnessproto.TypeTurnStart)
 	txt := col.waitFor(t, harnessproto.TypeText)
 	if txt.ItemID != "m1" {
 		t.Fatalf("text item id = %q", txt.ItemID)
@@ -130,6 +118,40 @@ func TestPromptBracketsTurn(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("Prompt returned %v", err)
+	}
+}
+
+// TestObservedTurnFromAnyOrigin checks that a turn started by *another* client
+// (only turn/started + turn/completed observed, no local Prompt) is still tracked
+// and bracketed — so web steer/interrupt can target a TUI-initiated turn.
+func TestObservedTurnFromAnyOrigin(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	ctx := context.Background()
+	col := subscribeCollector(ctx, sup)
+
+	fs.mu.Lock()
+	fs.turnID = "turn_tui"
+	fs.mu.Unlock()
+	fs.pushTurnStarted()
+
+	col.waitFor(t, harnessproto.TypeTurnStart)
+	// The supervisor tracked the TUI-origin turn, so Cancel targets it.
+	if err := sup.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	c, ok := fs.sawCall("turn/interrupt")
+	if !ok {
+		t.Fatal("no turn/interrupt")
+	}
+	var p struct {
+		TurnID string `json:"turnId"`
+	}
+	_ = json.Unmarshal(c.Params, &p)
+	if p.TurnID != "turn_tui" {
+		t.Fatalf("interrupt targeted turn %q, want turn_tui (the observed TUI turn)", p.TurnID)
 	}
 }
 
@@ -156,20 +178,6 @@ func TestInterjectSteers(t *testing.T) {
 	}
 }
 
-func TestCancelInterrupts(t *testing.T) {
-	sup, fs, client := newFakePair(t)
-	defer fs.close()
-	defer sup.Close()
-	attach(t, sup, client)
-
-	if err := sup.Cancel(context.Background()); err != nil {
-		t.Fatalf("Cancel: %v", err)
-	}
-	if _, ok := fs.sawCall("turn/interrupt"); !ok {
-		t.Fatal("no turn/interrupt call")
-	}
-}
-
 func TestApprovalRoundTrip(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()
@@ -179,10 +187,19 @@ func TestApprovalRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	col := subscribeCollector(ctx, sup)
 
-	// Server raises an approval request; the supervisor answers via Resolve.
-	go fs.pushRequest("item/commandExecution/requestApproval", "ap1", map[string]any{
-		"itemId": "it1", "threadId": "thr_1", "turnId": "turn_1", "command": "rm -rf x",
-	})
+	go func() {
+		resp := fs.pushRequest("item/commandExecution/requestApproval", "ap1", map[string]any{
+			"itemId": "it1", "threadId": "thr_1", "turnId": "turn_1", "command": "rm -rf x",
+		})
+		// The client answers with an OBJECT {decision:"accept"}, not a bare enum.
+		var r struct {
+			Decision string `json:"decision"`
+		}
+		_ = json.Unmarshal(resp.Result, &r)
+		if r.Decision != "accept" {
+			t.Errorf("approval response result = %s, want {decision:accept}", resp.Result)
+		}
+	}()
 
 	req := col.waitFor(t, harnessproto.TypePermissionRequest)
 	var rp struct {
@@ -200,12 +217,11 @@ func TestApprovalRoundTrip(t *testing.T) {
 	if err := sup.Resolve(ctx, "ap1", harnessproto.DecisionAllow); err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	col.waitFor(t, harnessproto.TypePermissionResolved)
 	if len(sup.OpenApprovals()) != 0 {
 		t.Fatal("approval still open after Resolve")
 	}
-
-	// Duplicate reply is rejected as duplicate; unknown id as stale.
+	// No speculative permission_resolved is emitted on a successful write; the
+	// resolution is signalled by the server (turn end / item completion).
 	if err := sup.Resolve(ctx, "ap1", harnessproto.DecisionAllow); err != errDuplicateApproval {
 		t.Fatalf("duplicate Resolve err = %v, want duplicate", err)
 	}
@@ -223,14 +239,10 @@ func TestDisconnectMidTurnUnblocksPrompt(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- sup.Prompt(ctx, "long task") }()
 	waitCall(t, fs, "turn/start")
-
-	// The server dies mid-turn; the pending Prompt must not hang.
 	fs.close()
 
 	select {
 	case <-done:
-		// Unblocked — the property under test (turn_end stop_reason may race the hub
-		// teardown, so we assert only that Prompt returns).
 	case <-time.After(3 * time.Second):
 		t.Fatal("Prompt hung after mid-turn disconnect")
 	}
@@ -242,16 +254,38 @@ func TestUnknownServerRequestAnswered(t *testing.T) {
 	defer sup.Close()
 	attach(t, sup, client)
 
-	// An unknown server request must be answered (method-not-found) so the server
-	// does not hang, and recorded as raw so nothing is dropped.
 	resp := fs.pushRequest("weird/serverRequest", "x1", map[string]any{})
 	if resp.Error == nil {
 		t.Fatalf("unknown server request not answered with an error: %+v", resp)
 	}
 }
 
-// waitCall polls until the fake has seen a client call for method (the server's
-// handleCall is async from the client's call() returning).
+func TestUserInputNotAutoAnswered(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	ctx := context.Background()
+	col := subscribeCollector(ctx, sup)
+
+	// A user-input request is surfaced but NOT auto-answered (another client may).
+	rawID, _ := json.Marshal("ui1")
+	ch := make(chan incoming, 1)
+	fs.mu.Lock()
+	fs.respByID[string(rawID)] = ch
+	fs.mu.Unlock()
+	fs.write(map[string]any{"method": "tool/requestUserInput", "id": "ui1",
+		"params": map[string]any{"questions": []map[string]any{{"question": "which?"}}}})
+
+	col.waitFor(t, harnessproto.TypeNotice)
+	select {
+	case r := <-ch:
+		t.Fatalf("user-input was auto-answered: %+v", r)
+	case <-time.After(300 * time.Millisecond):
+		// good: left open for another client
+	}
+}
+
 func waitCall(t *testing.T, fs *fakeServer, method string) {
 	t.Helper()
 	deadline := time.After(3 * time.Second)

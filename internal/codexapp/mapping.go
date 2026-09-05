@@ -98,7 +98,9 @@ func mapNotification(method string, params json.RawMessage, st *streamState) (ev
 		return []harnessproto.RuntimeEvent{notice("info", "session established")}, nil
 
 	case "turn/started":
-		return nil, nil // the supervisor brackets turn_start
+		// Emit turn_start from the OBSERVED notification (any origin), not from the
+		// supervisor's own Prompt — so a turn a native TUI started is bracketed too.
+		return []harnessproto.RuntimeEvent{turnStartEvent()}, nil
 
 	case "turn/completed":
 		var p struct {
@@ -124,6 +126,9 @@ func mapNotification(method string, params json.RawMessage, st *streamState) (ev
 			}
 			evs = append(evs, notice("error", msg))
 		}
+		// turn_end is emitted here (observed), bracketing every turn regardless of
+		// which client started it.
+		evs = append(evs, turnEndEvent(stop))
 		return evs, &turnResult{TurnID: p.Turn.ID, StopReason: stop, IsError: isErr}
 
 	case "turn/plan/updated":
@@ -322,6 +327,16 @@ func planStatus(s string) string {
 func notice(level, text string) harnessproto.RuntimeEvent {
 	return harnessproto.RuntimeEvent{Type: harnessproto.TypeNotice, Direction: harnessproto.DirMeta,
 		Payload: mustMarshal(map[string]any{"level": level, "text": text})}
+}
+
+func turnStartEvent() harnessproto.RuntimeEvent {
+	return harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnStart, Direction: harnessproto.DirMeta,
+		Payload: mustMarshal(map[string]any{})}
+}
+
+func turnEndEvent(stopReason string) harnessproto.RuntimeEvent {
+	return harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
+		Payload: mustMarshal(map[string]any{"stop_reason": stopReason})}
 }
 
 func rawEvent(nativeType string, body json.RawMessage) harnessproto.RuntimeEvent {

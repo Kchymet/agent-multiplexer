@@ -18,7 +18,7 @@ func TestIdentitySaveLoadRemove(t *testing.T) {
 
 	id := Identity{
 		SessionID:   "sess-1",
-		SocketPath:  SocketPathFor("sess-1"),
+		Endpoint:    EndpointFor("sess-1"),
 		ThreadID:    "thr-9",
 		ControlMode: harnessproto.ControlModeStructured,
 	}
@@ -71,21 +71,28 @@ func TestSanitizeEmptyFallsBack(t *testing.T) {
 	}
 }
 
+func TestEndpointForShape(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	if got := EndpointFor("sess-1"); got != "unix:///run/user/1000/codexapp/sess-1.sock" {
+		t.Fatalf("endpoint = %q", got)
+	}
+}
+
 func TestAttachArgvShape(t *testing.T) {
-	argv := AttachArgv("codex", "/run/user/1000/codexapp/s.sock", "thr-1")
+	argv := AttachArgv("codex", "unix:///run/user/1000/codexapp/s.sock", "thr-1")
 	want := []string{"codex", "--remote", "unix:///run/user/1000/codexapp/s.sock", "resume", "thr-1"}
 	if strings.Join(argv, " ") != strings.Join(want, " ") {
 		t.Fatalf("attach argv = %v, want %v", argv, want)
 	}
 	// No thread id → no resume subcommand.
-	argv = AttachArgv("", "/s.sock", "")
-	if strings.Join(argv, " ") != "codex --remote unix:///s.sock" {
+	argv = AttachArgv("", "ws://127.0.0.1:4500", "")
+	if strings.Join(argv, " ") != "codex --remote ws://127.0.0.1:4500" {
 		t.Fatalf("attach argv (no thread) = %v", argv)
 	}
 }
 
 func TestAppServerArgvShape(t *testing.T) {
-	argv := AppServerArgv("codex", "/s.sock")
+	argv := AppServerArgv("codex", "unix:///s.sock")
 	if strings.Join(argv, " ") != "codex app-server --listen unix:///s.sock" {
 		t.Fatalf("app-server argv = %v", argv)
 	}

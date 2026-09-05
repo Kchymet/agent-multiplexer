@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,31 +27,37 @@ import (
 // Two entry points separate the process concern from the protocol concern so the
 // protocol is unit-testable without a real binary:
 //
-//   - Start(ctx): production. Spawns `codex app-server --listen unix://<socket>`,
-//     waits for the socket, dials it, and runs the handshake. The process is put
-//     in its own process group so it is not felled by signals aimed at the pane.
-//   - attach(ctx, transport): the protocol core over any io.ReadWriteCloser —
-//     exercised in tests against an in-memory fake App Server (net.Pipe).
+//   - Start(ctx, wrappedArgv): production. Launches `codex app-server --listen
+//     <endpoint>` (under the daemon's sandbox-wrapped argv), dials the endpoint's
+//     WebSocket, and runs the handshake. The process is in its own group so a
+//     signal aimed at the pane never reaches it, and ctx cancellation kills it.
+//   - attach(ctx, msgConn): the protocol core over a message-framed transport —
+//     exercised in tests against an in-memory fake App Server.
 
-// Pilot posture for thread/start (mirrors the AGE-179 harness pilot). onRequest so
-// the server actually raises answerable approvals — confined to workspaceWrite,
-// never dangerFullAccess. The process-level sandbox is governed by amux's own
-// launcher; these are the thread-level request defaults.
+// Thread/start policy. The values are the App Server's HYPHENATED enums, verified
+// against Codex 0.153.4 by the ROOT probe: `onRequest`/`workspaceWrite` are
+// rejected -32600. on-request so the server actually raises answerable approvals,
+// confined to workspace-write, never danger-full-access. The process-level sandbox
+// is amux's own launcher (panespec); these are the thread-level request defaults.
 const (
-	defaultApprovalPolicy = "onRequest"
-	defaultSandbox        = "workspaceWrite"
+	defaultApprovalPolicy = "on-request"
+	defaultSandbox        = "workspace-write"
 	defaultDialTimeout    = 15 * time.Second
 )
 
 // Config parameterizes one supervised App Server. SessionID ties it to the amux
-// session (identity persistence); SocketPath is the per-session Unix socket
-// inside the session's private scope.
+// session (identity persistence); Endpoint is the WebSocket listen/dial address
+// (unix://<per-session socket> by default, inside the session's private scope).
 type Config struct {
-	SessionID      string
-	Bin            string        // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
-	Dir            string        // working directory (the worktree)
-	Env            []string      // extra KEY=VALUE additions to the child environment
-	SocketPath     string        // unix socket to listen on / dial
+	SessionID string
+	Bin       string   // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
+	Dir       string   // working directory (the worktree)
+	Env       []string // extra KEY=VALUE additions to the child environment
+	// Endpoint is the App Server WebSocket endpoint: unix://<path> (default,
+	// per-session, sandbox-scoped), ws://127.0.0.1:<port> (loopback), or
+	// wss://host:port (cross-machine, authenticated). amux launches the server with
+	// --listen <Endpoint> and dials the same value.
+	Endpoint       string
 	ResumeThreadID string        // non-empty ⇒ thread/resume instead of thread/start
 	ApprovalPolicy string        // "" ⇒ defaultApprovalPolicy
 	Sandbox        string        // "" ⇒ defaultSandbox
@@ -110,36 +115,33 @@ func New(cfg Config) *Supervisor {
 	}
 }
 
-// AppServerArgv is the argv amux launches to run the background App Server on a
-// Unix socket. The official docs show `codex app-server --listen ws://...`; the
-// pinned 0.153.4 CLI additionally accepts a unix:// endpoint (see the AGE-177
-// note). This is the exact command a native CLI's `--remote` peer must point at.
-//
-// UNVALIDATED ON HOST: there is no codex binary in the amux CI sandbox, so the
-// exact --listen flag/scheme is validated only against docs and the pinned CLI
-// surface here; the opt-in smoke test captures the real invocation on a host with
-// codex installed. Do not treat this as live-verified.
-func AppServerArgv(bin, socketPath string) []string {
+// AppServerArgv is the inner argv amux launches to run the background App Server:
+// `codex app-server --listen <endpoint>` (docs: `--listen ws://…`; the endpoint may
+// also be `unix://…`). It is the command *before* the sandbox wrapper — the daemon
+// wraps it with the amux launcher (panespec) so it runs in the session's scope.
+// The endpoint is exactly what a native `--remote` peer points at.
+func AppServerArgv(bin, endpoint string) []string {
 	if bin == "" {
 		bin = "codex"
 	}
-	return []string{bin, "app-server", "--listen", "unix://" + socketPath}
+	return []string{bin, "app-server", "--listen", endpoint}
 }
 
 // AttachArgv is the argv a native Codex CLI (in an amux pane) uses to attach to
 // the SAME supervised server/thread — the whole point of AGE-181: the terminal UI
-// and the web adapter drive one server/thread, not separate processes.
+// and the web bridge drive one server/thread, not separate processes.
 //
-// UNVALIDATED ON HOST: that `codex --remote unix://<socket> resume <thread-id>`
-// attaches to the running server/thread (rather than starting its own process)
-// MUST be confirmed on a host with the pinned codex. This builder encodes the
-// documented syntax; the caller must not claim live attachment until the smoke
-// test / host run confirms it.
-func AttachArgv(bin, socketPath, threadID string) []string {
+// UNVALIDATED ON HOST: that `codex --remote <endpoint> resume <thread-id>` attaches
+// to the running server/thread (rather than starting its own process) MUST be
+// confirmed on a host with the pinned codex; and `thread/resume` before the first
+// turn returns "no rollout found" (ROOT probe), so fresh-session attach needs the
+// create-first-turn flow, not a bare resume. This builder encodes the documented
+// syntax; the caller must not claim live attachment until a host run confirms it.
+func AttachArgv(bin, endpoint, threadID string) []string {
 	if bin == "" {
 		bin = "codex"
 	}
-	argv := []string{bin, "--remote", "unix://" + socketPath}
+	argv := []string{bin, "--remote", endpoint}
 	if threadID != "" {
 		argv = append(argv, "resume", threadID)
 	}
@@ -152,7 +154,7 @@ func AttachArgv(bin, socketPath, threadID string) []string {
 // (the socket lives in the private sandbox scope).
 type Identity struct {
 	SessionID   string `json:"sessionId"`
-	SocketPath  string `json:"socketPath"`
+	Endpoint    string `json:"endpoint"`
 	ThreadID    string `json:"threadId"`
 	ControlMode string `json:"controlMode"`
 }
@@ -163,7 +165,7 @@ func (s *Supervisor) Identity() Identity {
 	defer s.mu.Unlock()
 	return Identity{
 		SessionID:   s.cfg.SessionID,
-		SocketPath:  s.cfg.SocketPath,
+		Endpoint:    s.cfg.Endpoint,
 		ThreadID:    s.threadID,
 		ControlMode: harnessproto.ControlModeStructured,
 	}
@@ -178,11 +180,15 @@ func (s *Supervisor) ThreadID() string {
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
-// Start launches the background App Server, dials its socket, and runs the
-// handshake. ctx is the SUPERVISOR's lifetime (pass the daemon's context) — it is
-// not tied to any pane or client connection. On success the server is live and
-// the thread is pinned; on any failure the partial process is cleaned up.
-func (s *Supervisor) Start(ctx context.Context) error {
+// Start launches the background App Server under the amux sandbox launcher, dials
+// its WebSocket endpoint, and runs the handshake. ctx is the SUPERVISOR's lifetime
+// (the daemon's context) — not any pane or client connection; when it is cancelled
+// the supervisor closes and the server is killed. wrappedArgv is the fully
+// sandbox-wrapped command the daemon resolved (bwrap … -- codex app-server --listen
+// <endpoint>); passing it here is how the server inherits the session's mount/config/
+// identity scope instead of a bare exec. A nil wrappedArgv falls back to the inner
+// AppServerArgv (used only by the opt-in smoke test, which runs codex directly).
+func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -194,13 +200,17 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	if s.cfg.SocketPath == "" {
-		return errors.New("codexapp: no socket path")
+	if s.cfg.Endpoint == "" {
+		return errors.New("codexapp: no endpoint")
 	}
-	// A stale socket from a prior run would make the listener fail to bind.
-	_ = os.Remove(s.cfg.SocketPath)
+	if p := unixEndpointPath(s.cfg.Endpoint); p != "" {
+		_ = os.Remove(p) // a stale socket from a prior run blocks the listener bind
+	}
 
-	argv := AppServerArgv(s.cfg.Bin, s.cfg.SocketPath)
+	argv := wrappedArgv
+	if len(argv) == 0 {
+		argv = AppServerArgv(s.cfg.Bin, s.cfg.Endpoint)
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = s.cfg.Dir
 	cmd.Env = append(os.Environ(), s.cfg.Env...)
@@ -214,7 +224,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.proc = cmd
 	s.mu.Unlock()
 
-	conn, err := s.dialSocket(ctx)
+	conn, err := s.dialWithRetry(ctx)
 	if err != nil {
 		s.killProc()
 		return err
@@ -223,19 +233,29 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		s.killProc()
 		return err
 	}
+	// Context cancellation (daemon shutdown, or the manager dropping this session)
+	// must tear the supervisor down even if nothing calls Close — the audit found
+	// ctx cancel alone did not stop the server.
+	go func() {
+		<-ctx.Done()
+		_ = s.Close()
+	}()
 	return nil
 }
 
-// dialSocket waits for the App Server's Unix socket to appear and become
-// dialable, up to the configured timeout.
-func (s *Supervisor) dialSocket(ctx context.Context) (net.Conn, error) {
+// dialWithRetry waits for the App Server's WebSocket endpoint to accept a
+// connection and complete the handshake, up to the configured timeout (the child
+// needs a moment to bind its listener).
+func (s *Supervisor) dialWithRetry(ctx context.Context) (msgConn, error) {
 	deadline := time.Now().Add(s.cfg.DialTimeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		conn, err := net.Dial("unix", s.cfg.SocketPath)
+		dialCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		conn, err := dialWS(dialCtx, s.cfg.Endpoint)
+		cancel()
 		if err == nil {
 			return conn, nil
 		}
@@ -245,13 +265,13 @@ func (s *Supervisor) dialSocket(ctx context.Context) (net.Conn, error) {
 	if lastErr == nil {
 		lastErr = errors.New("timeout")
 	}
-	return nil, fmt.Errorf("codexapp: dial %s: %w", s.cfg.SocketPath, lastErr)
+	return nil, fmt.Errorf("codexapp: connect %s: %w", s.cfg.Endpoint, lastErr)
 }
 
 // attach runs the protocol core over an already-connected transport: it starts
 // the read loop, performs the handshake, and pins the thread id. Exposed to tests
-// via a net.Pipe fake; Start calls it with the dialed socket.
-func (s *Supervisor) attach(ctx context.Context, transport io.ReadWriteCloser) error {
+// via an in-memory msgConn; Start calls it with the dialed WebSocket.
+func (s *Supervisor) attach(ctx context.Context, transport msgConn) error {
 	rpc := newRPCConn(transport)
 	rpc.onNotify = s.onNotify
 	rpc.onRequest = s.onRequest
@@ -289,23 +309,35 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		return fmt.Errorf("codexapp initialized: %w", err)
 	}
 
-	var res json.RawMessage
-	var err error
-	if s.cfg.ResumeThreadID != "" {
-		res, err = s.rpc.call(ctx, "thread/resume", map[string]any{"threadId": s.cfg.ResumeThreadID})
-	} else {
-		res, err = s.rpc.call(ctx, "thread/start", map[string]any{
+	start := func() (json.RawMessage, error) {
+		return s.rpc.call(ctx, "thread/start", map[string]any{
 			"approvalPolicy": s.cfg.ApprovalPolicy,
 			"sandbox":        s.cfg.Sandbox,
 		})
+	}
+
+	var res json.RawMessage
+	var err error
+	resumed := s.cfg.ResumeThreadID != ""
+	if resumed {
+		res, err = s.rpc.call(ctx, "thread/resume", map[string]any{"threadId": s.cfg.ResumeThreadID})
+		if err != nil && isNoRollout(err) {
+			// A pinned thread that never ran a turn has no rollout to resume (ROOT
+			// probe: "no rollout found"). Start a fresh thread and adopt its id rather
+			// than failing the launch — the empty thread carried no history to lose.
+			resumed = false
+			res, err = start()
+		}
+	} else {
+		res, err = start()
 	}
 	if err != nil {
 		return fmt.Errorf("codexapp thread handshake: %w", err)
 	}
 
 	id := threadIDFromResult(res)
-	if id == "" {
-		id = s.cfg.ResumeThreadID // resume onto the pinned id even if the server echoed nothing
+	if id == "" && resumed {
+		id = s.cfg.ResumeThreadID // resumed onto the pinned id even if the server echoed nothing
 	}
 	s.mu.Lock()
 	if s.threadID == "" {
@@ -318,6 +350,21 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		return errors.New("codexapp: no thread id from handshake")
 	}
 	return nil
+}
+
+// isNoRollout reports whether a thread/resume error is the "no rollout found"
+// case — a pinned thread that never had a turn, so there is nothing to resume.
+func isNoRollout(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no rollout")
+}
+
+// unixEndpointPath returns the filesystem path of a unix:// endpoint, or "" for a
+// ws/wss endpoint (nothing to unlink).
+func unixEndpointPath(endpoint string) string {
+	if strings.HasPrefix(endpoint, "unix://") {
+		return strings.TrimPrefix(endpoint, "unix://")
+	}
+	return ""
 }
 
 func threadIDFromResult(res json.RawMessage) string {
@@ -377,8 +424,8 @@ func (s *Supervisor) killProc() {
 	_ = syscall.Kill(-proc.Process.Pid, syscall.SIGTERM)
 	_ = proc.Process.Kill()
 	_, _ = proc.Process.Wait()
-	if s.cfg.SocketPath != "" {
-		_ = os.Remove(s.cfg.SocketPath)
+	if p := unixEndpointPath(s.cfg.Endpoint); p != "" {
+		_ = os.Remove(p)
 	}
 }
 
@@ -398,16 +445,18 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	threadID := s.threadID
 	s.mu.Unlock()
 
-	s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnStart, Direction: harnessproto.DirMeta, Payload: json.RawMessage(`{}`)})
-
+	// turn_start / turn_end are emitted from the OBSERVED turn/started + turn/completed
+	// notifications (onNotify), so every turn is bracketed once regardless of origin.
+	// Prompt only starts the turn and waits for completion.
 	res, err := s.rpc.call(ctx, "turn/start", map[string]any{
 		"threadId": threadID,
 		"input":    inputBlocks(text),
 	})
 	if err != nil {
+		// No turn began, so no observed turn/completed will arrive — emit a synthetic
+		// end so a consumer isn't left waiting.
 		s.clearTurn()
-		s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
-			Payload: mustMarshal(map[string]any{"stop_reason": "error", "error": err.Error()})})
+		s.emit(turnEndEvent("error"))
 		return err
 	}
 	s.mu.Lock()
@@ -416,15 +465,12 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 
 	select {
 	case <-ctx.Done():
-		s.clearTurn()
-		s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
-			Payload: mustMarshal(map[string]any{"stop_reason": "cancelled"})})
+		// The caller's context ended; the turn continues server-side and its observed
+		// turn/completed will bracket and clear it. Don't emit a synthetic end here.
 		return ctx.Err()
-	case r := <-done:
-		s.clearTurn()
-		s.clearOpenApprovals("turn ended")
-		s.emit(harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
-			Payload: mustMarshal(map[string]any{"stop_reason": r.StopReason})})
+	case <-done:
+		// turn/completed was observed: onNotify already emitted turn_end and cleared
+		// the turn + open approvals. Nothing to do but return.
 		return nil
 	}
 }
@@ -475,21 +521,22 @@ func (s *Supervisor) Cancel(ctx context.Context) error {
 
 // Resolve answers an App Server approval request. It correlates the decision to
 // the exact server request by echoing its JSON-RPC id, and rejects a stale
-// (unknown) or duplicate (already-answered) reply. On success it emits a
-// permission_resolved event so the stream records the prompt as closed.
+// (unknown) or duplicate (already-answered) reply.
+//
+// It does NOT emit permission_resolved just because the write succeeded (ROOT
+// audit: "don't declare resolved on a successful write"). The App Server's own
+// notification that the item/turn moved on is the resolution signal, so all
+// clients — this one and the native TUI — converge on the same truth; a
+// turn/completed also clears any still-open approval.
 func (s *Supervisor) Resolve(_ context.Context, requestID, decision string) error {
 	p, err := s.approvals.take(requestID)
 	if err != nil {
 		return err // stale or duplicate
 	}
-	// Answer with the bare App Server approval enum, matching the AGE-179 harness
-	// pilot verbatim so both amux's client and a native `--remote` peer resolve
-	// identically (and any host-validated correction lands in one shape).
-	if err := s.rpc.respond(p.rawID, decisionToResult(decision)); err != nil {
-		return err
-	}
-	s.emit(permissionResolved(requestID, decision))
-	return nil
+	// The approval response is an OBJECT {decision:"accept"|"decline"}, verified
+	// against Codex 0.153.4 (a bare enum string is rejected). The same shape serves
+	// amux's client and a native `--remote` peer.
+	return s.rpc.respond(p.rawID, map[string]any{"decision": decisionToResult(decision)})
 }
 
 // decisionToResult maps a contract decision onto the App Server approval
@@ -526,13 +573,51 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 			s.mu.Unlock()
 		}
 	}
+	// Track the active turn from ANY origin (ROOT audit): a turn started in the
+	// native TUI raises turn/started too, and web steer/interrupt must target it —
+	// not only turns this supervisor's Prompt began. Filter to our pinned thread so
+	// a stray id can't hijack the tracked turn.
+	if method == "turn/started" {
+		s.trackTurn(params)
+	}
 	events, res := mapNotification(method, params, s.state)
 	for _, ev := range events {
 		s.emit(ev)
 	}
 	if res != nil {
+		// The turn ended: wake a Prompt waiting on it FIRST (deliverTurn reads
+		// s.turnDone, which clearTurn nils), then clear the tracked turn and any
+		// approval it left open.
 		s.deliverTurn(res)
+		s.clearTurn()
+		s.clearOpenApprovals("turn ended")
 	}
+}
+
+// trackTurn records the in-flight turn id from a turn/started notification when it
+// belongs to our pinned thread, so Interject/Cancel target it regardless of which
+// client initiated the turn.
+func (s *Supervisor) trackTurn(params json.RawMessage) {
+	var p struct {
+		ThreadID string `json:"threadId"`
+		Turn     struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+		TurnID string `json:"turnId"`
+	}
+	_ = json.Unmarshal(params, &p)
+	turnID := p.Turn.ID
+	if turnID == "" {
+		turnID = p.TurnID
+	}
+	if turnID == "" {
+		return
+	}
+	s.mu.Lock()
+	if p.ThreadID == "" || p.ThreadID == s.threadID {
+		s.curTurn = turnID
+	}
+	s.mu.Unlock()
 }
 
 func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.RawMessage) {
@@ -594,12 +679,14 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 	})
 }
 
-// handleUserInput represents a structured request-user-input. There is no
-// interactive-input event type in the shared contract and no path to collect an
-// answer here, so it is EXPLICITLY LIMITED: the questions are surfaced as a notice
-// + raw (nothing lost) and the server request is answered with empty answers so
-// the turn does not hang. Same posture as the AGE-179 pilot.
-func (s *Supervisor) handleUserInput(id json.RawMessage, params json.RawMessage) {
+// handleUserInput represents a structured request-user-input. amux does NOT
+// auto-answer it (ROOT audit): with the native TUI (and other clients) attached to
+// the same server, answering empty here would preempt a client that can actually
+// collect the input. So the questions are surfaced as a notice + raw (nothing
+// lost) and the request is left open for another client to answer. The answer
+// shape, when a client does answer, is a MAP keyed by question id — not an array
+// (verified against Codex 0.153.4) — but amux is not that client here.
+func (s *Supervisor) handleUserInput(_ json.RawMessage, params json.RawMessage) {
 	var p struct {
 		Questions []struct {
 			Question string `json:"question"`
@@ -610,9 +697,8 @@ func (s *Supervisor) handleUserInput(id json.RawMessage, params json.RawMessage)
 	for _, q := range p.Questions {
 		qs = append(qs, q.Question)
 	}
-	s.emit(notice("info", "request-user-input (not interactively answerable): "+strings.Join(qs, " | ")))
+	s.emit(notice("info", "request-user-input awaiting a client: "+strings.Join(qs, " | ")))
 	s.emit(rawEvent("tool/requestUserInput", params))
-	_ = s.rpc.respond(id, map[string]any{"answers": []string{}})
 }
 
 // ── turn signalling ──────────────────────────────────────────────────────────

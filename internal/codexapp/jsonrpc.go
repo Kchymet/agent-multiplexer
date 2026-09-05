@@ -30,22 +30,28 @@
 package codexapp
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 )
 
 // errClosed is returned by the rpc layer once the transport is torn down.
 var errClosed = errors.New("codexapp: connection closed")
 
-// readLineLimit bounds a single JSON-RPC line. App Server item events can carry
-// large command output and file diffs, so this is generous.
-const readLineLimit = 16 << 20
+// msgConn is a message-framed transport: one JSON-RPC object per message. The App
+// Server speaks JSON-RPC over WebSocket (HTTP Upgrade over a unix socket or
+// loopback TCP), so a message boundary is a WebSocket frame — NOT a newline. The
+// production implementation is wsConn (wsconn.go); tests use an in-memory pair.
+// Raw newline-delimited JSONL is never written to the App Server's listener (the
+// real binary closes such a connection immediately — ROOT audit f4483d7e).
+type msgConn interface {
+	ReadMessage() ([]byte, error)
+	WriteMessage([]byte) error
+	Close() error
+}
 
 // rpcError is a JSON-RPC error object.
 type rpcError struct {
@@ -63,11 +69,11 @@ type rpcResponse struct {
 }
 
 // rpcConn multiplexes requests, responses, notifications and server-initiated
-// requests over one newline-delimited transport. The read loop (run) owns all
-// reads; call() registers a pending waiter the read loop wakes on the matching
-// response id.
+// requests over one message-framed transport (a WebSocket connection). The read
+// loop (run) owns all reads; call() registers a pending waiter the read loop wakes
+// on the matching response id.
 type rpcConn struct {
-	transport io.ReadWriteCloser
+	transport msgConn
 
 	writeMu sync.Mutex // serialize writes to the transport
 
@@ -81,7 +87,7 @@ type rpcConn struct {
 	onRequest func(id json.RawMessage, method string, params json.RawMessage)
 }
 
-func newRPCConn(t io.ReadWriteCloser) *rpcConn {
+func newRPCConn(t msgConn) *rpcConn {
 	return &rpcConn{transport: t, pending: map[int64]chan rpcResponse{}}
 }
 
@@ -95,25 +101,26 @@ type incoming struct {
 	Error  *rpcError       `json:"error"`
 }
 
-// run reads and dispatches frames until the transport closes or ctx is
+// run reads and dispatches messages until the transport closes or ctx is
 // cancelled, then fails every pending call so no caller hangs on a dead
-// connection.
+// connection. Each WebSocket message is one JSON-RPC object.
 func (c *rpcConn) run(ctx context.Context) error {
-	sc := bufio.NewScanner(c.transport)
-	sc.Buffer(make([]byte, 1<<20), readLineLimit)
-	for sc.Scan() {
+	for {
+		msg, err := c.transport.ReadMessage()
+		if err != nil {
+			c.failPending()
+			return err
+		}
 		if ctx.Err() != nil {
 			c.failPending()
 			return ctx.Err()
 		}
-		line := bytes.TrimSpace(sc.Bytes())
+		line := bytes.TrimSpace(msg)
 		if len(line) == 0 {
 			continue
 		}
-		c.dispatch(append([]byte(nil), line...))
+		c.dispatch(line)
 	}
-	c.failPending()
-	return sc.Err()
 }
 
 // unparsableMethod is the synthetic notification method a non-JSON-RPC line is
@@ -215,7 +222,6 @@ func (c *rpcConn) write(obj any) error {
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n') // newline-delimited framing
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	c.mu.Lock()
@@ -224,8 +230,9 @@ func (c *rpcConn) write(obj any) error {
 	if closed {
 		return errClosed
 	}
-	_, err = c.transport.Write(b)
-	return err
+	// One JSON-RPC object per WebSocket message — never a newline-framed byte
+	// stream to the App Server listener.
+	return c.transport.WriteMessage(b)
 }
 
 // failPending drains every waiting call with a closed-connection error so no

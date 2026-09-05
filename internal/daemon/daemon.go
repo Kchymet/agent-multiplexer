@@ -395,6 +395,20 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		return
 	}
 	dir, env, argv, err := d.resolve(a.ID, a.Tab)
+	// Opening the AGENT tab of a structured session must NOT start a standalone
+	// Codex: it attaches the native TUI to the supervised server/thread via
+	// `codex --remote <endpoint> resume <thread>` (AGE-181). Ensure the supervisor
+	// first so the server is up and the thread pinned, then resolve the attach argv.
+	if a.Tab == panespec.TabAgent {
+		if sess, ok, _ := lookupSession(a.ID); ok && d.structuredControl(sess) {
+			sup, e := d.ensureSupervisor(a.ID)
+			if e != nil {
+				paneExit(e.Error())
+				return
+			}
+			dir, env, argv, err = panespec.AttachCommand(a.ID, codexapp.EndpointFor(a.ID), sup.ThreadID())
+		}
+	}
 	if err != nil {
 		paneExit(err.Error())
 		return
@@ -448,11 +462,14 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	}
 	var firstErr error
 	for _, aid := range ids {
-		dir, env, argv, err := d.resolve(aid, panespec.TabAgent)
-		if err == nil {
-			if sess, ok, _ := lookupSession(aid); ok && d.structuredControl(sess) {
-				_, err = d.codex.Ensure(aid, dir, env)
-			} else {
+		var err error
+		if sess, ok, _ := lookupSession(aid); ok && d.structuredControl(sess) {
+			_, err = d.ensureSupervisor(aid)
+		} else {
+			var dir string
+			var env, argv []string
+			dir, env, argv, err = d.resolve(aid, panespec.TabAgent)
+			if err == nil {
 				_, err = d.engine.Ensure(ctx, engine.Spec{
 					Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
 					Dir: dir, Env: env, Argv: argv,
@@ -464,6 +481,19 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 		}
 	}
 	return firstErr
+}
+
+// ensureSupervisor starts (or returns) the App Server supervisor for a structured
+// session, launched under the amux sandbox wrapper (panespec.AppServerCommand) so
+// it inherits the session's mount/config/identity scope — not a bare exec. The
+// endpoint is the per-session WebSocket socket in the private scope.
+func (d *Daemon) ensureSupervisor(agentID string) (*codexapp.Supervisor, error) {
+	endpoint := codexapp.EndpointFor(agentID)
+	dir, env, argv, err := panespec.AppServerCommand(agentID, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return d.codex.Ensure(agentID, dir, env, argv)
 }
 
 // structuredControl reports whether session s should run under the App Server

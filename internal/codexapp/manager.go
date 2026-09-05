@@ -19,14 +19,30 @@ type Manager struct {
 	ctx context.Context // daemon lifetime; every supervisor's Start is bound to it
 	bin string          // codex binary override (AMUX_CODEX_BIN), "" ⇒ "codex"
 
-	mu  sync.Mutex
-	sup map[string]*Supervisor
+	mu     sync.Mutex
+	sup    map[string]*Supervisor
+	starts map[string]*sync.Mutex // per-session creation lock (serialize Ensure before spawn)
 }
 
 // NewManager builds a Manager bound to the daemon's context. bin overrides the
 // codex binary (pass the resolved AMUX_CODEX_BIN or "").
 func NewManager(ctx context.Context, bin string) *Manager {
-	return &Manager{ctx: ctx, bin: bin, sup: map[string]*Supervisor{}}
+	return &Manager{ctx: ctx, bin: bin, sup: map[string]*Supervisor{}, starts: map[string]*sync.Mutex{}}
+}
+
+// startLock returns the per-session creation mutex, creating it once. Serializing
+// Ensure per session BEFORE spawning is what prevents two callers from each
+// launching an App Server on the same socket and the loser's cleanup unlinking the
+// winner's listener (ROOT audit).
+func (m *Manager) startLock(sessionID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.starts[sessionID]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.starts[sessionID] = l
+	}
+	return l
 }
 
 // Get returns the live supervisor for a session id, or false. It is the daemon's
@@ -39,27 +55,36 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 }
 
 // Ensure returns the supervisor for a session, starting one if none is live. It
-// fills the durable parts of the Config from the persisted identity (socket path
-// and, when known, the thread to resume) and the per-session event log, starts the
-// App Server bound to the daemon context, and persists the resulting identity so a
-// later restart resumes the same thread. Idempotent: a second call returns the
-// running supervisor unchanged.
+// fills the durable parts of the Config from the persisted identity (endpoint and,
+// when known, the thread to resume) and the per-session event log, launches the
+// App Server under the sandbox-wrapped argv bound to the daemon context, and
+// persists the resulting identity so a later restart resumes the same thread.
+// Idempotent: a second call returns the running supervisor unchanged.
 //
-// dir is the session's worktree; env are extra child-environment additions.
-func (m *Manager) Ensure(sessionID, dir string, env []string) (*Supervisor, error) {
-	m.mu.Lock()
-	if s, ok := m.sup[sessionID]; ok {
-		m.mu.Unlock()
+// dir is the session's worktree; env are extra child-environment additions;
+// wrappedArgv is the sandbox-wrapped `codex app-server --listen <endpoint>` the
+// daemon resolved (nil only in tests / the direct-exec smoke path). Creation is
+// serialized per session, so two callers never spawn competing servers.
+func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string) (*Supervisor, error) {
+	// Fast path: already live.
+	if s, ok := m.Get(sessionID); ok {
 		return s, nil
 	}
-	m.mu.Unlock()
+	// Serialize creation for this session, then re-check under the lock so only one
+	// caller ever spawns.
+	lock := m.startLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	if s, ok := m.Get(sessionID); ok {
+		return s, nil
+	}
 
 	cfg := Config{
 		SessionID:    sessionID,
 		Bin:          m.bin,
 		Dir:          dir,
 		Env:          env,
-		SocketPath:   SocketPathFor(sessionID),
+		Endpoint:     EndpointFor(sessionID),
 		EventLogPath: EventLogPathFor(sessionID),
 	}
 	// Resume the same thread across daemon restarts when we have one on record.
@@ -68,19 +93,12 @@ func (m *Manager) Ensure(sessionID, dir string, env []string) (*Supervisor, erro
 	}
 
 	sup := New(cfg)
-	if err := sup.Start(m.ctx); err != nil {
+	if err := sup.Start(m.ctx, wrappedArgv); err != nil {
 		return nil, err
 	}
 	_ = SaveIdentity(sup.Identity())
 
 	m.mu.Lock()
-	// A concurrent Ensure may have won the race while we were starting; if so, keep
-	// the first and discard ours so there is only ever one server per session.
-	if existing, ok := m.sup[sessionID]; ok {
-		m.mu.Unlock()
-		_ = sup.Close()
-		return existing, nil
-	}
 	m.sup[sessionID] = sup
 	m.mu.Unlock()
 	return sup, nil

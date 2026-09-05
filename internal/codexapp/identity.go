@@ -46,6 +46,14 @@ func SocketPathFor(sessionID string) string {
 	return filepath.Join(base, "codexapp", sanitize(sessionID)+".sock")
 }
 
+// EndpointFor is the default App Server endpoint for a session: WebSocket over the
+// per-session Unix socket (`unix://<path>`), which keeps the endpoint inside the
+// session's private sandbox scope. A loopback/WSS endpoint can be supplied via
+// Config.Endpoint instead when portability is needed.
+func EndpointFor(sessionID string) string {
+	return "unix://" + SocketPathFor(sessionID)
+}
+
 // runtimeDir prefers $XDG_RUNTIME_DIR (per-user tmpfs) for the socket, falling
 // back to amux's state dir where it is unset (e.g. macOS). It mirrors core's own
 // unexported runtimeDir so socket placement matches the daemon control socket.
