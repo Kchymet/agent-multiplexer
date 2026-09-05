@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,9 @@ import (
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
+	"amux/internal/runtimeevents"
 	"amux/internal/store"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // isolateHome points the store (and every config path) at a temp dir so a test
@@ -87,11 +90,14 @@ func (f *fakeInstance) written() string {
 }
 
 // fakeEngine holds instances by key; Ensure registers one, mimicking a start.
+// ensureBlock, when set, parks Ensure until it is closed — the stand-in for a
+// runtime cold start, which is what an accepted `prompt` must not wait on.
 type fakeEngine struct {
-	mu        sync.Mutex
-	insts     map[engine.Key]*fakeInstance
-	ensureErr error
-	ensured   []engine.Key
+	mu          sync.Mutex
+	insts       map[engine.Key]*fakeInstance
+	ensureErr   error
+	ensureBlock chan struct{}
+	ensured     []engine.Key
 }
 
 func newFakeEngine() *fakeEngine {
@@ -100,6 +106,9 @@ func newFakeEngine() *fakeEngine {
 
 func (e *fakeEngine) Name() string { return "fake" }
 func (e *fakeEngine) Ensure(_ context.Context, spec engine.Spec) (engine.Instance, error) {
+	if e.ensureBlock != nil {
+		<-e.ensureBlock
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ensured = append(e.ensured, spec.Key)
@@ -138,6 +147,14 @@ func (e *fakeEngine) Kill(key engine.Key) {
 }
 func (e *fakeEngine) Shutdown() {}
 
+// ensuredKeys copies the keys Ensure has been called with, under the lock, so a
+// test can read them while a start is still in flight.
+func (e *fakeEngine) ensuredKeys() []engine.Key {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]engine.Key(nil), e.ensured...)
+}
+
 // running registers an already-live agent pane for id.
 func (e *fakeEngine) running(id string) *fakeInstance {
 	e.mu.Lock()
@@ -147,7 +164,10 @@ func (e *fakeEngine) running(id string) *fakeInstance {
 	return in
 }
 
-// steerDaemon is a daemon with a fake engine and an isolated store.
+// steerDaemon is a daemon with a fake engine and an isolated store. A `prompt`
+// to a stopped agent now starts it on its own goroutine, so the daemon is wired
+// with a join point: without one the start outlives the test, and the isolated
+// HOME is torn down under it.
 func steerDaemon(t *testing.T) (*Daemon, *fakeEngine) {
 	t.Helper()
 	isolateHome(t)
@@ -157,7 +177,20 @@ func steerDaemon(t *testing.T) (*Daemon, *fakeEngine) {
 	d.steerSettle = time.Millisecond
 	d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
 	d.resolve = func(string, int) (string, []string, []string, error) { return "", nil, []string{"sh"}, nil }
+	d.steerStarted = make(chan string, 8)
 	return d, eng
+}
+
+// waitStarted blocks until a deferred start finishes, failing the test if none
+// does. Every test that prompts a stopped agent must call it before asserting on
+// the engine — the point of the change under test is that steer returns first.
+func waitStarted(t *testing.T, d *Daemon) {
+	t.Helper()
+	select {
+	case <-d.steerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the deferred start behind an accepted prompt never finished")
+	}
 }
 
 // TestSteerDeliversKeystrokes is the heart of the feature: each verb must reach
@@ -412,7 +445,8 @@ func TestStopNeedsNoTurnForAnInertKey(t *testing.T) {
 
 // TestSteerPromptStartsStoppedAgent pins the one verb that starts an agent: a
 // prompt to a stopped session brings it up and then types the text, so a remote
-// caller doesn't have to know whether the process happens to be running.
+// caller doesn't have to know whether the process happens to be running. The
+// start is deferred past the ack now, so the assertions wait for it.
 func TestSteerPromptStartsStoppedAgent(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
@@ -423,6 +457,7 @@ func TestSteerPromptStartsStoppedAgent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("steer: %v", err)
 	}
+	waitStarted(t, d)
 
 	key := engine.Key{AgentID: "a1", Tab: panespec.TabAgent}
 	if len(eng.ensured) != 1 || eng.ensured[0] != key {
@@ -471,6 +506,7 @@ func TestSteerReachesTheConsole(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("steer: %v", err)
 		}
+		waitStarted(t, d)
 		key := engine.Key{AgentID: console.ID, Tab: panespec.TabAgent}
 		inst, ok := eng.Lookup(key)
 		if !ok {
@@ -487,21 +523,102 @@ func TestSteerReachesTheConsole(t *testing.T) {
 	})
 }
 
-// TestSteerPromptReportsStartFailure keeps the start path honest: if the agent
-// can't come up, the verb fails loudly instead of reporting a delivery that
-// never happened.
+// TestSteerAcksBeforeStarting is the point of the whole change: the verb is
+// answered while the cold start is still in flight. The fake engine parks inside
+// Ensure, so a steer that still waited for the start could not return — which is
+// exactly the several-second stall that made a relayed prompt to an idle session
+// time out at the web client (AGE-191).
+func TestSteerAcksBeforeStarting(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	release := make(chan struct{})
+	eng.ensureBlock = release
+
+	acked := make(chan error, 1)
+	go func() {
+		acked <- d.steer(context.Background(), core.Action{
+			Action: core.ActionSteer, ID: "a1",
+			Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "go"},
+		})
+	}()
+
+	select {
+	case err := <-acked:
+		if err != nil {
+			t.Fatalf("steer: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("steer blocked on the cold start instead of acking first")
+	}
+	// The ack came back before the engine was even done starting.
+	if got := eng.ensuredKeys(); len(got) != 0 {
+		t.Fatalf("engine already finished starting %v before the ack", got)
+	}
+	close(release)
+	waitStarted(t, d)
+
+	inst, ok := eng.Lookup(engine.Key{AgentID: "a1", Tab: panespec.TabAgent})
+	if !ok {
+		t.Fatal("no instance after the deferred start")
+	}
+	in := inst.(*fakeInstance)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && in.written() != "go\r" {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := in.written(); got != "go\r" {
+		t.Fatalf("pane received %q, want the prompt to arrive after the ack", got)
+	}
+}
+
+// TestSteerPromptReportsStartFailure keeps the start path honest. The verb has
+// already been acknowledged by the time the start fails, so the failure cannot
+// come back as a returned error any more — it has to reach the caller on the
+// session's runtime-events stream, as an `error`-level notice. Silence here
+// would leave an orchestrator waiting for a turn that is never coming.
 func TestSteerPromptReportsStartFailure(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
 	eng.ensureErr = os.ErrPermission
 
-	err := d.steer(context.Background(), core.Action{
+	if err := d.steer(context.Background(), core.Action{
 		Action: core.ActionSteer, ID: "a1",
 		Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "go"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "start agent a1") {
-		t.Fatalf("error = %v, want a start failure for a1", err)
+	}); err != nil {
+		t.Fatalf("steer should have acked before the start could fail: %v", err)
 	}
+	waitStarted(t, d)
+
+	recs := core.ReadJournal("a1")
+	if len(recs) != 2 {
+		t.Fatalf("journal = %+v, want the starting notice and the failure", recs)
+	}
+	if recs[0].Level != core.JournalInfo || !strings.Contains(recs[0].Text, "starting agent") {
+		t.Errorf("first line = %+v, want an info notice that the agent is starting", recs[0])
+	}
+	if recs[1].Level != core.JournalError || !strings.Contains(recs[1].Text, "start agent a1") {
+		t.Errorf("second line = %+v, want an error naming the failed start", recs[1])
+	}
+
+	// And the journal is what the event stream reads, so the orchestrator sees the
+	// failure as a notice rather than having to parse a log.
+	evs := runtimeevents.MapJournalLine("claude", mustJSON(t, recs[1]))
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypeNotice {
+		t.Fatalf("journal error mapped to %+v, want one notice event", evs)
+	}
+	if !strings.Contains(string(evs[0].Payload), core.JournalError) {
+		t.Errorf("notice payload %s should carry the error level", evs[0].Payload)
+	}
+}
+
+// mustJSON re-marshals a journal record into the line the reader tails.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestSteerDoesNotSurviveADeadPane guards the deferred write: an agent that

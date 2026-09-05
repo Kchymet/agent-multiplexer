@@ -67,7 +67,7 @@ var goldenFrames = []struct {
 		},
 	}},
 	{"session_result_accepted", HarnessMsg{
-		Type: HSessionResult, ReqID: "r2", OK: true, Result: ResultAccepted,
+		Type: HSessionResult, ReqID: "r2", OK: true, Result: ResultAccepted, Accepted: true,
 	}},
 	{"sessions", HarnessMsg{
 		Type: HSessions,
