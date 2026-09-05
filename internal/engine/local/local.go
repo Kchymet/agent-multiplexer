@@ -487,12 +487,12 @@ func (in *instance) signal(sig syscall.Signal) {
 	}
 }
 
-// buildEnv is the child's environment: this process's environment minus $TMUX
-// and $TERM (so a fresh terminal is presented regardless of where the engine
-// runs), then the spec's additions, and a default $TERM if the spec didn't set
-// one.
+// buildEnv presents a fresh terminal regardless of where the engine runs.
+// Launcher color overrides (notably NO_COLOR from automation shells) describe
+// the launcher's output, not the pane's PTY. Drop them alongside TMUX and TERM,
+// then apply explicit pane preferences and a default TERM if none was set.
 func buildEnv(extra []string) []string {
-	env := stripEnv(os.Environ(), "TMUX", "TERM")
+	env := stripEnv(os.Environ(), "TMUX", "TERM", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE")
 	env = append(env, extra...)
 	for _, e := range extra {
 		if strings.HasPrefix(e, "TERM=") {
