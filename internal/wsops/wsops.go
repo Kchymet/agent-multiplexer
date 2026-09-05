@@ -264,6 +264,12 @@ resolving conflicts) so you take a change all the way to merged, not just opened
 // start the process(es) for a freshly-created session — root or agent — the same
 // way the TUI starts an agent when it's opened.
 func AgentIDsUnder(id string) ([]string, error) {
+	// The console is a synthetic single agent (no store row, never a root), so
+	// it resolves to itself: `start` and a `prompt` to a stopped console both
+	// come through here.
+	if id == console.ID {
+		return []string{id}, nil
+	}
 	db, err := store.Open()
 	if err != nil {
 		return nil, err

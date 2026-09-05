@@ -197,6 +197,13 @@ state anyway, so the refusal is also the honest answer.
 `permission` all act on a turn that must already be in flight, so on a stopped
 session they fail rather than surprise the caller by launching one.
 
+*The console is a session like any other.* The built-in `amux console` (`id:
+"console"`) is published in the inventory and takes every verb an agent does:
+`prompt` starts it when stopped, and `start`/`stop`/`interject`/`permission`
+behave as above. It is synthetic on the daemon side (not a stored workgroup or
+agent), which is the daemon's business — an orchestrator addresses it by the id
+it was published under.
+
 Steering verbs are verbs: `--read-only-sessions` (§6) rejects all four exactly as
 it rejects the lifecycle verbs.
 
