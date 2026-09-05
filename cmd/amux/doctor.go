@@ -175,7 +175,7 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 	var disk []branchRef
 	for _, repo := range repos {
 		gitDir := filepath.Join(core.ReposDir(), repo.Name+".git")
-		for _, b := range git.ListBranches(ctx, gitDir, "amux/*") {
+		for _, b := range git.ListBranches(ctx, gitDir, core.BranchPrefix+"*") {
 			disk = append(disk, branchRef{Repo: repo.Name, Branch: b})
 		}
 	}
@@ -272,7 +272,7 @@ func reconcile(sessionsDir string, roots []core.WorkgroupRow, disk []branchRef) 
 // reconciliation match a branch to a live agent by id even when the session's
 // stored branch is blank.
 func agentIDFromBranch(branch string) string {
-	b := strings.TrimPrefix(branch, "amux/")
+	b := strings.TrimPrefix(branch, core.BranchPrefix)
 	if i := strings.LastIndex(b, "-"); i >= 0 {
 		return b[i+1:]
 	}

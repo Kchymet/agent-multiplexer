@@ -72,6 +72,10 @@ func WorkspacesDir() string { return filepath.Join(DataDir(), "workspaces") }
 // SessionsDir holds per-root-session directories of sub-session worktrees.
 func SessionsDir() string { return filepath.Join(DataDir(), "sessions") }
 
+// BranchPrefix namespaces every branch amux creates. Cleanup only ever deletes a
+// branch under it, and doctor's reconciliation only ever looks under it.
+const BranchPrefix = "amux/"
+
 // BranchFor is the git branch an agent commits on: amux/<root>-<agent>. This is
 // the single source of the branch scheme — every worktree, the agent guide, and
 // the doctor reconciliation derive the branch from here, so changing the scheme is
@@ -82,8 +86,15 @@ func SessionsDir() string { return filepath.Join(DataDir(), "sessions") }
 // amux/<root>/<agent> (a file/directory conflict), which broke adding a second
 // agent to older workspaces.
 func BranchFor(rootID, agentID string) string {
-	return "amux/" + rootID + "-" + agentID
+	return BranchPrefix + rootID + "-" + agentID
 }
+
+// LegacyBranchFor is the pre-hierarchy scheme, amux/<root>: one branch per
+// workspace, checked out by every repo worktree under workspaces/<root>. A
+// session imported from that layout carries no stored branch (see
+// store.importLegacy), so delete derives the name from here when it can't read
+// it off the worktree itself.
+func LegacyBranchFor(rootID string) string { return BranchPrefix + rootID }
 
 // DBPath is the SQLite session store.
 func DBPath() string { return filepath.Join(DataDir(), "amux.db") }

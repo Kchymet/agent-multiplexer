@@ -3,11 +3,13 @@ package wsops
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/git"
 	"amux/internal/store"
 )
 
@@ -735,5 +737,137 @@ func TestWriteAgentGuide(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, tc.other)); err == nil {
 			t.Errorf("kind %q: unexpectedly wrote %s too", tc.kind, tc.other)
 		}
+	}
+}
+
+// gitRun runs git in dir with a hermetic identity/config, failing the test on
+// error.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// bareRepoWithCommit creates a bare clone holding one commit on main — the shape
+// of a repo-store entry — and returns its git dir.
+func bareRepoWithCommit(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "src")
+	gitDir := filepath.Join(t.TempDir(), "repo.git")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, src, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(src, "README"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, src, "add", "README")
+	gitRun(t, src, "commit", "-q", "-m", "init")
+	gitRun(t, "", "clone", "-q", "--bare", src, gitDir)
+	return gitDir
+}
+
+// TestDeleteLegacyAgentRemovesBranch pins the delete contract ("worktrees +
+// branch") for a session imported from the legacy workspaces/ layout. Its record
+// has no stored branch, so cleanup must read the branch off the worktree — or,
+// when the worktree dir is already gone, derive the legacy amux/<root> name —
+// rather than skip the branch delete and leave a "branch with no agent" behind.
+func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		dirGone bool
+	}{
+		{"worktree present", false},
+		{"worktree dir already removed", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateStore(t)
+			ctx := context.Background()
+			gitDir := bareRepoWithCommit(t)
+
+			db, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.PutRepo(store.Repo{Name: "acme", Source: gitDir, GitDir: gitDir}); err != nil {
+				t.Fatal(err)
+			}
+			// The legacy layout: workspaces/<root>/<repo> on branch amux/<root>.
+			rootID := "f12442"
+			dir := filepath.Join(core.WorkspacesDir(), rootID)
+			if err := git.AddWorktree(ctx, gitDir, filepath.Join(dir, "acme"), core.LegacyBranchFor(rootID)); err != nil {
+				t.Fatal(err)
+			}
+			// Mirror importLegacy: a root plus one agent sharing the legacy dir, with
+			// the agent's Branch left blank.
+			if err := db.PutSession(store.Session{ID: rootID, Name: "legacy", Mode: store.ModeTask, Scope: store.ScopeWork, Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			agentID := db.NewID()
+			if err := db.PutSession(store.Session{ID: agentID, RootID: rootID, Mode: store.ModeTask, Repo: "acme", Dir: dir}); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			if tt.dirGone {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := DeleteByID(ctx, rootID); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 0 {
+				t.Errorf("legacy branch survived delete: %v", got)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("legacy dir %s still exists (stat err %v)", dir, err)
+			}
+			db, err = store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, id := range []string{rootID, agentID} {
+				if _, ok, _ := db.GetSession(id); ok {
+					t.Errorf("session %s survived delete", id)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentBranchOnlyDerivesAmuxBranches: a stored branch is used as-is; a blank
+// record derives the branch from the worktree only when it's amux-owned, so a
+// worktree sitting on main never gets main deleted out from under the repo.
+func TestAgentBranchOnlyDerivesAmuxBranches(t *testing.T) {
+	ctx := context.Background()
+	gitDir := bareRepoWithCommit(t)
+	onMain := filepath.Join(t.TempDir(), "on-main")
+	gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", onMain, "main")
+	onAmux := filepath.Join(t.TempDir(), "on-amux")
+	if err := git.AddWorktree(ctx, gitDir, onAmux, "amux/r"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := agentBranch(ctx, store.Session{RootID: "r", Branch: "amux/r-a"}, onMain); got != "amux/r-a" {
+		t.Errorf("stored branch: got %q, want amux/r-a", got)
+	}
+	if got := agentBranch(ctx, store.Session{RootID: "r"}, onMain); got != "" {
+		t.Errorf("worktree on main: got %q, want \"\" (never delete a non-amux branch)", got)
+	}
+	if got := agentBranch(ctx, store.Session{RootID: "r"}, onAmux); got != "amux/r" {
+		t.Errorf("worktree on amux branch: got %q, want amux/r", got)
+	}
+	if got := agentBranch(ctx, store.Session{RootID: "r"}, filepath.Join(t.TempDir(), "gone")); got != "amux/r" {
+		t.Errorf("missing worktree: got %q, want legacy amux/r", got)
 	}
 }

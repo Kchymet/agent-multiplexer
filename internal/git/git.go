@@ -129,6 +129,16 @@ func RemoveWorktree(ctx context.Context, gitDir, path, branch string) error {
 	return nil
 }
 
+// CurrentBranch returns the branch checked out in the worktree at path, or ""
+// when the dir is gone, isn't a worktree, or HEAD is detached.
+func CurrentBranch(ctx context.Context, path string) string {
+	out, err := run(ctx, path, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
 // IsGitRepo reports whether path is inside a git working tree.
 func IsGitRepo(ctx context.Context, path string) bool {
 	out, err := run(ctx, path, "rev-parse", "--is-inside-work-tree")
