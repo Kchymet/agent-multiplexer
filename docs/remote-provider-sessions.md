@@ -133,12 +133,12 @@ creation verbs (`new-workgroup`, `add-agent`); `ok` and `error` follow JSON
 and a failure carries `ok:false` with a non-empty `error`.
 
 `result` is the disposition of a *successful* verb, and distinguishes a verb
-whose effect is already done from one merely handed to a running agent:
+whose effect is already done from one accepted for asynchronous input delivery:
 
 | `result` | meaning |
 | --- | --- |
 | `applied` | the verb ran to completion; its effect is in the next `sessions` snapshot. Every lifecycle verb (§3) is applied. |
-| `accepted` | the verb was validated and taken on; the effect is asynchronous — watch `runtime-events` (§4) or the session's `state` for it. Every steering verb (§3.1) is accepted. |
+| `accepted` | validated and taken on for asynchronous, best-effort input delivery; not confirmation of runtime submission or processing. Watch `runtime-events` (§4) or the session's `state` for observable effects. Every steering verb (§3.1) is accepted. |
 
 `accepted` promises less than "delivered". A `prompt` to a **stopped** agent is
 answered as soon as the daemon knows it is deliverable, and the cold start it
@@ -256,11 +256,16 @@ asking, allow it"; a caller that can name the request should.
 
 Steering is asynchronous by nature: writing a prompt to a running agent does not
 wait for the turn it starts. A successful steering result is therefore
-`result:"accepted"` — the daemon took the verb on — and the observable effect
-arrives later on the `runtime-events` stream (§4) or as a change of the session's
-`state` in the next inventory snapshot (§2). A steering verb that could not be
-delivered (no such session, agent not running, unparseable `decision`, no pending
-request for that `request_id`) returns `ok:false` with a human-readable `error`.
+`result:"accepted"`: accepted for asynchronous, best-effort input delivery,
+not confirmation that the runtime submitted the composer or the model received
+the text. Observe `runtime-events` (§4) or the session's `state` (§2) for effects.
+The bounded PTY input queue can silently drop input when full; startup and
+submit waits are timing heuristics, and an exited runtime or unexpected dialog
+can prevent submission after acceptance. Do not stack retries solely because
+`accepted` has not yet produced a response. A steering
+verb rejected before delivery (no such session, agent not running, unparseable
+`decision`, no pending request for that `request_id`) returns `ok:false` with a
+human-readable `error`.
 
 **A `prompt` that starts a stopped agent acks first.** Everything that can refuse
 the verb is decided synchronously — the session exists, its kind is steerable,
@@ -279,8 +284,11 @@ A consumer that acts on `accepted` must therefore watch that stream — the ack
 means "this will be attempted", not "this worked".
 
 Delivery mechanism is the daemon's business, and v1 of this extension delivers by
-writing to the agent's PTY: `prompt`/`interject` write the text followed by
-Enter, `stop` sends the runtime's own interrupt key, and `permission` sends the
+writing to the agent's PTY: `prompt`/`interject` queue an atomic text-and-submit
+sequence. Claude text uses bracketed paste to preserve newlines, followed by a
+100ms wait after the paste write completes, then Enter; this prevents adjacent
+commands from mixing during the wait. Startup settling also occupies this FIFO.
+`stop` sends the runtime's own interrupt key, and `permission` sends the
 keystrokes that runtime's permission prompt expects. That is an implementation
 detail of the daemon, not the wire — the orchestrator sends the same four verbs
 regardless of how a given runtime is driven, and a daemon delivering them over a
