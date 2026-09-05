@@ -3,6 +3,7 @@ package runtimeevents
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"time"
@@ -207,6 +208,18 @@ func offsetOnLineBoundary(path string, offset int64) bool {
 	return b[0] == '\n'
 }
 
+// structuredLine decodes one line of a supervisor-written structured event record
+// (AGE-181): the line is already a marshaled harnessproto.RuntimeEvent, so the
+// mapper is the identity. A blank or malformed line yields nothing (skipped), the
+// same tolerance the runtime decoders apply to a partial write.
+func structuredLine(line []byte) []harnessproto.RuntimeEvent {
+	var ev harnessproto.RuntimeEvent
+	if err := json.Unmarshal(line, &ev); err != nil || ev.Type == "" {
+		return nil
+	}
+	return []harnessproto.RuntimeEvent{ev}
+}
+
 // PathResolver resolves a published session id to its on-disk runtime record
 // path. ok=false ⇒ the session has no structured record (the provider advertises
 // the feature but emits nothing for it — honest degradation, §4).
@@ -231,6 +244,12 @@ type Record struct {
 	// when the caller resolves no journal. Like Permissions it is additive: a
 	// consumer older than the field simply sees one source fewer.
 	Journal string
+	// Structured marks Path as a supervisor-written event record (AGE-181): each
+	// line is an already-normalized harnessproto.RuntimeEvent, so it is read with
+	// the identity mapper rather than a runtime's raw-line decoder. It is the
+	// durable transport for a structured (Codex App Server) session's events, and
+	// carries permission events itself, so no separate permission source is needed.
+	Structured bool
 }
 
 // Resolver resolves a published session id to its runtime record. ok=false ⇒ the
@@ -258,6 +277,18 @@ type sourceSpec struct {
 // the rollout is itself a permission source.
 func sourcesFor(rec Record) ([]sourceSpec, bool) {
 	var out []sourceSpec
+	// A structured (AGE-181) record is already normalized: each line is a
+	// harnessproto.RuntimeEvent, so it is decoded with the identity mapper and needs
+	// no runtime-specific line reader. It carries its own permission events.
+	if rec.Structured {
+		out = append(out, sourceSpec{path: rec.Path, permission: true, newMapper: func() LineMapper {
+			return structuredLine
+		}})
+		if rec.Journal != "" {
+			out = append(out, sourceSpec{path: rec.Journal, newMapper: journalMapper(rec.Runtime)})
+		}
+		return out, true
+	}
 	switch rec.Runtime {
 	case harnessproto.RuntimeClaude:
 		out = append(out, sourceSpec{path: rec.Path, newMapper: func() LineMapper {

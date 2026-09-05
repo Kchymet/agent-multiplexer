@@ -56,7 +56,11 @@ subscriber resumes from a bounded in-memory replay ring via its `afterSeq` curso
 
 - **Steer verbs** (`prompt`, `interject`, `stop`, `permission`) route to JSON-RPC
   (`turn/start`, `turn/steer`, `turn/interrupt`, an approval response) instead of
-  keystrokes. They remain `accepted` (asynchronous), same as the PTY path.
+  keystrokes. The daemon's steer handler (`internal/daemon/steer.go`) checks for a
+  live supervisor first and routes to it, skipping the PTY path entirely; a stopped
+  structured session is started by `prompt` alone, mirroring the PTY rule. Verbs
+  remain `accepted` (asynchronous): `prompt` runs the whole turn in the background,
+  the shorter verbs answer with the supervisor's own error.
 - **Permissions are natively correlated.** An approval is a server→client JSON-RPC
   request; its id is the `request_id` a `permission` verb echoes back. amux tracks
   outstanding approvals and rejects a **stale** (unknown) or **duplicate**
@@ -69,12 +73,44 @@ subscriber resumes from a bounded in-memory replay ring via its `afterSeq` curso
   request-user-input is surfaced as a `notice` + `raw` and answered with empty
   answers so the turn does not hang (it is not interactively answerable here).
 
+### Event transport (why a durable record, not a socket)
+
+The provider that publishes `runtime-events` to a remote orchestrator runs
+**out-of-process** (`amux provide`): it reaches the daemon over its control socket
+and *tails on-disk records*; it cannot subscribe to the daemon's in-memory event
+hub. So a structured session's events reach a remote consumer through a
+**daemon-owned durable record**: the supervisor appends every normalized event as
+one JSON line to a per-session NDJSON log (`<data>/codexapp/<id>.events.jsonl`),
+and `runtimeevents.sourcesFor` reads a `Structured` record with the *identity*
+mapper (each line is already a `RuntimeEvent`). This reuses the whole tailer — seq
+assignment, `afterSeq` resume, rotation/resync — unchanged, so the provider path is
+drop-in. Each supervisor lifetime truncates the log (a fresh seq space); the tailer
+resyncs on the size shrink and a consumer dedups by ordinal, exactly as for a
+rollout `--resume` rewrite. The in-memory hub remains for any in-daemon subscriber.
+
+> A future alternative, if the pinned `codex app-server` turns out to write its own
+> rollout jsonl (like `codex exec`): tail that rollout with the existing Codex
+> mapper for transcript events and add only correlated approvals as a second
+> source. That needs the host binary to confirm and is not assumed here.
+
 ## Opt-in and fallback
 
-Structured mode is opt-in; the default is the untouched PTY/exec path. The two are
-never wired at once for a given session. The intended selector is an amux env flag
-(`AMUX_CODEX_CONTROL=app-server`, default off) applied at launch; the daemon
-routing that consumes it lands in the follow-up PR.
+Structured mode is opt-in; the default is the untouched PTY/exec path, and the two
+are never wired at once for a given session. The selector is
+`AMUX_CODEX_CONTROL=app-server` (default off), read by the daemon at launch: a
+Codex session started with the flag on comes up as a supervised App Server
+(`internal/daemon/daemon.go` `startEngineFor` → `codexapp.Manager.Ensure`) instead
+of a PTY pane; every other session, and every session with the flag off, takes the
+original PTY path. `killEngineFor` stops the supervisor on archive/delete (keeping
+the persisted identity so an unarchive resumes), and daemon shutdown stops all
+supervisors. The gate lives in one place — `Daemon.structuredControl` — so the
+default path is provably unaffected (`TestStructuredControlGate`).
+
+**Deferred (needs host validation): the native TUI pane.** Launching the pane as
+`codex --remote unix://<socket> resume <thread-id>` so the terminal UI attaches to
+the *same* supervised thread is intentionally not wired yet: it hinges on the
+unvalidated attach semantics below. Until then a structured session is driven
+through amux's structured control path (rail/remote), not a local PTY.
 
 ## Validation posture — read this before claiming it works
 
@@ -85,6 +121,12 @@ Consequently:
   against a fake App Server (`internal/codexapp/*_test.go`), including handshake
   (start/resume), turn bracketing, interject, cancel, the approval round-trip with
   stale/duplicate rejection, disconnect-mid-turn, and the unknown-request path.
+- The daemon integration is covered without a real binary: the structured verb
+  routing and its refusals (`TestSteerStructuredRoutesVerbs`), the opt-in gate that
+  keeps PTY the default (`TestStructuredControlGate`), the durable event record's
+  identity mapping and permission replay (`runtimeevents` structured tests), and the
+  §2.2 control-mode stamp (`source` tests). The legacy PTY steering tests continue
+  to pass unchanged — the fallback is intact.
 - An **opt-in, self-skipping** real-runtime smoke test
   (`AMUX_CODEX_APP_SERVER_SMOKE=1`, `TestSmokeRealAppServer`) drives a real
   `codex app-server` on a Unix socket when a pinned binary is present, logging the

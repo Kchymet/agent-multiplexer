@@ -243,6 +243,11 @@ type RuntimeRecord struct {
 	// it is resolvable for a session with no transcript at all — which is the
 	// point, since that is the stopped agent an accepted `prompt` is starting.
 	Journal string `json:"journal,omitempty"`
+	// Structured marks Path as a supervisor-written event record whose lines are
+	// already normalized runtime events (AGE-181, structured control mode), so the
+	// reader decodes them with the identity mapper. Additive/omitempty: a client
+	// older than the field reads Path as a raw runtime transcript, as before.
+	Structured bool `json:"structured,omitempty"`
 }
 
 // Action is the client -> daemon control request. It carries both the lifecycle
