@@ -99,6 +99,27 @@ var goldenFrames = []struct {
 			ControlMode: ControlModeStructured,
 		}},
 	}},
+	{"sessions_roles", HarnessMsg{
+		Type: HSessions,
+		Sessions: []Session{{
+			ID: "console", Title: "amux console", Source: "workspace", Kind: RuntimeClaude, Mode: "console",
+			State: StateReady, Status: "ready · amux-wide", Cwd: "/home/u/.local/share/amux/console",
+			CanAttach: true, Runtime: RuntimeClaude, Role: RoleConsole,
+			Caps: &SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true},
+		}, {
+			ID: "wg1", Title: "payments", Source: "workspace", Kind: RuntimeClaude, Mode: "interactive",
+			IsRoot: true, Section: SectionWorkgroups, State: StateRunning, Status: "running · 2 agents",
+			Cwd: "/home/u/.local/share/amux/sessions/wg1", CanAttach: true, CanKill: true,
+			Runtime: RuntimeClaude, Role: RoleCoordinator,
+			Caps: &SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true},
+		}, {
+			ID: "api", Title: "octo/api", Source: "workspace", Kind: "repo", Mode: "interactive",
+			Section: SectionRepos, State: StateIdle, Status: "idle · repo home",
+			Cwd: "/home/u/.local/share/amux/sessions/api", CanAttach: true,
+			Runtime: RuntimeClaude, Role: RoleRepo,
+			Caps: &SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true},
+		}},
+	}},
 	{"runtime_events", HarnessMsg{
 		Type: HRuntimeEvents, SessionID: "s1", Runtime: RuntimeClaude, Seq: 7,
 		Events: []RuntimeEvent{

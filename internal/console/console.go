@@ -1,13 +1,13 @@
 // Package console provides the amux control console: a built-in, always-present
-// session that runs an agent in a neutral directory, preconfigured (via its
-// CLAUDE.md) to help the user configure and operate amux — and scoped to config
-// + CLI only, never workspace or amux source code.
+// session that runs an agent in a neutral directory with context over
+// everything amux runs on this machine — every workgroup, agent, and repo — and
+// operates amux for the user through its CLI. It is the machine-wide default
+// session (store.RoleConsole); its guide (CLAUDE.md) is generated at every
+// launch by wsops from the live inventory, like every agent's.
 package console
 
 import (
-	_ "embed"
 	"os"
-	"path/filepath"
 
 	"amux/internal/agent"
 	"amux/internal/core"
@@ -27,35 +27,25 @@ const ID = "console"
 // always resumes the same config session across restarts.
 const SessionID = "a3c00501-0000-4000-8000-0000c0501010"
 
-//go:embed CLAUDE.md
-var claudeMD []byte
-
 // Dir is the console's neutral working directory.
 func Dir() string { return core.ConsoleDir() }
 
-// Ensure creates the console directory and writes its CLAUDE.md if missing
-// (existing user edits are preserved).
+// Ensure creates the console directory. Its guide is written at launch (see
+// wsops.AgentCommand), and trust is granted then too, in the console's own
+// config home (agent.Harness.PrepareLaunch) — the user's ~/.claude.json is never
+// edited.
 func Ensure() error {
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
-		return err
-	}
-	// Trust is granted at launch, in the console's own config home (see
-	// agent.Harness.PrepareLaunch) — the user's ~/.claude.json is never edited.
-	p := filepath.Join(Dir(), "CLAUDE.md")
-	if _, err := os.Stat(p); err == nil {
-		return nil
-	}
-	return os.WriteFile(p, claudeMD, 0o644)
+	return os.MkdirAll(Dir(), 0o755)
 }
 
 // Session returns the synthetic session describing the console (not stored in
-// the DB).
+// the DB). Mode is store.ModeConsole, which is also what marks its role.
 func Session() store.Session {
 	return store.Session{
 		ID:       ID,
 		Name:     "amux console",
 		Agent:    agent.DefaultKind(),
-		Mode:     "console",
+		Mode:     store.ModeConsole,
 		Dir:      Dir(),
 		ClaudeID: SessionID,
 	}

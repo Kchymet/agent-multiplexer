@@ -478,6 +478,10 @@ func sessionList() error {
 		return err
 	}
 	for _, r := range roots {
+		if r.Role == store.RoleRepo {
+			// A repo's home session: listed under `amux repo ls`, not as a workgroup.
+			continue
+		}
 		fmt.Printf("%-8s %-6s %s\n", r.ID, defaultStr(r.Scope, "work"), orID(r.Display, r.ID))
 		for _, s := range r.Agents {
 			tag := ""

@@ -3,6 +3,7 @@ package wsops
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,16 @@ func AddRepoSource(ctx context.Context, source string) (store.Repo, error) {
 		return store.Repo{}, err
 	}
 	r := store.Repo{Name: name, Source: source, GitDir: gitDir}
-	return r, db.PutRepo(r)
+	if err := db.PutRepo(r); err != nil {
+		return store.Repo{}, err
+	}
+	// The repo's home session (store.RoleRepo) exists from the moment the repo is
+	// tracked, so the rail's repo row is openable right away. Best-effort: a
+	// failure here is logged and ResolveSession creates it on first open.
+	if _, err := ensureRepoHome(db, name); err != nil {
+		log.Printf("amux: creating repo %s's home session: %v", name, err)
+	}
+	return r, nil
 }
 
 // RemoveRepo untracks a repository: it refuses if any agent's worktree still
@@ -86,6 +96,7 @@ func RemoveRepo(name string) error {
 		return fmt.Errorf("repo %q is in use by: %s\n  delete those first (amux workgroup rm <id>)",
 			name, strings.Join(users, ", "))
 	}
+	removeRepoHome(db, name)
 	_ = os.RemoveAll(r.GitDir)
 	return db.DeleteRepo(name)
 }

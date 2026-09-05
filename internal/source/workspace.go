@@ -27,7 +27,12 @@ const untrackedTTL = 12 * time.Hour
 const maxArchivedRows = 8
 
 // Workspace is the rail's source: the control console, then each root session
-// with its sub-sessions nested underneath.
+// with its sub-sessions nested underneath, then each tracked repo with its
+// one-off agents. The console, every work-scoped root, and every repo row is
+// itself a session — the built-in default sessions (store.Role*): the console,
+// the workgroup's coordinator, the repo's home — so those rows carry a runtime,
+// caps, a role, and their own activity state, and can be opened and steered
+// like an agent.
 type Workspace struct {
 	// engineLive, if set, reports which agent ids are running in the daemon's
 	// engine. An agent is "live" if it's in the engine, which is what lights it
@@ -69,11 +74,12 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	tracked := map[string]bool{console.SessionID: true}
 	trackedDirs := map[string]bool{console.Dir(): true}
 
-	// Control console, pinned first.
+	// Control console, pinned first: the machine-wide default session.
 	consoleState := agentState(liveOf(console.ID), console.Session())
 	out = append(out, w.withCaps(core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
-		Mode: "console", State: consoleState, Status: stateLabel(consoleState) + " · configure amux",
+		Mode: store.ModeConsole, Role: store.RoleConsole,
+		State: consoleState, Status: stateLabel(consoleState) + " · amux-wide",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
 	}, true)) // console resolves in steer.go — steerable
 
@@ -86,6 +92,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// repo while passing over the roots; work-scoped roots render inline here.
 	// Archived agents/workgroups are pulled aside into a collapsed ARCHIVED section.
 	repoAgents := map[string][]store.Session{}
+	repoHomes := map[string]store.Session{} // a repo's home session, by repo name
 	var archived []store.Session
 	track := func(s store.Session) {
 		if s.ClaudeID != "" {
@@ -99,6 +106,13 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		subs, err := db.Children(r.ID)
 		if err != nil {
 			return nil, err
+		}
+		if r.Role() == store.RoleRepo {
+			// A repo's home session renders AS the repo header (below), not as a
+			// workgroup: its id is the repo name, which is already the header's id.
+			track(r)
+			repoHomes[r.Repo] = r
+			continue
 		}
 		if r.Scope == store.ScopeRepo {
 			for _, s := range subs {
@@ -125,23 +139,29 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		if r.Archived {
 			continue
 		}
+		// The root row is the workgroup's coordinator session. Its own activity
+		// leads its status; the row's state is the most demanding of its own and
+		// its agents', so a workgroup with a blocked member still floats up.
+		track(r)
+		ownState := agentState(liveOf(r.ID), r)
 		subStates := make([]string, len(active))
-		rootState := core.StateIdle
+		rootState := ownState
 		for i, s := range active {
 			subStates[i] = agentState(liveOf(s.ID), s)
 			if stateRank(subStates[i]) > stateRank(rootState) {
 				rootState = subStates[i]
 			}
 		}
-		out = append(out, core.Session{
+		out = append(out, w.withCaps(core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
-			IsRoot: true, Mode: r.Mode,
+			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode),
+			Role:      store.RoleCoordinator,
 			State:     rootState,
-			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(rootState), len(active), plural(len(active))),
-			Cwd:       r.Dir,
-			CanAttach: true, // Enter opens all sub-sessions
+			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(ownState), len(active), plural(len(active))),
+			Cwd:       containerDir(r),
+			CanAttach: true, // opens the coordinator
 			CanKill:   true, // delete the whole root
-		})
+		}, true)) // the coordinator resolves in steer.go — steerable
 		for i, s := range active {
 			out = append(out, w.withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
@@ -157,12 +177,23 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 
 	// Tracked repositories, each a container for its repo-scoped agents (nested
 	// directly beneath, so a single-repo agent shows here, never under WORKGROUPS).
+	// The repo row is the repo's home session (id = repo name). A repo tracked
+	// before default sessions has no home row yet; the daemon creates it on first
+	// open (wsops.ResolveSession), so the header is still openable and steerable
+	// and carries the runtime it will have.
 	if repos, err := db.Repos(); err == nil {
 		for _, r := range repos {
-			out = append(out, core.Session{
+			home, ok := repoHomes[r.Name]
+			if !ok {
+				home = store.Session{ID: store.RepoHomeID(r.Name), Agent: agent.DefaultKind(), Scope: store.ScopeRepo, Repo: r.Name, Mode: store.ModeInteractive}
+			}
+			st := agentState(liveOf(home.ID), home)
+			out = append(out, w.withCaps(core.Session{
 				ID: r.Name, Title: repoTitle(r), Source: "workspace", Section: core.SectionRepos,
-				Kind: "repo", Cwd: r.GitDir, CanAttach: true,
-			})
+				Kind: "repo", Mode: store.NormalizeMode(home.Mode), Role: store.RoleRepo,
+				State: st, Status: stateLabel(st) + " · repo home",
+				Cwd: containerDir(home), CanAttach: true,
+			}, true)) // the home resolves in steer.go — steerable
 			for _, s := range repoAgents[r.Name] {
 				st := agentState(liveOf(s.ID), s)
 				out = append(out, w.withCaps(core.Session{
@@ -197,12 +228,13 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	return out, nil
 }
 
-// withCaps stamps an agent row with its runtime identity and the control
+// withCaps stamps a session row with its runtime identity and the control
 // capabilities amux can serve for it (AGE-178), so a remote orchestrator gates
 // its affordances on the row's *effective control path* rather than on the
-// runtime name alone. It is applied only to rows that are a real agent — never
-// the repo/workgroup container rows, whose Kind is a structural label ("repo",
-// "") and carries no runtime.
+// runtime name alone. It is applied to rows that host a session: every agent,
+// and the container rows that are default sessions (the console, a workgroup's
+// coordinator, a repo's home) — a repo row keeps its structural Kind ("repo"),
+// so its Runtime is resolved from the home session, not from Kind.
 //
 // Runtime identity is always preserved. Caps, however, are gated on `steerable`:
 // the daemon's steer handler (internal/daemon/steer.go) resolves only the console
@@ -218,9 +250,12 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 // the consumer layers on; it must not overwrite this daemon control path.
 func (w *Workspace) withCaps(s core.Session, steerable bool) core.Session {
 	s.Runtime = agent.Canonical(s.Kind)
+	if s.Kind == "repo" {
+		s.Runtime = agent.DefaultKind() // the repo home's runtime; Kind stays the structural label
+	}
 	var caps core.SessionCaps
 	if steerable {
-		caps = agent.CapsFor(s.Kind)
+		caps = agent.CapsFor(s.Runtime)
 	}
 	s.Caps = &caps
 	// ControlMode says HOW those caps are delivered (§2.2): a supervised session is
@@ -231,6 +266,16 @@ func (w *Workspace) withCaps(s core.Session, steerable bool) core.Session {
 		s.ControlMode = w.controlMode(s.ID)
 	}
 	return s
+}
+
+// containerDir is a container session's sandbox: the stored dir, or — for a
+// root that predates default sessions and will get one on first open — the
+// container dir it will be given (see wsops.ResolveSession).
+func containerDir(s store.Session) string {
+	if s.Dir != "" {
+		return s.Dir
+	}
+	return store.RootDir(s.ID)
 }
 
 // recentArchived returns the most recently archived sessions (by ArchivedAt,

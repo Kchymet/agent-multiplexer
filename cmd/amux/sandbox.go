@@ -94,6 +94,11 @@ func sandboxAgents(id string) ([]sandboxAgent, error) {
 			return nil, fmt.Errorf("%v\n  the daemon resolves agents; start it with `amux` or `amux daemon start`", err)
 		}
 		for _, wg := range roots {
+			// A workgroup's coordinator and a repo's home have private config homes
+			// of their own (their sandbox is the container dir).
+			if wg.Role != "" && wg.Dir != "" && (id == "" || wg.ID == id) {
+				sessions = append(sessions, store.Session{ID: wg.ID, Agent: wg.Agent, Scope: wg.Scope, Dir: wg.Dir})
+			}
 			for _, a := range wg.Agents {
 				if id != "" && a.ID != id {
 					continue

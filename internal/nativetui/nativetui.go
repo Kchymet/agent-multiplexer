@@ -373,7 +373,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+r": // force a state refresh (the daemon also auto-polls)
 		return m, m.sendCmd(core.Action{Action: core.ActionRefresh})
 	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
-		if s := m.selected(); s != nil && attachable(s) && s.ID != console.ID && s.Section != core.SectionArchived {
+		if s := m.selected(); s != nil && isAgent(s) && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
 				message: "Move " + s.Title + " into a new work-scoped workgroup?",
 				action:  core.Action{Action: core.ActionMove, ID: s.ID},
@@ -382,7 +382,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select an agent to move"
 	case "x": // mark the selected agent done/archived (or restore an archived one)
-		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
+		if s := m.selected(); s != nil && s.ID != console.ID && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
 			if s.Section == core.SectionArchived {
 				m.status = "restoring " + s.Title + "…"
 			} else {
@@ -392,7 +392,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select an agent to archive"
 	case "D": // permanently delete the selected agent/workgroup (worktrees + branch), with a confirm
-		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
+		if s := m.selected(); s != nil && s.ID != console.ID && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
 			what := "agent"
 			if s.IsRoot {
 				what = "workgroup"
@@ -405,13 +405,13 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select an agent or workgroup to delete"
 	case "r": // rename the selected agent/workgroup (set a display name; id is unchanged)
-		if s := m.selected(); s != nil && s.ID != console.ID && (attachable(s) || s.IsRoot) {
+		if s := m.selected(); s != nil && s.ID != console.ID && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
 			m.openRenameForm(s.ID, s.Title)
 			return m, nil
 		}
 		m.status = "select a workgroup or agent to rename"
 	case "e": // edit which repos an agent works on (fuzzy-select; adds/removes worktrees)
-		if s := m.selected(); s != nil && attachable(s) {
+		if s := m.selected(); s != nil && isAgent(s) {
 			p := newRepoPicker("Repos · "+s.Title, m.sessions, agentRepos(s))
 			p.action, p.id = core.ActionAgentSetRepos, s.ID
 			m.openRepoPicker(p)
@@ -553,20 +553,23 @@ func (m *model) attachSelected() tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	// A repo header is a container for its repo-scoped agents: open the first one,
-	// or create one if it has none (auto-creates the repo-scoped workgroup).
-	if s.Kind == "repo" {
-		if sub := m.firstChild(s.ID); sub != nil {
-			s = sub
-		} else {
-			m.openNewRepoAgentForm(s.ID, s.Title)
-			return nil
-		}
-	} else if s.IsRoot {
-		// A workgroup root isn't itself attachable — open its first agent so the
-		// natural choice of selecting the workgroup row "just works".
-		if sub := m.firstChild(s.ID); sub != nil {
-			s = sub
+	// A container row that hosts a default session (the console, a workgroup's
+	// coordinator, a repo's home — Role set) opens that session itself. A bare
+	// container from a daemon that predates default sessions falls back to its
+	// first agent: a repo header opens the first repo-scoped agent, or the
+	// new-agent form if it has none; a workgroup root opens its first agent.
+	if s.Role == "" {
+		if s.Kind == "repo" {
+			if sub := m.firstChild(s.ID); sub != nil {
+				s = sub
+			} else {
+				m.openNewRepoAgentForm(s.ID, s.Title)
+				return nil
+			}
+		} else if s.IsRoot {
+			if sub := m.firstChild(s.ID); sub != nil {
+				s = sub
+			}
 		}
 	}
 	if !attachable(s) {
@@ -597,7 +600,7 @@ func (m *model) tryPendingAttach() tea.Cmd {
 	if s == nil {
 		return nil // not in this snapshot yet — wait for the next one
 	}
-	if s.Kind == "repo" || s.IsRoot {
+	if s.Role == "" && (s.Kind == "repo" || s.IsRoot) {
 		s = m.firstChild(s.ID)
 	}
 	if s == nil || !attachable(s) {
@@ -737,16 +740,26 @@ func (m *model) handlePaneFrame(p *core.PaneFrame) {
 	}
 }
 
+// isAgent reports whether a row is an ordinary (non-container) agent: the rows
+// that can be moved between workgroups or re-scoped to other repos. The console
+// and the container sessions (a coordinator, a repo home) are pinned to their
+// containers and can be neither.
+func isAgent(s *core.Session) bool {
+	return attachable(s) && s.ID != console.ID && s.Role == "" && !s.IsRoot && s.Kind != "repo"
+}
+
 // paneIDOf is the per-(agent,tab) stream id the daemon echoes on pane frames.
 // It's stable, so reopening a tab reuses the same id (the daemon replaces the
 // prior subscription).
 func paneIDOf(id string, tab int) string { return id + "\x1f" + strconv.Itoa(tab) }
 
 // attachable reports whether a row hosts an agent we can embed: the console, a
-// work-scoped workgroup's sub-agent, or a repo-scoped agent nested under a repo
-// header — but not a workgroup container, a repo header, or a detached row.
+// work-scoped workgroup's sub-agent, a repo-scoped agent nested under a repo
+// header, or a container row that is itself a default session (a workgroup's
+// coordinator, a repo's home — Role set) — but not a bare container or a
+// detached row.
 func attachable(s *core.Session) bool {
-	if s.ID == console.ID {
+	if s.ID == console.ID || s.Role != "" {
 		return true
 	}
 	if s.Section == core.SectionArchived {
