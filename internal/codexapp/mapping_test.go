@@ -18,22 +18,38 @@ func TestMapThreadStartedIsNotice(t *testing.T) {
 	}
 }
 
-func TestMapTurnCompletedSignalsResult(t *testing.T) {
+func TestMapTurnStartedEmitsTurnStart(t *testing.T) {
+	evs, res := mapOne("turn/started", `{"threadId":"t","turn":{"id":"tr1"}}`)
+	if res != nil || len(evs) != 1 || evs[0].Type != harnessproto.TypeTurnStart {
+		t.Fatalf("turn/started → %+v res=%v", evs, res)
+	}
+}
+
+func TestMapTurnCompletedSignalsResultAndEnd(t *testing.T) {
 	evs, res := mapOne("turn/completed", `{"turn":{"id":"tr1","status":"completed"}}`)
 	if res == nil || res.StopReason != "completed" || res.IsError {
 		t.Fatalf("turn/completed res = %+v", res)
 	}
-	if len(evs) != 0 {
-		t.Fatalf("completed turn should emit no error notice, got %+v", evs)
+	// A completed turn emits turn_end (observed), no error notice.
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypeTurnEnd {
+		t.Fatalf("completed turn events = %+v", evs)
+	}
+	var ep struct {
+		StopReason string `json:"stop_reason"`
+	}
+	_ = json.Unmarshal(evs[0].Payload, &ep)
+	if ep.StopReason != "completed" {
+		t.Fatalf("turn_end stop_reason = %q", ep.StopReason)
 	}
 }
 
-func TestMapTurnFailedEmitsErrorNotice(t *testing.T) {
+func TestMapTurnFailedEmitsErrorNoticeAndEnd(t *testing.T) {
 	evs, res := mapOne("turn/completed", `{"turn":{"id":"tr1","status":"failed","error":{"message":"boom"}}}`)
 	if res == nil || !res.IsError {
 		t.Fatalf("failed turn res = %+v", res)
 	}
-	if len(evs) != 1 || evs[0].Type != harnessproto.TypeNotice {
+	// notice(error) then turn_end.
+	if len(evs) != 2 || evs[0].Type != harnessproto.TypeNotice || evs[1].Type != harnessproto.TypeTurnEnd {
 		t.Fatalf("failed turn events = %+v", evs)
 	}
 	var p struct{ Level, Text string }

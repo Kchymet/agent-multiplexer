@@ -56,6 +56,57 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 	return dir, env, scope(dir, tab, s, argv, agentRepoSources(agentID)), nil
 }
 
+// AppServerCommand resolves the launch spec for a Codex App Server supervising an
+// agent (AGE-181): the same working dir, env, and — crucially — the same sandbox
+// scope and config binds as the agent's own pane, but running `codex app-server
+// --listen <endpoint>` instead of the interactive TUI. Running it through scope()
+// (not a bare exec) is what preserves the session's mount/config/identity grants;
+// cwd alone does not. The codex binary is taken from the agent's resolved command
+// so AMUX_CODEX_BIN and PATH resolution stay identical.
+func AppServerCommand(agentID, endpoint string) (dir string, env, argv []string, err error) {
+	s, err := sessionFor(agentID)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	dir, env, agentArgv, err := wsops.AgentCommand(s)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
+	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), nil
+}
+
+// AttachCommand resolves the launch spec for a native Codex CLI attaching to the
+// supervised server/thread from a pane: `codex --remote <endpoint> resume
+// <threadID>`, in the agent's sandbox scope. This is the pane path for a structured
+// session — it never starts a standalone Codex runtime. threadID may be empty
+// (attach without a resume, e.g. a thread not yet created).
+func AttachCommand(agentID, endpoint, threadID string) (dir string, env, argv []string, err error) {
+	s, err := sessionFor(agentID)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	dir, env, agentArgv, err := wsops.AgentCommand(s)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	inner := []string{codexBin(agentArgv), "--remote", endpoint}
+	if threadID != "" {
+		inner = append(inner, "resume", threadID)
+	}
+	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), nil
+}
+
+// codexBin is the resolved codex executable from an agent's command argv (argv[0]),
+// so the App Server and the --remote attach launch the exact binary the agent
+// would. Falls back to the bare name if the argv is somehow empty.
+func codexBin(agentArgv []string) string {
+	if len(agentArgv) > 0 && agentArgv[0] != "" {
+		return agentArgv[0]
+	}
+	return "codex"
+}
+
 // agentRepoSources returns the bare-clone git dirs backing an agent's worktrees.
 // They live under the read-only amux tree but must be writable so git can commit
 // (it writes objects/refs/index there), so the scope re-binds them read-write.

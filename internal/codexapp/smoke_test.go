@@ -2,7 +2,6 @@ package codexapp
 
 import (
 	"context"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,11 +55,14 @@ func TestSmokeRealAppServer(t *testing.T) {
 
 	sandbox := t.TempDir()
 	socket := filepath.Join(sandbox, "app.sock")
-	t.Logf("app-server argv: %v", AppServerArgv(bin, socket))
+	endpoint := "unix://" + socket
+	t.Logf("app-server argv: %v", AppServerArgv(bin, endpoint))
 
-	sup := New(Config{SessionID: "smoke", Bin: bin, Dir: sandbox, SocketPath: socket})
-	if err := sup.Start(ctx); err != nil {
-		t.Fatalf("Start (spawn app-server + dial socket + handshake): %v", err)
+	// Direct exec (nil wrappedArgv): the smoke test runs codex directly. Production
+	// launches under the sandbox wrapper the daemon resolves.
+	sup := New(Config{SessionID: "smoke", Bin: bin, Dir: sandbox, Endpoint: endpoint})
+	if err := sup.Start(ctx, nil); err != nil {
+		t.Fatalf("Start (spawn app-server + WebSocket handshake): %v", err)
 	}
 	defer sup.Close()
 
@@ -70,13 +72,15 @@ func TestSmokeRealAppServer(t *testing.T) {
 	}
 	t.Logf("handshake OK; thread id = %s", threadID)
 
-	// A second client must be able to dial the same socket — the multi-client
-	// property native `--remote` attach relies on.
-	if c2, err := net.Dial("unix", socket); err != nil {
-		t.Fatalf("second client could not dial the same socket: %v", err)
-	} else {
-		_ = c2.Close()
+	// A second WebSocket client must initialize on the same listener — the
+	// multi-client property native `--remote` attach relies on (ROOT probe).
+	dialCtx, dcancel := context.WithTimeout(ctx, 10*time.Second)
+	c2, err := dialWS(dialCtx, endpoint)
+	dcancel()
+	if err != nil {
+		t.Fatalf("second WebSocket client could not connect to the same listener: %v", err)
 	}
+	_ = c2.Close()
 
 	col := subscribeCollector(ctx, sup)
 	var start, end int

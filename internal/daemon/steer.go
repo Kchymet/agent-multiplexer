@@ -196,12 +196,7 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 	}
 	go func() {
 		journal(sess.ID, core.JournalInfo, "starting agent")
-		dir, env, _, err := d.resolve(sess.ID, panespec.TabAgent)
-		if err != nil {
-			d.steerStartFailed(sess.ID, fmt.Errorf("start agent %s: %w", sess.ID, err))
-			return
-		}
-		sup, err := d.codex.Ensure(sess.ID, dir, env)
+		sup, err := d.ensureSupervisor(sess.ID)
 		if err != nil {
 			d.steerStartFailed(sess.ID, fmt.Errorf("start agent %s: %w", sess.ID, err))
 			return
