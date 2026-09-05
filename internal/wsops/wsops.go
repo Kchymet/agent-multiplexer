@@ -332,7 +332,8 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 			continue
 		}
 		if repo, ok, _ := db.Repo(r); ok {
-			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch)
+			wt := filepath.Join(a.Dir, r)
+			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
 		}
 	}
 	// Field-scoped write: only the repo column changes here.
@@ -567,7 +568,8 @@ func DeleteByID(ctx context.Context, id string) error {
 func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
 	for _, repoName := range store.SplitRepos(a.Repo) {
 		if repo, ok, _ := db.Repo(repoName); ok {
-			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, repoName), a.Branch)
+			wt := filepath.Join(a.Dir, repoName)
+			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
 		}
 	}
 	// The private config home goes with the dir; drop its seed manifest too.
@@ -576,6 +578,29 @@ func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
 	}
 	_ = os.RemoveAll(a.Dir)
 	_ = db.DeleteSession(a.ID)
+}
+
+// agentBranch is the branch to delete along with agent a's worktree at wt, or ""
+// for none. The stored branch is authoritative. A session imported from the
+// legacy workspaces/ layout has none (importLegacy never set one), which used to
+// make removal skip the branch delete entirely and leave amux/<root> behind in
+// every repo — exactly the "branch with no agent" leftovers doctor then reports.
+// So with a blank record, ask the worktree what it has checked out, and if the
+// worktree is already gone fall back to the legacy scheme. A derived name is only
+// trusted if it's amux-owned: a worktree someone switched onto main is never a
+// reason to delete main.
+func agentBranch(ctx context.Context, a store.Session, wt string) string {
+	if a.Branch != "" {
+		return a.Branch
+	}
+	b := git.CurrentBranch(ctx, wt)
+	if b == "" {
+		b = core.LegacyBranchFor(a.RootID)
+	}
+	if !strings.HasPrefix(b, core.BranchPrefix) {
+		return ""
+	}
+	return b
 }
 
 // Apply executes a control action against the session model — the shared
