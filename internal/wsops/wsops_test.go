@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"amux/internal/claudecfg"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/store"
@@ -931,5 +932,23 @@ func TestAgentCommandSeedsPrivateConfig(t *testing.T) {
 	// terminal tab uses the agent's config too.
 	if !strings.Contains(strings.Join(AgentEnv(s), " "), "CLAUDE_CONFIG_DIR="+priv) {
 		t.Error("AgentEnv should carry CLAUDE_CONFIG_DIR")
+	}
+}
+
+// TestAgentIDsUnderConsole pins the console as a startable agent: it has no
+// store row, so a store-only resolver refused to start it (and so refused a
+// remote `start`, or a `prompt` to a stopped console). It is a single agent
+// that resolves to itself.
+func TestAgentIDsUnderConsole(t *testing.T) {
+	isolateStore(t)
+	ids, err := AgentIDsUnder(console.ID)
+	if err != nil {
+		t.Fatalf("AgentIDsUnder(console): %v", err)
+	}
+	if len(ids) != 1 || ids[0] != console.ID {
+		t.Fatalf("ids = %v, want [%s]", ids, console.ID)
+	}
+	if _, err := AgentIDsUnder("nope"); err == nil {
+		t.Fatal("an unknown id still resolves — the console case must not loosen the lookup")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
@@ -98,15 +99,10 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 }
 
 // steerTarget resolves a session id to the harness that knows how to drive it and
-// the stored record naming its conversation — the two things every steering
-// decision needs, read once so the store isn't opened twice per verb.
+// the record naming its conversation — the two things every steering decision
+// needs, read once so the store isn't opened twice per verb.
 func (d *Daemon) steerTarget(agentID string) (agent.Harness, store.Session, error) {
-	db, err := store.Open()
-	if err != nil {
-		return nil, store.Session{}, fmt.Errorf("open store: %w", err)
-	}
-	defer db.Close()
-	s, ok, err := db.GetSession(agentID)
+	s, ok, err := lookupSession(agentID)
 	if err != nil {
 		return nil, store.Session{}, fmt.Errorf("read session %s: %w", agentID, err)
 	}
@@ -114,6 +110,24 @@ func (d *Daemon) steerTarget(agentID string) (agent.Harness, store.Session, erro
 		return nil, store.Session{}, fmt.Errorf("no such session %s", agentID)
 	}
 	return agent.HarnessFor(s.Agent), s, nil
+}
+
+// lookupSession resolves a session id the way the rail and the pane resolver do:
+// the built-in console is a synthetic session (never a store row), so it answers
+// from the console package; everything else is read from the store. Every
+// daemon-side id → session lookup goes through here so a verb that reaches the
+// daemon by id — steering from a remote rail included — sees the same inventory
+// the daemon publishes.
+func lookupSession(id string) (store.Session, bool, error) {
+	if id == console.ID {
+		return console.Session(), true, nil
+	}
+	db, err := store.Open()
+	if err != nil {
+		return store.Session{}, false, fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close()
+	return db.GetSession(id)
 }
 
 // steerPayload turns a verb plus its fields into the byte writes that serve it,
