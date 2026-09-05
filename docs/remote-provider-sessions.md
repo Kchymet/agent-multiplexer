@@ -294,6 +294,16 @@ detail of the daemon, not the wire — the orchestrator sends the same four verb
 regardless of how a given runtime is driven, and a daemon delivering them over a
 runtime's API instead is still conforming.
 
+Because that mechanism is a claim about someone else's TUI, it is checked against
+the real thing rather than only against a fake: `go test -tags livecli -run
+TestLiveSteer ./internal/daemon` drives each installed CLI in a throwaway config
+home and asserts the steered text reaches its transcript as a *submitted* user
+turn, single- and multi-line. It is tagged out of CI (it needs an authenticated
+CLI and costs a model turn) and is the check to run when `Keys` or the payload
+changes — text left sitting unsent in a composer is indistinguishable from a
+delivered prompt on screen, in the daemon's ack, and in every fake instance.
+Verified this way against Claude Code 2.1.261.
+
 In amux the keystrokes are per-agent-kind data on the harness registry
 (`internal/agent`, `Harness.Keys`), not a switch in the daemon, so adding a
 runtime means describing its keys rather than editing the delivery path. Today:
