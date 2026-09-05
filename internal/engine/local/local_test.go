@@ -3,12 +3,66 @@ package local
 import (
 	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"amux/internal/engine"
 )
+
+// Restarting from an automation shell must not carry its output preferences
+// into the fresh PTYs. A pane can still explicitly request those preferences.
+func TestPaneColorEnvironment(t *testing.T) {
+	for _, key := range []string{"NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"} {
+		t.Setenv(key, "0")
+	}
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("TERM", "dumb")
+	t.Setenv("TMUX", "launcher")
+	t.Setenv("COLORTERM", "truecolor")
+	for _, tc := range []struct {
+		name  string
+		extra []string
+	}{
+		{"default", nil},
+		{"explicit pane preferences", []string{"NO_COLOR=1", "FORCE_COLOR=0", "CLICOLOR=0", "CLICOLOR_FORCE=0", "TERM=vt100"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := map[string]string{}
+			for _, e := range buildEnv(tc.extra) {
+				key, value, _ := strings.Cut(e, "=")
+				if _, exists := got[key]; exists {
+					t.Fatalf("duplicate environment key %q", key)
+				}
+				got[key] = value
+			}
+			if len(tc.extra) == 0 {
+				for _, key := range []string{"NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"} {
+					if _, exists := got[key]; exists {
+						t.Errorf("pane inherited launcher override %s", key)
+					}
+				}
+				if got["TERM"] != "xterm-256color" {
+					t.Errorf("TERM = %q", got["TERM"])
+				}
+			} else {
+				for _, e := range tc.extra {
+					key, value, _ := strings.Cut(e, "=")
+					if got[key] != value {
+						t.Errorf("explicit %s lost: got %q", e, got[key])
+					}
+				}
+			}
+			if _, exists := got["TMUX"]; exists {
+				t.Error("pane inherited launcher TMUX")
+			}
+			if got["COLORTERM"] != "truecolor" {
+				t.Error("lost terminal color capability")
+			}
+		})
+	}
+}
 
 // collector accumulates an instance's output for substring assertions.
 type collector struct {
