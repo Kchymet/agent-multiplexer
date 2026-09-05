@@ -9,7 +9,7 @@ LDFLAGS := -s -w
 # there would merge green.
 GO_MODULES := . ./harnessproto
 
-.PHONY: all build install uninstall test fmt vet clean cross run
+.PHONY: all build install uninstall test test-live fmt vet clean cross run
 
 all: build
 
@@ -35,6 +35,14 @@ uninstall:
 
 test:
 	@for m in $(GO_MODULES); do echo "== go test $$m =="; (cd $$m && go test ./...) || exit 1; done
+
+# The live steering check: it drives the agent CLIs installed on this machine to
+# confirm a steered prompt is actually submitted, not left in the composer. It is
+# behind the `livecli` tag and out of `test` on purpose — it needs authenticated
+# CLIs and costs a model turn per runtime — and is the check to run after touching
+# agent.Keys or the daemon's steer payload.
+test-live:
+	go test -tags livecli -run TestLiveSteer -timeout 15m -v ./internal/daemon
 
 fmt:
 	gofmt -w .
