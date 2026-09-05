@@ -3,6 +3,7 @@ package agent
 import (
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"amux/internal/cfghome"
@@ -30,11 +31,14 @@ type Harness interface {
 	// Kind is the canonical agent kind this harness serves (e.g. "claude").
 	Kind() string
 
-	// Models is the selectable model catalog, default first. May be empty (a
-	// harness that takes no --model, or whose models amux doesn't enumerate).
+	// Models is the selectable model catalog, default first: the harness's
+	// built-in list folded with whatever its CLI has cached as available to this
+	// account (read live from the user's config home on each call — a cheap file
+	// read, so callers may ask freely). May be empty (a harness that takes no
+	// --model, or whose models amux doesn't enumerate).
 	Models() []string
-	// DefaultModel is the built-in default (first-offered) model, or "" when the
-	// harness has no enumerated catalog.
+	// DefaultModel is the first-offered model, or "" when the harness has no
+	// enumerated catalog.
 	DefaultModel() string
 	// PreferredModel is the user's configured model for this harness (read from
 	// the CLI's own config), or "" when they haven't set one — callers fall back
@@ -261,6 +265,24 @@ func persistConvID(sessionID, id string) {
 	// A single-column update: adopting the codex id must not clobber a concurrent
 	// rename/archive from the TUI (which a full-row PutSession of a stale read would).
 	_ = db.SetClaudeID(sessionID, id)
+}
+
+// mergeModels concatenates model lists into one catalog, keeping first-seen
+// order and dropping blanks and duplicates — how a harness folds the models it
+// discovers (a cached live catalog, the user's configured pick) into its
+// built-in list without offering any twice.
+func mergeModels(lists ...[]string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, l := range lists {
+		for _, m := range l {
+			if m = strings.TrimSpace(m); m != "" && !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
 }
 
 // noopHarness is the Harness for an unrecognized kind: it launches nothing amux

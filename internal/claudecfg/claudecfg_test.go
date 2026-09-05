@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -415,6 +416,47 @@ func TestPreferredModel(t *testing.T) {
 			}
 			if got := PreferredModel(); got != tc.want {
 				t.Errorf("PreferredModel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAdditionalModels pins how amux reads the extra models Claude Code caches
+// for the account: the values of additionalModelOptionsCache in order, blanks
+// and duplicates dropped, and nil for every degraded case (absent key, missing
+// file, malformed json, wrong shape).
+func TestAdditionalModels(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string // "" means write no file at all
+		want    []string
+	}{
+		{
+			name: "cached options",
+			content: `{"additionalModelOptionsCache":[
+				{"label":"Fable","value":"claude-fable-5-1[1m]","description":"Fable 5.1"},
+				{"label":"Dup","value":"claude-fable-5-1[1m]"},
+				{"label":"Blank","value":"  "},
+				{"label":"Next","value":" claude-next-preview "}]}`,
+			want: []string{"claude-fable-5-1[1m]", "claude-next-preview"},
+		},
+		{name: "empty cache", content: `{"additionalModelOptionsCache":[]}`, want: nil},
+		{name: "key absent", content: `{"model":"opus"}`, want: nil},
+		{name: "missing file", content: "", want: nil},
+		{name: "malformed json", content: `{not json`, want: nil},
+		{name: "wrong shape", content: `{"additionalModelOptionsCache":"opus"}`, want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", dir)
+			if tc.content != "" {
+				if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := User().AdditionalModels(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("AdditionalModels() = %v, want %v", got, tc.want)
 			}
 		})
 	}

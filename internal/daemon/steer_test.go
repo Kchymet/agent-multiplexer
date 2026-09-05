@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
@@ -440,6 +441,50 @@ func TestSteerPromptStartsStoppedAgent(t *testing.T) {
 	if got := in.written(); got != "go\r" {
 		t.Fatalf("pane received %q, want %q", got, "go\r")
 	}
+}
+
+// TestSteerReachesTheConsole pins the one session that is not a store row. The
+// console is published in the same inventory as every agent, so a remote rail
+// that prompts it must be answered like any other session — a store-only lookup
+// answered "no such session console" to exactly the row the daemon had just
+// advertised. Both halves matter: a running console takes the keystrokes
+// directly, and a stopped one is started by `prompt` like any other agent.
+func TestSteerReachesTheConsole(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		d, eng := steerDaemon(t)
+		in := eng.running(console.ID)
+		if err := d.steer(context.Background(), core.Action{
+			Action: core.ActionSteer, ID: console.ID,
+			Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "add a repo"},
+		}); err != nil {
+			t.Fatalf("steer: %v", err)
+		}
+		if got := in.written(); got != "add a repo\r" {
+			t.Fatalf("pane received %q, want %q", got, "add a repo\r")
+		}
+	})
+	t.Run("stopped", func(t *testing.T) {
+		d, eng := steerDaemon(t)
+		if err := d.steer(context.Background(), core.Action{
+			Action: core.ActionSteer, ID: console.ID,
+			Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "go"},
+		}); err != nil {
+			t.Fatalf("steer: %v", err)
+		}
+		key := engine.Key{AgentID: console.ID, Tab: panespec.TabAgent}
+		inst, ok := eng.Lookup(key)
+		if !ok {
+			t.Fatal("no console instance after a prompt to the stopped console")
+		}
+		in := inst.(*fakeInstance)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && in.written() != "go\r" {
+			time.Sleep(2 * time.Millisecond)
+		}
+		if got := in.written(); got != "go\r" {
+			t.Fatalf("pane received %q, want %q", got, "go\r")
+		}
+	})
 }
 
 // TestSteerPromptReportsStartFailure keeps the start path honest: if the agent

@@ -118,9 +118,14 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 		return core.RuntimeRecord{Runtime: s.Agent, Path: path, Permissions: perms}, nil
 	}
 	kind := agent.DefaultKind()
-	for _, info := range agent.HarnessFor(kind).ListSessions() {
+	h := agent.HarnessFor(kind)
+	for _, info := range h.ListSessions() {
 		if info.ID == id {
-			return core.RuntimeRecord{Runtime: kind, Path: info.Path}, nil
+			// An untracked id IS the conversation id, which is what the permission
+			// hooks key their journal on — so the harness can resolve one from a
+			// session carrying nothing else.
+			perms, _ := h.RuntimePermissionPath(store.Session{ClaudeID: id})
+			return core.RuntimeRecord{Runtime: kind, Path: info.Path, Permissions: perms}, nil
 		}
 	}
 	return core.RuntimeRecord{}, nil

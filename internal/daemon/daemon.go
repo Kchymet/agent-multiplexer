@@ -24,7 +24,6 @@ import (
 	"amux/internal/engine/local"
 	"amux/internal/panespec"
 	"amux/internal/source"
-	"amux/internal/store"
 	"amux/internal/wsops"
 )
 
@@ -110,12 +109,7 @@ func Default(self string) *Daemon {
 // best-effort: any error/not-found yields ActivityUnknown, which the engine
 // treats as safe to stop, so a missing signal never blocks a shutdown.
 func (d *Daemon) instanceActivity(k engine.Key) engine.Activity {
-	db, err := store.Open()
-	if err != nil {
-		return engine.ActivityUnknown
-	}
-	defer db.Close()
-	s, ok, err := db.GetSession(k.AgentID)
+	s, ok, err := lookupSession(k.AgentID)
 	if err != nil || !ok {
 		return engine.ActivityUnknown
 	}

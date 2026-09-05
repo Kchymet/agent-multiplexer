@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -63,10 +65,13 @@ func TestHarnessDoctor(t *testing.T) {
 	}
 }
 
-// TestHarnessModelCatalog pins each harness's model catalog and default, now
-// owned by the registry rather than the store: Claude leads with opus, Codex with
-// gpt-5.5, and Hermes enumerates none (amux passes no --model).
+// TestHarnessModelCatalog pins each harness's built-in model catalog and
+// default — what is offered with nothing discovered from the CLIs' config homes:
+// Claude leads with opus, Codex with gpt-5.5, and Hermes enumerates none (amux
+// passes no --model).
 func TestHarnessModelCatalog(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
 	if got := HarnessFor("claude").Models(); len(got) == 0 || got[0] != "opus" {
 		t.Errorf("claude Models() = %v, want opus first", got)
 	}
@@ -129,5 +134,48 @@ func TestArgvThroughHarness(t *testing.T) {
 	}
 	if want := []string{"hermes-amux-test", "chat", "-m", "m1"}; !reflect.DeepEqual(argv, want) {
 		t.Fatalf("hermes Argv = %v, want %v", argv, want)
+	}
+}
+
+// TestHarnessModelsDiscovered pins that the catalogs are live, not baked in:
+// Codex offers exactly what its models cache lists (in its order, so its top
+// pick becomes the default) plus the user's configured model even when the
+// cache doesn't list it; Claude keeps its aliases first and appends the extra
+// models Claude Code cached for the account plus the user's configured model.
+func TestHarnessModelsDiscovered(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	cache := `{"models":[
+		{"slug":"gpt-5.5-astra","visibility":"list","priority":1},
+		{"slug":"gpt-5.5","visibility":"list","priority":2},
+		{"slug":"gpt-5.5-hidden","visibility":"hide","priority":0}]}`
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("model = \"gpt-5.5-hidden\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"gpt-5.5-astra", "gpt-5.5", "gpt-5.5-hidden"}
+	if got := HarnessFor("codex").Models(); !reflect.DeepEqual(got, want) {
+		t.Errorf("codex Models() = %v, want %v", got, want)
+	}
+	if got := HarnessFor("codex").DefaultModel(); got != "gpt-5.5-astra" {
+		t.Errorf("codex DefaultModel() = %q, want the cache's top pick", got)
+	}
+
+	claudeHome := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	cfg := `{"model":"claude-opus-5","additionalModelOptionsCache":[
+		{"label":"Fable","value":"claude-fable-5-1[1m]"},
+		{"label":"Opus","value":"opus"}]}`
+	if err := os.WriteFile(filepath.Join(claudeHome, ".claude.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"opus", "sonnet", "haiku", "fable", "claude-fable-5-1[1m]", "claude-opus-5"}
+	if got := HarnessFor("claude").Models(); !reflect.DeepEqual(got, want) {
+		t.Errorf("claude Models() = %v, want %v", got, want)
+	}
+	if got := HarnessFor("claude").DefaultModel(); got != "opus" {
+		t.Errorf("claude DefaultModel() = %q, want opus regardless of extras", got)
 	}
 }

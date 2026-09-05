@@ -191,6 +191,14 @@ written to the agent's private copy of `config.toml`) inside a `--sandbox worksp
 override the sandbox level with `AMUX_CODEX_SANDBOX`
 (`read-only`|`workspace-write`|`danger-full-access`, or `none` to omit the flag).
 
+The model picker is live, not a baked-in list: Codex agents offer whatever your
+Codex has cached as available to your account (`~/.codex/models_cache.json`, the
+same list its own `/model` picker shows, in the same order), and Claude agents
+offer the built-in aliases plus any extra models Claude Code has cached for your
+account (`additionalModelOptionsCache` in `~/.claude.json`). The model set in each
+CLI's own config (`model` in `config.toml` / `.claude.json`) is always offered and
+pre-filled. Run the CLI once outside amux to refresh what it caches.
+
 ## Client/server usage
 
 ```sh

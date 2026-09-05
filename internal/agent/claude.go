@@ -23,11 +23,22 @@ type claudeHarness struct{}
 
 func (claudeHarness) Kind() string { return "claude" }
 
-// claudeModels is the selectable Claude model catalog, opus first (the default).
+// claudeModels is the built-in Claude model catalog — the aliases every Claude
+// Code install accepts — opus first (the default).
 var claudeModels = []string{"opus", "sonnet", "haiku", "fable"}
 
-func (claudeHarness) Models() []string       { return claudeModels }
-func (claudeHarness) DefaultModel() string   { return claudeModels[0] }
+// Models is the built-in catalog plus whatever Claude Code has cached as
+// additionally selectable for this account (claudecfg.Home.AdditionalModels —
+// a preview or org-enabled model amux's catalog predates) and the user's
+// configured model (.claude.json), so a model named by full id is offered too.
+func (claudeHarness) Models() []string {
+	user := claudecfg.User()
+	return mergeModels(claudeModels, user.AdditionalModels(), []string{user.PreferredModel()})
+}
+
+// DefaultModel is the first-offered model — always the built-in opus, since
+// the discovered extras are appended after the aliases.
+func (h claudeHarness) DefaultModel() string { return h.Models()[0] }
 func (claudeHarness) PreferredModel() string { return claudecfg.PreferredModel() }
 
 // Argv builds Claude Code's launch argv. It defaults to the safe auto-accept

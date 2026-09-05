@@ -21,12 +21,28 @@ type codexHarness struct{}
 
 func (codexHarness) Kind() string { return "codex" }
 
-// codexModels is the selectable Codex model catalog. gpt-5.5 is the recommended
-// default and comes first.
+// codexModels is the built-in Codex model catalog, gpt-5.5 (the recommended
+// default) first. It is the fallback for a machine whose Codex has never cached
+// the live catalog (never run, or too old to fetch one).
 var codexModels = []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
 
-func (codexHarness) Models() []string       { return codexModels }
-func (codexHarness) DefaultModel() string   { return codexModels[0] }
+// Models is the live catalog Codex cached for the signed-in account
+// (codexcfg.Home.CachedModels — the same list its own /model picker offers, in
+// the same order), falling back to the built-in catalog when there is none; the
+// user's configured model (config.toml) is always offered too, so a model the
+// cache hides or predates is still selectable.
+func (codexHarness) Models() []string {
+	user := codexcfg.UserHome()
+	catalog := user.CachedModels()
+	if len(catalog) == 0 {
+		catalog = codexModels
+	}
+	return mergeModels(catalog, []string{user.PreferredModel()})
+}
+
+// DefaultModel is the first-offered model: Codex's own top pick when the live
+// catalog is cached, else the built-in default.
+func (h codexHarness) DefaultModel() string { return h.Models()[0] }
 func (codexHarness) PreferredModel() string { return codexcfg.PreferredModel() }
 
 // Argv builds Codex's launch argv. It defaults to autonomous operation, mirroring
