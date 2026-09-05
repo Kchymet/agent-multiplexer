@@ -2,7 +2,9 @@ package panespec
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"amux/internal/core"
@@ -129,5 +131,71 @@ func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	}
 	if !hasBind(binds, cred) {
 		t.Errorf("claude TabAgent scope missing the shared credentials bind %q; got %v", cred, binds)
+	}
+}
+
+// Native Claude installs live under ~/.local, above amux's default data dir.
+// Its read-only binary mount must not hide the writable worktree/git mounts.
+func TestScopeGitWorkflowWithLocalBinary(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap unavailable")
+	}
+	probe := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-user", "--", "/bin/true")
+	if out, err := probe.CombinedOutput(); err != nil {
+		t.Skipf("bwrap unavailable: %v: %s", err, out)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("AMUX_JAIL", "on")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_AUTHOR_NAME", "Test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "test@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "Test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v: %s", args, err, out)
+		}
+	}
+	repo := filepath.Join(core.ReposDir(), "repo.git")
+	dir := filepath.Join(core.SessionsDir(), "agent")
+	wt := filepath.Join(dir, "repo")
+	remote := filepath.Join(dir, "remote.git")
+	seed := filepath.Join(home, "seed")
+	run("git", "init", seed)
+	run("git", "-C", seed, "commit", "--allow-empty", "-m", "initial")
+	run("git", "clone", "--bare", seed, repo)
+	run("git", "--git-dir", repo, "worktree", "add", "-b", "amux/test", wt)
+	run("git", "init", "--bare", remote)
+	run("git", "-C", wt, "remote", "set-url", "origin", remote)
+	run("git", "-C", wt, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	bin := filepath.Join(home, ".local", "bin", "test-shell")
+	if err := os.MkdirAll(filepath.Dir(bin), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/sh", bin); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated repo remains read-only even though the assigned repo is writable.
+	other := filepath.Join(core.ReposDir(), "other.git")
+	run("git", "init", "--bare", other)
+	script := `set -eu
+ cd repo
+ echo change > change.txt
+ git add change.txt
+ git commit -m change
+ git push -u origin HEAD
+ git fetch origin
+ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/amux/test)"
+ if touch "$1/should-not-write" 2>/dev/null; then exit 1; fi
+ `
+	argv := scope(dir, TabAgent, store.Session{}, []string{bin, "-c", script, "test", other}, []string{repo})
+	run(argv...)
+	out, err := exec.Command("git", "--git-dir", remote, "log", "-1", "--format=%s", "amux/test").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "change" {
+		t.Fatalf("push not persisted: %s, %v", out, err)
 	}
 }

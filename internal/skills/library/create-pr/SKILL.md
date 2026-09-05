@@ -196,5 +196,8 @@ work remains), say so and why.
   a follow-up rather than piling it into this branch.
 - If preflight can't go green and you can't fix it, stop and report the failure
   with the output — don't open a knowingly-broken PR.
-- Everything stays inside your worktree. Don't touch other agents' worktrees, the
-  amux data dir, or any parent clone.
+- Keep source edits inside your assigned worktree and run git commands there.
+  Git's writes to its backing metadata in amux's shared bare clone are allowed
+  for commits, fetches, merges, and pushes of your assigned branch. Opening or
+  updating its PR with `gh` is allowed within the sandbox. Do not manually edit
+  the shared clone, other agents' worktrees, or amux's state; keep the sandbox enabled.

@@ -198,9 +198,15 @@ This directory is your sandbox. It contains a git **worktree per repository** yo
 are assigned (the subdirectories here). %s
 
 ## Stay in your sandbox
-- Keep all **edits** inside this directory (your worktrees). Do not write outside
-  it: other agents' worktrees, the amux data dir, or any parent/clone of these
-  repos. (Reading the shared agent sessions below is the one exception.)
+- Keep source and configuration **edits** inside this directory (your worktrees).
+  Run git commands from your assigned worktree. Git may write its backing metadata
+  (objects, refs, index, locks, and config) in amux's shared bare clone outside this
+  directory; amux mounts that metadata writable for this purpose. This is allowed.
+  Do not manually edit the shared clone, other agents' worktrees, or amux's state.
+  Reading the shared agent sessions below is also allowed.
+- You may commit, fetch, merge, push your assigned branch, and open or update its
+  pull request with gh using the host's shared GitHub authentication. These are
+  normal sandbox operations; keep the sandbox enabled.
 - You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
   commit on the default branch (main/master), and do not push to it.
 

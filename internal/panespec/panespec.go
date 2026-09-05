@@ -126,6 +126,13 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 	// ~/.local/share/amux/repos, so git needs to read it), and finally the agent's
 	// own worktree read-write on top so it can edit its files.
 	args = append(args, "--tmpfs", home)
+	// The pane binary itself, if it lives under $HOME (e.g. claude under ~/.nvm),
+	// would be hidden by the tmpfs — bind its subtree read-only so it still runs.
+	// Mount it BEFORE the data/worktree/git mounts: a native Claude install under
+	// ~/.local otherwise hides those writable mounts behind a read-only parent.
+	if sub := homeSubtree(home, argv[0]); sub != "" {
+		args = append(args, "--ro-bind-try", sub, sub)
+	}
 	args = append(args, "--ro-bind-try", core.DataDir(), core.DataDir())
 	args = append(args, "--bind", dir, dir)
 	// The agent's own bare clones, read-write, so git can commit to its branch.
@@ -133,11 +140,6 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 		args = append(args, "--bind-try", src, src)
 	}
 	args = append(args, "--chdir", dir)
-	// The pane binary itself, if it lives under $HOME (e.g. claude under ~/.nvm),
-	// would be hidden by the tmpfs — bind its subtree read-only so it still runs.
-	if sub := homeSubtree(home, argv[0]); sub != "" {
-		args = append(args, "--ro-bind-try", sub, sub)
-	}
 	for _, b := range configBinds(tab, s, home) {
 		args = append(args, b...)
 	}
