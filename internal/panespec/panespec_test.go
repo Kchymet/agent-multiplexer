@@ -199,3 +199,50 @@ func TestScopeGitWorkflowWithLocalBinary(t *testing.T) {
 		t.Fatalf("push not persisted: %s, %v", out, err)
 	}
 }
+
+// TestScopeReaches pins the visibility rule doctor uses to tell a $BROWSER (or
+// any third tool) that is hidden by the scope's tmpfs $HOME apart from one that
+// is missing outright: system roots, the WSL interop mounts, and the amux data
+// tree are visible; the rest of $HOME and unbound trees like /snap are not.
+func TestScopeReaches(t *testing.T) {
+	const data = "/home/tester/.local/share/amux"
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/usr/bin/wslview", true},
+		{"/usr/bin/xdg-open", true},
+		{"/home/linuxbrew/.linuxbrew/bin/browser", true},
+		{"/opt/google/chrome/chrome", true},
+		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", true},
+		{"/mnt/wsl/helper", true},
+		{data + "/bin/amux", true},
+		{"/home/tester/.local/bin/open-browser", false}, // $HOME is a tmpfs inside the scope
+		{"/home/tester/bin/firefox", false},
+		{"/snap/bin/firefox", false}, // /snap is not bound
+		{"/var/lib/flatpak/exports/bin/org.mozilla.firefox", false},
+		{"/usrx/bin/nope", false}, // prefix match must be on a path boundary
+		{"/home/linuxbrewer/x", false},
+	} {
+		if got := ScopeReaches(data, tc.path); got != tc.want {
+			t.Errorf("ScopeReaches(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestScopeRootsMatchBinds keeps systemRoots honest: scope must bind exactly
+// the roots ScopeReaches promises are visible, or doctor's verdict drifts from
+// what a pane actually sees.
+func TestScopeRootsMatchBinds(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not installed; scope is a no-op here")
+	}
+	t.Setenv("AMUX_JAIL", "on")
+	args := scope(t.TempDir(), TabAgent, store.Session{Agent: "claude"}, []string{"/usr/bin/true"}, nil)
+	joined := strings.Join(args, " ")
+	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
+		if !strings.Contains(joined, " "+r+" "+r+" ") {
+			t.Errorf("scope does not bind %s, but ScopeReaches reports it visible:\n%s", r, joined)
+		}
+	}
+}
