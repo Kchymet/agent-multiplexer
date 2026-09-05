@@ -64,7 +64,7 @@ func TestResumeCwds(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resumeCwds(store.Session{Dir: base, Repo: tt.repo})
+			got := resumeCwds(store.Session{RootID: "root1", Dir: base, Repo: tt.repo})
 			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
 				t.Errorf("resumeCwds(repo=%q) = %v, want %v", tt.repo, got, tt.want)
 			}
@@ -621,7 +621,7 @@ func TestAgentWorkdir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AgentWorkdir(store.Session{Dir: base, Repo: tt.repo})
+			got := AgentWorkdir(store.Session{RootID: "root1", Dir: base, Repo: tt.repo})
 			if got != tt.want {
 				t.Errorf("AgentWorkdir(repo=%q) = %q, want %q", tt.repo, got, tt.want)
 			}
@@ -717,7 +717,7 @@ func TestWriteAgentGuide(t *testing.T) {
 		{"codex", "AGENTS.md", "CLAUDE.md"},
 	} {
 		dir := t.TempDir()
-		writeAgentGuide(store.Session{Agent: tc.kind, Branch: "amux/root-agent", Repo: "acme/api", Dir: dir})
+		writeAgentGuide(store.Session{RootID: "root", Agent: tc.kind, Branch: "amux/root-agent", Repo: "acme/api", Dir: dir})
 
 		b, err := os.ReadFile(filepath.Join(dir, tc.file))
 		if err != nil {

@@ -237,6 +237,13 @@ func (d *DB) SetArchivedFlag(id string, archived bool, archivedAt int64) error {
 	return err
 }
 
+// SetDir updates a session's sandbox dir (filled in for a workgroup root that
+// predates default sessions, the first time it is resolved as a coordinator).
+func (d *DB) SetDir(id, dir string) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET dir=? WHERE id=?`, dir, id)
+	return err
+}
+
 // SetRepoScope updates a session's repo list (its comma-joined worktree scope).
 func (d *DB) SetRepoScope(id, repo string) error {
 	_, err := d.sql.Exec(`UPDATE sessions SET repo=? WHERE id=?`, repo, id)

@@ -6,7 +6,6 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/codexapp"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
 
@@ -85,7 +84,13 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 			if scope == "" {
 				scope = store.ScopeWork
 			}
-			wg := core.WorkgroupRow{ID: r.ID, Scope: scope, Display: r.Display()}
+			wg := core.WorkgroupRow{ID: r.ID, Scope: scope, Display: r.Display(), Role: r.Role()}
+			if wg.Role != "" {
+				wg.Agent, wg.Dir = agent.Canonical(r.Agent), r.Dir
+				if wg.Dir == "" {
+					wg.Dir = store.RootDir(r.ID) // a root predating default sessions
+				}
+			}
 			subs, _ := db.Children(r.ID)
 			for _, s := range subs {
 				wg.Agents = append(wg.Agents, core.AgentRow{
@@ -118,12 +123,17 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 	if err != nil {
 		return core.RuntimeRecord{}, err
 	}
-	if !ok && id == console.ID {
+	if !ok || s.Role() == store.RoleCoordinator {
 		// The console is published in the same inventory as every agent but is a
-		// synthetic session rather than a store row, so resolve it the way every
-		// other daemon-side lookup does (lookupSession) instead of answering
-		// "nothing to read" for a row the daemon itself advertises.
-		s, ok = console.Session(), true
+		// synthetic session rather than a store row; a repo home may not exist yet
+		// for a repo tracked before default sessions; a coordinator root may still
+		// lack its pinned conversation. Resolve them the way every other
+		// daemon-side lookup does (lookupSession) instead of answering "nothing to
+		// read" for a row the daemon itself advertises.
+		s, ok, err = lookupSession(id)
+		if err != nil {
+			return core.RuntimeRecord{}, err
+		}
 	}
 	if ok {
 		// A structured-control session (AGE-181) records its normalized events in a

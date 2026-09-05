@@ -158,6 +158,10 @@ func defaultStr(v, def string) string {
 const (
 	ModeTask        = "task"
 	ModeInteractive = "interactive"
+	// ModeConsole marks the built-in console session (a synthetic row, never
+	// stored): the one session that is neither a task nor a plain interactive
+	// agent. It doubles as the console's role marker (see Session.Role).
+	ModeConsole = "console"
 )
 
 // modeLoopLegacy is the retired "loop" mode value. It predates the
@@ -187,3 +191,53 @@ const (
 	ScopeWork = "work" // cross-repo workgroup: root + N agents
 	ScopeRepo = "repo" // single-repo, single-member workgroup nested under its repo
 )
+
+// Session roles: the built-in "default sessions" every container hosts. They
+// mirror the published harnessproto Role* values (store sits below core in the
+// import graph, so the strings are restated here; harnessproto is the wire's
+// source of truth and a test pins the two in step).
+//
+//   - RoleConsole: the machine-wide amux console (Mode == ModeConsole; synthetic).
+//   - RoleCoordinator: a work-scoped workgroup root's own session — the
+//     coordinator of its agents. Its id is the workgroup id and its sandbox is
+//     the workgroup's container dir, which holds every member's sandbox.
+//   - RoleRepo: a tracked repo's home session — the long-lived context for the
+//     one-off agents run against that repo. Its id is the repo name (see
+//     RepoHomeID) and it is a repo-scoped root with no members of its own.
+//   - RoleAgent ("") : an ordinary agent, or a bare container (a hidden
+//     single-member repo root) that hosts no session.
+const (
+	RoleAgent       = ""
+	RoleConsole     = "console"
+	RoleCoordinator = "coordinator"
+	RoleRepo        = "repo"
+)
+
+// RepoHomeID is the session id of a tracked repo's home session: the repo name
+// itself, so the rail's repo row, the daemon's pane/steer lookups, and the store
+// all address the same thing without a mapping table. Repo names never collide
+// with minted ids (six hex chars) in practice, and NewID checks the store anyway.
+func RepoHomeID(repo string) string { return repo }
+
+// Role classifies a session (see the Role* constants). It is derived, not
+// stored: the console by its mode, a coordinator by being a work-scoped root, a
+// repo home by being the repo-scoped root whose id IS its repo name.
+func (s Session) Role() string {
+	switch {
+	case s.Mode == ModeConsole:
+		return RoleConsole
+	case !s.IsRoot():
+		return RoleAgent
+	case s.Scope == ScopeRepo:
+		if s.Repo != "" && s.ID == RepoHomeID(s.Repo) {
+			return RoleRepo
+		}
+		return RoleAgent // a hidden single-member repo root: no session of its own
+	default:
+		return RoleCoordinator
+	}
+}
+
+// IsContainerSession reports whether s is one of the built-in default sessions
+// (console, coordinator, repo home) rather than an ordinary agent.
+func (s Session) IsContainerSession() bool { return s.Role() != RoleAgent }

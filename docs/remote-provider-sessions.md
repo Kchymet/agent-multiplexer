@@ -91,10 +91,11 @@ control support from the mere existence of a transcript:
 ```
 
 - `runtime` names the runtime backing the session — `claude` or `codex` (the
-  `Runtime*` set of §4). It is set only on rows that are a real agent, never on
-  the structural container rows (a repo header, a workgroup root), whose `kind`
-  is a layout label. A consumer picks the transcript renderer and the affordance
-  set for this value.
+  `Runtime*` set of §4). It is set on every row that hosts a session: each agent,
+  and the container rows that are the daemon's **default sessions** (§2.2). A
+  container row from a daemon that predates default sessions carries no
+  `runtime`, and its `kind` is only a layout label (`repo`, `""`). A consumer
+  picks the transcript renderer and the affordance set for this value.
 - `caps` is the honest control surface for the session — one boolean per steering
   verb (§3.1): `prompt`, `interject`, `cancel`, `permission`. Each says whether
   the daemon can serve that verb for *this* session, so a consumer disables an
@@ -105,8 +106,37 @@ control support from the mere existence of a transcript:
     an open prompt (§3.1, §4.5). A runtime that streams a transcript but records
     no answerable prompt reports `permission:false`.
 
-**Backward compatibility.** Both fields are additive (`omitempty` on `runtime`, a
-nullable object for `caps`). A provider that predates them omits both. A consumer
+### 2.2 Default sessions: the console, a workgroup's coordinator, a repo's home
+
+Every container the daemon publishes hosts one long-lived session scoped to it,
+and the row carries a `role` naming which:
+
+```json
+{"id":"console","title":"amux console","mode":"console","role":"console",
+ "runtime":"claude","state":"ready","caps":{...}}
+{"id":"wg1","title":"payments","isRoot":true,"section":"workgroups",
+ "role":"coordinator","runtime":"claude","state":"running","status":"running · 2 agents","caps":{...}}
+{"id":"api","title":"octo/api","kind":"repo","section":"repos",
+ "role":"repo","runtime":"claude","state":"idle","caps":{...}}
+```
+
+- `role` ∈ `console | coordinator | repo` (the `Role*` set); absent on an
+  ordinary agent. The console is the machine-wide session (context over every
+  workgroup, agent, and repo). A workgroup root row *is* its coordinator: its id
+  is the workgroup id. A repo header row *is* the repo's home session: its id is
+  the repo name. All three accept every session verb (§3) like an agent — a
+  `prompt` to a workgroup id reaches its coordinator (starting it if stopped),
+  never its members — and stream `runtime-events` (§4) from their own transcript.
+- A root row's `state` is the most demanding of the coordinator's own state and
+  its members'; its `status` leads with the coordinator's own.
+- A consumer that renders container rows as headers keeps doing so; it may
+  additionally offer them the session affordances it offers an agent. A consumer
+  that sorts sectionless or `repo`-kind rows into a session list must not: the
+  console is sectionless by design and a repo row is a header that hosts a
+  session — neither is a one-off agent.
+
+**Backward compatibility.** These fields are additive (`omitempty` on `runtime`
+and `role`, a nullable object for `caps`). A provider that predates them omits both. A consumer
 MUST then fall back conservatively: resolve the runtime from `kind` (which has
 always carried the same string for agent rows), and — because it cannot know the
 per-session control surface — apply its own safe default rather than assuming a

@@ -65,7 +65,32 @@ type Session struct {
 	// native CLI") and MAY trust a structured row's correlated permissions without
 	// the transcript-heuristic caveat. Additive/omitempty: unset ⇒ pty.
 	ControlMode string `json:"controlMode,omitempty"`
+
+	// Role names what kind of session a row is when it is not an ordinary agent
+	// (a value from the Role* set below): the machine-wide console, a workgroup's
+	// coordinator, or a repo's home session. These are the daemon's built-in
+	// "default sessions" — each container the rail shows (the console, a
+	// workgroup root, a tracked repo) hosts one long-lived agent scoped to that
+	// container, so a consumer can open, steer, and read the transcript of a
+	// workgroup or a repo exactly like an agent. Additive/omitempty: empty means
+	// an ordinary agent (or a bare container row with no session: a root or repo
+	// published by a daemon that predates default sessions carries no Runtime).
+	Role string `json:"role,omitempty"`
 }
+
+// Session roles (Session.Role): the built-in default sessions a daemon hosts for
+// its containers. An ordinary agent has an empty role.
+const (
+	// RoleConsole is the machine-wide amux console: one per daemon, with context
+	// over every workgroup, agent, and repo it runs (id "console").
+	RoleConsole = "console"
+	// RoleCoordinator is a workgroup root's own session — the coordinator or
+	// supervisor of that workgroup's agents. Its id is the workgroup id.
+	RoleCoordinator = "coordinator"
+	// RoleRepo is a tracked repo's home session — the long-lived context for the
+	// one-off agents run against that repo. Its id is the repo name.
+	RoleRepo = "repo"
+)
 
 // SessionCaps is the per-session control surface a provider advertises for a
 // published session (docs/remote-provider-sessions.md §3.1). Each flag reports

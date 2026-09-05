@@ -30,11 +30,14 @@ type AgentSpec struct {
 	Prompt string   // initial prompt
 }
 
-// CreateWorkspace creates a workgroup (root) — a pure container of agents that
-// checks out nothing itself and holds no repos of its own (a repo is an attribute
-// of an agent, via its worktrees). When defaultAgent is non-nil it also creates
-// one agent from that spec (its repos, model, mode, and prompt are honored). Pass
-// nil to create an empty workgroup. Returns the workgroup id.
+// CreateWorkspace creates a workgroup (root): a container of agents that checks
+// out nothing itself and holds no repos of its own (a repo is an attribute of
+// an agent, via its worktrees), but which IS a session — the workgroup's
+// coordinator (store.RoleCoordinator), sandboxed to the container dir that
+// holds every member's sandbox, with a conversation pinned now so it resumes
+// durably. When defaultAgent is non-nil it also creates one agent from that spec
+// (its repos, model, mode, and prompt are honored). Pass nil to create an empty
+// workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
 	db, err := store.Open()
 	if err != nil {
@@ -43,10 +46,17 @@ func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) 
 	defer db.Close()
 
 	rootID := db.NewID()
-	if err := db.PutSession(store.Session{
+	kind := agent.DefaultKind()
+	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Mode: store.ModeTask, Created: store.Now(),
-	}); err != nil {
+		Agent: kind, Mode: store.ModeInteractive,
+		Dir: store.RootDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
+		Created: store.Now(),
+	}
+	if err := os.MkdirAll(root.Dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := db.PutSession(root); err != nil {
 		return "", err
 	}
 	if defaultAgent != nil {
@@ -178,113 +188,32 @@ func ensureConfigHome(s store.Session) {
 	}
 }
 
-// writeAgentGuide drops the sandbox guide into the agent's directory (its cwd),
-// telling the agent to stay sandboxed to this dir and to keep its branch current
-// with the remote. It is templated from the live session record — the branch
-// (s.Branch, authoritative even after a move) and the assigned repos — and
-// rewritten at every launch (see AgentCommand), so an LLM agent never obeys stale
-// instructions after its scope changes. It's written to the file the agent's
-// provider actually reads — CLAUDE.md for Claude Code, AGENTS.md for others (see
-// agent.Harness.GuideFile). The agent dir is not a git repo, so this never dirties
-// a worktree.
-func writeAgentGuide(s store.Session) {
-	repos := "This agent has no repos attached — it works in its own sandbox dir."
-	if names := store.SplitRepos(s.Repo); len(names) > 0 {
-		repos = "You are assigned these repos (one worktree subdir each): " + strings.Join(names, ", ") + "."
-	}
-	guide := fmt.Sprintf(`# amux agent — your sandbox
-
-This directory is your sandbox. It contains a git **worktree per repository** you
-are assigned (the subdirectories here). %s
-
-## Stay in your sandbox
-- Keep source and configuration **edits** inside this directory (your worktrees).
-  Run git commands from your assigned worktree. Git may write its backing metadata
-  (objects, refs, index, locks, and config) in amux's shared bare clone outside this
-  directory; amux mounts that metadata writable for this purpose. This is allowed.
-  Do not manually edit the shared clone, other agents' worktrees, or amux's state.
-  Reading the shared agent sessions below is also allowed.
-- You may commit, fetch, merge, push your assigned branch, and open or update its
-  pull request with gh using the host's shared GitHub authentication. These are
-  normal sandbox operations; keep the sandbox enabled.
-- You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
-  commit on the default branch (main/master), and do not push to it.
-
-## Your own configuration
-Your harness's configuration (Claude Code's `+"`~/.claude`"+`, Codex's `+"`$CODEX_HOME`"+`) is a
-**private copy** under `+"`.amux/`"+` in this directory, seeded from the user's own config
-as a template; `+"`CLAUDE_CONFIG_DIR`"+` / `+"`CODEX_HOME`"+` point at it. You may edit it —
-settings, memory, skills, MCP servers — it is yours. amux compares your copy with
-the template and reports what you changed, so the user can decide whether a change
-should propagate to their config and to other agents (`+"`amux sandbox drift`"+`). Nothing
-you change there propagates on its own. The credentials file is shared and not yours
-to edit.
-
-## Reason across agent sessions
-You can **read** the transcripts of every agent session on this machine (Claude
-Code, Codex, …) — your own, other agents', and the user's — to reason about work that spans
-conversations: recurring tasks, prior decisions, and what's already been done.
-List them (most recent first) with:
-
-    amux agent sessions
-
-Each row is a session; the indented line is the transcript path (a JSONL
-conversation log) you can open with your normal file tools. Add `+"`--json`"+` for
-machine-readable records. This is read-only context — never modify these files,
-and keep every edit inside your worktree.
-
-## Keep current with the remote
-Each repo here is a worktree of a shared clone of its remote, and other agents
-may be working the same repo in parallel on their own branches. Before starting,
-and regularly as you work, refresh your branch from the remote — run inside each
-repo subdirectory:
-
-    git fetch origin && git merge --no-edit origin/HEAD
-
-**Merge, don't rebase.** Once you've pushed your branch for a PR, rebasing
-rewrites commits the remote already has, so your next push is rejected as
-non-fast-forward — the only way through is a force-push, which needs a human to
-unblock. Merging only ever adds commits, so every push stays a fast-forward: you
-can update a PR without ever force-pushing or asking for help. The project
-squash-merges PRs, so the extra merge commits never reach the default branch.
-Resolve any conflicts on your branch. This keeps you building on the latest
-remote, not a stale snapshot.
-
-## Shipping your work
-When a change is ready for review, use the `+"`create-pr`"+` skill — it encodes this
-project's end-to-end PR flow (commit and push conventions, opening the PR, then
-babysitting it: watching CI, weighing review feedback on its merits, and
-resolving conflicts) so you take a change all the way to merged, not just opened.
-`, repos, s.Branch)
-	_ = os.WriteFile(agent.HarnessFor(s.Agent).GuideFile(s.Dir), []byte(guide), 0o644)
-}
-
 // AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
 // workgroup root, all its agent children; otherwise id itself. It lets a caller
 // start the process(es) for a freshly-created session — root or agent — the same
 // way the TUI starts an agent when it's opened.
 func AgentIDsUnder(id string) ([]string, error) {
-	// The console is a synthetic single agent (no store row, never a root), so
-	// it resolves to itself: `start` and a `prompt` to a stopped console both
-	// come through here.
-	if id == console.ID {
-		return []string{id}, nil
-	}
-	db, err := store.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	s, ok, err := db.GetSession(id)
+	// The console and a repo home are single sessions (the console has no store
+	// row; a home is a root with no members), so each resolves to itself: `start`
+	// and a `prompt` to a stopped one both come through here. A workgroup root
+	// still resolves to its member agents — "start the workgroup" brings the
+	// workers up; its coordinator starts when opened or prompted (see
+	// daemon.startForSteer, which starts exactly the steered session).
+	s, ok, err := ResolveSession(id)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
 	}
-	if !s.IsRoot() {
-		return []string{id}, nil
+	if !s.IsRoot() || s.Role() == store.RoleConsole || s.Role() == store.RoleRepo {
+		return []string{s.ID}, nil
 	}
+	db, err := store.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
 	kids, err := db.Children(id)
 	if err != nil {
 		return nil, err
@@ -358,7 +287,8 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 // (they embed the old root id but are read from the stored values, so they keep
 // working; physically moving git worktrees is avoided). An old single-member
 // repo-scoped workgroup left empty is dropped (its container dir is left on disk
-// because the moved agent's worktree still lives under it and is in use).
+// because the moved agent's worktree still lives under it and is in use); a
+// work-scoped one left empty stays, since it is its coordinator's session.
 func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	db, err := store.Open()
 	if err != nil {
@@ -397,10 +327,14 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	if err := db.SetRootID(a.ID, targetRootID); err != nil {
 		return err
 	}
-	// Drop the old workgroup if it's now empty (always true for a moved-out
-	// single-member repo-scoped one).
-	if kids, _ := db.Children(oldRoot); len(kids) == 0 {
-		_ = db.DeleteSession(oldRoot)
+	// Drop the old workgroup if it was the hidden single-member repo-scoped
+	// wrapper around this agent, now empty. A work-scoped workgroup stays: it is
+	// its coordinator's session, possibly running, and the user deletes it
+	// deliberately.
+	if old, ok, _ := db.GetSession(oldRoot); ok && old.Scope == store.ScopeRepo && old.Role() != store.RoleRepo {
+		if kids, _ := db.Children(oldRoot); len(kids) == 0 {
+			_ = db.DeleteSession(oldRoot)
+		}
 	}
 	return nil
 }
@@ -423,10 +357,11 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 		return "", nil, nil, fmt.Errorf("agent dir missing: %s", dir)
 	}
 
-	// Regenerate the agent guide from the current session record before each launch,
-	// so its branch and repo list reflect the latest state (a re-scope or a move) —
-	// an LLM agent that reloads its guide never obeys stale instructions.
-	writeAgentGuide(s)
+	// Regenerate the guide from the current session record (and, for a container
+	// session, the live inventory) before each launch, so its branch, repo list,
+	// and roster reflect the latest state — an LLM agent that reloads its guide
+	// never obeys stale instructions.
+	writeGuide(s)
 
 	h := agent.HarnessFor(s.Agent)
 	prompt := strings.TrimSpace(s.Prompt)
@@ -486,7 +421,10 @@ func AgentEnv(s store.Session) []string {
 		"AMUX_WORKGROUP=" + s.ID,
 		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
-		"AMUX_SCOPE=" + agentScope(s.RootID),
+		"AMUX_SCOPE=" + ScopeOf(s),
+		// The session's role: empty for an ordinary agent; console | coordinator
+		// | repo for the built-in default sessions (store.Role*).
+		"AMUX_ROLE=" + s.Role(),
 		"AMUX_MODE=" + store.NormalizeMode(s.Mode),
 		"AMUX_AGENT=" + agent.Canonical(s.Agent),
 		// The harness session id, so a harness with no hook stream (unlike Claude,
@@ -513,6 +451,12 @@ func AgentEnv(s store.Session) []string {
 // loads them (settings.local.json is read only from the launch dir). See
 // AgentCommand.
 func AgentWorkdir(s store.Session) string {
+	// A container session (console, coordinator, repo home) has no worktree: its
+	// Repo names the repo it is the home of (or, for a root, the union its members
+	// work on), not a checkout under its dir.
+	if s.IsContainerSession() {
+		return s.Dir
+	}
 	if repos := store.SplitRepos(s.Repo); len(repos) == 1 {
 		return filepath.Join(s.Dir, repos[0])
 	}
@@ -563,14 +507,18 @@ func DeleteByID(ctx context.Context, id string) error {
 		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
 	}
 	if s.IsRoot() {
+		if s.Role() == store.RoleRepo {
+			return fmt.Errorf("%q is repo %s's home session; it goes with the repo (amux repo rm %s)", id, s.Repo, s.Repo)
+		}
 		agents, _ := db.Children(id)
 		for _, a := range agents {
 			removeAgent(ctx, db, a)
 		}
-		// Non-recursive: remove the container dir only if empty. A re-parented agent
-		// can still physically live under this root's tree (move is DB-only), so we
-		// must never blow the whole tree away.
-		_ = os.Remove(store.RootDir(id))
+		// The coordinator's own files go; the container dir itself is removed only
+		// if that leaves it empty. A re-parented agent can still physically live
+		// under this root's tree (move is DB-only), so we must never blow the whole
+		// tree away.
+		removeContainerFiles(db, s)
 		return db.DeleteSession(id)
 	}
 	removeAgent(ctx, db, s)

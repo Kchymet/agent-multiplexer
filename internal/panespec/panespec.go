@@ -13,7 +13,6 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/cfghome"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -111,16 +110,16 @@ func codexBin(agentArgv []string) string {
 // They live under the read-only amux tree but must be writable so git can commit
 // (it writes objects/refs/index there), so the scope re-binds them read-write.
 func agentRepoSources(agentID string) []string {
-	if agentID == console.ID {
-		return nil
-	}
 	db, err := store.Open()
 	if err != nil {
 		return nil
 	}
 	defer db.Close()
 	s, ok, _ := db.GetSession(agentID)
-	if !ok {
+	if !ok || s.IsRoot() {
+		// The console has no store row; a coordinator or repo home is a root with
+		// no worktree of its own (a repo home reads its bare clone, never commits
+		// to it), so none of them gets a writable clone.
 		return nil
 	}
 	var out []string
@@ -307,22 +306,13 @@ func homeSubtree(home, p string) string {
 	return filepath.Join(home, parts[0])
 }
 
-// sessionFor resolves the session for an agent id, handling the built-in console
-// (synthetic, not in the store). Every pane of an agent — the Claude process, the
-// editor, the shell — derives its launch dir and argv from this one session.
+// sessionFor resolves the session for an id: an agent, or one of the built-in
+// default sessions — the console (synthetic, not in the store), a workgroup's
+// coordinator (its root row), or a repo's home (created on first open for a repo
+// tracked before default sessions). Every pane of a session — the agent process,
+// the editor, the shell — derives its launch dir and argv from this one record.
 func sessionFor(id string) (store.Session, error) {
-	if id == console.ID {
-		if err := console.Ensure(); err != nil {
-			return store.Session{}, err
-		}
-		return console.Session(), nil
-	}
-	db, err := store.Open()
-	if err != nil {
-		return store.Session{}, err
-	}
-	defer db.Close()
-	s, ok, err := db.GetSession(id)
+	s, ok, err := wsops.ResolveSession(id)
 	if err != nil {
 		return store.Session{}, err
 	}
