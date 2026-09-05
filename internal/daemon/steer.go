@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -90,19 +91,70 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 	if verb != core.SteerPrompt {
 		return fmt.Errorf("agent %s is not running (only %q starts a stopped agent)", a.ID, core.SteerPrompt)
 	}
-	if err := d.startEngineFor(ctx, a.ID); err != nil {
-		return fmt.Errorf("start agent %s: %w", a.ID, err)
+	// Everything this verb can be refused for has now been checked, so it is
+	// accepted — and the cold start it needs takes seconds (a Claude Code boot),
+	// which is far longer than the caller will wait. Hand the start to a goroutine
+	// and return: the relay that carried this verb answers immediately, and the
+	// progress arrives on the session's runtime-events stream instead.
+	go d.startForSteer(ctx, a.ID, key, payload)
+	return nil
+}
+
+// startForSteer performs the work an accepted `prompt` to a stopped agent
+// deferred: bring the engine instance up, then type the text into it. It runs
+// after the caller has been answered, so nothing it does can be reported by
+// returning an error — every outcome is written to the session's journal
+// instead, which reaches a subscribed orchestrator as a `notice` event on the
+// same stream the agent's own output will arrive on (docs/
+// remote-provider-sessions.md §4.6).
+//
+// ctx is the daemon's lifetime context, not the connection's: the client that
+// sent the verb is gone the moment it reads the ack, and a start cancelled by
+// its disconnect would leave the session exactly as stuck as the timeout this
+// change exists to remove.
+func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload []engine.InputStep) {
+	if d.steerStarted != nil {
+		defer func() {
+			select {
+			case d.steerStarted <- id:
+			default:
+			}
+		}()
+	}
+	journal(id, core.JournalInfo, "starting agent")
+	if err := d.startEngineFor(ctx, id); err != nil {
+		d.steerStartFailed(id, fmt.Errorf("start agent %s: %w", id, err))
+		return
 	}
 	d.triggerPoll()
-	in, ok = d.engine.Lookup(key)
+	in, ok := d.engine.Lookup(key)
 	if !ok {
-		return fmt.Errorf("agent %s did not come up", a.ID)
+		d.steerStartFailed(id, fmt.Errorf("agent %s did not come up", id))
+		return
 	}
 	// The runtime is a TUI that has to boot before it will accept typed input, so
-	// reserve a delay in the input FIFO instead of sleeping on the caller. The
+	// reserve a delay in the input FIFO instead of sleeping on this goroutine. The
 	// verb is already "accepted" at this point; this is not a readiness check.
 	d.deferInput(in, payload)
-	return nil
+}
+
+// steerStartFailed reports a start that failed after the verb was already
+// acknowledged. It goes to the session's journal — where the orchestrator that
+// sent the verb is watching — and to the daemon log, where a local operator is.
+// Neither is optional: the caller has been told "accepted" and would otherwise
+// wait forever for a turn that is never coming.
+func (d *Daemon) steerStartFailed(id string, err error) {
+	log.Printf("steer: %v", err)
+	journal(id, core.JournalError, err.Error())
+}
+
+// journal appends one line to a session's amux journal, logging a write that
+// fails rather than propagating it: the journal is a progress report, and losing
+// a line must never be worse than the condition it was reporting.
+func journal(id, level, text string) {
+	if err := core.AppendJournal(id, level, text); err != nil {
+		log.Printf("steer: journal %s: %v", id, err)
+	}
 }
 
 // steerTarget resolves a session id to the harness that knows how to drive it and

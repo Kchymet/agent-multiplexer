@@ -3,8 +3,10 @@ package provider
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -317,6 +319,12 @@ func TestSteeringVerbsRouteToSteer(t *testing.T) {
 			if res.Result != harnessproto.ResultAccepted {
 				t.Fatalf("result disposition = %q, want %q", res.Result, harnessproto.ResultAccepted)
 			}
+			// The boolean rides with the disposition, never instead of it: a `prompt`
+			// to a stopped agent is answered before the runtime has even started, so a
+			// consumer has to be able to see "not finished" without matching strings.
+			if !res.Accepted {
+				t.Fatalf("result = %+v, want the accepted flag set alongside the disposition", res)
+			}
 			got, called := rec.last()
 			if !called {
 				t.Fatal("steering verb never reached ApplyAction")
@@ -354,6 +362,9 @@ func TestLifecycleVerbsReportApplied(t *testing.T) {
 	res := readResult(t, oc)
 	if !res.OK || res.Result != harnessproto.ResultApplied {
 		t.Fatalf("result = %+v, want ok with %q", res, harnessproto.ResultApplied)
+	}
+	if res.Accepted {
+		t.Fatalf("result = %+v, want the accepted flag clear on a finished verb", res)
 	}
 }
 
@@ -560,4 +571,105 @@ func readResult(t *testing.T, oc *harnessproto.Conn) harnessproto.HarnessMsg {
 		t.Fatalf("frame = %q, want session-result", m.Type)
 	}
 	return m
+}
+
+// recordingLog collects the provider's log lines for assertions.
+type recordingLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *recordingLog) logf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+// find returns the first line containing sub, or "".
+func (l *recordingLog) find(sub string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, s := range l.lines {
+		if strings.Contains(s, sub) {
+			return s
+		}
+	}
+	return ""
+}
+
+func (l *recordingLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// TestSessionActionIsLogged covers the observability half: before it, the
+// provider logged only dial/register/disconnect, so "did the prompt I sent from
+// the web actually reach this machine?" had no answer on the box — the first
+// question anyone asks about a relay that looks stuck. Every verb now leaves one
+// line naming the session, the verb, how it came out and how long it took.
+//
+// The negative half matters just as much: the line must never carry `fields`.
+// That is where the prompt text and a permission prompt's reason live — the
+// user's own words, which have no business in a log just because they passed
+// through this process.
+func TestSessionActionIsLogged(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	rec := &recordingApply{}
+	src := &mutableSource{}
+	logs := &recordingLog{}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns), Logf: logs.logf,
+		PublishSessions: true, Sessions: src.poll, ApplyAction: rec.apply,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+
+	const secret = "the user's private prompt text"
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "r1", Action: harnessproto.VerbPrompt, ID: "a1",
+		Fields: map[string]string{harnessproto.FieldText: secret},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res := readResult(t, oc); !res.OK {
+		t.Fatalf("result = %+v, want ok", res)
+	}
+
+	line := logs.find("session-action prompt")
+	if line == "" {
+		t.Fatalf("no line for the relayed prompt; logged: %v", logs.all())
+	}
+	for _, want := range []string{"id=a1", harnessproto.ResultAccepted, " in "} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line %q should contain %q", line, want)
+		}
+	}
+	for _, l := range logs.all() {
+		if strings.Contains(l, secret) {
+			t.Fatalf("the prompt text reached the log: %q", l)
+		}
+	}
+
+	// A refusal is logged too, with the reason — a verb that never arrives and one
+	// that arrived and was rejected look identical otherwise.
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "r2", Action: "spawn", ID: "a1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res := readResult(t, oc); res.OK {
+		t.Fatalf("result = %+v, want the pane verb refused", res)
+	}
+	line = logs.find("session-action spawn")
+	if line == "" {
+		t.Fatalf("no line for the refused verb; logged: %v", logs.all())
+	}
+	if !strings.Contains(line, "failed") || !strings.Contains(line, harnessproto.ErrUnsupported) {
+		t.Errorf("refusal line %q should say it failed and why", line)
+	}
 }

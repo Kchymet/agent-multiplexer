@@ -78,6 +78,51 @@ One JSON object per line, same `wire` framing as all provider traffic.
 - The daemon MAY redact sessions (e.g. publish only non-archived, or nothing
   at all while still advertising the feature) — inventory content is policy.
 
+### 2.1 Per-session runtime and capabilities
+
+Two additive fields let a consumer gate its UI on what a session actually is and
+what its daemon can actually do, rather than assuming a runtime or inferring
+control support from the mere existence of a transcript:
+
+```json
+{"id":"a2","title":"idempotency","kind":"codex","runtime":"codex",
+ "state":"running","status":"running · api",
+ "caps":{"prompt":true,"interject":true,"cancel":true,"permission":true}}
+```
+
+- `runtime` names the runtime backing the session — `claude` or `codex` (the
+  `Runtime*` set of §4). It is set only on rows that are a real agent, never on
+  the structural container rows (a repo header, a workgroup root), whose `kind`
+  is a layout label. A consumer picks the transcript renderer and the affordance
+  set for this value.
+- `caps` is the honest control surface for the session — one boolean per steering
+  verb (§3.1): `prompt`, `interject`, `cancel`, `permission`. Each says whether
+  the daemon can serve that verb for *this* session, so a consumer disables an
+  affordance it would only fail on.
+  - `permission` is deliberately **not** "a transcript exists". It is true only
+    when the runtime raises *correlated* `permission_request` events — a
+    `request_id` the `permission` verb can quote back and the daemon can match to
+    an open prompt (§3.1, §4.5). A runtime that streams a transcript but records
+    no answerable prompt reports `permission:false`.
+
+**Backward compatibility.** Both fields are additive (`omitempty` on `runtime`, a
+nullable object for `caps`). A provider that predates them omits both. A consumer
+MUST then fall back conservatively: resolve the runtime from `kind` (which has
+always carried the same string for agent rows), and — because it cannot know the
+per-session control surface — apply its own safe default rather than assuming a
+verb works. The nullable `caps` is what makes this decidable: absent (`null`)
+means "unknown, fall back"; present with a flag `false` means "known, and this
+verb is off".
+
+**Release/consumer dependency order.** These wire types live in the published
+`harnessproto` module. A consumer in another repo (the harness orchestrator)
+pins `harnessproto` by version, so the ordering is: (1) the producer change —
+`harnessproto` plus the amux capability producer — merges and the module commit
+is available; (2) the consumer change bumps its `harnessproto` pin to that commit
+and reads the new fields. The two ship as separate PRs; until step (1) is merged,
+a consumer that wants to build against the new fields pins the producer branch
+commit and re-pins to the merged commit before its own merge.
+
 ```json
 {"type":"session-result","reqId":"r7","ok":true,"newId":"a9","error":""}
 ```
@@ -93,11 +138,26 @@ whose effect is already done from one accepted for asynchronous input delivery:
 | `result` | meaning |
 | --- | --- |
 | `applied` | the verb ran to completion; its effect is in the next `sessions` snapshot. Every lifecycle verb (§3) is applied. |
-| `accepted` | accepted for asynchronous, best-effort input delivery; not confirmation of runtime submission or processing. Watch `runtime-events` (§4) or the session's `state` for observable effects. Every steering verb (§3.1) is accepted. |
+| `accepted` | validated and taken on for asynchronous, best-effort input delivery; not confirmation of runtime submission or processing. Watch `runtime-events` (§4) or the session's `state` for observable effects. Every steering verb (§3.1) is accepted. |
 
-The field is additive and `omitempty`: absent means `applied`, so a daemon
-predating it reads correctly and a bare `{"ok":true}` is unchanged on the wire.
-It is unset on a failure — `error` carries that.
+`accepted` promises less than "delivered". A `prompt` to a **stopped** agent is
+answered as soon as the daemon knows it is deliverable, and the cold start it
+needs happens afterwards (§3.1) — so an accepted verb may not have reached the
+runtime yet at all.
+
+```json
+{"type":"session-result","reqId":"r7","ok":true,"result":"accepted","accepted":true}
+```
+
+`accepted` is the boolean form of `result:"accepted"`, set on exactly the same
+replies and never on its own. It exists because "did this succeed?" and "is the
+work finished?" are now different questions, and a consumer that must not block
+on the second should be able to ask the first without matching against a
+disposition vocabulary that may grow.
+
+Both fields are additive and `omitempty`: absent `result` means `applied`, so a
+daemon predating them reads correctly and a bare `{"ok":true}` is unchanged on
+the wire. Neither is set on a failure — `error` carries that.
 
 ## 3. Messages: orchestrator → daemon
 
@@ -136,7 +196,7 @@ access, still the daemon's choice of delivery mechanism, still rejectable.
 
 | Verb | `fields` | Meaning |
 | --- | --- | --- |
-| `prompt` | `text` | Deliver a new user turn to the session's agent. If the agent is not running, the daemon MAY start it with `text` as its initial prompt (the `start` path with a prompt) rather than failing. |
+| `prompt` | `text` | Deliver a new user turn to the session's agent. If the agent is not running, the daemon MAY start it with `text` as its initial prompt (the `start` path with a prompt) rather than failing, and MAY answer before that start finishes. |
 | `interject` | `text` | Deliver text to the agent *while a turn is running* — a steer, not a new turn. |
 | `stop` | — | Interrupt the current turn **without killing the session**. The agent stays alive and ready for the next verb; this is not `kill`. |
 | `permission` | `request_id`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` echoes that event's `request_id`; `decision` is `allow` or `deny`; `reason` is optional free text. |
@@ -170,6 +230,22 @@ can prevent submission after acceptance. Do not stack retries solely because
 verb rejected before delivery (no such session, agent not running, unparseable
 `decision`, no pending request for that `request_id`) returns `ok:false` with a
 human-readable `error`.
+
+**A `prompt` that starts a stopped agent acks first.** Everything that can refuse
+the verb is decided synchronously — the session exists, its kind is steerable,
+the verb is allowed, the `request_id` names an open prompt — and the reply goes
+out as soon as those hold. Only then does the daemon start the runtime and type
+the text in. This matters because a runtime cold start takes seconds (a Claude
+Code boot is the common case, since an idle session is the ordinary thing to
+prompt), which is longer than the dispatch timeouts sitting in front of this
+relay: a daemon that answered only once the agent was up would fail the request
+at the client while succeeding on the machine.
+
+The consequence is that a failure *after* the ack has nowhere to go in the reply.
+It is reported instead as an `error`-level `notice` on the session's
+`runtime-events` stream (§4.6), alongside the `notice` that says the start began.
+A consumer that acts on `accepted` must therefore watch that stream — the ack
+means "this will be attempted", not "this worked".
 
 Delivery mechanism is the daemon's business, and v1 of this extension delivers by
 writing to the agent's PTY: `prompt`/`interject` queue an atomic text-and-submit
@@ -410,14 +486,48 @@ upstream rename of one of the resolving hooks leaves a request open until the
 turn boundary clears it; a contract test pins the event names so the drift is
 visible.
 
+### 4.6 amux's own journal (the third record)
+
+Some of what happens to a session is amux's doing, not the runtime's, and the
+runtime therefore never records it. The case that forced this record: a `prompt`
+to a stopped agent is acknowledged immediately and the cold start happens
+afterwards (§3.1), so "starting agent" — and a start that failed — have no reply
+left to travel in.
+
+amux keeps a per-session append-only JSONL journal (`<state>/journal/<session
+id>.jsonl`) and the reader tails it as a further source alongside the transcript
+and the permission journal. Each line is a `{level, text}` record and becomes one
+`notice` event:
+
+| journal line | event |
+| --- | --- |
+| `{"level":"info","text":"starting agent"}` | `notice` with `level: "info"` — the deferred start began |
+| `{"level":"error","text":"start agent a1: …"}` | `notice` with `level: "error"` — the start failed after the verb was acked |
+| anything unparsable | `raw` (never dropped) |
+
+Two properties matter to a consumer:
+
+- **It is keyed by the amux session id, not the runtime's conversation id.** The
+  first line is written before the runtime — and therefore the conversation —
+  exists, which is exactly when a conversation id is unavailable.
+- **A session with no transcript still has a stream.** A session that has never
+  run resolves to a record naming only this journal, and subscribing to it works.
+  Answering "no record" for that session would leave the one case that most needs
+  progress reporting with nothing at all.
+
+The journal is polled last of a session's sources, so the shared event ordinals
+of everything that predates it are unchanged and a resuming `afterSeq` cursor
+still points where it did.
+
 ## 5. Compatibility
 
 - These are additive messages behind feature negotiation — protocol version 2
   is unchanged, and peers that don't negotiate the features never see them.
 - The `session-action` verb set is likewise additive: new verbs land without a
   version bump, and a daemon that predates one answers `"unsupported verb"`
-  (§3.2). `session-result.result` is additive in the same way — absent means
-  `applied` (§2).
+  (§3.2). `session-result.result` and `session-result.accepted` are additive in
+  the same way — absent `result` means `applied`, and a consumer that ignores
+  both reads a success exactly as it did before (§2).
 - A daemon may implement `sessions` without `runtime-events` (status-only
   inventory) — consumers should expect that and render inventory alone.
 
@@ -439,6 +549,21 @@ so the daemon stays authoritative (it owns the engine that `start` needs and the
 re-poll that surfaces a change); if no daemon is reachable, verbs fail cleanly.
 Feature strings passed via `--feature`/`AMUX_PROVIDER_FEATURES` are orthogonal
 and still advertised alongside `sessions`.
+
+Every relayed verb leaves one line on `amux provide`'s stderr, before the reply
+is written, so an operator can answer "did it reach this machine, and how long
+did it take here?" without instrumenting anything:
+
+```
+amux provide: session-action prompt id=a1 accepted in 4ms
+amux provide: session-action add-agent id=wg1 applied in 21ms (created a7)
+amux provide: session-action spawn id=a1 failed in 0s: unsupported
+```
+
+The line names the session, the verb, the disposition (§2) and the elapsed
+handling time. It deliberately carries no `fields` — that is where the prompt
+text and a permission decision's reason live, and the user's words do not belong
+in a log just because they passed through here.
 
 With `--runtime-events` (which requires `--publish-sessions`), the daemon also
 advertises `runtime-events` and, for each published session the orchestrator

@@ -18,6 +18,10 @@ import (
 // Session is a normalized agent session surfaced from any Source.
 type Session = harnessproto.Session
 
+// SessionCaps is the per-session control surface published alongside a Session
+// (Session.Caps): the honest set of steering verbs the daemon can serve for it.
+type SessionCaps = harnessproto.SessionCaps
+
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one.
 const (
@@ -223,7 +227,8 @@ const (
 
 // RuntimeRecord is the QueryRuntimeRecord read model: a session's on-disk runtime
 // transcript and the runtime (agent kind) that wrote it. A zero Path means the
-// session has no record a runtime-event reader supports.
+// session has no transcript a runtime-event reader supports — it may still carry
+// a Journal, which is all a never-started session has.
 type RuntimeRecord struct {
 	Runtime string `json:"runtime,omitempty"`
 	Path    string `json:"path,omitempty"`
@@ -233,6 +238,11 @@ type RuntimeRecord struct {
 	// empty for a runtime that records its own (Codex). It is additive: a client
 	// older than the field simply reads the transcript alone.
 	Permissions string `json:"permissions,omitempty"`
+	// Journal is amux's own session journal (journal.go): what amux did to the
+	// session, which no runtime records. The reader tails it alongside Path, and
+	// it is resolvable for a session with no transcript at all — which is the
+	// point, since that is the stopped agent an accepted `prompt` is starting.
+	Journal string `json:"journal,omitempty"`
 }
 
 // Action is the client -> daemon control request. It carries both the lifecycle

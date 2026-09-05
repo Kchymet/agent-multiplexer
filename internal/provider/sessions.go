@@ -99,27 +99,73 @@ func (p *Provider) publishOnce(ctx context.Context, s *session, seq int64, last 
 // correlated by ReqID. It runs inline on the read loop, which serializes verbs;
 // the store operations are quick and a steering verb's PTY write is queued by
 // the engine rather than performed here, so neither stalls the loop.
+//
+// Every relayed verb leaves one line in the log. Until it did, the provider
+// recorded only dial/register/disconnect, so "did the prompt I sent from the web
+// actually reach this machine?" had no answer here at all — the question you ask
+// first when a relay looks stuck, and the one the journal could not answer.
 func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	if !p.publishing() {
 		return
 	}
+	started := time.Now()
 	res := harnessproto.HarnessMsg{Type: harnessproto.HSessionResult, ReqID: m.ReqID}
 	newID, err := p.applySessionAction(m)
 	if err != nil {
 		res.Error = err.Error()
 	} else {
 		res.OK, res.NewID = true, newID
-		// A steering verb is delivered to a running agent, not completed: say
-		// "accepted" so the orchestrator waits for runtime-events or the next
-		// inventory snapshot instead of assuming the turn is done (spec §2).
+		// A steering verb is taken on, not completed: say "accepted" so the
+		// orchestrator waits for runtime-events or the next inventory snapshot
+		// instead of assuming the turn is done (spec §2). A `prompt` to a stopped
+		// agent is answered before the runtime has even started, so this is the
+		// only thing the reply can honestly claim.
 		res.Result = harnessproto.ResultApplied
 		if harnessproto.SteeringVerbs[m.Action] {
-			res.Result = harnessproto.ResultAccepted
+			res.Result, res.Accepted = harnessproto.ResultAccepted, true
 		}
 	}
+	// Logged before the reply is written, not after: the line's whole job is to
+	// say when this machine was done with the verb, and one that landed after the
+	// answer went out could not be compared against an upstream timeout. The
+	// elapsed time is the daemon's handling, which is what that comparison needs —
+	// the socket write is the orchestrator's side of the story.
+	p.logSessionAction(m, res, time.Since(started))
 	if werr := s.hc.WriteHarness(res); werr != nil {
 		s.cancel()
 	}
+}
+
+// logSessionAction records one relayed verb: which session, which verb, how it
+// came out, and how long it took. Elapsed is the number that makes the line
+// worth having — it separates "the daemon never answered" from "the daemon
+// answered slowly", which is the whole diagnosis of a relay that times out
+// upstream.
+//
+// It deliberately logs no `fields`. Those carry the prompt text and a permission
+// prompt's reason: the user's own words, which have no business in a machine's
+// log just because they passed through it. The verb and the session id are what
+// an operator needs, and they are not the user's content.
+func (p *Provider) logSessionAction(m harnessproto.MuxMsg, res harnessproto.HarnessMsg, elapsed time.Duration) {
+	id := m.ID
+	if id == "" {
+		id = "-" // creation verbs (new-workgroup) name no existing session
+	}
+	took := elapsed.Round(time.Millisecond)
+	if !res.OK {
+		p.cfg.Logf("session-action %s id=%s failed in %s: %s", m.Action, id, took, res.Error)
+		return
+	}
+	disposition := res.Result
+	if disposition == "" {
+		disposition = harnessproto.ResultApplied
+	}
+	if res.NewID != "" {
+		p.cfg.Logf("session-action %s id=%s %s in %s (created %s)",
+			m.Action, id, disposition, took, res.NewID)
+		return
+	}
+	p.cfg.Logf("session-action %s id=%s %s in %s", m.Action, id, disposition, took)
 }
 
 // errUnsupported rejects a verb outside the accepted set (spec §3). Its string
