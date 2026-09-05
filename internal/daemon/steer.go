@@ -67,7 +67,7 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 		// — which is also the honest reading of the verb: `stop` interrupts the
 		// current turn, and there isn't one.
 		if verb == core.SteerStop && keys.InterruptOnlyWhileBusy &&
-			h.Activity(sess.ClaudeID) != engine.ActivityBusy {
+			h.Activity(sess) != engine.ActivityBusy {
 			return fmt.Errorf("agent %s has no turn running to stop", a.ID)
 		}
 		writeAll(in, payload)

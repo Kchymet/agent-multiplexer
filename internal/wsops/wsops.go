@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"amux/internal/agent"
+	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
@@ -139,10 +140,42 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	// Write the guide from the session record so it's correct immediately; every
 	// launch rewrites it from the current record (see AgentCommand).
 	writeAgentGuide(a)
+	// Seed the agent's private harness config from the user's (the template) now,
+	// so what the agent starts with is what the user had at creation — not
+	// whatever the template holds by the time it first launches.
+	ensureConfigHome(a)
 	if err := db.PutSession(a); err != nil {
 		return store.Session{}, err
 	}
 	return a, nil
+}
+
+// ensureConfigHome seeds the agent's private harness configuration — a copy of
+// the user's own config dir, placed under the agent's dir and pointed at via the
+// harness's config env (see agent.Harness.Config) — if it isn't there yet. It is
+// idempotent, so it runs at creation and again at every launch: an agent created
+// before config homes were private gets one on its next launch, and an agent's
+// own edits to its copy are never touched. Best-effort: a failure is logged and
+// the launch proceeds (the harness then falls back to its default, the user's
+// home — visible in the daemon log rather than blocking the agent).
+func ensureConfigHome(s store.Session) {
+	spec, ok := agent.HarnessFor(s.Agent).Config(s)
+	if !ok {
+		return
+	}
+	fresh, err := cfghome.Seed(spec)
+	if err != nil {
+		log.Printf("amux: seeding %s config for agent %s: %v", spec.Kind, s.ID, err)
+		return
+	}
+	if fresh {
+		log.Printf("amux: seeded agent %s's private %s config from %s", s.ID, spec.Kind, spec.Template)
+	}
+	// A legacy agent whose dir is itself a worktree must not see its config home
+	// as untracked files.
+	if git.IsGitRepo(context.Background(), s.Dir) {
+		_ = git.Exclude(context.Background(), s.Dir, ".amux/")
+	}
 }
 
 // writeAgentGuide drops the sandbox guide into the agent's directory (its cwd),
@@ -170,6 +203,16 @@ are assigned (the subdirectories here). %s
   repos. (Reading the shared agent sessions below is the one exception.)
 - You are on branch `+"`%s`"+`. Commit only to this branch. Do not switch to or
   commit on the default branch (main/master), and do not push to it.
+
+## Your own configuration
+Your harness's configuration (Claude Code's `+"`~/.claude`"+`, Codex's `+"`$CODEX_HOME`"+`) is a
+**private copy** under `+"`.amux/`"+` in this directory, seeded from the user's own config
+as a template; `+"`CLAUDE_CONFIG_DIR`"+` / `+"`CODEX_HOME`"+` point at it. You may edit it —
+settings, memory, skills, MCP servers — it is yours. amux compares your copy with
+the template and reports what you changed, so the user can decide whether a change
+should propagate to their config and to other agents (`+"`amux sandbox drift`"+`). Nothing
+you change there propagates on its own. The credentials file is shared and not yours
+to edit.
 
 ## Reason across agent sessions
 You can **read** the transcripts of every agent session on this machine (Claude
@@ -374,6 +417,9 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 
 	h := agent.HarnessFor(s.Agent)
 	prompt := strings.TrimSpace(s.Prompt)
+	// The agent's private harness config must exist before anything below reads
+	// or writes it (gap-fill, resume detection, trust all live in that home).
+	ensureConfigHome(s)
 	// Before deciding resume-vs-fresh, gap-fill the harness transcript from amux's
 	// captured backup: a mid-turn kill can leave the harness's own copy missing
 	// even though we hooked a backup, so restore it into the primary resume cwd
@@ -381,7 +427,7 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// resume. Best-effort — RestoreTranscript no-ops when there's nothing better to
 	// restore and never clobbers a fresher copy, so a failure never blocks launch.
 	if s.ClaudeID != "" {
-		if restored, _ := h.RestoreTranscript(dir, s.ClaudeID); restored {
+		if restored, _ := h.RestoreTranscript(s, dir); restored {
 			log.Printf("amux: gap-filled transcript for %s from captured backup", s.ClaudeID)
 		}
 	}
@@ -394,7 +440,7 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 
 	// Pre-launch filesystem side effects the harness needs in its launch dir
 	// (trusting the folder, installing amux's hooks). Best-effort by contract.
-	h.PrepareLaunchDir(dir)
+	h.PrepareLaunch(s, dir)
 
 	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
 	// the running binary. Where it goes is the harness's call — Claude reads
@@ -416,11 +462,14 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 }
 
 // AgentEnv is the extra environment (KEY=VALUE) every pane of an agent gets —
-// the exported amux intent (see the README's philosophy table). It is separate
-// from AgentCommand so the editor and terminal panes can be resolved without
-// running the agent-launch side effects (resume decisions, trust, hook installs).
+// the exported amux intent (see the README's philosophy table), plus the
+// harness's config env (CLAUDE_CONFIG_DIR / CODEX_HOME) pointing at the agent's
+// private config copy, so the agent pane and a `claude`/`codex` run from the
+// terminal tab both use it. It is separate from AgentCommand so the editor and
+// terminal panes can be resolved without running the agent-launch side effects
+// (resume decisions, trust, hook installs).
 func AgentEnv(s store.Session) []string {
-	return []string{
+	env := []string{
 		"AMUX_WORKGROUP=" + s.ID,
 		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
@@ -433,6 +482,10 @@ func AgentEnv(s store.Session) []string {
 		// self-minting harness (Codex) has adopted its id — matching what's pinned.
 		"AMUX_SESSION_ID=" + s.ClaudeID,
 	}
+	if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
+		env = append(env, spec.EnvEntry())
+	}
+	return env
 }
 
 // AgentWorkdir is the directory the editor and terminal panes run in. An agent
@@ -516,6 +569,10 @@ func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
 		if repo, ok, _ := db.Repo(repoName); ok {
 			_ = git.RemoveWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, repoName), a.Branch)
 		}
+	}
+	// The private config home goes with the dir; drop its seed manifest too.
+	if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
+		cfghome.Forget(spec)
 	}
 	_ = os.RemoveAll(a.Dir)
 	_ = db.DeleteSession(a.ID)

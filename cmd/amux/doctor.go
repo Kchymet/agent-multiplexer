@@ -134,6 +134,19 @@ func cmdDoctor() error {
 		fmt.Printf("  ✓ claude    project-dir path munge matches Claude's on-disk layout\n")
 	}
 
+	// Sandbox config: each agent runs against a private copy of the user's harness
+	// config; edits an agent made to its copy await the user's decision to
+	// propagate or discard. Counted through the daemon (it resolves the agents).
+	fmt.Println("\nSandbox config")
+	if !daemonUp {
+		fmt.Printf("  · agents    (start the daemon to compare config copies with your templates)\n")
+	} else if agents, edits := sandboxDriftSummary(); edits == 0 {
+		fmt.Printf("  ✓ agents    every agent's config copy matches your templates\n")
+	} else {
+		fmt.Printf("  ⚠ agents    %d agent%s made %d config edit%s — review: amux sandbox drift\n",
+			agents, plural(agents), edits, plural(edits))
+	}
+
 	// Provider mode: opt-in, so a machine that never registered says so quietly
 	// rather than failing the check. What it reports is the whole chain — config,
 	// credential, service, and whether the loop actually reached an orchestrator —

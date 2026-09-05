@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"amux/internal/agent"
+	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -52,7 +53,7 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 			return "", nil, nil, err
 		}
 	}
-	return dir, env, scope(dir, tab, s.Agent, argv, agentRepoSources(agentID)), nil
+	return dir, env, scope(dir, tab, s, argv, agentRepoSources(agentID)), nil
 }
 
 // agentRepoSources returns the bare-clone git dirs backing an agent's worktrees.
@@ -84,11 +85,12 @@ func agentRepoSources(agentID string) []string {
 // worktree: the system is read-only (so tools/libraries run), only the worktree
 // (and a private /tmp) is writable, and the rest of $HOME — other repos, other
 // agents' worktrees, the store, your files — is replaced by an empty tmpfs. Only
-// what the tool itself needs is bound back: the agent gets its Claude config/auth
-// and its own runtime; the editor gets its config; the shell gets nothing. This
-// is a filesystem scope, not a hardened jail (network and pids are shared), and
-// it's skipped if AMUX_JAIL=off or bwrap is missing.
-func scope(dir string, tab int, agentKind string, argv []string, rwSources []string) []string {
+// what the tool itself needs is bound back: the agent gets its own runtime and
+// the one shared auth file (its harness config is a private copy already inside
+// its dir — see agent.Harness.Config); the editor gets its config; the shell gets
+// nothing. This is a filesystem scope, not a hardened jail (network and pids are
+// shared), and it's skipped if AMUX_JAIL=off or bwrap is missing.
+func scope(dir string, tab int, s store.Session, argv []string, rwSources []string) []string {
 	if len(argv) == 0 || envOr("AMUX_JAIL", "on") == "off" {
 		return argv
 	}
@@ -136,7 +138,7 @@ func scope(dir string, tab int, agentKind string, argv []string, rwSources []str
 	if sub := homeSubtree(home, argv[0]); sub != "" {
 		args = append(args, "--ro-bind-try", sub, sub)
 	}
-	for _, b := range configBinds(tab, agentKind, home) {
+	for _, b := range configBinds(tab, s, home) {
 		args = append(args, b...)
 	}
 	args = append(args, "--")
@@ -144,11 +146,11 @@ func scope(dir string, tab int, agentKind string, argv []string, rwSources []str
 }
 
 // configBinds is the minimal per-tool config/state mounted into the scope so the
-// tool can run: the agent harness's own config/auth/state (writable — each stores
-// its transcripts there) for the agent, the editor's config/state for the editor,
-// nothing for the shell. The agent binds depend on which harness runs: Claude
-// keeps its state in ~/.claude(.json), Codex under $CODEX_HOME.
-func configBinds(tab int, agentKind string, home string) [][]string {
+// tool can run: for the agent, the harness's shared auth file (its config is a
+// private copy inside the agent's dir, already writable — nothing of the user's
+// ~/.claude or $CODEX_HOME is mounted); the editor's config/state for the
+// editor; nothing for the shell.
+func configBinds(tab int, s store.Session, home string) [][]string {
 	j := filepath.Join
 	switch tab {
 	case TabAgent:
@@ -157,10 +159,14 @@ func configBinds(tab int, agentKind string, home string) [][]string {
 		// durable copy of the conversation for the "restarting" diagnostic).
 		// --bind-try skips missing paths, so create the capture dir first.
 		_ = os.MkdirAll(core.TranscriptDir(), 0o755)
-		// The harness's own config/auth/state binds (Claude keeps state in
-		// ~/.claude(.json); Codex under $CODEX_HOME) — the one part that varies by
-		// kind. Everything below is shared by every agent pane regardless of harness.
-		binds := agent.HarnessFor(agentKind).AgentConfigBinds(home)
+		// The harness's shared auth file, bound at its template path — the one
+		// thing the agent's private config copy links back to (its OAuth credential
+		// must not diverge per agent). Everything below is shared by every agent
+		// pane regardless of harness.
+		var binds [][]string
+		if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
+			binds = cfghome.Binds(spec)
+		}
 		binds = append(binds,
 			[]string{"--bind-try", core.HookStateDir(), core.HookStateDir()},
 			[]string{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},

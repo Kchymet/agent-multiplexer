@@ -21,14 +21,66 @@ import (
 
 var mu sync.Mutex // serialize our own read-modify-write
 
-// projectsRoot is where Claude Code stores per-directory session transcripts.
-func projectsRoot() string {
+// Home is one Claude Code configuration directory — the tree $CLAUDE_CONFIG_DIR
+// names. It holds the user-level settings (settings.json), the mixed config/state
+// file .claude.json (MCP servers, per-project trust, onboarding flags), the OAuth
+// credentials (.credentials.json), and per-machine state: the projects/ transcript
+// tree, history, caches, plugins.
+//
+// amux distinguishes two homes. User() is the user's own — the template every
+// agent's config is seeded from. At(dir) is an agent's private copy, which amux
+// creates under the agent's sandbox dir and points Claude at via CLAUDE_CONFIG_DIR
+// (see agent.Harness.Config). Every path lookup goes through a Home so resume,
+// gap-fill, listing, and trust all read the same tree Claude itself writes.
+type Home struct {
+	Dir string
+	// split marks Claude's default layout: with CLAUDE_CONFIG_DIR unset, Claude
+	// keeps .claude.json beside ~/.claude (at ~/.claude.json), not inside it. An
+	// explicit config dir keeps everything under Dir.
+	split bool
+}
+
+// User is the user's own Claude Code home: $CLAUDE_CONFIG_DIR when set, else
+// ~/.claude with .claude.json beside it. It is the template agents are seeded
+// from, and the home amux's own process-level lookups (the package-level
+// functions below) read.
+func User() Home {
 	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return filepath.Join(d, "projects")
+		return Home{Dir: d}
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "projects")
+	return Home{Dir: filepath.Join(home, ".claude"), split: true}
 }
+
+// At is the home at an explicit config dir — what an agent launched with
+// CLAUDE_CONFIG_DIR=dir uses. Claude then keeps .claude.json inside dir too.
+func At(dir string) Home { return Home{Dir: dir} }
+
+// ProjectsRoot is where this home stores per-directory session transcripts.
+func (h Home) ProjectsRoot() string { return filepath.Join(h.Dir, "projects") }
+
+// ConfigPath is this home's .claude.json — beside the dir for the default
+// layout, inside it for an explicit CLAUDE_CONFIG_DIR.
+func (h Home) ConfigPath() string {
+	if h.split {
+		return filepath.Join(filepath.Dir(h.Dir), ".claude.json")
+	}
+	return filepath.Join(h.Dir, ".claude.json")
+}
+
+// SettingsPath is this home's user-level settings.json (hooks, permissions,
+// env, status line, enabled plugins).
+func (h Home) SettingsPath() string { return filepath.Join(h.Dir, "settings.json") }
+
+// CredentialsPath is this home's OAuth credentials file. It is auth, not config:
+// amux never copies it into an agent's home — see Template.
+func (h Home) CredentialsPath() string { return filepath.Join(h.Dir, CredentialsFile) }
+
+// CredentialsFile is the name of the OAuth credentials file inside a home.
+const CredentialsFile = ".credentials.json"
+
+// projectsRoot is the user home's transcript tree (package-level convenience).
+func projectsRoot() string { return User().ProjectsRoot() }
 
 // munge maps an absolute path to Claude Code's project-dir name ('/' and '.'
 // become '-'), e.g. /home/u/.local/x -> -home-u--local-x.
@@ -64,9 +116,13 @@ func ProjectDirName(cwd string) string { return munge(cwd) }
 // launch cwd) is munge(cwd) or munge of an ancestor — that's a normal cwd shift,
 // not scheme drift, and must not be flagged. Only a project dir that matches no
 // level is genuine munge drift. Transcripts with an unreadable cwd are skipped.
-func MungeDrift() []string {
+func MungeDrift() []string { return User().MungeDrift() }
+
+// MungeDrift is the drift probe over this home's transcripts (see the
+// package-level MungeDrift).
+func (h Home) MungeDrift() []string {
 	var out []string
-	for _, s := range ListSessions() {
+	for _, s := range h.ListSessions() {
 		if s.Cwd == "" || s.Project == "" {
 			continue
 		}
@@ -104,8 +160,8 @@ func mungeMatchesAncestor(cwd, project string) bool {
 // ("No conversation found") — which would leave the agent unable to open at all
 // instead of falling back to a fresh start. So we require the transcript itself:
 // the <uuid>.jsonl file, or a .jsonl inside the <uuid>/ working dir.
-func sessionPresent(cwd, uuid string) bool {
-	base := filepath.Join(projectsRoot(), munge(cwd), uuid)
+func (h Home) sessionPresent(cwd, uuid string) bool {
+	base := filepath.Join(h.ProjectsRoot(), munge(cwd), uuid)
 	if fi, err := os.Stat(base + ".jsonl"); err == nil && !fi.IsDir() {
 		return true
 	}
@@ -133,16 +189,28 @@ func dirHasTranscript(dir string) bool {
 // through this package so gap-fill (restoring a captured backup into the path
 // Claude expects) stays consistent with resume detection (sessionPresent), which
 // reads the very same location.
-func TranscriptPath(cwd, uuid string) string {
-	return filepath.Join(projectsRoot(), munge(cwd), uuid+".jsonl")
+func TranscriptPath(cwd, uuid string) string { return User().TranscriptPath(cwd, uuid) }
+
+// TranscriptPath is the transcript path for uuid under cwd in this home.
+func (h Home) TranscriptPath(cwd, uuid string) string {
+	return filepath.Join(h.ProjectsRoot(), munge(cwd), uuid+".jsonl")
+}
+
+// ProjectDir is the directory this home keeps cwd's transcripts (and their
+// per-session working areas) in: <projects>/<munge(cwd)>.
+func (h Home) ProjectDir(cwd string) string {
+	return filepath.Join(h.ProjectsRoot(), munge(cwd))
 }
 
 // SessionExists reports whether a saved session with uuid exists for cwd.
-func SessionExists(cwd, uuid string) bool {
+func SessionExists(cwd, uuid string) bool { return User().SessionExists(cwd, uuid) }
+
+// SessionExists reports whether uuid's transcript for cwd exists in this home.
+func (h Home) SessionExists(cwd, uuid string) bool {
 	if uuid == "" {
 		return false
 	}
-	return sessionPresent(cwd, uuid)
+	return h.sessionPresent(cwd, uuid)
 }
 
 // FindSession looks for uuid's transcript under each candidate cwd in order and
@@ -152,11 +220,17 @@ func SessionExists(cwd, uuid string) bool {
 // changed over time, so a session pinned under one convention can have its
 // transcript stored under another. ok is false if no candidate has it.
 func FindSession(uuid string, cwds ...string) (cwd string, ok bool) {
+	return User().FindSession(uuid, cwds...)
+}
+
+// FindSession is the resume lookup within this home (see the package-level
+// FindSession).
+func (h Home) FindSession(uuid string, cwds ...string) (cwd string, ok bool) {
 	if uuid == "" {
 		return "", false
 	}
 	for _, c := range cwds {
-		if sessionPresent(c, uuid) {
+		if h.sessionPresent(c, uuid) {
 			return c, true
 		}
 	}
@@ -164,8 +238,11 @@ func FindSession(uuid string, cwds ...string) (cwd string, ok bool) {
 }
 
 // AnySession reports whether cwd has any saved Claude session transcript.
-func AnySession(cwd string) bool {
-	ents, err := os.ReadDir(filepath.Join(projectsRoot(), munge(cwd)))
+func AnySession(cwd string) bool { return User().AnySession(cwd) }
+
+// AnySession reports whether cwd has any saved transcript in this home.
+func (h Home) AnySession(cwd string) bool {
+	ents, err := os.ReadDir(h.ProjectDir(cwd))
 	if err != nil {
 		return false
 	}
@@ -197,8 +274,11 @@ type SessionInfo struct {
 // the whole listing, so an agent always gets whatever is readable. Only the
 // per-project top-level <uuid>.jsonl transcripts are reported (mirroring
 // AnySession) — a session's subagents/ working area is not itself a session.
-func ListSessions() []SessionInfo {
-	root := projectsRoot()
+func ListSessions() []SessionInfo { return User().ListSessions() }
+
+// ListSessions enumerates this home's transcripts, most recent first.
+func (h Home) ListSessions() []SessionInfo {
+	root := h.ProjectsRoot()
 	projects, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -265,22 +345,20 @@ func transcriptCwd(path string) string {
 	return ""
 }
 
-// ConfigPath is ~/.claude.json (honoring CLAUDE_CONFIG_DIR if set).
-func ConfigPath() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return filepath.Join(d, ".claude.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude.json")
-}
+// ConfigPath is the user home's .claude.json (~/.claude.json, or inside
+// CLAUDE_CONFIG_DIR when set).
+func ConfigPath() string { return User().ConfigPath() }
 
 // PreferredModel returns the user's configured Claude Code model (the top-level
 // "model" key in ~/.claude.json), or "" if unset or unreadable. amux uses it as
 // the rational default when interactively configuring a new agent, so the user
 // doesn't have to retype their usual model every time. Best-effort — callers
 // treat "" as "let Claude pick its own default".
-func PreferredModel() string {
-	b, err := os.ReadFile(ConfigPath())
+func PreferredModel() string { return User().PreferredModel() }
+
+// PreferredModel is the "model" key of this home's .claude.json, or "".
+func (h Home) PreferredModel() string {
+	b, err := os.ReadFile(h.ConfigPath())
 	if err != nil {
 		return ""
 	}
@@ -297,7 +375,11 @@ func PreferredModel() string {
 // caller should proceed (Claude will just show the trust dialog once). The whole
 // file is round-tripped with json.Number so large integer fields aren't mangled,
 // and written atomically so a concurrent Claude process never sees a partial file.
-func TrustDir(dir string) error {
+func TrustDir(dir string) error { return User().TrustDir(dir) }
+
+// TrustDir marks dir as trusted in this home's .claude.json (see the
+// package-level TrustDir).
+func (h Home) TrustDir(dir string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -305,7 +387,10 @@ func TrustDir(dir string) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	path := ConfigPath()
+	path := h.ConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	root := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
 		dec := json.NewDecoder(bytes.NewReader(b))
@@ -339,15 +424,9 @@ func TrustDir(dir string) error {
 	return os.Rename(tmp, path)
 }
 
-// SettingsPath is Claude Code's user settings.json (honoring CLAUDE_CONFIG_DIR).
+// SettingsPath is the user home's settings.json (honoring CLAUDE_CONFIG_DIR).
 // This is where hook configuration lives — distinct from ConfigPath's .claude.json.
-func SettingsPath() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return filepath.Join(d, "settings.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
-}
+func SettingsPath() string { return User().SettingsPath() }
 
 // hookEvents maps each Claude Code hook event amux listens on to the activity
 // state it implies. Driven by hooks rather than by scraping the transcript or

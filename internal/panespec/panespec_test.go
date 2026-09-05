@@ -25,7 +25,7 @@ func hasBind(binds [][]string, src string) bool {
 // image) can find and launch it. Without /mnt/c the read fails with "can't
 // find image on clipboard". See configBinds' TabAgent case.
 func TestAgentScopeBindsWindowsDriveForWSLClipboard(t *testing.T) {
-	binds := configBinds(TabAgent, "claude", "/home/tester")
+	binds := configBinds(TabAgent, store.Session{Agent: "claude"}, "/home/tester")
 	if !hasBind(binds, "/mnt/c") {
 		t.Errorf("TabAgent scope missing /mnt/c bind (needed for WSL clipboard interop); got %v", binds)
 	}
@@ -37,7 +37,7 @@ func TestAgentScopeBindsWindowsDriveForWSLClipboard(t *testing.T) {
 // The terminal tab already bound /mnt/wsl (for the Docker CLI symlink); make
 // sure that stays intact and unaffected by the agent-scope change.
 func TestTerminalScopeStillBindsMntWsl(t *testing.T) {
-	binds := configBinds(TabTerminal, "claude", "/home/tester")
+	binds := configBinds(TabTerminal, store.Session{Agent: "claude"}, "/home/tester")
 	if !hasBind(binds, "/mnt/wsl") {
 		t.Errorf("TabTerminal scope missing /mnt/wsl bind; got %v", binds)
 	}
@@ -85,21 +85,49 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 	}
 }
 
-// A codex agent needs its own state home ($CODEX_HOME) bound writable so it can
-// write rollout transcripts and read auth/config — and must NOT get Claude's
-// config binds. The shared amux state (hook-state, transcript capture) stays
-// bound for every harness.
-func TestCodexAgentScopeBindsCodexHome(t *testing.T) {
+// The agent scope no longer mounts the user's harness config: a codex agent's
+// config is a private copy inside its dir (CODEX_HOME points there), so neither
+// $CODEX_HOME nor Claude's ~/.claude is bound — only the shared auth file, at its
+// template path, so the copy's symlink to it resolves. The shared amux state
+// (hook-state, transcript capture) stays bound for every harness.
+func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	ch := t.TempDir()
 	t.Setenv("CODEX_HOME", ch)
-	binds := configBinds(TabAgent, "codex", "/home/tester")
-	if !hasBind(binds, ch) {
-		t.Errorf("codex TabAgent scope missing $CODEX_HOME bind %q; got %v", ch, binds)
+	auth := filepath.Join(ch, "auth.json")
+	if err := os.WriteFile(auth, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if hasBind(binds, "/home/tester/.claude") {
-		t.Errorf("codex TabAgent scope should not bind Claude's config dir; got %v", binds)
+	s := store.Session{ID: "a1", Agent: "codex", Dir: t.TempDir()}
+	binds := configBinds(TabAgent, s, "/home/tester")
+	if hasBind(binds, ch) {
+		t.Errorf("codex TabAgent scope must not bind the user's $CODEX_HOME; got %v", binds)
+	}
+	if !hasBind(binds, auth) {
+		t.Errorf("codex TabAgent scope missing the shared auth.json bind %q; got %v", auth, binds)
+	}
+	if hasBind(binds, "/home/tester/.claude") || hasBind(binds, "/home/tester/.claude.json") {
+		t.Errorf("codex TabAgent scope should not bind Claude's config; got %v", binds)
 	}
 	if !hasBind(binds, core.HookStateDir()) {
 		t.Errorf("codex TabAgent scope missing shared hook-state bind; got %v", binds)
+	}
+}
+
+// Likewise for Claude: the user's ~/.claude and ~/.claude.json are no longer
+// mounted; only .credentials.json is, at its own path.
+func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	cred := filepath.Join(cfg, ".credentials.json")
+	if err := os.WriteFile(cred, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}
+	binds := configBinds(TabAgent, s, "/home/tester")
+	if hasBind(binds, cfg) || hasBind(binds, "/home/tester/.claude") || hasBind(binds, "/home/tester/.claude.json") {
+		t.Errorf("claude TabAgent scope must not bind the user's config home; got %v", binds)
+	}
+	if !hasBind(binds, cred) {
+		t.Errorf("claude TabAgent scope missing the shared credentials bind %q; got %v", cred, binds)
 	}
 }

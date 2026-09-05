@@ -2,8 +2,10 @@ package agent
 
 import (
 	"log"
+	"sort"
 	"time"
 
+	"amux/internal/cfghome"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/store"
@@ -18,9 +20,9 @@ import (
 // The method set is grouped by concern:
 //
 //   - identity & catalog: Kind, Models, DefaultModel, PreferredModel
-//   - launch: Argv, NewSessionID, PlanLaunch, PrepareLaunchDir
+//   - launch: Argv, NewSessionID, PlanLaunch, PrepareLaunch
 //   - steering: Keys
-//   - sandbox: AgentConfigBinds
+//   - sandbox: Config (the templated per-agent configuration home)
 //   - rail/durability: Activity, RailState, RestoreTranscript
 //   - workspace layout: SkillsDir, GuideFile
 //   - reasoning-across-sessions: ListSessions
@@ -51,10 +53,11 @@ type Harness interface {
 	// trailing args to pass before Argv's own. It may persist an adopted session
 	// id as a side effect (Codex).
 	PlanLaunch(req LaunchRequest) LaunchDecision
-	// PrepareLaunchDir performs the pre-launch filesystem side effects the harness
-	// needs in its launch dir: trusting the folder and installing amux's hooks.
-	// Best-effort — a failure must never block the launch.
-	PrepareLaunchDir(dir string)
+	// PrepareLaunch performs the pre-launch filesystem side effects the harness
+	// needs for session s launching in dir: trusting the folder (in the agent's
+	// own config home) and installing amux's hooks. Best-effort — a failure must
+	// never block the launch.
+	PrepareLaunch(s store.Session, dir string)
 
 	// Keys are the keystrokes that drive this harness's interactive TUI from
 	// outside: submit a line, interrupt a turn, answer a permission prompt. The
@@ -63,24 +66,29 @@ type Harness interface {
 	// harness cannot be steered by keystroke and the verb is refused.
 	Keys() Keys
 
-	// AgentConfigBinds returns the bubblewrap binds specific to this harness's
-	// agent pane (its config/auth/state under $HOME), on top of the shared binds
-	// the sandbox always adds. home is the user's home dir.
-	AgentConfigBinds(home string) [][]string
+	// Config describes the agent's private configuration home: the user's own
+	// config dir for this harness is the TEMPLATE, a copy of it lives under the
+	// agent's sandbox dir, and Spec.Env points the harness at the copy. Nothing of
+	// the user's home is mounted into the sandbox except the shared auth file
+	// (cfghome.Binds). ok=false for a harness with no config amux templates; such
+	// an agent gets no config env and no binds.
+	Config(s store.Session) (spec cfghome.Spec, ok bool)
 
-	// Activity reports whether the instance is mid-turn (ActivityBusy, unsafe to
+	// Activity reports whether the session is mid-turn (ActivityBusy, unsafe to
 	// stop) or idle/between turns (ActivitySafe), or ActivityUnknown when there is
-	// no signal — a missing signal never blocks a shutdown.
-	Activity(sessionID string) engine.Activity
+	// no signal — a missing signal never blocks a shutdown. It takes the store
+	// session because a harness without a hook stream reads its own transcript
+	// state, which lives in the agent's private config home.
+	Activity(s store.Session) engine.Activity
 	// RailState is the fine-grained state word shown on the rail for a live
 	// session (core.State*). Claude reports its hook states directly; harnesses
 	// without a hook stream degrade honestly to running/ready via Activity.
-	RailState(sessionID string) string
-	// RestoreTranscript gap-fills the harness's own transcript for sessionID under
+	RailState(s store.Session) string
+	// RestoreTranscript gap-fills the harness's own transcript for session s under
 	// cwd from amux's captured backup, when the harness's copy is missing or
 	// staler, so a relaunch resumes the real conversation. Never clobbers a fresher
 	// copy; returns whether it restored one.
-	RestoreTranscript(cwd, sessionID string) (bool, error)
+	RestoreTranscript(s store.Session, cwd string) (bool, error)
 
 	// SkillsDir / GuideFile are the harness's own workspace-config locations under
 	// the launch root: where it discovers skills and reads its agent guide. Claude
@@ -90,8 +98,9 @@ type Harness interface {
 	GuideFile(root string) string
 
 	// ListSessions enumerates this harness's on-disk conversations (most recent
-	// first) so an agent can reason across sessions. Empty when the harness keeps
-	// no listable transcripts.
+	// first) so an agent can reason across sessions: the user's own plus every
+	// amux agent's (each has a private home). Empty when the harness keeps no
+	// listable transcripts.
 	ListSessions() []SessionInfo
 
 	// RuntimeTranscriptPath resolves a stored session to the on-disk transcript
@@ -263,19 +272,61 @@ func (noopHarness) NewSessionID() string { return "" }
 func (noopHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
 	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}
 }
-func (noopHarness) Keys() Keys                                         { return Keys{} }
-func (noopHarness) PrepareLaunchDir(string)                            {}
-func (noopHarness) AgentConfigBinds(string) [][]string                 { return nil }
-func (noopHarness) Activity(string) engine.Activity                    { return engine.ActivityUnknown }
-func (n noopHarness) RailState(sid string) string                      { return railStateFromActivity(n.Activity(sid)) }
-func (noopHarness) RestoreTranscript(string, string) (bool, error)     { return false, nil }
-func (noopHarness) SkillsDir(root string) string                       { return agentsSkillsDir(root) }
-func (noopHarness) GuideFile(root string) string                       { return agentsGuideFile(root) }
-func (noopHarness) ListSessions() []SessionInfo                        { return nil }
-func (noopHarness) RuntimeTranscriptPath(store.Session) (string, bool) { return "", false }
-func (noopHarness) Doctor() []string                                   { return nil }
+func (noopHarness) Keys() Keys                                            { return Keys{} }
+func (noopHarness) PrepareLaunch(store.Session, string)                   {}
+func (noopHarness) Config(store.Session) (cfghome.Spec, bool)             { return cfghome.Spec{}, false }
+func (noopHarness) Activity(store.Session) engine.Activity                { return engine.ActivityUnknown }
+func (n noopHarness) RailState(s store.Session) string                    { return railStateFromActivity(n.Activity(s)) }
+func (noopHarness) RestoreTranscript(store.Session, string) (bool, error) { return false, nil }
+func (noopHarness) SkillsDir(root string) string                          { return agentsSkillsDir(root) }
+func (noopHarness) GuideFile(root string) string                          { return agentsGuideFile(root) }
+func (noopHarness) ListSessions() []SessionInfo                           { return nil }
+func (noopHarness) RuntimeTranscriptPath(store.Session) (string, bool)    { return "", false }
+func (noopHarness) Doctor() []string                                      { return nil }
 
 // unknownKindError is returned by Argv for a kind no registered harness serves.
 type unknownKindError struct{ kind string }
 
 func (e *unknownKindError) Error() string { return "unknown agent kind " + `"` + e.kind + `"` }
+
+// agentDirs lists the sandbox dir of every stored agent of kind (plus the
+// console's), so a harness can find each agent's private config home — every
+// agent's transcripts live in its own home now, not in the user's. Best-effort:
+// an unreadable store yields none.
+func agentDirs(kind string) []string {
+	var out []string
+	if consoleDir != nil {
+		if d := consoleDir(); d != "" {
+			out = append(out, d)
+		}
+	}
+	db, err := store.Open()
+	if err != nil {
+		return out
+	}
+	defer db.Close()
+	all, err := db.AllSessions()
+	if err != nil {
+		return out
+	}
+	for _, s := range all {
+		if s.IsRoot() || s.Dir == "" || Canonical(s.Agent) != kind {
+			continue
+		}
+		out = append(out, s.Dir)
+	}
+	return out
+}
+
+// consoleDir, when set, returns the built-in console agent's dir so its private
+// home is included in listings. The console package registers it (it imports
+// this package, so the dependency can't point the other way).
+var consoleDir func() string
+
+// RegisterConsoleDir installs the console dir provider (see consoleDir).
+func RegisterConsoleDir(f func() string) { consoleDir = f }
+
+// sortSessions orders a merged listing most-recently-modified first.
+func sortSessions(s []SessionInfo) {
+	sort.Slice(s, func(i, j int) bool { return s[i].Modified.After(s[j].Modified) })
+}
