@@ -99,23 +99,31 @@ func mapNotification(method string, params json.RawMessage, st *streamState) (ev
 
 	case "turn/started":
 		// Emit turn_start from the OBSERVED notification (any origin), not from the
-		// supervisor's own Prompt — so a turn a native TUI started is bracketed too.
-		return []harnessproto.RuntimeEvent{turnStartEvent()}, nil
+		// supervisor's own Prompt — so a turn a native TUI started is bracketed too —
+		// carrying the wire thread_id + turn_id for cross-client correlation.
+		tid, turnID := turnIDsFromNotification(params)
+		return []harnessproto.RuntimeEvent{turnStartEvent(tid, turnID)}, nil
 
 	case "turn/completed":
 		var p struct {
-			Turn struct {
+			ThreadID string `json:"threadId"`
+			Turn     struct {
 				ID     string `json:"id"`
 				Status string `json:"status"`
 				Error  *struct {
 					Message string `json:"message"`
 				} `json:"error"`
 			} `json:"turn"`
+			TurnID string `json:"turnId"`
 		}
 		_ = json.Unmarshal(params, &p)
 		stop := p.Turn.Status
 		if stop == "" {
 			stop = "completed"
+		}
+		turnID := p.Turn.ID
+		if turnID == "" {
+			turnID = p.TurnID
 		}
 		isErr := p.Turn.Status == "failed"
 		var evs []harnessproto.RuntimeEvent
@@ -127,9 +135,9 @@ func mapNotification(method string, params json.RawMessage, st *streamState) (ev
 			evs = append(evs, notice("error", msg))
 		}
 		// turn_end is emitted here (observed), bracketing every turn regardless of
-		// which client started it.
-		evs = append(evs, turnEndEvent(stop))
-		return evs, &turnResult{TurnID: p.Turn.ID, StopReason: stop, IsError: isErr}
+		// which client started it, with the same thread_id + turn_id as turn_start.
+		evs = append(evs, turnEndEvent(p.ThreadID, turnID, stop))
+		return evs, &turnResult{TurnID: turnID, StopReason: stop, IsError: isErr}
 
 	case "turn/plan/updated":
 		return []harnessproto.RuntimeEvent{planFromTurn(params)}, nil
@@ -329,14 +337,54 @@ func notice(level, text string) harnessproto.RuntimeEvent {
 		Payload: mustMarshal(map[string]any{"level": level, "text": text})}
 }
 
-func turnStartEvent() harnessproto.RuntimeEvent {
+// turnStartEvent / turnEndEvent carry the wire thread_id and turn_id so a consumer
+// on the producer→provider→browser path can correlate a bracketed turn to the exact
+// App Server thread and turn — a required shared-session invariant (a native-TUI and
+// a web client must agree which turn started/ended and which turn a cancel targets),
+// not an optional UX field. Both are omitempty so a synthetic end with no turn (a
+// failed turn/start) still validates.
+func turnStartEvent(threadID, turnID string) harnessproto.RuntimeEvent {
 	return harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnStart, Direction: harnessproto.DirMeta,
-		Payload: mustMarshal(map[string]any{})}
+		Payload: mustMarshal(turnPayload(threadID, turnID, ""))}
 }
 
-func turnEndEvent(stopReason string) harnessproto.RuntimeEvent {
+func turnEndEvent(threadID, turnID, stopReason string) harnessproto.RuntimeEvent {
 	return harnessproto.RuntimeEvent{Type: harnessproto.TypeTurnEnd, Direction: harnessproto.DirMeta,
-		Payload: mustMarshal(map[string]any{"stop_reason": stopReason})}
+		Payload: mustMarshal(turnPayload(threadID, turnID, stopReason))}
+}
+
+// turnIDsFromNotification extracts the wire thread id and turn id from a turn/*
+// notification: {threadId, turn:{id}} with a {turnId} fallback.
+func turnIDsFromNotification(params json.RawMessage) (threadID, turnID string) {
+	var p struct {
+		ThreadID string `json:"threadId"`
+		Turn     struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+		TurnID string `json:"turnId"`
+	}
+	_ = json.Unmarshal(params, &p)
+	turnID = p.Turn.ID
+	if turnID == "" {
+		turnID = p.TurnID
+	}
+	return p.ThreadID, turnID
+}
+
+// turnPayload builds a turn_start/turn_end payload, omitting empty correlation
+// fields so the shape stays minimal when a value is genuinely unknown.
+func turnPayload(threadID, turnID, stopReason string) map[string]any {
+	m := map[string]any{}
+	if threadID != "" {
+		m["thread_id"] = threadID
+	}
+	if turnID != "" {
+		m["turn_id"] = turnID
+	}
+	if stopReason != "" {
+		m["stop_reason"] = stopReason
+	}
+	return m
 }
 
 func rawEvent(nativeType string, body json.RawMessage) harnessproto.RuntimeEvent {

@@ -483,9 +483,10 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	})
 	if err != nil {
 		// No turn began, so no observed turn/completed will arrive — emit a synthetic
-		// end so a consumer isn't left waiting.
+		// end so a consumer isn't left waiting. Carry the pinned thread id for
+		// correlation; there is no turn id (the turn never started).
 		s.clearTurn()
-		s.emit(turnEndEvent("error"))
+		s.emit(turnEndEvent(threadID, "", "error"))
 		return err
 	}
 	s.mu.Lock()
