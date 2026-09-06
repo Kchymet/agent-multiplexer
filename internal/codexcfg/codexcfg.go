@@ -62,6 +62,9 @@ func (h Home) AuthPath() string { return filepath.Join(h.Dir(), AuthFile) }
 const (
 	ConfigFile = "config.toml"
 	AuthFile   = "auth.json"
+	// MCPCredentialsFile stores file-backed MCP OAuth logins, separately from
+	// the account login in auth.json.
+	MCPCredentialsFile = ".credentials.json"
 )
 
 // ConfigPath is the user home's config.toml.

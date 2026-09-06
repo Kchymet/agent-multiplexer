@@ -274,3 +274,84 @@ func TestSeedAdoptsBaselineWhenManifestMissing(t *testing.T) {
 		t.Fatal("Forget should remove the manifest")
 	}
 }
+
+func TestSeedBackfillsMissingSharedAuth(t *testing.T) {
+	for _, baseline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without-manifest", true: "with-manifest"}[baseline], func(t *testing.T) {
+			sp := spec(t)
+			if baseline {
+				_, err := Seed(sp)
+				must(t, err)
+			}
+			write(t, filepath.Join(sp.Dir, "settings.json"), `{"agent":"edit"}`)
+			// An auth entry added by an amux upgrade, or a login made later.
+			sp.Shared = append(sp.Shared, ".credentials.json")
+			sp.HardlinkShared = []string{".credentials.json"}
+			if fresh, err := Seed(sp); err != nil || fresh {
+				t.Fatalf("Seed before login = %v, %v", fresh, err)
+			}
+			if _, err := os.Lstat(filepath.Join(sp.Dir, ".credentials.json")); !os.IsNotExist(err) {
+				t.Fatal("missing host login must not create credentials")
+			}
+			write(t, filepath.Join(sp.Template, ".credentials.json"), "test-token")
+			if fresh, err := Seed(sp); err != nil || fresh {
+				t.Fatalf("Seed after login = %v, %v", fresh, err)
+			}
+			local, err := os.Lstat(filepath.Join(sp.Dir, ".credentials.json"))
+			must(t, err)
+			source, err := os.Stat(filepath.Join(sp.Template, ".credentials.json"))
+			must(t, err)
+			if !os.SameFile(local, source) {
+				t.Fatal("existing home did not inherit the shared credential")
+			}
+			if b, _ := os.ReadFile(filepath.Join(sp.Dir, "settings.json")); string(b) != `{"agent":"edit"}` {
+				t.Fatal("backfill overwrote agent configuration")
+			}
+		})
+	}
+}
+
+func TestSeedPreservesDetachedSharedAuth(t *testing.T) {
+	sp := spec(t)
+	sp.HardlinkShared = []string{"auth.json"}
+	_, err := Seed(sp)
+	must(t, err)
+	path := filepath.Join(sp.Dir, "auth.json")
+	must(t, os.Remove(path))
+	write(t, path, "private-token")
+	_, err = Seed(sp)
+	must(t, err)
+	if b, _ := os.ReadFile(path); string(b) != "private-token" {
+		t.Fatal("Seed replaced a detached credential")
+	}
+	if got := statuses(t, sp)["auth.json"]; got != SharedDetached {
+		t.Fatalf("detached hard link status = %q", got)
+	}
+	must(t, Reset(sp, "auth.json"))
+	if got := statuses(t, sp); len(got) != 0 {
+		t.Fatalf("Reset did not restore shared auth: %v", got)
+	}
+	// A dangling symlink is existing state too, not a missing entry to replace.
+	must(t, os.Remove(path))
+	must(t, os.Symlink(filepath.Join(sp.Dir, "absent"), path))
+	_, err = Seed(sp)
+	must(t, err)
+	if target, err := os.Readlink(path); err != nil || target != filepath.Join(sp.Dir, "absent") {
+		t.Fatalf("Seed replaced dangling link: %q, %v", target, err)
+	}
+}
+
+func TestBindsOverlayExistingSharedLockDirectory(t *testing.T) {
+	sp := spec(t)
+	sp.Shared = append(sp.Shared, "locks")
+	write(t, filepath.Join(sp.Template, "locks", "refresh.lock"), "")
+	write(t, filepath.Join(sp.Dir, "locks", "local.lock"), "")
+	_, err := Seed(sp)
+	must(t, err)
+	for _, bind := range Binds(sp) {
+		if bind[1] == filepath.Join(sp.Template, "locks") && bind[2] == filepath.Join(sp.Dir, "locks") {
+			return
+		}
+	}
+	t.Fatal("existing lock directory must be overlaid with shared locks")
+}
