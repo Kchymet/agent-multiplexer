@@ -288,6 +288,33 @@ Feature strings are opaque: amux never interprets or hardcodes them — the
 orchestrator matches on them by convention. `bwrap`, `os`, and `arch`
 capabilities are detected automatically (`bwrap` is probed on `$PATH`).
 
+### Advertising agent runtimes for remote session creation
+
+One such convention gates **which agent runtimes an orchestrator's "new session"
+UI offers for this machine**: it offers only the runtimes the machine advertises
+as feature strings — `codex` for the Codex CLI, `claude` for Claude Code. A
+machine that advertises no runtime feature string is offered as Claude-only. So
+to let operators create Codex sessions on this machine from the web, advertise the
+runtimes it actually has installed:
+
+```
+amux provide install --orchestrator orch.example.com:7443 \
+                     --token-file ~/.config/amux/provider.token \
+                     --name laptop \
+                     --feature codex --feature claude
+```
+
+This persists into `~/.config/amux/provider.toml` as `features = ["codex",
+"claude"]` (the same list the bare `amux provide` service reads); it can also be
+set with `AMUX_PROVIDER_FEATURES=codex,claude` in the service environment, or by
+editing that `features` array directly. Because these strings are opaque to amux,
+the list is purely an **advertisement** — it neither installs a runtime nor grants
+any sandbox permission, so advertise a runtime only where its CLI is actually
+present. Advertising `codex` is also independent of Codex *structured control*,
+which is enabled separately on the daemon via `AMUX_CODEX_CONTROL=app-server` (see
+`docs/codex-app-server-supervision.md`); a machine can advertise `codex` for
+create-UI purposes with or without structured control.
+
 ## Failure behavior summary
 
 | Event | Provider behavior |
