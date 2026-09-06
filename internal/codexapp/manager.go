@@ -65,10 +65,12 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 // wrappedArgv is the sandbox-wrapped `codex app-server --listen <endpoint>` the
 // daemon resolved (nil only in tests / the direct-exec smoke path); endpoint is the
 // listen/dial URL the daemon chose (loopback ws by default, unix optional) — the
-// same value baked into wrappedArgv. Creation is serialized per session, so two
-// callers never spawn competing servers. initialPrompt is submitted only when
-// starting a fresh thread, never when reusing or resuming a supervisor.
-func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, initialPrompt string) (*Supervisor, error) {
+// same value baked into wrappedArgv. model and initialPrompt are the selections
+// stored on the amux session; the supervisor applies them to the structured
+// thread and its first turn. Creation is serialized per session, so two callers
+// never spawn competing servers. initialPrompt is submitted only when starting a
+// fresh thread, never when reusing or resuming a supervisor.
+func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt string) (*Supervisor, error) {
 	// Fast path: already live.
 	if s, ok := m.Get(sessionID); ok {
 		return s, nil
@@ -87,6 +89,7 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 		Bin:           m.bin,
 		Dir:           dir,
 		Env:           env,
+		Model:         model,
 		Endpoint:      endpoint,
 		InitialPrompt: initialPrompt,
 		EventLogPath:  EventLogPathFor(sessionID),

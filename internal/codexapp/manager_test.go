@@ -36,7 +36,7 @@ func TestManagerInitialPromptOnce(t *testing.T) {
 	// The in-process fake owns the socket; this child exercises process lifetime
 	// without invoking a real model. Shutdown kills it immediately.
 	ensure := func(m *Manager) (*Supervisor, error) {
-		return m.Ensure("initial", "", nil, []string{"sleep", "60"}, endpoint, "fix it")
+		return m.Ensure("initial", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "fix it")
 	}
 	errs := make(chan error, 8)
 	for i := 0; i < cap(errs); i++ {
