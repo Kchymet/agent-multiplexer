@@ -507,7 +507,7 @@ func (d *Daemon) ensureSupervisor(agentID string) (*codexapp.Supervisor, error) 
 		return sup, nil
 	}
 	// AppServerCommand resolves the sandbox-wrapped launch AND the per-session unix
-	// endpoint (in the launch dir's rw-bound .amux/) — one source for the endpoint
+	// endpoint (in its separately mounted socket directory) — one source for the endpoint
 	// baked into argv, dialed by amux, and persisted for a native attach.
 	dir, env, argv, endpoint, err := panespec.AppServerCommand(agentID)
 	if err != nil {

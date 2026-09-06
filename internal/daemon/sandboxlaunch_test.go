@@ -68,11 +68,20 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 	t.Logf("endpoint: %s", endpoint)
 	t.Logf("sandboxed argv: %s", strings.Join(argv, " "))
 
-	// The endpoint must live inside the resolved launch dir's private .amux/ (which
-	// scope binds read-write), NOT under $XDG_RUNTIME_DIR (/run, bound read-only).
-	if !strings.HasPrefix(endpoint, "unix://"+dir+"/") {
-		t.Fatalf("endpoint %q is not inside the bound launch dir %q", endpoint, dir)
+	// The endpoint is outside shared worktrees and only its own parent gets a
+	// writable bind after the dedicated socket root is masked.
+	expected, err := panespec.AppServerEndpoint("sbx")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if endpoint != expected || strings.HasPrefix(endpoint, "unix://"+dir+"/") {
+		t.Fatalf("unexpected private endpoint: got %q expected %q outside %q", endpoint, expected, dir)
+	}
+	socketDir := filepath.Dir(strings.TrimPrefix(endpoint, "unix://"))
+	if !containsArg(argv, socketDir) {
+		t.Fatalf("own socket directory not mounted: %v", argv)
+	}
+
 	// It must actually be sandboxed (bwrap-wrapped) and carry the real codex + the
 	// endpoint — otherwise this proves nothing about OS isolation.
 	if !strings.Contains(argv[0], "bwrap") {

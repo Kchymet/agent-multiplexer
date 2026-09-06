@@ -48,7 +48,7 @@ Configurable endpoints (`Config.Endpoint` / `--listen`):
 
 | endpoint | use |
 | --- | --- |
-| `unix://<launch dir>/.amux/cx.sock` | **default** — per session, kept inside the private scope; the scope binds it **read-write** at the same path in/out of bwrap (no `$XDG_RUNTIME_DIR`, which scope binds read-only). Validated by an actual bwrap launch (`TestSandboxedAppServerLaunch`). |
+| `unix://<amux data>/cx/<session key>/cx.sock` | **default** — outside shared worktrees. Each pane masks the socket tree and mounts only its own session socket directory read-write. The key is a fixed-length hash of the session ID, not an authentication credential. |
 | `ws://127.0.0.1:<port>` | loopback, colocated clients — now works (Origin omitted); `codexapp.LoopbackEndpoint()` allocates a free port. |
 | `wss://host:port` | cross-machine, **authenticated TLS** — verification never downgraded; a non-loopback `ws://` (no TLS) is refused before dialing. |
 
@@ -189,8 +189,8 @@ tests pass unchanged.
   concrete reason for the `gorilla/websocket` switch).
 - `TestSandboxedAppServerLaunch` — an **actual bwrap launch** of the argv
   `panespec.AppServerCommand` produces: the codex executable is reachable inside the
-  scope and the unix endpoint in the worktree `.amux/` is reachable across the
-  sandbox boundary (handshake succeeds). This is OS-isolation proof, not argv strings.
+  scope and its separately mounted Unix endpoint is reachable across the
+  sandbox boundary (handshake succeeds). Socket isolation is tested separately.
 
 Also confirmed against the schema/CLI: `--listen` accepts `stdio://`/`unix://`/
 `ws://IP:PORT`/`off`; `--remote <ADDR>` is a real global TUI option (with
@@ -204,3 +204,33 @@ Also confirmed against the schema/CLI: `--listen` accepts `stdio://`/`unix://`/
    the amux tests prove the server, socket, and multi-client `initialize`, but not a
    real TUI attaching and co-driving one thread.
 2. Last-subscriber thread-unload grace (idle unload after the last client leaves).
+
+### Private App Server socket mounts
+
+A read-only bind of a Unix socket does not prevent connecting to it. App Server
+sockets therefore live under `<amux data>/cx/<session key>/`, outside the shared
+session/workgroup directories. After all runtime, data, worktree, and config
+mounts, every pane overlays the socket root with an empty tmpfs and mounts only
+its own session's socket directory read-write. If the data directory is a
+symlink, its canonical socket-root path is masked too. Directory creation or
+binding failures must not omit the mask and expose sibling endpoints.
+
+The own directory exists before a pane launches, so a terminal opened before its
+App Server can connect when that server starts. The parent mask also hides peers
+created after the pane starts. Coordinator access to workgroup files does not
+implicitly grant access to members' raw App Server sockets.
+
+`TestScopeRejectsSiblingSessionSocket` runs real connections in bubblewrap. It
+checks own access, denied sibling/canonical/proc-alias access, coordinator own vs
+peer access, and own/peer sockets created after namespace setup. Denial must be a
+missing-path or permission error, not a broken listener or oversized address.
+`TestSandboxedAppServerLaunch` still proves the real Codex handshake across the
+own socket bind.
+
+These checks establish the tested socket mount boundary. They do not turn amux
+into a hostile multi-tenant security boundary: network/PID sharing, inherited
+identity/configuration, and access to the amux control API require their own
+policies. Full native/provider/browser acceptance remains a separate gate.
+Existing servers keep their endpoints until they restart; new launches use the
+new location and preserve the persisted thread's resume behavior. No rollout
+flag is enabled by this change.
