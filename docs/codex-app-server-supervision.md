@@ -89,8 +89,9 @@ the agent pane of a structured session launches `codex --remote <endpoint> resum
 <thread-id>` (`panespec.AttachCommand`) — the native TUI attaches to the supervised
 thread rather than starting a standalone Codex.
 
-Per-session creation is **serialized** (a per-session lock taken before spawn), so
-two callers never race to start competing servers on the same socket.
+Per-session creation is **serialized** (a per-session lock taken before spawn).
+Only `Supervisor.Start` removes a stale socket under that lock. Constructing a
+second launch command leaves an existing listener connectable.
 
 ## Socket / thread identity persistence
 
@@ -98,21 +99,24 @@ amux persists, per structured session, `{endpoint, thread id, control mode}` as 
 JSON sidecar under `<state>/codexapp/<session>.json`. It is amux-internal — never
 on the wire (the endpoint lives in the private scope).
 
-**Daemon-restart semantics + the pre-turn resume hazard.** On restart the daemon
-re-supervises the session with a fresh `codex app-server`. It **resumes the pinned
-thread only once that thread has run a turn** — i.e. the persisted identity is
-`Resumable`, set the moment the first `turn/started` is observed (a rollout now
-exists on disk). A thread that was pinned but never ran a turn is **not** resumed;
-the supervisor starts fresh. This matters because attempting `thread/resume` on a
-not-yet-rolled-out thread returns **"no rollout found"** and, per AGE-198's
-real-binary run, a *failed pre-turn resume can leave the thread's first turn never
-completing*. Gating on `Resumable` avoids the failed resume entirely; the handshake
-also keeps a backstop — if a resume is attempted and still misses (e.g. the rollout
-was pruned), it falls back to `thread/start` and adopts the new id (single source of
-truth: `Identity.ThreadID == ThreadID()`, so no split). The live event seq space
-restarts from 1 per supervisor lifetime, which a consumer dedups by seq like any
-tailer resync. Validated end-to-end against the real binary
-(`TestSmokeTurnAfterResumeMiss`: a first turn completes after a pre-turn resume miss).
+**Fresh sessions and daemon restarts.** Codex 0.153.4 does not persist an empty
+`thread/start` by itself. Before returning a fresh supervisor, amux sets the
+thread name to `amux <session-id>` and issues a normal `thread/resume` on that
+same ID. Naming makes the rollout persistable; the normal resume flushes it so
+the native TUI's `excludeTurns=true` resume can load paginated history. Naming
+alone still fails with "missing source rollout". Neither operation starts a
+model turn. Errors abort startup instead of advertising an attachable session.
+Existing resumed threads retain their names.
+
+A successfully initialized thread is immediately `Resumable`, including before
+its first prompt. Restart resumes the same empty or populated conversation.
+Older identities explicitly marked not resumable still start fresh, and legacy
+unversioned identities attempt resume to preserve existing conversations. A
+missing-rollout error keeps the fallback to a new thread for a pruned or older
+unpersisted identity. Successful resume always preserves `Resumable=true`.
+
+The event sequence restarts per supervisor lifetime; provider replay and
+cross-restart event continuity still require separate integration acceptance.
 
 ## Steering and events
 
@@ -179,11 +183,10 @@ tests pass unchanged.
   **second client completing its own `initialize`** on the same listener. Model
   outcome is *reported* (without credentials the turn ends `failed`), never passed
   off as success.
-- `TestSmokeEmptyThreadResume` / `TestSmokeTurnAfterResumeMiss` — a pinned empty
-  thread's `thread/resume` returns "no rollout found"; the supervisor adopts a new
-  thread as the single source of truth (Identity/ThreadID agree, no split, no lost
-  conversation) **and a first turn completes after that resume miss** — the failed
-  resume does not poison the turn.
+- `TestSmokeEmptyThreadResume` — a fresh thread survives a real App Server
+  restart with the same ID before any model turn. `TestSmokeTurnAfterResumeMiss`
+  separately creates an older unpersisted thread to exercise the missing-rollout
+  fallback; it must not substitute that fallback for normal cold-session identity.
 - `TestSmokeLoopbackTransport` — the amux client (Origin omitted) completes the
   handshake against codex's **loopback ws** listener, which 403s any Origin (the
   concrete reason for the `gorilla/websocket` switch).
@@ -201,8 +204,10 @@ Also confirmed against the schema/CLI: `--listen` accepts `stdio://`/`unix://`/
 
 1. That a *native Codex TUI* launched `codex --remote <endpoint> resume <thread-id>`
    attaches to the running server/thread and shares it live with the web bridge —
-   the amux tests prove the server, socket, and multi-client `initialize`, but not a
-   real TUI attaching and co-driving one thread.
+   the amux sandbox tests prove a second client can resume the empty canonical
+   thread using the native pagination request. The harness native fixture proves
+   a real TUI-origin turn with a passive adapter. Neither proves the entire
+   sandbox/provider/API/browser path together.
 2. Last-subscriber thread-unload grace (idle unload after the last client leaves).
 
 ### Private App Server socket mounts
@@ -224,8 +229,10 @@ implicitly grant access to members' raw App Server sockets.
 checks own access, denied sibling/canonical/proc-alias access, coordinator own vs
 peer access, and own/peer sockets created after namespace setup. Denial must be a
 missing-path or permission error, not a broken listener or oversized address.
-`TestSandboxedAppServerLaunch` still proves the real Codex handshake across the
-own socket bind.
+Both sandboxed-launch tests also require a second client to resume the fresh
+thread with `excludeTurns=true` and read an empty history. This is the native
+bootstrap RPC that failed before empty-thread persistence. The ordinary launch
+also replaces a real stale Unix socket during supervisor startup.
 
 These checks establish the tested socket mount boundary. They do not turn amux
 into a hostile multi-tenant security boundary: network/PID sharing, inherited

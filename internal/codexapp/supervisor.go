@@ -95,7 +95,7 @@ type Supervisor struct {
 	logW   io.WriteCloser // EventLogPath sink, opened lazily on first emit
 	logErr bool           // a prior log write failed; stop retrying (never fatal)
 
-	resumable bool // set once a turn has started (a rollout now exists → resume is safe)
+	resumable bool // a rollout exists; native attach and later resume are safe
 }
 
 // New builds a supervisor from cfg. It does not start anything — call Start (or
@@ -137,12 +137,8 @@ func AppServerArgv(bin, endpoint string) []string {
 // the SAME supervised server/thread — the whole point of AGE-181: the terminal UI
 // and the web bridge drive one server/thread, not separate processes.
 //
-// UNVALIDATED ON HOST: that `codex --remote <endpoint> resume <thread-id>` attaches
-// to the running server/thread (rather than starting its own process) MUST be
-// confirmed on a host with the pinned codex; and `thread/resume` before the first
-// turn returns "no rollout found" (ROOT probe), so fresh-session attach needs the
-// create-first-turn flow, not a bare resume. This builder encodes the documented
-// syntax; the caller must not claim live attachment until a host run confirms it.
+// The handshake persists fresh threads before exposing this command, including
+// the empty rollout required by the native TUI's paginated resume in Codex 0.153.4.
 func AttachArgv(bin, endpoint, threadID string) []string {
 	if bin == "" {
 		bin = "codex"
@@ -163,13 +159,10 @@ type Identity struct {
 	Endpoint    string `json:"endpoint"`
 	ThreadID    string `json:"threadId"`
 	ControlMode string `json:"controlMode"`
-	// Resumable is true once the thread has a rollout on disk — set when the thread
-	// runs its first turn, or immediately when it is (re)attached by a successful
-	// `thread/resume` (a resumed thread necessarily has history). Until then a resume
-	// would return "no rollout found" (ROOT/AGE-198), so a reconnect must NOT attempt
-	// it — it starts a fresh thread instead. This is the primary guard against a
-	// pre-turn failed resume poisoning the first turn; the handshake keeps an error
-	// fallback as a backstop.
+	// Resumable is true after successful resume. Fresh threads are named and
+	// resumed during initialization, so they also have a rollout before any turn.
+	// Older identities may still describe a never-persisted empty thread; the
+	// manager's gating and handshake fallback retain compatibility with those.
 	Resumable bool `json:"resumable,omitempty"`
 	// Version is the identity schema version. A value of 0 means the identity was
 	// persisted before Resumable existed — such a thread may hold a real conversation
@@ -358,26 +351,33 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	if id == "" && resumed {
 		id = s.cfg.ResumeThreadID // resumed onto the pinned id even if the server echoed nothing
 	}
-	s.mu.Lock()
-	if s.threadID == "" {
-		s.threadID = id
-	} else {
-		id = s.threadID // a thread/started notification raced in first; it wins
-	}
-	// A SUCCESSFUL resume means the thread already had a rollout, so it stays
-	// resumable across further restarts even if this run never adds a turn. Without
-	// this, Manager.Ensure's post-Start SaveIdentity would overwrite a persisted
-	// Resumable:true with false, and a second restart with no intervening turn would
-	// silently drop the pinned thread and start a new one — losing the conversation
-	// (ROOT regression on #98). A fresh/fallback thread/start stays not-resumable
-	// until its first turn.
-	if resumed {
-		s.resumable = true
-	}
-	s.mu.Unlock()
 	if id == "" {
 		return errors.New("codexapp: no thread id from handshake")
 	}
+	if !resumed {
+		// Codex 0.153.4 does not persist an empty thread/start. Naming it makes
+		// the rollout persistable; a normal resume flushes it before the native
+		// TUI's excludeTurns=true resume loads paginated history. Neither RPC
+		// starts a model turn. Naming alone still fails "missing source rollout".
+		if _, err := s.rpc.call(ctx, "thread/name/set", map[string]any{
+			"threadId": id, "name": "amux " + s.cfg.SessionID,
+		}); err != nil {
+			return fmt.Errorf("codexapp name fresh thread: %w", err)
+		}
+		ready, err := s.rpc.call(ctx, "thread/resume", map[string]any{"threadId": id})
+		if err != nil {
+			return fmt.Errorf("codexapp persist fresh thread: %w", err)
+		}
+		if got := threadIDFromResult(ready); got != id {
+			return fmt.Errorf("codexapp fresh thread changed during persistence: got %q, want %q", got, id)
+		}
+	}
+	s.mu.Lock()
+	s.threadID = id
+	// Both paths now completed a successful resume, even before a first turn.
+	// Manager.Ensure can persist this identity for native attach and restarts.
+	s.resumable = true
+	s.mu.Unlock()
 	return nil
 }
 

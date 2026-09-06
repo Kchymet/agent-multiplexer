@@ -63,11 +63,12 @@ type fakeServer struct {
 	t    *testing.T
 	conn *memConn
 
-	mu        sync.Mutex
-	calls     []incoming
-	respByID  map[string]chan incoming
-	turnID    string
-	resumeErr string // when set, thread/resume replies with this JSON-RPC error message
+	mu         sync.Mutex
+	calls      []incoming
+	respByID   map[string]chan incoming
+	turnID     string
+	failMethod string // optional RPC failure for initialization tests
+	resumeErr  string // when set, thread/resume replies with this JSON-RPC error message
 }
 
 func newFakePair(t *testing.T) (*Supervisor, *fakeServer, *memConn) {
@@ -107,6 +108,10 @@ func (fs *fakeServer) loop() {
 }
 
 func (fs *fakeServer) handleCall(m incoming) {
+	if m.Method == fs.failMethod {
+		fs.write(map[string]any{"id": m.ID, "error": map[string]any{"code": -32000, "message": "fixture failure"}})
+		return
+	}
 	var result any = map[string]any{}
 	switch m.Method {
 	case "initialize":
@@ -124,6 +129,7 @@ func (fs *fakeServer) handleCall(m incoming) {
 	case "thread/resume":
 		fs.mu.Lock()
 		rerr := fs.resumeErr
+		fs.resumeErr = "" // only the initial missing-thread resume fails
 		fs.mu.Unlock()
 		if rerr != "" {
 			fs.write(map[string]any{"id": m.ID, "error": map[string]any{"code": -32000, "message": rerr}})

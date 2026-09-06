@@ -83,6 +83,9 @@ func TestHandshakeResume(t *testing.T) {
 	if _, ok := fs.sawCall("thread/start"); ok {
 		t.Fatal("thread/start sent on a resume")
 	}
+	if _, ok := fs.sawCall("thread/name/set"); ok {
+		t.Fatal("existing thread renamed during resume")
+	}
 }
 
 // TestHandshakeResumeMissFallsBack checks the belt-and-suspenders backstop: if a
@@ -109,32 +112,63 @@ func TestHandshakeResumeMissFallsBack(t *testing.T) {
 	}
 }
 
-// TestResumableMarkedOnTurnStart checks that a session becomes Resumable only
-// after a turn begins (a rollout then exists), which is what lets a later launch
-// safely resume — and, before that, keeps it from attempting a resume that would
-// miss.
-func TestResumableMarkedOnTurnStart(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // SaveIdentity writes under HOME
+// Fresh initialization must persist an empty thread without spending a model
+// turn, and preserve that same identity when the daemon restarts.
+func TestFreshThreadReadyBeforeFirstTurn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	sup, fs, client := newFakePair(t)
 	defer fs.close()
 	defer sup.Close()
 	attach(t, sup, client)
-
-	if sup.Identity().Resumable {
-		t.Fatal("session marked resumable before any turn")
+	if !sup.Identity().Resumable {
+		t.Fatal("fresh thread not ready to resume")
 	}
-	fs.mu.Lock()
-	fs.turnID = "turn_1"
-	fs.mu.Unlock()
-	fs.pushTurnStarted()
-
-	deadline := time.After(2 * time.Second)
-	for !sup.Identity().Resumable {
-		select {
-		case <-deadline:
-			t.Fatal("session not marked resumable after turn/started")
-		case <-time.After(5 * time.Millisecond):
+	for _, method := range []string{"thread/name/set", "thread/resume"} {
+		call, ok := fs.sawCall(method)
+		if !ok {
+			t.Fatalf("missing %s", method)
 		}
+		var p struct {
+			ThreadID     string `json:"threadId"`
+			ExcludeTurns bool   `json:"excludeTurns"`
+		}
+		if err := json.Unmarshal(call.Params, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.ThreadID != sup.ThreadID() || p.ExcludeTurns {
+			t.Fatalf("%s does not prepare canonical full history: %s", method, call.Params)
+		}
+	}
+	if _, ok := fs.sawCall("turn/start"); ok {
+		t.Fatal("initialization spent a hidden model turn")
+	}
+	if err := SaveIdentity(sup.Identity()); err != nil {
+		t.Fatal(err)
+	}
+	if got := resumeThreadFor("s-test"); got != sup.ThreadID() {
+		t.Fatalf("restart lost empty thread: %q", got)
+	}
+}
+
+func TestFreshThreadPreparationFailure(t *testing.T) {
+	for _, method := range []string{"thread/name/set", "thread/resume"} {
+		t.Run(method, func(t *testing.T) {
+			client, server := newMemPair()
+			fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, failMethod: method}
+			go fs.loop()
+			defer fs.close()
+			sup := New(Config{SessionID: "failure"})
+			defer sup.Close()
+			if err := sup.attach(context.Background(), client); err == nil {
+				t.Fatal("startup succeeded without persisted empty thread")
+			}
+			if sup.Identity().Resumable {
+				t.Fatal("failed preparation advertised resumability")
+			}
+			if _, ok := fs.sawCall("turn/start"); ok {
+				t.Fatal("failed preparation spent a model turn")
+			}
+		})
 	}
 }
 

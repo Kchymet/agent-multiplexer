@@ -117,6 +117,7 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 		t.Fatalf("sandboxed launch (exec bwrap-wrapped codex + WS handshake): %v", err)
 	}
 	defer sup.Close()
+	assertFreshNativeResume(t, endpoint, sup.ThreadID())
 
 	if id := sup.ThreadID(); id == "" {
 		t.Fatal("no thread id: the app-server did not initialize inside the sandbox")
@@ -294,6 +295,7 @@ func TestSandboxedSymlinkedCodexLaunch(t *testing.T) {
 		t.Fatalf("sandboxed launch of a symlinked-standalone codex: %v", err)
 	}
 	defer sup.Close()
+	assertFreshNativeResume(t, endpoint, sup.ThreadID())
 	if sup.ThreadID() == "" {
 		t.Fatal("no thread id: symlinked-standalone codex did not initialize in-scope")
 	}
