@@ -85,6 +85,59 @@ func TestHandshakeResume(t *testing.T) {
 	}
 }
 
+// TestHandshakeResumeMissFallsBack checks the belt-and-suspenders backstop: if a
+// resume is attempted and the server returns "no rollout found", the handshake
+// falls back to thread/start and pins the new thread rather than failing (or
+// leaving the thread in a state whose first turn hangs).
+func TestHandshakeResumeMissFallsBack(t *testing.T) {
+	client, server := newMemPair()
+	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, resumeErr: "no rollout found"}
+	go fs.loop()
+	defer fs.close()
+	sup := New(Config{SessionID: "s-test", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: "thr_gone"})
+	defer sup.Close()
+	attach(t, sup, client)
+
+	if _, ok := fs.sawCall("thread/resume"); !ok {
+		t.Fatal("expected a thread/resume attempt")
+	}
+	if _, ok := fs.sawCall("thread/start"); !ok {
+		t.Fatal("resume miss did not fall back to thread/start")
+	}
+	if got := sup.ThreadID(); got != "thr_1" {
+		t.Fatalf("threadID = %q, want thr_1 (the fresh thread from the fallback)", got)
+	}
+}
+
+// TestResumableMarkedOnTurnStart checks that a session becomes Resumable only
+// after a turn begins (a rollout then exists), which is what lets a later launch
+// safely resume — and, before that, keeps it from attempting a resume that would
+// miss.
+func TestResumableMarkedOnTurnStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // SaveIdentity writes under HOME
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	if sup.Identity().Resumable {
+		t.Fatal("session marked resumable before any turn")
+	}
+	fs.mu.Lock()
+	fs.turnID = "turn_1"
+	fs.mu.Unlock()
+	fs.pushTurnStarted()
+
+	deadline := time.After(2 * time.Second)
+	for !sup.Identity().Resumable {
+		select {
+		case <-deadline:
+			t.Fatal("session not marked resumable after turn/started")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func TestPromptBracketsTurn(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()

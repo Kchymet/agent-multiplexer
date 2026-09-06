@@ -33,28 +33,26 @@ the identical wire, so they are interchangeable.
 The App Server listener speaks **JSON-RPC 2.0 over WebSocket (HTTP Upgrade)** — a
 raw newline-delimited JSONL connection is closed immediately (ROOT audit). amux
 dials it with a real WebSocket client (`internal/codexapp/wsconn.go`, built on
-`golang.org/x/net/websocket`) and frames each JSON-RPC object as one text message.
+`github.com/gorilla/websocket`) and frames each JSON-RPC object as one text message.
 
-**Default endpoint: unix-over-WebSocket in the session's private scope.** The
-socket lives at `<launch dir>/.amux/cx.sock` — a path the scope already binds
-**read-write** at the same absolute path inside and outside bwrap, so the
-app-server (inside the sandbox) creates the listener and amux (and a native
-`--remote` peer) dial it, with no extra mount and no dependence on
-`$XDG_RUNTIME_DIR` (which scope binds **read-only**). This was validated by an
-actual bwrap launch (`TestSandboxedAppServerLaunch`).
+**The `Origin` finding, and why gorilla (verified against Codex 0.153.4):** the App
+Server's **loopback TCP** and **WSS** listeners reject any request carrying an
+`Origin` header with **403** (DNS-rebinding protection); its **unix** listener
+tolerates one. `golang.org/x/net/websocket` *always* sends `Origin` (and panics if
+it is nil), so it can only reach the unix listener. `gorilla/websocket` sends **no
+`Origin` unless we set one**, so the amux client — a same-host or authenticated
+cross-host client, not a browser — reaches **every** listener (unix, loopback, wss).
+`Config.Origin` can set an allowlisted value when a deployment requires it.
 
-**Why not loopback ws by default (verified against Codex 0.153.4):** the App
-Server's **unix** WebSocket listener tolerates an `Origin` header, but its
-**loopback TCP** listener rejects *any* request carrying `Origin` with **403**
-(DNS-rebinding protection). `golang.org/x/net/websocket` always sends `Origin`
-(and panics if it is nil), so this client interoperates with the unix listener and
-with Origin-accepting ws servers, but **not** codex's loopback ws listener.
-`Config.Endpoint` still accepts `ws://127.0.0.1:<port>` and `wss://host:port`
-(a non-loopback `ws://` is refused before dialing; TLS verification is never
-downgraded), and `codexapp.LoopbackEndpoint()` allocates a free port — but
-cross-host `wss` to codex needs either an Origin-omitting client or a server-side
-Origin allowlist (open item on AGE-177). The AGE-179 harness pilot keeps its stdio
-transport (not converted gratuitously).
+Configurable endpoints (`Config.Endpoint` / `--listen`):
+
+| endpoint | use |
+| --- | --- |
+| `unix://<launch dir>/.amux/cx.sock` | **default** — per session, kept inside the private scope; the scope binds it **read-write** at the same path in/out of bwrap (no `$XDG_RUNTIME_DIR`, which scope binds read-only). Validated by an actual bwrap launch (`TestSandboxedAppServerLaunch`). |
+| `ws://127.0.0.1:<port>` | loopback, colocated clients — now works (Origin omitted); `codexapp.LoopbackEndpoint()` allocates a free port. |
+| `wss://host:port` | cross-machine, **authenticated TLS** — verification never downgraded; a non-loopback `ws://` (no TLS) is refused before dialing. |
+
+The AGE-179 harness pilot keeps its stdio transport (not converted gratuitously).
 
 ## Protocol shapes (corrected against 0.153.4)
 
@@ -100,13 +98,21 @@ amux persists, per structured session, `{endpoint, thread id, control mode}` as 
 JSON sidecar under `<state>/codexapp/<session>.json`. It is amux-internal — never
 on the wire (the endpoint lives in the private scope).
 
-**Daemon-restart semantics.** On restart the daemon re-supervises the session:
-fresh `codex app-server`, dial, then `thread/resume <thread-id>`. If the pinned
-thread never ran a turn, `thread/resume` returns **"no rollout found"** (ROOT
-probe); the supervisor then falls back to `thread/start` and adopts the new id
-rather than failing the launch (the empty thread had no history to lose). The live
-event seq space restarts from 1 per supervisor lifetime, which a consumer dedups by
-seq like any tailer resync.
+**Daemon-restart semantics + the pre-turn resume hazard.** On restart the daemon
+re-supervises the session with a fresh `codex app-server`. It **resumes the pinned
+thread only once that thread has run a turn** — i.e. the persisted identity is
+`Resumable`, set the moment the first `turn/started` is observed (a rollout now
+exists on disk). A thread that was pinned but never ran a turn is **not** resumed;
+the supervisor starts fresh. This matters because attempting `thread/resume` on a
+not-yet-rolled-out thread returns **"no rollout found"** and, per AGE-198's
+real-binary run, a *failed pre-turn resume can leave the thread's first turn never
+completing*. Gating on `Resumable` avoids the failed resume entirely; the handshake
+also keeps a backstop — if a resume is attempted and still misses (e.g. the rollout
+was pruned), it falls back to `thread/start` and adopts the new id (single source of
+truth: `Identity.ThreadID == ThreadID()`, so no split). The live event seq space
+restarts from 1 per supervisor lifetime, which a consumer dedups by seq like any
+tailer resync. Validated end-to-end against the real binary
+(`TestSmokeTurnAfterResumeMiss`: a first turn completes after a pre-turn resume miss).
 
 ## Steering and events
 
@@ -173,10 +179,14 @@ tests pass unchanged.
   **second client completing its own `initialize`** on the same listener. Model
   outcome is *reported* (without credentials the turn ends `failed`), never passed
   off as success.
-- `TestSmokeEmptyThreadResume` — a pinned empty thread's `thread/resume` returns
-  "no rollout found"; the supervisor falls back to a new thread and adopts it as the
-  single source of truth (Identity/ThreadID agree) — no split identity, no lost
-  conversation (the resumed thread was empty).
+- `TestSmokeEmptyThreadResume` / `TestSmokeTurnAfterResumeMiss` — a pinned empty
+  thread's `thread/resume` returns "no rollout found"; the supervisor adopts a new
+  thread as the single source of truth (Identity/ThreadID agree, no split, no lost
+  conversation) **and a first turn completes after that resume miss** — the failed
+  resume does not poison the turn.
+- `TestSmokeLoopbackTransport` — the amux client (Origin omitted) completes the
+  handshake against codex's **loopback ws** listener, which 403s any Origin (the
+  concrete reason for the `gorilla/websocket` switch).
 - `TestSandboxedAppServerLaunch` — an **actual bwrap launch** of the argv
   `panespec.AppServerCommand` produces: the codex executable is reachable inside the
   scope and the unix endpoint in the worktree `.amux/` is reachable across the

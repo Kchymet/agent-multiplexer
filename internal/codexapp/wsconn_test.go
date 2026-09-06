@@ -10,20 +10,35 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 )
 
-// echoHandler is a WebSocket server that echoes each message back — enough to
-// prove dialWS completes a real RFC6455 handshake and round-trips messages over
-// either a unix socket or loopback TCP.
+// echoUpgrader accepts a WebSocket regardless of Origin — mirroring codex's
+// Origin-tolerant listener, and specifically exercising that the amux client sends
+// NO Origin (the fix: codex's loopback/wss listeners 403 any Origin).
+var echoUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+// echoHandler is a WebSocket server that echoes each message back — enough to prove
+// dialWS completes a real handshake (with no Origin) and round-trips messages over
+// a unix socket or loopback TCP.
 func echoHandler() http.Handler {
-	return websocket.Handler(func(ws *websocket.Conn) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The amux client must NOT send an Origin header.
+		if r.Header.Get("Origin") != "" {
+			http.Error(w, "unexpected Origin header from amux client", http.StatusForbidden)
+			return
+		}
+		c, err := echoUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
 		for {
-			var b []byte
-			if err := websocket.Message.Receive(ws, &b); err != nil {
+			mt, b, err := c.ReadMessage()
+			if err != nil {
 				return
 			}
-			if err := websocket.Message.Send(ws, string(b)); err != nil {
+			if err := c.WriteMessage(mt, b); err != nil {
 				return
 			}
 		}
@@ -42,7 +57,7 @@ func TestDialWSOverUnix(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := dialWS(ctx, "unix://"+sock)
+	conn, err := dialWS(ctx, "unix://"+sock, "")
 	if err != nil {
 		t.Fatalf("dialWS unix: %v", err)
 	}
@@ -67,7 +82,7 @@ func TestDialWSOverLoopbackTCP(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := dialWS(ctx, endpoint)
+	conn, err := dialWS(ctx, endpoint, "")
 	if err != nil {
 		t.Fatalf("dialWS loopback tcp: %v", err)
 	}
@@ -87,7 +102,7 @@ func TestDialWSOverLoopbackTCP(t *testing.T) {
 
 func TestDialWSRefusesNonLoopback(t *testing.T) {
 	// A non-loopback ws:// (no TLS, no auth) must be refused before any dial.
-	_, err := dialWS(context.Background(), "ws://10.0.0.1:4500")
+	_, err := dialWS(context.Background(), "ws://10.0.0.1:4500", "")
 	if err == nil {
 		t.Fatal("expected refusal of a non-loopback ws:// endpoint")
 	}
