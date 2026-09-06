@@ -57,16 +57,23 @@ func newApprovalTracker() *approvalTracker {
 	return &approvalTracker{live: map[string]*pendingApproval{}, resolved: map[string]bool{}}
 }
 
-// register records a new outstanding approval. A repeat id (server re-sent) keeps
-// the first registration; an id already resolved is not resurrected.
-func (a *approvalTracker) register(p *pendingApproval) {
+// register records a new outstanding approval and reports whether it was NEWLY
+// added. A repeat id (the server re-sent it, or a reconnect replayed it) keeps the
+// first registration; an id already resolved is not resurrected. Both return false so
+// the caller emits the permission_request only on the first registration — a second
+// emit would reopen an unanswerable prompt (already confirmed) or run the decision
+// flow twice (still pending). The check-and-insert is atomic under the tracker lock,
+// so concurrent duplicates yield exactly one true (ROOT approval-replay audit;
+// AGE-179 harness parity).
+func (a *approvalTracker) register(p *pendingApproval) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, ok := a.live[p.key]; ok || a.resolved[p.key] {
-		return
+		return false
 	}
 	p.state = apPending
 	a.live[p.key] = p
+	return true
 }
 
 // errStaleApproval / errDuplicateApproval classify a rejected Resolve so callers

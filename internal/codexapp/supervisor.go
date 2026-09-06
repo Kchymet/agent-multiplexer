@@ -904,15 +904,21 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 	}
 
 	// Register BEFORE emitting so a consumer that Resolves the instant it sees the
-	// event always finds the outstanding request (no emit/register race).
-	s.approvals.register(&pendingApproval{
+	// event always finds the outstanding request (no emit/register race). Emit ONLY on
+	// the first registration: a re-sent or replayed request whose id is still pending
+	// (or already resolved) must not raise a second permission_request — that would
+	// reopen an unanswerable prompt or double the decision flow (ROOT approval-replay
+	// audit). register is atomic, so exactly one concurrent duplicate emits.
+	if !s.approvals.register(&pendingApproval{
 		rawID:    append(json.RawMessage(nil), id...),
 		key:      key,
 		method:   method,
 		threadID: p.ThreadID,
 		turnID:   p.TurnID,
 		itemID:   p.ItemID,
-	})
+	}) {
+		return
+	}
 
 	s.emit(harnessproto.RuntimeEvent{
 		Type:      harnessproto.TypePermissionRequest,
