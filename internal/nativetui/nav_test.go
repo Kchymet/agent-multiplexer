@@ -28,14 +28,14 @@ func TestPageClamps(t *testing.T) {
 
 	m.cursor = 8
 	m.page(5) // would land at 13
-	if m.cursor != 9 {
-		t.Fatalf("page past the end: cursor = %d, want 9", m.cursor)
+	if m.sectionCursor != core.SectionRepos {
+		t.Fatalf("page past the end: section = %q, want repos", m.sectionCursor)
 	}
 
-	m.cursor = 2
+	m.cursor, m.sectionCursor = 2, ""
 	m.page(-5) // would land at -3
-	if m.cursor != 0 {
-		t.Fatalf("page past the start: cursor = %d, want 0", m.cursor)
+	if m.sectionCursor != core.SectionWorkgroups {
+		t.Fatalf("page past the start: section = %q, want workgroups", m.sectionCursor)
 	}
 
 	empty := &model{}
@@ -73,19 +73,20 @@ func TestPagingKeys(t *testing.T) {
 	full := railModel(1, 23).pageStep() // 19
 
 	cases := []struct {
-		name  string
-		start int
-		key   tea.KeyMsg
-		want  int
+		name    string
+		start   int
+		key     tea.KeyMsg
+		want    int
+		section string
 	}{
-		{"ctrl+d half down", 0, tea.KeyMsg{Type: tea.KeyCtrlD}, half},
-		{"ctrl+u half up", 30, tea.KeyMsg{Type: tea.KeyCtrlU}, 30 - half},
-		{"pgdown full down", 0, tea.KeyMsg{Type: tea.KeyPgDown}, full},
-		{"pgup full up", 30, tea.KeyMsg{Type: tea.KeyPgUp}, 30 - full},
-		{"home to top", 20, tea.KeyMsg{Type: tea.KeyHome}, 0},
-		{"end to bottom", 0, tea.KeyMsg{Type: tea.KeyEnd}, 39},
-		{"g to top", 20, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}, 0},
-		{"G to bottom", 0, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")}, 39},
+		{"ctrl+d half down", 0, tea.KeyMsg{Type: tea.KeyCtrlD}, half, ""},
+		{"ctrl+u half up", 30, tea.KeyMsg{Type: tea.KeyCtrlU}, 30 - half, ""},
+		{"pgdown full down", 0, tea.KeyMsg{Type: tea.KeyPgDown}, full, ""},
+		{"pgup full up", 30, tea.KeyMsg{Type: tea.KeyPgUp}, 30 - full, ""},
+		{"home to top", 20, tea.KeyMsg{Type: tea.KeyHome}, 0, core.SectionWorkgroups},
+		{"end to bottom", 0, tea.KeyMsg{Type: tea.KeyEnd}, 0, core.SectionRepos},
+		{"g to top", 20, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}, 0, core.SectionWorkgroups},
+		{"G to bottom", 0, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")}, 0, core.SectionRepos},
 	}
 
 	for _, tc := range cases {
@@ -93,8 +94,8 @@ func TestPagingKeys(t *testing.T) {
 			m := railModel(40, 23)
 			m.cursor = tc.start
 			m.handleKey(tc.key)
-			if m.cursor != tc.want {
-				t.Fatalf("cursor = %d, want %d", m.cursor, tc.want)
+			if m.cursor != tc.want || m.sectionCursor != tc.section {
+				t.Fatalf("selection = (%d, %q), want (%d, %q)", m.cursor, m.sectionCursor, tc.want, tc.section)
 			}
 		})
 	}

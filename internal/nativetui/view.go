@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"amux/internal/core"
 	"amux/internal/keymap"
@@ -134,41 +135,34 @@ func (m *model) renderSidebar() string {
 	var top []string
 	cursorEntry := -1 // index into top of the selected row, for scroll-follow
 
-	// Pinned, sectionless rows first (the control console).
-	for i, s := range m.sessions {
-		if s.Section == "" {
-			if i == m.cursor {
+	for _, e := range m.railEntries() {
+		if e.section != "" {
+			top = append(top, "")
+			if m.railSelected(e) {
 				cursorEntry = len(top)
 			}
-			top = append(top, m.renderRow(i, s))
-		}
-	}
-
-	// WORKGROUPS and REPOS are always shown — with an empty-state hint when they
-	// have no rows — so creating the first one is discoverable. ARCHIVED and
-	// DETACHED only appear when populated (they have nothing to create).
-	for _, sec := range []struct{ key, hotkey, empty string }{
-		{core.SectionWorkgroups, "w", "no workgroups — w to create"},
-		{core.SectionRepos, "R", "no repos — R to add"},
-		{core.SectionArchived, "", ""},
-		{core.SectionDetached, "", ""},
-	} {
-		any := false
-		for i, s := range m.sessions {
-			if s.Section == sec.key {
-				if !any {
-					top = append(top, "", sectionHeader(sec.key, sec.hotkey))
-					any = true
+			top = append(top, m.sectionHeader(e.section))
+			if !m.collapsed[railGroup{section: e.section}] {
+				populated := false
+				for _, s := range m.sessions {
+					if s.Section == e.section {
+						populated = true
+						break
+					}
 				}
-				if i == m.cursor {
-					cursorEntry = len(top)
+				if !populated {
+					for _, sec := range railSections {
+						if sec.key == e.section && sec.empty != "" {
+							top = append(top, dimStyle.Render(" "+truncate(sec.empty, sidebarWidth-1)))
+						}
+					}
 				}
-				top = append(top, m.renderRow(i, s))
 			}
-		}
-		if !any && sec.empty != "" {
-			top = append(top, "", sectionHeader(sec.key, sec.hotkey))
-			top = append(top, dimStyle.Render(" "+truncate(sec.empty, sidebarWidth-1)))
+		} else {
+			if m.railSelected(e) {
+				cursorEntry = len(top)
+			}
+			top = append(top, m.renderRow(e.index, m.sessions[e.index]))
 		}
 	}
 
@@ -235,6 +229,7 @@ func (m *model) railHints() []string {
 	l1 := " " + keyStyle.Render("↵") + dimStyle.Render(" open  ") + keyStyle.Render("↑↓") + dimStyle.Render(" move ")
 	return []string{
 		borderSeg(sidebarWidth, fill, l1, ""),
+		borderSeg(sidebarWidth, fill, " "+keyStyle.Render("Space")+dimStyle.Render(" fold/unfold "), ""),
 	}
 }
 
@@ -257,10 +252,17 @@ func (m *model) renderRow(i int, s core.Session) string {
 	if s.ID == m.attached {
 		mark = "▸" // currently embedded
 	}
-	label := truncate(fmt.Sprintf("%s%s%s %s", mark, indent, glyph(s), s.Title), sidebarWidth)
+	icon := glyph(s)
+	if container(&s) {
+		icon = disclosure(m.collapsed[m.group(&s)])
+		if s.Kind == "repo" {
+			icon += " " + glyph(s)
+		}
+	}
+	label := truncate(fmt.Sprintf("%s%s%s %s", mark, indent, icon, s.Title), sidebarWidth)
 	var line string
 	switch {
-	case i == m.cursor:
+	case m.sectionCursor == "" && i == m.cursor:
 		line = selStyle.Width(sidebarWidth).Render(label)
 	case s.IsRoot:
 		line = titleStyle.Render(label)
@@ -352,8 +354,7 @@ func (m *model) renderDialog() string {
 }
 
 // renderHelp is the bottom line: a status message when there is one, the agent
-// keys while the agent is focused, otherwise nothing (the rail carries its own
-// command hints).
+// keys while the agent is focused, otherwise the rail command hints.
 func (m *model) renderHelp() string {
 	switch {
 	case m.status != "":
@@ -366,7 +367,7 @@ func (m *model) renderHelp() string {
 			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
 		})
 	default:
-		return hints("", []hint{{"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}})
+		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {"←/→", "collapse/expand"}, {"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
 	}
 }
 
@@ -426,20 +427,35 @@ func hints(label string, hs []hint) string {
 	return b.String()
 }
 
-// sectionHeader renders a section's title bar. When hotkey is non-empty it
-// right-aligns an "add" hint (e.g. "w +") in the accent color, so the key to
-// create the first entry is always visible — not just in the empty state.
-func sectionHeader(section, hotkey string) string {
-	label := sectionLabel(section)
-	if hotkey == "" {
-		return sectionStyle.Width(sidebarWidth).Render(label)
+func disclosure(collapsed bool) string {
+	if collapsed {
+		return "▸"
 	}
-	hint := sectionKeyStyle.Render(hotkey) + sectionStyle.Render(" + ")
+	return "▾"
+}
+
+// Section headers participate in cursor navigation and retain their create hint.
+func (m *model) sectionHeader(section string) string {
+	label := " " + disclosure(m.collapsed[railGroup{section: section}]) + sectionLabel(section)
+	style, keys := sectionStyle, sectionKeyStyle
+	if m.sectionCursor == section {
+		style, keys = selStyle, selStyle
+	}
+	hotkey := ""
+	for _, sec := range railSections {
+		if sec.key == section {
+			hotkey = sec.hotkey
+		}
+	}
+	if hotkey == "" {
+		return style.Width(sidebarWidth).Render(label)
+	}
+	hint := keys.Render(hotkey) + style.Render(" + ")
 	gap := sidebarWidth - lipgloss.Width(label) - lipgloss.Width(hint)
 	if gap < 1 {
-		return sectionStyle.Width(sidebarWidth).Render(label)
+		return style.Width(sidebarWidth).Render(label)
 	}
-	return sectionStyle.Render(label+strings.Repeat(" ", gap)) + hint
+	return style.Render(label+strings.Repeat(" ", gap)) + hint
 }
 
 func sectionLabel(section string) string {

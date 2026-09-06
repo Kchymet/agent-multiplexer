@@ -71,10 +71,12 @@ type paneKey struct {
 }
 
 type model struct {
-	client   *daemon.Client
-	sessions []core.Session
-	keys     keymap.Keymap // global hotkeys; zero value = built-in defaults
-	cursor   int
+	client        *daemon.Client
+	sessions      []core.Session
+	keys          keymap.Keymap      // global hotkeys; zero value = built-in defaults
+	cursor        int                // index into the full snapshot when a session is selected
+	sectionCursor string             // selected section header, or empty for a session
+	collapsed     map[railGroup]bool // local to this TUI; survives snapshot refreshes
 	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
 	// so the selected row stays visible when the rail overflows its height.
 	railScroll int
@@ -175,13 +177,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s := msg.f.Snapshot; s != nil {
-			m.sessions = s.Sessions
-			if m.cursor >= len(m.sessions) {
-				m.cursor = len(m.sessions) - 1
-			}
-			if m.cursor < 0 {
-				m.cursor = 0
-			}
+			m.refreshSessions(s.Sessions)
 		}
 		if p := msg.f.Pane; p != nil {
 			m.handlePaneFrame(p)
@@ -342,12 +338,20 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgdown", "ctrl+f": // full page down
 		m.page(m.pageStep())
 	case "home", "g": // jump to the first row
-		m.cursor = 0
+		m.railEdge(false)
 	case "end", "G": // jump to the last row
-		if n := len(m.sessions); n > 0 {
-			m.cursor = n - 1
+		m.railEdge(true)
+	case " ":
+		m.toggleRailGroup()
+	case "left", "h":
+		m.railLeft()
+	case "right", "l":
+		m.railRight()
+	case "enter":
+		if m.sectionCursor != "" {
+			m.toggleRailGroup()
+			return m, nil
 		}
-	case "enter", "l", "right":
 		return m, m.attachSelected()
 	case "a": // add an agent — on a repo header, a repo-scoped agent; on a workgroup, another agent
 		s := m.selected()
@@ -466,29 +470,28 @@ func (m *model) toggleFocus() {
 }
 
 func (m *model) move(d int) {
-	n := len(m.sessions)
+	entries := m.railEntries()
+	n := len(entries)
 	if n == 0 {
 		return
 	}
-	m.cursor = (m.cursor + d + n) % n
+	i := (m.railPosition(entries) + d%n + n) % n
+	m.selectEntry(entries[i])
 }
 
-// page moves the cursor by d rows and clamps to the list bounds (no wrap), the
-// way ctrl-d/ctrl-u and PgUp/PgDn behave in a pager. The render pass scrolls the
-// rail to follow the cursor.
+// page moves by visible rows, including section headers, without wrapping.
 func (m *model) page(d int) {
-	n := len(m.sessions)
-	if n == 0 {
+	entries := m.railEntries()
+	if len(entries) == 0 {
 		return
 	}
-	c := m.cursor + d
-	switch {
-	case c < 0:
-		c = 0
-	case c >= n:
-		c = n - 1
+	i := m.railPosition(entries) + d
+	if i < 0 {
+		i = 0
+	} else if i >= len(entries) {
+		i = len(entries) - 1
 	}
-	m.cursor = c
+	m.selectEntry(entries[i])
 }
 
 // halfPage is the row step for ctrl-u/ctrl-d — half the visible pane height, at
@@ -510,7 +513,7 @@ func (m *model) pageStep() int {
 }
 
 func (m *model) selected() *core.Session {
-	if m.cursor < 0 || m.cursor >= len(m.sessions) {
+	if m.sectionCursor != "" || m.cursor < 0 || m.cursor >= len(m.sessions) {
 		return nil
 	}
 	return &m.sessions[m.cursor]
@@ -636,6 +639,8 @@ func (m *model) selectByID(id string) {
 	for i := range m.sessions {
 		if m.sessions[i].ID == id {
 			m.cursor = i
+			m.sectionCursor = ""
+			m.reveal(&m.sessions[i])
 			return
 		}
 	}
