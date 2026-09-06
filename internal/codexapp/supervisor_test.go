@@ -206,6 +206,34 @@ func TestHandshakeSelectedModel(t *testing.T) {
 	}
 }
 
+func TestHandshakeResumeUsesConfiguredPolicy(t *testing.T) {
+	for _, sandbox := range []string{"workspace-write", "read-only"} {
+		t.Run(sandbox, func(t *testing.T) {
+			sup, fs, client := newFakePair(t)
+			defer fs.close()
+			defer sup.Close()
+			sup.cfg.ResumeThreadID = "thr_saved"
+			sup.cfg.Sandbox = sandbox
+			sup.cfg.ApprovalPolicy = "never"
+			attach(t, sup, client)
+			call, ok := fs.sawCall("thread/resume")
+			if !ok {
+				t.Fatal("no thread/resume call")
+			}
+			var params struct {
+				Sandbox        string `json:"sandbox"`
+				ApprovalPolicy string `json:"approvalPolicy"`
+			}
+			if err := json.Unmarshal(call.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if params.Sandbox != sandbox || params.ApprovalPolicy != "never" {
+				t.Fatalf("resume lost configured permissions: %s", call.Params)
+			}
+		})
+	}
+}
+
 func TestHandshakeResume(t *testing.T) {
 	client, server := newMemPair()
 	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}}

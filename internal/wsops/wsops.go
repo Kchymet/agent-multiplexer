@@ -444,7 +444,7 @@ func AgentEnv(s store.Session) []string {
 		"AMUX_SESSION_ID=" + s.ClaudeID,
 	}
 	if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
-		env = append(env, spec.EnvEntry())
+		env = append(env, spec.EnvEntries()...)
 	}
 	return env
 }

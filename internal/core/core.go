@@ -67,8 +67,9 @@ const (
 // agent's process in the daemon's engine without attaching a UI, so a
 // CLI-created session comes up running the way the TUI starts one on open.
 const (
-	ActionStart = "start" // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
-	ActionQuery = "query" // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
+	ActionStart      = "start"       // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
+	ActionAuthReload = "auth-reload" // resume live Claude agents with the shared login
+	ActionQuery      = "query"       // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
 	// ActionSteer drives the agent *inside* a running session rather than the
 	// session itself: send it a prompt, interject mid-turn, interrupt the turn, or
 	// answer its permission prompt. ID is the agent id and Fields[SteerVerb] names
@@ -131,6 +132,7 @@ const (
 var controlActions = []string{
 	ActionRefresh,
 	ActionStart,
+	ActionAuthReload,
 	ActionSteer,
 	ActionRename,
 	ActionMove,

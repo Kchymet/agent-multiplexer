@@ -20,10 +20,95 @@ mount, and how an agent's edits to its configuration come back to amux.
 - **The agent may edit its copy.** Settings, memory (`CLAUDE.md`), commands,
   skills, MCP servers, plugins — it is the agent's own configuration. What the
   agent does there stays there until you say otherwise.
-- **Shared auth.** OAuth credentials must not diverge per agent: a rotated token in one copy would strand the others. They are
-  linked to the template rather than copied, and the scope binds the shared
-  paths. Codex MCP credentials use a hard link because Codex requires a regular
-  file when writing refreshed tokens; other credential files use symlinks.
+- **Shared auth.** `amux auth login` establishes a dedicated Claude credential
+  store shared by all its sessions, including credential-write and refresh locks.
+  The scope mounts the directory so atomic credential replacement remains visible.
+  Until enabled, Claude retains the legacy template credential symlink. Codex
+  account auth uses a symlink; its MCP credentials use a hard link because Codex
+  requires a regular file when writing refreshed tokens.
+
+### One Claude login for all sessions
+
+After installing the updated CLI **and restarting the amux daemon**, run from
+your host terminal:
+
+```sh
+amux auth login
+```
+
+This runs Claude's own `auth login` in a dedicated context under
+`<amux data>/auth/claude` (normally `~/.local/share/amux/auth/claude`). Complete
+the browser login once. A successful login enables this store for new sessions
+and queues the currently running Claude agent panes to resume their existing
+conversations with it. Agents wait until their hooks report idle; a busy or
+unknown-state pane is not interrupted automatically. Codex and editor/terminal
+panes are not restarted. Reopen existing editor/terminal processes to inherit
+the new environment. A failed/cancelled first login does not activate the store.
+
+```sh
+amux auth status          # Claude's status for the shared login
+amux auth restart         # queue running Claude agents to resume when idle
+amux auth restart --force # also interrupt busy/unknown agents stuck at login
+```
+
+`--force` applies to **all running Claude agent panes**, including ones doing
+work. It resumes saved conversations but can interrupt an unfinished turn.
+If the login succeeds but the daemon cannot accept the restart request, the CLI
+reports that separately: the saved login is still usable. Update/start the
+daemon and run `amux auth restart`. Pending reloads are local daemon work;
+restarting that daemon restores its live agents with the current auth settings.
+Restart failures are recorded in the daemon log; reopening that agent retries.
+
+Claude uses `CLAUDE_CONFIG_DIR` for each agent's private config/history and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` for the shared credential store. The shared
+directory contains Claude's normal credentials and sibling locks; the directory
+itself is never replaced. A refresh or `/login` in any migrated agent therefore
+updates the same store. amux does **not** implement an OAuth refresh HTTP client
+or start a second refresher: Claude's native cross-process locking coordinates
+the writers. If a running process retains stale credentials, `amux auth restart`
+reloads them. Normal refreshes do not restart sessions.
+
+This is a new login, not a copy of the user's existing refresh token. Existing
+private `.credentials.json` files are left on disk but are no longer selected or
+mounted as the shared credential; they no longer appear as configuration drift.
+The user's ordinary Claude login remains separate. Existing MCP definitions
+are still copied from the user's config, but MCP credentials from that old
+store are not imported: authenticate needed MCP servers in the shared context.
+Inherited API-key, bearer-token and OAuth-token environment overrides are
+cleared for migrated sessions so they cannot shadow the shared login. Explicit
+credential helpers or alternate providers in Claude settings still need to be
+configured consistently with the intended authentication method.
+
+The separate secure-storage variable is currently an **undocumented Claude
+interface** ([upstream tracking issue](https://github.com/anthropics/claude-code/issues/79223)).
+Verified with Claude Code 2.1.263: its credential store, storage-write lock,
+and OAuth refresh lock all use this directory. Use a current Claude Code
+with this override and its native refresh locks.
+The opt-in compatibility check uses synthetic credentials, not your login or a
+model request:
+
+```sh
+AMUX_CLAUDE_AUTH_SMOKE=1 go test ./internal/claudecfg -run TestClaudeSharedAuthStoreCompatibility -v
+```
+
+This checks credential-store selection, not a real server-side token rotation.
+The sandbox masks the auth root in every pane and mounts only a Claude pane's
+selected store, so adding another harness's auth store does not expose it through
+the otherwise-readable amux data tree.
+
+### Git writes from Codex
+
+An agent's worktree lives inside its workspace, but its Git index, objects and
+refs live in the assigned bare clone under `<amux data>/repos`. amux grants that
+clone write access in both the outer bubblewrap scope and Codex's inner
+`workspace-write` sandbox. The same `sandbox_workspace_write.writable_roots`
+override is passed to interactive Codex and App Server launches, including
+resumed sessions. Other repositories and coordinator sessions receive no new
+grants. Explicit read-only mode remains read-only.
+
+Restart existing Codex sessions after updating amux to pick up these launch
+arguments. An already-running session's sandbox policy is not changed by
+rebuilding the binary.
 
 ### What is configuration, what is state
 
@@ -32,7 +117,7 @@ starts with an empty transcript tree, history, and caches:
 
 | harness | copied (config) | not copied (state) | shared (auth) |
 |---------|-----------------|--------------------|---------------|
-| claude  | `settings.json`, `settings.local.json`, `CLAUDE.md`, `keybindings.json`, `statusline-command.sh`, `commands/`, `skills/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`, `.claude.json` (minus its per-project trust table) | `projects/`, `history.jsonl`, `sessions/`, `session-env/`, `shell-snapshots/`, `file-history/`, caches, `statsig/`, `todos/` | `.credentials.json` |
+| claude  | `settings.json`, `settings.local.json`, `CLAUDE.md`, `keybindings.json`, `statusline-command.sh`, `commands/`, `skills/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`, `.claude.json` (minus its per-project trust table) | `projects/`, `history.jsonl`, `sessions/`, `session-env/`, `shell-snapshots/`, `file-history/`, caches, `statsig/`, `todos/` | dedicated auth directory after `amux auth login`; legacy `.credentials.json` symlink until then |
 | codex   | `config.toml`, `AGENTS.md`, `prompts/`, `skills/`, `rules/` | `sessions/`, `history.jsonl`, `log/`, `memories/` | `auth.json`, `.credentials.json` (MCP OAuth), `mcp-oauth-locks/` |
 
 ### MCP inheritance
@@ -51,7 +136,7 @@ filesystem; amux reports a seeding error if it cannot create the link. OS keyrin
 credentials continue to depend on Codex's configured backend and its availability
 inside the sandbox; amux does not export keyring secrets into files.
 
-Missing shared credential links are added at the next launch, including for
+For Codex and legacy Claude auth, missing shared credential links are added at the next launch, including for
 existing agents and logins completed after an agent was created. Existing config
 edits and private credential files are preserved. To update an existing agent's
 MCP definitions, use `amux sandbox reset <id> config.toml` (this resets the whole
@@ -89,7 +174,7 @@ and manifest attributes every difference:
 | `agent-changed` / `agent-added` / `agent-removed` | the agent edited its copy; the template still has what was seeded | `promote` (propagate) or `reset` (discard) |
 | `template-changed` | you changed the template since the seed; the copy is stale | `reset` pulls the new version into the copy |
 | `conflict` | both sides changed the same path differently | pick one with `promote` / `reset` |
-| `shared-detached` | the auth file in the copy is no longer linked to the template (the harness rewrote it in place) | `reset` re-links it to yours |
+| `shared-detached` | a legacy linked auth file was replaced with a private file | `reset` re-links it to yours; use `amux auth login` for durable Claude sharing |
 
 Files the harness churns on its own are compared on their configuration only:
 `.claude.json` on its config keys (`mcpServers`, `model`), `config.toml` without

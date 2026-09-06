@@ -5,9 +5,9 @@
 // Each agent gets a private COPY of it under its sandbox dir, and the harness is
 // pointed at the copy (CLAUDE_CONFIG_DIR, CODEX_HOME). Nothing from the user's
 // home is mounted into the sandbox any more except the one thing that must stay
-// shared — the OAuth credentials, which are linked from the copy back to the
-// template and bound read-write at their template path. The agent may edit its
-// copy freely: that is its own configuration.
+// shared — authentication. A harness can use a dedicated shared credential
+// directory or links back to the template, bound read-write in the sandbox.
+// The agent may edit its config copy freely: that is its own configuration.
 //
 // Because the copy's initial content is recorded in a manifest that lives
 // OUTSIDE the sandbox (under amux's state dir, which is never bound in), amux
@@ -65,6 +65,14 @@ type Spec struct {
 	// the harness refuses symlinks when refreshing it. These use hard links and
 	// require the template and copy to reside on the same filesystem.
 	HardlinkShared []string
+	// AuthDir is an optional dedicated credential directory. Bind the directory,
+	// not its files: credential writers atomically replace files and create locks.
+	// AuthEnv tells the harness to use it independently of its private config.
+	AuthDir string
+	AuthEnv string
+	// AuthUnsetEnv clears inherited credential overrides when the user opts in
+	// to this store. Otherwise an old environment token could shadow a new login.
+	AuthUnsetEnv []string
 }
 
 // Entry is one configuration path of a template.
@@ -158,6 +166,18 @@ var mu sync.Mutex // serialize manifest read-modify-write across Seed/Scan/Promo
 
 // EnvEntry is the KEY=VALUE that points the harness at the agent's copy.
 func (sp Spec) EnvEntry() string { return sp.Env + "=" + sp.Dir }
+
+// EnvEntries routes configuration and, when configured, shared authentication.
+func (sp Spec) EnvEntries() []string {
+	env := []string{sp.EnvEntry()}
+	if sp.AuthDir != "" && sp.AuthEnv != "" {
+		env = append(env, sp.AuthEnv+"="+sp.AuthDir)
+		for _, key := range sp.AuthUnsetEnv {
+			env = append(env, key+"=")
+		}
+	}
+	return env
+}
 
 // Seeded reports whether the agent's copy exists.
 func Seeded(sp Spec) bool {
@@ -298,6 +318,11 @@ func linkShared(sp Spec, rel string) error {
 // requires — down from the whole config tree.
 func Binds(sp Spec) [][]string {
 	var out [][]string
+	if sp.AuthDir != "" {
+		// Required, not --bind-try: silently missing auth would fall back to a
+		// stale private credential and recreate the split refresh chain.
+		out = append(out, []string{"--bind", sp.AuthDir, sp.AuthDir})
+	}
 	for _, rel := range sp.Shared {
 		p := filepath.Join(sp.Template, rel)
 		if fi, err := os.Stat(p); err == nil {

@@ -384,7 +384,14 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	var err error
 	resumed := s.cfg.ResumeThreadID != ""
 	if resumed {
-		params := map[string]any{"threadId": s.cfg.ResumeThreadID}
+		// Resume must select the same configured policy as start. Otherwise a
+		// restarted server can fall back to read-only and omit the Git grants
+		// supplied through sandbox_workspace_write.writable_roots at launch.
+		params := map[string]any{
+			"threadId":       s.cfg.ResumeThreadID,
+			"approvalPolicy": s.cfg.ApprovalPolicy,
+			"sandbox":        s.cfg.Sandbox,
+		}
 		if s.cfg.Model != "" {
 			params["model"] = s.cfg.Model
 		}

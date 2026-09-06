@@ -66,6 +66,10 @@ func DataDir() string {
 // ReposDir holds the local bare clones used as worktree sources.
 func ReposDir() string { return filepath.Join(DataDir(), "repos") }
 
+// AuthDir holds dedicated harness credential stores. Panes mask this root and
+// expose only the store selected by their harness, rather than all credentials.
+func AuthDir() string { return filepath.Join(DataDir(), "auth") }
+
 // WorkspacesDir holds legacy per-workspace directories (pre-hierarchy).
 func WorkspacesDir() string { return filepath.Join(DataDir(), "workspaces") }
 
