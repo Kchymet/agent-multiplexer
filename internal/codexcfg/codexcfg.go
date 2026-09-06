@@ -176,6 +176,38 @@ func (h Home) RolloutPath(uuid string) (string, bool) {
 	return found, found != ""
 }
 
+// LatestRolloutTime is the mtime of the most recently written rollout anywhere in
+// this home, and whether the home holds one at all. It answers "when did this
+// Codex last write?" without knowing which uuid to look for — the question
+// freshness asks of an agent's *private* home, where every rollout belongs to
+// that one agent. The user's shared home carries no such guarantee, so callers
+// must not read it as one session's activity.
+//
+// Like RolloutPath this sits on the daemon's poll path, so it stops at file
+// metadata: no rollout is opened and no cwd is parsed (that is LatestSession's
+// more expensive job).
+func (h Home) LatestRolloutTime() (time.Time, bool) {
+	var newest time.Time
+	var ok bool
+	_ = filepath.WalkDir(h.sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil // skip an unreadable dir, keep walking siblings
+		}
+		if _, isRollout := rolloutUUID(d.Name()); !isRollout {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if !ok || info.ModTime().After(newest) {
+			newest, ok = info.ModTime(), true
+		}
+		return nil
+	})
+	return newest, ok
+}
+
 // NewRolloutPath builds a fresh, plausible rollout path for uuid under today's
 // sessions/YYYY/MM/DD directory, following Codex's rollout-<timestamp>-<uuid>
 // naming. amux uses it to place a gap-filled transcript where `codex resume

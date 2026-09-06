@@ -77,6 +77,44 @@ func TestLatestSession(t *testing.T) {
 	}
 }
 
+// TestLatestRolloutTime returns the newest rollout's mtime regardless of cwd or
+// uuid — the freshness probe for an agent's private home — and reports no rollout
+// for an empty home or a tree holding only non-rollout files.
+func TestLatestRolloutTime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+
+	if _, ok := UserHome().LatestRolloutTime(); ok {
+		t.Fatal("LatestRolloutTime found a rollout in an empty home")
+	}
+
+	older := mkRollout(t, home, "2026", "07", "01", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", t.TempDir())
+	newer := mkRollout(t, home, "2026", "07", "02", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", t.TempDir())
+	oldT := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	newT := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(older, oldT, oldT); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, newT, newT); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := UserHome().LatestRolloutTime()
+	if !ok || !got.Equal(newT) {
+		t.Fatalf("LatestRolloutTime = %v,%v want %v,true", got, ok, newT)
+	}
+
+	// A stray file written after the newest rollout is not a rollout, so it must
+	// not pass for one.
+	stray := filepath.Join(filepath.Dir(newer), "notes.jsonl")
+	if err := os.WriteFile(stray, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := UserHome().LatestRolloutTime(); !ok || !got.Equal(newT) {
+		t.Fatalf("after stray file LatestRolloutTime = %v,%v want %v,true", got, ok, newT)
+	}
+}
+
 // TestListSessions lists rollouts most-recent first, carrying the parsed uuid
 // and recorded cwd.
 func TestListSessions(t *testing.T) {
