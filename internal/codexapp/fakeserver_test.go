@@ -61,7 +61,7 @@ func (c *memConn) Close() error {
 // shapes (hyphenated enums).
 type fakeServer struct {
 	t    *testing.T
-	conn *memConn
+	conn msgConn
 
 	mu         sync.Mutex
 	calls      []incoming

@@ -2,8 +2,85 @@ package codexapp
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
+
+// Concurrent starts (creation and native attach) submit once; a daemon restart
+// resumes the persisted identity without replaying the creation prompt.
+func TestManagerInitialPromptOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	servers := make(chan *fakeServer, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		servers <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	m := NewManager(ctx, "")
+	defer m.Shutdown()
+	// The in-process fake owns the socket; this child exercises process lifetime
+	// without invoking a real model. Shutdown kills it immediately.
+	ensure := func(m *Manager) (*Supervisor, error) {
+		return m.Ensure("initial", "", nil, []string{"sleep", "60"}, endpoint, "fix it")
+	}
+	errs := make(chan error, 8)
+	for i := 0; i < cap(errs); i++ {
+		go func() { _, err := ensure(m); errs <- err }()
+	}
+	for i := 0; i < cap(errs); i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	fs := <-servers
+	fs.mu.Lock()
+	turns := 0
+	for _, call := range fs.calls {
+		if call.Method == "turn/start" {
+			turns++
+		}
+	}
+	fs.mu.Unlock()
+	if turns != 1 {
+		t.Fatalf("concurrent starts submitted %d prompts, want 1", turns)
+	}
+	id, ok := LoadIdentity("initial")
+	if !ok || !id.Resumable {
+		t.Fatalf("missing resumable identity: %+v", id)
+	}
+	m.Shutdown()
+	restarted := NewManager(ctx, "")
+	defer restarted.Shutdown()
+	sup, err := ensure(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sup.ThreadID() != id.ThreadID {
+		t.Fatal("restart changed the thread")
+	}
+	resumed := <-servers
+	if _, ok := resumed.sawCall("turn/start"); ok {
+		t.Fatal("restart replayed the initial prompt")
+	}
+	if _, ok := resumed.sawCall("thread/start"); ok {
+		t.Fatal("restart created a fresh thread")
+	}
+}
 
 // TestManagerEmptyLookups checks the no-supervisor paths: Get misses, Live is
 // empty, and Close is a harmless no-op. These are the states the daemon hits on

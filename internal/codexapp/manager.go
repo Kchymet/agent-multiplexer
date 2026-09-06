@@ -66,8 +66,9 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 // daemon resolved (nil only in tests / the direct-exec smoke path); endpoint is the
 // listen/dial URL the daemon chose (loopback ws by default, unix optional) — the
 // same value baked into wrappedArgv. Creation is serialized per session, so two
-// callers never spawn competing servers.
-func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint string) (*Supervisor, error) {
+// callers never spawn competing servers. initialPrompt is submitted only when
+// starting a fresh thread, never when reusing or resuming a supervisor.
+func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, initialPrompt string) (*Supervisor, error) {
 	// Fast path: already live.
 	if s, ok := m.Get(sessionID); ok {
 		return s, nil
@@ -82,12 +83,13 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 	}
 
 	cfg := Config{
-		SessionID:    sessionID,
-		Bin:          m.bin,
-		Dir:          dir,
-		Env:          env,
-		Endpoint:     endpoint,
-		EventLogPath: EventLogPathFor(sessionID),
+		SessionID:     sessionID,
+		Bin:           m.bin,
+		Dir:           dir,
+		Env:           env,
+		Endpoint:      endpoint,
+		InitialPrompt: initialPrompt,
+		EventLogPath:  EventLogPathFor(sessionID),
 	}
 	cfg.ResumeThreadID = resumeThreadFor(sessionID)
 

@@ -68,6 +68,7 @@ type Config struct {
 	// --listen <Endpoint> and dials the same value.
 	Endpoint       string
 	ResumeThreadID string        // non-empty ⇒ thread/resume instead of thread/start
+	InitialPrompt  string        // submitted only when the handshake creates a fresh thread
 	ApprovalPolicy string        // "" ⇒ defaultApprovalPolicy
 	Sandbox        string        // "" ⇒ defaultSandbox
 	DialTimeout    time.Duration // "" ⇒ defaultDialTimeout
@@ -424,6 +425,18 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	// Manager.Ensure can persist this identity for native attach and restarts.
 	s.resumable = true
 	s.mu.Unlock()
+	if prompt := strings.TrimSpace(s.cfg.InitialPrompt); !resumed && prompt != "" {
+		// The App Server has no positional prompt. Submit it on the canonical
+		// thread before exposing the supervisor, waiting only for acceptance so
+		// a long first turn cannot block creation or native attach. Notifications
+		// track its lifecycle just as they do a turn started by a native client.
+		if _, err := s.rpc.call(ctx, "turn/start", map[string]any{
+			"threadId": id,
+			"input":    inputBlocks(prompt),
+		}); err != nil {
+			return fmt.Errorf("codexapp initial prompt: %w", err)
+		}
+	}
 	return nil
 }
 
