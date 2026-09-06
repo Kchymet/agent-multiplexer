@@ -286,7 +286,7 @@ func TestFreshThreadReadyBeforeFirstTurn(t *testing.T) {
 	if err := SaveIdentity(sup.Identity()); err != nil {
 		t.Fatal(err)
 	}
-	if got := resumeThreadFor("s-test"); got != sup.ThreadID() {
+	if got := resumeThreadFor("s-test", ""); got != sup.ThreadID() {
 		t.Fatalf("restart lost empty thread: %q", got)
 	}
 }
@@ -346,7 +346,7 @@ func TestResumedIdentitySurvivesAnotherRestart(t *testing.T) {
 	}
 
 	// Restart #1 (no intervening turn): still resumes the same thread.
-	if got := resumeThreadFor("cont"); got != "existing-history" {
+	if got := resumeThreadFor("cont", ""); got != "existing-history" {
 		t.Fatalf("after resume+persist, resumeThreadFor = %q, want existing-history (conversation dropped!)", got)
 	}
 	// Restart #2 (still no turn): the persisted identity is stable, so it keeps
@@ -355,7 +355,7 @@ func TestResumedIdentitySurvivesAnotherRestart(t *testing.T) {
 	if !saved.Resumable {
 		t.Fatalf("persisted identity lost Resumable: %+v", saved)
 	}
-	if got := resumeThreadFor("cont"); got != "existing-history" {
+	if got := resumeThreadFor("cont", ""); got != "existing-history" {
 		t.Fatalf("second restart resumeThreadFor = %q, want existing-history", got)
 	}
 }

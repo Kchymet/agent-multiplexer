@@ -112,6 +112,10 @@ The session's selected model is sent on `thread/start` or `thread/resume` and on
 every amux-originated `turn/start`, so App Server control uses the same model as
 the PTY launch path. A fresh structured thread starts the session's initial
 prompt as its first turn; a resumed thread never replays that creation prompt.
+On the first PTY-to-structured launch, when no structured identity sidecar exists,
+the supervisor adopts the Codex thread ID already pinned in amux's session store.
+This preserves the live conversation across a control-mode change instead of
+creating a replacement thread and replaying only the original prompt.
 
 A successfully initialized thread is immediately `Resumable`, including before
 its first prompt. When the session's supervisor is started again, it attempts to

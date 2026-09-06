@@ -67,10 +67,13 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 // listen/dial URL the daemon chose (loopback ws by default, unix optional) — the
 // same value baked into wrappedArgv. model and initialPrompt are the selections
 // stored on the amux session; the supervisor applies them to the structured
-// thread and its first turn. Creation is serialized per session, so two callers
-// never spawn competing servers. initialPrompt is submitted only when starting a
-// fresh thread, never when reusing or resuming a supervisor.
-func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt string) (*Supervisor, error) {
+// thread and its first turn. legacyThreadID is the conversation id pinned by the
+// older PTY control path; it is used only when no structured identity exists, so
+// switching control modes adopts the existing conversation instead of starting
+// over. Creation is serialized per session, so two callers never spawn competing
+// servers. initialPrompt is submitted only when starting a fresh thread, never
+// when reusing or resuming a supervisor.
+func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string) (*Supervisor, error) {
 	// Fast path: already live.
 	if s, ok := m.Get(sessionID); ok {
 		return s, nil
@@ -94,7 +97,7 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 		InitialPrompt: initialPrompt,
 		EventLogPath:  EventLogPathFor(sessionID),
 	}
-	cfg.ResumeThreadID = resumeThreadFor(sessionID)
+	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
 
 	sup := New(cfg)
 	if err := sup.Start(m.ctx, wrappedArgv); err != nil {
@@ -108,13 +111,19 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 	return sup, nil
 }
 
-// resumeThreadFor returns the thread to resume, or "" for an older identity
-// known never to have been persisted. Fresh threads are now persisted by the
-// handshake before their first turn. Legacy identities without a version still
-// attempt resume to avoid discarding conversations; a missing rollout falls back.
-func resumeThreadFor(sessionID string) string {
+// resumeThreadFor returns the thread to resume, or "" for an identity known never
+// to have been persisted. Fresh threads are now persisted by the handshake before
+// their first turn. A structured identity is authoritative when present. Without
+// one, legacyThreadID lets the first structured launch adopt a conversation that
+// the PTY path already pinned in the session store. Legacy sidecars without a
+// version still attempt resume to avoid discarding conversations; a missing
+// rollout falls back.
+func resumeThreadFor(sessionID, legacyThreadID string) string {
 	id, ok := LoadIdentity(sessionID)
-	if !ok || id.ThreadID == "" {
+	if !ok {
+		return legacyThreadID
+	}
+	if id.ThreadID == "" {
 		return ""
 	}
 	switch {
