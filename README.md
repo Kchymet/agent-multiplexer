@@ -285,7 +285,13 @@ amux sandbox promote | reset <id> <path>  # propagate an agent's config edit to 
 amux do <action> ...       # drive any daemon action from scripts (see below)
 amux provide [<addr>] [flags]     # provider mode: serve panes to a remote orchestrator
 amux provide install | uninstall  # run provider mode as a user service
+amux version                # CLI + connected daemon/database versions and compatibility
+amux doctor                 # versions/compatibility plus dependencies and runtime health
 ```
+
+Version compatibility is based on the CLI↔daemon protocol and the
+daemon↔database schema, not equality of release strings. See
+[Versioning and compatibility](docs/versioning.md).
 
 ### Lending this machine to a remote orchestrator
 

@@ -62,6 +62,31 @@ func (s Session) Display() string {
 // DB is a handle to the session store.
 type DB struct{ sql *sql.DB }
 
+// The schema version range says which databases this build can migrate and
+// open. Version zero is the legacy, unmarked schema used before explicit
+// versioning; Open migrates it in place. Future migrations advance the current
+// version only after their changes have completed successfully.
+const (
+	MinSchemaVersion     = 0
+	CurrentSchemaVersion = 1
+)
+
+// SchemaVersionError means the database is outside the range this daemon can
+// safely migrate and open. Refusing before migration prevents a binary from
+// making assumptions about a schema it does not understand.
+type SchemaVersionError struct {
+	Have int
+	Min  int
+	Max  int
+}
+
+func (e *SchemaVersionError) Error() string {
+	if e.Min == e.Max {
+		return fmt.Sprintf("database schema %d is unsupported by this daemon (requires %d)", e.Have, e.Min)
+	}
+	return fmt.Sprintf("database schema %d is unsupported by this daemon (supported range %d-%d)", e.Have, e.Min, e.Max)
+}
+
 // Open opens (creating if needed) the store, applies the schema, and imports any
 // legacy JSON registry once.
 func Open() (*DB, error) {
@@ -89,6 +114,13 @@ func Open() (*DB, error) {
 func (d *DB) Close() error { return d.sql.Close() }
 
 func (d *DB) migrate() error {
+	version, err := d.SchemaVersion()
+	if err != nil {
+		return err
+	}
+	if version < MinSchemaVersion || version > CurrentSchemaVersion {
+		return &SchemaVersionError{Have: version, Min: MinSchemaVersion, Max: CurrentSchemaVersion}
+	}
 	if _, err := d.sql.Exec(`
 CREATE TABLE IF NOT EXISTS repos (
   name    TEXT PRIMARY KEY,
@@ -124,7 +156,19 @@ CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
 	if err := d.addColumn("sessions", "archived", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	return d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0")
+	if err := d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err = d.sql.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaVersion))
+	return err
+}
+
+// SchemaVersion returns SQLite's persistent user_version marker. It is zero for
+// databases created by amux before schema versioning was introduced.
+func (d *DB) SchemaVersion() (int, error) {
+	var version int
+	err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
+	return version, err
 }
 
 // addColumn adds col to table if it isn't already present.

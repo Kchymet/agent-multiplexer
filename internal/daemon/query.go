@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
+	"amux/internal/buildinfo"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -37,6 +39,29 @@ func (d *Daemon) query(cl *connState, a core.Action) {
 func (d *Daemon) readModel(a core.Action) (any, error) {
 	if a.Query == core.QueryCodexControl {
 		return d.codexControl, d.configErr
+	}
+	if a.Query == core.QueryVersion {
+		info := core.VersionInfo{
+			DaemonVersion:     buildinfo.Version,
+			DaemonProtocol:    buildinfo.DaemonProtocol,
+			DatabaseMinSchema: store.MinSchemaVersion,
+			DatabaseMaxSchema: store.CurrentSchemaVersion,
+		}
+		db, err := store.Open()
+		if err != nil {
+			info.DatabaseError = err.Error()
+			var versionErr *store.SchemaVersionError
+			if errors.As(err, &versionErr) {
+				info.DatabaseSchema = versionErr.Have
+			}
+			return info, nil
+		}
+		defer db.Close()
+		info.DatabaseSchema, err = db.SchemaVersion()
+		if err != nil {
+			info.DatabaseError = err.Error()
+		}
+		return info, nil
 	}
 	// QuerySnapshot serves the already-computed rail (no store read): it's the same
 	// inventory the poll loop caches and broadcasts, handed to a peer that would

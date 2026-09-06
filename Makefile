@@ -1,7 +1,8 @@
 BINDIR  ?= $(HOME)/.local/bin
 CONFDIR ?= $(HOME)/.config/amux
 GOFLAGS ?=
-LDFLAGS := -s -w
+VERSION ?= 0.1.0
+LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
 
 # Go modules in this repo. harnessproto is a nested, independently-published
 # module (the wire protocol harness imports), so it is NOT covered by the root

@@ -226,7 +226,24 @@ const (
 	// tell the orchestrator which runtime a session's events came from. Path is ""
 	// when the session has no supported record.
 	QueryRuntimeRecord = "runtime-record"
+	// QueryVersion reports the daemon build, its CLI protocol, and the schema
+	// version of the database it owns. It is intentionally additive: a new CLI
+	// can identify an older daemon by the latter's unknown-query response.
+	QueryVersion = "version"
 )
+
+// VersionInfo is the QueryVersion read model. Protocol compatibility is a
+// CLI-to-daemon concern; the schema range states what the reporting daemon can
+// safely open. Product version strings are diagnostic rather than compatibility
+// gates, since patch/minor releases may retain the same contracts.
+type VersionInfo struct {
+	DaemonVersion     string `json:"daemonVersion"`
+	DaemonProtocol    int    `json:"daemonProtocol"`
+	DatabaseSchema    int    `json:"databaseSchema"`
+	DatabaseMinSchema int    `json:"databaseMinSchema"`
+	DatabaseMaxSchema int    `json:"databaseMaxSchema"`
+	DatabaseError     string `json:"databaseError,omitempty"`
+}
 
 // RuntimeRecord is the QueryRuntimeRecord read model: a session's on-disk runtime
 // transcript and the runtime (agent kind) that wrote it. A zero Path means the

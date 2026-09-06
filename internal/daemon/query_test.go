@@ -5,10 +5,31 @@ import (
 	"path/filepath"
 	"testing"
 
+	"amux/internal/buildinfo"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
 )
+
+func TestQueryVersionReportsDaemonAndDatabaseContracts(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	c, done := dialDaemon(t, testDaemon(t))
+	defer done()
+
+	got, err := c.Version()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DaemonVersion != buildinfo.Version || got.DaemonProtocol != buildinfo.DaemonProtocol {
+		t.Errorf("daemon version = %+v, want %s protocol %d", got, buildinfo.Version, buildinfo.DaemonProtocol)
+	}
+	if got.DatabaseSchema != store.CurrentSchemaVersion ||
+		got.DatabaseMinSchema != store.MinSchemaVersion ||
+		got.DatabaseMaxSchema != store.CurrentSchemaVersion || got.DatabaseError != "" {
+		t.Errorf("database version = %+v, want schema %d in supported range %d-%d",
+			got, store.CurrentSchemaVersion, store.MinSchemaVersion, store.CurrentSchemaVersion)
+	}
+}
 
 // TestQuerySnapshotServesCachedRail verifies the daemon serves its already-computed
 // session rail over ActionQuery, so a peer (the provider) publishes the inventory

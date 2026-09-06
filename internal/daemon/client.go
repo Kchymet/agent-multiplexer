@@ -176,6 +176,29 @@ func (c *Client) CodexControl() (amuxcfg.Control, error) {
 	return control, nil
 }
 
+// Version reports the daemon build and the database schema it owns. The
+// deadline keeps diagnostics bounded when a stale process accepts a connection
+// but does not answer. A daemon predating this query returns an unknown-query
+// error, which callers render as an unknown version rather than guessing.
+func (c *Client) Version() (core.VersionInfo, error) {
+	var info core.VersionInfo
+	if err := c.conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return info, err
+	}
+	defer c.conn.SetDeadline(time.Time{})
+	raw, err := c.Query(core.QueryVersion)
+	if err != nil {
+		return info, err
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return info, err
+	}
+	if info.DaemonVersion == "" || info.DaemonProtocol == 0 {
+		return info, fmt.Errorf("daemon returned incomplete version information")
+	}
+	return info, nil
+}
+
 // Snapshot returns the daemon's current session rail — the same inventory it
 // broadcasts to subscribers — so a peer (the provider) publishes it without
 // opening the store itself.

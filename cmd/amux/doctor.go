@@ -14,7 +14,6 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/core"
-	"amux/internal/daemon"
 	"amux/internal/gh"
 	"amux/internal/git"
 	"amux/internal/provider"
@@ -23,10 +22,17 @@ import (
 
 // cmdDoctor prints a health summary: required/optional CLI dependencies and the
 // amux runtime (daemon, database). Exits non-zero if a required dependency is
-// missing.
+// missing or a known component contract is incompatible.
 func cmdDoctor() error {
 	ctx := context.Background()
 	fmt.Print("amux doctor\n\n")
+
+	versions := collectVersions()
+	versionOutput, incompatible := versionLines(versions, true)
+	fmt.Println("Versions")
+	for _, line := range versionOutput {
+		fmt.Println(line)
+	}
 
 	type dep struct {
 		bin, verArg, note string
@@ -76,10 +82,8 @@ func cmdDoctor() error {
 	}
 
 	fmt.Println("\nRuntime")
-	daemonUp := false
-	if c, err := daemon.Dial(); err == nil {
-		_ = c.Close()
-		daemonUp = true
+	daemonUp := versions.Connected
+	if daemonUp {
 		fmt.Printf("  ✓ daemon    running (socket %s)\n", core.SocketPath())
 	} else {
 		fmt.Printf("  · daemon    offline — starts on `amux`\n")
@@ -179,8 +183,13 @@ func cmdDoctor() error {
 	fmt.Printf("  data     %s\n", core.DataDir())
 	fmt.Printf("  state    %s\n", core.StateDir())
 
-	if missingRequired {
-		fmt.Println("\n✗ missing a required dependency (see above)")
+	if missingRequired || incompatible {
+		if missingRequired {
+			fmt.Println("\n✗ missing a required dependency (see above)")
+		}
+		if incompatible {
+			fmt.Println("\n✗ incompatible amux components (see Versions above)")
+		}
 		return fmt.Errorf("health check failed")
 	}
 	fmt.Println("\n✓ all required dependencies present")

@@ -8,7 +8,7 @@
 //	daemon   run the polling/serving daemon (foreground)
 //	agent    self-reporting run by an agent about itself (status/hook/name/done)
 //	status   print current workgroups as text and exit
-//	version  print version
+//	version  print CLI, daemon, and database versions
 package main
 
 import (
@@ -29,8 +29,6 @@ import (
 	"amux/internal/nativetui"
 	"amux/internal/vtdemo"
 )
-
-var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -90,7 +88,7 @@ var commands = []command{
 	// deprecated top-level alias for "amux agent name"
 	{names: []string{"name"}, run: cmdName, hidden: true},
 	{names: []string{"do"}, run: cmdDo},
-	{names: []string{"version", "--version", "-v"}, run: func([]string) error { fmt.Println("amux", version); return nil }},
+	{names: []string{"version", "--version", "-v"}, run: func([]string) error { return cmdVersion() }},
 	// hidden: help is what prints usage(), so it doesn't list itself
 	{names: []string{"help", "-h", "--help"}, run: func([]string) error { usage(); return nil }, hidden: true},
 }
@@ -132,14 +130,14 @@ usage: amux <command>
   status [--json]    print workgroups and exit (--json for the raw snapshot)
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
-  doctor             health check: dependencies (fzf/claude/gh/…) + runtime
+  doctor             health check: versions, compatibility, dependencies + runtime
   config [ls|get|set|unset|path]  show or change amux settings (keybindings, Codex control)
   sandbox drift [<id>]  list edits agents made to their private copy of your harness config
   sandbox promote | reset <id> <path>  propagate an agent's config edit to yours / discard it
   provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
   provide install | uninstall  run provider mode as a user service (survives reboot)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
-  version            print version
+  version            print CLI, daemon and database versions + compatibility
 
 amux do <action> drives the daemon's control API from scripts (no direct store
 access). Positional [id]/[kind] still work; flags reach the rest:
