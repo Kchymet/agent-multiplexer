@@ -5,6 +5,7 @@
 package panespec
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -63,13 +64,9 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 // cwd alone does not. The codex binary is taken from the agent's resolved command
 // so AMUX_CODEX_BIN and PATH resolution stay identical.
 //
-// It also RETURNS the endpoint it chose: a per-session Unix socket in the launch
-// dir's private `.amux/` directory — which the scope already binds read-write at
-// the same absolute path inside and out, so the app-server can create the listener
-// and amux (and a native `--remote` peer) can dial it, with no extra mount and no
-// dependence on $XDG_RUNTIME_DIR (which scope binds read-only). unix-over-WebSocket
-// is also the transport the App Server accepts with an Origin header (its loopback
-// TCP listener rejects Origin — see internal/codexapp/wsconn.go).
+// The returned Unix-WebSocket endpoint lives in a dedicated socket tree. Every
+// pane hides that tree, then mounts only its own session's socket directory. A
+// read-only mount of a sibling's socket would still permit connecting to it.
 func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint string, err error) {
 	s, err := sessionFor(agentID)
 	if err != nil {
@@ -79,19 +76,27 @@ func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint 
 	if err != nil {
 		return "", nil, nil, "", err
 	}
-	sock := appServerSocketPath(dir)
-	_ = os.MkdirAll(filepath.Dir(sock), 0o700)
-	_ = os.Remove(sock) // a stale socket from a prior run blocks the listener bind
+	sock := appServerSocketPath(s.ID)
+	if err := os.MkdirAll(filepath.Dir(sock), 0700); err != nil {
+		return "", nil, nil, "", fmt.Errorf("create App Server socket directory: %w", err)
+	}
+	// Supervisor.Start removes stale sockets under Manager.Ensure's startup lock.
+	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
 	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), endpoint, nil
 }
 
-// appServerSocketPath is the per-session App Server socket, kept in the launch
-// dir's `.amux/` (rw-bound in the scope, private to the session) with a short name
-// so the absolute path stays within the OS sun_path limit (~108 bytes).
-func appServerSocketPath(dir string) string {
-	return filepath.Join(dir, ".amux", "cx.sock")
+// The root stays outside session worktrees, including coordinator directories
+// that contain their members. Masking it once also hides sockets created after
+// a pane has started; enumerating today's siblings would leave that race open.
+func appServerSocketRoot() string { return filepath.Join(core.DataDir(), "cx") }
+
+func appServerSocketPath(sessionID string) string {
+	// Fixed-length, filesystem-safe keys also keep Unix paths short. The root is
+	// already scoped by amux's data directory, including isolated daemon instances.
+	key := sha256.Sum256([]byte(sessionID))
+	return filepath.Join(appServerSocketRoot(), fmt.Sprintf("%x", key[:8]), "cx.sock")
 }
 
 // AppServerEndpoint returns the endpoint AppServerCommand would choose for a
@@ -101,7 +106,7 @@ func AppServerEndpoint(agentID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "unix://" + appServerSocketPath(s.Dir), nil
+	return "unix://" + appServerSocketPath(s.ID), nil
 }
 
 // AttachCommand resolves the launch spec for a native Codex CLI attaching to the
@@ -288,6 +293,25 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 	args = append(args, "--chdir", dir)
 	for _, b := range configBinds(tab, s, home) {
 		args = append(args, b...)
+	}
+	// Create the mountpoint before the read-only data bind is applied. If this
+	// fails, keep the mask in argv so bubblewrap fails closed rather than exposing it.
+	_ = os.MkdirAll(appServerSocketRoot(), 0700)
+	// Apply after all other mounts so a broader runtime/config/workgroup bind
+	// cannot reveal peer sockets again. Only this session's directory is restored.
+	socketRoot := appServerSocketRoot()
+	args = append(args, "--tmpfs", socketRoot)
+	// XDG_DATA_HOME may be a symlink. A runtime subtree bind can expose the
+	// canonical path too, so hide that alias before restoring the own endpoint.
+	if canonical, err := filepath.EvalSymlinks(socketRoot); err == nil && canonical != socketRoot {
+		args = append(args, "--tmpfs", canonical)
+	}
+	if s.ID != "" {
+		ownSockets := filepath.Dir(appServerSocketPath(s.ID))
+		// Mount the directory even before the server exists, so a terminal opened
+		// first can attach when its session starts the server later.
+		_ = os.MkdirAll(ownSockets, 0700)
+		args = append(args, "--bind", ownSockets, ownSockets)
 	}
 	args = append(args, "--")
 	return append(args, launchArgv...)

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,11 +69,20 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 	t.Logf("endpoint: %s", endpoint)
 	t.Logf("sandboxed argv: %s", strings.Join(argv, " "))
 
-	// The endpoint must live inside the resolved launch dir's private .amux/ (which
-	// scope binds read-write), NOT under $XDG_RUNTIME_DIR (/run, bound read-only).
-	if !strings.HasPrefix(endpoint, "unix://"+dir+"/") {
-		t.Fatalf("endpoint %q is not inside the bound launch dir %q", endpoint, dir)
+	// The endpoint is outside shared worktrees and only its own parent gets a
+	// writable bind after the dedicated socket root is masked.
+	expected, err := panespec.AppServerEndpoint("sbx")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if endpoint != expected || strings.HasPrefix(endpoint, "unix://"+dir+"/") {
+		t.Fatalf("unexpected private endpoint: got %q expected %q outside %q", endpoint, expected, dir)
+	}
+	socketDir := filepath.Dir(strings.TrimPrefix(endpoint, "unix://"))
+	if !containsArg(argv, socketDir) {
+		t.Fatalf("own socket directory not mounted: %v", argv)
+	}
+
 	// It must actually be sandboxed (bwrap-wrapped) and carry the real codex + the
 	// endpoint — otherwise this proves nothing about OS isolation.
 	if !strings.Contains(argv[0], "bwrap") {
@@ -88,6 +98,20 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	// Cleanup belongs to Supervisor.Start, not command construction. Leave a real
+	// stale Unix socket behind and require the sandboxed server to replace it.
+	stalePath := strings.TrimPrefix(endpoint, "unix://")
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: stalePath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatal(err)
+	}
 	sup := codexapp.New(codexapp.Config{SessionID: "sbx", Dir: dir, Env: env, Endpoint: endpoint})
 	if err := sup.Start(ctx, argv); err != nil {
 		t.Fatalf("sandboxed launch (exec bwrap-wrapped codex + WS handshake): %v", err)
