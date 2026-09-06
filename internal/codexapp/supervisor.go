@@ -145,6 +145,15 @@ func New(cfg Config) *Supervisor {
 	}
 }
 
+// SetModel changes the model applied to future amux-originated turns. Native
+// clients can switch a shared thread's model; the daemon observes that choice in
+// Codex's rollout and calls this so remote steering does not switch it back.
+func (s *Supervisor) SetModel(model string) {
+	s.mu.Lock()
+	s.cfg.Model = strings.TrimSpace(model)
+	s.mu.Unlock()
+}
+
 // AppServerArgv is the inner argv amux launches to run the background App Server:
 // `codex app-server --listen <endpoint>` (docs: `--listen ws://…`; the endpoint may
 // also be `unix://…`). It is the command *before* the sandbox wrapper — the daemon
@@ -573,6 +582,7 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	s.ownTurn = ""
 	s.earlyTerm = map[string]*turnResult{}
 	threadID := s.threadID
+	model := s.cfg.Model
 	s.mu.Unlock()
 
 	// turn_start / turn_end are emitted from the OBSERVED turn/started + turn/completed
@@ -582,8 +592,8 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 		"threadId": threadID,
 		"input":    inputBlocks(text),
 	}
-	if s.cfg.Model != "" {
-		params["model"] = s.cfg.Model
+	if model != "" {
+		params["model"] = model
 	}
 	res, err := s.rpc.call(ctx, "turn/start", params)
 	if err != nil {

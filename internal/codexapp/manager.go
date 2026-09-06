@@ -54,6 +54,14 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 	return s, ok
 }
 
+// SetModel updates a live supervisor's default for subsequent turns. It is a
+// no-op for sessions not currently under structured control.
+func (m *Manager) SetModel(sessionID, model string) {
+	if s, ok := m.Get(sessionID); ok {
+		s.SetModel(model)
+	}
+}
+
 // Ensure returns the supervisor for a session, starting one if none is live. It
 // fills the durable parts of the Config from the persisted identity (endpoint and,
 // when known, the thread to resume) and the per-session event log, launches the

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -43,6 +45,10 @@ func cmdAgent(args []string) error {
 		// the transcript never records (identity and tool come from the hook JSON on
 		// stdin).
 		return cmdAgentPermission(args[1:])
+	case "model":
+		// Claude status-line binding: record the current model, then faithfully
+		// forward the same payload to any status-line command amux wrapped.
+		return cmdAgentModel(args[1:])
 	case "sessions":
 		// List every agent session on the machine (Claude Code + Codex) so an agent
 		// can reason across conversations (not scoped to the caller — shared context).
@@ -82,6 +88,9 @@ usage: amux agent <command>
                      request | allow | deny | clear. amux wires this into
                      Claude's settings.json; the journal is what gives a remote
                      orchestrator a request_id to answer.
+  model [--statusline]  report the runtime's current model. Claude's installed
+                     status-line wrapper invokes this automatically and preserves
+                     any pre-existing status-line command.
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
   done               report the task complete: archive this agent off the active
@@ -96,6 +105,48 @@ Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned. Per-agent identity (authn +
 authz) is planned to properly scope every command in this namespace.
 `)
+}
+
+// cmdAgentModel consumes Claude Code's status-line JSON, records its current
+// model, and optionally runs the status-line command that amux wrapped. A status
+// line is the only Claude callback whose payload follows `/model` changes; normal
+// hooks carry the model only at SessionStart. Like all self-reporting commands,
+// failures are swallowed so telemetry can never interrupt the runtime.
+func cmdAgentModel(args []string) error {
+	var forward64 string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--forward-base64" && i+1 < len(args):
+			forward64 = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--forward-base64="):
+			forward64 = strings.TrimPrefix(args[i], "--forward-base64=")
+		}
+	}
+
+	var input []byte
+	if stdinPiped() {
+		input, _ = io.ReadAll(os.Stdin)
+	}
+	var payload claudecfg.StatusLinePayload
+	_ = json.Unmarshal(input, &payload)
+	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
+	_ = core.WriteRuntimeModel(sessionID, payload.Model.ID)
+
+	if forward64 == "" {
+		return nil
+	}
+	forward, err := base64.RawURLEncoding.DecodeString(forward64)
+	if err != nil || strings.TrimSpace(string(forward)) == "" {
+		return nil
+	}
+	cmd := exec.Command("sh", "-c", string(forward))
+	cmd.Stdin = strings.NewReader(string(input))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	_ = cmd.Run()
+	return nil
 }
 
 // cmdAgentStatus records the agent's current activity state for the daemon's

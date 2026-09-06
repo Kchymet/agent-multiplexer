@@ -57,7 +57,7 @@ One JSON object per line, same `wire` framing as all provider traffic.
    "state":"running","status":"running · 2 agents",
    "startedAt":1751500000,"archived":false},
   {"id":"a2","title":"idempotency","rootId":"a1","isRoot":false,
-   "section":"workgroups","repos":"api","mode":"task",
+   "section":"workgroups","repos":"api","mode":"task","model":"gpt-5.6-codex",
    "state":"waiting","status":"waiting · needs input",
    "startedAt":1751500100,"archived":false}
 ]}
@@ -74,7 +74,9 @@ One JSON object per line, same `wire` framing as all provider traffic.
   `workgroups | repos | detached | archived`; `state` ∈
   `idle | ready | waiting | running | unknown` (the attention ladder). `archived`
   is emitted only when true (JSON `omitempty`); an archived session also carries
-  `section:"archived"`.
+  `section:"archived"`. `model`, when present, is the runtime's currently
+  observed selection, including an in-session model switch (not merely the
+  launch-time default).
 - The daemon MAY redact sessions (e.g. publish only non-archived, or nothing
   at all while still advertising the feature) — inventory content is policy.
 

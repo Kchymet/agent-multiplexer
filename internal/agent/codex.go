@@ -45,6 +45,24 @@ func (codexHarness) Models() []string {
 func (h codexHarness) DefaultModel() string { return h.Models()[0] }
 func (codexHarness) PreferredModel() string { return codexcfg.PreferredModel() }
 
+// CurrentModel reads Codex's latest turn_context, which records the model chosen
+// for every turn and therefore reflects `/model` changes. Unlike Claude, Codex
+// exposes no command-hook or status-line callback.
+func (h codexHarness) CurrentModel(s store.Session) (string, bool) {
+	if path, ok := h.RuntimeTranscriptPath(s); ok {
+		return latestModelLine(path, codexModelLine)
+	}
+	// During a first run Codex has minted a rollout but amux has not adopted its
+	// uuid yet. The private home belongs only to this agent, so its newest rollout
+	// is an unambiguous fallback.
+	if _, private := h.Config(s); private {
+		if path, ok := h.home(s).LatestRolloutPath(); ok {
+			return latestModelLine(path, codexModelLine)
+		}
+	}
+	return "", false
+}
+
 // Argv builds Codex's launch argv. It defaults to autonomous operation, mirroring
 // claude's permission-mode convention: a sandbox unless the user opts out with
 // AMUX_CODEX_SANDBOX=none. Override the level with AMUX_CODEX_SANDBOX=

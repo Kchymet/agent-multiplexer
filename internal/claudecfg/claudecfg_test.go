@@ -2,9 +2,11 @@ package claudecfg
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,10 +189,11 @@ func TestInstallHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallHooksIn(dir, "/opt/amux"); err != nil {
+	homeDir := t.TempDir()
+	if err := InstallHooksIn(dir, homeDir, "/opt/amux"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallHooksIn(dir, "/opt/amux"); err != nil { // reinstall: must not stack
+	if err := InstallHooksIn(dir, homeDir, "/opt/amux"); err != nil { // reinstall: must not stack
 		t.Fatal(err)
 	}
 
@@ -266,11 +269,41 @@ func TestInstallHooksPreservesTUIOverride(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"tui":"default"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallHooksIn(dir, "/opt/amux"); err != nil {
+	if err := InstallHooksIn(dir, t.TempDir(), "/opt/amux"); err != nil {
 		t.Fatal(err)
 	}
 	if got := readSetting(t, path, "tui"); got != "default" {
 		t.Errorf("tui = %q, want %q (user override must survive)", got, "default")
+	}
+}
+
+func TestInstallHooksWrapsInheritedStatusLine(t *testing.T) {
+	dir := t.TempDir()
+	homeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(homeDir, "settings.json"), []byte(`{
+		"statusLine":{"type":"command","command":"printf 'model: '; jq -r .model.display_name","padding":2}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooksIn(dir, homeDir, "/old/amux"); err != nil {
+		t.Fatal(err)
+	}
+	// A reinstall from a newer binary must replace, not nest, the wrapper.
+	if err := InstallHooksIn(dir, homeDir, "/new/amux"); err != nil {
+		t.Fatal(err)
+	}
+	root := readRoot(t, ProjectSettingsLocalPath(dir))
+	status, _ := root["statusLine"].(map[string]any)
+	command, _ := status["command"].(string)
+	if !strings.HasPrefix(command, "/new/amux"+modelStatusLineMarker) || strings.Contains(command, "/old/amux") {
+		t.Fatalf("statusLine command = %q; want one wrapper at the new path", command)
+	}
+	downstream, ok := unwrapModelStatusLine(command)
+	if !ok || downstream != "printf 'model: '; jq -r .model.display_name" {
+		t.Fatalf("wrapped command = %q, %v", downstream, ok)
+	}
+	if fmt.Sprint(status["padding"]) != "2" {
+		t.Errorf("status-line options were not preserved: %+v", status)
 	}
 }
 

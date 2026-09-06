@@ -41,6 +41,19 @@ func (claudeHarness) Models() []string {
 func (h claudeHarness) DefaultModel() string { return h.Models()[0] }
 func (claudeHarness) PreferredModel() string { return claudecfg.PreferredModel() }
 
+// CurrentModel prefers Claude's live status-line report (updated immediately by
+// `/model`) and falls back to the latest assistant transcript entry for sessions
+// launched before amux installed that callback.
+func (h claudeHarness) CurrentModel(s store.Session) (string, bool) {
+	if report, ok := core.RuntimeModel(s.ClaudeID); ok {
+		return report.Model, true
+	}
+	if path, ok := h.RuntimeTranscriptPath(s); ok {
+		return latestModelLine(path, claudeModelLine)
+	}
+	return "", false
+}
+
 // Argv builds Claude Code's launch argv. It defaults to the safe auto-accept
 // permission mode (a classifier blocks escalations — NOT
 // --dangerously-skip-permissions); override with AMUX_PERMISSION_MODE=
@@ -170,7 +183,7 @@ func copyTree(src, dst string) error {
 // into a worktree), git-exclude the file so it never dirties the tree.
 func (h claudeHarness) PrepareLaunch(s store.Session, dir string) {
 	_ = h.home(s).TrustDir(dir)
-	if err := claudecfg.InstallHooksIn(dir, core.InstalledBinPath()); err == nil {
+	if err := claudecfg.InstallHooksIn(dir, h.home(s).Dir, core.InstalledBinPath()); err == nil {
 		if git.IsGitRepo(context.Background(), dir) {
 			_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
 		}

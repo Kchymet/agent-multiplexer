@@ -267,6 +267,13 @@ func (d *DB) SetName(id, name string) error {
 	return err
 }
 
+// SetModel updates the model amux will display and pass on the next launch. The
+// runtime-observation path uses this after an in-session model switch.
+func (d *DB) SetModel(id, model string) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET model=? WHERE id=?`, model, id)
+	return err
+}
+
 // SetClaudeID updates a session's pinned conversation id (Claude's --session-id
 // or Codex's adopted rollout uuid).
 func (d *DB) SetClaudeID(id, claudeID string) error {

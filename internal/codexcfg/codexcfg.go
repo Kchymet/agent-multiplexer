@@ -208,6 +208,29 @@ func (h Home) LatestRolloutTime() (time.Time, bool) {
 	return newest, ok
 }
 
+// LatestRolloutPath is the most recently modified rollout in this home. It is
+// safe as a session fallback only for an agent's private home, whose rollouts all
+// belong to that agent; callers must not attribute the user's shared newest file
+// to an arbitrary session.
+func (h Home) LatestRolloutPath() (string, bool) {
+	var newestPath string
+	var newest time.Time
+	_ = filepath.WalkDir(h.sessionsRoot(), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if _, ok := rolloutUUID(d.Name()); !ok {
+			return nil
+		}
+		info, err := d.Info()
+		if err == nil && (newestPath == "" || info.ModTime().After(newest)) {
+			newestPath, newest = path, info.ModTime()
+		}
+		return nil
+	})
+	return newestPath, newestPath != ""
+}
+
 // NewRolloutPath builds a fresh, plausible rollout path for uuid under today's
 // sessions/YYYY/MM/DD directory, following Codex's rollout-<timestamp>-<uuid>
 // naming. amux uses it to place a gap-filled transcript where `codex resume

@@ -149,6 +149,11 @@ func Default(self string) *Daemon {
 		}
 		return ""
 	})
+	ws.SetModelObserved(func(id, kind, model string) {
+		if kind == "codex" && d.codex != nil {
+			d.codex.SetModel(id, model)
+		}
+	})
 	// Let the engine defer terminating a mid-turn agent on graceful shutdown until
 	// it is safe. The probe closes over d, so it must be set after d is built.
 	eng.SetActivity(d.instanceActivity)

@@ -44,6 +44,9 @@ type Harness interface {
 	// the CLI's own config), or "" when they haven't set one — callers fall back
 	// to DefaultModel.
 	PreferredModel() string
+	// CurrentModel observes the model the running conversation actually selected.
+	// It differs from the stored launch preference after an in-session `/model`.
+	CurrentModel(store.Session) (string, bool)
 
 	// Argv builds the absolute launch argv (with an optional model override and
 	// trailing args). The launch binary is overridable via AMUX_<KIND>_BIN.
@@ -291,10 +294,11 @@ func mergeModels(lists ...[]string) []string {
 // value nothing can edit does.
 type noopHarness struct{ kind string }
 
-func (n noopHarness) Kind() string         { return n.kind }
-func (noopHarness) Models() []string       { return nil }
-func (noopHarness) DefaultModel() string   { return "" }
-func (noopHarness) PreferredModel() string { return "" }
+func (n noopHarness) Kind() string                            { return n.kind }
+func (noopHarness) Models() []string                          { return nil }
+func (noopHarness) DefaultModel() string                      { return "" }
+func (noopHarness) PreferredModel() string                    { return "" }
+func (noopHarness) CurrentModel(store.Session) (string, bool) { return "", false }
 func (n noopHarness) Argv(string, ...string) ([]string, error) {
 	return nil, &unknownKindError{n.kind}
 }

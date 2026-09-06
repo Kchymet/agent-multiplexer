@@ -210,6 +210,13 @@ account (`additionalModelOptionsCache` in `~/.claude.json`). The model set in ea
 CLI's own config (`model` in `config.toml` / `.claude.json`) is always offered and
 pre-filled. Run the CLI once outside amux to refresh what it caches.
 
+An in-session `/model` switch is reconciled back into amux automatically. Claude
+reports its live `model.id` through an amux-installed status-line wrapper (which
+forwards any status line you already configured unchanged); Codex records the
+selection in each rollout `turn_context`, which the daemon observes. The rail,
+the next resume, and Codex App Server turns then use the newly selected model
+rather than the model chosen when the session was created.
+
 ## Client/server usage
 
 ```sh

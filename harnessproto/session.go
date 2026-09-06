@@ -13,6 +13,7 @@ type Session struct {
 	Source    string `json:"source"`             // claude | hermes | workspace
 	Kind      string `json:"kind"`               // agent kind, e.g. claude
 	Mode      string `json:"mode,omitempty"`     // task (short) | loop (long)
+	Model     string `json:"model,omitempty"`    // runtime's current model (updated after an in-session switch)
 	RootID    string `json:"rootId,omitempty"`   // parent root for sub-sessions
 	IsRoot    bool   `json:"isRoot,omitempty"`   // true => a root container row
 	Repos     string `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
