@@ -250,7 +250,7 @@ func (m *model) renderRow(i int, s core.Session) string {
 	}
 	mark := " "
 	if s.ID == m.attached {
-		mark = "▸" // currently embedded
+		mark = "▌" // open session; keep arrows for disclosure and circles for activity
 	}
 	icon := glyph(s)
 	if container(&s) {
