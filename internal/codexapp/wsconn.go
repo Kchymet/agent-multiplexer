@@ -69,11 +69,9 @@ func dialWS(ctx context.Context, endpoint string) (msgConn, error) {
 		if !isLoopbackHost(u.Hostname()) {
 			return nil, fmt.Errorf("codexapp: refusing non-loopback ws:// endpoint %q (use wss:// for cross-machine)", endpoint)
 		}
-		network, addr = "tcp", u.Host
-		wsURL = endpoint
+		network, addr, wsURL = "tcp", u.Host, wsURLWithPath(u)
 	case "wss":
-		network, addr = "tcp", u.Host
-		wsURL = endpoint
+		network, addr, wsURL = "tcp", u.Host, wsURLWithPath(u)
 	default:
 		return nil, fmt.Errorf("codexapp: unsupported endpoint scheme %q", u.Scheme)
 	}
@@ -99,6 +97,13 @@ func dialWS(ctx context.Context, endpoint string) (msgConn, error) {
 		_ = raw.Close()
 		return nil, fmt.Errorf("codexapp: ws config: %w", err)
 	}
+	// NOTE (verified against Codex 0.153.4): the App Server's UNIX WebSocket listener
+	// tolerates an Origin header, but its loopback TCP listener rejects ANY Origin
+	// with 403 (DNS-rebinding protection). golang.org/x/net/websocket always sends
+	// Origin (and panics if it is nil), so this client works with unix:// endpoints —
+	// amux's default — and with Origin-accepting ws servers, but not codex's loopback
+	// ws listener. Cross-host wss would need an Origin-omitting client or a server
+	// Origin allowlist (documented on AGE-177).
 	if dl, ok := ctx.Deadline(); ok {
 		_ = raw.SetDeadline(dl)
 	}
@@ -119,6 +124,38 @@ func tlsHandshakeCtx(ctx context.Context, c *tls.Conn) error {
 		defer c.SetDeadline(time.Time{})
 	}
 	return c.HandshakeContext(ctx)
+}
+
+// LoopbackEndpoint allocates a free loopback TCP port and returns a
+// `ws://127.0.0.1:<port>` endpoint. This is the default endpoint for a supervised
+// App Server: the amux sandbox (panespec.scope) shares the network namespace but
+// read-only-binds /run and gives no writable, short, stable filesystem path for a
+// per-session unix socket, so a loopback port is reachable across the bwrap
+// boundary without any mount gymnastics or the 108-byte sun_path limit. A unix://
+// endpoint stays available via configuration for setups with a bindable socket dir.
+//
+// The port is chosen by binding :0 and closing; a tiny TOCTOU window remains (the
+// server rebinds it), and a lost race surfaces as a Start error the caller retries.
+func LoopbackEndpoint() (string, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("codexapp: allocate loopback port: %w", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return fmt.Sprintf("ws://127.0.0.1:%d", port), nil
+}
+
+// wsURLWithPath returns u as a ws/wss URL with a non-empty path. The App Server's
+// WebSocket handler is at "/", and x/net/websocket sends the URL's path as the
+// HTTP request-URI verbatim — an empty path yields a malformed request line the
+// server rejects (400 → "bad status"). So default an empty path to "/".
+func wsURLWithPath(u *url.URL) string {
+	v := *u
+	if v.Path == "" {
+		v.Path = "/"
+	}
+	return v.String()
 }
 
 // isLoopbackHost reports whether h names the loopback interface, so a ws:// (no
