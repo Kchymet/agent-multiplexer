@@ -267,11 +267,16 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 	// ~/.local/share/amux/repos, so git needs to read it), and finally the agent's
 	// own worktree read-write on top so it can edit its files.
 	args = append(args, "--tmpfs", home)
-	// The pane binary itself, if it lives under $HOME (e.g. claude under ~/.nvm),
-	// would be hidden by the tmpfs — bind its subtree read-only so it still runs.
-	// Mount it BEFORE the data/worktree/git mounts: a native Claude install under
-	// ~/.local otherwise hides those writable mounts behind a read-only parent.
-	if sub := homeSubtree(home, argv[0]); sub != "" {
+	// A launcher may resolve into a different home subtree (for example Codex's
+	// ~/.local/bin launcher into ~/.codex/packages). Bind the resolved package or
+	// executable and run it directly, without exposing the launcher subtree too.
+	// Otherwise retain the normal runtime subtree bind, e.g. Claude under ~/.nvm.
+	// These mounts precede the writable data/worktree/git mounts.
+	launchArgv := argv
+	if real, root := resolvedInstallRoot(home, argv[0]); root != "" {
+		args = append(args, "--ro-bind-try", root, root)
+		launchArgv = append([]string{real}, argv[1:]...)
+	} else if sub := homeSubtree(home, argv[0]); sub != "" {
 		args = append(args, "--ro-bind-try", sub, sub)
 	}
 	args = append(args, "--ro-bind-try", core.DataDir(), core.DataDir())
@@ -285,7 +290,31 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 		args = append(args, b...)
 	}
 	args = append(args, "--")
-	return append(args, argv...)
+	return append(args, launchArgv...)
+}
+
+// resolvedInstallRoot handles a launcher symlink whose target is in a different
+// home subtree. A nested package's bin directory needs its package root (sibling
+// resources may be required). Other layouts bind only the executable: never add
+// a mount of the whole home or top-level config subtree for a launcher target.
+// Running the resolved path also avoids missing intermediate symlinks in scope.
+func resolvedInstallRoot(home, p string) (real, root string) {
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil || r == p {
+		return "", ""
+	}
+	subtree := homeSubtree(home, r)
+	if subtree == "" || subtree == homeSubtree(home, p) {
+		return "", ""
+	}
+	dir := filepath.Dir(r)
+	if filepath.Base(dir) == "bin" {
+		pkg := filepath.Dir(dir)
+		if pkg != filepath.Clean(home) && pkg != subtree {
+			return r, pkg
+		}
+	}
+	return r, r
 }
 
 // configBinds is the minimal per-tool config/state mounted into the scope so the
