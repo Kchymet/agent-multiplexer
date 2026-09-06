@@ -94,20 +94,19 @@ func TestSmokeRealAppServer(t *testing.T) {
 	}
 }
 
-// TestSmokeEmptyThreadResume proves the empty-thread resume fallback against the
-// real binary and, crucially, that it does not split identities or discard
-// conversation: a pinned thread that never ran a turn has no rollout, so
-// `thread/resume` fails ("no rollout found") and the supervisor adopts a NEW thread
-// id — which becomes the single source of truth (ThreadID/Identity), so every
-// client (web via amux, native via AttachCommand) uses the same id. No conversation
-// is lost because the resumed thread was empty.
+// TestSmokeEmptyThreadResume requires a freshly initialized thread to survive a
+// real App Server restart without a model turn or replacement conversation.
 func TestSmokeEmptyThreadResume(t *testing.T) {
 	bin := requireSmokeCodex(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// 1) Fresh server → thread T1, never run a turn (so no rollout is written).
+	// 1) Fresh server persists thread T1 without a model turn.
 	sandbox := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(sandbox, "codex-home"))
+	if err := os.MkdirAll(os.Getenv("CODEX_HOME"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	endpoint := "unix://" + filepath.Join(sandbox, "a.sock")
 	s1 := New(Config{SessionID: "empty", Bin: bin, Dir: sandbox, Endpoint: endpoint})
 	if err := s1.Start(ctx, nil); err != nil {
@@ -119,12 +118,11 @@ func TestSmokeEmptyThreadResume(t *testing.T) {
 		t.Fatal("empty thread id from s1")
 	}
 
-	// 2) A fresh supervisor pinned to resume T1. The real binary returns "no rollout
-	// found"; the supervisor must fall back to a new thread rather than fail.
+	// 2) Restart before any turn: the empty persisted thread must retain its ID.
 	endpoint2 := "unix://" + filepath.Join(sandbox, "b.sock")
 	s2 := New(Config{SessionID: "empty", Bin: bin, Dir: sandbox, Endpoint: endpoint2, ResumeThreadID: t1})
 	if err := s2.Start(ctx, nil); err != nil {
-		t.Fatalf("start s2 (resume of empty thread must fall back, not fail): %v", err)
+		t.Fatalf("resume persisted empty thread: %v", err)
 	}
 	defer s2.Close()
 	t2 := s2.ThreadID()
@@ -132,10 +130,11 @@ func TestSmokeEmptyThreadResume(t *testing.T) {
 	if t2 == "" {
 		t.Fatal("no thread id after empty-thread resume fallback")
 	}
-	if t2 == t1 {
-		t.Logf("NOTE: resume of the empty thread %s succeeded (binary tolerated it); id preserved", t1)
-	} else {
-		t.Logf("empty-thread resume fell back: %s → %s (new id adopted)", t1, t2)
+	if t2 != t1 {
+		t.Fatalf("restart replaced the empty thread: %s -> %s", t1, t2)
+	}
+	if !s2.Identity().Resumable {
+		t.Fatal("resumed empty thread lost resumability")
 	}
 	// Single source of truth: Identity and ThreadID agree, so a native attach
 	// (AttachCommand uses ThreadID) and the web (via the persisted Identity) target
@@ -160,7 +159,14 @@ func TestSmokeTurnAfterResumeMiss(t *testing.T) {
 	if err := s1.Start(ctx, nil); err != nil {
 		t.Fatalf("s1: %v", err)
 	}
-	t1 := s1.ThreadID()
+	raw, err := s1.rpc.call(ctx, "thread/start", map[string]any{"approvalPolicy": defaultApprovalPolicy, "sandbox": defaultSandbox})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1 := threadIDFromResult(raw)
+	if t1 == "" {
+		t.Fatal("unpersisted thread fixture returned no ID")
+	}
 	_ = s1.Close()
 
 	// Resume it (miss → fallback), then run the first turn.

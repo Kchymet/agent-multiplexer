@@ -103,12 +103,10 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 	return sup, nil
 }
 
-// resumeThreadFor returns the thread id to resume for a session, or "" to start
-// fresh. It resumes ONLY a persisted thread that has already run a turn
-// (Resumable): attempting resume on a pinned-but-never-run thread returns "no
-// rollout found" and can poison that thread's first turn (AGE-198), so a
-// not-yet-resumable session starts fresh instead. The handshake keeps an error
-// fallback for the rare case a rollout was pruned after being marked resumable.
+// resumeThreadFor returns the thread to resume, or "" for an older identity
+// known never to have been persisted. Fresh threads are now persisted by the
+// handshake before their first turn. Legacy identities without a version still
+// attempt resume to avoid discarding conversations; a missing rollout falls back.
 func resumeThreadFor(sessionID string) string {
 	id, ok := LoadIdentity(sessionID)
 	if !ok || id.ThreadID == "" {
@@ -116,7 +114,7 @@ func resumeThreadFor(sessionID string) string {
 	}
 	switch {
 	case id.Resumable:
-		// Known to have a rollout (ran a turn, or was previously resumed).
+		// Known to have a rollout (initialized, ran a turn, or resumed).
 		return id.ThreadID
 	case id.Version == 0:
 		// Legacy identity persisted before Resumable existed — it may hold a real
