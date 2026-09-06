@@ -56,7 +56,11 @@ memory (`.amux/claude/CLAUDE.md`), which survives regeneration.
 
 - The console is synthetic (never a store row) and cannot be deleted.
 - A workgroup's coordinator is the root row itself: creating the workgroup
-  creates it (sandbox dir + pinned conversation); a root that predates default
+  creates it (sandbox dir + pinned conversation) and starts its runtime, even
+  for an empty workgroup or a CLI/remote creation with no UI attached. Opening
+  its rail row attaches to that running session. It starts ready for input;
+  no goal or management task is submitted automatically. The optional creation
+  prompt still belongs to the first member agent. A root that predates default
   sessions gets both the first time it is resolved. Deleting the workgroup
   removes the coordinator's own files and leaves any agent sandbox that still
   lives under the container (a moved-out agent) untouched. Moving the last
