@@ -880,6 +880,22 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 		Reason   string `json:"reason"`
 	}
 	_ = json.Unmarshal(params, &p)
+
+	// Ownership guard (ROOT foreign-approval audit / AGE-179 harness parity): an
+	// approval names the thread it belongs to, and only our pinned thread's approvals
+	// are answerable through this supervisor. A foreign thread's request belongs to
+	// another client/session, and a missing thread is not implicitly ours — neither may
+	// become a local OpenApprovals entry a `permission` verb could answer, or reach the
+	// event stream. Validate ownership BEFORE registering or emitting. A same-thread
+	// request still registers even if it is passive/early (before we track a turn): the
+	// guard is on thread, not turn.
+	s.mu.Lock()
+	pinned := s.threadID
+	s.mu.Unlock()
+	if p.ThreadID == "" || pinned == "" || p.ThreadID != pinned {
+		return
+	}
+
 	key := idKey(id)
 
 	tool, action := "command_execution", p.Command
@@ -888,15 +904,21 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 	}
 
 	// Register BEFORE emitting so a consumer that Resolves the instant it sees the
-	// event always finds the outstanding request (no emit/register race).
-	s.approvals.register(&pendingApproval{
+	// event always finds the outstanding request (no emit/register race). Emit ONLY on
+	// the first registration: a re-sent or replayed request whose id is still pending
+	// (or already resolved) must not raise a second permission_request — that would
+	// reopen an unanswerable prompt or double the decision flow (ROOT approval-replay
+	// audit). register is atomic, so exactly one concurrent duplicate emits.
+	if !s.approvals.register(&pendingApproval{
 		rawID:    append(json.RawMessage(nil), id...),
 		key:      key,
 		method:   method,
 		threadID: p.ThreadID,
 		turnID:   p.TurnID,
 		itemID:   p.ItemID,
-	})
+	}) {
+		return
+	}
 
 	s.emit(harnessproto.RuntimeEvent{
 		Type:      harnessproto.TypePermissionRequest,
