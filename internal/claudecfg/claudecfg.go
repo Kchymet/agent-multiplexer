@@ -82,7 +82,7 @@ const CredentialsFile = ".credentials.json"
 // projectsRoot is the user home's transcript tree (package-level convenience).
 func projectsRoot() string { return User().ProjectsRoot() }
 
-// munge maps an absolute path to Claude Code's project-dir name ('/' and '.'
+// munge maps an absolute path to Claude Code's project-dir name ('/', '.', and '_'
 // become '-'), e.g. /home/u/.local/x -> -home-u--local-x.
 func munge(cwd string) string {
 	abs, err := filepath.Abs(cwd)
@@ -90,7 +90,7 @@ func munge(cwd string) string {
 		abs = cwd
 	}
 	return strings.Map(func(r rune) rune {
-		if r == '/' || r == '.' {
+		if r == '/' || r == '.' || r == '_' {
 			return '-'
 		}
 		return r
@@ -106,16 +106,14 @@ func ProjectDirName(cwd string) string { return munge(cwd) }
 // MungeDrift detects divergence between Claude Code's project-dir naming scheme
 // and amux's copy of it: for every discovered transcript whose originating cwd we
 // can read, it flags any whose project-dir name isn't derivable from that cwd (or
-// any ancestor of it) by amux's path munge. A non-empty result means an upstream
-// Claude change broke the '/'/'.' → '-' scheme — resume, capture, and listing
-// would silently degrade — so the doctor probe surfaces it loudly instead of
-// best-effort silence.
+// any ancestor of it) by amux's path munge. A mismatch may mean the naming
+// convention changed or the transcript moved; resume and capture may be affected.
 //
 // The ancestor allowance matters: amux launches an agent in a dir and the agent
 // may cd into a repo worktree beneath it, so Claude's project dir (keyed to the
 // launch cwd) is munge(cwd) or munge of an ancestor — that's a normal cwd shift,
-// not scheme drift, and must not be flagged. Only a project dir that matches no
-// level is genuine munge drift. Transcripts with an unreadable cwd are skipped.
+// not scheme drift, and must not be flagged. Transcripts with an unreadable cwd
+// are skipped.
 func MungeDrift() []string { return User().MungeDrift() }
 
 // MungeDrift is the drift probe over this home's transcripts (see the
@@ -127,14 +125,14 @@ func (h Home) MungeDrift() []string {
 			continue
 		}
 		if !mungeMatchesAncestor(s.Cwd, s.Project) {
-			out = append(out, fmt.Sprintf("%s: stored under %q, not derivable from cwd %q by amux's path munge", s.ID, s.Project, s.Cwd))
+			out = append(out, fmt.Sprintf("session %s: transcript folder does not match its working directory\n      cwd: %s\n      transcript: %s", s.ID, s.Cwd, s.Path))
 		}
 	}
 	return out
 }
 
 // mungeMatchesAncestor reports whether project equals munge(cwd) or munge of any
-// ancestor directory of cwd — i.e. whether the '/'/'.' → '-' scheme still explains
+// ancestor directory of cwd — i.e. whether the path conversion still explains
 // where Claude stored the transcript, allowing for amux's launch-dir-vs-recorded-cwd
 // shift.
 func mungeMatchesAncestor(cwd, project string) bool {

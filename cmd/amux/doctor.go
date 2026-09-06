@@ -124,7 +124,7 @@ func cmdDoctor() error {
 	// Harness surface drift: each harness self-checks its load-bearing integration
 	// with an unversioned upstream CLI (Claude's project-dir path munge) and reports
 	// mismatches loudly, instead of resume/status/capture degrading in silence.
-	fmt.Println("\nHarness surface")
+	fmt.Println("\nAgent transcripts")
 	anyDrift := false
 	for _, h := range agent.Harnesses() {
 		findings := h.Doctor()
@@ -137,7 +137,10 @@ func cmdDoctor() error {
 		}
 	}
 	if !anyDrift {
-		fmt.Printf("  ✓ claude    project-dir path munge matches Claude's on-disk layout\n")
+		fmt.Printf("  ✓ claude    transcript folders match their working directories\n")
+	} else {
+		fmt.Println("  Resume or transcript capture may be affected. Check whether the working directory moved;")
+		fmt.Println("  otherwise report these paths as an amux compatibility issue. Keep the transcripts.")
 	}
 
 	// Sandbox config: each agent runs against a private copy of the user's harness
@@ -146,11 +149,15 @@ func cmdDoctor() error {
 	fmt.Println("\nSandbox config")
 	if !daemonUp {
 		fmt.Printf("  · agents    (start the daemon to compare config copies with your templates)\n")
-	} else if agents, edits := sandboxDriftSummary(); edits == 0 {
-		fmt.Printf("  ✓ agents    every agent's config copy matches your templates\n")
+	} else if agents, edits, err := sandboxDriftSummary(); err != nil {
+		fmt.Printf("  ⚠ agents    could not compare config copies: %v\n", err)
+	} else if edits == 0 {
+		fmt.Printf("  ✓ agents    no agent-side config differences awaiting review\n")
 	} else {
-		fmt.Printf("  ⚠ agents    %d agent%s made %d config edit%s — review: amux sandbox drift\n",
-			agents, plural(agents), edits, plural(edits))
+		fmt.Printf("  ⚠ agents    %d config file difference%s across %d agent%s — review: amux sandbox drift\n",
+			edits, plural(edits), agents, plural(agents))
+		fmt.Println("              Counts files per agent, not editing actions; harnesses can update their own config.")
+		fmt.Println("              Nothing is promoted automatically. Use `amux sandbox promote/reset <id> <path>` after review.")
 	}
 
 	// Browser: agents open links (gh --web, Claude's login) through $BROWSER, and
@@ -217,12 +224,17 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 		fmt.Printf("  ✓ agents    store and disk agree\n")
 		return
 	}
-	printCapped("worktree dir with no agent", orphanDirs, func(d string) string {
+	printCapped("agent directory not tracked by amux", orphanDirs, func(d string) string {
 		return filepath.Join(core.SessionsDir(), d)
 	})
-	printCapped("agent with no worktree dir", missingDirs, func(s string) string { return s })
-	printCapped("amux branch with no agent", orphanBranches, func(s string) string { return s })
-	fmt.Printf("  (leftovers from an interrupted delete/move; safe to remove by hand)\n")
+	printCapped("tracked agent missing its directory", missingDirs, func(s string) string { return s })
+	printCapped("branch not linked to a tracked agent", orphanBranches, func(s string) string { return s })
+	if len(missingDirs) > 0 {
+		fmt.Println("  Missing directories can prevent agents from resuming. Check moved/deleted paths with: amux workgroup ls")
+	}
+	if len(orphanDirs)+len(orphanBranches) > 0 {
+		fmt.Println("  Untracked items may contain work you want to keep. Inspect files and unmerged commits before removing them.")
+	}
 }
 
 // printCapped prints up to reconcileCap findings of one kind, then a "+N more"
@@ -232,7 +244,7 @@ func printCapped(label string, items []string, render func(string) string) {
 	const reconcileCap = 10
 	for i, it := range items {
 		if i == reconcileCap {
-			fmt.Printf("  ⚠ … and %d more %s\n", len(items)-reconcileCap, label+"(s)")
+			fmt.Printf("  ⚠ … and %d more (%d total): %s\n", len(items)-reconcileCap, len(items), label)
 			break
 		}
 		fmt.Printf("  ⚠ %s: %s\n", label, render(it))
@@ -266,7 +278,8 @@ func reconcile(sessionsDir string, roots []core.WorkgroupRow, disk []branchRef) 
 		}
 		agentEnts, _ := os.ReadDir(filepath.Join(sessionsDir, re.Name()))
 		for _, ae := range agentEnts {
-			if !ae.IsDir() {
+			// Root sessions keep their own config alongside child agent dirs.
+			if !ae.IsDir() || strings.HasPrefix(ae.Name(), ".") {
 				continue
 			}
 			seenDir[ae.Name()] = true
@@ -299,14 +312,18 @@ func reconcile(sessionsDir string, roots []core.WorkgroupRow, disk []branchRef) 
 	return orphanDirs, missingDirs, orphanBranches
 }
 
-// agentIDFromBranch extracts the agent id from an amux branch (amux/<root>-<agent>
+// agentIDFromBranch extracts the agent id from an amux branch (amux/<root>-<agent>[-<description>]
 // → <agent>), or "" for a legacy amux/<root> branch that names no agent. This lets
 // reconciliation match a branch to a live agent by id even when the session's
 // stored branch is blank.
 func agentIDFromBranch(branch string) string {
-	b := strings.TrimPrefix(branch, core.BranchPrefix)
-	if i := strings.LastIndex(b, "-"); i >= 0 {
-		return b[i+1:]
+	b, ok := strings.CutPrefix(branch, core.BranchPrefix)
+	if !ok {
+		return ""
+	}
+	if _, tail, ok := strings.Cut(b, "-"); ok {
+		id, _, _ := strings.Cut(tail, "-")
+		return id
 	}
 	return ""
 }

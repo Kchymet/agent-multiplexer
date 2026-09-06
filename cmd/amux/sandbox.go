@@ -231,17 +231,20 @@ func sandboxPath(args []string) error {
 	return nil
 }
 
-// sandboxDriftSummary is the doctor's one-line view: how many agents have edits
-// awaiting a decision. Best-effort — an unreachable daemon yields nothing.
-func sandboxDriftSummary() (agents, edits int) {
+// sandboxDriftSummary counts agent/path differences awaiting a decision, not
+// editing actions. Query or scan failures must not be reported as a clean check.
+func sandboxDriftSummary() (agents, edits int, err error) {
 	all, err := sandboxAgents("")
 	if err != nil {
-		return 0, 0
+		return 0, 0, err
 	}
 	for _, sa := range all {
 		n := 0
 		for _, spec := range sa.specs {
-			changes, _ := cfghome.Scan(spec)
+			changes, err := cfghome.Scan(spec)
+			if err != nil {
+				return 0, 0, fmt.Errorf("%s (%s): %w", sa.s.ID, spec.Kind, err)
+			}
 			n += cfghome.Pending(changes)
 		}
 		if n > 0 {
@@ -249,7 +252,7 @@ func sandboxDriftSummary() (agents, edits int) {
 			edits += n
 		}
 	}
-	return agents, edits
+	return agents, edits, nil
 }
 
 // plural is the "s" suffix for a count other than one.
