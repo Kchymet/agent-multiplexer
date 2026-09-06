@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"amux/internal/claudecfg"
 	"amux/internal/codexcfg"
@@ -61,6 +62,58 @@ func TestCodexActivity(t *testing.T) {
 	}
 	if got := h.Activity(s); got != engine.ActivityBusy {
 		t.Fatalf("fresh rollout Activity=%v, want Busy", got)
+	}
+}
+
+// TestCodexActivityUnpinned covers a codex session amux has no rollout uuid for —
+// every session's first run, since Codex mints its uuid and amux only adopts it at
+// the next launch. Freshness still has to come from the agent's private home,
+// otherwise the session reads Unknown for the whole run and the rail shows a
+// "running" that never clears.
+func TestCodexActivityUnpinned(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate HookStateDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
+	h := HarnessFor("codex")
+
+	s := store.Session{ID: "a1", Agent: "codex", Dir: t.TempDir()} // no ClaudeID
+	if got := h.Activity(s); got != engine.ActivityUnknown {
+		t.Fatalf("no rollout Activity=%v, want Unknown", got)
+	}
+
+	dir := filepath.Join(codexcfg.AgentHome(s.Dir), "sessions", "2026", "07", "02")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roll := filepath.Join(dir, "rollout-2026-07-02T10-00-00-55555555-5555-4555-8555-555555555555.jsonl")
+	if err := os.WriteFile(roll, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Activity(s); got != engine.ActivityBusy {
+		t.Fatalf("fresh rollout Activity=%v, want Busy", got)
+	}
+
+	// Idle at its prompt: the rollout stops being written and the session must
+	// fall back to Safe (the rail's "ready"), not stay busy forever.
+	stale := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(roll, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Activity(s); got != engine.ActivitySafe {
+		t.Fatalf("stale rollout Activity=%v, want Safe", got)
+	}
+
+	// With no private home the fallback would be reading strangers' rollouts out
+	// of the user's shared home, so a dirless session stays Unknown.
+	userRoll := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "07", "02")
+	if err := os.MkdirAll(userRoll, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userRoll,
+		"rollout-2026-07-02T10-00-00-66666666-6666-4666-8666-666666666666.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Activity(store.Session{ID: "a2", Agent: "codex"}); got != engine.ActivityUnknown {
+		t.Fatalf("dirless Activity=%v, want Unknown", got)
 	}
 }
 

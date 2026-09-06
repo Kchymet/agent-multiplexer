@@ -171,9 +171,9 @@ const codexBusyWindow = 45 * time.Second
 
 // Activity reports Codex's turn state. Codex exposes no hook signal, so this is
 // two-tier: first honor an explicit state if something recorded one in the same
-// store Claude's hooks use; otherwise fall back to the rollout file's mtime —
-// written within codexBusyWindow reads as Busy, an older rollout as Safe, and no
-// rollout at all as Unknown (never blocks a shutdown).
+// store Claude's hooks use; otherwise fall back to the rollout's mtime (see
+// rolloutWrite) — written within codexBusyWindow reads as Busy, an older rollout
+// as Safe, and no rollout at all as Unknown (never blocks a shutdown).
 func (h codexHarness) Activity(s store.Session) engine.Activity {
 	if rec, ok := core.HookState(s.ClaudeID); ok {
 		switch rec.State {
@@ -183,18 +183,43 @@ func (h codexHarness) Activity(s store.Session) engine.Activity {
 			return engine.ActivitySafe
 		}
 	}
-	path, ok := h.home(s).RolloutPath(s.ClaudeID)
+	mod, ok := h.rolloutWrite(s)
 	if !ok {
 		return engine.ActivityUnknown
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return engine.ActivityUnknown
-	}
-	if time.Since(fi.ModTime()) < codexBusyWindow {
+	if time.Since(mod) < codexBusyWindow {
 		return engine.ActivityBusy
 	}
 	return engine.ActivitySafe
+}
+
+// rolloutWrite is when this session's Codex last wrote its rollout — the pinned
+// uuid's file when amux has one, else the newest rollout in the agent's own
+// private home.
+//
+// The fallback is what keeps an unpinned session honest. Codex mints its uuid on
+// its first run and amux only adopts it at the *next* launch (PlanLaunch), so
+// throughout a first run ClaudeID is "" and there is no pinned file to stat. With
+// only the pinned lookup that reads as Unknown — which the rail renders as a
+// "running" that never clears, however long the agent sits idle at its prompt.
+// The agent's private home holds only its own rollouts (including any subagent
+// thread, whose writes are equally this session's activity), so its newest write
+// is exactly the signal wanted. A dirless session has no private home — only the
+// user's shared one, where a stranger's rollout would answer for this session —
+// so it stays Unknown rather than guess.
+func (h codexHarness) rolloutWrite(s store.Session) (time.Time, bool) {
+	home := h.home(s)
+	if path, ok := home.RolloutPath(s.ClaudeID); ok {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return fi.ModTime(), true
+	}
+	if _, private := h.Config(s); !private {
+		return time.Time{}, false
+	}
+	return home.LatestRolloutTime()
 }
 
 // RailState degrades honestly to running/ready via the coarse Activity signal —
