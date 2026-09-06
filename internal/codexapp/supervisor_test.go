@@ -143,6 +143,69 @@ func TestHandshakeInitialPromptFailure(t *testing.T) {
 	}
 }
 
+// A structured session has no Codex CLI invocation to consume amux's selected
+// model. Carry it on fresh/resumed threads and on the initial App Server turn.
+func TestHandshakeSelectedModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, resume, prompt string
+	}{
+		{name: "fresh with initial prompt", prompt: "fix the launch path"},
+		{name: "resume", resume: "thr_existing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := newMemPair()
+			fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}}
+			go fs.loop()
+			defer fs.close()
+
+			sup := New(Config{
+				SessionID: "selected", Endpoint: "unix:///tmp/x.sock",
+				ResumeThreadID: tc.resume, InitialPrompt: tc.prompt, Model: "gpt-5.6-sol",
+			})
+			defer sup.Close()
+			attach(t, sup, client)
+
+			method := "thread/start"
+			if tc.resume != "" {
+				method = "thread/resume"
+			}
+			thread, ok := fs.sawCall(method)
+			if !ok {
+				t.Fatalf("no %s call", method)
+			}
+			var threadParams struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(thread.Params, &threadParams); err != nil {
+				t.Fatal(err)
+			}
+			if threadParams.Model != "gpt-5.6-sol" {
+				t.Fatalf("%s model = %q, want gpt-5.6-sol", method, threadParams.Model)
+			}
+
+			turn, hasTurn := fs.sawCall("turn/start")
+			if tc.prompt == "" {
+				if hasTurn {
+					t.Fatal("resume unexpectedly started an initial turn")
+				}
+				return
+			}
+			if !hasTurn {
+				t.Fatal("initial prompt did not start a turn")
+			}
+			var turnParams struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(turn.Params, &turnParams); err != nil {
+				t.Fatal(err)
+			}
+			if turnParams.Model != "gpt-5.6-sol" {
+				t.Fatalf("turn/start model = %q, want gpt-5.6-sol", turnParams.Model)
+			}
+		})
+	}
+}
+
 func TestHandshakeResume(t *testing.T) {
 	client, server := newMemPair()
 	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}}
@@ -360,6 +423,7 @@ func TestPromptBracketsTurn(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()
 	defer sup.Close()
+	sup.cfg.Model = "gpt-5.6-sol"
 	attach(t, sup, client)
 
 	ctx := context.Background()
@@ -369,6 +433,16 @@ func TestPromptBracketsTurn(t *testing.T) {
 	go func() { done <- sup.Prompt(ctx, "hello") }()
 
 	waitCall(t, fs, "turn/start")
+	call, _ := fs.sawCall("turn/start")
+	var turnParams struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(call.Params, &turnParams); err != nil {
+		t.Fatal(err)
+	}
+	if turnParams.Model != "gpt-5.6-sol" {
+		t.Fatalf("turn/start model = %q, want gpt-5.6-sol", turnParams.Model)
+	}
 	// The observed turn lifecycle brackets the turn (any origin).
 	fs.pushTurnStarted()
 	// Streamed text field is `delta` (pinned 0.153.4 AgentMessageDeltaNotification), not `text`.

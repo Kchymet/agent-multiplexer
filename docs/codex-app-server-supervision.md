@@ -108,6 +108,11 @@ alone still fails with "missing source rollout". Neither operation starts a
 model turn. Errors abort startup instead of advertising an attachable session.
 Existing resumed threads retain their names.
 
+The session's selected model is sent on `thread/start` or `thread/resume` and on
+every amux-originated `turn/start`, so App Server control uses the same model as
+the PTY launch path. A fresh structured thread starts the session's initial
+prompt as its first turn; a resumed thread never replays that creation prompt.
+
 A successfully initialized thread is immediately `Resumable`, including before
 its first prompt. Restart resumes the same empty or populated conversation.
 Older identities explicitly marked not resumable still start fresh, and legacy

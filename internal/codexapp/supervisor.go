@@ -62,6 +62,7 @@ type Config struct {
 	Bin       string   // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
 	Dir       string   // working directory (the worktree)
 	Env       []string // extra KEY=VALUE additions to the child environment
+	Model     string   // selected amux model; sticky on the thread and explicit on turns
 	// Endpoint is the App Server WebSocket endpoint: unix://<path> (default,
 	// per-session, sandbox-scoped), ws://127.0.0.1:<port> (loopback), or
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
@@ -369,17 +370,25 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	}
 
 	start := func() (json.RawMessage, error) {
-		return s.rpc.call(ctx, "thread/start", map[string]any{
+		params := map[string]any{
 			"approvalPolicy": s.cfg.ApprovalPolicy,
 			"sandbox":        s.cfg.Sandbox,
-		})
+		}
+		if s.cfg.Model != "" {
+			params["model"] = s.cfg.Model
+		}
+		return s.rpc.call(ctx, "thread/start", params)
 	}
 
 	var res json.RawMessage
 	var err error
 	resumed := s.cfg.ResumeThreadID != ""
 	if resumed {
-		res, err = s.rpc.call(ctx, "thread/resume", map[string]any{"threadId": s.cfg.ResumeThreadID})
+		params := map[string]any{"threadId": s.cfg.ResumeThreadID}
+		if s.cfg.Model != "" {
+			params["model"] = s.cfg.Model
+		}
+		res, err = s.rpc.call(ctx, "thread/resume", params)
 		if err != nil && isNoRollout(err) {
 			// A pinned thread that never ran a turn has no rollout to resume (ROOT
 			// probe: "no rollout found"). Start a fresh thread and adopt its id rather
@@ -411,7 +420,11 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		}); err != nil {
 			return fmt.Errorf("codexapp name fresh thread: %w", err)
 		}
-		ready, err := s.rpc.call(ctx, "thread/resume", map[string]any{"threadId": id})
+		params := map[string]any{"threadId": id}
+		if s.cfg.Model != "" {
+			params["model"] = s.cfg.Model
+		}
+		ready, err := s.rpc.call(ctx, "thread/resume", params)
 		if err != nil {
 			return fmt.Errorf("codexapp persist fresh thread: %w", err)
 		}
@@ -430,10 +443,14 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		// thread before exposing the supervisor, waiting only for acceptance so
 		// a long first turn cannot block creation or native attach. Notifications
 		// track its lifecycle just as they do a turn started by a native client.
-		if _, err := s.rpc.call(ctx, "turn/start", map[string]any{
+		params := map[string]any{
 			"threadId": id,
 			"input":    inputBlocks(prompt),
-		}); err != nil {
+		}
+		if s.cfg.Model != "" {
+			params["model"] = s.cfg.Model
+		}
+		if _, err := s.rpc.call(ctx, "turn/start", params); err != nil {
 			return fmt.Errorf("codexapp initial prompt: %w", err)
 		}
 	}
@@ -554,10 +571,14 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	// turn_start / turn_end are emitted from the OBSERVED turn/started + turn/completed
 	// notifications (onNotify), so every turn is bracketed once regardless of origin.
 	// Prompt only starts the turn and waits for completion.
-	res, err := s.rpc.call(ctx, "turn/start", map[string]any{
+	params := map[string]any{
 		"threadId": threadID,
 		"input":    inputBlocks(text),
-	})
+	}
+	if s.cfg.Model != "" {
+		params["model"] = s.cfg.Model
+	}
+	res, err := s.rpc.call(ctx, "turn/start", params)
 	if err != nil {
 		// No turn began, so no observed turn/completed will arrive — emit a synthetic
 		// end so a consumer isn't left waiting. Carry the pinned thread id for

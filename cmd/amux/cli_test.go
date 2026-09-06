@@ -13,6 +13,11 @@ import (
 // not a claude one). An explicit --model always wins, and repos still fall through
 // as positionals.
 func TestParseCreateFlagsAgent(t *testing.T) {
+	// Model discovery reads the user's live Codex config/cache. Isolate it so the
+	// expected fallback does not change with whichever model the test runner has
+	// selected in its own account.
+	t.Setenv("CODEX_HOME", t.TempDir())
+
 	t.Run("defaults to claude", func(t *testing.T) {
 		repos, cfg := parseCreateFlags([]string{"acme/api"})
 		if cfg.agent != agent.DefaultKind() {
