@@ -5,7 +5,7 @@
 // Each agent gets a private COPY of it under its sandbox dir, and the harness is
 // pointed at the copy (CLAUDE_CONFIG_DIR, CODEX_HOME). Nothing from the user's
 // home is mounted into the sandbox any more except the one thing that must stay
-// shared — the OAuth credentials, which are symlinked from the copy back to the
+// shared — the OAuth credentials, which are linked from the copy back to the
 // template and bound read-write at their template path. The agent may edit its
 // copy freely: that is its own configuration.
 //
@@ -56,11 +56,15 @@ type Spec struct {
 	// caches, history — is deliberately not an entry: it stays private to each
 	// home and is never compared.
 	Entries []Entry
-	// Shared are auth files (relative to Template) the copy must not own: the
-	// copy holds a symlink to the template's file and the sandbox binds that file
+	// Shared are auth files and lock directories (relative to Template) the copy
+	// must not own: the copy links to the template and the sandbox binds the path
 	// back at its template path (Binds), so every agent — and the user — refresh
 	// the same token instead of each holding a copy that rotation would strand.
 	Shared []string
+	// HardlinkShared is the subset of Shared requiring a regular file, because
+	// the harness refuses symlinks when refreshing it. These use hard links and
+	// require the template and copy to reside on the same filesystem.
+	HardlinkShared []string
 }
 
 // Entry is one configuration path of a template.
@@ -101,9 +105,8 @@ const (
 	TemplateChanged Status = "template-changed"
 	// Conflict: both sides changed the same path differently since the seed.
 	Conflict Status = "conflict"
-	// SharedDetached: an auth file the copy should merely link to has become a
-	// real file — the harness rewrote it in place of the symlink, so the agent
-	// now holds its own credential copy that rotation may strand.
+	// SharedDetached: an auth file no longer has the expected link to the
+	// template, so the agent holds a credential copy that rotation may strand.
 	SharedDetached Status = "shared-detached"
 )
 
@@ -164,9 +167,10 @@ func Seeded(sp Spec) bool {
 
 // Seed creates the agent's private copy from the template if it does not exist
 // yet, and records the manifest. It is idempotent: an existing copy is left
-// exactly as the agent has it (its edits are the point), and only a missing
-// manifest is rebuilt from the copy's current content. Returns whether a fresh
-// copy was made. A template that is missing entirely still yields an (empty)
+// as the agent has it (its edits are the point), except that missing shared
+// auth links are filled in. A missing manifest is rebuilt from the copy's
+// current content. Returns whether a fresh copy was made.
+// A template that is missing entirely still yields an (empty)
 // copy, so a harness never falls back to the user's home by accident.
 func Seed(sp Spec) (fresh bool, err error) {
 	if sp.Dir == "" || sp.Template == "" {
@@ -175,6 +179,18 @@ func Seed(sp Spec) (fresh bool, err error) {
 	mu.Lock()
 	defer mu.Unlock()
 	if Seeded(sp) {
+		// New shared entries and logins made after this home was seeded should
+		// become available on the next launch. Preserve detached credentials and
+		// existing links, including dangling ones; Reset is the explicit repair.
+		for _, rel := range sp.Shared {
+			if _, err := os.Lstat(filepath.Join(sp.Dir, rel)); errors.Is(err, fs.ErrNotExist) {
+				if err := linkShared(sp, rel); err != nil {
+					return false, err
+				}
+			} else if err != nil {
+				return false, err
+			}
+		}
 		if _, err := readManifest(sp); err == nil {
 			return false, nil
 		}
@@ -263,7 +279,15 @@ func linkShared(sp Spec, rel string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	_ = os.Remove(dst)
+	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if hardlinkShared(sp, rel) {
+		if err := os.Link(src, dst); err != nil {
+			return fmt.Errorf("sharing %s requires a hard link (template and agent must be on the same filesystem): %w", rel, err)
+		}
+		return nil
+	}
 	return os.Symlink(src, dst)
 }
 
@@ -276,8 +300,17 @@ func Binds(sp Spec) [][]string {
 	var out [][]string
 	for _, rel := range sp.Shared {
 		p := filepath.Join(sp.Template, rel)
-		if _, err := os.Stat(p); err == nil {
+		if fi, err := os.Stat(p); err == nil {
 			out = append(out, []string{"--bind-try", p, p})
+			// Existing homes can already have a private lock directory. Overlay
+			// it with the shared one in the sandbox so token refreshes coordinate
+			// with the user and other agents, without deleting local state.
+			if fi.IsDir() {
+				dst := filepath.Join(sp.Dir, rel)
+				if local, err := os.Lstat(dst); err == nil && local.IsDir() {
+					out = append(out, []string{"--bind-try", p, dst})
+				}
+			}
 		}
 	}
 	return out
@@ -366,10 +399,20 @@ func Scan(sp Spec) ([]Change, error) {
 	}
 	for _, rel := range sp.Shared {
 		p := filepath.Join(sp.Dir, rel)
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
-			out = append(out, Change{Kind: sp.Kind, Rel: rel, Status: SharedDetached,
-				Copy: p, Template: filepath.Join(sp.Template, rel)})
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue
 		}
+		src, srcErr := os.Stat(filepath.Join(sp.Template, rel))
+		if hardlinkShared(sp, rel) {
+			if fi.Mode().IsRegular() && srcErr == nil && os.SameFile(fi, src) {
+				continue
+			}
+		} else if fi.Mode()&os.ModeSymlink != 0 || (fi.IsDir() && srcErr == nil && src.IsDir()) {
+			continue // shared lock directories are overlaid by Binds
+		}
+		out = append(out, Change{Kind: sp.Kind, Rel: rel, Status: SharedDetached,
+			Copy: p, Template: filepath.Join(sp.Template, rel)})
 	}
 	if converged {
 		_ = writeManifest(sp, m.Files)
@@ -702,6 +745,15 @@ func covered(sp Spec, rel string) bool {
 
 func isShared(sp Spec, rel string) bool {
 	for _, s := range sp.Shared {
+		if s == rel {
+			return true
+		}
+	}
+	return false
+}
+
+func hardlinkShared(sp Spec, rel string) bool {
+	for _, s := range sp.HardlinkShared {
 		if s == rel {
 			return true
 		}

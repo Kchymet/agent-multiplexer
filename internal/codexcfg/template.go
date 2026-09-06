@@ -13,7 +13,7 @@ const Env = "CODEX_HOME"
 // configEntries are the parts of a Codex home that are configuration: the user
 // config, global instructions, custom prompts, skills, and rules. The sessions/
 // rollout tree, history, logs, and memories are per-machine state a copy starts
-// empty; auth.json is shared (see Template).
+// empty; account and MCP OAuth credentials are shared (see Template).
 var configEntries = []string{ConfigFile, "AGENTS.md", "prompts", "skills", "rules"}
 
 // Template describes how the user's Codex home (UserHome()) is templated into an
@@ -32,7 +32,10 @@ func Template(agentID, dir string) cfghome.Spec {
 		Kind: "codex", AgentID: agentID, Env: Env,
 		Template: UserHome().Dir(), Dir: dir,
 		Entries: entries,
-		Shared:  []string{AuthFile},
+		Shared:  []string{AuthFile, MCPCredentialsFile, "mcp-oauth-locks"},
+		// Codex opens MCP credentials with O_NOFOLLOW when refreshing tokens.
+		// A hard link shares the credential without failing that regular-file check.
+		HardlinkShared: []string{MCPCredentialsFile},
 	}
 }
 
