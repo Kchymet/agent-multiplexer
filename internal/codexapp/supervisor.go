@@ -605,18 +605,33 @@ func turnIDFromResult(res json.RawMessage) string {
 	return p.TurnID
 }
 
+// errNoActiveTurn is returned by Interject when there is no in-flight turn to steer,
+// so a caller (and the daemon's error surface) can tell a precondition failure from a
+// transport error — and no malformed turn/steer ever reaches the App Server.
+var errNoActiveTurn = errors.New("codexapp: no active turn to interject")
+
 // Interject steers the in-flight turn (turn/steer): it appends input to the
-// running turn rather than starting a new one.
+// running turn rather than starting a new one. It requires an active turn — see
+// errNoActiveTurn — and never starts one.
 func (s *Supervisor) Interject(ctx context.Context, text string) error {
 	s.mu.Lock()
 	threadID := s.threadID
 	turnID := s.curTurn
 	s.mu.Unlock()
-	params := map[string]any{"threadId": threadID, "input": inputBlocks(text)}
-	if turnID != "" {
-		params["expectedTurnId"] = turnID
+	// Interject steers an ACTIVE turn, and the App Server requires expectedTurnId to
+	// correlate the steer to it. If no exact active turn is known — no pinned thread, or
+	// no tracked turn (idle, or a completion raced this call and cleared curTurn) — fail
+	// fast BEFORE any RPC: a turn/steer without expectedTurnId is malformed, and we must
+	// never create/start a turn or infer/fall back to another target. A process that is
+	// running is not the same as a model turn in flight.
+	if threadID == "" || turnID == "" {
+		return errNoActiveTurn
 	}
-	_, err := s.rpc.call(ctx, "turn/steer", params)
+	_, err := s.rpc.call(ctx, "turn/steer", map[string]any{
+		"threadId":       threadID,
+		"input":          inputBlocks(text),
+		"expectedTurnId": turnID,
+	})
 	return err
 }
 

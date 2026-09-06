@@ -372,6 +372,15 @@ func TestInterjectSteers(t *testing.T) {
 	defer sup.Close()
 	attach(t, sup, client)
 
+	// Establish an active turn first — Interject steers an in-flight turn and requires
+	// its expectedTurnId.
+	col := subscribeCollector(context.Background(), sup)
+	fs.mu.Lock()
+	fs.turnID = "turn_live"
+	fs.mu.Unlock()
+	fs.pushTurnStarted()
+	col.waitFor(t, harnessproto.TypeTurnStart)
+
 	if err := sup.Interject(context.Background(), "also do X"); err != nil {
 		t.Fatalf("Interject: %v", err)
 	}
@@ -380,12 +389,59 @@ func TestInterjectSteers(t *testing.T) {
 		t.Fatal("no turn/steer call")
 	}
 	var p struct {
-		ThreadID string           `json:"threadId"`
-		Input    []map[string]any `json:"input"`
+		ThreadID       string           `json:"threadId"`
+		ExpectedTurnID string           `json:"expectedTurnId"`
+		Input          []map[string]any `json:"input"`
 	}
 	_ = json.Unmarshal(c.Params, &p)
 	if p.ThreadID != "thr_1" || len(p.Input) == 0 {
 		t.Fatalf("steer params = %+v", p)
+	}
+	// The active turn's id must be carried so the server can correlate the steer.
+	if p.ExpectedTurnID != "turn_live" {
+		t.Fatalf("steer omitted/mismatched expectedTurnId: %+v", p)
+	}
+}
+
+// Interject with no in-flight turn must fail fast with errNoActiveTurn and send NO
+// turn/steer — a running process is not a running model turn, and a steer without
+// expectedTurnId is malformed. It must never start or infer a turn.
+func TestInterjectIdleFailsFastNoRPC(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client) // pinned thread, but no turn started
+
+	if err := sup.Interject(context.Background(), "steer nothing"); err != errNoActiveTurn {
+		t.Fatalf("idle Interject err = %v, want errNoActiveTurn", err)
+	}
+	if _, ok := fs.sawCall("turn/steer"); ok {
+		t.Fatal("idle Interject sent a turn/steer despite no active turn")
+	}
+	if _, ok := fs.sawCall("turn/start"); ok {
+		t.Fatal("idle Interject started a turn — it must never create one")
+	}
+}
+
+// A completion that races Interject clears the tracked turn, so a steer arriving after
+// the turn ended is rejected (stale) rather than steering a dead turn.
+func TestInterjectRejectedAfterTurnCompletes(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	col := subscribeCollector(context.Background(), sup)
+	fs.mu.Lock()
+	fs.turnID = "turn_live"
+	fs.mu.Unlock()
+	fs.pushTurnStarted()
+	col.waitFor(t, harnessproto.TypeTurnStart)
+	fs.completeTurn("completed")
+	col.waitFor(t, harnessproto.TypeTurnEnd) // curTurn cleared by the completion
+
+	if err := sup.Interject(context.Background(), "too late"); err != errNoActiveTurn {
+		t.Fatalf("post-completion Interject err = %v, want errNoActiveTurn", err)
 	}
 }
 
