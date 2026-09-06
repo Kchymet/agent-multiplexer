@@ -880,6 +880,22 @@ func (s *Supervisor) handleApproval(id json.RawMessage, method string, params js
 		Reason   string `json:"reason"`
 	}
 	_ = json.Unmarshal(params, &p)
+
+	// Ownership guard (ROOT foreign-approval audit / AGE-179 harness parity): an
+	// approval names the thread it belongs to, and only our pinned thread's approvals
+	// are answerable through this supervisor. A foreign thread's request belongs to
+	// another client/session, and a missing thread is not implicitly ours — neither may
+	// become a local OpenApprovals entry a `permission` verb could answer, or reach the
+	// event stream. Validate ownership BEFORE registering or emitting. A same-thread
+	// request still registers even if it is passive/early (before we track a turn): the
+	// guard is on thread, not turn.
+	s.mu.Lock()
+	pinned := s.threadID
+	s.mu.Unlock()
+	if p.ThreadID == "" || pinned == "" || p.ThreadID != pinned {
+		return
+	}
+
 	key := idKey(id)
 
 	tool, action := "command_execution", p.Command
