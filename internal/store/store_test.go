@@ -1,8 +1,14 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"amux/internal/core"
 )
 
 // openTemp opens a store rooted at a fresh temp dir so a test never touches the
@@ -16,6 +22,48 @@ func openTemp(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+func TestOpenVersionsTheSchema(t *testing.T) {
+	db := openTemp(t)
+	got, err := db.SchemaVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != CurrentSchemaVersion {
+		t.Fatalf("SchemaVersion() = %d, want %d", got, CurrentSchemaVersion)
+	}
+}
+
+func TestOpenRejectsANewerSchema(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	if err := os.MkdirAll(core.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", core.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := CurrentSchemaVersion + 1
+	if _, err := raw.Exec(`PRAGMA user_version = ` + fmt.Sprint(future)); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open()
+	if db != nil {
+		db.Close()
+		t.Fatal("Open returned a database for an unsupported future schema")
+	}
+	var versionErr *SchemaVersionError
+	if !errors.As(err, &versionErr) || versionErr.Have != future ||
+		versionErr.Min != MinSchemaVersion || versionErr.Max != CurrentSchemaVersion {
+		t.Fatalf("Open error = %v, want schema %d outside range %d-%d",
+			err, future, MinSchemaVersion, CurrentSchemaVersion)
+	}
 }
 
 // TestFieldScopedUpdatersTouchOneColumn pins the core contract behind AGE-133:
