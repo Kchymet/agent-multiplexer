@@ -69,6 +69,19 @@ are assigned (the subdirectories here). %s
   commit on the default branch (main/master), and do not push to it.
 
 `+configHomeSection+`
+## Talk to amux as an agent
+When you need to interact with amux itself, use the self-scoped `+"`amux agent ...`"+`
+commands by default. They infer which agent you are, so you do not need to look
+up or pass your own id. Run `+"`amux agent --help`"+` to see the available commands;
+the ones you will normally need are `+"`amux agent sessions`"+` to find conversation
+history, `+"`amux agent name <display name>`"+` to name yourself, and `+"`amux agent done`"+`
+to mark your task complete.
+
+Other command families such as `+"`amux do`"+`, `+"`amux workgroup`"+`, `+"`amux repo`"+`,
+`+"`amux config`"+`, and `+"`amux sandbox`"+` operate the wider control plane. Do not use
+them during ordinary agent work unless the user explicitly asks you to administer
+amux itself.
+
 `+transcriptsSection+`
 ## Keep current with the remote
 Each repo here is a worktree of a shared clone of its remote, and other agents

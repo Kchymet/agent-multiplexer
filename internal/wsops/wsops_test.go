@@ -767,6 +767,16 @@ func TestWriteAgentGuide(t *testing.T) {
 		if strings.Contains(string(b), "git rebase") {
 			t.Errorf("kind %q: %s should not tell agents to run git rebase (forces a force-push on a pushed PR)", tc.kind, tc.file)
 		}
+		// Ordinary agents should use the self-scoped agent namespace rather
+		// than reaching for amux's operator-facing control-plane commands.
+		for _, want := range []string{"amux agent --help", "amux agent sessions", "amux agent name <display name>", "amux agent done"} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("kind %q: %s missing agent command guidance %q", tc.kind, tc.file, want)
+			}
+		}
+		if !strings.Contains(string(b), "Do not use\nthem during ordinary agent work unless the user explicitly asks") {
+			t.Errorf("kind %q: %s should reserve control-plane commands for explicit administration requests", tc.kind, tc.file)
+		}
 		if _, err := os.Stat(filepath.Join(dir, tc.other)); err == nil {
 			t.Errorf("kind %q: unexpectedly wrote %s too", tc.kind, tc.other)
 		}
