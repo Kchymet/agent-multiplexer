@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
@@ -181,7 +182,7 @@ func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structu
 		}()
 	}
 	if err := sup.Prompt(ctx, text); err != nil {
-		journal(id, core.JournalError, fmt.Sprintf("prompt: %v", err))
+		structuredJournal(id, core.JournalError, fmt.Sprintf("prompt: %v", err))
 	}
 }
 
@@ -195,9 +196,13 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
 	}
 	go func() {
-		journal(sess.ID, core.JournalInfo, "starting agent")
+		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
 		sup, err := d.ensureSupervisor(sess.ID)
 		if err != nil {
+			// steerStartFailed writes the human journal + daemon log; also surface the
+			// failure on the session's single structured event source so a subscriber
+			// waiting on the first turn sees why it never came.
+			structuredNotice(sess.ID, core.JournalError, fmt.Sprintf("start agent %s: %v", sess.ID, err))
 			d.steerStartFailed(sess.ID, fmt.Errorf("start agent %s: %w", sess.ID, err))
 			return
 		}
@@ -264,6 +269,26 @@ func (d *Daemon) steerStartFailed(id string, err error) {
 func journal(id, level, text string) {
 	if err := core.AppendJournal(id, level, text); err != nil {
 		log.Printf("steer: journal %s: %v", id, err)
+	}
+}
+
+// structuredJournal reports a structured session's cold-start/failure progress to
+// BOTH the human session journal and the session's single structured runtime-event
+// log — so the notice reaches a subscriber tailing that one canonical source
+// (runtimeRecord resolves a structured session to it alone) as well as the CLI
+// journal. Use only for structured (App Server) sessions; a stray call would create
+// an events file for a session that has none.
+func structuredJournal(id, level, text string) {
+	journal(id, level, text)
+	structuredNotice(id, level, text)
+}
+
+// structuredNotice appends a notice to the session's structured event log only,
+// for a site that already recorded the human journal + daemon log elsewhere.
+// Best-effort, like journal.
+func structuredNotice(id, level, text string) {
+	if err := codexapp.AppendNotice(id, level, text); err != nil {
+		log.Printf("steer: structured notice %s: %v", id, err)
 	}
 }
 

@@ -280,6 +280,18 @@ func sourcesFor(rec Record) ([]sourceSpec, bool) {
 	// A structured (AGE-181) record is already normalized: each line is a
 	// harnessproto.RuntimeEvent, so it is decoded with the identity mapper and needs
 	// no runtime-specific line reader. It carries its own permission events.
+	//
+	// It is a SINGLE canonical source: the daemon resolves a structured session to its
+	// supervisor-written event log alone (no separate journal source), and the daemon's
+	// own cold-start/failure notices are appended into that same append-only log
+	// (codexapp.AppendNotice). One ordered file means an event's ordinal is just its
+	// line number, identical whether a subscriber followed the cold→first-turn stream
+	// live or reconnected after it — even when a late journal/failure notice lands after
+	// structured output. Merging a second, independently-growing journal file here could
+	// not preserve that: the two files have no cross-file order that a live interleave
+	// and a single reconnect sweep would both reproduce. rec.Journal is tolerated for a
+	// caller that still supplies one, but the daemon no longer does for structured
+	// records (see runtimeRecord).
 	if rec.Structured {
 		out = append(out, sourceSpec{path: rec.Path, permission: true, newMapper: func() LineMapper {
 			return structuredLine
