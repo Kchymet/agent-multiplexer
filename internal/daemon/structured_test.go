@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -19,19 +20,27 @@ import (
 func TestStructuredControlGate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d := &Daemon{codex: codexapp.NewManager(ctx, "")}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	newDaemon := func() *Daemon {
+		d := New("", nil, time.Hour)
+		d.codex = codexapp.NewManager(ctx, "")
+		return d
+	}
 
 	codex := store.Session{ID: "a", Agent: "codex"}
 	claude := store.Session{ID: "b", Agent: "claude"}
 
 	// Flag unset ⇒ everything is pty.
 	t.Setenv("AMUX_CODEX_CONTROL", "")
+	d := newDaemon()
 	if d.structuredControl(codex) {
 		t.Error("codex session structured with the flag unset")
 	}
 
 	// Flag on ⇒ codex is structured, claude is not (Codex-only).
 	t.Setenv("AMUX_CODEX_CONTROL", "app-server")
+	d = newDaemon()
 	if !d.structuredControl(codex) {
 		t.Error("codex session not structured with the flag on")
 	}
@@ -41,13 +50,14 @@ func TestStructuredControlGate(t *testing.T) {
 
 	// An unrelated flag value stays pty.
 	t.Setenv("AMUX_CODEX_CONTROL", "exec-json")
+	d = newDaemon()
 	if d.structuredControl(codex) {
 		t.Error("codex session structured for a non-app-server flag value")
 	}
 
 	// No manager ⇒ never structured, even with the flag on.
 	t.Setenv("AMUX_CODEX_CONTROL", "app-server")
-	if (&Daemon{}).structuredControl(codex) {
+	if (&Daemon{codexControl: amuxcfg.Control{Effective: amuxcfg.AppServer}}).structuredControl(codex) {
 		t.Error("structured control active with no manager")
 	}
 }

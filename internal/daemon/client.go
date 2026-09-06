@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/core"
 )
 
@@ -152,6 +153,27 @@ func (c *Client) queryAction(a core.Action) (json.RawMessage, error) {
 		}
 		return f.Data.Rows, nil
 	}
+}
+
+// CodexControl reads the actual daemon startup selection with a bounded wait.
+// Older daemons return an unknown-query error rather than a guessed selection.
+func (c *Client) CodexControl() (amuxcfg.Control, error) {
+	var control amuxcfg.Control
+	if err := c.conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return control, err
+	}
+	defer c.conn.SetDeadline(time.Time{})
+	raw, err := c.Query(core.QueryCodexControl)
+	if err != nil {
+		return control, err
+	}
+	if err := json.Unmarshal(raw, &control); err != nil {
+		return control, err
+	}
+	if control.Effective != amuxcfg.PTY && control.Effective != amuxcfg.AppServer {
+		return control, fmt.Errorf("daemon did not report a Codex control selection")
+	}
+	return control, nil
 }
 
 // Snapshot returns the daemon's current session rail — the same inventory it

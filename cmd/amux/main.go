@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/nativetui"
@@ -132,7 +133,7 @@ usage: amux <command>
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: dependencies (fzf/claude/gh/…) + runtime
-  config [ls|get|set|unset|path]  show or change amux settings (TUI keybindings)
+  config [ls|get|set|unset|path]  show or change amux settings (keybindings, Codex control)
   sandbox drift [<id>]  list edits agents made to their private copy of your harness config
   sandbox promote | reset <id> <path>  propagate an agent's config edit to yours / discard it
   provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
@@ -314,6 +315,10 @@ func daemonStart(self string) error {
 // binary. The daemon owns its agents' processes, so a restart stops them — this
 // is the deliberate, explicit way to do that.
 func daemonRestart() error {
+	// Reject malformed rollout config before stopping a healthy daemon.
+	if _, err := amuxcfg.ResolveCodexControl(); err != nil {
+		return err
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -362,8 +367,15 @@ func ensureDaemon(self string) error {
 		_ = c.Close()
 		return nil
 	}
+	// Auto-start and manual start share this validation and child entrypoint.
+	if _, err := amuxcfg.ResolveCodexControl(); err != nil {
+		return err
+	}
 	_ = os.MkdirAll(core.StateDir(), 0o755)
 	logf, _ := os.OpenFile(core.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if logf != nil {
+		defer logf.Close()
+	}
 
 	cmd := exec.Command(self, "daemon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from our session

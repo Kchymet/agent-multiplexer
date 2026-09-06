@@ -9,9 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/core"
 )
 
@@ -300,16 +300,9 @@ func duplicate(m map[string]string) string {
 // doesn't own.
 
 func readConfig() (map[string]string, error) {
-	b, err := os.ReadFile(core.ConfigPath())
+	top, err := amuxcfg.Read()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
-	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(b, &top); err != nil {
-		return nil, fmt.Errorf("%s: %w", core.ConfigPath(), err)
 	}
 	if top["keys"] == nil {
 		return nil, nil
@@ -322,12 +315,8 @@ func readConfig() (map[string]string, error) {
 }
 
 func writeConfig(keys map[string]string) error {
-	top := map[string]json.RawMessage{}
-	if b, err := os.ReadFile(core.ConfigPath()); err == nil {
-		if err := json.Unmarshal(b, &top); err != nil {
-			return fmt.Errorf("%s: %w (fix or remove the file, then retry)", core.ConfigPath(), err)
-		}
-	} else if !os.IsNotExist(err) {
+	top, err := amuxcfg.Read()
+	if err != nil {
 		return err
 	}
 	if len(keys) == 0 {
@@ -339,16 +328,5 @@ func writeConfig(keys map[string]string) error {
 		}
 		top["keys"] = b
 	}
-	out, err := json.MarshalIndent(top, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(core.ConfigDir(), 0o755); err != nil {
-		return err
-	}
-	tmp := core.ConfigPath() + ".tmp"
-	if err := os.WriteFile(tmp, append(out, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, core.ConfigPath())
+	return amuxcfg.Write(top)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"amux/internal/agent"
+	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -34,6 +35,9 @@ func (d *Daemon) query(cl *connState, a core.Action) {
 // marshalling and framing in query stay uniform across query names. The daemon is
 // the sole store owner, so this — and the poll loop — are the only readers.
 func (d *Daemon) readModel(a core.Action) (any, error) {
+	if a.Query == core.QueryCodexControl {
+		return d.codexControl, d.configErr
+	}
 	// QuerySnapshot serves the already-computed rail (no store read): it's the same
 	// inventory the poll loop caches and broadcasts, handed to a peer that would
 	// otherwise open the store itself.
@@ -55,7 +59,7 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 		// then emits nothing for that session (honest degradation). The older
 		// QueryRuntimePath answers with just the path, so a provider built before
 		// QueryRuntimeRecord keeps working against a newer daemon.
-		rec, err := runtimeRecord(db, a.ID)
+		rec, err := d.runtimeRecord(db, a.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -123,15 +127,15 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 // will run — or is running — structured, so the canonical source is stable from cold)
 // OR a structured identity was persisted (history stays readable after the App Server
 // exits, and even after the gate is later turned off).
-func structuredResolvable(id string) bool {
-	if structuredCodexEnabled() {
+func (d *Daemon) structuredResolvable(id string) bool {
+	if d.codexControl.Effective == amuxcfg.AppServer {
 		return true
 	}
 	_, ok := codexapp.LoadIdentity(id)
 	return ok
 }
 
-func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
+func (d *Daemon) runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 	s, ok, err := db.GetSession(id)
 	if err != nil {
 		return core.RuntimeRecord{}, err
@@ -160,13 +164,13 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 		// ROOT interleaved-replay audit).
 		//
 		// Resolve structured from COLD, before the supervisor persists identity: the
-		// gate (opt-in env + Codex agent) already determines the session will run
+		// gate (startup selection + Codex agent) already determines the session will run
 		// structured, so the canonical source is stable from the first subscription and
 		// a provider that subscribes while Codex is still starting simply tails the
 		// (not-yet-written) log and follows it — no reconnect, no source switch. A
 		// persisted identity still resolves it too, so history stays readable after the
 		// App Server exits (and after the gate is later turned off).
-		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && structuredResolvable(id) {
+		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && d.structuredResolvable(id) {
 			return core.RuntimeRecord{
 				Runtime:    harnessproto.RuntimeCodex,
 				Path:       codexapp.EventLogPathFor(id),

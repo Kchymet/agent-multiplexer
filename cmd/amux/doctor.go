@@ -108,6 +108,8 @@ func cmdDoctor() error {
 	// leftovers (a crash or a bug that removed a store row but not its dir/branch)
 	// and the reverse (a store row whose dir vanished). Reads only through the
 	// daemon's session model, never the store.
+	reportCodexControl()
+
 	fmt.Println("\nReconciliation")
 	if !statsOK {
 		fmt.Printf("  · agents    (start the daemon to reconcile store vs disk)\n")

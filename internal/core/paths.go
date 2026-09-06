@@ -49,8 +49,8 @@ func ConfigDir() string {
 	return filepath.Join(home, ".config", "amux")
 }
 
-// ConfigPath is the user-editable settings file (keybindings today; any future
-// user preference belongs here too). `amux config` reads and writes it.
+// ConfigPath is the user-editable settings file for keybindings and daemon
+// rollout settings. `amux config` reads and writes it.
 func ConfigPath() string { return filepath.Join(ConfigDir(), "config.json") }
 
 // DataDir is where amux keeps durable data: the repo store, workspace
