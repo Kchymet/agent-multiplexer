@@ -145,6 +145,66 @@ func TestSmokeEmptyThreadResume(t *testing.T) {
 	}
 }
 
+// TestSmokeTurnAfterResumeMiss is the AGE-198 assertion: a FIRST turn completes
+// after a pre-turn resume miss. It pins a never-run thread, lets `thread/resume`
+// miss (→ fallback), then runs a turn against the real binary and requires it to
+// bracket (turn_start … turn_end) — i.e. the failed resume did not poison the turn.
+func TestSmokeTurnAfterResumeMiss(t *testing.T) {
+	bin := requireSmokeCodex(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	sandbox := t.TempDir()
+
+	// A never-run thread (no rollout).
+	s1 := New(Config{SessionID: "rm", Bin: bin, Dir: sandbox, Endpoint: "unix://" + filepath.Join(sandbox, "a.sock")})
+	if err := s1.Start(ctx, nil); err != nil {
+		t.Fatalf("s1: %v", err)
+	}
+	t1 := s1.ThreadID()
+	_ = s1.Close()
+
+	// Resume it (miss → fallback), then run the first turn.
+	s2 := New(Config{SessionID: "rm", Bin: bin, Dir: sandbox, Endpoint: "unix://" + filepath.Join(sandbox, "b.sock"), ResumeThreadID: t1})
+	if err := s2.Start(ctx, nil); err != nil {
+		t.Fatalf("s2 start after resume miss: %v", err)
+	}
+	defer s2.Close()
+
+	col := newSmokeCollector(s2.Subscribe(ctx, 0))
+	pctx, pc := context.WithTimeout(ctx, 60*time.Second)
+	defer pc()
+	_ = s2.Prompt(pctx, "reply: pong")
+	_, ended := col.awaitTurnEnd(10 * time.Second)
+	starts, ends, _ := col.counts()
+	if starts == 0 || !ended {
+		t.Fatalf("first turn after a resume miss did not complete (turn_start=%d turn_end=%d) — the failed resume poisoned the turn", starts, ends)
+	}
+	t.Logf("turn completed after a pre-turn resume miss (turn_start=%d turn_end=%d)", starts, ends)
+}
+
+// TestSmokeLoopbackTransport proves the Origin fix: with gorilla/websocket omitting
+// Origin, the amux client now completes the handshake against codex's LOOPBACK ws
+// listener (which 403s any Origin, and x/net always sent one).
+func TestSmokeLoopbackTransport(t *testing.T) {
+	bin := requireSmokeCodex(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	ep, err := LoopbackEndpoint()
+	if err != nil {
+		t.Fatalf("loopback endpoint: %v", err)
+	}
+	t.Logf("loopback endpoint: %s", ep)
+	sup := New(Config{SessionID: "lb", Bin: bin, Dir: t.TempDir(), Endpoint: ep})
+	if err := sup.Start(ctx, nil); err != nil {
+		t.Fatalf("loopback ws handshake against real codex (Origin must be omitted): %v", err)
+	}
+	defer sup.Close()
+	if sup.ThreadID() == "" {
+		t.Fatal("no thread id over loopback ws")
+	}
+	t.Logf("loopback ws OK: handshake completed, thread id = %s", sup.ThreadID())
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func requireSmokeCodex(t *testing.T) string {
@@ -167,7 +227,7 @@ func requireSmokeCodex(t *testing.T) string {
 func secondClientInitializes(ctx context.Context, endpoint string) error {
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	conn, err := dialWS(dctx, endpoint)
+	conn, err := dialWS(dctx, endpoint, "")
 	if err != nil {
 		return err
 	}

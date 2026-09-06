@@ -89,10 +89,7 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 		Endpoint:     endpoint,
 		EventLogPath: EventLogPathFor(sessionID),
 	}
-	// Resume the same thread across daemon restarts when we have one on record.
-	if id, ok := LoadIdentity(sessionID); ok && id.ThreadID != "" {
-		cfg.ResumeThreadID = id.ThreadID
-	}
+	cfg.ResumeThreadID = resumeThreadFor(sessionID)
 
 	sup := New(cfg)
 	if err := sup.Start(m.ctx, wrappedArgv); err != nil {
@@ -104,6 +101,19 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 	m.sup[sessionID] = sup
 	m.mu.Unlock()
 	return sup, nil
+}
+
+// resumeThreadFor returns the thread id to resume for a session, or "" to start
+// fresh. It resumes ONLY a persisted thread that has already run a turn
+// (Resumable): attempting resume on a pinned-but-never-run thread returns "no
+// rollout found" and can poison that thread's first turn (AGE-198), so a
+// not-yet-resumable session starts fresh instead. The handshake keeps an error
+// fallback for the rare case a rollout was pruned after being marked resumable.
+func resumeThreadFor(sessionID string) string {
+	if id, ok := LoadIdentity(sessionID); ok && id.ThreadID != "" && id.Resumable {
+		return id.ThreadID
+	}
+	return ""
 }
 
 // Close stops and forgets the supervisor for a session (its App Server exits). It

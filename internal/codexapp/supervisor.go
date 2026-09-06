@@ -62,6 +62,10 @@ type Config struct {
 	ApprovalPolicy string        // "" ⇒ defaultApprovalPolicy
 	Sandbox        string        // "" ⇒ defaultSandbox
 	DialTimeout    time.Duration // "" ⇒ defaultDialTimeout
+	// Origin, when set, is sent as the WebSocket Origin header. Default empty ⇒ no
+	// Origin (codex's loopback/wss listeners 403 any Origin). Set only for a server
+	// deployment that allowlists a specific Origin.
+	Origin string
 	// EventLogPath, when set, is the per-session NDJSON record the supervisor
 	// appends every emitted runtime event to (one marshaled harnessproto.RuntimeEvent
 	// per line). It is the durable transport the out-of-process provider tails via
@@ -90,6 +94,8 @@ type Supervisor struct {
 	logMu  sync.Mutex
 	logW   io.WriteCloser // EventLogPath sink, opened lazily on first emit
 	logErr bool           // a prior log write failed; stop retrying (never fatal)
+
+	resumable bool // set once a turn has started (a rollout now exists → resume is safe)
 }
 
 // New builds a supervisor from cfg. It does not start anything — call Start (or
@@ -157,18 +163,20 @@ type Identity struct {
 	Endpoint    string `json:"endpoint"`
 	ThreadID    string `json:"threadId"`
 	ControlMode string `json:"controlMode"`
+	// Resumable is true once the thread has run at least one turn, so a rollout
+	// exists on disk and `thread/resume` will succeed. Until then a resume would
+	// return "no rollout found" (ROOT/AGE-198), so a reconnect must NOT attempt it —
+	// it starts a fresh thread instead. This is the primary guard against a pre-turn
+	// failed resume poisoning the thread's first turn; the handshake keeps an error
+	// fallback as a backstop.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 // Identity returns the current durable identity of the supervised session.
 func (s *Supervisor) Identity() Identity {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Identity{
-		SessionID:   s.cfg.SessionID,
-		Endpoint:    s.cfg.Endpoint,
-		ThreadID:    s.threadID,
-		ControlMode: harnessproto.ControlModeStructured,
-	}
+	return s.identityLocked()
 }
 
 // ThreadID returns the pinned Codex thread id, or "" before the handshake.
@@ -254,7 +262,7 @@ func (s *Supervisor) dialWithRetry(ctx context.Context) (msgConn, error) {
 			return nil, ctx.Err()
 		}
 		dialCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		conn, err := dialWS(dialCtx, s.cfg.Endpoint)
+		conn, err := dialWS(dialCtx, s.cfg.Endpoint, s.cfg.Origin)
 		cancel()
 		if err == nil {
 			return conn, nil
@@ -614,10 +622,33 @@ func (s *Supervisor) trackTurn(params json.RawMessage) {
 		return
 	}
 	s.mu.Lock()
+	newlyResumable := false
 	if p.ThreadID == "" || p.ThreadID == s.threadID {
 		s.curTurn = turnID
+		if !s.resumable {
+			// A turn has begun, so the thread now has a rollout — future launches may
+			// safely `thread/resume` it. Persist that fact once so a reconnect resumes
+			// rather than starting fresh, and never attempts a resume before a rollout.
+			s.resumable = true
+			newlyResumable = true
+		}
 	}
+	id := s.identityLocked()
 	s.mu.Unlock()
+	if newlyResumable {
+		_ = SaveIdentity(id)
+	}
+}
+
+// identityLocked builds the Identity without taking s.mu (caller holds it).
+func (s *Supervisor) identityLocked() Identity {
+	return Identity{
+		SessionID:   s.cfg.SessionID,
+		Endpoint:    s.cfg.Endpoint,
+		ThreadID:    s.threadID,
+		ControlMode: harnessproto.ControlModeStructured,
+		Resumable:   s.resumable,
+	}
 }
 
 func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.RawMessage) {

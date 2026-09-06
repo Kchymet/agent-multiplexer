@@ -44,3 +44,32 @@ func TestManagerForgetRemovesIdentity(t *testing.T) {
 		t.Fatal("Forget left the persisted identity behind")
 	}
 }
+
+// TestResumeThreadForGating checks the AGE-198 fix: a session is resumed ONLY once
+// its thread has run a turn (Resumable), so a pinned-but-never-run thread is never
+// resumed (which would 'no rollout found' and poison its first turn) — it starts
+// fresh instead.
+func TestResumeThreadForGating(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Not resumable (fresh thread, no turn) ⇒ do not resume.
+	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: false}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resumeThreadFor("g"); got != "" {
+		t.Fatalf("resumeThreadFor(non-resumable) = %q, want empty", got)
+	}
+
+	// Resumable (a turn has run) ⇒ resume that thread.
+	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resumeThreadFor("g"); got != "thr-1" {
+		t.Fatalf("resumeThreadFor(resumable) = %q, want thr-1", got)
+	}
+
+	// No identity ⇒ start fresh.
+	if got := resumeThreadFor("unknown"); got != "" {
+		t.Fatalf("resumeThreadFor(unknown) = %q, want empty", got)
+	}
+}
