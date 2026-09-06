@@ -22,6 +22,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.triggerPoll()
 		return ok()
+	case core.ActionAuthReload:
+		if err := d.queueAuthReload(a); err != nil {
+			return fail("%v", err)
+		}
+		d.triggerPoll()
+		return ok()
 	case core.ActionSteer:
 		// Engine-only like start: it drives the agent inside a running session and
 		// changes no store state, so it never reaches wsops.

@@ -93,6 +93,11 @@ type Daemon struct {
 	// until sessions/specs are resolvable.
 	firstPoll     chan struct{}
 	firstPollOnce sync.Once
+
+	// authPending contains only the instances live when the user requested a
+	// credential reload. New/replacement instances already inherit current auth.
+	authMu      sync.Mutex
+	authPending map[engine.Key]authReload
 }
 
 // New builds a daemon and captures its Codex control selection. Run reports
@@ -287,6 +292,7 @@ func (d *Daemon) pollOnce(ctx context.Context) {
 		}(s)
 	}
 	wg.Wait()
+	d.resumeWithSharedAuth(ctx)
 
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].Source != all[j].Source {
@@ -654,6 +660,10 @@ func (d *Daemon) killEngineFor(id string) {
 	if d.engine == nil {
 		return
 	}
+	// Serialize archive/delete with credential restarts so a pending reload
+	// cannot resurrect a session being removed.
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
 	ids := map[string]bool{id: true}
 	d.mu.RLock()
 	for _, s := range d.sessions {
@@ -663,6 +673,7 @@ func (d *Daemon) killEngineFor(id string) {
 	}
 	d.mu.RUnlock()
 	for aid := range ids {
+		delete(d.authPending, engine.Key{AgentID: aid, Tab: panespec.TabAgent})
 		for tab := 0; tab < 3; tab++ { // agent | editor | terminal
 			d.engine.Kill(engine.Key{AgentID: aid, Tab: tab})
 		}

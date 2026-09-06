@@ -6,6 +6,7 @@ package panespec
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,7 +54,11 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 			return "", nil, nil, err
 		}
 	}
-	return dir, env, scope(dir, tab, s, argv, agentRepoSources(agentID)), nil
+	sources := agentRepoSources(agentID)
+	if tab == TabAgent && agent.Canonical(s.Agent) == "codex" {
+		argv = codexWritableRepos(argv, sources)
+	}
+	return dir, env, scope(dir, tab, s, argv, sources), nil
 }
 
 // AppServerCommand resolves the launch spec for a Codex App Server supervising an
@@ -84,7 +89,24 @@ func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint 
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
-	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), endpoint, nil
+	sources := agentRepoSources(agentID)
+	inner = codexWritableRepos(inner, sources)
+	return dir, env, scope(dir, TabAgent, s, inner, sources), endpoint, nil
+}
+
+// Codex applies its own tool sandbox inside amux's mount namespace. Grant the
+// same assigned bare clones in both layers: the worktree's index, objects and
+// refs live there, outside cwd. A writable outer bind alone is insufficient.
+// A config override works for both the TUI (including resume) and App Server.
+// It only takes effect in workspace-write mode; read-only stays read-only.
+func codexWritableRepos(argv, sources []string) []string {
+	if len(argv) == 0 || len(sources) == 0 {
+		return argv
+	}
+	// JSON string arrays are valid TOML and safely quote spaces and path escapes.
+	roots, _ := json.Marshal(sources)
+	out := []string{argv[0], "-c", "sandbox_workspace_write.writable_roots=" + string(roots)}
+	return append(out, argv[1:]...)
 }
 
 // The root stays outside session worktrees, including coordinator directories
@@ -291,8 +313,22 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 		args = append(args, "--bind-try", src, src)
 	}
 	args = append(args, "--chdir", dir)
+	// Mask all credential stores, including ones created after this pane starts.
+	// Per-harness directory binds below expose only the selected store.
+	_ = os.MkdirAll(core.AuthDir(), 0700)
+	args = append(args, "--tmpfs", core.AuthDir())
+	if canonical, err := filepath.EvalSymlinks(core.AuthDir()); err == nil && canonical != core.AuthDir() {
+		args = append(args, "--tmpfs", canonical)
+	}
 	for _, b := range configBinds(tab, s, home) {
 		args = append(args, b...)
+	}
+	// A Claude invoked from a terminal/editor inherits the same auth environment
+	// as the agent. It needs the directory writable for refresh and lock creation.
+	if tab != TabAgent {
+		if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok && spec.AuthDir != "" {
+			args = append(args, "--bind", spec.AuthDir, spec.AuthDir)
+		}
 	}
 	// Create the mountpoint before the read-only data bind is applied. If this
 	// fails, keep the mask in argv so bubblewrap fails closed rather than exposing it.
@@ -342,7 +378,7 @@ func resolvedInstallRoot(home, p string) (real, root string) {
 }
 
 // configBinds is the minimal per-tool config/state mounted into the scope so the
-// tool can run: for the agent, the harness's shared auth file (its config is a
+// tool can run: for the agent, the harness's shared auth paths (its config is a
 // private copy inside the agent's dir, already writable — nothing of the user's
 // ~/.claude or $CODEX_HOME is mounted); the editor's config/state for the
 // editor; nothing for the shell.
@@ -355,10 +391,9 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		// durable copy of the conversation for the "restarting" diagnostic).
 		// --bind-try skips missing paths, so create the capture dir first.
 		_ = os.MkdirAll(core.TranscriptDir(), 0o755)
-		// The harness's shared auth file, bound at its template path — the one
-		// thing the agent's private config copy links back to (its OAuth credential
-		// must not diverge per agent). Everything below is shared by every agent
-		// pane regardless of harness.
+		// Shared auth files or a dedicated credential directory. Credentials and
+		// refresh locks must not diverge per agent. Everything below is shared by
+		// every agent pane regardless of harness.
 		var binds [][]string
 		if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
 			binds = cfghome.Binds(spec)

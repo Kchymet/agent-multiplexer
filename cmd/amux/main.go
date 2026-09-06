@@ -83,6 +83,7 @@ var commands = []command{
 	{names: []string{"doctor", "health", "check"}, run: func([]string) error { return cmdDoctor() }},
 	{names: []string{"config", "conf", "cfg"}, run: cmdConfig},
 	{names: []string{"sandbox", "sb"}, run: cmdSandbox},
+	{names: []string{"auth"}, run: cmdAuth},
 	{names: []string{"repo"}, run: cmdRepo},
 	{names: []string{"workgroup", "wg", "session", "ses", "workspace", "ws"}, run: cmdSession},
 	// deprecated top-level alias for "amux agent name"
@@ -134,6 +135,7 @@ usage: amux <command>
   config [ls|get|set|unset|path]  show or change amux settings (keybindings, Codex control)
   sandbox drift [<id>]  list edits agents made to their private copy of your harness config
   sandbox promote | reset <id> <path>  propagate an agent's config edit to yours / discard it
+  auth login | status | restart  manage one shared Claude login for all agent sessions
   provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
   provide install | uninstall  run provider mode as a user service (survives reboot)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
