@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"context"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,5 +60,44 @@ func TestStartSurfacesChildStderrOnDialTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), marker) {
 		t.Fatalf("Start error omitted the child stderr tail: %v", err)
+	}
+}
+
+// TestStartBoundedWhenDescendantHoldsStderr is the AGE-198 lifecycle regression: a
+// failing child that leaves a DETACHED descendant holding the stderr pipe open must
+// not wedge Start. os/exec's copier goroutine blocks on that pipe's EOF, and killProc
+// waits for the copier via cmd.Wait — so without a bound Start hangs until the holder
+// exits (AGE-198 measured 6s+, unbounded). cmd.WaitDelay must force the pipe closed
+// and let Start return promptly, still carrying the child's own stderr tail.
+func TestStartBoundedWhenDescendantHoldsStderr(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid not available to detach a stderr-holding descendant")
+	}
+	sock := filepath.Join(t.TempDir(), "cx.sock")
+	sup := New(Config{
+		SessionID:   "stderr-held",
+		Endpoint:    "unix://" + sock,
+		DialTimeout: 200 * time.Millisecond,
+	})
+	const marker = "AMUX_HELD_STDERR_MARKER"
+	// Write a distinct stderr line, then start a session-detached (setsid) sleep that
+	// inherits and keeps the stderr pipe open far longer than the test, and exit before
+	// listening. The detached sleep escapes the process-group kill, so only WaitDelay
+	// bounds the wait.
+	argv := []string{"sh", "-c", "echo " + marker + " 1>&2; setsid sleep 30 & exit 127"}
+
+	done := make(chan error, 1)
+	go func() { done <- sup.Start(context.Background(), argv) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			_ = sup.Close()
+			t.Fatal("Start must fail when the child never listens")
+		}
+		if !strings.Contains(err.Error(), marker) {
+			t.Fatalf("Start error omitted the child stderr tail: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Start hung on a descendant holding the stderr pipe — cmd.WaitDelay is not bounding cmd.Wait")
 	}
 }
