@@ -537,7 +537,7 @@ func (d *Daemon) ensureSupervisor(agentID string) (*codexapp.Supervisor, error) 
 	if !ok {
 		return nil, fmt.Errorf("agent %q not found", agentID)
 	}
-	return d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt)
+	return d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
 }
 
 // structuredControl applies the startup selection to Codex sessions only.

@@ -36,7 +36,7 @@ func TestManagerInitialPromptOnce(t *testing.T) {
 	// The in-process fake owns the socket; this child exercises process lifetime
 	// without invoking a real model. Shutdown kills it immediately.
 	ensure := func(m *Manager) (*Supervisor, error) {
-		return m.Ensure("initial", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "fix it")
+		return m.Ensure("initial", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "fix it", "")
 	}
 	errs := make(chan error, 8)
 	for i := 0; i < cap(errs); i++ {
@@ -133,7 +133,7 @@ func TestResumeThreadForGating(t *testing.T) {
 	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: false, Version: identityVersion}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resumeThreadFor("g"); got != "" {
+	if got := resumeThreadFor("g", "pty-thread"); got != "" {
 		t.Fatalf("resumeThreadFor(current, non-resumable) = %q, want empty", got)
 	}
 
@@ -141,7 +141,7 @@ func TestResumeThreadForGating(t *testing.T) {
 	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: true, Version: identityVersion}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resumeThreadFor("g"); got != "thr-1" {
+	if got := resumeThreadFor("g", "pty-thread"); got != "thr-1" {
 		t.Fatalf("resumeThreadFor(resumable) = %q, want thr-1", got)
 	}
 
@@ -151,12 +151,62 @@ func TestResumeThreadForGating(t *testing.T) {
 	if err := SaveIdentity(Identity{SessionID: "legacy", ThreadID: "old-thr", Resumable: false, Version: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if got := resumeThreadFor("legacy"); got != "old-thr" {
+	if got := resumeThreadFor("legacy", "pty-thread"); got != "old-thr" {
 		t.Fatalf("resumeThreadFor(legacy) = %q, want old-thr (must not discard a legacy conversation)", got)
 	}
 
-	// No identity ⇒ start fresh.
-	if got := resumeThreadFor("unknown"); got != "" {
-		t.Fatalf("resumeThreadFor(unknown) = %q, want empty", got)
+	// No structured identity ⇒ adopt the PTY path's persisted conversation.
+	if got := resumeThreadFor("unknown", "pty-thread"); got != "pty-thread" {
+		t.Fatalf("resumeThreadFor(unknown, PTY pin) = %q, want pty-thread", got)
+	}
+}
+
+// TestManagerAdoptsPTYConversation covers a control-mode migration: Codex first
+// ran in a native PTY, so the store has its real rollout id but no structured
+// identity sidecar. The first App Server launch must resume that rollout and must
+// not replay the session's creation prompt.
+func TestManagerAdoptsPTYConversation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	connected := make(chan *fakeServer, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		connected <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+
+	m := NewManager(ctx, "")
+	defer m.Shutdown()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	sup, err := m.Ensure("migrating", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "original prompt", "pty-thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sup.ThreadID() != "pty-thread" {
+		t.Fatalf("structured launch changed PTY thread: got %q", sup.ThreadID())
+	}
+	fs := <-connected
+	resume, ok := fs.sawCall("thread/resume")
+	if !ok || !strings.Contains(string(resume.Params), `"threadId":"pty-thread"`) {
+		t.Fatalf("structured launch did not resume PTY thread: %+v", resume)
+	}
+	if _, ok := fs.sawCall("thread/start"); ok {
+		t.Fatal("structured launch started a replacement thread")
+	}
+	if _, ok := fs.sawCall("turn/start"); ok {
+		t.Fatal("structured launch replayed the creation prompt")
+	}
+	id, ok := LoadIdentity("migrating")
+	if !ok || id.ThreadID != "pty-thread" || !id.Resumable {
+		t.Fatalf("PTY adoption was not persisted: %+v", id)
 	}
 }
