@@ -110,10 +110,23 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 // not-yet-resumable session starts fresh instead. The handshake keeps an error
 // fallback for the rare case a rollout was pruned after being marked resumable.
 func resumeThreadFor(sessionID string) string {
-	if id, ok := LoadIdentity(sessionID); ok && id.ThreadID != "" && id.Resumable {
-		return id.ThreadID
+	id, ok := LoadIdentity(sessionID)
+	if !ok || id.ThreadID == "" {
+		return ""
 	}
-	return ""
+	switch {
+	case id.Resumable:
+		// Known to have a rollout (ran a turn, or was previously resumed).
+		return id.ThreadID
+	case id.Version == 0:
+		// Legacy identity persisted before Resumable existed — it may hold a real
+		// conversation, so don't silently discard it; attempt the resume and let the
+		// handshake fall back to a fresh thread only on a genuine "no rollout" miss.
+		return id.ThreadID
+	default:
+		// Current identity, known not-yet-run — start fresh to avoid a doomed resume.
+		return ""
+	}
 }
 
 // Close stops and forgets the supervisor for a session (its App Server exits). It

@@ -138,6 +138,53 @@ func TestResumableMarkedOnTurnStart(t *testing.T) {
 	}
 }
 
+// TestResumedIdentitySurvivesAnotherRestart is the ROOT #98 regression: a
+// SUCCESSFUL resume must leave the session Resumable=true, so Manager.Ensure's
+// post-Start SaveIdentity persists true (not false) and a second restart with no
+// intervening turn still resumes the same thread rather than silently starting a
+// new one (losing the conversation).
+func TestResumedIdentitySurvivesAnotherRestart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // SaveIdentity writes under HOME
+
+	client, server := newMemPair()
+	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}} // thread/resume succeeds
+	go fs.loop()
+	defer fs.close()
+	sup := New(Config{SessionID: "cont", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: "existing-history"})
+	defer sup.Close()
+	attach(t, sup, client)
+
+	// A successful resume ⇒ resumable immediately (the thread has history), even
+	// though no new turn ran this session.
+	id := sup.Identity()
+	if !id.Resumable {
+		t.Fatalf("successful resume did not set Resumable: %+v", id)
+	}
+	if id.ThreadID != "existing-history" {
+		t.Fatalf("resumed thread id = %q, want existing-history", id.ThreadID)
+	}
+
+	// Manager.Ensure persists identity right after Start — this must NOT clobber the
+	// true back to false.
+	if err := SaveIdentity(sup.Identity()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart #1 (no intervening turn): still resumes the same thread.
+	if got := resumeThreadFor("cont"); got != "existing-history" {
+		t.Fatalf("after resume+persist, resumeThreadFor = %q, want existing-history (conversation dropped!)", got)
+	}
+	// Restart #2 (still no turn): the persisted identity is stable, so it keeps
+	// resuming — the two-restart case ROOT flagged.
+	saved, _ := LoadIdentity("cont")
+	if !saved.Resumable {
+		t.Fatalf("persisted identity lost Resumable: %+v", saved)
+	}
+	if got := resumeThreadFor("cont"); got != "existing-history" {
+		t.Fatalf("second restart resumeThreadFor = %q, want existing-history", got)
+	}
+}
+
 func TestPromptBracketsTurn(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()

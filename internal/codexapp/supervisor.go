@@ -163,14 +163,25 @@ type Identity struct {
 	Endpoint    string `json:"endpoint"`
 	ThreadID    string `json:"threadId"`
 	ControlMode string `json:"controlMode"`
-	// Resumable is true once the thread has run at least one turn, so a rollout
-	// exists on disk and `thread/resume` will succeed. Until then a resume would
-	// return "no rollout found" (ROOT/AGE-198), so a reconnect must NOT attempt it —
-	// it starts a fresh thread instead. This is the primary guard against a pre-turn
-	// failed resume poisoning the thread's first turn; the handshake keeps an error
+	// Resumable is true once the thread has a rollout on disk — set when the thread
+	// runs its first turn, or immediately when it is (re)attached by a successful
+	// `thread/resume` (a resumed thread necessarily has history). Until then a resume
+	// would return "no rollout found" (ROOT/AGE-198), so a reconnect must NOT attempt
+	// it — it starts a fresh thread instead. This is the primary guard against a
+	// pre-turn failed resume poisoning the first turn; the handshake keeps an error
 	// fallback as a backstop.
 	Resumable bool `json:"resumable,omitempty"`
+	// Version is the identity schema version. A value of 0 means the identity was
+	// persisted before Resumable existed — such a thread may hold a real conversation
+	// even though Resumable reads false, so a reconnect still attempts to resume it
+	// (the handshake fallback covers a genuine miss) rather than silently discarding
+	// it. A current identity (Version >= 1) is trusted: Resumable=false means truly
+	// not-yet-run, so start fresh.
+	Version int `json:"v,omitempty"`
 }
+
+// identityVersion is the current Identity schema version (see Identity.Version).
+const identityVersion = 1
 
 // Identity returns the current durable identity of the supervised session.
 func (s *Supervisor) Identity() Identity {
@@ -352,6 +363,16 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		s.threadID = id
 	} else {
 		id = s.threadID // a thread/started notification raced in first; it wins
+	}
+	// A SUCCESSFUL resume means the thread already had a rollout, so it stays
+	// resumable across further restarts even if this run never adds a turn. Without
+	// this, Manager.Ensure's post-Start SaveIdentity would overwrite a persisted
+	// Resumable:true with false, and a second restart with no intervening turn would
+	// silently drop the pinned thread and start a new one — losing the conversation
+	// (ROOT regression on #98). A fresh/fallback thread/start stays not-resumable
+	// until its first turn.
+	if resumed {
+		s.resumable = true
 	}
 	s.mu.Unlock()
 	if id == "" {
@@ -648,6 +669,7 @@ func (s *Supervisor) identityLocked() Identity {
 		ThreadID:    s.threadID,
 		ControlMode: harnessproto.ControlModeStructured,
 		Resumable:   s.resumable,
+		Version:     identityVersion,
 	}
 }
 

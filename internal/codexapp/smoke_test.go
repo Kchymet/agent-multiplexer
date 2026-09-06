@@ -205,6 +205,45 @@ func TestSmokeLoopbackTransport(t *testing.T) {
 	t.Logf("loopback ws OK: handshake completed, thread id = %s", sup.ThreadID())
 }
 
+// TestSmokeResumeAfterTurnKeepsThread is the end-to-end continuity proof for the
+// ROOT #98 regression, against the real binary: a thread that ran a turn writes a
+// rollout and becomes Resumable; a later launch pinned to it **resumes the SAME
+// thread** (not a fresh one) and stays Resumable — so a conversation survives
+// restarts even with no new turn in between.
+func TestSmokeResumeAfterTurnKeepsThread(t *testing.T) {
+	bin := requireSmokeCodex(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	sandbox := t.TempDir()
+
+	s1 := New(Config{SessionID: "cont", Bin: bin, Dir: sandbox, Endpoint: "unix://" + filepath.Join(sandbox, "a.sock")})
+	if err := s1.Start(ctx, nil); err != nil {
+		t.Fatalf("s1: %v", err)
+	}
+	t1 := s1.ThreadID()
+	pctx, pc := context.WithTimeout(ctx, 30*time.Second)
+	_ = s1.Prompt(pctx, "hello") // errors without creds, but writes a rollout
+	pc()
+	if !s1.Identity().Resumable {
+		t.Fatal("thread not marked Resumable after a turn")
+	}
+	_ = s1.Close()
+
+	// A fresh launch pinned to t1 must resume the SAME thread (rollout exists).
+	s2 := New(Config{SessionID: "cont", Bin: bin, Dir: sandbox, Endpoint: "unix://" + filepath.Join(sandbox, "b.sock"), ResumeThreadID: t1})
+	if err := s2.Start(ctx, nil); err != nil {
+		t.Fatalf("s2 resume: %v", err)
+	}
+	defer s2.Close()
+	if s2.ThreadID() != t1 {
+		t.Fatalf("resume did not keep the thread: %s → %s (conversation would be lost)", t1, s2.ThreadID())
+	}
+	if !s2.Identity().Resumable {
+		t.Fatal("resumed thread lost Resumable — a further restart would drop it")
+	}
+	t.Logf("continuity OK: resumed the same thread %s, still Resumable", t1)
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func requireSmokeCodex(t *testing.T) string {
