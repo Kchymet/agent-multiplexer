@@ -63,9 +63,11 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 //
 // dir is the session's worktree; env are extra child-environment additions;
 // wrappedArgv is the sandbox-wrapped `codex app-server --listen <endpoint>` the
-// daemon resolved (nil only in tests / the direct-exec smoke path). Creation is
-// serialized per session, so two callers never spawn competing servers.
-func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string) (*Supervisor, error) {
+// daemon resolved (nil only in tests / the direct-exec smoke path); endpoint is the
+// listen/dial URL the daemon chose (loopback ws by default, unix optional) — the
+// same value baked into wrappedArgv. Creation is serialized per session, so two
+// callers never spawn competing servers.
+func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint string) (*Supervisor, error) {
 	// Fast path: already live.
 	if s, ok := m.Get(sessionID); ok {
 		return s, nil
@@ -84,7 +86,7 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string) (*Sup
 		Bin:          m.bin,
 		Dir:          dir,
 		Env:          env,
-		Endpoint:     EndpointFor(sessionID),
+		Endpoint:     endpoint,
 		EventLogPath: EventLogPathFor(sessionID),
 	}
 	// Resume the same thread across daemon restarts when we have one on record.

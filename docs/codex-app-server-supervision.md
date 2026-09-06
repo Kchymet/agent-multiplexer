@@ -35,17 +35,26 @@ raw newline-delimited JSONL connection is closed immediately (ROOT audit). amux
 dials it with a real WebSocket client (`internal/codexapp/wsconn.go`, built on
 `golang.org/x/net/websocket`) and frames each JSON-RPC object as one text message.
 
-Endpoints (configurable via `Config.Endpoint` / the server's `--listen`):
+**Default endpoint: unix-over-WebSocket in the session's private scope.** The
+socket lives at `<launch dir>/.amux/cx.sock` — a path the scope already binds
+**read-write** at the same absolute path inside and outside bwrap, so the
+app-server (inside the sandbox) creates the listener and amux (and a native
+`--remote` peer) dial it, with no extra mount and no dependence on
+`$XDG_RUNTIME_DIR` (which scope binds **read-only**). This was validated by an
+actual bwrap launch (`TestSandboxedAppServerLaunch`).
 
-| endpoint | use |
-| --- | --- |
-| `unix://<per-session socket>` | **default** — local optimization that keeps the endpoint inside the session's private sandbox scope |
-| `ws://127.0.0.1:<port>` | loopback, colocated clients (docs example) |
-| `wss://host:port` | cross-machine, **authenticated TLS** — verification is never downgraded |
-
-A non-loopback `ws://` (no TLS, no auth) endpoint is refused before dialing; an
-unauthenticated non-loopback listener is never opened. Cross-machine ⇒ WSS. The
-AGE-179 harness pilot keeps its stdio transport (not converted gratuitously).
+**Why not loopback ws by default (verified against Codex 0.153.4):** the App
+Server's **unix** WebSocket listener tolerates an `Origin` header, but its
+**loopback TCP** listener rejects *any* request carrying `Origin` with **403**
+(DNS-rebinding protection). `golang.org/x/net/websocket` always sends `Origin`
+(and panics if it is nil), so this client interoperates with the unix listener and
+with Origin-accepting ws servers, but **not** codex's loopback ws listener.
+`Config.Endpoint` still accepts `ws://127.0.0.1:<port>` and `wss://host:port`
+(a non-loopback `ws://` is refused before dialing; TLS verification is never
+downgraded), and `codexapp.LoopbackEndpoint()` allocates a free port — but
+cross-host `wss` to codex needs either an Origin-omitting client or a server-side
+Origin allowlist (open item on AGE-177). The AGE-179 harness pilot keeps its stdio
+transport (not converted gratuitously).
 
 ## Protocol shapes (corrected against 0.153.4)
 
@@ -143,33 +152,45 @@ session. The selector is `AMUX_CODEX_CONTROL=app-server` (default off), read by 
 daemon at launch through a single gate — `Daemon.structuredControl` — so the
 default path is provably unaffected (`TestStructuredControlGate`).
 
-## Validation posture — read before claiming it works
+## Validation posture
 
-There is **no codex binary in the amux CI sandbox, and this work installs none.**
+Unit tests run with no binary (in-memory fake App Server): handshake start/resume
+incl. the empty-thread `thread/start` fallback, observed turn bracketing from any
+origin, interject, cancel, approval round-trip with the `{decision}` object +
+stale/duplicate rejection + no-speculative-resolve, user-input not auto-answered,
+disconnect-mid-turn, unknown request; a real WebSocket handshake + round-trip over
+unix and loopback TCP + the non-loopback refusal (`wsconn_test.go`); and the daemon
+integration (structured verb routing + refusals, opt-in gate, durable event-record
+identity mapping + permission replay, control-mode stamp). Legacy PTY steering
+tests pass unchanged.
 
-- The protocol/transport is covered by in-memory contract tests against a fake App
-  Server (handshake start/resume incl. the empty-thread `thread/start` fallback,
-  observed turn bracketing from any origin, interject, cancel, approval round-trip
-  with the `{decision}` object + stale/duplicate rejection + no-speculative-resolve,
-  user-input not auto-answered, disconnect-mid-turn, unknown request), plus a real
-  WebSocket handshake + round-trip over unix and loopback TCP and the non-loopback
-  refusal (`wsconn_test.go`).
-- The daemon integration is covered without a binary: structured verb routing and
-  refusals, the opt-in gate, the sandbox-wrapped launch resolution, the durable
-  event record's identity mapping + permission replay, and the control-mode stamp.
-  Legacy PTY steering tests pass unchanged.
-- An **opt-in, self-skipping** smoke test (`AMUX_CODEX_APP_SERVER_SMOKE=1`,
-  `TestSmokeRealAppServer`) drives a real `codex app-server` over a Unix WebSocket
-  when a pinned binary is present, proving the handshake, a bracketed turn, and a
-  **second** WebSocket client on the same listener. It **skips** (never fudges a
-  pass) with no binary.
+**Validated against the real binary (Codex 0.153.4), opt-in via
+`AMUX_CODEX_APP_SERVER_SMOKE=1`:**
 
-Still **to confirm on a pinned-codex host** before rollout (owned with AGE-198):
+- `TestSmokeRealAppServer` — WebSocket-over-unix handshake, `on-request` /
+  `workspace-write` accepted, thread id returned, a turn **bracketed** (turn_start …
+  turn_end from the observed notifications — confirming the method names), and a
+  **second client completing its own `initialize`** on the same listener. Model
+  outcome is *reported* (without credentials the turn ends `failed`), never passed
+  off as success.
+- `TestSmokeEmptyThreadResume` — a pinned empty thread's `thread/resume` returns
+  "no rollout found"; the supervisor falls back to a new thread and adopts it as the
+  single source of truth (Identity/ThreadID agree) — no split identity, no lost
+  conversation (the resumed thread was empty).
+- `TestSandboxedAppServerLaunch` — an **actual bwrap launch** of the argv
+  `panespec.AppServerCommand` produces: the codex executable is reachable inside the
+  scope and the unix endpoint in the worktree `.amux/` is reachable across the
+  sandbox boundary (handshake succeeds). This is OS-isolation proof, not argv strings.
 
-1. That `codex --remote <endpoint> resume <thread-id>` attaches to the *running*
-   server/thread rather than starting its own process — the central attach claim.
-   Do not claim native attach until a host run confirms it.
-2. Fresh-session attach flow: `thread/resume` before the first turn fails ("no
-   rollout found"); the create-first-turn-then-attach path needs a host test.
-3. Last-subscriber thread-unload grace (idle unload after the last client leaves),
-   which bounds how long a background session survives with no client.
+Also confirmed against the schema/CLI: `--listen` accepts `stdio://`/`unix://`/
+`ws://IP:PORT`/`off`; `--remote <ADDR>` is a real global TUI option (with
+`--remote-auth-token-env`); the approval response is `{"decision":"accept"|
+"decline"}`; `requestUserInput` answers are a map by question id.
+
+**Still requires an interactive host run (owned with AGE-198):**
+
+1. That a *native Codex TUI* launched `codex --remote <endpoint> resume <thread-id>`
+   attaches to the running server/thread and shares it live with the web bridge —
+   the amux tests prove the server, socket, and multi-client `initialize`, but not a
+   real TUI attaching and co-driving one thread.
+2. Last-subscriber thread-unload grace (idle unload after the last client leaves).

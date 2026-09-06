@@ -62,17 +62,46 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 // (not a bare exec) is what preserves the session's mount/config/identity grants;
 // cwd alone does not. The codex binary is taken from the agent's resolved command
 // so AMUX_CODEX_BIN and PATH resolution stay identical.
-func AppServerCommand(agentID, endpoint string) (dir string, env, argv []string, err error) {
+//
+// It also RETURNS the endpoint it chose: a per-session Unix socket in the launch
+// dir's private `.amux/` directory — which the scope already binds read-write at
+// the same absolute path inside and out, so the app-server can create the listener
+// and amux (and a native `--remote` peer) can dial it, with no extra mount and no
+// dependence on $XDG_RUNTIME_DIR (which scope binds read-only). unix-over-WebSocket
+// is also the transport the App Server accepts with an Origin header (its loopback
+// TCP listener rejects Origin — see internal/codexapp/wsconn.go).
+func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint string, err error) {
 	s, err := sessionFor(agentID)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, "", err
 	}
 	dir, env, agentArgv, err := wsops.AgentCommand(s)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, "", err
 	}
+	sock := appServerSocketPath(dir)
+	_ = os.MkdirAll(filepath.Dir(sock), 0o700)
+	_ = os.Remove(sock) // a stale socket from a prior run blocks the listener bind
+	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
-	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), nil
+	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), endpoint, nil
+}
+
+// appServerSocketPath is the per-session App Server socket, kept in the launch
+// dir's `.amux/` (rw-bound in the scope, private to the session) with a short name
+// so the absolute path stays within the OS sun_path limit (~108 bytes).
+func appServerSocketPath(dir string) string {
+	return filepath.Join(dir, ".amux", "cx.sock")
+}
+
+// AppServerEndpoint returns the endpoint AppServerCommand would choose for a
+// session, without launching — for a native `--remote` attach or diagnostics.
+func AppServerEndpoint(agentID string) (string, error) {
+	s, err := sessionFor(agentID)
+	if err != nil {
+		return "", err
+	}
+	return "unix://" + appServerSocketPath(s.Dir), nil
 }
 
 // AttachCommand resolves the launch spec for a native Codex CLI attaching to the

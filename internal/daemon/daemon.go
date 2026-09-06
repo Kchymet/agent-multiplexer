@@ -406,7 +406,10 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 				paneExit(e.Error())
 				return
 			}
-			dir, env, argv, err = panespec.AttachCommand(a.ID, codexapp.EndpointFor(a.ID), sup.ThreadID())
+			// Attach at the LIVE server's endpoint and thread — a single source of
+			// truth, so the native TUI and the web bridge share one server/thread.
+			id := sup.Identity()
+			dir, env, argv, err = panespec.AttachCommand(a.ID, id.Endpoint, id.ThreadID)
 		}
 	}
 	if err != nil {
@@ -499,12 +502,18 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 // it inherits the session's mount/config/identity scope — not a bare exec. The
 // endpoint is the per-session WebSocket socket in the private scope.
 func (d *Daemon) ensureSupervisor(agentID string) (*codexapp.Supervisor, error) {
-	endpoint := codexapp.EndpointFor(agentID)
-	dir, env, argv, err := panespec.AppServerCommand(agentID, endpoint)
+	// A live supervisor already has its endpoint; reuse it so we don't rebuild argv.
+	if sup, ok := d.codex.Get(agentID); ok {
+		return sup, nil
+	}
+	// AppServerCommand resolves the sandbox-wrapped launch AND the per-session unix
+	// endpoint (in the launch dir's rw-bound .amux/) — one source for the endpoint
+	// baked into argv, dialed by amux, and persisted for a native attach.
+	dir, env, argv, endpoint, err := panespec.AppServerCommand(agentID)
 	if err != nil {
 		return nil, err
 	}
-	return d.codex.Ensure(agentID, dir, env, argv)
+	return d.codex.Ensure(agentID, dir, env, argv, endpoint)
 }
 
 // structuredControl reports whether session s should run under the App Server
