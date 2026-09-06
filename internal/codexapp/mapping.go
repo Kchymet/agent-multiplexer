@@ -53,8 +53,12 @@ func (st *streamState) ensure() {
 }
 
 // turnResult is the decoded terminal turn signal; the supervisor uses it to
-// unblock a pending Prompt and bracket turn_end.
+// unblock a pending Prompt and bracket turn_end. ThreadID + TurnID carry the wire
+// correlation so the supervisor can decide whether the completion belongs to the
+// turn it is tracking (exact-correlation invariant) rather than assuming every
+// completion is ours.
 type turnResult struct {
+	ThreadID   string
 	TurnID     string
 	StopReason string
 	IsError    bool
@@ -137,7 +141,7 @@ func mapNotification(method string, params json.RawMessage, st *streamState) (ev
 		// turn_end is emitted here (observed), bracketing every turn regardless of
 		// which client started it, with the same thread_id + turn_id as turn_start.
 		evs = append(evs, turnEndEvent(p.ThreadID, turnID, stop))
-		return evs, &turnResult{TurnID: turnID, StopReason: stop, IsError: isErr}
+		return evs, &turnResult{ThreadID: p.ThreadID, TurnID: turnID, StopReason: stop, IsError: isErr}
 
 	case "turn/plan/updated":
 		return []harnessproto.RuntimeEvent{planFromTurn(params)}, nil

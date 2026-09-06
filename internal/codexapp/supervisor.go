@@ -489,8 +489,20 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 		s.emit(turnEndEvent(threadID, "", "error"))
 		return err
 	}
+	// Bind this pending Prompt to the turn id the server returned. Only while THIS
+	// Prompt's waiter is still live, and only for a non-empty id:
+	//   - If an early turn/completed already delivered and cleared the turn (the
+	//     completion-before-response race), s.turnDone was niled — do NOT resurrect the
+	//     dead turn id here.
+	//   - A response with no turn id must not blank a binding trackTurn already made
+	//     from the observed turn/started (a missing id never silently becomes ours).
+	// In the normal path turn/started already set s.curTurn to this same id on the read
+	// loop; this is the redundant/backup binding for our own thread.
+	myTurn := turnIDFromResult(res)
 	s.mu.Lock()
-	s.curTurn = turnIDFromResult(res)
+	if s.turnDone == done && myTurn != "" {
+		s.curTurn = myTurn
+	}
 	s.mu.Unlock()
 
 	select {
@@ -627,14 +639,40 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 	for _, ev := range events {
 		s.emit(ev)
 	}
-	if res != nil {
-		// The turn ended: wake a Prompt waiting on it FIRST (deliverTurn reads
-		// s.turnDone, which clearTurn nils), then clear the tracked turn and any
-		// approval it left open.
+	if res != nil && s.ownsCompletedTurn(res) {
+		// The turn WE are tracking ended (same pinned thread + same turn id): wake a
+		// Prompt waiting on it FIRST (deliverTurn reads s.turnDone, which clearTurn
+		// nils), then clear the tracked turn and any approval it left open.
+		//
+		// A completion that does NOT match — a foreign thread, a peer turn on our
+		// thread, or a completion carrying no correlating ids — still emitted its
+		// observed turn_end above (bracketing every turn regardless of origin) but must
+		// NOT satisfy the local Prompt, clear our control target, or drain our open
+		// approvals (ROOT turn-completion audit): those belong to a different turn, and
+		// a missing id never silently becomes ours.
 		s.deliverTurn(res)
 		s.clearTurn()
 		s.clearOpenApprovals("turn ended")
 	}
+}
+
+// ownsCompletedTurn reports whether a turn/completed belongs to the turn this
+// supervisor is tracking: it must name our pinned thread AND the exact turn id we
+// bound (from turn/started or the turn/start response). Both ids must be present and
+// equal — a completion on another thread, a peer turn on our thread, or one carrying
+// no correlating ids is not ours, so it never wakes the local Prompt, clears the
+// control target, or drains open approvals. This is the exact-correlation invariant
+// applied to turn completion.
+func (s *Supervisor) ownsCompletedTurn(res *turnResult) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.threadID == "" || res.ThreadID != s.threadID {
+		return false
+	}
+	if s.curTurn == "" || res.TurnID != s.curTurn {
+		return false
+	}
+	return true
 }
 
 // trackTurn records the in-flight turn id from a turn/started notification when it
