@@ -3,6 +3,7 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,65 @@ func TestHandshakeStart(t *testing.T) {
 	id := sup.Identity()
 	if id.ControlMode != harnessproto.ControlModeStructured || id.ThreadID != "thr_1" {
 		t.Fatalf("identity = %+v", id)
+	}
+}
+
+func TestHandshakeInitialPrompt(t *testing.T) {
+	const prompt = "Fix the 'Codex' launch\nPreserve $HOME, `quotes`, and Unicode: café."
+	for _, tc := range []struct {
+		name, prompt, resume, resumeErr string
+		wantTurn                        bool
+	}{
+		{name: "fresh", prompt: " \n" + prompt + "\n ", wantTurn: true},
+		{name: "empty"},
+		{name: "whitespace", prompt: " \n\t"},
+		{name: "resume", prompt: prompt, resume: "thr_saved"},
+		{name: "missing rollout", prompt: prompt, resume: "thr_gone", resumeErr: "no rollout found", wantTurn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup, fs, client := newFakePair(t)
+			defer fs.close()
+			defer sup.Close()
+			sup.cfg.InitialPrompt = tc.prompt
+			sup.cfg.ResumeThreadID = tc.resume
+			fs.resumeErr = tc.resumeErr
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			// No turn/completed is sent: launching must wait only for acceptance.
+			if err := sup.attach(ctx, client); err != nil {
+				t.Fatal(err)
+			}
+			call, ok := fs.sawCall("turn/start")
+			if ok != tc.wantTurn {
+				t.Fatalf("turn/start present = %v, want %v", ok, tc.wantTurn)
+			}
+			if !ok {
+				return
+			}
+			var params struct {
+				ThreadID string                        `json:"threadId"`
+				Input    []struct{ Type, Text string } `json:"input"`
+			}
+			if err := json.Unmarshal(call.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if params.ThreadID != sup.ThreadID() || len(params.Input) != 1 || params.Input[0].Type != "text" || params.Input[0].Text != prompt {
+				t.Fatalf("initial prompt lost or misrouted: %s", call.Params)
+			}
+		})
+	}
+}
+
+func TestHandshakeInitialPromptFailure(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	sup.cfg.InitialPrompt = "fix it"
+	fs.failMethod = "turn/start"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sup.attach(ctx, client); err == nil || !strings.Contains(err.Error(), "initial prompt") {
+		t.Fatalf("initial prompt failure must fail launch: %v", err)
 	}
 }
 

@@ -513,7 +513,14 @@ func (d *Daemon) ensureSupervisor(agentID string) (*codexapp.Supervisor, error) 
 	if err != nil {
 		return nil, err
 	}
-	return d.codex.Ensure(agentID, dir, env, argv, endpoint)
+	sess, ok, err := lookupSession(agentID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("agent %q not found", agentID)
+	}
+	return d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Prompt)
 }
 
 // structuredControl reports whether session s should run under the App Server
