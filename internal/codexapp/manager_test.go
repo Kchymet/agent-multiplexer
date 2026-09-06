@@ -52,20 +52,30 @@ func TestManagerForgetRemovesIdentity(t *testing.T) {
 func TestResumeThreadForGating(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	// Not resumable (fresh thread, no turn) ⇒ do not resume.
-	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: false}); err != nil {
+	// Current identity, not resumable (fresh thread, no turn) ⇒ do not resume.
+	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: false, Version: identityVersion}); err != nil {
 		t.Fatal(err)
 	}
 	if got := resumeThreadFor("g"); got != "" {
-		t.Fatalf("resumeThreadFor(non-resumable) = %q, want empty", got)
+		t.Fatalf("resumeThreadFor(current, non-resumable) = %q, want empty", got)
 	}
 
-	// Resumable (a turn has run) ⇒ resume that thread.
-	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: true}); err != nil {
+	// Resumable (ran a turn, or was previously resumed) ⇒ resume that thread.
+	if err := SaveIdentity(Identity{SessionID: "g", ThreadID: "thr-1", Resumable: true, Version: identityVersion}); err != nil {
 		t.Fatal(err)
 	}
 	if got := resumeThreadFor("g"); got != "thr-1" {
 		t.Fatalf("resumeThreadFor(resumable) = %q, want thr-1", got)
+	}
+
+	// LEGACY identity (persisted before the Resumable field, Version 0) with a
+	// thread id ⇒ still attempt resume — don't silently discard a real conversation
+	// on upgrade (the handshake fallback covers a genuine miss).
+	if err := SaveIdentity(Identity{SessionID: "legacy", ThreadID: "old-thr", Resumable: false, Version: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resumeThreadFor("legacy"); got != "old-thr" {
+		t.Fatalf("resumeThreadFor(legacy) = %q, want old-thr (must not discard a legacy conversation)", got)
 	}
 
 	// No identity ⇒ start fresh.
