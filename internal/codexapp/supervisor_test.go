@@ -17,6 +17,24 @@ func subscribeCollector(ctx context.Context, s *Supervisor) *collector {
 	return &collector{ch: s.Subscribe(ctx, 0)}
 }
 
+// tryGet returns the next event if one arrives within a short window, else ok=false.
+// It is for negative assertions ("nothing reached the stream").
+func (c *collector) tryGet() (harnessproto.RuntimeEvent, bool) {
+	for {
+		select {
+		case b, ok := <-c.ch:
+			if !ok {
+				return harnessproto.RuntimeEvent{}, false
+			}
+			if len(b.Events) > 0 {
+				return b.Events[0], true
+			}
+		case <-time.After(100 * time.Millisecond):
+			return harnessproto.RuntimeEvent{}, false
+		}
+	}
+}
+
 func (c *collector) waitFor(t *testing.T, typ string) harnessproto.RuntimeEvent {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
@@ -216,6 +234,65 @@ func TestResumedIdentitySurvivesAnotherRestart(t *testing.T) {
 	}
 	if got := resumeThreadFor("cont"); got != "existing-history" {
 		t.Fatalf("second restart resumeThreadFor = %q, want existing-history", got)
+	}
+}
+
+// TestTurnEventsCarryCorrelation checks the producer-side shared-session invariant:
+// the normalized turn_start and turn_end both carry the wire thread_id and turn_id,
+// so the provider→browser path can pair them and know which thread/turn they name.
+func TestTurnEventsCarryCorrelation(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	ctx := context.Background()
+	col := subscribeCollector(ctx, sup)
+
+	fs.pushNotify("turn/started", map[string]any{"threadId": "thr_1", "turn": map[string]any{"id": "turn_9"}})
+	start := col.waitFor(t, harnessproto.TypeTurnStart)
+	fs.pushNotify("turn/completed", map[string]any{"threadId": "thr_1", "turn": map[string]any{"id": "turn_9", "status": "completed"}})
+	end := col.waitFor(t, harnessproto.TypeTurnEnd)
+
+	for _, ev := range []harnessproto.RuntimeEvent{start, end} {
+		var p struct {
+			ThreadID string `json:"thread_id"`
+			TurnID   string `json:"turn_id"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		if p.ThreadID != "thr_1" || p.TurnID != "turn_9" {
+			t.Fatalf("%s missing correlation ids: %s", ev.Type, ev.Payload)
+		}
+	}
+}
+
+// TestForeignThreadTurnNotTracked checks the cancel-target invariant: a turn/started
+// for a DIFFERENT thread must not become this supervisor's tracked turn, so a Cancel
+// never interrupts a foreign turn.
+func TestForeignThreadTurnNotTracked(t *testing.T) {
+	sup, fs, client := newFakePair(t) // pinned thread is thr_1
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	ctx := context.Background()
+
+	fs.pushNotify("turn/started", map[string]any{"threadId": "other-thread", "turn": map[string]any{"id": "foreign"}})
+	// Give the read loop a moment to process the notification.
+	waitCall(t, fs, "initialize") // ensures the loop is running; initialize already happened
+	time.Sleep(50 * time.Millisecond)
+
+	if err := sup.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	c, ok := fs.sawCall("turn/interrupt")
+	if !ok {
+		t.Fatal("no turn/interrupt")
+	}
+	var p struct {
+		TurnID string `json:"turnId"`
+	}
+	_ = json.Unmarshal(c.Params, &p)
+	if p.TurnID == "foreign" {
+		t.Fatal("Cancel targeted a foreign thread's turn — cross-thread cancel leak")
 	}
 }
 

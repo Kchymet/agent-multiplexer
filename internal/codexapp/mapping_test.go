@@ -23,10 +23,32 @@ func TestMapTurnStartedEmitsTurnStart(t *testing.T) {
 	if res != nil || len(evs) != 1 || evs[0].Type != harnessproto.TypeTurnStart {
 		t.Fatalf("turn/started → %+v res=%v", evs, res)
 	}
+	// Correlation invariant: turn_start carries the wire thread_id + turn_id.
+	var p struct {
+		ThreadID string `json:"thread_id"`
+		TurnID   string `json:"turn_id"`
+	}
+	_ = json.Unmarshal(evs[0].Payload, &p)
+	if p.ThreadID != "t" || p.TurnID != "tr1" {
+		t.Fatalf("turn_start missing correlation ids: %s", evs[0].Payload)
+	}
+}
+
+// The {turnId} form is honored when the turn object omits id.
+func TestMapTurnStartedFlatTurnID(t *testing.T) {
+	evs, _ := mapOne("turn/started", `{"threadId":"t2","turnId":"flat1"}`)
+	var p struct {
+		ThreadID string `json:"thread_id"`
+		TurnID   string `json:"turn_id"`
+	}
+	_ = json.Unmarshal(evs[0].Payload, &p)
+	if p.ThreadID != "t2" || p.TurnID != "flat1" {
+		t.Fatalf("turn_start flat turnId not preserved: %s", evs[0].Payload)
+	}
 }
 
 func TestMapTurnCompletedSignalsResultAndEnd(t *testing.T) {
-	evs, res := mapOne("turn/completed", `{"turn":{"id":"tr1","status":"completed"}}`)
+	evs, res := mapOne("turn/completed", `{"threadId":"thr_x","turn":{"id":"tr1","status":"completed"}}`)
 	if res == nil || res.StopReason != "completed" || res.IsError {
 		t.Fatalf("turn/completed res = %+v", res)
 	}
@@ -36,10 +58,17 @@ func TestMapTurnCompletedSignalsResultAndEnd(t *testing.T) {
 	}
 	var ep struct {
 		StopReason string `json:"stop_reason"`
+		ThreadID   string `json:"thread_id"`
+		TurnID     string `json:"turn_id"`
 	}
 	_ = json.Unmarshal(evs[0].Payload, &ep)
 	if ep.StopReason != "completed" {
 		t.Fatalf("turn_end stop_reason = %q", ep.StopReason)
+	}
+	// Correlation invariant: turn_end carries the same thread_id + turn_id, so a
+	// consumer can pair it with turn_start.
+	if ep.ThreadID != "thr_x" || ep.TurnID != "tr1" {
+		t.Fatalf("turn_end missing correlation ids: %s", evs[0].Payload)
 	}
 }
 

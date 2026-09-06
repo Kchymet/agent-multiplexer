@@ -83,12 +83,25 @@ type Supervisor struct {
 	approvals *approvalTracker
 	state     *streamState // owned by the read loop only
 
-	mu        sync.Mutex
-	proc      *exec.Cmd
-	closed    bool
-	threadID  string
-	curTurn   string
-	turnDone  chan *turnResult
+	mu       sync.Mutex
+	proc     *exec.Cmd
+	closed   bool
+	threadID string
+
+	// curTurn is the OBSERVED active turn on our pinned thread, from ANY origin (a
+	// native TUI turn raises turn/started too). It is the target for Cancel/Interject,
+	// and is cleared when that turn completes. It is deliberately NOT the local Prompt's
+	// ownership: a peer turn sets curTurn, but must never satisfy our pending request.
+	curTurn string
+
+	// The local-request ownership state below is what a Prompt's own turn/start
+	// establishes, scoped to a generation so an abandoned/cancelled Prompt can neither
+	// rebind a newer request nor have late cleanup erase a newer waiter.
+	turnDone  chan *turnResult       // the pending Prompt's waiter (nil when none)
+	turnGen   uint64                 // bumped per Prompt; scopes ownership + cleanup
+	ownTurn   string                 // turn id THIS Prompt owns, bound from its turn/start response ("" until bound)
+	earlyTerm map[string]*turnResult // terminal events observed on our thread before ownTurn was bound, by turn id
+
 	runCancel context.CancelFunc
 
 	logMu  sync.Mutex
@@ -470,7 +483,15 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 		s.mu.Unlock()
 		return errors.New("codexapp: session closed")
 	}
+	// Open a fresh ownership generation for this Prompt. ownTurn stays unbound until
+	// our own turn/start response returns; earlyTerm retains any terminal observed for
+	// our thread in the meantime so an early completion isn't lost (and a peer's isn't
+	// mistaken for ours).
+	s.turnGen++
+	gen := s.turnGen
 	s.turnDone = done
+	s.ownTurn = ""
+	s.earlyTerm = map[string]*turnResult{}
 	threadID := s.threadID
 	s.mu.Unlock()
 
@@ -483,13 +504,36 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	})
 	if err != nil {
 		// No turn began, so no observed turn/completed will arrive — emit a synthetic
-		// end so a consumer isn't left waiting.
-		s.clearTurn()
-		s.emit(turnEndEvent("error"))
+		// end so a consumer isn't left waiting. Carry the pinned thread id for
+		// correlation; there is no turn id (the turn never started). Abandon only OUR
+		// local waiter (scoped to this generation) — a peer turn's active-control state
+		// (curTurn) must survive our failed start.
+		s.abandonLocalTurn(gen)
+		s.emit(turnEndEvent(threadID, "", "error"))
 		return err
 	}
+	// Bind ownership to the ACTUAL turn/start response id, scoped to this generation.
+	// If a superseding Prompt (or cancellation) already replaced our waiter, do not
+	// rebind or touch the newer state. If our turn already completed before the
+	// response returned (the completion-before-response race), a matching terminal is
+	// waiting in earlyTerm — deliver it now; otherwise discard the retained peer
+	// terminals (they were never ours) and wait for the live completion.
+	myTurn := turnIDFromResult(res)
 	s.mu.Lock()
-	s.curTurn = turnIDFromResult(res)
+	if s.turnGen == gen && s.turnDone == done {
+		s.ownTurn = myTurn
+		if myTurn != "" && s.earlyTerm != nil {
+			if early, ok := s.earlyTerm[myTurn]; ok {
+				s.turnDone = nil
+				s.ownTurn = ""
+				select {
+				case done <- early:
+				default:
+				}
+			}
+		}
+		s.earlyTerm = nil
+	}
 	s.mu.Unlock()
 
 	select {
@@ -615,10 +659,18 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 		s.handleServerResolved(params)
 		return
 	}
+	// A turn lifecycle notification for a DIFFERENT thread belongs to another
+	// session/thread: it must neither mutate our state nor enter our event stream
+	// (ROOT audit: foreign notifications must not contaminate our stream). A missing
+	// threadId is left to the downstream correlation checks, which never treat it as
+	// ours.
+	if (method == "turn/started" || method == "turn/completed") && s.foreignThread(params) {
+		return
+	}
 	// Track the active turn from ANY origin (ROOT audit): a turn started in the
 	// native TUI raises turn/started too, and web steer/interrupt must target it —
-	// not only turns this supervisor's Prompt began. Filter to our pinned thread so
-	// a stray id can't hijack the tracked turn.
+	// not only turns this supervisor's Prompt began. This is OBSERVED active-turn
+	// tracking (curTurn), deliberately separate from local-request ownership.
 	if method == "turn/started" {
 		s.trackTurn(params)
 	}
@@ -627,18 +679,94 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 		s.emit(ev)
 	}
 	if res != nil {
-		// The turn ended: wake a Prompt waiting on it FIRST (deliverTurn reads
-		// s.turnDone, which clearTurn nils), then clear the tracked turn and any
-		// approval it left open.
-		s.deliverTurn(res)
-		s.clearTurn()
-		s.clearOpenApprovals("turn ended")
+		s.handleTurnCompleted(res)
 	}
 }
 
-// trackTurn records the in-flight turn id from a turn/started notification when it
-// belongs to our pinned thread, so Interject/Cancel target it regardless of which
-// client initiated the turn.
+// handleTurnCompleted applies a turn/completed to two INDEPENDENT pieces of state:
+//
+//   - Observed active turn (curTurn): if this ended the active turn (any origin),
+//     clear the Cancel/Interject target and drain the approvals that turn raised. A
+//     peer/native-TUI turn owns and clears its own approvals this way.
+//   - Local-request ownership (turnDone/ownTurn): the pending Prompt's waiter is
+//     satisfied ONLY by the completion of the exact turn its own turn/start response
+//     bound (ownTurn). A peer turn — even the observed active one — must never satisfy
+//     an unrelated local Prompt. If ownership is not yet bound (the turn/start response
+//     is still in flight), the terminal is RETAINED (earlyTerm) so it can be matched
+//     once the response binds ownTurn; it is never allowed to clear an unbound waiter.
+//
+// A completion whose thread is not ours, or which carries no turn id, correlates to
+// nothing and is ignored.
+func (s *Supervisor) handleTurnCompleted(res *turnResult) {
+	turnID := res.TurnID
+	s.mu.Lock()
+	if s.threadID == "" || res.ThreadID != s.threadID || turnID == "" {
+		s.mu.Unlock()
+		return
+	}
+
+	// (1) Observed active-turn control state.
+	if turnID == s.curTurn {
+		s.curTurn = ""
+	}
+
+	// (2) Local-request ownership.
+	var deliverTo chan *turnResult
+	switch {
+	case s.turnDone == nil:
+		// No local Prompt is waiting.
+	case s.ownTurn != "":
+		// Ownership bound: satisfy the waiter only on an exact turn match.
+		if turnID == s.ownTurn {
+			deliverTo = s.turnDone
+			s.turnDone = nil
+			s.ownTurn = ""
+			s.earlyTerm = nil
+		}
+	default:
+		// Ownership not yet bound (turn/start response still in flight): retain this
+		// terminal so the response can match it. A peer completion retained here is
+		// discarded when ownTurn binds to a different id (Prompt) — it never satisfies
+		// the unbound waiter.
+		if s.earlyTerm == nil {
+			s.earlyTerm = map[string]*turnResult{}
+		}
+		s.earlyTerm[turnID] = res
+	}
+	s.mu.Unlock()
+
+	if deliverTo != nil {
+		select {
+		case deliverTo <- res:
+		default:
+		}
+	}
+	// Every completed turn on our thread owns the approvals it raised: drain by turn id
+	// so a peer turn clears only its own outstanding requests, neutrally.
+	s.clearApprovalsForTurn(turnID)
+}
+
+// foreignThread reports whether params names a thread other than our pinned one. A
+// missing threadId is NOT classified foreign here (downstream correlation handles it);
+// only a present, mismatched thread is foreign.
+func (s *Supervisor) foreignThread(params json.RawMessage) bool {
+	var p struct {
+		ThreadID string `json:"threadId"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if p.ThreadID == "" {
+		return false
+	}
+	s.mu.Lock()
+	pinned := s.threadID
+	s.mu.Unlock()
+	return pinned != "" && p.ThreadID != pinned
+}
+
+// trackTurn records the OBSERVED active turn from a turn/started notification on our
+// pinned thread, so Interject/Cancel target it regardless of which client initiated
+// the turn. It only touches curTurn (and the resumable flag) — never local-request
+// ownership. A missing or foreign thread does not mutate state.
 func (s *Supervisor) trackTurn(params json.RawMessage) {
 	var p struct {
 		ThreadID string `json:"threadId"`
@@ -657,7 +785,9 @@ func (s *Supervisor) trackTurn(params json.RawMessage) {
 	}
 	s.mu.Lock()
 	newlyResumable := false
-	if p.ThreadID == "" || p.ThreadID == s.threadID {
+	// Require an exact, present thread match: a missing thread must not mutate our
+	// state (ROOT audit), and a foreign one was already dropped by onNotify.
+	if p.ThreadID != "" && p.ThreadID == s.threadID {
 		s.curTurn = turnID
 		if !s.resumable {
 			// A turn has begun, so the thread now has a rollout — future launches may
@@ -769,22 +899,30 @@ func (s *Supervisor) handleUserInput(_ json.RawMessage, params json.RawMessage) 
 
 // ── turn signalling ──────────────────────────────────────────────────────────
 
-func (s *Supervisor) deliverTurn(res *turnResult) {
+// abandonLocalTurn drops THIS Prompt's local ownership state (waiter, bound turn,
+// retained terminals) when its turn/start never started a turn — but only if the
+// generation still matches, so an abandoned start can neither erase a newer waiter
+// nor rebind a newer request. It deliberately leaves curTurn (a peer's observed
+// active turn) untouched.
+func (s *Supervisor) abandonLocalTurn(gen uint64) {
 	s.mu.Lock()
-	ch := s.turnDone
-	s.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- res:
-		default:
-		}
+	if s.turnGen == gen {
+		s.turnDone = nil
+		s.ownTurn = ""
+		s.earlyTerm = nil
 	}
+	s.mu.Unlock()
 }
 
-// failTurn unblocks a pending Prompt if the transport closes mid-turn.
+// failTurn unblocks a pending Prompt if the transport closes mid-turn, and drops the
+// local ownership state so a late completion can't deliver again.
 func (s *Supervisor) failTurn() {
 	s.mu.Lock()
 	ch := s.turnDone
+	s.turnDone = nil
+	s.ownTurn = ""
+	s.earlyTerm = nil
+	s.curTurn = ""
 	s.mu.Unlock()
 	if ch != nil {
 		select {
@@ -792,13 +930,6 @@ func (s *Supervisor) failTurn() {
 		default:
 		}
 	}
-}
-
-func (s *Supervisor) clearTurn() {
-	s.mu.Lock()
-	s.turnDone = nil
-	s.curTurn = ""
-	s.mu.Unlock()
 }
 
 // handleServerResolved consumes a serverRequest/resolved notification: the server
@@ -850,13 +981,17 @@ func winningDecision(serverDecision string) string {
 	}
 }
 
-// clearOpenApprovals emits a permission_resolved for every approval still live when
-// a turn ends without the server having confirmed it — the decision this supervisor
-// sent if it answered, else "cleared" — so a consumer never waits forever.
-func (s *Supervisor) clearOpenApprovals(string) {
-	for _, key := range s.approvals.drainOutstanding() {
-		// Neutral clear: an unconfirmed local answer is only an attempt, so an
-		// abandoned turn must not surface it as the outcome.
+// clearApprovalsForTurn emits a neutral permission_resolved for every approval the
+// completed turn raised but the server never confirmed — so a consumer never waits
+// forever. It drains only that turn's requests (by turn id), so a peer/native turn
+// ending clears its own approvals without disturbing another turn's outstanding ones.
+// The clear is neutral: an unconfirmed local answer is only an attempt, so an
+// abandoned turn must not surface it as the outcome.
+func (s *Supervisor) clearApprovalsForTurn(turnID string) {
+	if turnID == "" {
+		return
+	}
+	for _, key := range s.approvals.drainForTurn(turnID) {
 		s.emit(permissionResolved(key, harnessproto.DecisionCleared))
 	}
 }

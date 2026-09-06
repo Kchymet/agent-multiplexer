@@ -173,7 +173,10 @@ func (fs *fakeServer) completeTurn(status string) {
 	fs.mu.Lock()
 	id := fs.turnID
 	fs.mu.Unlock()
-	fs.pushNotify("turn/completed", map[string]any{"turn": map[string]any{"id": id, "status": status}})
+	// Real Codex 0.153.4 carries threadId on turn/completed (see mapping_test), and the
+	// supervisor requires it to correlate the completion to the turn it is tracking, so
+	// this helper mirrors pushTurnStarted rather than sending a thread-less completion.
+	fs.pushNotify("turn/completed", map[string]any{"threadId": "thr_1", "turn": map[string]any{"id": id, "status": status}})
 }
 
 func (fs *fakeServer) pushRequest(method, id string, params any) incoming {
