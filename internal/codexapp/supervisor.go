@@ -239,6 +239,14 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = s.cfg.Dir
 	cmd.Env = append(os.Environ(), s.cfg.Env...)
+	// Capture the child's stderr into a bounded ring so a startup failure inside the
+	// sandbox wrapper (an execvp ENOENT, a bwrap mount error) is explained in the
+	// error below instead of only surfacing as a generic dial timeout — os/exec would
+	// otherwise send stderr to /dev/null. The ring keeps only the last few KiB, so the
+	// long-running server's stderr never grows memory; control/events flow over the WS
+	// protocol, not stderr, so this is purely diagnostic.
+	stderr := newStderrRing(maxStderrCapture)
+	cmd.Stderr = stderr
 	// Own process group: signals aimed at the foreground pane never reach the
 	// background server (independent lifetime).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -251,12 +259,12 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 
 	conn, err := s.dialWithRetry(ctx)
 	if err != nil {
-		s.killProc()
-		return err
+		s.killProc() // waits for the child + stderr copier, so the tail below is complete
+		return withStderrTail(err, stderr)
 	}
 	if err := s.attach(ctx, conn); err != nil {
 		s.killProc()
-		return err
+		return withStderrTail(err, stderr)
 	}
 	// Context cancellation (daemon shutdown, or the manager dropping this session)
 	// must tear the supervisor down even if nothing calls Close — the audit found
@@ -266,6 +274,18 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 		_ = s.Close()
 	}()
 	return nil
+}
+
+// withStderrTail appends the captured child-stderr tail to a launch/dial/handshake
+// error, so pane.exit and the async start journal explain the ACTUAL cause (e.g. a
+// bwrap execvp ENOENT) rather than only the surface symptom. When nothing was
+// captured the original error is returned unchanged.
+func withStderrTail(err error, r *stderrRing) error {
+	tail := r.tail()
+	if tail == "" {
+		return err
+	}
+	return fmt.Errorf("%w\ncodexapp: app-server stderr (last %dB):\n%s", err, len(tail), tail)
 }
 
 // dialWithRetry waits for the App Server's WebSocket endpoint to accept a
@@ -465,7 +485,11 @@ func (s *Supervisor) killProc() {
 	// Signal the whole process group so any children the server spawned go too.
 	_ = syscall.Kill(-proc.Process.Pid, syscall.SIGTERM)
 	_ = proc.Process.Kill()
-	_, _ = proc.Process.Wait()
+	// cmd.Wait (not Process.Wait) reaps the child AND waits for os/exec's stderr-copier
+	// goroutine to drain, then closes the pipe fds — so the captured stderr tail is
+	// complete and the diagnostic pipe never leaks. Called exactly once per proc (this
+	// function nils s.proc under the lock).
+	_ = proc.Wait()
 	if p := unixEndpointPath(s.cfg.Endpoint); p != "" {
 		_ = os.Remove(p)
 	}
