@@ -84,6 +84,8 @@ rotating it is one write and no reinstall.
   --ca <pem>         private CA to trust on top of the system roots
   --server-name <n>  TLS server name for SNI/verification
   --max-panes <n>    capability: max concurrent panes
+  --harness <name>   verify and advertise only this harness (repeat; auto restores discovery)
+  --identity-mode <m> credential source (currently machine only)
   --label k=v        scheduling label (repeatable)
   --feature <s>      opaque capability feature string (repeatable)
   --publish-sessions  publish this daemon's session inventory and accept lifecycle verbs
@@ -114,17 +116,19 @@ the provider's last registration and heartbeat.
 // parse can be exercised on its own — which is what tells the flags-in-any-order
 // fix from a regression back to silently dropping them.
 type provideFlags struct {
-	orch       string
-	tokenFile  string
-	name       string
-	caFile     string
-	serverName string
-	maxPanes   int
-	publishSes bool
-	readOnly   bool
-	rtEvents   bool
-	labels     multiFlag
-	features   multiFlag
+	orch         string
+	tokenFile    string
+	name         string
+	caFile       string
+	serverName   string
+	maxPanes     int
+	publishSes   bool
+	readOnly     bool
+	rtEvents     bool
+	labels       multiFlag
+	features     multiFlag
+	harnesses    multiFlag
+	identityMode string
 }
 
 func (f *provideFlags) register(fs *flag.FlagSet) {
@@ -138,6 +142,8 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
 	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
 	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
+	fs.Var(&f.harnesses, "harness", "restrict automatic discovery to this harness (repeatable; auto resets the restriction)")
+	fs.StringVar(&f.identityMode, "identity-mode", "", "credential source (machine; default $AMUX_PROVIDER_IDENTITY_MODE)")
 	fs.Var(&f.features, "feature", "capability feature string (repeatable); merged with $AMUX_PROVIDER_FEATURES")
 }
 
@@ -211,16 +217,21 @@ func provideRun(args []string) error {
 	readonly := f.readOnly || envBool("AMUX_PROVIDER_SESSIONS_READONLY") || file.ReadOnlySessions
 	runtimeEvents := f.rtEvents || envBool("AMUX_PROVIDER_RUNTIME_EVENTS") || file.RuntimeEvents
 
+	execution, err := executionConfig(f, file, os.Getenv)
+	if err != nil {
+		return err
+	}
 	cfg := provider.Config{
-		Orchestrator: addr,
-		Token:        token,
-		Name:         displayName,
-		Labels:       mergeLabels(file.Labels, parseLabels(os.Getenv("AMUX_PROVIDER_LABELS"), f.labels)),
-		CAFile:       ca,
-		ServerName:   sni,
-		MaxPanes:     mp,
-		Features:     mergeFeatures(os.Getenv("AMUX_PROVIDER_FEATURES"), append(multiFlag(file.Features), f.features...)),
-		Logf:         func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
+		DiscoverExecution: executionDiscovery(execution),
+		Orchestrator:      addr,
+		Token:             token,
+		Name:              displayName,
+		Labels:            mergeLabels(file.Labels, parseLabels(os.Getenv("AMUX_PROVIDER_LABELS"), f.labels)),
+		CAFile:            ca,
+		ServerName:        sni,
+		MaxPanes:          mp,
+		Features:          mergeFeatures(os.Getenv("AMUX_PROVIDER_FEATURES"), append(multiFlag(file.Features), f.features...)),
+		Logf:              func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
 		// The status file is how `amux doctor` — and anyone looking at a headless
 		// provider box — sees whether this thing is actually connected, instead of
 		// inferring it from a log tail.

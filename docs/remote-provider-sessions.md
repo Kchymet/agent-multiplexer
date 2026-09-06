@@ -624,14 +624,10 @@ light up AAP-derived state). Lifecycle verbs run through the local daemon socket
 so the daemon stays authoritative (it owns the engine that `start` needs and the
 re-poll that surfaces a change); if no daemon is reachable, verbs fail cleanly.
 Feature strings passed via `--feature`/`AMUX_PROVIDER_FEATURES` are orthogonal
-and still advertised alongside `sessions`. Note one such string by convention:
-to have an orchestrator's remote "new session" UI offer a runtime for this
-machine, advertise it as a feature string — `--feature codex`, `--feature claude`
-(a machine advertising no runtime string is offered Claude-only). This is
-advertisement only, distinct from `--publish-sessions`/`--runtime-events` (which
-publish inventory and stream transcripts) and from installing or sandbox-
-permitting the runtime; see "Advertising agent runtimes for remote session
-creation" in `docs/remote-provider.md`.
+and still advertised alongside `sessions`. Runtime selection for remote
+creation no longer uses those opaque strings: the registration's verified
+`capabilities.execution` block names the harnesses the provider can run. See
+"Verified agent runtimes for remote creation" in `docs/remote-provider.md`.
 
 Every relayed verb leaves one line on `amux provide`'s stderr, before the reply
 is written, so an operator can answer "did it reach this machine, and how long

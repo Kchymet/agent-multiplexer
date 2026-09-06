@@ -322,6 +322,14 @@ amux provide --token-file ~/.config/amux/provider.token --ca private-ca.pem \
 The token is never taken from argv — it lives in the file `--token-file` names
 (mode 0600), or `$AMUX_PROVIDER_TOKEN`.
 
+At registration, the provider verifies its installed agent CLIs with
+`--version` and advertises the resulting harness names and versions to the
+orchestrator. By default it discovers every supported local harness (Claude,
+Codex, and Hermes when installed). Use `--harness claude` or repeated
+`--harness` flags to restrict that list; `--harness auto` restores discovery.
+The local provider uses the machine's existing harness credentials and reports
+the `machine` identity mode. It does not inspect or send account identity.
+
 ### Scripting the daemon: `amux do`
 
 `amux do` is the command-line entrypoint to the daemon's control API — the same

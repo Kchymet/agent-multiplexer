@@ -32,14 +32,17 @@ import (
 // Config is the provider's runtime configuration, assembled by the CLI from
 // flags, the AMUX_PROVIDER_* / AMUX_TLS_* env vars, or the config file.
 type Config struct {
-	Orchestrator string            // address host:port (optionally tls:-prefixed)
-	Token        string            // bearer credential
-	Name         string            // display name (defaults to hostname upstream)
-	Labels       map[string]string // scheduling labels (advisory)
-	CAFile       string            // private CA to trust on top of system roots
-	ServerName   string            // TLS server-name override (SNI / verification)
-	MaxPanes     int               // capability: max concurrent panes
-	Features     []string          // capability: opaque feature strings from config
+	Execution *harnessproto.ExecutionCapabilities
+	// DiscoverExecution runs on the host before dialing, on every reconnect.
+	DiscoverExecution func(context.Context) *harnessproto.ExecutionCapabilities
+	Orchestrator      string            // address host:port (optionally tls:-prefixed)
+	Token             string            // bearer credential
+	Name              string            // display name (defaults to hostname upstream)
+	Labels            map[string]string // scheduling labels (advisory)
+	CAFile            string            // private CA to trust on top of system roots
+	ServerName        string            // TLS server-name override (SNI / verification)
+	MaxPanes          int               // capability: max concurrent panes
+	Features          []string          // capability: opaque feature strings from config
 
 	// PublishSessions opts into the "sessions" feature (docs/remote-provider-sessions.md):
 	// the provider advertises "sessions" in register and, once the orchestrator
@@ -147,6 +150,9 @@ func (p *Provider) Run(ctx context.Context) error {
 			p.stopped()
 			p.killAllPanes()
 			return err
+		}
+		if p.cfg.DiscoverExecution != nil {
+			p.cfg.Execution = p.cfg.DiscoverExecution(ctx)
 		}
 		p.setStatus(func(s *Status) { s.State = StateDialing })
 		conn, err := p.dial(ctx)
@@ -371,11 +377,12 @@ func (p *Provider) registerMsg() harnessproto.HarnessMsg {
 func (p *Provider) capabilities() *harnessproto.Capabilities {
 	_, err := exec.LookPath("bwrap")
 	return &harnessproto.Capabilities{
-		MaxPanes: p.cfg.MaxPanes,
-		Bwrap:    err == nil,
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Features: p.features(),
+		Execution: p.cfg.Execution,
+		MaxPanes:  p.cfg.MaxPanes,
+		Bwrap:     err == nil,
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		Features:  p.features(),
 	}
 }
 

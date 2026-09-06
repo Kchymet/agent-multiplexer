@@ -1,6 +1,7 @@
 package harnessproto
 
 import (
+	"encoding/json"
 	"net"
 	"testing"
 )
@@ -49,5 +50,39 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if e.Type != HExit || e.Error != "boom" {
 		t.Fatalf("exit mismatch: %+v", e)
+	}
+}
+
+// TestExecutionCapabilitiesEmptyVsAbsent preserves the distinction needed for
+// rollout: no execution block is a legacy provider, while a present empty block
+// says this provider ran discovery and verified no usable harness.
+func TestExecutionCapabilitiesEmptyVsAbsent(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      Capabilities
+		present bool
+	}{
+		{"legacy absent", Capabilities{}, false},
+		{"verified none", Capabilities{Execution: &ExecutionCapabilities{
+			Harnesses: []HarnessCapability{}, IdentityModes: []string{IdentityMachine},
+		}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out Capabilities
+			if err := json.Unmarshal(b, &out); err != nil {
+				t.Fatal(err)
+			}
+			if (out.Execution != nil) != tc.present {
+				t.Fatalf("wire %s decoded execution %+v, present=%v", b, out.Execution, tc.present)
+			}
+			if tc.present && (len(out.Execution.Harnesses) != 0 || out.Execution.Supports("claude", IdentityMachine)) {
+				t.Fatalf("empty verified execution became usable: %+v", out.Execution)
+			}
+		})
 	}
 }

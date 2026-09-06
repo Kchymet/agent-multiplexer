@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
+	"amux/internal/agent"
 	"amux/internal/core"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -196,6 +198,16 @@ func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 	}
 	if p.cfg.ReadOnlySessions || p.cfg.ApplyAction == nil {
 		return "", errors.New("read-only: session verbs are disabled")
+	}
+	if m.Action == harnessproto.VerbNewWorkgroup || m.Action == harnessproto.VerbAddAgent {
+		kind := agent.Canonical(m.Fields["agent"])
+		identity := m.Fields["identity_mode"]
+		if identity == "" {
+			identity = harnessproto.IdentityMachine
+		}
+		if identity != harnessproto.IdentityMachine || (p.cfg.Execution != nil && !p.cfg.Execution.Supports(kind, identity)) {
+			return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
+		}
 	}
 	return p.cfg.ApplyAction(context.Background(), act)
 }

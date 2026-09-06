@@ -17,13 +17,17 @@ import (
 	"strconv"
 	"strings"
 
+	"amux/internal/agent"
 	"amux/internal/core"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Config is the provider configuration as it lives on disk. The field set is
 // exactly the `amux provide` flag set minus the token itself; the TOML keys are
 // the flag names verbatim, so the file reads like the command line it replaces.
 type Config struct {
+	Harnesses        []string          // nil/empty: automatic discovery; otherwise verified allowlist
+	IdentityMode     string            // currently only machine is supported
 	Orchestrator     string            // orchestrator address host:port
 	TokenFile        string            // path to the 0600 file holding the bearer token
 	Name             string            // provider display name (default: hostname)
@@ -45,6 +49,9 @@ func Path() string { return filepath.Join(core.ConfigDir(), "provider.toml") }
 // orchestrator to dial, a token file to read the credential out of, and no
 // feature that depends on one that is off.
 func (c Config) Validate() error {
+	if err := c.ValidateExecution(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Orchestrator) == "" {
 		return fmt.Errorf("need an orchestrator address (--orchestrator host:port)")
 	}
@@ -108,6 +115,15 @@ func (c Config) Marshal() []byte {
 	str("orchestrator", c.Orchestrator)
 	str("token-file", c.TokenFile)
 	str("name", c.Name)
+	str("identity-mode", c.IdentityMode)
+	harnesses := NormalizeHarnesses(c.Harnesses)
+	if len(harnesses) > 0 {
+		quoted := make([]string, len(harnesses))
+		for i, h := range harnesses {
+			quoted[i] = tomlString(h)
+		}
+		fmt.Fprintf(&b, "harnesses = [%s]\n", strings.Join(quoted, ", "))
+	}
 	str("ca-file", c.CAFile)
 	str("server-name", c.ServerName)
 	if c.MaxPanes > 0 {
@@ -237,6 +253,15 @@ func (c *Config) assign(key string, val any) error {
 		return boolean(&c.ReadOnlySessions)
 	case "runtime-events":
 		return boolean(&c.RuntimeEvents)
+	case "identity-mode":
+		return str(&c.IdentityMode)
+	case "harnesses":
+		v, ok := val.([]string)
+		if !ok {
+			return fmt.Errorf("harnesses must be an array of strings")
+		}
+		c.Harnesses = v
+		return nil
 	case "features":
 		v, ok := val.([]string)
 		if !ok {
@@ -390,3 +415,32 @@ func splitTop(s string, sep byte) []string {
 }
 
 func lineErr(i int, msg string) error { return fmt.Errorf("line %d: %s", i+1, msg) }
+
+// NormalizeHarnesses applies the repeated --harness spelling in order. "auto"
+// clears an earlier restriction; a later harness starts a new allowlist. The
+// empty result means automatic discovery.
+func NormalizeHarnesses(harnesses []string) []string {
+	var out []string
+	for _, raw := range harnesses {
+		h := strings.TrimSpace(raw)
+		if h == "auto" {
+			out = nil
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// ValidateExecution rejects configuration that would advertise unsupported modes.
+func (c Config) ValidateExecution() error {
+	if c.IdentityMode != "" && c.IdentityMode != harnessproto.IdentityMachine {
+		return fmt.Errorf("amux providers support only identity-mode=machine")
+	}
+	for _, h := range NormalizeHarnesses(c.Harnesses) {
+		if h == "" || !agent.Known(h) {
+			return fmt.Errorf("unknown harness %q", h)
+		}
+	}
+	return nil
+}

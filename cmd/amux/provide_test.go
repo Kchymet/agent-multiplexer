@@ -77,6 +77,65 @@ func TestInstallReplacesLabelsAndFeatures(t *testing.T) {
 	}
 }
 
+// TestExecutionConfigPrecedence keeps the execution selector aligned with the
+// rest of provider configuration: flags override service environment, which
+// overrides the installed file. `auto` is an ordered reset in a repeated flag
+// list, so a later harness begins a new explicit allowlist.
+func TestExecutionConfigPrecedence(t *testing.T) {
+	file := providercfg.Config{Harnesses: []string{"claude"}, IdentityMode: "machine"}
+	env := map[string]string{
+		"AMUX_PROVIDER_HARNESSES":     "codex, hermes",
+		"AMUX_PROVIDER_IDENTITY_MODE": "api-key",
+	}
+	getenv := func(key string) string { return env[key] }
+
+	got, err := executionConfig(provideFlags{
+		harnesses: multiFlag{"claude", "auto", "codex"}, identityMode: "machine",
+	}, file, getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"codex"}; !reflect.DeepEqual(got.Harnesses, want) {
+		t.Errorf("harnesses = %v, want %v", got.Harnesses, want)
+	}
+	if got.IdentityMode != "machine" {
+		t.Errorf("identity mode = %q, want flag value machine", got.IdentityMode)
+	}
+
+	got, err = executionConfig(provideFlags{}, file, func(key string) string {
+		if key == "AMUX_PROVIDER_HARNESSES" {
+			return "codex"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"codex"}; !reflect.DeepEqual(got.Harnesses, want) {
+		t.Errorf("environment did not override file: %v", got.Harnesses)
+	}
+	if got.IdentityMode != "machine" {
+		t.Errorf("file identity mode = %q, want machine", got.IdentityMode)
+	}
+}
+
+func TestInstallExecutionConfigRoundTrip(t *testing.T) {
+	base := providercfg.Config{Orchestrator: "o:1", TokenFile: "/t"}
+	cfg := parseInstall(t, base,
+		"--harness", "claude", "--harness", "auto", "--harness", "codex",
+		"--identity-mode", "machine")
+	if want := []string{"codex"}; !reflect.DeepEqual(cfg.Harnesses, want) {
+		t.Fatalf("installed harnesses = %v, want %v", cfg.Harnesses, want)
+	}
+	got, err := providercfg.Parse(cfg.Marshal())
+	if err != nil {
+		t.Fatalf("Parse installed config: %v", err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Errorf("installed config round trip changed it:\n got %+v\nwant %+v", got, cfg)
+	}
+}
+
 // TestInstallTakesTheAddressEitherWay: install has the same address-plus-flags
 // shape running the provider does, so it needs the same any-order parse — a
 // --token-file dropped here would write a config with no credential in it.
