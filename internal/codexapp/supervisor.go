@@ -43,6 +43,15 @@ const (
 	defaultApprovalPolicy = "on-request"
 	defaultSandbox        = "workspace-write"
 	defaultDialTimeout    = 15 * time.Second
+	// killWaitDelay bounds how long killProc's cmd.Wait blocks after the process is
+	// killed, waiting for os/exec's stderr-copier goroutine to drain. Normally the
+	// copier hits EOF the instant the child exits; but if the child spawned a
+	// descendant that inherited and still holds the stderr pipe's write end (and
+	// escaped the process-group kill via its own session), that EOF never comes.
+	// WaitDelay makes Wait force the pipe closed after this delay and return, so a
+	// launch/dial failure can never hang on a lingering grandchild (AGE-198 lifecycle
+	// audit). The child's own stderr is already drained before this matters.
+	killWaitDelay = 2 * time.Second
 )
 
 // Config parameterizes one supervised App Server. SessionID ties it to the amux
@@ -247,6 +256,10 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	// protocol, not stderr, so this is purely diagnostic.
 	stderr := newStderrRing(maxStderrCapture)
 	cmd.Stderr = stderr
+	// Bound the post-exit wait for the stderr-copier goroutine so a killed child whose
+	// descendant still holds the stderr pipe can't wedge killProc's cmd.Wait (see
+	// killWaitDelay). Zero (the default) would wait forever for that pipe to close.
+	cmd.WaitDelay = killWaitDelay
 	// Own process group: signals aimed at the foreground pane never reach the
 	// background server (independent lifetime).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -482,13 +495,19 @@ func (s *Supervisor) killProc() {
 	if proc == nil || proc.Process == nil {
 		return
 	}
-	// Signal the whole process group so any children the server spawned go too.
+	// Signal the whole process group so any children the server spawned go too: SIGTERM
+	// for a clean exit, then SIGKILL as the forceful backstop for anything in the group
+	// that ignores it. The child is its own group leader (Setpgid), so -pid targets its
+	// group alone, never the daemon's. A descendant that started its own session escapes
+	// the group; the WaitDelay below (not the group signal) is what bounds that case.
 	_ = syscall.Kill(-proc.Process.Pid, syscall.SIGTERM)
+	_ = syscall.Kill(-proc.Process.Pid, syscall.SIGKILL)
 	_ = proc.Process.Kill()
 	// cmd.Wait (not Process.Wait) reaps the child AND waits for os/exec's stderr-copier
 	// goroutine to drain, then closes the pipe fds — so the captured stderr tail is
-	// complete and the diagnostic pipe never leaks. Called exactly once per proc (this
-	// function nils s.proc under the lock).
+	// complete and the diagnostic pipe never leaks. cmd.WaitDelay (set in Start) bounds
+	// that wait, so a descendant still holding the stderr pipe open cannot wedge this.
+	// Called exactly once per proc (this function nils s.proc under the lock).
 	_ = proc.Wait()
 	if p := unixEndpointPath(s.cfg.Endpoint); p != "" {
 		_ = os.Remove(p)
