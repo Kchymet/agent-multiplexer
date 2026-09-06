@@ -147,6 +147,14 @@ func cmdDoctor() error {
 			agents, plural(agents), edits, plural(edits))
 	}
 
+	// Browser: agents open links (gh --web, Claude's login) through $BROWSER, and
+	// a value that this shell resolves can still be unreachable from a pane — the
+	// sandbox hides $HOME, and a WSL $BROWSER under /mnt/c is a per-machine path.
+	fmt.Println("\nBrowser")
+	for _, l := range checkBrowser(probeBrowser(ctx, daemonUp)) {
+		fmt.Println(l)
+	}
+
 	// Provider mode: opt-in, so a machine that never registered says so quietly
 	// rather than failing the check. What it reports is the whole chain — config,
 	// credential, service, and whether the loop actually reached an orchestrator —

@@ -160,6 +160,72 @@ func agentRepoSources(agentID string) []string {
 	return out
 }
 
+// systemRoots are the host trees every pane sees read-only, in bind order: the
+// first two (/usr, /etc) are required, the rest are bound with -try so a system
+// that lacks one (non-merged /usr, no Nix, no linuxbrew) still scopes. Anything
+// a pane runs — the harness, the editor, $BROWSER — has to live under one of
+// these, under the amux data tree, or under the pane binary's own $HOME subtree;
+// the rest of $HOME is a tmpfs inside the scope. ScopeReaches is the query side
+// of this list, so doctor can tell a hidden binary apart from a missing one.
+var systemRoots = []string{"/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew", "/run"}
+
+// interopRoots are the WSL2 mounts the agent pane binds so Windows interop
+// (clipboard .exe helpers, path translation) works from inside the scope. They
+// are -try binds, so this is a no-op off WSL.
+var interopRoots = []string{"/mnt/c", "/mnt/wsl"}
+
+// jail resolves what scope needs to build a sandbox — the bwrap binary and the
+// home dir it hides — and reports false when panes run unscoped: AMUX_JAIL=off,
+// no bwrap on this host (macOS), or no resolvable $HOME.
+func jail() (bwrap, home string, ok bool) {
+	if envOr("AMUX_JAIL", "on") == "off" {
+		return "", "", false
+	}
+	bw, err := exec.LookPath("bwrap")
+	if err != nil {
+		return "", "", false
+	}
+	home, err = os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", "", false
+	}
+	return bw, home, true
+}
+
+// Jailed reports whether panes on this host run inside the bwrap scope. False
+// means every pane sees the host filesystem as-is (AMUX_JAIL=off, or no bwrap),
+// so a visibility question like ScopeReaches has no bearing.
+func Jailed() bool {
+	_, _, ok := jail()
+	return ok
+}
+
+// ScopeReaches reports whether an absolute host path is visible from inside an
+// agent pane's scope: under one of the read-only system roots, the WSL interop
+// mounts, or the amux data tree (dataDir, a parameter so the rule is testable).
+// Everything else under $HOME is replaced by an empty tmpfs (only the pane
+// binary's own subtree and the agent's dir come back, neither of which a caller
+// should rely on for a third tool), and paths outside the listed roots (/var,
+// /snap, /srv, …) are not bound at all. The path is checked as given; a caller
+// that cares about a symlink's target (Ubuntu's /usr/bin/firefox → /snap/…)
+// should resolve it and ask about both.
+func ScopeReaches(dataDir, path string) bool {
+	path = filepath.Clean(path)
+	under := func(root string) bool {
+		root = filepath.Clean(root)
+		return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
+	}
+	if dataDir != "" && under(dataDir) {
+		return true
+	}
+	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
+		if under(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // scope wraps a pane's command in a bubblewrap mount namespace confined to the
 // worktree: the system is read-only (so tools/libraries run), only the worktree
 // (and a private /tmp) is writable, and the rest of $HOME — other repos, other
@@ -170,15 +236,11 @@ func agentRepoSources(agentID string) []string {
 // nothing. This is a filesystem scope, not a hardened jail (network and pids are
 // shared), and it's skipped if AMUX_JAIL=off or bwrap is missing.
 func scope(dir string, tab int, s store.Session, argv []string, rwSources []string) []string {
-	if len(argv) == 0 || envOr("AMUX_JAIL", "on") == "off" {
+	if len(argv) == 0 {
 		return argv
 	}
-	bw, err := exec.LookPath("bwrap")
-	if err != nil {
-		return argv
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	bw, home, ok := jail()
+	if !ok {
 		return argv
 	}
 
@@ -189,7 +251,7 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 	// Non-merged-/usr systems also need these as real dirs; on merged systems they
 	// are symlinks already covered by /usr, so -try skips whatever's absent. /opt,
 	// /nix, /home/linuxbrew (brew prefix), and /run cover this host's toolchain.
-	for _, p := range []string{"/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew", "/run"} {
+	for _, p := range systemRoots[2:] {
 		args = append(args, "--ro-bind-try", p, p)
 	}
 	// Network is shared (not unshared), but DNS needs the *real* resolv.conf: on
@@ -262,10 +324,9 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		// scope the .exe can't be found and the read fails ("can't find image on
 		// clipboard"). Bind it read-only; /mnt/wsl backs some interop helpers too.
 		// --ro-bind-try is a no-op off WSL, so this stays cross-platform.
-		binds = append(binds,
-			[]string{"--ro-bind-try", "/mnt/c", "/mnt/c"},
-			[]string{"--ro-bind-try", "/mnt/wsl", "/mnt/wsl"},
-		)
+		for _, p := range interopRoots {
+			binds = append(binds, []string{"--ro-bind-try", p, p})
+		}
 		return append(binds, gitBinds(home)...)
 	case TabEditor:
 		name := filepath.Base(editorBin())

@@ -359,7 +359,11 @@ Two things are OS-specific by design:
   which exists on Linux/WSL but not macOS. Where `bwrap` is absent the scope is
   **silently skipped** — panes still run, just unscoped to the worktree
   (`AMUX_JAIL=off` is the explicit form). Docker-in-the-pane and `proctree`
-  process mapping are likewise Linux-only.
+  process mapping are likewise Linux-only. Inside the jail `$HOME` is an empty
+  tmpfs, so anything a pane launches — including `$BROWSER`, which agents use
+  for `gh --web` and Claude's login — must live under a system root (`/usr`,
+  `/opt`, `/home/linuxbrew`, …). `amux doctor` checks that; on WSL set
+  `BROWSER=wslview` (package `wslu`) rather than a `/mnt/c/...` `.exe` path.
 - **The native TUI needs no tmux.** It hosts every pane in-process over a PTY.
 
 | Capability | Win (WSL) | Mac (iTerm2) | Linux |
