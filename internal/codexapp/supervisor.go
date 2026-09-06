@@ -558,7 +558,11 @@ func (s *Supervisor) Cancel(ctx context.Context) error {
 // clients — this one and the native TUI — converge on the same truth; a
 // turn/completed also clears any still-open approval.
 func (s *Supervisor) Resolve(_ context.Context, requestID, decision string) error {
-	p, err := s.approvals.take(requestID)
+	// Record the local answer (rejecting stale/duplicate) but do NOT mark it
+	// resolved or emit permission_resolved — the server's authoritative
+	// `serverRequest/resolved` notification does that, so amux, the native TUI, and
+	// the web peer all converge on the same truth (no speculative resolution).
+	p, err := s.approvals.answerLocally(requestID, decision)
 	if err != nil {
 		return err // stale or duplicate
 	}
@@ -601,6 +605,15 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 			s.threadID = id
 			s.mu.Unlock()
 		}
+	}
+	// The server authoritatively resolves an approval — answered by ANY client —
+	// via serverRequest/resolved, which arrives while the turn is still active. Clear
+	// it and emit permission_resolved immediately so every client converges before
+	// turn end (AGE-198). Handled here (not the pure mapper) because it mutates the
+	// approval tracker; returns so it isn't also passed through as a raw event.
+	if method == "serverRequest/resolved" {
+		s.handleServerResolved(params)
+		return
 	}
 	// Track the active turn from ANY origin (ROOT audit): a turn started in the
 	// native TUI raises turn/started too, and web steer/interrupt must target it —
@@ -788,13 +801,45 @@ func (s *Supervisor) clearTurn() {
 	s.mu.Unlock()
 }
 
-// clearOpenApprovals emits a permission_resolved(cleared) for every approval
-// still open, so a consumer never waits forever on a prompt the turn abandoned.
-func (s *Supervisor) clearOpenApprovals(string) {
-	for _, id := range s.approvals.open() {
-		if _, err := s.approvals.take(id); err == nil {
-			s.emit(permissionResolved(id, harnessproto.DecisionCleared))
+// handleServerResolved consumes a serverRequest/resolved notification: the server
+// (on any client's answer) reports requestId resolved. It matches the pinned
+// thread, clears the request, and emits permission_resolved exactly once — with the
+// decision this supervisor sent if it answered locally, else "cleared" (another
+// client answered). A mismatched thread, or an unknown/already-resolved id, is
+// ignored. requestId may be a string or a number.
+func (s *Supervisor) handleServerResolved(params json.RawMessage) {
+	var p struct {
+		ThreadID  string          `json:"threadId"`
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || len(p.RequestID) == 0 {
+		return
+	}
+	key := idKey(p.RequestID)
+	// Only clear a request that belongs to our pinned thread. An empty threadId in
+	// the notice is treated as "our thread" (the server addressed this connection).
+	if p.ThreadID != "" {
+		if owner, ok := s.approvals.threadOf(key); ok && owner != "" && owner != p.ThreadID {
+			return // resolution for a different thread — not ours
 		}
+		s.mu.Lock()
+		pinned := s.threadID
+		s.mu.Unlock()
+		if pinned != "" && p.ThreadID != pinned {
+			return
+		}
+	}
+	if decision, ok := s.approvals.serverResolved(key); ok {
+		s.emit(permissionResolved(key, decision))
+	}
+}
+
+// clearOpenApprovals emits a permission_resolved for every approval still live when
+// a turn ends without the server having confirmed it — the decision this supervisor
+// sent if it answered, else "cleared" — so a consumer never waits forever.
+func (s *Supervisor) clearOpenApprovals(string) {
+	for _, r := range s.approvals.drainOutstanding() {
+		s.emit(permissionResolved(r.key, r.decision))
 	}
 }
 
