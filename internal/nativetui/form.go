@@ -2,10 +2,12 @@ package nativetui
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"amux/internal/agent"
 	"amux/internal/core"
@@ -105,6 +107,7 @@ type formField struct {
 	options []string
 	picker  bool // repos-style field: activating it opens the fuzzy repo picker
 	cursor  int  // rune index of the vim cursor (text fields)
+	scroll  int  // first visible row of a multi-row text field (see renderRows)
 }
 
 func (f *formField) isSelect() bool { return len(f.options) > 0 }
@@ -127,7 +130,10 @@ func (f *formField) cycle(forward bool) {
 	f.value = f.options[idx]
 }
 
-func (f *formField) display() string {
+// display renders an inactive field in at most width cells on one row. A text
+// value shows its first line, cut with an ellipsis if long, and a count of the
+// lines it hides: a pasted multi-line prompt stays one row until selected.
+func (f *formField) display(width int) string {
 	if f.isSelect() {
 		return "‹ " + f.value + " ›"
 	}
@@ -140,11 +146,35 @@ func (f *formField) display() string {
 	if f.value == "" {
 		return dimStyle.Render("(empty)")
 	}
-	return f.value
+	first, rest, multi := strings.Cut(f.value, "\n")
+	if !multi {
+		return truncateCells(first, width)
+	}
+	more := dimStyle.Render(" (+" + strconv.Itoa(strings.Count(rest, "\n")+1) + " lines)")
+	return truncateCells(first, width-lipgloss.Width(more)) + more
 }
 
-// renderActive renders a text field with a block cursor at f.cursor.
-func (f *formField) renderActive() string {
+// lineCount and cursorLine are the field's logical (newline-separated) line
+// count and the 1-based line the cursor is on, for the active field's label.
+func (f *formField) lineCount() int { return strings.Count(f.value, "\n") + 1 }
+func (f *formField) cursorLine() int {
+	r := []rune(f.value)
+	c := f.cursor
+	if c > len(r) {
+		c = len(r)
+	}
+	return strings.Count(string(r[:c]), "\n") + 1
+}
+
+// renderRows draws the active text field: its value wrapped into rows of at
+// most width cells, with a block cursor at f.cursor, showing at most maxRows of
+// them. The window scrolls only as far as needed to keep the cursor's row in
+// view (f.scroll remembers it between frames), so moving through a long pasted
+// prompt pans it inside the box rather than growing the box.
+func (f *formField) renderRows(width, maxRows int) []string {
+	if maxRows < 1 {
+		maxRows = 1
+	}
 	r := []rune(f.value)
 	c := f.cursor
 	if c < 0 {
@@ -153,16 +183,45 @@ func (f *formField) renderActive() string {
 	if c > len(r) {
 		c = len(r)
 	}
-	on := " "
-	after := ""
-	if c < len(r) {
-		on = string(r[c])
-		after = string(r[c+1:])
+	// Wrap one cell short so a cursor sitting past a full row's last rune still
+	// fits on that row instead of spilling into a new one.
+	spans := wrapSpans(r, width-1)
+	row := cursorRow(spans, r, c)
+	if row < f.scroll {
+		f.scroll = row
 	}
-	return string(r[:c]) + cursorStyle.Render(on) + after
+	if row >= f.scroll+maxRows {
+		f.scroll = row - maxRows + 1
+	}
+	if f.scroll > len(spans)-maxRows {
+		f.scroll = len(spans) - maxRows
+	}
+	if f.scroll < 0 {
+		f.scroll = 0
+	}
+	end := f.scroll + maxRows
+	if end > len(spans) {
+		end = len(spans)
+	}
+	out := make([]string, 0, end-f.scroll)
+	for i := f.scroll; i < end; i++ {
+		sp := spans[i]
+		if i != row {
+			out = append(out, expandTabs(r[sp.start:sp.end]))
+			continue
+		}
+		on := " "
+		after := ""
+		if c < sp.end {
+			on = expandTabs(r[c : c+1])
+			after = expandTabs(r[c+1 : sp.end])
+		}
+		out = append(out, expandTabs(r[sp.start:c])+cursorStyle.Render(on)+after)
+	}
+	return out
 }
 
-// ---- single-line vim editor primitives (operate on the rune slice) ----
+// ---- vim editor primitives (operate on the rune slice) ----
 
 func (f *formField) end() int { return len([]rune(f.value)) }
 
@@ -307,7 +366,7 @@ func (f *formField) wordEnd() { // e
 	f.cursor = c
 }
 
-func isWordSpace(r rune) bool { return r == ' ' || r == '\t' }
+func isWordSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }
 
 // formState is a pending modal form: a column of fields plus a submit button
 // (cursor == len(fields)). Text fields are vim-edited; `insert` is the vim mode
@@ -444,7 +503,7 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			m.cancelForm()
 		case tea.KeyRunes:
-			field.insertRunes(k.Runes)
+			field.insertRunes(inputRunes(k))
 		case tea.KeySpace:
 			field.insertRunes([]rune{' '})
 		case tea.KeyBackspace:
@@ -459,6 +518,11 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if text { // normal mode
+		if k.Paste { // a paste is text to keep, never a run of commands
+			field.insertRunes(inputRunes(k))
+			field.clampNormal()
+			return m, nil
+		}
 		switch k.String() {
 		case "esc", "ctrl+c":
 			m.cancelForm()
@@ -544,6 +608,28 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// inputRunes is the text a key press adds to a field. Typed runes pass through;
+// a bracketed paste arrives whole, newlines included, and is kept that way (a
+// multi-line prompt stays multi-line) with the terminal's CR / CRLF line ends
+// folded to LF so the value has one kind of newline.
+func inputRunes(k tea.KeyMsg) []rune {
+	if !k.Paste {
+		return k.Runes
+	}
+	out := make([]rune, 0, len(k.Runes))
+	for i, r := range k.Runes {
+		switch {
+		case r == '\r' && i+1 < len(k.Runes) && k.Runes[i+1] == '\n':
+			continue // CRLF: the LF that follows carries the newline
+		case r == '\r':
+			out = append(out, '\n')
+		default:
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // applyOperator finishes a pending vim operator with its argument key.
 func (m *model) applyOperator(field *formField, k tea.KeyMsg) {
 	fs := m.form
@@ -612,7 +698,18 @@ func (m *model) submitForm() tea.Cmd {
 	return cmd
 }
 
-// renderForm draws the form as a centered modal in the main pane.
+// minValueCells is the narrowest a text field's rows may get beside their label
+// before they drop under it instead.
+const minValueCells = 12
+
+// formChrome is the rows around the fields inside the modal: border (2),
+// padding (2), title + blank (2), blank + footer row (2).
+const formChrome = 8
+
+// renderForm draws the form as a centered modal in the main pane. The modal is
+// sized to the pane: each field takes one row except the active text field,
+// which gets the rows left over (up to maxFieldRows) and scrolls within them,
+// so a long or pasted multi-line prompt never grows the box past the pane.
 func (m *model) renderForm() string {
 	fs := m.form
 	w := m.mainWidth() - 8
@@ -622,35 +719,75 @@ func (m *model) renderForm() string {
 	if w < 18 {
 		w = 18
 	}
+	inner := w - 4 // Width includes the padding
+	// The footer is the submit button beside the key hint, or the two stacked
+	// when they do not fit on one row (the hint is worth a field row).
+	submit := " " + fs.submit + " "
+	if fs.onSubmit() {
+		submit = selStyle.Render(submit)
+	} else {
+		submit = keyStyle.Render(submit)
+	}
+	footer := []string{submit + "  " + m.formHint()}
+	if lipgloss.Width(footer[0]) > inner {
+		footer = []string{submit, m.formHint()}
+	}
+	rows := m.paneRows() - formChrome - (len(footer) - 1) - (len(fs.fields) - 1)
+	if rows > maxFieldRows {
+		rows = maxFieldRows
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	// Every row is budgeted as exactly one row: anything wider than the box is
+	// cut rather than wrapped, which would push the box past the pane.
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(fs.title))
-	b.WriteString("\n\n")
+	row := func(s string) { b.WriteString(ansi.Truncate(s, inner, "…") + "\n") }
+	row(titleStyle.Render(fs.title))
+	row("")
 	for i, f := range fs.fields {
 		active := i == fs.cursor
 		marker := "  "
 		label := dimStyle.Render(f.label + ": ")
-		val := f.display()
-		if active {
-			marker = keyStyle.Render("▸ ")
-			label = f.label + ": "
-			if !f.isSelect() && !f.isPicker() {
-				val = f.renderActive()
+		if !active {
+			row(marker + label + f.display(inner-lipgloss.Width(marker+label)))
+			continue
+		}
+		marker = keyStyle.Render("▸ ")
+		label = f.label + ": "
+		if f.isSelect() || f.isPicker() {
+			row(marker + label + f.display(inner-lipgloss.Width(marker+label)))
+			continue
+		}
+		if f.lineCount() > 1 {
+			label = f.label + dimStyle.Render(" [line "+strconv.Itoa(f.cursorLine())+"/"+strconv.Itoa(f.lineCount())+"]") + ": "
+		}
+		// Rows hang under the value, after the label; when the label leaves too
+		// little room (narrow pane, long label) they start on the next row.
+		prefix := marker + label
+		indent := strings.Repeat(" ", lipgloss.Width(prefix))
+		if inner-len(indent) < minValueCells {
+			row(prefix)
+			prefix, indent = "    ", "    "
+			rows--
+		}
+		for j, r := range f.renderRows(inner-len(indent), rows) {
+			if j == 0 {
+				row(prefix + r)
+			} else {
+				row(indent + r)
 			}
 		}
-		b.WriteString(marker + label + val + "\n")
 	}
-	b.WriteString("\n")
-	submit := " " + fs.submit + " "
-	if fs.onSubmit() {
-		b.WriteString(selStyle.Render(submit))
-	} else {
-		b.WriteString(keyStyle.Render(submit))
+	row("")
+	for _, f := range footer {
+		row(f)
 	}
-	b.WriteString("  " + m.formHint())
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
 		Padding(1, 2).Width(w).
-		Render(b.String())
+		Render(strings.TrimSuffix(b.String(), "\n"))
+	box = clampBlock(box, m.mainWidth(), m.paneRows())
 	return lipgloss.Place(m.mainWidth(), m.paneRows(), lipgloss.Center, lipgloss.Center, box)
 }
 

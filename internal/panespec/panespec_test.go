@@ -96,8 +96,11 @@ func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	ch := t.TempDir()
 	t.Setenv("CODEX_HOME", ch)
 	auth := filepath.Join(ch, "auth.json")
-	if err := os.WriteFile(auth, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
+	mcpAuth := filepath.Join(ch, ".credentials.json")
+	for _, path := range []string{auth, mcpAuth} {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s := store.Session{ID: "a1", Agent: "codex", Dir: t.TempDir()}
 	binds := configBinds(TabAgent, s, "/home/tester")
@@ -106,6 +109,9 @@ func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	}
 	if !hasBind(binds, auth) {
 		t.Errorf("codex TabAgent scope missing the shared auth.json bind %q; got %v", auth, binds)
+	}
+	if !hasBind(binds, mcpAuth) {
+		t.Errorf("codex TabAgent scope missing shared MCP credentials bind %q; got %v", mcpAuth, binds)
 	}
 	if hasBind(binds, "/home/tester/.claude") || hasBind(binds, "/home/tester/.claude.json") {
 		t.Errorf("codex TabAgent scope should not bind Claude's config; got %v", binds)
