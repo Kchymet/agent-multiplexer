@@ -226,8 +226,10 @@ Navigation is **Alt/Option-only** (no prefix):
 
 | key | action |
 |-----|--------|
-| `↑/↓`, `k/j` | move the rail cursor |
-| `Enter` | open the selected session — an agent, or a workgroup's coordinator / a repo's home |
+| `↑/↓`, `k/j` | move the rail cursor (including section headers) |
+| `Space` | fold/unfold the selected section, repo, or workgroup |
+| `←/→`, `h/l` | collapse/expand a group; move to its parent/first child |
+| `Enter` | open the selected session — an agent, or a workgroup's coordinator / a repo's home; fold/unfold a section header |
 | `Alt+l` / `Alt+h` | focus the agent pane / the rail |
 | `Alt+a` | toggle focus between rail and agent |
 | `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |
