@@ -169,6 +169,8 @@ func TestMungeDrift(t *testing.T) {
 	// the agent in /home/u/agent and it cd'd into the repo worktree beneath. This is
 	// a normal cwd shift, not scheme drift, and must not be flagged.
 	write(ProjectDirName("/home/u/agent"), "44444444-4444-4444-8444-444444444444", "/home/u/agent/repo")
+	// Actual Claude layout: underscores in cwd become hyphens too.
+	write("-home-u-harness--ws-permission-deny", "55555555-5555-4555-8555-555555555555", "/home/u/harness/_ws/permission_deny")
 	if d := MungeDrift(); len(d) != 0 {
 		t.Fatalf("no drift expected for a matching or ancestor layout, got %v", d)
 	}
@@ -182,16 +184,32 @@ func TestMungeDrift(t *testing.T) {
 }
 
 // TestProjectDirMungeContract pins the load-bearing project-dir path munge Claude
-// uses to locate a session's transcript: '/' and '.' become '-'. Resume detection,
+// uses to locate a session's transcript: '/', '.', and '_' become '-'. Resume detection,
 // gap-fill, and transcript listing all depend on reproducing it exactly.
 func TestProjectDirMungeContract(t *testing.T) {
 	cases := map[string]string{
-		"/home/u/work":                "-home-u-work",
-		"/home/u/.local/share/amux/x": "-home-u--local-share-amux-x",
+		"/home/u/work":                        "-home-u-work",
+		"/home/u/.local/share/amux/x":         "-home-u--local-share-amux-x",
+		"/home/u/harness/_ws/permission_deny": "-home-u-harness--ws-permission-deny",
+		"/tmp/scratchpad/wsHost_default":      "-tmp-scratchpad-wsHost-default",
 	}
 	for cwd, want := range cases {
 		if got := ProjectDirName(cwd); got != want {
 			t.Errorf("ProjectDirName(%q) = %q, want %q", cwd, got, want)
 		}
+	}
+}
+
+func TestFindSessionWithUnderscores(t *testing.T) {
+	home := At(t.TempDir())
+	cwd := "/home/u/harness/_ws/permission_deny"
+	id := "55555555-5555-4555-8555-555555555555"
+	// Use Claude's observed folder spelling rather than the implementation under test.
+	writeSession(t, home.ProjectsRoot(), "-home-u-harness--ws-permission-deny", id, `{"cwd":"`+cwd+`"}`)
+	if got, ok := home.FindSession(id, cwd); !ok || got != cwd {
+		t.Fatalf("FindSession = %q, %v; want %q, true", got, ok, cwd)
+	}
+	if _, err := os.Stat(home.TranscriptPath(cwd, id)); err != nil {
+		t.Fatalf("transcript lookup: %v", err)
 	}
 }

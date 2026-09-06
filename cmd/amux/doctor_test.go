@@ -20,7 +20,7 @@ func TestReconcile(t *testing.T) {
 	sessions := t.TempDir()
 	// On disk: r1/{a1,aX}, and r2/a3 (a3 was moved to workgroup r9 but its dir
 	// still lives under its original root r2).
-	for _, p := range []string{"r1/a1", "r1/aX", "r2/a3", "r9/a4"} {
+	for _, p := range []string{"r1/a1", "r1/aX", "r2/a3", "r9/a4", "r1/.amux", "r1/.claude", "harness/.amux", "harness/.claude"} {
 		if err := os.MkdirAll(filepath.Join(sessions, p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -41,9 +41,10 @@ func TestReconcile(t *testing.T) {
 		}},
 	}
 	disk := []branchRef{
-		{Repo: "acme/api", Branch: "amux/r1-a1"},  // known via stored branch
-		{Repo: "acme/api", Branch: "amux/r9-a4"},  // known via agent id (blank stored branch)
-		{Repo: "acme/api", Branch: "amux/gone-x"}, // orphan (deleted agent)
+		{Repo: "acme/api", Branch: "amux/r1-a1"},             // known via stored branch
+		{Repo: "acme/api", Branch: "amux/r9-a4"},             // known via agent id (blank stored branch)
+		{Repo: "acme/api", Branch: "amux/r2-a3-cold-attach"}, // descriptive branch of a moved agent
+		{Repo: "acme/api", Branch: "amux/gone-x"},            // orphan (deleted agent)
 	}
 
 	orphanDirs, missingDirs, orphanBranches := reconcile(sessions, roots, disk)
@@ -62,8 +63,7 @@ func TestReconcile(t *testing.T) {
 // TestAgentIDFromBranchRoundTrips pins that agentIDFromBranch is the inverse of
 // core.BranchFor for the agent id — the pair encode/decode the branch scheme, so
 // the reconciliation's blank-stored-branch fallback stays correct even if the
-// scheme changes. (It would catch agent ids gaining a hyphen, which the
-// LastIndex split assumes they don't.)
+// scheme changes. Agent and root IDs contain no hyphens.
 func TestAgentIDFromBranchRoundTrips(t *testing.T) {
 	for _, tc := range []struct{ root, agent string }{
 		{"r1", "a1"},
@@ -76,6 +76,16 @@ func TestAgentIDFromBranchRoundTrips(t *testing.T) {
 	// A legacy amux/<root> branch names no agent.
 	if got := agentIDFromBranch("amux/f12442"); got != "" {
 		t.Errorf("agentIDFromBranch(legacy root branch) = %q, want empty", got)
+	}
+	for branch, want := range map[string]string{
+		"amux/418eea-e5d6da-approval-resolve": "e5d6da",
+		"amux/418eea-e5d6da-cold-attach":      "e5d6da",
+		"feature/418eea-e5d6da":               "",
+		"amux/root-":                          "",
+	} {
+		if got := agentIDFromBranch(branch); got != want {
+			t.Errorf("agentIDFromBranch(%q) = %q, want %q", branch, got, want)
+		}
 	}
 }
 
