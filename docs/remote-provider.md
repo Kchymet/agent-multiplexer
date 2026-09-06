@@ -311,7 +311,8 @@ editing that `features` array directly. Because these strings are opaque to amux
 the list is purely an **advertisement** — it neither installs a runtime nor grants
 any sandbox permission, so advertise a runtime only where its CLI is actually
 present. Advertising `codex` is also independent of Codex *structured control*,
-which is enabled separately on the daemon via `AMUX_CODEX_CONTROL=app-server` (see
+which is enabled separately with `amux config set codex.control app-server`
+and an operator-controlled daemon restart (see
 `docs/codex-app-server-supervision.md`); a machine can advertise `codex` for
 create-UI purposes with or without structured control.
 

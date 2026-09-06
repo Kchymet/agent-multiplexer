@@ -208,8 +208,10 @@ func DescriptorFor(action string) ActionDescriptor { return actionDescriptors[ac
 // through the daemon instead of opening SQLite themselves. (The daemon and the
 // standalone mux server own store access directly; the CLI/provider do not.)
 const (
-	QueryRepos    = "repos"    // tracked repositories -> []RepoRow
-	QuerySessions = "sessions" // workgroups + their agents -> []WorkgroupRow
+	// QueryCodexControl reports the running daemon's startup selection.
+	QueryCodexControl = "codex-control"
+	QueryRepos        = "repos"    // tracked repositories -> []RepoRow
+	QuerySessions     = "sessions" // workgroups + their agents -> []WorkgroupRow
 	// QuerySnapshot returns the daemon's current session rail ([]Session) — the same
 	// inventory it broadcasts to subscribers — so a peer process (the provider)
 	// publishes it without opening the store itself.

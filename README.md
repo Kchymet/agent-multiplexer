@@ -423,6 +423,15 @@ Auto-launching amux on terminal open is optional and off by default. If you want
 it, opt in by sourcing the shim (`scripts/amux.sh`) from your shell rc; set
 `AMUX_SKIP=1` in any shell to bypass it.
 
+### Persistent Codex App Server opt-in
+
+Use `amux config set codex.control app-server` to save the daemon's Codex backend
+selection across restarts (`pty` is the default and rollback value). Changes
+require an operator-controlled `amux daemon restart`, which stops hosted agents;
+they do not change routing in a running daemon. `amux doctor` compares saved
+config, the shell override, and the running daemon's reported selection. See the
+[operator enable/restart/rollback sequence and override precedence](docs/codex-app-server-supervision.md#opt-in-and-fallback).
+
 ## Roadmap
 
 - **Thin-client TUI** — migrate the native TUI onto `muxclient` so the default app

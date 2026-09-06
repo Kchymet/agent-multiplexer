@@ -15,11 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -50,9 +50,13 @@ type Daemon struct {
 	// codex supervises structured-control Codex sessions (AGE-181): a background
 	// App Server per session, owned by the daemon, independent of any pane. It is
 	// created in Run (bound to the daemon context) and is inert until a session is
-	// launched with AMUX_CODEX_CONTROL=app-server, so the default PTY path is
+	// launched with App Server control enabled, so the default PTY path is
 	// unaffected. nil in tests that don't exercise structured control.
 	codex *codexapp.Manager
+
+	// Captured once at construction; config edits never reroute a running daemon.
+	codexControl amuxcfg.Control
+	configErr    error
 
 	mu       sync.RWMutex
 	sessions []core.Session
@@ -91,9 +95,13 @@ type Daemon struct {
 	firstPollOnce sync.Once
 }
 
-// New builds a daemon. self is the absolute path to this binary.
+// New builds a daemon and captures its Codex control selection. Run reports
+// any configuration error before opening a socket. self is this binary's path.
 func New(self string, sources []source.Source, interval time.Duration) *Daemon {
+	control, err := amuxcfg.ResolveCodexControl()
 	return &Daemon{
+		codexControl:   control,
+		configErr:      err,
 		sources:        sources,
 		interval:       interval,
 		self:           self,
@@ -170,6 +178,15 @@ func liveAgents(eng engine.Engine) map[string]bool {
 
 // Run starts the poll loop and socket server until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
+	if d.configErr != nil {
+		return d.configErr
+	}
+	log.Printf("codex control: %s (source=%s, config=%s, persisted=%q, override_set=%t, override=%q)",
+		d.codexControl.Effective, d.codexControl.Source, d.codexControl.ConfigPath,
+		d.codexControl.Persisted, d.codexControl.OverrideSet, d.codexControl.Override)
+	if d.codexControl.Warning != "" {
+		log.Print(d.codexControl.Warning)
+	}
 	if err := os.MkdirAll(core.StateDir(), 0o755); err != nil {
 		return err
 	}
@@ -189,7 +206,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// The structured-control supervisor manager is bound to the daemon's context:
 	// its App Servers live and die with the daemon, not with any pane or client.
-	// It stays inert unless a session is launched with AMUX_CODEX_CONTROL=app-server.
+	// It stays inert unless the captured startup selection enables App Server control.
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
 	defer d.codex.Shutdown()
 	// The engine's agents live in this process; stop them cleanly on shutdown.
@@ -523,19 +540,10 @@ func (d *Daemon) ensureSupervisor(agentID string) (*codexapp.Supervisor, error) 
 	return d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt)
 }
 
-// structuredControl reports whether session s should run under the App Server
-// supervisor rather than a PTY pane. It is opt-in (AMUX_CODEX_CONTROL=app-server),
-// Codex-only, and requires the manager to exist — so the default PTY path is never
-// affected. This is the single gate that keeps structured mode dark by default.
+// structuredControl applies the startup selection to Codex sessions only.
+// Configuration is never re-read while routing existing or new sessions.
 func (d *Daemon) structuredControl(s store.Session) bool {
-	return d.codex != nil && structuredCodexEnabled() && agent.Canonical(s.Agent) == harnessproto.RuntimeCodex
-}
-
-// structuredCodexEnabled reads the opt-in flag: AMUX_CODEX_CONTROL=app-server
-// selects the supervised App Server control path for Codex; anything else (the
-// default, unset) keeps the PTY path.
-func structuredCodexEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("AMUX_CODEX_CONTROL")), "app-server")
+	return d.codex != nil && d.codexControl.Effective == amuxcfg.AppServer && agent.Canonical(s.Agent) == harnessproto.RuntimeCodex
 }
 
 // persistLiveAgents writes the current set of live engine keys to disk so a

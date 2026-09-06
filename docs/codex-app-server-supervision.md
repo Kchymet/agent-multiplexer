@@ -114,14 +114,16 @@ the PTY launch path. A fresh structured thread starts the session's initial
 prompt as its first turn; a resumed thread never replays that creation prompt.
 
 A successfully initialized thread is immediately `Resumable`, including before
-its first prompt. Restart resumes the same empty or populated conversation.
+its first prompt. When the session's supervisor is started again, it attempts to
+resume that saved empty or populated conversation.
 Older identities explicitly marked not resumable still start fresh, and legacy
 unversioned identities attempt resume to preserve existing conversations. A
 missing-rollout error keeps the fallback to a new thread for a pruned or older
 unpersisted identity. Successful resume always preserves `Resumable=true`.
 
-The event sequence restarts per supervisor lifetime; provider replay and
-cross-restart event continuity still require separate integration acceptance.
+The in-memory hub starts a new sequence space with each supervisor instance.
+The out-of-process provider instead derives replay ordinals from the durable
+event log described below; these are separate sequence spaces.
 
 ## Steering and events
 
@@ -152,20 +154,124 @@ in-memory hub). So a structured session's events reach a remote consumer through
 **daemon-owned durable record**: the supervisor appends each normalized event as a
 JSON line to `<data>/codexapp/<id>.events.jsonl`, and `runtimeevents.sourcesFor`
 reads a `Structured` record with the *identity* mapper — reusing the whole tailer
-(seq, `afterSeq` resume, rotation) unchanged. Each supervisor lifetime truncates
-the log; the tailer resyncs on the shrink and a consumer dedups by ordinal.
+(seq, `afterSeq` resume, rotation) unchanged. `Supervisor.writeLog` opens the
+record with `O_APPEND`; starting a new supervisor does **not** truncate it.
+Daemon cold-start and failure notices use `AppendNotice` to append to this same
+canonical file. Keeping one ordered record preserves replay ordinals across
+supervisor restarts while that file is retained. The provider's `afterSeq`
+cursor refers to this durable record, not the supervisor's in-memory hub.
 
-> If the pinned `codex app-server` turns out to write its own rollout jsonl (like
-> `codex exec`), transcript events could come from the existing Codex rollout mapper
-> and the supervisor would add only correlated approvals. That needs the host binary
-> to confirm and is not assumed here.
+Logging is best-effort, so this is not a guarantee against disk-write failures
+or external deletion/rotation. Session thread identity, daemon backend selection,
+and event-history persistence are separate: changing `codex.control` does not
+clear the event log, and this rollout setting does not alter history mapping or
+replay behavior.
 
 ## Opt-in and fallback
 
-Default is the untouched PTY/exec path; the two are never wired at once for a
-session. The selector is `AMUX_CODEX_CONTROL=app-server` (default off), read by the
-daemon at launch through a single gate — `Daemon.structuredControl` — so the
-default path is provably unaffected (`TestStructuredControlGate`).
+The default remains PTY. Enable App Server control durably with amux's own
+configuration (AGE-233), stored at `amux config path`:
+
+```json
+{
+  "codex": { "control": "app-server" }
+}
+```
+
+`codex.control` accepts exactly `app-server` or `pty`. It is daemon rollout
+configuration for Codex, **not a per-session PTY-versus-web frontend choice**.
+Other runtimes are unaffected. `get` prints the saved value, or `pty` when unset;
+`ls` distinguishes saved values from defaults. Neither applies environment
+overrides. Setting/unsetting it preserves keybindings and unrelated config
+sections, and keybinding edits preserve the Codex setting.
+
+### Operator enable, restart, and rollback
+
+Run these as the user who owns the daemon, using that user's HOME and
+XDG_CONFIG_HOME. A worker's isolated config is not the host daemon's config.
+The operator performs the restart at an appropriate time: it stops hosted agent
+processes and may relaunch previously live sessions. Saving config alone does
+not stop or reroute any running session.
+
+Persisted opt-in selects the backend on subsequent session launches; it does
+not extend automatic session restoration. The current daemon restore list
+records live engine panes. A supervised session without a live agent pane may
+need to be started or attached again after restart, at which point it uses the
+saved backend selection and attempts to resume its saved thread identity.
+
+```sh
+# Enable durably; inspect before applying.
+amux config path
+amux config set codex.control app-server
+amux config get codex.control
+amux doctor
+
+# Operator only: apply with no one-command compatibility override.
+env -u AMUX_CODEX_CONTROL amux daemon restart
+amux doctor
+# Verify "running daemon: app-server (source=config...)".
+
+# Roll back durably, then apply (operator only).
+amux config set codex.control pty
+env -u AMUX_CODEX_CONTROL amux daemon restart
+amux doctor
+# Verify "running daemon: pty (source=config...)".
+
+# Alternatively remove the saved choice to restore the default:
+amux config unset codex.control
+# A daemon restart is still required to apply this change.
+```
+
+`env -u` only removes the variable for that invocation; it does not alter the
+shell's global environment. A supervisor or service that explicitly sets the
+variable can still override config on a later start; review its startup inputs.
+
+### Compatibility override precedence
+
+On every fresh daemon construction, amux validates the saved setting, then
+resolves the daemon's inherited `AMUX_CODEX_CONTROL`:
+
+| Environment at daemon startup | Selection |
+| --- | --- |
+| Unset | Saved `codex.control`, or default `pty` |
+| Empty or whitespace only | Saved setting, or default `pty` |
+| `app-server` (case-insensitive, surrounding whitespace ignored) | App Server, overriding disk |
+| `pty` (case-insensitive, surrounding whitespace ignored) | Explicit PTY override, even with persisted opt-in |
+| Any other nonempty value, including `0`, `false`, `off`, and typos | Legacy PTY override, with a warning in the daemon log and doctor |
+
+Empty env previously implied PTY because there was no saved setting; now it
+defers to disk. Unconfigured users retain PTY. Use `pty` to explicitly disable
+an existing persisted opt-in. Invalid nonempty env values retain the historical
+PTY behavior but are no longer silent. Persistent values are stricter: malformed
+JSON, a non-object `codex` section, or a control value other than the two accepted
+strings (including null/empty) rejects startup **even with an env override**.
+Repair an invalid `control` value with `config set` or `unset`; malformed JSON or
+a non-object section requires editing the file. Manual restart validates before
+stopping a healthy daemon.
+
+Auto-start, `daemon start`, foreground `daemon`, and `daemon restart` all use the
+same resolver. The selection is captured once; config edits affect the next
+daemon, never live routing, new-session routing inside the existing daemon, or
+its cold transcript resolution. There is no silent fallback from an App Server
+launch failure to PTY. Existing structured history retains its identity-based
+resolution independently of the startup selection.
+
+### Diagnostics
+
+`amux doctor` shows the saved setting and file path, this shell's override and
+predicted next-start selection, and the **running daemon's own report** over the
+local socket: actual selection, source (`config`, `environment`, or `default`),
+and the saved setting/path and override captured at startup. Startup also logs
+these values in `daemon.log`. The daemon selection describes its Codex routing
+policy; it does not assert that every individual session currently has a live
+App Server.
+
+The diagnostic query uses the same Unix-socket path on Linux and macOS; there
+is no `/proc` dependency or inference from the CLI environment. macOS runtime
+validation remains subject to the platform limitations in the README. An
+offline/unreachable daemon or an older daemon without the query is reported as
+unknown; update and restart
+under operator control to obtain the report. Doctor never starts a daemon.
 
 ## Validation posture
 
