@@ -23,8 +23,8 @@ import (
 //	turn/completed {turn.status,error}              | notice(error) if failed (+ turn_end from the supervisor)
 //	turn/plan/updated {plan[]}                      | plan
 //	turn/diff/updated {diff}                        | raw (no turn-level-diff type)
-//	item/agentMessage/delta {itemId,text}           | text  (chunk, coalesced by itemId)
-//	item/reasoning/summaryTextDelta {itemId,text}   | thinking (chunk, coalesced by itemId)
+//	item/agentMessage/delta {itemId,delta}          | text  (chunk, coalesced by itemId)
+//	item/reasoning/{summaryTextDelta,textDelta} {itemId,delta} | thinking (chunk, coalesced by itemId)
 //	item/started agentMessage|reasoning             | (none — deltas carry the text)
 //	item/completed agentMessage {text}              | text (final; closes coalesced group)
 //	item/completed reasoning {content|summary}      | thinking (final)
@@ -149,7 +149,7 @@ func mapNotification(method string, params json.RawMessage, st *streamState) (ev
 	case "item/agentMessage/delta":
 		return []harnessproto.RuntimeEvent{deltaChunk(harnessproto.TypeText, params, st)}, nil
 
-	case "item/reasoning/summaryTextDelta":
+	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
 		return []harnessproto.RuntimeEvent{deltaChunk(harnessproto.TypeThinking, params, st)}, nil
 
 	case "item/started":
@@ -238,14 +238,22 @@ func mapItem(phase string, params json.RawMessage, st *streamState) []harnesspro
 
 // deltaChunk emits one streaming text/thinking chunk from a delta notification,
 // marking the item id so the eventual item/completed closes the coalesced group.
+//
+// The streamed text field is `delta` (pinned Codex 0.153.4: AgentMessageDeltaNotification /
+// ReasoningTextDeltaNotification / ReasoningSummaryTextDeltaNotification all carry
+// {delta,itemId,threadId,turnId}). This mapper previously read `text`, which is absent on
+// these notifications, so streamed assistant text was silently DROPPED against the real
+// binary — only item/completed carried the whole text. Because the user-facing provider
+// bridge consumes THIS supervisor mapper, that dropped real remote-session content (harness
+// PR #138 fixed the parallel copy; this is the companion fix here).
 func deltaChunk(typ string, params json.RawMessage, st *streamState) harnessproto.RuntimeEvent {
 	var p struct {
 		ItemID string `json:"itemId"`
-		Text   string `json:"text"`
+		Delta  string `json:"delta"`
 	}
 	_ = json.Unmarshal(params, &p)
 	st.streamed[p.ItemID] = true
-	payload := map[string]any{"text": p.Text}
+	payload := map[string]any{"text": p.Delta}
 	if typ == harnessproto.TypeText {
 		payload["final"] = false
 	}

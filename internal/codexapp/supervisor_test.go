@@ -311,13 +311,23 @@ func TestPromptBracketsTurn(t *testing.T) {
 	waitCall(t, fs, "turn/start")
 	// The observed turn lifecycle brackets the turn (any origin).
 	fs.pushTurnStarted()
-	fs.pushNotify("item/agentMessage/delta", map[string]any{"itemId": "m1", "text": "hi"})
+	// Streamed text field is `delta` (pinned 0.153.4 AgentMessageDeltaNotification), not `text`.
+	fs.pushNotify("item/agentMessage/delta", map[string]any{"itemId": "m1", "delta": "hi", "threadId": "t", "turnId": "u"})
 	fs.completeTurn("completed")
 
 	col.waitFor(t, harnessproto.TypeTurnStart)
 	txt := col.waitFor(t, harnessproto.TypeText)
 	if txt.ItemID != "m1" {
 		t.Fatalf("text item id = %q", txt.ItemID)
+	}
+	// Non-empty streamed content must survive the supervisor event stream / coalescing — this
+	// is what the provider bridge relays to the user (the dropped-text regression, AGE-179).
+	var tp struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(txt.Payload, &tp)
+	if tp.Text != "hi" {
+		t.Fatalf("streamed assistant text lost through the supervisor stream: got %q, want %q", tp.Text, "hi")
 	}
 	end := col.waitFor(t, harnessproto.TypeTurnEnd)
 	var ep struct {
