@@ -562,7 +562,7 @@ func (s *Supervisor) Resolve(_ context.Context, requestID, decision string) erro
 	// resolved or emit permission_resolved — the server's authoritative
 	// `serverRequest/resolved` notification does that, so amux, the native TUI, and
 	// the web peer all converge on the same truth (no speculative resolution).
-	p, err := s.approvals.answerLocally(requestID, decision)
+	p, err := s.approvals.answerLocally(requestID)
 	if err != nil {
 		return err // stale or duplicate
 	}
@@ -811,26 +811,42 @@ func (s *Supervisor) handleServerResolved(params json.RawMessage) {
 	var p struct {
 		ThreadID  string          `json:"threadId"`
 		RequestID json.RawMessage `json:"requestId"`
+		Decision  string          `json:"decision"` // usually absent; the notice names no winner
 	}
 	if err := json.Unmarshal(params, &p); err != nil || len(p.RequestID) == 0 {
 		return
 	}
-	key := idKey(p.RequestID)
-	// Only clear a request that belongs to our pinned thread. An empty threadId in
-	// the notice is treated as "our thread" (the server addressed this connection).
-	if p.ThreadID != "" {
-		if owner, ok := s.approvals.threadOf(key); ok && owner != "" && owner != p.ThreadID {
-			return // resolution for a different thread — not ours
-		}
-		s.mu.Lock()
-		pinned := s.threadID
-		s.mu.Unlock()
-		if pinned != "" && p.ThreadID != pinned {
-			return
-		}
+	// Exact thread correlation is required: a missing threadId is NOT implicitly
+	// ours, and a mismatched one belongs to another thread. Either way, ignore.
+	if p.ThreadID == "" {
+		return
 	}
-	if decision, ok := s.approvals.serverResolved(key); ok {
-		s.emit(permissionResolved(key, decision))
+	s.mu.Lock()
+	pinned := s.threadID
+	s.mu.Unlock()
+	if pinned == "" || p.ThreadID != pinned {
+		return
+	}
+	if s.approvals.serverResolved(idKey(p.RequestID)) {
+		// Clear NEUTRALLY: the notification names no winning client or decision, and
+		// our own reply was only an attempt (a peer may have answered the other way).
+		// Surface a real decision only if the server itself supplied one.
+		s.emit(permissionResolved(idKey(p.RequestID), winningDecision(p.Decision)))
+	}
+}
+
+// winningDecision maps a server-supplied winning decision to the contract
+// vocabulary, defaulting to DecisionCleared when the server named none (the current
+// serverRequest/resolved notice carries no decision). It never invents allow/deny
+// from our local attempt.
+func winningDecision(serverDecision string) string {
+	switch strings.ToLower(strings.TrimSpace(serverDecision)) {
+	case "accept", harnessproto.DecisionAllow:
+		return harnessproto.DecisionAllow
+	case "decline", "reject", harnessproto.DecisionDeny:
+		return harnessproto.DecisionDeny
+	default:
+		return harnessproto.DecisionCleared
 	}
 }
 
@@ -838,8 +854,10 @@ func (s *Supervisor) handleServerResolved(params json.RawMessage) {
 // a turn ends without the server having confirmed it — the decision this supervisor
 // sent if it answered, else "cleared" — so a consumer never waits forever.
 func (s *Supervisor) clearOpenApprovals(string) {
-	for _, r := range s.approvals.drainOutstanding() {
-		s.emit(permissionResolved(r.key, r.decision))
+	for _, key := range s.approvals.drainOutstanding() {
+		// Neutral clear: an unconfirmed local answer is only an attempt, so an
+		// abandoned turn must not surface it as the outcome.
+		s.emit(permissionResolved(key, harnessproto.DecisionCleared))
 	}
 }
 
