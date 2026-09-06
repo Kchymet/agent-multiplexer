@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,6 +98,20 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	// Cleanup belongs to Supervisor.Start, not command construction. Leave a real
+	// stale Unix socket behind and require the sandboxed server to replace it.
+	stalePath := strings.TrimPrefix(endpoint, "unix://")
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: stalePath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatal(err)
+	}
 	sup := codexapp.New(codexapp.Config{SessionID: "sbx", Dir: dir, Env: env, Endpoint: endpoint})
 	if err := sup.Start(ctx, argv); err != nil {
 		t.Fatalf("sandboxed launch (exec bwrap-wrapped codex + WS handshake): %v", err)

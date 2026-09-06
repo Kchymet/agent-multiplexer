@@ -80,7 +80,8 @@ func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint 
 	if err := os.MkdirAll(filepath.Dir(sock), 0700); err != nil {
 		return "", nil, nil, "", fmt.Errorf("create App Server socket directory: %w", err)
 	}
-	_ = os.Remove(sock) // a stale socket from a prior run blocks the listener bind
+	// Supervisor.Start removes stale sockets under Manager.Ensure's startup lock.
+	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
 	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), endpoint, nil
