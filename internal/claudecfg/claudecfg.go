@@ -7,6 +7,7 @@ package claudecfg
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -506,6 +507,16 @@ type HookPayload struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
+// StatusLinePayload is the subset of Claude Code's status-line JSON amux needs.
+// Unlike ordinary hook payloads, model.id is the live selection and changes
+// immediately after `/model`.
+type StatusLinePayload struct {
+	SessionID string `json:"session_id"`
+	Model     struct {
+		ID string `json:"id"`
+	} `json:"model"`
+}
+
 // permissionHooks maps each Claude Code hook event that moves a permission
 // prompt's lifecycle to the `amux agent permission` verb it runs. Claude answers
 // its prompts in the TUI and writes none of them to the transcript, so this table
@@ -605,17 +616,17 @@ func ProjectSettingsLocalPath(dir string) string {
 // directory (never a parent), dir must be the agent's actual cwd. Idempotent and
 // preserves any non-amux hooks. Best-effort — callers proceed on error (status
 // just falls back to "unknown").
-func InstallHooksIn(dir, amuxPath string) error {
+func InstallHooksIn(dir, homeDir, amuxPath string) error {
 	mu.Lock()
 	defer mu.Unlock()
-	return writeHooks(ProjectSettingsLocalPath(dir), amuxPath)
+	return writeHooks(ProjectSettingsLocalPath(dir), dir, homeDir, amuxPath)
 }
 
 // writeHooks installs amux's status + capture hook groups into the settings.json
 // at settingsPath, pointed at amuxPath. It reads any existing file, replaces
 // amux's own hook groups (so a moved binary or changed event set is corrected)
 // while leaving other hooks untouched, and writes the result back atomically.
-func writeHooks(settingsPath, amuxPath string) error {
+func writeHooks(settingsPath, projectDir, homeDir, amuxPath string) error {
 	path := settingsPath
 	root := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
@@ -666,6 +677,8 @@ func writeHooks(settingsPath, amuxPath string) error {
 		hooks[event] = groups
 	}
 
+	installModelStatusLine(root, projectDir, homeDir, amuxPath)
+
 	// Default Claude to the fullscreen TUI renderer. It draws on the alternate
 	// screen and handles mouse-wheel scrolling; the default inline renderer does
 	// not, and inside an amux mirror pane (which forwards raw wheel events to a
@@ -687,6 +700,76 @@ func writeHooks(settingsPath, amuxPath string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+const modelStatusLineMarker = " agent model --statusline"
+
+// installModelStatusLine wraps the user's effective status-line command so amux
+// can observe the current model without changing what Claude renders. Project-
+// local settings have highest precedence, so inherited project/user status lines
+// must be forwarded explicitly. Reinstall unwraps our old command first, avoiding
+// wrapper nesting when the amux binary path changes.
+func installModelStatusLine(root map[string]any, projectDir, homeDir, amuxPath string) {
+	status, _ := root["statusLine"].(map[string]any)
+	if status == nil {
+		status = inheritedStatusLine(projectDir, homeDir)
+	}
+	if status == nil {
+		status = map[string]any{}
+	}
+	command, _ := status["command"].(string)
+	if downstream, ok := unwrapModelStatusLine(command); ok {
+		command = downstream
+	}
+	wrapper := amuxPath + modelStatusLineMarker
+	if strings.TrimSpace(command) != "" {
+		wrapper += " --forward-base64=" + base64.RawURLEncoding.EncodeToString([]byte(command))
+	}
+	status["type"] = "command"
+	status["command"] = wrapper
+	root["statusLine"] = status
+}
+
+func inheritedStatusLine(projectDir, homeDir string) map[string]any {
+	for _, path := range []string{
+		filepath.Join(projectDir, ".claude", "settings.json"),
+		filepath.Join(homeDir, "settings.local.json"),
+		filepath.Join(homeDir, "settings.json"),
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var cfg map[string]any
+		if json.Unmarshal(b, &cfg) != nil {
+			continue
+		}
+		status, _ := cfg["statusLine"].(map[string]any)
+		if command, _ := status["command"].(string); strings.TrimSpace(command) != "" {
+			copy := make(map[string]any, len(status))
+			for k, v := range status {
+				copy[k] = v
+			}
+			return copy
+		}
+	}
+	return nil
+}
+
+func unwrapModelStatusLine(command string) (string, bool) {
+	i := strings.Index(command, modelStatusLineMarker)
+	if i < 0 {
+		return "", false
+	}
+	for _, field := range strings.Fields(command[i+len(modelStatusLineMarker):]) {
+		if encoded, ok := strings.CutPrefix(field, "--forward-base64="); ok {
+			decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+			if err == nil {
+				return string(decoded), true
+			}
+		}
+	}
+	return "", true
 }
 
 // UninstallHooks removes amux's status/capture hook groups from Claude Code's

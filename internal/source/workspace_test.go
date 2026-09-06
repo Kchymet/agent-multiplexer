@@ -225,6 +225,57 @@ func TestPollCapsByControlPath(t *testing.T) {
 	}
 }
 
+func TestPollReconcilesRuntimeModel(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("HOME", t.TempDir())
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := store.Session{ID: "wg", Scope: store.ScopeWork, Agent: "claude", Model: "opus", Created: 1}
+	agentRow := store.Session{ID: "agent", RootID: "wg", Agent: "claude", Model: "sonnet", ClaudeID: "runtime-id", Created: 2}
+	for _, s := range []store.Session{root, agentRow} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	if err := core.WriteRuntimeModel("runtime-id", "claude-opus-4-7"); err != nil {
+		t.Fatal(err)
+	}
+
+	var observed string
+	w := NewWorkspace()
+	w.SetModelObserved(func(id, kind, model string) {
+		if id == "agent" && kind == "claude" {
+			observed = model
+		}
+	})
+	rows, err := w.Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published string
+	for _, row := range rows {
+		if row.ID == "agent" {
+			published = row.Model
+		}
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, err := db.GetSession("agent")
+	if err != nil || !ok {
+		t.Fatalf("GetSession: %v, %v", ok, err)
+	}
+	if got.Model != "claude-opus-4-7" || observed != got.Model || published != got.Model {
+		t.Fatalf("stored = %q, callback = %q, published = %q; want runtime selection", got.Model, observed, published)
+	}
+}
+
 // The ARCHIVED rail section is capped at the most recently archived agents so it
 // can't overrun the active rail; overflow is dropped (oldest first).
 func TestRecentArchived(t *testing.T) {

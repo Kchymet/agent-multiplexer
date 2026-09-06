@@ -110,8 +110,11 @@ Existing resumed threads retain their names.
 
 The session's selected model is sent on `thread/start` or `thread/resume` and on
 every amux-originated `turn/start`, so App Server control uses the same model as
-the PTY launch path. A fresh structured thread starts the session's initial
-prompt as its first turn; a resumed thread never replays that creation prompt.
+the PTY launch path. If a native client changes the model mid-session, the
+daemon observes the next rollout `turn_context`, persists that selection, and
+updates the live supervisor before the next amux-originated turn. A fresh
+structured thread starts the session's initial prompt as its first turn; a
+resumed thread never replays that creation prompt.
 On the first PTY-to-structured launch, when no structured identity sidecar exists,
 the supervisor adopts the Codex thread ID already pinned in amux's session store.
 This preserves the live conversation across a control-mode change instead of

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"io"
 	"os"
 	"testing"
 
@@ -112,5 +114,48 @@ func TestAgentPermissionNeverDisrupts(t *testing.T) {
 	}
 	if got := core.PendingPermissions("s1"); len(got) != 0 {
 		t.Errorf("no malformed call should have journaled anything, got %+v", got)
+	}
+}
+
+func TestAgentModelRecordsStatusLineSelection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AMUX_SESSION_ID", "")
+	const session = "33333333-3333-4333-8333-333333333333"
+	withHookStdin(t, `{"session_id":"`+session+`","model":{"id":"claude-opus-4-7","display_name":"Opus"}}`, func() {
+		if err := cmdAgentModel([]string{"--statusline"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	got, ok := core.RuntimeModel(session)
+	if !ok || got.Model != "claude-opus-4-7" {
+		t.Fatalf("RuntimeModel = %+v, %v", got, ok)
+	}
+}
+
+func TestAgentModelForwardsExistingStatusLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AMUX_SESSION_ID", "")
+	payload := `{"session_id":"s1","model":{"id":"claude-sonnet-4-6"}}`
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	withHookStdin(t, payload, func() {
+		encoded := base64.RawURLEncoding.EncodeToString([]byte("cat"))
+		if err := cmdAgentModel([]string{"--statusline", "--forward-base64=" + encoded}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	w.Close()
+	os.Stdout = orig
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != payload {
+		t.Fatalf("forwarded stdout = %q, want exact original payload", got)
 	}
 }

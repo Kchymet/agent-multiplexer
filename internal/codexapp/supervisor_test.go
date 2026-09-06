@@ -451,8 +451,8 @@ func TestPromptBracketsTurn(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()
 	defer sup.Close()
-	sup.cfg.Model = "gpt-5.6-sol"
 	attach(t, sup, client)
+	sup.SetModel("gpt-5.6-sol") // runtime observation after the thread is live
 
 	ctx := context.Background()
 	col := subscribeCollector(ctx, sup)

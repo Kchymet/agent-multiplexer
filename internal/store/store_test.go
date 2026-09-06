@@ -85,6 +85,9 @@ func TestFieldScopedUpdatersTouchOneColumn(t *testing.T) {
 	if err := db.SetName("a1", "renamed"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetModel("a1", "sonnet"); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetClaudeID("a1", "cid-new"); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,7 @@ func TestFieldScopedUpdatersTouchOneColumn(t *testing.T) {
 		t.Fatalf("GetSession: ok=%v err=%v", ok, err)
 	}
 	want := Session{
-		ID: "a1", RootID: "r2", Name: "renamed", Agent: "claude", Model: "opus",
+		ID: "a1", RootID: "r2", Name: "renamed", Agent: "claude", Model: "sonnet",
 		Mode: ModeTask, Repo: "acme/web", Branch: "amux/r1-a1", Dir: "/d",
 		ClaudeID: "cid-new", Prompt: "p", Created: 100, Scope: ScopeWork,
 		Archived: true, ArchivedAt: 555,

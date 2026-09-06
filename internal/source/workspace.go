@@ -42,6 +42,9 @@ type Workspace struct {
 	// ControlMode*) — "structured" for a session under the App Server supervisor,
 	// "" (pty) otherwise (AGE-181). nil ⇒ every row is pty, as before.
 	controlMode func(id string) string
+	// modelObserved is notified after a runtime-selected model is reconciled into
+	// the store, so a live structured controller can update its next-turn default.
+	modelObserved func(id, kind, model string)
 }
 
 func NewWorkspace() *Workspace { return &Workspace{} }
@@ -51,6 +54,9 @@ func (w *Workspace) SetLiveness(f func() map[string]bool) { w.engineLive = f }
 
 // SetControlMode installs the control-mode probe (see Workspace.controlMode).
 func (w *Workspace) SetControlMode(f func(id string) string) { w.controlMode = f }
+
+// SetModelObserved installs the live-controller reconciliation callback.
+func (w *Workspace) SetModelObserved(f func(id, kind, model string)) { w.modelObserved = f }
 
 func (w *Workspace) Name() string { return "workspace" }
 
@@ -75,10 +81,11 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	trackedDirs := map[string]bool{console.Dir(): true}
 
 	// Control console, pinned first: the machine-wide default session.
-	consoleState := agentState(liveOf(console.ID), console.Session())
+	consoleSession := console.Session()
+	consoleState := agentState(liveOf(console.ID), consoleSession)
 	out = append(out, w.withCaps(core.Session{
 		ID: console.ID, Title: "amux console", Source: "workspace", Kind: agent.DefaultKind(),
-		Mode: store.ModeConsole, Role: store.RoleConsole,
+		Mode: store.ModeConsole, Model: consoleSession.Model, Role: store.RoleConsole,
 		State: consoleState, Status: stateLabel(consoleState) + " · amux-wide",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
 	}, true)) // console resolves in steer.go — steerable
@@ -103,9 +110,13 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 	}
 	for _, r := range roots {
+		r = w.reconcileModel(db, r)
 		subs, err := db.Children(r.ID)
 		if err != nil {
 			return nil, err
+		}
+		for i := range subs {
+			subs[i] = w.reconcileModel(db, subs[i])
 		}
 		if r.Role() == store.RoleRepo {
 			// A repo's home session renders AS the repo header (below), not as a
@@ -154,7 +165,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 		out = append(out, w.withCaps(core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
-			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode),
+			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode), Model: r.Model,
 			Role:      store.RoleCoordinator,
 			State:     rootState,
 			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(ownState), len(active), plural(len(active))),
@@ -166,6 +177,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			out = append(out, w.withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
+				Model:     s.Model,
 				State:     subStates[i],
 				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s) + configSuffix(s),
 				Cwd:       s.Dir,
@@ -191,6 +203,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			out = append(out, w.withCaps(core.Session{
 				ID: r.Name, Title: repoTitle(r), Source: "workspace", Section: core.SectionRepos,
 				Kind: "repo", Mode: store.NormalizeMode(home.Mode), Role: store.RoleRepo,
+				Model: home.Model,
 				State: st, Status: stateLabel(st) + " · repo home",
 				Cwd: containerDir(home), CanAttach: true,
 			}, true)) // the home resolves in steer.go — steerable
@@ -199,6 +212,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				out = append(out, w.withCaps(core.Session{
 					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
 					RootID: r.Name, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
+					Model:     s.Model,
 					State:     st,
 					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s) + configSuffix(s),
 					Cwd:       s.Dir,
@@ -217,6 +231,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		out = append(out, w.withCaps(core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			Kind: agent.Canonical(s.Agent), Mode: s.Mode,
+			Model: s.Model,
 			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
 		}, false)) // archived / observe-only — not steerable
@@ -226,6 +241,26 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// user-level), shown read-only at the bottom.
 	out = append(out, w.untrackedRows(tracked, trackedDirs)...)
 	return out, nil
+}
+
+// reconcileModel folds the runtime's current selection back into the durable
+// session row. This makes `/model` visible on the rail and, crucially, prevents a
+// later resume from reapplying the stale launch-time model. Observation is best-
+// effort: an unreadable or not-yet-created transcript simply leaves the row as-is.
+func (w *Workspace) reconcileModel(db *store.DB, s store.Session) store.Session {
+	model, ok := agent.HarnessFor(s.Agent).CurrentModel(s)
+	model = strings.TrimSpace(model)
+	if !ok || model == "" || model == s.Model {
+		return s
+	}
+	if err := db.SetModel(s.ID, model); err != nil {
+		return s
+	}
+	s.Model = model
+	if w.modelObserved != nil {
+		w.modelObserved(s.ID, agent.Canonical(s.Agent), model)
+	}
+	return s
 }
 
 // withCaps stamps a session row with its runtime identity and the control
@@ -318,6 +353,7 @@ func (w *Workspace) untrackedRows(tracked, trackedDirs map[string]bool) []core.S
 			Section:   core.SectionDetached,
 			Kind:      agent.DefaultKind(),
 			Mode:      "external",
+			Model:     runtimeModel(id),
 			State:     rec.State,
 			Status:    stateLabel(rec.State) + " · untracked",
 			Cwd:       rec.Cwd,
@@ -325,6 +361,13 @@ func (w *Workspace) untrackedRows(tracked, trackedDirs map[string]bool) []core.S
 		}, false)) // external/detached — steer.go can't resolve it, so not steerable
 	}
 	return out
+}
+
+func runtimeModel(id string) string {
+	if report, ok := core.RuntimeModel(id); ok {
+		return report.Model
+	}
+	return ""
 }
 
 // repoTitle shows a tracked repo as "org/repo" for remote sources, falling back
