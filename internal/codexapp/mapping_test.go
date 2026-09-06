@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
@@ -182,10 +183,94 @@ func TestMapCommandExecution(t *testing.T) {
 	}
 }
 
-func TestMapUserMessageDropped(t *testing.T) {
-	evs, _ := mapNotification("item/completed", json.RawMessage(`{"item":{"id":"u1","type":"userMessage"}}`), &streamState{})
+// AGE-232: the shared server echoes prompts from every client. These are the
+// authority for history; a web composer's optimistic bubble is not a log row.
+func TestMapSharedUserMessages(t *testing.T) {
+	for _, phases := range [][]string{{"item/started", "item/completed", "item/completed"}, {"item/completed", "item/started"}} {
+		st := &streamState{}
+		for _, turn := range []string{"native-turn", "web-turn"} {
+			params := mustMarshal(map[string]any{"threadId": "shared", "turnId": turn,
+				"item": map[string]any{"id": "u1", "type": "userMessage", "content": []map[string]string{
+					{"type": "text", "text": "same prompt"}, {"type": "text", "text": "second line"},
+				}}})
+			var got []harnessproto.RuntimeEvent
+			for _, phase := range phases {
+				evs, _ := mapNotification(phase, params, st)
+				got = append(got, evs...)
+			}
+			if len(got) != 1 {
+				t.Fatalf("%s %v: got %d events, want one canonical prompt", turn, phases, len(got))
+			}
+			ev := got[0]
+			var p map[string]any
+			_ = json.Unmarshal(ev.Payload, &p)
+			if ev.Type != harnessproto.TypePrompt || ev.Direction != harnessproto.DirIn || ev.ItemID != "u1" ||
+				p["text"] != "same prompt\nsecond line" || p["thread_id"] != "shared" || p["turn_id"] != turn {
+				t.Fatalf("canonical prompt lost content or identity: %+v %s", ev, ev.Payload)
+			}
+		}
+	}
+}
+
+func TestMapUserMessageUnsupportedContentIsRaw(t *testing.T) {
+	st := &streamState{}
+	params := json.RawMessage(`{"threadId":"shared","turnId":"web","item":{"id":"u1","type":"userMessage","content":[{"type":"futureInput","value":9007199254740993}]}}`)
+	evs, _ := mapNotification("item/completed", params, st)
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypeRaw {
+		t.Fatalf("unsupported user content must survive as raw: %+v", evs)
+	}
+	if !strings.Contains(string(evs[0].Payload), "9007199254740993") {
+		t.Fatalf("raw content changed while adding correlation: %s", evs[0].Payload)
+	}
+	if evs, _ := mapNotification("item/completed", params, st); len(evs) != 0 {
+		t.Fatalf("duplicate unsupported completion: %+v", evs)
+	}
+}
+
+func TestMapUserMessageEmptyStartDoesNotHideCompletion(t *testing.T) {
+	st := &streamState{}
+	evs, _ := mapNotification("item/started", json.RawMessage(`{"threadId":"shared","turnId":"web","item":{"id":"u1","type":"userMessage","content":[{"type":"text","text":""}]}}`), st)
 	if len(evs) != 0 {
-		t.Fatalf("userMessage should be dropped, got %+v", evs)
+		t.Fatalf("empty start produced a conversation row: %+v", evs)
+	}
+	evs, _ = mapNotification("item/completed", json.RawMessage(`{"threadId":"shared","turnId":"web","item":{"id":"u1","type":"userMessage","content":[{"type":"text","text":"actual prompt"}]}}`), st)
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypePrompt {
+		t.Fatalf("completed input lost: %+v", evs)
+	}
+}
+
+func TestMapAssistantCompletionOnce(t *testing.T) {
+	for _, streamed := range []bool{false, true} {
+		st := &streamState{}
+		var got []harnessproto.RuntimeEvent
+		if streamed {
+			evs, _ := mapNotification("item/agentMessage/delta", json.RawMessage(`{"threadId":"shared","turnId":"web","itemId":"a1","delta":"reply"}`), st)
+			got = append(got, evs...)
+		}
+		for _, phase := range []string{"item/started", "item/completed", "item/completed"} {
+			evs, _ := mapNotification(phase, json.RawMessage(`{"threadId":"shared","turnId":"web","item":{"id":"a1","type":"agentMessage","text":"reply"}}`), st)
+			got = append(got, evs...)
+		}
+		text, finals := "", 0
+		for _, ev := range got {
+			var p struct {
+				Text   string `json:"text"`
+				Final  bool   `json:"final"`
+				Thread string `json:"thread_id"`
+				Turn   string `json:"turn_id"`
+			}
+			_ = json.Unmarshal(ev.Payload, &p)
+			if p.Thread != "shared" || p.Turn != "web" {
+				t.Fatalf("lost reply identity: %s", ev.Payload)
+			}
+			text += p.Text
+			if p.Final {
+				finals++
+			}
+		}
+		if text != "reply" || finals != 1 {
+			t.Fatalf("streamed=%v: text=%q finals=%d", streamed, text, finals)
+		}
 	}
 }
 

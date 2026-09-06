@@ -3,6 +3,7 @@ package codexapp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -32,7 +33,7 @@ import (
 //	item/completed fileChange {changes[]}           | tool_call(edit) + tool_result(diffs)
 //	item/{started,completed} mcpToolCall            | tool_call / tool_result
 //	item/completed functionCallOutput {output}      | tool_result
-//	item/completed userMessage                      | (none — echo of our own prompt)
+//	item/{started,completed} userMessage            | prompt (once per thread/turn/item, any origin)
 //	anything else                                   | raw (§4 — never dropped)
 //
 // Server-initiated approval / user-input *requests* are NOT handled here — they
@@ -43,12 +44,22 @@ import (
 // coalesced group rather than duplicating it. NOT concurrency-safe — the
 // supervisor owns one and only the read loop touches it.
 type streamState struct {
-	streamed map[string]bool // item_id -> chunk text/thinking already emitted
+	streamed map[string]bool              // item_id -> chunk text/thinking already emitted
+	users    map[conversationItemKey]bool // canonical prompts already emitted
+	replies  map[conversationItemKey]bool // completed assistant items already emitted
 }
+
+type conversationItemKey struct{ thread, turn, item string }
 
 func (st *streamState) ensure() {
 	if st.streamed == nil {
 		st.streamed = map[string]bool{}
+	}
+	if st.users == nil {
+		st.users = map[conversationItemKey]bool{}
+	}
+	if st.replies == nil {
+		st.replies = map[conversationItemKey]bool{}
 	}
 }
 
@@ -97,6 +108,27 @@ type itemPayload struct {
 // thread/started is the supervisor's job (onNotify), not this pure mapper's.
 func mapNotification(method string, params json.RawMessage, st *streamState) (events []harnessproto.RuntimeEvent, res *turnResult) {
 	st.ensure()
+	// Keep content correlated with the same wire IDs as the turn brackets. The
+	// generic runtime-event envelope carries these in its payload.
+	defer func() {
+		if !strings.HasPrefix(method, "item/") {
+			return
+		}
+		thread, turn := turnIDsFromNotification(params)
+		for i := range events {
+			var p map[string]json.RawMessage
+			if json.Unmarshal(events[i].Payload, &p) != nil || p == nil {
+				continue
+			}
+			if thread != "" {
+				p["thread_id"] = mustMarshal(thread)
+			}
+			if turn != "" {
+				p["turn_id"] = mustMarshal(turn)
+			}
+			events[i].Payload = mustMarshal(p)
+		}
+	}()
 	switch method {
 	case "thread/started":
 		return []harnessproto.RuntimeEvent{notice("info", "session established")}, nil
@@ -182,10 +214,59 @@ func mapItem(phase string, params json.RawMessage, st *streamState) []harnesspro
 	completed := phase == "item/completed"
 	switch it.Type {
 	case "userMessage":
-		return nil // echo of the prompt we sent
+		// A shared App Server broadcasts native and web input alike. No caller
+		// logs these for us: persist the canonical item, never inferred metadata
+		// or a local dispatch. Started gives prompt-before-reply ordering;
+		// completed is a fallback when attaching after the start notification.
+		thread, turn := turnIDsFromNotification(params)
+		key := conversationItemKey{thread, turn, it.ID}
+		if it.ID != "" && st.users[key] {
+			return nil
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		var texts []string
+		if json.Unmarshal(it.Content, &blocks) == nil {
+			for _, b := range blocks {
+				if b.Type == "text" {
+					texts = append(texts, b.Text)
+				}
+			}
+		}
+		text := strings.Join(texts, "\n")
+		if text == "" {
+			// Preserve unsupported input without inventing a chat message. A
+			// later completion may carry text absent from the start.
+			if !completed {
+				return nil
+			}
+			if it.ID != "" {
+				st.users[key] = true
+			}
+			return []harnessproto.RuntimeEvent{rawEvent("item/userMessage", wrap.Item)}
+		}
+		if it.ID == "" && !completed {
+			return nil
+		}
+		if it.ID != "" {
+			st.users[key] = true
+		}
+		return []harnessproto.RuntimeEvent{{Type: harnessproto.TypePrompt, ItemID: it.ID,
+			Direction: harnessproto.DirIn,
+			Payload:   mustMarshal(map[string]any{"text": text, "content": it.Content})}}
 	case "agentMessage":
 		if !completed {
 			return nil // deltas carry the streaming text
+		}
+		thread, turn := turnIDsFromNotification(params)
+		key := conversationItemKey{thread, turn, it.ID}
+		if it.ID != "" {
+			if st.replies[key] {
+				return nil
+			}
+			st.replies[key] = true
 		}
 		return []harnessproto.RuntimeEvent{closeOrEmitText(harnessproto.TypeText, it.ID, it.Text, true, st)}
 	case "reasoning":

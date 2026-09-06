@@ -446,7 +446,7 @@ func TestPromptBracketsTurn(t *testing.T) {
 	// The observed turn lifecycle brackets the turn (any origin).
 	fs.pushTurnStarted()
 	// Streamed text field is `delta` (pinned 0.153.4 AgentMessageDeltaNotification), not `text`.
-	fs.pushNotify("item/agentMessage/delta", map[string]any{"itemId": "m1", "delta": "hi", "threadId": "t", "turnId": "u"})
+	fs.pushNotify("item/agentMessage/delta", map[string]any{"itemId": "m1", "delta": "hi", "threadId": "thr_1", "turnId": "turn_1"})
 	fs.completeTurn("completed")
 
 	col.waitFor(t, harnessproto.TypeTurnStart)

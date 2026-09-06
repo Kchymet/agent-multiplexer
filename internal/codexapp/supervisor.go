@@ -751,12 +751,12 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 		s.handleServerResolved(params)
 		return
 	}
-	// A turn lifecycle notification for a DIFFERENT thread belongs to another
+	// A turn lifecycle or item notification for a DIFFERENT thread belongs to another
 	// session/thread: it must neither mutate our state nor enter our event stream
 	// (ROOT audit: foreign notifications must not contaminate our stream). A missing
 	// threadId is left to the downstream correlation checks, which never treat it as
 	// ours.
-	if (method == "turn/started" || method == "turn/completed") && s.foreignThread(params) {
+	if (method == "turn/started" || method == "turn/completed" || strings.HasPrefix(method, "item/")) && s.foreignThread(params) {
 		return
 	}
 	// Track the active turn from ANY origin (ROOT audit): a turn started in the
