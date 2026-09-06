@@ -17,6 +17,24 @@ func subscribeCollector(ctx context.Context, s *Supervisor) *collector {
 	return &collector{ch: s.Subscribe(ctx, 0)}
 }
 
+// tryGet returns the next event if one arrives within a short window, else ok=false.
+// It is for negative assertions ("nothing reached the stream").
+func (c *collector) tryGet() (harnessproto.RuntimeEvent, bool) {
+	for {
+		select {
+		case b, ok := <-c.ch:
+			if !ok {
+				return harnessproto.RuntimeEvent{}, false
+			}
+			if len(b.Events) > 0 {
+				return b.Events[0], true
+			}
+		case <-time.After(100 * time.Millisecond):
+			return harnessproto.RuntimeEvent{}, false
+		}
+	}
+}
+
 func (c *collector) waitFor(t *testing.T, typ string) harnessproto.RuntimeEvent {
 	t.Helper()
 	deadline := time.After(3 * time.Second)

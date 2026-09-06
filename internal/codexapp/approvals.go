@@ -136,6 +136,25 @@ func (a *approvalTracker) drainOutstanding() []string {
 	return out
 }
 
+// drainForTurn resolves every still-live approval raised by turnID (the turn that
+// raised them has ended) and returns their ids for neutral clearing. Approvals for
+// other turns are left untouched, so one turn ending — a peer's or ours — never
+// clears another turn's outstanding requests. Each drained id is marked resolved so a
+// late notification does not double-emit.
+func (a *approvalTracker) drainForTurn(turnID string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for k, p := range a.live {
+		if p.turnID == turnID {
+			out = append(out, k)
+			a.resolved[k] = true
+			delete(a.live, k)
+		}
+	}
+	return out
+}
+
 // open returns the ids of approvals still awaiting a first answer (apPending), the
 // set a new decision may target — an answered-awaiting-confirmation request is not
 // re-answerable.
