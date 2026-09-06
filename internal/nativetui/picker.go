@@ -370,6 +370,7 @@ func (m *model) renderPicker() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
 		Padding(1, 2).Width(w).
+		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(b.String())
 	return lipgloss.Place(m.mainWidth(), m.paneRows(), lipgloss.Center, lipgloss.Center, box)
 }

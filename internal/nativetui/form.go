@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -130,28 +131,58 @@ func (f *formField) cycle(forward bool) {
 	f.value = f.options[idx]
 }
 
-// display renders an inactive field in at most width cells on one row. A text
-// value shows its first line, cut with an ellipsis if long, and a count of the
-// lines it hides: a pasted multi-line prompt stays one row until selected.
+// display renders a field's value in at most width cells on one row: a select
+// keeps its ‹ › even when the option is cut, a picker lists the repos that fit
+// and counts the rest, and a text value shows its first (non-blank) line plus a
+// count of the lines it hides — a pasted multi-line prompt stays one row until
+// selected.
 func (f *formField) display(width int) string {
 	if f.isSelect() {
-		return "‹ " + f.value + " ›"
+		return "‹ " + truncateCells(f.value, width-4) + " ›"
 	}
 	if f.isPicker() {
 		if f.value == "" {
 			return dimStyle.Render("(none — ↵ to pick)")
 		}
-		return strings.ReplaceAll(f.value, ",", ", ")
+		return fitList(store.SplitRepos(f.value), width)
 	}
 	if f.value == "" {
 		return dimStyle.Render("(empty)")
 	}
-	first, rest, multi := strings.Cut(f.value, "\n")
-	if !multi {
-		return truncateCells(first, width)
+	lines := strings.Split(strings.TrimRight(f.value, "\n"), "\n")
+	if len(lines) == 1 {
+		return truncateCells(lines[0], width)
 	}
-	more := dimStyle.Render(" (+" + strconv.Itoa(strings.Count(rest, "\n")+1) + " lines)")
+	first := ""
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			first = l
+			break
+		}
+	}
+	more := dimStyle.Render(" (+" + plural(len(lines)-1, "line") + ")")
 	return truncateCells(first, width-lipgloss.Width(more)) + more
+}
+
+// fitList joins items with ", " as far as width allows, then counts the rest.
+func fitList(items []string, width int) string {
+	for n := len(items); n > 0; n-- {
+		s := strings.Join(items[:n], ", ")
+		if n < len(items) {
+			s += dimStyle.Render(" (+" + plural(len(items)-n, "more") + ")")
+		}
+		if lipgloss.Width(s) <= width {
+			return s
+		}
+	}
+	return dimStyle.Render("(" + plural(len(items), "repo") + ")")
+}
+
+func plural(n int, noun string) string {
+	if n == 1 || noun == "more" {
+		return strconv.Itoa(n) + " " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }
 
 // lineCount and cursorLine are the field's logical (newline-separated) line
@@ -222,8 +253,38 @@ func (f *formField) renderRows(width, maxRows int) []string {
 }
 
 // ---- vim editor primitives (operate on the rune slice) ----
+//
+// A value may hold several lines (a pasted prompt usually does), so the motions
+// and operators that vim scopes to a line — 0 $ I A D C dd cc d$ d0 x X — work
+// on the cursor's line here too; w/b/e cross lines the way vim's do. Nothing but
+// a paste or ^J inserts a newline, so no edit joins lines by accident.
 
 func (f *formField) end() int { return len([]rune(f.value)) }
+
+// lineBounds is the cursor's line as the rune range [start, end): end is the
+// index of the line's newline, or the end of the value on the last line.
+func (f *formField) lineBounds() (int, int) {
+	r := []rune(f.value)
+	c := f.cursor
+	if c > len(r) {
+		c = len(r)
+	}
+	if c < 0 {
+		c = 0
+	}
+	start := c
+	for start > 0 && r[start-1] != '\n' {
+		start--
+	}
+	end := c
+	for end < len(r) && r[end] != '\n' {
+		end++
+	}
+	return start, end
+}
+
+func (f *formField) lineStart() int { s, _ := f.lineBounds(); return s }
+func (f *formField) lineEnd() int   { _, e := f.lineBounds(); return e }
 
 func (f *formField) clampNormal() {
 	n := f.end()
@@ -254,6 +315,16 @@ func (f *formField) left() {
 	}
 }
 
+// lastOnLine puts a normal-mode cursor on the line's last rune ($).
+func (f *formField) lastOnLine() {
+	s, e := f.lineBounds()
+	if e > s {
+		f.cursor = e - 1
+	} else {
+		f.cursor = s
+	}
+}
+
 func (f *formField) insertRunes(rs []rune) {
 	r := []rune(f.value)
 	c := f.cursor
@@ -267,54 +338,94 @@ func (f *formField) insertRunes(rs []rune) {
 	f.cursor = c + len(rs)
 }
 
+// deleteRange removes the runes in [a, b) and leaves the cursor at a.
+func (f *formField) deleteRange(a, b int) {
+	r := []rune(f.value)
+	if a < 0 {
+		a = 0
+	}
+	if b > len(r) {
+		b = len(r)
+	}
+	if a >= b {
+		f.cursor = a
+		return
+	}
+	f.value = string(append(r[:a:a], r[b:]...))
+	f.cursor = a
+}
+
 func (f *formField) backspace() {
 	r := []rune(f.value)
 	if f.cursor > 0 && f.cursor <= len(r) {
-		f.value = string(append(r[:f.cursor-1], r[f.cursor:]...))
-		f.cursor--
+		f.deleteRange(f.cursor-1, f.cursor)
 	}
 }
 
-func (f *formField) deleteAt() { // x
+func (f *formField) deleteAt() { // x: never the newline
 	r := []rune(f.value)
-	if f.cursor < len(r) {
-		f.value = string(append(r[:f.cursor], r[f.cursor+1:]...))
+	if f.cursor < len(r) && r[f.cursor] != '\n' {
+		f.deleteRange(f.cursor, f.cursor+1)
+	}
+	f.clampNormal()
+}
+
+func (f *formField) deleteBefore() { // X: stays on the line
+	r := []rune(f.value)
+	if f.cursor > 0 && f.cursor <= len(r) && r[f.cursor-1] != '\n' {
+		f.deleteRange(f.cursor-1, f.cursor)
 	}
 	f.clampNormal()
 }
 
 func (f *formField) deleteToEnd() { // D / d$
-	r := []rune(f.value)
-	if f.cursor < len(r) {
-		f.value = string(r[:f.cursor])
-	}
+	f.deleteRange(f.cursor, f.lineEnd())
 	f.clampNormal()
 }
 
 func (f *formField) deleteToStart() { // d0
+	f.deleteRange(f.lineStart(), f.cursor)
+}
+
+// deleteLine removes the cursor's line (dd), newline included; the last line
+// takes the newline before it instead, as in vim.
+func (f *formField) deleteLine() {
 	r := []rune(f.value)
-	if f.cursor <= len(r) {
-		f.value = string(r[f.cursor:])
+	s, e := f.lineBounds()
+	switch {
+	case e < len(r):
+		f.deleteRange(s, e+1)
+	case s > 0:
+		f.deleteRange(s-1, e)
+		f.cursor = f.lineStart()
+	default:
+		f.deleteRange(s, e)
 	}
-	f.cursor = 0
+	f.clampNormal()
+}
+
+// changeLine clears the cursor's line but keeps it (cc).
+func (f *formField) changeLine() {
+	s, e := f.lineBounds()
+	f.deleteRange(s, e)
 }
 
 func (f *formField) deleteWord() { // dw
 	r := []rune(f.value)
 	e := f.cursor
-	for e < len(r) && !isWordSpace(r[e]) {
+	for e < len(r) && isWordRune(r[e]) {
 		e++
 	}
 	for e < len(r) && isWordSpace(r[e]) {
 		e++
 	}
-	f.value = string(append(r[:f.cursor], r[e:]...))
+	f.deleteRange(f.cursor, e)
 	f.clampNormal()
 }
 
 func (f *formField) replaceAt(ch rune) { // r<char>
 	r := []rune(f.value)
-	if f.cursor < len(r) {
+	if f.cursor < len(r) && r[f.cursor] != '\n' {
 		r[f.cursor] = ch
 		f.value = string(r)
 	}
@@ -323,10 +434,10 @@ func (f *formField) replaceAt(ch rune) { // r<char>
 func (f *formField) wordForward() { // w
 	r := []rune(f.value)
 	c := f.cursor
-	for c < len(r) && !isWordSpace(r[c]) {
+	for c < len(r) && isWordRune(r[c]) {
 		c++
 	}
-	for c < len(r) && isWordSpace(r[c]) {
+	for c < len(r) && !isWordRune(r[c]) {
 		c++
 	}
 	f.cursor = c
@@ -336,10 +447,10 @@ func (f *formField) wordForward() { // w
 func (f *formField) wordBack() { // b
 	r := []rune(f.value)
 	c := f.cursor - 1
-	for c > 0 && isWordSpace(r[c]) {
+	for c > 0 && !isWordRune(r[c]) {
 		c--
 	}
-	for c > 0 && !isWordSpace(r[c-1]) {
+	for c > 0 && isWordRune(r[c-1]) {
 		c--
 	}
 	if c < 0 {
@@ -351,10 +462,10 @@ func (f *formField) wordBack() { // b
 func (f *formField) wordEnd() { // e
 	r := []rune(f.value)
 	c := f.cursor + 1
-	for c < len(r) && isWordSpace(r[c]) {
+	for c < len(r) && !isWordRune(r[c]) {
 		c++
 	}
-	for c+1 < len(r) && !isWordSpace(r[c+1]) {
+	for c+1 < len(r) && isWordRune(r[c+1]) {
 		c++
 	}
 	if c >= len(r) {
@@ -366,7 +477,8 @@ func (f *formField) wordEnd() { // e
 	f.cursor = c
 }
 
-func isWordSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }
+func isWordSpace(r rune) bool { return r == ' ' || r == '\t' }
+func isWordRune(r rune) bool  { return !isWordSpace(r) && r != '\n' }
 
 // formState is a pending modal form: a column of fields plus a submit button
 // (cursor == len(fields)). Text fields are vim-edited; `insert` is the vim mode
@@ -482,6 +594,17 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	text := field != nil && !field.isSelect()
 
+	// A paste is text to keep, never a run of commands: it lands in the field in
+	// either vim mode, and a half-typed operator is dropped rather than fed it.
+	if text && k.Paste {
+		fs.pending = ""
+		field.insertRunes(pasteRunes(k.Runes))
+		if !fs.insert {
+			field.clampNormal()
+		}
+		return m, nil
+	}
+
 	// A half-typed operator (d/c/r) consumes the next key.
 	if text && fs.pending != "" {
 		m.applyOperator(field, k)
@@ -495,7 +618,13 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			field.left() // vim drops the cursor leaving insert
 			return m, nil
 		case tea.KeyEnter:
+			if k.Alt { // alt+enter, like ^J, breaks the line; plain Enter moves on
+				field.insertRunes([]rune{'\n'})
+				return m, nil
+			}
 			return m.formEnter()
+		case tea.KeyCtrlJ:
+			field.insertRunes([]rune{'\n'})
 		case tea.KeyTab:
 			fs.next()
 		case tea.KeyShiftTab:
@@ -503,7 +632,7 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			m.cancelForm()
 		case tea.KeyRunes:
-			field.insertRunes(inputRunes(k))
+			field.insertRunes(k.Runes)
 		case tea.KeySpace:
 			field.insertRunes([]rune{' '})
 		case tea.KeyBackspace:
@@ -518,11 +647,6 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if text { // normal mode
-		if k.Paste { // a paste is text to keep, never a run of commands
-			field.insertRunes(inputRunes(k))
-			field.clampNormal()
-			return m, nil
-		}
 		switch k.String() {
 		case "esc", "ctrl+c":
 			m.cancelForm()
@@ -539,10 +663,10 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			field.clampInsert()
 			fs.insert = true
 		case "I":
-			field.cursor = 0
+			field.cursor = field.lineStart()
 			fs.insert = true
 		case "A":
-			field.cursor = field.end()
+			field.cursor = field.lineEnd()
 			fs.insert = true
 		case "s":
 			field.deleteAt()
@@ -553,10 +677,9 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			field.cursor++
 			field.clampNormal()
 		case "0":
-			field.cursor = 0
+			field.cursor = field.lineStart()
 		case "$":
-			field.cursor = field.end()
-			field.clampNormal()
+			field.lastOnLine()
 		case "w":
 			field.wordForward()
 		case "b":
@@ -566,8 +689,7 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "x":
 			field.deleteAt()
 		case "X":
-			field.backspace()
-			field.clampNormal()
+			field.deleteBefore()
 		case "D":
 			field.deleteToEnd()
 		case "C":
@@ -608,21 +730,25 @@ func (m *model) handleForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// inputRunes is the text a key press adds to a field. Typed runes pass through;
-// a bracketed paste arrives whole, newlines included, and is kept that way (a
-// multi-line prompt stays multi-line) with the terminal's CR / CRLF line ends
-// folded to LF so the value has one kind of newline.
-func inputRunes(k tea.KeyMsg) []rune {
-	if !k.Paste {
-		return k.Runes
-	}
-	out := make([]rune, 0, len(k.Runes))
-	for i, r := range k.Runes {
+// pasteRunes is what a bracketed paste adds to a field. The text arrives whole,
+// newlines included, and stays multi-line; the terminal's CR / CRLF line ends
+// fold to LF so the value has one kind of newline, and escape sequences and
+// other control runes (BEL, C1 controls — common in text copied off a terminal)
+// are dropped: stored, they would reach the agent's prompt and, drawn, would be
+// interpreted by the terminal rather than shown.
+func pasteRunes(rs []rune) []rune {
+	rs = []rune(ansi.Strip(string(rs))) // whole escape sequences, not just the ESC
+	out := make([]rune, 0, len(rs))
+	for i, r := range rs {
 		switch {
-		case r == '\r' && i+1 < len(k.Runes) && k.Runes[i+1] == '\n':
+		case r == '\r' && i+1 < len(rs) && rs[i+1] == '\n':
 			continue // CRLF: the LF that follows carries the newline
 		case r == '\r':
 			out = append(out, '\n')
+		case r == '\n' || r == '\t':
+			out = append(out, r)
+		case unicode.IsControl(r):
+			continue
 		default:
 			out = append(out, r)
 		}
@@ -645,7 +771,7 @@ func (m *model) applyOperator(field *formField, k tea.KeyMsg) {
 	case "d":
 		switch k.String() {
 		case "d":
-			field.value, field.cursor = "", 0
+			field.deleteLine()
 		case "$":
 			field.deleteToEnd()
 		case "0":
@@ -656,7 +782,7 @@ func (m *model) applyOperator(field *formField, k tea.KeyMsg) {
 	case "c":
 		switch k.String() {
 		case "c":
-			field.value, field.cursor = "", 0
+			field.changeLine()
 			fs.insert = true
 		case "$":
 			field.deleteToEnd()
@@ -703,7 +829,7 @@ func (m *model) submitForm() tea.Cmd {
 const minValueCells = 12
 
 // formChrome is the rows around the fields inside the modal: border (2),
-// padding (2), title + blank (2), blank + footer row (2).
+// padding (2), title + spacer (2), spacer + footer row (2).
 const formChrome = 8
 
 // renderForm draws the form as a centered modal in the main pane. The modal is
@@ -732,7 +858,13 @@ func (m *model) renderForm() string {
 	if lipgloss.Width(footer[0]) > inner {
 		footer = []string{submit, m.formHint()}
 	}
-	rows := m.paneRows() - formChrome - (len(footer) - 1) - (len(fs.fields) - 1)
+	// In a pane too short for the modal's chrome, give up the blank spacer rows
+	// and the vertical padding before anything the user needs to see.
+	chrome, pad := formChrome, 1
+	if m.paneRows() < formChrome+len(footer)-1+len(fs.fields) {
+		chrome, pad = formChrome-4, 0
+	}
+	rows := m.paneRows() - chrome - (len(footer) - 1) - (len(fs.fields) - 1)
 	if rows > maxFieldRows {
 		rows = maxFieldRows
 	}
@@ -743,8 +875,13 @@ func (m *model) renderForm() string {
 	// cut rather than wrapped, which would push the box past the pane.
 	var b strings.Builder
 	row := func(s string) { b.WriteString(ansi.Truncate(s, inner, "…") + "\n") }
+	spacer := func() {
+		if pad > 0 {
+			row("")
+		}
+	}
 	row(titleStyle.Render(fs.title))
-	row("")
+	spacer()
 	for i, f := range fs.fields {
 		active := i == fs.cursor
 		marker := "  "
@@ -763,10 +900,11 @@ func (m *model) renderForm() string {
 			label = f.label + dimStyle.Render(" [line "+strconv.Itoa(f.cursorLine())+"/"+strconv.Itoa(f.lineCount())+"]") + ": "
 		}
 		// Rows hang under the value, after the label; when the label leaves too
-		// little room (narrow pane, long label) they start on the next row.
+		// little room (narrow pane, long label) they start on the next row — if
+		// there is a row to spare.
 		prefix := marker + label
 		indent := strings.Repeat(" ", lipgloss.Width(prefix))
-		if inner-len(indent) < minValueCells {
+		if inner-len(indent) < minValueCells && rows > 1 {
 			row(prefix)
 			prefix, indent = "    ", "    "
 			rows--
@@ -779,15 +917,18 @@ func (m *model) renderForm() string {
 			}
 		}
 	}
-	row("")
+	spacer()
 	for _, f := range footer {
 		row(f)
 	}
+	// The layout above fits the pane; MaxWidth/MaxHeight guarantee it where
+	// even the trimmed chrome cannot, since a modal must never push the
+	// surrounding chrome around.
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
-		Padding(1, 2).Width(w).
+		Padding(pad, 2).Width(w).
+		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(strings.TrimSuffix(b.String(), "\n"))
-	box = clampBlock(box, m.mainWidth(), m.paneRows())
 	return lipgloss.Place(m.mainWidth(), m.paneRows(), lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -799,7 +940,7 @@ func (m *model) formHint() string {
 	}
 	if f := fs.active(); f != nil && !f.isSelect() {
 		if fs.insert {
-			return titleStyle.Render("-- INSERT --") + dimStyle.Render("  Esc normal · Enter next")
+			return titleStyle.Render("-- INSERT --") + dimStyle.Render("  Esc normal · Enter next · ^J newline")
 		}
 		return titleStyle.Render("-- NORMAL --") + dimStyle.Render("  i insert · j/k move · Esc cancel")
 	}
