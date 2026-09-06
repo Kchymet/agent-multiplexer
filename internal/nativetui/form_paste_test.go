@@ -76,7 +76,7 @@ func TestPastedMultilinePromptStaysInBox(t *testing.T) {
 // The modal fits the pane at every reasonable terminal size — and never exceeds
 // it even when the pane is too small for the form's chrome.
 func TestFormFitsPaneAcrossSizes(t *testing.T) {
-	for _, sz := range [][2]int{{80, 24}, {120, 40}, {100, 16}, {60, 14}, {50, 10}, {40, 8}} {
+	for _, sz := range [][2]int{{80, 24}, {120, 40}, {70, 19}, {100, 16}, {60, 14}, {50, 10}, {40, 8}} {
 		m := &model{w: sz[0], h: sz[1]}
 		m.openNewWorkgroupForm()
 		m.handleForm(key("j")) // onto Prompt
@@ -89,7 +89,7 @@ func TestFormFitsPaneAcrossSizes(t *testing.T) {
 		if w := lipgloss.Width(out); w > m.mainWidth() {
 			t.Errorf("%dx%d: form is %d cols wide, pane is %d", sz[0], sz[1], w, m.mainWidth())
 		}
-		if sz[1] >= 24 && !strings.Contains(out, "╯") {
+		if sz[1] >= 19 && !strings.Contains(out, "╯") {
 			t.Errorf("%dx%d: form lost its bottom border:\n%s", sz[0], sz[1], out)
 		}
 	}
@@ -111,7 +111,9 @@ func TestMultilineFieldScrollsWithCursor(t *testing.T) {
 		t.Errorf("label should report the cursor line:\n%s", out)
 	}
 	m.handleForm(key("<esc>"))
-	m.handleForm(key("0"))
+	for i := 0; i < 1000; i++ { // b crosses lines; walk back to the very start
+		m.handleForm(key("b"))
+	}
 	out = plain(m.renderForm())
 	if !strings.Contains(out, "line 00 of") || strings.Contains(out, "line 39 of") {
 		t.Errorf("cursor at start should scroll the window to the top:\n%s", out)
@@ -196,5 +198,127 @@ func TestCursorRow(t *testing.T) {
 		if got := cursorRow(spans, r, c); got != want {
 			t.Errorf("cursorRow(%d) = %d, want %d", c, got, want)
 		}
+	}
+}
+
+// A paste that arrives while an operator is half typed (d/c/r) is still text to
+// keep: it lands in the field and the operator is dropped.
+func TestPasteAfterPendingOperatorInserts(t *testing.T) {
+	m := &model{}
+	m.openNewRepoAgentForm("repo", "Repo")
+	m.handleForm(key("i"))
+	m.handleForm(key("abc"))
+	m.handleForm(key("<esc>"))
+	m.handleForm(key("d"))
+	m.handleForm(paste("PASTED"))
+	if got := m.form.fields[0].value; !strings.Contains(got, "PASTED") {
+		t.Fatalf("paste after a pending operator was lost: %q", got)
+	}
+	if m.form.pending != "" {
+		t.Fatal("pending operator should be dropped by a paste")
+	}
+}
+
+// Control runes in pasted text (escape sequences, BEL) never reach the value;
+// tabs and newlines do.
+func TestPasteDropsControlRunes(t *testing.T) {
+	m := &model{}
+	m.openNewRepoAgentForm("repo", "Repo")
+	m.handleForm(key("i"))
+	m.handleForm(paste("hello \x1b[31mred\x1b[0m\a\tend\r\n\u0085two"))
+	if got := m.form.fields[0].value; got != "hello red\tend\ntwo" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// Line-scoped vim editing on a multi-line value: 0/$ stay on the line, D/dd/cc
+// touch only the cursor's line, x never joins lines, and ^J / alt+enter insert
+// a newline in insert mode.
+func TestMultilineVimEditing(t *testing.T) {
+	open := func(v string, cursor int) *model {
+		m := &model{}
+		m.openNewRepoAgentForm("repo", "Repo")
+		m.form.fields[0].value, m.form.fields[0].cursor = v, cursor
+		return m
+	}
+	val := func(m *model) string { return m.form.fields[0].value }
+	cur := func(m *model) int { return m.form.fields[0].cursor }
+
+	m := open("line one\nline two\nline three", 14) // on the 't' of "two"
+	m.handleForm(key("D"))
+	if val(m) != "line one\nline \nline three" {
+		t.Errorf("D: %q", val(m))
+	}
+	m = open("line one\nline two\nline three", 14)
+	m.handleForm(key("d"))
+	m.handleForm(key("d"))
+	if val(m) != "line one\nline three" || cur(m) != 9 {
+		t.Errorf("dd: %q cursor %d", val(m), cur(m))
+	}
+	m = open("one\ntwo", 5) // dd on the last line takes the newline before it
+	m.handleForm(key("d"))
+	m.handleForm(key("d"))
+	if val(m) != "one" {
+		t.Errorf("dd last line: %q", val(m))
+	}
+	m = open("line one\nline two\nline three", 14)
+	m.handleForm(key("c"))
+	m.handleForm(key("c"))
+	m.handleForm(key("X"))
+	if val(m) != "line one\nX\nline three" {
+		t.Errorf("cc: %q", val(m))
+	}
+	m = open("line one\nline two", 14)
+	m.handleForm(key("0"))
+	if cur(m) != 9 {
+		t.Errorf("0: cursor %d, want 9", cur(m))
+	}
+	m.handleForm(key("$"))
+	if cur(m) != 16 {
+		t.Errorf("$: cursor %d, want 16", cur(m))
+	}
+	m = open("ab\ncd", 2) // on the newline
+	m.handleForm(key("x"))
+	if val(m) != "ab\ncd" {
+		t.Errorf("x must not delete the newline: %q", val(m))
+	}
+	m = open("ab\ncd", 3) // at the start of line two
+	m.handleForm(key("X"))
+	if val(m) != "ab\ncd" {
+		t.Errorf("X must not join lines: %q", val(m))
+	}
+	m = open("ab", 2)
+	m.handleForm(key("i"))
+	m.handleForm(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m.handleForm(key("c"))
+	m.handleForm(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m.handleForm(key("d"))
+	if val(m) != "ab\nc\nd" {
+		t.Errorf("^J / alt+enter newline: %q", val(m))
+	}
+}
+
+// Inactive-field summaries: a picker lists what fits and counts the rest, a
+// select keeps its ‹ ›, and a text summary skips blank leading lines, ignores a
+// trailing newline, and uses the singular for one hidden line.
+func TestInactiveFieldSummaries(t *testing.T) {
+	f := &formField{key: "repos", picker: true, value: "repo-one,repo-two,repo-three,repo-four"}
+	if got := plain(f.display(30)); got != "repo-one, repo-two (+2 more)" {
+		t.Errorf("picker: %q", got)
+	}
+	if got := plain(f.display(200)); got != "repo-one, repo-two, repo-three, repo-four" {
+		t.Errorf("picker wide: %q", got)
+	}
+	f = &formField{key: "model", options: []string{"x"}, value: "claude-fable-5-1-very-long-model-id"}
+	if got := f.display(20); !strings.HasSuffix(got, " ›") || lipgloss.Width(got) > 20 {
+		t.Errorf("select: %q", got)
+	}
+	f = &formField{key: "prompt", value: "\nWrite tests\n"}
+	if got := plain(f.display(40)); got != "Write tests (+1 line)" {
+		t.Errorf("text: %q", got)
+	}
+	f = &formField{key: "prompt", value: "Fix the bug\n"}
+	if got := plain(f.display(40)); got != "Fix the bug" {
+		t.Errorf("trailing newline: %q", got)
 	}
 }

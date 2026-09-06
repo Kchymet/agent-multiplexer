@@ -346,6 +346,7 @@ func (m *model) renderDialog() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
 		Padding(1, 2).Width(w).
+		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(m.confirm.message + "\n\n" + keys)
 	return lipgloss.Place(m.mainWidth(), m.paneRows(), lipgloss.Center, lipgloss.Center, box)
 }
