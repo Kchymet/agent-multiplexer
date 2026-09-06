@@ -1045,10 +1045,16 @@ func (s *Supervisor) emit(ev harnessproto.RuntimeEvent) {
 	s.hub.emit(ev)
 }
 
-// writeLog appends one marshaled event as an NDJSON line to EventLogPath, opening
-// (and truncating) the file on first use. Best-effort: a failure disables further
-// logging rather than ever blocking the read loop or a verb — the durable log is a
-// transport, and losing it must never be worse than the turn it was carrying.
+// writeLog appends one marshaled event as an NDJSON line to EventLogPath. It opens
+// the file in APPEND mode (never truncating): the daemon may have already appended
+// cold-start notices for this session (AppendNotice), and the structured event log is
+// the session's SINGLE canonical runtime-event source — one append-only file whose
+// line order is the event order, so an event's ordinal is its line number and stays
+// identical whether a subscriber followed the live stream or reconnected (a merged
+// journal+transcript with no cross-file order could not, see runtimeevents.sourcesFor).
+// Best-effort: a failure disables further logging rather than ever blocking the read
+// loop or a verb — the durable log is a transport, and losing it must never be worse
+// than the turn it was carrying.
 func (s *Supervisor) writeLog(ev harnessproto.RuntimeEvent) {
 	if s.cfg.EventLogPath == "" {
 		return
@@ -1063,10 +1069,7 @@ func (s *Supervisor) writeLog(ev harnessproto.RuntimeEvent) {
 			s.logErr = true
 			return
 		}
-		// Truncate: each supervisor lifetime is a fresh event seq space. The tailer
-		// resyncs on the size shrink and a consumer dedups by ordinal, exactly as it
-		// does for a rollout --resume rewrite.
-		f, err := os.OpenFile(s.cfg.EventLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		f, err := os.OpenFile(s.cfg.EventLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			s.logErr = true
 			return
@@ -1080,6 +1083,37 @@ func (s *Supervisor) writeLog(ev harnessproto.RuntimeEvent) {
 	if _, err := s.logW.Write(append(b, '\n')); err != nil {
 		s.logErr = true
 	}
+}
+
+// AppendNotice appends one normalized notice event to a structured session's event
+// log (EventLogPathFor) as a single NDJSON line, so amux's daemon can record
+// cold-start progress and failure notices ONTO the same single, append-only log the
+// supervisor writes. Keeping them in one canonical source — rather than a separate
+// journal file merged at read time — is what makes replay ordinals stable: one file
+// means an event's ordinal is its line number, identical live or on reconnect, even
+// for a failure notice that lands after the first turn's output (ROOT interleaved
+// replay audit). The write is one O_APPEND of a short line, so it interleaves whole
+// lines with the supervisor's own appends rather than tearing one. Best-effort by
+// contract: a caller treats a failure like a lost journal line.
+func AppendNotice(sessionID, level, text string) error {
+	if sessionID == "" || text == "" {
+		return nil
+	}
+	path := EventLogPathFor(sessionID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(notice(level, text))
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(b, '\n'))
+	return err
 }
 
 func (s *Supervisor) closeLog() {

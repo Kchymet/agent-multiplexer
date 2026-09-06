@@ -118,6 +118,19 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 // journal is keyed by the amux session id, and a session that has never run —
 // exactly the one an accepted `prompt` is cold-starting — has nothing else to
 // stream. So a zero Path no longer means "nothing to read here".
+// structuredResolvable reports whether a Codex session should resolve to its
+// single structured event-log source. True when the opt-in gate is on (the session
+// will run — or is running — structured, so the canonical source is stable from cold)
+// OR a structured identity was persisted (history stays readable after the App Server
+// exits, and even after the gate is later turned off).
+func structuredResolvable(id string) bool {
+	if structuredCodexEnabled() {
+		return true
+	}
+	_, ok := codexapp.LoadIdentity(id)
+	return ok
+}
+
 func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 	s, ok, err := db.GetSession(id)
 	if err != nil {
@@ -138,15 +151,26 @@ func runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
 	if ok {
 		// A structured-control session (AGE-181) records its normalized events in a
 		// supervisor-written log, not the runtime's own transcript, so resolve it to
-		// that log with Structured set. The persisted identity is the marker: it is
-		// written when the session launches structured and outlives a stop, so the
-		// event history stays readable after the App Server exits.
-		if _, sok := codexapp.LoadIdentity(id); sok && agent.Canonical(s.Agent) == harnessproto.RuntimeCodex {
+		// that log with Structured set — and to that log ALONE. It is the single
+		// canonical source: amux's own cold-start/failure notices are appended into the
+		// same file (codexapp.AppendNotice), not carried as a separate journal source,
+		// so replay ordinals stay stable (one append-only file ⇒ ordinal == line number,
+		// identical live or on reconnect; a second journal file merged at read time
+		// could not preserve that when a late notice interleaves with turn output —
+		// ROOT interleaved-replay audit).
+		//
+		// Resolve structured from COLD, before the supervisor persists identity: the
+		// gate (opt-in env + Codex agent) already determines the session will run
+		// structured, so the canonical source is stable from the first subscription and
+		// a provider that subscribes while Codex is still starting simply tails the
+		// (not-yet-written) log and follows it — no reconnect, no source switch. A
+		// persisted identity still resolves it too, so history stays readable after the
+		// App Server exits (and after the gate is later turned off).
+		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && structuredResolvable(id) {
 			return core.RuntimeRecord{
 				Runtime:    harnessproto.RuntimeCodex,
 				Path:       codexapp.EventLogPathFor(id),
 				Structured: true,
-				Journal:    core.JournalPath(id),
 			}, nil
 		}
 		h := agent.HarnessFor(s.Agent)
