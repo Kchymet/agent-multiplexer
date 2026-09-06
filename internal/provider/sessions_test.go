@@ -224,6 +224,66 @@ func TestSessionActionVerbs(t *testing.T) {
 	}
 }
 
+// TestSessionActionRejectsUnavailableExecution makes a verified capability
+// block authoritative for creation. Nil remains the legacy-provider case; a
+// present block must not silently fall back to Claude or accept a cloud-only
+// api-key identity.
+func TestSessionActionRejectsUnavailableExecution(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		exec   *harnessproto.ExecutionCapabilities
+		fields map[string]string
+		wantOK bool
+	}{
+		{
+			name: "selected harness absent",
+			exec: &harnessproto.ExecutionCapabilities{
+				Harnesses:     []harnessproto.HarnessCapability{{Name: "claude"}},
+				IdentityModes: []string{harnessproto.IdentityMachine},
+			},
+			fields: map[string]string{"agent": "codex"},
+		},
+		{
+			name: "verified empty",
+			exec: &harnessproto.ExecutionCapabilities{
+				Harnesses: []harnessproto.HarnessCapability{}, IdentityModes: []string{harnessproto.IdentityMachine},
+			},
+			fields: map[string]string{"agent": "claude"},
+		},
+		{
+			name: "cloud identity rejected locally",
+			exec: &harnessproto.ExecutionCapabilities{
+				Harnesses:     []harnessproto.HarnessCapability{{Name: "claude"}},
+				IdentityModes: []string{harnessproto.IdentityMachine},
+			},
+			fields: map[string]string{"agent": "claude", "identity_mode": harnessproto.IdentityAPIKey},
+		},
+		{
+			name: "advertised selection",
+			exec: &harnessproto.ExecutionCapabilities{
+				Harnesses:     []harnessproto.HarnessCapability{{Name: "codex"}},
+				IdentityModes: []string{harnessproto.IdentityMachine},
+			},
+			fields: map[string]string{"agent": "codex"},
+			wantOK: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingApply{}
+			p := New(Config{Execution: tc.exec, ApplyAction: rec.apply})
+			_, err := p.applySessionAction(harnessproto.MuxMsg{
+				Action: harnessproto.VerbNewWorkgroup, Fields: tc.fields,
+			})
+			if (err == nil) != tc.wantOK {
+				t.Fatalf("applySessionAction error = %v, want success=%v", err, tc.wantOK)
+			}
+			if _, called := rec.last(); called != tc.wantOK {
+				t.Fatalf("ApplyAction called=%v, want %v", called, tc.wantOK)
+			}
+		})
+	}
+}
+
 // TestSessionActionExcludedVerb proves any verb outside the fixed set — notably a
 // pane/terminal verb — is rejected with "unsupported" and never reaches ApplyAction.
 func TestSessionActionExcludedVerb(t *testing.T) {

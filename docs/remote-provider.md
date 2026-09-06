@@ -209,6 +209,8 @@ orchestrator = "orch.example.com:7443"
 token-file = "/home/you/.config/amux/provider.token"
 name = "laptop"
 max-panes = 8
+harnesses = ["claude", "codex"]
+identity-mode = "machine"
 publish-sessions = true
 features = ["bigdisk", "cuda"]
 
@@ -252,6 +254,8 @@ Configuration resolves from flags first, then these env vars (matching amux's
 | Scheduling labels | `--label k=v` (repeatable) | `AMUX_PROVIDER_LABELS` (comma-separated `k=v`) |
 | Feature capabilities | `--feature s` (repeatable) | `AMUX_PROVIDER_FEATURES` (comma-separated) |
 | Max panes capability | `--max-panes` | `AMUX_PROVIDER_MAX_PANES` |
+| Verified harness allowlist | `--harness name` (repeatable) | `AMUX_PROVIDER_HARNESSES` (comma-separated) |
+| Execution identity mode | `--identity-mode machine` | `AMUX_PROVIDER_IDENTITY_MODE` |
 | Private CA | `--ca` | `AMUX_TLS_CA` |
 | TLS server name | `--server-name` | `AMUX_TLS_SERVERNAME` |
 
@@ -288,33 +292,40 @@ Feature strings are opaque: amux never interprets or hardcodes them — the
 orchestrator matches on them by convention. `bwrap`, `os`, and `arch`
 capabilities are detected automatically (`bwrap` is probed on `$PATH`).
 
-### Advertising agent runtimes for remote session creation
+### Verified agent runtimes for remote creation
 
-One such convention gates **which agent runtimes an orchestrator's "new session"
-UI offers for this machine**: it offers only the runtimes the machine advertises
-as feature strings — `codex` for the Codex CLI, `claude` for Claude Code. A
-machine that advertises no runtime feature string is offered as Claude-only. So
-to let operators create Codex sessions on this machine from the web, advertise the
-runtimes it actually has installed:
+The registration `capabilities.execution` block tells an orchestrator exactly
+which harnesses this provider verified in its own host environment. amux runs
+each candidate executable with `--version` before every dial and advertises only
+the successful results, including their reported versions. It discovers every
+supported local harness by default: Claude, Codex, and Hermes when installed.
+
+Restrict discovery when a provider should accept only selected runtimes:
 
 ```
 amux provide install --orchestrator orch.example.com:7443 \
                      --token-file ~/.config/amux/provider.token \
-                     --name laptop \
-                     --feature codex --feature claude
+                     --harness claude --harness codex
 ```
 
-This persists into `~/.config/amux/provider.toml` as `features = ["codex",
-"claude"]` (the same list the bare `amux provide` service reads); it can also be
-set with `AMUX_PROVIDER_FEATURES=codex,claude` in the service environment, or by
-editing that `features` array directly. Because these strings are opaque to amux,
-the list is purely an **advertisement** — it neither installs a runtime nor grants
-any sandbox permission, so advertise a runtime only where its CLI is actually
-present. Advertising `codex` is also independent of Codex *structured control*,
-which is enabled separately with `amux config set codex.control app-server`
-and an operator-controlled daemon restart (see
-`docs/codex-app-server-supervision.md`); a machine can advertise `codex` for
-create-UI purposes with or without structured control.
+The installed config stores that as `harnesses = ["claude", "codex"]`.
+`AMUX_PROVIDER_HARNESSES=claude,codex` supplies the same allowlist for an
+unattended service, while `--harness auto` clears an earlier restriction and
+returns to automatic discovery. An absent execution block denotes a legacy
+provider; a present block with an empty `harnesses` array means discovery ran
+but verified none, and a scheduler must not substitute a default harness.
+
+amux providers advertise the `machine` identity mode: the selected CLI uses its
+existing configuration on the provider machine. The registration never includes
+an account, organization, API key, or other credential identity. `api-key` is a
+separate cloud-provider identity mode, not valid for `amux provide`.
+
+At creation, the orchestrator sends the selected harness as the lifecycle
+action's `agent` field and may include `identity_mode` (`machine` when omitted).
+The provider rejects a harness or identity that is not in its verified execution
+capabilities before it asks the local daemon to create the workgroup. The chosen
+harness and model apply to the workgroup coordinator as well as any later
+agents, so a Codex-only provider never creates a hidden Claude coordinator.
 
 ## Failure behavior summary
 

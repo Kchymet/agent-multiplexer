@@ -57,6 +57,18 @@ func cmdDoctor() error {
 	missingRequired := false
 	fmt.Println("Dependencies")
 	for _, d := range deps {
+		if agent.Known(d.bin) {
+			r := agent.Probe(ctx, d.bin)
+			if r.Err != nil {
+				if d.required {
+					missingRequired = true
+				}
+				fmt.Printf("  ✗ %-8s %v\n", d.bin, r.Err)
+			} else {
+				fmt.Printf("  ✓ %-8s %-26s %s\n      %s\n", d.bin, r.Version, d.note, r.Path)
+			}
+			continue
+		}
 		path, via := resolveCmd(ctx, d.bin)
 		switch {
 		case path == "" && d.required:

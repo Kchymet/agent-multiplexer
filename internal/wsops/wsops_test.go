@@ -589,6 +589,33 @@ func TestApplyResultHonorsAgentField(t *testing.T) {
 	}
 }
 
+// TestNewWorkgroupHonorsAgentField keeps the coordinator on the selected
+// harness too. A remote provider may expose only Codex, so making its root
+// Claude while its children are Codex leaves it unable to start the workgroup.
+func TestNewWorkgroupHonorsAgentField(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+
+	codexID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"agent": "codex", "model": "gpt-6-astra"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex := getSession(t, codexID)
+	if got := codex.Agent; got != "codex" {
+		t.Errorf("new-workgroup agent=codex made a %q coordinator", got)
+	}
+	if codex.Model != "gpt-6-astra" {
+		t.Errorf("new-workgroup lost the selected coordinator model: %q", codex.Model)
+	}
+	if got := getSession(t, claudeID).Agent; got != "claude" {
+		t.Errorf("new-workgroup without an agent made a %q coordinator", got)
+	}
+}
+
 // getSession reads one session back from the store for an assertion.
 func getSession(t *testing.T, id string) store.Session {
 	t.Helper()

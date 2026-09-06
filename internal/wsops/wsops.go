@@ -39,6 +39,16 @@ type AgentSpec struct {
 // (its repos, model, mode, and prompt are honored). Pass nil to create an empty
 // workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
+	return createWorkspace(ctx, name, agent.DefaultKind(), "", defaultAgent)
+}
+
+// createWorkspace is the action-path variant of CreateWorkspace. It lets a
+// remote client choose the coordinator harness and model while preserving the
+// public helper's long-standing Claude-default behavior for local callers.
+func createWorkspace(ctx context.Context, name, kind, model string, defaultAgent *AgentSpec) (string, error) {
+	if !agent.Known(kind) {
+		return "", fmt.Errorf("unknown agent kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
+	}
 	db, err := store.Open()
 	if err != nil {
 		return "", err
@@ -46,10 +56,10 @@ func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) 
 	defer db.Close()
 
 	rootID := db.NewID()
-	kind := agent.DefaultKind()
+	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Agent: kind, Mode: store.ModeInteractive,
+		Agent: kind, Model: model, Mode: store.ModeInteractive,
 		Dir: store.RootDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
@@ -640,7 +650,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: prompt}
 		}
 		// Return the workgroup root; the client resolves it to the first agent.
-		return CreateWorkspace(ctx, a.Fields["name"], def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], def)
 	case core.ActionCreateWorkspace:
 		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
 		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
@@ -653,7 +663,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
 			}
 		}
-		return CreateWorkspace(ctx, a.Fields["name"], def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], def)
 	}
 	// A verb that reaches here is one no dispatch path claims. The CLI screens
 	// these before they leave the machine, so this is the answer for anything

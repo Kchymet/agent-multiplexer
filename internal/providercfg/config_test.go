@@ -12,6 +12,8 @@ import (
 // one fails rather than passing on the fields that happen to be exercised.
 func full() Config {
 	return Config{
+		Harnesses:        []string{"claude", "codex"},
+		IdentityMode:     "machine",
 		Orchestrator:     "orch.example.com:7443",
 		TokenFile:        "/home/u/.config/amux/provider.token",
 		Name:             "laptop",
@@ -158,6 +160,14 @@ func TestValidate(t *testing.T) {
 			Config{Orchestrator: "h:1", TokenFile: "/tmp/t", ReadOnlySessions: true},
 			"--read-only-sessions requires",
 		},
+		"unknown harness": {
+			Config{Orchestrator: "h:1", TokenFile: "/tmp/t", Harnesses: []string{"missing"}},
+			"unknown harness",
+		},
+		"cloud identity": {
+			Config{Orchestrator: "h:1", TokenFile: "/tmp/t", IdentityMode: "api-key"},
+			"identity-mode=machine",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := tc.cfg.Validate()
@@ -170,6 +180,15 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate = %v, want it to mention %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestNormalizeHarnesses(t *testing.T) {
+	if got, want := NormalizeHarnesses([]string{"claude", "auto", " codex "}), []string{"codex"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("NormalizeHarnesses = %v, want %v", got, want)
+	}
+	if got := NormalizeHarnesses([]string{"claude", "auto"}); len(got) != 0 {
+		t.Errorf("NormalizeHarnesses ending in auto = %v, want automatic discovery", got)
 	}
 }
 

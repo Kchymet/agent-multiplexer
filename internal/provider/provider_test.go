@@ -9,11 +9,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +132,42 @@ func TestRoundTrip(t *testing.T) {
 
 	cancel()
 	<-runErr
+}
+
+// TestDiscoveryRefreshesBeforeEachDial ensures a provider never reuses a stale
+// startup probe after a reconnect. A CLI can be upgraded, removed, or added
+// while the service is running, so each registration must reflect the host as
+// it is at that dial.
+func TestDiscoveryRefreshesBeforeEachDial(t *testing.T) {
+	conns := make(chan net.Conn, 2)
+	var calls atomic.Int32
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		DiscoverExecution: func(context.Context) *harnessproto.ExecutionCapabilities {
+			version := calls.Add(1)
+			return &harnessproto.ExecutionCapabilities{
+				Harnesses:     []harnessproto.HarnessCapability{{Name: "codex", Version: fmt.Sprintf("v%d", version)}},
+				IdentityModes: []string{harnessproto.IdentityMachine},
+			}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	first := harnessproto.NewConn(<-conns)
+	reg := expectRegister(t, first)
+	if got := reg.Capabilities.Execution.Harnesses[0].Version; got != "v1" {
+		t.Fatalf("first discovery version = %q, want v1", got)
+	}
+	_ = first.Close() // force a reconnect without accepting the registration
+
+	second := harnessproto.NewConn(<-conns)
+	reg = expectRegister(t, second)
+	if got := reg.Capabilities.Execution.Harnesses[0].Version; got != "v2" {
+		t.Fatalf("second discovery version = %q, want v2", got)
+	}
+	_ = second.Close()
 }
 
 // TestReconnectAdoptReplay proves a pane survives a disconnect and its output

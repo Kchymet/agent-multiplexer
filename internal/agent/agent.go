@@ -9,11 +9,13 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Argv returns the absolute argv to run for kind (with an optional model
@@ -44,6 +46,12 @@ func finishArgv(bin string, args, extra []string) []string {
 // surface via PATH or a login shell. If everything misses it DEGRADES TO THE
 // BARE NAME rather than failing. Never errors.
 func resolve(bin string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return resolveContext(ctx, bin)
+}
+
+func resolveContext(ctx context.Context, bin string) string {
 	if strings.ContainsRune(bin, '/') {
 		return bin // explicit path or relative command — pass through
 	}
@@ -54,7 +62,7 @@ func resolve(bin string) string {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	if out, err := exec.Command(shell, "-lic", "command -v "+bin).Output(); err == nil {
+	if out, err := resolveInShell(ctx, shell, bin); err == nil {
 		if p := strings.TrimSpace(string(out)); p != "" && strings.ContainsRune(p, '/') {
 			return p
 		}
@@ -150,4 +158,13 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func resolveInShell(ctx context.Context, shell, bin string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, shell, "-lic", "command -v -- '"+strings.ReplaceAll(bin, "'", "'\"'\"'")+"'")
+	cmd.WaitDelay = 100 * time.Millisecond
+	var out probeOutput
+	cmd.Stdout = &out
+	err := cmd.Run()
+	return []byte(out.String()), err
 }

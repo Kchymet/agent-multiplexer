@@ -229,11 +229,12 @@ const (
 
 // Capabilities advertises what a provider can run, for orchestrator scheduling.
 type Capabilities struct {
-	MaxPanes int      `json:"maxPanes,omitempty"`
-	Bwrap    bool     `json:"bwrap,omitempty"`
-	OS       string   `json:"os,omitempty"`
-	Arch     string   `json:"arch,omitempty"`
-	Features []string `json:"features,omitempty"`
+	Execution *ExecutionCapabilities `json:"execution,omitempty"`
+	MaxPanes  int                    `json:"maxPanes,omitempty"`
+	Bwrap     bool                   `json:"bwrap,omitempty"`
+	OS        string                 `json:"os,omitempty"`
+	Arch      string                 `json:"arch,omitempty"`
+	Features  []string               `json:"features,omitempty"`
 }
 
 // PaneOffer is a still-running pane a reconnecting provider offers for resume.
