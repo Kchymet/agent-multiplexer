@@ -61,9 +61,20 @@ func TestMapTurnFailedEmitsErrorNoticeAndEnd(t *testing.T) {
 
 func TestMapAgentMessageDeltaThenComplete(t *testing.T) {
 	st := &streamState{}
-	evs, _ := mapNotification("item/agentMessage/delta", json.RawMessage(`{"itemId":"m1","text":"he"}`), st)
+	// Real 0.153.4 AgentMessageDeltaNotification carries the streamed text in `delta` (NOT
+	// `text`); reading `text` dropped it and the provider bridge showed empty assistant text.
+	// Assert the streamed content SURVIVES.
+	evs, _ := mapNotification("item/agentMessage/delta", json.RawMessage(`{"itemId":"m1","delta":"he","threadId":"t","turnId":"u"}`), st)
 	if len(evs) != 1 || evs[0].Type != harnessproto.TypeText || evs[0].ItemID != "m1" {
 		t.Fatalf("delta → %+v", evs)
+	}
+	var d struct {
+		Text  string `json:"text"`
+		Final bool   `json:"final"`
+	}
+	_ = json.Unmarshal(evs[0].Payload, &d)
+	if d.Text != "he" || d.Final {
+		t.Fatalf("streamed delta text dropped or wrong: %+v (want text=he final=false)", d)
 	}
 	// The completion for a streamed item closes the group with empty text (no dup).
 	evs, _ = mapNotification("item/completed", json.RawMessage(`{"item":{"id":"m1","type":"agentMessage","text":"hello"}}`), st)
@@ -77,6 +88,43 @@ func TestMapAgentMessageDeltaThenComplete(t *testing.T) {
 	_ = json.Unmarshal(evs[0].Payload, &p)
 	if p.Text != "" || !p.Final {
 		t.Fatalf("streamed completion should be empty+final, got %+v", p)
+	}
+}
+
+// TestRootDaemonMapperStreamsPinnedDelta is ROOT's exact reproduction (AGE-179): the supervisor
+// mapper must NOT drop streamed assistant text when the real binary sends it in `delta`.
+func TestRootDaemonMapperStreamsPinnedDelta(t *testing.T) {
+	st := &streamState{}
+	evs, _ := mapNotification("item/agentMessage/delta",
+		json.RawMessage(`{"threadId":"t","turnId":"u","itemId":"m","delta":"real content"}`), st)
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypeText {
+		t.Fatalf("delta → %+v", evs)
+	}
+	var p struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(evs[0].Payload, &p)
+	if p.Text != "real content" {
+		t.Fatalf("streamed delta text dropped: got %q, want %q", p.Text, "real content")
+	}
+}
+
+// TestMapReasoningDeltaStreamsText: both reasoning delta methods carry text in `delta` and map
+// to non-empty thinking chunks (pinned Reasoning{Text,SummaryText}DeltaNotification).
+func TestMapReasoningDeltaStreamsText(t *testing.T) {
+	for _, method := range []string{"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"} {
+		st := &streamState{}
+		evs, _ := mapNotification(method, json.RawMessage(`{"itemId":"r1","delta":"thinking…","threadId":"t","turnId":"u"}`), st)
+		if len(evs) != 1 || evs[0].Type != harnessproto.TypeThinking {
+			t.Fatalf("%s → %+v", method, evs)
+		}
+		var p struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(evs[0].Payload, &p)
+		if p.Text != "thinking…" {
+			t.Fatalf("%s dropped streamed delta text: %+v", method, p)
+		}
 	}
 }
 
