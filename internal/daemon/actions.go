@@ -42,6 +42,16 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		r := ok()
 		r.NewID = newID
+		if desc := core.DescriptorFor(a.Action); desc.CreatesSession && desc.TargetsRoot && newID != "" {
+			// The root is the coordinator's session. Start it at creation even when
+			// the client opens a member instead, or never attaches a UI at all.
+			// startEngineFor would start the members, leaving the coordinator idle.
+			if err := d.startAgent(ctx, newID); err != nil {
+				r.OK = false
+				r.Error = fmt.Sprintf("workgroup %s created, but coordinator failed to start: %v; open the workgroup to retry", newID, err)
+			}
+			d.triggerPoll()
+		}
 		return r
 	}
 }

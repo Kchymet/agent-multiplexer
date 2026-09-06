@@ -197,7 +197,7 @@ func AgentIDsUnder(id string) ([]string, error) {
 	// row; a home is a root with no members), so each resolves to itself: `start`
 	// and a `prompt` to a stopped one both come through here. A workgroup root
 	// still resolves to its member agents — "start the workgroup" brings the
-	// workers up; its coordinator starts when opened or prompted (see
+	// workers up; its coordinator starts at creation, when opened, or prompted (see
 	// daemon.startForSteer, which starts exactly the steered session).
 	s, ok, err := ResolveSession(id)
 	if err != nil {
