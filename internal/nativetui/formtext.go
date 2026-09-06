@@ -22,8 +22,11 @@ const tabCells = 4
 const maxFieldRows = 10
 
 func cellWidth(r rune) int {
-	if r == '\t' {
+	switch {
+	case r == '\t':
 		return tabCells
+	case r >= ' ' && r < 0x7f: // printable ASCII: the common case, no measuring
+		return 1
 	}
 	return lipgloss.Width(string(r))
 }
@@ -109,24 +112,4 @@ func truncateCells(s string, width int) string {
 		return s
 	}
 	return ansi.Truncate(s, width, "…")
-}
-
-// clampBlock hard-limits a rendered block to h rows of w cells. The form lays
-// itself out to fit, so this only bites in degenerate panes — but a modal must
-// never push the surrounding chrome around.
-func clampBlock(s string, w, h int) string {
-	if w < 1 {
-		w = 1
-	}
-	if h < 1 {
-		h = 1
-	}
-	lines := strings.Split(s, "\n")
-	if len(lines) > h {
-		lines = lines[:h]
-	}
-	for i, l := range lines {
-		lines[i] = ansi.Truncate(l, w, "")
-	}
-	return strings.Join(lines, "\n")
 }
