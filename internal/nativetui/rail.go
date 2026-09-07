@@ -24,6 +24,19 @@ func (m *model) group(s *core.Session) railGroup {
 	return railGroup{section: s.Section, id: s.ID}
 }
 
+// groupHasChildren reports whether a container has anything in its section to
+// disclose. Root IDs can survive when an agent is archived, so a child in a
+// different section must not make an otherwise-empty live container foldable.
+func (m *model) groupHasChildren(s *core.Session) bool {
+	for i := range m.sessions {
+		child := &m.sessions[i]
+		if child.Section == s.Section && child.RootID == s.ID {
+			return true
+		}
+	}
+	return false
+}
+
 // parentIndex stays within a section: an archived agent can retain the RootID
 // of a live workgroup, but collapsing that workgroup must not hide the archive.
 func (m *model) parentIndex(s *core.Session) int {
@@ -118,7 +131,7 @@ func (m *model) selectedGroup() (railGroup, bool) {
 	if m.sectionCursor != "" {
 		return railGroup{section: m.sectionCursor}, true
 	}
-	if s := m.selected(); s != nil && container(s) {
+	if s := m.selected(); s != nil && container(s) && m.groupHasChildren(s) {
 		return m.group(s), true
 	}
 	return railGroup{}, false
