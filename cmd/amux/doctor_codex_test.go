@@ -94,7 +94,7 @@ func TestDoctorControlInvalidSavedAndOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := captureOutput(t, func() error { reportCodexControl(); return nil })
-	if err != nil || !strings.Contains(out, "startup rejected") || !strings.Contains(out, "running daemon: unknown/offline") {
+	if err != nil || !strings.Contains(out, "startup rejected") || !strings.Contains(out, "running daemon: unknown/unreachable") {
 		t.Fatalf("doctor: %s, %v", out, err)
 	}
 }
