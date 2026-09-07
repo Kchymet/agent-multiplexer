@@ -219,7 +219,7 @@ func provideRun(args []string) error {
 	publish := f.publishSes || envBool("AMUX_PROVIDER_PUBLISH_SESSIONS") || file.PublishSessions
 	readonly := f.readOnly || envBool("AMUX_PROVIDER_SESSIONS_READONLY") || file.ReadOnlySessions
 	runtimeEvents := f.rtEvents || envBool("AMUX_PROVIDER_RUNTIME_EVENTS") || file.RuntimeEvents
-	allowCompute := f.allowCompute || envBool("AMUX_PROVIDER_ALLOW_COMPUTE") || file.AllowCompute
+	allowCompute := resolvedBool(fs, "allow-compute", f.allowCompute, "AMUX_PROVIDER_ALLOW_COMPUTE", file.AllowCompute)
 
 	execution, err := executionConfig(f, file, os.Getenv)
 	if err != nil {
@@ -299,6 +299,25 @@ func envBool(key string) bool {
 		return true
 	}
 	return false
+}
+
+// resolvedBool applies the documented flag > environment > file precedence for
+// a security-sensitive boolean. Presence matters: an explicit false flag or
+// environment value must be able to revoke a true installed setting.
+func resolvedBool(fs *flag.FlagSet, flagName string, flagValue bool, envName string, fileValue bool) bool {
+	flagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == flagName {
+			flagSet = true
+		}
+	})
+	if flagSet {
+		return flagValue
+	}
+	if _, ok := os.LookupEnv(envName); ok {
+		return envBool(envName)
+	}
+	return fileValue
 }
 
 // sessionsViaDaemon fetches the published session rail from the local daemon —

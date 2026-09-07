@@ -62,6 +62,37 @@ func TestInstallCanTurnAFeatureOff(t *testing.T) {
 	}
 }
 
+func TestAllowComputePrecedenceCanRevoke(t *testing.T) {
+	resolve := func(env string, file bool, args ...string) bool {
+		t.Helper()
+		fs := flag.NewFlagSet("provide", flag.ContinueOnError)
+		var f provideFlags
+		f.register(fs)
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		if env == "<unset>" {
+			t.Setenv("AMUX_PROVIDER_ALLOW_COMPUTE", "")
+			_ = os.Unsetenv("AMUX_PROVIDER_ALLOW_COMPUTE")
+		} else {
+			t.Setenv("AMUX_PROVIDER_ALLOW_COMPUTE", env)
+		}
+		return resolvedBool(fs, "allow-compute", f.allowCompute, "AMUX_PROVIDER_ALLOW_COMPUTE", file)
+	}
+	if !resolve("<unset>", true) {
+		t.Fatal("file true was not used when higher-precedence settings were absent")
+	}
+	if resolve("false", true) {
+		t.Fatal("explicit environment false did not revoke file true")
+	}
+	if resolve("true", true, "--allow-compute=false") {
+		t.Fatal("explicit flag false did not revoke environment/file true")
+	}
+	if !resolve("false", false, "--allow-compute=true") {
+		t.Fatal("explicit flag true did not override environment false")
+	}
+}
+
 func TestInstallReplacesLabelsAndFeatures(t *testing.T) {
 	base := providercfg.Config{
 		Orchestrator: "o:1", TokenFile: "/t",
