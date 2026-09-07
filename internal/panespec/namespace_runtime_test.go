@@ -28,7 +28,11 @@ func TestRuntimeNamespaceRejectsAliasesFDsAndFutureSiblings(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("AMUX_JAIL", "on")
-	for _, name := range []string{"AMUX_MUX_TOKEN", "AMUX_PROVIDER_TOKEN", "AMUX_TLS_KEY", "AMUX_RPC_DIR", "OPENAI_API_KEY"} {
+	for _, name := range []string{
+		"AMUX_MUX_TOKEN", "AMUX_PROVIDER_TOKEN", "AMUX_PROVIDER_PASSWORD",
+		"AMUX_TLS_KEY", "AMUX_TLS_KEY_PASSWORD", "AMUX_HOST_PRIVATE_KEY",
+		"AMUX_RPC_DIR", "OPENAI_API_KEY",
+	} {
 		t.Setenv(name, "planted-host-only")
 	}
 	own := filepath.Join(core.SessionsDir(), "root", "own")
@@ -70,7 +74,10 @@ func TestRuntimeNamespaceRejectsAliasesFDsAndFutureSiblings(t *testing.T) {
 	script := `set -eu
 test -z "${AMUX_MUX_TOKEN+x}"
 test -z "${AMUX_PROVIDER_TOKEN+x}"
+test -z "${AMUX_PROVIDER_PASSWORD+x}"
 test -z "${AMUX_TLS_KEY+x}"
+test -z "${AMUX_TLS_KEY_PASSWORD+x}"
+test -z "${AMUX_HOST_PRIVATE_KEY+x}"
 test -z "${AMUX_RPC_DIR+x}"
 test -z "${OPENAI_API_KEY+x}"
 test "$(cat /amux-session-access/current)" = credential

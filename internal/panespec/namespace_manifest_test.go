@@ -78,7 +78,11 @@ func TestTypedLaunchPathsStripInheritedHostAuthority(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
 	useFakeSecureBwrap(t)
-	secrets := []string{"AMUX_MUX_TOKEN", "AMUX_PROVIDER_TOKEN", "AMUX_TLS_KEY", "AMUX_RPC_DIR", "OPENAI_API_KEY"}
+	secrets := []string{
+		"AMUX_MUX_TOKEN", "AMUX_PROVIDER_TOKEN", "AMUX_PROVIDER_PASSWORD",
+		"AMUX_TLS_KEY", "AMUX_TLS_KEY_PASSWORD", "AMUX_HOST_PRIVATE_KEY",
+		"AMUX_RPC_DIR", "OPENAI_API_KEY",
+	}
 	for _, name := range secrets {
 		t.Setenv(name, "planted-host-only")
 	}
