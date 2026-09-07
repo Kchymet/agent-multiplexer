@@ -37,9 +37,6 @@ import (
 // ok=false means no such session or repo.
 func ResolveSession(id string) (store.Session, bool, error) {
 	if id == console.ID {
-		if err := console.Ensure(); err != nil {
-			return store.Session{}, false, err
-		}
 		return console.Session(), true, nil
 	}
 	db, err := store.Open()

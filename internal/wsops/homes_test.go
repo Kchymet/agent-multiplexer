@@ -23,6 +23,9 @@ func envOf(env []string, key string) string {
 
 func TestResolveSessionConsole(t *testing.T) {
 	isolateStore(t)
+	if _, err := os.Stat(console.Dir()); !os.IsNotExist(err) {
+		t.Fatalf("console fixture unexpectedly exists: %v", err)
+	}
 	s, ok, err := ResolveSession(console.ID)
 	if err != nil || !ok {
 		t.Fatalf("ResolveSession(console) = ok=%v err=%v", ok, err)
@@ -30,8 +33,8 @@ func TestResolveSessionConsole(t *testing.T) {
 	if s.Role() != store.RoleConsole || s.Dir != console.Dir() {
 		t.Fatalf("console session = %+v, want role console in %s", s, console.Dir())
 	}
-	if _, err := os.Stat(console.Dir()); err != nil {
-		t.Fatalf("console dir not created: %v", err)
+	if _, err := os.Stat(console.Dir()); !os.IsNotExist(err) {
+		t.Fatalf("console resolve mutated filesystem: %v", err)
 	}
 	if _, ok, _ := ResolveSession("nope"); ok {
 		t.Fatal("an unknown id resolved")
@@ -211,6 +214,9 @@ func TestGuidesByRole(t *testing.T) {
 
 	// Console: the whole inventory, and the operating vocabulary.
 	c, _, _ := ResolveSession(console.ID)
+	if err := console.Ensure(); err != nil {
+		t.Fatal(err)
+	}
 	writeGuide(c)
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
 	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
