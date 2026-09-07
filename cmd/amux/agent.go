@@ -74,8 +74,9 @@ func agentUsage() {
 
 Scoped to the calling agent: they resolve the caller's own identity (from the
 Claude hook payload on stdin, else $AMUX_SESSION_ID, else the tmux window)
-rather than taking an id like the management verbs. Reporting never disrupts the
-agent — it exits 0 even with no daemon and swallows its own errors.
+rather than taking an id like the management verbs. Telemetry hooks are
+best-effort so they never disrupt the agent; control verbs such as name and done
+return nonzero when the requested durable change was not made.
 
 usage: amux agent <command>
 
@@ -255,28 +256,21 @@ func cmdAgentPermission(args []string) error {
 // wsops.AgentCommand), so a one-off agent that has integrated its artifact can
 // mark itself done without knowing its own id.
 //
-// Like every `amux agent` verb, reporting must never disrupt the agent: it
-// swallows a missing identity and any harness error and always exits 0.
-// Archiving is reversible (`amux workgroup unarchive <id>`); it hides the row
-// and does not delete the worktree or branch.
+// Unlike telemetry hooks, this durable control operation must report failure:
+// exit 0 means the daemon confirmed archival. Archiving is reversible (`amux
+// workgroup unarchive <id>`); it hides the row and does not delete the worktree
+// or branch.
 func cmdAgentDone(args []string) error {
 	id := selfAgentID(args, os.Getenv)
 	if id == "" {
-		// Not an amux-launched agent (or the env was stripped): nothing to archive.
-		// A no-op, not an error — the agent shouldn't fail just because it wasn't
-		// started by amux.
-		fmt.Fprintln(os.Stderr, "amux agent done: "+notInsideAgent("amux agent done", "amux workgroup archive <id>"))
-		return nil
+		return fmt.Errorf("amux agent done: %s", notInsideAgent("amux agent done", "amux workgroup archive <id>"))
 	}
 	if err := sendAction(core.Action{
 		Action: core.ActionSetArchived,
 		ID:     id,
 		Fields: map[string]string{"archived": "true"},
 	}); err != nil {
-		// The harness was unreachable. Report it, but don't fail the agent — the
-		// self-report is best-effort by contract.
-		fmt.Fprintf(os.Stderr, "amux agent done: could not reach the harness to archive %s: %v\n", id, err)
-		return nil
+		return fmt.Errorf("amux agent done: archive %s: %w", id, err)
 	}
 	fmt.Printf("marked done: archived %s (reversible: amux workgroup unarchive %s)\n", id, id)
 	return nil

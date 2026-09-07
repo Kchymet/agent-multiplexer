@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -174,6 +175,16 @@ var daemonSubcommands = map[string]func() error{
 	"reload":  daemonRestart,
 }
 
+// startupDial is the single-attempt socket probe used by client and lifecycle
+// paths. Keeping it replaceable lets regressions prove that a denied client does
+// not fall through to process creation without manufacturing a host-level Unix
+// socket permission failure.
+var startupDial = daemon.Dial
+
+// daemonCommand is the detached spawn boundary, replaceable only so tests can
+// fail on any attempted exec after a denied probe.
+var daemonCommand = exec.Command
+
 // cmdDaemon dispatches the daemon lifecycle.
 func cmdDaemon(args []string) error {
 	sub := ""
@@ -235,9 +246,15 @@ func isHelpFlag(sub string) bool {
 // (SIGTERM) stops the agents it hosts.
 func daemonRun() error {
 	// Single instance: if the socket already answers, another daemon owns it.
-	if c, err := daemon.Dial(); err == nil {
+	if c, err := startupDial(); err == nil {
 		_ = c.Close()
 		return nil
+	} else if daemonAccessDenied(err) {
+		return fmt.Errorf("daemon state unknown: access denied at %s; not starting: %w", core.SocketPath(), err)
+	} else if !daemonMayStart(err) {
+		return fmt.Errorf("daemon state unknown after connection failure; not starting: %w", err)
+	} else if restrictedSessionClient(os.Getenv) {
+		return fmt.Errorf("refusing to start a daemon from inside an amux agent: %w", err)
 	}
 	self, err := os.Executable()
 	if err != nil {
@@ -262,9 +279,11 @@ func daemonStop(mustExist bool) error {
 	if err != nil {
 		if !mustExist {
 			// No pidfile, but the socket might still answer a stale daemon.
-			if c, derr := daemon.Dial(); derr == nil {
+			if c, derr := startupDial(); derr == nil {
 				_ = c.Close()
 				return fmt.Errorf("daemon is answering %s but its pidfile is missing; stop it by hand", core.SocketPath())
+			} else if !daemonMayStart(derr) {
+				return fmt.Errorf("cannot verify daemon absence with no pidfile: %w", daemonConnectionError(derr))
 			}
 			return nil // nothing to stop
 		}
@@ -299,12 +318,13 @@ func daemonStop(mustExist bool) error {
 // daemonStart turns a daemon up if one isn't already answering, reusing the same
 // detached-spawn path bare `amux` uses.
 func daemonStart(self string) error {
-	if c, err := daemon.Dial(); err == nil {
+	c, initialErr := startupDial()
+	if initialErr == nil {
 		_ = c.Close()
 		fmt.Println("daemon already running")
 		return nil
 	}
-	if err := ensureDaemon(self); err != nil {
+	if err := startDaemonAfterDial(self, initialErr); err != nil {
 		return err
 	}
 	fmt.Println("daemon started")
@@ -315,6 +335,24 @@ func daemonStart(self string) error {
 // binary. The daemon owns its agents' processes, so a restart stops them — this
 // is the deliberate, explicit way to do that.
 func daemonRestart() error {
+	// A session client must never stop the host daemon and then discover that its
+	// sandbox cannot start the replacement. The operator lifecycle stays outside
+	// agent sessions; agents only connect to the daemon they were launched under.
+	if restrictedSessionClient(os.Getenv) {
+		return fmt.Errorf("refusing to restart the daemon from inside an amux agent")
+	}
+	// Only an absent or stale listener may continue into the legacy pidfile flow.
+	// Permission, authentication, and unexpected transport failures leave daemon
+	// state unknown and must not turn restart into a destructive guess. Authenticating
+	// pidfile process ownership is separate lifecycle work; an integer PID alone is
+	// not proof that the process is an amux daemon.
+	if c, err := startupDial(); err == nil {
+		_ = c.Close()
+	} else if daemonAccessDenied(err) {
+		return fmt.Errorf("daemon state unknown: access denied at %s; not restarting: %w", core.SocketPath(), err)
+	} else if !daemonMayStart(err) {
+		return fmt.Errorf("daemon state unknown after connection failure; not restarting: %w", err)
+	}
 	// Reject malformed rollout config before stopping a healthy daemon.
 	if _, err := amuxcfg.ResolveCodexControl(); err != nil {
 		return err
@@ -330,9 +368,14 @@ func daemonRestart() error {
 	// process, but give the socket file a beat to disappear on slow filesystems.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := daemon.Dial(); err != nil {
+		c, err := startupDial()
+		if err != nil {
+			if !daemonMayStart(err) {
+				return fmt.Errorf("cannot verify daemon stopped: %w", daemonConnectionError(err))
+			}
 			break
 		}
+		_ = c.Close()
 		time.Sleep(50 * time.Millisecond)
 	}
 	return daemonStart(self)
@@ -360,16 +403,68 @@ func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
+// daemonAccessDenied recognizes permission failures through net.OpError and
+// os.PathError wrappers. They leave daemon existence and liveness unknown.
+func daemonAccessDenied(err error) bool {
+	return errors.Is(err, os.ErrPermission) ||
+		errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
+}
+
+// daemonMayStart is deliberately a positive allowlist. ENOENT means no socket
+// path and ECONNREFUSED means no listener owns the path; every other error may
+// represent a live daemon, an authorization rejection, or an unhealthy
+// transport and must not cause a competing process to start.
+func daemonMayStart(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// restrictedSessionClient identifies a CLI launched inside an amux agent. Both
+// variables name the same store session; AMUX_WORKSPACE is the legacy alias.
+func restrictedSessionClient(getenv func(string) string) bool {
+	return strings.TrimSpace(getenv("AMUX_WORKGROUP")) != "" ||
+		strings.TrimSpace(getenv("AMUX_WORKSPACE")) != ""
+}
+
+// daemonConnectionError renders a failed client dial without guessing about
+// daemon liveness. Only the same absent/stale-listener errors allowed to trigger
+// startup are called offline.
+func daemonConnectionError(err error) error {
+	if daemonMayStart(err) {
+		return fmt.Errorf("daemon offline: %w", err)
+	}
+	if daemonAccessDenied(err) {
+		return fmt.Errorf("daemon state unknown; access denied at %s: %w", core.SocketPath(), err)
+	}
+	return fmt.Errorf("daemon state unknown; connection failed at %s: %w", core.SocketPath(), err)
+}
+
 // ensureDaemon starts a detached daemon if the socket isn't already answering,
 // then waits briefly for it to come up.
 func ensureDaemon(self string) error {
-	if c, err := daemon.Dial(); err == nil {
+	c, initialErr := startupDial()
+	if initialErr == nil {
 		_ = c.Close()
 		return nil
 	}
+	return startDaemonAfterDial(self, initialErr)
+}
+
+// startDaemonAfterDial applies the startup policy to the exact error from the
+// caller's first connection attempt. Keeping that error avoids a second probe
+// racing to a different conclusion and makes every later failure inspectable.
+func startDaemonAfterDial(self string, initialErr error) error {
+	if daemonAccessDenied(initialErr) {
+		return fmt.Errorf("daemon state unknown: access denied at %s; not starting: %w", core.SocketPath(), initialErr)
+	}
+	if !daemonMayStart(initialErr) {
+		return fmt.Errorf("daemon state unknown after connection failure; not starting: %w", initialErr)
+	}
+	if restrictedSessionClient(os.Getenv) {
+		return fmt.Errorf("refusing to start a daemon from inside an amux agent: %w", initialErr)
+	}
 	// Auto-start and manual start share this validation and child entrypoint.
 	if _, err := amuxcfg.ResolveCodexControl(); err != nil {
-		return err
+		return fmt.Errorf("initial daemon connection failed (%w); startup configuration invalid: %w", initialErr, err)
 	}
 	_ = os.MkdirAll(core.StateDir(), 0o755)
 	logf, _ := os.OpenFile(core.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -377,25 +472,28 @@ func ensureDaemon(self string) error {
 		defer logf.Close()
 	}
 
-	cmd := exec.Command(self, "daemon")
+	cmd := daemonCommand(self, "daemon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from our session
 	if logf != nil {
 		cmd.Stdout, cmd.Stderr = logf, logf
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return fmt.Errorf("initial daemon connection failed (%w); start daemon: %w", initialErr, err)
 	}
 	_ = cmd.Process.Release()
 
+	lastErr := initialErr
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if c, err := daemon.Dial(); err == nil {
+		if c, err := startupDial(); err == nil {
 			_ = c.Close()
 			return nil
+		} else {
+			lastErr = err
 		}
 		time.Sleep(75 * time.Millisecond)
 	}
-	return fmt.Errorf("daemon did not come up within timeout (see %s)", core.LogPath())
+	return fmt.Errorf("daemon did not come up within timeout (see %s); initial connection failed: %w; last connection failed: %w", core.LogPath(), initialErr, lastErr)
 }
 
 // cmdNative launches the native Bubble Tea TUI (bare `amux`). It ensures the
@@ -426,9 +524,9 @@ func cmdStatus(args []string) error {
 			asJSON = true
 		}
 	}
-	c, err := daemon.Dial()
+	c, err := startupDial()
 	if err != nil {
-		return fmt.Errorf("daemon offline: %w", err)
+		return daemonConnectionError(err)
 	}
 	defer c.Close()
 	for {
