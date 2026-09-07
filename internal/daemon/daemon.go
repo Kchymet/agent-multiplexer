@@ -509,8 +509,10 @@ func (d *Daemon) authenticateHost(ctx context.Context, conn net.Conn) (access.Pr
 	if err := json.NewEncoder(conn).Encode(challenge); err != nil {
 		return access.Principal{}, nil, err
 	}
-	reader := bufio.NewReader(conn)
-	line, err := reader.ReadBytes('\n')
+	// ReadSlice on a fixed-capacity reader makes the pre-auth proof an actual
+	// byte bound. ReadBytes would allocate without limit until a newline arrived.
+	reader := bufio.NewReaderSize(conn, access.MaxBodyBytes+1)
+	line, err := reader.ReadSlice('\n')
 	if err != nil {
 		return access.Principal{}, nil, err
 	}

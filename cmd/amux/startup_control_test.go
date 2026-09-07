@@ -1,17 +1,281 @@
 package main
 
 import (
+	"errors"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
 )
+
+func stubStartupDial(t *testing.T, err error) {
+	t.Helper()
+	old := startupDial
+	startupDial = func() (*daemon.Client, error) { return nil, err }
+	t.Cleanup(func() { startupDial = old })
+}
+
+func deniedSocketError() error {
+	return &net.OpError{
+		Op:  "dial",
+		Net: "unix",
+		Err: os.NewSyscallError("connect", syscall.EPERM),
+	}
+}
+
+func TestDaemonStartupPreservesPermissionDenialWithoutExec(t *testing.T) {
+	for name, errno := range map[string]error{
+		"EPERM":  syscall.EPERM,
+		"EACCES": syscall.EACCES,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sandboxCLI(t)
+			stubStartupDial(t, &net.OpError{
+				Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", errno),
+			})
+			spawnCalls := 0
+			oldCommand := daemonCommand
+			daemonCommand = func(string, ...string) *exec.Cmd {
+				spawnCalls++
+				return exec.Command("/bin/false")
+			}
+			t.Cleanup(func() { daemonCommand = oldCommand })
+
+			for lifecycle, start := range map[string]func(string) error{
+				"automatic": ensureDaemon,
+				"manual":    daemonStart,
+			} {
+				err := start("would-be-daemon")
+				if !errors.Is(err, errno) {
+					t.Fatalf("%s error = %v, want wrapped %v", lifecycle, err, errno)
+				}
+				if strings.Contains(err.Error(), "timeout") {
+					t.Fatalf("%s denial was replaced by a startup timeout: %v", lifecycle, err)
+				}
+			}
+			if err := daemonRun(); !errors.Is(err, errno) {
+				t.Fatalf("foreground daemon error = %v, want wrapped %v", err, errno)
+			}
+			if err := daemonRestart(); !errors.Is(err, errno) {
+				t.Fatalf("restart error = %v, want wrapped %v", err, errno)
+			}
+			if spawnCalls != 0 {
+				t.Fatalf("permission-denied lifecycle attempted %d daemon exec(s)", spawnCalls)
+			}
+		})
+	}
+}
+
+func TestDeniedRestartDoesNotSignalPidfileProcess(t *testing.T) {
+	sandboxCLI(t)
+	stubStartupDial(t, deniedSocketError())
+	if err := os.MkdirAll(core.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	child := exec.Command("/bin/sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = child.Process.Kill()
+		<-exited
+	})
+	if err := os.WriteFile(core.PidPath(), []byte(strconv.Itoa(child.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := daemonRestart(); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("restart error = %v, want wrapped EPERM", err)
+	}
+	select {
+	case waitErr := <-exited:
+		reaped = true
+		t.Fatalf("denied restart signaled unrelated pidfile process: %v", waitErr)
+	case <-time.After(100 * time.Millisecond):
+		// Still running: the denied probe returned before pidfile handling.
+	}
+}
+
+func TestDaemonStartupRejectsUnexpectedConnectionErrorWithoutExec(t *testing.T) {
+	sandboxCLI(t)
+	errRejected := errors.New("daemon credential rejected")
+	stubStartupDial(t, errRejected)
+
+	for name, start := range map[string]func(string) error{
+		"automatic": ensureDaemon,
+		"manual":    daemonStart,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := start("/executable-must-not-run")
+			if !errors.Is(err, errRejected) {
+				t.Fatalf("start error = %v, want original rejection", err)
+			}
+			if errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "not starting") {
+				t.Fatalf("unexpected connection error fell through to exec: %v", err)
+			}
+		})
+	}
+	if err := daemonRun(); !errors.Is(err, errRejected) {
+		t.Fatalf("foreground daemon error = %v, want original rejection", err)
+	}
+	if err := daemonRestart(); !errors.Is(err, errRejected) {
+		t.Fatalf("restart error = %v, want original rejection", err)
+	}
+}
+
+func TestDaemonStartupPreservesConnectionAndSpawnErrors(t *testing.T) {
+	sandboxCLI(t)
+	stubStartupDial(t, syscall.ECONNREFUSED)
+
+	err := ensureDaemon("/executable-does-not-exist")
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("start error = %v, want original ECONNREFUSED", err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("start error = %v, want executable failure too", err)
+	}
+}
+
+func TestDaemonConnectionErrorOnlyCallsAbsentOrStaleOffline(t *testing.T) {
+	errRejected := errors.New("credential revoked")
+	for name, tc := range map[string]struct {
+		err     error
+		offline bool
+	}{
+		"absent":     {err: syscall.ENOENT, offline: true},
+		"stale":      {err: syscall.ECONNREFUSED, offline: true},
+		"permission": {err: deniedSocketError()},
+		"rejected":   {err: errRejected},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := daemonConnectionError(tc.err)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("connection error %v lost original %v", err, tc.err)
+			}
+			if got := strings.Contains(err.Error(), "daemon offline"); got != tc.offline {
+				t.Fatalf("connection error = %q, offline=%v want %v", err, got, tc.offline)
+			}
+			if !tc.offline && !strings.Contains(err.Error(), "state unknown") {
+				t.Fatalf("unexpected connection error was not unknown: %v", err)
+			}
+		})
+	}
+}
+
+func TestDaemonLifecycleDoesNotStartOrRestartInsideAgent(t *testing.T) {
+	sandboxCLI(t)
+	t.Setenv("AMUX_WORKGROUP", "agent-123")
+	stubStartupDial(t, syscall.ENOENT)
+
+	for name, run := range map[string]func() error{
+		"automatic":  func() error { return ensureDaemon("/executable-must-not-run") },
+		"manual":     func() error { return daemonStart("/executable-must-not-run") },
+		"foreground": daemonRun,
+		"restart":    daemonRestart,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := run()
+			if err == nil || !strings.Contains(err.Error(), "inside an amux agent") {
+				t.Fatalf("lifecycle error = %v, want agent-session refusal", err)
+			}
+		})
+	}
+}
+
+func TestDaemonStartupCannotDowngradeByUnsettingSessionEnvironment(t *testing.T) {
+	sandboxCLI(t)
+	for _, name := range []string{"AMUX_SESSION_ID", "AMUX_RPC_DIR", "AMUX_WORKGROUP", "AMUX_WORKSPACE", "HOME", "XDG_RUNTIME_DIR"} {
+		t.Setenv(name, "")
+	}
+	oldContext := sessionContextRestricted
+	sessionContextRestricted = func() bool { return true }
+	t.Cleanup(func() { sessionContextRestricted = oldContext })
+	stubStartupDial(t, syscall.ENOENT)
+	spawned := false
+	oldCommand := daemonCommand
+	daemonCommand = func(string, ...string) *exec.Cmd {
+		spawned = true
+		return exec.Command("/executable-must-not-run")
+	}
+	t.Cleanup(func() { daemonCommand = oldCommand })
+
+	err := ensureDaemon("/executable-must-not-run")
+	if err == nil || !strings.Contains(err.Error(), "inside an amux agent") {
+		t.Fatalf("startup error = %v, want fixed-context refusal", err)
+	}
+	if spawned {
+		t.Fatal("missing socket spawned a daemon after session environment was unset")
+	}
+}
+
+func TestFixedSessionContextErrorsFailClosed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err        error
+		restricted bool
+	}{
+		"valid":      {restricted: true},
+		"missing":    {err: os.ErrNotExist, restricted: false},
+		"permission": {err: os.ErrPermission, restricted: true},
+		"invalid":    {err: errors.New("invalid context"), restricted: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := restrictedBySessionContext(func() (access.SessionContext, error) {
+				return access.SessionContext{}, tc.err
+			})
+			if got != tc.restricted {
+				t.Fatalf("restricted = %v, want %v", got, tc.restricted)
+			}
+		})
+	}
+}
+
+func TestMissingContextAndEnvironmentCannotGrantAutomaticHostStartup(t *testing.T) {
+	sandboxCLI(t)
+	for _, name := range []string{"AMUX_SESSION_ID", "AMUX_RPC_DIR", "AMUX_CREDENTIAL_DIR", "HOME", "XDG_RUNTIME_DIR", "XDG_DATA_HOME"} {
+		t.Setenv(name, filepath.Join(t.TempDir(), "forged"))
+	}
+	t.Setenv("AMUX_WORKGROUP", "")
+	t.Setenv("AMUX_WORKSPACE", "")
+	oldContext := sessionContextRestricted
+	sessionContextRestricted = func() bool { return false } // proven ENOENT
+	t.Cleanup(func() { sessionContextRestricted = oldContext })
+	oldProtected := protectedHostStartup
+	protectedHostStartup = func() error { return os.ErrNotExist }
+	t.Cleanup(func() { protectedHostStartup = oldProtected })
+	stubStartupDial(t, syscall.ENOENT)
+	spawned := false
+	oldCommand := daemonCommand
+	daemonCommand = func(string, ...string) *exec.Cmd {
+		spawned = true
+		return exec.Command("/executable-must-not-run")
+	}
+	t.Cleanup(func() { daemonCommand = oldCommand })
+
+	err := ensureDaemon("/executable-must-not-run")
+	if err == nil || !strings.Contains(err.Error(), "protected host credential") {
+		t.Fatalf("startup error = %v, want protected-host refusal", err)
+	}
+	if spawned {
+		t.Fatal("missing context and forged environment spawned a daemon without protected host authority")
+	}
+}
 
 // The shim below redirects the real detached-spawn path into this child. The
 // daemon uses an empty, private store and cannot launch a paid model.

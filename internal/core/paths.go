@@ -1,14 +1,32 @@
 package core
 
 import (
+	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 )
 
 // StateDir is where amux keeps runtime state (pidfile, logs, fallback socket).
 func StateDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "state", "amux")
+}
+
+// ProtectedStateDir resolves the login account's home without consulting HOME
+// or XDG. It is used only to decide whether automatic daemon bootstrap has a
+// pre-existing host credential. A restricted process must not obtain host
+// startup authority by pointing environment variables at attacker-owned files.
+func ProtectedStateDir() (string, error) {
+	u, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+	if err != nil {
+		return "", fmt.Errorf("resolve login account: %w", err)
+	}
+	if !filepath.IsAbs(u.HomeDir) {
+		return "", fmt.Errorf("login home is not absolute")
+	}
+	return filepath.Join(u.HomeDir, ".local", "state", "amux"), nil
 }
 
 // runtimeDir prefers $XDG_RUNTIME_DIR (tmpfs, per-user) for the control socket,
@@ -124,6 +142,14 @@ func LogPath() string {
 // lifetime. A successful socket connect is not a singleton primitive: a stale
 // or hostile listener must never cause a new daemon to unlink a live socket.
 func DaemonLockPath() string { return filepath.Join(StateDir(), "daemon.lock") }
+
+// SessionAccessDir is the immediate-root directory mount used by every
+// restricted agent namespace. Launch code read-only binds the stable
+// CredentialHostDir here; current and context.json therefore rotate together
+// without a writable ancestor that the session could rename or cover.
+func SessionAccessDir() string { return "/amux-session-access" }
+
+func SessionContextPath() string { return filepath.Join(SessionAccessDir(), "context.json") }
 
 // LiveAgentsPath is the JSON file recording which engine instances were running,
 // so a daemon restart can relaunch them without a UI trigger.

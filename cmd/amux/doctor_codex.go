@@ -40,7 +40,7 @@ func reportCodexControl() {
 	}
 	c, dialErr := daemon.Dial()
 	if dialErr != nil {
-		fmt.Printf("  running daemon: unknown/offline (%v)\n", dialErr)
+		fmt.Printf("  running daemon: unknown/unreachable (%v)\n", dialErr)
 		return
 	}
 	defer c.Close()

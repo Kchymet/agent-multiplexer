@@ -86,7 +86,7 @@ func TestAgentPermissionJournalsTheHookLifecycle(t *testing.T) {
 	}
 }
 
-// TestAgentPermissionNeverDisrupts: like every `amux agent` verb, this one must
+// TestAgentPermissionNeverDisrupts: like every telemetry hook, this one must
 // exit 0 whatever it is handed — a hook that fails would interrupt the agent it
 // is only meant to observe.
 func TestAgentPermissionNeverDisrupts(t *testing.T) {
