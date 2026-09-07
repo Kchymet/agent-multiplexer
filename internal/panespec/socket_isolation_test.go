@@ -20,11 +20,11 @@ import (
 // This helper runs as a subprocess inside the exact pane namespace. Merely
 // checking write permission on the parent directory does not test socket access.
 func TestSocketScopeProbe(t *testing.T) {
-	path := os.Getenv("AMUX_TEST_SOCKET_PATH")
+	path := os.Getenv("PANESPEC_TEST_SOCKET_PATH")
 	if path == "" {
 		t.Skip("subprocess helper")
 	}
-	if os.Getenv("AMUX_TEST_SOCKET_WAIT") == "1" {
+	if os.Getenv("PANESPEC_TEST_SOCKET_WAIT") == "1" {
 		fmt.Println("SCOPE_READY")
 		if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
 			t.Fatal(err)
@@ -34,7 +34,7 @@ func TestSocketScopeProbe(t *testing.T) {
 	if err == nil {
 		conn.Close()
 	}
-	if os.Getenv("AMUX_TEST_SOCKET_DENY") == "1" {
+	if os.Getenv("PANESPEC_TEST_SOCKET_DENY") == "1" {
 		if err == nil {
 			t.Fatal("sandbox connected to another session's private socket")
 		}
@@ -47,8 +47,8 @@ func TestSocketScopeProbe(t *testing.T) {
 }
 
 func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bubblewrap unavailable")
+	if err := IsolationSupport(); err != nil {
+		t.Skipf("protected namespace unavailable: %v", err)
 	}
 	home, err := os.MkdirTemp("", "cx-scope-")
 	if err != nil {
@@ -68,6 +68,7 @@ func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
 	t.Setenv("AMUX_JAIL", "on")
 	own := filepath.Join(core.SessionsDir(), "wg", "own")
 	sibling := filepath.Join(core.SessionsDir(), "wg", "peer")
+	coordinator := filepath.Join(core.SessionsDir(), "wg", "coordinator")
 	listen := func(sessionID string) string {
 		t.Helper()
 		path := appServerSocketPath(sessionID)
@@ -91,7 +92,7 @@ func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
 		return path
 	}
 	ownSocket, peerSocket, coordinatorSocket := listen("own"), listen("peer"), listen("wg")
-	for _, dir := range []string{own, sibling} {
+	for _, dir := range []string{own, sibling, coordinator} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -140,16 +141,21 @@ func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
 		{"sibling", "own", own, peerSocket, "1"},
 		{"sibling-canonical-alias", "own", own, canonicalPeer, "1"},
 		{"sibling-proc-alias", "own", own, fmt.Sprintf("/proc/%d/root%s", os.Getpid(), peerSocket), "1"},
-		{"coordinator-own", "wg", filepath.Dir(own), coordinatorSocket, "0"},
-		{"coordinator-peer", "wg", filepath.Dir(own), peerSocket, "1"},
+		{"coordinator-own", "wg", coordinator, coordinatorSocket, "0"},
+		{"coordinator-peer", "wg", coordinator, peerSocket, "1"},
 	}
 	command := func(t *testing.T, id, dir, path, deny string) *exec.Cmd {
 		t.Helper()
-		argv := scope(dir, TabAgent, store.Session{ID: id, Agent: "codex", Dir: dir}, []string{exe, "-test.run=^TestSocketScopeProbe$", "-test.v"}, nil)
+		s := store.Session{ID: id, Agent: "codex", Dir: dir}
+		spec := testLaunchSpec(t, s)
+		argv, err := scope(dir, TabAgent, s, spec.Access, []string{exe, "-test.run=^TestSocketScopeProbe$", "-test.v"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		t.Cleanup(cancel)
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.Env = append(os.Environ(), "AMUX_TEST_SOCKET_PATH="+path, "AMUX_TEST_SOCKET_DENY="+deny)
+		cmd.Env = append(os.Environ(), "PANESPEC_TEST_SOCKET_PATH="+path, "PANESPEC_TEST_SOCKET_DENY="+deny)
 		return cmd
 	}
 	for _, tc := range cases {
@@ -166,7 +172,7 @@ func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
 	} {
 		t.Run(late.name, func(t *testing.T) {
 			cmd := command(t, late.session, own, appServerSocketPath(late.target), late.deny)
-			cmd.Env = append(cmd.Env, "AMUX_TEST_SOCKET_WAIT=1")
+			cmd.Env = append(cmd.Env, "PANESPEC_TEST_SOCKET_WAIT=1")
 			output, err := cmd.StdoutPipe()
 			if err != nil {
 				t.Fatal(err)
