@@ -118,6 +118,13 @@ func readRegularAtMode(dir *os.File, name string, max int, mode uint32) ([]byte,
 }
 
 func atomicWriteAt(dir *os.File, final string, data []byte, random io.Reader) error {
+	return atomicWriteAtObserved(dir, final, data, random, nil)
+}
+
+// atomicWriteAtObserved exposes the publication boundary only to package tests.
+// The observer runs after the temporary is safely opened and chmodded, but
+// before it is written and renamed into its unique final identity.
+func atomicWriteAtObserved(dir *os.File, final string, data []byte, random io.Reader, afterCreate func()) error {
 	if !validComponent(final) || len(data) == 0 || random == nil {
 		return ErrInvalidRecord
 	}
@@ -140,6 +147,9 @@ func atomicWriteAt(dir *os.File, final string, data []byte, random io.Reader) er
 	}()
 	if err := file.Chmod(regularFileMode); err != nil {
 		return err
+	}
+	if afterCreate != nil {
+		afterCreate()
 	}
 	if err := writeFull(file, data); err != nil {
 		return err
@@ -258,4 +268,9 @@ func requestIDFromFile(name string) (string, bool) {
 	}
 	id := strings.TrimSuffix(name, ".req")
 	return id, validRequestID(id)
+}
+
+func requestTemporaryFromFile(name string) bool {
+	const prefix = ".tmp-"
+	return strings.HasPrefix(name, prefix) && validRequestID(strings.TrimPrefix(name, prefix))
 }
