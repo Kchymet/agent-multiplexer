@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"amux/internal/codexcfg"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -180,7 +181,7 @@ func AttachArgv(bin, endpoint, threadID string) []string {
 	if threadID != "" {
 		argv = append(argv, "resume", threadID)
 	}
-	return argv
+	return codexcfg.FullscreenTUI(argv)
 }
 
 // Identity is the durable server/thread identity amux persists for a structured
