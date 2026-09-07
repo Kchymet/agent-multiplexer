@@ -2,13 +2,16 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/panespec"
 	"amux/internal/store"
 
 	"golang.org/x/sys/unix"
@@ -31,15 +34,20 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 	if session.Archived {
 		return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q is archived", id)
 	}
+	// The console is synthetic and its read-side projection deliberately has no
+	// materialization side effect. Launch is the lifecycle boundary that creates
+	// its private directory before path validation and authority provisioning.
+	if session.Role() == store.RoleConsole {
+		if err := console.Ensure(); err != nil {
+			return store.Session{}, access.SessionAccess{}, fmt.Errorf("ensure console launch directory: %w", err)
+		}
+	}
 	expected := session.Dir
 	switch session.Role() {
 	case store.RoleConsole:
 		expected = console.Dir()
 	case store.RoleCoordinator:
-		// Coordinator and repo-home layouts require their dedicated namespace
-		// directories. The namespace integration supplies that role-aware
-		// validator; never preserve the unsafe shared RootDir as authority.
-		return store.Session{}, access.SessionAccess{}, fmt.Errorf("root session %q has no secure dedicated launch layout", id)
+		expected = store.CoordinatorDir(session.ID)
 	case store.RoleRepo:
 		expected = store.RootDir(session.ID)
 	case store.RoleAgent:
@@ -50,11 +58,34 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 	if !filepath.IsAbs(session.Dir) || filepath.Clean(session.Dir) != filepath.Clean(expected) {
 		return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q uses unsupported legacy/shared directory %q", id, session.Dir)
 	}
+	// A revoked or expired credential file is evidence that this subject has
+	// existed before. Never turn a launch/reconcile into implicit re-issuance;
+	// only a subject with no credential yet may be provisioned here.
+	credentialDir := d.authority.CredentialDir(access.SubjectSession, session.ID)
+	if credential, credentialErr := access.LoadCredential(credentialDir); credentialErr == nil {
+		principal := access.Principal{KeyID: credential.KeyID, SubjectID: credential.SubjectID, Kind: credential.Kind, Generation: credential.Generation}
+		if err := d.authority.Valid(ctx, principal); err != nil {
+			return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q credential is not current: %w", id, err)
+		}
+	} else if !errors.Is(credentialErr, os.ErrNotExist) {
+		return store.Session{}, access.SessionAccess{}, fmt.Errorf("validate session %q credential: %w", id, credentialErr)
+	}
 	grant, err := d.authority.EnsureSession(ctx, session.ID, session.Dir)
 	if err != nil {
 		return store.Session{}, access.SessionAccess{}, err
 	}
 	return session, grant, nil
+}
+
+// launchSpecFor is the one typed bridge from daemon-owned provisioning into
+// panespec. All launch call sites use this result; none resolve the session or
+// access grant independently.
+func (d *Daemon) launchSpecFor(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+	session, grant, err := d.sessionAccessForLaunch(ctx, id)
+	if err != nil {
+		return panespec.LaunchSpec{}, err
+	}
+	return panespec.LaunchSpec{Session: session, Access: grant}, nil
 }
 
 // validateStoredAgentDir deliberately does not derive a path from RootID: a

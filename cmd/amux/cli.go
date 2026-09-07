@@ -401,6 +401,23 @@ func cmdSession(args []string) error {
 		}
 		fmt.Printf("restored %s\n", args[1])
 		return nil
+	case "recreate":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: amux workgroup recreate <id>")
+		}
+		if sessionContextRestricted() {
+			return fmt.Errorf("runtime recreation requires authenticated host control")
+		}
+		c, err := dial()
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.RecreateSession(args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("recreated runtime %s with current session access mounts\n", args[1])
+		return nil
 	case "ls", "list":
 		return sessionList()
 	default:
@@ -413,6 +430,7 @@ func cmdSession(args []string) error {
 			"  repos <agent> <repo>...      re-scope an agent to exactly these repos\n"+
 			"  rename <id> <name>           set a display name (the id is unchanged)\n"+
 			"  archive | unarchive <id>     mark done / bring back (reversible)\n"+
+			"  recreate <id>                replace one runtime with current access mounts (host only)\n"+
 			"  rm <id>                      delete for good — worktrees + branch\n"+
 			"  ls                           list workgroups and their agents", sub)
 	}
@@ -438,6 +456,8 @@ usage: amux workgroup [command]
   rename <id> <name>  set a display name (the id is unchanged)
   archive <id>       drop a session off the active rail  (alias: done)
   unarchive <id>     put an archived session back  (alias: restore)
+  recreate <id>      replace one runtime with current access mounts (host only;
+                     stored worktree/config/transcript files are preserved)
   rm <id>            delete a session, its worktrees and branches  (alias: delete)
 `)
 }

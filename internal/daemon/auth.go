@@ -76,7 +76,13 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 			continue
 		}
 		// Resolve before stopping so a launch/config error preserves the old pane.
-		dir, env, argv, err := d.resolve(k.AgentID, k.Tab)
+		spec, err := d.launchSpec(ctx, k.AgentID)
+		if err != nil {
+			log.Printf("amux: auth reload %s: %v", k.AgentID, err)
+			delete(d.authPending, k)
+			continue
+		}
+		dir, env, argv, err := d.resolve(spec, k.Tab)
 		if err != nil {
 			log.Printf("amux: auth reload %s: %v", k.AgentID, err)
 			delete(d.authPending, k)

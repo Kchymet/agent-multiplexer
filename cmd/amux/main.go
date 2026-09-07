@@ -296,50 +296,59 @@ func daemonRun() error {
 	return daemon.Default(self).Run(ctx)
 }
 
-// daemonStop turns the running daemon down. It signals the pidfile's process
-// with SIGTERM so the daemon shuts its engine down cleanly (stopping the agents
-// it hosts), then waits for the socket to go quiet, escalating to SIGKILL if the
-// daemon doesn't exit in time. With mustExist=false a not-running daemon is not
-// an error (used by restart, which then just starts a fresh one).
+// daemonStop turns the running daemon down through the authenticated host
+// control stream. A pidfile is diagnostic only: stale integer process IDs are
+// never signalled. With mustExist=false a not-running daemon is not an error
+// (used by restart, which then just starts a fresh one).
 func daemonStop(mustExist bool) error {
-	pid, err := daemonPid()
+	c, err := startupDial()
 	if err != nil {
-		if !mustExist {
-			// No pidfile, but the socket might still answer a stale daemon.
-			if c, derr := startupDial(); derr == nil {
-				_ = c.Close()
-				return fmt.Errorf("daemon is answering %s but its pidfile is missing; stop it by hand", core.SocketPath())
-			} else if !daemonMayStart(derr) {
-				return fmt.Errorf("cannot verify daemon absence with no pidfile: %w", daemonConnectionError(derr))
+		if daemonMayStart(err) {
+			if mustExist {
+				return fmt.Errorf("daemon is not running: %w", err)
 			}
-			return nil // nothing to stop
-		}
-		return err
-	}
-	if !processAlive(pid) {
-		_ = os.Remove(core.PidPath())
-		if mustExist {
-			fmt.Printf("daemon (pid %d) was not running; cleared stale pidfile\n", pid)
-		}
-		return nil
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("signal daemon (pid %d): %w", pid, err)
-	}
-	// Wait for a clean exit: the daemon stops its agents, removes the socket, and
-	// exits. Poll until the process is gone (up to ~12s to allow agent teardown).
-	deadline := time.Now().Add(12 * time.Second)
-	for time.Now().Before(deadline) {
-		if !processAlive(pid) {
-			fmt.Printf("daemon stopped (pid %d)\n", pid)
 			return nil
+		}
+		return fmt.Errorf("cannot authenticate daemon shutdown: %w", daemonConnectionError(err))
+	}
+	if err := c.Shutdown(); err != nil {
+		_ = c.Close()
+		return fmt.Errorf("daemon rejected shutdown: %w", err)
+	}
+	_ = c.Close()
+	// Wait for both endpoint removal and singleton-lock release. Socket absence
+	// alone is not process identity and can precede final engine cleanup.
+	deadline := time.Now().Add(12 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		probe, probeErr := startupDial()
+		if probeErr == nil {
+			_ = probe.Close()
+			lastErr = fmt.Errorf("daemon still accepting authenticated connections")
+		} else if !daemonMayStart(probeErr) {
+			return fmt.Errorf("cannot verify daemon shutdown: %w", daemonConnectionError(probeErr))
+		} else if singletonReleased() {
+			fmt.Println("daemon stopped")
+			return nil
+		} else {
+			lastErr = fmt.Errorf("daemon listener closed but singleton lock is still held")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	// Didn't exit gracefully — force it so a restart can proceed.
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	fmt.Printf("daemon (pid %d) did not exit in time; sent SIGKILL\n", pid)
-	return nil
+	return fmt.Errorf("daemon did not complete authenticated shutdown within timeout: %w", lastErr)
+}
+
+func singletonReleased() bool {
+	f, err := os.OpenFile(core.DaemonLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return false
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true
 }
 
 // daemonStart turns a daemon up if one isn't already answering, reusing the same
@@ -368,11 +377,12 @@ func daemonRestart() error {
 	if restrictedSessionClient(os.Getenv) {
 		return fmt.Errorf("refusing to restart the daemon from inside an amux agent")
 	}
-	// Only an absent or stale listener may continue into the legacy pidfile flow.
+	// Only an absent or stale listener may continue into startup. Every live
+	// daemon is stopped through its authenticated control stream; pidfiles are
+	// never process authority.
 	// Permission, authentication, and unexpected transport failures leave daemon
-	// state unknown and must not turn restart into a destructive guess. Authenticating
-	// pidfile process ownership is separate lifecycle work; an integer PID alone is
-	// not proof that the process is an amux daemon.
+	// state unknown and must not turn restart into a destructive guess. An integer
+	// PID is diagnostic only and is never process authority.
 	if c, err := startupDial(); err == nil {
 		_ = c.Close()
 	} else if daemonAccessDenied(err) {
@@ -561,6 +571,33 @@ func cmdStatus(args []string) error {
 		if a == "--json" || a == "-j" {
 			asJSON = true
 		}
+	}
+	if sessionContextRestricted() {
+		var sessions []core.Session
+		if err := queryRows(core.QuerySnapshot, &sessions); err != nil {
+			return err
+		}
+		snapshot := core.Snapshot{Type: "snapshot", Sessions: sessions}
+		if asJSON {
+			b, err := json.MarshalIndent(snapshot, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(b))
+			return nil
+		}
+		if len(sessions) == 0 {
+			fmt.Println("(no visible sessions)")
+			return nil
+		}
+		for _, s := range sessions {
+			state := s.State
+			if state == "" {
+				state = core.StateIdle
+			}
+			fmt.Printf("%-20s %-8s %-8s %s\n", s.Title, s.Kind, state, s.Cwd)
+		}
+		return nil
 	}
 	c, err := startupDial()
 	if err != nil {

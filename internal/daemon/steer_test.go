@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -41,7 +42,7 @@ func putSession(t *testing.T, id, kind string) {
 	}
 	defer db.Close()
 	if err := db.PutSession(store.Session{
-		ID: id, Name: id, Agent: kind, Dir: t.TempDir(), ClaudeID: convID(id),
+		ID: id, RootID: "test-root", Name: id, Agent: kind, Dir: t.TempDir(), ClaudeID: convID(id),
 	}); err != nil {
 		t.Fatalf("put session: %v", err)
 	}
@@ -189,7 +190,10 @@ func steerDaemon(t *testing.T) (*Daemon, *fakeEngine) {
 	d.engine = eng
 	d.steerSettle = time.Millisecond
 	d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
-	d.resolve = func(string, int) (string, []string, []string, error) { return "", nil, []string{"sh"}, nil }
+	d.launchSpec = testLaunchSpecResolver
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
 	d.steerStarted = make(chan string, 8)
 	return d, eng
 }
@@ -227,25 +231,31 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 		{"claude stop", "claude",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x03"},
 		{"claude allow", "claude",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow},
+			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow, core.SteerRequestID: "perm-1"},
 			"\r"},
 		{"claude deny", "claude",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny},
+			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny, core.SteerRequestID: "perm-1"},
 			"\x1b"},
 		{"codex prompt", "codex",
 			map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "hi"}, "hi\r"},
 		{"codex stop", "codex",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x1b"},
-		{"codex allow", "codex",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow}, "y"},
-		{"codex deny", "codex",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny}, "n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d, eng := steerDaemon(t)
 			putSession(t, "a1", tc.kind)
 			in := eng.running("a1")
+			if tc.fields[core.SteerVerb] == core.SteerPermission {
+				generation, err := d.permissions.observe("a1", in)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tc.fields[access.RuntimeGenerationField] = generation
+				if err := core.AppendPermission(convID("a1"), core.PermissionRecord{RequestID: "perm-1", Tool: "Bash", Action: "test"}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			// `stop` only fires mid-turn for a harness whose interrupt key is unsafe
 			// at an idle prompt, so put the session in a turn.
 			if tc.fields[core.SteerVerb] == core.SteerStop {
@@ -273,13 +283,18 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
 	in := eng.running("a1")
+	generation, err := d.permissions.observe("a1", in)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	allow := func(requestID string) error {
 		return d.steer(context.Background(), core.Action{
 			Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
-				core.SteerVerb:      core.SteerPermission,
-				core.SteerDecision:  core.SteerAllow,
-				core.SteerRequestID: requestID,
+				core.SteerVerb:                core.SteerPermission,
+				core.SteerDecision:            core.SteerAllow,
+				core.SteerRequestID:           requestID,
+				access.RuntimeGenerationField: generation,
 			},
 		})
 	}
@@ -293,7 +308,7 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 	}
 
 	// Nothing open at all: refused, and nothing reaches the pane.
-	err := allow("perm-gone")
+	err = allow("perm-gone")
 	if err == nil || !strings.Contains(err.Error(), `no pending request "perm-gone"`) {
 		t.Fatalf("stale id with no prompt open: err = %v, want a no-pending-request refusal", err)
 	}
@@ -335,17 +350,18 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 		t.Fatalf("pane received %q: the replay must not have been delivered", got)
 	}
 
-	// An empty request_id keeps the older, uncorrelated behavior: answer whatever
-	// is open. It is the explicit way to say "whatever it is asking".
+	// Empty request IDs are no longer a compatibility escape hatch: every role
+	// must name the exact live request and runtime generation.
 	if err := d.steer(context.Background(), core.Action{
 		Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
 			core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny,
+			access.RuntimeGenerationField: generation,
 		},
-	}); err != nil {
-		t.Fatalf("empty request_id: %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "request_id is required") {
+		t.Fatalf("empty request_id = %v", err)
 	}
-	if got := in.written(); got != "\r\x1b" {
-		t.Fatalf("pane received %q, want the allow then the uncorrelated deny", got)
+	if got := in.written(); got != "\r" {
+		t.Fatalf("pane received %q, want only the correlated allow", got)
 	}
 }
 
@@ -719,12 +735,16 @@ func TestSteerStartupDelayPrecedesLaterPrompt(t *testing.T) {
 func TestSteerPromptStartsTheCoordinator(t *testing.T) {
 	d, eng := steerDaemon(t)
 	d.agentsUnder = wsops.AgentIDsUnder // the real root → members resolution
+	coordinatorDir := store.CoordinatorDir("wg1")
+	if err := os.MkdirAll(coordinatorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range []store.Session{
-		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Created: 1},
+		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Dir: coordinatorDir, Created: 1},
 		{ID: "a1", RootID: "wg1", Agent: "claude", Dir: t.TempDir(), ClaudeID: convID("a1"), Created: 2},
 	} {
 		if err := db.PutSession(s); err != nil {
@@ -735,6 +755,9 @@ func TestSteerPromptStartsTheCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
+	if _, err := wsops.EnsureRepoHome("api"); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, id := range []string{"wg1", "api"} {
 		if err := d.steer(context.Background(), core.Action{

@@ -119,11 +119,11 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PutSession(store.Session{ID: "c1", Agent: "codex", ClaudeID: cid, Dir: t.TempDir()}); err != nil {
+	if err := db.PutSession(store.Session{ID: "c1", RootID: "test-root", Agent: "codex", ClaudeID: cid, Dir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 	// A codex session with no rollout on disk: tracked, but never run.
-	if err := db.PutSession(store.Session{ID: "c2", Agent: "codex", Dir: t.TempDir()}); err != nil {
+	if err := db.PutSession(store.Session{ID: "c2", RootID: "test-root", Agent: "codex", Dir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
