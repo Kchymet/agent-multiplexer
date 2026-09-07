@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"syscall"
@@ -99,7 +100,7 @@ func TestVersionLinesChecksProtocolAndSchemaIndependently(t *testing.T) {
 	}
 	lines, incompatible := versionLines(r, true)
 	got := strings.Join(lines, "\n")
-	for _, want := range []string{"✓ daemon", "1.1.0", "protocol 1", "compatible with CLI", "✓ database", "schema 2", "range 1–2"} {
+	for _, want := range []string{"✓ daemon", "1.1.0", fmt.Sprintf("protocol %d", buildinfo.DaemonProtocol), "compatible with CLI", "✓ database", "schema 2", "range 1–2"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("doctor version output missing %q:\n%s", want, got)
 		}

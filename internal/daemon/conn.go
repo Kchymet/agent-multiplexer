@@ -95,11 +95,7 @@ func (cl *connState) writeLoop(conn net.Conn) {
 		case <-cl.done:
 			return
 		case v := <-cl.out:
-			if !cl.authorized() {
-				cl.stop()
-				return
-			}
-			if err := enc.Encode(v); err != nil {
+			if err := cl.encodeAuthorized(enc, v); err != nil {
 				cl.stop()
 				return
 			}
@@ -146,17 +142,17 @@ func (cl *connState) drainPanes(enc *json.Encoder) error {
 		cl.obMu.Unlock()
 
 		if reset {
-			if err := enc.Encode(core.PaneFrame{Type: core.FramePaneReset, PaneID: paneID}); err != nil {
+			if err := cl.encodeAuthorized(enc, core.PaneFrame{Type: core.FramePaneReset, PaneID: paneID}); err != nil {
 				return err
 			}
 		}
 		if len(data) > 0 {
-			if err := enc.Encode(core.PaneFrame{Type: core.FramePaneOutput, PaneID: paneID, Data: data}); err != nil {
+			if err := cl.encodeAuthorized(enc, core.PaneFrame{Type: core.FramePaneOutput, PaneID: paneID, Data: data}); err != nil {
 				return err
 			}
 		}
 		if exit {
-			if err := enc.Encode(core.PaneFrame{Type: core.FramePaneExit, PaneID: paneID, Error: exitErr}); err != nil {
+			if err := cl.encodeAuthorized(enc, core.PaneFrame{Type: core.FramePaneExit, PaneID: paneID, Error: exitErr}); err != nil {
 				return err
 			}
 		}
@@ -212,6 +208,13 @@ func (cl *connState) signalWrite() {
 }
 
 func (cl *connState) authorized() bool { return cl.valid == nil || cl.valid() }
+
+func (cl *connState) encodeAuthorized(enc *json.Encoder, frame any) error {
+	if !cl.authorized() {
+		return net.ErrClosed
+	}
+	return enc.Encode(frame)
+}
 
 func (cl *connState) stop() { cl.once.Do(func() { close(cl.done) }) }
 

@@ -54,6 +54,7 @@ var (
 	ErrReplay            = errors.New("request replayed")
 	ErrCapacity          = errors.New("access state capacity exceeded")
 	ErrAuthorityInUse    = errors.New("access authority already open")
+	ErrAuthorityClosed   = errors.New("access authority is closed")
 )
 
 // CredentialRecord is the daemon-owned public half of an issued credential.
@@ -275,6 +276,32 @@ func (a *FileAuthority) Close() error {
 func (a *FileAuthority) Root() string   { return a.root }
 func (a *FileAuthority) BootID() string { return a.bootID }
 
+// IssuerKeyID identifies the daemon authority signer without exposing its
+// private key. An empty value means the authority has been closed.
+func (a *FileAuthority) IssuerKeyID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.rootDir == nil {
+		return ""
+	}
+	return a.issuer.KeyID
+}
+
+// SignIssuer signs exact, caller-domain-separated service/response bytes for
+// filesystem RPC. The issuer private key never leaves the authority.
+func (a *FileAuthority) SignIssuer(message []byte) ([]byte, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.rootDir == nil {
+		return nil, ErrAuthorityClosed
+	}
+	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
+	if err != nil || len(priv) != ed25519.PrivateKeySize {
+		return nil, ErrInvalidCredential
+	}
+	return ed25519.Sign(ed25519.PrivateKey(priv), message), nil
+}
+
 func subjectKey(kind SubjectKind, id string) string {
 	d := sha256.Sum256([]byte(string(kind) + "\x00" + id))
 	return hex.EncodeToString(d[:16])
@@ -290,6 +317,16 @@ func DefaultCredentialDir(kind SubjectKind, subjectID string) string {
 	return filepath.Join(AuthorityRoot(), "credentials", subjectKey(kind, subjectID))
 }
 
+// ProtectedHostCredentialDir is independent of caller-controlled HOME/XDG and
+// is used only as the capability gate for automatic host daemon startup.
+func ProtectedHostCredentialDir() (string, error) {
+	stateDir, err := core.ProtectedStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(stateDir, "access", "v1", "credentials", subjectKey(SubjectHost, LocalHostSubject)), nil
+}
+
 func (a *FileAuthority) EnsureHost(ctx context.Context) (string, error) {
 	return a.Ensure(ctx, SubjectHost, LocalHostSubject)
 }
@@ -302,6 +339,9 @@ func (a *FileAuthority) Ensure(_ context.Context, kind SubjectKind, subjectID st
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return "", ErrAuthorityClosed
+	}
 	if keyID := a.registry.Current[currentKey(kind, subjectID)]; keyID != "" {
 		if rec, ok := a.registry.Records[keyID]; ok && rec.RevokedAt == 0 && rec.NotAfter > a.now().UnixMilli() {
 			if err := a.ensureCredentialPublished(kind, subjectID, keyID); err == nil {
@@ -322,6 +362,9 @@ func (a *FileAuthority) Rotate(_ context.Context, kind SubjectKind, subjectID st
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return "", ErrAuthorityClosed
+	}
 	return a.issueLocked(kind, subjectID)
 }
 
@@ -516,6 +559,9 @@ func validateDaemonTLS(identity daemonTLSCredential) error {
 func (a *FileAuthority) Revoke(_ context.Context, kind SubjectKind, subjectID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return ErrAuthorityClosed
+	}
 	key := currentKey(kind, subjectID)
 	keyID := a.registry.Current[key]
 	if keyID == "" {
@@ -553,6 +599,9 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return Principal{}, ErrAuthorityClosed
+	}
 	rec, ok := a.registry.Records[req.KeyID]
 	if !ok || rec.Generation != req.Generation || a.registry.Current[currentKey(rec.Kind, rec.SubjectID)] != req.KeyID {
 		return Principal{}, ErrInvalidCredential
@@ -615,6 +664,9 @@ func cloneReplay(in replayFile) replayFile {
 func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	if a.rootDir == nil {
+		return ErrAuthorityClosed
+	}
 	return a.validLocked(p)
 }
 
@@ -639,6 +691,9 @@ func (a *FileAuthority) validLocked(p Principal) error {
 func (a *FileAuthority) WatchInvalidation(p Principal) (<-chan struct{}, func(), error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return nil, nil, ErrAuthorityClosed
+	}
 	if err := a.validLocked(p); err != nil {
 		return nil, nil, err
 	}

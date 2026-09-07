@@ -18,6 +18,11 @@ import (
 // The socket path is only routing; all streaming bytes, including client proof,
 // flow inside this authenticated encrypted channel.
 func (a *FileAuthority) ServerTLSConfig() (*tls.Config, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.rootDir == nil {
+		return nil, ErrAuthorityClosed
+	}
 	der, err := base64.RawStdEncoding.DecodeString(a.tls.Certificate)
 	if err != nil {
 		return nil, ErrInvalidCredential
@@ -84,6 +89,11 @@ type SocketWelcome struct {
 }
 
 func (a *FileAuthority) NewChallenge() (SocketChallenge, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.rootDir == nil {
+		return SocketChallenge{}, ErrAuthorityClosed
+	}
 	nonce := make([]byte, 32)
 	if _, err := io.ReadFull(a.rand, nonce); err != nil {
 		return SocketChallenge{}, err
@@ -145,6 +155,10 @@ func (a *FileAuthority) VerifyProof(ctx context.Context, challenge SocketChallen
 		return Principal{}, ErrInvalidCredential
 	}
 	a.mu.Lock()
+	if a.rootDir == nil {
+		a.mu.Unlock()
+		return Principal{}, ErrAuthorityClosed
+	}
 	rec, ok := a.registry.Records[proof.KeyID]
 	a.mu.Unlock()
 	if !ok || rec.Generation != proof.Generation {
