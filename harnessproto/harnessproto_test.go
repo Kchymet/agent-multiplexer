@@ -86,3 +86,24 @@ func TestExecutionCapabilitiesEmptyVsAbsent(t *testing.T) {
 		})
 	}
 }
+
+// TestComputeCapabilityIsExplicit pins the fail-closed compatibility rule:
+// older providers omit the additive field and therefore do not grant compute.
+// Only a literal true value authorizes placement and pane control.
+func TestComputeCapabilityIsExplicit(t *testing.T) {
+	for name, raw := range map[string]string{
+		"legacy absent":  `{}`,
+		"explicit false": `{"compute":false}`,
+		"explicit true":  `{"compute":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got Capabilities
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Compute != (name == "explicit true") {
+				t.Fatalf("Compute = %v for %s", got.Compute, raw)
+			}
+		})
+	}
+}

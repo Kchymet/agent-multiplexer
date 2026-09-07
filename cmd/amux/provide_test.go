@@ -51,14 +51,45 @@ func TestInstallMergesOverTheExistingConfig(t *testing.T) {
 // fset.Visit rather than zero values: without it, --publish-sessions would be a
 // one-way switch that no later install could undo.
 func TestInstallCanTurnAFeatureOff(t *testing.T) {
-	base := providercfg.Config{Orchestrator: "o:1", TokenFile: "/t", PublishSessions: true, RuntimeEvents: true}
+	base := providercfg.Config{Orchestrator: "o:1", TokenFile: "/t", AllowCompute: true, PublishSessions: true, RuntimeEvents: true}
 
 	if got := parseInstall(t, base, "--name", "x"); !got.PublishSessions {
 		t.Errorf("an unrelated flag turned publish-sessions off: %+v", got)
 	}
-	got := parseInstall(t, base, "--publish-sessions=false", "--runtime-events=false")
-	if got.PublishSessions || got.RuntimeEvents {
+	got := parseInstall(t, base, "--allow-compute=false", "--publish-sessions=false", "--runtime-events=false")
+	if got.AllowCompute || got.PublishSessions || got.RuntimeEvents {
 		t.Errorf("--publish-sessions=false did not turn the feature off: %+v", got)
+	}
+}
+
+func TestAllowComputePrecedenceCanRevoke(t *testing.T) {
+	resolve := func(env string, file bool, args ...string) bool {
+		t.Helper()
+		fs := flag.NewFlagSet("provide", flag.ContinueOnError)
+		var f provideFlags
+		f.register(fs)
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		if env == "<unset>" {
+			t.Setenv("AMUX_PROVIDER_ALLOW_COMPUTE", "")
+			_ = os.Unsetenv("AMUX_PROVIDER_ALLOW_COMPUTE")
+		} else {
+			t.Setenv("AMUX_PROVIDER_ALLOW_COMPUTE", env)
+		}
+		return resolvedBool(fs, "allow-compute", f.allowCompute, "AMUX_PROVIDER_ALLOW_COMPUTE", file)
+	}
+	if !resolve("<unset>", true) {
+		t.Fatal("file true was not used when higher-precedence settings were absent")
+	}
+	if resolve("false", true) {
+		t.Fatal("explicit environment false did not revoke file true")
+	}
+	if resolve("true", true, "--allow-compute=false") {
+		t.Fatal("explicit flag false did not revoke environment/file true")
+	}
+	if !resolve("false", false, "--allow-compute=true") {
+		t.Fatal("explicit flag true did not override environment false")
 	}
 }
 

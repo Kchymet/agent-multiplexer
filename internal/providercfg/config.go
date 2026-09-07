@@ -34,6 +34,7 @@ type Config struct {
 	CAFile           string            // private CA to trust on top of the system roots
 	ServerName       string            // TLS server name for SNI/verification
 	MaxPanes         int               // capability: max concurrent panes (0 = unset)
+	AllowCompute     bool              // explicitly allow remote spawn/input/resize/kill
 	PublishSessions  bool              // advertise the "sessions" feature
 	ReadOnlySessions bool              // publish inventory but reject lifecycle verbs
 	RuntimeEvents    bool              // advertise "runtime-events" (needs PublishSessions)
@@ -135,6 +136,7 @@ func (c Config) Marshal() []byte {
 		}
 	}
 	boolean("publish-sessions", c.PublishSessions)
+	boolean("allow-compute", c.AllowCompute)
 	boolean("read-only-sessions", c.ReadOnlySessions)
 	boolean("runtime-events", c.RuntimeEvents)
 
@@ -249,6 +251,8 @@ func (c *Config) assign(key string, val any) error {
 		return nil
 	case "publish-sessions":
 		return boolean(&c.PublishSessions)
+	case "allow-compute":
+		return boolean(&c.AllowCompute)
 	case "read-only-sessions":
 		return boolean(&c.ReadOnlySessions)
 	case "runtime-events":

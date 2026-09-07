@@ -20,6 +20,7 @@ func full() Config {
 		CAFile:           "/etc/ssl/private-ca.pem",
 		ServerName:       "orch.internal",
 		MaxPanes:         8,
+		AllowCompute:     true,
 		PublishSessions:  true,
 		ReadOnlySessions: true,
 		RuntimeEvents:    true,
@@ -101,6 +102,7 @@ func TestParseHandComposed(t *testing.T) {
 orchestrator = "orch:7443"   # the home box
 token-file = "/tmp/tok"
 max-panes = 4
+allow-compute = true
 publish-sessions = true
 
 [labels]
@@ -114,6 +116,7 @@ tag = "has # hash"
 		Orchestrator:    "orch:7443",
 		TokenFile:       "/tmp/tok",
 		MaxPanes:        4,
+		AllowCompute:    true,
 		PublishSessions: true,
 		Labels:          map[string]string{"tag": "has # hash"},
 	}
