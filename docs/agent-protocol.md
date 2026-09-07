@@ -63,8 +63,10 @@ the session id in this precedence order, stopping at the first hit:
 4. The tmux `@amx_ws` window variable, if the agent runs inside an amux-managed
    tmux window (the path `amux agent name` uses today).
 
-If no id resolves, the report is a **silent no-op** (exit `0`). Reporting MUST NOT
-fail the agent merely because identity is unknown.
+For telemetry reports, if no id resolves the report is a **silent no-op** (exit
+`0`): observability MUST NOT fail the agent merely because identity is unknown.
+The durable terminal control `report_done` uses store identity and fails when it
+cannot identify or archive an agent (§5.9).
 
 > **Planned: authenticated identity.** Today identity is *inferred*, not
 > *authenticated* — any process that can name a session id can report under it.
@@ -140,8 +142,9 @@ requires a running daemon and so is **not** suitable for the
 ## 5. The reporting API (agent → harness)
 
 Language-neutral function surface. Each maps to a CLI verb (4a) and a Record
-channel (4b/§6). All functions are **idempotent** and **best-effort** (return
-void; never throw to the caller).
+channel (4b/§6). Telemetry functions are **idempotent** and **best-effort**
+(return void; never throw to the caller). The durable `report_done` control is
+idempotent but returns failure unless the requested archive is confirmed (§5.9).
 
 ### 5.1 `report_status(state, detail?)`
 
@@ -242,12 +245,12 @@ its artifact calls this to retire itself from the active rail.
   (the id the archive/rename control actions take), which the harness sets on every
   launched agent as `$AMUX_WORKGROUP`. Precedence: `--id <id>`, then
   `$AMUX_WORKGROUP`, then its legacy `$AMUX_WORKSPACE` alias. When none resolves
-  the call is a silent no-op (the caller isn't an amux-launched agent).
+  the call fails nonzero because no agent was identified or archived.
 - **Bridges the two planes (like §5.2 `set_label`).** `done` is reported through
   the control plane (the `set-archived` action, §9) because archival is durable
-  store state the harness owns, not a volatile activity channel. It remains
-  best-effort and MUST NOT disrupt the agent: a missing identity or an unreachable
-  harness is reported and swallowed, and the call still exits `0`.
+  store state the harness owns, not a volatile activity channel. It exits `0`
+  only after the daemon confirms the archive action; missing identity, transport
+  denial, an unreachable daemon, and rejected actions are nonzero failures.
 - **Idempotent:** marking an already-done session done again is a no-op.
 
 > Distinct from `status idle` (§5.1/§8): `idle` means "no live turn right now" and
