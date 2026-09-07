@@ -43,6 +43,10 @@ type Config struct {
 	ServerName        string            // TLS server-name override (SNI / verification)
 	MaxPanes          int               // capability: max concurrent panes
 	Features          []string          // capability: opaque feature strings from config
+	// AllowCompute deliberately grants the remote peer arbitrary local process
+	// and PTY control (spawn/input/resize/kill). It is independent of inventory,
+	// runtime-event, and session-action grants and is fail-closed by default.
+	AllowCompute bool
 
 	// PublishSessions opts into the "sessions" feature (docs/remote-provider-sessions.md):
 	// the provider advertises "sessions" in register and, once the orchestrator
@@ -392,6 +396,7 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 	_, err := exec.LookPath("bwrap")
 	return &harnessproto.Capabilities{
 		Execution: p.cfg.Execution,
+		Compute:   p.cfg.AllowCompute,
 		MaxPanes:  p.cfg.MaxPanes,
 		Bwrap:     err == nil,
 		OS:        runtime.GOOS,
@@ -453,19 +458,31 @@ func (p *Provider) paneOffers() []harnessproto.PaneOffer {
 // their afterSeq (so output replays from there); every other surviving pane is
 // killed (the orchestrator either listed it under kill or omitted it, both of
 // which mean terminate).
-func (p *Provider) applyDirectives(adopt []harnessproto.AdoptPane, _ []string) map[string]int64 {
+func (p *Provider) applyDirectives(adopt []harnessproto.AdoptPane, kill []string) map[string]int64 {
 	sent := map[string]int64{}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	killed := make(map[string]bool, len(kill))
+	for _, id := range kill {
+		killed[id] = true
+	}
 	adopted := map[string]bool{}
-	for _, a := range adopt {
-		if _, ok := p.panes[a.PaneID]; ok {
+	if p.cfg.AllowCompute {
+		for _, a := range adopt {
+			pn, ok := p.panes[a.PaneID]
+			if !ok || killed[a.PaneID] || a.AfterSeq < 0 {
+				continue
+			}
+			last, _ := pn.buf.snapshot()
+			if a.AfterSeq > last {
+				continue
+			}
 			sent[a.PaneID] = a.AfterSeq
 			adopted[a.PaneID] = true
 		}
 	}
 	for id, pn := range p.panes {
-		if !adopted[id] {
+		if killed[id] || !adopted[id] {
 			pn.terminate()
 			delete(p.panes, id)
 		}
@@ -485,19 +502,27 @@ func (p *Provider) readLoop(s *session) {
 		}
 		switch m.Type {
 		case harnessproto.MSpawn:
-			p.spawn(m)
+			if p.cfg.AllowCompute {
+				p.spawn(m)
+			}
 		case harnessproto.MInput:
-			if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil {
-				_, _ = pn.ptmx.Write(m.Data)
+			if p.cfg.AllowCompute {
+				if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil {
+					_, _ = pn.ptmx.Write(m.Data)
+				}
 			}
 		case harnessproto.MResize:
-			if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil && m.Cols > 0 && m.Rows > 0 {
-				_ = pty.Setsize(pn.ptmx, &pty.Winsize{Cols: uint16(m.Cols), Rows: uint16(m.Rows)})
+			if p.cfg.AllowCompute {
+				if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil && m.Cols > 0 && m.Rows > 0 {
+					_ = pty.Setsize(pn.ptmx, &pty.Winsize{Cols: uint16(m.Cols), Rows: uint16(m.Rows)})
+				}
 			}
 		case harnessproto.MKill:
-			p.mu.Lock()
-			p.killLocked(m.PaneID)
-			p.mu.Unlock()
+			if p.cfg.AllowCompute {
+				p.mu.Lock()
+				p.killLocked(m.PaneID)
+				p.mu.Unlock()
+			}
 		case harnessproto.MPong:
 			atomic.StoreInt64(&s.lastPong, time.Now().UnixNano())
 			// The heartbeat is the liveness signal a report can actually trust: a

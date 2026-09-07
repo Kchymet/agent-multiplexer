@@ -84,6 +84,7 @@ rotating it is one write and no reinstall.
   --ca <pem>         private CA to trust on top of the system roots
   --server-name <n>  TLS server name for SNI/verification
   --max-panes <n>    capability: max concurrent panes
+  --allow-compute    allow remote spawn/input/resize/kill (off by default)
   --harness <name>   verify and advertise only this harness (repeat; auto restores discovery)
   --identity-mode <m> credential source (currently machine only)
   --label k=v        scheduling label (repeatable)
@@ -122,6 +123,7 @@ type provideFlags struct {
 	caFile       string
 	serverName   string
 	maxPanes     int
+	allowCompute bool
 	publishSes   bool
 	readOnly     bool
 	rtEvents     bool
@@ -138,6 +140,7 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
 	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
 	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
+	fs.BoolVar(&f.allowCompute, "allow-compute", false, "allow remote spawn/input/resize/kill (default $AMUX_PROVIDER_ALLOW_COMPUTE; off by default)")
 	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
 	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
 	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
@@ -216,6 +219,7 @@ func provideRun(args []string) error {
 	publish := f.publishSes || envBool("AMUX_PROVIDER_PUBLISH_SESSIONS") || file.PublishSessions
 	readonly := f.readOnly || envBool("AMUX_PROVIDER_SESSIONS_READONLY") || file.ReadOnlySessions
 	runtimeEvents := f.rtEvents || envBool("AMUX_PROVIDER_RUNTIME_EVENTS") || file.RuntimeEvents
+	allowCompute := f.allowCompute || envBool("AMUX_PROVIDER_ALLOW_COMPUTE") || file.AllowCompute
 
 	execution, err := executionConfig(f, file, os.Getenv)
 	if err != nil {
@@ -230,6 +234,7 @@ func provideRun(args []string) error {
 		CAFile:            ca,
 		ServerName:        sni,
 		MaxPanes:          mp,
+		AllowCompute:      allowCompute,
 		Features:          mergeFeatures(os.Getenv("AMUX_PROVIDER_FEATURES"), append(multiFlag(file.Features), f.features...)),
 		Logf:              func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
 		// The status file is how `amux doctor` — and anyone looking at a headless

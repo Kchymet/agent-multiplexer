@@ -51,13 +51,13 @@ func TestInstallMergesOverTheExistingConfig(t *testing.T) {
 // fset.Visit rather than zero values: without it, --publish-sessions would be a
 // one-way switch that no later install could undo.
 func TestInstallCanTurnAFeatureOff(t *testing.T) {
-	base := providercfg.Config{Orchestrator: "o:1", TokenFile: "/t", PublishSessions: true, RuntimeEvents: true}
+	base := providercfg.Config{Orchestrator: "o:1", TokenFile: "/t", AllowCompute: true, PublishSessions: true, RuntimeEvents: true}
 
 	if got := parseInstall(t, base, "--name", "x"); !got.PublishSessions {
 		t.Errorf("an unrelated flag turned publish-sessions off: %+v", got)
 	}
-	got := parseInstall(t, base, "--publish-sessions=false", "--runtime-events=false")
-	if got.PublishSessions || got.RuntimeEvents {
+	got := parseInstall(t, base, "--allow-compute=false", "--publish-sessions=false", "--runtime-events=false")
+	if got.AllowCompute || got.PublishSessions || got.RuntimeEvents {
 		t.Errorf("--publish-sessions=false did not turn the feature off: %+v", got)
 	}
 }
