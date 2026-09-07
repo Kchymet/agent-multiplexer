@@ -106,6 +106,41 @@ func TestHostListenerRejectsSessionPrincipalWithoutSnapshot(t *testing.T) {
 	<-done
 }
 
+func TestHostListenerBoundsNewlineFreeProofBeforeSnapshot(t *testing.T) {
+	d := New("", nil, time.Hour)
+	var err error
+	d.authority, err = access.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.authority.Close() })
+	dir, _ := d.authority.EnsureHost(context.Background())
+	credential, _ := access.LoadCredential(dir)
+
+	server, client := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { d.serve(ctx, server); close(done) }()
+	config, _ := access.ClientTLSConfig(credential)
+	secure := tls.Client(client, config)
+	if err := secure.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(secure)
+	if _, err := reader.ReadBytes('\n'); err != nil { // signed challenge only
+		t.Fatal(err)
+	}
+	oversized := bytes.Repeat([]byte("x"), access.MaxBodyBytes+2)
+	_, _ = secure.Write(oversized) // server closes as soon as its fixed buffer fills
+	_ = secure.SetReadDeadline(time.Now().Add(time.Second))
+	if line, err := reader.ReadBytes('\n'); err == nil {
+		t.Fatalf("oversized proof received protected frame: %s", line)
+	}
+	_ = secure.Close()
+	<-done
+}
+
 func TestOwnedSocketNeverRemovesUnmanagedEndpoint(t *testing.T) {
 	root := t.TempDir()
 	stable := filepath.Join(root, "daemon.sock")

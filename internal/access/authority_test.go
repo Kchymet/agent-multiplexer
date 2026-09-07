@@ -2,7 +2,9 @@ package access
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,70 @@ import (
 	"testing"
 	"time"
 )
+
+func TestClosedAuthorityRejectsSigningWatchingAndAuthentication(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := []byte("amux-sessionrpc-service-v1\x00fixture")
+	signature, err := a.SignIssuer(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerPublic, _ := base64.RawStdEncoding.DecodeString(credential.IssuerPublicKey)
+	if !ed25519.Verify(ed25519.PublicKey(issuerPublic), message, signature) {
+		t.Fatal("issuer seam did not sign exact message bytes")
+	}
+	challenge, err := a.NewChallenge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := SignProof(credential, challenge, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := Principal{KeyID: credential.KeyID, SubjectID: credential.SubjectID, Kind: credential.Kind, Generation: credential.Generation}
+	request, err := SignRequest(credential, a.BootID(), []byte(`{"query":"snapshot"}`), time.Now(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if a.IssuerKeyID() != "" {
+		t.Fatal("closed authority still exposed an issuer key id")
+	}
+	checks := []struct {
+		name string
+		err  error
+	}{
+		{"sign", func() error { _, err := a.SignIssuer(message); return err }()},
+		{"challenge", func() error { _, err := a.NewChallenge(); return err }()},
+		{"tls", func() error { _, err := a.ServerTLSConfig(); return err }()},
+		{"proof", func() error {
+			_, err := a.VerifyProof(context.Background(), challenge, proof, SubjectSession)
+			return err
+		}()},
+		{"request", func() error { _, err := a.Verify(context.Background(), request); return err }()},
+		{"valid", a.Valid(context.Background(), principal)},
+		{"watch", func() error { _, _, err := a.WatchInvalidation(principal); return err }()},
+	}
+	for _, check := range checks {
+		if !errors.Is(check.err, ErrAuthorityClosed) {
+			t.Errorf("%s after Close = %v, want ErrAuthorityClosed", check.name, check.err)
+		}
+	}
+}
 
 func TestSignedRequestVerifyReplayAndBodyBinding(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
@@ -172,6 +238,13 @@ func TestEnsureSessionFreezesMailboxAndCredentialPaths(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(got.MailboxHostDir, CredentialDirName))
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("host credential placeholder is not empty: %v, %v", entries, err)
+	}
+	var sessionContext SessionContext
+	if err := readJSON(filepath.Join(got.CredentialHostDir, ContextFileName), &sessionContext); err != nil {
+		t.Fatal(err)
+	}
+	if sessionContext.Protocol != ProtocolVersion || sessionContext.SubjectID != "a1" || sessionContext.MailboxDir != got.MailboxMountDir {
+		t.Fatalf("fixed session context = %+v", sessionContext)
 	}
 }
 
