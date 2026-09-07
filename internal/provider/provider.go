@@ -222,14 +222,26 @@ type session struct {
 	subscribe chan struct{}
 	subOnce   sync.Once
 
+	// Published-session grants are connection-local and installed only after the
+	// matching snapshot is written. grantMu is also the revoke barrier: targeted
+	// actions and each runtime-event write hold it through admission, so once a
+	// revocation acquires it no queued work can retain the old grant.
+	grantMu   sync.Mutex
+	published map[string]core.Session
+
 	// "runtime-events" feature: rtCtx is cancelled on session teardown to stop all
-	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session;
-	// rtWG waits the pumps out before the connection is considered torn down.
+	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session
+	// and carries its cancellation handle; rtWG waits the pumps out before the
+	// connection is considered torn down. rtSubs is guarded by grantMu.
 	rtCtx    context.Context
 	rtCancel context.CancelFunc
-	rtMu     sync.Mutex
-	rtSubs   map[string]bool
+	rtSubs   map[string]*runtimeSubscription
 	rtWG     sync.WaitGroup
+}
+
+type runtimeSubscription struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (s *session) cancel() { s.once.Do(func() { close(s.done) }) }
@@ -311,9 +323,10 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 		wake:      make(chan struct{}, 1),
 		lastPong:  time.Now().UnixNano(),
 		subscribe: make(chan struct{}),
+		published: map[string]core.Session{},
 		rtCtx:     rtCtx,
 		rtCancel:  rtCancel,
-		rtSubs:    map[string]bool{},
+		rtSubs:    map[string]*runtimeSubscription{},
 	}
 	p.mu.Lock()
 	p.wake = s.wake
@@ -336,8 +349,9 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	case <-ctx.Done():
 	}
 	s.cancel()
-	rtCancel()       // stop the per-session runtime-events pumps
-	_ = conn.Close() // unblock the reader's ReadMux
+	_ = conn.Close() // unblock a reader or writer before waiting on revoke barriers
+	s.revokeAllPublished()
+	rtCancel() // stop the per-session runtime-events pumps
 	wg.Wait()
 	s.rtWG.Wait()
 

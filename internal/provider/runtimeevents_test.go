@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
+	"amux/internal/core"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -13,15 +16,32 @@ import (
 // afterSeq) it was called with and returns a channel the test feeds. ok reports
 // whether a record exists for the session.
 type fakeStream struct {
+	mu       sync.Mutex
 	ch       chan harnessproto.RuntimeEventBatch
 	ok       bool
 	gotSess  string
 	gotAfter int64
+	calls    int
 }
 
 func (f *fakeStream) stream(_ context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.gotSess, f.gotAfter = sessionID, afterSeq
+	f.calls++
 	return f.ch, f.ok
+}
+
+func (f *fakeStream) observed() (sessionID string, afterSeq int64, calls int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gotSess, f.gotAfter, f.calls
+}
+
+func (f *fakeStream) replaceChannel(ch chan harnessproto.RuntimeEventBatch) {
+	f.mu.Lock()
+	f.ch = ch
+	f.mu.Unlock()
 }
 
 func readRuntimeEvents(t *testing.T, oc *harnessproto.Conn) harnessproto.HarnessMsg {
@@ -83,6 +103,7 @@ func TestRuntimeEventsRequiresSessions(t *testing.T) {
 func TestRuntimeEventsSubscribeStreamsFrames(t *testing.T) {
 	conns := make(chan net.Conn, 1)
 	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}})
 	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch, 2), ok: true}
 	p := newFast(Config{
 		Orchestrator: "pipe", Dial: pipeDialer(conns),
@@ -95,6 +116,8 @@ func TestRuntimeEventsSubscribeStreamsFrames(t *testing.T) {
 
 	oc := harnessproto.NewConn(<-conns)
 	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
 
 	if err := oc.WriteMux(harnessproto.MuxMsg{
 		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1", AfterSeq: 3,
@@ -119,8 +142,9 @@ func TestRuntimeEventsSubscribeStreamsFrames(t *testing.T) {
 	if m.Runtime != harnessproto.RuntimeCodex {
 		t.Fatalf("frame runtime = %q, want codex", m.Runtime)
 	}
-	if fs.gotSess != "sess-1" || fs.gotAfter != 3 {
-		t.Fatalf("stream called with (%q,%d), want (sess-1,3)", fs.gotSess, fs.gotAfter)
+	gotSess, gotAfter, calls := fs.observed()
+	if gotSess != "sess-1" || gotAfter != 3 || calls != 1 {
+		t.Fatalf("stream called %d time(s) with (%q,%d), want once with (sess-1,3)", calls, gotSess, gotAfter)
 	}
 }
 
@@ -130,6 +154,7 @@ func TestRuntimeEventsSubscribeStreamsFrames(t *testing.T) {
 func TestRuntimeEventsNoRecordEmitsNothing(t *testing.T) {
 	conns := make(chan net.Conn, 1)
 	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-x"}})
 	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch), ok: false}
 	p := newFast(Config{
 		Orchestrator: "pipe", Dial: pipeDialer(conns),
@@ -142,15 +167,140 @@ func TestRuntimeEventsNoRecordEmitsNothing(t *testing.T) {
 
 	oc := harnessproto.NewConn(<-conns)
 	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
 	if err := oc.WriteMux(harnessproto.MuxMsg{
 		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-x",
 	}); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	// A subsequent sessions-subscribe → sessions frame proves the connection is
-	// alive and no runtime-events frame jumped ahead.
+	// A session action result proves the connection is alive and no runtime-events
+	// frame jumped ahead.
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "probe", Action: harnessproto.VerbRename, ID: "sess-x",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFrame(t, oc); got.Type != harnessproto.HSessionResult {
+		t.Fatalf("expected session-result frame, got %q (runtime-events should emit nothing)", got.Type)
+	}
+}
+
+// TestRuntimeEventsRequireCurrentPublishedOpaqueID proves caller-chosen runtime
+// IDs never reach the resolver unless they are exact members of the current
+// published set, and path/URI aliases are rejected even if guessed.
+func TestRuntimeEventsRequireCurrentPublishedOpaqueID(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}})
+	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch, 1), ok: true}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll,
+		RuntimeEvents: true, RuntimeEventStream: fs.stream,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
 	subscribe(t, oc)
-	if got := readFrame(t, oc); got.Type != harnessproto.HSessions {
-		t.Fatalf("expected sessions frame, got %q (a runtime-events frame should not appear)", got.Type)
+	readSessions(t, oc)
+	for _, id := range []string{"", "unknown", "../sess-1", "/tmp/transcript", `sibling\\record`, "file://sess-1"} {
+		if err := oc.WriteMux(harnessproto.MuxMsg{
+			Type: harnessproto.MRuntimeEventsSubscribe, SessionID: id,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1", AfterSeq: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fs.ch <- harnessproto.RuntimeEventBatch{
+		Seq: 8, Runtime: harnessproto.RuntimeCodex,
+		Events: []harnessproto.RuntimeEvent{{Type: "notice", Payload: json.RawMessage(`{"text":"ok"}`)}},
+	}
+	readRuntimeEvents(t, oc)
+	got, after, calls := fs.observed()
+	if calls != 1 || got != "sess-1" || after != 7 {
+		t.Fatalf("resolver calls=%d last=(%q,%d), want one exact published ID", calls, got, after)
+	}
+}
+
+// TestRuntimeEventsRemovalIsWriteBarrier proves removal cancels a live pump
+// before the reduced snapshot is sent. A batch queued afterward cannot cross
+// the barrier; the next frame is the explicit denial for a targeted action.
+func TestRuntimeEventsRemovalIsWriteBarrier(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}})
+	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch, 2), ok: true}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, SessionPollInterval: 5 * time.Millisecond,
+		RuntimeEvents: true, RuntimeEventStream: fs.stream,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fs.ch <- harnessproto.RuntimeEventBatch{
+		Seq: 1, Runtime: harnessproto.RuntimeCodex,
+		Events: []harnessproto.RuntimeEvent{{Type: "notice", Payload: json.RawMessage(`{"text":"first"}`)}},
+	}
+	readRuntimeEvents(t, oc)
+
+	src.set([]core.Session{})
+	if reduced := readSessions(t, oc); len(reduced.Sessions) != 0 {
+		t.Fatalf("reduced snapshot = %+v, want empty", reduced.Sessions)
+	}
+	fs.ch <- harnessproto.RuntimeEventBatch{
+		Seq: 2, Runtime: harnessproto.RuntimeCodex,
+		Events: []harnessproto.RuntimeEvent{{Type: "notice", Payload: json.RawMessage(`{"text":"revoked"}`)}},
+	}
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "after-revoke",
+		Action: harnessproto.VerbRename, ID: "sess-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := readFrame(t, oc)
+	if got.Type != harnessproto.HSessionResult || got.OK || got.Error != errSessionNotPublished.Error() {
+		t.Fatalf("first post-revoke frame = %+v, want unpublished session-result", got)
+	}
+
+	// Revocation deletes the old subscription marker. Republishing the same
+	// opaque ID can therefore establish a distinct fresh stream; the old pump's
+	// deferred cleanup must not erase this replacement subscription.
+	fresh := make(chan harnessproto.RuntimeEventBatch, 1)
+	fs.replaceChannel(fresh)
+	publishRows(t, oc, src, core.Session{ID: "sess-1"})
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1", AfterSeq: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh <- harnessproto.RuntimeEventBatch{
+		Seq: 3, Runtime: harnessproto.RuntimeCodex,
+		Events: []harnessproto.RuntimeEvent{{Type: "notice", Payload: json.RawMessage(`{"text":"fresh"}`)}},
+	}
+	if freshFrame := readRuntimeEvents(t, oc); freshFrame.Seq != 3 {
+		t.Fatalf("fresh subscription frame = %+v, want seq 3", freshFrame)
+	}
+	_, after, calls := fs.observed()
+	if after != 2 || calls != 2 {
+		t.Fatalf("fresh resolver calls=%d after=%d, want calls=2 after=2", calls, after)
 	}
 }

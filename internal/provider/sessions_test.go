@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
@@ -21,20 +22,41 @@ import (
 type mutableSource struct {
 	mu   sync.Mutex
 	sess []core.Session
+	err  error
 }
 
 func (m *mutableSource) set(s []core.Session) {
 	m.mu.Lock()
 	m.sess = s
+	m.err = nil
+	m.mu.Unlock()
+}
+
+func (m *mutableSource) setError(err error) {
+	m.mu.Lock()
+	m.err = err
 	m.mu.Unlock()
 }
 
 func (m *mutableSource) poll(context.Context) ([]core.Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.err != nil {
+		return nil, m.err
+	}
 	out := make([]core.Session, len(m.sess))
 	copy(out, m.sess)
 	return out, nil
+}
+
+func publishRows(t *testing.T, oc *harnessproto.Conn, src *mutableSource, rows ...core.Session) {
+	t.Helper()
+	src.set(rows)
+	subscribe(t, oc)
+	got := readSessions(t, oc)
+	if len(got.Sessions) != len(rows) {
+		t.Fatalf("published %d rows, want %d", len(got.Sessions), len(rows))
+	}
 }
 
 // recordingApply captures the last core.Action it was handed and returns a
@@ -43,6 +65,7 @@ func (m *mutableSource) poll(context.Context) ([]core.Session, error) {
 type recordingApply struct {
 	mu     sync.Mutex
 	called bool
+	calls  int
 	got    core.Action
 }
 
@@ -50,8 +73,15 @@ func (r *recordingApply) apply(_ context.Context, a core.Action) (string, error)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.called = true
+	r.calls++
 	r.got = a
 	return "new-" + a.Action + "-" + a.ID, nil
+}
+
+func (r *recordingApply) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func (r *recordingApply) last() (core.Action, bool) {
@@ -204,6 +234,9 @@ func TestSessionActionVerbs(t *testing.T) {
 
 			oc := harnessproto.NewConn(<-conns)
 			accept(t, oc, 2, nil, 60)
+			if tc.id != "" {
+				publishRows(t, oc, src, core.Session{ID: tc.id})
+			}
 			if err := oc.WriteMux(harnessproto.MuxMsg{
 				Type: harnessproto.MSessionAction, ReqID: "r1", Action: tc.verb, ID: tc.id, Fields: tc.fields,
 			}); err != nil {
@@ -302,6 +335,8 @@ func TestSessionActionExcludedVerb(t *testing.T) {
 
 			oc := harnessproto.NewConn(<-conns)
 			accept(t, oc, 2, nil, 60)
+			caps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+			publishRows(t, oc, src, core.Session{ID: "a1", Caps: &caps})
 			if err := oc.WriteMux(harnessproto.MuxMsg{
 				Type: harnessproto.MSessionAction, ReqID: "r2", Action: verb, ID: "a1",
 			}); err != nil {
@@ -366,6 +401,8 @@ func TestSteeringVerbsRouteToSteer(t *testing.T) {
 
 			oc := harnessproto.NewConn(<-conns)
 			accept(t, oc, 2, nil, 60)
+			caps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+			publishRows(t, oc, src, core.Session{ID: "a1", Caps: &caps})
 			if err := oc.WriteMux(harnessproto.MuxMsg{
 				Type: harnessproto.MSessionAction, ReqID: "r3", Action: tc.verb, ID: "a1",
 				Fields: tc.fields,
@@ -414,6 +451,7 @@ func TestLifecycleVerbsReportApplied(t *testing.T) {
 
 	oc := harnessproto.NewConn(<-conns)
 	accept(t, oc, 2, nil, 60)
+	publishRows(t, oc, src, core.Session{ID: "a1"})
 	if err := oc.WriteMux(harnessproto.MuxMsg{
 		Type: harnessproto.MSessionAction, ReqID: "r4", Action: harnessproto.VerbArchive, ID: "a1",
 	}); err != nil {
@@ -451,6 +489,8 @@ func TestSessionActionUnimplementedVerb(t *testing.T) {
 
 	oc := harnessproto.NewConn(<-conns)
 	accept(t, oc, 2, nil, 60)
+	caps := core.SessionCaps{Prompt: true}
+	publishRows(t, oc, src, core.Session{ID: "a1", Caps: &caps})
 	if err := oc.WriteMux(harnessproto.MuxMsg{
 		Type: harnessproto.MSessionAction, ReqID: "r5", Action: future, ID: "a1",
 	}); err != nil {
@@ -462,6 +502,80 @@ func TestSessionActionUnimplementedVerb(t *testing.T) {
 	}
 	if _, called := rec.last(); called {
 		t.Fatal("unimplemented verb reached ApplyAction")
+	}
+}
+
+// TestSessionActionRequiresFreshPublishedTarget pins the authorization boundary:
+// target IDs are admitted only after a successful snapshot, a poll error
+// immediately suspends them, and the same ID must be published again before it
+// can reach ApplyAction.
+func TestSessionActionRequiresFreshPublishedTarget(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	rec := &recordingApply{}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, ApplyAction: rec.apply,
+		SessionPollInterval: 5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+
+	send := func(req string) harnessproto.HarnessMsg {
+		t.Helper()
+		if err := oc.WriteMux(harnessproto.MuxMsg{
+			Type: harnessproto.MSessionAction, ReqID: req,
+			Action: harnessproto.VerbRename, ID: "a1", Fields: map[string]string{"name": "x"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return readResult(t, oc)
+	}
+
+	if res := send("before"); res.OK || res.Error != errSessionNotPublished.Error() {
+		t.Fatalf("pre-publish result = %+v", res)
+	}
+	if calls := rec.callCount(); calls != 0 {
+		t.Fatalf("pre-publish ApplyAction calls = %d, want 0", calls)
+	}
+	publishRows(t, oc, src, core.Session{ID: "a1"})
+	if res := send("fresh"); !res.OK {
+		t.Fatalf("fresh published result = %+v", res)
+	}
+
+	src.setError(errors.New("inventory unavailable"))
+	deadline := time.Now().Add(time.Second)
+	for {
+		res := send("after-error")
+		if !res.OK {
+			if res.Error != errSessionNotPublished.Error() {
+				t.Fatalf("post-error result = %+v", res)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("poll error did not suspend the published target")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	deniedAt := rec.callCount()
+	if res := send("still-suspended"); res.OK || res.Error != errSessionNotPublished.Error() {
+		t.Fatalf("still-suspended result = %+v", res)
+	}
+	if calls := rec.callCount(); calls != deniedAt {
+		t.Fatalf("suspended ApplyAction calls = %d, want unchanged %d", calls, deniedAt)
+	}
+
+	publishRows(t, oc, src, core.Session{ID: "a1"})
+	if res := send("republished"); !res.OK {
+		t.Fatalf("republished target result = %+v", res)
+	}
+	if calls := rec.callCount(); calls != deniedAt+1 {
+		t.Fatalf("republished ApplyAction calls = %d, want %d", calls, deniedAt+1)
 	}
 }
 
@@ -688,6 +802,8 @@ func TestSessionActionIsLogged(t *testing.T) {
 
 	oc := harnessproto.NewConn(<-conns)
 	accept(t, oc, 2, nil, 60)
+	caps := core.SessionCaps{Prompt: true}
+	publishRows(t, oc, src, core.Session{ID: "a1", Caps: &caps})
 
 	const secret = "the user's private prompt text"
 	if err := oc.WriteMux(harnessproto.MuxMsg{

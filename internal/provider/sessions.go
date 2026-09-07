@@ -73,28 +73,90 @@ func (p *Provider) publishLoop(ctx context.Context, s *session) {
 
 // publishOnce polls the inventory and, if it changed since last, pushes a new
 // sessions frame with the next seq. It returns the (possibly advanced) seq and
-// the snapshot bytes to compare against next time. A poll error keeps the prior
-// state (nothing is pushed); a write error cancels the session.
+// the snapshot bytes to compare against next time. A poll error immediately
+// suspends the current grants; a write error cancels the session.
 func (p *Provider) publishOnce(ctx context.Context, s *session, seq int64, last []byte) (int64, []byte) {
 	sess, err := p.cfg.Sessions(ctx)
 	if err != nil {
-		return seq, last
+		// Inventory is the authority source, not merely display data. A failed poll
+		// cannot retain stale grants indefinitely: suspend everything immediately,
+		// cancel live runtime subscriptions, and force the next successful poll to
+		// publish before restoring any target.
+		s.revokeAllPublished()
+		return seq, nil
 	}
 	if sess == nil {
 		sess = []core.Session{}
 	}
+	next := publishedSessions(sess)
 	b, err := json.Marshal(sess)
 	if err != nil || bytes.Equal(b, last) {
 		return seq, last
 	}
 	seq++
-	if werr := s.hc.WriteHarness(harnessproto.HarnessMsg{
+	if werr := s.writePublishedSnapshot(next, harnessproto.HarnessMsg{
 		Type: harnessproto.HSessions, Seq: seq, Sessions: sess,
 	}); werr != nil {
 		s.cancel()
 		return seq, last
 	}
 	return seq, b
+}
+
+// publishedSessions returns the exact non-empty IDs in a successful snapshot.
+// Runtime path validation is stricter at subscription time; the inventory map
+// also gates lifecycle targets whose IDs need not be filesystem components.
+func publishedSessions(sessions []core.Session) map[string]core.Session {
+	out := make(map[string]core.Session, len(sessions))
+	for _, row := range sessions {
+		if row.ID != "" {
+			out[row.ID] = row
+		}
+	}
+	return out
+}
+
+// writePublishedSnapshot holds the grant barrier across the transport write and
+// installation. Removed IDs are revoked before bytes become observable;
+// additions are installed before an inbound message that follows the snapshot
+// can acquire the barrier. A failed write revokes everything.
+func (s *session) writePublishedSnapshot(next map[string]core.Session, msg harnessproto.HarnessMsg) error {
+	s.grantMu.Lock()
+	defer s.grantMu.Unlock()
+	s.revokeMissingPublishedLocked(next)
+	if err := s.hc.WriteHarness(msg); err != nil {
+		s.revokeAllPublishedLocked()
+		return err
+	}
+	s.published = next
+	return nil
+}
+
+func (s *session) revokeMissingPublishedLocked(next map[string]core.Session) {
+	for id := range s.published {
+		if _, ok := next[id]; ok {
+			continue
+		}
+		delete(s.published, id)
+		if sub := s.rtSubs[id]; sub != nil {
+			sub.cancel()
+			delete(s.rtSubs, id)
+		}
+	}
+}
+
+func (s *session) revokeAllPublished() {
+	s.grantMu.Lock()
+	s.revokeAllPublishedLocked()
+	s.grantMu.Unlock()
+}
+
+func (s *session) revokeAllPublishedLocked() {
+	s.published = map[string]core.Session{}
+	for id, sub := range s.rtSubs {
+		sub.cancel()
+		delete(s.rtSubs, id)
+	}
 }
 
 // handleSessionAction executes one verb and replies with a session-result
@@ -112,7 +174,7 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	}
 	started := time.Now()
 	res := harnessproto.HarnessMsg{Type: harnessproto.HSessionResult, ReqID: m.ReqID}
-	newID, err := p.applySessionAction(m)
+	newID, err := p.applyAuthorizedSessionAction(s, m)
 	if err != nil {
 		res.Error = err.Error()
 	} else {
@@ -136,6 +198,33 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	if werr := s.hc.WriteHarness(res); werr != nil {
 		s.cancel()
 	}
+}
+
+var errSessionNotPublished = errors.New("session is not currently published")
+
+// applyAuthorizedSessionAction binds every targeted verb to the connection's
+// current published inventory. The grant lock remains held through ApplyAction,
+// defining the revoke barrier: a refresh may wait for an already-admitted action
+// to finish, but once revocation completes no queued action can use the old ID.
+// New-workgroup is the one creation verb with no existing target; enabling the
+// session-control hook deliberately grants it. A newly created ID is not usable
+// until a later successful snapshot publishes it.
+func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMsg) (string, error) {
+	if _, ok := sessionActionFor(m); !ok {
+		return p.applySessionAction(m)
+	}
+	if m.Action == harnessproto.VerbNewWorkgroup {
+		return p.applySessionAction(m)
+	}
+	if m.ID == "" {
+		return "", errSessionNotPublished
+	}
+	s.grantMu.Lock()
+	defer s.grantMu.Unlock()
+	if _, ok := s.published[m.ID]; !ok {
+		return "", errSessionNotPublished
+	}
+	return p.applySessionAction(m)
 }
 
 // logSessionAction records one relayed verb: which session, which verb, how it
