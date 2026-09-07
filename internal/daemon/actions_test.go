@@ -13,16 +13,19 @@ import (
 )
 
 // Creation must launch the coordinator without any pane.open or follow-up start
-// action, including when there are no members for a client to auto-attach to.
+// action. New-workgroup configures that default session directly; the older
+// create-workspace verb can still explicitly request a child agent.
 func TestCreateWorkgroupStartsCoordinator(t *testing.T) {
 	for _, action := range []string{core.ActionNewWorkgroup, core.ActionCreateWorkspace} {
-		for _, withMember := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/member=%v", action, withMember), func(t *testing.T) {
+		for _, configured := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/configured=%v", action, configured), func(t *testing.T) {
 				d, eng := steerDaemon(t)
 				fields := map[string]string{"name": "payments", "agent": "claude"}
-				if withMember {
+				if configured {
 					fields["prompt"] = "fix the idempotency bug"
-					fields["defaultAgent"] = "1"
+					if action == core.ActionCreateWorkspace {
+						fields["defaultAgent"] = "1"
+					}
 				}
 				r := d.handle(context.Background(), core.Action{Action: action, Fields: fields})
 				if !r.OK || r.NewID == "" {
@@ -46,19 +49,23 @@ func TestCreateWorkgroupStartsCoordinator(t *testing.T) {
 				if err != nil || !ok || root.Role() != store.RoleCoordinator {
 					t.Fatalf("coordinator row: %+v, %v", root, err)
 				}
-				if root.Mode != store.ModeInteractive || root.Prompt != "" {
-					t.Fatalf("coordinator should await input without a forced goal: %+v", root)
+				wantRootPrompt := ""
+				if action == core.ActionNewWorkgroup && configured {
+					wantRootPrompt = fields["prompt"]
+				}
+				if root.Mode != store.ModeInteractive || root.Prompt != wantRootPrompt {
+					t.Fatalf("coordinator config = mode %q, prompt %q; want %q, %q", root.Mode, root.Prompt, store.ModeInteractive, wantRootPrompt)
 				}
 				kids, err := db.Children(r.NewID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if withMember {
+				if action == core.ActionCreateWorkspace && configured {
 					if len(kids) != 1 || kids[0].Prompt != fields["prompt"] {
 						t.Fatalf("first member lost its creation prompt: %+v", kids)
 					}
 				} else if len(kids) != 0 {
-					t.Fatalf("empty workgroup unexpectedly has members: %+v", kids)
+					t.Fatalf("workgroup unexpectedly has members: %+v", kids)
 				}
 			})
 		}

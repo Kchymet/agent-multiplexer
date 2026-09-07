@@ -39,13 +39,13 @@ type AgentSpec struct {
 // (its repos, model, mode, and prompt are honored). Pass nil to create an empty
 // workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
-	return createWorkspace(ctx, name, agent.DefaultKind(), "", defaultAgent)
+	return createWorkspace(ctx, name, agent.DefaultKind(), "", "", defaultAgent)
 }
 
 // createWorkspace is the action-path variant of CreateWorkspace. It lets a
-// remote client choose the coordinator harness and model while preserving the
-// public helper's long-standing Claude-default behavior for local callers.
-func createWorkspace(ctx context.Context, name, kind, model string, defaultAgent *AgentSpec) (string, error) {
+// remote client choose the coordinator harness, model, and initial prompt while
+// preserving the public helper's long-standing defaults for local callers.
+func createWorkspace(ctx context.Context, name, kind, model, prompt string, defaultAgent *AgentSpec) (string, error) {
 	if !agent.Known(kind) {
 		return "", fmt.Errorf("unknown agent kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
 	}
@@ -59,7 +59,7 @@ func createWorkspace(ctx context.Context, name, kind, model string, defaultAgent
 	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Agent: kind, Model: model, Mode: store.ModeInteractive,
+		Agent: kind, Model: model, Mode: store.ModeInteractive, Prompt: prompt,
 		Dir: store.RootDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
@@ -646,11 +646,13 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
 		repos := store.SplitRepos(a.Fields["repos"])
 		var def *AgentSpec
-		if len(repos) > 0 || prompt != "" {
+		// The workgroup root is its default coordinator session, so the form's
+		// prompt and model configure that session directly. Repositories still
+		// explicitly request a first child agent; a prompt by itself must not.
+		if len(repos) > 0 {
 			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: prompt}
 		}
-		// Return the workgroup root; the client resolves it to the first agent.
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], prompt, def)
 	case core.ActionCreateWorkspace:
 		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
 		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
@@ -663,7 +665,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
 			}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], "", def)
 	}
 	// A verb that reaches here is one no dispatch path claims. The CLI screens
 	// these before they leave the machine, so this is the answer for anything
