@@ -127,10 +127,11 @@ func cmdDoctor() error {
 	reportCodexControl()
 
 	fmt.Println("\nReconciliation")
+	reconciliationFailed := false
 	if !statsOK {
 		fmt.Printf("  · agents    (start the daemon to reconcile store vs disk)\n")
-	} else {
-		reconcileSessions(ctx, repos, roots)
+	} else if err := reconcileSessions(ctx, repos, roots); err != nil {
+		reconciliationFailed = true
 	}
 
 	// Harness surface drift: each harness self-checks its load-bearing integration
@@ -202,12 +203,15 @@ func cmdDoctor() error {
 	fmt.Printf("  data     %s\n", core.DataDir())
 	fmt.Printf("  state    %s\n", core.StateDir())
 
-	if missingRequired || incompatible {
+	if missingRequired || incompatible || reconciliationFailed {
 		if missingRequired {
 			fmt.Println("\n✗ missing a required dependency (see above)")
 		}
 		if incompatible {
 			fmt.Println("\n✗ incompatible amux components (see Versions above)")
+		}
+		if reconciliationFailed {
+			fmt.Println("\n✗ reconciliation incomplete (see Reconciliation above)")
 		}
 		return fmt.Errorf("health check failed")
 	}
@@ -222,19 +226,26 @@ type branchRef struct{ Repo, Branch string }
 // what's on disk — the worktree dirs under SessionsDir and the amux/* branches in
 // each repo — and prints drift in both directions. Reads only through the daemon's
 // session model, never the store.
-func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.WorkgroupRow) {
+func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.WorkgroupRow) error {
 	var disk []branchRef
+	var inventoryErrs []error
 	for _, repo := range repos {
 		gitDir := filepath.Join(core.ReposDir(), repo.Name+".git")
-		for _, b := range git.ListBranches(ctx, gitDir, core.BranchPrefix+"*") {
+		branches, err := git.ListBranchesE(ctx, gitDir, core.BranchPrefix+"*")
+		if err != nil {
+			fmt.Printf("  ✗ agents    could not inspect branch inventory for %s: %v\n", repo.Name, err)
+			inventoryErrs = append(inventoryErrs, fmt.Errorf("inspect %s branch inventory: %w", repo.Name, err))
+			continue
+		}
+		for _, b := range branches {
 			disk = append(disk, branchRef{Repo: repo.Name, Branch: b})
 		}
 	}
 	orphanDirs, missingDirs, orphanBranches := reconcile(core.SessionsDir(), roots, disk)
 
-	if len(orphanDirs)+len(missingDirs)+len(orphanBranches) == 0 {
+	if len(orphanDirs)+len(missingDirs)+len(orphanBranches) == 0 && len(inventoryErrs) == 0 {
 		fmt.Printf("  ✓ agents    store and disk agree\n")
-		return
+		return nil
 	}
 	printCapped("agent directory not tracked by amux", orphanDirs, func(d string) string {
 		return filepath.Join(core.SessionsDir(), d)
@@ -247,6 +258,10 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 	if len(orphanDirs)+len(orphanBranches) > 0 {
 		fmt.Println("  Untracked items may contain work you want to keep. Inspect files and unmerged commits before removing them.")
 	}
+	if len(inventoryErrs) > 0 {
+		fmt.Println("  Branch inventory is incomplete; store/disk agreement cannot be determined.")
+	}
+	return errors.Join(inventoryErrs...)
 }
 
 // printCapped prints up to reconcileCap findings of one kind, then a "+N more"

@@ -88,7 +88,7 @@ may be working the same repo in parallel on their own branches. Before starting,
 and regularly as you work, refresh your branch from the remote — run inside each
 repo subdirectory:
 
-    git fetch origin && git merge --no-edit origin/HEAD
+    git fetch origin && git merge --no-edit FETCH_HEAD
 
 **Merge, don't rebase.** Once you've pushed your branch for a PR, rebasing
 rewrites commits the remote already has, so your next push is rejected as

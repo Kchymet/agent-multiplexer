@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -356,16 +357,66 @@ func TestLegacyInventoryHasInternalDeadlineAndVisibleError(t *testing.T) {
 	}
 }
 
-func TestAssignedBranchRefspecSupportsPlainPull(t *testing.T) {
+func TestFetchBeforeFirstPushAndPullAfterPushStayNarrow(t *testing.T) {
 	ctx := context.Background()
 	remote := testRemote(t)
 	checkout := filepath.Join(t.TempDir(), "session")
 	testAddCheckout(t, ctx, remote, checkout, "amux/own", filepath.Join(t.TempDir(), "staging"))
+
+	// Advance the default branch and publish a sibling's private branch. A raw
+	// fetch before this session's first push must succeed, update only FETCH_HEAD,
+	// and leave the sibling commit unavailable even when its object ID is known.
+	writer := filepath.Join(t.TempDir(), "writer")
+	testGit(t, "", "clone", "-q", remote, writer)
+	testGit(t, writer, "commit", "-q", "--allow-empty", "-m", "default advance")
+	testGit(t, writer, "push", "-q", "origin", "main")
+	testGit(t, writer, "checkout", "-q", "-b", "amux/sibling")
+	testGit(t, writer, "commit", "-q", "--allow-empty", "-m", "sibling unpublished work")
+	siblingCommit := testGit(t, writer, "rev-parse", "HEAD")
+	testGit(t, writer, "push", "-q", "origin", "HEAD")
+
+	assertNoFetchRefspec(t, checkout)
+	testGit(t, checkout, "fetch", "origin")
+	testGit(t, checkout, "merge", "--ff-only", "FETCH_HEAD")
+	if got := testGit(t, checkout, "log", "-1", "--format=%s"); got != "default advance" {
+		t.Fatalf("pre-push fetch merged %q, want remote default advance", got)
+	}
+	assertObjectMissing(t, checkout, siblingCommit)
+
+	// Once the session publishes its own branch, push -u records the precise
+	// upstream. A later plain pull follows only that branch and still does not
+	// make the sibling commit inspectable.
 	testGit(t, checkout, "commit", "-q", "--allow-empty", "-m", "own work")
 	testGit(t, checkout, "push", "-q", "-u", "origin", "HEAD")
+	assignedWriter := filepath.Join(t.TempDir(), "assigned-writer")
+	testGit(t, "", "clone", "-q", "--branch", "amux/own", remote, assignedWriter)
+	testGit(t, assignedWriter, "commit", "-q", "--allow-empty", "-m", "assigned advance")
+	testGit(t, assignedWriter, "push", "-q", "origin", "HEAD")
 	testGit(t, checkout, "pull", "--ff-only")
-	refspecs := strings.Split(testGit(t, checkout, "config", "--get-all", "remote.origin.fetch"), "\n")
-	if len(refspecs) != 2 || refspecs[1] != "+refs/heads/amux/own:refs/remotes/origin/amux/own" {
-		t.Fatalf("assigned fetch refspecs = %v", refspecs)
+	if got := testGit(t, checkout, "log", "-1", "--format=%s"); got != "assigned advance" {
+		t.Fatalf("post-push pull reached %q, want assigned branch advance", got)
+	}
+	assertNoFetchRefspec(t, checkout)
+	assertObjectMissing(t, checkout, siblingCommit)
+	if got := testGit(t, checkout, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/amux/sibling"); got != "" {
+		t.Fatalf("sibling remote-tracking ref was created: %s", got)
+	}
+}
+
+func assertNoFetchRefspec(t *testing.T, checkout string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", checkout, "config", "--get-all", "remote.origin.fetch")
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("fetch refspec lookup = %v, output %q; want missing key", err, strings.TrimSpace(string(out)))
+	}
+}
+
+func assertObjectMissing(t *testing.T, checkout, object string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", checkout, "cat-file", "-e", object+"^{commit}")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("sibling object %s is inspectable: %s", object, strings.TrimSpace(string(out)))
 	}
 }

@@ -177,7 +177,7 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 			t.Errorf("coordinator guide missing %q", want)
 		}
 	}
-	if strings.Contains(guide, "git merge --no-edit origin/HEAD") {
+	if strings.Contains(guide, "git merge --no-edit origin/HEAD") || strings.Contains(guide, "git merge --no-edit FETCH_HEAD") {
 		t.Error("coordinator guide carries the member branch workflow")
 	}
 }
