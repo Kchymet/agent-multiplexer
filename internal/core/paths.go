@@ -120,6 +120,11 @@ func LogPath() string {
 	return filepath.Join(StateDir(), "daemon.log")
 }
 
+// DaemonLockPath is the kernel-locked singleton file held for a daemon's full
+// lifetime. A successful socket connect is not a singleton primitive: a stale
+// or hostile listener must never cause a new daemon to unlink a live socket.
+func DaemonLockPath() string { return filepath.Join(StateDir(), "daemon.lock") }
+
 // LiveAgentsPath is the JSON file recording which engine instances were running,
 // so a daemon restart can relaunch them without a UI trigger.
 func LiveAgentsPath() string {
