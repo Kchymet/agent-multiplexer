@@ -107,6 +107,13 @@ unchanged and still spoken by `amux harness`.
   common; no overlap ⇒ `unsupported-version`); resolves the resume offer
   (every offered pane is adopted or killed — omission means kill). For
   adopted panes the provider retransmits output frames `> afterSeq`.
+  When the provider advertised `compute:false` (or omitted it), the orchestrator
+  sends `adopt:[]` and lists every offer under `kill`; the provider independently
+  refuses adoption and terminates every offer even if a peer sends contradictory
+  directives. Because v2 has no kill acknowledgement, the orchestrator marks
+  those durable pane cursors stopped after its `registered` response is committed;
+  a disconnect before termination simply causes any survivor to be offered and
+  killed again on the next registration.
 - `spawn` `{paneId, dir, env, argv, cols, rows}` / `input` / `resize` /
   `kill` — exactly v1. The environment split holds: the provider supplies the
   local execution environment, the orchestrator supplies workload-specific

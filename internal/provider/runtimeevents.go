@@ -23,26 +23,35 @@ func (p *Provider) onRuntimeEventsSubscribe(s *session, m harnessproto.MuxMsg) {
 		return
 	}
 
-	// Membership, dedupe and resolver invocation share the revoke barrier. The
-	// peer can never use the daemon's untracked-conversation fallback, nor race a
-	// removal between the membership check and opening a transcript source.
-	s.grantMu.Lock()
-	if _, ok := s.published[m.SessionID]; !ok || s.rtSubs[m.SessionID] != nil {
-		s.grantMu.Unlock()
+	// Membership and resolver admission share opMu. The opening gets its own
+	// completion barrier: removal cancels and waits for it without blocking work
+	// for retained targets, so the daemon's untracked-conversation fallback is
+	// never reachable through an ID whose grant disappeared mid-open.
+	s.opMu.Lock()
+	if _, ok := s.published[m.SessionID]; !ok || s.rtOpening[m.SessionID] != nil || s.rtSubs[m.SessionID] != nil {
+		s.opMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(s.rtCtx)
-	sub := &runtimeSubscription{ctx: ctx, cancel: cancel}
+	opening := &runtimeOpening{cancel: cancel, done: make(chan struct{})}
+	s.rtOpening[m.SessionID] = opening
+	s.opMu.Unlock()
 	batches, ok := p.cfg.RuntimeEventStream(ctx, m.SessionID, m.AfterSeq)
-	if !ok {
+	close(opening.done)
+	s.opMu.Lock()
+	active := s.rtOpening[m.SessionID] == opening
+	if active {
+		delete(s.rtOpening, m.SessionID)
+	}
+	if !active || !ok || ctx.Err() != nil {
+		s.opMu.Unlock()
 		cancel()
-		s.grantMu.Unlock()
 		return
 	}
+	sub := &runtimeSubscription{ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	s.rtSubs[m.SessionID] = sub
-
 	s.rtWG.Add(1)
-	s.grantMu.Unlock()
+	s.opMu.Unlock()
 	go func() {
 		defer s.rtWG.Done()
 		p.pumpRuntimeEvents(s, m.SessionID, sub, batches)
@@ -62,12 +71,13 @@ func validRuntimeSessionID(id string) bool {
 // (which tears the session down, mirroring the pane sender and publish loop).
 func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeSubscription, batches <-chan harnessproto.RuntimeEventBatch) {
 	defer func() {
-		s.grantMu.Lock()
+		s.opMu.Lock()
 		if s.rtSubs[sessionID] == sub {
 			delete(s.rtSubs, sessionID)
 		}
-		s.grantMu.Unlock()
+		s.opMu.Unlock()
 		sub.cancel()
+		close(sub.done)
 	}()
 	for {
 		select {
@@ -80,14 +90,14 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 			if len(b.Events) == 0 {
 				continue
 			}
-			// Revalidate immediately before every emitted batch and hold the same
-			// lock through the write. Revocation waits for an already-admitted write,
-			// then cancels/removes the subscription; no queued batch can cross it.
-			s.grantMu.Lock()
+			// Revalidate immediately before every emitted batch and hold the admission
+			// lock through the write. Revocation deletes/cancels the subscription, then
+			// waits for its done barrier; no queued batch can cross it.
+			s.opMu.Lock()
 			_, published := s.published[sessionID]
 			active := s.rtSubs[sessionID] == sub
 			if !published || !active {
-				s.grantMu.Unlock()
+				s.opMu.Unlock()
 				return
 			}
 			err := s.hc.WriteHarness(harnessproto.HarnessMsg{
@@ -97,7 +107,7 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 				Seq:       b.Seq,
 				Events:    b.Events,
 			})
-			s.grantMu.Unlock()
+			s.opMu.Unlock()
 			if err != nil {
 				s.cancel()
 				return

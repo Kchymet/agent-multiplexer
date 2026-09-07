@@ -261,7 +261,7 @@ func provideRun(args []string) error {
 			// runtime. Read-only; a session with no record on disk simply emits
 			// nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.Stream(runtimeRecordViaDaemon(), 0)
+			cfg.RuntimeEventStream = runtimeevents.StreamContext(runtimeRecordViaDaemon(), 0)
 		}
 	}
 
@@ -327,12 +327,30 @@ func resolvedBool(fs *flag.FlagSet, flagName string, flagValue bool, envName str
 // fresh per poll; an unreachable daemon returns an error the provider handles by
 // publishing nothing that cycle.
 func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c, err := daemon.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("daemon unreachable: %w", err)
 	}
 	defer c.Close()
-	return c.Snapshot()
+	type result struct {
+		sessions []core.Session
+		err      error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		sessions, err := c.Snapshot()
+		ch <- result{sessions: sessions, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = c.Close()
+		return nil, ctx.Err()
+	case got := <-ch:
+		return got.sessions, got.err
+	}
 }
 
 // runtimeRecordViaDaemon resolves a published session id to its on-disk
@@ -345,9 +363,9 @@ func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
 // A record with no transcript but an amux journal is still worth tailing: that is
 // a session which has not run yet, and an accepted `prompt` cold-starting it
 // reports its progress into that journal before any transcript exists.
-func runtimeRecordViaDaemon() runtimeevents.Resolver {
-	return func(sessionID string) (runtimeevents.Record, bool) {
-		if sessionID == "" {
+func runtimeRecordViaDaemon() runtimeevents.ContextResolver {
+	return func(ctx context.Context, sessionID string) (runtimeevents.Record, bool) {
+		if sessionID == "" || ctx.Err() != nil {
 			return runtimeevents.Record{}, false
 		}
 		c, err := daemon.Dial()
@@ -355,7 +373,23 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 			return runtimeevents.Record{}, false
 		}
 		defer c.Close()
-		rec, err := c.RuntimeRecord(sessionID)
+		type result struct {
+			rec core.RuntimeRecord
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			rec, err := c.RuntimeRecord(sessionID)
+			ch <- result{rec: rec, err: err}
+		}()
+		var rec core.RuntimeRecord
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+			return runtimeevents.Record{}, false
+		case got := <-ch:
+			rec, err = got.rec, got.err
+		}
 		if err != nil || (rec.Path == "" && rec.Journal == "") {
 			return runtimeevents.Record{}, false
 		}
@@ -373,6 +407,9 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 // action, and returns the id of any session it created. Snapshot frames that
 // arrive first are skipped; a non-OK result surfaces the daemon's error.
 func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	c, err := daemon.Dial()
 	if err != nil {
 		return "", fmt.Errorf("daemon unreachable: %w", err)
@@ -382,7 +419,7 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 		return "", err
 	}
 	for {
-		f, err := c.Next()
+		f, err := nextDaemonFrame(ctx, c)
 		if err != nil {
 			return "", err
 		}
@@ -392,6 +429,29 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 			}
 			return f.Result.NewID, nil
 		}
+	}
+}
+
+// nextDaemonFrame makes the legacy daemon client's blocking read cancellable
+// without changing that shared client package (owned by the primary daemon
+// work). Closing the per-call client unblocks Next; the buffered result channel
+// lets the reader finish without depending on its caller after cancellation.
+func nextDaemonFrame(ctx context.Context, c *daemon.Client) (daemon.Frame, error) {
+	type result struct {
+		frame daemon.Frame
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		frame, err := c.Next()
+		ch <- result{frame: frame, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = c.Close()
+		return daemon.Frame{}, ctx.Err()
+	case got := <-ch:
+		return got.frame, got.err
 	}
 }
 

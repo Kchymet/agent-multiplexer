@@ -304,3 +304,130 @@ func TestRuntimeEventsRemovalIsWriteBarrier(t *testing.T) {
 		t.Fatalf("fresh resolver calls=%d after=%d, want calls=2 after=2", calls, after)
 	}
 }
+
+// TestRuntimeResolverRemovalCancelsBlockingLookup covers the admission half of
+// the runtime barrier. A resolver that accepted a published ID but stopped
+// replying is cancelled and joined before the reduced snapshot is emitted.
+func TestRuntimeResolverRemovalCancelsBlockingLookup(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}})
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, SessionPollInterval: 5 * time.Millisecond,
+		RuntimeEvents: true,
+		RuntimeEventStream: func(ctx context.Context, _ string, _ int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			return nil, false
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("runtime resolver did not start")
+	}
+	src.set([]core.Session{})
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("removal did not cancel blocking runtime resolver")
+	}
+	if reduced := readSessions(t, oc); len(reduced.Sessions) != 0 {
+		t.Fatalf("reduced snapshot = %+v, want empty", reduced.Sessions)
+	}
+}
+
+func TestRetainedRuntimeOpeningDoesNotBlockSiblingRemoval(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}, {ID: "sess-2"}})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, SessionPollInterval: 5 * time.Millisecond,
+		RuntimeEvents: true,
+		RuntimeEventStream: func(ctx context.Context, _ string, _ int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+			close(started)
+			select {
+			case <-release:
+				return make(chan harnessproto.RuntimeEventBatch), true
+			case <-ctx.Done():
+				return nil, false
+			}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	src.set([]core.Session{{ID: "sess-1"}})
+	if reduced := readSessions(t, oc); len(reduced.Sessions) != 1 || reduced.Sessions[0].ID != "sess-1" {
+		t.Fatalf("reduced snapshot = %+v, want retained sess-1", reduced.Sessions)
+	}
+	close(release)
+}
+
+func TestRetainedRuntimeStreamSurvivesUnrelatedSnapshotChange(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}, {ID: "sess-2", Title: "old"}})
+	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch, 2), ok: true}
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, SessionPollInterval: 5 * time.Millisecond,
+		RuntimeEvents: true, RuntimeEventStream: fs.stream,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 1, Runtime: harnessproto.RuntimeCodex,
+		Events: []harnessproto.RuntimeEvent{{Type: "notice", Payload: json.RawMessage(`{"text":"before"}`)}}}
+	readRuntimeEvents(t, oc)
+
+	src.set([]core.Session{{ID: "sess-1"}, {ID: "sess-2", Title: "new"}})
+	readSessions(t, oc)
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 2, Runtime: harnessproto.RuntimeCodex,
+		Events: []harnessproto.RuntimeEvent{{Type: "notice", Payload: json.RawMessage(`{"text":"after"}`)}}}
+	if got := readRuntimeEvents(t, oc); got.Seq != 2 {
+		t.Fatalf("retained stream frame = %+v, want seq 2 without re-subscribe", got)
+	}
+	if _, _, calls := fs.observed(); calls != 1 {
+		t.Fatalf("resolver calls = %d, want one retained subscription", calls)
+	}
+}

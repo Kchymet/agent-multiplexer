@@ -58,12 +58,16 @@ type Config struct {
 	// spec's read-only publishing policy). Ignored unless PublishSessions is set.
 	ReadOnlySessions bool
 	// Sessions returns the current session rail to publish. Required for the
-	// "sessions" feature; nil disables it regardless of PublishSessions.
+	// "sessions" feature; nil disables it regardless of PublishSessions. It must
+	// return when ctx is cancelled so a dropped connection cannot retain a poll
+	// goroutine or block reconnect.
 	Sessions func(context.Context) ([]core.Session, error)
 	// ApplyAction executes one session lifecycle verb against the daemon's store,
 	// returning the id of any session it created (see wsops.ApplyResult). Nil
 	// rejects every verb (read-only). The provider validates the verb set and maps
-	// the wire action to a core.Action before calling this.
+	// the wire action to a core.Action before calling this. It must honor ctx:
+	// removal, poll failure, and connection teardown cancel admitted work before
+	// waiting for the authorization barrier.
 	ApplyAction func(context.Context, core.Action) (newID string, err error)
 	// SessionPollInterval debounces inventory publishing: the provider re-polls
 	// Sessions at this cadence and pushes only when the snapshot changed. Defaults
@@ -79,7 +83,9 @@ type Config struct {
 	// RuntimeEventStream produces seq-ordered event batches for one session,
 	// resumable from afterSeq, running until ctx is cancelled. ok=false ⇒ the
 	// session has no structured record (the feature is advertised but that session
-	// emits nothing — honest degradation). Required for "runtime-events".
+	// emits nothing — honest degradation). Opening and tailing must both honor ctx
+	// so removal and connection teardown can revoke an in-flight subscription.
+	// Required for "runtime-events".
 	RuntimeEventStream func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool)
 
 	// OnStatus, when set, receives a snapshot every time the connection state
@@ -226,26 +232,42 @@ type session struct {
 	subscribe chan struct{}
 	subOnce   sync.Once
 
-	// Published-session grants are connection-local and installed only after the
-	// matching snapshot is written. grantMu is also the revoke barrier: targeted
-	// actions and each runtime-event write hold it through admission, so once a
-	// revocation acquires it no queued work can retain the old grant.
-	grantMu   sync.Mutex
+	// Published-session grants and admitted work are connection-local. opMu is
+	// the admission gate: removal deletes the target and cancels its operations
+	// under this lock, then waits on their done channels without blocking work for
+	// retained targets. Runtime batch writes revalidate membership under the same
+	// lock, so no queued batch crosses a completed revoke barrier.
+	opMu      sync.Mutex
 	published map[string]core.Session
+	actions   map[uint64]*sessionActionCall
+	nextOpID  uint64
 
 	// "runtime-events" feature: rtCtx is cancelled on session teardown to stop all
 	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session
-	// and carries its cancellation handle; rtWG waits the pumps out before the
-	// connection is considered torn down. rtSubs is guarded by grantMu.
-	rtCtx    context.Context
-	rtCancel context.CancelFunc
-	rtSubs   map[string]*runtimeSubscription
-	rtWG     sync.WaitGroup
+	// and carries its cancellation handle; rtOpening tracks resolver calls before
+	// a pump exists. rtWG waits pumps out before teardown. Both maps use opMu.
+	rtCtx     context.Context
+	rtCancel  context.CancelFunc
+	rtOpening map[string]*runtimeOpening
+	rtSubs    map[string]*runtimeSubscription
+	rtWG      sync.WaitGroup
 }
 
 type runtimeSubscription struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type runtimeOpening struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type sessionActionCall struct {
+	target string
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func (s *session) cancel() { s.once.Do(func() { close(s.done) }) }
@@ -328,8 +350,10 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 		lastPong:  time.Now().UnixNano(),
 		subscribe: make(chan struct{}),
 		published: map[string]core.Session{},
+		actions:   map[uint64]*sessionActionCall{},
 		rtCtx:     rtCtx,
 		rtCancel:  rtCancel,
+		rtOpening: map[string]*runtimeOpening{},
 		rtSubs:    map[string]*runtimeSubscription{},
 	}
 	p.mu.Lock()
@@ -345,7 +369,7 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	// starts fresh per connection, so a reconnect re-publishes a full snapshot.
 	if p.publishing() {
 		wg.Add(1)
-		go func() { defer wg.Done(); p.publishLoop(ctx, s) }()
+		go func() { defer wg.Done(); p.publishLoop(s.rtCtx, s) }()
 	}
 
 	select {
@@ -354,8 +378,8 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	}
 	s.cancel()
 	_ = conn.Close() // unblock a reader or writer before waiting on revoke barriers
+	rtCancel()       // cancel daemon-backed hooks before revoke waits for their barrier
 	s.revokeAllPublished()
-	rtCancel() // stop the per-session runtime-events pumps
 	wg.Wait()
 	s.rtWG.Wait()
 

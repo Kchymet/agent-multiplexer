@@ -304,7 +304,7 @@ func TestSessionActionRejectsUnavailableExecution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordingApply{}
 			p := New(Config{Execution: tc.exec, ApplyAction: rec.apply})
-			_, err := p.applySessionAction(harnessproto.MuxMsg{
+			_, err := p.applySessionAction(context.Background(), harnessproto.MuxMsg{
 				Action: harnessproto.VerbNewWorkgroup, Fields: tc.fields,
 			})
 			if (err == nil) != tc.wantOK {
@@ -576,6 +576,141 @@ func TestSessionActionRequiresFreshPublishedTarget(t *testing.T) {
 	}
 	if calls := rec.callCount(); calls != deniedAt+1 {
 		t.Fatalf("republished ApplyAction calls = %d, want %d", calls, deniedAt+1)
+	}
+}
+
+// TestRetainedActionSurvivesSiblingRemoval covers the commit/result race: a
+// daemon may commit A and the poller may observe that mutation before the action
+// response arrives. Removing sibling B must neither cancel A nor misreport the
+// committed action as failed.
+func TestRetainedActionSurvivesSiblingRemoval(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, SessionPollInterval: 5 * time.Millisecond,
+		ApplyAction: func(ctx context.Context, _ core.Action) (string, error) {
+			close(started)
+			// Simulate the daemon commit becoming visible to the independent poller
+			// before this call receives its result frame.
+			src.set([]core.Session{{ID: "a1", Title: "renamed"}})
+			<-release
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return "committed", nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	publishRows(t, oc, src, core.Session{ID: "a1"}, core.Session{ID: "b1"})
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "blocking",
+		Action: harnessproto.VerbRename, ID: "a1", Fields: map[string]string{"name": "x"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("action hook did not start")
+	}
+	if snapshot := readSessions(t, oc); len(snapshot.Sessions) != 1 || snapshot.Sessions[0].ID != "a1" {
+		t.Fatalf("replacement snapshot = %+v, want retained a1", snapshot.Sessions)
+	}
+	close(release)
+	if result := readResult(t, oc); !result.OK || result.ReqID != "blocking" || result.NewID != "committed" {
+		t.Fatalf("committed action result = %+v, want success", result)
+	}
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "after-revoke",
+		Action: harnessproto.VerbRename, ID: "b1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res := readResult(t, oc); res.OK || res.Error != errSessionNotPublished.Error() {
+		t.Fatalf("post-revoke result = %+v", res)
+	}
+}
+
+func TestPollErrorCancelsBlockingAction(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	started := make(chan struct{})
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll, SessionPollInterval: 5 * time.Millisecond,
+		ApplyAction: func(ctx context.Context, _ core.Action) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	publishRows(t, oc, src, core.Session{ID: "a1"})
+	if err := oc.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MSessionAction, ReqID: "blocking",
+		Action: harnessproto.VerbRename, ID: "a1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	src.setError(errors.New("inventory unavailable"))
+	if result := readResult(t, oc); result.OK || result.Error != context.Canceled.Error() {
+		t.Fatalf("poll-error action result = %+v", result)
+	}
+}
+
+func TestDisconnectCancelsBlockingInventoryPoll(t *testing.T) {
+	conns := make(chan net.Conn, 2)
+	started := make(chan struct{})
+	var once sync.Once
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns), PublishSessions: true,
+		Sessions: func(ctx context.Context) ([]core.Session, error) {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- p.Run(ctx) }()
+
+	first := harnessproto.NewConn(<-conns)
+	accept(t, first, 2, nil, 60)
+	subscribe(t, first)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("inventory poll did not start")
+	}
+	_ = first.Close()
+	var second net.Conn
+	select {
+	case second = <-conns:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not tear down and reconnect after cancelling inventory poll")
+	}
+	_ = second.Close()
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider did not stop")
 	}
 }
 

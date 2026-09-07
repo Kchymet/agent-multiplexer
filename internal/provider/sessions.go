@@ -116,46 +116,97 @@ func publishedSessions(sessions []core.Session) map[string]core.Session {
 	return out
 }
 
-// writePublishedSnapshot holds the grant barrier across the transport write and
-// installation. Removed IDs are revoked before bytes become observable;
-// additions are installed before an inbound message that follows the snapshot
-// can acquire the barrier. A failed write revokes everything.
+// writePublishedSnapshot revokes removed IDs and waits only for work admitted
+// against those IDs. Retained actions and streams continue across ordinary
+// metadata churn. The final write+install holds opMu, so removals precede bytes
+// becoming observable and additions are usable as soon as the peer can respond.
 func (s *session) writePublishedSnapshot(next map[string]core.Session, msg harnessproto.HarnessMsg) error {
-	s.grantMu.Lock()
-	defer s.grantMu.Unlock()
-	s.revokeMissingPublishedLocked(next)
+	waits := s.revokeMissingPublished(next)
+	waitForRevokedWork(waits)
+
+	s.opMu.Lock()
+	if err := s.rtCtx.Err(); err != nil {
+		s.opMu.Unlock()
+		return err
+	}
 	if err := s.hc.WriteHarness(msg); err != nil {
-		s.revokeAllPublishedLocked()
+		waits = s.revokeAllPublishedLocked()
+		s.opMu.Unlock()
+		waitForRevokedWork(waits)
 		return err
 	}
 	s.published = next
+	s.opMu.Unlock()
 	return nil
 }
 
-func (s *session) revokeMissingPublishedLocked(next map[string]core.Session) {
+func (s *session) revokeMissingPublished(next map[string]core.Session) []<-chan struct{} {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	removed := map[string]bool{}
 	for id := range s.published {
-		if _, ok := next[id]; ok {
-			continue
+		if _, ok := next[id]; !ok {
+			removed[id] = true
+			delete(s.published, id)
 		}
-		delete(s.published, id)
-		if sub := s.rtSubs[id]; sub != nil {
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	var waits []<-chan struct{}
+	for _, call := range s.actions {
+		if removed[call.target] {
+			call.cancel()
+			waits = append(waits, call.done)
+		}
+	}
+	for id, opening := range s.rtOpening {
+		if removed[id] {
+			opening.cancel()
+			waits = append(waits, opening.done)
+			delete(s.rtOpening, id)
+		}
+	}
+	for id, sub := range s.rtSubs {
+		if removed[id] {
 			sub.cancel()
+			waits = append(waits, sub.done)
 			delete(s.rtSubs, id)
 		}
 	}
+	return waits
 }
 
 func (s *session) revokeAllPublished() {
-	s.grantMu.Lock()
-	s.revokeAllPublishedLocked()
-	s.grantMu.Unlock()
+	s.opMu.Lock()
+	waits := s.revokeAllPublishedLocked()
+	s.opMu.Unlock()
+	waitForRevokedWork(waits)
 }
 
-func (s *session) revokeAllPublishedLocked() {
+func (s *session) revokeAllPublishedLocked() []<-chan struct{} {
 	s.published = map[string]core.Session{}
+	var waits []<-chan struct{}
+	for _, call := range s.actions {
+		call.cancel()
+		waits = append(waits, call.done)
+	}
+	for id, opening := range s.rtOpening {
+		opening.cancel()
+		waits = append(waits, opening.done)
+		delete(s.rtOpening, id)
+	}
 	for id, sub := range s.rtSubs {
 		sub.cancel()
+		waits = append(waits, sub.done)
 		delete(s.rtSubs, id)
+	}
+	return waits
+}
+
+func waitForRevokedWork(waits []<-chan struct{}) {
+	for _, done := range waits {
+		<-done
 	}
 }
 
@@ -203,28 +254,42 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 var errSessionNotPublished = errors.New("session is not currently published")
 
 // applyAuthorizedSessionAction binds every targeted verb to the connection's
-// current published inventory. The grant lock remains held through ApplyAction,
-// defining the revoke barrier: a refresh may wait for an already-admitted action
-// to finish, but once revocation completes no queued action can use the old ID.
+// current published inventory. Admission registers a cancellable call and its
+// completion barrier under opMu. Removing that target cancels and waits for the
+// call without disturbing retained targets; once revocation completes no queued
+// action can use the old ID.
 // New-workgroup is the one creation verb with no existing target; enabling the
 // session-control hook deliberately grants it. A newly created ID is not usable
 // until a later successful snapshot publishes it.
 func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMsg) (string, error) {
 	if _, ok := sessionActionFor(m); !ok {
-		return p.applySessionAction(m)
+		return p.applySessionAction(s.rtCtx, m)
 	}
-	if m.Action == harnessproto.VerbNewWorkgroup {
-		return p.applySessionAction(m)
-	}
-	if m.ID == "" {
+	if m.Action != harnessproto.VerbNewWorkgroup && m.ID == "" {
 		return "", errSessionNotPublished
 	}
-	s.grantMu.Lock()
-	defer s.grantMu.Unlock()
-	if _, ok := s.published[m.ID]; !ok {
-		return "", errSessionNotPublished
+
+	s.opMu.Lock()
+	if m.Action != harnessproto.VerbNewWorkgroup {
+		if _, ok := s.published[m.ID]; !ok {
+			s.opMu.Unlock()
+			return "", errSessionNotPublished
+		}
 	}
-	return p.applySessionAction(m)
+	ctx, cancel := context.WithCancel(s.rtCtx)
+	s.nextOpID++
+	opID := s.nextOpID
+	call := &sessionActionCall{target: m.ID, cancel: cancel, done: make(chan struct{})}
+	s.actions[opID] = call
+	s.opMu.Unlock()
+
+	newID, err := p.applySessionAction(ctx, m)
+	cancel()
+	close(call.done)
+	s.opMu.Lock()
+	delete(s.actions, opID)
+	s.opMu.Unlock()
+	return newID, err
 }
 
 // logSessionAction records one relayed verb: which session, which verb, how it
@@ -277,7 +342,7 @@ var errUnsupportedVerb = errors.New(harnessproto.ErrUnsupportedVerb)
 // "unsupported verb", and read-only mode rejects every verb — steering verbs
 // (spec §3.1) exactly as much as lifecycle ones. Accepted verbs map to the
 // daemon's own lifecycle core.Actions and run through ApplyAction (wsops).
-func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
+func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg) (string, error) {
 	act, ok := sessionActionFor(m)
 	if !ok {
 		if harnessproto.SessionVerbs[m.Action] {
@@ -298,7 +363,7 @@ func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 			return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
 		}
 	}
-	return p.cfg.ApplyAction(context.Background(), act)
+	return p.cfg.ApplyAction(ctx, act)
 }
 
 // sessionActionFor maps an accepted wire verb to the equivalent daemon
