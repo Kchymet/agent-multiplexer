@@ -76,7 +76,7 @@ func (codexHarness) Argv(model string, extra ...string) ([]string, error) {
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	return finishArgv(bin, args, extra), nil
+	return codexcfg.FullscreenTUI(finishArgv(bin, args, extra)), nil
 }
 
 // NewSessionID returns "" — Codex mints its own uuid on its first run and can't be

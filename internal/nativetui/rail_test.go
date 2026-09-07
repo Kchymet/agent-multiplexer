@@ -73,6 +73,40 @@ func TestFoldGroupsAndSections(t *testing.T) {
 	}
 }
 
+func TestEmptyContainersHaveNoDisclosure(t *testing.T) {
+	m := groupedRail()
+	m.sessions = append(m.sessions,
+		core.Session{ID: "empty-wg", Title: "empty-workgroup", IsRoot: true, Section: core.SectionWorkgroups},
+		core.Session{ID: "empty-repo", Title: "empty-repository", Kind: "repo", Section: core.SectionRepos},
+	)
+	out := plain(m.renderSidebar())
+	for _, want := range []string{"▾ payments", "▾ ⛁ acme/api"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("populated container lost disclosure %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"▾ empty-workgroup", "▸ empty-workgroup", "▾ ⛁ empty-repository", "▸ ⛁ empty-repository"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("empty container rendered disclosure %q:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(out, "⛁ empty-repository") {
+		t.Fatalf("empty repo lost its repo glyph:\n%s", out)
+	}
+
+	for _, id := range []string{"empty-wg", "empty-repo"} {
+		m.selectByID(id)
+		m.handleKey(tea.KeyMsg{Type: tea.KeySpace})
+		if m.collapsed[m.group(m.selected())] {
+			t.Fatalf("Space collapsed empty container %q", id)
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyLeft})
+		if m.sectionCursor != m.sessionByID(id).Section {
+			t.Fatalf("left on empty container %q did not select its section", id)
+		}
+	}
+}
+
 func TestFoldNavigation(t *testing.T) {
 	m := groupedRail()
 	m.selectByID("wg")

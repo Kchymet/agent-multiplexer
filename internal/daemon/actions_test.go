@@ -10,6 +10,7 @@ import (
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // Creation must launch the coordinator without any pane.open or follow-up start
@@ -69,6 +70,34 @@ func TestCreateWorkgroupStartsCoordinator(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A remote client receives the created id but does not attach a pane the way
+// the native TUI does. Adding an agent must therefore start its process as part
+// of the daemon action, or its persisted creation prompt waits until somebody
+// manually opens the session.
+func TestAddAgentStartsWithoutClientAttach(t *testing.T) {
+	d, eng := steerDaemon(t)
+	rootID, err := wsops.CreateWorkspace(context.Background(), "payments", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := d.handle(context.Background(), core.Action{
+		Action: core.ActionAddAgent,
+		ID:     rootID,
+		Fields: map[string]string{"agent": "claude", "prompt": "fix the Android flow"},
+	})
+	if !r.OK || r.NewID == "" {
+		t.Fatalf("add agent: %+v", r)
+	}
+	key := engine.Key{AgentID: r.NewID, Tab: panespec.TabAgent}
+	inst, ok := eng.Lookup(key)
+	if !ok || !inst.Alive() {
+		t.Fatal("created agent is not running after the action")
+	}
+	if keys := eng.ensuredKeys(); len(keys) != 1 || keys[0] != key {
+		t.Fatalf("creation launched %v, want just the new agent %v", keys, key)
 	}
 }
 

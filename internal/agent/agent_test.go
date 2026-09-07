@@ -65,11 +65,11 @@ func TestArgvCodex(t *testing.T) {
 		want                 []string
 	}{
 		{"default sandbox + model", "", "gpt-5.5",
-			[]string{"codex-amux-test", "--sandbox", "workspace-write", "--model", "gpt-5.5"}},
+			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "--sandbox", "workspace-write", "--model", "gpt-5.5"}},
 		{"explicit sandbox, no model", "read-only", "",
-			[]string{"codex-amux-test", "--sandbox", "read-only"}},
+			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "--sandbox", "read-only"}},
 		{"sandbox none omits flag", "none", "gpt-5.4",
-			[]string{"codex-amux-test", "--model", "gpt-5.4"}},
+			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "--model", "gpt-5.4"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

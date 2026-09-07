@@ -254,7 +254,12 @@ func (m *model) renderRow(i int, s core.Session) string {
 	}
 	icon := glyph(s)
 	if container(&s) {
-		icon = disclosure(m.collapsed[m.group(&s)])
+		// Keep container titles aligned, but reserve disclosure arrows for rows
+		// that actually have children to fold and unfold.
+		icon = " "
+		if m.groupHasChildren(&s) {
+			icon = disclosure(m.collapsed[m.group(&s)])
+		}
 		if s.Kind == "repo" {
 			icon += " " + glyph(s)
 		}

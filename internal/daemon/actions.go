@@ -48,13 +48,20 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		r := ok()
 		r.NewID = newID
-		if desc := core.DescriptorFor(a.Action); desc.CreatesSession && desc.TargetsRoot && newID != "" {
-			// The root is the coordinator's session. Start it at creation even when
-			// the client opens a member instead, or never attaches a UI at all.
-			// startEngineFor would start the members, leaving the coordinator idle.
+		if desc := core.DescriptorFor(a.Action); desc.CreatesSession && newID != "" {
+			// Start the exact session returned by every creation verb. The native TUI
+			// also starts a new session by attaching to it, but remote/headless clients
+			// do not necessarily attach after creation. In particular, an add-agent
+			// prompt must begin running without waiting for the user to switch to it.
+			// For a root, the returned id is the coordinator itself; startAgent avoids
+			// startEngineFor's root fan-out to the members.
 			if err := d.startAgent(ctx, newID); err != nil {
+				kind := "agent"
+				if desc.TargetsRoot {
+					kind = "workgroup"
+				}
 				r.OK = false
-				r.Error = fmt.Sprintf("workgroup %s created, but coordinator failed to start: %v; open the workgroup to retry", newID, err)
+				r.Error = fmt.Sprintf("%s %s created, but failed to start: %v; open it to retry", kind, newID, err)
 			}
 			d.triggerPoll()
 		}
