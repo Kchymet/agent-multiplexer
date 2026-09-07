@@ -92,9 +92,9 @@ AMUX_CLAUDE_AUTH_SMOKE=1 go test ./internal/claudecfg -run TestClaudeSharedAuthS
 ```
 
 This checks credential-store selection, not a real server-side token rotation.
-The sandbox masks the auth root in every pane and mounts only a Claude pane's
-selected store, so adding another harness's auth store does not expose it through
-the otherwise-readable amux data tree.
+The sandbox never mounts the amux data or auth root. It mounts only a Claude
+pane's exact selected store, so adding another harness's auth store does not
+expose it through a shared ancestor.
 
 ### Git writes from Codex
 
@@ -107,12 +107,11 @@ sibling's unpublished branch/object is not copied into a new session, and Git
 writes need no mount outside the session directory in either the bubblewrap or
 Codex `workspace-write` sandbox.
 
-This clone policy is a write-isolation and initial-transfer boundary, not the
-complete read-confidentiality boundary by itself. Until the companion namespace
-change removes the broad read-only amux data bind, a session can still read
-sibling `.git` objects and local tracked origins by path; an explicit fetch can
-therefore retrieve objects that source advertises. New-session confidentiality
-requires that mount change as well as private clones.
+This clone policy is a write-isolation and initial-transfer boundary. The pane
+namespace supplies the corresponding read boundary: it mounts only the exact
+session directory and never the amux data/state roots, sibling clones, or host
+Git cache. An explicit network fetch can still retrieve objects the remote
+source advertises.
 
 The remote remains the tracked repository's authoritative source, so ordinary
 fetch/commit/push and pull-request workflows keep working. Host-side lifecycle
@@ -168,9 +167,9 @@ MCP definitions, use `amux sandbox reset <id> config.toml` (this resets the whol
 config file). For a detached MCP credential, use
 `amux sandbox reset <id> .credentials.json`. Relaunch the agent after either reset.
 Existing private lock directories are overlaid with the shared directory inside
-the sandbox. When running with the amux sandbox disabled, an existing private
-lock directory must be reconciled before concurrent OAuth refreshes can share
-locks; newly seeded homes link to the shared lock directory directly.
+the sandbox. Protected launches refuse a disabled or unsupported namespace
+rather than forwarding session credentials to a host-visible process; newly
+seeded homes link to the shared lock directory directly.
 
 Two files get a small transform on the way in. `settings.json` has absolute
 references to the template dir rewritten to the copy, so a status-line script or
@@ -179,12 +178,25 @@ hook command under `~/.claude` runs the copy's file inside the scope (where
 (your trust and history for your own directories); amux trusts the agent's own dir
 in the copy at launch.
 
-Transcripts therefore live in the agent's private home. Resume detection,
-gap-fill from amux's captured backups, `amux agent sessions`, and the runtime
-event stream all read each agent's home (and the user's, for your own sessions).
-An agent created before this change has its conversation in your `~/.claude`;
-its first launch afterwards carries that project dir over, once, so nothing is
-lost — and until it launches, readers fall back to the old location.
+Transcripts therefore live in the agent's private home. Host-side resume and
+runtime readers operate on that explicitly selected home; restricted sessions
+receive only role-filtered context through authenticated amux requests, never a
+global transcript path. An agent created before this change has its conversation
+in your `~/.claude`; its first launch afterwards carries that project dir over,
+once, so nothing is lost — and until it launches, host-authorized readers fall
+back to the old location.
+
+### Namespace grants
+
+On supported Linux hosts, protected panes require bubblewrap 0.12.0 or newer
+and enter a private PID namespace with a fresh `/proc`. They receive the exact
+session directory, selected runtime/config/account grants, their own App Server
+socket directory, and daemon-issued file-RPC mounts. `/run`, amux data/state,
+global hooks/transcripts, sibling directories and shared Git metadata are not
+mounted. The mailbox is read-only except for its `requests/` overlay;
+credentials and fixed `context.json` are read-only at the immediate-root
+`/amux-session-access` directory. Host provider/TLS/management environment
+variables and ambient API tokens are removed before the child starts.
 
 ## The feedback loop
 

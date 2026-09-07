@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,40 +32,33 @@ func TestSharedAuthDirectoryIsVisibleOnlyToClaudePanes(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	t.Setenv("AMUX_JAIL", "on")
-	bin := filepath.Join(home, "bin")
-	if err := os.MkdirAll(bin, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// Only inspect generated argv; no dependency on the host's bwrap install.
-	if err := os.WriteFile(filepath.Join(bin, "bwrap"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
+	useFakeSecureBwrap(t)
 	if err := claudecfg.Login(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	for _, kind := range []string{"claude", "codex"} {
 		for _, tab := range []int{TabAgent, TabTerminal, TabEditor} {
 			s := store.Session{ID: "one", Agent: kind, Dir: filepath.Join(home, "agent")}
-			argv := scope(s.Dir, tab, s, []string{"/usr/bin/true"}, nil)
-			mask, bind, canonicalMask := -1, -1, -1
+			spec := testLaunchSpec(t, s)
+			argv, err := scope(s.Dir, tab, s, spec.Access, []string{"/usr/bin/true"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bind := -1
 			for i := 0; i < len(argv)-2; i++ {
-				if argv[i] == "--tmpfs" && argv[i+1] == core.AuthDir() {
-					mask = i
-				}
-				if argv[i] == "--tmpfs" && argv[i+1] == filepath.Join(realData, "amux", "auth") {
-					canonicalMask = i
-				}
 				if slices.Equal(argv[i:i+3], []string{"--bind", claudecfg.SharedAuthDir(), claudecfg.SharedAuthDir()}) {
 					bind = i
 				}
 			}
-			if mask < 0 || canonicalMask < 0 {
-				t.Fatalf("%s tab %d exposes auth root: %v", kind, tab, argv)
+			joined := strings.Join(argv, "\x00")
+			for _, forbidden := range []string{core.DataDir(), core.StateDir(), core.HookStateDir(), core.TranscriptDir()} {
+				if strings.Contains(joined, "\x00"+forbidden+"\x00") {
+					t.Fatalf("%s tab %d exposes broad/private root %s: %v", kind, tab, forbidden, argv)
+				}
 			}
 			if kind == "claude" {
-				if bind <= mask {
-					t.Fatalf("Claude tab %d must bind auth after the mask: %v", tab, argv)
+				if bind < 0 {
+					t.Fatalf("Claude tab %d missing explicit auth grant: %v", tab, argv)
 				}
 				env := wsops.AgentEnv(s)
 				if !slices.Contains(env, claudecfg.SecureStorageEnv+"="+claudecfg.SharedAuthDir()) || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=") {
@@ -80,11 +74,8 @@ func TestSharedAuthDirectoryIsVisibleOnlyToClaudePanes(t *testing.T) {
 // Keep two real mount namespaces alive while the host replaces the credentials.
 // A file bind would retain the old inode; a directory bind must see the new one.
 func TestRunningClaudeScopesObserveCredentialReplacement(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bubblewrap unavailable")
-	}
-	if out, err := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-user", "--", "/bin/true").CombinedOutput(); err != nil {
-		t.Skipf("bubblewrap unavailable: %v: %s", err, out)
+	if err := IsolationSupport(); err != nil {
+		t.Skipf("protected namespace unavailable: %v", err)
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -113,7 +104,11 @@ test "$(cat .credentials.json)" = rotated
 test -d .oauth_refresh.lock
 echo seen > "$1"
 `
-		argv := scope(s.Dir, TabAgent, s, []string{"/bin/sh", "-c", script, "auth-test", id}, nil)
+		spec := testLaunchSpec(t, s)
+		argv, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/sh", "-c", script, "auth-test", id}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Env = append(os.Environ(), wsops.AgentEnv(s)...)
 		cmd.Stderr = os.Stderr

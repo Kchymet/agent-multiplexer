@@ -11,6 +11,19 @@ import (
 	"amux/internal/core"
 )
 
+func TestCoordinatorDirIsSeparateFromMemberAncestor(t *testing.T) {
+	root := RootDir("wg")
+	coordinator := CoordinatorDir("wg")
+	member := AgentDir("wg", "agent")
+
+	if coordinator != filepath.Join(root, "coordinator") {
+		t.Fatalf("CoordinatorDir = %q, want child of %q", coordinator, root)
+	}
+	if coordinator == root || filepath.Dir(coordinator) != filepath.Dir(member) {
+		t.Fatalf("coordinator %q and member %q must be distinct siblings", coordinator, member)
+	}
+}
+
 // openTemp opens a store rooted at a fresh temp dir so a test never touches the
 // user's DB.
 func openTemp(t *testing.T) *DB {

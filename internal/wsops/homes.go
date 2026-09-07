@@ -5,11 +5,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"amux/internal/agent"
 	"amux/internal/cfghome"
 	"amux/internal/console"
+	"amux/internal/git"
 	"amux/internal/store"
 )
 
@@ -20,23 +20,21 @@ import (
 // lookups, the rail, and the CLI all see the same inventory:
 //
 //   - The console is synthetic (console.Session; never a store row).
-//   - A work-scoped root IS its coordinator: the root row gains a sandbox dir
-//     (its container dir, which already holds every member's sandbox) and a
-//     pinned conversation id. Roots created before default sessions get both
-//     filled in the first time they are resolved.
+//   - A work-scoped root IS its coordinator. New roots have a dedicated own
+//     directory beside (never above) member sandboxes.
 //   - A repo home is a repo-scoped root whose id is the repo name
 //     (store.RepoHomeID). It is created when a repo is tracked, and on first
-//     resolve for repos tracked before default sessions.
+//     host-authorized creation for repos tracked before default sessions.
 //
 // A hidden single-member repo root (the wrapper around a one-off agent) hosts
 // nothing and resolves as a bare store row, as before.
 
 // ResolveSession resolves an id the way every daemon-side lookup must: the
-// console, a store row (agent, coordinator root, or repo home), or a tracked
-// repo whose home session doesn't exist yet. A coordinator or home that is
-// missing its sandbox dir or conversation id gets them now, persisted, so the
-// launch that follows resumes durably across restarts. ok=false means no such
-// session or repo.
+// console or an existing store row (agent, coordinator root, or repo home).
+// Resolution is read-only for stored sessions. Legacy roots are never silently
+// relocated or provisioned while answering a lookup; they fail with explicit
+// host-authorized recovery guidance and all existing files remain untouched.
+// ok=false means no such session or repo.
 func ResolveSession(id string) (store.Session, bool, error) {
 	if id == console.ID {
 		if err := console.Ensure(); err != nil {
@@ -55,44 +53,38 @@ func ResolveSession(id string) (store.Session, bool, error) {
 	}
 	if ok {
 		if s.Role() == store.RoleCoordinator {
-			return ensureContainerHome(db, s)
+			if err := validateContainerHome(s, store.CoordinatorDir(s.ID), "workgroup coordinator"); err != nil {
+				return store.Session{}, false, err
+			}
+		}
+		if s.Role() == store.RoleRepo {
+			if err := validateContainerHome(s, store.RootDir(s.ID), "repo home"); err != nil {
+				return store.Session{}, false, err
+			}
 		}
 		return s, true, nil
 	}
-	// Not a session: a tracked repo's home that predates default sessions?
+	// A tracked repo whose home predates explicit provisioning must be repaired by
+	// a host-authorized lifecycle operation, never created as a side effect of a
+	// query, endpoint lookup, or launch resolution.
 	if r, ok, _ := db.Repo(id); ok {
-		home, err := ensureRepoHome(db, r.Name)
-		return home, err == nil, err
+		return store.Session{}, false, fmt.Errorf("repo %q has no provisioned home session; run a host-authorized repo repair before launch", r.Name)
 	}
 	return store.Session{}, false, nil
 }
 
-// ensureContainerHome fills in a coordinator root's sandbox dir and pinned
-// conversation id when either is missing (a root created before default
-// sessions), writing them back field by field so a concurrent rename or
-// archive of the same row is never reverted.
-func ensureContainerHome(db *store.DB, s store.Session) (store.Session, bool, error) {
-	// A container session's sandbox is always its container dir. A root imported
-	// from the legacy registry recorded the workspace's combined worktree dir
-	// instead, and a guide or config home written there would dirty a checkout.
-	if want := store.RootDir(s.ID); s.Dir != want {
-		s.Dir = want
-		if err := db.SetDir(s.ID, s.Dir); err != nil {
-			return store.Session{}, false, err
-		}
+func validateContainerHome(s store.Session, want, label string) error {
+	if s.Dir == "" || filepath.Clean(s.Dir) != filepath.Clean(want) {
+		return fmt.Errorf("%s %q uses an unsupported legacy layout at %q; files were left unchanged and host-authorized migration or recreation is required", label, s.ID, s.Dir)
 	}
-	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
-		return store.Session{}, false, err
+	info, err := os.Lstat(s.Dir)
+	if err != nil {
+		return fmt.Errorf("%s %q own directory is unavailable: %w", label, s.ID, err)
 	}
-	if s.ClaudeID == "" {
-		if id := agent.HarnessFor(s.Agent).NewSessionID(); id != "" {
-			s.ClaudeID = id
-			if err := db.SetClaudeID(s.ID, id); err != nil {
-				return store.Session{}, false, err
-			}
-		}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s %q own directory is not a real directory: %s", label, s.ID, s.Dir)
 	}
-	return s, true, nil
+	return nil
 }
 
 // ensureRepoHome returns the home session of a tracked repo, creating it (the
@@ -105,7 +97,10 @@ func ensureRepoHome(db *store.DB, repo string) (store.Session, error) {
 		if s.Role() != store.RoleRepo {
 			return store.Session{}, fmt.Errorf("session id %q is taken by a %s, not repo %s's home", id, describeRole(s), repo)
 		}
-		return ensureRepoHomeDir(db, s)
+		if err := validateContainerHome(s, store.RootDir(s.ID), "repo home"); err != nil {
+			return store.Session{}, err
+		}
+		return s, nil
 	}
 	kind := agent.DefaultKind()
 	s := store.Session{
@@ -114,23 +109,19 @@ func ensureRepoHome(db *store.DB, repo string) (store.Session, error) {
 		Dir: store.RootDir(id), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
-	if err := db.PutSession(s); err != nil {
+	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 		return store.Session{}, err
 	}
-	return ensureRepoHomeDir(db, s)
-}
-
-func ensureRepoHomeDir(db *store.DB, s store.Session) (store.Session, error) {
-	s, _, err := ensureContainerHome(db, s)
-	if err != nil {
+	if err := db.PutSession(s); err != nil {
 		return store.Session{}, err
 	}
 	return s, nil
 }
 
 // EnsureRepoHome creates (or returns) the home session of a tracked repo. It is
-// called when a repo is tracked so the home exists from the start; ResolveSession
-// creates it lazily for repos tracked before default sessions.
+// called when a repo is tracked so the home exists from the start. Repos that
+// predate home sessions require an explicit host-authorized repair; reads never
+// create one lazily.
 func EnsureRepoHome(repo string) (store.Session, error) {
 	db, err := store.Open()
 	if err != nil {
@@ -168,52 +159,24 @@ func removeRepoHome(db *store.DB, repo string) {
 	_ = db.DeleteSession(id)
 }
 
-// removeContainerFiles clears a coordinator's own files from a workgroup's
-// container dir when the workgroup is deleted, without touching any agent
-// sandbox that still lives under it (an agent moved out of this workgroup keeps
-// its dir here — see MoveAgent). Only the container's own entries — the guide,
-// the private config home, the installed skills — are known; anything that is
-// some session's sandbox is kept, and the dir itself is removed only if that
-// leaves it empty.
-func removeContainerFiles(db *store.DB, s store.Session) {
+// removeContainerFiles removes only the coordinator's dedicated own directory.
+// It never scans the member-containing workgroup parent. Legacy shared roots
+// fail validation before deletion, preserving unknown and moved-session data.
+func removeContainerFiles(_ *store.DB, s store.Session) error {
+	if err := validateContainerHome(s, store.CoordinatorDir(s.ID), "workgroup coordinator"); err != nil {
+		return err
+	}
+	managedRoot, err := sessionStorageRoot(s.Dir)
+	if err != nil {
+		return err
+	}
+	if err := git.RemoveManagedTree(s.Dir, managedRoot, gitStagingDir()); err != nil {
+		return fmt.Errorf("remove coordinator directory %s: %w", s.ID, err)
+	}
 	if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
 		cfghome.Forget(spec)
 	}
-	dir := s.Dir
-	if dir == "" {
-		dir = store.RootDir(s.ID)
-	}
-	keep := map[string]bool{}
-	if all, err := db.AllSessions(); err == nil {
-		for _, o := range all {
-			if o.ID != s.ID && o.Dir != "" {
-				keep[filepath.Clean(o.Dir)] = true
-			}
-		}
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		p := filepath.Join(dir, e.Name())
-		if e.IsDir() && underAny(p, keep) {
-			continue
-		}
-		_ = os.RemoveAll(p)
-	}
-	_ = os.Remove(dir) // non-recursive: only if nothing else lives here
-}
-
-// underAny reports whether p is, or contains, a kept sandbox path.
-func underAny(p string, keep map[string]bool) bool {
-	p = filepath.Clean(p)
-	for k := range keep {
-		if k == p || strings.HasPrefix(k, p+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
 func describeRole(s store.Session) string {
