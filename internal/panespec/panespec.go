@@ -349,6 +349,9 @@ func validateLaunchSpec(spec LaunchSpec) (store.Session, error) {
 	if err := requireIndependentGit(s); err != nil {
 		return store.Session{}, err
 	}
+	if err := IsolationSupport(); err != nil {
+		return store.Session{}, err
+	}
 	return s, nil
 }
 
