@@ -750,6 +750,52 @@ func TestSetAgentReposSkipsUntracked(t *testing.T) {
 	}
 }
 
+func TestSetAgentReposPropagatesTrustedCleanupFailure(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+	gitDir := bareRepoWithCommit(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "acme", Source: gitDir, GitDir: gitDir}); err != nil {
+		t.Fatal(err)
+	}
+	rootID := db.NewID()
+	if err := db.PutSession(store.Session{ID: rootID, Scope: store.ScopeWork, Mode: store.ModeTask,
+		Dir: filepath.Join(core.SessionsDir(), rootID)}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := addAgent(ctx, db, rootID, AgentSpec{Agent: "codex", Repos: []string{"acme"}})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt only the daemon-private authority record. Cleanup must fail before
+	// touching the checkout and SetAgentRepos must preserve the recorded scope.
+	if err := os.WriteFile(gitLayoutPath(a.ID, "acme"), []byte("wrong layout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAgentRepos(ctx, a.ID, nil); err == nil {
+		t.Fatal("SetAgentRepos hid trusted cleanup failure")
+	}
+	if _, err := os.Stat(filepath.Join(a.Dir, "acme", ".git")); err != nil {
+		t.Fatalf("checkout changed after rejected cleanup: %v", err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, err := db.GetSession(a.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload agent: found=%v err=%v", ok, err)
+	}
+	if got.Repo != "acme" {
+		t.Fatalf("repo scope changed after cleanup failure: %q", got.Repo)
+	}
+}
+
 // TestWriteAgentGuide checks the guide lands in the file each provider actually
 // reads: CLAUDE.md for Claude (incl. the "" default), AGENTS.md for others.
 func TestWriteAgentGuide(t *testing.T) {
@@ -836,9 +882,8 @@ func bareRepoWithCommit(t *testing.T) string {
 
 // TestDeleteLegacyAgentRemovesBranch pins the delete contract ("worktrees +
 // branch") for a session imported from the legacy workspaces/ layout. Its record
-// has no stored branch, so cleanup must read the branch off the worktree — or,
-// when the worktree dir is already gone, derive the legacy amux/<root> name —
-// rather than skip the branch delete and leave a "branch with no agent" behind.
+// has no stored branch, so cleanup derives the legacy amux/<root> name rather
+// than asking session-writable Git state and leaving a branch behind.
 func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -862,9 +907,7 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 			// The legacy layout: workspaces/<root>/<repo> on branch amux/<root>.
 			rootID := "f12442"
 			dir := filepath.Join(core.WorkspacesDir(), rootID)
-			if err := git.AddWorktree(ctx, gitDir, filepath.Join(dir, "acme"), core.LegacyBranchFor(rootID)); err != nil {
-				t.Fatal(err)
-			}
+			gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", "-b", core.LegacyBranchFor(rootID), filepath.Join(dir, "acme"), "main")
 			// Mirror importLegacy: a root plus one agent sharing the legacy dir, with
 			// the agent's Branch left blank.
 			if err := db.PutSession(store.Session{ID: rootID, Name: "legacy", Mode: store.ModeTask, Scope: store.ScopeWork, Dir: dir}); err != nil {
@@ -906,23 +949,21 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 }
 
 // TestAgentBranchOnlyDerivesAmuxBranches: a stored branch is used as-is; a blank
-// record derives the branch from the worktree only when it's amux-owned, so a
-// worktree sitting on main never gets main deleted out from under the repo.
+// legacy record derives the deterministic amux branch without invoking Git
+// against session-writable configuration. It never returns main.
 func TestAgentBranchOnlyDerivesAmuxBranches(t *testing.T) {
 	ctx := context.Background()
 	gitDir := bareRepoWithCommit(t)
 	onMain := filepath.Join(t.TempDir(), "on-main")
 	gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", onMain, "main")
 	onAmux := filepath.Join(t.TempDir(), "on-amux")
-	if err := git.AddWorktree(ctx, gitDir, onAmux, "amux/r"); err != nil {
-		t.Fatal(err)
-	}
+	gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", "-b", "amux/r", onAmux, "main")
 
 	if got := agentBranch(ctx, store.Session{RootID: "r", Branch: "amux/r-a"}, onMain); got != "amux/r-a" {
 		t.Errorf("stored branch: got %q, want amux/r-a", got)
 	}
-	if got := agentBranch(ctx, store.Session{RootID: "r"}, onMain); got != "" {
-		t.Errorf("worktree on main: got %q, want \"\" (never delete a non-amux branch)", got)
+	if got := agentBranch(ctx, store.Session{RootID: "r"}, onMain); got != "amux/r" {
+		t.Errorf("legacy worktree: got %q, want deterministic amux/r", got)
 	}
 	if got := agentBranch(ctx, store.Session{RootID: "r"}, onAmux); got != "amux/r" {
 		t.Errorf("worktree on amux branch: got %q, want amux/r", got)

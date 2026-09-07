@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"io/fs"
 	"log"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
-	"amux/internal/git"
 	"amux/internal/store"
 )
 
@@ -179,15 +177,11 @@ func copyTree(src, dst string) error {
 // PrepareLaunch trusts the launch dir in the agent's own home and installs amux's
 // status/capture hooks into the launch dir (not the user-wide settings.json),
 // pointed at the stable installed binary. Claude loads settings.local.json only
-// from the launch dir. When the dir is a git repo (resuming a legacy conversation
-// into a worktree), git-exclude the file so it never dirties the tree.
+// from the launch dir. Safe launches use the session root, outside its private
+// repository clone; do not invoke host-side Git against session-writable config.
 func (h claudeHarness) PrepareLaunch(s store.Session, dir string) {
 	_ = h.home(s).TrustDir(dir)
-	if err := claudecfg.InstallHooksIn(dir, h.home(s).Dir, core.InstalledBinPath()); err == nil {
-		if git.IsGitRepo(context.Background(), dir) {
-			_ = git.Exclude(context.Background(), dir, ".claude/settings.local.json")
-		}
-	}
+	_ = claudecfg.InstallHooksIn(dir, h.home(s).Dir, core.InstalledBinPath())
 }
 
 // Keys are Claude Code's interactive bindings (see claudeKeys).

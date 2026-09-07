@@ -98,17 +98,42 @@ the otherwise-readable amux data tree.
 
 ### Git writes from Codex
 
-An agent's worktree lives inside its workspace, but its Git index, objects and
-refs live in the assigned bare clone under `<amux data>/repos`. amux grants that
-clone write access in both the outer bubblewrap scope and Codex's inner
-`workspace-write` sandbox. The same `sandbox_workspace_write.writable_roots`
-override is passed to interactive Codex and App Server launches, including
-resumed sessions. Other repositories and coordinator sessions receive no new
-grants. Explicit read-only mode remains read-only.
+Each newly-created agent repository is a fully independent clone inside that
+session's workspace. Its `.git` directory contains the session's own config,
+refs, hooks namespace, index, worktree metadata and objects. amux clones only the
+authoritative source's default branch, without local hardlinks, tags or object
+alternates; it does not seed from the mutable host cache. Consequently a
+sibling's unpublished branch/object is not copied into a new session, and Git
+writes need no mount outside the session directory in either the bubblewrap or
+Codex `workspace-write` sandbox.
 
-Restart existing Codex sessions after updating amux to pick up these launch
-arguments. An already-running session's sandbox policy is not changed by
-rebuilding the binary.
+This clone policy is a write-isolation and initial-transfer boundary, not the
+complete read-confidentiality boundary by itself. Until the companion namespace
+change removes the broad read-only amux data bind, a session can still read
+sibling `.git` objects and local tracked origins by path; an explicit fetch can
+therefore retrieve objects that source advertises. New-session confidentiality
+requires that mount change as well as private clones.
+
+The remote remains the tracked repository's authoritative source, so ordinary
+fetch/commit/push and pull-request workflows keep working. Host-side lifecycle
+code does not invoke Git against the private clone after launch: the session can
+edit its local Git config, so hooks, fsmonitor, credential helpers, includes and
+other command-bearing settings are untrusted. Deletion removes a validated
+session path through directory-FD-anchored filesystem operations rather than
+asking that repository to run Git. A daemon-private layout record, not mutable
+`.git` contents, selects independent versus legacy cleanup.
+
+Legacy sessions created as linked worktrees are **not migrated automatically**.
+After relaunch, amux refuses them explicitly instead of restoring writable access
+to their shared bare Git common directory. Preserve the session's conversation
+and inspect all dirty, staged, untracked, rebase and submodule state from the
+host before recreating or using a future host-authorized migration tool. Already
+running legacy mount namespaces keep their old writable-cache access until they
+exit; installing a new binary cannot change an existing namespace.
+
+An already-running session's sandbox policy is not changed by rebuilding the
+binary. Relaunching a legacy linked-worktree session reaches the explicit refusal
+above; only newly-created independent clones launch normally in this release.
 
 ### What is configuration, what is state
 
