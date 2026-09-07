@@ -61,16 +61,30 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 			t.Fatalf("writable Git stores = %v, want %v; argv=%v", got, want, argv)
 		}
 	}
+	checkFullscreen := func(argv []string, want bool) {
+		t.Helper()
+		got := slices.Contains(argv, `tui.alternate_screen="always"`)
+		if got != want {
+			t.Fatalf("alternate-screen override present = %v, want %v; argv=%v", got, want, argv)
+		}
+	}
 	_, _, argv, err := Resolve(s.ID, TabAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	check(argv, nil)
+	checkFullscreen(argv, true)
 	_, _, argv, _, err = AppServerCommand(s.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	check(argv, nil)
+	checkFullscreen(argv, false) // the background server has no TUI
+	_, _, argv, err = AttachCommand(s.ID, "unix:///tmp/codex.sock", "thread-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkFullscreen(argv, true)
 	// A coordinator may carry repo names, but owns no worktrees or writable clones.
 	s.RootID = ""
 	if err := db.PutSession(s); err != nil {
@@ -92,6 +106,7 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 			t.Fatal(err)
 		}
 		check(argv, nil)
+		checkFullscreen(argv, false)
 	}
 }
 

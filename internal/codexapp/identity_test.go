@@ -80,13 +80,13 @@ func TestEndpointForShape(t *testing.T) {
 
 func TestAttachArgvShape(t *testing.T) {
 	argv := AttachArgv("codex", "unix:///run/user/1000/codexapp/s.sock", "thr-1")
-	want := []string{"codex", "--remote", "unix:///run/user/1000/codexapp/s.sock", "resume", "thr-1"}
+	want := []string{"codex", "-c", `tui.alternate_screen="always"`, "--remote", "unix:///run/user/1000/codexapp/s.sock", "resume", "thr-1"}
 	if strings.Join(argv, " ") != strings.Join(want, " ") {
 		t.Fatalf("attach argv = %v, want %v", argv, want)
 	}
 	// No thread id → no resume subcommand.
 	argv = AttachArgv("", "ws://127.0.0.1:4500", "")
-	if strings.Join(argv, " ") != "codex --remote ws://127.0.0.1:4500" {
+	if strings.Join(argv, " ") != `codex -c tui.alternate_screen="always" --remote ws://127.0.0.1:4500` {
 		t.Fatalf("attach argv (no thread) = %v", argv)
 	}
 }
