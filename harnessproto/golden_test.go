@@ -36,7 +36,7 @@ var goldenFrames = []struct {
 		Name:     "mybox",
 		Labels:   map[string]string{"os": "linux", "zone": "home"},
 		Capabilities: &Capabilities{
-			MaxPanes: 8, Bwrap: true, OS: "linux", Arch: "amd64", Features: []string{"pane-seq", "sessions", "runtime-events"},
+			Compute: true, MaxPanes: 8, Bwrap: true, OS: "linux", Arch: "amd64", Features: []string{"pane-seq", "sessions", "runtime-events"},
 		},
 		Panes: []PaneOffer{{PaneID: "p1", OutSeq: 42, Running: true}},
 	}},
