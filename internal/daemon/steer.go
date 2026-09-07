@@ -173,6 +173,10 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 // caller's connection) and reports any failure to the session journal — the
 // caller has already been told "accepted".
 func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structuredSteerer, text string) {
+	if err := revalidateDeferred(ctx); err != nil {
+		structuredJournal(id, core.JournalError, "prompt cancelled: access revoked")
+		return
+	}
 	if d.steerStarted != nil {
 		defer func() {
 			select {
@@ -196,6 +200,10 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
 	}
 	go func() {
+		if err := revalidateDeferred(ctx); err != nil {
+			structuredJournal(sess.ID, core.JournalError, "prompt cancelled: access revoked")
+			return
+		}
 		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
 		sup, err := d.ensureSupervisor(sess.ID)
 		if err != nil {
@@ -225,6 +233,10 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 // its disconnect would leave the session exactly as stuck as the timeout this
 // change exists to remove.
 func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload []engine.InputStep) {
+	if err := revalidateDeferred(ctx); err != nil {
+		journal(id, core.JournalError, "prompt cancelled: access revoked")
+		return
+	}
 	if d.steerStarted != nil {
 		defer func() {
 			select {
@@ -245,6 +257,10 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	in, ok := d.engine.Lookup(key)
 	if !ok {
 		d.steerStartFailed(id, fmt.Errorf("agent %s did not come up", id))
+		return
+	}
+	if err := revalidateDeferred(ctx); err != nil {
+		d.steerStartFailed(id, fmt.Errorf("prompt cancelled: access revoked"))
 		return
 	}
 	// The runtime is a TUI that has to boot before it will accept typed input, so
