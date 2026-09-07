@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -224,6 +225,79 @@ func TestConcurrentOneShotCalls(t *testing.T) {
 			case <-time.After(time.Millisecond):
 			}
 		}
+	}
+}
+
+func TestServerScanPreservesInFlightAtomicPublication(t *testing.T) {
+	f := newFixture(t, Callbacks{}, ServerOptions{})
+	created := make(chan struct{})
+	resume := make(chan struct{})
+	client := f.client(clientOptions{
+		poll: time.Millisecond,
+		afterRequestCreate: func() {
+			close(created)
+			<-resume
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := client.Query(ctx, Query{Verb: "snapshot", Fields: map[string]string{"value": "race"}})
+		done <- outcome{result: result, err: err}
+	}()
+	select {
+	case <-created:
+	case <-ctx.Done():
+		t.Fatal("client did not create publication temporary")
+	}
+	processed, err := f.server.ServeOnce(ctx)
+	if err != nil || processed != 1 {
+		t.Fatalf("scan with in-flight temporary processed=%d err=%v", processed, err)
+	}
+	entries, err := os.ReadDir(f.grant.RequestsHostDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !requestTemporaryFromFile(entries[0].Name()) {
+		t.Fatalf("scanner removed or altered in-flight temporary: %v", entries)
+	}
+	close(resume)
+	for {
+		if _, err := f.server.ServeOnce(ctx); err != nil && !errors.Is(err, ErrQueueFull) {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-done:
+			if got.err != nil || string(got.result.Body) != "ok:race" {
+				t.Fatalf("call after scan result=%+v err=%v", got.result, got.err)
+			}
+			return
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestServerRemovesAbandonedAtomicPublication(t *testing.T) {
+	now := time.Now()
+	f := newFixture(t, Callbacks{}, ServerOptions{Clock: func() time.Time { return now }})
+	name := ".tmp-" + strings.Repeat("a", 32)
+	path := filepath.Join(f.grant.RequestsHostDir, name)
+	if err := os.WriteFile(path, []byte("abandoned"), regularFileMode); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(requestTemporaryMaxAge + time.Second)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned temporary remains: %v", err)
 	}
 }
 

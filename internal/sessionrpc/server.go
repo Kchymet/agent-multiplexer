@@ -185,16 +185,18 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 			return processed, err
 		}
 		if s.rejectRequests || more {
-			s.rejectRequests = more
+			kept := false
 			for _, name := range requestNames {
-				_ = unlinkAt(s.requests, name)
+				removed, err := s.removeRequestEntry(name)
+				if err != nil {
+					return processed, err
+				}
+				kept = kept || !removed
 				processed++
 			}
+			s.rejectRequests = more || kept
 			if len(requestNames) != 0 || more {
 				overflow = true
-			}
-			if more {
-				s.rejectRequests = true
 			}
 			goto cleanup
 		}
@@ -205,7 +207,9 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 				break
 			}
 			if _, ok := requestIDFromFile(name); !ok {
-				_ = unlinkAt(s.requests, name)
+				if _, err := s.removeRequestEntry(name); err != nil {
+					return processed, err
+				}
 				processed++
 				continue
 			}
@@ -239,6 +243,29 @@ cleanup:
 		return processed, ErrQueueFull
 	}
 	return processed, nil
+}
+
+// removeRequestEntry removes hostile queue entries and abandoned publication
+// temporaries, while preserving a recent safe temporary that a client may still
+// be writing. Removing that inode would make the client's final rename fail
+// with ENOENT after the request outcome has already become uncertain.
+func (s *Server) removeRequestEntry(name string) (bool, error) {
+	if !requestTemporaryFromFile(name) {
+		return true, unlinkAt(s.requests, name)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(s.requests.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return true, nil
+		}
+		return false, err
+	}
+	mode := uint32(stat.Mode)
+	if mode&unix.S_IFMT == unix.S_IFREG && stat.Nlink == 1 && stat.Uid == uint32(os.Geteuid()) &&
+		mode&0o7777 == regularFileMode && !statChangeTime(stat).Before(s.clock().Add(-requestTemporaryMaxAge)) {
+		return false, nil
+	}
+	return true, unlinkAt(s.requests, name)
 }
 
 func (s *Server) Run(ctx context.Context) error {

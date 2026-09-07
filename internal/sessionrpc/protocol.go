@@ -33,6 +33,10 @@ const (
 	MaxReceiptGrace     = 30 * time.Second
 	DefaultReceiptGrace = 3 * time.Second
 	DefaultPollInterval = 20 * time.Millisecond
+	// Request temporaries older than every valid request lifetime are abandoned.
+	// A scanner must preserve newer temporaries because the publishing client
+	// may still hold and fsync the file before its no-replace rename.
+	requestTemporaryMaxAge = 2 * access.MaxRequestAge
 
 	maxContextFileBytes    = 8 << 10
 	maxCredentialFileBytes = 64 << 10
