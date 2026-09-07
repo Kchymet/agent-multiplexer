@@ -48,19 +48,18 @@ func writeAgentGuide(s store.Session) { writeGuide(s) }
 func memberGuide(s store.Session) string {
 	repos := "This agent has no repos attached — it works in its own sandbox dir."
 	if names := store.SplitRepos(s.Repo); len(names) > 0 {
-		repos = "You are assigned these repos (one worktree subdir each): " + strings.Join(names, ", ") + "."
+		repos = "You are assigned these repos (one independent clone subdir each): " + strings.Join(names, ", ") + "."
 	}
 	return fmt.Sprintf(`# amux agent — your sandbox
 
-This directory is your sandbox. It contains a git **worktree per repository** you
+This directory is your sandbox. It contains an independent Git clone per repository you
 are assigned (the subdirectories here). %s
 
 ## Stay in your sandbox
 - Keep source and configuration **edits** inside this directory (your worktrees).
-  Run git commands from your assigned worktree. Git may write its backing metadata
-  (objects, refs, index, locks, and config) in amux's shared bare clone outside this
-  directory; amux mounts that metadata writable for this purpose. This is allowed.
-  Do not manually edit the shared clone, other agents' worktrees, or amux's state.
+  Run git commands from your assigned clone. Its Git metadata (objects, refs, index,
+  locks, hooks, and config) is private to this session and stays under the clone.
+  Do not edit other agents' clones or amux's host-side state/cache.
   Reading the shared agent sessions below is also allowed.
 - You may commit, fetch, merge, push your assigned branch, and open or update its
   pull request with gh using the host's shared GitHub authentication. These are
@@ -84,7 +83,7 @@ amux itself.
 
 `+transcriptsSection+`
 ## Keep current with the remote
-Each repo here is a worktree of a shared clone of its remote, and other agents
+Each repo here is an independent clone of its remote, and other agents
 may be working the same repo in parallel on their own branches. Before starting,
 and regularly as you work, refresh your branch from the remote — run inside each
 repo subdirectory:
@@ -254,10 +253,10 @@ criteria is the record that survives your context). %s
 func repoGuide(home store.Session) string {
 	var b strings.Builder
 	repoName := home.Repo
-	gitDir, source := "", ""
+	source := ""
 	if db, err := store.Open(); err == nil {
 		if r, ok, _ := db.Repo(repoName); ok {
-			gitDir, source = r.GitDir, r.Source
+			source = r.Source
 		}
 		db.Close()
 	}
@@ -269,10 +268,9 @@ it, by whom, and where it stands; you dispatch new one-off agents and steer the
 ones running. Prompting this repo from the rail or the web reaches you.
 
 ## This repo
-- Bare clone: `+"`%s`"+` — every agent worktree on this repo is sourced from it. Read
-  history and files from it directly, e.g. `+"`git -C %s log --oneline origin/HEAD`"+`
-  and `+"`git -C %s show origin/HEAD:<path>`"+`. Never write to it.
-- You have no worktree of your own: to change code, dispatch a one-off agent and
+- Authoritative source: `+"`%s`"+`. Each dispatched agent receives an independent
+  single-branch clone; the host cache and other sessions' Git metadata are not yours.
+- You have no clone of your own: to change code, dispatch a one-off agent and
   read its worktree at its sandbox path.
 
 ## Your sandbox
@@ -286,7 +284,7 @@ Read freely; never edit an agent's worktree. %s
 - `+"`amux do new-repo-agent %s -f prompt=\"…\"`"+` dispatches a new one-off agent on
   this repo (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are optional).
 
-`, repoName, repoName, source, gitDir, gitDir, gitDir, home.Dir, guideRegenNote, steeringVerbs, repoName)
+`, repoName, repoName, source, source, home.Dir, guideRegenNote, steeringVerbs, repoName)
 	b.WriteString(repoSessionsSection(repoName))
 	b.WriteString("\n")
 	b.WriteString(configHomeSection)
@@ -414,7 +412,7 @@ func inventorySection() string {
 		b.WriteString("None tracked.\n")
 	}
 	for _, r := range repos {
-		fmt.Fprintf(&b, "- **%s** (`%s`) — home session id `%s`, bare clone `%s`\n", r.Name, r.Source, store.RepoHomeID(r.Name), r.GitDir)
+		fmt.Fprintf(&b, "- **%s** (`%s`) — home session id `%s`; per-session clones are isolated\n", r.Name, r.Source, store.RepoHomeID(r.Name))
 		for _, a := range repoAgents[r.Name] {
 			b.WriteString("  ")
 			writeAgentLine(&b, a)

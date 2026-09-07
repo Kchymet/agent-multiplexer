@@ -95,11 +95,9 @@ func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint 
 	return dir, env, scope(dir, TabAgent, s, inner, sources), endpoint, nil
 }
 
-// Codex applies its own tool sandbox inside amux's mount namespace. Grant the
-// same assigned bare clones in both layers: the worktree's index, objects and
-// refs live there, outside cwd. A writable outer bind alone is insufficient.
-// A config override works for both the TUI (including resume) and App Server.
-// It only takes effect in workspace-write mode; read-only stays read-only.
+// Codex applies its own tool sandbox inside amux's mount namespace. This helper
+// remains for non-Git writable roots, but independent session repositories need
+// no override: their .git directories are already beneath the session workspace.
 func codexWritableRepos(argv, sources []string) []string {
 	if len(argv) == 0 || len(sources) == 0 {
 		return argv
@@ -164,29 +162,15 @@ func codexBin(agentArgv []string) string {
 	return "codex"
 }
 
-// agentRepoSources returns the bare-clone git dirs backing an agent's worktrees.
-// They live under the read-only amux tree but must be writable so git can commit
-// (it writes objects/refs/index there), so the scope re-binds them read-write.
+// agentRepoSources previously returned the shared bare-clone Git directories
+// backing linked worktrees. New sessions use independent repositories contained
+// in their own directory, so they need no extra mount or Codex writable root.
+//
+// Legacy linked worktrees deliberately fail closed after relaunch until an
+// explicit migration is performed. Inferring legacy status from a session-
+// writable .git file would let a session regain a writable host-cache mount.
 func agentRepoSources(agentID string) []string {
-	db, err := store.Open()
-	if err != nil {
-		return nil
-	}
-	defer db.Close()
-	s, ok, _ := db.GetSession(agentID)
-	if !ok || s.IsRoot() {
-		// The console has no store row; a coordinator or repo home is a root with
-		// no worktree of its own (a repo home reads its bare clone, never commits
-		// to it), so none of them gets a writable clone.
-		return nil
-	}
-	var out []string
-	for _, name := range store.SplitRepos(s.Repo) {
-		if r, ok, _ := db.Repo(name); ok && r.GitDir != "" {
-			out = append(out, r.GitDir)
-		}
-	}
-	return out
+	return nil
 }
 
 // systemRoots are the host trees every pane sees read-only, in bind order: the
@@ -499,7 +483,32 @@ func sessionFor(id string) (store.Session, error) {
 	if !ok {
 		return store.Session{}, fmt.Errorf("no such agent %q", id)
 	}
+	if err := requireIndependentGit(s); err != nil {
+		return store.Session{}, err
+	}
 	return s, nil
+}
+
+// requireIndependentGit fails before any pane/App Server launch side effect if
+// an assigned checkout is still a linked worktree. A session can modify its own
+// .git entry, so this check grants no additional mount based on what it sees; it
+// only refuses unsafe/ambiguous layouts. Existing dirty/staged/untracked/rebase
+// and submodule state stays untouched for an explicit host-authorized migration.
+func requireIndependentGit(s store.Session) error {
+	if s.IsRoot() {
+		return nil
+	}
+	for _, repo := range store.SplitRepos(s.Repo) {
+		checkout := filepath.Join(s.Dir, repo)
+		info, err := os.Lstat(filepath.Join(checkout, ".git"))
+		if err != nil {
+			return fmt.Errorf("session %s repo %s is not launchable: missing private Git metadata; preserve the session and recreate or migrate it from the host", s.ID, repo)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("session %s repo %s uses legacy or unsafe shared Git metadata; launch refused to protect other sessions. Preserve its conversation and all dirty, staged, untracked, rebase, and submodule state, then recreate or migrate it with a host-authorized tool", s.ID, repo)
+		}
+	}
+	return nil
 }
 
 // EditorBin is the configured editor, defaulting to nvim.
