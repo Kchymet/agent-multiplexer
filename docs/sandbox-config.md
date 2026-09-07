@@ -198,6 +198,17 @@ credentials and fixed `context.json` are read-only at the immediate-root
 `/amux-session-access` directory. Host provider/TLS/management environment
 variables and ambient API tokens are removed before the child starts.
 
+The 0.12.0 floor is a security boundary, not a packaging preference. The
+[bubblewrap advisory](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx)
+marks older releases vulnerable to following an attacker-controlled mount-target
+symlink through the setup-time `/oldroot`; 0.12.0 creates destinations with
+`openat2(RESOLVE_IN_ROOT)`. amux refuses an older or missing binary rather than
+falling back to a broad host view. Runtime acceptance on a host with an older
+binary should use a disposable Linux VM or CI runner image that already contains
+bubblewrap 0.12.0 or newer and enables unprivileged user and PID namespaces. This
+tests the real mount/PID boundary without installing packages, restarting the
+host daemon, or nesting a harness sandbox probe on the development host.
+
 ## The feedback loop
 
 Because a copy could otherwise drift from the template in silence, amux records

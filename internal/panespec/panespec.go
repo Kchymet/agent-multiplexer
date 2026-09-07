@@ -437,7 +437,8 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 	args = append(args, "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc")
 	// Non-merged-/usr systems also need these as real dirs; on merged systems they
 	// are symlinks already covered by /usr, so -try skips whatever's absent. /opt,
-	// /nix, /home/linuxbrew (brew prefix), and /run cover this host's toolchain.
+	// /nix, and /home/linuxbrew cover additional host toolchains without exposing
+	// the host's runtime-service namespace under /run.
 	for _, p := range systemRoots[2:] {
 		args = append(args, "--ro-bind-try", p, p)
 	}
