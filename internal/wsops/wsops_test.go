@@ -589,14 +589,16 @@ func TestApplyResultHonorsAgentField(t *testing.T) {
 	}
 }
 
-// TestNewWorkgroupHonorsAgentField keeps the coordinator on the selected
-// harness too. A remote provider may expose only Codex, so making its root
-// Claude while its children are Codex leaves it unable to start the workgroup.
-func TestNewWorkgroupHonorsAgentField(t *testing.T) {
+// TestNewWorkgroupConfiguresCoordinator keeps the selected harness, model, and
+// prompt on the workgroup's default coordinator session. A prompt alone must
+// not create a redundant child agent.
+func TestNewWorkgroupConfiguresCoordinator(t *testing.T) {
 	isolateStore(t)
 	ctx := context.Background()
 
-	codexID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"agent": "codex", "model": "gpt-6-astra"}})
+	codexID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{
+		"agent": "codex", "model": "gpt-6-astra", "prompt": "coordinate the rollout",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,6 +612,21 @@ func TestNewWorkgroupHonorsAgentField(t *testing.T) {
 	}
 	if codex.Model != "gpt-6-astra" {
 		t.Errorf("new-workgroup lost the selected coordinator model: %q", codex.Model)
+	}
+	if codex.Prompt != "coordinate the rollout" {
+		t.Errorf("new-workgroup lost the selected coordinator prompt: %q", codex.Prompt)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	children, err := db.Children(codexID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 0 {
+		t.Fatalf("coordinator config created %d child agents, want none: %+v", len(children), children)
 	}
 	if got := getSession(t, claudeID).Agent; got != "claude" {
 		t.Errorf("new-workgroup without an agent made a %q coordinator", got)
