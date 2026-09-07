@@ -67,6 +67,22 @@ const (
 	MCPCredentialsFile = ".credentials.json"
 )
 
+// FullscreenTUI adds the invocation-local Codex config needed when its TUI is
+// embedded in amux. Codex's "auto" alternate-screen mode can choose the normal
+// screen based on inherited terminal environment (notably Zellij); amux mirrors
+// a fixed-size pane instead of exposing the outer terminal's scrollback, so that
+// choice leaves mouse-wheel events with nowhere useful to go. Force an alternate
+// screen for this Codex process only, without changing the user's config.toml or
+// any outer terminal/multiplexer setting.
+func FullscreenTUI(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := make([]string, 0, len(argv)+2)
+	out = append(out, argv[0], "-c", `tui.alternate_screen="always"`)
+	return append(out, argv[1:]...)
+}
+
 // ConfigPath is the user home's config.toml.
 func ConfigPath() string { return UserHome().ConfigPath() }
 

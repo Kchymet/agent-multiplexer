@@ -15,6 +15,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/cfghome"
+	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -149,6 +150,7 @@ func AttachCommand(agentID, endpoint, threadID string) (dir string, env, argv []
 	if threadID != "" {
 		inner = append(inner, "resume", threadID)
 	}
+	inner = codexcfg.FullscreenTUI(inner)
 	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), nil
 }
 
