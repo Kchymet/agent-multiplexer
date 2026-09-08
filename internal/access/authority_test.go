@@ -263,6 +263,251 @@ func TestCurrentRecoversCommittedStagedPublicationWithoutIssuing(t *testing.T) {
 	}
 }
 
+func TestCurrentRejectsCredentialInconsistentWithCommittedRecord(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, unrelatedPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*Credential){
+		"protocol":      func(c *Credential) { c.Protocol++ },
+		"key id":        func(c *Credential) { c.KeyID = strings.Repeat("0", len(c.KeyID)) },
+		"subject":       func(c *Credential) { c.SubjectID = "other" },
+		"kind":          func(c *Credential) { c.Kind = SubjectProvider },
+		"generation":    func(c *Credential) { c.Generation++ },
+		"expiry":        func(c *Credential) { c.NotAfter++ },
+		"issuer key id": func(c *Credential) { c.IssuerKeyID = strings.Repeat("0", len(c.IssuerKeyID)) },
+		"issuer public key": func(c *Credential) {
+			c.IssuerPublicKey = base64.RawStdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
+		},
+		"private key seed": func(c *Credential) {
+			private, err := base64.RawStdEncoding.DecodeString(c.PrivateKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			private[0] ^= 1
+			c.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+		},
+		"private keypair": func(c *Credential) { c.PrivateKey = base64.RawStdEncoding.EncodeToString(unrelatedPrivate) },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			corrupt := original
+			mutate(&corrupt)
+			if err := atomicJSON(filepath.Join(dir, "current"), corrupt, 0o400); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Current(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrInvalidCredential) {
+				t.Fatalf("Current error = %v, want ErrInvalidCredential", err)
+			}
+			if err := atomicJSON(filepath.Join(dir, "current"), original, 0o400); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("malformed json", func(t *testing.T) {
+		bad := filepath.Join(dir, ".malformed-current")
+		if err := os.WriteFile(bad, []byte("{"), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(bad, filepath.Join(dir, "current")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.Current(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrInvalidCredential) {
+			t.Fatalf("Current error = %v, want ErrInvalidCredential", err)
+		}
+		if err := atomicJSON(filepath.Join(dir, "current"), original, 0o400); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	record := a.registry.Records[original.KeyID]
+	record.PublicKey = base64.RawStdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
+	a.registry.Records[original.KeyID] = record
+	if _, err := a.Current(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("Current with corrupt committed public key = %v", err)
+	}
+}
+
+func TestCurrentUsesValidStageInsteadOfCorruptPublishedCredential(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONFile(stagedCredentialPath(dir, original.KeyID), original, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := original
+	corrupt.Generation++
+	if err := atomicJSON(filepath.Join(dir, "current"), corrupt, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Current(context.Background(), SubjectSession, "a1"); err != nil {
+		t.Fatalf("recover valid staged credential: %v", err)
+	}
+	published, err := LoadCredential(dir)
+	if err != nil || published.Generation != original.Generation || published.PrivateKey != original.PrivateKey {
+		t.Fatalf("recovered credential = %+v, err=%v", published, err)
+	}
+}
+
+func TestCurrentRejectsSeedCorruptStagedCredential(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, err := base64.RawStdEncoding.DecodeString(cred.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private[0] ^= 1
+	cred.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+	if err := writeJSONFile(stagedCredentialPath(dir, cred.KeyID), cred, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Current(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("Current with seed-corrupt staged credential = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestOpenRejectsIssuerWhoseKeyPairOrIDDoesNotMatch(t *testing.T) {
+	for _, field := range []string{"private", "seed", "id"} {
+		t.Run(field, func(t *testing.T) {
+			root := t.TempDir()
+			a, err := Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			issuer := a.issuer
+			if err := a.Close(); err != nil {
+				t.Fatal(err)
+			}
+			switch field {
+			case "private":
+				_, private, err := ed25519.GenerateKey(rand.Reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				issuer.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+			case "seed":
+				private, err := base64.RawStdEncoding.DecodeString(issuer.PrivateKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				private[0] ^= 1
+				issuer.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+			case "id":
+				issuer.KeyID = strings.Repeat("0", len(issuer.KeyID))
+			}
+			if err := writeJSONFile(filepath.Join(root, "issuer.json"), issuer, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := Open(root); err == nil {
+				_ = reopened.Close()
+				t.Fatal("Open accepted inconsistent issuer")
+			}
+		})
+	}
+}
+
+func TestCredentialStageAndAncestrySyncBeforeRegistryCommit(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	realSync := a.syncFile
+	realCommit := a.commit
+	syncCalls := 0
+	stageSynced := false
+	a.syncFile = func(file *os.File) error {
+		syncCalls++
+		staged, _ := filepath.Glob(filepath.Join(a.CredentialDir(SubjectSession, "a1"), ".current.*.next"))
+		if len(staged) == 1 {
+			stageSynced = true
+		}
+		return realSync(file)
+	}
+	a.commit = func(path string, value any, mode os.FileMode) (bool, error) {
+		if syncCalls < 4 || !stageSynced {
+			t.Fatalf("registry commit preceded ancestry/stage sync: calls=%d stage=%v", syncCalls, stageSynced)
+		}
+		return realCommit(path, value, mode)
+	}
+	if _, err := a.Ensure(context.Background(), SubjectSession, "a1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCredentialDurabilityBarrierFailurePreventsRegistryCommit(t *testing.T) {
+	for failAt := 1; failAt <= 4; failAt++ {
+		t.Run(fmt.Sprintf("sync_%d", failAt), func(t *testing.T) {
+			a, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = a.Close() })
+			realSync := a.syncFile
+			commitCalled := false
+			syncCalls := 0
+			a.syncFile = func(file *os.File) error {
+				syncCalls++
+				if syncCalls == failAt {
+					return errors.New("injected directory sync failure")
+				}
+				return realSync(file)
+			}
+			a.commit = func(string, any, os.FileMode) (bool, error) {
+				commitCalled = true
+				return false, errors.New("registry commit must not run")
+			}
+			if _, err := a.Ensure(context.Background(), SubjectSession, "a1"); err == nil {
+				t.Fatal("Ensure succeeded across failed durability barrier")
+			}
+			if commitCalled || len(a.registry.Current) != 0 || len(a.registry.Records) != 0 {
+				t.Fatalf("failed barrier reached registry: commit=%v registry=%+v", commitCalled, a.registry)
+			}
+			staged, err := filepath.Glob(filepath.Join(a.CredentialDir(SubjectSession, "a1"), ".current.*.next"))
+			if err != nil || len(staged) != 0 {
+				t.Fatalf("failed barrier retained staged publication: paths=%v err=%v", staged, err)
+			}
+		})
+	}
+}
+
 func TestRevokedOrExpiredCredentialCannotBeImplicitlyReissued(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	a, err := open(t.TempDir(), func() time.Time { return now }, rand.Reader)

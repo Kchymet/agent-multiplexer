@@ -1,7 +1,7 @@
 // Package wsops holds session lifecycle operations shared by the daemon (rail
 // actions) and the CLI. A workgroup (root) is a pure container: it checks out
 // nothing itself; its agents (subs) each work on a subset of the tracked repos,
-// one worktree per repo under the agent's own directory.
+// one isolated linked worktree per repo under the agent's own directory.
 package wsops
 
 import (
@@ -145,7 +145,11 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 			log.Printf("amux: skipping unknown repo %q while creating agent under %s", repoName, rootID)
 			continue
 		}
-		if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(dir, repoName), branch); err != nil {
+		req, err := checkoutRequest(repo, agentID, filepath.Join(dir, repoName), branch, core.SessionsDir())
+		if err != nil {
+			return store.Session{}, err
+		}
+		if err := git.AddCheckout(ctx, req); err != nil {
 			return store.Session{}, err
 		}
 		repos = append(repos, repoName)
@@ -281,6 +285,17 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 	if a.IsRoot() {
 		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
+	var managedRoot string
+	storageRoot := func() (string, error) {
+		if managedRoot != "" {
+			return managedRoot, nil
+		}
+		root, err := sessionStorageRoot(a.Dir)
+		if err == nil {
+			managedRoot = root
+		}
+		return root, err
+	}
 
 	cur := map[string]bool{}
 	for _, r := range store.SplitRepos(a.Repo) {
@@ -299,7 +314,15 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 			continue
 		}
 		if !cur[r] {
-			if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch); err != nil {
+			managedRoot, err := storageRoot()
+			if err != nil {
+				return err
+			}
+			req, err := checkoutRequest(repo, a.ID, filepath.Join(a.Dir, r), a.Branch, managedRoot)
+			if err != nil {
+				return err
+			}
+			if err := git.AddCheckout(ctx, req); err != nil {
 				return err
 			}
 		}
@@ -310,9 +333,21 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 		if wantSet[r] {
 			continue
 		}
-		if repo, ok, _ := db.Repo(r); ok {
-			wt := filepath.Join(a.Dir, r)
-			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
+		repo, ok, repoErr := db.Repo(r)
+		if repoErr != nil {
+			return repoErr
+		}
+		if !ok {
+			return fmt.Errorf("cannot remove repo %q from agent %s: tracked repository record is missing", r, agentID)
+		}
+		managedRoot, err := storageRoot()
+		if err != nil {
+			return err
+		}
+		wt := filepath.Join(a.Dir, r)
+		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt), managedRoot,
+			gitStagingDir(), gitLayoutPath(a.ID, r)); err != nil {
+			return fmt.Errorf("remove repo %q from agent %s: %w", r, agentID, err)
 		}
 	}
 	// Field-scoped write: only the repo column changes here.
@@ -568,7 +603,9 @@ func DeleteByID(ctx context.Context, id string) error {
 		}
 		agents, _ := db.Children(id)
 		for _, a := range agents {
-			removeAgent(ctx, db, a)
+			if err := removeAgent(ctx, db, a); err != nil {
+				return err
+			}
 		}
 		// The coordinator's own files go; the container dir itself is removed only
 		// if that leaves it empty. A re-parented agent can still physically live
@@ -577,23 +614,36 @@ func DeleteByID(ctx context.Context, id string) error {
 		removeContainerFiles(db, s)
 		return db.DeleteSession(id)
 	}
-	removeAgent(ctx, db, s)
-	return nil
+	return removeAgent(ctx, db, s)
 }
 
-func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
+func removeAgent(ctx context.Context, db *store.DB, a store.Session) error {
+	managedRoot, err := sessionStorageRoot(a.Dir)
+	if err != nil {
+		return err
+	}
 	for _, repoName := range store.SplitRepos(a.Repo) {
-		if repo, ok, _ := db.Repo(repoName); ok {
-			wt := filepath.Join(a.Dir, repoName)
-			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
+		repo, ok, repoErr := db.Repo(repoName)
+		if repoErr != nil {
+			return repoErr
+		}
+		if !ok {
+			return fmt.Errorf("cannot remove agent %s: tracked repository %q is missing", a.ID, repoName)
+		}
+		wt := filepath.Join(a.Dir, repoName)
+		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt), managedRoot,
+			gitStagingDir(), gitLayoutPath(a.ID, repoName)); err != nil {
+			return fmt.Errorf("remove repo %q for agent %s: %w", repoName, a.ID, err)
 		}
 	}
 	// The private config home goes with the dir; drop its seed manifest too.
 	if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
 		cfghome.Forget(spec)
 	}
-	_ = os.RemoveAll(a.Dir)
-	_ = db.DeleteSession(a.ID)
+	if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
+		return fmt.Errorf("remove agent directory %s: %w", a.ID, err)
+	}
+	return db.DeleteSession(a.ID)
 }
 
 // agentBranch is the branch to delete along with agent a's worktree at wt, or ""
@@ -609,10 +659,10 @@ func agentBranch(ctx context.Context, a store.Session, wt string) string {
 	if a.Branch != "" {
 		return a.Branch
 	}
-	b := git.CurrentBranch(ctx, wt)
-	if b == "" {
-		b = core.LegacyBranchFor(a.RootID)
-	}
+	// Do not ask Git: wt is writable by the session and its config can name
+	// external helpers. Blank Branch is the legacy import shape, whose branch
+	// naming convention is deterministic.
+	b := core.LegacyBranchFor(a.RootID)
 	if !strings.HasPrefix(b, core.BranchPrefix) {
 		return ""
 	}
