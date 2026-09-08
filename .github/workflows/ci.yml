@@ -45,6 +45,10 @@ jobs:
           # creation via openat2(RESOLVE_IN_ROOT).
           ref: 2a76602a8c71f36c1527cf9fc3417d9149822e0c
           path: .ci/bubblewrap-v0.12.0
+      - name: install ephemeral bubblewrap build dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libcap-dev
       - name: build private bubblewrap runner
         shell: bash
         run: |
