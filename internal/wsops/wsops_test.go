@@ -824,7 +824,7 @@ func TestWriteAgentGuide(t *testing.T) {
 		// The guide must steer agents to merge, not rebase: rebasing a pushed
 		// branch forces a force-push to update its PR, which needs a human to
 		// unblock. Merging keeps every push a fast-forward.
-		if !strings.Contains(string(b), "git merge --no-edit origin/HEAD") {
+		if !strings.Contains(string(b), "git merge --no-edit FETCH_HEAD") {
 			t.Errorf("kind %q: %s should tell agents to merge the remote", tc.kind, tc.file)
 		}
 		if strings.Contains(string(b), "git rebase") {

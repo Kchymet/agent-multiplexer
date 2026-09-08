@@ -107,6 +107,13 @@ sibling's unpublished branch/object is not copied into a new session, and Git
 writes need no mount outside the session directory in either the bubblewrap or
 Codex `workspace-write` sandbox.
 
+Checkout publication is an atomic rename from daemon-private
+`StateDir()/git-staging` into session storage. Those locations must be on the
+same filesystem. In particular, a custom `XDG_DATA_HOME` must not place session
+storage on a different filesystem from amux's state directory. If the kernel
+returns `EXDEV`, creation fails closed: amux does not publish a partial checkout
+or fall back to a non-atomic copy.
+
 This clone policy is a write-isolation and initial-transfer boundary. The pane
 namespace supplies the corresponding read boundary: it mounts only the exact
 session directory and never the amux data/state roots, sibling clones, or host

@@ -30,7 +30,7 @@ You are in an amux worktree. The rules from your workspace guide (`CLAUDE.md`, o
   root):
 
   ```sh
-  git fetch origin && git merge --no-edit origin/HEAD
+  git fetch origin && git merge --no-edit FETCH_HEAD
   ```
 
   Merge — don't rebase. Once the branch is pushed, rebasing rewrites its history
