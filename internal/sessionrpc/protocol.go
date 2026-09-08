@@ -291,7 +291,7 @@ type ResponseLease interface {
 
 type Callbacks struct {
 	// All callbacks are trusted synchronous boundaries. Implementations must
-	// honor context cancellation, remain bounded and nonblocking, and not panic.
+	// honor context cancellation, return within a bounded time, and not panic.
 	// The package serializes calls per subject but does not isolate daemon code.
 	Authorize func(context.Context, access.Principal, Call) error
 	// Dispatch is the execution boundary. Integration must compare the
