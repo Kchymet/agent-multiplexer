@@ -189,6 +189,33 @@ func TestRuntimeEventDispatchAllowsArchivedTargetStillInCurrentScope(t *testing.
 	}
 }
 
+func TestRuntimeEventDispatchReturnsStableInvalidRequestCodes(t *testing.T) {
+	session := store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}
+	_, runtime, principals := sessionRuntimeFixture(t, session)
+	for _, tc := range []struct {
+		name   string
+		fields map[string]string
+		code   string
+	}{
+		{"unknown field", map[string]string{"path": "/host/transcript"}, "runtime_events_invalid"},
+		{"malformed cursor", map[string]string{core.RuntimeEventsCursorField: "not-a-cursor"}, "runtime_events_cursor_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+				Principal: principals[session.ID], RequestID: "0123456789abcdef0123456789abcdef",
+				Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery,
+					Verb: core.QueryRuntimeEvents, ID: session.ID, Fields: tc.fields},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != sessionrpc.StatusInvalid || result.Code != tc.code || len(result.Body) != 0 {
+				t.Fatalf("invalid runtime event query = %+v", result)
+			}
+		})
+	}
+}
+
 func TestRestartDerivesArchivedCompletionCleanupWithoutInMemoryHooks(t *testing.T) {
 	isolateHome(t)
 	ctx := context.Background()

@@ -43,6 +43,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 	req := request.Call.AccessRequest()
 	action, err := canonicalSessionOperation(req)
 	if err != nil {
+		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+			return runtimeEventError(err), nil
+		}
 		return rpcInvalid("invalid_operation"), nil
 	}
 	if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {

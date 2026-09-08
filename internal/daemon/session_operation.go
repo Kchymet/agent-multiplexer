@@ -52,7 +52,7 @@ func validateSessionQuery(req access.Request) error {
 			return fmt.Errorf("query %q requires an id", req.Verb)
 		}
 		if err := validateFields(req.Fields, core.RuntimeEventsCursorField, core.RuntimeEventsAfterSequenceField); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", errEventQueryInvalid, err)
 		}
 		_, _, err := parseSessionEventFields(req.Fields)
 		return err
