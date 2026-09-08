@@ -340,8 +340,22 @@ func sourcesFor(rec Record) ([]sourceSpec, bool) {
 // and its "starting agent" notice has to reach the caller before the transcript
 // the events will later come from exists.
 func Stream(resolve Resolver, poll time.Duration) func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+	return StreamContext(func(_ context.Context, sessionID string) (Record, bool) {
+		return resolve(sessionID)
+	}, poll)
+}
+
+// ContextResolver is the cancellable form of Resolver. Provider production uses
+// it for daemon-backed lookup so connection teardown or grant revocation can
+// interrupt a peer that accepted the request but stopped replying.
+type ContextResolver func(context.Context, string) (Record, bool)
+
+// StreamContext is Stream with a context-aware resolver. The same context then
+// governs the tail, giving authorization revocation one cancellation boundary
+// across both opening and consuming a runtime record.
+func StreamContext(resolve ContextResolver, poll time.Duration) func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
 	return func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
-		rec, ok := resolve(sessionID)
+		rec, ok := resolve(ctx, sessionID)
 		if !ok || (rec.Path == "" && rec.Journal == "") {
 			return nil, false
 		}

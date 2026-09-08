@@ -230,11 +230,15 @@ const (
 // Capabilities advertises what a provider can run, for orchestrator scheduling.
 type Capabilities struct {
 	Execution *ExecutionCapabilities `json:"execution,omitempty"`
-	MaxPanes  int                    `json:"maxPanes,omitempty"`
-	Bwrap     bool                   `json:"bwrap,omitempty"`
-	OS        string                 `json:"os,omitempty"`
-	Arch      string                 `json:"arch,omitempty"`
-	Features  []string               `json:"features,omitempty"`
+	// Compute is the explicit local grant for spawn/input/resize/kill. Absence is
+	// false: a registration bearer, labels, MaxPanes, or Execution metadata must
+	// never imply arbitrary command execution on the provider host.
+	Compute  bool     `json:"compute,omitempty"`
+	MaxPanes int      `json:"maxPanes,omitempty"`
+	Bwrap    bool     `json:"bwrap,omitempty"`
+	OS       string   `json:"os,omitempty"`
+	Arch     string   `json:"arch,omitempty"`
+	Features []string `json:"features,omitempty"`
 }
 
 // PaneOffer is a still-running pane a reconnecting provider offers for resume.
