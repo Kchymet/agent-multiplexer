@@ -73,8 +73,12 @@ func (b *sessionResponseBudget) ReserveResponse(ctx context.Context, request ses
 		}
 		return nil, errSessionResponseCapacity
 	}
-	if b.files >= b.maxFiles || request.MaxBytes > b.maxBytes-b.bytes ||
-		(request.ReceiptSlot && b.receipts >= b.maxReceipts) {
+	// Existing responses are already durable disk reality from a prior daemon
+	// incarnation. Adopt and account them even when the retained set exceeds the
+	// current limits; rejecting adoption would wedge startup before cleanup can
+	// release anything. Only new amplification is subject to admission limits.
+	if !request.Existing && (b.files >= b.maxFiles || request.MaxBytes > b.maxBytes-b.bytes ||
+		(request.ReceiptSlot && b.receipts >= b.maxReceipts)) {
 		return nil, errSessionResponseCapacity
 	}
 
