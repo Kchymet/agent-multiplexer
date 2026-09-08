@@ -284,6 +284,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer func() {
 		d.stopDeferredAdmission()
 		cancelRun()
+		// Retire structured-control transports before joining anything that may be
+		// blocked in an admitted JSON-RPC write. This is intentionally earlier than
+		// Shutdown below: process/engine teardown and authority release still happen
+		// only after every admitted caller and serving connection has returned.
+		if codexOwned {
+			d.codex.InterruptTransports()
+		}
 		if ln != nil {
 			_ = ln.Close()
 		}

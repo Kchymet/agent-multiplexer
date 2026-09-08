@@ -97,10 +97,14 @@ type Supervisor struct {
 	approvals *approvalTracker
 	state     *streamState // owned by the read loop only
 
-	mu       sync.Mutex
-	proc     *exec.Cmd
-	closed   bool
-	threadID string
+	mu     sync.Mutex
+	proc   *exec.Cmd
+	closed bool
+	// interrupted is set during daemon drain before deferred callers are joined.
+	// It retires the control transport without killing the owned process; Close
+	// performs that later teardown after all admitted callers have returned.
+	interrupted bool
+	threadID    string
 
 	// curTurn is the OBSERVED active turn on our pinned thread, from ANY origin (a
 	// native TUI turn raises turn/started too). It is the target for Cancel/Interject,
@@ -356,6 +360,11 @@ func (s *Supervisor) attach(ctx context.Context, transport msgConn) error {
 	rpc.onNotify = s.onNotify
 	rpc.onRequest = s.onRequest
 	s.mu.Lock()
+	if s.closed || s.interrupted {
+		s.mu.Unlock()
+		_ = transport.Close()
+		return errClosed
+	}
 	s.rpc = rpc
 	s.mu.Unlock()
 
@@ -528,6 +537,7 @@ func (s *Supervisor) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.interrupted = true
 	cancel := s.runCancel
 	rpc := s.rpc
 	s.mu.Unlock()
@@ -542,6 +552,28 @@ func (s *Supervisor) Close() error {
 	s.closeLog()
 	s.killProc()
 	return nil
+}
+
+// interruptTransport retires the supervisor's client transport without killing
+// its App Server process. Daemon shutdown calls this before joining admitted
+// effects: closing the transport interrupts a blocked WebSocket read or write and
+// releases every pending JSON-RPC caller. Full process, hub, log, and identity
+// teardown remains Close's job after those callers have drained.
+//
+// Setting interrupted before reading rpc also covers a cold start which has not
+// attached yet: attach will reject and close any subsequently dialed transport.
+func (s *Supervisor) interruptTransport() {
+	s.mu.Lock()
+	s.interrupted = true
+	cancel := s.runCancel
+	rpc := s.rpc
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if rpc != nil {
+		_ = rpc.close()
+	}
 }
 
 func (s *Supervisor) killProc() {

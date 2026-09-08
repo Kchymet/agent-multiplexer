@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +19,8 @@ import (
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/source"
+
+	"github.com/gorilla/websocket"
 )
 
 type lifecycleBlockingSource struct {
@@ -187,6 +192,158 @@ func TestRunDrainsOwnedWorkBeforeEngineAndAuthority(t *testing.T) {
 		t.Fatalf("authority ownership leaked after Run: %v", err)
 	}
 	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunInterruptsStalledStructuredWriteBeforeDeferredJoin(t *testing.T) {
+	isolateControl(t)
+	authority, err := access.Open(filepath.Join(t.TempDir(), "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	protocolReady := make(chan struct{})
+	frameEntered := make(chan struct{})
+	releaseServer := make(chan struct{})
+	serverErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			serverErr <- fmt.Errorf("upgrade: %w", err)
+			return
+		}
+		defer conn.Close()
+		if tcp, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+			_ = tcp.SetReadBuffer(1024)
+		}
+
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				serverErr <- fmt.Errorf("handshake read: %w", err)
+				return
+			}
+			var call struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			if err := json.Unmarshal(raw, &call); err != nil {
+				serverErr <- fmt.Errorf("decode handshake call: %w", err)
+				return
+			}
+			if len(call.ID) == 0 || string(call.ID) == "null" {
+				continue
+			}
+			var result any = map[string]any{}
+			switch call.Method {
+			case "initialize":
+				result = map[string]any{"capabilities": map[string]any{}}
+			case "thread/start":
+				result = map[string]any{"thread": map[string]any{"id": "run-thread"}}
+			case "thread/resume":
+				result = map[string]any{"thread": map[string]any{"id": "run-thread"}}
+			}
+			if err := conn.WriteJSON(map[string]any{"id": call.ID, "result": result}); err != nil {
+				serverErr <- fmt.Errorf("handshake response: %w", err)
+				return
+			}
+			if call.Method == "thread/resume" {
+				close(protocolReady)
+				break
+			}
+		}
+
+		// The manager's next request is the large turn/start below. Consume only a
+		// fragment of its actual WebSocket frame, then stop reading so the client
+		// remains inside the kernel write until Run interrupts the transport.
+		oneFrameFragment := make([]byte, 1024)
+		if _, err := conn.UnderlyingConn().Read(oneFrameFragment); err != nil {
+			serverErr <- fmt.Errorf("stalled frame read: %w", err)
+			return
+		}
+		close(frameEntered)
+		<-releaseServer
+	}))
+	t.Cleanup(func() {
+		close(releaseServer)
+		server.Close()
+	})
+
+	eng := newLifecycleTestEngine()
+	d := New("", nil, time.Hour)
+	d.authority = authority
+	d.engine = eng
+	listener := newLifecycleListener()
+	d.listen = func(string, string) (net.Listener, func(), error) {
+		return listener, func() {}, nil
+	}
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{}, errors.New("disabled in lifecycle test")
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runDone := make(chan error, 1)
+	go func() { runDone <- d.Run(runCtx) }()
+	select {
+	case <-d.firstPoll:
+	case err := <-runDone:
+		t.Fatalf("Run exited before manager initialization: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not initialize its manager")
+	}
+
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	sup, err := d.codex.Ensure(context.Background(), "stalled", "", nil, []string{"sleep", "60"}, endpoint, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-protocolReady:
+	case err := <-serverErr:
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		t.Fatal("structured handshake did not finish")
+	}
+
+	admissionDone := make(chan error, 1)
+	if !d.startDeferredWork(func() {
+		admissionDone <- d.admitDeferredEffect(context.Background(), func(admitCtx context.Context) error {
+			_, err := sup.BeginPrompt(admitCtx, strings.Repeat("x", 32<<20))
+			return err
+		})
+	}) {
+		t.Fatal("structured admission rejected before shutdown")
+	}
+	select {
+	case <-frameEntered:
+	case err := <-admissionDone:
+		t.Fatalf("turn/start returned before transport interrupt: %v", err)
+	case err := <-serverErr:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn/start never entered stalled WebSocket write")
+	}
+
+	cancelRun()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run waited on a structured write instead of interrupting its transport")
+	}
+	select {
+	case err := <-admissionDone:
+		if err == nil {
+			t.Fatal("interrupted turn/start succeeded")
+		}
+	default:
+		t.Fatal("Run returned before its admitted structured caller")
+	}
+	if err := <-eng.shutdown; err != nil {
 		t.Fatal(err)
 	}
 }
