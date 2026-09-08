@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"amux/internal/agent"
-	"amux/internal/core"
 	"amux/internal/hostprep"
 	"amux/internal/store"
 )
