@@ -207,7 +207,8 @@ func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 // status/capture hooks into the launch dir (not the user-wide settings.json),
 // pointed at the stable installed binary. Claude loads settings.local.json only
 // from the launch dir. Safe launches use the session root, outside its private
-// repository clone; do not invoke host-side Git against session-writable config.
+// repository checkout; do not invoke host-side Git against session-writable
+// metadata here.
 func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
 	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
 		return err

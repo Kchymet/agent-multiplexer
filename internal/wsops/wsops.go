@@ -215,7 +215,7 @@ func ensureConfigHomeRooted(root *hostprep.Root, s store.Session) error {
 	}
 	// New repositories live beneath s.Dir, so the private config is outside Git.
 	// Do not run host-side Git against a legacy session-writable checkout here;
-	// explicit migration handles its excludes and any dirty state.
+	// explicit migration owns any needed exclusions and dirty-state handling.
 	return nil
 }
 
@@ -486,9 +486,9 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
 	// the running binary. Where it goes is the harness's call — Claude reads
 	// .claude/skills, others .agents/skills. Ordinary failures just mean the agent
-	// lacks the skills; unsafe destination failures refuse launch. The launch
-	// directory is the session root, outside its repository worktrees, so launch
-	// preparation never invokes host-side Git against session-writable metadata.
+	// lacks the skills; unsafe destination failures refuse launch. The launch dir
+	// is the agent's own root, outside its repository checkouts. Do not query or
+	// write session-controlled Git metadata during launch preparation.
 	skillsDir := h.SkillsDir(dir)
 	if err := optionalPreparation("prepare agent skills", skills.InstallRooted(root, skillsDir)); err != nil {
 		return "", nil, nil, err
