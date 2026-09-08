@@ -81,10 +81,18 @@ func validatePrivateDir(dir *os.File) error {
 }
 
 func readRegularAt(dir *os.File, name string, max int) ([]byte, error) {
-	return readRegularAtMode(dir, name, max, regularFileMode)
+	return readRegularAtObserved(dir, name, max, nil)
+}
+
+func readRegularAtObserved(dir *os.File, name string, max int, afterStat func()) ([]byte, error) {
+	return readRegularAtModeObserved(dir, name, max, regularFileMode, afterStat)
 }
 
 func readRegularAtMode(dir *os.File, name string, max int, mode uint32) ([]byte, error) {
+	return readRegularAtModeObserved(dir, name, max, mode, nil)
+}
+
+func readRegularAtModeObserved(dir *os.File, name string, max int, mode uint32, afterStat func()) ([]byte, error) {
 	if !validComponent(name) || max <= 0 {
 		return nil, ErrInvalidRecord
 	}
@@ -101,6 +109,9 @@ func readRegularAtMode(dir *os.File, name string, max int, mode uint32) ([]byte,
 	statMode := uint32(stat.Mode)
 	if statMode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) || statMode&0o7777 != mode || stat.Size < 0 || stat.Size > int64(max) {
 		return nil, fmt.Errorf("%w: unsafe regular file %q", ErrInvalidRecord, name)
+	}
+	if afterStat != nil {
+		afterStat()
 	}
 	data, err := io.ReadAll(io.LimitReader(file, int64(max)+1))
 	if err != nil {
@@ -122,9 +133,9 @@ func atomicWriteAt(dir *os.File, final string, data []byte, random io.Reader) er
 }
 
 // atomicWriteAtObserved exposes the publication boundary only to package tests.
-// The observer runs after the temporary is safely opened and chmodded, but
-// before it is written and renamed into its unique final identity.
-func atomicWriteAtObserved(dir *os.File, final string, data []byte, random io.Reader, afterCreate func()) error {
+// The observer runs after the temporary is fully written, synced, and closed,
+// immediately before its no-replace rename into the unique final identity.
+func atomicWriteAtObserved(dir *os.File, final string, data []byte, random io.Reader, beforePublish func()) error {
 	if !validComponent(final) || len(data) == 0 || random == nil {
 		return ErrInvalidRecord
 	}
@@ -148,9 +159,6 @@ func atomicWriteAtObserved(dir *os.File, final string, data []byte, random io.Re
 	if err := file.Chmod(regularFileMode); err != nil {
 		return err
 	}
-	if afterCreate != nil {
-		afterCreate()
-	}
 	if err := writeFull(file, data); err != nil {
 		return err
 	}
@@ -159,6 +167,9 @@ func atomicWriteAtObserved(dir *os.File, final string, data []byte, random io.Re
 	}
 	if err := file.Close(); err != nil {
 		return err
+	}
+	if beforePublish != nil {
+		beforePublish()
 	}
 	if err := renameNoReplace(int(dir.Fd()), temporary, int(dir.Fd()), final); err != nil {
 		return err
@@ -239,6 +250,22 @@ func listNames(dir *os.File, limit int) ([]string, bool, error) {
 		names = names[:limit]
 	}
 	return names, overflow, nil
+}
+
+// nextNames advances a persistent directory stream instead of restarting at
+// its first entries. At EOF it rewinds for the next bounded cleanup cycle.
+func nextNames(dir *os.File, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, ErrInvalidRecord
+	}
+	names, err := dir.Readdirnames(limit)
+	if errors.Is(err, io.EOF) {
+		if _, seekErr := dir.Seek(0, io.SeekStart); seekErr != nil {
+			return nil, seekErr
+		}
+		return names, nil
+	}
+	return names, err
 }
 
 func unlinkAt(dir *os.File, name string) error {

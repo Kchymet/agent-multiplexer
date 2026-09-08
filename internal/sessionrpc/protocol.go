@@ -3,6 +3,7 @@
 package sessionrpc
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"time"
 
@@ -33,6 +35,8 @@ const (
 	MaxReceiptGrace     = 30 * time.Second
 	DefaultReceiptGrace = 3 * time.Second
 	DefaultPollInterval = 20 * time.Millisecond
+	MaxPendingReceipts  = MaxQueuedRequests
+	MaxResponseFiles    = MaxQueuedRequests
 	// Request temporaries older than every valid request lifetime are abandoned.
 	// A scanner must preserve newer temporaries because the publishing client
 	// may still hold and fsync the file before its no-replace rename.
@@ -44,12 +48,16 @@ const (
 	// SignedRequest/Response bodies are base64 JSON strings. Bound the encoded
 	// file independently while retaining access.MaxBodyBytes exact body bytes.
 	maxEnvelopeFileBytes = ((access.MaxBodyBytes+2)/3)*4 + (8 << 10)
+	// MaxResponseBytes is the per-subject bound for daemon-created response
+	// files. Count admission remains independently enforced.
+	MaxResponseBytes = int64(8 << 20)
 )
 
 var (
 	ErrInvalidRecord    = errors.New("invalid session RPC record")
 	ErrInvalidSignature = errors.New("invalid session RPC signature")
 	ErrQueueFull        = errors.New("session RPC queue capacity exceeded")
+	ErrResponseCapacity = errors.New("session RPC response capacity exceeded")
 	ErrRestarted        = errors.New("session RPC daemon boot changed")
 	ErrIndeterminate    = errors.New("session RPC outcome is indeterminate")
 	ErrClosed           = errors.New("session RPC endpoint is closed")
@@ -219,13 +227,27 @@ type PersistedResponse struct {
 type ReceiptSettlement struct {
 	RequestID string
 	Received  bool
+	Reason    SettlementReason
 	At        time.Time
 }
+
+type SettlementReason string
+
+const (
+	SettlementReceipt        SettlementReason = "receipt"
+	SettlementGraceExpired   SettlementReason = "grace_expired"
+	SettlementResponseFailed SettlementReason = "response_failed"
+	SettlementCapacity       SettlementReason = "capacity"
+	SettlementServerClosed   SettlementReason = "server_closed"
+)
 
 type ReceiptHooks struct {
 	Grace             time.Duration
 	ResponsePersisted func(PersistedResponse)
-	Settled           func(ReceiptSettlement)
+	// Settled is required when ReceiptHooks is returned. It runs exactly once,
+	// including when signing or durable response publication fails after the
+	// operation committed. ResponsePersisted is never called on those failures.
+	Settled func(ReceiptSettlement)
 }
 
 type DispatchResult struct {
@@ -235,9 +257,37 @@ type DispatchResult struct {
 	Receipt *ReceiptHooks
 }
 
+// ResponseBudget atomically admits daemon-wide response amplification across
+// independently served subjects. A daemon implementation must include both
+// file count and MaxBytes in one reservation decision. Each returned lease is
+// committed after durable publication and released only after the corresponding
+// response file is removed. ReserveResponse must serialize admission across
+// subjects and idempotently return the existing lease when Existing is true.
+// All lease methods must be idempotent.
+type ResponseBudget interface {
+	ReserveResponse(context.Context, ResponseReservation) (ResponseLease, error)
+}
+
+type ResponseReservation struct {
+	SubjectID   string
+	RequestID   string
+	MaxBytes    int64
+	Existing    bool
+	ReceiptSlot bool
+}
+
+type ResponseLease interface {
+	Commit(actualBytes int64, receiptPending bool)
+	ReleaseReceipt()
+	Release()
+}
+
 type Callbacks struct {
 	Authorize func(context.Context, access.Principal, Call) error
-	Dispatch  func(context.Context, DispatchRequest) (DispatchResult, error)
+	// Dispatch is the execution boundary. Integration must compare the
+	// authenticated Principal.Generation with current authority and policy under
+	// the same lock or transaction that admits the operation's effects.
+	Dispatch func(context.Context, DispatchRequest) (DispatchResult, error)
 }
 
 func validateCall(call Call) error {
@@ -407,8 +457,77 @@ func unmarshalBounded(data []byte, max int, out any) error {
 	if len(data) == 0 || len(data) > max {
 		return ErrInvalidRecord
 	}
-	if err := json.Unmarshal(data, out); err != nil {
+	if err := rejectDuplicateOrTrailingJSON(data); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+	}
+	return nil
+}
+
+func rejectDuplicateOrTrailingJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := consumeStrictJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeStrictJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		keys := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("non-string JSON object key")
+			}
+			if _, duplicate := keys[key]; duplicate {
+				return fmt.Errorf("duplicate JSON object key %q", key)
+			}
+			keys[key] = struct{}{}
+			if err := consumeStrictJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeStrictJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return errors.New("unexpected closing JSON delimiter")
 	}
 	return nil
 }
