@@ -260,6 +260,8 @@ func ensureConfigHomeRooted(root *hostprep.Root, s store.Session) error {
 	if fresh {
 		log.Printf("amux: seeded agent %s's private %s config from %s", s.ID, spec.Kind, spec.Template)
 	}
+	// Do not run host-side Git against a legacy session-writable checkout here;
+	// explicit migration owns any needed exclusions and dirty-state handling.
 	return nil
 }
 
@@ -528,8 +530,8 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// the running binary. Where it goes is the harness's call — Claude reads
 	// .claude/skills, others .agents/skills. Ordinary failures just mean the agent
 	// lacks the skills; unsafe destination failures refuse launch. The launch dir
-	// is normally the agent's own root dir. Legacy worktree cleanup remains an
-	// explicit migration concern rather than a launch-time host Git mutation.
+	// is normally the agent's own root dir. Do not query or write session-controlled
+	// Git metadata here; legacy cleanup is an explicit migration concern.
 	skillsDir := h.SkillsDir(dir)
 	if err := optionalPreparation("prepare agent skills", skills.InstallRooted(root, skillsDir)); err != nil {
 		return "", nil, nil, err

@@ -293,6 +293,36 @@ func TestAgentCommandRestoresTranscriptPastPredictableTempAlias(t *testing.T) {
 	}
 }
 
+func TestAgentCommandDoesNotWriteSessionControlledGitExclude(t *testing.T) {
+	isolateStore(t)
+	session := filepath.Join(t.TempDir(), "session")
+	cmd := exec.Command("git", "init", "--quiet", session)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	exclude := filepath.Join(session, ".git", "info", "exclude")
+	if err := os.Remove(exclude); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "outside-exclude")
+	const original = "outside-canary\n"
+	if err := os.WriteFile(canary, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, exclude); err != nil {
+		t.Fatal(err)
+	}
+
+	s := store.Session{ID: "hp1", RootID: "root", Agent: "claude", Dir: session}
+	if _, _, _, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != original {
+		t.Fatalf("session-controlled .git/info/exclude redirected a host write: %q, %v", got, err)
+	}
+}
+
 // TestAgentEnvExportsSessionID pins the intent env every pane inherits: the
 // canonical harness kind and — the fix — the harness session id, so a harness
 // with no hook stream (unlike Claude) can still self-report via `amux agent

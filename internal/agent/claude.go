@@ -207,15 +207,13 @@ func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 // status/capture hooks into the launch dir (not the user-wide settings.json),
 // pointed at the stable installed binary. Claude loads settings.local.json only
 // from the launch dir. All writes are anchored under the pinned session root;
-// legacy worktree cleanup remains an explicit migration concern.
+// do not invoke host-side Git against session-writable metadata here. Legacy
+// worktree cleanup remains an explicit migration concern.
 func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
 	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
 		return err
 	}
-	if err := claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.InstalledBinPath()); err != nil {
-		return err
-	}
-	return nil
+	return claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.InstalledBinPath())
 }
 
 // Keys are Claude Code's interactive bindings (see claudeKeys).
