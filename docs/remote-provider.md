@@ -43,10 +43,12 @@ knowledge of, or code for, any particular orchestrator.
 
 ## Trust model — read this first
 
-Registering with an orchestrator hands it **arbitrary code execution on this
-machine, as your user** (that is the feature — the same trust shape as a
-self-hosted CI runner). Only register with orchestrators you control or
-trust. Mitigations on the provider side:
+Registration alone does not grant compute. `--allow-compute` deliberately hands
+the orchestrator **arbitrary code execution on this machine, as your user**
+(the same trust shape as a self-hosted CI runner). Without it, the authenticated
+connection may still publish explicitly enabled inventory/runtime/control
+features, but `spawn/input/resize/kill` and pane adoption are denied. Only grant
+compute to orchestrators you control or trust. Mitigations on the provider side:
 
 - Run the provider as a dedicated, minimally-privileged user.
 - amux's bubblewrap sandboxing travels inside the spawned argv; advertise
@@ -83,8 +85,10 @@ unchanged and still spoken by `amux harness`.
 ### Provider → orchestrator
 
 - `register` — first message on every connection:
-  `{versions:[1,2], token, name, labels:{...}, capabilities:{maxPanes, bwrap,
+  `{versions:[1,2], token, name, labels:{...}, capabilities:{compute, maxPanes, bwrap,
   os, arch, features:[]}, panes:[{paneId, outSeq, running}]}`.
+  `compute` must be literally true before the orchestrator schedules panes;
+  absent/false is an inventory-only connection and is not a registration error.
   `panes` offers panes still running from a previous connection (resume);
   empty on cold start.
 - `output` `{paneId, data, seq}` — pane bytes; `seq` is per-pane, monotonic
@@ -103,6 +107,13 @@ unchanged and still spoken by `amux harness`.
   common; no overlap ⇒ `unsupported-version`); resolves the resume offer
   (every offered pane is adopted or killed — omission means kill). For
   adopted panes the provider retransmits output frames `> afterSeq`.
+  When the provider advertised `compute:false` (or omitted it), the orchestrator
+  sends `adopt:[]` and lists every offer under `kill`; the provider independently
+  refuses adoption and terminates every offer even if a peer sends contradictory
+  directives. Because v2 has no kill acknowledgement, the orchestrator marks
+  those durable pane cursors stopped after its `registered` response is committed;
+  a disconnect before termination simply causes any survivor to be offered and
+  killed again on the next registration.
 - `spawn` `{paneId, dir, env, argv, cols, rows}` / `input` / `resize` /
   `kill` — exactly v1. The environment split holds: the provider supplies the
   local execution environment, the orchestrator supplies workload-specific
@@ -151,7 +162,7 @@ printf '%s' "$TOKEN" > ~/.config/amux/provider.token
 # 2. write the config and install the service
 amux provide install --orchestrator orch.example.com:7443 \
                      --token-file ~/.config/amux/provider.token \
-                     --name laptop --label zone=home
+                     --name laptop --label zone=home --allow-compute
 
 amux doctor          # Provider section: config, token, service, last heartbeat
 ```
@@ -209,6 +220,7 @@ orchestrator = "orch.example.com:7443"
 token-file = "/home/you/.config/amux/provider.token"
 name = "laptop"
 max-panes = 8
+allow-compute = true
 harnesses = ["claude", "codex"]
 identity-mode = "machine"
 publish-sessions = true
@@ -229,6 +241,7 @@ amux provide orch.example.com:7443 \
              --token-file ~/.config/amux/provider.token \
              --label zone=home --label gpu=none \
              --feature cuda --feature bigdisk \
+             [--allow-compute] \
              [--ca /path/to/private-ca.pem] [--name mybox] \
              [--max-panes 8] [--server-name mybox.internal]
 ```
@@ -254,6 +267,7 @@ Configuration resolves from flags first, then these env vars (matching amux's
 | Scheduling labels | `--label k=v` (repeatable) | `AMUX_PROVIDER_LABELS` (comma-separated `k=v`) |
 | Feature capabilities | `--feature s` (repeatable) | `AMUX_PROVIDER_FEATURES` (comma-separated) |
 | Max panes capability | `--max-panes` | `AMUX_PROVIDER_MAX_PANES` |
+| Remote process/PTY control | `--allow-compute` | `AMUX_PROVIDER_ALLOW_COMPUTE` |
 | Verified harness allowlist | `--harness name` (repeatable) | `AMUX_PROVIDER_HARNESSES` (comma-separated) |
 | Execution identity mode | `--identity-mode machine` | `AMUX_PROVIDER_IDENTITY_MODE` |
 | Private CA | `--ca` | `AMUX_TLS_CA` |

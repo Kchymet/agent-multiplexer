@@ -26,7 +26,7 @@ func TestV2CodecRoundTrip(t *testing.T) {
 			Name:     "mybox",
 			Labels:   map[string]string{"zone": "home", "gpu": "none"},
 			Capabilities: &Capabilities{
-				MaxPanes: 8, Bwrap: true, OS: "linux", Arch: "amd64", Features: []string{"pty"},
+				Compute: true, MaxPanes: 8, Bwrap: true, OS: "linux", Arch: "amd64", Features: []string{"pty"},
 			},
 			Panes: []PaneOffer{{PaneID: "p1", OutSeq: 42, Running: true}},
 		},
