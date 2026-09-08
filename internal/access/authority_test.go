@@ -292,6 +292,14 @@ func TestCurrentRejectsCredentialInconsistentWithCommittedRecord(t *testing.T) {
 		"issuer public key": func(c *Credential) {
 			c.IssuerPublicKey = base64.RawStdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
 		},
+		"private key seed": func(c *Credential) {
+			private, err := base64.RawStdEncoding.DecodeString(c.PrivateKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			private[0] ^= 1
+			c.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+		},
 		"private keypair": func(c *Credential) { c.PrivateKey = base64.RawStdEncoding.EncodeToString(unrelatedPrivate) },
 	}
 	for name, mutate := range mutations {
@@ -365,7 +373,7 @@ func TestCurrentUsesValidStageInsteadOfCorruptPublishedCredential(t *testing.T) 
 }
 
 func TestOpenRejectsIssuerWhoseKeyPairOrIDDoesNotMatch(t *testing.T) {
-	for _, field := range []string{"private", "id"} {
+	for _, field := range []string{"private", "seed", "id"} {
 		t.Run(field, func(t *testing.T) {
 			root := t.TempDir()
 			a, err := Open(root)
@@ -376,13 +384,21 @@ func TestOpenRejectsIssuerWhoseKeyPairOrIDDoesNotMatch(t *testing.T) {
 			if err := a.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if field == "private" {
+			switch field {
+			case "private":
 				_, private, err := ed25519.GenerateKey(rand.Reader)
 				if err != nil {
 					t.Fatal(err)
 				}
 				issuer.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
-			} else {
+			case "seed":
+				private, err := base64.RawStdEncoding.DecodeString(issuer.PrivateKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				private[0] ^= 1
+				issuer.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+			case "id":
 				issuer.KeyID = strings.Repeat("0", len(issuer.KeyID))
 			}
 			if err := writeJSONFile(filepath.Join(root, "issuer.json"), issuer, 0o600); err != nil {

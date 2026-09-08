@@ -682,8 +682,7 @@ func (a *FileAuthority) validatePublishedCredential(rec CredentialRecord, cred C
 		return ErrInvalidCredential
 	}
 	priv, err := base64.RawStdEncoding.DecodeString(cred.PrivateKey)
-	if err != nil || len(priv) != ed25519.PrivateKeySize ||
-		!ed25519.PrivateKey(priv).Public().(ed25519.PublicKey).Equal(ed25519.PublicKey(pub)) {
+	if err != nil || !privateKeyMatchesPublic(priv, pub) {
 		return ErrInvalidCredential
 	}
 	return nil
@@ -729,8 +728,7 @@ func (a *FileAuthority) loadOrCreateIssuer() error {
 func validateIssuerCredential(issuer issuerCredential) error {
 	pub, pubErr := base64.RawStdEncoding.DecodeString(issuer.PublicKey)
 	priv, privErr := base64.RawStdEncoding.DecodeString(issuer.PrivateKey)
-	if pubErr != nil || privErr != nil || len(pub) != ed25519.PublicKeySize || len(priv) != ed25519.PrivateKeySize ||
-		!ed25519.PrivateKey(priv).Public().(ed25519.PublicKey).Equal(ed25519.PublicKey(pub)) {
+	if pubErr != nil || privErr != nil || !privateKeyMatchesPublic(priv, pub) {
 		return fmt.Errorf("invalid access issuer key")
 	}
 	digest := sha256.Sum256(pub)
@@ -738,6 +736,19 @@ func validateIssuerCredential(issuer issuerCredential) error {
 		return fmt.Errorf("invalid access issuer key id")
 	}
 	return nil
+}
+
+// An Ed25519 private key stores the seed followed by a cached public-key
+// suffix. PrivateKey.Public returns that suffix without deriving it from the
+// seed, so validate both the complete canonical expansion and the expected
+// public key before accepting persisted signing material.
+func privateKeyMatchesPublic(private, public []byte) bool {
+	if len(private) != ed25519.PrivateKeySize || len(public) != ed25519.PublicKeySize {
+		return false
+	}
+	derived := ed25519.NewKeyFromSeed(private[:ed25519.SeedSize])
+	return subtle.ConstantTimeCompare(private, derived) == 1 &&
+		subtle.ConstantTimeCompare(public, derived[ed25519.SeedSize:]) == 1
 }
 
 const daemonTLSServerName = "amux-daemon"
