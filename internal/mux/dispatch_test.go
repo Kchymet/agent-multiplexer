@@ -307,6 +307,54 @@ func TestSuspendCancelsAndJoinsActiveAction(t *testing.T) {
 	}
 }
 
+func TestSuspendCancelsAndJoinsActiveSubscription(t *testing.T) {
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	s := New(testPrimary{snapshot: func(ctx context.Context) ([]core.Session, error) {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return nil, ctx.Err()
+	}})
+	cl := attachedClient(s)
+
+	handled := make(chan struct{})
+	go func() {
+		s.handleMsg(cl, muxproto.ClientMsg{Type: muxproto.CSubscribe})
+		close(handled)
+	}()
+	<-entered
+
+	suspended := make(chan struct{})
+	go func() {
+		s.suspend()
+		close(suspended)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("suspension did not cancel the active primary subscription")
+	}
+	select {
+	case <-suspended:
+		t.Fatal("suspension returned before the canceled primary subscription exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("active subscription handler did not exit after cancellation")
+	}
+	select {
+	case <-suspended:
+	case <-time.After(time.Second):
+		t.Fatal("suspension did not join the active subscription handler")
+	}
+}
+
 func TestJoinPrimaryCallWaitsForCallbackAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{})

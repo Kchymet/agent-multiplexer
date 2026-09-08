@@ -103,6 +103,9 @@ func authenticateClientContext(ctx context.Context, conn net.Conn, credential ac
 	secure := tls.Client(conn, tlsConfig)
 	if err := secure.HandshakeContext(ctx); err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("verify daemon TLS identity: %w", err)
 	}
 	defer secure.SetDeadline(time.Time{})
