@@ -371,11 +371,14 @@ func sandboxCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdinBak, dialBak, ttyBak := os.Stdin, dial, stdinIsTerminal
+	startupAuthBak := protectedHostStartup
 	os.Stdin = devNull
 	dial = func() (*daemon.Client, error) { return nil, errors.New("daemon offline (test)") }
 	stdinIsTerminal = func() bool { return false }
+	protectedHostStartup = func() error { return nil }
 	t.Cleanup(func() {
 		os.Stdin, dial, stdinIsTerminal = stdinBak, dialBak, ttyBak
+		protectedHostStartup = startupAuthBak
 		_ = devNull.Close()
 	})
 }

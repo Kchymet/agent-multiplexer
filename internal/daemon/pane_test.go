@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
@@ -18,6 +19,15 @@ import (
 func testDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	d := New("", nil, time.Hour)
+	var err error
+	d.authority, err = access.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.authority.EnsureHost(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.authority.Close() })
 	d.engine = local.New()
 	t.Cleanup(d.engine.Shutdown)
 	d.resolve = func(agentID string, tab int) (string, []string, []string, error) {
@@ -30,11 +40,29 @@ func testDaemon(t *testing.T) *Daemon {
 // dialDaemon connects a client to a fresh serve goroutine over an in-memory pipe.
 func dialDaemon(t *testing.T, d *Daemon) (*Client, func()) {
 	t.Helper()
+	if d.authority == nil {
+		var err error
+		d.authority, err = access.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.authority.EnsureHost(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = d.authority.Close() })
+	}
 	srv, cli := net.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { d.serve(ctx, srv); close(done) }()
-	c := newClient(cli)
+	credential, err := access.LoadCredential(d.authority.CredentialDir(access.SubjectHost, access.LocalHostSubject))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := authenticateClient(cli, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return c, func() {
 		_ = cli.Close()
 		cancel()

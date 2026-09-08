@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 )
@@ -21,6 +24,18 @@ func fakeControlDaemon(t *testing.T, selection *amuxcfg.Control) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	t.Setenv("AMUX_SOCK", filepath.Join(dir, "d.sock"))
+	authority, err := access.OpenDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.EnsureHost(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	tlsConfig, err := authority.ServerTLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	ln, err := net.Listen("unix", core.SocketPath())
 	if err != nil {
 		t.Fatal(err)
@@ -28,12 +43,30 @@ func fakeControlDaemon(t *testing.T, selection *amuxcfg.Control) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		conn, err := ln.Accept()
+		raw, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		conn := tls.Server(raw, tlsConfig)
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if err := conn.Handshake(); err != nil {
+			return
+		}
+		challenge, err := authority.NewChallenge()
+		if err != nil || json.NewEncoder(conn).Encode(challenge) != nil {
+			return
+		}
+		var proof access.SocketProof
+		if json.NewDecoder(conn).Decode(&proof) != nil {
+			return
+		}
+		if _, err := authority.VerifyProof(context.Background(), challenge, proof, access.SubjectHost); err != nil {
+			return
+		}
+		if json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, OK: true}) != nil {
+			return
+		}
 		var action core.Action
 		if err := json.NewDecoder(conn).Decode(&action); err != nil {
 			return
