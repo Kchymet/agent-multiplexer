@@ -71,6 +71,9 @@ func TestClosedAuthorityRejectsSigningWatchingAndAuthentication(t *testing.T) {
 		{"request", func() error { _, err := a.Verify(context.Background(), request); return err }()},
 		{"valid", a.Valid(context.Background(), principal)},
 		{"watch", func() error { _, _, err := a.WatchInvalidation(principal); return err }()},
+		{"current", func() error { _, err := a.Current(context.Background(), SubjectSession, "a1"); return err }()},
+		{"ensure", func() error { _, err := a.Ensure(context.Background(), SubjectSession, "a1"); return err }()},
+		{"rotate", func() error { _, err := a.Rotate(context.Background(), SubjectSession, "a1"); return err }()},
 	}
 	for _, check := range checks {
 		if !errors.Is(check.err, ErrAuthorityClosed) {
@@ -201,6 +204,157 @@ func TestRotationUsesStableDirectoryAndRevokesOldGeneration(t *testing.T) {
 	}
 	if err := a.Valid(context.Background(), Principal{KeyID: cur.KeyID, SubjectID: "a1", Kind: SubjectSession, Generation: cur.Generation}); !errors.Is(err, ErrInvalidCredential) && !errors.Is(err, ErrRevoked) {
 		t.Fatalf("revoked validity error = %v", err)
+	}
+}
+
+func TestCurrentRecoversCommittedStagedPublicationWithoutIssuing(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, err := open(t.TempDir(), func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	if _, err := a.Current(context.Background(), SubjectSession, "never"); !errors.Is(err, ErrNotProvisioned) {
+		t.Fatalf("never-provisioned current error = %v", err)
+	}
+	if _, err := a.Rotate(context.Background(), SubjectSession, "never"); !errors.Is(err, ErrNotProvisioned) {
+		t.Fatalf("never-provisioned rotate error = %v", err)
+	}
+	if len(a.registry.Current) != 0 || len(a.registry.Records) != 0 {
+		t.Fatalf("Current issued never-provisioned state: %+v", a.registry)
+	}
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realCommit := a.commit
+	a.commit = func(path string, value any, mode os.FileMode) (bool, error) {
+		committed, commitErr := realCommit(path, value, mode)
+		if commitErr != nil {
+			return committed, commitErr
+		}
+		return true, errors.New("injected post-commit failure")
+	}
+	if _, err := a.Rotate(context.Background(), SubjectSession, "a1"); err == nil {
+		t.Fatal("uncertain rotation unexpectedly succeeded")
+	}
+	a.commit = realCommit
+
+	current, err := a.Current(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatalf("recover committed current: %v", err)
+	}
+	if current.Generation != old.Generation+1 || current.KeyID == old.KeyID {
+		t.Fatalf("recovered current = %+v, old = %+v", current, old)
+	}
+	published, err := LoadCredential(dir)
+	if err != nil || published.KeyID != current.KeyID || published.Generation != current.Generation {
+		t.Fatalf("published credential = %+v, err=%v", published, err)
+	}
+}
+
+func TestRevokedOrExpiredCredentialCannotBeImplicitlyReissued(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, err := open(t.TempDir(), func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	if _, err := a.Ensure(context.Background(), SubjectSession, "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Revoke(context.Background(), SubjectSession, "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	for name, issue := range map[string]func() error{
+		"current": func() error { _, err := a.Current(context.Background(), SubjectSession, "revoked"); return err },
+		"ensure":  func() error { _, err := a.Ensure(context.Background(), SubjectSession, "revoked"); return err },
+		"rotate":  func() error { _, err := a.Rotate(context.Background(), SubjectSession, "revoked"); return err },
+	} {
+		if err := issue(); !errors.Is(err, ErrRevoked) {
+			t.Errorf("%s revoked error = %v", name, err)
+		}
+	}
+	if got := a.registry.Current[currentKey(SubjectSession, "revoked")]; got != "" {
+		t.Fatalf("revoked subject regained current key %q", got)
+	}
+	if got := len(a.registry.Records); got != 1 {
+		t.Fatalf("revoked attempts changed record count to %d", got)
+	}
+
+	if _, err := a.Ensure(context.Background(), SubjectSession, "expired"); err != nil {
+		t.Fatal(err)
+	}
+	expiredKey := a.registry.Current[currentKey(SubjectSession, "expired")]
+	now = now.Add(31 * 24 * time.Hour)
+	for name, issue := range map[string]func() error{
+		"current": func() error { _, err := a.Current(context.Background(), SubjectSession, "expired"); return err },
+		"ensure":  func() error { _, err := a.Ensure(context.Background(), SubjectSession, "expired"); return err },
+		"rotate":  func() error { _, err := a.Rotate(context.Background(), SubjectSession, "expired"); return err },
+	} {
+		if err := issue(); !errors.Is(err, ErrExpired) {
+			t.Errorf("%s expired error = %v", name, err)
+		}
+	}
+	if got := a.registry.Current[currentKey(SubjectSession, "expired")]; got != expiredKey {
+		t.Fatalf("expired subject rotated from %q to %q", expiredKey, got)
+	}
+	if got := len(a.registry.Records); got != 2 {
+		t.Fatalf("expired attempts changed record count to %d", got)
+	}
+}
+
+func TestEnsureSessionSerializesPublicationWithClose(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state", "access", "v1")
+	a, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realCommit := a.commit
+	commitEntered := make(chan struct{})
+	allowCommit := make(chan struct{})
+	a.commit = func(path string, value any, mode os.FileMode) (bool, error) {
+		close(commitEntered)
+		<-allowCommit
+		return realCommit(path, value, mode)
+	}
+	sessionDir := filepath.Join(t.TempDir(), "session")
+	ensureDone := make(chan error, 1)
+	go func() {
+		_, err := a.EnsureSession(context.Background(), "a1", sessionDir)
+		ensureDone <- err
+	}()
+	<-commitEntered
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- a.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before in-flight publication completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := Open(root); !errors.Is(err, ErrAuthorityInUse) {
+		t.Fatalf("authority ownership released during publication: %v", err)
+	}
+	close(allowCommit)
+	if err := <-ensureDone; err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := a.EnsureSession(context.Background(), "a2", filepath.Join(t.TempDir(), "session")); !errors.Is(err, ErrAuthorityClosed) {
+		t.Fatalf("EnsureSession after Close = %v", err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen authority after serialized Close: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -420,7 +574,7 @@ func TestFailedAndUncertainAuthorityCommitsRemainFailClosed(t *testing.T) {
 		t.Fatal("old generation remained live after committed rotation")
 	}
 	a.commit = realCommit
-	if _, err := a.Ensure(context.Background(), SubjectSession, "a1"); err != nil {
+	if _, err := a.Current(context.Background(), SubjectSession, "a1"); err != nil {
 		t.Fatalf("committed staged credential was not recoverable: %v", err)
 	}
 	current, err := LoadCredential(dir)
