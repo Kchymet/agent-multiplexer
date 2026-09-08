@@ -261,6 +261,59 @@ func TestPoolRollbackSelectsCachedLineageWithoutRemovedIntermediate(t *testing.T
 	assertObjectMissing(t, rolledBack, oidB)
 }
 
+func TestPoolRepeatedNonFastForwardReusesRootWithoutPredecessorDisclosure(t *testing.T) {
+	remote := testRemote(t)
+	root := t.TempDir()
+	key := SourceKey(remote)
+	a, layoutA := pooledTestCheckout(t, root, remote, key, "a-first")
+	oidA := testGit(t, a, "rev-parse", "HEAD")
+
+	writer := filepath.Join(root, "writer")
+	testGit(t, "", "clone", "-q", remote, writer)
+	testGit(t, writer, "checkout", "-q", "--orphan", "unrelated")
+	if err := os.Remove(filepath.Join(writer, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(writer, "unrelated.txt"), []byte("X\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, writer, "add", "-A")
+	testGit(t, writer, "commit", "-q", "-m", "unrelated X")
+	oidX := testGit(t, writer, "rev-parse", "HEAD")
+
+	selectRemote := func(oid, name string) (string, CheckoutLayout) {
+		t.Helper()
+		testGit(t, writer, "push", "-q", "--force", "origin", oid+":main")
+		if err := PrepareObjectPool(context.Background(), filepath.Join(root, "pool"), key, remote, true); err != nil {
+			t.Fatalf("select %s: %v", name, err)
+		}
+		return pooledTestCheckout(t, root, remote, key, name)
+	}
+
+	xFirst, layoutX := selectRemote(oidX, "x-first")
+	if len(layoutX.ObjectMounts) != 1 {
+		t.Fatalf("first X root inherited A: %+v", layoutX.ObjectMounts)
+	}
+	assertObjectMissing(t, xFirst, oidA)
+
+	for i := 0; i < 2; i++ {
+		aAgain, gotA := selectRemote(oidA, "a-again-"+strconv.Itoa(i))
+		if len(gotA.ObjectMounts) != 1 || gotA.ObjectMounts[0] != layoutA.ObjectMounts[0] {
+			t.Fatalf("reopen A cycle %d selected wrong closure: %+v", i, gotA.ObjectMounts)
+		}
+		assertObjectMissing(t, aAgain, oidX)
+
+		xAgain, gotX := selectRemote(oidX, "x-again-"+strconv.Itoa(i))
+		if len(gotX.ObjectMounts) != 1 || gotX.ObjectMounts[0] != layoutX.ObjectMounts[0] {
+			t.Fatalf("reopen X cycle %d selected wrong closure: %+v", i, gotX.ObjectMounts)
+		}
+		if got := testGit(t, xAgain, "rev-parse", "HEAD"); got != oidX {
+			t.Fatalf("reopen X cycle %d base = %s, want %s", i, got, oidX)
+		}
+		assertObjectMissing(t, xAgain, oidA)
+	}
+}
+
 func TestPoolManyFastForwardsUseFlatAlternates(t *testing.T) {
 	remote := testRemote(t)
 	root := t.TempDir()

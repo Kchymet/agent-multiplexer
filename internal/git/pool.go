@@ -487,6 +487,38 @@ func matchingGeneration(repoRoot, generation, repoKey, source, policy, ref, oid 
 	return m, true, nil
 }
 
+// ensureRootGeneration reuses only the exact deterministic root requested by
+// this transition. Its manifest must match the full source/ref/OID identity and
+// its verified closure must contain no predecessor. This lets A -> X -> A -> X
+// reopen X without either republishing it or granting A as an alternate.
+func ensureRootGeneration(ctx context.Context, repoRoot, repoKey, source, policy, ref, oid, discriminator string) (poolManifest, error) {
+	gen := generationID(repoKey+discriminator, source, ref, oid)
+	if existing, ok, err := matchingGeneration(repoRoot, gen, repoKey, source, policy, ref, oid); err != nil {
+		return poolManifest{}, err
+	} else if ok {
+		if existing.Predecessor != "" {
+			return poolManifest{}, fmt.Errorf("cached Git pool root %s unexpectedly has predecessor %s", gen, existing.Predecessor)
+		}
+		mounts, err := mountClosure(repoRoot, existing)
+		if err != nil {
+			return poolManifest{}, err
+		}
+		if len(mounts) != 1 || mounts[0].Generation != gen {
+			return poolManifest{}, fmt.Errorf("cached Git pool root %s has invalid closure", gen)
+		}
+		return existing, nil
+	}
+
+	created, published, err := createGeneration(ctx, repoRoot, repoKey, source, policy, ref, oid, discriminator, nil, "")
+	if err != nil {
+		return poolManifest{}, err
+	}
+	if !published {
+		return poolManifest{}, fmt.Errorf("failed to publish Git pool root generation")
+	}
+	return created, nil
+}
+
 // createGeneration publishes only after a requested fast-forward relationship
 // has been proven in staging. A rejected non-fast-forward candidate is removed;
 // it can never become an alternate edge selected by a later rollback.
@@ -647,26 +679,17 @@ func ensureObjectPool(ctx context.Context, poolRoot, repoKey, source string, all
 		}
 		if !published {
 			// The staged delta saw both commits and proved a non-fast-forward.
-			// Re-fetch the selected ref into a root generation with no predecessor.
+			// Select or create the exact root with no predecessor. Repeated
+			// A -> X transitions reuse X without exposing the rejected A lineage.
 			discriminator := "\x00root\x00" + current.Generation
-			next, published, err = createGeneration(ctx, repoRoot, repoKey, source, policy, ref, oid, discriminator, nil, "")
-			if err != nil {
-				return poolResult{}, err
-			}
-			if !published {
-				return poolResult{}, fmt.Errorf("failed to publish non-fast-forward Git pool root")
-			}
+			next, err = ensureRootGeneration(ctx, repoRoot, repoKey, source, policy, ref, oid, discriminator)
 		}
 	} else {
 		discriminator := ""
 		if current != nil && current.Source == source && current.DefaultRef == ref && current.BaseOID != oid {
 			discriminator = "\x00root\x00" + current.Generation
 		}
-		var published bool
-		next, published, err = createGeneration(ctx, repoRoot, repoKey, source, policy, ref, oid, discriminator, nil, "")
-		if err == nil && !published {
-			err = fmt.Errorf("failed to publish Git pool root generation")
-		}
+		next, err = ensureRootGeneration(ctx, repoRoot, repoKey, source, policy, ref, oid, discriminator)
 	}
 	if err != nil {
 		return poolResult{}, err
