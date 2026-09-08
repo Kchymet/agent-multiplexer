@@ -119,13 +119,11 @@ transfers zero object payload and duplicates zero base-pack bytes: it initialize
 only private metadata, lists the selected generation closure as flat alternates,
 and checks out the assigned linked worktree.
 
-The namespace must consume daemon-authoritative GitObjectMount values and bind
-each exact generation objects directory read-only. It must never bind a pool
-parent, pool refs/config/hooks, the legacy cache, or another session's common
-directory. Until that companion namespace change removes broad data/cache
-visibility, this source change alone is not a cross-session confidentiality
-claim. Objects readable from shared upstream credentials are also outside this
-filesystem boundary.
+The pane namespace consumes daemon-authoritative GitObjectMount values and binds
+each exact generation objects directory read-only. It never binds a pool parent,
+pool refs/config/hooks, the legacy cache, another session's common directory, or
+the broad amux data/state roots. Objects readable through an explicit network
+fetch with shared upstream credentials remain outside this filesystem boundary.
 
 Worktree and private-common publication uses anchored renames from the
 StateDir()/git-staging directory into session storage. State-directory staging
@@ -211,12 +209,39 @@ hook command under `~/.claude` runs the copy's file inside the scope (where
 (your trust and history for your own directories); amux trusts the agent's own dir
 in the copy at launch.
 
-Transcripts therefore live in the agent's private home. Resume detection,
-gap-fill from amux's captured backups, `amux agent sessions`, and the runtime
-event stream all read each agent's home (and the user's, for your own sessions).
-An agent created before this change has its conversation in your `~/.claude`;
-its first launch afterwards carries that project dir over, once, so nothing is
-lost — and until it launches, readers fall back to the old location.
+Transcripts therefore live in the agent's private home. Host-side resume and
+runtime readers operate on that explicitly selected home; restricted sessions
+receive only role-filtered context through authenticated amux requests, never a
+global transcript path. An agent created before this change has its conversation
+in your `~/.claude`; its first launch afterwards carries that project dir over,
+once, so nothing is lost — and until it launches, host-authorized readers fall
+back to the old location.
+
+### Namespace grants
+
+On supported Linux hosts, protected panes require bubblewrap 0.12.0 or newer
+and enter a private PID namespace with a fresh `/proc`. They receive the exact
+session directory, selected runtime/config/account grants, their own App Server
+socket directory, and daemon-issued file-RPC mounts. `/run`, amux data/state,
+global hooks/transcripts, sibling directories and shared Git metadata are not
+mounted. The mailbox is read-only except for its `requests/` overlay;
+credentials and fixed `context.json` are read-only at the immediate-root
+`/amux-session-access` directory. Host provider/TLS/management environment
+variables and ambient API tokens are removed before the child starts. Immediately
+before the final payload exec, an in-namespace trampoline marks every inherited
+descriptor above standard error close-on-exec; a private `/proc` alone cannot
+revoke an already-open host file descriptor.
+
+The 0.12.0 floor is a security boundary, not a packaging preference. The
+[bubblewrap advisory](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx)
+marks older releases vulnerable to following an attacker-controlled mount-target
+symlink through the setup-time `/oldroot`; 0.12.0 creates destinations with
+`openat2(RESOLVE_IN_ROOT)`. amux refuses an older or missing binary rather than
+falling back to a broad host view. Runtime acceptance on a host with an older
+binary should use a disposable Linux VM or CI runner image that already contains
+bubblewrap 0.12.0 or newer and enables unprivileged user and PID namespaces. This
+tests the real mount/PID boundary without installing packages, restarting the
+host daemon, or nesting a harness sandbox probe on the development host.
 
 ## The feedback loop
 

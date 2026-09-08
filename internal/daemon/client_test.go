@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -64,5 +67,84 @@ func TestSendPreservesOrder(t *testing.T) {
 		if a.Action != core.ActionPaneInput || len(a.Data) != 1 || a.Data[0] != byte(i) {
 			t.Fatalf("frame %d out of order: got action=%q data=%v", i, a.Action, a.Data)
 		}
+	}
+}
+
+func TestNextRejectsOversizedFrameAndRetiresConnection(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	go func() {
+		_, _ = srv.Write(bytes.Repeat([]byte("x"), clientFrameLimit+1))
+	}()
+	if _, err := c.Next(); !errors.Is(err, ErrClientFrameTooLarge) {
+		t.Fatalf("oversized frame error = %v", err)
+	}
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("oversized frame left client connection reusable")
+	}
+}
+
+func TestNextContextCancellationInterruptsRead(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, err := c.NextContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled read error = %v", err)
+	}
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("interrupted partial-frame read left client connection reusable")
+	}
+}
+
+func TestPaneInputContextInterruptsBlockedWrite(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if err := c.PaneInputContext(ctx, "pane", []byte("blocked")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled write error = %v", err)
+	}
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("interrupted write did not retire client connection")
+	}
+}
+
+func TestCloseInterruptsBlockedNext(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.Next()
+		result <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("blocked Next returned no error after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not interrupt blocked Next")
 	}
 }

@@ -21,6 +21,7 @@ type fakeRestrictedRPC struct {
 	actionErr   error
 	query       sessionrpc.Result
 	queryErr    error
+	lastQuery   sessionrpc.Query
 }
 
 func (f *fakeRestrictedRPC) Action(_ context.Context, action sessionrpc.Action) (sessionrpc.Result, error) {
@@ -31,6 +32,7 @@ func (f *fakeRestrictedRPC) Action(_ context.Context, action sessionrpc.Action) 
 func (f *fakeRestrictedRPC) Query(_ context.Context, query sessionrpc.Query) (sessionrpc.Result, error) {
 	f.queryCalls++
 	f.queries = append(f.queries, query)
+	f.lastQuery = query
 	return f.query, f.queryErr
 }
 func (*fakeRestrictedRPC) Close() error { return nil }

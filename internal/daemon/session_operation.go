@@ -22,7 +22,7 @@ func canonicalSessionOperation(req access.Request) (core.Action, error) {
 		if err := validateSessionQuery(req); err != nil {
 			return core.Action{}, err
 		}
-		return core.Action{Action: core.ActionQuery, Query: req.Verb, ID: req.ID}, nil
+		return core.Action{Action: core.ActionQuery, Query: req.Verb, ID: req.ID, Fields: cloneFields(req.Fields)}, nil
 	case access.RouteAction:
 		if err := validateSessionAction(req); err != nil {
 			return core.Action{}, err
@@ -37,21 +37,30 @@ func canonicalSessionOperation(req access.Request) (core.Action, error) {
 }
 
 func validateSessionQuery(req access.Request) error {
-	if req.Target != "" || len(req.Fields) != 0 {
-		return fmt.Errorf("query %q has unsupported target or fields", req.Verb)
+	if req.Target != "" {
+		return fmt.Errorf("query %q has unsupported target", req.Verb)
 	}
 	switch req.Verb {
 	case core.QueryVersion, core.QueryCodexControl, core.QueryRepos,
 		core.QuerySessions, core.QuerySnapshot:
-		if req.ID != "" {
+		if req.ID != "" || len(req.Fields) != 0 {
 			return fmt.Errorf("query %q does not accept an id", req.Verb)
 		}
 		return nil
+	case core.QueryRuntimeEvents:
+		if strings.TrimSpace(req.ID) == "" {
+			return fmt.Errorf("query %q requires an id", req.Verb)
+		}
+		if err := validateFields(req.Fields, core.RuntimeEventsCursorField, core.RuntimeEventsAfterSequenceField); err != nil {
+			return fmt.Errorf("%w: %v", errEventQueryInvalid, err)
+		}
+		_, _, err := parseSessionEventFields(req.Fields)
+		return err
 	case core.QueryRuntimePath, core.QueryRuntimeRecord:
 		// These names are recognized so policy can return access denied instead
 		// of pretending they are an extensible route. Restricted principals are
 		// never dispatched to the host-path readModel implementation.
-		if strings.TrimSpace(req.ID) == "" {
+		if strings.TrimSpace(req.ID) == "" || len(req.Fields) != 0 {
 			return fmt.Errorf("query %q requires an id", req.Verb)
 		}
 		return nil

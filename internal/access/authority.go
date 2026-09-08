@@ -395,8 +395,9 @@ func (a *FileAuthority) Current(_ context.Context, kind SubjectKind, subjectID s
 
 // LastRevoked returns the authoritative latest revoked generation for an
 // explicitly authorized restore transition. It neither publishes nor issues a
-// credential. Callers pass its Generation to Regrant after committing the
-// corresponding unarchive and quiescing stale completion ownership.
+// credential. Callers pass its Generation to Regrant only after quiescing stale
+// completion ownership. They may keep the daemon-owned subject archived while
+// publishing the successor, then commit unarchive after publication succeeds.
 func (a *FileAuthority) LastRevoked(_ context.Context, kind SubjectKind, subjectID string) (CredentialRecord, error) {
 	if err := validateSubject(kind, subjectID); err != nil {
 		return CredentialRecord{}, err
@@ -421,9 +422,10 @@ func (a *FileAuthority) LastRevoked(_ context.Context, kind SubjectKind, subject
 
 // Regrant explicitly restores a revoked subject at the generation immediately
 // following expectedRevokedGeneration. It is not an automatic renewal API:
-// callers must first authorize and commit unarchive in daemon-owned state and
-// invalidate stale completion ownership. A current, missing, non-latest, or
-// differently generated predecessor fails closed.
+// callers must first authorize the restore and invalidate stale completion
+// ownership. They may retain archived policy until successor publication is
+// confirmed. A current, missing, non-latest, or differently generated
+// predecessor fails closed.
 func (a *FileAuthority) Regrant(_ context.Context, kind SubjectKind, subjectID string, expectedRevokedGeneration uint64) (string, error) {
 	if err := validateSubject(kind, subjectID); err != nil {
 		return "", err

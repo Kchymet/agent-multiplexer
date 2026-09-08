@@ -178,6 +178,11 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 			t.Errorf("coordinator guide missing %q", want)
 		}
 	}
+	for _, forbidden := range []string{kids[0].Dir, "sandbox `"} {
+		if strings.Contains(guide, forbidden) {
+			t.Errorf("coordinator guide exposes unavailable path/claim %q", forbidden)
+		}
+	}
 	if strings.Contains(guide, "git merge --no-edit origin/HEAD") || strings.Contains(guide, "git merge --no-edit FETCH_HEAD") {
 		t.Error("coordinator guide carries the member branch workflow")
 	}
@@ -213,7 +218,7 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = cr.Close()
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
+	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
 		}

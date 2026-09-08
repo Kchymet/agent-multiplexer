@@ -313,10 +313,8 @@ func cmdSession(args []string) error {
 		// amux workgroup create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
 		// Creates a workgroup plus one default agent scoped to the given repos.
 		repos, cfg := parseCreateFlags(args[1:])
-		rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: map[string]string{
-			"name": cfg.name, "repos": strings.Join(repos, ","), "agent": cfg.agent,
-			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
-		}})
+		fields := createWorkspaceFields(repos, cfg)
+		rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: fields})
 		if err != nil {
 			return err
 		}
@@ -790,6 +788,17 @@ func querySessions() ([]core.WorkgroupRow, error) {
 // ---- shared helpers ------------------------------------------------------
 
 type createCfg struct{ name, prompt, mode, model, agent string }
+
+func createWorkspaceFields(repos []string, cfg createCfg) map[string]string {
+	fields := map[string]string{
+		"name": cfg.name, "agent": cfg.agent, "mode": cfg.mode,
+		"model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
+	}
+	if len(repos) > 0 {
+		fields["repos"] = strings.Join(repos, ",")
+	}
+	return fields
+}
 
 func parseCreateFlags(args []string) ([]string, createCfg) {
 	// Same rational defaults as the interactive flow: the claude harness and task

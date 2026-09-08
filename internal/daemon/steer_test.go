@@ -16,6 +16,7 @@ import (
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/runtimeevents"
+	"amux/internal/sessionrpc"
 	"amux/internal/store"
 	"amux/internal/wsops"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
@@ -155,7 +156,104 @@ func TestStartAgentRevalidatesAtRuntimeExecution(t *testing.T) {
 	}
 }
 
+type gatedPromptSteerer struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedPromptSteerer) Prompt(ctx context.Context, text string) error {
+	wait, err := s.BeginPrompt(ctx, text)
+	if err != nil {
+		return err
+	}
+	return wait(ctx)
+}
+func (s *gatedPromptSteerer) BeginPrompt(context.Context, string) (func(context.Context) error, error) {
+	close(s.started)
+	return func(ctx context.Context) error {
+		select {
+		case <-s.release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, nil
+}
+func (*gatedPromptSteerer) Interject(context.Context, string) error       { return nil }
+func (*gatedPromptSteerer) Cancel(context.Context) error                  { return nil }
+func (*gatedPromptSteerer) Resolve(context.Context, string, string) error { return nil }
+
+func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T) {
+	root := store.Session{ID: "prompt-root", Scope: store.ScopeWork, Agent: "claude", Dir: t.TempDir()}
+	other := store.Session{ID: "prompt-other", Scope: store.ScopeWork, Agent: "claude", Dir: t.TempDir()}
+	member := store.Session{ID: "prompt-member", RootID: root.ID, Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, root, other, member)
+	d.sessionRPC = runtime
+	d.steerStarted = make(chan string, 1)
+	defer runtime.close()
+	call := sessionrpc.Call{
+		Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSteer, ID: member.ID,
+		Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "bounded prompt"},
+	}
+	if err := runtime.authorize(context.Background(), principals[root.ID], call); err != nil {
+		t.Fatal(err)
+	}
+
+	validationEntered := make(chan struct{})
+	releaseValidation := make(chan struct{})
+	guarded := withAccessGuard(withEffectAdmission(context.Background()), func() error {
+		close(validationEntered)
+		<-releaseValidation
+		return runtime.authorize(context.Background(), principals[root.ID], call)
+	})
+	sink := &gatedPromptSteerer{started: make(chan struct{}), release: make(chan struct{})}
+	if err := d.steerStructured(guarded, member.ID, sink, core.SteerPrompt, call.Fields); err != nil {
+		t.Fatal(err)
+	}
+	<-validationEntered
+
+	moved := make(chan core.Result, 1)
+	go func() {
+		moved <- d.handle(context.Background(), core.Action{Action: core.ActionMove, ID: member.ID, Target: other.ID})
+	}()
+	select {
+	case result := <-moved:
+		t.Fatalf("host move crossed final prompt admission: %+v", result)
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case <-sink.started:
+		t.Fatal("prompt started before its final policy validation completed")
+	default:
+	}
+
+	close(releaseValidation)
+	select {
+	case <-sink.started:
+	case <-time.After(time.Second):
+		t.Fatal("prompt turn/start was not admitted")
+	}
+	select {
+	case result := <-moved:
+		if !result.OK {
+			t.Fatalf("host move failed after prompt admission: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("host move remained blocked for the model turn")
+	}
+	if err := runtime.authorize(context.Background(), principals[root.ID], call); err == nil {
+		t.Fatal("old coordinator remained authorized after member move")
+	}
+	close(sink.release)
+	select {
+	case <-d.steerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("structured prompt waiter did not finish")
+	}
+}
+
 func TestStartAgentPublishesReplacementGenerationAtomically(t *testing.T) {
+	isolateHome(t)
 	d := New("", nil, time.Hour)
 	d.permissionBaseline = func(string) ([]string, error) { return nil, nil }
 	eng := newFakeEngine()

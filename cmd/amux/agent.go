@@ -50,6 +50,10 @@ func cmdAgent(args []string) error {
 		// List every agent session on the machine (Claude Code + Codex) so an agent
 		// can reason across conversations (not scoped to the caller — shared context).
 		return cmdAgentSessions(args[1:])
+	case "events":
+		// Authenticated bounded history. The daemon derives and opens the source;
+		// this client never receives a transcript path.
+		return cmdAgentEvents(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
 	case "done":
@@ -92,11 +96,10 @@ usage: amux agent <command>
   label <text>       alias of "name"
   done               report the task complete: archive this agent off the active
                      rail (reversible — amux workgroup unarchive <id>).
-                     identity comes only from the fixed session context
-  sessions [--json]  list every agent session on this machine — Claude Code and
-                     Codex, tagged by harness — most recent first, so you can
-                     reason about work that spans conversations. Read a transcript
-                     with your normal file tools; --json emits the full records.
+	                     identity comes only from the fixed session context
+	  sessions [--json]  list host-visible agent sessions (legacy host diagnostic)
+	  events [<id>]      read one bounded normalized event page through authenticated
+	                     session RPC (--after/--cursor, --json)
 
 Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned.

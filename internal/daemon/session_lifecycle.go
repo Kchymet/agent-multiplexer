@@ -43,8 +43,11 @@ type sessionRuntime struct {
 	callbackTimeout time.Duration
 	dispatchMu      sync.Mutex
 	servers         map[string]*sessionrpc.Server
+	initialized     map[string]bool
 	completions     *completionRegistry
 	responseBudget  sessionrpc.ResponseBudget
+	events          *sessionEventPager
+	eventsErr       error
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -52,16 +55,21 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
 		now: time.Now, callbackTimeout: sessionCallbackTimeout,
 		servers:        make(map[string]*sessionrpc.Server),
+		initialized:    make(map[string]bool),
 		responseBudget: newSessionResponseBudget(),
 		applyResult:    wsops.ApplyResult,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
+	r.events, r.eventsErr = newDaemonSessionEventPager(d)
 	return r
 }
 
 func (r *sessionRuntime) start(ctx context.Context) error {
+	if r.eventsErr != nil {
+		return fmt.Errorf("initialize session event pager: %w", r.eventsErr)
+	}
 	return r.reconcile(ctx)
 }
 
@@ -84,11 +92,37 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 	if err := r.reconcile(ctx); err != nil {
 		return err
 	}
+	return r.serveCurrent(ctx)
+}
+
+func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 	ids := make([]string, 0, len(r.servers))
 	for id := range r.servers {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	ready := true
+	var initializeErr error
+	for _, id := range ids {
+		if r.initialized[id] {
+			continue
+		}
+		err := r.servers[id].Initialize(ctx)
+		if err == nil {
+			r.initialized[id] = true
+			continue
+		}
+		ready = false
+		if !errors.Is(err, sessionrpc.ErrResponseCapacity) && !errors.Is(err, sessionrpc.ErrClosed) {
+			initializeErr = errors.Join(initializeErr, fmt.Errorf("initialize session RPC %s: %w", id, err))
+		}
+	}
+	if !ready {
+		// ErrResponseCapacity is the package's bounded-progress sentinel during
+		// startup adoption. Do not dispatch any mailbox until every current
+		// subject is initialized; the next poll resumes unfinished scans.
+		return initializeErr
+	}
 	for _, id := range ids {
 		if _, err := r.servers[id].ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
 			log.Printf("session RPC %s: %v", id, err)
@@ -182,6 +216,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	r.servers[session.ID] = server
+	r.initialized[session.ID] = false
 	return nil
 }
 
@@ -263,6 +298,7 @@ func (r *sessionRuntime) closeServer(id string) {
 		_ = server.Close()
 		delete(r.servers, id)
 	}
+	delete(r.initialized, id)
 }
 
 func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
@@ -270,6 +306,10 @@ func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
 	if err := r.d.authority.Revoke(ctx, access.SubjectSession, id); err != nil {
 		log.Printf("session RPC %s revoke: %v", id, err)
 	}
+	// Reconciliation is also the durable post-crash/post-callback cleanup path.
+	// Revoke before making the old runtime disappear so observing it stopped can
+	// never race ahead of credential invalidation.
+	r.d.killRuntimeFor(id)
 }
 
 func (r *sessionRuntime) close() {
@@ -279,6 +319,9 @@ func (r *sessionRuntime) close() {
 		r.closeServer(id)
 	}
 	r.completions.close()
+	if r.events != nil {
+		r.events.close()
+	}
 }
 
 type completionRegistry struct {
@@ -446,15 +489,18 @@ stop:
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return
 	}
-	if !c.d.killRuntimeToken(subjectID, entry.runtime) {
-		return
-	}
 	// Revoke only the credential generation that authorized completion. The
 	// explicit restore API will supersede/cancel this entry before issuing a new
-	// generation; arbitrary reconciliation can never regrant it.
+	// generation; arbitrary reconciliation can never regrant it. Revoke before
+	// publishing runtime death so a caller cannot observe the process disappear
+	// while its credential is still current.
 	if c.d.authority != nil {
-		_ = c.d.authority.RevokeCurrent(context.Background(), entry.principal)
+		if err := c.d.authority.RevokeCurrent(context.Background(), entry.principal); err != nil {
+			log.Printf("session RPC %s completion revoke: %v", subjectID, err)
+			return
+		}
 	}
+	c.d.killRuntimeToken(subjectID, entry.runtime)
 }
 
 func (c *completionRegistry) owns(subjectID string, entry *completionEntry) bool {

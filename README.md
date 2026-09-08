@@ -97,8 +97,8 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 
 ## Concepts
 
-- **Repository** — a tracked repo, cloned as a local **bare** clone (the worktree
-  source) under `~/.local/share/amux/repos/`. Add with `amux repo add <url|path|OWNER/REPO>`,
+- **Repository** — a tracked upstream with daemon-managed shared object storage
+  backing session-private Git worktrees. Add with `amux repo add <url|path|OWNER/REPO>`,
   or no-arg to fuzzy-find from your GitHub remotes via `gh`.
 - **Workgroup** — a container of agents, in one of two **scopes**:
   - **repo-scoped** — pinned to a single repo, **single-member** (one agent).
@@ -115,17 +115,27 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
   **1** the agent (Claude Code or Codex), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
   **3** a terminal. **All three are scoped to the agent's worktree** with a
-  bubblewrap mount namespace: the system is read-only, the rest of your home —
-  other projects, your files, secrets — is replaced by an empty tmpfs, and the
-  amux data tree (`~/.local/share/amux`) is mounted **read-only** so git can read
-  the bare clone its worktree is sourced from. Writable: the agent's **worktree**
-  (to edit) and **its repo's bare clone** (so git can commit to its branch). Only
-  what each tool needs is bound back: the editor's config, the shell's rc/theme —
+  bubblewrap mount and PID namespace: the system is read-only, `/proc` is private,
+  and the rest of your home — other projects, files, state, and secrets — is
+  replaced by an empty tmpfs. Only the exact session directory is writable.
+  Each repository keeps its writable Git common/admin metadata there; only the
+  daemon-authorized immutable base-object generation directories are added as
+  exact read-only mounts. Those admitted object bytes are intentionally readable.
+  Daemon-private access storage, global transcripts/hooks, sibling directories,
+  Docker, Windows/WSL drives, and host shell histories are not mounted. Only what
+  each tool needs is bound back explicitly: the editor's config, the shell's rc/theme —
   e.g. `~/.zshrc` + oh-my-zsh — so the terminal keeps your prompt/aliases/plugins,
   and your **git/GitHub auth** (`~/.gitconfig` + `~/.config/gh`) so agents push and
-  use `gh` without logging in again. Network works (DNS included). It's a
-  filesystem scope, not a hardened jail (network/pids are shared); `AMUX_JAIL=off`
-  disables it.
+  use `gh` without logging in again. The daemon-selected model account is the only
+  ambient credential environment projected into the launcher; cloud/operator keys
+  are excluded before bubblewrap starts. Bare `amux` resolves through the exact
+  running binary in read-only `/amux-bin`. Claude's generated hooks and model
+  status line retain the stable installed absolute path through a second
+  read-only alias of that same running executable, even if the host installation
+  is missing or older; the containing `~/.local/bin` directory stays absent.
+  Network remains shared (DNS included), so this is not a network
+  sandbox. Protected launch fails closed when isolation is disabled or
+  unsupported. See `docs/namespace-rollout.md` before deployment.
 - **Harness config is a private copy, not a mount.** Your `~/.claude` /
   `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
@@ -378,11 +388,10 @@ something we have actually used here; ⚠️ is something we *expect* to work bu
 
 Two things are OS-specific by design:
 
-- **The filesystem jail is Linux-only.** It shells out to `bwrap` (bubblewrap),
-  which exists on Linux/WSL but not macOS. Where `bwrap` is absent the scope is
-  **silently skipped** — panes still run, just unscoped to the worktree
-  (`AMUX_JAIL=off` is the explicit form). Docker-in-the-pane and `proctree`
-  process mapping are likewise Linux-only. Inside the jail `$HOME` is an empty
+- **The filesystem jail is Linux-only.** It requires `bwrap` (bubblewrap) 0.12.0
+  or newer plus usable user/PID namespaces. Missing, older, disabled, or non-Linux
+  isolation fails protected launch explicitly; it never silently forwards session
+  credentials to an unscoped process. Inside the jail `$HOME` is an empty
   tmpfs, so anything a pane launches — including `$BROWSER`, which agents use
   for `gh --web` and Claude's login — must live under a system root (`/usr`,
   `/opt`, `/home/linuxbrew`, …). `amux doctor` checks that; on WSL set
@@ -393,11 +402,11 @@ Two things are OS-specific by design:
 |------------|:---------:|:------------:|:-----:|
 | Native TUI (`amux`) | ✅ | ⚠️ | ⚠️ |
 | Client/server (`amux serve` / `harness`) | ✅ | ⚠️ | ⚠️ |
-| Worktrees + bare-clone store | ✅ | ⚠️ | ⚠️ |
+| Private worktrees + shared object pool | ⚠️ | ➖ | ⚠️ |
 | Agent / editor / terminal tabs | ✅ | ⚠️ | ⚠️ |
-| Filesystem jail (`bwrap`) | ✅ | ➖ | ⚠️ |
-| Docker inside the terminal pane | ✅ | ⚠️¹ | ⚠️ |
-| Process-tree mapping (`proctree`) | ✅ | ➖ | ⚠️ |
+| Filesystem/PID jail (`bwrap` ≥ 0.12) | ✅ | ➖ | ⚠️ |
+| Docker inside protected panes | ➖ | ➖ | ➖ |
+| Private process-tree mapping | ✅ | ➖ | ⚠️ |
 
 **Legend** — ✅ run & exercised here (WSL2)  ·  ⚠️ expected to work (shared code
 path / build-verified) but **not directly validated**  ·  ➖ not applicable

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"amux/internal/agent"
-	"amux/internal/core"
 	"amux/internal/hostprep"
 	"amux/internal/store"
 )
@@ -84,9 +83,9 @@ are assigned (the subdirectories here). %s
 When you need to interact with amux itself, use the self-scoped `+"`amux agent ...`"+`
 commands by default. They infer which agent you are, so you do not need to look
 up or pass your own id. Run `+"`amux agent --help`"+` to see the available commands;
-the ones you will normally need are `+"`amux agent sessions`"+` to find conversation
-history, `+"`amux agent name <display name>`"+` to name yourself, and `+"`amux agent done`"+`
-to mark your task complete.
+the ones you will normally need are `+"`amux agent events --json`"+` to read your own
+normalized history, `+"`amux agent name <display name>`"+` to name yourself, and
+`+"`amux agent done`"+` to mark your task complete.
 
 Other command families such as `+"`amux do`"+`, `+"`amux workgroup`"+`, `+"`amux repo`"+`,
 `+"`amux config`"+`, and `+"`amux sandbox`"+` operate the wider control plane. Do not use
@@ -131,18 +130,23 @@ should propagate to their config and to other agents (` + "`amux sandbox drift`"
 you change there propagates on its own. The credentials file is shared and not yours
 to edit.
 `
-	transcriptsSection = `## Reason across agent sessions
-You can **read** the transcripts of every agent session on this machine (Claude
-Code, Codex, …) — your own, other agents', and the user's — to reason about work that spans
-conversations: recurring tasks, prior decisions, and what's already been done.
-List them (most recent first) with:
+	transcriptsSection = `## Authorized session context
+The filesystem namespace exposes only this session's own files. Use the
+authenticated amux commands for session context rather than searching sibling,
+parent, state, or transcript paths. List the sessions your current server-issued
+role may see, then read one bounded normalized event page with:
 
-    amux agent sessions
+    amux status --json
+    amux agent events <session-id> --json
 
-Each row is a session; the indented line is the transcript path (a JSONL
-conversation log) you can open with your normal file tools. Add ` + "`--json`" + ` for
-machine-readable records. This is read-only context — never modify these files,
-and keep every edit inside your own directory.
+Omit ` + "`<session-id>`" + ` to read yourself. Continue with the returned opaque cursor:
+
+    amux agent events <session-id> --cursor <next-cursor> --json
+
+Ordinary agents receive only their own normalized events; coordinators may read
+their current direct members, including archived members still belonging to the
+workgroup; repo homes receive their granted repo descendants. Responses are at
+most 64 KiB and do not grant host paths or filesystem access to another session.
 `
 	// guideRegenNote tells a long-lived session where durable instructions go,
 	// since its guide is rewritten at every launch.
@@ -187,15 +191,11 @@ a native TUI and mirrored to a web dashboard.
   session (its id is the repo name).
 
 ## Where everything is
-- This directory (%s) is your sandbox: the only place you write. %s
-- amux's data dir (%s), readable, holds:
-  - `+"`amux.db`"+` — the SQLite store of repos and sessions (read it via the CLI, never edit it);
-  - `+"`repos/<name>.git`"+` — legacy bare-clone inventory, never an agent's writable Git common directory;
-  - `+"`sessions/<workgroup>/`"+` — a workgroup's container: the coordinator's sandbox,
-    holding `+"`<agent>/`"+` sandboxes with each agent's worktrees, its own `+"`CLAUDE.md`"+`,
-    and its private config (and transcript) under `+"`.amux/`"+`;
-  - `+"`sessions/<repo>/`"+` — a repo home's sandbox.
-- Every agent's conversation: `+"`amux agent sessions`"+` lists them with transcript paths.
+- This directory (%s) is your own writable sandbox. No workgroup, repo cache,
+  daemon state, database, credential source, or other session directory is
+mounted here. %s
+- Your global coordination view is an explicit authenticated daemon grant.
+  Query and operate it through amux; do not infer access from host path names.
 
 ## Operate amux
 %s
@@ -211,10 +211,10 @@ a native TUI and mirrored to a web dashboard.
 ## Rules
 - Never edit a worktree, another session's sandbox, a bare clone, or the store.
   Change amux state through the CLI; put code changes in an agent, not here.
-- Verify before you report: an agent's transcript, its branch, and its PR are
-  the evidence — not its last status word.
+- Verify before you report: an agent's authenticated normalized event history,
+  its branch, and its PR are the evidence — not its last status word.
 
-`, s.Dir, guideRegenNote, core.DataDir(), steeringVerbs)
+`, s.Dir, guideRegenNote, steeringVerbs)
 	b.WriteString(configHomeSection)
 	b.WriteString("\n")
 	b.WriteString(inventorySection())
@@ -284,7 +284,7 @@ ones running. Prompting this repo from the rail or the web reaches you.
   with private writable Git metadata and a read-only authorized base-object pool;
   the legacy host cache and other sessions' private Git metadata are not yours.
 - You have no clone of your own: to change code, dispatch a one-off agent and
-  read its worktree at its sandbox path.
+  inspect it through your authenticated repo-scoped session view.
 
 ## Your sandbox
 This directory (%s) is your writable sandbox; keep your notes here. Each one-off

@@ -206,9 +206,9 @@ func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 // PrepareLaunch trusts the launch dir in the agent's own home and installs amux's
 // status/capture hooks into the launch dir (not the user-wide settings.json),
 // pointed at the stable installed binary. Claude loads settings.local.json only
-// from the launch dir. Safe launches use the session root, outside its private
-// repository checkout; do not invoke host-side Git against session-writable
-// metadata here.
+// from the launch dir. All writes are anchored under the pinned session root;
+// do not invoke host-side Git against session-writable metadata here. Legacy
+// worktree cleanup remains an explicit migration concern.
 func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
 	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
 		return err

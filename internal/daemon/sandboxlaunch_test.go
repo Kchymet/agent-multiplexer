@@ -13,6 +13,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/codexapp"
+	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/store"
 )
@@ -114,7 +115,10 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 	if _, err := os.Stat(stalePath); err != nil {
 		t.Fatal(err)
 	}
-	sup := codexapp.New(codexapp.Config{SessionID: "sbx", Dir: dir, Env: env, Endpoint: endpoint})
+	sup := codexapp.New(codexapp.Config{
+		SessionID: "sbx", Dir: dir, Env: env, Endpoint: endpoint,
+		ModelAccess: launchenv.ForRuntime("codex"),
+	})
 	if err := sup.Start(ctx, argv); err != nil {
 		t.Fatalf("sandboxed launch (exec bwrap-wrapped codex + WS handshake): %v", err)
 	}
@@ -293,7 +297,10 @@ func TestSandboxedSymlinkedCodexLaunch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	sup := codexapp.New(codexapp.Config{SessionID: "sym", Dir: dir, Env: env, Endpoint: endpoint})
+	sup := codexapp.New(codexapp.Config{
+		SessionID: "sym", Dir: dir, Env: env, Endpoint: endpoint,
+		ModelAccess: launchenv.ForRuntime("codex"),
+	})
 	if err := sup.Start(ctx, argv); err != nil {
 		t.Fatalf("sandboxed launch of a symlinked-standalone codex: %v", err)
 	}

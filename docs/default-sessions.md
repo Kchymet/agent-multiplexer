@@ -9,7 +9,7 @@ orchestrator over the provider protocol.
 | container | role (`AMUX_ROLE`) | session id | sandbox (cwd) | scope (`AMUX_SCOPE`) |
 |-----------|--------------------|------------|---------------|----------------------|
 | the machine | `console` | `console` | `~/.local/share/amux/console/` | `global` |
-| a work-scoped workgroup | `coordinator` | the workgroup id | `sessions/<workgroup>/` — the container dir holding every member's sandbox | `work` |
+| a work-scoped workgroup | `coordinator` | the workgroup id | `sessions/<workgroup>/coordinator/` — a dedicated own directory | `work` |
 | a tracked repo | `repo` | the repo name | `sessions/<repo>/` | `repo` |
 
 An ordinary agent has an empty role. A hidden single-member repo root (the
@@ -17,9 +17,10 @@ wrapper around a one-off agent) hosts no session.
 
 ## What each one is for
 
-- **The console** has machine-wide context: every workgroup, agent, and repo,
-  what each agent was asked to do and what it did (their transcripts are
-  readable), and the CLI to operate all of it. Its guide carries a launch-time
+- **The console** has an explicit machine coordination view: every granted
+  workgroup, agent, and repo, plus bounded normalized event queries for their
+  history and the CLI to operate them. Other sessions' filesystem transcripts
+  are not mounted. Its guide carries a launch-time
   inventory and the `amux do` vocabulary. It coordinates *across* workgroups;
   it does not write code.
 - **A workgroup coordinator** supervises that workgroup's agents: scopes the
@@ -30,20 +31,25 @@ wrapper around a one-off agent) hosts no session.
   verb=prompt …`, or the web — reaches the coordinator. `amux do start
   <workgroup>` still starts the *members*.
 - **A repo home** is the long-lived context for a repo's one-off agents: it
-  knows what has been tried, dispatches new one-offs (`amux do new-repo-agent
-  <repo> …`), and reads the bare clone directly. It has no worktree of its own.
+  knows what has been tried through its authenticated repo-scoped view and
+  dispatches new one-offs (`amux do new-repo-agent <repo> …`). It does not mount
+  another session's worktree or shared Git administration directly.
 
 ## Scope
 
-A default session launches through the same path as an agent: a bubblewrap
-scope with its sandbox writable, the amux data tree readable, and a private
-copy of your harness config under `<sandbox>/.amux/` (see
-`docs/sandbox-config.md`). That is what makes the scoping fall out of the
-directory layout: the coordinator's sandbox *is* the container that holds its
-members' sandboxes, so it can read every member's worktree, guide, and
-transcript; the repo home and the console read the data tree. None of them gets
-a writable bare clone — they change amux through the CLI and change code by
-steering an agent, and their guides say so.
+A default session launches through the same typed bubblewrap boundary as an
+agent: only its dedicated own directory is writable, with private PID/proc state,
+fixed daemon-issued access mounts, and a private harness-config copy under
+`<sandbox>/.amux/` (see `docs/sandbox-config.md`). A coordinator does not mount
+the workgroup parent containing members; repo homes and the console do not mount
+the amux data/state tree. Their wider views are explicit authenticated daemon
+grants, so they change amux through the CLI and change code by steering an agent.
+
+Existing processes keep the namespace they started with. A legacy coordinator
+that still sees its member-containing parent or broad state invalidates any
+mixed-mode confidentiality claim until every such runtime is stopped and safely
+recreated. See `docs/namespace-rollout.md`; launch refuses unsupported legacy
+roots rather than relocating or deleting unknown state during a read.
 
 ## Guides
 
@@ -57,7 +63,8 @@ memory (`.amux/claude/CLAUDE.md`), which survives regeneration.
 - The console is synthetic (never a store row) and cannot be deleted.
 - A workgroup's coordinator is the root row itself: creating the workgroup
   creates it (sandbox dir + pinned conversation) and starts its runtime, even
-  for an empty workgroup or a CLI/remote creation with no UI attached. Opening
+  in its dedicated `coordinator/` directory, even for an empty workgroup or a
+  CLI/remote creation with no UI attached. Opening
   its rail row attaches to that running session. When the workgroup creation
   form includes a prompt or model, those configure this coordinator directly;
   a prompt no longer creates a separate member agent. Without a prompt it starts

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"amux/internal/engine"
+	"amux/internal/launchenv"
 )
 
 // Restarting from an automation shell must not carry its output preferences
@@ -32,7 +33,11 @@ func TestPaneColorEnvironment(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := map[string]string{}
-			for _, e := range buildEnv(tc.extra) {
+			env, err := buildEnv(tc.extra, launchenv.ModelCapability{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range env {
 				key, value, _ := strings.Cut(e, "=")
 				if _, exists := got[key]; exists {
 					t.Fatalf("duplicate environment key %q", key)
@@ -63,6 +68,41 @@ func TestPaneColorEnvironment(t *testing.T) {
 				t.Error("lost terminal color capability")
 			}
 		})
+	}
+}
+
+func TestPaneEnvironmentUsesSelectedModelCapabilityOnly(t *testing.T) {
+	for name, value := range map[string]string{
+		"OPENAI_API_KEY":          "selected-codex-key",
+		"ANTHROPIC_API_KEY":       "other-model-key",
+		"AWS_SECRET_ACCESS_KEY":   "operator-aws",
+		"AZURE_CLIENT_SECRET":     "operator-azure",
+		"GOOGLE_API_KEY":          "operator-google",
+		"GH_ENTERPRISE_TOKEN":     "operator-gh",
+		"GITHUB_ENTERPRISE_TOKEN": "operator-github",
+		"AMUX_MUX_TOKEN":          "operator-amux",
+	} {
+		t.Setenv(name, value)
+	}
+	env, err := buildEnv([]string{"AMUX_SESSION_ID=subject"}, launchenv.ForRuntime("codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "OPENAI_API_KEY=selected-codex-key") {
+		t.Fatalf("selected Codex environment authentication was lost: %v", env)
+	}
+	for _, denied := range []string{
+		"ANTHROPIC_API_KEY=", "AWS_SECRET_ACCESS_KEY=", "AZURE_CLIENT_SECRET=",
+		"GOOGLE_API_KEY=", "GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN=",
+		"AMUX_MUX_TOKEN=",
+	} {
+		if strings.Contains(joined, denied) {
+			t.Errorf("pane inherited %s: %v", denied, env)
+		}
+	}
+	if _, err := buildEnv([]string{"OPENAI_API_KEY=caller-minted"}, launchenv.ForRuntime("codex")); err == nil {
+		t.Fatal("generic pane overlay minted a model credential")
 	}
 }
 
