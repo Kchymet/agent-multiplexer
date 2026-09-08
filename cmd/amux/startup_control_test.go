@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
@@ -112,6 +113,42 @@ func TestDeniedRestartDoesNotSignalPidfileProcess(t *testing.T) {
 	}
 }
 
+func TestAbsentDaemonStopDoesNotSignalStalePidfileProcess(t *testing.T) {
+	sandboxCLI(t)
+	stubStartupDial(t, syscall.ENOENT)
+	if err := os.MkdirAll(core.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	child := exec.Command("/bin/sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = child.Process.Kill()
+		<-exited
+	})
+	if err := os.WriteFile(core.PidPath(), []byte(strconv.Itoa(child.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := daemonStop(false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case waitErr := <-exited:
+		reaped = true
+		t.Fatalf("absent-daemon stop signaled stale pidfile process: %v", waitErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestDaemonStartupRejectsUnexpectedConnectionErrorWithoutExec(t *testing.T) {
 	sandboxCLI(t)
 	errRejected := errors.New("daemon credential rejected")
@@ -195,6 +232,84 @@ func TestDaemonLifecycleDoesNotStartOrRestartInsideAgent(t *testing.T) {
 				t.Fatalf("lifecycle error = %v, want agent-session refusal", err)
 			}
 		})
+	}
+}
+
+func TestDaemonStartupCannotDowngradeByUnsettingSessionEnvironment(t *testing.T) {
+	sandboxCLI(t)
+	for _, name := range []string{"AMUX_SESSION_ID", "AMUX_RPC_DIR", "AMUX_WORKGROUP", "AMUX_WORKSPACE", "HOME", "XDG_RUNTIME_DIR"} {
+		t.Setenv(name, "")
+	}
+	oldContext := sessionContextRestricted
+	sessionContextRestricted = func() bool { return true }
+	t.Cleanup(func() { sessionContextRestricted = oldContext })
+	stubStartupDial(t, syscall.ENOENT)
+	spawned := false
+	oldCommand := daemonCommand
+	daemonCommand = func(string, ...string) *exec.Cmd {
+		spawned = true
+		return exec.Command("/executable-must-not-run")
+	}
+	t.Cleanup(func() { daemonCommand = oldCommand })
+
+	err := ensureDaemon("/executable-must-not-run")
+	if err == nil || !strings.Contains(err.Error(), "inside an amux agent") {
+		t.Fatalf("startup error = %v, want fixed-context refusal", err)
+	}
+	if spawned {
+		t.Fatal("missing socket spawned a daemon after session environment was unset")
+	}
+}
+
+func TestFixedSessionContextErrorsFailClosed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err        error
+		restricted bool
+	}{
+		"valid":      {restricted: true},
+		"missing":    {err: os.ErrNotExist, restricted: false},
+		"permission": {err: os.ErrPermission, restricted: true},
+		"invalid":    {err: errors.New("invalid context"), restricted: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := restrictedBySessionContext(func() (access.SessionContext, error) {
+				return access.SessionContext{}, tc.err
+			})
+			if got != tc.restricted {
+				t.Fatalf("restricted = %v, want %v", got, tc.restricted)
+			}
+		})
+	}
+}
+
+func TestMissingContextAndEnvironmentCannotGrantAutomaticHostStartup(t *testing.T) {
+	sandboxCLI(t)
+	for _, name := range []string{"AMUX_SESSION_ID", "AMUX_RPC_DIR", "AMUX_CREDENTIAL_DIR", "HOME", "XDG_RUNTIME_DIR", "XDG_DATA_HOME"} {
+		t.Setenv(name, filepath.Join(t.TempDir(), "forged"))
+	}
+	t.Setenv("AMUX_WORKGROUP", "")
+	t.Setenv("AMUX_WORKSPACE", "")
+	oldContext := sessionContextRestricted
+	sessionContextRestricted = func() bool { return false } // proven ENOENT
+	t.Cleanup(func() { sessionContextRestricted = oldContext })
+	oldProtected := protectedHostStartup
+	protectedHostStartup = func() error { return os.ErrNotExist }
+	t.Cleanup(func() { protectedHostStartup = oldProtected })
+	stubStartupDial(t, syscall.ENOENT)
+	spawned := false
+	oldCommand := daemonCommand
+	daemonCommand = func(string, ...string) *exec.Cmd {
+		spawned = true
+		return exec.Command("/executable-must-not-run")
+	}
+	t.Cleanup(func() { daemonCommand = oldCommand })
+
+	err := ensureDaemon("/executable-must-not-run")
+	if err == nil || !strings.Contains(err.Error(), "protected host credential") {
+		t.Fatalf("startup error = %v, want protected-host refusal", err)
+	}
+	if spawned {
+		t.Fatal("missing context and forged environment spawned a daemon without protected host authority")
 	}
 }
 

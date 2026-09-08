@@ -1,7 +1,7 @@
 // Package wsops holds session lifecycle operations shared by the daemon (rail
 // actions) and the CLI. A workgroup (root) is a pure container: it checks out
 // nothing itself; its agents (subs) each work on a subset of the tracked repos,
-// one worktree per repo under the agent's own directory.
+// one independent clone per repo under the agent's own directory.
 package wsops
 
 import (
@@ -33,8 +33,8 @@ type AgentSpec struct {
 // CreateWorkspace creates a workgroup (root): a container of agents that checks
 // out nothing itself and holds no repos of its own (a repo is an attribute of
 // an agent, via its worktrees), but which IS a session — the workgroup's
-// coordinator (store.RoleCoordinator), sandboxed to the container dir that
-// holds every member's sandbox, with a conversation pinned now so it resumes
+// coordinator (store.RoleCoordinator), sandboxed to a dedicated own directory
+// beside member sandboxes, with a conversation pinned now so it resumes
 // durably. When defaultAgent is non-nil it also creates one agent from that spec
 // (its repos, model, mode, and prompt are honored). Pass nil to create an empty
 // workgroup. Returns the workgroup id.
@@ -60,7 +60,7 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
 		Agent: kind, Model: model, Mode: store.ModeInteractive, Prompt: prompt,
-		Dir: store.RootDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
+		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
 	if err := os.MkdirAll(root.Dir, 0o755); err != nil {
@@ -140,7 +140,8 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 			log.Printf("amux: skipping unknown repo %q while creating agent under %s", repoName, rootID)
 			continue
 		}
-		if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(dir, repoName), branch); err != nil {
+		if err := git.AddCheckout(ctx, checkoutSource(repo.Source), filepath.Join(dir, repoName), branch,
+			gitStagingDir(), core.SessionsDir(), gitLayoutPath(agentID, repoName)); err != nil {
 			return store.Session{}, err
 		}
 		repos = append(repos, repoName)
@@ -191,11 +192,9 @@ func ensureConfigHome(s store.Session) {
 	if fresh {
 		log.Printf("amux: seeded agent %s's private %s config from %s", s.ID, spec.Kind, spec.Template)
 	}
-	// A legacy agent whose dir is itself a worktree must not see its config home
-	// as untracked files.
-	if git.IsGitRepo(context.Background(), s.Dir) {
-		_ = git.Exclude(context.Background(), s.Dir, ".amux/")
-	}
+	// New repositories live beneath s.Dir, so the private config is outside Git.
+	// Do not run host-side Git against a legacy session-writable checkout here;
+	// explicit migration handles its excludes and any dirty state.
 }
 
 // AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
@@ -253,6 +252,17 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 	if a.IsRoot() {
 		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
+	var managedRoot string
+	storageRoot := func() (string, error) {
+		if managedRoot != "" {
+			return managedRoot, nil
+		}
+		root, err := sessionStorageRoot(a.Dir)
+		if err == nil {
+			managedRoot = root
+		}
+		return root, err
+	}
 
 	cur := map[string]bool{}
 	for _, r := range store.SplitRepos(a.Repo) {
@@ -271,7 +281,12 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 			continue
 		}
 		if !cur[r] {
-			if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch); err != nil {
+			managedRoot, err := storageRoot()
+			if err != nil {
+				return err
+			}
+			if err := git.AddCheckout(ctx, checkoutSource(repo.Source), filepath.Join(a.Dir, r), a.Branch,
+				gitStagingDir(), managedRoot, gitLayoutPath(a.ID, r)); err != nil {
 				return err
 			}
 		}
@@ -282,9 +297,21 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 		if wantSet[r] {
 			continue
 		}
-		if repo, ok, _ := db.Repo(r); ok {
-			wt := filepath.Join(a.Dir, r)
-			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
+		repo, ok, repoErr := db.Repo(r)
+		if repoErr != nil {
+			return repoErr
+		}
+		if !ok {
+			return fmt.Errorf("cannot remove repo %q from agent %s: tracked repository record is missing", r, agentID)
+		}
+		managedRoot, err := storageRoot()
+		if err != nil {
+			return err
+		}
+		wt := filepath.Join(a.Dir, r)
+		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt), managedRoot,
+			gitStagingDir(), gitLayoutPath(a.ID, r)); err != nil {
+			return fmt.Errorf("remove repo %q from agent %s: %w", r, agentID, err)
 		}
 	}
 	// Field-scoped write: only the repo column changes here.
@@ -403,15 +430,11 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
 	// the running binary. Where it goes is the harness's call — Claude reads
 	// .claude/skills, others .agents/skills. Best-effort: a failure just means the
-	// agent lacks the skills, never that it can't launch. The launch dir is normally
-	// the agent's own root dir (not a git repo); if resuming into a worktree, git-exclude
-	// the tree so it never dirties the repo.
+	// agent lacks the skills, never that it can't launch. The launch dir is the
+	// agent's own root, outside its repository clones. We intentionally do not run
+	// host-side Git against a session-writable clone during launch.
 	skillsDir := h.SkillsDir(dir)
-	if err := skills.Install(skillsDir); err == nil && git.IsGitRepo(context.Background(), dir) {
-		if rel, err := filepath.Rel(dir, skillsDir); err == nil {
-			_ = git.Exclude(context.Background(), dir, rel+"/")
-		}
-	}
+	_ = skills.Install(skillsDir)
 	argv, err = h.Argv(s.Model, plan.Extra...)
 	if err != nil {
 		return "", nil, nil, err
@@ -520,34 +543,56 @@ func DeleteByID(ctx context.Context, id string) error {
 		if s.Role() == store.RoleRepo {
 			return fmt.Errorf("%q is repo %s's home session; it goes with the repo (amux repo rm %s)", id, s.Repo, s.Repo)
 		}
+		// Validate before touching members. A legacy coordinator shares its parent
+		// with member and unknown files; partial deletion would silently destroy
+		// exactly the state that explicit host recovery must preserve.
+		if err := validateContainerHome(s, store.CoordinatorDir(s.ID), "workgroup coordinator"); err != nil {
+			return fmt.Errorf("refusing to delete legacy workgroup: %w", err)
+		}
 		agents, _ := db.Children(id)
 		for _, a := range agents {
-			removeAgent(ctx, db, a)
+			if err := removeAgent(ctx, db, a); err != nil {
+				return err
+			}
 		}
-		// The coordinator's own files go; the container dir itself is removed only
-		// if that leaves it empty. A re-parented agent can still physically live
-		// under this root's tree (move is DB-only), so we must never blow the whole
-		// tree away.
-		removeContainerFiles(db, s)
+		// Remove exactly the dedicated coordinator own directory. A re-parented
+		// agent can still physically live under this root's parent (move is DB-only),
+		// so the parent is never scanned or recursively removed.
+		if err := removeContainerFiles(db, s); err != nil {
+			return err
+		}
 		return db.DeleteSession(id)
 	}
-	removeAgent(ctx, db, s)
-	return nil
+	return removeAgent(ctx, db, s)
 }
 
-func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
+func removeAgent(ctx context.Context, db *store.DB, a store.Session) error {
+	managedRoot, err := sessionStorageRoot(a.Dir)
+	if err != nil {
+		return err
+	}
 	for _, repoName := range store.SplitRepos(a.Repo) {
-		if repo, ok, _ := db.Repo(repoName); ok {
-			wt := filepath.Join(a.Dir, repoName)
-			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
+		repo, ok, repoErr := db.Repo(repoName)
+		if repoErr != nil {
+			return repoErr
+		}
+		if !ok {
+			return fmt.Errorf("cannot remove agent %s: tracked repository %q is missing", a.ID, repoName)
+		}
+		wt := filepath.Join(a.Dir, repoName)
+		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt), managedRoot,
+			gitStagingDir(), gitLayoutPath(a.ID, repoName)); err != nil {
+			return fmt.Errorf("remove repo %q for agent %s: %w", repoName, a.ID, err)
 		}
 	}
 	// The private config home goes with the dir; drop its seed manifest too.
 	if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
 		cfghome.Forget(spec)
 	}
-	_ = os.RemoveAll(a.Dir)
-	_ = db.DeleteSession(a.ID)
+	if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
+		return fmt.Errorf("remove agent directory %s: %w", a.ID, err)
+	}
+	return db.DeleteSession(a.ID)
 }
 
 // agentBranch is the branch to delete along with agent a's worktree at wt, or ""
@@ -563,10 +608,10 @@ func agentBranch(ctx context.Context, a store.Session, wt string) string {
 	if a.Branch != "" {
 		return a.Branch
 	}
-	b := git.CurrentBranch(ctx, wt)
-	if b == "" {
-		b = core.LegacyBranchFor(a.RootID)
-	}
+	// Do not ask Git: wt is writable by the session and its config can name
+	// external helpers. Blank Branch is the legacy import shape, whose branch
+	// naming convention is deterministic.
+	b := core.LegacyBranchFor(a.RootID)
 	if !strings.HasPrefix(b, core.BranchPrefix) {
 		return ""
 	}

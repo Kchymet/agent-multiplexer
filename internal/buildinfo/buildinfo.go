@@ -9,4 +9,4 @@ var Version = "0.1.0"
 
 // DaemonProtocol is the local CLI-to-daemon API contract. Additive changes may
 // keep the same number; bump it when either side must reject the other.
-const DaemonProtocol = 1
+const DaemonProtocol = 2

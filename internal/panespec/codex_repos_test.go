@@ -11,14 +11,14 @@ import (
 	"amux/internal/store"
 )
 
-func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
+func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
 	t.Setenv("AMUX_CLAUDE_BIN", "/bin/true")
-	t.Setenv("AMUX_JAIL", "off")
+	useFakeSecureBwrap(t)
 	dir := filepath.Join(home, "agent")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -35,6 +35,11 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 			path = roots[i]
 		}
 		if err := db.PutRepo(store.Repo{Name: name, GitDir: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(dir, name, ".git"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -63,19 +68,20 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 			t.Fatalf("alternate-screen override present = %v, want %v; argv=%v", got, want, argv)
 		}
 	}
-	_, _, argv, err := Resolve(s.ID, TabAgent)
+	spec := testLaunchSpec(t, s)
+	_, _, argv, err := Resolve(spec, TabAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(argv, roots)
+	check(argv, nil)
 	checkFullscreen(argv, true)
-	_, _, argv, _, err = AppServerCommand(s.ID)
+	_, _, argv, _, err = AppServerCommand(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(argv, roots)
+	check(argv, nil)
 	checkFullscreen(argv, false) // the background server has no TUI
-	_, _, argv, err = AttachCommand(s.ID, "unix:///tmp/codex.sock", "thread-1")
+	_, _, argv, err = AttachCommand(spec, "unix:///tmp/codex.sock", "thread-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +91,8 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 	if err := db.PutSession(s); err != nil {
 		t.Fatal(err)
 	}
-	_, _, argv, _, err = AppServerCommand(s.ID)
+	spec = testLaunchSpec(t, s)
+	_, _, argv, _, err = AppServerCommand(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,12 +102,42 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 	if err := db.PutSession(s); err != nil {
 		t.Fatal(err)
 	}
+	spec = testLaunchSpec(t, s)
 	for _, tab := range []int{TabAgent, TabTerminal} {
-		_, _, argv, err = Resolve(s.ID, tab)
+		_, _, argv, err = Resolve(spec, tab)
 		if err != nil {
 			t.Fatal(err)
 		}
 		check(argv, nil)
 		checkFullscreen(argv, false)
+	}
+}
+
+func TestResolveRefusesLegacySharedGitLayout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	useFakeSecureBwrap(t)
+	dir := filepath.Join(home, "agent")
+	if err := os.MkdirAll(filepath.Join(dir, "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repo", ".git"), []byte("gitdir: /shared/cache/worktrees/a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "legacy", RootID: "root", Agent: "codex", Dir: dir, Repo: "repo"}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, _, _, err := Resolve(testLaunchSpec(t, s), TabAgent); err == nil || !strings.Contains(err.Error(), "launch refused") {
+		t.Fatalf("Resolve legacy linked worktree error = %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "repo", ".git")); err != nil || !strings.Contains(string(b), "/shared/cache") {
+		t.Fatalf("refusal mutated legacy checkout: %q, %v", b, err)
 	}
 }

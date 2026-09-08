@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"amux/internal/console"
@@ -23,7 +24,7 @@ func TestPollDefaultSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range []store.Session{
-		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Mode: store.ModeInteractive, Dir: store.RootDir("wg1"), ClaudeID: "conv-wg1", Created: 1},
+		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Mode: store.ModeInteractive, Dir: store.CoordinatorDir("wg1"), ClaudeID: "conv-wg1", Created: 1},
 		{ID: "a1", RootID: "wg1", Agent: "claude", Mode: store.ModeTask, Created: 2},
 		{ID: "legacy", Name: "old", Scope: store.ScopeWork, Created: 3}, // predates default sessions: no dir, no id
 		{ID: "api", Scope: store.ScopeRepo, Repo: "api", Agent: "claude", Mode: store.ModeInteractive, Dir: store.RootDir("api"), ClaudeID: "conv-api", Created: 4},
@@ -75,20 +76,23 @@ func TestPollDefaultSessions(t *testing.T) {
 		return r
 	}
 	check(console.ID, store.RoleConsole, "claude", console.Dir())
-	wg := check("wg1", store.RoleCoordinator, "claude", store.RootDir("wg1"))
+	wg := check("wg1", store.RoleCoordinator, "claude", store.CoordinatorDir("wg1"))
 	if !wg.IsRoot || wg.Section != core.SectionWorkgroups || wg.State != core.StateRunning || wg.Kind != "claude" {
 		t.Errorf("coordinator row = %+v", wg)
 	}
-	// A root predating default sessions is still a coordinator: it gets its
-	// container dir on first open, so the rail advertises that dir now.
-	check("legacy", store.RoleCoordinator, "claude", store.RootDir("legacy"))
+	// A root predating default sessions remains visible, but a read does not
+	// invent or materialize a cwd that would imply migration succeeded.
+	check("legacy", store.RoleCoordinator, "claude", "")
 	api := check("api", store.RoleRepo, "claude", store.RootDir("api"))
 	if api.Kind != "repo" || api.Section != core.SectionRepos || api.State != core.StateIdle {
 		t.Errorf("repo home row = %+v", api)
 	}
-	// A repo tracked before default sessions has no home row yet; its header is
-	// still a repo home the daemon materializes on open.
-	check("web", store.RoleRepo, "claude", store.RootDir("web"))
+	// A repo tracked before default sessions has no home row yet. A read does not
+	// materialize it; the header reports repair-required and is not attachable.
+	web := byID["web"]
+	if web.Role != store.RoleRepo || web.Cwd != "" || web.CanAttach || !strings.Contains(web.Status, "repair required") {
+		t.Errorf("unprovisioned repo home = %+v", web)
+	}
 	if _, ok := byID["hidden"]; ok {
 		t.Error("the hidden single-member repo root rendered as a row")
 	}

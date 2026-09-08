@@ -56,6 +56,13 @@ func trimScheme(spec, scheme string) string {
 // Run starts a server listening on the local unix socket plus any extra listen
 // specs (e.g. "tcp:0.0.0.0:7077" for remote access), until interrupted.
 func Run(extra ...string) error {
+	return RunWithLaunchResolver(nil, extra...)
+}
+
+// RunWithLaunchResolver is the authority-injection seam for a daemon/provider
+// that owns current SessionAccess. A nil resolver deliberately leaves legacy
+// pane-open fail-closed; this package never opens an authority of its own.
+func RunWithLaunchResolver(resolver LaunchSpecResolver, extra ...string) error {
 	specs := append([]string{"unix:" + core.MuxSocketPath()}, extra...)
 	var lns []net.Listener
 	for _, spec := range specs {
@@ -69,5 +76,5 @@ func Run(extra ...string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return New().Serve(ctx, lns...)
+	return New(resolver).Serve(ctx, lns...)
 }

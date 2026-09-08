@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -36,7 +37,16 @@ type Server struct {
 	lastSnap []byte // last broadcast snapshot, for change detection
 
 	pollCh chan struct{}
+
+	// launchSpec is injected by the daemon/provider integration that owns the
+	// current session record and access authority. The legacy mux must not derive
+	// identity or provision a second authority from an outer pane-open message.
+	launchSpec LaunchSpecResolver
+	resolve    paneResolver
 }
+
+type LaunchSpecResolver func(context.Context, string) (panespec.LaunchSpec, error)
+type paneResolver func(panespec.LaunchSpec, int) (dir string, env, argv []string, err error)
 
 type route struct {
 	cl         *client
@@ -88,13 +98,21 @@ const (
 // New creates a server. When $AMUX_MUX_TOKEN is set, clients must present a
 // matching token in their hello (constant-time checked); an empty value leaves
 // auth off, appropriate for the trusted local unix socket.
-func New() *Server {
+func New(resolvers ...LaunchSpecResolver) *Server {
+	launchSpec := LaunchSpecResolver(func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{}, fmt.Errorf("legacy mux has no daemon-authorized launch resolver")
+	})
+	if len(resolvers) != 0 && resolvers[0] != nil {
+		launchSpec = resolvers[0]
+	}
 	return &Server{
-		src:     source.NewWorkspace(),
-		token:   os.Getenv("AMUX_MUX_TOKEN"),
-		clients: map[*client]bool{},
-		routes:  map[string]route{},
-		pollCh:  make(chan struct{}, 1),
+		src:        source.NewWorkspace(),
+		token:      os.Getenv("AMUX_MUX_TOKEN"),
+		clients:    map[*client]bool{},
+		routes:     map[string]route{},
+		pollCh:     make(chan struct{}, 1),
+		launchSpec: launchSpec,
+		resolve:    panespec.Resolve,
 	}
 }
 
@@ -246,7 +264,12 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 }
 
 func (s *Server) openPane(cl *client, m muxproto.ClientMsg) {
-	dir, env, argv, err := panespec.Resolve(m.Agent, m.Tab)
+	spec, err := s.launchSpec(context.Background(), m.Agent)
+	if err != nil {
+		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: err.Error()})
+		return
+	}
+	dir, env, argv, err := s.resolve(spec, m.Tab)
 	if err != nil {
 		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: err.Error()})
 		return

@@ -2,15 +2,18 @@ package mux
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/muxclient"
+	"amux/internal/panespec"
 )
 
 // TestEndToEnd starts a real server on a unix socket and drives it with the real
@@ -32,7 +35,30 @@ func TestEndToEnd(t *testing.T) {
 	defer ln.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = New().Serve(ctx, ln) }()
+	authority, err := access.Open(filepath.Join(dir, "access"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authority.Close()
+	resolver := func(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+		if id != console.ID {
+			return panespec.LaunchSpec{}, fmt.Errorf("unexpected session %q", id)
+		}
+		if err := console.Ensure(); err != nil {
+			return panespec.LaunchSpec{}, err
+		}
+		session := console.Session()
+		grant, err := authority.EnsureSession(ctx, session.ID, session.Dir)
+		return panespec.LaunchSpec{Session: session, Access: grant}, err
+	}
+	srv := New(resolver)
+	// This test exercises mux routing, not namespace construction. Namespace
+	// behavior has its own tests and now correctly rejects credentials when the
+	// jail is disabled.
+	srv.resolve = func(spec panespec.LaunchSpec, tab int) (string, []string, []string, error) {
+		return spec.Session.Dir, nil, []string{"/bin/sh"}, nil
+	}
+	go func() { _ = srv.Serve(ctx, ln) }()
 
 	var mu sync.Mutex
 	var out []byte
@@ -88,5 +114,12 @@ func TestEndToEnd(t *testing.T) {
 		got := string(out)
 		mu.Unlock()
 		t.Fatalf("pane output never contained the marker; got %q", got)
+	}
+}
+
+func TestNewWithoutLaunchSpecResolverFailsClosed(t *testing.T) {
+	_, err := New().launchSpec(context.Background(), console.ID)
+	if err == nil || !strings.Contains(err.Error(), "no daemon-authorized launch resolver") {
+		t.Fatalf("default legacy mux resolver error = %v", err)
 	}
 }

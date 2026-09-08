@@ -2,7 +2,6 @@ package panespec
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,7 +53,7 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex")) // empty: pinned rollout is missing
-	t.Setenv("AMUX_JAIL", "off")
+	useFakeSecureBwrap(t)
 
 	dir := filepath.Join(t.TempDir(), "agent")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -70,8 +69,9 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 	}
 	db.Close()
 
+	spec := testLaunchSpec(t, store.Session{ID: "a", RootID: "r", Agent: "codex", Dir: dir, ClaudeID: pinned})
 	for _, tab := range []int{TabEditor, TabTerminal} {
-		if _, _, _, err := Resolve("a", tab); err != nil {
+		if _, _, _, err := Resolve(spec, tab); err != nil {
 			t.Fatalf("Resolve(tab=%d) = %v", tab, err)
 		}
 	}
@@ -90,8 +90,8 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 // The agent scope no longer mounts the user's harness config: a codex agent's
 // config is a private copy inside its dir (CODEX_HOME points there), so neither
 // $CODEX_HOME nor Claude's ~/.claude is bound — only the shared auth file, at its
-// template path, so the copy's symlink to it resolves. The shared amux state
-// (hook-state, transcript capture) stays bound for every harness.
+// template path, so the copy's symlink to it resolves. Shared hook and
+// transcript state must not enter the namespace.
 func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	ch := t.TempDir()
 	t.Setenv("CODEX_HOME", ch)
@@ -116,8 +116,8 @@ func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	if hasBind(binds, "/home/tester/.claude") || hasBind(binds, "/home/tester/.claude.json") {
 		t.Errorf("codex TabAgent scope should not bind Claude's config; got %v", binds)
 	}
-	if !hasBind(binds, core.HookStateDir()) {
-		t.Errorf("codex TabAgent scope missing shared hook-state bind; got %v", binds)
+	if hasBind(binds, core.HookStateDir()) || hasBind(binds, core.TranscriptDir()) {
+		t.Errorf("codex TabAgent scope exposes shared hook/transcript state; got %v", binds)
 	}
 }
 
@@ -142,67 +142,14 @@ func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
 
 // Native Claude installs live under ~/.local, above amux's default data dir.
 // Its read-only binary mount must not hide the writable worktree/git mounts.
-func TestScopeGitWorkflowWithLocalBinary(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bwrap unavailable")
-	}
-	probe := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-user", "--", "/bin/true")
-	if out, err := probe.CombinedOutput(); err != nil {
-		t.Skipf("bwrap unavailable: %v: %s", err, out)
-	}
+func TestScopeRejectsSharedWritableGitMount(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", "")
-	t.Setenv("AMUX_JAIL", "on")
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	t.Setenv("GIT_AUTHOR_NAME", "Test")
-	t.Setenv("GIT_AUTHOR_EMAIL", "test@example.com")
-	t.Setenv("GIT_COMMITTER_NAME", "Test")
-	t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
-	run := func(args ...string) {
-		t.Helper()
-		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-			t.Fatalf("%v: %v: %s", args, err, out)
-		}
-	}
-	repo := filepath.Join(core.ReposDir(), "repo.git")
-	dir := filepath.Join(core.SessionsDir(), "agent")
-	wt := filepath.Join(dir, "repo")
-	remote := filepath.Join(dir, "remote.git")
-	seed := filepath.Join(home, "seed")
-	run("git", "init", seed)
-	run("git", "-C", seed, "commit", "--allow-empty", "-m", "initial")
-	run("git", "clone", "--bare", seed, repo)
-	run("git", "--git-dir", repo, "worktree", "add", "-b", "amux/test", wt)
-	run("git", "init", "--bare", remote)
-	run("git", "-C", wt, "remote", "set-url", "origin", remote)
-	run("git", "-C", wt, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-	bin := filepath.Join(home, ".local", "bin", "test-shell")
-	if err := os.MkdirAll(filepath.Dir(bin), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/bin/sh", bin); err != nil {
-		t.Fatal(err)
-	}
-	// An unrelated repo remains read-only even though the assigned repo is writable.
-	other := filepath.Join(core.ReposDir(), "other.git")
-	run("git", "init", "--bare", other)
-	script := `set -eu
- cd repo
- echo change > change.txt
- git add change.txt
- git commit -m change
- git push -u origin HEAD
- git fetch origin
- test "$(git rev-parse HEAD)" = "$(git rev-parse origin/amux/test)"
- if touch "$1/should-not-write" 2>/dev/null; then exit 1; fi
- `
-	argv := scope(dir, TabAgent, store.Session{}, []string{bin, "-c", script, "test", other}, []string{repo})
-	run(argv...)
-	out, err := exec.Command("git", "--git-dir", remote, "log", "-1", "--format=%s", "amux/test").Output()
-	if err != nil || strings.TrimSpace(string(out)) != "change" {
-		t.Fatalf("push not persisted: %s, %v", out, err)
+	useFakeSecureBwrap(t)
+	s := store.Session{ID: "a", Agent: "codex", Dir: filepath.Join(home, "agent")}
+	spec := testLaunchSpec(t, s)
+	if _, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/true"}, []string{"/shared/repo.git"}); err == nil || !strings.Contains(err.Error(), "shared writable") {
+		t.Fatalf("scope shared Git mount error = %v", err)
 	}
 }
 
@@ -222,7 +169,7 @@ func TestScopeReaches(t *testing.T) {
 		{"/opt/google/chrome/chrome", true},
 		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", true},
 		{"/mnt/wsl/helper", true},
-		{data + "/bin/amux", true},
+		{data + "/bin/amux", false},
 		{"/home/tester/.local/bin/open-browser", false}, // $HOME is a tmpfs inside the scope
 		{"/home/tester/bin/firefox", false},
 		{"/snap/bin/firefox", false}, // /snap is not bound
@@ -240,11 +187,13 @@ func TestScopeReaches(t *testing.T) {
 // the roots ScopeReaches promises are visible, or doctor's verdict drifts from
 // what a pane actually sees.
 func TestScopeRootsMatchBinds(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bwrap not installed; scope is a no-op here")
+	useFakeSecureBwrap(t)
+	s := store.Session{ID: "a", Agent: "claude", Dir: t.TempDir()}
+	spec := testLaunchSpec(t, s)
+	args, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/usr/bin/true"}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Setenv("AMUX_JAIL", "on")
-	args := scope(t.TempDir(), TabAgent, store.Session{Agent: "claude"}, []string{"/usr/bin/true"}, nil)
 	joined := strings.Join(args, " ")
 	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
 		if !strings.Contains(joined, " "+r+" "+r+" ") {

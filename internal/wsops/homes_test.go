@@ -23,6 +23,9 @@ func envOf(env []string, key string) string {
 
 func TestResolveSessionConsole(t *testing.T) {
 	isolateStore(t)
+	if _, err := os.Stat(console.Dir()); !os.IsNotExist(err) {
+		t.Fatalf("console fixture unexpectedly exists: %v", err)
+	}
 	s, ok, err := ResolveSession(console.ID)
 	if err != nil || !ok {
 		t.Fatalf("ResolveSession(console) = ok=%v err=%v", ok, err)
@@ -30,60 +33,55 @@ func TestResolveSessionConsole(t *testing.T) {
 	if s.Role() != store.RoleConsole || s.Dir != console.Dir() {
 		t.Fatalf("console session = %+v, want role console in %s", s, console.Dir())
 	}
-	if _, err := os.Stat(console.Dir()); err != nil {
-		t.Fatalf("console dir not created: %v", err)
+	if _, err := os.Stat(console.Dir()); !os.IsNotExist(err) {
+		t.Fatalf("console resolve mutated filesystem: %v", err)
 	}
 	if _, ok, _ := ResolveSession("nope"); ok {
 		t.Fatal("an unknown id resolved")
 	}
 }
 
-// A workgroup created before default sessions has no sandbox dir and no pinned
-// conversation; resolving it as a coordinator fills both in, persistently, so
-// the launch that follows resumes durably.
-func TestResolveSessionBackfillsCoordinator(t *testing.T) {
+// Resolving a legacy workgroup must not relocate it, mint an identity, or touch
+// the shared parent. Recovery is an explicit host-authorized lifecycle action.
+func TestResolveSessionRefusesLegacyCoordinatorWithoutMutation(t *testing.T) {
 	isolateStore(t)
+	legacyDir := store.RootDir("wg1")
+	memberDir := store.AgentDir("wg1", "moved-member")
+	if err := os.MkdirAll(memberDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(legacyDir, "unknown-user-file")
+	if err := os.WriteFile(canary, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PutSession(store.Session{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Mode: store.ModeTask, Created: 1}); err != nil {
+	original := store.Session{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Mode: store.ModeTask, Dir: legacyDir, ClaudeID: "legacy-conversation", Created: 1}
+	if err := db.PutSession(original); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	s, ok, err := ResolveSession("wg1")
-	if err != nil || !ok {
-		t.Fatalf("ResolveSession(wg1) = ok=%v err=%v", ok, err)
-	}
-	if s.Role() != store.RoleCoordinator {
-		t.Fatalf("role = %q, want coordinator", s.Role())
-	}
-	if want := store.RootDir("wg1"); s.Dir != want {
-		t.Fatalf("Dir = %q, want %q", s.Dir, want)
-	}
-	if _, err := os.Stat(s.Dir); err != nil {
-		t.Fatalf("container dir not created: %v", err)
-	}
-	if s.ClaudeID == "" {
-		t.Fatal("no conversation id pinned")
+	if _, ok, err := ResolveSession("wg1"); err == nil || ok || !strings.Contains(err.Error(), "host-authorized migration or recreation") {
+		t.Fatalf("ResolveSession(wg1) = ok=%v err=%v, want explicit legacy refusal", ok, err)
 	}
 	db, _ = store.Open()
 	defer db.Close()
 	got, _, _ := db.GetSession("wg1")
-	if got.Dir != s.Dir || got.ClaudeID != s.ClaudeID {
-		t.Fatalf("backfill not persisted: %+v", got)
+	if got.Dir != original.Dir || got.ClaudeID != original.ClaudeID {
+		t.Fatalf("read mutated legacy row: got %+v want %+v", got, original)
 	}
-	// Resolving again is stable: same dir, same pinned id.
-	again, _, _ := ResolveSession("wg1")
-	if again.ClaudeID != s.ClaudeID || again.Dir != s.Dir {
-		t.Fatalf("second resolve changed the session: %+v vs %+v", again, s)
+	data, err := os.ReadFile(canary)
+	if err != nil || string(data) != "preserve" {
+		t.Fatalf("read changed legacy filesystem: data=%q err=%v", data, err)
 	}
 }
 
-// A tracked repo's home session is created on first resolve (for repos tracked
-// before default sessions), keyed by the repo name.
-func TestResolveSessionCreatesRepoHome(t *testing.T) {
+// A tracked repo predating home sessions is not mutated by a lookup. The
+// explicit host lifecycle helper creates it and subsequent reads are stable.
+func TestResolveSessionRequiresExplicitRepoHomeCreation(t *testing.T) {
 	isolateStore(t)
 	db, err := store.Open()
 	if err != nil {
@@ -94,9 +92,12 @@ func TestResolveSessionCreatesRepoHome(t *testing.T) {
 	}
 	db.Close()
 
-	s, ok, err := ResolveSession("api")
-	if err != nil || !ok {
-		t.Fatalf("ResolveSession(api) = ok=%v err=%v", ok, err)
+	if _, ok, err := ResolveSession("api"); err == nil || ok || !strings.Contains(err.Error(), "host-authorized repo repair") {
+		t.Fatalf("ResolveSession(api) = ok=%v err=%v, want explicit repair", ok, err)
+	}
+	s, err := EnsureRepoHome("api")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if s.Role() != store.RoleRepo || s.ID != store.RepoHomeID("api") || s.Repo != "api" || s.Scope != store.ScopeRepo {
 		t.Fatalf("repo home = %+v", s)
@@ -123,8 +124,8 @@ func TestResolveSessionCreatesRepoHome(t *testing.T) {
 	}
 }
 
-// A new workgroup IS its coordinator: the root row has a sandbox (the container
-// dir) and a pinned conversation from creation. `start <root>` still means the
+// A new workgroup IS its coordinator: the root row has a dedicated own sandbox
+// and a pinned conversation from creation. `start <root>` still means the
 // members; the coordinator is opened or prompted directly.
 func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 	isolateStore(t)
@@ -140,8 +141,11 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 	if root.Role() != store.RoleCoordinator {
 		t.Fatalf("role = %q, want coordinator", root.Role())
 	}
-	if root.Dir != store.RootDir(rootID) || root.ClaudeID == "" || root.Agent == "" {
+	if root.Dir != store.CoordinatorDir(rootID) || root.ClaudeID == "" || root.Agent == "" {
 		t.Fatalf("root not a session: %+v", root)
+	}
+	if filepath.Dir(root.Dir) != filepath.Dir(kids[0].Dir) || root.Dir == kids[0].Dir {
+		t.Fatalf("coordinator %q and member %q must be sibling own roots", root.Dir, kids[0].Dir)
 	}
 	if _, err := os.Stat(root.Dir); err != nil {
 		t.Fatalf("container dir missing: %v", err)
@@ -172,9 +176,14 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	guide := string(b)
-	for _, want := range []string{"coordinator", "payments", kids[0].ID, "amux do add-agent " + rootID, "never edit an agent's worktree"} {
+	for _, want := range []string{"coordinator", "payments", kids[0].ID, "amux do add-agent " + rootID, "outside this filesystem namespace"} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("coordinator guide missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{kids[0].Dir, "sandbox `"} {
+		if strings.Contains(guide, forbidden) {
+			t.Errorf("coordinator guide exposes unavailable path/claim %q", forbidden)
 		}
 	}
 	if strings.Contains(guide, "git merge --no-edit origin/HEAD") {
@@ -186,10 +195,14 @@ func TestGuidesByRole(t *testing.T) {
 	isolateStore(t)
 	ctx := context.Background()
 	db, _ := store.Open()
-	if err := db.PutRepo(store.Repo{Name: "api", Source: "octo/api", GitDir: bareRepoWithCommit(t)}); err != nil {
+	gitDir := bareRepoWithCommit(t)
+	if err := db.PutRepo(store.Repo{Name: "api", Source: gitDir, GitDir: gitDir}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
+	if _, err := EnsureRepoHome("api"); err != nil {
+		t.Fatal(err)
+	}
 	rootID, err := CreateWorkspace(ctx, "payments", &AgentSpec{Agent: "claude", Prompt: "fix the idempotency bug"})
 	if err != nil {
 		t.Fatal(err)
@@ -201,9 +214,12 @@ func TestGuidesByRole(t *testing.T) {
 
 	// Console: the whole inventory, and the operating vocabulary.
 	c, _, _ := ResolveSession(console.ID)
+	if err := console.Ensure(); err != nil {
+		t.Fatal(err)
+	}
 	writeGuide(c)
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", "octo/api", oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
+	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
 		}
@@ -213,10 +229,13 @@ func TestGuidesByRole(t *testing.T) {
 	home, _, _ := ResolveSession("api")
 	writeGuide(home)
 	b, _ = os.ReadFile(filepath.Join(home.Dir, "CLAUDE.md"))
-	for _, want := range []string{"home session", "octo/api", oneOff.ID, "review open PRs", "amux do new-repo-agent api", "git -C "} {
+	for _, want := range []string{"home session", gitDir, oneOff.ID, "review open PRs", "amux do new-repo-agent api", "independent"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("repo guide missing %q", want)
 		}
+	}
+	if strings.Contains(string(b), oneOff.Dir) {
+		t.Errorf("repo guide exposes unmounted one-off path %q", oneOff.Dir)
 	}
 	if strings.Contains(string(b), rootID) {
 		t.Error("repo guide lists a workgroup agent that isn't on this repo")

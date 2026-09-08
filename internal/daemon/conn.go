@@ -22,9 +22,13 @@ import (
 // and leaves ghost text. obuf coalesces bytes instead of dropping them; only a
 // client that falls catastrophically far behind triggers a resync (see obuf).
 type connState struct {
-	out  chan any
-	done chan struct{}
-	once sync.Once
+	out chan any
+	// valid is checked immediately before every socket write. nil is reserved
+	// for transport-only unit tests; authenticated daemon connections always
+	// provide a generation/revocation check.
+	valid func() bool
+	done  chan struct{}
+	once  sync.Once
 
 	mu    sync.Mutex
 	panes map[string]paneRoute // client pane id -> engine route
@@ -64,7 +68,12 @@ type paneRoute struct {
 }
 
 func newConnState(conn net.Conn) *connState {
+	return newAuthenticatedConnState(conn, nil)
+}
+
+func newAuthenticatedConnState(conn net.Conn, valid func() bool) *connState {
 	cl := &connState{
+		valid: valid,
 		out:   make(chan any, 512),
 		done:  make(chan struct{}),
 		panes: map[string]paneRoute{},
@@ -86,11 +95,15 @@ func (cl *connState) writeLoop(conn net.Conn) {
 		case <-cl.done:
 			return
 		case v := <-cl.out:
-			if err := enc.Encode(v); err != nil {
+			if err := cl.encodeAuthorized(enc, v); err != nil {
 				cl.stop()
 				return
 			}
 		case <-cl.wake:
+			if !cl.authorized() {
+				cl.stop()
+				return
+			}
 			if err := cl.drainPanes(enc); err != nil {
 				cl.stop()
 				return
@@ -105,6 +118,9 @@ func (cl *connState) writeLoop(conn net.Conn) {
 // returns immediately. It runs until no pane has pending work.
 func (cl *connState) drainPanes(enc *json.Encoder) error {
 	for {
+		if !cl.authorized() {
+			return net.ErrClosed
+		}
 		cl.obMu.Lock()
 		var paneID string
 		var b *paneOut
@@ -126,17 +142,17 @@ func (cl *connState) drainPanes(enc *json.Encoder) error {
 		cl.obMu.Unlock()
 
 		if reset {
-			if err := enc.Encode(core.PaneFrame{Type: core.FramePaneReset, PaneID: paneID}); err != nil {
+			if err := cl.encodeAuthorized(enc, core.PaneFrame{Type: core.FramePaneReset, PaneID: paneID}); err != nil {
 				return err
 			}
 		}
 		if len(data) > 0 {
-			if err := enc.Encode(core.PaneFrame{Type: core.FramePaneOutput, PaneID: paneID, Data: data}); err != nil {
+			if err := cl.encodeAuthorized(enc, core.PaneFrame{Type: core.FramePaneOutput, PaneID: paneID, Data: data}); err != nil {
 				return err
 			}
 		}
 		if exit {
-			if err := enc.Encode(core.PaneFrame{Type: core.FramePaneExit, PaneID: paneID, Error: exitErr}); err != nil {
+			if err := cl.encodeAuthorized(enc, core.PaneFrame{Type: core.FramePaneExit, PaneID: paneID, Error: exitErr}); err != nil {
 				return err
 			}
 		}
@@ -189,6 +205,15 @@ func (cl *connState) signalWrite() {
 	case cl.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (cl *connState) authorized() bool { return cl.valid == nil || cl.valid() }
+
+func (cl *connState) encodeAuthorized(enc *json.Encoder, frame any) error {
+	if !cl.authorized() {
+		return net.ErrClosed
+	}
+	return enc.Encode(frame)
 }
 
 func (cl *connState) stop() { cl.once.Do(func() { close(cl.done) }) }

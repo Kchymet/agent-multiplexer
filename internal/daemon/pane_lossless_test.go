@@ -98,3 +98,28 @@ func TestPaneOutputResyncOnOverflow(t *testing.T) {
 		t.Fatal("retained buffer must end in the most recent output")
 	}
 }
+
+func TestPaneBatchRevalidatesBeforeEveryFrame(t *testing.T) {
+	checks := 0
+	cl := &connState{
+		valid: func() bool {
+			checks++
+			return checks < 3 // batch entry + reset pass; output is revoked
+		},
+		obuf: map[string]*paneOut{
+			"p": {reset: true, data: []byte("protected-output"), exit: true, exitErr: "protected-exit"},
+		},
+		done: make(chan struct{}),
+	}
+	var wire bytes.Buffer
+	err := cl.drainPanes(json.NewEncoder(&wire))
+	if err == nil {
+		t.Fatal("pane drain continued after credential invalidation")
+	}
+	if bytes.Contains(wire.Bytes(), []byte("protected-output")) || bytes.Contains(wire.Bytes(), []byte("protected-exit")) {
+		t.Fatalf("later batch frames crossed revocation barrier: %q", wire.Bytes())
+	}
+	if !bytes.Contains(wire.Bytes(), []byte(core.FramePaneReset)) {
+		t.Fatalf("fixture did not begin the first allowed frame: %q", wire.Bytes())
+	}
+}
