@@ -6,6 +6,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/store"
 )
 
 // canonicalSessionOperation validates the complete restricted RPC vocabulary
@@ -102,25 +103,33 @@ func validateSessionAction(req access.Request) error {
 		return joinValidation(requireID(), noTarget(), fields("name"), requireField(req.Fields, "name"))
 	case core.ActionMove:
 		return joinValidation(requireID(), fields())
-	case core.ActionArchive, core.ActionDelete, core.ActionKill, core.ActionRmRepo:
+	case core.ActionDelete, core.ActionKill, core.ActionRmRepo:
 		return joinValidation(requireID(), noTarget(), fields())
+	case core.ActionArchive:
+		return fmt.Errorf("toggle archive is host-only; restricted callers must request an explicit archive")
 	case core.ActionSetArchived:
 		if err := joinValidation(requireID(), noTarget(), fields("archived"), requireField(req.Fields, "archived")); err != nil {
 			return err
 		}
-		return requiredBool(req.Fields, "archived")
+		if err := requiredBool(req.Fields, "archived"); err != nil {
+			return err
+		}
+		if req.Fields["archived"] != "true" {
+			return fmt.Errorf("restoring an archived session requires authenticated host regrant")
+		}
+		return nil
 	case core.ActionAgentSetRepos:
 		return joinValidation(requireID(), noTarget(), fields("repos"), requireField(req.Fields, "repos"))
 	case core.ActionAddRepo:
 		return joinValidation(noID(), noTarget(), fields("source"), requireNonemptyField(req.Fields, "source"))
 	case core.ActionAddAgent:
-		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model", "repos"))
+		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model", "repos"), validateCreationMode(req.Fields))
 	case core.ActionNewRepoAgent:
-		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model"))
+		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model"), validateCreationMode(req.Fields))
 	case core.ActionNewWorkgroup:
-		return joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "linear"))
+		return joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "linear"), validateCreationMode(req.Fields))
 	case core.ActionCreateWorkspace:
-		if err := joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "defaultAgent")); err != nil {
+		if err := joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "defaultAgent"), validateCreationMode(req.Fields)); err != nil {
 			return err
 		}
 		if value, ok := req.Fields["defaultAgent"]; ok && value != "1" {
@@ -129,6 +138,19 @@ func validateSessionAction(req access.Request) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown session RPC action %q", req.Verb)
+	}
+}
+
+func validateCreationMode(fields map[string]string) error {
+	mode, ok := fields["mode"]
+	if !ok {
+		return nil
+	}
+	switch mode {
+	case store.ModeTask, store.ModeInteractive:
+		return nil
+	default:
+		return fmt.Errorf("field %q must be %q or %q", "mode", store.ModeTask, store.ModeInteractive)
 	}
 }
 

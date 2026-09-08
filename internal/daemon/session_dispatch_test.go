@@ -348,6 +348,17 @@ func TestCompletionRuntimeGraceIsBoundedWhenAcknowledgementUnknown(t *testing.T)
 	runtime.completions.minimum = time.Millisecond
 	runtime.completions.runtime = 25 * time.Millisecond
 	runtime.completions.poll = time.Millisecond
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, true, time.Now().UnixMilli()); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	hooks := runtime.completions.begin(principals[session.ID], "0123456789abcdef0123456789abcdef", session.ID)
 	hooks.ResponsePersisted(sessionrpc.PersistedResponse{RequestID: "0123456789abcdef0123456789abcdef", ResponseDigest: "abcd"})
 	hooks.Settled(sessionrpc.ReceiptSettlement{RequestID: "0123456789abcdef0123456789abcdef", Received: false})
@@ -363,6 +374,85 @@ func TestCompletionRuntimeGraceIsBoundedWhenAcknowledgementUnknown(t *testing.T)
 	}
 	if _, ok := d.permissions.generation(session.ID); ok {
 		t.Fatal("runtime generation survived completion stop")
+	}
+}
+
+func TestCompletionDoesNotStopReplacementRuntime(t *testing.T) {
+	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	eng := newFakeEngine()
+	d.engine = eng
+	old := eng.running(session.ID)
+	if _, err := d.permissions.observe(session.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, true, time.Now().UnixMilli()); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.completions.minimum = 30 * time.Millisecond
+	runtime.completions.runtime = 20 * time.Millisecond
+	runtime.completions.poll = time.Millisecond
+	requestID := "0123456789abcdef0123456789abcdef"
+	hooks := runtime.completions.begin(principals[session.ID], requestID, session.ID)
+	hooks.Settled(sessionrpc.ReceiptSettlement{RequestID: requestID, Received: true})
+
+	// Model the authenticated restore boundary during the observation grace:
+	// supersede archive state and publish a new exact runtime incarnation.
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, false, 0); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var replacement *fakeInstance
+	if _, _, err := d.permissions.publish(session.ID, func() (any, error) {
+		replacement = eng.running(session.ID)
+		return replacement, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if current, ok := eng.Lookup(replacement.Key()); !ok || current != replacement {
+		t.Fatal("stale completion stopped the replacement runtime")
+	}
+	if err := d.authority.Valid(context.Background(), principals[session.ID]); err != nil {
+		t.Fatalf("stale completion revoked credential after restore superseded it: %v", err)
+	}
+}
+
+func TestCompletionRegistryCloseDrainsTimersWithoutLateActions(t *testing.T) {
+	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	eng := newFakeEngine()
+	d.engine = eng
+	instance := eng.running(session.ID)
+	if _, err := d.permissions.observe(session.ID, instance); err != nil {
+		t.Fatal(err)
+	}
+	runtime.completions.abandon = 10 * time.Millisecond
+	runtime.completions.minimum = 10 * time.Millisecond
+	runtime.completions.runtime = 10 * time.Millisecond
+	runtime.completions.begin(principals[session.ID], "0123456789abcdef0123456789abcdef", session.ID)
+	runtime.completions.close()
+	time.Sleep(50 * time.Millisecond)
+	if current, ok := eng.Lookup(instance.Key()); !ok || current != instance {
+		t.Fatal("completion timer acted after registry close")
+	}
+	if err := d.authority.Valid(context.Background(), principals[session.ID]); err != nil {
+		t.Fatalf("completion callback acted after registry close: %v", err)
 	}
 }
 

@@ -92,9 +92,11 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 		if !pending.force && d.instanceActivity(k) != engine.ActivitySafe {
 			continue
 		}
-		d.engine.Kill(k)
+		d.permissions.retireAnd(k.AgentID, func() { d.engine.Kill(k) })
 		delete(d.authPending, k)
-		if _, err := d.engine.Ensure(ctx, engine.Spec{Key: k, Dir: dir, Env: env, Argv: argv}); err != nil {
+		if _, _, err := d.permissions.publish(k.AgentID, func() (any, error) {
+			return d.engine.Ensure(ctx, engine.Spec{Key: k, Dir: dir, Env: env, Argv: argv})
+		}); err != nil {
 			log.Printf("amux: auth reload %s could not resume: %v; reopen its agent pane", k.AgentID, err)
 		}
 	}

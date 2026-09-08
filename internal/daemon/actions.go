@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
@@ -82,6 +83,17 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		if err != nil {
 			return fail("%v", err)
 		}
+		if d.sessionRPC != nil {
+			restored := a.Action == core.ActionSetArchived && a.Fields["archived"] == "false"
+			if a.Action == core.ActionArchive {
+				if session, found, lookupErr := lookupSession(a.ID); lookupErr == nil && found {
+					restored = !session.Archived
+				}
+			}
+			if restored {
+				d.sessionRPC.completions.cancel(a.ID)
+			}
+		}
 		d.triggerPoll()
 		r := ok()
 		r.NewID = newID
@@ -126,12 +138,16 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		}
 		d.killRuntimeFor(id)
 		session := spec.Session
-		supervisor, err := d.codex.Ensure(id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
+		published, _, err := d.permissions.publish(id, func() (any, error) {
+			return d.codex.Ensure(id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
+		})
 		if err != nil {
 			return err
 		}
-		_, err = d.permissions.observe(id, supervisor)
-		return err
+		if _, ok := published.(*codexapp.Supervisor); !ok {
+			return fmt.Errorf("App Server returned no runtime")
+		}
+		return nil
 	}
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
@@ -144,14 +160,18 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		return err
 	}
 	d.killRuntimeFor(id)
-	instance, err := d.engine.Ensure(ctx, engine.Spec{
-		Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env, Argv: argv,
+	published, _, err := d.permissions.publish(id, func() (any, error) {
+		return d.engine.Ensure(ctx, engine.Spec{
+			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env, Argv: argv,
+		})
 	})
 	if err != nil {
 		return err
 	}
-	_, err = d.permissions.observe(id, instance)
-	return err
+	if _, ok := published.(engine.Instance); !ok {
+		return fmt.Errorf("engine returned no runtime")
+	}
+	return nil
 }
 
 func ok() core.Result { return core.Result{Type: "result", OK: true} }

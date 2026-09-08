@@ -753,22 +753,29 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		paneExit(err.Error())
 		return
 	}
-	inst, err := d.engine.Ensure(ctx, engine.Spec{
+	engineSpec := engine.Spec{
 		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
 		Dir: dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
-	})
+	}
+	var inst engine.Instance
+	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
+		published, _, publishErr := d.permissions.publish(a.ID, func() (any, error) {
+			return d.engine.Ensure(ctx, engineSpec)
+		})
+		err = publishErr
+		if err == nil {
+			inst, _ = published.(engine.Instance)
+		}
+	} else {
+		inst, err = d.engine.Ensure(ctx, engineSpec)
+	}
 	if err != nil {
 		paneExit(err.Error())
 		return
 	}
-	// Permission generations identify the runtime that owns the prompt. Human
-	// editor/terminal panes are unrelated, and a structured native attach is a
-	// client of the supervisor rather than the supervisor itself.
-	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
-		if _, err := d.permissions.observe(a.ID, inst); err != nil {
-			paneExit(err.Error())
-			return
-		}
+	if inst == nil {
+		paneExit("engine returned no runtime")
+		return
 	}
 	// Replace any prior subscription on this pane id, then subscribe afresh.
 	cl.paneClose(a.PaneID)
@@ -849,15 +856,19 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	if err := revalidateDeferred(ctx); err != nil {
 		return err
 	}
-	inst, err := d.engine.Ensure(ctx, engine.Spec{
-		Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-		Dir: dir, Env: env, Argv: argv,
+	published, _, err := d.permissions.publish(aid, func() (any, error) {
+		return d.engine.Ensure(ctx, engine.Spec{
+			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
+			Dir: dir, Env: env, Argv: argv,
+		})
 	})
 	if err != nil {
 		return err
 	}
-	_, err = d.permissions.observe(aid, inst)
-	return err
+	if _, ok := published.(engine.Instance); !ok {
+		return fmt.Errorf("engine returned no runtime")
+	}
+	return nil
 }
 
 // ensureSupervisor starts (or returns) the App Server supervisor for a structured
@@ -892,12 +903,15 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 		return nil, err
 	}
 	sess := spec.Session
-	sup, err := d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
+	published, _, err := d.permissions.publish(agentID, func() (any, error) {
+		return d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
+	})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.permissions.observe(agentID, sup); err != nil {
-		return nil, err
+	sup, ok := published.(*codexapp.Supervisor)
+	if !ok {
+		return nil, fmt.Errorf("App Server returned no runtime")
 	}
 	return sup, nil
 }
@@ -1042,19 +1056,42 @@ func (d *Daemon) killRuntimeFor(id string) {
 	d.killRuntimeLocked(id)
 }
 
-func (d *Daemon) killRuntimeLocked(id string) {
-	d.permissions.retire(id)
-	delete(d.authPending, engine.Key{AgentID: id, Tab: panespec.TabAgent})
-	if d.engine != nil {
-		for tab := 0; tab < 3; tab++ { // agent | editor | terminal
-			d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
+// killRuntimeToken stops only the exact incarnation captured by a lifecycle
+// owner. A stale completion must never kill a replacement published under the
+// same session id.
+func (d *Daemon) killRuntimeToken(id string, token permissionRuntimeToken) bool {
+	if d.engine == nil && d.codex == nil {
+		return false
+	}
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	return d.permissions.retireTokenAnd(id, token, func() {
+		delete(d.authPending, engine.Key{AgentID: id, Tab: panespec.TabAgent})
+		if d.engine != nil {
+			for tab := 0; tab < 3; tab++ {
+				d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
+			}
 		}
-	}
-	// A structured session runs under the supervisor, not a pane. Close keeps
-	// its persisted identity so recreation/unarchive resumes the same thread.
-	if d.codex != nil {
-		d.codex.Close(id)
-	}
+		if d.codex != nil {
+			d.codex.Close(id)
+		}
+	})
+}
+
+func (d *Daemon) killRuntimeLocked(id string) {
+	d.permissions.retireAnd(id, func() {
+		delete(d.authPending, engine.Key{AgentID: id, Tab: panespec.TabAgent})
+		if d.engine != nil {
+			for tab := 0; tab < 3; tab++ { // agent | editor | terminal
+				d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
+			}
+		}
+		// A structured session runs under the supervisor, not a pane. Close keeps
+		// its persisted identity so recreation/unarchive resumes the same thread.
+		if d.codex != nil {
+			d.codex.Close(id)
+		}
+	})
 }
 
 func (d *Daemon) find(id string) (core.Session, bool) {

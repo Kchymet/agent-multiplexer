@@ -111,7 +111,10 @@ type fakeEngine struct {
 	insts       map[engine.Key]*fakeInstance
 	ensureErr   error
 	ensureBlock chan struct{}
-	ensured     []engine.Key
+	// ensurePublished runs after the replacement is visible through Lookup but
+	// before Ensure returns, reproducing the production publication interval.
+	ensurePublished func(engine.Instance)
+	ensured         []engine.Key
 }
 
 func newFakeEngine() *fakeEngine {
@@ -146,21 +149,74 @@ func TestStartAgentRevalidatesAtRuntimeExecution(t *testing.T) {
 	}
 }
 
+func TestStartAgentPublishesReplacementGenerationAtomically(t *testing.T) {
+	d := New("", nil, time.Hour)
+	eng := newFakeEngine()
+	d.engine = eng
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{Session: store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}}, nil
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return t.TempDir(), nil, []string{"agent"}, nil
+	}
+	old := eng.running("a1")
+	oldGeneration, err := d.permissions.observe("a1", old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindPermission(t, d.permissions, "a1", "request-old", old)
+	eng.mu.Lock()
+	delete(eng.insts, old.Key())
+	eng.mu.Unlock()
+	published := make(chan struct{})
+	releaseEnsure := make(chan struct{})
+	eng.ensurePublished = func(engine.Instance) {
+		close(published)
+		<-releaseEnsure
+	}
+	started := make(chan error, 1)
+	go func() { started <- d.startAgent(context.Background(), "a1") }()
+	<-published
+
+	delivered := make(chan error, 1)
+	go func() {
+		delivered <- d.permissions.consume("a1", oldGeneration, "request-old", old,
+			func() error { return nil }, func() error { return nil })
+	}()
+	select {
+	case err := <-delivered:
+		t.Fatalf("old decision crossed Engine.Ensure publication: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(releaseEnsure)
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-delivered; err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("old decision after replacement start = %v", err)
+	}
+}
+
 func (e *fakeEngine) Name() string { return "fake" }
 func (e *fakeEngine) Ensure(_ context.Context, spec engine.Spec) (engine.Instance, error) {
 	if e.ensureBlock != nil {
 		<-e.ensureBlock
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.ensured = append(e.ensured, spec.Key)
 	if e.ensureErr != nil {
+		e.mu.Unlock()
 		return nil, e.ensureErr
 	}
 	in, ok := e.insts[spec.Key]
 	if !ok {
 		in = &fakeInstance{key: spec.Key}
 		e.insts[spec.Key] = in
+	}
+	hook := e.ensurePublished
+	e.mu.Unlock()
+	if hook != nil {
+		hook(in)
 	}
 	return in, nil
 }
@@ -283,6 +339,10 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 				if err := core.AppendPermission(convID("a1"), core.PermissionRecord{RequestID: "perm-1", Tool: "Bash", Action: "test"}); err != nil {
 					t.Fatal(err)
 				}
+				bound, err := d.bindPermissionRequest("a1", "perm-1")
+				if err != nil || bound != generation {
+					t.Fatalf("bind live permission = %q, %v; want %q", bound, err, generation)
+				}
 			}
 			// `stop` only fires mid-turn for a harness whose interrupt key is unsafe
 			// at an idle prompt, so put the session in a turn.
@@ -332,6 +392,10 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 			RequestID: id, Tool: tool, Action: tool + " something",
 		}); err != nil {
 			t.Fatal(err)
+		}
+		bound, err := d.bindPermissionRequest("a1", id)
+		if err != nil || bound != generation {
+			t.Fatalf("bind live permission = %q, %v; want %q", bound, err, generation)
 		}
 	}
 
