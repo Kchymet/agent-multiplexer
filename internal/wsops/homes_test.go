@@ -177,16 +177,18 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 			t.Errorf("coordinator guide missing %q", want)
 		}
 	}
-	if strings.Contains(guide, "git merge --no-edit origin/HEAD") {
+	if strings.Contains(guide, "git merge --no-edit origin/HEAD") || strings.Contains(guide, "git merge --no-edit FETCH_HEAD") {
 		t.Error("coordinator guide carries the member branch workflow")
 	}
 }
 
 func TestGuidesByRole(t *testing.T) {
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
 	isolateStore(t)
 	ctx := context.Background()
 	db, _ := store.Open()
-	if err := db.PutRepo(store.Repo{Name: "api", Source: "octo/api", GitDir: bareRepoWithCommit(t)}); err != nil {
+	gitDir := bareRepoWithCommit(t)
+	if err := db.PutRepo(store.Repo{Name: "api", Source: gitDir, GitDir: gitDir}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -203,7 +205,7 @@ func TestGuidesByRole(t *testing.T) {
 	c, _, _ := ResolveSession(console.ID)
 	writeGuide(c)
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", "octo/api", oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
+	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
 		}
@@ -213,7 +215,7 @@ func TestGuidesByRole(t *testing.T) {
 	home, _, _ := ResolveSession("api")
 	writeGuide(home)
 	b, _ = os.ReadFile(filepath.Join(home.Dir, "CLAUDE.md"))
-	for _, want := range []string{"home session", "octo/api", oneOff.ID, "review open PRs", "amux do new-repo-agent api", "git -C "} {
+	for _, want := range []string{"home session", gitDir, oneOff.ID, "review open PRs", "amux do new-repo-agent api", "linked worktree"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("repo guide missing %q", want)
 		}

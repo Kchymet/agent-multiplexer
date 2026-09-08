@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -198,6 +200,38 @@ func TestReconcileClean(t *testing.T) {
 	od, md, ob := reconcile(sessions, roots, disk)
 	if len(od)+len(md)+len(ob) != 0 {
 		t.Errorf("expected no drift, got dirs=%v missing=%v branches=%v", od, md, ob)
+	}
+}
+
+func TestReconcileReportsBranchInventoryFailure(t *testing.T) {
+	sandboxCLI(t)
+	gitDir := filepath.Join(core.ReposDir(), "broken.git")
+	if err := os.MkdirAll(filepath.Dir(gitDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "--bare", gitDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureOutput(t, func() error {
+		return reconcileSessions(context.Background(), []core.RepoRow{{Name: "broken"}}, nil)
+	})
+	if err == nil {
+		t.Fatal("reconciliation hid an unreadable branch inventory")
+	}
+	for _, want := range []string{
+		"could not inspect branch inventory for broken",
+		"Branch inventory is incomplete; store/disk agreement cannot be determined.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("reconciliation output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "store and disk agree") {
+		t.Errorf("reconciliation claimed agreement after an inventory failure:\n%s", out)
 	}
 }
 

@@ -8,10 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/core"
 	"amux/internal/store"
 )
 
-func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
+func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
@@ -19,7 +20,7 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
 	t.Setenv("AMUX_CLAUDE_BIN", "/bin/true")
 	t.Setenv("AMUX_JAIL", "off")
-	dir := filepath.Join(home, "agent")
+	dir := filepath.Join(core.SessionsDir(), "group", "agent")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +36,11 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 			path = roots[i]
 		}
 		if err := db.PutRepo(store.Repo{Name: name, GitDir: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(dir, name, ".git"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -67,13 +73,13 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(argv, roots)
+	check(argv, nil)
 	checkFullscreen(argv, true)
 	_, _, argv, _, err = AppServerCommand(s.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(argv, roots)
+	check(argv, nil)
 	checkFullscreen(argv, false) // the background server has no TUI
 	_, _, argv, err = AttachCommand(s.ID, "unix:///tmp/codex.sock", "thread-1")
 	if err != nil {
@@ -102,5 +108,33 @@ func TestCodexLaunchGrantsOnlyAssignedGitStores(t *testing.T) {
 		}
 		check(argv, nil)
 		checkFullscreen(argv, false)
+	}
+}
+
+func TestResolveRefusesLegacySharedGitLayout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("AMUX_JAIL", "off")
+	dir := filepath.Join(core.SessionsDir(), "root", "agent")
+	if err := os.MkdirAll(filepath.Join(dir, "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repo", ".git"), []byte("gitdir: /shared/cache/worktrees/a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(store.Session{ID: "legacy", RootID: "root", Agent: "codex", Dir: dir, Repo: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, _, _, err := Resolve("legacy", TabAgent); err == nil || !strings.Contains(err.Error(), "launch refused") {
+		t.Fatalf("Resolve legacy linked worktree error = %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "repo", ".git")); err != nil || !strings.Contains(string(b), "/shared/cache") {
+		t.Fatalf("refusal mutated legacy checkout: %q, %v", b, err)
 	}
 }

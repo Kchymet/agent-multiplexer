@@ -98,17 +98,74 @@ the otherwise-readable amux data tree.
 
 ### Git writes from Codex
 
-An agent's worktree lives inside its workspace, but its Git index, objects and
-refs live in the assigned bare clone under `<amux data>/repos`. amux grants that
-clone write access in both the outer bubblewrap scope and Codex's inner
-`workspace-write` sandbox. The same `sandbox_workspace_write.writable_roots`
-override is passed to interactive Codex and App Server launches, including
-resumed sessions. Other repositories and coordinator sessions receive no new
-grants. Explicit read-only mode remains read-only.
+Each newly-created agent repository is a genuine Git linked worktree. Its small
+common directory is private under the session and holds that session's writable
+refs, config, hooks, objects, logs, index, and worktree administration. Large
+base objects are read through a daemon-built immutable pool containing only the
+authoritative remote default branch's reachable closure. The legacy shared bare
+cache is never a pool source.
 
-Restart existing Codex sessions after updating amux to pick up these launch
-arguments. An already-running session's sandbox policy is not changed by
-rebuilding the binary.
+Pool generations are append-only. An unchanged upstream reuses its existing
+generation; session creation accepts a current record for at most 30 seconds
+before checking the remote again. A normal fast-forward fetches only its delta
+into a new generation while Git sees the retained predecessor closure through a
+process-scoped flat object list. Published pool generations contain no recursive
+alternate files, so ordinary update counts cannot hit Git's alternate-depth
+limit; existing packs are neither copied nor repacked. Source/default-branch
+changes and non-fast-forward updates start a new root lineage, while a rollback
+to a cached base selects only that base's prior authorized lineage. Old
+generations remain for sessions already pinned to them. Session creation itself
+transfers zero object payload and duplicates zero base-pack bytes: it initializes
+only private metadata, lists the selected generation closure as flat alternates,
+and checks out the assigned linked worktree.
+
+The namespace must consume daemon-authoritative GitObjectMount values and bind
+each exact generation objects directory read-only. It must never bind a pool
+parent, pool refs/config/hooks, the legacy cache, or another session's common
+directory. Until that companion namespace change removes broad data/cache
+visibility, this source change alone is not a cross-session confidentiality
+claim. Objects readable from shared upstream credentials are also outside this
+filesystem boundary.
+
+Worktree and private-common publication uses anchored renames from the
+StateDir()/git-staging directory into session storage. State-directory staging
+and session storage must be on the same filesystem. In particular, a custom
+XDG_DATA_HOME that moves session storage onto another filesystem is unsupported.
+EXDEV fails closed without copying or rewriting a live checkout.
+
+The authoritative remote remains origin, so status/add/commit/stash/rebase,
+fetch, push -u, pull, gh, editors, and hooks use normal Git behavior. Before the
+assigned branch exists remotely, plain fetch follows only remote HEAD into
+FETCH_HEAD; after push -u, pull follows the exact upstream without a wildcard
+sibling refspec. Host lifecycle code never runs Git against the
+session-writable common directory after publication. Deletion and validation
+use a daemon-private typed layout record plus anchored filesystem operations, so
+session config, fsmonitor, hooks, credential helpers, upload-pack settings,
+includes, external commands, and alternate edits cannot influence host Git.
+
+Network HTTPS/SSH sources are the confidentiality-supported pool inputs.
+Filesystem and file: sources require the explicit
+AMUX_GIT_TRUST_LOCAL_SOURCE=1 host acknowledgement and are safe only when no
+session can write the source; repository-side upload-pack configuration is part
+of that trust decision. They must not be described as confidential, and a
+legacy amux bare cache is never eligible. Automatic submodule initialization is
+not performed. Network submodules may be initialized normally into the
+session-private common directory, subject to their own remote credentials;
+local/shared submodule caches and relative local URLs have no isolation claim.
+
+Legacy sessions created as linked worktrees are **not migrated automatically**.
+After relaunch, amux refuses them explicitly instead of restoring writable access
+to their shared bare Git common directory. Preserve the session's conversation
+and inspect all dirty, staged, untracked, rebase and submodule state from the
+host before recreating or using a future host-authorized migration tool. Already
+running legacy mount namespaces keep their old writable-cache access until they
+exit; installing a new binary cannot change an existing namespace.
+
+An already-running session's sandbox policy is not changed by rebuilding the
+binary. Relaunching a legacy shared-common worktree reaches the explicit refusal
+above. Private full clones briefly created by the superseded #133 design remain
+usable and isolated but are retained compatibility state, not the new creation
+or migration path.
 
 ### What is configuration, what is state
 
