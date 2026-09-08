@@ -150,12 +150,11 @@ func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal ac
 	if err := r.withFinalAdmission(ctx, principal, req); err != nil {
 		return rpcDenied("access_denied"), nil
 	}
-	body, err := r.events.page(ctx, principal, action.ID, action.Fields)
+	body, err := r.events.pageForRelease(ctx, principal, action.ID, action.Fields, func(checkCtx context.Context) error {
+		return r.withFinalAdmission(checkCtx, principal, req)
+	})
 	if err != nil {
 		return runtimeEventError(err), nil
-	}
-	if err := r.withFinalAdmission(ctx, principal, req); err != nil {
-		return rpcDenied("access_denied"), nil
 	}
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 }

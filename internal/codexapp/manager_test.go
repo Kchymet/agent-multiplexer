@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,33 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestManagerEnsureQueuedCreationHonorsAdmissionContext(t *testing.T) {
+	m := NewManager(context.Background(), "")
+	gate := m.startGate("queued")
+	<-gate
+	t.Cleanup(func() { gate <- struct{}{} })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := m.Ensure(ctx, "queued", "", nil, nil, "unix:///unused", "", "", "")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued Ensure error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("queued Ensure ignored admission deadline: %v", elapsed)
+	}
+}
+
+func TestManagerEnsureRejectsCancelledLifetimeBeforeStart(t *testing.T) {
+	lifetime, cancel := context.WithCancel(context.Background())
+	cancel()
+	m := NewManager(lifetime, "")
+	_, err := m.Ensure(context.Background(), "stopped", "", nil, nil, "unix:///unused", "", "", "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Ensure after manager cancellation = %v", err)
+	}
+}
 
 // Concurrent starts (creation and native attach) submit once; a daemon restart
 // resumes the persisted identity without replaying the creation prompt.
@@ -36,7 +64,7 @@ func TestManagerInitialPromptOnce(t *testing.T) {
 	// The in-process fake owns the socket; this child exercises process lifetime
 	// without invoking a real model. Shutdown kills it immediately.
 	ensure := func(m *Manager) (*Supervisor, error) {
-		return m.Ensure("initial", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "fix it", "")
+		return m.Ensure(context.Background(), "initial", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "fix it", "")
 	}
 	errs := make(chan error, 8)
 	for i := 0; i < cap(errs); i++ {
@@ -187,7 +215,7 @@ func TestManagerAdoptsPTYConversation(t *testing.T) {
 	m := NewManager(ctx, "")
 	defer m.Shutdown()
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
-	sup, err := m.Ensure("migrating", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "original prompt", "pty-thread")
+	sup, err := m.Ensure(context.Background(), "migrating", "", nil, []string{"sleep", "60"}, endpoint, "gpt-5.6-sol", "original prompt", "pty-thread")
 	if err != nil {
 		t.Fatal(err)
 	}

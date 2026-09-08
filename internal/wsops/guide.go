@@ -156,8 +156,8 @@ are lost; durable instructions for yourself belong in your private config home's
 memory (` + "`.amux/claude/CLAUDE.md`" + ` for Claude Code) or in notes you keep in this
 directory.`
 	// steeringVerbs is the operating vocabulary every container session shares.
-	steeringVerbs = `- ` + "`amux status --json`" + ` — the live rail: every session with its state
-  (idle | ready | waiting | running), title, repos, and sandbox dir.
+	steeringVerbs = `- ` + "`amux status --json`" + ` — the scope-filtered live view for this role,
+  with normalized session state (idle | ready | waiting | running), title, and repos.
 - ` + "`amux do steer <id> -f verb=prompt -f text=\"…\"`" + ` — send an agent a prompt
   (this starts a stopped agent); ` + "`-f verb=interject`" + ` speaks mid-turn,
   ` + "`-f verb=stop`" + ` interrupts the turn, ` + "`-f verb=permission -f decision=allow|deny`" + `
@@ -181,8 +181,8 @@ a native TUI and mirrored to a web dashboard.
 
 ## Your role
 - Answer for the whole machine: which workgroups, agents, and repos exist, what
-  each agent was asked to do, what state it is in, and what it has done — read
-  its transcript before you say.
+  each agent was asked to do, what state it is in, and what it has done — use
+  authenticated amux session views before you say.
 - Operate amux for the user: create workgroups and agents, steer, archive, and
   rename them, track repos, tune amux's configuration.
 - Coordinate *across* workgroups when asked. Coordination *within* one belongs to
@@ -193,7 +193,7 @@ a native TUI and mirrored to a web dashboard.
 ## Where everything is
 - This directory (%s) is your own writable sandbox. No workgroup, repo cache,
   daemon state, database, credential source, or other session directory is
-mounted here. %s
+  mounted here. %s
 - Your global coordination view is an explicit authenticated daemon grant.
   Query and operate it through amux; do not infer access from host path names.
 
@@ -217,13 +217,14 @@ mounted here. %s
 `, s.Dir, guideRegenNote, steeringVerbs)
 	b.WriteString(configHomeSection)
 	b.WriteString("\n")
+	b.WriteString(transcriptsSection)
+	b.WriteString("\n")
 	b.WriteString(inventorySection())
 	return b.String()
 }
 
 // coordinatorGuide is the guide for a workgroup root's own session: the
-// coordinator of that workgroup's agents, working in the container dir that
-// holds every member's sandbox.
+// coordinator of that workgroup's agents, working in its dedicated own dir.
 func coordinatorGuide(root store.Session) string {
 	var b strings.Builder
 	name := root.Display()
@@ -236,20 +237,19 @@ evidence, and keep the user informed. Prompting this workgroup from the rail or
 the web reaches you.
 
 ## Your sandbox
-This directory (%s) is the workgroup's container and your writable sandbox. Each
-member agent's sandbox is a subdirectory of it (`+"`<agent id>/`"+`), holding that
-agent's worktrees (one per assigned repo), its own `+"`CLAUDE.md`"+`, and its private
-config home under `+"`.amux/`"+` — where its transcript lives. Read any of it
-freely; **never edit an agent's worktree** — steer the agent instead. Keep your
-own notes here (a `+"`COORDINATION.md`"+` with the roster, decisions, and acceptance
-criteria is the record that survives your context). %s
+This directory (%s) is your dedicated writable sandbox. Member sandboxes are
+siblings outside this filesystem namespace, not children you can read by path.
+Observe and control current direct members only through the authenticated amux
+grant. Keep your own notes here (a `+"`COORDINATION.md`"+` with the roster,
+decisions, and acceptance criteria is the record that survives your context). %s
 
 ## Operate this workgroup
 %s
 - `+"`amux do add-agent %s -f repos=… -f prompt=\"…\"`"+` adds an agent to this
   workgroup (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are optional).
 - Every agent commits on its own branch (`+"`amux/%s-<agent>`"+`) and ships through a
-  pull request; review the PR and the transcript, not the agent's summary of them.
+  pull request; review its authenticated session view and PR evidence, not only
+  the agent's summary.
 
 `, name, name, root.ID, root.Dir, guideRegenNote, steeringVerbs, root.ID, root.ID)
 	b.WriteString(membersSection(root))
@@ -287,10 +287,9 @@ ones running. Prompting this repo from the rail or the web reaches you.
   inspect it through your authenticated repo-scoped session view.
 
 ## Your sandbox
-This directory (%s) is your writable sandbox; keep your notes here. Each one-off
-agent's sandbox (listed below) holds its worktree of this repo, its own
-`+"`CLAUDE.md`"+`, and its private config home with its transcript under `+"`.amux/`"+`.
-Read freely; never edit an agent's worktree. %s
+This directory (%s) is your writable sandbox; keep your notes here. One-off
+agent sandboxes are not mounted. Their normalized context and explicit control
+operations come through your authenticated repo-scoped grant. %s
 
 ## Operate
 %s
@@ -407,7 +406,7 @@ func inventorySection() string {
 			b.WriteString("\n### Workgroups\n")
 			wrote = true
 		}
-		fmt.Fprintf(&b, "- **%s** (`%s`) — coordinator sandbox `%s`\n", r.Display(), r.ID, store.RootDir(r.ID))
+		fmt.Fprintf(&b, "- **%s** (`%s`) — coordinator session\n", r.Display(), r.ID)
 		for _, a := range subs {
 			if a.Archived {
 				continue
@@ -435,7 +434,8 @@ func inventorySection() string {
 }
 
 // writeAgentLine renders one agent as a roster line: id, what it is doing, its
-// runtime and mode, repos, branch, and sandbox path.
+// runtime and mode, repos, and branch. Host sandbox paths are intentionally not
+// copied into another session's generated guide.
 func writeAgentLine(b *strings.Builder, a store.Session) {
 	label := strings.TrimSpace(a.Name)
 	if label == "" {
@@ -454,7 +454,7 @@ func writeAgentLine(b *strings.Builder, a store.Session) {
 	if a.Archived {
 		b.WriteString(" · archived")
 	}
-	fmt.Fprintf(b, " · sandbox `%s`\n", a.Dir)
+	b.WriteByte('\n')
 }
 
 // taskSummary condenses an agent's initial prompt into one line (the first
