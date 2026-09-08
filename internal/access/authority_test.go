@@ -372,6 +372,37 @@ func TestCurrentUsesValidStageInsteadOfCorruptPublishedCredential(t *testing.T) 
 	}
 }
 
+func TestCurrentRejectsSeedCorruptStagedCredential(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, err := base64.RawStdEncoding.DecodeString(cred.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private[0] ^= 1
+	cred.PrivateKey = base64.RawStdEncoding.EncodeToString(private)
+	if err := writeJSONFile(stagedCredentialPath(dir, cred.KeyID), cred, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Current(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("Current with seed-corrupt staged credential = %v, want ErrInvalidCredential", err)
+	}
+}
+
 func TestOpenRejectsIssuerWhoseKeyPairOrIDDoesNotMatch(t *testing.T) {
 	for _, field := range []string{"private", "seed", "id"} {
 		t.Run(field, func(t *testing.T) {
