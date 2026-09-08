@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 )
@@ -38,15 +41,70 @@ func Dial() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newClient(conn), nil
+	credential, err := access.LoadCredential(access.DefaultCredentialDir(access.SubjectHost, access.LocalHostSubject))
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("load daemon host credential: %w", err)
+	}
+	return authenticateClient(conn, credential)
+}
+
+func authenticateClient(conn net.Conn, credential access.Credential) (*Client, error) {
+	_ = conn.SetDeadline(time.Now().Add(authDeadline))
+	tlsConfig, err := access.ClientTLSConfig(credential)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("load daemon TLS pin: %w", err)
+	}
+	secure := tls.Client(conn, tlsConfig)
+	if err := secure.Handshake(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("verify daemon TLS identity: %w", err)
+	}
+	defer secure.SetDeadline(time.Time{})
+	reader := bufio.NewReader(secure)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read daemon challenge: %w", err)
+	}
+	var challenge access.SocketChallenge
+	if err := json.Unmarshal(line, &challenge); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("invalid daemon challenge: %w", err)
+	}
+	proof, err := access.SignProof(credential, challenge, rand.Reader)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("verify daemon identity: %w", err)
+	}
+	if err := json.NewEncoder(secure).Encode(proof); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	line, err = reader.ReadBytes('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read daemon authentication: %w", err)
+	}
+	var welcome access.SocketWelcome
+	if err := json.Unmarshal(line, &welcome); err != nil || welcome.Type != access.FrameWelcome || !welcome.OK {
+		conn.Close()
+		return nil, fmt.Errorf("daemon authentication failed")
+	}
+	return newClientReader(secure, reader), nil
 }
 
 // newClient wraps a connection and starts its writer goroutine. Used by Dial and
 // by tests that dial over an in-memory pipe.
 func newClient(conn net.Conn) *Client {
+	return newClientReader(conn, bufio.NewReader(conn))
+}
+
+func newClientReader(conn net.Conn, reader *bufio.Reader) *Client {
 	c := &Client{
 		conn: conn,
-		r:    bufio.NewReader(conn),
+		r:    reader,
 		out:  make(chan []byte, outBuf),
 		done: make(chan struct{}),
 	}

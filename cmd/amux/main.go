@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
@@ -185,6 +186,32 @@ var startupDial = daemon.Dial
 // fail on any attempted exec after a denied probe.
 var daemonCommand = exec.Command
 
+// sessionContextRestricted is fixed-path namespace provenance, replaceable only
+// by tests. A valid context proves a restricted session; an unreadable or
+// invalid context fails closed. Only a proven ENOENT means the fixed mount is
+// absent. Environment variables remain hints and cannot remove this guard.
+var sessionContextRestricted = func() bool {
+	return restrictedBySessionContext(access.LoadSessionContext)
+}
+
+// protectedHostStartup validates possession from a path that HOME/XDG cannot
+// redirect. Automatic startup is allowed only after a daemon has provisioned
+// this host credential. Explicit `amux daemon start` is the bootstrap path.
+var protectedHostStartup = func() error {
+	dir, err := access.ProtectedHostCredentialDir()
+	if err != nil {
+		return err
+	}
+	credential, err := access.LoadCredential(dir)
+	if err != nil {
+		return err
+	}
+	if credential.Kind != access.SubjectHost || credential.SubjectID != access.LocalHostSubject || credential.NotAfter <= time.Now().UnixMilli() {
+		return access.ErrInvalidCredential
+	}
+	return nil
+}
+
 // cmdDaemon dispatches the daemon lifecycle.
 func cmdDaemon(args []string) error {
 	sub := ""
@@ -324,7 +351,7 @@ func daemonStart(self string) error {
 		fmt.Println("daemon already running")
 		return nil
 	}
-	if err := startDaemonAfterDial(self, initialErr); err != nil {
+	if err := startDaemonAfterDial(self, initialErr, true); err != nil {
 		return err
 	}
 	fmt.Println("daemon started")
@@ -421,8 +448,14 @@ func daemonMayStart(err error) bool {
 // restrictedSessionClient identifies a CLI launched inside an amux agent. Both
 // variables name the same store session; AMUX_WORKSPACE is the legacy alias.
 func restrictedSessionClient(getenv func(string) string) bool {
-	return strings.TrimSpace(getenv("AMUX_WORKGROUP")) != "" ||
+	return sessionContextRestricted() ||
+		strings.TrimSpace(getenv("AMUX_WORKGROUP")) != "" ||
 		strings.TrimSpace(getenv("AMUX_WORKSPACE")) != ""
+}
+
+func restrictedBySessionContext(load func() (access.SessionContext, error)) bool {
+	_, err := load()
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 // daemonConnectionError renders a failed client dial without guessing about
@@ -446,13 +479,13 @@ func ensureDaemon(self string) error {
 		_ = c.Close()
 		return nil
 	}
-	return startDaemonAfterDial(self, initialErr)
+	return startDaemonAfterDial(self, initialErr, false)
 }
 
 // startDaemonAfterDial applies the startup policy to the exact error from the
 // caller's first connection attempt. Keeping that error avoids a second probe
 // racing to a different conclusion and makes every later failure inspectable.
-func startDaemonAfterDial(self string, initialErr error) error {
+func startDaemonAfterDial(self string, initialErr error, explicitBootstrap bool) error {
 	if daemonAccessDenied(initialErr) {
 		return fmt.Errorf("daemon state unknown: access denied at %s; not starting: %w", core.SocketPath(), initialErr)
 	}
@@ -461,6 +494,11 @@ func startDaemonAfterDial(self string, initialErr error) error {
 	}
 	if restrictedSessionClient(os.Getenv) {
 		return fmt.Errorf("refusing to start a daemon from inside an amux agent: %w", initialErr)
+	}
+	if !explicitBootstrap {
+		if err := protectedHostStartup(); err != nil {
+			return fmt.Errorf("automatic daemon startup requires a protected host credential; run `amux daemon start` explicitly to bootstrap: %w", err)
+		}
 	}
 	// Auto-start and manual start share this validation and child entrypoint.
 	if _, err := amuxcfg.ResolveCodexControl(); err != nil {

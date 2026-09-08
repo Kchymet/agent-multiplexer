@@ -7,8 +7,11 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -16,8 +19,10 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
@@ -40,6 +45,9 @@ type Daemon struct {
 	interval time.Duration
 	self     string // absolute path to the amux binary (for spawning rails)
 	engine   engine.Engine
+	// authority is initialized before the singleton socket is touched. Every
+	// connection authenticates against it before connState/subscription exists.
+	authority *access.FileAuthority
 	// resolve turns an (agent id, tab) into a launch spec (working dir, env,
 	// sandboxed argv). Defaults to panespec.Resolve; overridable in tests.
 	resolve func(agentID string, tab int) (dir string, env, argv []string, err error)
@@ -200,19 +208,30 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := os.MkdirAll(core.StateDir(), 0o755); err != nil {
 		return err
 	}
+	lock, err := acquireSingletonLock()
+	if err != nil {
+		return err
+	}
+	defer releaseSingletonLock(lock)
+	if d.authority == nil {
+		d.authority, err = access.OpenDefault()
+		if err != nil {
+			return fmt.Errorf("open daemon authority: %w", err)
+		}
+	}
+	defer d.authority.Close()
+	if _, err := d.authority.EnsureHost(ctx); err != nil {
+		return fmt.Errorf("provision host credential: %w", err)
+	}
 	sock := core.SocketPath()
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		return err
 	}
-	// Clear a stale socket from a previous crash (single-instance is enforced
-	// by the caller probing the socket before starting us).
-	_ = os.Remove(sock)
-
-	ln, err := net.Listen("unix", sock)
+	ln, cleanupSocket, err := listenOwnedUnix(sock, d.authority.BootID())
 	if err != nil {
 		return err
 	}
-	defer func() { _ = ln.Close(); _ = os.Remove(sock) }()
+	defer cleanupSocket()
 
 	// The structured-control supervisor manager is bound to the daemon's context:
 	// its App Servers live and die with the daemon, not with any pane or client.
@@ -349,9 +368,40 @@ func (d *Daemon) triggerPoll() {
 
 func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	if d.authority == nil {
+		return
+	}
+	tlsConfig, err := d.authority.ServerTLSConfig()
+	if err != nil {
+		return
+	}
+	secure := tls.Server(conn, tlsConfig)
+	_ = secure.SetDeadline(time.Now().Add(authDeadline))
+	if err := secure.HandshakeContext(ctx); err != nil {
+		return
+	}
+	principal, reader, err := d.authenticateHost(ctx, secure)
+	if err != nil {
+		return
+	}
 
-	cl := newConnState(conn)
+	invalidated, cancelWatch, err := d.authority.WatchInvalidation(principal)
+	if err != nil {
+		return
+	}
+	defer cancelWatch()
+	cl := newAuthenticatedConnState(secure, func() bool { return d.authority.Valid(ctx, principal) == nil })
 	defer cl.shutdown()
+	go func() {
+		select {
+		case <-invalidated:
+			// Abort a blocked TLS write as well as queued frames. A write that has
+			// not completed when revocation commits must not drain afterward.
+			_ = secure.Close()
+		case <-cl.done:
+		case <-ctx.Done():
+		}
+	}()
 
 	ch := make(chan core.Snapshot, 4)
 	d.subsMu.Lock()
@@ -364,6 +414,9 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	}()
 
 	// Send the current state immediately on connect.
+	if d.authority.Valid(ctx, principal) != nil {
+		return
+	}
 	cl.send(d.snapshot())
 
 	// Push subsequent snapshots.
@@ -378,21 +431,32 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 				if !ok {
 					return
 				}
+				if d.authority.Valid(ctx, principal) != nil {
+					cl.stop()
+					return
+				}
 				cl.send(snap)
 			}
 		}
 	}()
 
+	// Deferred work carries the same generation guard and rechecks it at the
+	// actual execution boundary, not merely when this loop accepts the frame.
+	clientCtx := withAccessGuard(ctx, func() error { return d.authority.Valid(ctx, principal) })
+
 	// Read actions from the client until it disconnects.
-	dec := json.NewDecoder(conn)
+	dec := json.NewDecoder(reader)
 	for {
 		var a core.Action
 		if err := dec.Decode(&a); err != nil {
 			return // deferred cl.shutdown detaches panes (without killing agents)
 		}
+		if d.authority.Valid(ctx, principal) != nil {
+			return
+		}
 		switch a.Action {
 		case core.ActionPaneOpen:
-			d.paneOpen(ctx, cl, a)
+			d.paneOpen(clientCtx, cl, a)
 		case core.ActionPaneInput:
 			cl.paneInput(a.PaneID, a.Data)
 		case core.ActionPaneResize:
@@ -402,12 +466,135 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case core.ActionQuery:
 			d.query(cl, a)
 		default:
-			res := d.handle(ctx, a)
+			res := d.handle(clientCtx, a)
 			if a.Action != "" {
 				cl.send(res)
 			}
 		}
 	}
+}
+
+type accessGuardContextKey struct{}
+
+func withAccessGuard(ctx context.Context, valid func() error) context.Context {
+	return context.WithValue(ctx, accessGuardContextKey{}, valid)
+}
+
+// revalidateDeferred is a no-op for internal/test callers without a streaming
+// principal. Work accepted from an authenticated connection carries a guard.
+func revalidateDeferred(ctx context.Context) error {
+	valid, _ := ctx.Value(accessGuardContextKey{}).(func() error)
+	if valid == nil {
+		return nil
+	}
+	return valid()
+}
+
+const authDeadline = 5 * time.Second
+
+// authenticateHost completes authentication before the caller creates a write
+// pump, subscription, or pane route. The host listener accepts only explicitly
+// issued host keys; session and provider keys cannot unlock streaming by selecting
+// a different socket path.
+func (d *Daemon) authenticateHost(ctx context.Context, conn net.Conn) (access.Principal, *bufio.Reader, error) {
+	if d.authority == nil {
+		return access.Principal{}, nil, fmt.Errorf("daemon authority unavailable")
+	}
+	_ = conn.SetDeadline(time.Now().Add(authDeadline))
+	defer conn.SetDeadline(time.Time{})
+	challenge, err := d.authority.NewChallenge()
+	if err != nil {
+		return access.Principal{}, nil, err
+	}
+	if err := json.NewEncoder(conn).Encode(challenge); err != nil {
+		return access.Principal{}, nil, err
+	}
+	// ReadSlice on a fixed-capacity reader makes the pre-auth proof an actual
+	// byte bound. ReadBytes would allocate without limit until a newline arrived.
+	reader := bufio.NewReaderSize(conn, access.MaxBodyBytes+1)
+	line, err := reader.ReadSlice('\n')
+	if err != nil {
+		return access.Principal{}, nil, err
+	}
+	if len(line) > access.MaxBodyBytes {
+		return access.Principal{}, nil, access.ErrInvalidCredential
+	}
+	var proof access.SocketProof
+	if err := json.Unmarshal(line, &proof); err != nil {
+		_ = json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, Error: "authentication failed"})
+		return access.Principal{}, nil, access.ErrInvalidCredential
+	}
+	principal, err := d.authority.VerifyProof(ctx, challenge, proof, access.SubjectHost)
+	if err != nil {
+		_ = json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, Error: "authentication failed"})
+		return access.Principal{}, nil, err
+	}
+	if err := json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, OK: true}); err != nil {
+		return access.Principal{}, nil, err
+	}
+	return principal, reader, nil
+}
+
+// listenOwnedUnix binds a boot-unique socket, then publishes it through the
+// stable socket pathname as a relative symlink. The singleton lock must already
+// be held. Replacing an old managed symlink never unlinks its socket inode; an
+// unmanaged legacy socket/file is refused rather than guessed stale. Cleanup
+// removes only this boot's unique socket and deliberately leaves a dangling
+// managed symlink for the next lock owner to replace.
+func listenOwnedUnix(stable, bootID string) (net.Listener, func(), error) {
+	if len(bootID) < 16 {
+		return nil, nil, fmt.Errorf("invalid daemon boot identity")
+	}
+	unique := stable + "." + bootID[:16]
+	ln, err := net.Listen("unix", unique)
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() {
+		_ = ln.Close()
+		_ = os.Remove(unique)
+	}
+	if info, err := os.Lstat(stable); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			cleanup()
+			return nil, nil, fmt.Errorf("refusing to replace unmanaged daemon endpoint %s", stable)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		cleanup()
+		return nil, nil, err
+	}
+	pending := stable + ".link." + bootID[:16]
+	_ = os.Remove(pending) // boot-unique path owned by this lock holder
+	if err := os.Symlink(filepath.Base(unique), pending); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := os.Rename(pending, stable); err != nil {
+		_ = os.Remove(pending)
+		cleanup()
+		return nil, nil, err
+	}
+	return ln, cleanup, nil
+}
+
+func acquireSingletonLock() (*os.File, error) {
+	f, err := os.OpenFile(core.DaemonLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("daemon already running (singleton lock %s): %w", core.DaemonLockPath(), err)
+	}
+	return f, nil
+}
+
+func releaseSingletonLock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
 }
 
 // paneOpen attaches this connection to a tab of an agent: it resolves the launch
