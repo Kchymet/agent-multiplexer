@@ -138,15 +138,16 @@ type replayFile struct {
 // private keys are stored in subject-specific credential directories beneath
 // that root and only those individual directories are mounted into sandboxes.
 type FileAuthority struct {
-	root    string
-	now     func() time.Time
-	rand    io.Reader
-	bootID  string
-	issuer  issuerCredential
-	tls     daemonTLSCredential
-	commit  func(string, any, os.FileMode) (bool, error)
-	lock    *os.File
-	rootDir *os.File
+	root     string
+	now      func() time.Time
+	rand     io.Reader
+	bootID   string
+	issuer   issuerCredential
+	tls      daemonTLSCredential
+	commit   func(string, any, os.FileMode) (bool, error)
+	syncFile func(*os.File) error
+	lock     *os.File
+	rootDir  *os.File
 
 	mu       sync.RWMutex
 	registry registryFile
@@ -215,6 +216,7 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 		registry: registryFile{Version: ProtocolVersion, Current: map[string]string{}, Records: map[string]CredentialRecord{}},
 		replay:   replayFile{Version: ProtocolVersion, Entries: map[string]replayRecord{}},
 		commit:   atomicJSONCommit,
+		syncFile: func(file *os.File) error { return file.Sync() },
 		lock:     lock,
 		rootDir:  rootDir,
 		watchers: make(map[string]map[chan struct{}]struct{}),
@@ -357,10 +359,11 @@ func (a *FileAuthority) ensureLocked(kind SubjectKind, subjectID string) (string
 		}
 		return a.issueLocked(kind, subjectID, "")
 	}
-	if _, err := a.currentRecordLocked(kind, subjectID); err != nil {
+	rec, err := a.currentRecordLocked(kind, subjectID)
+	if err != nil {
 		return "", err
 	}
-	if err := a.ensureCredentialPublished(kind, subjectID, keyID); err != nil {
+	if err := a.ensureCredentialPublished(rec); err != nil {
 		return "", err
 	}
 	return a.CredentialDir(kind, subjectID), nil
@@ -384,7 +387,7 @@ func (a *FileAuthority) Current(_ context.Context, kind SubjectKind, subjectID s
 	if err != nil {
 		return CredentialRecord{}, err
 	}
-	if err := a.ensureCredentialPublished(kind, subjectID, rec.KeyID); err != nil {
+	if err := a.ensureCredentialPublished(rec); err != nil {
 		return CredentialRecord{}, err
 	}
 	return rec, nil
@@ -558,15 +561,22 @@ func (a *FileAuthority) issueLocked(kind SubjectKind, subjectID, oldKeyID string
 		IssuerPublicKey: a.issuer.PublicKey, DaemonCertificate: a.tls.Certificate,
 		NotAfter: notAfter.UnixMilli(),
 	}
-	dir := a.CredentialDir(kind, subjectID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir, dirHandle, err := a.ensureCredentialDirLocked(kind, subjectID)
+	if err != nil {
 		return "", err
 	}
+	defer dirHandle.Close()
 	// Stage the key in the stable directory. It is not authoritative until the
 	// registry commit below; a crash here leaves only an unusable staged key.
 	staged := stagedCredentialPath(dir, keyID)
 	if err := writeJSONFile(staged, cred, 0o400); err != nil {
 		return "", err
+	}
+	// The registry must never durably point at a credential whose staged name or
+	// newly-created ancestry has not crossed a directory durability barrier.
+	if err := a.syncFile(dirHandle); err != nil {
+		_ = os.Remove(staged)
+		return "", fmt.Errorf("sync staged credential directory: %w", err)
 	}
 	nextRegistry.Records[keyID] = rec
 	nextRegistry.Current[current] = keyID
@@ -596,12 +606,45 @@ func (a *FileAuthority) issueLocked(kind SubjectKind, subjectID, oldKeyID string
 	return dir, nil
 }
 
-func (a *FileAuthority) ensureCredentialPublished(kind SubjectKind, subjectID, keyID string) error {
-	dir := a.CredentialDir(kind, subjectID)
-	for _, name := range []string{"current", filepath.Base(stagedCredentialPath(dir, keyID))} {
+func (a *FileAuthority) ensureCredentialDirLocked(kind SubjectKind, subjectID string) (string, *os.File, error) {
+	credentials, err := ensureDirAt(int(a.rootDir.Fd()), "credentials", 0o700)
+	if err != nil {
+		return "", nil, fmt.Errorf("open credential authority root: %w", err)
+	}
+	defer credentials.Close()
+	if err := a.syncFile(a.rootDir); err != nil {
+		return "", nil, fmt.Errorf("sync credential authority ancestry: %w", err)
+	}
+	opaque := subjectKey(kind, subjectID)
+	subject, err := ensureDirAt(int(credentials.Fd()), opaque, 0o700)
+	if err != nil {
+		return "", nil, fmt.Errorf("open subject credential directory: %w", err)
+	}
+	if err := a.syncFile(credentials); err != nil {
+		subject.Close()
+		return "", nil, fmt.Errorf("sync subject credential ancestry: %w", err)
+	}
+	if err := a.syncFile(subject); err != nil {
+		subject.Close()
+		return "", nil, fmt.Errorf("sync subject credential directory: %w", err)
+	}
+	return a.CredentialDir(kind, subjectID), subject, nil
+}
+
+func (a *FileAuthority) ensureCredentialPublished(rec CredentialRecord) error {
+	dir := a.CredentialDir(rec.Kind, rec.SubjectID)
+	var validationErr error
+	for _, name := range []string{"current", filepath.Base(stagedCredentialPath(dir, rec.KeyID))} {
 		var cred Credential
 		path := filepath.Join(dir, name)
-		if err := readJSON(path, &cred); err != nil || cred.KeyID != keyID {
+		if err := readJSON(path, &cred); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				validationErr = ErrInvalidCredential
+			}
+			continue
+		}
+		if err := a.validatePublishedCredential(rec, cred); err != nil {
+			validationErr = err
 			continue
 		}
 		if cred.DaemonCertificate != a.tls.Certificate {
@@ -618,7 +661,31 @@ func (a *FileAuthority) ensureCredentialPublished(kind SubjectKind, subjectID, k
 		}
 		return nil
 	}
-	return fmt.Errorf("current access credential %s is not published", keyID)
+	if validationErr != nil {
+		return fmt.Errorf("validate published access credential %s: %w", rec.KeyID, validationErr)
+	}
+	return fmt.Errorf("current access credential %s is not published", rec.KeyID)
+}
+
+func (a *FileAuthority) validatePublishedCredential(rec CredentialRecord, cred Credential) error {
+	if cred.Protocol != ProtocolVersion || cred.KeyID != rec.KeyID || cred.SubjectID != rec.SubjectID ||
+		cred.Kind != rec.Kind || cred.Generation != rec.Generation || cred.NotAfter != rec.NotAfter ||
+		cred.IssuerKeyID != a.issuer.KeyID || cred.IssuerPublicKey != a.issuer.PublicKey {
+		return ErrInvalidCredential
+	}
+	pub, err := base64.RawStdEncoding.DecodeString(rec.PublicKey)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return ErrInvalidCredential
+	}
+	digest := sha256.Sum256(pub)
+	if subtle.ConstantTimeCompare([]byte(rec.KeyID), []byte(hex.EncodeToString(digest[:16]))) != 1 {
+		return ErrInvalidCredential
+	}
+	priv, err := base64.RawStdEncoding.DecodeString(cred.PrivateKey)
+	if err != nil || !privateKeyMatchesPublic(priv, pub) {
+		return ErrInvalidCredential
+	}
+	return nil
 }
 
 func stagedCredentialPath(dir, keyID string) string {
@@ -639,10 +706,8 @@ func cloneRegistry(in registryFile) registryFile {
 func (a *FileAuthority) loadOrCreateIssuer() error {
 	path := filepath.Join(a.root, "issuer.json")
 	if err := readJSON(path, &a.issuer); err == nil {
-		pub, pubErr := base64.RawStdEncoding.DecodeString(a.issuer.PublicKey)
-		priv, privErr := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
-		if pubErr != nil || privErr != nil || len(pub) != ed25519.PublicKeySize || len(priv) != ed25519.PrivateKeySize {
-			return fmt.Errorf("invalid access issuer key")
+		if err := validateIssuerCredential(a.issuer); err != nil {
+			return err
 		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -658,6 +723,32 @@ func (a *FileAuthority) loadOrCreateIssuer() error {
 		PrivateKey: base64.RawStdEncoding.EncodeToString(priv),
 	}
 	return atomicJSON(path, a.issuer, 0o600)
+}
+
+func validateIssuerCredential(issuer issuerCredential) error {
+	pub, pubErr := base64.RawStdEncoding.DecodeString(issuer.PublicKey)
+	priv, privErr := base64.RawStdEncoding.DecodeString(issuer.PrivateKey)
+	if pubErr != nil || privErr != nil || !privateKeyMatchesPublic(priv, pub) {
+		return fmt.Errorf("invalid access issuer key")
+	}
+	digest := sha256.Sum256(pub)
+	if subtle.ConstantTimeCompare([]byte(issuer.KeyID), []byte(hex.EncodeToString(digest[:16]))) != 1 {
+		return fmt.Errorf("invalid access issuer key id")
+	}
+	return nil
+}
+
+// An Ed25519 private key stores the seed followed by a cached public-key
+// suffix. PrivateKey.Public returns that suffix without deriving it from the
+// seed, so validate both the complete canonical expansion and the expected
+// public key before accepting persisted signing material.
+func privateKeyMatchesPublic(private, public []byte) bool {
+	if len(private) != ed25519.PrivateKeySize || len(public) != ed25519.PublicKeySize {
+		return false
+	}
+	derived := ed25519.NewKeyFromSeed(private[:ed25519.SeedSize])
+	return subtle.ConstantTimeCompare(private, derived) == 1 &&
+		subtle.ConstantTimeCompare(public, derived[ed25519.SeedSize:]) == 1
 }
 
 const daemonTLSServerName = "amux-daemon"
