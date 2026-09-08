@@ -18,25 +18,27 @@ import (
 )
 
 type Client struct {
-	contextDir         *os.File
-	mailbox            *os.File
-	requests           *os.File
-	responses          *os.File
-	context            SessionContext
-	clock              func() time.Time
-	random             io.Reader
-	poll               time.Duration
-	afterRequestCreate func()
+	contextDir           *os.File
+	mailbox              *os.File
+	requests             *os.File
+	responses            *os.File
+	context              SessionContext
+	clock                func() time.Time
+	random               io.Reader
+	poll                 time.Duration
+	beforeRequestPublish func()
+	afterServiceStat     func()
 
 	mu     sync.RWMutex
 	closed bool
 }
 
 type clientOptions struct {
-	clock              func() time.Time
-	random             io.Reader
-	poll               time.Duration
-	afterRequestCreate func()
+	clock                func() time.Time
+	random               io.Reader
+	poll                 time.Duration
+	beforeRequestPublish func()
+	afterServiceStat     func()
 }
 
 // OpenClient discovers only the fixed read-only session context. There is no
@@ -126,7 +128,8 @@ func openClientAt(fixedContextDir string, options clientOptions) (*Client, error
 	return &Client{
 		contextDir: contextDir, mailbox: mailbox, requests: requests, responses: responses,
 		context: sessionContext, clock: clock, random: random, poll: poll,
-		afterRequestCreate: options.afterRequestCreate,
+		beforeRequestPublish: options.beforeRequestPublish,
+		afterServiceStat:     options.afterServiceStat,
 	}, nil
 }
 
@@ -169,7 +172,7 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if err := atomicWriteAtObserved(c.requests, requestFileName(envelope.RequestID), encoded, c.random, c.afterRequestCreate); err != nil {
+	if err := atomicWriteAtObserved(c.requests, requestFileName(envelope.RequestID), encoded, c.random, c.beforeRequestPublish); err != nil {
 		return Result{RequestID: envelope.RequestID}, errors.Join(ErrIndeterminate,
 			fmt.Errorf("publish session RPC request: %w", err))
 	}
@@ -194,7 +197,20 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 }
 
 func (c *Client) loadService(credential access.Credential) (Service, error) {
-	data, err := readRegularAt(c.mailbox, ServiceFileName, maxServiceFileBytes)
+	var (
+		data []byte
+		err  error
+	)
+	// service.json is the sole replaceable protocol record. A reader can hold
+	// the prior inode while atomic replacement drops its link count/changes its
+	// ctime; retry that transient strict-file rejection against the held mailbox
+	// directory. Unique request/response records are never retried this way.
+	for attempt := 0; attempt < 3; attempt++ {
+		data, err = readRegularAtObserved(c.mailbox, ServiceFileName, maxServiceFileBytes, c.afterServiceStat)
+		if err == nil || !errors.Is(err, ErrInvalidRecord) {
+			break
+		}
+	}
 	if err != nil {
 		return Service{}, err
 	}

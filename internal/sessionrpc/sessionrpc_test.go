@@ -228,14 +228,14 @@ func TestConcurrentOneShotCalls(t *testing.T) {
 	}
 }
 
-func TestServerScanPreservesInFlightAtomicPublication(t *testing.T) {
+func TestServerScanPreservesSyncedInFlightAtomicPublication(t *testing.T) {
 	f := newFixture(t, Callbacks{}, ServerOptions{})
-	created := make(chan struct{})
+	readyToPublish := make(chan struct{})
 	resume := make(chan struct{})
 	client := f.client(clientOptions{
 		poll: time.Millisecond,
-		afterRequestCreate: func() {
-			close(created)
+		beforeRequestPublish: func() {
+			close(readyToPublish)
 			<-resume
 		},
 	})
@@ -251,9 +251,9 @@ func TestServerScanPreservesInFlightAtomicPublication(t *testing.T) {
 		done <- outcome{result: result, err: err}
 	}()
 	select {
-	case <-created:
+	case <-readyToPublish:
 	case <-ctx.Done():
-		t.Fatal("client did not create publication temporary")
+		t.Fatal("client did not sync publication temporary")
 	}
 	processed, err := f.server.ServeOnce(ctx)
 	if err != nil || processed != 1 {
@@ -265,6 +265,10 @@ func TestServerScanPreservesInFlightAtomicPublication(t *testing.T) {
 	}
 	if len(entries) != 1 || !requestTemporaryFromFile(entries[0].Name()) {
 		t.Fatalf("scanner removed or altered in-flight temporary: %v", entries)
+	}
+	info, err := entries[0].Info()
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("publication temporary was not fully written before scan: info=%v err=%v", info, err)
 	}
 	close(resume)
 	for {
@@ -284,15 +288,728 @@ func TestServerScanPreservesInFlightAtomicPublication(t *testing.T) {
 	}
 }
 
+func TestServerRevalidatesCredentialAfterAuthorize(t *testing.T) {
+	var authority *access.FileAuthority
+	var dispatched atomic.Int32
+	f := newFixture(t, Callbacks{
+		Authorize: func(_ context.Context, principal access.Principal, _ Call) error {
+			return authority.Revoke(context.Background(), principal.Kind, principal.SubjectID)
+		},
+		Dispatch: countDispatch(&dispatched),
+	}, ServerOptions{})
+	authority = f.auth
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteAction, Verb: "mutate", ID: f.grant.SubjectID,
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if dispatched.Load() != 0 {
+		t.Fatalf("revoked principal dispatched %d times", dispatched.Load())
+	}
+	response := readTestResponse(t, f.grant.MailboxHostDir, envelope.RequestID)
+	if response.Status != StatusDenied || response.Code != "credential_invalid" {
+		t.Fatalf("response after authorize-time revoke = %+v", response)
+	}
+}
+
+type failingIssuerSigner struct {
+	IssuerSigner
+	err error
+}
+
+func (s failingIssuerSigner) SignIssuer([]byte) ([]byte, error) { return nil, s.err }
+
+type testResponseBudget struct {
+	mu       sync.Mutex
+	limit    int
+	active   int
+	commits  int
+	releases int
+	receipts int
+	leases   map[string]*testResponseLease
+}
+
+func (b *testResponseBudget) ReserveResponse(_ context.Context, request ResponseReservation) (ResponseLease, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.leases == nil {
+		b.leases = make(map[string]*testResponseLease)
+	}
+	key := request.SubjectID + "/" + request.RequestID
+	if existing := b.leases[key]; existing != nil {
+		if request.Existing {
+			return existing, nil
+		}
+		return nil, ErrResponseCapacity
+	}
+	// Existing reservations adopt durable disk reality even when it already
+	// exceeds today's admission limit. Only new amplification is rejected.
+	if b.active >= b.limit && !request.Existing {
+		return nil, ErrResponseCapacity
+	}
+	b.active++
+	if request.ReceiptSlot {
+		b.receipts++
+	}
+	lease := &testResponseLease{budget: b, key: key, receipt: request.ReceiptSlot}
+	b.leases[key] = lease
+	return lease, nil
+}
+
+func (b *testResponseBudget) counts() (active, commits, releases int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.active, b.commits, b.releases
+}
+
+func (b *testResponseBudget) receiptCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.receipts
+}
+
+type testResponseLease struct {
+	mu        sync.Mutex
+	budget    *testResponseBudget
+	key       string
+	committed bool
+	released  bool
+	receipt   bool
+}
+
+func (l *testResponseLease) Commit(_ int64, receiptPending bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
+	l.budget.mu.Lock()
+	if !l.committed {
+		l.committed = true
+		l.budget.commits++
+	}
+	if l.receipt && !receiptPending {
+		l.receipt = false
+		l.budget.receipts--
+	}
+	l.budget.mu.Unlock()
+}
+
+func (l *testResponseLease) ReleaseReceipt() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released || !l.receipt {
+		return
+	}
+	l.receipt = false
+	l.budget.mu.Lock()
+	l.budget.receipts--
+	l.budget.mu.Unlock()
+}
+
+func (l *testResponseLease) Release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
+	l.released = true
+	l.budget.mu.Lock()
+	if l.receipt {
+		l.budget.receipts--
+		l.receipt = false
+	}
+	l.budget.active--
+	l.budget.releases++
+	delete(l.budget.leases, l.key)
+	l.budget.mu.Unlock()
+}
+
+func TestPostCommitResponseFailureSettlesExactlyOnceWithoutPersisted(t *testing.T) {
+	f := newFixture(t, Callbacks{}, ServerOptions{})
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = nil
+	var persisted atomic.Int32
+	settled := make(chan ReceiptSettlement, 2)
+	server, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, f.auth,
+		failingIssuerSigner{IssuerSigner: f.auth, err: errors.New("injected signing failure")}, Callbacks{
+			Authorize: func(context.Context, access.Principal, Call) error { return nil },
+			Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+				return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+					ResponsePersisted: func(PersistedResponse) { persisted.Add(1) },
+					Settled:           func(value ReceiptSettlement) { settled <- value },
+				}}, nil
+			},
+		}, ServerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server = server
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID,
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := server.ServeOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "injected signing failure") {
+		t.Fatalf("response publication error = %v", err)
+	}
+	if persisted.Load() != 0 {
+		t.Fatalf("failed response reported persisted %d times", persisted.Load())
+	}
+	select {
+	case value := <-settled:
+		if value.RequestID != envelope.RequestID || value.Received || value.Reason != SettlementResponseFailed {
+			t.Fatalf("failure settlement = %+v", value)
+		}
+	default:
+		t.Fatal("post-commit response failure did not settle")
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case duplicate := <-settled:
+		t.Fatalf("response failure settled twice: %+v", duplicate)
+	default:
+	}
+}
+
+func TestPostCommitUncertainResponseDurabilitySettlesWithoutPersisted(t *testing.T) {
+	var persisted atomic.Int32
+	settled := make(chan ReceiptSettlement, 2)
+	f := newFixture(t, Callbacks{
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+				ResponsePersisted: func(PersistedResponse) { persisted.Add(1) },
+				Settled:           func(value ReceiptSettlement) { settled <- value },
+			}}, nil
+		},
+	}, ServerOptions{})
+	injected := errors.New("injected directory fsync uncertainty")
+	f.server.responseWriter = func(dir *os.File, name string, data []byte, random io.Reader) error {
+		if err := atomicWriteAt(dir, name, data, random); err != nil {
+			return err
+		}
+		return injected
+	}
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID,
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); !errors.Is(err, injected) {
+		t.Fatalf("uncertain response publication error = %v", err)
+	}
+	if persisted.Load() != 0 {
+		t.Fatalf("uncertain response reported persisted %d times", persisted.Load())
+	}
+	if _, err := os.Stat(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, responseFileName(envelope.RequestID))); err != nil {
+		t.Fatalf("injected post-rename response missing: %v", err)
+	}
+	select {
+	case value := <-settled:
+		if value.Received || value.Reason != SettlementResponseFailed {
+			t.Fatalf("uncertain durability settlement = %+v", value)
+		}
+	default:
+		t.Fatal("uncertain response durability did not settle")
+	}
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = nil
+	select {
+	case duplicate := <-settled:
+		t.Fatalf("uncertain durability settled twice: %+v", duplicate)
+	default:
+	}
+}
+
+func TestAggregateResponseBudgetAdmitsBeforeDispatchAndReleasesOnRemoval(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	clock := newTestClock(time.Now())
+	var firstDispatch atomic.Int32
+	firstCallbacks := Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error { return nil },
+		Dispatch:  countDispatch(&firstDispatch),
+	}
+	first := newFixture(t, firstCallbacks, ServerOptions{Clock: clock.Now, ResponseBudget: budget})
+	firstEnvelope, firstBytes := signedCall(t, first.auth, first.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot",
+	})
+	publishEnvelope(t, first.grant.RequestsHostDir, firstEnvelope, firstBytes)
+	if _, err := first.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if active, commits, releases := budget.counts(); active != 1 || commits != 1 || releases != 0 {
+		t.Fatalf("budget after durable response active=%d commits=%d releases=%d", active, commits, releases)
+	}
+
+	var secondDispatch atomic.Int32
+	second := newFixture(t, Callbacks{Dispatch: countDispatch(&secondDispatch)}, ServerOptions{ResponseBudget: budget})
+	secondEnvelope, secondBytes := signedCall(t, second.auth, second.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteAction, Verb: "mutate", ID: second.grant.SubjectID,
+	})
+	publishEnvelope(t, second.grant.RequestsHostDir, secondEnvelope, secondBytes)
+	if _, err := second.server.ServeOnce(context.Background()); !errors.Is(err, ErrResponseCapacity) {
+		t.Fatalf("aggregate admission error = %v", err)
+	}
+	if secondDispatch.Load() != 0 {
+		t.Fatalf("aggregate budget rejected after dispatch: %d", secondDispatch.Load())
+	}
+	if err := first.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first.server = nil
+	if active, commits, releases := budget.counts(); active != 1 || commits != 1 || releases != 0 {
+		t.Fatalf("close released durable response active=%d commits=%d releases=%d", active, commits, releases)
+	}
+	reopened, err := OpenServerMailbox(first.grant.SubjectID, first.grant.MailboxHostDir, first.auth, first.auth,
+		firstCallbacks, ServerOptions{Clock: clock.Now, ResponseBudget: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.server = reopened
+	if _, err := reopened.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if active, commits, releases := budget.counts(); active != 1 || commits != 1 || releases != 0 {
+		t.Fatalf("reopen did not idempotently adopt response active=%d commits=%d releases=%d", active, commits, releases)
+	}
+	clock.Advance(time.Duration(access.MaxResponseAge+1) * time.Second)
+	if _, err := reopened.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if active, commits, releases := budget.counts(); active != 0 || commits != 1 || releases != 1 {
+		t.Fatalf("budget after anchored response removal active=%d commits=%d releases=%d", active, commits, releases)
+	}
+	if _, err := second.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if secondDispatch.Load() != 1 {
+		t.Fatalf("released aggregate capacity did not dispatch: %d", secondDispatch.Load())
+	}
+	if err := second.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second.server = nil
+	if active, _, releases := budget.counts(); active != 1 || releases != 1 {
+		t.Fatalf("close released second durable response active=%d releases=%d", active, releases)
+	}
+}
+
+func TestRestartBudgetScrubsResponseTemporaryBeforeAdoption(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	var dispatched atomic.Int32
+	callbacks := Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error { return nil },
+		Dispatch:  countDispatch(&dispatched),
+	}
+	f := newFixture(t, callbacks, ServerOptions{ResponseBudget: budget})
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot",
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = nil
+
+	temporary := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, ".tmp-"+strings.Repeat("a", 32))
+	if err := os.WriteFile(temporary, []byte("crash-left"), regularFileMode); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, f.auth, f.auth,
+		callbacks, ServerOptions{ResponseBudget: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server = reopened
+	if _, err := reopened.ServeOnce(context.Background()); err != nil {
+		t.Fatalf("restart adoption after response temporary: %v", err)
+	}
+	if _, err := os.Stat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crash-left response temporary remains: %v", err)
+	}
+	if active, commits, releases := budget.counts(); active != 1 || commits != 1 || releases != 0 {
+		t.Fatalf("retained response accounting active=%d commits=%d releases=%d", active, commits, releases)
+	}
+}
+
+func TestRestartCleanupAndAdoptionProgressBeyondOneChunk(t *testing.T) {
+	clock := newTestClock(time.Now())
+	f := newFixture(t, Callbacks{}, ServerOptions{Clock: clock.Now})
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = nil
+	responseDir := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName)
+	old := clock.Now().Add(-time.Duration(access.MaxResponseAge+1) * time.Second)
+	for index := 0; index < MaxResponseFiles+1; index++ {
+		name := fmt.Sprintf("%032x.res", index+1)
+		path := filepath.Join(responseDir, name)
+		if err := os.WriteFile(path, []byte("{}"), regularFileMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 2*MaxQueuedRequests+1; index++ {
+		name := fmt.Sprintf(".tmp-%032x", index+MaxResponseFiles+2)
+		if err := os.WriteFile(filepath.Join(responseDir, name), []byte("crash-left"), regularFileMode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	budget := &testResponseBudget{limit: 1}
+	reopened, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, f.auth, f.auth, Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error { return nil },
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK}, nil
+		},
+	}, ServerOptions{Clock: clock.Now, ResponseBudget: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server = reopened
+	previous := 3*MaxQueuedRequests + 2
+	madeProgress := false
+	for attempt := 0; attempt < 32; attempt++ {
+		_, serveErr := reopened.ServeOnce(context.Background())
+		entries, readErr := os.ReadDir(responseDir)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if len(entries) > previous {
+			t.Fatalf("startup cleanup grew: before=%d after=%d err=%v", previous, len(entries), serveErr)
+		}
+		if len(entries) < previous {
+			madeProgress = true
+		}
+		previous = len(entries)
+		if serveErr == nil {
+			break
+		}
+		if !errors.Is(serveErr, ErrResponseCapacity) {
+			t.Fatalf("startup cleanup error: %v", serveErr)
+		}
+	}
+	if previous != 0 {
+		t.Fatalf("startup cleanup left %d response artifacts", previous)
+	}
+	if !madeProgress {
+		t.Fatal("startup cleanup never advanced beyond its first bounded scan")
+	}
+	if active, commits, releases := budget.counts(); active != 0 || commits != MaxResponseFiles+1 || releases != MaxResponseFiles+1 {
+		t.Fatalf("over-capacity adoption accounting active=%d commits=%d releases=%d", active, commits, releases)
+	}
+}
+
+func TestAggregateReceiptLeaseReleasedOnSettlement(t *testing.T) {
+	budget := &testResponseBudget{limit: 4}
+	clock := newTestClock(time.Now())
+	settled := make(chan ReceiptSettlement, 1)
+	f := newFixture(t, Callbacks{
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+				Grace: time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+			}}, nil
+		},
+	}, ServerOptions{Clock: clock.Now, SettlementInterval: time.Millisecond, ResponseBudget: budget})
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID,
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := budget.receiptCount(); got != 1 {
+		t.Fatalf("committed receipt slots = %d", got)
+	}
+	clock.Advance(2 * time.Second)
+	select {
+	case value := <-settled:
+		if value.Reason != SettlementGraceExpired {
+			t.Fatalf("settlement = %+v", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receipt did not settle")
+	}
+	if got := budget.receiptCount(); got != 0 {
+		t.Fatalf("settled receipt slots = %d", got)
+	}
+	if active, _, releases := budget.counts(); active != 1 || releases != 0 {
+		t.Fatalf("settlement released durable response active=%d releases=%d", active, releases)
+	}
+}
+
+func TestPendingReceiptAdmissionBlocksDispatchAtLimit(t *testing.T) {
+	var dispatched atomic.Int32
+	f := newFixture(t, Callbacks{Dispatch: countDispatch(&dispatched)}, ServerOptions{})
+	deadline := time.Now().Add(time.Hour)
+	f.server.mu.Lock()
+	for index := 0; index < MaxPendingReceipts; index++ {
+		f.server.pending[fmt.Sprintf("%032x", index)] = pendingReceipt{deadline: deadline}
+	}
+	f.server.mu.Unlock()
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteAction, Verb: "mutate", ID: f.grant.SubjectID,
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if dispatched.Load() != 0 {
+		t.Fatalf("dispatch ran with saturated pending receipts: %d", dispatched.Load())
+	}
+	response := readTestResponse(t, f.grant.MailboxHostDir, envelope.RequestID)
+	if response.Status != StatusIndeterminate || response.Code != "receipt_capacity" {
+		t.Fatalf("capacity response = %+v", response)
+	}
+}
+
+func TestResponseCountAdmissionAndProgressingCleanup(t *testing.T) {
+	t.Run("count-admission-before-dispatch", func(t *testing.T) {
+		var dispatched atomic.Int32
+		f := newFixture(t, Callbacks{Dispatch: countDispatch(&dispatched)}, ServerOptions{})
+		for index := 0; index < MaxResponseFiles+1; index++ {
+			envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+				Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", ID: fmt.Sprint(index),
+			})
+			publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+			_, err := f.server.ServeOnce(context.Background())
+			if index < MaxResponseFiles && err != nil {
+				t.Fatalf("call %d: %v", index, err)
+			}
+			if index == MaxResponseFiles && !errors.Is(err, ErrResponseCapacity) {
+				t.Fatalf("over-capacity call error = %v", err)
+			}
+		}
+		entries, err := os.ReadDir(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != MaxResponseFiles || dispatched.Load() != MaxResponseFiles {
+			t.Fatalf("responses=%d dispatches=%d", len(entries), dispatched.Load())
+		}
+	})
+
+	t.Run("byte-admission-before-dispatch", func(t *testing.T) {
+		var dispatched atomic.Int32
+		f := newFixture(t, Callbacks{Dispatch: countDispatch(&dispatched)}, ServerOptions{})
+		responsesDir := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName)
+		files := int(MaxResponseBytes / int64(maxEnvelopeFileBytes))
+		content := bytes.Repeat([]byte{'x'}, maxEnvelopeFileBytes)
+		for index := 0; index < files; index++ {
+			path := filepath.Join(responsesDir, responseFileName(fmt.Sprintf("%032x", index)))
+			if err := os.WriteFile(path, content, regularFileMode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+			Kind: CallOperation, Route: access.RouteAction, Verb: "mutate", ID: f.grant.SubjectID,
+		})
+		publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+		if _, err := f.server.ServeOnce(context.Background()); !errors.Is(err, ErrResponseCapacity) {
+			t.Fatalf("byte-capacity error = %v", err)
+		}
+		if dispatched.Load() != 0 {
+			t.Fatalf("dispatch ran without worst-case response bytes: %d", dispatched.Load())
+		}
+	})
+
+	t.Run("cleanup-advances-past-first-chunk", func(t *testing.T) {
+		now := time.Now()
+		f := newFixture(t, Callbacks{}, ServerOptions{Clock: func() time.Time { return now }})
+		responsesDir := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName)
+		old := now.Add(-time.Duration(access.MaxResponseAge+1) * time.Second)
+		for index := 0; index < MaxResponseFiles+17; index++ {
+			path := filepath.Join(responsesDir, responseFileName(fmt.Sprintf("%032x", index)))
+			if err := os.WriteFile(path, []byte("stale"), regularFileMode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for attempt := 0; attempt < 3; attempt++ {
+			if _, err := f.server.ServeOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		entries, err := os.ReadDir(responsesDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("progressing cleanup left %d stale responses", len(entries))
+		}
+	})
+}
+
+func TestReceiptDeadlineAtAcceptanceAndIndependentSettlement(t *testing.T) {
+	t.Run("deadline-rechecked-after-authorize", func(t *testing.T) {
+		var nowMillis atomic.Int64
+		nowMillis.Store(time.Now().UnixMilli())
+		clock := func() time.Time { return time.UnixMilli(nowMillis.Load()) }
+		settled := make(chan ReceiptSettlement, 1)
+		f := newFixture(t, Callbacks{
+			Authorize: func(_ context.Context, _ access.Principal, call Call) error {
+				if call.Kind == CallReceipt {
+					nowMillis.Add(int64(2 * time.Second / time.Millisecond))
+				}
+				return nil
+			},
+			Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+				return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+					Grace: time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+				}}, nil
+			},
+		}, ServerOptions{Clock: clock})
+		// Isolate the acceptance-time check from the independent expiry loop;
+		// the next subtest covers that loop itself.
+		f.server.settlementStopOnce.Do(func() { close(f.server.settlementStop) })
+		<-f.server.settlementDone
+		operation, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+			Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID,
+		})
+		publishEnvelope(t, f.grant.RequestsHostDir, operation, encoded)
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		response := readTestResponse(t, f.grant.MailboxHostDir, operation.RequestID)
+		receipt, receiptBytes := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+			Kind: CallReceipt, Receipt: &Receipt{RequestID: operation.RequestID, ResponseDigest: responseDigest(response)},
+		})
+		publishEnvelope(t, f.grant.RequestsHostDir, receipt, receiptBytes)
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		value := <-settled
+		if value.Received || value.Reason != SettlementGraceExpired {
+			t.Fatalf("late receipt settlement = %+v", value)
+		}
+		receiptResponse := readTestResponse(t, f.grant.MailboxHostDir, receipt.RequestID)
+		if receiptResponse.Status != StatusInvalid || receiptResponse.Code != "receipt_expired" {
+			t.Fatalf("late receipt response = %+v", receiptResponse)
+		}
+	})
+
+	t.Run("settles-without-another-server-tick", func(t *testing.T) {
+		var nowMillis atomic.Int64
+		nowMillis.Store(time.Now().UnixMilli())
+		clock := func() time.Time { return time.UnixMilli(nowMillis.Load()) }
+		settled := make(chan ReceiptSettlement, 1)
+		f := newFixture(t, Callbacks{
+			Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+				return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+					Grace: time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+				}}, nil
+			},
+		}, ServerOptions{Clock: clock, SettlementInterval: time.Millisecond})
+		operation, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+			Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID,
+		})
+		publishEnvelope(t, f.grant.RequestsHostDir, operation, encoded)
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		nowMillis.Add(int64(2 * time.Second / time.Millisecond))
+		select {
+		case value := <-settled:
+			if value.Received || value.Reason != SettlementGraceExpired {
+				t.Fatalf("independent settlement = %+v", value)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("receipt grace did not settle independently")
+		}
+	})
+}
+
+func TestStrictJSONRejectsUnknownDuplicateAndTrailingInput(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"unknown":                  []byte(`{"kind":"call","route":"query","verb":"snapshot","unknown":true}`),
+		"duplicate":                []byte(`{"kind":"call","route":"query","verb":"first","verb":"last"}`),
+		"case_folded_duplicate":    []byte(`{"kind":"receipt","Kind":"call","route":"query","verb":"snapshot"}`),
+		"case_folded_alias":        []byte(`{"Kind":"call","route":"query","verb":"snapshot"}`),
+		"nested_duplicate":         []byte(`{"kind":"call","route":"query","verb":"snapshot","fields":{"x":"first","x":"last"}}`),
+		"nested_case_folded_alias": []byte(`{"kind":"receipt","receipt":{"RequestID":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","responseDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`),
+		"trailing":                 []byte(`{"kind":"call","route":"query","verb":"snapshot"} {}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var call Call
+			if err := unmarshalBounded(body, access.MaxBodyBytes, &call); !errors.Is(err, ErrInvalidRecord) {
+				t.Fatalf("strict decode error = %v", err)
+			}
+			var dispatched atomic.Int32
+			f := newFixture(t, Callbacks{Dispatch: countDispatch(&dispatched)}, ServerOptions{})
+			envelope, encoded := signedBody(t, f.auth, f.grant.CredentialHostDir, body)
+			publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+			if _, err := f.server.ServeOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if dispatched.Load() != 0 {
+				t.Fatalf("strictly invalid signed call dispatched %d times", dispatched.Load())
+			}
+			response := readTestResponse(t, f.grant.MailboxHostDir, envelope.RequestID)
+			if response.Status != StatusInvalid || response.Code != "invalid_call" {
+				t.Fatalf("strictly invalid response = %+v", response)
+			}
+		})
+	}
+}
+
+func TestStrictJSONAllowsArbitraryCaseSensitiveFieldMapKeys(t *testing.T) {
+	var call Call
+	body := []byte(`{"kind":"call","route":"query","verb":"snapshot","fields":{"UserKey":"value"}}`)
+	if err := unmarshalBounded(body, access.MaxBodyBytes, &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.Fields["UserKey"] != "value" {
+		t.Fatalf("field map = %#v", call.Fields)
+	}
+}
+
+func TestStrictJSONRequiresCanonicalNamesAcrossWireRecords(t *testing.T) {
+	tests := []struct {
+		name      string
+		canonical []byte
+		alias     []byte
+		value     func() any
+	}{
+		{"context", []byte(`{"subjectId":"subject-a"}`), []byte(`{"SubjectID":"subject-a"}`), func() any { return new(SessionContext) }},
+		{"credential", []byte(`{"keyId":"aa"}`), []byte(`{"KeyID":"aa"}`), func() any { return new(access.Credential) }},
+		{"service", []byte(`{"bootId":"aa"}`), []byte(`{"BootID":"aa"}`), func() any { return new(Service) }},
+		{"request", []byte(`{"requestId":"aa"}`), []byte(`{"RequestID":"aa"}`), func() any { return new(access.SignedRequest) }},
+		{"response", []byte(`{"completedAt":1}`), []byte(`{"CompletedAt":1}`), func() any { return new(Response) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := unmarshalBounded(test.canonical, maxEnvelopeFileBytes, test.value()); err != nil {
+				t.Fatalf("canonical field rejected: %v", err)
+			}
+			if err := unmarshalBounded(test.alias, maxEnvelopeFileBytes, test.value()); !errors.Is(err, ErrInvalidRecord) {
+				t.Fatalf("case-folded alias error = %v", err)
+			}
+		})
+	}
+}
+
 func TestServerRemovesAbandonedAtomicPublication(t *testing.T) {
-	now := time.Now()
-	f := newFixture(t, Callbacks{}, ServerOptions{Clock: func() time.Time { return now }})
+	clock := newTestClock(time.Now())
+	f := newFixture(t, Callbacks{}, ServerOptions{Clock: clock.Now})
 	name := ".tmp-" + strings.Repeat("a", 32)
 	path := filepath.Join(f.grant.RequestsHostDir, name)
 	if err := os.WriteFile(path, []byte("abandoned"), regularFileMode); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(requestTemporaryMaxAge + time.Second)
+	clock.Advance(requestTemporaryMaxAge + time.Second)
 	if _, err := f.server.ServeOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +1037,19 @@ type zeroReader struct{}
 func (zeroReader) Read(buffer []byte) (int, error) {
 	clear(buffer)
 	return len(buffer), nil
+}
+
+type testClock struct{ millis atomic.Int64 }
+
+func newTestClock(now time.Time) *testClock {
+	clock := &testClock{}
+	clock.millis.Store(now.UnixMilli())
+	return clock
+}
+
+func (c *testClock) Now() time.Time { return time.UnixMilli(c.millis.Load()) }
+func (c *testClock) Advance(delta time.Duration) {
+	c.millis.Add(int64(delta / time.Millisecond))
 }
 
 func TestServerRejectsSymlinkFIFOHardlinkAndBoundsQueue(t *testing.T) {
@@ -420,11 +1150,16 @@ func countDispatch(counter *atomic.Int32) func(context.Context, DispatchRequest)
 
 func signedCall(t *testing.T, authority *access.FileAuthority, credentialDir string, call Call) (access.SignedRequest, []byte) {
 	t.Helper()
-	credential, err := access.LoadCredential(credentialDir)
+	body, err := json.Marshal(call)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(call)
+	return signedBody(t, authority, credentialDir, body)
+}
+
+func signedBody(t *testing.T, authority *access.FileAuthority, credentialDir string, body []byte) (access.SignedRequest, []byte) {
+	t.Helper()
+	credential, err := access.LoadCredential(credentialDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,6 +1180,19 @@ func publishEnvelope(t *testing.T, requestsDir string, envelope access.SignedReq
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readTestResponse(t *testing.T, mailboxDir, requestID string) Response {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(mailboxDir, ResponsesDirName, responseFileName(requestID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response Response
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	return response
 }
 
 type mutatingAuthority struct {
@@ -715,7 +1463,7 @@ func TestReceiptOrderingAndArchivedPolicyNarrowness(t *testing.T) {
 }
 
 func TestReceiptGraceSettlesWithoutBypass(t *testing.T) {
-	now := time.Now()
+	clock := newTestClock(time.Now())
 	settled := make(chan ReceiptSettlement, 1)
 	f := newFixture(t, Callbacks{
 		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
@@ -723,13 +1471,13 @@ func TestReceiptGraceSettlesWithoutBypass(t *testing.T) {
 				Grace: time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
 			}}, nil
 		},
-	}, ServerOptions{Clock: func() time.Time { return now }})
+	}, ServerOptions{Clock: clock.Now})
 	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: "subject-a"})
 	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
 	if _, err := f.server.ServeOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(2 * time.Second)
+	clock.Advance(2 * time.Second)
 	if _, err := f.server.ServeOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -863,13 +1611,13 @@ func TestOversizedDispatchResultBecomesSignedFailure(t *testing.T) {
 }
 
 func TestSignedServiceReplacementAndTamperDetection(t *testing.T) {
-	now := time.Now()
-	f := newFixture(t, Callbacks{}, ServerOptions{Clock: func() time.Time { return now }})
+	clock := newTestClock(time.Now())
+	f := newFixture(t, Callbacks{}, ServerOptions{Clock: clock.Now})
 	first, err := os.Stat(filepath.Join(f.grant.MailboxHostDir, ServiceFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(time.Second)
+	clock.Advance(time.Second)
 	if err := f.server.PublishService(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -895,6 +1643,29 @@ func TestSignedServiceReplacementAndTamperDetection(t *testing.T) {
 	service.BootID = string(bytes.Repeat([]byte{'e'}, 64))
 	if err := verifyService(credential, service); !errors.Is(err, ErrInvalidSignature) {
 		t.Fatalf("tampered service err=%v", err)
+	}
+}
+
+func TestClientRetriesServiceReadAcrossAtomicReplacement(t *testing.T) {
+	f := newFixture(t, Callbacks{}, ServerOptions{})
+	var (
+		once       sync.Once
+		replaceErr error
+	)
+	client := f.client(clientOptions{
+		poll: time.Millisecond,
+		afterServiceStat: func() {
+			once.Do(func() { replaceErr = f.server.PublishService(context.Background()) })
+		},
+	})
+	result, err := pumpClient(t, f.server, func(ctx context.Context) (Result, error) {
+		return client.Query(ctx, Query{Verb: "snapshot", Fields: map[string]string{"value": "republished"}})
+	})
+	if replaceErr != nil {
+		t.Fatal(replaceErr)
+	}
+	if err != nil || string(result.Body) != "ok:republished" {
+		t.Fatalf("call across service replacement result=%+v err=%v", result, err)
 	}
 }
 
