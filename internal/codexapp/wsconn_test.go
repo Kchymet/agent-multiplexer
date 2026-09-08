@@ -63,7 +63,7 @@ func TestDialWSOverUnix(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteMessage([]byte(`{"hello":1}`)); err != nil {
+	if err := conn.WriteMessage(ctx, []byte(`{"hello":1}`)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	got, err := conn.ReadMessage()
@@ -88,7 +88,7 @@ func TestDialWSOverLoopbackTCP(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteMessage([]byte("ping")); err != nil {
+	if err := conn.WriteMessage(ctx, []byte("ping")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	got, err := conn.ReadMessage()

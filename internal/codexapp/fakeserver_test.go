@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"sync"
@@ -40,11 +41,13 @@ func (c *memConn) ReadMessage() ([]byte, error) {
 	}
 }
 
-func (c *memConn) WriteMessage(b []byte) error {
+func (c *memConn) WriteMessage(ctx context.Context, b []byte) error {
 	msg := append([]byte(nil), b...)
 	select {
 	case c.out <- msg:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-c.done:
 		return errClosed
 	}
@@ -153,7 +156,7 @@ func (fs *fakeServer) handleCall(m incoming) {
 
 func (fs *fakeServer) write(obj any) {
 	b, _ := json.Marshal(obj)
-	_ = fs.conn.WriteMessage(b)
+	_ = fs.conn.WriteMessage(context.Background(), b)
 }
 
 func (fs *fakeServer) pushNotify(method string, params any) {
