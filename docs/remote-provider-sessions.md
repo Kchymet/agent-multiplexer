@@ -267,24 +267,19 @@ access, still the daemon's choice of delivery mechanism, still rejectable.
 | `prompt` | `text` | Deliver a new user turn to the session's agent. If the agent is not running, the daemon MAY start it with `text` as its initial prompt (the `start` path with a prompt) rather than failing, and MAY answer before that start finishes. |
 | `interject` | `text` | Deliver text to the agent *while a turn is running* — a steer, not a new turn. |
 | `stop` | — | Interrupt the current turn **without killing the session**. The agent stays alive and ready for the next verb; this is not `kill`. |
-| `permission` | `request_id`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` echoes that event's `request_id`; `decision` is `allow` or `deny`; `reason` is optional free text. |
+| `permission` | `request_id`, `runtime_generation`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` and the opaque `runtime_generation` echo that exact event; `decision` is `allow` or `deny`; `reason` is optional free text. |
 
 `id` names the target session for all four, and is required. `decision` accepts
 exactly `allow` or `deny` — a daemon MUST reject any other value rather than
 guess at a permission prompt.
 
-`request_id` is correlated, not decorative. The daemon matches it against the
-requests the runtime actually has open — the ones it published as
-`permission_request` events (§4.5) — and refuses an id that names none of them
-with `ok:false, error:"permission: no pending request …"`. That refusal is the
-point of the field: if the turn moves on between the orchestrator seeing a prompt
-and its `permission` arriving, the keystroke would otherwise land on a *different*
-prompt, allowing or denying an action nobody decided on. A refused verb is
-recoverable — re-read the stream and answer the request that is open now.
-
-An **empty** `request_id` still answers whatever prompt is open. That is the
-older, uncorrelated behavior, kept as the explicit way to say "whatever it is
-asking, allow it"; a caller that can name the request should.
+`request_id` and `runtime_generation` are correlated authority, not decorative.
+The daemon atomically consumes that request from that exact live runtime and
+refuses a missing, stale, already-consumed, or no-longer-open pair. If the runtime
+is replaced between publication and decision, its new generation cannot inherit
+the old request id. There is no missing-generation or empty-request fallback to
+"whatever is current". A refused verb is recoverable only by reading and
+answering a newly published request carrying its current pair.
 
 Steering is asynchronous by nature: writing a prompt to a running agent does not
 wait for the turn it starts. A successful steering result is therefore
@@ -430,12 +425,14 @@ nothing for it (honest degradation) — the feature stays advertised.
   `permission_resolved`, `notice` (`meta`), `turn_end`, and `raw`. `raw` carries
   `{runtime, native_type, body}` and is the passthrough for any record entry the
   reader has no mapping for — **never dropped**.
-- `permission_request` carries `{request_id, tool, action, options}` and says the
+- `permission_request` carries
+  `{request_id, runtime_generation, tool, action, options}` and says the
   session is blocked on a prompt; `permission_resolved` carries
   `{request_id, decision}` and retires it. Both use the `request_id` as `item_id`,
   so a consumer coalesces the pair into one card. A request is answerable — by the
-  `permission` verb (§3.1) — from the moment it is published until its
-  `permission_resolved` arrives, and never after. `decision` is `allow`, `deny`,
+  `permission` verb (§3.1) — only for the exact live runtime generation, from
+  the moment it is published until its `permission_resolved` arrives, and never
+  after. `decision` is `allow`, `deny`,
   or `cleared`: the last means amux knows the prompt closed (the turn ended) but
   not which way it went.
 - `seq` is per-session monotonic — the ordinal of the **last** event in `events`;

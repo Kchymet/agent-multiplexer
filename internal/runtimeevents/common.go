@@ -81,3 +81,29 @@ func mustMarshal(v any) json.RawMessage {
 	}
 	return b
 }
+
+// bindPermissionEvents publishes a permission request only when the daemon has
+// bound that exact request id to a live runtime generation. This never stamps an
+// arbitrary historical transcript request with whichever generation is current.
+func bindPermissionEvents(events []harnessproto.RuntimeEvent, bindings map[string]string) []harnessproto.RuntimeEvent {
+	out := events[:0]
+	for _, event := range events {
+		if event.Type != harnessproto.TypePermissionRequest {
+			out = append(out, event)
+			continue
+		}
+		var payload map[string]any
+		if json.Unmarshal(event.Payload, &payload) != nil {
+			continue
+		}
+		requestID, _ := payload[harnessproto.FieldRequestID].(string)
+		generation := bindings[requestID]
+		if requestID == "" || generation == "" {
+			continue
+		}
+		payload[harnessproto.FieldRuntimeGeneration] = generation
+		event.Payload = mustMarshal(payload)
+		out = append(out, event)
+	}
+	return out
+}

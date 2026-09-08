@@ -51,7 +51,7 @@ const (
 	TypeToolResult        = "tool_result"        // out: {item_id, status, output, diffs?, raw_output?}
 	TypePlan              = "plan"               // out: {items:[{text,status}]}
 	TypeUsage             = "usage"              // out: {used, size, cost?}
-	TypePermissionRequest = "permission_request" // out: {request_id, tool, action, options}
+	TypePermissionRequest = "permission_request" // out: {request_id, tool, action, options, runtime_generation}
 	// TypePermissionResolved closes a permission_request: the prompt it named is
 	// gone, so its request_id must never be answered again. `decision` is
 	// DecisionAllow, DecisionDeny, or DecisionCleared when the producer knows the

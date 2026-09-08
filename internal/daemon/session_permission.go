@@ -7,6 +7,9 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"amux/internal/runtimeevents"
+	"amux/internal/store"
 )
 
 // runtimePermissionGate binds permission decisions to one live runtime
@@ -18,10 +21,34 @@ type runtimePermissionGate struct {
 	runtimes map[string]permissionRuntime
 }
 
+// permissionBaseline snapshots requests already open in durable history before
+// a runtime identity is admitted. A replacement runtime must not inherit them.
+func (d *Daemon) loadPermissionBaseline(subject string) ([]string, error) {
+	db, err := store.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rec, err := d.runtimeRecord(db, subject)
+	if err != nil {
+		return nil, err
+	}
+	open := runtimeevents.OpenPermissions(runtimeEventRecord(rec))
+	ids := make([]string, 0, len(open))
+	for _, pending := range open {
+		ids = append(ids, pending.RequestID)
+	}
+	return ids, nil
+}
+
 type permissionRuntime struct {
 	identity   string
 	generation string
 	claimed    map[string]struct{}
+	// excluded contains requests already open when this runtime identity was
+	// observed. They are historical (or raced the conservative boundary) and
+	// must never be relabeled with this incarnation's generation.
+	excluded map[string]struct{}
 }
 
 func newRuntimePermissionGate() *runtimePermissionGate {
@@ -29,6 +56,10 @@ func newRuntimePermissionGate() *runtimePermissionGate {
 }
 
 func (g *runtimePermissionGate) observe(subject string, runtime any) (string, error) {
+	return g.observeExcluding(subject, runtime, nil)
+}
+
+func (g *runtimePermissionGate) observeExcluding(subject string, runtime any, excluded []string) (string, error) {
 	if g == nil || strings.TrimSpace(subject) == "" || runtime == nil {
 		return "", fmt.Errorf("permission runtime unavailable")
 	}
@@ -43,10 +74,46 @@ func (g *runtimePermissionGate) observe(subject string, runtime any) (string, er
 		return "", fmt.Errorf("create runtime generation: %w", err)
 	}
 	generation := hex.EncodeToString(nonce)
+	baseline := make(map[string]struct{}, len(excluded))
+	for _, requestID := range excluded {
+		if strings.TrimSpace(requestID) != "" {
+			baseline[requestID] = struct{}{}
+		}
+	}
 	g.runtimes[subject] = permissionRuntime{
-		identity: identity, generation: generation, claimed: make(map[string]struct{}),
+		identity: identity, generation: generation, claimed: make(map[string]struct{}), excluded: baseline,
 	}
 	return generation, nil
+}
+
+// bindings returns answerable request->generation tuples from one atomic view
+// of the current runtime gate. Requests that predate this incarnation or were
+// already consumed are absent; callers must not invent a current-generation
+// fallback for them.
+func (g *runtimePermissionGate) bindings(subject, expectedGeneration string, open []runtimeevents.Pending) map[string]string {
+	out := make(map[string]string)
+	if g == nil {
+		return out
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	runtime, ok := g.runtimes[subject]
+	if !ok || expectedGeneration == "" || runtime.generation != expectedGeneration {
+		return out
+	}
+	for _, pending := range open {
+		if pending.RequestID == "" {
+			continue
+		}
+		if _, excluded := runtime.excluded[pending.RequestID]; excluded {
+			continue
+		}
+		if _, claimed := runtime.claimed[pending.RequestID]; claimed {
+			continue
+		}
+		out[pending.RequestID] = runtime.generation
+	}
+	return out
 }
 
 func (g *runtimePermissionGate) generation(subject string) (string, bool) {

@@ -196,18 +196,18 @@ func (d *Daemon) runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, err
 		// persisted identity still resolves it too, so history stays readable after the
 		// App Server exits (and after the gate is later turned off).
 		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && d.structuredResolvable(id) {
-			return core.RuntimeRecord{
+			return d.bindRuntimeRecord(id, core.RuntimeRecord{
 				Runtime:    harnessproto.RuntimeCodex,
 				Path:       codexapp.EventLogPathFor(id),
 				Structured: true,
-			}, nil
+			}), nil
 		}
 		h := agent.HarnessFor(s.Agent)
 		path, _ := h.RuntimeTranscriptPath(s)
 		perms, _ := h.RuntimePermissionPath(s)
-		return core.RuntimeRecord{
+		return d.bindRuntimeRecord(id, core.RuntimeRecord{
 			Runtime: s.Agent, Path: path, Permissions: perms, Journal: core.JournalPath(id),
-		}, nil
+		}), nil
 	}
 	kind := agent.DefaultKind()
 	h := agent.HarnessFor(kind)

@@ -14,11 +14,12 @@ import (
 // permissionPayload is the published shape of a permission_request payload; the
 // tests decode into it so a renamed field fails here rather than in a consumer.
 type permissionPayload struct {
-	RequestID string   `json:"request_id"`
-	Tool      string   `json:"tool"`
-	Action    string   `json:"action"`
-	Options   []string `json:"options"`
-	Decision  string   `json:"decision"`
+	RequestID         string   `json:"request_id"`
+	Tool              string   `json:"tool"`
+	Action            string   `json:"action"`
+	Options           []string `json:"options"`
+	Decision          string   `json:"decision"`
+	RuntimeGeneration string   `json:"runtime_generation"`
 }
 
 func decodePermission(t *testing.T, ev harnessproto.RuntimeEvent) permissionPayload {
@@ -182,7 +183,8 @@ func TestTailMergesPermissionJournal(t *testing.T) {
 	write(transcript, `{"type":"user","message":{"role":"user","content":"delete the build dir"}}`)
 	write(journal, `{"request_id":"perm-1","tool":"Bash","action":"rm -rf build/"}`)
 
-	rec := Record{Runtime: harnessproto.RuntimeClaude, Path: transcript, Permissions: journal}
+	rec := Record{Runtime: harnessproto.RuntimeClaude, Path: transcript, Permissions: journal,
+		PermissionBindings: map[string]string{"perm-1": "runtime-1"}}
 	stream := Stream(func(string) (Record, bool) { return rec, true }, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

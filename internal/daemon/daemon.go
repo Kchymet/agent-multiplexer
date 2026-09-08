@@ -118,6 +118,10 @@ type Daemon struct {
 	// permissions owns runtime-generation binding and atomic request consumption
 	// for every caller role. It is initialized even in tests that do not Run.
 	permissions *runtimePermissionGate
+	// permissionBaseline records unresolved durable requests before a newly
+	// observed runtime is assigned a generation. Tests inject a record-free
+	// resolver; production reads through the daemon's runtime-record seam.
+	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
 }
@@ -145,6 +149,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		permissions:    newRuntimePermissionGate(),
 	}
 	d.launchSpec = d.launchSpecFor
+	d.permissionBaseline = d.loadPermissionBaseline
 	return d
 }
 
@@ -685,6 +690,14 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		paneExit(err.Error())
 		return
 	}
+	var permissionBaseline []string
+	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
+		permissionBaseline, err = d.permissionBaseline(a.ID)
+		if err != nil {
+			paneExit(fmt.Sprintf("capture permission boundary: %v", err))
+			return
+		}
+	}
 	inst, err := d.engine.Ensure(ctx, engine.Spec{
 		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
 		Dir: dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
@@ -697,7 +710,7 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	// editor/terminal panes are unrelated, and a structured native attach is a
 	// client of the supervisor rather than the supervisor itself.
 	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
-		if _, err := d.permissions.observe(a.ID, inst); err != nil {
+		if _, err := d.permissions.observeExcluding(a.ID, inst, permissionBaseline); err != nil {
 			paneExit(err.Error())
 			return
 		}
@@ -772,6 +785,10 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	if err != nil {
 		return err
 	}
+	baseline, err := d.permissionBaseline(aid)
+	if err != nil {
+		return fmt.Errorf("capture permission boundary: %w", err)
+	}
 	inst, err := d.engine.Ensure(ctx, engine.Spec{
 		Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
 		Dir: dir, Env: env, Argv: argv,
@@ -779,7 +796,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.permissions.observe(aid, inst)
+	_, err = d.permissions.observeExcluding(aid, inst, baseline)
 	return err
 }
 
@@ -804,6 +821,10 @@ func (d *Daemon) ensureSupervisorSpec(spec panespec.LaunchSpec) (*codexapp.Super
 	if sup, ok := d.codex.Get(agentID); ok {
 		return sup, nil
 	}
+	baseline, err := d.permissionBaseline(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("capture permission boundary: %w", err)
+	}
 	// AppServerCommand resolves the sandbox-wrapped launch AND the per-session unix
 	// endpoint (in its separately mounted socket directory) — one source for the endpoint
 	// baked into argv, dialed by amux, and persisted for a native attach.
@@ -816,7 +837,7 @@ func (d *Daemon) ensureSupervisorSpec(spec panespec.LaunchSpec) (*codexapp.Super
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.permissions.observe(agentID, sup); err != nil {
+	if _, err := d.permissions.observeExcluding(agentID, sup, baseline); err != nil {
 		return nil, err
 	}
 	return sup, nil

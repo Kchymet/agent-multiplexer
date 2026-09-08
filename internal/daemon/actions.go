@@ -113,6 +113,10 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	baseline, err := d.permissionBaseline(id)
+	if err != nil {
+		return fmt.Errorf("capture permission boundary: %w", err)
+	}
 	if d.structuredControl(spec.Session) {
 		dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
 		if err != nil {
@@ -124,7 +128,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		_, err = d.permissions.observe(id, supervisor)
+		_, err = d.permissions.observeExcluding(id, supervisor, baseline)
 		return err
 	}
 	if d.engine == nil {
@@ -141,7 +145,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.permissions.observe(id, instance)
+	_, err = d.permissions.observeExcluding(id, instance, baseline)
 	return err
 }
 

@@ -7,9 +7,31 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"amux/internal/runtimeevents"
 )
 
 type permissionRuntimeFixture struct{ n int }
+
+func TestPermissionBindingsRequireExactRuntimeAndExcludeBaseline(t *testing.T) {
+	gate := newRuntimePermissionGate()
+	first := new(int)
+	generation, err := gate.observeExcluding("a1", first, []string{"old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := []runtimeevents.Pending{{RequestID: "old"}, {RequestID: "new"}}
+	bindings := gate.bindings("a1", generation, open)
+	if len(bindings) != 1 || bindings["new"] != generation || bindings["old"] != "" {
+		t.Fatalf("bindings = %v", bindings)
+	}
+	if _, err := gate.observeExcluding("a1", new(int), []string{"old", "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if stale := gate.bindings("a1", generation, open); len(stale) != 0 {
+		t.Fatalf("old generation produced bindings after replacement: %v", stale)
+	}
+}
 
 func TestRuntimePermissionGateConsumesExactlyOnceConcurrently(t *testing.T) {
 	gate := newRuntimePermissionGate()

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"amux/internal/core"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 var ErrDenied = errors.New("access denied")
@@ -191,7 +192,7 @@ func ordinaryAction(req Request) bool {
 	return req.Verb == core.ActionSetArchived && req.Fields["archived"] == "true"
 }
 
-const RuntimeGenerationField = "runtime_generation"
+const RuntimeGenerationField = harnessproto.FieldRuntimeGeneration
 
 func coordinatorAction(req Request, self bool) bool {
 	switch req.Verb {
