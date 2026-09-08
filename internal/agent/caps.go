@@ -41,9 +41,11 @@ func CapsFor(kind string) harnessproto.SessionCaps {
 
 // correlatesPermissions reports whether a runtime raises permission_request
 // events with a request_id a VerbPermission verb can answer and the daemon can
-// correlate to an open prompt. These are exactly the runtimes amux has a
-// runtime-events permission source for (internal/runtimeevents.sourcesFor):
-// Claude via amux's own permission journal, Codex via its rollout. A runtime
+// correlate to an open prompt. These are exactly the runtimes amux has an
+// authoritative runtime-native permission source for. Codex owns structured
+// approvals in its App Server supervisor. Claude hooks are session-authenticated
+// observations, but the session can fabricate an identical report; they cannot
+// make a prompt answerable. A runtime
 // without such a source cannot back an answerable approval round-trip, so it
 // reports Permission=false even when its TUI has allow/deny keys.
 //
@@ -54,7 +56,7 @@ func CapsFor(kind string) harnessproto.SessionCaps {
 // producing correlatable prompts, and vice versa would advertise a phantom.
 func correlatesPermissions(kind string) bool {
 	switch kind {
-	case harnessproto.RuntimeClaude, harnessproto.RuntimeCodex:
+	case harnessproto.RuntimeCodex:
 		return true
 	default:
 		return false

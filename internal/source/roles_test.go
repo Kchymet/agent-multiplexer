@@ -43,7 +43,7 @@ func TestPollDefaultSessions(t *testing.T) {
 	}
 	db.Close()
 	// The coordinator is live and mid-turn; the repo home is stopped.
-	if err := core.WriteHookState("conv-wg1", core.StateRunning, ""); err != nil {
+	if err := core.WriteSessionHookState("wg1", "conv-wg1", core.StateRunning, ""); err != nil {
 		t.Fatal(err)
 	}
 	w := NewWorkspace()
@@ -57,7 +57,7 @@ func TestPollDefaultSessions(t *testing.T) {
 	for _, r := range rows {
 		byID[r.ID] = r
 	}
-	allOn := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
 	check := func(id, role, runtime, cwd string) core.Session {
 		t.Helper()
 		r, ok := byID[id]
@@ -67,8 +67,8 @@ func TestPollDefaultSessions(t *testing.T) {
 		if r.Role != role || r.Runtime != runtime || !r.CanAttach {
 			t.Errorf("%s: role=%q runtime=%q canAttach=%v, want %q %q true", id, r.Role, r.Runtime, r.CanAttach, role, runtime)
 		}
-		if r.Caps == nil || *r.Caps != allOn {
-			t.Errorf("%s: caps = %+v, want all-on", id, r.Caps)
+		if r.Caps == nil || *r.Caps != claudeCaps {
+			t.Errorf("%s: caps = %+v, want Claude permission fail-closed", id, r.Caps)
 		}
 		if r.Cwd != cwd {
 			t.Errorf("%s: cwd = %q, want %q", id, r.Cwd, cwd)

@@ -116,12 +116,11 @@ type Harness interface {
 	// the provider honestly emits nothing rather than advertising a phantom stream.
 	RuntimeTranscriptPath(s store.Session) (path string, ok bool)
 
-	// RuntimePermissionPath resolves a stored session to amux's permission journal
-	// for it: the record of the permission prompts the runtime itself never writes
-	// down (core/permissions.go), read alongside the transcript so a consumer gets
+	// RuntimePermissionPath resolves a stored session to an authoritative
+	// permission event source, read alongside the transcript so a consumer gets
 	// `permission_request` events with an id the `permission` verb can answer.
-	// ok=false for a harness whose runtime records its own prompts (Codex puts them
-	// in the rollout) or that amux does not hook.
+	// ok=false when prompts are already in the runtime transcript (Codex), when no
+	// independently authoritative source exists (Claude), or when unsupported.
 	RuntimePermissionPath(s store.Session) (path string, ok bool)
 
 	// Doctor returns human-readable drift/health findings for this harness's

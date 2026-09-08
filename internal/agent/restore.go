@@ -14,8 +14,8 @@ import (
 // The trusted captured backup streams into an unpredictable temporary file, so
 // large intentional histories are neither memory-bounded nor exposed to a
 // predictable destination temp alias.
-func restoreCapturedRooted(root *hostprep.Root, sessionID, dst string) (bool, error) {
-	src, srcSize, ok := core.CapturedTranscript(sessionID)
+func restoreCapturedRooted(root *hostprep.Root, subjectID, runtimeID, dst string) (bool, error) {
+	src, srcSize, ok := core.SessionCapturedTranscript(subjectID, runtimeID)
 	if !ok || dst == "" {
 		return false, nil
 	}

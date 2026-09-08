@@ -8,22 +8,59 @@ import (
 	"time"
 )
 
-// Claude Code hooks bridge the agent's lifecycle into amux: the
-// `amux agent hook` subcommand writes a session's current activity here on each
-// hook event (as does `amux agent status`), and
-// the daemon's poll loop reads it back to drive the rail status. Records are
-// keyed by the Claude session id (the same uuid amux pins as Session.ClaudeID).
-// Because the hooks are installed at the user level, every Claude session writes
-// here — including ones amux didn't launch, which the rail surfaces as untracked.
+// Managed Claude hooks report lifecycle through authenticated session RPC; the
+// daemon writes subject/runtime-scoped records here and managed readers require
+// that exact provenance. UUID-only records from the historical host hook path
+// remain preserved below as untracked diagnostics.
 
 // HookRecord is the last activity recorded for a Claude session.
 type HookRecord struct {
-	State   string `json:"state"`         // idle | ready | waiting | running
-	Cwd     string `json:"cwd,omitempty"` // the session's working directory
-	Updated int64  `json:"updated"`       // unix millis of the last hook event
+	SubjectID string `json:"subject_id,omitempty"`
+	RuntimeID string `json:"runtime_id,omitempty"`
+	State     string `json:"state"`         // idle | ready | waiting | running
+	Cwd       string `json:"cwd,omitempty"` // the session's working directory
+	Updated   int64  `json:"updated"`       // unix millis of the last hook event
 }
 
-// HookStateDir holds the per-session activity files written by Claude hooks.
+// WriteSessionHookState records managed-session activity under the
+// authoritative amux subject/runtime pair. UUID-only WriteHookState remains a
+// legacy host-diagnostic channel and is never consulted for a managed session.
+func WriteSessionHookState(subjectID, runtimeID, state, cwd string) error {
+	path := sessionRecordPath(HookStateDir(), subjectID, runtimeID, "")
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(HookRecord{
+		SubjectID: subjectID, RuntimeID: runtimeID, State: state, Cwd: cwd,
+		Updated: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// SessionHookState returns only an exact managed subject/runtime observation.
+func SessionHookState(subjectID, runtimeID string) (HookRecord, bool) {
+	path := sessionRecordPath(HookStateDir(), subjectID, runtimeID, "")
+	if path == "" {
+		return HookRecord{}, false
+	}
+	rec, ok := readHookRecord(path)
+	if !ok || rec.SubjectID != subjectID || rec.RuntimeID != runtimeID {
+		return HookRecord{}, false
+	}
+	return rec, true
+}
+
+// HookStateDir holds daemon-owned managed activity and legacy UUID diagnostics.
 func HookStateDir() string { return filepath.Join(StateDir(), "hooks") }
 
 func hookStatePath(sessionID string) string {
