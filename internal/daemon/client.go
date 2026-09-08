@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -20,6 +23,23 @@ import (
 // wedged (which the daemon's non-blocking serve loop is designed to prevent).
 const outBuf = 1024
 
+const (
+	// clientFrameLimit is larger than the daemon's maximum coalesced pane batch
+	// after JSON/base64 expansion, while still making every client-side frame
+	// allocation finite. A peer that crosses it has desynchronized the stream;
+	// Next closes the connection instead of attempting to resume mid-frame.
+	clientFrameLimit = 8 << 20
+	clientWriteLimit = 5 * time.Second
+)
+
+var ErrClientFrameTooLarge = errors.New("daemon client frame exceeds limit")
+
+type clientWrite struct {
+	data []byte
+	ctx  context.Context
+	done chan error
+}
+
 // Client is a connection to the daemon. It decodes the inbound frame stream
 // (snapshots and action results) one message at a time via Next, and sends
 // actions via Send. Send never touches the socket directly: it hands the encoded
@@ -29,8 +49,9 @@ const outBuf = 1024
 type Client struct {
 	conn net.Conn
 	r    *bufio.Reader
+	read sync.Mutex
 
-	out  chan []byte
+	out  chan clientWrite
 	done chan struct{}
 	once sync.Once
 }
@@ -63,7 +84,7 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 	}
 	defer secure.SetDeadline(time.Time{})
 	reader := bufio.NewReader(secure)
-	line, err := reader.ReadBytes('\n')
+	line, err := readBoundedLine(reader, access.MaxBodyBytes)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("read daemon challenge: %w", err)
@@ -82,7 +103,7 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 		conn.Close()
 		return nil, err
 	}
-	line, err = reader.ReadBytes('\n')
+	line, err = readBoundedLine(reader, access.MaxBodyBytes)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("read daemon authentication: %w", err)
@@ -105,7 +126,7 @@ func newClientReader(conn net.Conn, reader *bufio.Reader) *Client {
 	c := &Client{
 		conn: conn,
 		r:    reader,
-		out:  make(chan []byte, outBuf),
+		out:  make(chan clientWrite, outBuf),
 		done: make(chan struct{}),
 	}
 	go c.writeLoop()
@@ -122,13 +143,70 @@ func (c *Client) writeLoop() {
 		select {
 		case <-c.done:
 			return
-		case b := <-c.out:
-			if _, err := c.conn.Write(b); err != nil {
+		case request := <-c.out:
+			err := c.write(request)
+			if request.done != nil {
+				request.done <- err
+			}
+			if err != nil {
 				c.stop()
+				_ = c.conn.Close()
 				return
 			}
 		}
 	}
+}
+
+func (c *Client) write(request clientWrite) error {
+	if err := request.ctx.Err(); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(clientWriteLimit)
+	contextBound := false
+	if contextDeadline, ok := request.ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+		contextBound = true
+	}
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	watchDone := make(chan struct{})
+	watchStopped := make(chan struct{})
+	go func() {
+		defer close(watchStopped)
+		select {
+		case <-request.ctx.Done():
+			_ = c.conn.SetWriteDeadline(time.Now())
+		case <-watchDone:
+		}
+	}()
+	_, err := writeAll(c.conn, request.data)
+	close(watchDone)
+	<-watchStopped
+	_ = c.conn.SetWriteDeadline(time.Time{})
+	if request.ctx.Err() != nil {
+		return request.ctx.Err()
+	}
+	if err != nil && contextBound && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
+func writeAll(w io.Writer, data []byte) (int, error) {
+	written := 0
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		written += n
+		data = data[n:]
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrUnexpectedEOF
+		}
+	}
+	return written, nil
 }
 
 func (c *Client) stop() { c.once.Do(func() { close(c.done) }) }
@@ -146,19 +224,67 @@ func (c *Client) Close() error {
 // reconnect. Ordering is preserved because every frame goes through the same
 // FIFO channel and single writer.
 func (c *Client) Send(a core.Action) error {
-	b, err := json.Marshal(a)
+	b, err := marshalClientAction(a)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
 	select {
-	case c.out <- b:
+	case c.out <- clientWrite{data: b, ctx: context.Background()}:
 		return nil
 	case <-c.done:
 		return net.ErrClosed
 	default:
 		return net.ErrClosed
 	}
+}
+
+// SendContext writes an action through the client's single FIFO writer and
+// waits until the complete frame reaches the authenticated daemon connection.
+// It is intended for protocol relays that must apply backpressure and cannot
+// treat a queued write as delivery. Writes have a five-second ceiling even
+// when ctx has no deadline; cancellation interrupts blocked I/O and retires the
+// connection because a partially written JSON frame cannot be resumed safely.
+func (c *Client) SendContext(ctx context.Context, a core.Action) error {
+	if ctx == nil {
+		return context.Canceled
+	}
+	b, err := marshalClientAction(a)
+	if err != nil {
+		return err
+	}
+	request := clientWrite{data: b, ctx: ctx, done: make(chan error, 1)}
+	select {
+	case c.out <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return net.ErrClosed
+	}
+	select {
+	case err := <-request.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		select {
+		case err := <-request.done:
+			return err
+		default:
+			return net.ErrClosed
+		}
+	}
+}
+
+func marshalClientAction(a core.Action) ([]byte, error) {
+	b, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	b = append(b, '\n')
+	if len(b) > clientFrameLimit {
+		return nil, ErrClientFrameTooLarge
+	}
+	return b, nil
 }
 
 // Shutdown requests a clean daemon shutdown over the already authenticated
@@ -211,9 +337,17 @@ func (c *Client) PaneOpen(paneID, agentID string, tab, cols, rows int) error {
 	return c.Send(core.Action{Action: core.ActionPaneOpen, PaneID: paneID, ID: agentID, Tab: tab, Cols: cols, Rows: rows})
 }
 
+func (c *Client) PaneOpenContext(ctx context.Context, paneID, agentID string, tab, cols, rows int) error {
+	return c.SendContext(ctx, core.Action{Action: core.ActionPaneOpen, PaneID: paneID, ID: agentID, Tab: tab, Cols: cols, Rows: rows})
+}
+
 // PaneInput forwards input bytes to an attached pane.
 func (c *Client) PaneInput(paneID string, data []byte) error {
 	return c.Send(core.Action{Action: core.ActionPaneInput, PaneID: paneID, Data: data})
+}
+
+func (c *Client) PaneInputContext(ctx context.Context, paneID string, data []byte) error {
+	return c.SendContext(ctx, core.Action{Action: core.ActionPaneInput, PaneID: paneID, Data: data})
 }
 
 // PaneResize forwards a resize to an attached pane.
@@ -221,9 +355,17 @@ func (c *Client) PaneResize(paneID string, cols, rows int) error {
 	return c.Send(core.Action{Action: core.ActionPaneResize, PaneID: paneID, Cols: cols, Rows: rows})
 }
 
+func (c *Client) PaneResizeContext(ctx context.Context, paneID string, cols, rows int) error {
+	return c.SendContext(ctx, core.Action{Action: core.ActionPaneResize, PaneID: paneID, Cols: cols, Rows: rows})
+}
+
 // PaneClose detaches a pane (the agent keeps running in the daemon's engine).
 func (c *Client) PaneClose(paneID string) error {
 	return c.Send(core.Action{Action: core.ActionPaneClose, PaneID: paneID})
+}
+
+func (c *Client) PaneCloseContext(ctx context.Context, paneID string) error {
+	return c.SendContext(ctx, core.Action{Action: core.ActionPaneClose, PaneID: paneID})
 }
 
 // Query asks the daemon for a store-backed read model (QueryRepos, QuerySessions)
@@ -355,8 +497,52 @@ type Frame struct {
 
 // Next blocks until the next frame arrives (or the connection errors).
 func (c *Client) Next() (Frame, error) {
-	line, err := c.r.ReadBytes('\n')
+	return c.NextContext(context.Background())
+}
+
+// NextContext reads one complete daemon frame with a hard byte cap. Only one
+// read may be active per Client. Cancellation interrupts the underlying read;
+// Close likewise interrupts it by closing the connection.
+func (c *Client) NextContext(ctx context.Context) (Frame, error) {
+	if ctx == nil {
+		return Frame{}, context.Canceled
+	}
+	c.read.Lock()
+	defer c.read.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Frame{}, err
+	}
+	contextDeadline, hasContextDeadline := ctx.Deadline()
+	if hasContextDeadline {
+		if err := c.conn.SetReadDeadline(contextDeadline); err != nil {
+			return Frame{}, err
+		}
+	}
+	watchDone := make(chan struct{})
+	watchStopped := make(chan struct{})
+	go func() {
+		defer close(watchStopped)
+		select {
+		case <-ctx.Done():
+			_ = c.conn.SetReadDeadline(time.Now())
+		case <-watchDone:
+		}
+	}()
+	line, err := readBoundedLine(c.r, clientFrameLimit)
+	close(watchDone)
+	<-watchStopped
+	_ = c.conn.SetReadDeadline(time.Time{})
 	if err != nil {
+		// Any failed read may have consumed a partial JSON line. Retire the
+		// connection rather than interpreting its suffix as another frame.
+		c.stop()
+		_ = c.conn.Close()
+		if ctx.Err() != nil {
+			return Frame{}, ctx.Err()
+		}
+		if hasContextDeadline && !time.Now().Before(contextDeadline) {
+			return Frame{}, context.DeadlineExceeded
+		}
 		return Frame{}, err
 	}
 	var env struct {
@@ -393,5 +579,40 @@ func (c *Client) Next() (Frame, error) {
 	default:
 		// Unknown frame: return an empty frame so the caller can keep reading.
 		return Frame{}, nil
+	}
+}
+
+func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		// ReadSlice waits for its whole internal buffer when no delimiter is
+		// present. Once less than that buffer remains, consume individual bytes
+		// so the first byte over the limit is rejected immediately instead of
+		// waiting for an attacker to supply a full additional buffer.
+		if limit-len(line) <= reader.Size() {
+			b, err := reader.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if len(line) == limit {
+				return nil, ErrClientFrameTooLarge
+			}
+			line = append(line, b)
+			if b == '\n' {
+				return line, nil
+			}
+			continue
+		}
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > limit {
+			return nil, ErrClientFrameTooLarge
+		}
+		line = append(line, fragment...)
+		if err == nil {
+			return line, nil
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return nil, err
+		}
 	}
 }
