@@ -426,13 +426,18 @@ nothing for it (honest degradation) — the feature stays advertised.
   `{runtime, native_type, body}` and is the passthrough for any record entry the
   reader has no mapping for — **never dropped**.
 - `permission_request` carries
-  `{request_id, runtime_generation, tool, action, options}` and says the
-  session is blocked on a prompt; `permission_resolved` carries
-  `{request_id, decision}` and retires it. Both use the `request_id` as `item_id`,
-  so a consumer coalesces the pair into one card. A request is answerable — by the
-  `permission` verb (§3.1) — only for the exact live runtime generation, from
-  the moment it is published until its `permission_resolved` arrives, and never
-  after. `decision` is `allow`, `deny`,
+  `{request_id, runtime_generation?, tool, action, options}` and says the
+  session asked for permission; `permission_resolved` carries
+  `{request_id, runtime_generation?, decision}`. The producer assigns a stable,
+  opaque occurrence `item_id`, and a live request plus its resolution use the
+  same one. Runtimes may reuse `request_id` after restart, so consumers match a
+  live resolution by the full `(request_id, runtime_generation)` tuple (and may
+  coalesce its matching occurrence by `item_id`), never by request ID alone. A
+  generation-free request or resolution is readable legacy/history only: it is
+  not answerable and cannot close a newer generation-bearing card. A request is
+  answerable — by the `permission` verb (§3.1) — only for the exact live runtime
+  generation, from the moment it is published until its matching
+  `permission_resolved` arrives, and never after. `decision` is `allow`, `deny`,
   or `cleared`: the last means amux knows the prompt closed (the turn ended) but
   not which way it went.
 - `seq` is per-session monotonic — the ordinal of the **last** event in `events`;

@@ -260,9 +260,10 @@ type VersionInfo struct {
 type RuntimeRecord struct {
 	Runtime string `json:"runtime,omitempty"`
 	Path    string `json:"path,omitempty"`
-	// PermissionBindings maps only currently answerable request ids to the exact
-	// live runtime generation that owns them. Historical/unresolved requests from
-	// an earlier runtime are deliberately absent.
+	// PermissionBindings maps only currently answerable permission occurrence
+	// ItemIDs to the exact live runtime generation that owns them. Request IDs are
+	// not keys because a runtime may reuse one after restart. Historical requests
+	// from an earlier runtime are deliberately absent.
 	PermissionBindings map[string]string `json:"permissionBindings"`
 	// Permissions is amux's own permission journal for the session, when its
 	// runtime resolves permission prompts without recording them (Claude Code).
