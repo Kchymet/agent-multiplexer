@@ -186,7 +186,7 @@ func (p Policy) authorizeQuery(ctx context.Context, subject Resource, req Reques
 		if err != nil {
 			return err
 		}
-		if !ok || target.Archived {
+		if !ok {
 			return ErrDenied
 		}
 		visible, err := p.visible(ctx, subject, target)

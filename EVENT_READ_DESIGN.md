@@ -4,11 +4,6 @@ Status: source/API checkpoint for coordinator and lifecycle-owner review. This
 does not authorize shared dispatcher or policy edits, deployment, or a readiness
 claim.
 
-The CLI and generated-guide spelling in this checkpoint is staged integration
-surface, not standalone availability. It must land with the b22-owned server
-authorization/dispatch glue below; until then `runtime-events` has no daemon
-query implementation.
-
 ## Boundary
 
 `runtime-events` is a read-only restricted query. The signed request names only

@@ -17,10 +17,10 @@ wrapper around a one-off agent) hosts no session.
 
 ## What each one is for
 
-- **The console** has an authenticated machine-wide view: every workgroup, agent,
-  and repo, plus bounded normalized event pages the daemon authorizes for them.
-  Other sessions' filesystem transcripts are not mounted. Its guide carries a
-  launch-time
+- **The console** has an explicit machine coordination view: every granted
+  workgroup, agent, and repo, plus bounded normalized event queries for their
+  history and the CLI to operate them. Other sessions' filesystem transcripts
+  are not mounted. Its guide carries a launch-time
   inventory and the `amux do` vocabulary. It coordinates *across* workgroups;
   it does not write code.
 - **A workgroup coordinator** supervises that workgroup's agents: scopes the

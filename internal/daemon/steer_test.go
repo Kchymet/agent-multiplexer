@@ -253,6 +253,7 @@ func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T
 }
 
 func TestStartAgentPublishesReplacementGenerationAtomically(t *testing.T) {
+	isolateHome(t)
 	d := New("", nil, time.Hour)
 	eng := newFakeEngine()
 	d.engine = eng

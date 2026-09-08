@@ -1,9 +1,5 @@
 # Scoped runtime-event reads
 
-Status: staged for integration. The command described here becomes usable only
-when the lifecycle owner's authenticated server policy/dispatch glue lands; the
-scoped pager/CLI checkpoint alone does not make `runtime-events` available.
-
 Agent sandboxes read history through authenticated daemon queries. They do not
 need—and are not granted—sibling sandbox, state-directory, or transcript paths.
 
