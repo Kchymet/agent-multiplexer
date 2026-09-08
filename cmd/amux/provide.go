@@ -396,7 +396,7 @@ func runtimeRecordViaDaemon() runtimeevents.ContextResolver {
 		return runtimeevents.Record{
 			Runtime: rec.Runtime, Path: rec.Path,
 			Permissions: rec.Permissions, Journal: rec.Journal,
-			Structured: rec.Structured,
+			Structured: rec.Structured, PermissionBindings: rec.PermissionBindings,
 		}, true
 	}
 }

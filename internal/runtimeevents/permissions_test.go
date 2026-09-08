@@ -14,11 +14,12 @@ import (
 // permissionPayload is the published shape of a permission_request payload; the
 // tests decode into it so a renamed field fails here rather than in a consumer.
 type permissionPayload struct {
-	RequestID string   `json:"request_id"`
-	Tool      string   `json:"tool"`
-	Action    string   `json:"action"`
-	Options   []string `json:"options"`
-	Decision  string   `json:"decision"`
+	RequestID         string   `json:"request_id"`
+	Tool              string   `json:"tool"`
+	Action            string   `json:"action"`
+	Options           []string `json:"options"`
+	Decision          string   `json:"decision"`
+	RuntimeGeneration string   `json:"runtime_generation"`
 }
 
 func decodePermission(t *testing.T, ev harnessproto.RuntimeEvent) permissionPayload {
@@ -36,7 +37,8 @@ func decodePermission(t *testing.T, ev harnessproto.RuntimeEvent) permissionPayl
 // answer, the resolution retiring it, and a line from no known version of the
 // format passed through as raw rather than dropped.
 func TestPermissionJournalContract(t *testing.T) {
-	events := mapEachLine("testdata/claude_permissions.jsonl", permissionMapper(harnessproto.RuntimeClaude)())
+	events := newPermissionOccurrenceTracker().decorate(
+		mapEachLine("testdata/claude_permissions.jsonl", permissionMapper(harnessproto.RuntimeClaude)()))
 	if len(events) != 4 {
 		t.Fatalf("got %d events from the 4-line journal: %+v", len(events), events)
 	}
@@ -51,14 +53,18 @@ func TestPermissionJournalContract(t *testing.T) {
 	if len(req.Options) != 2 {
 		t.Errorf("options = %v, want the two amux can deliver", req.Options)
 	}
-	// The id is the coalescing key, so a consumer can replace the card in place.
-	if events[0].ItemID != req.RequestID {
-		t.Errorf("item_id = %q, want the request id %q", events[0].ItemID, req.RequestID)
+	// ItemID names this occurrence, not the reusable native request id. Its
+	// resolution carries the same occurrence key.
+	if want := permissionOccurrenceID(req.RequestID, 1); events[0].ItemID != want {
+		t.Errorf("item_id = %q, want occurrence %q", events[0].ItemID, want)
 	}
 
 	res := decodePermission(t, events[1])
 	if events[1].Type != TypePermissionResolved || res.RequestID != req.RequestID || res.Decision != "allow" {
 		t.Errorf("second event = %q %+v, want perm-…a55 resolved allow", events[1].Type, res)
+	}
+	if events[1].ItemID != events[0].ItemID {
+		t.Errorf("resolution item_id = %q, want request occurrence %q", events[1].ItemID, events[0].ItemID)
 	}
 	if events[2].Type != TypePermissionRequest {
 		t.Errorf("third event = %q, want the second request", events[2].Type)
@@ -182,7 +188,8 @@ func TestTailMergesPermissionJournal(t *testing.T) {
 	write(transcript, `{"type":"user","message":{"role":"user","content":"delete the build dir"}}`)
 	write(journal, `{"request_id":"perm-1","tool":"Bash","action":"rm -rf build/"}`)
 
-	rec := Record{Runtime: harnessproto.RuntimeClaude, Path: transcript, Permissions: journal}
+	rec := Record{Runtime: harnessproto.RuntimeClaude, Path: transcript, Permissions: journal,
+		PermissionBindings: map[string]string{permissionOccurrenceID("perm-1", 1): "runtime-1"}}
 	stream := Stream(func(string) (Record, bool) { return rec, true }, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

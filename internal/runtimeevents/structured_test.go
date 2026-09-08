@@ -13,7 +13,9 @@ import (
 
 // TestStructuredSourceIsIdentityMapped checks the AGE-181 structured record path:
 // a supervisor-written NDJSON log of already-normalized events is streamed back
-// verbatim (identity mapper), unlike a raw runtime transcript which is decoded.
+// through the identity mapper, unlike a raw runtime transcript which is decoded.
+// Permission envelopes still receive producer-owned occurrence/generation
+// provenance at the common publication boundary.
 func TestStructuredSourceIsIdentityMapped(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.events.jsonl")
@@ -36,7 +38,8 @@ func TestStructuredSourceIsIdentityMapped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := Record{Runtime: harnessproto.RuntimeCodex, Path: path, Structured: true}
+	rec := Record{Runtime: harnessproto.RuntimeCodex, Path: path, Structured: true,
+		PermissionBindings: map[string]string{permissionOccurrenceID("ap1", 1): "runtime-1"}}
 	stream := Stream(func(string) (Record, bool) { return rec, true }, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

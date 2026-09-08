@@ -9,7 +9,9 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/hostprep"
 )
 
 var mu sync.Mutex // serialize our own read-modify-write
@@ -236,6 +239,54 @@ func (h Home) FindSession(uuid string, cwds ...string) (cwd string, ok bool) {
 	return "", false
 }
 
+// FindSessionRooted looks up a private transcript through a pinned session
+// root, rejecting aliases instead of following them during host preparation.
+func (h Home) FindSessionRooted(root *hostprep.Root, uuid string, cwds ...string) (cwd string, ok bool, err error) {
+	if uuid == "" {
+		return "", false, nil
+	}
+	for _, candidate := range cwds {
+		present, err := h.sessionPresentRooted(root, candidate, uuid)
+		if err != nil {
+			return "", false, err
+		}
+		if present {
+			return candidate, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (h Home) sessionPresentRooted(root *hostprep.Root, cwd, uuid string) (bool, error) {
+	base, err := root.Rel(filepath.Join(h.ProjectsRoot(), munge(cwd), uuid))
+	if err != nil {
+		return false, err
+	}
+	if _, err := root.StatFile(base + ".jsonl"); err == nil {
+		return true, nil
+	} else if hostprep.IsUnsafe(err) {
+		return false, err
+	}
+	ents, err := root.ReadDir(base)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		if _, err := root.StatFile(filepath.Join(base, e.Name())); err == nil {
+			return true, nil
+		} else if hostprep.IsUnsafe(err) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
 // AnySession reports whether cwd has any saved Claude session transcript.
 func AnySession(cwd string) bool { return User().AnySession(cwd) }
 
@@ -251,6 +302,32 @@ func (h Home) AnySession(cwd string) bool {
 		}
 	}
 	return false
+}
+
+// AnySessionRooted is AnySession for a private session home.
+func (h Home) AnySessionRooted(root *hostprep.Root, cwd string) (bool, error) {
+	dir, err := root.Rel(h.ProjectDir(cwd))
+	if err != nil {
+		return false, err
+	}
+	ents, err := root.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		if _, err := root.StatFile(filepath.Join(dir, e.Name())); err == nil {
+			return true, nil
+		} else if hostprep.IsUnsafe(err) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // SessionInfo describes one saved Claude Code session transcript discovered
@@ -453,6 +530,49 @@ func (h Home) TrustDir(dir string) error {
 	return os.Rename(tmp, path)
 }
 
+// TrustDirRooted is TrustDir for a private session home. It refuses unsafe
+// final aliases and publishes through the pinned session root.
+func (h Home) TrustDirRooted(session *hostprep.Root, dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	path, err := session.Rel(h.ConfigPath())
+	if err != nil {
+		return err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+
+	root := map[string]any{}
+	if b, err := session.ReadFile(path); err == nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.UseNumber()
+		_ = dec.Decode(&root)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	projects, ok := root["projects"].(map[string]any)
+	if !ok || projects == nil {
+		projects = map[string]any{}
+		root["projects"] = projects
+	}
+	entry, ok := projects[abs].(map[string]any)
+	if !ok || entry == nil {
+		entry = map[string]any{}
+		projects[abs] = entry
+	}
+	if trusted, _ := entry["hasTrustDialogAccepted"].(bool); trusted {
+		return nil
+	}
+	entry["hasTrustDialogAccepted"] = true
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	return session.AtomicWrite(path, out, 0o600)
+}
+
 // SettingsPath is the user home's settings.json (honoring CLAUDE_CONFIG_DIR).
 // This is where hook configuration lives — distinct from ConfigPath's .claude.json.
 func SettingsPath() string { return User().SettingsPath() }
@@ -622,6 +742,35 @@ func InstallHooksIn(dir, homeDir, amuxPath string) error {
 	return writeHooks(ProjectSettingsLocalPath(dir), dir, homeDir, amuxPath)
 }
 
+// InstallHooksInRooted installs per-project hooks through a pinned session
+// root. Both the file being preserved and inherited private-home settings are
+// read without following destination aliases.
+func InstallHooksInRooted(session *hostprep.Root, dir, homeDir, amuxPath string) error {
+	settingsRel, err := session.Rel(ProjectSettingsLocalPath(dir))
+	if err != nil {
+		return err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	root := map[string]any{}
+	if b, err := session.ReadFile(settingsRel); err == nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.UseNumber()
+		_ = dec.Decode(&root)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	inherited, err := inheritedStatusLineRooted(session, dir, homeDir)
+	if err != nil {
+		return err
+	}
+	out, err := encodeHooks(root, amuxPath, inherited)
+	if err != nil {
+		return err
+	}
+	return session.AtomicWrite(settingsRel, out, 0o644)
+}
+
 // writeHooks installs amux's status + capture hook groups into the settings.json
 // at settingsPath, pointed at amuxPath. It reads any existing file, replaces
 // amux's own hook groups (so a moved binary or changed event set is corrected)
@@ -635,6 +784,21 @@ func writeHooks(settingsPath, projectDir, homeDir, amuxPath string) error {
 		_ = dec.Decode(&root)
 	}
 
+	out, err := encodeHooks(root, amuxPath, inheritedStatusLine(projectDir, homeDir))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".amux.tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any) ([]byte, error) {
 	hooks, ok := root["hooks"].(map[string]any)
 	if !ok || hooks == nil {
 		hooks = map[string]any{}
@@ -677,7 +841,7 @@ func writeHooks(settingsPath, projectDir, homeDir, amuxPath string) error {
 		hooks[event] = groups
 	}
 
-	installModelStatusLine(root, projectDir, homeDir, amuxPath)
+	installModelStatusLine(root, inherited, amuxPath)
 
 	// Default Claude to the fullscreen TUI renderer. It draws on the alternate
 	// screen and handles mouse-wheel scrolling; the default inline renderer does
@@ -688,18 +852,7 @@ func writeHooks(settingsPath, projectDir, homeDir, amuxPath string) error {
 		root["tui"] = "fullscreen"
 	}
 
-	out, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".amux.tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return json.MarshalIndent(root, "", "  ")
 }
 
 const modelStatusLineMarker = " agent model --statusline"
@@ -709,10 +862,10 @@ const modelStatusLineMarker = " agent model --statusline"
 // local settings have highest precedence, so inherited project/user status lines
 // must be forwarded explicitly. Reinstall unwraps our old command first, avoiding
 // wrapper nesting when the amux binary path changes.
-func installModelStatusLine(root map[string]any, projectDir, homeDir, amuxPath string) {
+func installModelStatusLine(root map[string]any, inherited map[string]any, amuxPath string) {
 	status, _ := root["statusLine"].(map[string]any)
 	if status == nil {
-		status = inheritedStatusLine(projectDir, homeDir)
+		status = inherited
 	}
 	if status == nil {
 		status = map[string]any{}
@@ -728,6 +881,39 @@ func installModelStatusLine(root map[string]any, projectDir, homeDir, amuxPath s
 	status["type"] = "command"
 	status["command"] = wrapper
 	root["statusLine"] = status
+}
+
+func inheritedStatusLineRooted(session *hostprep.Root, projectDir, homeDir string) (map[string]any, error) {
+	for _, path := range []string{
+		filepath.Join(projectDir, ".claude", "settings.json"),
+		filepath.Join(homeDir, "settings.local.json"),
+		filepath.Join(homeDir, "settings.json"),
+	} {
+		rel, err := session.Rel(path)
+		if err != nil {
+			return nil, err
+		}
+		b, err := session.ReadFile(rel)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var cfg map[string]any
+		if json.Unmarshal(b, &cfg) != nil {
+			continue
+		}
+		status, _ := cfg["statusLine"].(map[string]any)
+		if command, _ := status["command"].(string); strings.TrimSpace(command) != "" {
+			copy := make(map[string]any, len(status))
+			for k, v := range status {
+				copy[k] = v
+			}
+			return copy, nil
+		}
+	}
+	return nil, nil
 }
 
 func inheritedStatusLine(projectDir, homeDir string) map[string]any {

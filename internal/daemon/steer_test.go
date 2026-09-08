@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -41,7 +42,7 @@ func putSession(t *testing.T, id, kind string) {
 	}
 	defer db.Close()
 	if err := db.PutSession(store.Session{
-		ID: id, Name: id, Agent: kind, Dir: t.TempDir(), ClaudeID: convID(id),
+		ID: id, RootID: "test-root", Name: id, Agent: kind, Dir: t.TempDir(), ClaudeID: convID(id),
 	}); err != nil {
 		t.Fatalf("put session: %v", err)
 	}
@@ -73,7 +74,11 @@ type fakeInstance struct {
 func (f *fakeInstance) Key() engine.Key              { return f.key }
 func (f *fakeInstance) Subscribe(engine.Sink) func() { return func() {} }
 func (f *fakeInstance) Resize(int, int)              {}
-func (f *fakeInstance) Alive() bool                  { return !f.dead }
+func (f *fakeInstance) Alive() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.dead
+}
 func (f *fakeInstance) Input(p []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -110,11 +115,92 @@ type fakeEngine struct {
 	insts       map[engine.Key]*fakeInstance
 	ensureErr   error
 	ensureBlock chan struct{}
-	ensured     []engine.Key
+	// ensurePublished runs after the replacement is visible through Lookup but
+	// before Ensure returns, reproducing the production publication interval.
+	ensurePublished func(engine.Instance)
+	killObserved    func(engine.Instance)
+	killRefuses     bool
+	ensured         []engine.Key
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{insts: map[engine.Key]*fakeInstance{}}
+}
+
+func TestStartAgentRevalidatesAtRuntimeExecution(t *testing.T) {
+	d := New("", nil, time.Hour)
+	eng := newFakeEngine()
+	d.engine = eng
+	allowed := true
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{Session: store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}}, nil
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		allowed = false // policy changes after resolution but before Engine.Ensure
+		return t.TempDir(), nil, []string{"agent"}, nil
+	}
+	ctx := withAccessGuard(context.Background(), func() error {
+		if !allowed {
+			return access.ErrDenied
+		}
+		return nil
+	})
+	if err := d.startAgent(ctx, "a1"); err == nil {
+		t.Fatal("runtime started after its execution policy was revoked")
+	}
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	if len(eng.ensured) != 0 {
+		t.Fatalf("engine Ensure called after revocation: %v", eng.ensured)
+	}
+}
+
+func TestStartAgentPublishesReplacementGenerationAtomically(t *testing.T) {
+	d := New("", nil, time.Hour)
+	eng := newFakeEngine()
+	d.engine = eng
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{Session: store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}}, nil
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return t.TempDir(), nil, []string{"agent"}, nil
+	}
+	old := eng.running("a1")
+	oldGeneration, err := d.permissions.observe("a1", old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindPermission(t, d.permissions, "a1", "request-old", old)
+	eng.mu.Lock()
+	delete(eng.insts, old.Key())
+	eng.mu.Unlock()
+	published := make(chan struct{})
+	releaseEnsure := make(chan struct{})
+	eng.ensurePublished = func(engine.Instance) {
+		close(published)
+		<-releaseEnsure
+	}
+	started := make(chan error, 1)
+	go func() { started <- d.startAgent(context.Background(), "a1") }()
+	<-published
+
+	delivered := make(chan error, 1)
+	go func() {
+		delivered <- d.permissions.consume("a1", oldGeneration, "request-old", old,
+			func() error { return nil }, func() error { return nil })
+	}()
+	select {
+	case err := <-delivered:
+		t.Fatalf("old decision crossed Engine.Ensure publication: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(releaseEnsure)
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-delivered; err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("old decision after replacement start = %v", err)
+	}
 }
 
 func (e *fakeEngine) Name() string { return "fake" }
@@ -123,15 +209,20 @@ func (e *fakeEngine) Ensure(_ context.Context, spec engine.Spec) (engine.Instanc
 		<-e.ensureBlock
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.ensured = append(e.ensured, spec.Key)
 	if e.ensureErr != nil {
+		e.mu.Unlock()
 		return nil, e.ensureErr
 	}
 	in, ok := e.insts[spec.Key]
 	if !ok {
 		in = &fakeInstance{key: spec.Key}
 		e.insts[spec.Key] = in
+	}
+	hook := e.ensurePublished
+	e.mu.Unlock()
+	if hook != nil {
+		hook(in)
 	}
 	return in, nil
 }
@@ -155,8 +246,18 @@ func (e *fakeEngine) Live() []engine.Key {
 }
 func (e *fakeEngine) Kill(key engine.Key) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.insts, key)
+	instance := e.insts[key]
+	if instance != nil && !e.killRefuses {
+		instance.mu.Lock()
+		instance.dead = true
+		instance.mu.Unlock()
+		delete(e.insts, key)
+	}
+	hook := e.killObserved
+	e.mu.Unlock()
+	if hook != nil && instance != nil {
+		hook(instance)
+	}
 }
 func (e *fakeEngine) Shutdown() {}
 
@@ -189,7 +290,10 @@ func steerDaemon(t *testing.T) (*Daemon, *fakeEngine) {
 	d.engine = eng
 	d.steerSettle = time.Millisecond
 	d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
-	d.resolve = func(string, int) (string, []string, []string, error) { return "", nil, []string{"sh"}, nil }
+	d.launchSpec = testLaunchSpecResolver
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
 	d.steerStarted = make(chan string, 8)
 	return d, eng
 }
@@ -227,25 +331,35 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 		{"claude stop", "claude",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x03"},
 		{"claude allow", "claude",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow},
+			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow, core.SteerRequestID: "perm-1"},
 			"\r"},
 		{"claude deny", "claude",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny},
+			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny, core.SteerRequestID: "perm-1"},
 			"\x1b"},
 		{"codex prompt", "codex",
 			map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "hi"}, "hi\r"},
 		{"codex stop", "codex",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x1b"},
-		{"codex allow", "codex",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow}, "y"},
-		{"codex deny", "codex",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny}, "n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d, eng := steerDaemon(t)
 			putSession(t, "a1", tc.kind)
 			in := eng.running("a1")
+			if tc.fields[core.SteerVerb] == core.SteerPermission {
+				generation, err := d.permissions.observe("a1", in)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tc.fields[access.RuntimeGenerationField] = generation
+				if err := core.AppendPermission(convID("a1"), core.PermissionRecord{RequestID: "perm-1", Tool: "Bash", Action: "test"}); err != nil {
+					t.Fatal(err)
+				}
+				bound, err := d.bindPermissionRequest("a1", "perm-1")
+				if err != nil || bound != generation {
+					t.Fatalf("bind live permission = %q, %v; want %q", bound, err, generation)
+				}
+			}
 			// `stop` only fires mid-turn for a harness whose interrupt key is unsafe
 			// at an idle prompt, so put the session in a turn.
 			if tc.fields[core.SteerVerb] == core.SteerStop {
@@ -273,13 +387,18 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
 	in := eng.running("a1")
+	generation, err := d.permissions.observe("a1", in)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	allow := func(requestID string) error {
 		return d.steer(context.Background(), core.Action{
 			Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
-				core.SteerVerb:      core.SteerPermission,
-				core.SteerDecision:  core.SteerAllow,
-				core.SteerRequestID: requestID,
+				core.SteerVerb:                core.SteerPermission,
+				core.SteerDecision:            core.SteerAllow,
+				core.SteerRequestID:           requestID,
+				access.RuntimeGenerationField: generation,
 			},
 		})
 	}
@@ -290,10 +409,14 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+		bound, err := d.bindPermissionRequest("a1", id)
+		if err != nil || bound != generation {
+			t.Fatalf("bind live permission = %q, %v; want %q", bound, err, generation)
+		}
 	}
 
 	// Nothing open at all: refused, and nothing reaches the pane.
-	err := allow("perm-gone")
+	err = allow("perm-gone")
 	if err == nil || !strings.Contains(err.Error(), `no pending request "perm-gone"`) {
 		t.Fatalf("stale id with no prompt open: err = %v, want a no-pending-request refusal", err)
 	}
@@ -335,17 +458,18 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 		t.Fatalf("pane received %q: the replay must not have been delivered", got)
 	}
 
-	// An empty request_id keeps the older, uncorrelated behavior: answer whatever
-	// is open. It is the explicit way to say "whatever it is asking".
+	// Empty request IDs are no longer a compatibility escape hatch: every role
+	// must name the exact live request and runtime generation.
 	if err := d.steer(context.Background(), core.Action{
 		Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
 			core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny,
+			access.RuntimeGenerationField: generation,
 		},
-	}); err != nil {
-		t.Fatalf("empty request_id: %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "request_id is required") {
+		t.Fatalf("empty request_id = %v", err)
 	}
-	if got := in.written(); got != "\r\x1b" {
-		t.Fatalf("pane received %q, want the allow then the uncorrelated deny", got)
+	if got := in.written(); got != "\r" {
+		t.Fatalf("pane received %q, want only the correlated allow", got)
 	}
 }
 
@@ -719,12 +843,16 @@ func TestSteerStartupDelayPrecedesLaterPrompt(t *testing.T) {
 func TestSteerPromptStartsTheCoordinator(t *testing.T) {
 	d, eng := steerDaemon(t)
 	d.agentsUnder = wsops.AgentIDsUnder // the real root → members resolution
+	coordinatorDir := store.CoordinatorDir("wg1")
+	if err := os.MkdirAll(coordinatorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range []store.Session{
-		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Created: 1},
+		{ID: "wg1", Name: "payments", Scope: store.ScopeWork, Agent: "claude", Dir: coordinatorDir, Created: 1},
 		{ID: "a1", RootID: "wg1", Agent: "claude", Dir: t.TempDir(), ClaudeID: convID("a1"), Created: 2},
 	} {
 		if err := db.PutSession(s); err != nil {
@@ -735,6 +863,9 @@ func TestSteerPromptStartsTheCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
+	if _, err := wsops.EnsureRepoHome("api"); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, id := range []string{"wg1", "api"} {
 		if err := d.steer(context.Background(), core.Action{

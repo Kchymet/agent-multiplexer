@@ -9,10 +9,38 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
+	"amux/internal/panespec"
+	"amux/internal/store"
 )
+
+func testLaunchSpecResolver(_ context.Context, id string) (panespec.LaunchSpec, error) {
+	if id == console.ID {
+		return panespec.LaunchSpec{Session: console.Session(), Access: access.SessionAccess{SubjectID: id}}, nil
+	}
+	db, err := store.Open()
+	var session store.Session
+	var ok bool
+	if err == nil {
+		defer db.Close()
+		session, ok, err = db.GetSession(id)
+		if err != nil {
+			return panespec.LaunchSpec{}, err
+		}
+	}
+	if !ok {
+		session.ID = id
+		session.Agent = "claude"
+		session.Dir = "/test/" + id
+	}
+	return panespec.LaunchSpec{
+		Session: session,
+		Access:  access.SessionAccess{SubjectID: id},
+	}, nil
+}
 
 // testDaemon is a daemon with no sources, a real local engine, and a fake spec
 // resolver that runs a trivial marker-emitting process instead of a real agent.
@@ -30,7 +58,9 @@ func testDaemon(t *testing.T) *Daemon {
 	t.Cleanup(func() { _ = d.authority.Close() })
 	d.engine = local.New()
 	t.Cleanup(d.engine.Shutdown)
-	d.resolve = func(agentID string, tab int) (string, []string, []string, error) {
+	d.launchSpec = testLaunchSpecResolver
+	d.permissionBaseline = func(string) ([]string, error) { return nil, nil }
+	d.resolve = func(spec panespec.LaunchSpec, tab int) (string, []string, []string, error) {
 		return "", nil, []string{"sh", "-c", "printf MARKER; sleep 30"}, nil
 	}
 	d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
@@ -152,6 +182,30 @@ func TestStartActionLaunchesAgentHeadless(t *testing.T) {
 	readPaneMarker(t, c, "p1", "MARKER", 3*time.Second)
 	if inst2, ok := d.engine.Lookup(key); !ok || inst2 != inst {
 		t.Fatal("pane.open after start should reuse the same instance")
+	}
+}
+
+func TestNonRuntimePaneDoesNotRotatePermissionGeneration(t *testing.T) {
+	d := testDaemon(t)
+	c, closer := dialDaemon(t, d)
+	defer closer()
+
+	if err := c.PaneOpen("agent", "a1", panespec.TabAgent, 80, 24); err != nil {
+		t.Fatalf("open agent: %v", err)
+	}
+	readPaneMarker(t, c, "agent", "MARKER", 3*time.Second)
+	first, ok := d.permissions.generation("a1")
+	if !ok {
+		t.Fatal("agent runtime did not publish a permission generation")
+	}
+
+	if err := c.PaneOpen("editor", "a1", panespec.TabEditor, 80, 24); err != nil {
+		t.Fatalf("open editor: %v", err)
+	}
+	readPaneMarker(t, c, "editor", "MARKER", 3*time.Second)
+	second, ok := d.permissions.generation("a1")
+	if !ok || second != first {
+		t.Fatalf("editor pane changed runtime generation from %q to %q", first, second)
 	}
 }
 

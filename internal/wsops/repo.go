@@ -2,6 +2,7 @@ package wsops
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"os"
@@ -73,9 +74,9 @@ func AddRepoSource(ctx context.Context, source string) (store.Repo, error) {
 	return r, nil
 }
 
-// RemoveRepo untracks a repository: it refuses if any agent's worktree still
-// uses it (those worktrees live inside the bare clone we'd delete), then removes
-// the clone from disk and the store record. It's the daemon-side core of the
+// RemoveRepo untracks a repository: it refuses while any agent is assigned to
+// it, then removes the host cache and store record. Session clones are independent,
+// but their assignment still depends on this tracked source. It's the daemon-side core of the
 // CLI's `repo rm`, so the CLI never opens the store to untrack a repo.
 func RemoveRepo(name string) error {
 	db, err := store.Open()
@@ -164,4 +165,40 @@ func expandHome(p string) string {
 		return filepath.Join(home, strings.TrimPrefix(p, "~"))
 	}
 	return p
+}
+
+// checkoutSource returns the authoritative source used for a session's private
+// clone. Bare GitHub slugs are expanded to their HTTPS remote; importantly, the
+// daemon never derives this from the mutable tracked bare cache's local config.
+func checkoutSource(source string) string {
+	source = strings.TrimSpace(source)
+	if looksLikeGHRepo(source) {
+		return "https://github.com/" + source + ".git"
+	}
+	return expandHome(source)
+}
+
+// gitStagingDir is daemon-private and is not mounted into session panes. Git
+// commands finish and the checkout is validated here before an atomic rename
+// publishes it into a session-writable directory.
+func gitStagingDir() string { return filepath.Join(core.StateDir(), "git-staging") }
+
+// gitLayoutPath is a daemon-private authority record. Session-controlled .git
+// contents never decide whether cleanup is for an independent or legacy layout.
+func gitLayoutPath(agentID, repoName string) string {
+	sum := sha256.Sum256([]byte(agentID + "\x00" + repoName))
+	return filepath.Join(core.StateDir(), "git-layout", "v1", fmt.Sprintf("%x", sum[:])+".layout")
+}
+
+// sessionStorageRoot identifies the amux-owned tree containing path. Legacy
+// imported sessions remain under workspaces/; current sessions use sessions/.
+// No path is moved or rewritten as a side effect of this lookup.
+func sessionStorageRoot(path string) (string, error) {
+	for _, root := range []string{core.SessionsDir(), core.WorkspacesDir()} {
+		rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return root, nil
+		}
+	}
+	return "", fmt.Errorf("session path %q is outside amux managed storage", path)
 }

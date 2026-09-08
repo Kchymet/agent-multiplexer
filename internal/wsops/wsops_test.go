@@ -12,6 +12,7 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -24,6 +25,272 @@ func isolateStore(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("AMUX_JAIL", "off")
+}
+
+func TestAgentCommandRefusesStaticPrivateConfigAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, config, outside, canary string)
+	}{
+		{
+			name: "config directory symlink",
+			plant: func(t *testing.T, config, outside, _ string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, config); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "final config symlink",
+			plant: func(t *testing.T, config, _, canary string) {
+				t.Helper()
+				if err := os.MkdirAll(config, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(canary, filepath.Join(config, "config.toml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "final config hardlink",
+			plant: func(t *testing.T, config, _, canary string) {
+				t.Helper()
+				if err := os.MkdirAll(config, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(canary, filepath.Join(config, "config.toml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStore(t)
+			template := filepath.Join(t.TempDir(), "codex-template")
+			t.Setenv("CODEX_HOME", template)
+			if err := os.MkdirAll(template, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			session := filepath.Join(t.TempDir(), "session")
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.MkdirAll(session, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(outside, "canary")
+			if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(session, ".amux", "codex")
+			tc.plant(t, config, outside, canary)
+			s := store.Session{ID: "n1", RootID: "root", Agent: "codex", Dir: session}
+			if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+				t.Fatalf("AgentCommand error = %v, want unsafe launch refusal", err)
+			}
+			if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+				t.Fatalf("outside canary = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestAgentCommandIgnoresPredictableTrustTempAlias(t *testing.T) {
+	isolateStore(t)
+	template := filepath.Join(t.TempDir(), "codex-template")
+	t.Setenv("CODEX_HOME", template)
+	if err := os.MkdirAll(template, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "session")
+	config := filepath.Join(session, ".amux", "codex")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(config, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, filepath.Join(config, "config.toml.amux.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "n1", RootID: "root", Agent: "codex", Dir: session}
+	if _, _, _, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside canary = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(config, "config.toml")); err != nil || !strings.Contains(string(got), "trusted") {
+		t.Fatalf("private config was not safely published: %q, %v", got, err)
+	}
+}
+
+func TestAgentCommandRefusesRacedConfigParentSymlink(t *testing.T) {
+	isolateStore(t)
+	template := filepath.Join(t.TempDir(), "codex-template")
+	t.Setenv("CODEX_HOME", template)
+	if err := os.MkdirAll(template, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "session")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(session, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := openPreparationRoot
+	defer func() { openPreparationRoot = original }()
+	openPreparationRoot = func(path string) (*hostprep.Root, error) {
+		root, err := original(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(outside, filepath.Join(session, ".amux")); err != nil {
+			_ = root.Close()
+			return nil, err
+		}
+		return root, nil
+	}
+	s := store.Session{ID: "n1", RootID: "root", Agent: "codex", Dir: session}
+	if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+		t.Fatalf("AgentCommand error = %v, want unsafe launch refusal", err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside canary = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "codex")); !os.IsNotExist(err) {
+		t.Fatalf("raced outside parent was populated: %v", err)
+	}
+}
+
+func TestAgentCommandRefusesRelaunchTranscriptAliases(t *testing.T) {
+	for _, hardlink := range []bool{false, true} {
+		name := "symlink"
+		if hardlink {
+			name = "hardlink"
+		}
+		t.Run(name, func(t *testing.T) {
+			isolateStore(t)
+			session := filepath.Join(t.TempDir(), "session")
+			if err := os.MkdirAll(session, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			const uuid = "77777777-7777-4777-8777-777777777777"
+			s := store.Session{ID: "n1", RootID: "root", Agent: "claude", Dir: session, ClaudeID: uuid}
+			if err := ensureConfigHome(s); err != nil {
+				t.Fatal(err)
+			}
+			project := filepath.Join(session, ".amux", "claude", "projects", munge(session))
+			if err := os.MkdirAll(project, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(t.TempDir(), "outside-transcript.jsonl")
+			if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dst := filepath.Join(project, uuid+".jsonl")
+			var err error
+			if hardlink {
+				err = os.Link(canary, dst)
+			} else {
+				err = os.Symlink(canary, dst)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+				t.Fatalf("AgentCommand error = %v, want unsafe relaunch refusal", err)
+			}
+			if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+				t.Fatalf("outside transcript = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestAgentCommandRefusesHookFinalAlias(t *testing.T) {
+	isolateStore(t)
+	session := filepath.Join(t.TempDir(), "session")
+	if err := os.MkdirAll(filepath.Join(session, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "n1", RootID: "root", Agent: "claude", Dir: session}
+	if err := ensureConfigHome(s); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "outside-settings.json")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(canary, filepath.Join(session, ".claude", "settings.local.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+		t.Fatalf("AgentCommand error = %v, want unsafe hook refusal", err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside hook settings = %q, %v", got, err)
+	}
+}
+
+func TestAgentCommandRestoresTranscriptPastPredictableTempAlias(t *testing.T) {
+	isolateStore(t)
+	session := filepath.Join(t.TempDir(), "session")
+	if err := os.MkdirAll(session, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const uuid = "88888888-8888-4888-8888-888888888888"
+	s := store.Session{ID: "n1", RootID: "root", Agent: "claude", Dir: session, ClaudeID: uuid}
+	if err := ensureConfigHome(s); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(session, ".amux", "claude", "projects", munge(session))
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "outside-temp")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(project, uuid+".jsonl")
+	if err := os.Symlink(canary, dst+".amux.tmp"); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(t.TempDir(), "live.jsonl")
+	if err := os.WriteFile(live, []byte("restored-transcript"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.CaptureTranscript(uuid, live, "Stop", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, argv, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	} else if !hasFlag(argv, "--resume") {
+		t.Fatalf("restored launch argv = %v, want --resume", argv)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside temp canary = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "restored-transcript" {
+		t.Fatalf("restored transcript = %q, %v", got, err)
+	}
 }
 
 // TestAgentEnvExportsSessionID pins the intent env every pane inherits: the
@@ -706,6 +973,92 @@ func TestCreateWorkspaceRepoLessAgent(t *testing.T) {
 	}
 }
 
+func TestHostCreatedCoordinatorOmittedGrantsPermitFirstRepoAgent(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+	gitDir := bareRepoWithCommit(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "api", Source: gitDir, GitDir: gitDir}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rootID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "payments"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+	_ = db.Close()
+	if err != nil || !initialized || len(grants) != 1 || grants[0] != "api" {
+		t.Fatalf("omitted creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
+	}
+
+	agentID, err := ApplyResult(ctx, core.Action{
+		Action: core.ActionAddAgent, ID: rootID,
+		Fields: map[string]string{"agent": "claude", "repos": "api"},
+	})
+	if err != nil || agentID == "" {
+		t.Fatalf("first allowed agent = %q, err=%v", agentID, err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	agentSession, found, err := db.GetSession(agentID)
+	if err != nil || !found || agentSession.RootID != rootID || agentSession.Repo != "api" {
+		t.Fatalf("first agent = %+v, found=%v, err=%v", agentSession, found, err)
+	}
+}
+
+func TestHostCreatedCoordinatorExplicitEmptyGrantCeiling(t *testing.T) {
+	isolateStore(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "api"}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := ApplyResult(context.Background(), core.Action{
+		Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "sealed", "repos": ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+	if err != nil || !initialized || len(grants) != 0 {
+		t.Fatalf("explicit empty creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyResult(context.Background(), core.Action{
+		Action: core.ActionAddAgent, ID: rootID,
+		Fields: map[string]string{"agent": "claude", "repos": "api"},
+	}); err == nil || !strings.Contains(err.Error(), "outside coordinator") {
+		t.Fatalf("explicit empty ceiling accepted first repo agent: %v", err)
+	}
+}
+
 // TestSetAgentReposSkipsUntracked verifies re-scoping an agent to an untracked
 // repo name is a no-op that never errors (defensive against stale/typo names) —
 // the reported "unknown repo" hard-fail is gone.
@@ -750,6 +1103,55 @@ func TestSetAgentReposSkipsUntracked(t *testing.T) {
 	}
 }
 
+func TestSetAgentReposPropagatesTrustedCleanupFailure(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+	gitDir := bareRepoWithCommit(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "acme", Source: gitDir, GitDir: gitDir}); err != nil {
+		t.Fatal(err)
+	}
+	rootID := db.NewID()
+	if err := db.PutSession(store.Session{ID: rootID, Scope: store.ScopeWork, Mode: store.ModeTask,
+		Dir: filepath.Join(core.SessionsDir(), rootID)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCoordinatorRepoGrants(rootID, []string{"acme"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := addAgent(ctx, db, rootID, AgentSpec{Agent: "codex", Repos: []string{"acme"}})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt only the daemon-private authority record. Cleanup must fail before
+	// touching the checkout and SetAgentRepos must preserve the recorded scope.
+	if err := os.WriteFile(gitLayoutPath(a.ID, "acme"), []byte("wrong layout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAgentRepos(ctx, a.ID, nil); err == nil {
+		t.Fatal("SetAgentRepos hid trusted cleanup failure")
+	}
+	if _, err := os.Stat(filepath.Join(a.Dir, "acme", ".git")); err != nil {
+		t.Fatalf("checkout changed after rejected cleanup: %v", err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, err := db.GetSession(a.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload agent: found=%v err=%v", ok, err)
+	}
+	if got.Repo != "acme" {
+		t.Fatalf("repo scope changed after cleanup failure: %q", got.Repo)
+	}
+}
+
 // TestWriteAgentGuide checks the guide lands in the file each provider actually
 // reads: CLAUDE.md for Claude (incl. the "" default), AGENTS.md for others.
 func TestWriteAgentGuide(t *testing.T) {
@@ -778,7 +1180,7 @@ func TestWriteAgentGuide(t *testing.T) {
 		// The guide must steer agents to merge, not rebase: rebasing a pushed
 		// branch forces a force-push to update its PR, which needs a human to
 		// unblock. Merging keeps every push a fast-forward.
-		if !strings.Contains(string(b), "git merge --no-edit origin/HEAD") {
+		if !strings.Contains(string(b), "git merge --no-edit FETCH_HEAD") {
 			t.Errorf("kind %q: %s should tell agents to merge the remote", tc.kind, tc.file)
 		}
 		if strings.Contains(string(b), "git rebase") {
@@ -834,12 +1236,10 @@ func bareRepoWithCommit(t *testing.T) string {
 	return gitDir
 }
 
-// TestDeleteLegacyAgentRemovesBranch pins the delete contract ("worktrees +
-// branch") for a session imported from the legacy workspaces/ layout. Its record
-// has no stored branch, so cleanup must read the branch off the worktree — or,
-// when the worktree dir is already gone, derive the legacy amux/<root> name —
-// rather than skip the branch delete and leave a "branch with no agent" behind.
-func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
+// Legacy roots share coordinator and member storage. A broad delete cannot prove
+// ownership of dirty/transcript/unknown files, so it fails before touching any
+// session row, path, or branch and requires host-authorized recovery.
+func TestDeleteLegacyRootFailsClosedWithoutDataLoss(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		dirGone bool
@@ -862,9 +1262,7 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 			// The legacy layout: workspaces/<root>/<repo> on branch amux/<root>.
 			rootID := "f12442"
 			dir := filepath.Join(core.WorkspacesDir(), rootID)
-			if err := git.AddWorktree(ctx, gitDir, filepath.Join(dir, "acme"), core.LegacyBranchFor(rootID)); err != nil {
-				t.Fatal(err)
-			}
+			gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", "-b", core.LegacyBranchFor(rootID), filepath.Join(dir, "acme"), "main")
 			// Mirror importLegacy: a root plus one agent sharing the legacy dir, with
 			// the agent's Branch left blank.
 			if err := db.PutSession(store.Session{ID: rootID, Name: "legacy", Mode: store.ModeTask, Scope: store.ScopeWork, Dir: dir}); err != nil {
@@ -881,15 +1279,15 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 				}
 			}
 
-			if err := DeleteByID(ctx, rootID); err != nil {
-				t.Fatal(err)
+			if err := DeleteByID(ctx, rootID); err == nil || !strings.Contains(err.Error(), "host-authorized migration or recreation") {
+				t.Fatalf("DeleteByID legacy root error = %v, want explicit recovery refusal", err)
 			}
 
-			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 0 {
-				t.Errorf("legacy branch survived delete: %v", got)
+			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 1 || got[0] != core.LegacyBranchFor(rootID) {
+				t.Errorf("legacy branch changed during refused delete: %v", got)
 			}
-			if _, err := os.Stat(dir); !os.IsNotExist(err) {
-				t.Errorf("legacy dir %s still exists (stat err %v)", dir, err)
+			if _, err := os.Stat(dir); tt.dirGone != os.IsNotExist(err) {
+				t.Errorf("legacy dir existence changed during refused delete: %v", err)
 			}
 			db, err = store.Open()
 			if err != nil {
@@ -897,8 +1295,8 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 			}
 			defer db.Close()
 			for _, id := range []string{rootID, agentID} {
-				if _, ok, _ := db.GetSession(id); ok {
-					t.Errorf("session %s survived delete", id)
+				if _, ok, _ := db.GetSession(id); !ok {
+					t.Errorf("session %s was removed by refused delete", id)
 				}
 			}
 		})
@@ -906,23 +1304,21 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 }
 
 // TestAgentBranchOnlyDerivesAmuxBranches: a stored branch is used as-is; a blank
-// record derives the branch from the worktree only when it's amux-owned, so a
-// worktree sitting on main never gets main deleted out from under the repo.
+// legacy record derives the deterministic amux branch without invoking Git
+// against session-writable configuration. It never returns main.
 func TestAgentBranchOnlyDerivesAmuxBranches(t *testing.T) {
 	ctx := context.Background()
 	gitDir := bareRepoWithCommit(t)
 	onMain := filepath.Join(t.TempDir(), "on-main")
 	gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", onMain, "main")
 	onAmux := filepath.Join(t.TempDir(), "on-amux")
-	if err := git.AddWorktree(ctx, gitDir, onAmux, "amux/r"); err != nil {
-		t.Fatal(err)
-	}
+	gitRun(t, "", "--git-dir", gitDir, "worktree", "add", "-q", "-b", "amux/r", onAmux, "main")
 
 	if got := agentBranch(ctx, store.Session{RootID: "r", Branch: "amux/r-a"}, onMain); got != "amux/r-a" {
 		t.Errorf("stored branch: got %q, want amux/r-a", got)
 	}
-	if got := agentBranch(ctx, store.Session{RootID: "r"}, onMain); got != "" {
-		t.Errorf("worktree on main: got %q, want \"\" (never delete a non-amux branch)", got)
+	if got := agentBranch(ctx, store.Session{RootID: "r"}, onMain); got != "amux/r" {
+		t.Errorf("legacy worktree: got %q, want deterministic amux/r", got)
 	}
 	if got := agentBranch(ctx, store.Session{RootID: "r"}, onAmux); got != "amux/r" {
 		t.Errorf("worktree on amux branch: got %q, want amux/r", got)

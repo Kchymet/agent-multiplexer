@@ -65,23 +65,24 @@ func cmdDo(args []string) error {
 // source of *which* verbs exist, so a newly added verb still shows up in the
 // list (glossless) instead of silently going missing from the help.
 var actionGlosses = map[string]string{
-	core.ActionRefresh:         "re-poll the daemon's sources now",
-	core.ActionStart:           "start an agent's (or a whole workgroup's) process",
-	core.ActionAuthReload:      "queue Claude agents to resume with shared credentials [-f force=true]",
-	core.ActionSteer:           "drive a running agent         -f verb=prompt|interject|stop|permission [-f text=… | -f decision=allow|deny]",
-	core.ActionRename:          "set a display name            -f name=…",
-	core.ActionMove:            "re-parent an agent            --target <workgroup> (omit for a new one)",
-	core.ActionArchive:         "toggle archived ⇄ restored",
-	core.ActionSetArchived:     "archive or restore explicitly -f archived=true|false",
-	core.ActionDelete:          "delete for good — worktrees + branch",
-	core.ActionKill:            "alias of delete",
-	core.ActionAddRepo:         "track a repo                  -f source=OWNER/REPO|url|path",
-	core.ActionRmRepo:          "untrack a repo                id is the repo name",
-	core.ActionAgentSetRepos:   "re-scope an agent's repos     -f repos=api,web",
-	core.ActionAddAgent:        "add an agent to a workgroup   id is the workgroup id",
-	core.ActionNewRepoAgent:    "start a repo-scoped agent     id is the repo name",
-	core.ActionNewWorkgroup:    "create a work-scoped workgroup",
-	core.ActionCreateWorkspace: "alias of new-workgroup (kept for older scripts)",
+	core.ActionRefresh:             "re-poll the daemon's sources now",
+	core.ActionStart:               "start an agent's (or a whole workgroup's) process",
+	core.ActionAuthReload:          "queue Claude agents to resume with shared credentials [-f force=true]",
+	core.ActionSteer:               "drive a running agent         -f verb=prompt|interject|stop|permission [-f text=… | -f decision=allow|deny]",
+	core.ActionRename:              "set a display name            -f name=…",
+	core.ActionMove:                "re-parent an agent            --target <workgroup> (omit for a new one)",
+	core.ActionArchive:             "toggle archived ⇄ restored",
+	core.ActionSetArchived:         "archive or restore explicitly -f archived=true|false",
+	core.ActionDelete:              "delete for good — worktrees + branch",
+	core.ActionKill:                "alias of delete",
+	core.ActionAddRepo:             "track a repo                  -f source=OWNER/REPO|url|path",
+	core.ActionRmRepo:              "untrack a repo                id is the repo name",
+	core.ActionAgentSetRepos:       "re-scope an agent's repos     -f repos=api,web",
+	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web (host only)",
+	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
+	core.ActionNewRepoAgent:        "start a repo-scoped agent     id is the repo name",
+	core.ActionNewWorkgroup:        "create a work-scoped workgroup",
+	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",
 }
 
 // actionList renders the vocabulary an unknown-action error teaches: every verb
@@ -259,6 +260,9 @@ func sendAction(a core.Action) error {
 // sendActionID is sendAction plus the id of any session the action created (the
 // daemon's Result.NewID), so a create command can start or switch to it.
 func sendActionID(a core.Action) (string, error) {
+	if sessionContextRestricted() {
+		return restrictedAction(a)
+	}
 	c, err := dial()
 	if err != nil {
 		return "", err
@@ -284,6 +288,9 @@ func sendActionID(a core.Action) (string, error) {
 // queryRows asks the daemon for a read model (QueryRepos, QuerySessions) and
 // decodes its rows into dst. It's the read half of the CLI's daemon bridge.
 func queryRows(name string, dst any) error {
+	if sessionContextRestricted() {
+		return restrictedQuery(name, dst)
+	}
 	c, err := dial()
 	if err != nil {
 		return err

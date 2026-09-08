@@ -92,23 +92,54 @@ AMUX_CLAUDE_AUTH_SMOKE=1 go test ./internal/claudecfg -run TestClaudeSharedAuthS
 ```
 
 This checks credential-store selection, not a real server-side token rotation.
-The sandbox masks the auth root in every pane and mounts only a Claude pane's
-selected store, so adding another harness's auth store does not expose it through
-the otherwise-readable amux data tree.
+The sandbox never mounts the amux data or auth root. It mounts only a Claude
+pane's exact selected store, so adding another harness's auth store does not
+expose it through a shared ancestor.
 
 ### Git writes from Codex
 
-An agent's worktree lives inside its workspace, but its Git index, objects and
-refs live in the assigned bare clone under `<amux data>/repos`. amux grants that
-clone write access in both the outer bubblewrap scope and Codex's inner
-`workspace-write` sandbox. The same `sandbox_workspace_write.writable_roots`
-override is passed to interactive Codex and App Server launches, including
-resumed sessions. Other repositories and coordinator sessions receive no new
-grants. Explicit read-only mode remains read-only.
+Each newly-created agent repository is a fully independent clone inside that
+session's workspace. Its `.git` directory contains the session's own config,
+refs, hooks namespace, index, worktree metadata and objects. amux clones only the
+authoritative source's default branch, without local hardlinks, tags or object
+alternates; it does not seed from the mutable host cache. Consequently a
+sibling's unpublished branch/object is not copied into a new session, and Git
+writes need no mount outside the session directory in either the bubblewrap or
+Codex `workspace-write` sandbox.
 
-Restart existing Codex sessions after updating amux to pick up these launch
-arguments. An already-running session's sandbox policy is not changed by
-rebuilding the binary.
+Checkout publication is an atomic rename from daemon-private
+`StateDir()/git-staging` into session storage. Those locations must be on the
+same filesystem. In particular, a custom `XDG_DATA_HOME` must not place session
+storage on a different filesystem from amux's state directory. If the kernel
+returns `EXDEV`, creation fails closed: amux does not publish a partial checkout
+or fall back to a non-atomic copy.
+
+This clone policy is a write-isolation and initial-transfer boundary. The pane
+namespace supplies the corresponding read boundary: it mounts only the exact
+session directory and never the amux data/state roots, sibling clones, or host
+Git cache. An explicit network fetch can still retrieve objects the remote
+source advertises.
+
+The remote remains the tracked repository's authoritative source, so ordinary
+fetch/commit/push and pull-request workflows keep working. Host-side lifecycle
+code does not invoke Git against the private clone after launch: the session can
+edit its local Git config, so hooks, fsmonitor, credential helpers, includes and
+other command-bearing settings are untrusted. Deletion removes a validated
+session path through directory-FD-anchored filesystem operations rather than
+asking that repository to run Git. A daemon-private layout record, not mutable
+`.git` contents, selects independent versus legacy cleanup.
+
+Legacy sessions created as linked worktrees are **not migrated automatically**.
+After relaunch, amux refuses them explicitly instead of restoring writable access
+to their shared bare Git common directory. Preserve the session's conversation
+and inspect all dirty, staged, untracked, rebase and submodule state from the
+host before recreating or using a future host-authorized migration tool. Already
+running legacy mount namespaces keep their old writable-cache access until they
+exit; installing a new binary cannot change an existing namespace.
+
+An already-running session's sandbox policy is not changed by rebuilding the
+binary. Relaunching a legacy linked-worktree session reaches the explicit refusal
+above; only newly-created independent clones launch normally in this release.
 
 ### What is configuration, what is state
 
@@ -143,9 +174,9 @@ MCP definitions, use `amux sandbox reset <id> config.toml` (this resets the whol
 config file). For a detached MCP credential, use
 `amux sandbox reset <id> .credentials.json`. Relaunch the agent after either reset.
 Existing private lock directories are overlaid with the shared directory inside
-the sandbox. When running with the amux sandbox disabled, an existing private
-lock directory must be reconciled before concurrent OAuth refreshes can share
-locks; newly seeded homes link to the shared lock directory directly.
+the sandbox. Protected launches refuse a disabled or unsupported namespace
+rather than forwarding session credentials to a host-visible process; newly
+seeded homes link to the shared lock directory directly.
 
 Two files get a small transform on the way in. `settings.json` has absolute
 references to the template dir rewritten to the copy, so a status-line script or
@@ -154,12 +185,36 @@ hook command under `~/.claude` runs the copy's file inside the scope (where
 (your trust and history for your own directories); amux trusts the agent's own dir
 in the copy at launch.
 
-Transcripts therefore live in the agent's private home. Resume detection,
-gap-fill from amux's captured backups, `amux agent sessions`, and the runtime
-event stream all read each agent's home (and the user's, for your own sessions).
-An agent created before this change has its conversation in your `~/.claude`;
-its first launch afterwards carries that project dir over, once, so nothing is
-lost — and until it launches, readers fall back to the old location.
+Transcripts therefore live in the agent's private home. Host-side resume and
+runtime readers operate on that explicitly selected home; restricted sessions
+receive only role-filtered context through authenticated amux requests, never a
+global transcript path. An agent created before this change has its conversation
+in your `~/.claude`; its first launch afterwards carries that project dir over,
+once, so nothing is lost — and until it launches, host-authorized readers fall
+back to the old location.
+
+### Namespace grants
+
+On supported Linux hosts, protected panes require bubblewrap 0.12.0 or newer
+and enter a private PID namespace with a fresh `/proc`. They receive the exact
+session directory, selected runtime/config/account grants, their own App Server
+socket directory, and daemon-issued file-RPC mounts. `/run`, amux data/state,
+global hooks/transcripts, sibling directories and shared Git metadata are not
+mounted. The mailbox is read-only except for its `requests/` overlay;
+credentials and fixed `context.json` are read-only at the immediate-root
+`/amux-session-access` directory. Host provider/TLS/management environment
+variables and ambient API tokens are removed before the child starts.
+
+The 0.12.0 floor is a security boundary, not a packaging preference. The
+[bubblewrap advisory](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx)
+marks older releases vulnerable to following an attacker-controlled mount-target
+symlink through the setup-time `/oldroot`; 0.12.0 creates destinations with
+`openat2(RESOLVE_IN_ROOT)`. amux refuses an older or missing binary rather than
+falling back to a broad host view. Runtime acceptance on a host with an older
+binary should use a disposable Linux VM or CI runner image that already contains
+bubblewrap 0.12.0 or newer and enables unprivileged user and PID namespaces. This
+tests the real mount/PID boundary without installing packages, restarting the
+host daemon, or nesting a harness sandbox probe on the development host.
 
 ## The feedback loop
 

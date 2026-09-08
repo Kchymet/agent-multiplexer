@@ -16,6 +16,14 @@ func Now() int64 { return time.Now().UnixMilli() }
 // RootDir is the container directory for a root session's sub-worktrees.
 func RootDir(rootID string) string { return filepath.Join(core.SessionsDir(), rootID) }
 
+// CoordinatorDir is the private sandbox for a workgroup coordinator. It is a
+// child of the workgroup container, but never the container itself: member
+// sandboxes may remain direct children of RootDir (including after DB-only
+// moves), so mounting RootDir would expose both current and former members.
+func CoordinatorDir(rootID string) string {
+	return filepath.Join(RootDir(rootID), "coordinator")
+}
+
 // SubDir is the worktree directory for a sub-session under its root.
 func SubDir(rootID, subID, repo, branch string) string {
 	label := strings.Trim(Slug(repo)+"-"+Slug(branch), "-")

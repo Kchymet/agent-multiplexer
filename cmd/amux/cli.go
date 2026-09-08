@@ -369,6 +369,19 @@ func cmdSession(args []string) error {
 		}
 		fmt.Printf("agent %s repos: %s\n", args[1], orNone(strings.Join(repos, ", ")))
 		return nil
+	case "grants":
+		// Host-only grant administration. An empty repo list deliberately stores
+		// an initialized empty ceiling; omission during low-level creation is the
+		// distinct documented default of all currently tracked repositories.
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [repo...]")
+		}
+		repos := args[2:]
+		if err := sendAction(core.Action{Action: core.ActionCoordinatorSetRepos, ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
+			return err
+		}
+		fmt.Printf("coordinator %s grants: %s\n", args[1], orNone(strings.Join(repos, ", ")))
+		return nil
 	case "rm", "delete":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup rm <id>")
@@ -401,6 +414,23 @@ func cmdSession(args []string) error {
 		}
 		fmt.Printf("restored %s\n", args[1])
 		return nil
+	case "recreate":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: amux workgroup recreate <id>")
+		}
+		if sessionContextRestricted() {
+			return fmt.Errorf("runtime recreation requires authenticated host control")
+		}
+		c, err := dial()
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.RecreateSession(args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("recreated runtime %s with current session access mounts\n", args[1])
+		return nil
 	case "ls", "list":
 		return sessionList()
 	default:
@@ -413,6 +443,7 @@ func cmdSession(args []string) error {
 			"  repos <agent> <repo>...      re-scope an agent to exactly these repos\n"+
 			"  rename <id> <name>           set a display name (the id is unchanged)\n"+
 			"  archive | unarchive <id>     mark done / bring back (reversible)\n"+
+			"  recreate <id>                replace one runtime with current access mounts (host only)\n"+
 			"  rm <id>                      delete for good — worktrees + branch\n"+
 			"  ls                           list workgroups and their agents", sub)
 	}
@@ -435,9 +466,12 @@ usage: amux workgroup [command]
   ls                 list workgroups and their agents  (alias: list)
   move <agent> [<root>|--new]  re-parent an agent into another workgroup
   repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
+  grants <coordinator> [repo...]  replace its host-managed repo ceiling
   rename <id> <name>  set a display name (the id is unchanged)
   archive <id>       drop a session off the active rail  (alias: done)
   unarchive <id>     put an archived session back  (alias: restore)
+  recreate <id>      replace one runtime with current access mounts (host only;
+                     stored worktree/config/transcript files are preserved)
   rm <id>            delete a session, its worktrees and branches  (alias: delete)
 `)
 }

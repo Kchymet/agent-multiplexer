@@ -190,9 +190,8 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	// Tracked repositories, each a container for its repo-scoped agents (nested
 	// directly beneath, so a single-repo agent shows here, never under WORKGROUPS).
 	// The repo row is the repo's home session (id = repo name). A repo tracked
-	// before default sessions has no home row yet; the daemon creates it on first
-	// open (wsops.ResolveSession), so the header is still openable and steerable
-	// and carries the runtime it will have.
+	// before default sessions may lack a provisioned home row. Reads never create
+	// one: that row remains visible but non-attachable until host-authorized repair.
 	if repos, err := db.Repos(); err == nil {
 		for _, r := range repos {
 			home, ok := repoHomes[r.Name]
@@ -200,13 +199,17 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				home = store.Session{ID: store.RepoHomeID(r.Name), Agent: agent.DefaultKind(), Scope: store.ScopeRepo, Repo: r.Name, Mode: store.ModeInteractive}
 			}
 			st := agentState(liveOf(home.ID), home)
+			status := stateLabel(st) + " · repo home"
+			if !ok {
+				status = "repair required · repo home not provisioned"
+			}
 			out = append(out, w.withCaps(core.Session{
 				ID: r.Name, Title: repoTitle(r), Source: "workspace", Section: core.SectionRepos,
 				Kind: "repo", Mode: store.NormalizeMode(home.Mode), Role: store.RoleRepo,
 				Model: home.Model,
-				State: st, Status: stateLabel(st) + " · repo home",
-				Cwd: containerDir(home), CanAttach: true,
-			}, true)) // the home resolves in steer.go — steerable
+				State: st, Status: status,
+				Cwd: containerDir(home), CanAttach: ok,
+			}, ok))
 			for _, s := range repoAgents[r.Name] {
 				st := agentState(liveOf(s.ID), s)
 				out = append(out, w.withCaps(core.Session{
@@ -303,14 +306,24 @@ func (w *Workspace) withCaps(s core.Session, steerable bool) core.Session {
 	return s
 }
 
-// containerDir is a container session's sandbox: the stored dir, or — for a
-// root that predates default sessions and will get one on first open — the
-// container dir it will be given (see wsops.ResolveSession).
+// containerDir publishes only an already-authoritative dedicated container
+// directory. It never invents a replacement path for a legacy row: doing so
+// would make a read look like migration had succeeded. Legacy rows remain
+// visible but have no launchable cwd until host-authorized recovery.
 func containerDir(s store.Session) string {
-	if s.Dir != "" {
-		return s.Dir
+	if s.Role() == store.RoleCoordinator {
+		if filepath.Clean(s.Dir) == filepath.Clean(store.CoordinatorDir(s.ID)) {
+			return s.Dir
+		}
+		return ""
 	}
-	return store.RootDir(s.ID)
+	if s.Role() == store.RoleRepo {
+		if filepath.Clean(s.Dir) == filepath.Clean(store.RootDir(s.ID)) {
+			return s.Dir
+		}
+		return ""
+	}
+	return s.Dir
 }
 
 // recentArchived returns the most recently archived sessions (by ArchivedAt,

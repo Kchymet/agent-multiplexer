@@ -33,7 +33,8 @@ func TestTemplateSeed(t *testing.T) {
 	must(os.WriteFile(filepath.Join(user, "sessions", "2026", "r.jsonl"), []byte("{}"), 0o644))
 
 	agentDir := filepath.Join(root, "agent")
-	sp := Template("a1", AgentHome(agentDir))
+	must(os.MkdirAll(agentDir, 0o755))
+	sp := Template("a1", agentDir)
 	if sp.Env != "CODEX_HOME" || sp.Dir != filepath.Join(agentDir, ".amux", "codex") {
 		t.Fatalf("spec = %+v", sp)
 	}

@@ -1,7 +1,7 @@
 // Package wsops holds session lifecycle operations shared by the daemon (rail
 // actions) and the CLI. A workgroup (root) is a pure container: it checks out
 // nothing itself; its agents (subs) each work on a subset of the tracked repos,
-// one worktree per repo under the agent's own directory.
+// one independent clone per repo under the agent's own directory.
 package wsops
 
 import (
@@ -17,9 +17,14 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
+	"amux/internal/hostprep"
 	"amux/internal/skills"
 	"amux/internal/store"
 )
+
+// openPreparationRoot is a test seam for deterministic pathname-replacement
+// races. Production always uses hostprep.OpenSession.
+var openPreparationRoot = hostprep.OpenSession
 
 // AgentSpec describes an agent to create under a workgroup.
 type AgentSpec struct {
@@ -33,19 +38,19 @@ type AgentSpec struct {
 // CreateWorkspace creates a workgroup (root): a container of agents that checks
 // out nothing itself and holds no repos of its own (a repo is an attribute of
 // an agent, via its worktrees), but which IS a session — the workgroup's
-// coordinator (store.RoleCoordinator), sandboxed to the container dir that
-// holds every member's sandbox, with a conversation pinned now so it resumes
+// coordinator (store.RoleCoordinator), sandboxed to a dedicated own directory
+// beside member sandboxes, with a conversation pinned now so it resumes
 // durably. When defaultAgent is non-nil it also creates one agent from that spec
 // (its repos, model, mode, and prompt are honored). Pass nil to create an empty
 // workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
-	return createWorkspace(ctx, name, agent.DefaultKind(), "", "", defaultAgent)
+	return createWorkspace(ctx, name, agent.DefaultKind(), "", "", defaultAgent, nil)
 }
 
 // createWorkspace is the action-path variant of CreateWorkspace. It lets a
 // remote client choose the coordinator harness, model, and initial prompt while
 // preserving the public helper's long-standing defaults for local callers.
-func createWorkspace(ctx context.Context, name, kind, model, prompt string, defaultAgent *AgentSpec) (string, error) {
+func createWorkspace(ctx context.Context, name, kind, model, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
 	if !agent.Known(kind) {
 		return "", fmt.Errorf("unknown agent kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
 	}
@@ -60,7 +65,7 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
 		Agent: kind, Model: model, Mode: store.ModeInteractive, Prompt: prompt,
-		Dir: store.RootDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
+		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
 	if err := os.MkdirAll(root.Dir, 0o755); err != nil {
@@ -68,6 +73,21 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 	}
 	if err := db.PutSession(root); err != nil {
 		return "", err
+	}
+	grants := []string(nil)
+	if selectedGrants == nil {
+		repos, err := db.Repos()
+		if err != nil {
+			return rootID, err
+		}
+		for _, repo := range repos {
+			grants = append(grants, repo.Name)
+		}
+	} else {
+		grants = append(grants, (*selectedGrants)...)
+	}
+	if err := db.SetCoordinatorRepoGrants(rootID, grants); err != nil {
+		return rootID, err
 	}
 	if defaultAgent != nil {
 		if _, err := addAgent(ctx, db, rootID, *defaultAgent); err != nil {
@@ -121,6 +141,41 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	if !agent.Known(spec.Agent) {
 		return store.Session{}, fmt.Errorf("unknown agent kind %q\n  known kinds: %s", spec.Agent, strings.Join(agent.Kinds(), ", "))
 	}
+	root, ok, err := db.GetSession(rootID)
+	if err != nil {
+		return store.Session{}, err
+	}
+	if !ok || !root.IsRoot() {
+		return store.Session{}, fmt.Errorf("no such workgroup %q", rootID)
+	}
+	// The persisted coordinator ceiling is an execution-time invariant, not
+	// merely an RPC-policy hint. Host/UI creation and restricted mailbox calls
+	// converge here, before a directory or checkout is created. Repo-scoped
+	// hidden roots have their separate single-repo construction contract.
+	if root.Role() == store.RoleCoordinator {
+		grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+		if err != nil {
+			return store.Session{}, err
+		}
+		if !initialized {
+			return store.Session{}, fmt.Errorf("coordinator %q has no initialized repository grants", rootID)
+		}
+		allowed := make(map[string]bool, len(grants))
+		for _, repo := range grants {
+			allowed[repo] = true
+		}
+		for _, repoName := range spec.Repos {
+			repoName = strings.TrimSpace(repoName)
+			if repoName == "" {
+				continue
+			}
+			if _, tracked, lookupErr := db.Repo(repoName); lookupErr != nil {
+				return store.Session{}, lookupErr
+			} else if tracked && !allowed[repoName] {
+				return store.Session{}, fmt.Errorf("repository %q is outside coordinator %q grants", repoName, rootID)
+			}
+		}
+	}
 	agentID := db.NewID()
 	dir := store.AgentDir(rootID, agentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -140,7 +195,8 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 			log.Printf("amux: skipping unknown repo %q while creating agent under %s", repoName, rootID)
 			continue
 		}
-		if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(dir, repoName), branch); err != nil {
+		if err := git.AddCheckout(ctx, checkoutSource(repo.Source), filepath.Join(dir, repoName), branch,
+			gitStagingDir(), core.SessionsDir(), gitLayoutPath(agentID, repoName)); err != nil {
 			return store.Session{}, err
 		}
 		repos = append(repos, repoName)
@@ -159,11 +215,15 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	}
 	// Write the guide from the session record so it's correct immediately; every
 	// launch rewrites it from the current record (see AgentCommand).
-	writeAgentGuide(a)
+	if err := optionalPreparation("prepare agent guide", writeAgentGuide(a)); err != nil {
+		return store.Session{}, err
+	}
 	// Seed the agent's private harness config from the user's (the template) now,
 	// so what the agent starts with is what the user had at creation — not
 	// whatever the template holds by the time it first launches.
-	ensureConfigHome(a)
+	if err := ensureConfigHome(a); err != nil {
+		return store.Session{}, err
+	}
 	if err := db.PutSession(a); err != nil {
 		return store.Session{}, err
 	}
@@ -175,27 +235,43 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 // harness's config env (see agent.Harness.Config) — if it isn't there yet. It is
 // idempotent, so it runs at creation and again at every launch: an agent created
 // before config homes were private gets one on its next launch, and an agent's
-// own edits to its copy are never touched. Best-effort: a failure is logged and
-// the launch proceeds (the harness then falls back to its default, the user's
-// home — visible in the daemon log rather than blocking the agent).
-func ensureConfigHome(s store.Session) {
+// own edits to its copy are never touched. Unsafe destination aliases are
+// returned: launch must never fall through from a compromised private path to a
+// host-side write. Ordinary seeding failures retain the existing logged
+// best-effort behavior.
+func ensureConfigHome(s store.Session) error {
+	root, err := openPreparationRoot(s.Dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return ensureConfigHomeRooted(root, s)
+}
+
+func ensureConfigHomeRooted(root *hostprep.Root, s store.Session) error {
 	spec, ok := agent.HarnessFor(s.Agent).Config(s)
 	if !ok {
-		return
+		return nil
 	}
-	fresh, err := cfghome.Seed(spec)
+	fresh, err := cfghome.SeedRooted(root, spec)
 	if err != nil {
-		log.Printf("amux: seeding %s config for agent %s: %v", spec.Kind, s.ID, err)
-		return
+		return optionalPreparation(fmt.Sprintf("seeding %s config for agent %s", spec.Kind, s.ID), err)
 	}
 	if fresh {
 		log.Printf("amux: seeded agent %s's private %s config from %s", s.ID, spec.Kind, spec.Template)
 	}
-	// A legacy agent whose dir is itself a worktree must not see its config home
-	// as untracked files.
-	if git.IsGitRepo(context.Background(), s.Dir) {
-		_ = git.Exclude(context.Background(), s.Dir, ".amux/")
+	return nil
+}
+
+func optionalPreparation(action string, err error) error {
+	if err == nil {
+		return nil
 	}
+	if hostprep.IsUnsafe(err) {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	log.Printf("amux: %s: %v", action, err)
+	return nil
 }
 
 // AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
@@ -253,6 +329,17 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 	if a.IsRoot() {
 		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
+	var managedRoot string
+	storageRoot := func() (string, error) {
+		if managedRoot != "" {
+			return managedRoot, nil
+		}
+		root, err := sessionStorageRoot(a.Dir)
+		if err == nil {
+			managedRoot = root
+		}
+		return root, err
+	}
 
 	cur := map[string]bool{}
 	for _, r := range store.SplitRepos(a.Repo) {
@@ -271,7 +358,12 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 			continue
 		}
 		if !cur[r] {
-			if err := git.AddWorktree(ctx, repo.GitDir, filepath.Join(a.Dir, r), a.Branch); err != nil {
+			managedRoot, err := storageRoot()
+			if err != nil {
+				return err
+			}
+			if err := git.AddCheckout(ctx, checkoutSource(repo.Source), filepath.Join(a.Dir, r), a.Branch,
+				gitStagingDir(), managedRoot, gitLayoutPath(a.ID, r)); err != nil {
 				return err
 			}
 		}
@@ -282,9 +374,21 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 		if wantSet[r] {
 			continue
 		}
-		if repo, ok, _ := db.Repo(r); ok {
-			wt := filepath.Join(a.Dir, r)
-			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
+		repo, ok, repoErr := db.Repo(r)
+		if repoErr != nil {
+			return repoErr
+		}
+		if !ok {
+			return fmt.Errorf("cannot remove repo %q from agent %s: tracked repository record is missing", r, agentID)
+		}
+		managedRoot, err := storageRoot()
+		if err != nil {
+			return err
+		}
+		wt := filepath.Join(a.Dir, r)
+		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt), managedRoot,
+			gitStagingDir(), gitLayoutPath(a.ID, r)); err != nil {
+			return fmt.Errorf("remove repo %q from agent %s: %w", r, agentID, err)
 		}
 	}
 	// Field-scoped write: only the repo column changes here.
@@ -371,21 +475,35 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// session, the live inventory) before each launch, so its branch, repo list,
 	// and roster reflect the latest state — an LLM agent that reloads its guide
 	// never obeys stale instructions.
-	writeGuide(s)
+	root, err := openPreparationRoot(s.Dir)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("open agent preparation root: %w", err)
+	}
+	defer root.Close()
+	if err := optionalPreparation("prepare agent guide", writeGuide(root, s)); err != nil {
+		return "", nil, nil, err
+	}
 
 	h := agent.HarnessFor(s.Agent)
 	prompt := strings.TrimSpace(s.Prompt)
 	// The agent's private harness config must exist before anything below reads
 	// or writes it (gap-fill, resume detection, trust all live in that home).
-	ensureConfigHome(s)
+	if err := ensureConfigHomeRooted(root, s); err != nil {
+		return "", nil, nil, err
+	}
 	// Before deciding resume-vs-fresh, gap-fill the harness transcript from amux's
 	// captured backup: a mid-turn kill can leave the harness's own copy missing
 	// even though we hooked a backup, so restore it into the primary resume cwd
 	// where resume detection looks, turning what would be a fresh start back into a
-	// resume. Best-effort — RestoreTranscript no-ops when there's nothing better to
-	// restore and never clobbers a fresher copy, so a failure never blocks launch.
+	// resume. Missing/stale captured data is still a harmless no-op. An unsafe
+	// private destination must refuse launch; ordinary restore failures retain the
+	// existing best-effort policy because resume safety does not rely on output.
 	if s.ClaudeID != "" {
-		if restored, _ := h.RestoreTranscript(s, dir); restored {
+		if restored, err := h.RestoreTranscript(root, s, dir); err != nil {
+			if err := optionalPreparation("restore agent transcript", err); err != nil {
+				return "", nil, nil, err
+			}
+		} else if restored {
 			log.Printf("amux: gap-filled transcript for %s from captured backup", s.ClaudeID)
 		}
 	}
@@ -393,24 +511,28 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// launch dir to wherever a transcript already lives. resumeCwds lists the cwds a
 	// transcript for this agent could live under (amux's workdir convention has
 	// shifted over time), preferred-first.
-	plan := h.PlanLaunch(agent.LaunchRequest{Session: s, Dir: dir, Prompt: prompt, ResumeCwds: resumeCwds(s)})
+	plan, err := h.PlanLaunch(agent.LaunchRequest{Root: root, Session: s, Dir: dir, Prompt: prompt, ResumeCwds: resumeCwds(s)})
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("plan agent launch: %w", err)
+	}
 	dir = plan.Dir
 
 	// Pre-launch filesystem side effects the harness needs in its launch dir
-	// (trusting the folder, installing amux's hooks). Best-effort by contract.
-	h.PrepareLaunch(s, dir)
+	// (trusting the folder, installing amux's hooks). Ordinary failures remain
+	// best-effort; destination containment/alias failures refuse launch.
+	if err := optionalPreparation("prepare "+h.Kind()+" launch", h.PrepareLaunch(root, s, dir)); err != nil {
+		return "", nil, nil, err
+	}
 
 	// Install amux's built-in skill library (the PR playbook, etc.) so it tracks
 	// the running binary. Where it goes is the harness's call — Claude reads
-	// .claude/skills, others .agents/skills. Best-effort: a failure just means the
-	// agent lacks the skills, never that it can't launch. The launch dir is normally
-	// the agent's own root dir (not a git repo); if resuming into a worktree, git-exclude
-	// the tree so it never dirties the repo.
+	// .claude/skills, others .agents/skills. Ordinary failures just mean the agent
+	// lacks the skills; unsafe destination failures refuse launch. The launch dir
+	// is normally the agent's own root dir. Legacy worktree cleanup remains an
+	// explicit migration concern rather than a launch-time host Git mutation.
 	skillsDir := h.SkillsDir(dir)
-	if err := skills.Install(skillsDir); err == nil && git.IsGitRepo(context.Background(), dir) {
-		if rel, err := filepath.Rel(dir, skillsDir); err == nil {
-			_ = git.Exclude(context.Background(), dir, rel+"/")
-		}
+	if err := optionalPreparation("prepare agent skills", skills.InstallRooted(root, skillsDir)); err != nil {
+		return "", nil, nil, err
 	}
 	argv, err = h.Argv(s.Model, plan.Extra...)
 	if err != nil {
@@ -520,34 +642,56 @@ func DeleteByID(ctx context.Context, id string) error {
 		if s.Role() == store.RoleRepo {
 			return fmt.Errorf("%q is repo %s's home session; it goes with the repo (amux repo rm %s)", id, s.Repo, s.Repo)
 		}
+		// Validate before touching members. A legacy coordinator shares its parent
+		// with member and unknown files; partial deletion would silently destroy
+		// exactly the state that explicit host recovery must preserve.
+		if err := validateContainerHome(s, store.CoordinatorDir(s.ID), "workgroup coordinator"); err != nil {
+			return fmt.Errorf("refusing to delete legacy workgroup: %w", err)
+		}
 		agents, _ := db.Children(id)
 		for _, a := range agents {
-			removeAgent(ctx, db, a)
+			if err := removeAgent(ctx, db, a); err != nil {
+				return err
+			}
 		}
-		// The coordinator's own files go; the container dir itself is removed only
-		// if that leaves it empty. A re-parented agent can still physically live
-		// under this root's tree (move is DB-only), so we must never blow the whole
-		// tree away.
-		removeContainerFiles(db, s)
+		// Remove exactly the dedicated coordinator own directory. A re-parented
+		// agent can still physically live under this root's parent (move is DB-only),
+		// so the parent is never scanned or recursively removed.
+		if err := removeContainerFiles(db, s); err != nil {
+			return err
+		}
 		return db.DeleteSession(id)
 	}
-	removeAgent(ctx, db, s)
-	return nil
+	return removeAgent(ctx, db, s)
 }
 
-func removeAgent(ctx context.Context, db *store.DB, a store.Session) {
+func removeAgent(ctx context.Context, db *store.DB, a store.Session) error {
+	managedRoot, err := sessionStorageRoot(a.Dir)
+	if err != nil {
+		return err
+	}
 	for _, repoName := range store.SplitRepos(a.Repo) {
-		if repo, ok, _ := db.Repo(repoName); ok {
-			wt := filepath.Join(a.Dir, repoName)
-			_ = git.RemoveWorktree(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt))
+		repo, ok, repoErr := db.Repo(repoName)
+		if repoErr != nil {
+			return repoErr
+		}
+		if !ok {
+			return fmt.Errorf("cannot remove agent %s: tracked repository %q is missing", a.ID, repoName)
+		}
+		wt := filepath.Join(a.Dir, repoName)
+		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, agentBranch(ctx, a, wt), managedRoot,
+			gitStagingDir(), gitLayoutPath(a.ID, repoName)); err != nil {
+			return fmt.Errorf("remove repo %q for agent %s: %w", repoName, a.ID, err)
 		}
 	}
 	// The private config home goes with the dir; drop its seed manifest too.
 	if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
 		cfghome.Forget(spec)
 	}
-	_ = os.RemoveAll(a.Dir)
-	_ = db.DeleteSession(a.ID)
+	if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
+		return fmt.Errorf("remove agent directory %s: %w", a.ID, err)
+	}
+	return db.DeleteSession(a.ID)
 }
 
 // agentBranch is the branch to delete along with agent a's worktree at wt, or ""
@@ -563,10 +707,10 @@ func agentBranch(ctx context.Context, a store.Session, wt string) string {
 	if a.Branch != "" {
 		return a.Branch
 	}
-	b := git.CurrentBranch(ctx, wt)
-	if b == "" {
-		b = core.LegacyBranchFor(a.RootID)
-	}
+	// Do not ask Git: wt is writable by the session and its config can name
+	// external helpers. Blank Branch is the legacy import shape, whose branch
+	// naming convention is deterministic.
+	b := core.LegacyBranchFor(a.RootID)
 	if !strings.HasPrefix(b, core.BranchPrefix) {
 		return ""
 	}
@@ -624,6 +768,13 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		// adding/removing worktrees to match. This is the "pull a repo into scope"
 		// action.
 		return "", SetAgentRepos(ctx, a.ID, store.SplitRepos(a.Fields["repos"]))
+	case core.ActionCoordinatorSetRepos:
+		db, err := store.Open()
+		if err != nil {
+			return "", err
+		}
+		defer db.Close()
+		return "", db.SetCoordinatorRepoGrants(a.ID, store.SplitRepos(a.Fields["repos"]))
 	case core.ActionNewRepoAgent:
 		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Agent:  agentOf(a.Fields),
@@ -645,6 +796,10 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	case core.ActionNewWorkgroup:
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
 		repos := store.SplitRepos(a.Fields["repos"])
+		var grants *[]string
+		if _, explicit := a.Fields["repos"]; explicit {
+			grants = &repos
+		}
 		var def *AgentSpec
 		// The workgroup root is its default coordinator session, so the form's
 		// prompt and model configure that session directly. Repositories still
@@ -652,20 +807,25 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		if len(repos) > 0 {
 			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: prompt}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], prompt, def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], prompt, def, grants)
 	case core.ActionCreateWorkspace:
 		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
 		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
 		// with an explicit mode/model/prompt. When the interactive flow configures
 		// its own agents it passes defaultAgent="" and follows up with add-agent.
 		var def *AgentSpec
+		repos := store.SplitRepos(a.Fields["repos"])
+		var grants *[]string
+		if _, explicit := a.Fields["repos"]; explicit {
+			grants = &repos
+		}
 		if a.Fields["defaultAgent"] == "1" {
 			def = &AgentSpec{
-				Agent: agentOf(a.Fields), Repos: store.SplitRepos(a.Fields["repos"]),
+				Agent: agentOf(a.Fields), Repos: repos,
 				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
 			}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], "", def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], "", def, grants)
 	}
 	// A verb that reaches here is one no dispatch path claims. The CLI screens
 	// these before they leave the machine, so this is the answer for anything

@@ -1,12 +1,67 @@
 package runtimeevents
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"amux/internal/core"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
+
+// permissionOccurrenceTracker assigns a deterministic opaque item id to each
+// request occurrence and its matching resolution. A runtime may reuse a
+// request_id after restart, so request_id alone is not event provenance. The
+// tracker is replayed from the start after reconnect or rotation, keeping the
+// occurrence ids stable without trusting mutable journal fields as authority.
+type permissionOccurrenceTracker struct {
+	next map[string]int
+	open map[string][]string
+}
+
+func newPermissionOccurrenceTracker() *permissionOccurrenceTracker {
+	return &permissionOccurrenceTracker{next: make(map[string]int), open: make(map[string][]string)}
+}
+
+func (t *permissionOccurrenceTracker) decorate(events []harnessproto.RuntimeEvent) []harnessproto.RuntimeEvent {
+	for i := range events {
+		event := &events[i]
+		if event.Type != TypePermissionRequest && event.Type != TypePermissionResolved {
+			continue
+		}
+		var payload struct {
+			RequestID string `json:"request_id"`
+		}
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.RequestID == "" {
+			continue
+		}
+		switch event.Type {
+		case TypePermissionRequest:
+			t.next[payload.RequestID]++
+			occurrence := permissionOccurrenceID(payload.RequestID, t.next[payload.RequestID])
+			t.open[payload.RequestID] = append(t.open[payload.RequestID], occurrence)
+			event.ItemID = occurrence
+		case TypePermissionResolved:
+			open := t.open[payload.RequestID]
+			if len(open) == 0 {
+				event.ItemID = ""
+				continue
+			}
+			event.ItemID = open[0]
+			if len(open) == 1 {
+				delete(t.open, payload.RequestID)
+			} else {
+				t.open[payload.RequestID] = open[1:]
+			}
+		}
+	}
+	return events
+}
+
+func permissionOccurrenceID(requestID string, occurrence int) string {
+	return "permission:" + strconv.Itoa(occurrence) + ":" + base64.RawURLEncoding.EncodeToString([]byte(requestID))
+}
 
 // permissions.go reads amux's own permission journal — the third record a
 // session's event stream is derived from, alongside the runtime's transcript.
@@ -34,7 +89,8 @@ func permissionMapper(runtime string) func() LineMapper {
 // MapPermissionLine decodes one line of a session's permission journal into the
 // event it stands for: a line that opens a request is a `permission_request`
 // carrying the id a `permission` verb quotes back, and one that closes it is a
-// `permission_resolved` retiring that id. Both coalesce on the request id.
+// `permission_resolved` retiring that id. The tailer replaces the mapper's
+// provisional request-id ItemID with a stable occurrence ItemID before publish.
 func MapPermissionLine(runtime string, line []byte) []harnessproto.RuntimeEvent {
 	if strings.TrimSpace(string(line)) == "" {
 		return nil
@@ -84,10 +140,11 @@ func permissionOptions(opts []string) []string {
 // Pending is the permission request a session currently has open: what the
 // runtime is blocked on, and the id that answers it.
 type Pending struct {
-	RequestID string
-	Tool      string
-	Action    string
-	Options   []string
+	RequestID  string
+	Occurrence string // event provenance only; never accepted as action authority
+	Tool       string
+	Action     string
+	Options    []string
 }
 
 // PendingPermission replays a session's record and returns the permission
@@ -118,12 +175,13 @@ func OpenPermissions(rec Record) []Pending {
 		return nil
 	}
 	var open []Pending
+	occurrences := newPermissionOccurrenceTracker()
 	for _, sp := range specs {
 		if !sp.permission || sp.path == "" {
 			continue
 		}
 		mapper := sp.newMapper()
-		for _, ev := range mapEachLine(sp.path, mapper) {
+		for _, ev := range occurrences.decorate(mapEachLine(sp.path, mapper)) {
 			switch ev.Type {
 			case TypePermissionRequest:
 				var body struct {
@@ -136,7 +194,7 @@ func OpenPermissions(rec Record) []Pending {
 					continue
 				}
 				open = append(open, Pending{
-					RequestID: body.RequestID, Tool: body.Tool,
+					RequestID: body.RequestID, Occurrence: ev.ItemID, Tool: body.Tool,
 					Action: body.Action, Options: body.Options,
 				})
 			case TypePermissionResolved:
@@ -147,7 +205,7 @@ func OpenPermissions(rec Record) []Pending {
 					continue
 				}
 				for i, o := range open {
-					if o.RequestID == body.RequestID {
+					if o.Occurrence == ev.ItemID {
 						open = append(open[:i], open[i+1:]...)
 						break
 					}

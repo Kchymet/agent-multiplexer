@@ -10,7 +10,8 @@ import (
 // into a standalone package in a different home subtree (codex:
 // ~/.local/bin/codex → ~/.codex/packages/standalone/<ver>/bin/codex) resolves to
 // the real binary and the package install root to bind — narrowly, never the whole
-// ~/.codex — while a plain binary and a same-subtree symlink are left alone.
+// ~/.codex — while a plain binary is left alone and a same-subtree symlink gets
+// only its resolved file/package, never the broad top-level runtime subtree.
 func TestResolvedInstallRoot(t *testing.T) {
 	home := t.TempDir()
 
@@ -57,7 +58,8 @@ func TestResolvedInstallRoot(t *testing.T) {
 		t.Errorf("plain binary should need no extra bind, got real=%q root=%q", r, root)
 	}
 
-	// A SAME-subtree symlink (already covered by the homeSubtree bind) → no extra bind.
+	// A same-subtree symlink is not covered by a broad home bind: mount only the
+	// resolved file. This prevents ~/.local or ~/.nvm from becoming a data alias.
 	sameTarget := filepath.Join(home, ".nvm", "versions", "codex")
 	if err := os.MkdirAll(filepath.Dir(sameTarget), 0o755); err != nil {
 		t.Fatal(err)
@@ -69,8 +71,8 @@ func TestResolvedInstallRoot(t *testing.T) {
 	if err := os.Symlink(sameTarget, sameLink); err != nil {
 		t.Fatal(err)
 	}
-	if _, root := resolvedInstallRoot(home, sameLink); root != "" {
-		t.Errorf("same-subtree symlink should need no extra bind, got root=%q", root)
+	if real, root := resolvedInstallRoot(home, sameLink); real != sameTarget || root != sameTarget {
+		t.Errorf("same-subtree symlink = (%q, %q), want exact target %q", real, root, sameTarget)
 	}
 }
 

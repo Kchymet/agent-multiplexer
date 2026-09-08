@@ -113,6 +113,42 @@ func TestDeniedRestartDoesNotSignalPidfileProcess(t *testing.T) {
 	}
 }
 
+func TestAbsentDaemonStopDoesNotSignalStalePidfileProcess(t *testing.T) {
+	sandboxCLI(t)
+	stubStartupDial(t, syscall.ENOENT)
+	if err := os.MkdirAll(core.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	child := exec.Command("/bin/sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = child.Process.Kill()
+		<-exited
+	})
+	if err := os.WriteFile(core.PidPath(), []byte(strconv.Itoa(child.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := daemonStop(false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case waitErr := <-exited:
+		reaped = true
+		t.Fatalf("absent-daemon stop signaled stale pidfile process: %v", waitErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestDaemonStartupRejectsUnexpectedConnectionErrorWithoutExec(t *testing.T) {
 	sandboxCLI(t)
 	errRejected := errors.New("daemon credential rejected")

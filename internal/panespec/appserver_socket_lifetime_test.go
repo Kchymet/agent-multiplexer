@@ -24,6 +24,7 @@ func TestAppServerCommandPreservesLiveSocket(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
+	useFakeSecureBwrap(t)
 	dir := filepath.Join(home, "work")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -32,13 +33,15 @@ func TestAppServerCommandPreservesLiveSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PutSession(store.Session{ID: "socket-owner", Agent: "codex", Dir: dir}); err != nil {
+	s := store.Session{ID: "socket-owner", Agent: "codex", Dir: dir}
+	if err := db.PutSession(s); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, endpoint, err := AppServerCommand("socket-owner")
+	spec := testLaunchSpec(t, s)
+	_, _, _, endpoint, err := AppServerCommand(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +65,7 @@ func TestAppServerCommandPreservesLiveSocket(t *testing.T) {
 		accepted.Close()
 	}
 	assertConnectable()
-	_, _, _, again, err := AppServerCommand("socket-owner")
+	_, _, _, again, err := AppServerCommand(spec)
 	if err != nil {
 		t.Fatal(err)
 	}

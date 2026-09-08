@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/codexapp"
 	"amux/internal/panespec"
 	"amux/internal/store"
@@ -62,7 +63,8 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 	}
 	_ = db.Close()
 
-	dir, env, argv, endpoint, err := panespec.AppServerCommand("sbx")
+	spec := sandboxLaunchSpec(t, store.Session{ID: "sbx", Agent: "codex", Dir: wt})
+	dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
 	if err != nil {
 		t.Fatalf("AppServerCommand: %v", err)
 	}
@@ -230,7 +232,8 @@ func TestSandboxedSymlinkedCodexLaunch(t *testing.T) {
 	}
 	_ = db.Close()
 
-	dir, env, argv, endpoint, err := panespec.AppServerCommand("sym")
+	spec := sandboxLaunchSpec(t, store.Session{ID: "sym", Agent: "codex", Dir: wt})
+	dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
 	if err != nil {
 		t.Fatalf("AppServerCommand: %v", err)
 	}
@@ -300,4 +303,18 @@ func TestSandboxedSymlinkedCodexLaunch(t *testing.T) {
 		t.Fatal("no thread id: symlinked-standalone codex did not initialize in-scope")
 	}
 	t.Logf("symlinked-standalone codex launched in-scope via resolved-target bind; thread id = %s", sup.ThreadID())
+}
+
+func sandboxLaunchSpec(t *testing.T, session store.Session) panespec.LaunchSpec {
+	t.Helper()
+	authority, err := access.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	grant, err := authority.EnsureSession(context.Background(), session.ID, session.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return panespec.LaunchSpec{Session: session, Access: grant}
 }
