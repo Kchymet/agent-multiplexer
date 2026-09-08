@@ -74,6 +74,12 @@ func TestClosedAuthorityRejectsSigningWatchingAndAuthentication(t *testing.T) {
 		{"current", func() error { _, err := a.Current(context.Background(), SubjectSession, "a1"); return err }()},
 		{"ensure", func() error { _, err := a.Ensure(context.Background(), SubjectSession, "a1"); return err }()},
 		{"rotate", func() error { _, err := a.Rotate(context.Background(), SubjectSession, "a1"); return err }()},
+		{"last revoked", func() error { _, err := a.LastRevoked(context.Background(), SubjectSession, "a1"); return err }()},
+		{"regrant", func() error {
+			_, err := a.Regrant(context.Background(), SubjectSession, "a1", credential.Generation)
+			return err
+		}()},
+		{"revoke current", a.RevokeCurrent(context.Background(), principal)},
 	}
 	for _, check := range checks {
 		if !errors.Is(check.err, ErrAuthorityClosed) {
@@ -305,6 +311,153 @@ func TestRevokedOrExpiredCredentialCannotBeImplicitlyReissued(t *testing.T) {
 	}
 	if got := len(a.registry.Records); got != 2 {
 		t.Fatalf("expired attempts changed record count to %d", got)
+	}
+}
+
+func TestExplicitRegrantRequiresLatestRevokedGeneration(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	root := t.TempDir()
+	a, err := open(root, func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPrincipal := Principal{KeyID: first.KeyID, SubjectID: first.SubjectID, Kind: first.Kind, Generation: first.Generation}
+	if _, err := a.LastRevoked(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("active LastRevoked error = %v", err)
+	}
+	if _, err := a.Regrant(context.Background(), SubjectSession, "a1", first.Generation); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("active Regrant error = %v", err)
+	}
+	if err := a.RevokeCurrent(context.Background(), firstPrincipal); err != nil {
+		t.Fatalf("revoke exact generation: %v", err)
+	}
+	revoked, err := a.LastRevoked(context.Background(), SubjectSession, "a1")
+	if err != nil || revoked.KeyID != first.KeyID || revoked.Generation != first.Generation || revoked.RevokedAt == 0 {
+		t.Fatalf("last revoked = %+v, err=%v", revoked, err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err = open(root, func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	revoked, err = a.LastRevoked(context.Background(), SubjectSession, "a1")
+	if err != nil || revoked.Generation != first.Generation {
+		t.Fatalf("reopened last revoked = %+v, err=%v", revoked, err)
+	}
+	for _, generation := range []uint64{0, first.Generation + 1} {
+		if _, err := a.Regrant(context.Background(), SubjectSession, "a1", generation); !errors.Is(err, ErrGenerationChanged) {
+			t.Errorf("Regrant generation %d error = %v", generation, err)
+		}
+	}
+	if _, err := a.Regrant(context.Background(), SubjectSession, "a1", first.Generation); err != nil {
+		t.Fatalf("explicit Regrant: %v", err)
+	}
+	second, err := LoadCredential(dir)
+	if err != nil || second.Generation != first.Generation+1 || second.KeyID == first.KeyID {
+		t.Fatalf("regranted credential = %+v, err=%v", second, err)
+	}
+	secondPrincipal := Principal{KeyID: second.KeyID, SubjectID: second.SubjectID, Kind: second.Kind, Generation: second.Generation}
+	if err := a.RevokeCurrent(context.Background(), firstPrincipal); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("stale completion revoke error = %v", err)
+	}
+	if err := a.Valid(context.Background(), secondPrincipal); err != nil {
+		t.Fatalf("stale completion revoked replacement: %v", err)
+	}
+	if err := a.RevokeCurrent(context.Background(), secondPrincipal); err != nil {
+		t.Fatalf("revoke regranted generation: %v", err)
+	}
+	latest, err := a.LastRevoked(context.Background(), SubjectSession, "a1")
+	if err != nil || latest.Generation != second.Generation {
+		t.Fatalf("latest revoked = %+v, err=%v", latest, err)
+	}
+}
+
+func TestRegrantUncertainCommitRecoversOnlyCommittedGeneration(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, err := open(t.TempDir(), func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := LoadCredential(dir)
+	if err := a.Revoke(context.Background(), SubjectSession, "a1"); err != nil {
+		t.Fatal(err)
+	}
+	realCommit := a.commit
+	a.commit = func(path string, value any, mode os.FileMode) (bool, error) {
+		committed, commitErr := realCommit(path, value, mode)
+		if commitErr != nil {
+			return committed, commitErr
+		}
+		return true, errors.New("injected post-commit failure")
+	}
+	if _, err := a.Regrant(context.Background(), SubjectSession, "a1", first.Generation); err == nil {
+		t.Fatal("uncertain Regrant unexpectedly succeeded")
+	}
+	a.commit = realCommit
+	if _, err := a.Regrant(context.Background(), SubjectSession, "a1", first.Generation); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("retry crossed committed generation: %v", err)
+	}
+	current, err := a.Current(context.Background(), SubjectSession, "a1")
+	if err != nil || current.Generation != first.Generation+1 {
+		t.Fatalf("recover committed regrant = %+v, err=%v", current, err)
+	}
+	if got := len(a.registry.Records); got != 2 {
+		t.Fatalf("uncertain regrant created %d records, want 2", got)
+	}
+}
+
+func TestRegrantDoesNotRecoverUncommittedPublication(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, err := open(t.TempDir(), func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	dir, err := a.Ensure(context.Background(), SubjectSession, "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := LoadCredential(dir)
+	if err := a.Revoke(context.Background(), SubjectSession, "a1"); err != nil {
+		t.Fatal(err)
+	}
+	realCommit := a.commit
+	a.commit = func(string, any, os.FileMode) (bool, error) {
+		return false, errors.New("injected pre-commit failure")
+	}
+	if _, err := a.Regrant(context.Background(), SubjectSession, "a1", first.Generation); err == nil {
+		t.Fatal("uncommitted Regrant unexpectedly succeeded")
+	}
+	a.commit = realCommit
+	if _, err := a.Current(context.Background(), SubjectSession, "a1"); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("uncommitted generation became current: %v", err)
+	}
+	if got := len(a.registry.Records); got != 1 {
+		t.Fatalf("uncommitted regrant changed record count to %d", got)
+	}
+	if _, err := a.Regrant(context.Background(), SubjectSession, "a1", first.Generation); err != nil {
+		t.Fatalf("retry after definite pre-commit failure: %v", err)
+	}
+	current, err := a.Current(context.Background(), SubjectSession, "a1")
+	if err != nil || current.Generation != first.Generation+1 {
+		t.Fatalf("committed retry current = %+v, err=%v", current, err)
 	}
 }
 

@@ -56,6 +56,7 @@ var (
 	ErrAuthorityInUse    = errors.New("access authority already open")
 	ErrAuthorityClosed   = errors.New("access authority is closed")
 	ErrNotProvisioned    = errors.New("credential not provisioned")
+	ErrGenerationChanged = errors.New("credential generation changed")
 )
 
 // CredentialRecord is the daemon-owned public half of an issued credential.
@@ -354,7 +355,7 @@ func (a *FileAuthority) ensureLocked(kind SubjectKind, subjectID string) (string
 		if a.subjectWasIssuedLocked(kind, subjectID) {
 			return "", ErrRevoked
 		}
-		return a.issueLocked(kind, subjectID)
+		return a.issueLocked(kind, subjectID, "")
 	}
 	if _, err := a.currentRecordLocked(kind, subjectID); err != nil {
 		return "", err
@@ -389,6 +390,62 @@ func (a *FileAuthority) Current(_ context.Context, kind SubjectKind, subjectID s
 	return rec, nil
 }
 
+// LastRevoked returns the authoritative latest revoked generation for an
+// explicitly authorized restore transition. It neither publishes nor issues a
+// credential. Callers pass its Generation to Regrant after committing the
+// corresponding unarchive and quiescing stale completion ownership.
+func (a *FileAuthority) LastRevoked(_ context.Context, kind SubjectKind, subjectID string) (CredentialRecord, error) {
+	if err := validateSubject(kind, subjectID); err != nil {
+		return CredentialRecord{}, err
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.rootDir == nil {
+		return CredentialRecord{}, ErrAuthorityClosed
+	}
+	if a.registry.Current[currentKey(kind, subjectID)] != "" {
+		return CredentialRecord{}, ErrGenerationChanged
+	}
+	rec, err := a.lastRecordLocked(kind, subjectID)
+	if err != nil {
+		return CredentialRecord{}, err
+	}
+	if rec.RevokedAt == 0 {
+		return CredentialRecord{}, ErrInvalidCredential
+	}
+	return rec, nil
+}
+
+// Regrant explicitly restores a revoked subject at the generation immediately
+// following expectedRevokedGeneration. It is not an automatic renewal API:
+// callers must first authorize and commit unarchive in daemon-owned state and
+// invalidate stale completion ownership. A current, missing, non-latest, or
+// differently generated predecessor fails closed.
+func (a *FileAuthority) Regrant(_ context.Context, kind SubjectKind, subjectID string, expectedRevokedGeneration uint64) (string, error) {
+	if err := validateSubject(kind, subjectID); err != nil {
+		return "", err
+	}
+	if expectedRevokedGeneration == 0 {
+		return "", ErrGenerationChanged
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return "", ErrAuthorityClosed
+	}
+	if a.registry.Current[currentKey(kind, subjectID)] != "" {
+		return "", ErrGenerationChanged
+	}
+	rec, err := a.lastRecordLocked(kind, subjectID)
+	if err != nil {
+		return "", err
+	}
+	if rec.RevokedAt == 0 || rec.Generation != expectedRevokedGeneration {
+		return "", ErrGenerationChanged
+	}
+	return a.issueLocked(kind, subjectID, rec.KeyID)
+}
+
 func (a *FileAuthority) currentRecordLocked(kind SubjectKind, subjectID string) (CredentialRecord, error) {
 	keyID := a.registry.Current[currentKey(kind, subjectID)]
 	if keyID == "" {
@@ -419,6 +476,31 @@ func (a *FileAuthority) subjectWasIssuedLocked(kind SubjectKind, subjectID strin
 	return false
 }
 
+func (a *FileAuthority) lastRecordLocked(kind SubjectKind, subjectID string) (CredentialRecord, error) {
+	var last CredentialRecord
+	found := false
+	for keyID, rec := range a.registry.Records {
+		if rec.Kind != kind || rec.SubjectID != subjectID {
+			continue
+		}
+		if rec.KeyID != keyID {
+			return CredentialRecord{}, ErrInvalidCredential
+		}
+		if !found || rec.Generation > last.Generation {
+			last = rec
+			found = true
+			continue
+		}
+		if rec.Generation == last.Generation && rec.KeyID != last.KeyID {
+			return CredentialRecord{}, ErrInvalidCredential
+		}
+	}
+	if !found {
+		return CredentialRecord{}, ErrNotProvisioned
+	}
+	return last, nil
+}
+
 // Rotate invalidates the current generation before publishing a replacement.
 // A failure during publication is fail-closed: the old key remains revoked.
 func (a *FileAuthority) Rotate(_ context.Context, kind SubjectKind, subjectID string) (string, error) {
@@ -430,25 +512,32 @@ func (a *FileAuthority) Rotate(_ context.Context, kind SubjectKind, subjectID st
 	if a.rootDir == nil {
 		return "", ErrAuthorityClosed
 	}
-	if _, err := a.currentRecordLocked(kind, subjectID); err != nil {
+	rec, err := a.currentRecordLocked(kind, subjectID)
+	if err != nil {
 		return "", err
 	}
-	return a.issueLocked(kind, subjectID)
+	return a.issueLocked(kind, subjectID, rec.KeyID)
 }
 
-func (a *FileAuthority) issueLocked(kind SubjectKind, subjectID string) (string, error) {
+func (a *FileAuthority) issueLocked(kind SubjectKind, subjectID, oldKeyID string) (string, error) {
 	now := a.now()
 	current := currentKey(kind, subjectID)
 	nextRegistry := cloneRegistry(a.registry)
-	oldKeyID := nextRegistry.Current[current]
+	currentKeyID := nextRegistry.Current[current]
+	if (oldKeyID == "" && currentKeyID != "") ||
+		(oldKeyID != "" && currentKeyID != "" && currentKeyID != oldKeyID) {
+		return "", ErrGenerationChanged
+	}
 	generation := uint64(1)
 	if oldID := oldKeyID; oldID != "" {
-		if old, ok := nextRegistry.Records[oldID]; ok {
-			generation = old.Generation + 1
-			if old.RevokedAt == 0 {
-				old.RevokedAt = now.UnixMilli()
-				nextRegistry.Records[oldID] = old
-			}
+		old, ok := nextRegistry.Records[oldID]
+		if !ok || old.Kind != kind || old.SubjectID != subjectID || old.Generation == ^uint64(0) {
+			return "", ErrInvalidCredential
+		}
+		generation = old.Generation + 1
+		if old.RevokedAt == 0 {
+			old.RevokedAt = now.UnixMilli()
+			nextRegistry.Records[oldID] = old
 		}
 	}
 	pub, priv, err := ed25519.GenerateKey(a.rand)
@@ -625,18 +714,57 @@ func validateDaemonTLS(identity daemonTLSCredential) error {
 }
 
 func (a *FileAuthority) Revoke(_ context.Context, kind SubjectKind, subjectID string) error {
+	if err := validateSubject(kind, subjectID); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.rootDir == nil {
 		return ErrAuthorityClosed
 	}
+	return a.revokeLocked(kind, subjectID, "")
+}
+
+// RevokeCurrent revokes only the exact principal generation supplied by its
+// caller. Delayed completion cleanup uses this after proving that it still owns
+// the corresponding runtime incarnation; it can never revoke a later regrant.
+func (a *FileAuthority) RevokeCurrent(_ context.Context, principal Principal) error {
+	if err := validateSubject(principal.Kind, principal.SubjectID); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return ErrAuthorityClosed
+	}
+	keyID := a.registry.Current[currentKey(principal.Kind, principal.SubjectID)]
+	if keyID == "" || keyID != principal.KeyID {
+		return ErrGenerationChanged
+	}
+	rec, ok := a.registry.Records[keyID]
+	if !ok || rec.Generation != principal.Generation || rec.Kind != principal.Kind || rec.SubjectID != principal.SubjectID {
+		return ErrGenerationChanged
+	}
+	return a.revokeLocked(principal.Kind, principal.SubjectID, keyID)
+}
+
+func (a *FileAuthority) revokeLocked(kind SubjectKind, subjectID, expectedKeyID string) error {
 	key := currentKey(kind, subjectID)
 	keyID := a.registry.Current[key]
 	if keyID == "" {
+		if expectedKeyID != "" {
+			return ErrGenerationChanged
+		}
 		return nil
 	}
+	if expectedKeyID != "" && keyID != expectedKeyID {
+		return ErrGenerationChanged
+	}
 	next := cloneRegistry(a.registry)
-	rec := next.Records[keyID]
+	rec, ok := next.Records[keyID]
+	if !ok || rec.Kind != kind || rec.SubjectID != subjectID {
+		return ErrInvalidCredential
+	}
 	if rec.RevokedAt == 0 {
 		rec.RevokedAt = a.now().UnixMilli()
 		next.Records[keyID] = rec
