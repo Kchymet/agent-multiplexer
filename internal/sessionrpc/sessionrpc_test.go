@@ -344,7 +344,9 @@ func (b *testResponseBudget) ReserveResponse(_ context.Context, request Response
 		}
 		return nil, ErrResponseCapacity
 	}
-	if b.active >= b.limit {
+	// Existing reservations adopt durable disk reality even when it already
+	// exceeds today's admission limit. Only new amplification is rejected.
+	if b.active >= b.limit && !request.Existing {
 		return nil, ErrResponseCapacity
 	}
 	b.active++
@@ -598,6 +600,117 @@ func TestAggregateResponseBudgetAdmitsBeforeDispatchAndReleasesOnRemoval(t *test
 	}
 }
 
+func TestRestartBudgetScrubsResponseTemporaryBeforeAdoption(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	var dispatched atomic.Int32
+	callbacks := Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error { return nil },
+		Dispatch:  countDispatch(&dispatched),
+	}
+	f := newFixture(t, callbacks, ServerOptions{ResponseBudget: budget})
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot",
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = nil
+
+	temporary := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, ".tmp-"+strings.Repeat("a", 32))
+	if err := os.WriteFile(temporary, []byte("crash-left"), regularFileMode); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, f.auth, f.auth,
+		callbacks, ServerOptions{ResponseBudget: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server = reopened
+	if _, err := reopened.ServeOnce(context.Background()); err != nil {
+		t.Fatalf("restart adoption after response temporary: %v", err)
+	}
+	if _, err := os.Stat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crash-left response temporary remains: %v", err)
+	}
+	if active, commits, releases := budget.counts(); active != 1 || commits != 1 || releases != 0 {
+		t.Fatalf("retained response accounting active=%d commits=%d releases=%d", active, commits, releases)
+	}
+}
+
+func TestRestartCleanupAndAdoptionProgressBeyondOneChunk(t *testing.T) {
+	clock := newTestClock(time.Now())
+	f := newFixture(t, Callbacks{}, ServerOptions{Clock: clock.Now})
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = nil
+	responseDir := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName)
+	old := clock.Now().Add(-time.Duration(access.MaxResponseAge+1) * time.Second)
+	for index := 0; index < MaxResponseFiles+1; index++ {
+		name := fmt.Sprintf("%032x.res", index+1)
+		path := filepath.Join(responseDir, name)
+		if err := os.WriteFile(path, []byte("{}"), regularFileMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 2*MaxQueuedRequests+1; index++ {
+		name := fmt.Sprintf(".tmp-%032x", index+MaxResponseFiles+2)
+		if err := os.WriteFile(filepath.Join(responseDir, name), []byte("crash-left"), regularFileMode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	budget := &testResponseBudget{limit: 1}
+	reopened, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, f.auth, f.auth, Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error { return nil },
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK}, nil
+		},
+	}, ServerOptions{Clock: clock.Now, ResponseBudget: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server = reopened
+	previous := 3*MaxQueuedRequests + 2
+	madeProgress := false
+	for attempt := 0; attempt < 32; attempt++ {
+		_, serveErr := reopened.ServeOnce(context.Background())
+		entries, readErr := os.ReadDir(responseDir)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if len(entries) > previous {
+			t.Fatalf("startup cleanup grew: before=%d after=%d err=%v", previous, len(entries), serveErr)
+		}
+		if len(entries) < previous {
+			madeProgress = true
+		}
+		previous = len(entries)
+		if serveErr == nil {
+			break
+		}
+		if !errors.Is(serveErr, ErrResponseCapacity) {
+			t.Fatalf("startup cleanup error: %v", serveErr)
+		}
+	}
+	if previous != 0 {
+		t.Fatalf("startup cleanup left %d response artifacts", previous)
+	}
+	if !madeProgress {
+		t.Fatal("startup cleanup never advanced beyond its first bounded scan")
+	}
+	if active, commits, releases := budget.counts(); active != 0 || commits != MaxResponseFiles+1 || releases != MaxResponseFiles+1 {
+		t.Fatalf("over-capacity adoption accounting active=%d commits=%d releases=%d", active, commits, releases)
+	}
+}
+
 func TestAggregateReceiptLeaseReleasedOnSettlement(t *testing.T) {
 	budget := &testResponseBudget{limit: 4}
 	clock := newTestClock(time.Now())
@@ -821,10 +934,13 @@ func TestReceiptDeadlineAtAcceptanceAndIndependentSettlement(t *testing.T) {
 
 func TestStrictJSONRejectsUnknownDuplicateAndTrailingInput(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"unknown":   []byte(`{"kind":"call","route":"query","verb":"snapshot","unknown":true}`),
-		"duplicate": []byte(`{"kind":"call","route":"query","verb":"first","verb":"last"}`),
-		"nested":    []byte(`{"kind":"call","route":"query","verb":"snapshot","fields":{"x":"first","x":"last"}}`),
-		"trailing":  []byte(`{"kind":"call","route":"query","verb":"snapshot"} {}`),
+		"unknown":                  []byte(`{"kind":"call","route":"query","verb":"snapshot","unknown":true}`),
+		"duplicate":                []byte(`{"kind":"call","route":"query","verb":"first","verb":"last"}`),
+		"case_folded_duplicate":    []byte(`{"kind":"receipt","Kind":"call","route":"query","verb":"snapshot"}`),
+		"case_folded_alias":        []byte(`{"Kind":"call","route":"query","verb":"snapshot"}`),
+		"nested_duplicate":         []byte(`{"kind":"call","route":"query","verb":"snapshot","fields":{"x":"first","x":"last"}}`),
+		"nested_case_folded_alias": []byte(`{"kind":"receipt","receipt":{"RequestID":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","responseDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`),
+		"trailing":                 []byte(`{"kind":"call","route":"query","verb":"snapshot"} {}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			var call Call
@@ -844,6 +960,42 @@ func TestStrictJSONRejectsUnknownDuplicateAndTrailingInput(t *testing.T) {
 			response := readTestResponse(t, f.grant.MailboxHostDir, envelope.RequestID)
 			if response.Status != StatusInvalid || response.Code != "invalid_call" {
 				t.Fatalf("strictly invalid response = %+v", response)
+			}
+		})
+	}
+}
+
+func TestStrictJSONAllowsArbitraryCaseSensitiveFieldMapKeys(t *testing.T) {
+	var call Call
+	body := []byte(`{"kind":"call","route":"query","verb":"snapshot","fields":{"UserKey":"value"}}`)
+	if err := unmarshalBounded(body, access.MaxBodyBytes, &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.Fields["UserKey"] != "value" {
+		t.Fatalf("field map = %#v", call.Fields)
+	}
+}
+
+func TestStrictJSONRequiresCanonicalNamesAcrossWireRecords(t *testing.T) {
+	tests := []struct {
+		name      string
+		canonical []byte
+		alias     []byte
+		value     func() any
+	}{
+		{"context", []byte(`{"subjectId":"subject-a"}`), []byte(`{"SubjectID":"subject-a"}`), func() any { return new(SessionContext) }},
+		{"credential", []byte(`{"keyId":"aa"}`), []byte(`{"KeyID":"aa"}`), func() any { return new(access.Credential) }},
+		{"service", []byte(`{"bootId":"aa"}`), []byte(`{"BootID":"aa"}`), func() any { return new(Service) }},
+		{"request", []byte(`{"requestId":"aa"}`), []byte(`{"RequestID":"aa"}`), func() any { return new(access.SignedRequest) }},
+		{"response", []byte(`{"completedAt":1}`), []byte(`{"CompletedAt":1}`), func() any { return new(Response) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := unmarshalBounded(test.canonical, maxEnvelopeFileBytes, test.value()); err != nil {
+				t.Fatalf("canonical field rejected: %v", err)
+			}
+			if err := unmarshalBounded(test.alias, maxEnvelopeFileBytes, test.value()); !errors.Is(err, ErrInvalidRecord) {
+				t.Fatalf("case-folded alias error = %v", err)
 			}
 		})
 	}

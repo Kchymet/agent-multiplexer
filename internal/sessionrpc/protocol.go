@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"amux/internal/access"
@@ -242,7 +244,10 @@ const (
 )
 
 type ReceiptHooks struct {
-	Grace             time.Duration
+	Grace time.Duration
+	// ResponsePersisted and Settled are synchronous ordering boundaries. Trusted
+	// daemon integration must make them bounded, nonblocking, and non-panicking;
+	// the transport does not detach lifecycle completion from these callbacks.
 	ResponsePersisted func(PersistedResponse)
 	// Settled is required when ReceiptHooks is returned. It runs exactly once,
 	// including when signing or durable response publication fails after the
@@ -263,7 +268,9 @@ type DispatchResult struct {
 // committed after durable publication and released only after the corresponding
 // response file is removed. ReserveResponse must serialize admission across
 // subjects and idempotently return the existing lease when Existing is true.
-// All lease methods must be idempotent.
+// Existing adopts disk reality and must succeed even when retained files exceed
+// the current admission limit; new amplification stays blocked until cleanup
+// releases enough leases. All lease methods must be idempotent.
 type ResponseBudget interface {
 	ReserveResponse(context.Context, ResponseReservation) (ResponseLease, error)
 }
@@ -283,6 +290,9 @@ type ResponseLease interface {
 }
 
 type Callbacks struct {
+	// All callbacks are trusted synchronous boundaries. Implementations must
+	// honor context cancellation, remain bounded and nonblocking, and not panic.
+	// The package serializes calls per subject but does not isolate daemon code.
 	Authorize func(context.Context, access.Principal, Call) error
 	// Dispatch is the execution boundary. Integration must compare the
 	// authenticated Principal.Generation with current authority and policy under
@@ -457,7 +467,11 @@ func unmarshalBounded(data []byte, max int, out any) error {
 	if len(data) == 0 || len(data) > max {
 		return ErrInvalidRecord
 	}
-	if err := rejectDuplicateOrTrailingJSON(data); err != nil {
+	target := reflect.TypeOf(out)
+	if target == nil || target.Kind() != reflect.Pointer || target.Elem().Kind() != reflect.Struct {
+		return ErrInvalidRecord
+	}
+	if err := rejectNoncanonicalJSON(data, target.Elem()); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -468,10 +482,10 @@ func unmarshalBounded(data []byte, max int, out any) error {
 	return nil
 }
 
-func rejectDuplicateOrTrailingJSON(data []byte) error {
+func rejectNoncanonicalJSON(data []byte, target reflect.Type) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	if err := consumeStrictJSONValue(decoder); err != nil {
+	if err := consumeStrictJSONValue(decoder, target); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -483,7 +497,7 @@ func rejectDuplicateOrTrailingJSON(data []byte) error {
 	return nil
 }
 
-func consumeStrictJSONValue(decoder *json.Decoder) error {
+func consumeStrictJSONValue(decoder *json.Decoder, target reflect.Type) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -494,6 +508,7 @@ func consumeStrictJSONValue(decoder *json.Decoder) error {
 	}
 	switch delim {
 	case '{':
+		fields, mapValue, arbitrary := canonicalObjectFields(target)
 		keys := make(map[string]struct{})
 		for decoder.More() {
 			keyToken, err := decoder.Token()
@@ -508,7 +523,15 @@ func consumeStrictJSONValue(decoder *json.Decoder) error {
 				return fmt.Errorf("duplicate JSON object key %q", key)
 			}
 			keys[key] = struct{}{}
-			if err := consumeStrictJSONValue(decoder); err != nil {
+			fieldTarget := mapValue
+			if !arbitrary {
+				var found bool
+				fieldTarget, found = fields[key]
+				if !found {
+					return fmt.Errorf("noncanonical JSON object key %q", key)
+				}
+			}
+			if err := consumeStrictJSONValue(decoder, fieldTarget); err != nil {
 				return err
 			}
 		}
@@ -517,8 +540,9 @@ func consumeStrictJSONValue(decoder *json.Decoder) error {
 			return errors.New("unterminated JSON object")
 		}
 	case '[':
+		element := canonicalElementType(target)
 		for decoder.More() {
-			if err := consumeStrictJSONValue(decoder); err != nil {
+			if err := consumeStrictJSONValue(decoder, element); err != nil {
 				return err
 			}
 		}
@@ -530,4 +554,54 @@ func consumeStrictJSONValue(decoder *json.Decoder) error {
 		return errors.New("unexpected closing JSON delimiter")
 	}
 	return nil
+}
+
+// canonicalObjectFields returns the exact JSON spellings accepted for a wire
+// struct. Maps intentionally retain arbitrary string keys (for Call.Fields),
+// while their values are still recursively checked for duplicate structure.
+func canonicalObjectFields(target reflect.Type) (map[string]reflect.Type, reflect.Type, bool) {
+	target = indirectType(target)
+	if target == nil || target.Kind() == reflect.Interface {
+		return nil, nil, true
+	}
+	if target.Kind() == reflect.Map && target.Key().Kind() == reflect.String {
+		return nil, target.Elem(), true
+	}
+	fields := make(map[string]reflect.Type)
+	if target.Kind() != reflect.Struct {
+		return fields, nil, false
+	}
+	for index := 0; index < target.NumField(); index++ {
+		field := target.Field(index)
+		if !field.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields, nil, false
+}
+
+func canonicalElementType(target reflect.Type) reflect.Type {
+	target = indirectType(target)
+	if target == nil || target.Kind() == reflect.Interface {
+		return nil
+	}
+	if target.Kind() == reflect.Array || target.Kind() == reflect.Slice {
+		return target.Elem()
+	}
+	return nil
+}
+
+func indirectType(target reflect.Type) reflect.Type {
+	for target != nil && target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	return target
 }

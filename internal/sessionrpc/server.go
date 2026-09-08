@@ -75,7 +75,9 @@ type Server struct {
 	settlementStop            chan struct{}
 	settlementDone            chan struct{}
 	settlementStopOnce        sync.Once
+	responseScrubComplete     bool
 	responseBudgetInitialized bool
+	responseAdoptionSeen      map[string]struct{}
 	budgetMu                  sync.Mutex
 	responseLeases            map[string]ResponseLease
 }
@@ -680,7 +682,7 @@ func (s *Server) runSettlement() {
 }
 
 func (s *Server) cleanupResponses() error {
-	names, err := nextNames(s.responseCleanup, MaxQueuedRequests)
+	names, _, err := nextNames(s.responseCleanup, MaxQueuedRequests)
 	if err != nil {
 		return err
 	}
@@ -718,56 +720,136 @@ func (s *Server) initializeResponseBudget(ctx context.Context) error {
 		s.responseBudgetInitialized = true
 		return nil
 	}
-	names, more, err := listNames(s.responseUsage, MaxResponseFiles)
+	// A response publication crash can leave a temporary behind. Scrub only
+	// entries that cannot be committed response identities before adoption; a
+	// valid durable response is never removed until its budget lease is held.
+	if !s.responseScrubComplete {
+		complete, err := s.scrubResponseArtifacts()
+		if err != nil {
+			return err
+		}
+		if !complete {
+			return ErrResponseCapacity
+		}
+		s.responseScrubComplete = true
+	}
+
+	// Adoption advances in bounded chunks and gates all request dispatch until a
+	// complete directory pass has accounted every surviving response. Leases are
+	// retained across retryable budget failures, while a restarted pass skips
+	// identities already adopted by this server.
+	names, complete, err := nextNames(s.responseUsage, MaxResponseFiles)
 	if err != nil {
 		return err
 	}
-	if more {
-		return ErrResponseCapacity
-	}
-	acquired := make(map[string]ResponseLease)
-	releaseAcquired := func() {
-		for _, lease := range acquired {
-			lease.Release()
-		}
+	if s.responseAdoptionSeen == nil {
+		s.responseAdoptionSeen = make(map[string]struct{})
 	}
 	for _, name := range names {
-		requestID, ok := requestIDFromResponseFile(name)
-		if !ok {
-			releaseAcquired()
-			return ErrResponseCapacity
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstatat(int(s.responses.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			if errors.Is(err, unix.ENOENT) {
-				continue
-			}
-			releaseAcquired()
+		requestID, size, safe, err := s.responseArtifact(name)
+		if err != nil {
 			return err
 		}
-		mode := uint32(stat.Mode)
-		if mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) ||
-			mode&0o7777 != regularFileMode || stat.Size <= 0 || stat.Size > int64(maxEnvelopeFileBytes) {
-			releaseAcquired()
+		if !safe {
+			// No package writer can publish a committed response with this shape.
+			// Remove a late unsafe artifact and restart the pass so it cannot be
+			// mistaken for a completed adoption cycle.
+			if err := unlinkAt(s.responses, name); err != nil {
+				return err
+			}
+			s.releaseResponseLease(requestID)
+			if err := rewindDirectory(s.responseUsage); err != nil {
+				return err
+			}
+			s.responseAdoptionSeen = make(map[string]struct{})
 			return ErrResponseCapacity
 		}
+		s.responseAdoptionSeen[requestID] = struct{}{}
+		s.budgetMu.Lock()
+		existing := s.responseLeases[requestID]
+		s.budgetMu.Unlock()
+		if existing != nil {
+			continue
+		}
 		lease, err := s.responseBudget.ReserveResponse(ctx, ResponseReservation{
-			SubjectID: s.subjectID, RequestID: requestID, MaxBytes: stat.Size, Existing: true,
+			SubjectID: s.subjectID, RequestID: requestID, MaxBytes: size, Existing: true,
 		})
 		if err != nil || lease == nil {
-			releaseAcquired()
+			if rewindErr := rewindDirectory(s.responseUsage); rewindErr != nil {
+				return rewindErr
+			}
+			s.responseAdoptionSeen = make(map[string]struct{})
 			return fmt.Errorf("%w: daemon response budget admission", ErrResponseCapacity)
 		}
-		lease.Commit(stat.Size, false)
-		acquired[requestID] = lease
-	}
-	for requestID, lease := range acquired {
+		lease.Commit(size, false)
 		s.budgetMu.Lock()
 		s.responseLeases[requestID] = lease
 		s.budgetMu.Unlock()
 	}
+	if !complete {
+		return ErrResponseCapacity
+	}
+	// Reconcile identities that vanished during a restarted adoption pass. The
+	// responses mount is client-read-only, but this keeps accounting correct if
+	// daemon-owned cleanup or replacement raced a recoverable budget failure.
+	s.budgetMu.Lock()
+	var vanished []ResponseLease
+	for requestID, lease := range s.responseLeases {
+		if _, ok := s.responseAdoptionSeen[requestID]; !ok {
+			delete(s.responseLeases, requestID)
+			vanished = append(vanished, lease)
+		}
+	}
+	s.budgetMu.Unlock()
+	for _, lease := range vanished {
+		lease.Release()
+	}
+	s.responseAdoptionSeen = nil
 	s.responseBudgetInitialized = true
 	return nil
+}
+
+func (s *Server) scrubResponseArtifacts() (bool, error) {
+	names, complete, err := nextNames(s.responseUsage, MaxQueuedRequests)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		_, _, safe, err := s.responseArtifact(name)
+		if err != nil {
+			return false, err
+		}
+		if safe {
+			continue
+		}
+		if err := unlinkAt(s.responses, name); err != nil {
+			return false, err
+		}
+	}
+	return complete, nil
+}
+
+// responseArtifact identifies the only shape atomicWriteAt can commit. A
+// missing entry is unsafe but harmless: unlinkAt treats the race as success.
+func (s *Server) responseArtifact(name string) (requestID string, size int64, safe bool, err error) {
+	requestID, validName := requestIDFromResponseFile(name)
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(s.responses.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return requestID, 0, false, nil
+		}
+		return requestID, 0, false, err
+	}
+	mode := uint32(stat.Mode)
+	safe = validName && mode&unix.S_IFMT == unix.S_IFREG && stat.Nlink == 1 &&
+		stat.Uid == uint32(os.Geteuid()) && mode&0o7777 == regularFileMode &&
+		stat.Size > 0 && stat.Size <= int64(maxEnvelopeFileBytes)
+	return requestID, stat.Size, safe, nil
+}
+
+func rewindDirectory(dir *os.File) error {
+	_, err := dir.Seek(0, io.SeekStart)
+	return err
 }
 
 func (s *Server) reserveResponse(ctx context.Context, requestID string) (*responseReservation, error) {
