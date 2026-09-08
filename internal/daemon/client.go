@@ -616,7 +616,7 @@ func (c *Client) NextContext(ctx context.Context) (Frame, error) {
 			return Frame{}, err
 		}
 		return Frame{Result: &r}, nil
-	case core.FramePaneOutput, core.FramePaneExit:
+	case core.FramePaneReset, core.FramePaneOutput, core.FramePaneExit:
 		var p core.PaneFrame
 		if err := json.Unmarshal(line, &p); err != nil {
 			return Frame{}, err

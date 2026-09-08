@@ -31,7 +31,7 @@ func (daemonPrimary) OpenPane(ctx context.Context, request PaneRequest) (PaneRel
 		return nil, fmt.Errorf("authenticate primary daemon pane relay: %w", err)
 	}
 	r := &daemonPaneRelay{client: c, paneID: "legacy-pane"}
-	if err := c.PaneOpen(r.paneID, request.Agent, request.Tab, request.Cols, request.Rows); err != nil {
+	if err := c.PaneOpenContext(ctx, r.paneID, request.Agent, request.Tab, request.Cols, request.Rows); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
@@ -45,47 +45,36 @@ type daemonPaneRelay struct {
 }
 
 func (r *daemonPaneRelay) Next(ctx context.Context) (core.PaneFrame, error) {
-	type result struct {
-		frame daemon.Frame
-		err   error
-	}
 	for {
-		done := make(chan result, 1)
-		go func() {
-			frame, err := r.client.Next()
-			done <- result{frame: frame, err: err}
-		}()
-		select {
-		case <-ctx.Done():
-			_ = r.Close() // closes the socket and interrupts the blocked read
-			<-done        // join the read before publishing route completion
-			return core.PaneFrame{}, ctx.Err()
-		case got := <-done:
-			if got.err != nil {
-				return core.PaneFrame{}, got.err
-			}
-			if got.frame.Pane != nil && got.frame.Pane.PaneID == r.paneID {
-				return *got.frame.Pane, nil
-			}
-			// Snapshot/result/data frames are unrelated to this one-purpose stream.
+		frame, err := r.client.NextContext(ctx)
+		if err != nil {
+			return core.PaneFrame{}, err
 		}
+		if frame.Pane != nil && frame.Pane.PaneID == r.paneID {
+			return *frame.Pane, nil
+		}
+		// Snapshot/result/data frames are unrelated to this one-purpose stream.
 	}
 }
 
 func (r *daemonPaneRelay) Input(data []byte) error {
-	return r.client.PaneInput(r.paneID, data)
+	ctx, cancel := context.WithTimeout(context.Background(), primaryReadTimeout)
+	defer cancel()
+	return r.client.PaneInputContext(ctx, r.paneID, data)
 }
 
 func (r *daemonPaneRelay) Resize(cols, rows int) error {
-	return r.client.PaneResize(r.paneID, cols, rows)
+	ctx, cancel := context.WithTimeout(context.Background(), primaryReadTimeout)
+	defer cancel()
+	return r.client.PaneResizeContext(ctx, r.paneID, cols, rows)
 }
 
 func (r *daemonPaneRelay) Close() error {
 	var err error
 	r.once.Do(func() {
-		// Connection close is the authoritative detach and interrupts blocked I/O;
-		// PaneClose is best-effort because Client.Send is asynchronous.
-		_ = r.client.PaneClose(r.paneID)
+		// Connection close is the authoritative detach. It interrupts every
+		// blocked read/write immediately; no queued best-effort close frame is
+		// allowed to delay the revocation barrier.
 		err = r.client.Close()
 	})
 	if err == nil {

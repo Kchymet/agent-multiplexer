@@ -107,6 +107,24 @@ func TestNextContextCancellationInterruptsRead(t *testing.T) {
 	}
 }
 
+func TestNextPreservesPaneReset(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	go func() {
+		_ = json.NewEncoder(srv).Encode(core.PaneFrame{Type: core.FramePaneReset, PaneID: "pane"})
+	}()
+	frame, err := c.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Pane == nil || frame.Pane.Type != core.FramePaneReset || frame.Pane.PaneID != "pane" {
+		t.Fatalf("pane reset decoded as %+v", frame)
+	}
+}
+
 func TestPaneInputContextInterruptsBlockedWrite(t *testing.T) {
 	srv, cli := net.Pipe()
 	c := newClient(cli)
