@@ -82,28 +82,58 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
-// bindPermissionEvents publishes a permission request only when the daemon has
-// bound that exact request id to a live runtime generation. This never stamps an
-// arbitrary historical transcript request with whichever generation is current.
-func bindPermissionEvents(events []harnessproto.RuntimeEvent, bindings map[string]string) []harnessproto.RuntimeEvent {
-	out := events[:0]
-	for _, event := range events {
-		if event.Type != harnessproto.TypePermissionRequest {
-			out = append(out, event)
+// permissionEventBinder stamps only occurrence-specific bindings proved by the
+// daemon. It retains a bound occurrence until its matching resolution arrives,
+// so that resolution carries the originally bound generation even though the
+// request is no longer open at publication time. Unbound history remains
+// readable but generation-free and therefore nonanswerable.
+type permissionEventBinder struct {
+	active map[string]string // occurrence ItemID -> runtime generation
+}
+
+func newPermissionEventBinder() *permissionEventBinder {
+	return &permissionEventBinder{active: make(map[string]string)}
+}
+
+func (b *permissionEventBinder) seed(bindings map[string]string) {
+	// Seed occurrences skipped by afterSeq that remain authoritatively open, so
+	// a later resolution still carries the same exact tuple.
+	for occurrence, generation := range bindings {
+		if occurrence != "" && generation != "" {
+			b.active[occurrence] = generation
+		}
+	}
+}
+
+func (b *permissionEventBinder) bind(events []harnessproto.RuntimeEvent, bindings map[string]string) []harnessproto.RuntimeEvent {
+	b.seed(bindings)
+	for i := range events {
+		event := &events[i]
+		if event.Type != harnessproto.TypePermissionRequest && event.Type != harnessproto.TypePermissionResolved {
 			continue
 		}
 		var payload map[string]any
 		if json.Unmarshal(event.Payload, &payload) != nil {
 			continue
 		}
-		requestID, _ := payload[harnessproto.FieldRequestID].(string)
-		generation := bindings[requestID]
-		if requestID == "" || generation == "" {
-			continue
+		// A structured record may itself contain this field. It is history, not
+		// authority: discard it and use only the daemon's live occurrence binding.
+		delete(payload, harnessproto.FieldRuntimeGeneration)
+		generation := ""
+		switch event.Type {
+		case harnessproto.TypePermissionRequest:
+			generation = bindings[event.ItemID]
+			if generation != "" {
+				b.active[event.ItemID] = generation
+			}
+		case harnessproto.TypePermissionResolved:
+			generation = b.active[event.ItemID]
+			delete(b.active, event.ItemID)
 		}
-		payload[harnessproto.FieldRuntimeGeneration] = generation
+		if generation != "" {
+			payload[harnessproto.FieldRuntimeGeneration] = generation
+		}
 		event.Payload = mustMarshal(payload)
-		out = append(out, event)
 	}
-	return out
+	return events
 }

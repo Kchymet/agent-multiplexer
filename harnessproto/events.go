@@ -43,20 +43,25 @@ const (
 // literals. They are NOT specific to any orchestrator. A consumer MUST pass an
 // unknown type through rather than dropping it.
 const (
-	TypePrompt            = "prompt"             // in:  {text}
-	TypeTurnStart         = "turn_start"         // out: {}
-	TypeText              = "text"               // out: {text, final?}
-	TypeThinking          = "thinking"           // out: {text}
-	TypeToolCall          = "tool_call"          // out: {item_id, title, kind, status, input, raw_input?}
-	TypeToolResult        = "tool_result"        // out: {item_id, status, output, diffs?, raw_output?}
-	TypePlan              = "plan"               // out: {items:[{text,status}]}
-	TypeUsage             = "usage"              // out: {used, size, cost?}
-	TypePermissionRequest = "permission_request" // out: {request_id, tool, action, options, runtime_generation}
+	TypePrompt     = "prompt"      // in:  {text}
+	TypeTurnStart  = "turn_start"  // out: {}
+	TypeText       = "text"        // out: {text, final?}
+	TypeThinking   = "thinking"    // out: {text}
+	TypeToolCall   = "tool_call"   // out: {item_id, title, kind, status, input, raw_input?}
+	TypeToolResult = "tool_result" // out: {item_id, status, output, diffs?, raw_output?}
+	TypePlan       = "plan"        // out: {items:[{text,status}]}
+	TypeUsage      = "usage"       // out: {used, size, cost?}
+	// Permission history without runtime_generation is readable but not
+	// answerable. For a live request, item_id identifies this exact occurrence and
+	// runtime_generation must be echoed by a permission action.
+	TypePermissionRequest = "permission_request" // out: {request_id, tool, action, options, runtime_generation?}
 	// TypePermissionResolved closes a permission_request: the prompt it named is
-	// gone, so its request_id must never be answered again. `decision` is
-	// DecisionAllow, DecisionDeny, or DecisionCleared when the producer knows the
-	// prompt closed but not which way it went.
-	TypePermissionResolved = "permission_resolved" // out: {request_id, decision}
+	// gone. A live resolution carries the exact generation originally bound to
+	// its occurrence; a generation-free legacy resolution is history only and
+	// must not close a newer generation-bearing card with a reused request id.
+	// `decision` is DecisionAllow, DecisionDeny, or DecisionCleared when the
+	// producer knows the prompt closed but not which way it went.
+	TypePermissionResolved = "permission_resolved" // out: {request_id, runtime_generation?, decision}
 	TypeNotice             = "notice"              // out: {level, text}
 	TypeTurnEnd            = "turn_end"            // out: {stop_reason}
 	TypeRaw                = "raw"                 // out: {runtime, native_type, body}  (never dropped)

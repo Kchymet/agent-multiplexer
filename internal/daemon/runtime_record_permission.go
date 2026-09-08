@@ -18,8 +18,8 @@ func (d *Daemon) bindRuntimeRecord(id string, rec core.RuntimeRecord) core.Runti
 	open := runtimeevents.OpenPermissions(runtimeEventRecord(rec))
 	for _, pending := range open {
 		generation, err := d.bindPermissionRequest(id, pending.RequestID)
-		if err == nil {
-			rec.PermissionBindings[pending.RequestID] = generation
+		if err == nil && generation != "" {
+			rec.PermissionBindings[pending.Occurrence] = generation
 		}
 	}
 	return rec
