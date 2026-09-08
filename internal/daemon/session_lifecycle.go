@@ -29,26 +29,29 @@ const (
 	completionMinimumGrace = 500 * time.Millisecond
 	completionRuntimeGrace = 10 * time.Second
 	completionActivityPoll = 50 * time.Millisecond
+	sessionCallbackTimeout = 10 * time.Minute
 )
 
 type sessionRuntime struct {
-	d              *Daemon
-	resolver       *daemonAccessResolver
-	policy         access.Policy
-	applyResult    func(context.Context, core.Action) (string, error)
-	encodeResult   func(core.Result) ([]byte, error)
-	poll           time.Duration
-	now            func() time.Time
-	dispatchMu     sync.Mutex
-	servers        map[string]*sessionrpc.Server
-	completions    *completionRegistry
-	responseBudget sessionrpc.ResponseBudget
+	d               *Daemon
+	resolver        *daemonAccessResolver
+	policy          access.Policy
+	applyResult     func(context.Context, core.Action) (string, error)
+	encodeResult    func(core.Result) ([]byte, error)
+	poll            time.Duration
+	now             func() time.Time
+	callbackTimeout time.Duration
+	dispatchMu      sync.Mutex
+	servers         map[string]*sessionrpc.Server
+	completions     *completionRegistry
+	responseBudget  sessionrpc.ResponseBudget
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
 	r := &sessionRuntime{
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
-		now: time.Now, servers: make(map[string]*sessionrpc.Server),
+		now: time.Now, callbackTimeout: sessionCallbackTimeout,
+		servers:        make(map[string]*sessionrpc.Server),
 		responseBudget: newSessionResponseBudget(),
 		applyResult:    wsops.ApplyResult,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
@@ -167,7 +170,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
-		sessionrpc.Callbacks{Authorize: r.authorize, Dispatch: r.dispatch},
+		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
 		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget})
 	if err != nil {
 		return err
@@ -178,6 +181,34 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	r.servers[session.ID] = server
 	return nil
+}
+
+// authorizeCallback and dispatchCallback are the only transport callback
+// entrypoints. They never let an integration panic take down mailbox service,
+// and they give every cooperative DB/process operation a fixed upper deadline.
+// The callbacks stay synchronous: on timeout no detached mutation is left
+// running and an accepted/uncertain effect is never retried by this boundary.
+func (r *sessionRuntime) authorizeCallback(ctx context.Context, principal access.Principal, call sessionrpc.Call) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("session authorization callback failed")
+		}
+	}()
+	return r.authorize(ctx, principal, call)
+}
+
+func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrpc.DispatchRequest) (result sessionrpc.DispatchResult, err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			result = rpcFailed("callback_failed")
+			err = nil
+		}
+	}()
+	return r.dispatch(ctx, request)
 }
 
 func (r *sessionRuntime) renewCurrent(ctx context.Context, session store.Session) {
@@ -297,7 +328,7 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 		go c.run(subjectID, entry)
 	}
 	c.mu.Unlock()
-	return &sessionrpc.ReceiptHooks{
+	hooks := &sessionrpc.ReceiptHooks{
 		Grace: c.receipt,
 		ResponsePersisted: func(p sessionrpc.PersistedResponse) {
 			c.mu.Lock()
@@ -307,6 +338,24 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 			c.mu.Unlock()
 		},
 		Settled: func(s sessionrpc.ReceiptSettlement) { c.settle(subjectID, s.RequestID) },
+	}
+	return nonPanickingReceiptHooks(hooks)
+}
+
+func nonPanickingReceiptHooks(hooks *sessionrpc.ReceiptHooks) *sessionrpc.ReceiptHooks {
+	if hooks == nil {
+		return nil
+	}
+	return &sessionrpc.ReceiptHooks{
+		Grace: hooks.Grace,
+		ResponsePersisted: func(response sessionrpc.PersistedResponse) {
+			defer func() { _ = recover() }()
+			hooks.ResponsePersisted(response)
+		},
+		Settled: func(settlement sessionrpc.ReceiptSettlement) {
+			defer func() { _ = recover() }()
+			hooks.Settled(settlement)
+		},
 	}
 }
 
