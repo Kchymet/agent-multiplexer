@@ -270,6 +270,10 @@ func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
 	if err := r.d.authority.Revoke(ctx, access.SubjectSession, id); err != nil {
 		log.Printf("session RPC %s revoke: %v", id, err)
 	}
+	// Reconciliation is also the durable post-crash/post-callback cleanup path.
+	// Revoke before making the old runtime disappear so observing it stopped can
+	// never race ahead of credential invalidation.
+	r.d.killRuntimeFor(id)
 }
 
 func (r *sessionRuntime) close() {
@@ -446,15 +450,18 @@ stop:
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return
 	}
-	if !c.d.killRuntimeToken(subjectID, entry.runtime) {
-		return
-	}
 	// Revoke only the credential generation that authorized completion. The
 	// explicit restore API will supersede/cancel this entry before issuing a new
-	// generation; arbitrary reconciliation can never regrant it.
+	// generation; arbitrary reconciliation can never regrant it. Revoke before
+	// publishing runtime death so a caller cannot observe the process disappear
+	// while its credential is still current.
 	if c.d.authority != nil {
-		_ = c.d.authority.RevokeCurrent(context.Background(), entry.principal)
+		if err := c.d.authority.RevokeCurrent(context.Background(), entry.principal); err != nil {
+			log.Printf("session RPC %s completion revoke: %v", subjectID, err)
+			return
+		}
 	}
+	c.d.killRuntimeToken(subjectID, entry.runtime)
 }
 
 func (c *completionRegistry) owns(subjectID string, entry *completionEntry) bool {
