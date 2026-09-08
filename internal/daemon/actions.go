@@ -337,7 +337,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		d.killRuntimeFor(id)
 		session := spec.Session
 		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-			return d.codex.Ensure(id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
+			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
 		})
 		if err != nil {
 			return err

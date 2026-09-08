@@ -23,28 +23,29 @@ type Manager struct {
 
 	mu     sync.Mutex
 	sup    map[string]*Supervisor
-	starts map[string]*sync.Mutex // per-session creation lock (serialize Ensure before spawn)
+	starts map[string]chan struct{} // per-session creation gate (serialize Ensure before spawn)
 }
 
 // NewManager builds a Manager bound to the daemon's context. bin overrides the
 // codex binary (pass the resolved AMUX_CODEX_BIN or "").
 func NewManager(ctx context.Context, bin string) *Manager {
-	return &Manager{ctx: ctx, bin: bin, sup: map[string]*Supervisor{}, starts: map[string]*sync.Mutex{}}
+	return &Manager{ctx: ctx, bin: bin, sup: map[string]*Supervisor{}, starts: map[string]chan struct{}{}}
 }
 
-// startLock returns the per-session creation mutex, creating it once. Serializing
-// Ensure per session BEFORE spawning is what prevents two callers from each
-// launching an App Server on the same socket and the loser's cleanup unlinking the
-// winner's listener (ROOT audit).
-func (m *Manager) startLock(sessionID string) *sync.Mutex {
+// startGate returns the per-session creation semaphore, creating it once.
+// Serializing Ensure per session BEFORE spawning prevents two callers from each
+// launching an App Server on the same socket and the loser's cleanup unlinking
+// the winner's listener, while still allowing a queued caller to honor context.
+func (m *Manager) startGate(sessionID string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	l := m.starts[sessionID]
-	if l == nil {
-		l = &sync.Mutex{}
-		m.starts[sessionID] = l
+	gate := m.starts[sessionID]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		gate <- struct{}{}
+		m.starts[sessionID] = gate
 	}
-	return l
+	return gate
 }
 
 // Get returns the live supervisor for a session id, or false. It is the daemon's
@@ -83,16 +84,29 @@ func (m *Manager) SetModel(sessionID, model string) {
 // over. Creation is serialized per session, so two callers never spawn competing
 // servers. initialPrompt is submitted only when starting a fresh thread, never
 // when reusing or resuming a supervisor.
-func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string) (*Supervisor, error) {
+func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string) (*Supervisor, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := m.ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Fast path: already live.
 	if s, ok := m.Get(sessionID); ok {
 		return s, nil
 	}
-	// Serialize creation for this session, then re-check under the lock so only one
-	// caller ever spawns.
-	lock := m.startLock(sessionID)
-	lock.Lock()
-	defer lock.Unlock()
+	// Serialize creation for this session with context-aware admission, then
+	// re-check under the gate so only one caller ever spawns. A request waiting
+	// behind another cold start must not outlive its final-admission deadline.
+	gate := m.startGate(sessionID)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.ctx.Done():
+		return nil, m.ctx.Err()
+	case <-gate:
+	}
+	defer func() { gate <- struct{}{} }()
 	if s, ok := m.Get(sessionID); ok {
 		return s, nil
 	}
@@ -111,8 +125,23 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
 
 	sup := New(cfg)
-	if err := sup.Start(m.ctx, wrappedArgv); err != nil {
+	// Startup is admitted by ctx but the successfully published supervisor lives
+	// for the manager/daemon lifetime. Stop forwarding admission cancellation once
+	// Start completes; until then either context interrupts dial/handshake/write.
+	startCtx, cancelStart := context.WithCancel(m.ctx)
+	stopAdmission := context.AfterFunc(ctx, cancelStart)
+	if err := sup.Start(startCtx, wrappedArgv); err != nil {
+		stopAdmission()
+		cancelStart()
 		return nil, err
+	}
+	if !stopAdmission() || ctx.Err() != nil || m.ctx.Err() != nil {
+		cancelStart()
+		_ = sup.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, m.ctx.Err()
 	}
 	_ = SaveIdentity(sup.Identity())
 
