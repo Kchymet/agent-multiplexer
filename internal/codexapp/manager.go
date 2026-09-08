@@ -145,6 +145,12 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	case <-gate:
 	}
 	defer func() { gate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := m.ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s, ok, err := m.existingForEnsure(sessionID); err != nil {
 		return nil, err
 	} else if ok {
