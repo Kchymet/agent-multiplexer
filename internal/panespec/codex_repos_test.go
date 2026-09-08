@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/core"
 	"amux/internal/store"
 )
 
