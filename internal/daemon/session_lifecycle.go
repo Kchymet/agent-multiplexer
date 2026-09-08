@@ -43,6 +43,7 @@ type sessionRuntime struct {
 	callbackTimeout time.Duration
 	dispatchMu      sync.Mutex
 	servers         map[string]*sessionrpc.Server
+	initialized     map[string]bool
 	completions     *completionRegistry
 	responseBudget  sessionrpc.ResponseBudget
 }
@@ -52,6 +53,7 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
 		now: time.Now, callbackTimeout: sessionCallbackTimeout,
 		servers:        make(map[string]*sessionrpc.Server),
+		initialized:    make(map[string]bool),
 		responseBudget: newSessionResponseBudget(),
 		applyResult:    wsops.ApplyResult,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
@@ -84,11 +86,37 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 	if err := r.reconcile(ctx); err != nil {
 		return err
 	}
+	return r.serveCurrent(ctx)
+}
+
+func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 	ids := make([]string, 0, len(r.servers))
 	for id := range r.servers {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	ready := true
+	var initializeErr error
+	for _, id := range ids {
+		if r.initialized[id] {
+			continue
+		}
+		err := r.servers[id].Initialize(ctx)
+		if err == nil {
+			r.initialized[id] = true
+			continue
+		}
+		ready = false
+		if !errors.Is(err, sessionrpc.ErrResponseCapacity) && !errors.Is(err, sessionrpc.ErrClosed) {
+			initializeErr = errors.Join(initializeErr, fmt.Errorf("initialize session RPC %s: %w", id, err))
+		}
+	}
+	if !ready {
+		// ErrResponseCapacity is the package's bounded-progress sentinel during
+		// startup adoption. Do not dispatch any mailbox until every current
+		// subject is initialized; the next poll resumes unfinished scans.
+		return initializeErr
+	}
 	for _, id := range ids {
 		if _, err := r.servers[id].ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
 			log.Printf("session RPC %s: %v", id, err)
@@ -182,6 +210,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	r.servers[session.ID] = server
+	r.initialized[session.ID] = false
 	return nil
 }
 
@@ -263,6 +292,7 @@ func (r *sessionRuntime) closeServer(id string) {
 		_ = server.Close()
 		delete(r.servers, id)
 	}
+	delete(r.initialized, id)
 }
 
 func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {

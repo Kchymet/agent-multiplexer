@@ -305,6 +305,89 @@ func TestSessionResponseBudgetRestartAdoptsRetainedMultiSubjectOverLimit(t *test
 	}
 }
 
+func TestSessionRuntimeRearmsGlobalInitializationBeforeFreshDispatch(t *testing.T) {
+	authority, err := access.Open(filepath.Join(t.TempDir(), "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authority.Close()
+	makeGrant := func(id string) access.SessionAccess {
+		dir := filepath.Join(t.TempDir(), id)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		grant, err := authority.EnsureSession(context.Background(), id, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return grant
+	}
+	open := func(id string, grant access.SessionAccess, budget sessionrpc.ResponseBudget, dispatch *int) *sessionrpc.Server {
+		server, err := sessionrpc.OpenServerMailbox(id, grant.MailboxHostDir, authority, authority,
+			sessionrpc.Callbacks{
+				Authorize: func(context.Context, access.Principal, sessionrpc.Call) error { return nil },
+				Dispatch: func(context.Context, sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
+					*dispatch++
+					return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK}, nil
+				},
+			}, sessionrpc.ServerOptions{ResponseBudget: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = server.Close() })
+		return server
+	}
+
+	budget := newSessionResponseBudgetWithLimits(1, 32<<20, 1)
+	freshGrant := makeGrant("a-fresh")
+	freshDispatch := 0
+	fresh := open("a-fresh", freshGrant, budget, &freshDispatch)
+	runtime := &sessionRuntime{
+		servers:     map[string]*sessionrpc.Server{"a-fresh": fresh},
+		initialized: map[string]bool{},
+	}
+	if err := runtime.serveCurrent(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.initialized["a-fresh"] {
+		t.Fatal("initial mailbox did not finish initialization")
+	}
+
+	// Produce a real signed retained response without the restarted daemon's
+	// budget, then reopen that mailbox with the shared budget.
+	retainedGrant := makeGrant("z-retained")
+	retainedDispatch := 0
+	old := open("z-retained", retainedGrant, nil, &retainedDispatch)
+	publishDaemonBudgetCall(t, authority, retainedGrant)
+	if processed, err := old.ServeOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("produce retained response = %d, %v", processed, err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retainedDispatch = 0
+	retained := open("z-retained", retainedGrant, budget, &retainedDispatch)
+	runtime.servers["z-retained"] = retained // later discovery re-arms the global gate
+	runtime.initialized["z-retained"] = false
+
+	publishDaemonBudgetCall(t, authority, freshGrant)
+	if err := runtime.serveCurrent(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.initialized["z-retained"] {
+		t.Fatal("later mailbox was not initialized")
+	}
+	if budget.files != 1 {
+		t.Fatalf("retained response was not adopted before serving fresh requests: files=%d", budget.files)
+	}
+	if freshDispatch != 0 {
+		t.Fatalf("fresh request dispatched before retained response admission: %d", freshDispatch)
+	}
+	if retainedDispatch != 0 {
+		t.Fatalf("retained response restart dispatched work: %d", retainedDispatch)
+	}
+}
+
 func publishDaemonBudgetCall(t *testing.T, authority *access.FileAuthority, grant access.SessionAccess) {
 	t.Helper()
 	credential, err := access.LoadCredential(grant.CredentialHostDir)

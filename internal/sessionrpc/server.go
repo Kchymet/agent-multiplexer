@@ -192,23 +192,39 @@ func (s *Server) PublishService(ctx context.Context) error {
 	return replaceFileAt(s.mailbox, ServiceFileName, encoded, s.random)
 }
 
+// Initialize performs the callback-free, bounded startup work required before
+// this mailbox may dispatch requests. Callers that coordinate multiple subject
+// servers must initialize every mailbox before serving any of them, so durable
+// responses from a prior daemon boot are accounted ahead of fresh response
+// admission. ErrResponseCapacity means bounded cleanup/adoption made progress
+// but needs another call; no Authorize, Dispatch, or receipt hook runs here.
+func (s *Server) Initialize(ctx context.Context) error {
+	s.serveMu.Lock()
+	defer s.serveMu.Unlock()
+	return s.initializeLocked(ctx)
+}
+
+func (s *Server) initializeLocked(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.isClosed() {
+		return ErrClosed
+	}
+	if err := s.initializeResponseBudget(ctx); err != nil {
+		return err
+	}
+	return s.cleanupResponses()
+}
+
 // ServeOnce performs bounded work for exactly one authoritative subject.
 func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 	s.serveMu.Lock()
 	defer s.serveMu.Unlock()
-	if err := ctx.Err(); err != nil {
+	if err := s.initializeLocked(ctx); err != nil {
 		return 0, err
-	}
-	if s.isClosed() {
-		return 0, ErrClosed
 	}
 	s.settleExpired()
-	if err := s.initializeResponseBudget(ctx); err != nil {
-		return 0, err
-	}
-	if err := s.cleanupResponses(); err != nil {
-		return 0, err
-	}
 	processed := 0
 	overflow := false
 
