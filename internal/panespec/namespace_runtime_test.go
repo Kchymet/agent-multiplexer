@@ -2,17 +2,20 @@ package panespec
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/launchenv"
 	"amux/internal/store"
 )
 
@@ -29,10 +32,13 @@ func TestRuntimeNamespaceRejectsAliasesFDsAndFutureSiblings(t *testing.T) {
 	for _, name := range []string{
 		"AMUX_MUX_TOKEN", "AMUX_PROVIDER_TOKEN", "AMUX_PROVIDER_PASSWORD",
 		"AMUX_TLS_KEY", "AMUX_TLS_KEY_PASSWORD", "AMUX_HOST_PRIVATE_KEY",
-		"AMUX_RPC_DIR", "OPENAI_API_KEY",
+		"AMUX_RPC_DIR", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+		"AZURE_CLIENT_SECRET", "GOOGLE_APPLICATION_CREDENTIALS",
+		"GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
 	} {
 		t.Setenv(name, "planted-host-only")
 	}
+	t.Setenv("OPENAI_API_KEY", "authorized-codex-model-key")
 	own := filepath.Join(core.SessionsDir(), "root", "own")
 	peer := filepath.Join(core.SessionsDir(), "root", "peer")
 	for _, dir := range []string{own, peer} {
@@ -77,7 +83,21 @@ test -z "${AMUX_TLS_KEY+x}"
 test -z "${AMUX_TLS_KEY_PASSWORD+x}"
 test -z "${AMUX_HOST_PRIVATE_KEY+x}"
 test -z "${AMUX_RPC_DIR+x}"
-test -z "${OPENAI_API_KEY+x}"
+test -z "${AWS_ACCESS_KEY_ID+x}"
+test -z "${AWS_SECRET_ACCESS_KEY+x}"
+test -z "${AZURE_CLIENT_SECRET+x}"
+test -z "${GOOGLE_APPLICATION_CREDENTIALS+x}"
+test -z "${GH_ENTERPRISE_TOKEN+x}"
+test -z "${GITHUB_ENTERPRISE_TOKEN+x}"
+test "$OPENAI_API_KEY" = authorized-codex-model-key
+! tr '\000' '\n' < /proc/1/environ | grep -F planted-host-only
+tr '\000' '\n' < /proc/1/environ | grep -Fx 'OPENAI_API_KEY=authorized-codex-model-key'
+test ! -e "$PANESPEC_TEST_SOURCE_PARENT"
+test ! -e "$PANESPEC_TEST_CREDENTIAL_SOURCE"
+test ! -e /mnt/c
+test ! -e /var/run/docker.sock
+test ! -e "$HOME/.zsh_history"
+test ! -e "$HOME/.bash_history"
 test "$(cat /amux-session-access/current)" = credential
 test "$(cat "$PANESPEC_TEST_MAILBOX/service.json")" = service
 echo request > "$PANESPEC_TEST_REQUESTS/request"
@@ -107,29 +127,34 @@ test "$(cat /amux-session-access/current)" = rotated
 	if err != nil {
 		t.Fatal(err)
 	}
+	payloadEnvironment := []string{
+		"PANESPEC_TEST_MAILBOX=" + spec.Access.MailboxMountDir,
+		"PANESPEC_TEST_REQUESTS=" + spec.Access.RequestsMountDir,
+		"PANESPEC_TEST_OWN=" + own,
+		"PANESPEC_TEST_PEER=" + peer,
+		"PANESPEC_TEST_FUTURE=" + future,
+		fmt.Sprintf("PANESPEC_TEST_HOST_PID=%d", os.Getpid()),
+		"PANESPEC_TEST_HOST_PID_NS=" + hostPIDNamespace,
+		"PANESPEC_TEST_DATA=" + core.DataDir(),
+		"PANESPEC_TEST_STATE=" + core.StateDir(),
+		"PANESPEC_TEST_SOURCE_PARENT=" + filepath.Dir(spec.Access.MailboxHostDir),
+		"PANESPEC_TEST_CREDENTIAL_SOURCE=" + spec.Access.CredentialHostDir,
+	}
+	argv = withPayloadEnvironment(t, argv, payloadEnvironment)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.ExtraFiles = []*os.File{peerFD}
-	cmd.Env = append(os.Environ(),
-		"PANESPEC_TEST_MAILBOX="+spec.Access.MailboxMountDir,
-		"PANESPEC_TEST_REQUESTS="+spec.Access.RequestsMountDir,
-		"PANESPEC_TEST_OWN="+own,
-		"PANESPEC_TEST_PEER="+peer,
-		"PANESPEC_TEST_FUTURE="+future,
-		fmt.Sprintf("PANESPEC_TEST_HOST_PID=%d", os.Getpid()),
-		"PANESPEC_TEST_HOST_PID_NS="+hostPIDNamespace,
-		"PANESPEC_TEST_DATA="+core.DataDir(),
-		"PANESPEC_TEST_STATE="+core.StateDir(),
-	)
+	cmd.Env, err = launchenv.Build(os.Environ(), nil, launchenv.ForRuntime(s.Agent))
+	if err != nil {
+		t.Fatal(err)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -141,9 +166,8 @@ test "$(cat /amux-session-access/current)" = rotated
 	for {
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil {
-			diagnostic, _ := io.ReadAll(stderr)
 			_ = cmd.Wait()
-			t.Fatalf("namespace did not become ready: %v: %s", readErr, diagnostic)
+			t.Fatalf("namespace did not become ready: %v: %s", readErr, stderr.String())
 		}
 		if line == "SCOPE_READY\n" {
 			break
@@ -155,11 +179,21 @@ test "$(cat /amux-session-access/current)" = rotated
 	if err := os.WriteFile(future, []byte("late-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	replacement := filepath.Join(spec.Access.CredentialHostDir, "replacement")
+	mountedCredential := spec.Access.CredentialHostDir + ".mounted"
+	if err := os.Rename(spec.Access.CredentialHostDir, mountedCredential); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(spec.Access.CredentialHostDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spec.Access.CredentialHostDir, "current"), []byte("attacker-replacement"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(mountedCredential, "replacement")
 	if err := os.WriteFile(replacement, []byte("rotated"), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(replacement, filepath.Join(spec.Access.CredentialHostDir, "current")); err != nil {
+	if err := os.Rename(replacement, filepath.Join(mountedCredential, "current")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := io.WriteString(stdin, "continue\n"); err != nil {
@@ -167,8 +201,7 @@ test "$(cat /amux-session-access/current)" = rotated
 	}
 	_ = stdin.Close()
 	if err := cmd.Wait(); err != nil {
-		diagnostic, _ := io.ReadAll(stderr)
-		t.Fatalf("runtime namespace fixture: %v: %s", err, diagnostic)
+		t.Fatalf("runtime namespace fixture: %v: %s", err, stderr.String())
 	}
 	if got, err := os.ReadFile(filepath.Join(spec.Access.RequestsHostDir, "request")); err != nil || string(got) != "request\n" {
 		t.Fatalf("requests overlay did not persist: %q, %v", got, err)
@@ -176,4 +209,28 @@ test "$(cat /amux-session-access/current)" = rotated
 	if got, err := os.ReadFile(peerCanary); err != nil || string(got) != "peer-secret" {
 		t.Fatalf("peer canary changed: %q, %v", got, err)
 	}
+}
+
+func withPayloadEnvironment(t *testing.T, argv, environment []string) []string {
+	t.Helper()
+	separator := -1
+	for i, arg := range argv {
+		if arg == "--" {
+			separator = i
+		}
+	}
+	if separator < 0 {
+		t.Fatalf("bwrap argv lacks payload separator: %v", argv)
+	}
+	setenv := make([]string, 0, len(environment)*3)
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || name == "" {
+			t.Fatalf("invalid fixture environment %q", entry)
+		}
+		setenv = append(setenv, "--setenv", name, value)
+	}
+	out := append([]string(nil), argv[:separator]...)
+	out = append(out, setenv...)
+	return append(out, argv[separator:]...)
 }

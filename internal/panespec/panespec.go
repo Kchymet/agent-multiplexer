@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -195,13 +194,8 @@ func agentRepoSources(agentID string) []string {
 // that lacks one (non-merged /usr, no Nix, no linuxbrew) still scopes. Anything
 // a pane runs — the harness, the editor, $BROWSER — has to live under one of
 // these or an exact explicit runtime/config grant; the rest of $HOME is a tmpfs
-// inside the scope. ScopeReaches is the query side of the system/interop list.
+// inside the scope. ScopeReaches is the query side of the system-root list.
 var systemRoots = []string{"/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew"}
-
-// interopRoots are the WSL2 mounts the agent pane binds so Windows interop
-// (clipboard .exe helpers, path translation) works from inside the scope. They
-// are -try binds, so this is a no-op off WSL.
-var interopRoots = []string{"/mnt/c", "/mnt/wsl"}
 
 // jail resolves the protected namespace implementation. Secure launches never
 // silently degrade to host filesystem access: Linux, a usable HOME, and
@@ -271,8 +265,8 @@ func IsolationSupport() error {
 }
 
 // ScopeReaches reports whether an absolute host path is visible from inside an
-// agent pane's scope: under one of the read-only system roots or WSL interop
-// mounts. The dataDir parameter remains for API compatibility but is never a
+// agent pane's scope: under one of the read-only system roots. The dataDir
+// parameter remains for API compatibility but is never a
 // visibility grant: only an exact own directory is mounted by a LaunchSpec.
 // Everything else under $HOME is replaced by an empty tmpfs; exact runtime,
 // session and configuration grants are not inferable from this global helper.
@@ -286,7 +280,7 @@ func ScopeReaches(_ string, path string) bool {
 		root = filepath.Clean(root)
 		return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
 	}
-	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
+	for _, r := range systemRoots {
 		if under(r) {
 			return true
 		}
@@ -425,9 +419,6 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 	}
 
 	args := []string{bw, "--die-with-parent", "--unshare-user", "--unshare-pid"}
-	for _, name := range hostOnlyEnvironmentNames(os.Environ()) {
-		args = append(args, "--unsetenv", name)
-	}
 	// Required core for a functional sandbox: binaries/libraries (/usr) and system
 	// config (/etc — provides resolv.conf for DNS and passwd for user resolution).
 	args = append(args, "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc")
@@ -517,46 +508,10 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
-var childAMUXEnvironment = map[string]bool{
-	"AMUX_AGENT": true, "AMUX_MODE": true, "AMUX_ROLE": true,
-	"AMUX_ROOT": true, "AMUX_SCOPE": true, "AMUX_SESSION_ID": true,
-	"AMUX_WORKGROUP": true, "AMUX_WORKSPACE": true,
-}
-
 const (
 	payloadExecEnv = "AMUX_PAYLOAD_CLEAN_EXEC"
 	payloadExecArg = "--amux-payload-clean-exec"
 )
-
-// hostOnlyEnvironmentNames strips daemon/operator authority inherited by both
-// engine/local and codexapp before the child command runs. Session identity and
-// harness runtime variables are supplied explicitly; host management, provider,
-// TLS, alternate-routing, and ambient credential variables are never forwarded.
-func hostOnlyEnvironmentNames(environ []string) []string {
-	seen := map[string]bool{}
-	for _, entry := range environ {
-		name, _, ok := strings.Cut(entry, "=")
-		if !ok || name == "" {
-			continue
-		}
-		hostOnly := strings.HasPrefix(name, "AMUX_") && !childAMUXEnvironment[name]
-		switch name {
-		case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-			"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-			"OPENAI_API_KEY", "CODEX_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK":
-			hostOnly = true
-		}
-		if hostOnly {
-			seen[name] = true
-		}
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
 
 // resolvedInstallRoot handles a launcher symlink. A nested package's bin
 // directory gets its package root (sibling resources may be required); other
@@ -618,15 +573,6 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		binds = append(binds,
 			[]string{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
 		)
-		// On WSL2, Claude reaches the Windows clipboard (e.g. pasting an image) by
-		// invoking a Windows .exe via interop; those live under /mnt/c, and the
-		// launcher path-translates through the DrvFs mount. Without /mnt/c in the
-		// scope the .exe can't be found and the read fails ("can't find image on
-		// clipboard"). Bind it read-only; /mnt/wsl backs some interop helpers too.
-		// --ro-bind-try is a no-op off WSL, so this stays cross-platform.
-		for _, p := range interopRoots {
-			binds = append(binds, []string{"--ro-bind-try", p, p})
-		}
 		return append(binds, gitBinds(home)...)
 	case TabEditor:
 		name := filepath.Base(editorBin())
@@ -651,17 +597,6 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		} {
 			binds = append(binds, []string{"--ro-bind-try", j(home, p), j(home, p)})
 		}
-		// History, writable so the shell can append to it.
-		binds = append(binds, []string{"--bind-try", j(home, ".zsh_history"), j(home, ".zsh_history")})
-		binds = append(binds, []string{"--bind-try", j(home, ".bash_history"), j(home, ".bash_history")})
-		// Docker, in the terminal only (the human shell), not the agent pane. On
-		// WSL2 the CLI is a symlink into /mnt/wsl (Docker Desktop); bind that so it
-		// resolves. The CLI defaults to /var/run/docker.sock, but the scope has no
-		// /var — expose exactly the real /run/docker.sock at
-		// the default path. NB: docker reaches the host daemon, bypassing the
-		// worktree scope — kept off the agent pane on purpose.
-		binds = append(binds, []string{"--ro-bind-try", "/mnt/wsl", "/mnt/wsl"})
-		binds = append(binds, []string{"--ro-bind-try", "/run/docker.sock", "/var/run/docker.sock"})
 		return append(binds, gitBinds(home)...)
 	}
 	return nil

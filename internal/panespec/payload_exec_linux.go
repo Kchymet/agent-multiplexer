@@ -5,7 +5,9 @@ package panespec
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -25,7 +27,16 @@ func init() {
 		_, _ = fmt.Fprintf(os.Stderr, "amux: close inherited payload descriptors: %v\n", err)
 		os.Exit(126)
 	}
-	if err := syscall.Exec(os.Args[2], os.Args[2:], os.Environ()); err != nil {
+	payload := os.Args[2]
+	if !strings.ContainsRune(payload, os.PathSeparator) {
+		var err error
+		payload, err = exec.LookPath(payload)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "amux: resolve protected payload: %v\n", err)
+			os.Exit(126)
+		}
+	}
+	if err := syscall.Exec(payload, os.Args[2:], os.Environ()); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "amux: exec protected payload: %v\n", err)
 		os.Exit(126)
 	}

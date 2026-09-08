@@ -73,7 +73,7 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	}
 }
 
-func TestTypedLaunchPathsStripInheritedHostAuthority(t *testing.T) {
+func TestTypedLaunchPathsDoNotSerializeHostAuthority(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
@@ -110,13 +110,11 @@ func TestTypedLaunchPathsStripInheritedHostAuthority(t *testing.T) {
 		if argvSequence(argv, "--setenv", payloadExecEnv, "1") < 0 {
 			t.Errorf("%s does not activate the descriptor-clean payload trampoline: %v", label, argv)
 		}
-		for _, name := range secrets {
-			if argvSequence(argv, "--unsetenv", name) < 0 {
-				t.Errorf("%s did not strip %s: %v", label, name, argv)
-			}
-		}
 		if strings.Contains(strings.Join(argv, "\x00"), "planted-host-only") {
 			t.Errorf("%s serialized a host credential value: %v", label, argv)
+		}
+		if slices.Contains(argv, "--unsetenv") || slices.Contains(argv, "--clearenv") {
+			t.Errorf("%s relies on payload-time environment cleanup instead of launcher sanitation: %v", label, argv)
 		}
 	}
 }
