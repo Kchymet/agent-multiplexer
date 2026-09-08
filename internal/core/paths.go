@@ -161,8 +161,9 @@ func LiveAgentsPath() string {
 // the Makefile's default install target). Claude Code's status hooks and the
 // agent sandbox reference this rather than the running daemon's os.Executable()
 // path: that path can be a throwaway dev build inside a session worktree which
-// later vanishes, breaking the hooks — whereas the install path is stable and is
-// exactly what the sandbox scope restores as a read-only exact-file alias.
+// later vanishes, breaking the host-side hooks. Inside a protected namespace,
+// panespec preserves this stable command name as an exact read-only alias of the
+// trusted running executable, so it cannot diverge from /amux-bin/amux.
 func InstalledBinPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "bin", "amux")

@@ -17,9 +17,20 @@ import (
 	"amux/internal/access"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
+	"amux/internal/git"
 	"amux/internal/launchenv"
 	"amux/internal/store"
 )
+
+// A protected generated hook reaches the same executable image as /amux-bin.
+// This test-only entry point gives that image observable candidate semantics
+// when the real bwrap fixture invokes it through either alias.
+func init() {
+	if os.Getenv("TERM") == "amux-alias-candidate" && len(os.Args) >= 4 && os.Args[1] == "agent" && os.Args[2] == "hook" {
+		_, _ = os.Stdout.WriteString("running-candidate")
+		os.Exit(0)
+	}
+}
 
 // This is the acceptance fixture for relationships a pure argv assertion
 // cannot prove: PID/proc aliases, inherited descriptors, ancestor renames, and
@@ -131,7 +142,7 @@ read -r signal
 test ! -e "$PANESPEC_TEST_FUTURE"
 test "$(cat /amux-session-access/current)" = rotated
 `
-	argv, err := scope(own, TabAgent, s, spec.Access, []string{"/bin/sh", "-c", script}, nil)
+	argv, err := scope(own, TabAgent, s, spec.Access, nil, []string{"/bin/sh", "-c", script})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,70 +241,166 @@ test "$(cat /amux-session-access/current)" = rotated
 
 func TestRuntimeGeneratedClaudeHookUsesExactInstalledAlias(t *testing.T) {
 	requireRuntimeIsolation(t)
+	for _, installedState := range []string{"divergent", "missing"} {
+		t.Run(installedState, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+			t.Setenv("AMUX_JAIL", "on")
+
+			installed := core.InstalledBinPath()
+			if err := os.MkdirAll(filepath.Dir(installed), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if installedState == "divergent" {
+				if err := os.WriteFile(installed, []byte("#!/bin/sh\nprintf old-installed"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sibling := filepath.Join(filepath.Dir(installed), "sibling-canary")
+			if err := os.WriteFile(sibling, []byte("must-stay-hidden"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			s := store.Session{ID: "hook-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "hook-owner")}
+			spec := testLaunchSpec(t, s)
+			claudeHome := filepath.Join(s.Dir, ".amux", "claude")
+			if err := claudecfg.InstallHooksIn(s.Dir, claudeHome, installed); err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(claudecfg.ProjectSettingsLocalPath(s.Dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings struct {
+				Hooks map[string][]struct {
+					Hooks []struct {
+						Command string `json:"command"`
+					} `json:"hooks"`
+				} `json:"hooks"`
+				StatusLine struct {
+					Command string `json:"command"`
+				} `json:"statusLine"`
+			}
+			if err := json.Unmarshal(b, &settings); err != nil {
+				t.Fatal(err)
+			}
+			groups := settings.Hooks["SessionStart"]
+			if len(groups) == 0 || len(groups[0].Hooks) == 0 {
+				t.Fatalf("generated settings lack SessionStart hook: %s", b)
+			}
+			hook := groups[0].Hooks[0].Command
+			if !strings.HasPrefix(hook, installed+" agent hook ") {
+				t.Fatalf("generated SessionStart hook = %q, want installed alias %q", hook, installed)
+			}
+			if !strings.HasPrefix(settings.StatusLine.Command, installed+" agent model --statusline") {
+				t.Fatalf("generated statusLine command = %q, want installed alias %q", settings.StatusLine.Command, installed)
+			}
+
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			self, err = filepath.EvalSymlinks(self)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := `set -eu
+test ! -e "$1"
+bare="$(/amux-bin/amux agent hook ready)"
+generated="$(/bin/sh -c "$2")"
+test "$bare" = running-candidate
+test "$generated" = "$bare"
+test "$(stat -Lc '%d:%i' /amux-bin/amux)" = "$(stat -Lc '%d:%i' "$3")"
+test "$(stat -Lc '%d:%i' /amux-bin/amux)" = "$(stat -Lc '%d:%i' "$4")"
+printf '%s' "$generated"
+`
+			argv, err := scope(s.Dir, TabAgent, s, spec.Access, nil, []string{"/bin/sh", "-c", script, "probe", sibling, hook, installed, self})
+			if err != nil {
+				t.Fatal(err)
+			}
+			launchEnv, err := launchenv.Build([]string{
+				"HOME=" + home,
+				"PATH=" + filepath.Dir(installed) + ":/usr/bin:/bin",
+				"TERM=amux-alias-candidate",
+			}, nil, launchenv.ForRuntime(s.Agent))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			cmd.Env = launchEnv
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generated SessionStart hook through running candidate alias: %v: %s", err, out)
+			}
+			if string(out) != "running-candidate" {
+				t.Fatalf("generated SessionStart hook output = %q", out)
+			}
+		})
+	}
+}
+
+func TestRuntimeGitObjectGrantIsExactReadOnly(t *testing.T) {
+	requireRuntimeIsolation(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("AMUX_JAIL", "on")
 
-	installed := core.InstalledBinPath()
-	if err := os.MkdirAll(filepath.Dir(installed), 0o700); err != nil {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(installed, []byte("#!/bin/sh\nprintf installed-hook-ok"), 0o700); err != nil {
+	runGitFixture(t, source, "init", "-q", "-b", "main")
+	runGitFixture(t, source, "config", "user.name", "amux test")
+	runGitFixture(t, source, "config", "user.email", "amux@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("authorized-base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sibling := filepath.Join(filepath.Dir(installed), "sibling-canary")
-	if err := os.WriteFile(sibling, []byte("must-stay-hidden"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	runGitFixture(t, source, "add", "README.md")
+	runGitFixture(t, source, "commit", "-q", "-m", "base")
 
-	s := store.Session{ID: "hook-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "hook-owner")}
+	managed := filepath.Join(root, "sessions")
+	s := store.Session{ID: "git-owner", RootID: "root", Agent: "codex", Repo: "repo", Dir: filepath.Join(managed, "root", "git-owner")}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(s.Dir, "repo")
+	layout := filepath.Join(root, "layout.json")
+	key := git.SourceKey(source)
+	if err := git.AddCheckout(context.Background(), git.CheckoutRequest{
+		Source: source, Path: checkout, Branch: "amux/runtime-test", RepoKey: key,
+		PoolRoot: filepath.Join(root, "pool"), StagingRoot: filepath.Join(root, "staging"),
+		ManagedRoot: managed, LayoutPath: layout, AllowLocalSource: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mounts, err := git.ReadObjectMounts(layout, checkout, managed)
+	if err != nil || len(mounts) == 0 {
+		t.Fatalf("read typed object closure: mounts=%+v err=%v", mounts, err)
+	}
 	spec := testLaunchSpec(t, s)
-	claudeHome := filepath.Join(s.Dir, ".amux", "claude")
-	if err := claudecfg.InstallHooksIn(s.Dir, claudeHome, installed); err != nil {
+	spec.GitObjects = mounts
+	if _, err := validateLaunchSpec(spec); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(claudecfg.ProjectSettingsLocalPath(s.Dir))
-	if err != nil {
-		t.Fatal(err)
+	poolConfig := filepath.Join(filepath.Dir(mounts[0].ObjectsHostDir), "config")
+	if _, err := os.Stat(poolConfig); err != nil {
+		t.Fatalf("fixture lacks planted pool config: %v", err)
 	}
-	var settings struct {
-		Hooks map[string][]struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
-		} `json:"hooks"`
-		StatusLine struct {
-			Command string `json:"command"`
-		} `json:"statusLine"`
-	}
-	if err := json.Unmarshal(b, &settings); err != nil {
-		t.Fatal(err)
-	}
-	groups := settings.Hooks["SessionStart"]
-	if len(groups) == 0 || len(groups[0].Hooks) == 0 {
-		t.Fatalf("generated settings lack SessionStart hook: %s", b)
-	}
-	hook := groups[0].Hooks[0].Command
-	if !strings.HasPrefix(hook, installed+" agent hook ") {
-		t.Fatalf("generated SessionStart hook = %q, want installed alias %q", hook, installed)
-	}
-	if !strings.HasPrefix(settings.StatusLine.Command, installed+" agent model --statusline") {
-		t.Fatalf("generated statusLine command = %q, want installed alias %q", settings.StatusLine.Command, installed)
-	}
-
 	script := `set -eu
-test ! -e "$1"
-exec /bin/sh -c "$2"
+test "$(git -C "$1" show HEAD:README.md)" = authorized-base
+test ! -e "$2"
+if touch "$3/session-write" 2>/dev/null; then exit 31; fi
 `
-	argv, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/sh", "-c", script, "probe", sibling, hook}, nil)
+	argv, err := scope(checkout, TabAgent, s, spec.Access, spec.GitObjects, []string{"/bin/sh", "-c", script, "probe", checkout, poolConfig, mounts[0].ObjectsMountDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	launchEnv, err := launchenv.Build([]string{
-		"HOME=" + home,
-		"PATH=" + filepath.Dir(installed) + ":/usr/bin:/bin",
-	}, nil, launchenv.ForRuntime(s.Agent))
+	launchEnv, err := launchenv.Build([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, nil, launchenv.ForRuntime(s.Agent))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,12 +408,17 @@ exec /bin/sh -c "$2"
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = launchEnv
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("generated SessionStart hook through exact installed alias: %v: %s", err, out)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pooled worktree through exact read-only Git object closure: %v: %s", err, out)
 	}
-	if string(out) != "installed-hook-ok" {
-		t.Fatalf("generated SessionStart hook output = %q", out)
+}
+
+func runGitFixture(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
 }
 

@@ -118,6 +118,9 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   bubblewrap mount and PID namespace: the system is read-only, `/proc` is private,
   and the rest of your home — other projects, files, state, and secrets — is
   replaced by an empty tmpfs. Only the exact session directory is writable.
+  Each repository keeps its writable Git common/admin metadata there; only the
+  daemon-authorized immutable base-object generation directories are added as
+  exact read-only mounts. Those admitted object bytes are intentionally readable.
   Daemon-private access storage, global transcripts/hooks, sibling directories,
   Docker, Windows/WSL drives, and host shell histories are not mounted. Only what
   each tool needs is bound back explicitly: the editor's config, the shell's rc/theme —
@@ -128,8 +131,9 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   are excluded before bubblewrap starts. Bare `amux` resolves through the exact
   running binary in read-only `/amux-bin`. Claude's generated hooks and model
   status line retain the stable installed absolute path through a second
-  read-only exact-file alias; the containing `~/.local/bin` directory stays
-  absent. Network remains shared (DNS included), so this is not a network
+  read-only alias of that same running executable, even if the host installation
+  is missing or older; the containing `~/.local/bin` directory stays absent.
+  Network remains shared (DNS included), so this is not a network
   sandbox. Protected launch fails closed when isolation is disabled or
   unsupported. See `docs/namespace-rollout.md` before deployment.
 - **Harness config is a private copy, not a mount.** Your `~/.claude` /

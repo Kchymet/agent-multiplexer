@@ -6,7 +6,6 @@ package panespec
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +20,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
+	"amux/internal/git"
 	"amux/internal/launchenv"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -35,8 +35,9 @@ var (
 // session row and access grant are captured together so panespec never reopens
 // the store or invents authority from an id, environment variable, or cwd.
 type LaunchSpec struct {
-	Session store.Session
-	Access  access.SessionAccess
+	Session    store.Session
+	Access     access.SessionAccess
+	GitObjects []git.GitObjectMount
 }
 
 // Tabs an agent exposes.
@@ -73,11 +74,7 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 			return "", nil, nil, err
 		}
 	}
-	sources := agentRepoSources(s.ID)
-	if tab == TabAgent && agent.Canonical(s.Agent) == "codex" {
-		argv = codexWritableRepos(argv, sources)
-	}
-	argv, err = scope(dir, tab, s, spec.Access, argv, sources)
+	argv, err = scope(dir, tab, s, spec.Access, spec.GitObjects, argv)
 	return dir, env, argv, err
 }
 
@@ -109,23 +106,8 @@ func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
-	sources := agentRepoSources(s.ID)
-	inner = codexWritableRepos(inner, sources)
-	argv, err = scope(dir, TabAgent, s, spec.Access, inner, sources)
+	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
 	return dir, env, argv, endpoint, err
-}
-
-// Codex applies its own tool sandbox inside amux's mount namespace. This helper
-// remains for non-Git writable roots, but independent session repositories need
-// no override: their .git directories are already beneath the session workspace.
-func codexWritableRepos(argv, sources []string) []string {
-	if len(argv) == 0 || len(sources) == 0 {
-		return argv
-	}
-	// JSON string arrays are valid TOML and safely quote spaces and path escapes.
-	roots, _ := json.Marshal(sources)
-	out := []string{argv[0], "-c", "sandbox_workspace_write.writable_roots=" + string(roots)}
-	return append(out, argv[1:]...)
 }
 
 // The socket root stays outside every session directory. It is never mounted;
@@ -169,7 +151,7 @@ func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env,
 		inner = append(inner, "resume", threadID)
 	}
 	inner = codexcfg.FullscreenTUI(inner)
-	argv, err = scope(dir, TabAgent, s, spec.Access, inner, agentRepoSources(s.ID))
+	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
 	return dir, env, argv, err
 }
 
@@ -181,13 +163,6 @@ func codexBin(agentArgv []string) string {
 		return agentArgv[0]
 	}
 	return "codex"
-}
-
-// agentRepoSources no longer returns shared writable Git common directories.
-// Pooled worktrees require typed read-only GitObjectMounts in LaunchSpec; that
-// namespace integration is deliberately separate from this legacy []string seam.
-func agentRepoSources(agentID string) []string {
-	return nil
 }
 
 // systemRoots are the host trees every pane sees read-only, in bind order: the
@@ -337,13 +312,52 @@ func validateLaunchSpec(spec LaunchSpec) (store.Session, error) {
 	); err != nil {
 		return store.Session{}, fmt.Errorf("session %q access destination: %w", s.ID, err)
 	}
-	if err := requireIndependentGit(s); err != nil {
+	if err := validateGitObjectMounts(spec.GitObjects, s, g); err != nil {
 		return store.Session{}, err
 	}
 	if err := IsolationSupport(); err != nil {
 		return store.Session{}, err
 	}
 	return s, nil
+}
+
+func validateGitObjectMounts(mounts []git.GitObjectMount, s store.Session, grant access.SessionAccess) error {
+	seen := make(map[string]bool, len(mounts))
+	for i, mount := range mounts {
+		if !singlePathComponent(mount.RepoKey) || !singlePathComponent(mount.Generation) {
+			return fmt.Errorf("invalid Git object grant %d: missing or unsafe repository/generation identity", i)
+		}
+		if !sameCleanAbsolute(mount.ObjectsHostDir, mount.ObjectsMountDir) {
+			return fmt.Errorf("invalid Git object grant %d: source and destination must be the same clean absolute path", i)
+		}
+		if filepath.Base(mount.ObjectsHostDir) != "objects" {
+			return fmt.Errorf("invalid Git object grant %d: path must name only an objects directory", i)
+		}
+		if seen[mount.ObjectsHostDir] {
+			return fmt.Errorf("invalid Git object grant %d: duplicate objects directory", i)
+		}
+		seen[mount.ObjectsHostDir] = true
+		if err := requireRealDirectory(mount.ObjectsHostDir); err != nil {
+			return fmt.Errorf("invalid Git object grant %d: %w", i, err)
+		}
+		canonical, err := filepath.EvalSymlinks(mount.ObjectsHostDir)
+		if err != nil || canonical != mount.ObjectsHostDir {
+			return fmt.Errorf("invalid Git object grant %d: objects directory is not canonical", i)
+		}
+		if pathWithin(s.Dir, mount.ObjectsHostDir) || pathWithin(mount.ObjectsHostDir, s.Dir) {
+			return fmt.Errorf("invalid Git object grant %d: objects directory overlaps the session", i)
+		}
+		for _, authority := range []string{grant.MailboxHostDir, grant.RequestsHostDir, grant.CredentialHostDir} {
+			if pathWithin(authority, mount.ObjectsHostDir) || pathWithin(mount.ObjectsHostDir, authority) {
+				return fmt.Errorf("invalid Git object grant %d: objects directory overlaps access authority", i)
+			}
+		}
+	}
+	return nil
+}
+
+func singlePathComponent(s string) bool {
+	return s != "" && s != "." && s != ".." && filepath.Base(s) == s
 }
 
 func sameCleanAbsolute(got, want string) bool {
@@ -404,12 +418,9 @@ func validateExistingDestinationParents(root string, paths ...string) error {
 // the authoritative own directory, exact daemon-issued access directories, the
 // own App Server socket directory, and explicit runtime/account capabilities
 // enter the namespace. Network remains shared for provider and Git access.
-func scope(dir string, tab int, s store.Session, grant access.SessionAccess, argv []string, rwSources []string) ([]string, error) {
+func scope(dir string, tab int, s store.Session, grant access.SessionAccess, gitObjects []git.GitObjectMount, argv []string) ([]string, error) {
 	if len(argv) == 0 {
 		return argv, nil
-	}
-	if len(rwSources) != 0 {
-		return nil, fmt.Errorf("shared writable repository mounts are unsupported")
 	}
 	bw, home, disabled, err := jail()
 	if err != nil {
@@ -461,17 +472,13 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 		"--setenv", payloadExecEnv, "1",
 	)
 	// Claude's generated hooks and model-status command deliberately use the
-	// stable install path so they also work outside a protected pane. A daemon
-	// may itself be a development binary elsewhere, so /amux-bin alone cannot
-	// satisfy those absolute commands. Restore only the canonical installed file
-	// at that exact compatibility alias; never expose its ~/.local/bin parent.
+	// stable install path so they also work outside a protected pane. Inside the
+	// pane that path must identify the same trusted running executable supplied by
+	// /amux-bin, even when the host installation is absent or older. Restore only
+	// that exact-file alias; never expose its ~/.local/bin parent.
 	installed := core.InstalledBinPath()
 	if installed != self {
-		if installedReal, err := filepath.EvalSymlinks(installed); err == nil {
-			if info, statErr := os.Stat(installedReal); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-				args = append(args, "--ro-bind", installedReal, installed)
-			}
-		}
+		args = append(args, "--ro-bind", self, installed)
 	}
 	// A launcher may resolve into a different home subtree (for example Codex's
 	// ~/.local/bin launcher into ~/.codex/packages). Bind the resolved package or
@@ -486,6 +493,9 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 		args = append(args, "--ro-bind-try", root, root)
 	}
 	args = append(args, "--bind", s.Dir, s.Dir)
+	for _, mount := range gitObjects {
+		args = append(args, "--ro-bind", mount.ObjectsHostDir, mount.ObjectsMountDir)
+	}
 	for _, b := range configBinds(tab, s, home) {
 		args = append(args, b...)
 	}
