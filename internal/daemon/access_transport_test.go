@@ -141,6 +141,60 @@ func TestHostListenerBoundsNewlineFreeProofBeforeSnapshot(t *testing.T) {
 	<-done
 }
 
+func TestDrainServingConnectionsBeforeAuthorityRelease(t *testing.T) {
+	root := t.TempDir()
+	d := New("", nil, time.Hour)
+	var err error
+	d.authority, err = access.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := d.authority.EnsureHost(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := access.LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := credentialPrincipal(credential)
+
+	server, client := net.Pipe()
+	defer client.Close()
+	// The handler blocks in its TLS handshake until shutdown closes the raw
+	// transport. Registration is synchronous, so drain must join that handler.
+	d.startServingConnection(context.Background(), server)
+	d.drainServingConnections()
+
+	d.servingMu.Lock()
+	remaining := len(d.serving)
+	draining := d.servingDraining
+	d.servingMu.Unlock()
+	if remaining != 0 || !draining {
+		t.Fatalf("serving state after drain: remaining=%d draining=%v", remaining, draining)
+	}
+	if err := d.authority.Valid(context.Background(), principal); err != nil {
+		t.Fatalf("authority was released before serving handlers drained: %v", err)
+	}
+	lateServer, lateClient := net.Pipe()
+	d.startServingConnection(context.Background(), lateServer)
+	defer lateClient.Close()
+	if _, err := lateClient.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection accepted after serving drain began")
+	}
+
+	if err := d.authority.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := access.Open(root)
+	if err != nil {
+		t.Fatalf("authority ownership was not reusable after ordered drain: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOwnedSocketNeverRemovesUnmanagedEndpoint(t *testing.T) {
 	root := t.TempDir()
 	stable := filepath.Join(root, "daemon.sock")

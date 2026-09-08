@@ -23,6 +23,9 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	if err := revalidateDeferred(ctx); err != nil {
+		return fail("authorization changed before execution: %v", err)
+	}
 	switch a.Action {
 	case actionSessionRecreate:
 		if a.ID == "" || a.Kind != "" || a.Cwd != "" || a.Target != "" || a.Query != "" ||
@@ -118,6 +121,9 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		if err := revalidateDeferred(ctx); err != nil {
+			return err
+		}
 		d.killRuntimeFor(id)
 		session := spec.Session
 		supervisor, err := d.codex.Ensure(id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
@@ -132,6 +138,9 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 	}
 	dir, env, argv, err := d.resolve(spec, panespec.TabAgent)
 	if err != nil {
+		return err
+	}
+	if err := revalidateDeferred(ctx); err != nil {
 		return err
 	}
 	d.killRuntimeFor(id)

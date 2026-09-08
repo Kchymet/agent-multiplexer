@@ -11,7 +11,6 @@ import (
 	"amux/internal/core"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
-	"amux/internal/wsops"
 )
 
 func (r *sessionRuntime) authorize(ctx context.Context, principal access.Principal, call sessionrpc.Call) error {
@@ -76,12 +75,21 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		}
 		// Completion is deliberately not d.handle/wsops.Dispatch: those stop the
 		// runtime before the durable response and its receipt can be observed.
-		if _, err := wsops.ApplyResult(ctx, action); err != nil {
+		if _, err := r.applyResult(ctx, action); err != nil {
+			archived, known := r.completionArchiveState(ctx, action.ID)
+			if archived || !known {
+				// The mutation may already be committed even though its caller saw an
+				// error. Keep the narrow archived receipt window and, independently
+				// of transport hooks, guarantee bounded runtime stop/revocation.
+				r.d.triggerPoll()
+				r.completions.begin(request.Principal, request.RequestID, action.ID)
+				return rpcIndeterminate("completion_commit_uncertain"), nil
+			}
 			return rpcFailed("completion_failed"), nil
 		}
 		r.d.triggerPoll()
 		hooks := r.completions.begin(request.Principal, request.RequestID, action.ID)
-		body, err := json.Marshal(core.Result{Type: "result", OK: true})
+		body, err := r.encodeResult(core.Result{Type: "result", OK: true})
 		if err != nil {
 			return rpcFailed("encode_failed"), nil
 		}
@@ -95,7 +103,7 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return r.policy.Authorize(ctx, request.Principal, req)
 	})
 	result := r.d.handle(guarded, action)
-	body, err := json.Marshal(result)
+	body, err := r.encodeResult(result)
 	if err != nil {
 		return rpcFailed("encode_failed"), nil
 	}
@@ -172,6 +180,17 @@ func (r *sessionRuntime) isSelfCompletion(ctx context.Context, principal access.
 	return err == nil && ok && resource.Role == store.RoleAgent && !resource.Archived
 }
 
+// completionArchiveState distinguishes a known pre-commit failure from an
+// accepted mutation whose commit outcome cannot be proven. Unknown state stays
+// on the fail-closed cleanup path and is never automatically retried.
+func (r *sessionRuntime) completionArchiveState(ctx context.Context, id string) (archived, known bool) {
+	resource, ok, err := r.resolver.Lookup(ctx, id)
+	if err != nil || !ok {
+		return false, false
+	}
+	return resource.Archived, true
+}
+
 func selfCompletionShape(principal access.Principal, action core.Action) bool {
 	return principal.Kind == access.SubjectSession && principal.SubjectID == action.ID &&
 		action.Action == core.ActionSetArchived && action.Fields["archived"] == "true"
@@ -187,4 +206,8 @@ func rpcInvalid(code string) sessionrpc.DispatchResult {
 
 func rpcFailed(code string) sessionrpc.DispatchResult {
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: code}
+}
+
+func rpcIndeterminate(code string) sessionrpc.DispatchResult {
+	return sessionrpc.DispatchResult{Status: sessionrpc.StatusIndeterminate, Code: code}
 }

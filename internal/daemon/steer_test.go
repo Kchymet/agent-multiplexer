@@ -118,6 +118,34 @@ func newFakeEngine() *fakeEngine {
 	return &fakeEngine{insts: map[engine.Key]*fakeInstance{}}
 }
 
+func TestStartAgentRevalidatesAtRuntimeExecution(t *testing.T) {
+	d := New("", nil, time.Hour)
+	eng := newFakeEngine()
+	d.engine = eng
+	allowed := true
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{Session: store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}}, nil
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		allowed = false // policy changes after resolution but before Engine.Ensure
+		return t.TempDir(), nil, []string{"agent"}, nil
+	}
+	ctx := withAccessGuard(context.Background(), func() error {
+		if !allowed {
+			return access.ErrDenied
+		}
+		return nil
+	})
+	if err := d.startAgent(ctx, "a1"); err == nil {
+		t.Fatal("runtime started after its execution policy was revoked")
+	}
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	if len(eng.ensured) != 0 {
+		t.Fatalf("engine Ensure called after revocation: %v", eng.ensured)
+	}
+}
+
 func (e *fakeEngine) Name() string { return "fake" }
 func (e *fakeEngine) Ensure(_ context.Context, spec engine.Spec) (engine.Instance, error) {
 	if e.ensureBlock != nil {

@@ -115,6 +115,16 @@ type Daemon struct {
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 
+	// serving tracks every accepted host transport. Run closes and joins these
+	// handlers before it closes the session RPC servers or releases authority
+	// ownership. That ordering matters for blocked TLS writes and for handlers
+	// whose invalidation watcher selected ctx.Done during shutdown.
+	servingMu       sync.Mutex
+	serving         map[uint64]net.Conn
+	servingNext     uint64
+	servingDraining bool
+	servingWG       sync.WaitGroup
+
 	// permissions owns runtime-generation binding and atomic request consumption
 	// for every caller role. It is initialized even in tests that do not Run.
 	permissions *runtimePermissionGate
@@ -142,6 +152,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		liveAgentsPath: core.LiveAgentsPath(),
 		firstPoll:      make(chan struct{}),
 		shutdown:       make(chan struct{}),
+		serving:        make(map[uint64]net.Conn),
 		permissions:    newRuntimePermissionGate(),
 	}
 	d.launchSpec = d.launchSpecFor
@@ -309,6 +320,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Close the listener when ctx ends so Accept returns.
 	go func() { <-ctx.Done(); _ = ln.Close() }()
+	// This is intentionally the last shutdown defer installed: accepted host
+	// transports are closed and their handlers joined while the session RPC
+	// servers and authority are still live.
+	defer d.drainServingConnections()
 
 	for {
 		conn, err := ln.Accept()
@@ -318,8 +333,52 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			return err
 		}
-		go d.serve(ctx, conn)
+		d.startServingConnection(ctx, conn)
 	}
+}
+
+// startServingConnection registers an accepted transport before its handler is
+// launched. Once draining starts, no new handler can race WaitGroup.Wait.
+func (d *Daemon) startServingConnection(ctx context.Context, conn net.Conn) {
+	d.servingMu.Lock()
+	if d.servingDraining {
+		d.servingMu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	id := d.servingNext
+	d.servingNext++
+	d.serving[id] = conn
+	d.servingWG.Add(1)
+	d.servingMu.Unlock()
+
+	go func() {
+		defer func() {
+			d.servingMu.Lock()
+			delete(d.serving, id)
+			d.servingMu.Unlock()
+			d.servingWG.Done()
+		}()
+		d.serve(ctx, conn)
+	}()
+}
+
+// drainServingConnections closes all accepted transports before waiting for
+// their handlers. Closing the raw connection unblocks both TLS handshakes and
+// writes; the authority remains owned until every handler has returned.
+func (d *Daemon) drainServingConnections() {
+	d.servingMu.Lock()
+	d.servingDraining = true
+	connections := make([]net.Conn, 0, len(d.serving))
+	for _, conn := range d.serving {
+		connections = append(connections, conn)
+	}
+	d.servingMu.Unlock()
+
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	d.servingWG.Wait()
 }
 
 func (d *Daemon) requestShutdown() {
@@ -440,8 +499,9 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	}
 	defer cancelWatch()
 	cl := newAuthenticatedConnState(secure, func() bool { return d.authority.Valid(ctx, principal) == nil })
-	defer cl.shutdown()
+	watchDone := make(chan struct{})
 	go func() {
+		defer close(watchDone)
 		select {
 		case <-invalidated:
 			// Abort a blocked TLS write as well as queued frames. A write that has
@@ -450,6 +510,10 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case <-cl.done:
 		case <-ctx.Done():
 		}
+	}()
+	defer func() {
+		cl.shutdown()
+		<-watchDone
 	}()
 
 	ch := make(chan core.Snapshot, 4)
@@ -670,7 +734,7 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	// first so the server is up and the thread pinned, then resolve the attach argv.
 	if a.Tab == panespec.TabAgent {
 		if d.structuredControl(spec.Session) {
-			sup, e := d.ensureSupervisorSpec(spec)
+			sup, e := d.ensureSupervisorSpec(ctx, spec)
 			if e != nil {
 				paneExit(e.Error())
 				return
@@ -682,6 +746,10 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		}
 	}
 	if err != nil {
+		paneExit(err.Error())
+		return
+	}
+	if err := revalidateDeferred(ctx); err != nil {
 		paneExit(err.Error())
 		return
 	}
@@ -734,6 +802,9 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
 	}
+	if err := revalidateDeferred(ctx); err != nil {
+		return err
+	}
 	ids, err := d.agentsUnder(id)
 	if err != nil {
 		return err
@@ -743,6 +814,9 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	}
 	var firstErr error
 	for _, aid := range ids {
+		if err := revalidateDeferred(ctx); err != nil {
+			return err
+		}
 		err := d.startAgent(ctx, aid)
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -765,11 +839,14 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 		return err
 	}
 	if d.structuredControl(spec.Session) {
-		_, err := d.ensureSupervisorSpec(spec)
+		_, err := d.ensureSupervisorSpec(ctx, spec)
 		return err
 	}
 	dir, env, argv, err := d.resolve(spec, panespec.TabAgent)
 	if err != nil {
+		return err
+	}
+	if err := revalidateDeferred(ctx); err != nil {
 		return err
 	}
 	inst, err := d.engine.Ensure(ctx, engine.Spec{
@@ -796,10 +873,10 @@ func (d *Daemon) ensureSupervisor(ctx context.Context, agentID string) (*codexap
 	if err != nil {
 		return nil, err
 	}
-	return d.ensureSupervisorSpec(spec)
+	return d.ensureSupervisorSpec(ctx, spec)
 }
 
-func (d *Daemon) ensureSupervisorSpec(spec panespec.LaunchSpec) (*codexapp.Supervisor, error) {
+func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchSpec) (*codexapp.Supervisor, error) {
 	agentID := spec.Session.ID
 	if sup, ok := d.codex.Get(agentID); ok {
 		return sup, nil
@@ -809,6 +886,9 @@ func (d *Daemon) ensureSupervisorSpec(spec panespec.LaunchSpec) (*codexapp.Super
 	// baked into argv, dialed by amux, and persisted for a native attach.
 	dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := revalidateDeferred(ctx); err != nil {
 		return nil, err
 	}
 	sess := spec.Session

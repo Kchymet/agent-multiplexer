@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,10 +13,12 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/console"
+	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 const (
@@ -29,20 +32,24 @@ const (
 )
 
 type sessionRuntime struct {
-	d           *Daemon
-	resolver    *daemonAccessResolver
-	policy      access.Policy
-	poll        time.Duration
-	now         func() time.Time
-	dispatchMu  sync.Mutex
-	servers     map[string]*sessionrpc.Server
-	completions *completionRegistry
+	d            *Daemon
+	resolver     *daemonAccessResolver
+	policy       access.Policy
+	applyResult  func(context.Context, core.Action) (string, error)
+	encodeResult func(core.Result) ([]byte, error)
+	poll         time.Duration
+	now          func() time.Time
+	dispatchMu   sync.Mutex
+	servers      map[string]*sessionrpc.Server
+	completions  *completionRegistry
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
 	r := &sessionRuntime{
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
 		now: time.Now, servers: make(map[string]*sessionrpc.Server),
+		applyResult:  wsops.ApplyResult,
+		encodeResult: func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)

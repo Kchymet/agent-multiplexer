@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 type completionRaceStore struct {
@@ -184,6 +186,93 @@ func TestSelfCompletionPersistsBeforeBoundedRuntimeStopAndRevoke(t *testing.T) {
 	}
 	if err := d.authority.Valid(context.Background(), principals[session.ID]); err == nil {
 		t.Fatal("completion credential remained valid after settled runtime stop")
+	}
+}
+
+func TestSelfCompletionPostCommitFailuresAlwaysSettle(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*sessionRuntime)
+		want      sessionrpc.Status
+		omitHooks bool
+	}{
+		{
+			name: "apply reports an error after commit",
+			configure: func(runtime *sessionRuntime) {
+				runtime.applyResult = func(ctx context.Context, action core.Action) (string, error) {
+					if _, err := wsops.ApplyResult(ctx, action); err != nil {
+						return "", err
+					}
+					return "", errors.New("injected post-commit failure")
+				}
+			},
+			want: sessionrpc.StatusIndeterminate,
+		},
+		{
+			name: "result encoding fails after commit",
+			configure: func(runtime *sessionRuntime) {
+				runtime.encodeResult = func(core.Result) ([]byte, error) {
+					return nil, errors.New("injected encoding failure")
+				}
+			},
+			want: sessionrpc.StatusFailed,
+		},
+		{
+			name:      "transport never persists response",
+			configure: func(*sessionRuntime) {},
+			want:      sessionrpc.StatusOK,
+			omitHooks: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := store.Session{ID: "a1", RootID: "root1", Name: "agent", Agent: "claude", Dir: t.TempDir()}
+			d, runtime, principals := sessionRuntimeFixture(t, session)
+			eng := newFakeEngine()
+			d.engine = eng
+			instance := eng.running(session.ID)
+			if _, err := d.permissions.observe(session.ID, instance); err != nil {
+				t.Fatal(err)
+			}
+			runtime.completions.abandon = 5 * time.Millisecond
+			runtime.completions.minimum = time.Millisecond
+			runtime.completions.runtime = 10 * time.Millisecond
+			runtime.completions.poll = time.Millisecond
+			tt.configure(runtime)
+
+			requestID := "0123456789abcdef0123456789abcdef"
+			call := sessionrpc.Call{
+				Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSetArchived,
+				ID: session.ID, Fields: map[string]string{"archived": "true"},
+			}
+			result, err := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+				Principal: principals[session.ID], RequestID: requestID, Call: call,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != tt.want {
+				t.Fatalf("completion result = %+v, want status %s", result, tt.want)
+			}
+			if tt.omitHooks && result.Receipt == nil {
+				t.Fatal("successful completion did not return receipt hooks")
+			}
+			// Deliberately invoke no receipt hook. The registry's independent
+			// abandonment path owns every failure after the archive commit.
+			key := instance.Key()
+			deadline := time.Now().Add(time.Second)
+			_, live := eng.Lookup(key)
+			for live && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+				_, live = eng.Lookup(key)
+			}
+			if live {
+				t.Fatal("post-commit failure left the runtime alive")
+			}
+			if err := d.authority.Valid(context.Background(), principals[session.ID]); err == nil {
+				t.Fatal("post-commit failure left the credential valid")
+			}
+		})
 	}
 }
 
