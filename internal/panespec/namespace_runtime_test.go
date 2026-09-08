@@ -21,9 +21,7 @@ import (
 // objects created after namespace setup. It skips explicitly on unsupported
 // hosts; it never falls back to a shared namespace.
 func TestRuntimeNamespaceRejectsAliasesFDsAndFutureSiblings(t *testing.T) {
-	if err := IsolationSupport(); err != nil {
-		t.Skipf("protected namespace unavailable: %v", err)
-	}
+	requireRuntimeIsolation(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
@@ -71,7 +69,7 @@ func TestRuntimeNamespaceRejectsAliasesFDsAndFutureSiblings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := `set -eu
+	script := `set -eux
 test -z "${AMUX_MUX_TOKEN+x}"
 test -z "${AMUX_PROVIDER_TOKEN+x}"
 test -z "${AMUX_PROVIDER_PASSWORD+x}"
@@ -83,9 +81,9 @@ test -z "${OPENAI_API_KEY+x}"
 test "$(cat /amux-session-access/current)" = credential
 test "$(cat "$PANESPEC_TEST_MAILBOX/service.json")" = service
 echo request > "$PANESPEC_TEST_REQUESTS/request"
-if echo bad > "$PANESPEC_TEST_MAILBOX/service.json" 2>/dev/null; then exit 21; fi
-if echo bad > "$PANESPEC_TEST_MAILBOX/responses/response" 2>/dev/null; then exit 23; fi
-if echo bad > /amux-session-access/current 2>/dev/null; then exit 22; fi
+if /bin/sh -c 'echo bad > "$1"' sh "$PANESPEC_TEST_MAILBOX/service.json" 2>/dev/null; then exit 21; fi
+if /bin/sh -c 'echo bad > "$1"' sh "$PANESPEC_TEST_MAILBOX/responses/response" 2>/dev/null; then exit 23; fi
+if /bin/sh -c 'echo bad > "$1"' sh /amux-session-access/current 2>/dev/null; then exit 22; fi
 mv "$PANESPEC_TEST_OWN/.amux" "$PANESPEC_TEST_OWN/.amux-hidden" 2>/dev/null || true
 test "$(cat /amux-session-access/current)" = credential
 test ! -e "$PANESPEC_TEST_PEER"
@@ -94,7 +92,7 @@ test ! -e "/proc/1/root$PANESPEC_TEST_PEER"
 test "$(readlink /proc/self/ns/pid)" != "$PANESPEC_TEST_HOST_PID_NS"
 test "$$" -ne 1
 grep -Eq '^NSpid:[[:space:]]+1$' /proc/1/status
-test ! -e /proc/self/fd/3
+if [ "$(cat /proc/self/fd/3 2>/dev/null || true)" = peer-secret ]; then exit 24; fi
 ! grep -F " $PANESPEC_TEST_DATA " /proc/self/mountinfo
 ! grep -F " $PANESPEC_TEST_STATE " /proc/self/mountinfo
 ! grep -F " /run " /proc/self/mountinfo

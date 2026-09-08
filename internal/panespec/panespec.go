@@ -452,6 +452,20 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
 	// Empty $HOME, then restore only the exact runtime and authoritative own dir.
 	args = append(args, "--tmpfs", home)
+	// Bubblewrap deliberately preserves descriptors passed to it. Execute every
+	// payload through this binary once inside the private namespace so the init
+	// trampoline can mark all descriptors above stderr close-on-exec. Mount the
+	// exact executable after /tmp and $HOME are hidden because test/development
+	// binaries commonly live beneath one of those tmpfs roots.
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve payload trampoline: %w", err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		return nil, fmt.Errorf("resolve payload trampoline path: %w", err)
+	}
+	args = append(args, "--ro-bind", self, self, "--setenv", payloadExecEnv, "1")
 	// A launcher may resolve into a different home subtree (for example Codex's
 	// ~/.local/bin launcher into ~/.codex/packages). Bind the resolved package or
 	// executable and run it directly, without exposing the launcher subtree too.
@@ -492,18 +506,19 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 		args = append(args, "--bind", ownSocketsSource, ownSockets)
 	}
 	// The daemon-private parent is never mounted. Mailbox is read-only, requests
-	// is its only writable overlay, and credentials are a read-only sibling source
-	// mounted both at the immutable immediate-root context path and at the legacy
-	// own-directory compatibility path.
+	// is its only writable overlay, and the independent credential source is
+	// mounted at the immutable immediate-root context path. Do not add a nested
+	// credential overlay below the read-only mailbox: bubblewrap would either
+	// need to mutate the private mailbox source to manufacture that mountpoint or
+	// fail closed with EROFS before the payload starts.
 	args = append(args,
 		"--ro-bind", grant.CredentialHostDir, core.SessionAccessDir(),
 		"--ro-bind", grant.MailboxHostDir, grant.MailboxMountDir,
 		"--bind", grant.RequestsHostDir, grant.RequestsMountDir,
-		"--ro-bind", grant.CredentialHostDir, grant.CredentialMountDir,
 		"--chdir", dir,
 	)
 	args = append(args, "--")
-	return append(args, launchArgv...), nil
+	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
 var childAMUXEnvironment = map[string]bool{
@@ -511,6 +526,11 @@ var childAMUXEnvironment = map[string]bool{
 	"AMUX_ROOT": true, "AMUX_SCOPE": true, "AMUX_SESSION_ID": true,
 	"AMUX_WORKGROUP": true, "AMUX_WORKSPACE": true,
 }
+
+const (
+	payloadExecEnv = "AMUX_PAYLOAD_CLEAN_EXEC"
+	payloadExecArg = "--amux-payload-clean-exec"
+)
 
 // hostOnlyEnvironmentNames strips daemon/operator authority inherited by both
 // engine/local and codexapp before the child command runs. Session identity and
@@ -602,9 +622,6 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		binds = append(binds,
 			[]string{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
 		)
-		if exe, err := os.Executable(); err == nil {
-			binds = append(binds, []string{"--ro-bind-try", exe, exe})
-		}
 		// On WSL2, Claude reaches the Windows clipboard (e.g. pasting an image) by
 		// invoking a Windows .exe via interop; those live under /mnt/c, and the
 		// launcher path-translates through the DrvFs mount. Without /mnt/c in the

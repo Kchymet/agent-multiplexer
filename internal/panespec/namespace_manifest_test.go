@@ -45,7 +45,6 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 		{"--ro-bind", spec.Access.CredentialHostDir, core.SessionAccessDir()},
 		{"--ro-bind", spec.Access.MailboxHostDir, spec.Access.MailboxMountDir},
 		{"--bind", spec.Access.RequestsHostDir, spec.Access.RequestsMountDir},
-		{"--ro-bind", spec.Access.CredentialHostDir, spec.Access.CredentialMountDir},
 	}
 	last := -1
 	for _, sequence := range want {
@@ -57,6 +56,9 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 			t.Errorf("mount order is unsafe at %v: %v", sequence, argv)
 		}
 		last = at
+	}
+	if argvSequence(argv, "--ro-bind", spec.Access.CredentialHostDir, spec.Access.CredentialMountDir) >= 0 {
+		t.Fatalf("manifest mounts credentials below the read-only mailbox: %v", argv)
 	}
 	for _, forbidden := range []string{
 		core.DataDir(), core.StateDir(), core.HookStateDir(), core.TranscriptDir(),
@@ -101,6 +103,13 @@ func TestTypedLaunchPathsStripInheritedHostAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	for label, argv := range map[string][]string{"agent": agentArgv, "app-server": serverArgv, "attach": attachArgv} {
+		separator := slices.Index(argv, "--")
+		if separator < 0 || separator+2 >= len(argv) || argv[separator+2] != payloadExecArg {
+			t.Errorf("%s does not pass through the descriptor-clean payload trampoline: %v", label, argv)
+		}
+		if argvSequence(argv, "--setenv", payloadExecEnv, "1") < 0 {
+			t.Errorf("%s does not activate the descriptor-clean payload trampoline: %v", label, argv)
+		}
 		for _, name := range secrets {
 			if argvSequence(argv, "--unsetenv", name) < 0 {
 				t.Errorf("%s did not strip %s: %v", label, name, argv)
