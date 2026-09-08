@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/hostprep"
 )
 
 // Spec describes how one harness's configuration is templated into one agent's
@@ -50,6 +51,10 @@ type Spec struct {
 	// Dir is the agent's private copy, under its sandbox dir so it is writable
 	// inside the scope without a mount of its own and dies with the agent.
 	Dir string
+	// Root is the authoritative session directory containing Dir. Host-side
+	// reads and writes of the private copy are descriptor-anchored here; Template
+	// is a separate trusted source and is never treated as a destination link.
+	Root string
 	// Entries are the template's configuration paths (relative to both Template
 	// and Dir): what a fresh copy is seeded with and what Scan watches. A
 	// directory entry covers its whole tree. Per-machine state — transcripts,
@@ -164,6 +169,97 @@ func sanitize(s string) string {
 
 var mu sync.Mutex // serialize manifest read-modify-write across Seed/Scan/Promote/Reset
 
+type destination struct {
+	root  *hostprep.Root
+	home  string
+	owned bool
+}
+
+func openDestination(sp Spec) (*destination, error) {
+	if sp.Root == "" || sp.Dir == "" {
+		return nil, errors.New("cfghome: private destination needs Root and Dir")
+	}
+	r, err := hostprep.OpenSession(sp.Root)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := r.Rel(sp.Dir)
+	if err != nil || rel == "." {
+		_ = r.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("cfghome: private home must be below session root")
+	}
+	return &destination{root: r, home: rel, owned: true}, nil
+}
+
+func destinationAt(root *hostprep.Root, sp Spec) (*destination, error) {
+	rootName, err := filepath.Abs(sp.Root)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Clean(rootName) != filepath.Clean(root.Name()) {
+		return nil, hostprep.ErrUnsafe
+	}
+	rel, err := root.Rel(sp.Dir)
+	if err != nil || rel == "." {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("cfghome: private home must be below session root")
+	}
+	return &destination{root: root, home: rel}, nil
+}
+
+func (d *destination) close() {
+	if d.owned {
+		_ = d.root.Close()
+	}
+}
+func (d *destination) path(rel string) string {
+	if rel == "" || rel == "." {
+		return d.home
+	}
+	return filepath.Join(d.home, rel)
+}
+func (d *destination) seeded() (bool, error) {
+	sub, err := d.root.Sub(d.home, false, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	_ = sub.Close()
+	return true, nil
+}
+func (d *destination) mkdir(rel string) error {
+	sub, err := d.root.Sub(d.path(rel), true, 0o755)
+	if err == nil {
+		_ = sub.Close()
+	}
+	return err
+}
+func (d *destination) lstat(rel string) (fs.FileInfo, error) {
+	return d.root.Lstat(d.path(rel))
+}
+func (d *destination) read(rel string) ([]byte, error) {
+	return d.root.ReadFile(d.path(rel))
+}
+func (d *destination) write(rel string, b []byte, mode fs.FileMode) error {
+	return d.root.AtomicWrite(d.path(rel), b, mode)
+}
+func (d *destination) remove(rel string) error {
+	return d.root.Remove(d.path(rel))
+}
+func (d *destination) symlink(rel, source string) error {
+	return d.root.ReplaceSymlink(d.path(rel), source)
+}
+func (d *destination) hardlink(rel, source string) error {
+	return d.root.ReplaceHardlink(d.path(rel), source)
+}
+
 // EnvEntry is the KEY=VALUE that points the harness at the agent's copy.
 func (sp Spec) EnvEntry() string { return sp.Env + "=" + sp.Dir }
 
@@ -181,8 +277,13 @@ func (sp Spec) EnvEntries() []string {
 
 // Seeded reports whether the agent's copy exists.
 func Seeded(sp Spec) bool {
-	fi, err := os.Stat(sp.Dir)
-	return err == nil && fi.IsDir()
+	d, err := openDestination(sp)
+	if err != nil {
+		return false
+	}
+	defer d.close()
+	ok, _ := d.seeded()
+	return ok
 }
 
 // Seed creates the agent's private copy from the template if it does not exist
@@ -193,18 +294,45 @@ func Seeded(sp Spec) bool {
 // A template that is missing entirely still yields an (empty)
 // copy, so a harness never falls back to the user's home by accident.
 func Seed(sp Spec) (fresh bool, err error) {
-	if sp.Dir == "" || sp.Template == "" {
-		return false, errors.New("cfghome: spec needs Dir and Template")
+	if sp.Dir == "" || sp.Template == "" || sp.Root == "" {
+		return false, errors.New("cfghome: spec needs Root, Dir, and Template")
 	}
+	d, err := openDestination(sp)
+	if err != nil {
+		return false, err
+	}
+	defer d.close()
+	return seedDestination(d, sp)
+}
+
+// SeedRooted performs Seed using a session root the launch caller already
+// pinned, so replacing the stored session pathname between preparation steps
+// cannot redirect this transaction.
+func SeedRooted(root *hostprep.Root, sp Spec) (fresh bool, err error) {
+	if sp.Dir == "" || sp.Template == "" || sp.Root == "" {
+		return false, errors.New("cfghome: spec needs Root, Dir, and Template")
+	}
+	d, err := destinationAt(root, sp)
+	if err != nil {
+		return false, err
+	}
+	return seedDestination(d, sp)
+}
+
+func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
 	mu.Lock()
 	defer mu.Unlock()
-	if Seeded(sp) {
+	seeded, err := d.seeded()
+	if err != nil {
+		return false, err
+	}
+	if seeded {
 		// New shared entries and logins made after this home was seeded should
 		// become available on the next launch. Preserve detached credentials and
 		// existing links, including dangling ones; Reset is the explicit repair.
 		for _, rel := range sp.Shared {
-			if _, err := os.Lstat(filepath.Join(sp.Dir, rel)); errors.Is(err, fs.ErrNotExist) {
-				if err := linkShared(sp, rel); err != nil {
+			if _, err := d.lstat(rel); errors.Is(err, fs.ErrNotExist) {
+				if err := linkShared(d, sp, rel); err != nil {
 					return false, err
 				}
 			} else if err != nil {
@@ -217,34 +345,41 @@ func Seed(sp Spec) (fresh bool, err error) {
 		// The copy exists but its baseline is gone (pre-manifest copy, or a wiped
 		// state dir): adopt the copy's current content as the baseline rather than
 		// reporting every file as an edit.
-		return false, writeManifest(sp, snapshot(sp, sp.Dir, false))
+		snapshot, err := snapshotDestination(d, sp)
+		if err != nil {
+			return false, err
+		}
+		return false, writeManifest(sp, snapshot)
 	}
-	if err := os.MkdirAll(sp.Dir, 0o755); err != nil {
+	if err := d.mkdir(""); err != nil {
 		return false, err
 	}
 	for _, e := range sp.Entries {
-		if err := seedEntry(sp, e); err != nil {
+		if err := seedEntry(d, sp, e); err != nil {
 			return false, err
 		}
 	}
 	for _, rel := range sp.Shared {
-		if err := linkShared(sp, rel); err != nil {
+		if err := linkShared(d, sp, rel); err != nil {
 			return false, err
 		}
 	}
-	return true, writeManifest(sp, snapshot(sp, sp.Dir, false))
+	snapshot, err := snapshotDestination(d, sp)
+	if err != nil {
+		return false, err
+	}
+	return true, writeManifest(sp, snapshot)
 }
 
 // seedEntry copies one entry (file or tree) from the template into the copy,
 // applying the entry's Seed transform to file content. A missing template path
 // is simply absent from the copy.
-func seedEntry(sp Spec, e Entry) error {
+func seedEntry(dst *destination, sp Spec, e Entry) error {
 	src := e.src(sp)
 	fi, err := os.Stat(src)
 	if err != nil {
 		return nil
 	}
-	dst := filepath.Join(sp.Dir, e.Rel)
 	if !fi.IsDir() {
 		b, err := os.ReadFile(src)
 		if err != nil {
@@ -253,7 +388,7 @@ func seedEntry(sp Spec, e Entry) error {
 		if e.Seed != nil {
 			b = e.Seed(sp, b)
 		}
-		return writeFile(dst, b, fi.Mode().Perm())
+		return dst.write(e.Rel, b, fi.Mode().Perm())
 	}
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -263,9 +398,9 @@ func seedEntry(sp Spec, e Entry) error {
 			return fs.SkipDir
 		}
 		rel, _ := filepath.Rel(src, p)
-		target := filepath.Join(dst, rel)
+		target := filepath.Join(e.Rel, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return dst.mkdir(target)
 		}
 		if !d.Type().IsRegular() {
 			return nil // symlinks and specials aren't config we template
@@ -279,7 +414,7 @@ func seedEntry(sp Spec, e Entry) error {
 		if info != nil {
 			mode = info.Mode().Perm()
 		}
-		return writeFile(target, b, mode)
+		return dst.write(target, b, mode)
 	})
 }
 
@@ -290,25 +425,18 @@ func skipDir(d fs.DirEntry) bool { return d.IsDir() && d.Name() == ".git" }
 // linkShared points the copy's rel at the template's file, so the harness reads
 // and refreshes the one shared credential. Nothing is linked when the template
 // has no such file (the user hasn't logged in on this machine).
-func linkShared(sp Spec, rel string) error {
+func linkShared(dst *destination, sp Spec, rel string) error {
 	src := filepath.Join(sp.Template, rel)
 	if _, err := os.Lstat(src); err != nil {
 		return nil
 	}
-	dst := filepath.Join(sp.Dir, rel)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
 	if hardlinkShared(sp, rel) {
-		if err := os.Link(src, dst); err != nil {
+		if err := dst.hardlink(rel, src); err != nil {
 			return fmt.Errorf("sharing %s requires a hard link (template and agent must be on the same filesystem): %w", rel, err)
 		}
 		return nil
 	}
-	return os.Symlink(src, dst)
+	return dst.symlink(rel, src)
 }
 
 // Binds are the bubblewrap arguments that make the shared (auth) files reachable
@@ -349,14 +477,26 @@ func Binds(sp Spec) [][]string {
 func Scan(sp Spec) ([]Change, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	if !Seeded(sp) {
+	d, err := openDestination(sp)
+	if err != nil {
+		return nil, err
+	}
+	defer d.close()
+	seeded, err := d.seeded()
+	if err != nil {
+		return nil, err
+	}
+	if !seeded {
 		return nil, nil
 	}
 	m, err := readManifest(sp)
 	if err != nil {
 		return nil, err
 	}
-	copyH := snapshot(sp, sp.Dir, false)
+	copyH, err := snapshotDestination(d, sp)
+	if err != nil {
+		return nil, err
+	}
 	tmplH := snapshot(sp, sp.Template, true)
 
 	rels := map[string]bool{}
@@ -424,7 +564,7 @@ func Scan(sp Spec) ([]Change, error) {
 	}
 	for _, rel := range sp.Shared {
 		p := filepath.Join(sp.Dir, rel)
-		fi, err := os.Lstat(p)
+		fi, err := d.lstat(rel)
 		if err != nil {
 			continue
 		}
@@ -461,10 +601,14 @@ func Promote(sp Spec, rel string) error {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	d, err := openDestination(sp)
+	if err != nil {
+		return err
+	}
+	defer d.close()
 	e := entryFor(sp, rel)
-	src := filepath.Join(sp.Dir, rel)
 	dst := templatePath(sp, rel)
-	b, err := os.ReadFile(src)
+	b, err := d.read(rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -487,7 +631,7 @@ func Promote(sp Spec, rel string) error {
 			return err
 		}
 	}
-	return settle(sp, rel)
+	return settleDestination(d, sp, rel)
 }
 
 // Reset discards the agent's version of rel and re-copies the template's — the
@@ -501,16 +645,20 @@ func Reset(sp Spec, rel string) error {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	d, err := openDestination(sp)
+	if err != nil {
+		return err
+	}
+	defer d.close()
 	if isShared(sp, rel) {
-		return linkShared(sp, rel) // re-point a detached credential at the template
+		return linkShared(d, sp, rel) // re-point a detached credential at the template
 	}
 	e := entryFor(sp, rel)
 	src := templatePath(sp, rel)
-	dst := filepath.Join(sp.Dir, rel)
 	b, err := os.ReadFile(src)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := d.remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	case err != nil:
@@ -523,21 +671,32 @@ func Reset(sp Spec, rel string) error {
 		if fi, err := os.Stat(src); err == nil {
 			mode = fi.Mode().Perm()
 		}
-		if err := writeFile(dst, b, mode); err != nil {
+		if err := d.write(rel, b, mode); err != nil {
 			return err
 		}
 	}
-	return settle(sp, rel)
+	return settleDestination(d, sp, rel)
 }
 
 // settle records the copy's current content of rel as the baseline. Caller
 // holds mu.
 func settle(sp Spec, rel string) error {
+	d, err := openDestination(sp)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+	return settleDestination(d, sp, rel)
+}
+
+func settleDestination(d *destination, sp Spec, rel string) error {
 	m, err := readManifest(sp)
 	if err != nil {
 		m = &manifest{Files: map[string]string{}}
 	}
-	if h, ok := hashFile(sp, filepath.Join(sp.Dir, rel), rel, false); ok {
+	if h, ok, err := hashDestination(d, sp, rel); err != nil {
+		return err
+	} else if ok {
 		m.Files[rel] = h
 	} else {
 		delete(m.Files, rel)
@@ -673,6 +832,77 @@ func snapshot(sp Spec, root string, template bool) map[string]string {
 		})
 	}
 	return out
+}
+
+// snapshotDestination is snapshot for the untrusted private copy. It never
+// follows destination symlinks or reads multiply linked files.
+func snapshotDestination(dst *destination, sp Spec) (map[string]string, error) {
+	out := map[string]string{}
+	for _, e := range sp.Entries {
+		fi, err := dst.lstat(e.Rel)
+		if err != nil {
+			if hostprep.IsUnsafe(err) {
+				return nil, err
+			}
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("snapshot %s: %w", e.Rel, hostprep.ErrUnsafe)
+		}
+		if fi.Mode().IsRegular() {
+			if h, ok, err := hashDestination(dst, sp, e.Rel); err != nil {
+				return nil, err
+			} else if ok {
+				out[e.Rel] = h
+			}
+			continue
+		}
+		if !fi.IsDir() {
+			continue
+		}
+		sub, err := dst.root.Sub(dst.path(e.Rel), false, 0)
+		if err != nil {
+			if hostprep.IsUnsafe(err) {
+				return nil, err
+			}
+			continue
+		}
+		err = sub.WalkRegular(".", func(name string, _ fs.FileInfo, b []byte) error {
+			if strings.Contains(filepath.ToSlash(name), "/.git/") || filepath.Base(name) == ".git" {
+				return nil
+			}
+			rel := filepath.Join(e.Rel, name)
+			out[rel] = hashDestinationBytes(sp, rel, b)
+			return nil
+		})
+		_ = sub.Close()
+		if err != nil {
+			if hostprep.IsUnsafe(err) {
+				return nil, err
+			}
+			continue
+		}
+	}
+	return out, nil
+}
+
+func hashDestination(dst *destination, sp Spec, rel string) (string, bool, error) {
+	b, err := dst.read(rel)
+	if err != nil {
+		if hostprep.IsUnsafe(err) {
+			return "", false, err
+		}
+		return "", false, nil
+	}
+	return hashDestinationBytes(sp, rel, b), true, nil
+}
+
+func hashDestinationBytes(sp Spec, rel string, b []byte) string {
+	if e := entryFor(sp, rel); e.Rel == rel && e.Normalize != nil {
+		b = e.Normalize(sp, b)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // hashFile is the sha256 of path's content as compared: a template-side file is

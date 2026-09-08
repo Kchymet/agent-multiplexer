@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"amux/internal/console"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -203,7 +204,14 @@ func TestGuidesByRole(t *testing.T) {
 
 	// Console: the whole inventory, and the operating vocabulary.
 	c, _, _ := ResolveSession(console.ID)
-	writeGuide(c)
+	cr, err := hostprep.OpenSession(c.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGuide(cr, c); err != nil {
+		t.Fatal(err)
+	}
+	_ = cr.Close()
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
 	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
 		if !strings.Contains(string(b), want) {
@@ -213,7 +221,14 @@ func TestGuidesByRole(t *testing.T) {
 
 	// Repo home: this repo's one-off sessions and how to dispatch more.
 	home, _, _ := ResolveSession("api")
-	writeGuide(home)
+	hr, err := hostprep.OpenSession(home.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGuide(hr, home); err != nil {
+		t.Fatal(err)
+	}
+	_ = hr.Close()
 	b, _ = os.ReadFile(filepath.Join(home.Dir, "CLAUDE.md"))
 	for _, want := range []string{"home session", gitDir, oneOff.ID, "review open PRs", "amux do new-repo-agent api", "linked worktree"} {
 		if !strings.Contains(string(b), want) {
@@ -257,7 +272,14 @@ func TestDeleteWorkgroupKeepsMovedAgentDir(t *testing.T) {
 	kids, _ := db.Children(rootID)
 	db.Close()
 	agentDir := kids[0].Dir
-	writeGuide(root) // the coordinator's own file in the container dir
+	rr, err := hostprep.OpenSession(root.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGuide(rr, root); err != nil { // the coordinator's own file in the container dir
+		t.Fatal(err)
+	}
+	_ = rr.Close()
 	guide := filepath.Join(root.Dir, "CLAUDE.md")
 	if _, err := os.Stat(guide); err != nil {
 		t.Fatal(err)

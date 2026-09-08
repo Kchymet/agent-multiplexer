@@ -10,6 +10,7 @@ import (
 	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -28,7 +29,7 @@ func TestHarnessFor(t *testing.T) {
 	if got := h.Activity(store.Session{ClaudeID: "anything"}); got != engine.ActivityUnknown {
 		t.Fatalf("noop Activity=%v, want Unknown", got)
 	}
-	if restored, err := h.RestoreTranscript(store.Session{ClaudeID: "sid"}, "/tmp"); err != nil || restored {
+	if restored, err := h.RestoreTranscript(nil, store.Session{ClaudeID: "sid"}, "/tmp"); err != nil || restored {
 		t.Fatalf("noop RestoreTranscript restored=%v err=%v", restored, err)
 	}
 
@@ -156,12 +157,17 @@ func TestClaudeRestoreTranscript(t *testing.T) {
 	cwd := t.TempDir()
 	s := store.Session{ID: "a1", Agent: "claude", Dir: cwd, ClaudeID: sid}
 	home := claudecfg.At(claudecfg.AgentHome(cwd))
+	root, err := hostprep.OpenSession(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 
 	// Not resumable and no backup: restore is a no-op.
 	if home.SessionExists(cwd, sid) {
 		t.Fatal("session should not exist yet")
 	}
-	if restored, err := h.RestoreTranscript(s, cwd); err != nil || restored {
+	if restored, err := h.RestoreTranscript(root, s, cwd); err != nil || restored {
 		t.Fatalf("no backup: restored=%v err=%v", restored, err)
 	}
 
@@ -173,7 +179,7 @@ func TestClaudeRestoreTranscript(t *testing.T) {
 	if err := core.CaptureTranscript(sid, live, "Stop", ""); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := h.RestoreTranscript(s, cwd)
+	restored, err := h.RestoreTranscript(root, s, cwd)
 	if err != nil || !restored {
 		t.Fatalf("restore: restored=%v err=%v", restored, err)
 	}
