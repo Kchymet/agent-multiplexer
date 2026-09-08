@@ -111,7 +111,7 @@ If `mergeable` is `CONFLICTING` or the base has advanced, merge the latest remot
 into your branch inside the repo worktree:
 
 ```sh
-git fetch origin && git merge --no-edit origin/HEAD
+git fetch origin && git merge --no-edit FETCH_HEAD
 # if it stops for conflicts: resolve them, keeping BOTH the intent of your
 # change and the incoming changes, then:
 git commit --no-edit

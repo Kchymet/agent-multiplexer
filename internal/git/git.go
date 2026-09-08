@@ -176,12 +176,17 @@ func AddCheckout(ctx context.Context, source, path, branch, stagingRoot, managed
 			return checkoutErr
 		}
 	}
-	// A single-branch clone maps only the default branch. Add exactly the
-	// assigned branch so `push -u` followed by an ordinary `pull` works without
-	// broadening future fetches to sibling amux branches.
-	refspec := "+refs/heads/" + branch + ":refs/remotes/origin/" + branch
-	if _, err := run(ctx, checkout, "config", "--add", "remote.origin.fetch", refspec); err != nil {
-		return err
+	// Do not retain the clone-created default-branch refspec or install an exact
+	// assigned-branch refspec yet. The exact ref does not exist before the first
+	// push, so it makes an ordinary `git fetch origin` fail; a wildcard would
+	// disclose sibling branches. With no configured fetch refspec, a pre-push
+	// fetch gets only the remote HEAD into FETCH_HEAD. After `push -u`, ordinary
+	// pull uses the branch's upstream merge ref without widening future fetches.
+	if _, err := run(ctx, checkout, "config", "--unset-all", "remote.origin.fetch"); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 { // no matching key is already the desired state
+			return err
+		}
 	}
 	if err := validateIndependentCheckout(ctx, checkout); err != nil {
 		return err
