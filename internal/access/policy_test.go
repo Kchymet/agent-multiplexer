@@ -36,6 +36,7 @@ func TestPolicyRoleMatrix(t *testing.T) {
 		"a2":      {ID: "a2", RootID: "wg1", Repo: "web"},
 		"wg2":     {ID: "wg2", Role: "coordinator", Scope: "work"},
 		"b1":      {ID: "b1", RootID: "wg2", Repo: "api"},
+		"old":     {ID: "old", RootID: "wg1", Archived: true},
 		"api":     {ID: "api", Role: "repo", Scope: "repo", Repo: "api"},
 		"one":     {ID: "one", RootID: "hidden", Scope: "repo", Repo: "api"},
 		"hidden":  {ID: "hidden", Scope: "repo", Repo: "api"},
@@ -71,6 +72,16 @@ func TestPolicyRoleMatrix(t *testing.T) {
 		{"unknown future action denied", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteAction, Verb: "credential-admin"}, false},
 		{"restricted pane", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RoutePane, Verb: core.ActionPaneOpen, ID: "a1"}, false},
 		{"raw runtime path", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimePath, ID: "a1"}, false},
+		{"raw runtime record", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeRecord, ID: "a1"}, false},
+		{"agent own normalized runtime", Principal{Kind: SubjectSession, SubjectID: "a1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1"}, true},
+		{"agent sibling normalized runtime", Principal{Kind: SubjectSession, SubjectID: "a1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a2"}, false},
+		{"coordinator member normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a2"}, true},
+		{"coordinator foreign normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
+		{"coordinator archived normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "old"}, false},
+		{"repo owned normalized runtime", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "one"}, true},
+		{"repo same-name workgroup denied", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
+		{"console normalized runtime", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, true},
+		{"normalized runtime needs id", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

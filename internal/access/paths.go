@@ -48,12 +48,17 @@ type SessionContext struct {
 
 // EnsureSession provisions authority and strict regular-file mailbox roots. It
 // returns explicit mount data but does not construct sandbox arguments.
-func (a *FileAuthority) EnsureSession(ctx context.Context, subjectID, sessionDir string) (SessionAccess, error) {
+func (a *FileAuthority) EnsureSession(_ context.Context, subjectID, sessionDir string) (SessionAccess, error) {
 	if !filepath.IsAbs(sessionDir) {
 		return SessionAccess{}, fmt.Errorf("session directory must be absolute")
 	}
+	if err := validateSubject(SubjectSession, subjectID); err != nil {
+		return SessionAccess{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.rootDir == nil {
-		return SessionAccess{}, fmt.Errorf("access authority is closed")
+		return SessionAccess{}, ErrAuthorityClosed
 	}
 	mailboxes, err := ensureDirAt(int(a.rootDir.Fd()), "mailboxes", 0o700)
 	if err != nil {
@@ -76,7 +81,7 @@ func (a *FileAuthority) EnsureSession(ctx context.Context, subjectID, sessionDir
 		}
 	}
 	mailboxHost := filepath.Join(a.root, "mailboxes", opaque)
-	credDir, err := a.Ensure(ctx, SubjectSession, subjectID)
+	credDir, err := a.ensureLocked(SubjectSession, subjectID)
 	if err != nil {
 		return SessionAccess{}, err
 	}

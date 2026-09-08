@@ -2,9 +2,7 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -58,18 +56,9 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 	if !filepath.IsAbs(session.Dir) || filepath.Clean(session.Dir) != filepath.Clean(expected) {
 		return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q uses unsupported legacy/shared directory %q", id, session.Dir)
 	}
-	// A revoked or expired credential file is evidence that this subject has
-	// existed before. Never turn a launch/reconcile into implicit re-issuance;
-	// only a subject with no credential yet may be provisioned here.
-	credentialDir := d.authority.CredentialDir(access.SubjectSession, session.ID)
-	if credential, credentialErr := access.LoadCredential(credentialDir); credentialErr == nil {
-		principal := access.Principal{KeyID: credential.KeyID, SubjectID: credential.SubjectID, Kind: credential.Kind, Generation: credential.Generation}
-		if err := d.authority.Valid(ctx, principal); err != nil {
-			return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q credential is not current: %w", id, err)
-		}
-	} else if !errors.Is(credentialErr, os.ErrNotExist) {
-		return store.Session{}, access.SessionAccess{}, fmt.Errorf("validate session %q credential: %w", id, credentialErr)
-	}
+	// EnsureSession is sticky across revocation/expiry and repairs only a
+	// recoverable publication gap. It cannot turn an old subject into a fresh
+	// credential; explicit lifecycle recovery remains the sole regrant path.
 	grant, err := d.authority.EnsureSession(ctx, session.ID, session.Dir)
 	if err != nil {
 		return store.Session{}, access.SessionAccess{}, err
