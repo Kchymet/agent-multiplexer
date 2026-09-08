@@ -253,19 +253,39 @@ func listNames(dir *os.File, limit int) ([]string, bool, error) {
 }
 
 // nextNames advances a persistent directory stream instead of restarting at
-// its first entries. At EOF it rewinds for the next bounded cleanup cycle.
-func nextNames(dir *os.File, limit int) ([]string, error) {
+// its first entries. completed reports that EOF was observed and the stream was
+// rewound for the next bounded scan cycle.
+func nextNames(dir *os.File, limit int) (names []string, completed bool, err error) {
 	if limit <= 0 {
-		return nil, ErrInvalidRecord
+		return nil, false, ErrInvalidRecord
 	}
-	names, err := dir.Readdirnames(limit)
+	names, err = dir.Readdirnames(limit)
 	if errors.Is(err, io.EOF) {
 		if _, seekErr := dir.Seek(0, io.SeekStart); seekErr != nil {
-			return nil, seekErr
+			return nil, false, seekErr
 		}
-		return names, nil
+		return names, true, nil
 	}
-	return names, err
+	if err != nil {
+		return nil, false, err
+	}
+	// os.File.Readdirnames may return a short non-empty final batch with a nil
+	// error. When there is room in this work unit, probe once so small scans can
+	// establish completion without requiring an otherwise empty extra tick.
+	if len(names) < limit {
+		probe, probeErr := dir.Readdirnames(1)
+		names = append(names, probe...)
+		if errors.Is(probeErr, io.EOF) {
+			if _, seekErr := dir.Seek(0, io.SeekStart); seekErr != nil {
+				return nil, false, seekErr
+			}
+			return names, true, nil
+		}
+		if probeErr != nil {
+			return nil, false, probeErr
+		}
+	}
+	return names, false, nil
 }
 
 func unlinkAt(dir *os.File, name string) error {
