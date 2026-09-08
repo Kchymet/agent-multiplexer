@@ -20,7 +20,7 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
 	t.Setenv("AMUX_CLAUDE_BIN", "/bin/true")
 	useFakeSecureBwrap(t)
-	dir := filepath.Join(home, "agent")
+	dir := filepath.Join(core.SessionsDir(), "group", "agent")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -114,12 +114,11 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	}
 }
 
-func TestResolveRefusesLegacySharedGitLayout(t *testing.T) {
+func TestEndpointRefusesLegacySharedGitLayout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-	useFakeSecureBwrap(t)
-	dir := filepath.Join(home, "agent")
+	dir := filepath.Join(core.SessionsDir(), "root", "agent")
 	if err := os.MkdirAll(filepath.Join(dir, "repo"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -135,8 +134,8 @@ func TestResolveRefusesLegacySharedGitLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	if _, _, _, err := Resolve(testLaunchSpec(t, s), TabAgent); err == nil || !strings.Contains(err.Error(), "launch refused") {
-		t.Fatalf("Resolve legacy linked worktree error = %v", err)
+	if _, err := AppServerEndpoint(s.ID); err == nil || !strings.Contains(err.Error(), "launch refused") {
+		t.Fatalf("AppServerEndpoint legacy linked worktree error = %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, "repo", ".git")); err != nil || !strings.Contains(string(b), "/shared/cache") {
 		t.Fatalf("refusal mutated legacy checkout: %q, %v", b, err)

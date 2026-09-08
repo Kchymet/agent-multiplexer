@@ -1005,6 +1005,7 @@ func TestCreateWorkspaceRepoLessAgent(t *testing.T) {
 
 func TestHostCreatedCoordinatorOmittedGrantsPermitFirstRepoAgent(t *testing.T) {
 	isolateStore(t)
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
 	ctx := context.Background()
 	gitDir := bareRepoWithCommit(t)
 	db, err := store.Open()
