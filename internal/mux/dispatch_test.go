@@ -13,10 +13,11 @@ import (
 )
 
 func attachedClient(s *Server) *client {
+	ctx, cancel := context.WithCancel(context.Background())
 	cl := &client{
 		out: make(chan muxproto.ServerMsg, 8), done: make(chan struct{}),
 		panes: map[string]*route{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1),
-		server: s, epoch: s.epoch,
+		server: s, ctx: ctx, cancel: cancel, epoch: s.epoch,
 	}
 	s.clients[cl] = true
 	return cl
@@ -255,5 +256,90 @@ func TestServeShutdownClosesAndJoinsPrimaryPaneRelay(t *testing.T) {
 	case <-r.done:
 	default:
 		t.Fatal("primary pane pump was not joined before Serve returned")
+	}
+}
+
+func TestSuspendCancelsAndJoinsActiveAction(t *testing.T) {
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	s := New(testPrimary{dispatch: func(ctx context.Context, _ core.Action) (string, error) {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return "", ctx.Err()
+	}})
+	cl := attachedClient(s)
+
+	handled := make(chan struct{})
+	go func() {
+		s.handleMsg(cl, muxproto.ClientMsg{Type: muxproto.CAction, Action: core.ActionRefresh})
+		close(handled)
+	}()
+	<-entered
+
+	suspended := make(chan struct{})
+	go func() {
+		s.suspend()
+		close(suspended)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("suspension did not cancel the active primary action")
+	}
+	select {
+	case <-suspended:
+		t.Fatal("suspension returned before the canceled primary action exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("active action handler did not exit after cancellation")
+	}
+	select {
+	case <-suspended:
+	case <-time.After(time.Second):
+		t.Fatal("suspension did not join the active action handler")
+	}
+}
+
+func TestJoinPrimaryCallWaitsForCallbackAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	closed := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := joinPrimaryCall(ctx, func() { close(closed) }, func() (string, error) {
+			close(entered)
+			<-release
+			return "committed", nil
+		})
+		result <- err
+	}()
+	<-entered
+	cancel()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not close the primary transport")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("primary call returned before its callback exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled primary call error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("primary call did not join its callback after transport close")
 	}
 }

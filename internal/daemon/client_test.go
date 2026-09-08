@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/core"
 )
 
@@ -205,5 +207,65 @@ func TestCloseJoinsBlockedWriter(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("blocked write did not return after Close")
+	}
+}
+
+func TestAuthenticateClientContextCancellationInterruptsPostTLSRead(t *testing.T) {
+	authority, err := access.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.EnsureHost(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := access.LoadCredential(authority.CredentialDir(access.SubjectHost, access.LocalHostSubject))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConfig, err := authority.ServerTLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server, rawClient := net.Pipe()
+	secureServer := tls.Server(server, serverConfig)
+	defer secureServer.Close()
+	handshake := make(chan error, 1)
+	go func() { handshake <- secureServer.Handshake() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type authResult struct {
+		client *Client
+		err    error
+	}
+	result := make(chan authResult, 1)
+	go func() {
+		client, err := authenticateClientContext(ctx, rawClient, credential)
+		result <- authResult{client: client, err: err}
+	}()
+	select {
+	case err := <-handshake:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS handshake did not complete")
+	}
+
+	// The server deliberately withholds the challenge after TLS. Cancellation
+	// must close that read and join authentication instead of waiting for the
+	// fixed authentication deadline.
+	cancel()
+	select {
+	case got := <-result:
+		if got.client != nil {
+			got.client.Close()
+			t.Fatal("canceled authentication returned a usable client")
+		}
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("canceled authentication error = %v", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("post-TLS challenge read ignored context cancellation")
 	}
 }

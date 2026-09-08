@@ -88,6 +88,12 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 }
 
 func authenticateClientContext(ctx context.Context, conn net.Conn, credential access.Credential) (*Client, error) {
+	if ctx == nil {
+		_ = conn.Close()
+		return nil, context.Canceled
+	}
+	stopCancellation := watchAuthCancellation(ctx, conn)
+	defer stopCancellation()
 	_ = conn.SetDeadline(time.Now().Add(authDeadline))
 	tlsConfig, err := access.ClientTLSConfig(credential)
 	if err != nil {
@@ -104,6 +110,9 @@ func authenticateClientContext(ctx context.Context, conn net.Conn, credential ac
 	line, err := readBoundedLine(reader, access.MaxBodyBytes)
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("read daemon challenge: %w", err)
 	}
 	var challenge access.SocketChallenge
@@ -118,11 +127,17 @@ func authenticateClientContext(ctx context.Context, conn net.Conn, credential ac
 	}
 	if err := json.NewEncoder(secure).Encode(proof); err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	line, err = readBoundedLine(reader, access.MaxBodyBytes)
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("read daemon authentication: %w", err)
 	}
 	var welcome access.SocketWelcome
@@ -130,7 +145,36 @@ func authenticateClientContext(ctx context.Context, conn net.Conn, credential ac
 		conn.Close()
 		return nil, fmt.Errorf("daemon authentication failed")
 	}
+	// Define successful authentication as completion before cancellation wins.
+	// If cancellation already began, wait for its close callback and fail rather
+	// than returning a client whose authenticated transport is being retired.
+	if !stopCancellation() {
+		return nil, ctx.Err()
+	}
 	return newClientReader(secure, reader), nil
+}
+
+// watchAuthCancellation closes the raw connection on cancellation across the
+// complete challenge/proof/welcome exchange, not only TLS HandshakeContext.
+// Its returned function is idempotent and waits for any winning close callback,
+// making the authentication lifetime a real join barrier.
+func watchAuthCancellation(ctx context.Context, conn net.Conn) func() bool {
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+		close(closed)
+	})
+	var once sync.Once
+	completed := false
+	return func() bool {
+		once.Do(func() {
+			completed = stop()
+			if !completed {
+				<-closed
+			}
+		})
+		return completed
+	}
 }
 
 // newClient wraps a connection and starts its writer goroutine. Used by Dial and

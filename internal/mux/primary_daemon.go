@@ -104,14 +104,23 @@ func daemonCall[T any](ctx context.Context, call func(*daemon.Client) (T, error)
 		return zero, fmt.Errorf("authenticate primary daemon: %w", err)
 	}
 	defer c.Close()
+	return joinPrimaryCall(ctx, func() { _ = c.Close() }, func() (T, error) { return call(c) })
+}
+
+// joinPrimaryCall owns the callback lifetime. Cancellation first closes the
+// authenticated transport, then waits for the callback to observe that close;
+// it makes no claim that an effect already committed by the primary rolled back.
+func joinPrimaryCall[T any](ctx context.Context, closeTransport func(), call func() (T, error)) (T, error) {
+	var zero T
 	done := make(chan daemonResult[T], 1)
 	go func() {
-		value, err := call(c)
+		value, err := call()
 		done <- daemonResult[T]{value: value, err: err}
 	}()
 	select {
 	case <-ctx.Done():
-		_ = c.Close()
+		closeTransport()
+		<-done
 		return zero, ctx.Err()
 	case result := <-done:
 		return result.value, result.err

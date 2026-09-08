@@ -131,6 +131,152 @@ type blockingWriteConn struct {
 	once    sync.Once
 }
 
+type auditListener struct {
+	incoming chan net.Conn
+	closed   chan struct{}
+	once     sync.Once
+}
+
+func newAuditListener() *auditListener {
+	return &auditListener{incoming: make(chan net.Conn), closed: make(chan struct{})}
+}
+
+func (l *auditListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.incoming:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *auditListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *auditListener) Addr() net.Addr { return auditAddr("audit") }
+
+type auditAddr string
+
+func (a auditAddr) Network() string { return string(a) }
+func (a auditAddr) String() string  { return string(a) }
+
+type observedReadConn struct {
+	net.Conn
+	reading chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (c *observedReadConn) Read(p []byte) (int, error) {
+	c.once.Do(func() { close(c.reading) })
+	return c.Conn.Read(p)
+}
+
+func (c *observedReadConn) Close() error {
+	select {
+	case <-c.closed:
+	default:
+		close(c.closed)
+	}
+	return c.Conn.Close()
+}
+
+func TestServeShutdownClosesPreHelloConnection(t *testing.T) {
+	s := New(testPrimary{})
+	s.token = "required"
+	ln := newAuditListener()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(ctx, ln) }()
+
+	server, peer := net.Pipe()
+	defer peer.Close()
+	observed := &observedReadConn{
+		Conn: server, reading: make(chan struct{}), closed: make(chan struct{}),
+	}
+	ln.incoming <- observed
+	select {
+	case <-observed.reading:
+	case <-time.After(time.Second):
+		t.Fatal("accepted connection did not reach its pre-hello read")
+	}
+
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not close and join the pre-hello handler")
+	}
+	select {
+	case <-observed.closed:
+	default:
+		t.Fatal("Serve returned with a pre-hello connection still open")
+	}
+	_ = peer.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	if err := muxproto.NewConn(peer).WriteClient(muxproto.ClientMsg{
+		Type: muxproto.CHello, Version: muxproto.Version, Token: "required",
+	}); err == nil {
+		t.Fatal("pre-hello peer authenticated after terminal shutdown")
+	}
+}
+
+func TestServeShutdownCancelsAndJoinsAdmission(t *testing.T) {
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	s := New(testPrimary{snapshot: func(ctx context.Context) ([]core.Session, error) {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return nil, ctx.Err()
+	}})
+	s.token = "required"
+	ln := newAuditListener()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(ctx, ln) }()
+
+	server, peer := net.Pipe()
+	defer peer.Close()
+	ln.incoming <- server
+	if err := muxproto.NewConn(peer).WriteClient(muxproto.ClientMsg{
+		Type: muxproto.CHello, Version: muxproto.Version, Token: "required",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("client did not reach primary admission")
+	}
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("terminal shutdown did not cancel primary admission")
+	}
+	select {
+	case err := <-served:
+		t.Fatalf("Serve returned before admission exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not join canceled primary admission")
+	}
+}
+
 func (c *blockingWriteConn) Write(p []byte) (int, error) {
 	c.once.Do(func() { close(c.entered) })
 	return c.Conn.Write(p)

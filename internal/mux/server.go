@@ -27,12 +27,19 @@ type Server struct {
 
 	mu           sync.Mutex
 	clients      map[*client]bool
+	accepted     map[*client]bool // registered before the first downstream read
 	routes       map[*route]bool
 	epoch        uint64
+	terminal     bool
+	serving      bool
+	serveCtx     context.Context
+	serveCancel  context.CancelFunc
 	lastSnap     []byte // last broadcast snapshot, for change detection
 	lastSessions []core.Session
 
-	pollCh chan struct{}
+	pollCh    chan struct{}
+	acceptors sync.WaitGroup
+	handlers  sync.WaitGroup
 }
 
 // PaneRequest is the only pane authority the mux may pass upstream. It contains
@@ -105,10 +112,14 @@ type client struct {
 	writerDone chan struct{}
 	once       sync.Once
 	server     *Server
+	ctx        context.Context
+	cancel     context.CancelFunc
 	epoch      uint64
 	panes      map[string]*route // client pane id -> primary pane relay
 	sub        bool
 	writeMu    sync.Mutex // target revocation waits for an already-started frame
+	workMu     sync.Mutex
+	work       sync.WaitGroup // primary calls owned by the current client
 
 	obMu sync.Mutex
 	obuf map[string]*paneOut // client pane id -> pending lossless output
@@ -148,12 +159,13 @@ func New(primaries ...Primary) *Server {
 		primary = primaries[0]
 	}
 	return &Server{
-		primary: primary,
-		token:   os.Getenv("AMUX_MUX_TOKEN"),
-		clients: map[*client]bool{},
-		routes:  map[*route]bool{},
-		epoch:   1,
-		pollCh:  make(chan struct{}, 1),
+		primary:  primary,
+		token:    os.Getenv("AMUX_MUX_TOKEN"),
+		clients:  map[*client]bool{},
+		accepted: map[*client]bool{},
+		routes:   map[*route]bool{},
+		epoch:    1,
+		pollCh:   make(chan struct{}, 1),
 	}
 }
 
@@ -161,16 +173,30 @@ func New(primaries ...Primary) *Server {
 // primary daemon owns every process and PTY; there is no embedded harness to
 // outlive this relay.
 func (s *Server) Serve(ctx context.Context, lns ...net.Listener) error {
-	defer s.suspend()
+	s.mu.Lock()
+	if s.serving || s.terminal {
+		s.mu.Unlock()
+		return fmt.Errorf("legacy mux server cannot be served more than once")
+	}
+	s.serveCtx, s.serveCancel = context.WithCancel(ctx)
+	s.serving = true
+	serveCtx := s.serveCtx
+	s.mu.Unlock()
+
 	pollDone := make(chan struct{})
 	go func() {
 		defer close(pollDone)
-		s.pollLoop(ctx)
+		s.pollLoop(serveCtx)
 	}()
+	s.acceptors.Add(len(lns))
 	for _, ln := range lns {
-		go s.acceptLoop(ln)
+		go func(ln net.Listener) {
+			defer s.acceptors.Done()
+			s.acceptLoop(ln)
+		}(ln)
 	}
-	<-ctx.Done()
+	<-serveCtx.Done()
+	s.shutdown(lns)
 	<-pollDone
 	return nil
 }
@@ -179,27 +205,67 @@ func (s *Server) Serve(ctx context.Context, lns ...net.Listener) error {
 
 func (s *Server) acceptLoop(ln net.Listener) {
 	for {
-		c, err := ln.Accept()
+		nc, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go s.handleClient(c)
+		cl, ok := s.registerClient(nc)
+		if !ok {
+			return
+		}
+		go s.serveClient(cl)
 	}
 }
 
 func (s *Server) handleClient(nc net.Conn) {
+	cl, ok := s.registerClient(nc)
+	if !ok {
+		return
+	}
+	s.serveClient(cl)
+}
+
+func (s *Server) registerClient(nc net.Conn) (*client, bool) {
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		_ = nc.Close()
+		return nil, false
+	}
+	parent := s.serveCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	clientCtx, clientCancel := context.WithCancel(parent)
 	cl := &client{
 		conn:       muxproto.NewConn(nc),
 		raw:        nc,
 		out:        make(chan muxproto.ServerMsg, 256),
 		done:       make(chan struct{}),
 		server:     s,
+		ctx:        clientCtx,
+		cancel:     clientCancel,
 		panes:      map[string]*route{},
 		obuf:       map[string]*paneOut{},
 		wake:       make(chan struct{}, 1),
 		writerDone: make(chan struct{}),
 	}
+	s.accepted[cl] = true
+	s.handlers.Add(1)
+	s.mu.Unlock()
 	go cl.writeLoop()
+	return cl, true
+}
+
+func (s *Server) serveClient(cl *client) {
+	defer func() {
+		s.dropClient(cl)
+		s.mu.Lock()
+		delete(s.accepted, cl)
+		s.mu.Unlock()
+		s.handlers.Done()
+	}()
+	nc := cl.raw
 	// Authentication is a strict first-frame gate. Before it succeeds the client
 	// is absent from subscriptions/routes and no protected state is queued to its
 	// writer, so no snapshot or pane byte can precede a successful hello.
@@ -208,7 +274,6 @@ func (s *Server) handleClient(nc net.Conn) {
 	if err != nil || hello.Type != muxproto.CHello || hello.Version != muxproto.Version ||
 		strings.TrimSpace(s.token) == "" || !muxproto.TokenOK(s.token, hello.Token) {
 		cl.reject(muxproto.ErrUnauthorized)
-		_ = cl.conn.Close()
 		return
 	}
 	_ = nc.SetReadDeadline(time.Time{})
@@ -218,19 +283,20 @@ func (s *Server) handleClient(nc net.Conn) {
 	s.mu.Lock()
 	admissionEpoch := s.epoch
 	s.mu.Unlock()
-	authCtx, cancelAuth := context.WithTimeout(context.Background(), primaryReadTimeout)
+	authCtx, cancelAuth, ok := cl.beginWork(primaryReadTimeout)
+	if !ok {
+		return
+	}
 	sessions, err := s.primary.Snapshot(authCtx)
 	cancelAuth()
 	if err != nil {
 		cl.reject(muxproto.ErrUnauthorized)
-		_ = cl.conn.Close()
 		return
 	}
 	s.mu.Lock()
 	if s.epoch != admissionEpoch {
 		s.mu.Unlock()
 		cl.reject(muxproto.ErrUnauthorized)
-		_ = cl.conn.Close()
 		return
 	}
 	cl.epoch = admissionEpoch
@@ -243,10 +309,8 @@ func (s *Server) handleClient(nc net.Conn) {
 	}
 	host, _ := os.Hostname()
 	if err := cl.writeServer(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: true, Version: muxproto.Version, Server: host}); err != nil {
-		s.dropClient(cl)
 		return
 	}
-	defer s.dropClient(cl)
 	for {
 		m, err := cl.conn.ReadClient()
 		if err != nil {
@@ -268,10 +332,13 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 	case muxproto.CHello:
 		return false // hello is valid exactly once and only as the first frame
 	case muxproto.CSubscribe:
-		ctx, cancel := context.WithTimeout(context.Background(), primaryReadTimeout)
+		ctx, finish, ok := cl.beginWork(primaryReadTimeout)
+		if !ok {
+			return false
+		}
 		sess, err := s.primary.Snapshot(ctx)
-		cancel()
 		if err == nil {
+			defer finish()
 			revoked, active := s.rememberFor(cl, sess)
 			closeRoutes(revoked, true)
 			if !active || !s.clientActive(cl) {
@@ -282,6 +349,9 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 			s.mu.Unlock()
 			cl.send(muxproto.ServerMsg{Type: muxproto.SSnapshot, Sessions: sess})
 		} else {
+			// Release this handler's work token before it invokes the global
+			// suspension barrier; otherwise it would wait for itself.
+			finish()
 			s.suspend()
 			return false
 		}
@@ -295,9 +365,12 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 			cl.send(muxproto.ServerMsg{Type: muxproto.SResult, OK: false, Error: "unsupported action"})
 			return true
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), primaryActionTimeout)
+		ctx, finish, ok := cl.beginWork(primaryActionTimeout)
+		if !ok {
+			return false
+		}
+		defer finish()
 		newID, err := s.primary.Dispatch(ctx, act)
-		cancel()
 		if !s.clientActive(cl) {
 			return false
 		}
@@ -350,7 +423,11 @@ func (s *Server) openPane(cl *client, m muxproto.ClientMsg) {
 		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: "pane id already open"})
 		return
 	}
-	routeCtx, routeCancel := context.WithCancel(context.Background())
+	parent := cl.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	routeCtx, routeCancel := context.WithCancel(parent)
 	openCtx, cancelOpen := context.WithTimeout(routeCtx, primaryActionTimeout)
 	r := &route{
 		cl: cl, clientPane: m.PaneID, agent: m.Agent, epoch: cl.epoch,
@@ -514,6 +591,7 @@ func (s *Server) dropClient(cl *client) {
 	cl.panes = map[string]*route{}
 	s.mu.Unlock()
 	cl.stop()
+	cl.waitWork()
 	if cl.writerDone != nil {
 		<-cl.writerDone
 	}
@@ -591,6 +669,10 @@ func activeSessionIDs(sessions []core.Session) map[string]bool {
 // successful poll does not resurrect either client or route.
 func (s *Server) suspend() {
 	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return
+	}
 	s.epoch++
 	clients := make([]*client, 0, len(s.clients))
 	for cl := range s.clients {
@@ -609,12 +691,58 @@ func (s *Server) suspend() {
 	for _, cl := range clients {
 		cl.stop()
 	}
+	closeRoutes(routes, true)
 	for _, cl := range clients {
+		cl.waitWork()
 		if cl.writerDone != nil {
 			<-cl.writerDone
 		}
 	}
+}
+
+// shutdown is terminal, unlike suspend: it permanently refuses registration,
+// closes the listeners used by this Serve call, and joins every accepted
+// handler (including sockets still waiting for hello or primary admission).
+// Primary effects that completed before cancellation are not rolled back; the
+// barrier only proves that no mux-owned callback or transport survives return.
+func (s *Server) shutdown(lns []net.Listener) {
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return
+	}
+	s.terminal = true
+	s.serving = false
+	s.epoch++
+	if s.serveCancel != nil {
+		s.serveCancel()
+	}
+	accepted := make([]*client, 0, len(s.accepted))
+	for cl := range s.accepted {
+		accepted = append(accepted, cl)
+	}
+	routes := make([]*route, 0, len(s.routes))
+	for r := range s.routes {
+		routes = append(routes, r)
+	}
+	for cl := range s.clients {
+		cl.panes = map[string]*route{}
+	}
+	s.clients = map[*client]bool{}
+	s.routes = map[*route]bool{}
+	s.lastSnap = nil
+	s.lastSessions = nil
+	s.mu.Unlock()
+
+	for _, ln := range lns {
+		_ = ln.Close()
+	}
+	for _, cl := range accepted {
+		cl.stop()
+	}
 	closeRoutes(routes, true)
+	s.acceptors.Wait()
+	s.handlers.Wait()
 }
 
 func (s *Server) remember(sessions []core.Session) {
@@ -900,6 +1028,37 @@ func (cl *client) authorized() bool {
 	return cl.server == nil || cl.server.clientActive(cl)
 }
 
+// beginWork binds one primary operation to this accepted client's lifetime.
+// stop closes admission under workMu before waitWork begins, so WaitGroup.Add
+// can never race with Wait after revocation.
+func (cl *client) beginWork(timeout time.Duration) (context.Context, context.CancelFunc, bool) {
+	cl.workMu.Lock()
+	select {
+	case <-cl.done:
+		cl.workMu.Unlock()
+		return nil, nil, false
+	default:
+	}
+	parent := cl.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	cl.work.Add(1)
+	cl.workMu.Unlock()
+	return ctx, func() {
+		cancel()
+		cl.work.Done()
+	}, true
+}
+
+func (cl *client) waitWork() {
+	// Synchronize with the last possible beginWork before waiting.
+	cl.workMu.Lock()
+	cl.workMu.Unlock()
+	cl.work.Wait()
+}
+
 func (cl *client) writeServer(message muxproto.ServerMsg) error {
 	_, err := cl.writeFrame(nil, false, message)
 	return err
@@ -936,7 +1095,12 @@ func (cl *client) writeFrame(route *route, requireAuthorization bool, message mu
 
 func (cl *client) stop() {
 	cl.once.Do(func() {
+		cl.workMu.Lock()
 		close(cl.done)
+		if cl.cancel != nil {
+			cl.cancel()
+		}
+		cl.workMu.Unlock()
 		if cl.conn != nil {
 			_ = cl.conn.Close()
 		}
