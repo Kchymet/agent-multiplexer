@@ -227,7 +227,10 @@ global hooks/transcripts, sibling directories and shared Git metadata are not
 mounted. The mailbox is read-only except for its `requests/` overlay;
 credentials and fixed `context.json` are read-only at the immediate-root
 `/amux-session-access` directory. Host provider/TLS/management environment
-variables and ambient API tokens are removed before the child starts.
+variables and ambient API tokens are removed before the child starts. Immediately
+before the final payload exec, an in-namespace trampoline marks every inherited
+descriptor above standard error close-on-exec; a private `/proc` alone cannot
+revoke an already-open host file descriptor.
 
 The 0.12.0 floor is a security boundary, not a packaging preference. The
 [bubblewrap advisory](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx)

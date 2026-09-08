@@ -47,9 +47,7 @@ func TestSocketScopeProbe(t *testing.T) {
 }
 
 func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
-	if err := IsolationSupport(); err != nil {
-		t.Skipf("protected namespace unavailable: %v", err)
-	}
+	requireRuntimeIsolation(t)
 	home, err := os.MkdirTemp("", "cx-scope-")
 	if err != nil {
 		t.Fatal(err)
