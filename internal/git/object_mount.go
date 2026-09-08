@@ -13,8 +13,8 @@ package git
 // namespace assembly. Namespace code must validate both paths against trusted
 // daemon state and bind only the named object directory read-only.
 type GitObjectMount struct {
-	RepoKey         string
-	Generation      string
-	ObjectsHostDir  string
-	ObjectsMountDir string
+	RepoKey         string `json:"repo_key"`
+	Generation      string `json:"generation"`
+	ObjectsHostDir  string `json:"objects_host_dir"`
+	ObjectsMountDir string `json:"objects_mount_dir"`
 }

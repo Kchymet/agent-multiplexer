@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/core"
 	"amux/internal/store"
 )
 
@@ -19,7 +20,7 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
 	t.Setenv("AMUX_CLAUDE_BIN", "/bin/true")
 	t.Setenv("AMUX_JAIL", "off")
-	dir := filepath.Join(home, "agent")
+	dir := filepath.Join(core.SessionsDir(), "group", "agent")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestResolveRefusesLegacySharedGitLayout(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("AMUX_JAIL", "off")
-	dir := filepath.Join(home, "agent")
+	dir := filepath.Join(core.SessionsDir(), "root", "agent")
 	if err := os.MkdirAll(filepath.Join(dir, "repo"), 0o700); err != nil {
 		t.Fatal(err)
 	}

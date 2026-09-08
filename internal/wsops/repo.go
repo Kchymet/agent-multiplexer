@@ -5,20 +5,21 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"amux/internal/core"
-	"amux/internal/gh"
 	"amux/internal/git"
 	"amux/internal/store"
 )
 
 // AddRepoSource tracks a repository from a single source string — a GitHub
-// owner/name, a git URL, or a local path — by cloning it bare into the amux
-// repos dir and registering it in the store. It is the non-interactive core
-// shared by the CLI's `repo add <src>` and the native TUI's "Add repo" form
+// owner/name, a git URL, or a local path — by preparing its authorized object
+// pool, creating an empty compatibility inventory, and registering it. It is
+// the non-interactive core shared by the CLI's `repo add <src>` and the native
+// TUI's "Add repo" form
 // (the fzf/gh owner browser stays in the CLI, which has a real TTY). Tracking an
 // already-known repo is a no-op that returns the existing record.
 func AddRepoSource(ctx context.Context, source string) (store.Repo, error) {
@@ -44,21 +45,15 @@ func AddRepoSource(ctx context.Context, source string) (store.Repo, error) {
 	}
 	gitDir := filepath.Join(core.ReposDir(), name+".git")
 
-	clone := func() error {
-		if looksLikeGHRepo(source) {
-			return gh.CloneBare(ctx, source, gitDir)
-		}
-		src := expandHome(source)
-		if git.LooksLocal(src) {
-			abs, _ := filepath.Abs(src)
-			if !git.IsGitRepo(ctx, abs) {
-				return fmt.Errorf("%s is not a git repository", abs)
-			}
-			src = abs
-		}
-		return git.CloneBare(ctx, src, gitDir)
+	poolSource, err := authoritativeSource(source)
+	if err != nil {
+		return store.Repo{}, err
 	}
-	if err := clone(); err != nil {
+	key := git.SourceKey(poolSource)
+	if err := git.PrepareObjectPool(ctx, gitPoolDir(), key, poolSource, allowLocalGitSource()); err != nil {
+		return store.Repo{}, fmt.Errorf("prepare Git object pool: %w", err)
+	}
+	if err := git.InitBareInventory(ctx, poolSource, gitDir); err != nil {
 		return store.Repo{}, err
 	}
 	r := store.Repo{Name: name, Source: source, GitDir: gitDir}
@@ -75,8 +70,8 @@ func AddRepoSource(ctx context.Context, source string) (store.Repo, error) {
 }
 
 // RemoveRepo untracks a repository: it refuses while any agent is assigned to
-// it, then removes the host cache and store record. Session clones are independent,
-// but their assignment still depends on this tracked source. It's the daemon-side core of the
+// it, then removes the legacy host cache and store record. Session worktree
+// metadata is private, but its assignment still depends on this tracked source. It's the daemon-side core of the
 // CLI's `repo rm`, so the CLI never opens the store to untrack a repo.
 func RemoveRepo(name string) error {
 	db, err := store.Open()
@@ -167,9 +162,9 @@ func expandHome(p string) string {
 	return p
 }
 
-// checkoutSource returns the authoritative source used for a session's private
-// clone. Bare GitHub slugs are expanded to their HTTPS remote; importantly, the
-// daemon never derives this from the mutable tracked bare cache's local config.
+// checkoutSource returns the authoritative source used for the immutable object
+// pool and a session's private Git origin. Bare GitHub slugs are expanded to
+// HTTPS; the mutable legacy cache's config is never consulted.
 func checkoutSource(source string) string {
 	source = strings.TrimSpace(source)
 	if looksLikeGHRepo(source) {
@@ -183,11 +178,108 @@ func checkoutSource(source string) string {
 // publishes it into a session-writable directory.
 func gitStagingDir() string { return filepath.Join(core.StateDir(), "git-staging") }
 
+func gitPoolDir() string { return filepath.Join(core.StateDir(), "git-pools", "v1") }
+
+func allowLocalGitSource() bool { return os.Getenv("AMUX_GIT_TRUST_LOCAL_SOURCE") == "1" }
+
 // gitLayoutPath is a daemon-private authority record. Session-controlled .git
 // contents never decide whether cleanup is for an independent or legacy layout.
 func gitLayoutPath(agentID, repoName string) string {
 	sum := sha256.Sum256([]byte(agentID + "\x00" + repoName))
-	return filepath.Join(core.StateDir(), "git-layout", "v1", fmt.Sprintf("%x", sum[:])+".layout")
+	return filepath.Join(core.StateDir(), "git-layout", "v2", fmt.Sprintf("%x", sum[:])+".json")
+}
+
+func authoritativeSource(source string) (string, error) {
+	source = checkoutSource(source)
+	if strings.HasPrefix(strings.ToLower(source), "file:") {
+		u, err := url.Parse(source)
+		if err != nil || u.Opaque != "" || (u.Host != "" && !strings.EqualFold(u.Host, "localhost")) || !filepath.IsAbs(u.Path) {
+			return "", fmt.Errorf("file Git source must be an absolute local URL: %q", source)
+		}
+		source = u.Path
+	}
+	if git.LooksLocal(source) {
+		abs, err := filepath.Abs(source)
+		if err != nil {
+			return "", err
+		}
+		if canonical, err := filepath.EvalSymlinks(abs); err == nil {
+			source = canonical
+		} else {
+			return "", fmt.Errorf("resolve local Git source %q: %w", source, err)
+		}
+		if underPath(source, core.ReposDir()) {
+			return "", fmt.Errorf("legacy amux bare cache %q is not an eligible object-pool source; preserve the session and use its authoritative upstream", source)
+		}
+	}
+	return source, nil
+}
+
+func checkoutRequest(repo store.Repo, agentID, path, branch, managedRoot string) (git.CheckoutRequest, error) {
+	source, err := authoritativeSource(repo.Source)
+	if err != nil {
+		return git.CheckoutRequest{}, err
+	}
+	return git.CheckoutRequest{
+		Source: source, Path: path, Branch: branch, RepoKey: git.SourceKey(source),
+		PoolRoot: gitPoolDir(), StagingRoot: gitStagingDir(), ManagedRoot: managedRoot,
+		LayoutPath: gitLayoutPath(agentID, repo.Name), AllowLocalSource: allowLocalGitSource(),
+	}, nil
+}
+
+func underPath(path, root string) bool {
+	pathAbs, pathErr := filepath.Abs(filepath.Clean(path))
+	rootAbs, rootErr := filepath.Abs(filepath.Clean(root))
+	if pathErr != nil || rootErr != nil {
+		return false
+	}
+	if canonical, err := filepath.EvalSymlinks(rootAbs); err == nil {
+		rootAbs = canonical
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// AgentGitObjectMounts resolves only daemon-private v2 records. It never reads
+// .git or an alternates file supplied by a session. Results retain each repo's
+// oldest-to-tip order and are stable-sorted by repository name.
+func AgentGitObjectMounts(s store.Session) ([]git.GitObjectMount, error) {
+	if s.IsRoot() {
+		return nil, nil
+	}
+	managedRoot, err := sessionStorageRoot(s.Dir)
+	if err != nil {
+		return nil, err
+	}
+	var mounts []git.GitObjectMount
+	for _, repoName := range store.SplitRepos(s.Repo) {
+		checkout := filepath.Join(s.Dir, repoName)
+		resolved, err := git.ReadObjectMounts(gitLayoutPath(s.ID, repoName), checkout, managedRoot)
+		if err != nil {
+			return nil, fmt.Errorf("session %s repo %s: %w", s.ID, repoName, err)
+		}
+		mounts = append(mounts, resolved...)
+	}
+	return mounts, nil
+}
+
+// ValidateAgentGit checks every assigned repository against daemon-private
+// layout authority without invoking Git in session-writable directories.
+func ValidateAgentGit(s store.Session) error {
+	if s.IsRoot() {
+		return nil
+	}
+	managedRoot, err := sessionStorageRoot(s.Dir)
+	if err != nil {
+		return err
+	}
+	for _, repoName := range store.SplitRepos(s.Repo) {
+		checkout := filepath.Join(s.Dir, repoName)
+		if err := git.ValidateCheckoutLayout(gitLayoutPath(s.ID, repoName), checkout, managedRoot); err != nil {
+			return fmt.Errorf("session %s repo %s launch refused: %w. Preserve its conversation and all dirty, staged, untracked, rebase, and submodule state; use an explicit stopped-session migration or recreate it", s.ID, repoName, err)
+		}
+	}
+	return nil
 }
 
 // sessionStorageRoot identifies the amux-owned tree containing path. Legacy

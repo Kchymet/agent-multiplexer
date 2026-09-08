@@ -48,18 +48,19 @@ func writeAgentGuide(s store.Session) { writeGuide(s) }
 func memberGuide(s store.Session) string {
 	repos := "This agent has no repos attached — it works in its own sandbox dir."
 	if names := store.SplitRepos(s.Repo); len(names) > 0 {
-		repos = "You are assigned these repos (one independent clone subdir each): " + strings.Join(names, ", ") + "."
+		repos = "You are assigned these repos (one isolated linked-worktree subdir each): " + strings.Join(names, ", ") + "."
 	}
 	return fmt.Sprintf(`# amux agent — your sandbox
 
-This directory is your sandbox. It contains an independent Git clone per repository you
+This directory is your sandbox. It contains an isolated Git linked worktree per repository you
 are assigned (the subdirectories here). %s
 
 ## Stay in your sandbox
 - Keep source and configuration **edits** inside this directory (your worktrees).
-  Run git commands from your assigned clone. Its Git metadata (objects, refs, index,
-  locks, hooks, and config) is private to this session and stays under the clone.
-  Do not edit other agents' clones or amux's host-side state/cache.
+  Run git commands from your assigned worktree. Its writable Git metadata (refs,
+  index, locks, hooks, config, and new objects) is private under this session.
+  Immutable objects reachable from the authorized upstream base are shared read-only;
+  do not edit other agents' worktrees or amux's host-side state/cache.
   Reading the shared agent sessions below is also allowed.
 - You may commit, fetch, merge, push your assigned branch, and open or update its
   pull request with gh using the host's shared GitHub authentication. These are
@@ -83,7 +84,7 @@ amux itself.
 
 `+transcriptsSection+`
 ## Keep current with the remote
-Each repo here is an independent clone of its remote, and other agents
+Each repo here is an isolated linked worktree of its remote, and other agents
 may be working the same repo in parallel on their own branches. Before starting,
 and regularly as you work, refresh your branch from the remote — run inside each
 repo subdirectory:
@@ -178,7 +179,7 @@ a native TUI and mirrored to a web dashboard.
 - This directory (%s) is your sandbox: the only place you write. %s
 - amux's data dir (%s), readable, holds:
   - `+"`amux.db`"+` — the SQLite store of repos and sessions (read it via the CLI, never edit it);
-  - `+"`repos/<name>.git`"+` — bare clones every agent worktree is sourced from;
+  - `+"`repos/<name>.git`"+` — legacy bare-clone inventory, never an agent's writable Git common directory;
   - `+"`sessions/<workgroup>/`"+` — a workgroup's container: the coordinator's sandbox,
     holding `+"`<agent>/`"+` sandboxes with each agent's worktrees, its own `+"`CLAUDE.md`"+`,
     and its private config (and transcript) under `+"`.amux/`"+`;
@@ -268,8 +269,9 @@ it, by whom, and where it stands; you dispatch new one-off agents and steer the
 ones running. Prompting this repo from the rail or the web reaches you.
 
 ## This repo
-- Authoritative source: `+"`%s`"+`. Each dispatched agent receives an independent
-  single-branch clone; the host cache and other sessions' Git metadata are not yours.
+- Authoritative source: `+"`%s`"+`. Each dispatched agent receives a linked worktree
+  with private writable Git metadata and a read-only authorized base-object pool;
+  the legacy host cache and other sessions' private Git metadata are not yours.
 - You have no clone of your own: to change code, dispatch a one-off agent and
   read its worktree at its sandbox path.
 
@@ -412,7 +414,7 @@ func inventorySection() string {
 		b.WriteString("None tracked.\n")
 	}
 	for _, r := range repos {
-		fmt.Fprintf(&b, "- **%s** (`%s`) — home session id `%s`; per-session clones are isolated\n", r.Name, r.Source, store.RepoHomeID(r.Name))
+		fmt.Fprintf(&b, "- **%s** (`%s`) — home session id `%s`; per-session linked-worktree metadata is isolated\n", r.Name, r.Source, store.RepoHomeID(r.Name))
 		for _, a := range repoAgents[r.Name] {
 			b.WriteString("  ")
 			writeAgentLine(&b, a)

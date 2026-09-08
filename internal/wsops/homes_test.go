@@ -183,6 +183,7 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 }
 
 func TestGuidesByRole(t *testing.T) {
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
 	isolateStore(t)
 	ctx := context.Background()
 	db, _ := store.Open()
@@ -214,7 +215,7 @@ func TestGuidesByRole(t *testing.T) {
 	home, _, _ := ResolveSession("api")
 	writeGuide(home)
 	b, _ = os.ReadFile(filepath.Join(home.Dir, "CLAUDE.md"))
-	for _, want := range []string{"home session", gitDir, oneOff.ID, "review open PRs", "amux do new-repo-agent api", "independent"} {
+	for _, want := range []string{"home session", gitDir, oneOff.ID, "review open PRs", "amux do new-repo-agent api", "linked worktree"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("repo guide missing %q", want)
 		}

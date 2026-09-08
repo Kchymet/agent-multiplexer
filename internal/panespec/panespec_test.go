@@ -56,7 +56,7 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex")) // empty: pinned rollout is missing
 	t.Setenv("AMUX_JAIL", "off")
 
-	dir := filepath.Join(t.TempDir(), "agent")
+	dir := filepath.Join(core.SessionsDir(), "r", "agent")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

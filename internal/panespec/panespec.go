@@ -162,13 +162,9 @@ func codexBin(agentArgv []string) string {
 	return "codex"
 }
 
-// agentRepoSources previously returned the shared bare-clone Git directories
-// backing linked worktrees. New sessions use independent repositories contained
-// in their own directory, so they need no extra mount or Codex writable root.
-//
-// Legacy linked worktrees deliberately fail closed after relaunch until an
-// explicit migration is performed. Inferring legacy status from a session-
-// writable .git file would let a session regain a writable host-cache mount.
+// agentRepoSources no longer returns shared writable Git common directories.
+// Pooled worktrees require typed read-only GitObjectMounts in LaunchSpec; that
+// namespace integration is deliberately separate from this legacy []string seam.
 func agentRepoSources(agentID string) []string {
 	return nil
 }
@@ -483,32 +479,10 @@ func sessionFor(id string) (store.Session, error) {
 	if !ok {
 		return store.Session{}, fmt.Errorf("no such agent %q", id)
 	}
-	if err := requireIndependentGit(s); err != nil {
+	if err := wsops.ValidateAgentGit(s); err != nil {
 		return store.Session{}, err
 	}
 	return s, nil
-}
-
-// requireIndependentGit fails before any pane/App Server launch side effect if
-// an assigned checkout is still a linked worktree. A session can modify its own
-// .git entry, so this check grants no additional mount based on what it sees; it
-// only refuses unsafe/ambiguous layouts. Existing dirty/staged/untracked/rebase
-// and submodule state stays untouched for an explicit host-authorized migration.
-func requireIndependentGit(s store.Session) error {
-	if s.IsRoot() {
-		return nil
-	}
-	for _, repo := range store.SplitRepos(s.Repo) {
-		checkout := filepath.Join(s.Dir, repo)
-		info, err := os.Lstat(filepath.Join(checkout, ".git"))
-		if err != nil {
-			return fmt.Errorf("session %s repo %s is not launchable: missing private Git metadata; preserve the session and recreate or migrate it from the host", s.ID, repo)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("session %s repo %s uses legacy or unsafe shared Git metadata; launch refused to protect other sessions. Preserve its conversation and all dirty, staged, untracked, rebase, and submodule state, then recreate or migrate it with a host-authorized tool", s.ID, repo)
-		}
-	}
-	return nil
 }
 
 // EditorBin is the configured editor, defaulting to nvim.
