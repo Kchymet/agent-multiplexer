@@ -174,7 +174,8 @@ func (c *Client) PaneResize(paneID string, cols, rows int) error {
 	return c.conn.WriteClient(muxproto.ClientMsg{Type: muxproto.CPaneResize, PaneID: paneID, Cols: cols, Rows: rows})
 }
 
-// PaneClose stops a pane.
+// PaneClose detaches this legacy stream; the primary daemon retains process and
+// runtime-lifecycle ownership.
 func (c *Client) PaneClose(paneID string) error {
 	return c.conn.WriteClient(muxproto.ClientMsg{Type: muxproto.CPaneClose, PaneID: paneID})
 }

@@ -201,8 +201,8 @@ func (s *Server) handleClient(nc net.Conn) {
 	}
 	go cl.writeLoop()
 	// Authentication is a strict first-frame gate. Before it succeeds the client
-	// is absent from subscriptions and no asynchronous writer exists that could
-	// disclose a snapshot or pane byte.
+	// is absent from subscriptions/routes and no protected state is queued to its
+	// writer, so no snapshot or pane byte can precede a successful hello.
 	_ = nc.SetReadDeadline(time.Now().Add(5 * time.Second))
 	hello, err := cl.conn.ReadClient()
 	if err != nil || hello.Type != muxproto.CHello || hello.Version != muxproto.Version ||
