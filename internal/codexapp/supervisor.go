@@ -577,11 +577,24 @@ func (s *Supervisor) killProc() {
 // turn/completed notification resolves it, bracketing the turn with
 // turn_start/turn_end events on the runtime-event stream.
 func (s *Supervisor) Prompt(ctx context.Context, text string) error {
+	wait, err := s.BeginPrompt(ctx, text)
+	if err != nil {
+		return err
+	}
+	return wait(ctx)
+}
+
+// BeginPrompt performs only the bounded turn/start admission round trip and
+// returns a waiter for the potentially long model turn. Daemon lifecycle code
+// uses this split to serialize the exact turn-start effect with membership and
+// credential changes without holding its global admission lock while the model
+// runs. The caller must invoke the returned waiter at most once.
+func (s *Supervisor) BeginPrompt(ctx context.Context, text string) (func(context.Context) error, error) {
 	done := make(chan *turnResult, 1)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return errors.New("codexapp: session closed")
+		return nil, errors.New("codexapp: session closed")
 	}
 	// Open a fresh ownership generation for this Prompt. ownTurn stays unbound until
 	// our own turn/start response returns; earlyTerm retains any terminal observed for
@@ -615,7 +628,7 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 		// (curTurn) must survive our failed start.
 		s.abandonLocalTurn(gen)
 		s.emit(turnEndEvent(threadID, "", "error"))
-		return err
+		return nil, err
 	}
 	// Bind ownership to the ACTUAL turn/start response id, scoped to this generation.
 	// If a superseding Prompt (or cancellation) already replaced our waiter, do not
@@ -641,16 +654,18 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	}
 	s.mu.Unlock()
 
-	select {
-	case <-ctx.Done():
-		// The caller's context ended; the turn continues server-side and its observed
-		// turn/completed will bracket and clear it. Don't emit a synthetic end here.
-		return ctx.Err()
-	case <-done:
-		// turn/completed was observed: onNotify already emitted turn_end and cleared
-		// the turn + open approvals. Nothing to do but return.
-		return nil
-	}
+	return func(waitCtx context.Context) error {
+		select {
+		case <-waitCtx.Done():
+			// The waiter ended; the turn continues server-side and its observed
+			// turn/completed will bracket and clear it. Don't emit a synthetic end here.
+			return waitCtx.Err()
+		case <-done:
+			// turn/completed was observed: onNotify already emitted turn_end and cleared
+			// the turn + open approvals. Nothing to do but return.
+			return nil
+		}
+	}, nil
 }
 
 func turnIDFromResult(res json.RawMessage) string {

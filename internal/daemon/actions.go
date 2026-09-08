@@ -154,10 +154,11 @@ func hostRestoreRequested(action core.Action) (bool, error) {
 }
 
 // restoreSessionAccess is reached only through the authenticated host stream.
-// It drains any completion owner before changing archive state, then explicitly
-// regrants exactly the latest revoked credential generation. A publication
-// error is resolved only by observing the expected committed generation; the
-// mutation is never retried automatically.
+// It drains any completion owner and proves the old runtime quiescent, then
+// explicitly regrants exactly the latest revoked credential while archived
+// policy remains fail-closed. Only a confirmed successor permits the active
+// store transition. Partial publication is observed, never blindly retried;
+// archived/current and archived/revoked are both explicit retryable states.
 func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (string, error) {
 	session, found, err := lookupSession(action.ID)
 	if err != nil {
@@ -166,12 +167,26 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 	if !found {
 		return "", fmt.Errorf("session %s not found", action.ID)
 	}
-	if !session.Archived {
-		return wsops.Dispatch(ctx, action, d.killEngineFor)
-	}
 	expected, regrant, err := d.restoreCredentialState(ctx, action.ID)
 	if err != nil {
 		return "", err
+	}
+	if !session.Archived && !regrant {
+		return wsops.Dispatch(ctx, action, d.killEngineFor)
+	}
+	if !session.Archived {
+		// Repair an active/revoked row left by an older partial restore before
+		// attempting a successor publication. The archived policy state is the
+		// durable recovery marker; an explicit retry can always resume from it.
+		_, archiveErr := wsops.ApplyResult(ctx, core.Action{
+			Action: core.ActionSetArchived,
+			ID:     action.ID,
+			Fields: map[string]string{"archived": "true"},
+		})
+		current, currentFound, lookupErr := lookupSession(action.ID)
+		if lookupErr != nil || !currentFound || !current.Archived {
+			return "", errors.Join(archiveErr, lookupErr, fmt.Errorf("restore recovery could not preserve archived state"))
+		}
 	}
 	var newID string
 	d.authMu.Lock()
@@ -179,21 +194,46 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 		if err = d.quiesceSessionRuntimeLocked(action.ID); err != nil {
 			return
 		}
-		var applyErr error
-		newID, applyErr = wsops.Dispatch(ctx, action, nil)
-		if applyErr != nil {
-			current, currentFound, lookupErr := lookupSession(action.ID)
-			if lookupErr != nil || !currentFound || current.Archived {
-				err = applyErr
-				return
-			}
-		}
+		var successor access.Principal
 		if regrant {
 			if _, regrantErr := d.authority.Regrant(ctx, access.SubjectSession, action.ID, expected); regrantErr != nil {
 				current, currentErr := d.authority.Current(ctx, access.SubjectSession, action.ID)
 				if currentErr != nil || current.Generation != expected+1 {
 					err = fmt.Errorf("restore credential regrant: %w", regrantErr)
+					return
 				}
+			}
+			current, currentErr := d.authority.Current(ctx, access.SubjectSession, action.ID)
+			if currentErr != nil || current.Generation != expected+1 {
+				err = errors.Join(currentErr, fmt.Errorf("restore successor generation was not published"))
+				return
+			}
+			successor = access.Principal{
+				KeyID: current.KeyID, SubjectID: current.SubjectID, Kind: current.Kind, Generation: current.Generation,
+			}
+		}
+
+		// Only now publish the active store row. Until the successor is confirmed,
+		// archived policy denies every operation even though the fresh key may be
+		// cryptographically readable from the stable credential directory.
+		var applyErr error
+		newID, applyErr = wsops.Dispatch(ctx, action, nil)
+		if applyErr == nil {
+			return
+		}
+		current, currentFound, lookupErr := lookupSession(action.ID)
+		if lookupErr == nil && currentFound && !current.Archived {
+			// The store mutation committed but its caller observed an uncertain
+			// failure. Do not retry it; the intended state is already durable.
+			return
+		}
+		err = applyErr
+		if regrant && successor.KeyID != "" {
+			// The store stayed archived, so retire the unused successor when
+			// possible. Failure is still fail-closed: archived policy denies this
+			// credential, and a later explicit retry can finish the transition.
+			if revokeErr := d.authority.RevokeCurrent(ctx, successor); revokeErr != nil && !errors.Is(revokeErr, access.ErrGenerationChanged) {
+				err = errors.Join(err, fmt.Errorf("retire unused restore credential: %w", revokeErr))
 			}
 		}
 	})
