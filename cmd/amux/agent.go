@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
@@ -260,10 +261,12 @@ func cmdAgentPermission(args []string) error {
 // exit 0 means the daemon confirmed archival. Archiving is reversible (`amux
 // workgroup unarchive <id>`); it hides the row and does not delete the worktree
 // or branch.
+var loadAgentSessionContext = access.LoadSessionContext
+
 func cmdAgentDone(args []string) error {
-	id := selfAgentID(args, os.Getenv)
-	if id == "" {
-		return fmt.Errorf("amux agent done: %s", notInsideAgent("amux agent done", "amux workgroup archive <id>"))
+	id, err := selfAgentID(args, loadAgentSessionContext)
+	if err != nil {
+		return fmt.Errorf("amux agent done: %w", err)
 	}
 	if err := sendAction(core.Action{
 		Action: core.ActionSetArchived,
@@ -283,16 +286,15 @@ func cmdAgentDone(args []string) error {
 //
 // This is the *store* session id (used by the archive/rename actions), distinct
 // from the Claude session id that the activity-report verbs (status/hook) key on.
-func selfAgentID(args []string, getenv func(string) string) string {
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "--id" && i+1 < len(args):
-			return strings.TrimSpace(args[i+1])
-		case strings.HasPrefix(args[i], "--id="):
-			return strings.TrimSpace(strings.TrimPrefix(args[i], "--id="))
-		}
+func selfAgentID(args []string, load func() (access.SessionContext, error)) (string, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("self completion accepts no id; identity comes only from %s", core.SessionContextPath())
 	}
-	return firstNonEmpty(getenv("AMUX_WORKGROUP"), getenv("AMUX_WORKSPACE"))
+	context, err := load()
+	if err != nil || strings.TrimSpace(context.SubjectID) == "" {
+		return "", fmt.Errorf("%s", notInsideAgent("amux agent done", "amux workgroup archive <id>"))
+	}
+	return context.SubjectID, nil
 }
 
 // cmdAgentCapture snapshots the agent's Claude transcript into amux's own

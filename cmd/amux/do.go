@@ -259,6 +259,9 @@ func sendAction(a core.Action) error {
 // sendActionID is sendAction plus the id of any session the action created (the
 // daemon's Result.NewID), so a create command can start or switch to it.
 func sendActionID(a core.Action) (string, error) {
+	if sessionContextRestricted() {
+		return restrictedAction(a)
+	}
 	c, err := dial()
 	if err != nil {
 		return "", err
@@ -284,6 +287,9 @@ func sendActionID(a core.Action) (string, error) {
 // queryRows asks the daemon for a read model (QueryRepos, QuerySessions) and
 // decodes its rows into dst. It's the read half of the CLI's daemon bridge.
 func queryRows(name string, dst any) error {
+	if sessionContextRestricted() {
+		return restrictedQuery(name, dst)
+	}
 	c, err := dial()
 	if err != nil {
 		return err

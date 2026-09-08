@@ -161,6 +161,49 @@ func (c *Client) Send(a core.Action) error {
 	}
 }
 
+// Shutdown requests a clean daemon shutdown over the already authenticated
+// host stream and waits for the daemon's acknowledgement. It never reads or
+// signals a pidfile process.
+func (c *Client) Shutdown() error {
+	if err := c.Send(core.Action{Action: actionDaemonShutdown}); err != nil {
+		return err
+	}
+	for {
+		frame, err := c.Next()
+		if err != nil {
+			return err
+		}
+		if frame.Result == nil {
+			continue
+		}
+		if !frame.Result.OK {
+			return fmt.Errorf("%s", frame.Result.Error)
+		}
+		return nil
+	}
+}
+
+// RecreateSession replaces one runtime through the authenticated host stream.
+// It is intentionally not part of restricted session RPC.
+func (c *Client) RecreateSession(id string) error {
+	if err := c.Send(core.Action{Action: actionSessionRecreate, ID: id}); err != nil {
+		return err
+	}
+	for {
+		frame, err := c.Next()
+		if err != nil {
+			return err
+		}
+		if frame.Result == nil {
+			continue
+		}
+		if !frame.Result.OK {
+			return fmt.Errorf("%s", frame.Result.Error)
+		}
+		return nil
+	}
+}
+
 // PaneOpen asks the daemon to attach this connection to a tab of an agent,
 // streaming its output back as pane frames. The caller mints paneID (unique
 // within the connection).
