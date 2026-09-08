@@ -162,7 +162,7 @@ func LiveAgentsPath() string {
 // agent sandbox reference this rather than the running daemon's os.Executable()
 // path: that path can be a throwaway dev build inside a session worktree which
 // later vanishes, breaking the hooks — whereas the install path is stable and is
-// exactly what the sandbox scope binds in (see panespec.configBinds).
+// exactly what the sandbox scope restores as a read-only exact-file alias.
 func InstalledBinPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "bin", "amux")

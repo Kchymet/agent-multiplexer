@@ -126,9 +126,12 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
   use `gh` without logging in again. The daemon-selected model account is the only
   ambient credential environment projected into the launcher; cloud/operator keys
   are excluded before bubblewrap starts. Bare `amux` resolves through the exact
-  running binary in read-only `/amux-bin`. Network remains shared (DNS included),
-  so this is not a network sandbox. Protected launch fails closed when isolation
-  is disabled or unsupported. See `docs/namespace-rollout.md` before deployment.
+  running binary in read-only `/amux-bin`. Claude's generated hooks and model
+  status line retain the stable installed absolute path through a second
+  read-only exact-file alias; the containing `~/.local/bin` directory stays
+  absent. Network remains shared (DNS included), so this is not a network
+  sandbox. Protected launch fails closed when isolation is disabled or
+  unsupported. See `docs/namespace-rollout.md` before deployment.
 - **Harness config is a private copy, not a mount.** Your `~/.claude` /
   `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
