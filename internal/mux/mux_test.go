@@ -16,6 +16,31 @@ import (
 	"amux/internal/panespec"
 )
 
+type testPrimary struct {
+	snapshot func(context.Context) ([]core.Session, error)
+	dispatch func(context.Context, core.Action) (string, error)
+	launch   LaunchSpecResolver
+}
+
+func (p testPrimary) Snapshot(ctx context.Context) ([]core.Session, error) {
+	if p.snapshot == nil {
+		return nil, nil
+	}
+	return p.snapshot(ctx)
+}
+func (p testPrimary) Dispatch(ctx context.Context, a core.Action) (string, error) {
+	if p.dispatch == nil {
+		return "", nil
+	}
+	return p.dispatch(ctx, a)
+}
+func (p testPrimary) LaunchSpec(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+	if p.launch == nil {
+		return panespec.LaunchSpec{}, fmt.Errorf("no launch")
+	}
+	return p.launch(ctx, id)
+}
+
 // TestEndToEnd starts a real server on a unix socket and drives it with the real
 // client: subscribe yields a snapshot, and opening the console's terminal tab
 // runs a shell whose output streams back over the protocol.
@@ -28,6 +53,12 @@ func TestEndToEnd(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 
 	sock := filepath.Join(dir, "mux.sock")
+	certFile, keyFile := genCert(t, dir)
+	t.Setenv("AMUX_TLS_CERT", certFile)
+	t.Setenv("AMUX_TLS_KEY", keyFile)
+	t.Setenv("AMUX_TLS_CA", certFile)
+	t.Setenv("AMUX_TLS_SERVERNAME", "localhost")
+	t.Setenv("AMUX_MUX_TOKEN", "test-mux-token")
 	ln, err := Listen("unix:" + sock)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +82,12 @@ func TestEndToEnd(t *testing.T) {
 		grant, err := authority.EnsureSession(ctx, session.ID, session.Dir)
 		return panespec.LaunchSpec{Session: session, Access: grant}, err
 	}
-	srv := New(resolver)
+	srv := New(testPrimary{
+		snapshot: func(context.Context) ([]core.Session, error) {
+			return []core.Session{{ID: console.ID}}, nil
+		},
+		launch: resolver,
+	})
 	// This test exercises mux routing, not namespace construction. Namespace
 	// behavior has its own tests and now correctly rejects credentials when the
 	// jail is disabled.

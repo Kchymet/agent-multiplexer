@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/panespec"
 )
 
 // outBuf bounds the client's outbound queue. Actions and pane input/responses
@@ -37,7 +39,17 @@ type Client struct {
 
 // Dial connects to the daemon socket (single attempt).
 func Dial() (*Client, error) {
-	conn, err := net.DialTimeout("unix", core.SocketPath(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second+authDeadline)
+	defer cancel()
+	return DialContext(ctx)
+}
+
+// DialContext connects and authenticates to the daemon while respecting ctx.
+// It is used by compatibility relays whose upstream authorization lease must
+// not leave a blocked dial alive after the downstream client is revoked.
+func DialContext(ctx context.Context) (*Client, error) {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", core.SocketPath())
 	if err != nil {
 		return nil, err
 	}
@@ -46,10 +58,14 @@ func Dial() (*Client, error) {
 		conn.Close()
 		return nil, fmt.Errorf("load daemon host credential: %w", err)
 	}
-	return authenticateClient(conn, credential)
+	return authenticateClientContext(ctx, conn, credential)
 }
 
 func authenticateClient(conn net.Conn, credential access.Credential) (*Client, error) {
+	return authenticateClientContext(context.Background(), conn, credential)
+}
+
+func authenticateClientContext(ctx context.Context, conn net.Conn, credential access.Credential) (*Client, error) {
 	_ = conn.SetDeadline(time.Now().Add(authDeadline))
 	tlsConfig, err := access.ClientTLSConfig(credential)
 	if err != nil {
@@ -57,7 +73,7 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 		return nil, fmt.Errorf("load daemon TLS pin: %w", err)
 	}
 	secure := tls.Client(conn, tlsConfig)
-	if err := secure.Handshake(); err != nil {
+	if err := secure.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("verify daemon TLS identity: %w", err)
 	}
@@ -204,6 +220,28 @@ func (c *Client) RecreateSession(id string) error {
 	}
 }
 
+// Dispatch applies one host lifecycle/control action through the authenticated
+// primary daemon and returns the created session id, if any. Snapshot frames
+// may precede the result on this subscribed stream and are skipped.
+func (c *Client) Dispatch(a core.Action) (string, error) {
+	if err := c.Send(a); err != nil {
+		return "", err
+	}
+	for {
+		frame, err := c.Next()
+		if err != nil {
+			return "", err
+		}
+		if frame.Result == nil {
+			continue
+		}
+		if !frame.Result.OK {
+			return "", fmt.Errorf("%s", frame.Result.Error)
+		}
+		return frame.Result.NewID, nil
+	}
+}
+
 // PaneOpen asks the daemon to attach this connection to a tab of an agent,
 // streaming its output back as pane frames. The caller mints paneID (unique
 // within the connection).
@@ -342,6 +380,21 @@ func (c *Client) RuntimeRecord(id string) (core.RuntimeRecord, error) {
 		return rec, nil
 	}
 	return rec, json.Unmarshal(raw, &rec)
+}
+
+// LaunchSpec asks the primary daemon to resolve and provision the complete
+// typed launch input for id. The mux never derives a session path or opens an
+// access authority itself.
+func (c *Client) LaunchSpec(id string) (panespec.LaunchSpec, error) {
+	raw, err := c.queryAction(core.Action{Action: core.ActionQuery, Query: core.QueryLaunchSpec, ID: id})
+	if err != nil {
+		return panespec.LaunchSpec{}, err
+	}
+	var spec panespec.LaunchSpec
+	if len(raw) == 0 {
+		return spec, fmt.Errorf("daemon returned no launch spec for %q", id)
+	}
+	return spec, json.Unmarshal(raw, &spec)
 }
 
 // Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane/Data

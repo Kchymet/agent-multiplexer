@@ -164,3 +164,17 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 		t.Errorf("RuntimeRecord(c2) = %+v, want codex with the session's journal", unrun)
 	}
 }
+
+func TestQueryLaunchSpecUsesDaemonOwnedResolver(t *testing.T) {
+	d := testDaemon(t)
+	c, done := dialDaemon(t, d)
+	defer done()
+
+	spec, err := c.LaunchSpec("a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Session.ID != "a1" || spec.Access.SubjectID != "a1" {
+		t.Fatalf("LaunchSpec(a1) = %+v", spec)
+	}
+}

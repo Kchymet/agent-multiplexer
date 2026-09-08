@@ -232,6 +232,10 @@ const (
 	// session named by Action.ID. Restricted policy may authorize this scoped
 	// projection; it never exposes the underlying host path or runtime record.
 	QueryRuntimeEvents = "runtime-events"
+	// QueryLaunchSpec returns the complete daemon-authorized pane launch input
+	// for Action.ID. It is served only on the authenticated host stream; the
+	// legacy mux consumes it without opening the store or access authority.
+	QueryLaunchSpec = "launch-spec"
 	// QueryVersion reports the daemon build, its CLI protocol, and the schema
 	// version of the database it owns. It is intentionally additive: a new CLI
 	// can identify an older daemon by the latter's unknown-query response.

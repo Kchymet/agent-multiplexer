@@ -54,8 +54,8 @@ func TestTokenOK(t *testing.T) {
 		configured, presented string
 		want                  bool
 	}{
-		{"", "", true},
-		{"", "whatever", true},
+		{"", "", false},
+		{"", "whatever", false},
 		{"tok", "tok", true},
 		{"tok", "nope", false},
 		{"tok", "", false},

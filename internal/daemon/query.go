@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +20,8 @@ import (
 // the store and sending it back as a Data frame. The daemon owns store access;
 // this is what lets the CLI list repos and workgroups without opening the DB
 // itself. Unknown queries and store errors come back as a failed Data frame.
-func (d *Daemon) query(cl *connState, a core.Action) {
-	rows, err := d.readModel(a)
+func (d *Daemon) query(ctx context.Context, cl *connState, a core.Action) {
+	rows, err := d.readModel(ctx, a)
 	if err != nil {
 		cl.send(core.Data{Type: core.FrameData, Query: a.Query, OK: false, Error: err.Error()})
 		return
@@ -36,7 +37,10 @@ func (d *Daemon) query(cl *connState, a core.Action) {
 // readModel returns the read model named by a.Query. It's split out so the
 // marshalling and framing in query stay uniform across query names. The daemon is
 // the sole store owner, so this — and the poll loop — are the only readers.
-func (d *Daemon) readModel(a core.Action) (any, error) {
+func (d *Daemon) readModel(ctx context.Context, a core.Action) (any, error) {
+	if err := revalidateDeferred(ctx); err != nil {
+		return nil, err
+	}
 	if a.Query == core.QueryCodexControl {
 		return d.codexControl, d.configErr
 	}
@@ -68,6 +72,12 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 	// otherwise open the store itself.
 	if a.Query == core.QuerySnapshot {
 		return d.snapshot().Sessions, nil
+	}
+	// A LaunchSpec can provision/validate the session's access grant, so it is a
+	// host-only daemon operation rather than a generic store read. The host
+	// listener is authenticated before readModel is reachable.
+	if a.Query == core.QueryLaunchSpec {
+		return d.launchSpec(ctx, a.ID)
 	}
 
 	db, err := store.Open()

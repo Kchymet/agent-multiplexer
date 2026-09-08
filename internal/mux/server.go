@@ -1,7 +1,7 @@
 // Package mux is amux's multiplexer server: the backend half of the client/server
-// split. It speaks muxproto to any number of UI clients (local unix socket or
-// remote TCP), owns the session model via store/source/wsops, and routes agent
-// pane I/O between clients and an agent harness (harnessproto). See
+// split. It speaks muxproto to authenticated UI clients, relays authoritative
+// state/control to the primary daemon, and routes agent pane I/O between clients
+// and an agent harness (harnessproto). See
 // docs/client-server.md.
 package mux
 
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,22 +20,21 @@ import (
 	"amux/internal/harness"
 	"amux/internal/muxproto"
 	"amux/internal/panespec"
-	"amux/internal/source"
-	"amux/internal/wsops"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Server is a running multiplexer server.
 type Server struct {
-	src   *source.Workspace
-	token string // bearer token required of clients; empty disables auth
+	primary Primary
+	token   string // nonempty bearer required inside an authenticated TLS channel
 
-	mu       sync.Mutex
-	clients  map[*client]bool
-	routes   map[string]route // harness pane id -> owning client + its pane id
-	hconn    *harnessproto.Conn
-	paneSeq  int64
-	lastSnap []byte // last broadcast snapshot, for change detection
+	mu           sync.Mutex
+	clients      map[*client]bool
+	routes       map[string]route // harness pane id -> owning client + its pane id
+	hconn        *harnessproto.Conn
+	paneSeq      int64
+	lastSnap     []byte // last broadcast snapshot, for change detection
+	lastSessions []core.Session
 
 	pollCh chan struct{}
 
@@ -47,6 +47,27 @@ type Server struct {
 
 type LaunchSpecResolver func(context.Context, string) (panespec.LaunchSpec, error)
 type paneResolver func(panespec.LaunchSpec, int) (dir string, env, argv []string, err error)
+
+// Primary is the mux's only state/authority seam. Production implements it by
+// authenticating to the singleton daemon as the host for every operation. Tests
+// inject inert fakes; no mux path opens the store or a FileAuthority.
+type Primary interface {
+	Snapshot(context.Context) ([]core.Session, error)
+	Dispatch(context.Context, core.Action) (string, error)
+	LaunchSpec(context.Context, string) (panespec.LaunchSpec, error)
+}
+
+type unavailablePrimary struct{}
+
+func (unavailablePrimary) Snapshot(context.Context) ([]core.Session, error) {
+	return nil, fmt.Errorf("legacy mux has no authenticated primary daemon relay")
+}
+func (unavailablePrimary) Dispatch(context.Context, core.Action) (string, error) {
+	return "", fmt.Errorf("legacy mux has no authenticated primary daemon relay")
+}
+func (unavailablePrimary) LaunchSpec(context.Context, string) (panespec.LaunchSpec, error) {
+	return panespec.LaunchSpec{}, fmt.Errorf("legacy mux has no daemon-authorized launch resolver")
+}
 
 type route struct {
 	cl         *client
@@ -86,6 +107,8 @@ type paneOut struct {
 }
 
 const (
+	primaryReadTimeout   = 5 * time.Second
+	primaryActionTimeout = 30 * time.Second
 	// paneOutCap is how many unsent output bytes we coalesce for one pane before
 	// giving up on streaming losslessly (a wedged socket, not a merely slow one,
 	// is what fills it). Matches the replay cap in docs/remote-provider.md.
@@ -95,23 +118,21 @@ const (
 	paneOutKeep = 256 << 10
 )
 
-// New creates a server. When $AMUX_MUX_TOKEN is set, clients must present a
-// matching token in their hello (constant-time checked); an empty value leaves
-// auth off, appropriate for the trusted local unix socket.
-func New(resolvers ...LaunchSpecResolver) *Server {
-	launchSpec := LaunchSpecResolver(func(context.Context, string) (panespec.LaunchSpec, error) {
-		return panespec.LaunchSpec{}, fmt.Errorf("legacy mux has no daemon-authorized launch resolver")
-	})
-	if len(resolvers) != 0 && resolvers[0] != nil {
-		launchSpec = resolvers[0]
+// New creates a server backed only by an injected primary-daemon relay. A
+// missing relay is fail-closed. Client authentication is mandatory: an empty
+// AMUX_MUX_TOKEN never enables a trusted-local bypass.
+func New(primaries ...Primary) *Server {
+	var primary Primary = unavailablePrimary{}
+	if len(primaries) != 0 && primaries[0] != nil {
+		primary = primaries[0]
 	}
 	return &Server{
-		src:        source.NewWorkspace(),
+		primary:    primary,
 		token:      os.Getenv("AMUX_MUX_TOKEN"),
 		clients:    map[*client]bool{},
 		routes:     map[string]route{},
 		pollCh:     make(chan struct{}, 1),
-		launchSpec: launchSpec,
+		launchSpec: primary.LaunchSpec,
 		resolve:    panespec.Resolve,
 	}
 }
@@ -119,25 +140,40 @@ func New(resolvers ...LaunchSpecResolver) *Server {
 // Serve starts the harness and the poll loop, then accepts clients on every
 // listener until ctx is cancelled. Blocks.
 func (s *Server) Serve(ctx context.Context, lns ...net.Listener) error {
-	s.startHarness()
-	go s.pollLoop(ctx)
+	if err := s.startHarness(); err != nil {
+		return err
+	}
+	defer s.suspend()
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		s.pollLoop(ctx)
+	}()
 	for _, ln := range lns {
 		go s.acceptLoop(ln)
 	}
 	<-ctx.Done()
+	<-pollDone
 	return nil
 }
 
 // ---- harness (in-process over net.Pipe; the protocol is real either way) ----
 
-func (s *Server) startHarness() {
+func (s *Server) startHarness() error {
 	a, b := net.Pipe()
 	s.hconn = harnessproto.NewConn(a)
 	go func() { _ = harness.Serve(harnessproto.NewConn(b)) }()
-	if r, err := s.hconn.ReadHarness(); err != nil || r.Type != harnessproto.HReady {
-		return
+	r, err := s.hconn.ReadHarness()
+	if err != nil {
+		_ = s.hconn.Close()
+		return fmt.Errorf("start embedded harness: %w", err)
+	}
+	if r.Type != harnessproto.HReady {
+		_ = s.hconn.Close()
+		return fmt.Errorf("start embedded harness: unexpected ready frame %q", r.Type)
 	}
 	go s.readHarness()
+	return nil
 }
 
 // readHarness routes harness output/exit frames to the client that owns the pane.
@@ -145,6 +181,7 @@ func (s *Server) readHarness() {
 	for {
 		m, err := s.hconn.ReadHarness()
 		if err != nil {
+			s.suspend()
 			return
 		}
 		r, ok := s.lookup(m.PaneID)
@@ -194,9 +231,38 @@ func (s *Server) handleClient(nc net.Conn) {
 		obuf:  map[string]*paneOut{},
 		wake:  make(chan struct{}, 1),
 	}
+	// Authentication is a strict first-frame gate. Before it succeeds the client
+	// is absent from subscriptions and no asynchronous writer exists that could
+	// disclose a snapshot or pane byte.
+	_ = nc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	hello, err := cl.conn.ReadClient()
+	if err != nil || hello.Type != muxproto.CHello || hello.Version != muxproto.Version ||
+		strings.TrimSpace(s.token) == "" || !muxproto.TokenOK(s.token, hello.Token) {
+		cl.reject(muxproto.ErrUnauthorized)
+		_ = cl.conn.Close()
+		return
+	}
+	_ = nc.SetReadDeadline(time.Time{})
+	// The mux bearer is not primary-daemon authority. Admit the connection only
+	// after a fresh authenticated primary read; this also prevents new clients
+	// from entering while a prior poll failure has suspended cached grants.
+	authCtx, cancelAuth := context.WithTimeout(context.Background(), primaryReadTimeout)
+	sessions, err := s.primary.Snapshot(authCtx)
+	cancelAuth()
+	if err != nil {
+		cl.reject(muxproto.ErrUnauthorized)
+		_ = cl.conn.Close()
+		return
+	}
 	s.mu.Lock()
 	s.clients[cl] = true
+	s.rememberLocked(sessions)
 	s.mu.Unlock()
+	host, _ := os.Hostname()
+	if err := cl.conn.WriteServer(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: true, Version: muxproto.Version, Server: host}); err != nil {
+		s.dropClient(cl)
+		return
+	}
 	go cl.writeLoop()
 	defer s.dropClient(cl)
 	for {
@@ -213,39 +279,50 @@ func (s *Server) handleClient(nc net.Conn) {
 // handleMsg processes one client message; it returns false when the connection
 // must be torn down (a terminal hello rejection).
 func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
+	if !s.clientActive(cl) {
+		return false
+	}
 	switch m.Type {
 	case muxproto.CHello:
-		// Version negotiation: a single supported version, so any mismatch has no
-		// overlap and fails loudly. Auth is a constant-time token compare.
-		if m.Version != muxproto.Version {
-			cl.reject(muxproto.ErrBadVersion)
-			return false
-		}
-		if !muxproto.TokenOK(s.token, m.Token) {
-			cl.reject(muxproto.ErrBadToken)
-			return false
-		}
-		host, _ := os.Hostname()
-		cl.send(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: true, Version: muxproto.Version, Server: host})
+		return false // hello is valid exactly once and only as the first frame
 	case muxproto.CSubscribe:
-		s.mu.Lock()
-		cl.sub = true
-		s.mu.Unlock()
-		if sess, err := s.src.Poll(context.Background()); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), primaryReadTimeout)
+		sess, err := s.primary.Snapshot(ctx)
+		cancel()
+		if err == nil && s.rememberFor(cl, sess) {
+			s.mu.Lock()
+			cl.sub = true
+			s.mu.Unlock()
 			cl.send(muxproto.ServerMsg{Type: muxproto.SSnapshot, Sessions: sess})
+		} else if err != nil {
+			s.suspend()
+			return false
 		}
 	case muxproto.CAction:
-		// One descriptor-driven path, shared with the daemon: Dispatch tears down the
-		// agent's live panes (killPanesFor — the mux analog of the daemon's engine
-		// kill) for a StopsEngine verb so a delete/archive doesn't leak a PTY, then
-		// applies the store mutation and returns any created id (previously discarded).
 		act := core.Action{Action: m.Action, ID: m.ID, Target: m.Target, Fields: m.Fields}
-		newID, err := wsops.Dispatch(context.Background(), act, s.killPanesFor)
+		// The compatibility token grants only the public control vocabulary. In
+		// particular, it must not turn daemon-internal host operations (shutdown,
+		// runtime recreation, queries, or pane frames) into remote actions merely
+		// because this relay itself authenticates as a host upstream.
+		if !core.KnownAction(act.Action) {
+			cl.send(muxproto.ServerMsg{Type: muxproto.SResult, OK: false, Error: "unsupported action"})
+			return true
+		}
+		before := s.sessions()
+		ctx, cancel := context.WithTimeout(context.Background(), primaryActionTimeout)
+		newID, err := s.primary.Dispatch(ctx, act)
+		cancel()
+		if !s.clientActive(cl) {
+			return false
+		}
 		res := muxproto.ServerMsg{Type: muxproto.SResult, OK: err == nil, NewID: newID}
 		if err != nil {
 			res.Error = err.Error()
 		}
 		cl.send(res)
+		if err == nil && core.DescriptorFor(act.Action).StopsEngine {
+			s.killPanesFor(sessionIDsUnder(before, act.ID))
+		}
 		s.pollNow()
 	case muxproto.CPaneOpen:
 		s.openPane(cl, m)
@@ -259,14 +336,33 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 		}
 	case muxproto.CPaneClose:
 		s.closePane(cl, m.PaneID)
+	default:
+		return false
 	}
 	return true
 }
 
 func (s *Server) openPane(cl *client, m muxproto.ClientMsg) {
-	spec, err := s.launchSpec(context.Background(), m.Agent)
+	if strings.TrimSpace(m.PaneID) == "" || strings.TrimSpace(m.Agent) == "" ||
+		m.Tab < panespec.TabAgent || m.Tab > panespec.TabTerminal {
+		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: "invalid pane request"})
+		return
+	}
+	s.mu.Lock()
+	_, duplicate := cl.panes[m.PaneID]
+	s.mu.Unlock()
+	if duplicate {
+		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: "pane id already open"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), primaryActionTimeout)
+	spec, err := s.launchSpec(ctx, m.Agent)
+	cancel()
 	if err != nil {
 		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: err.Error()})
+		return
+	}
+	if !s.clientActive(cl) {
 		return
 	}
 	dir, env, argv, err := s.resolve(spec, m.Tab)
@@ -276,14 +372,20 @@ func (s *Server) openPane(cl *client, m muxproto.ClientMsg) {
 	}
 	env = append(env, "TERM=xterm-256color")
 	s.mu.Lock()
+	if !s.clients[cl] {
+		s.mu.Unlock()
+		return
+	}
 	s.paneSeq++
 	hp := "h" + itoa(s.paneSeq)
 	s.routes[hp] = route{cl: cl, clientPane: m.PaneID, agent: m.Agent}
 	cl.panes[m.PaneID] = hp
 	s.mu.Unlock()
-	_ = s.hconn.WriteMux(harnessproto.MuxMsg{
+	if err := s.hconn.WriteMux(harnessproto.MuxMsg{
 		Type: harnessproto.MSpawn, PaneID: hp, Dir: dir, Env: env, Argv: argv, Cols: m.Cols, Rows: m.Rows,
-	})
+	}); err != nil {
+		s.suspend()
+	}
 }
 
 func (s *Server) closePane(cl *client, clientPane string) {
@@ -300,20 +402,13 @@ func (s *Server) closePane(cl *client, clientPane string) {
 	}
 }
 
-// killPanesFor tears down every live pane of an agent — the mux-server analog of
-// the daemon killing an agent's engine instance — so a StopsEngine verb
-// (delete/archive/…) doesn't leave a PTY-backed process running after the session
-// is gone. For a workgroup root it cascades to the root's agents (resolved via
-// wsops before the store record is removed). Sending MKill is enough: the harness
-// answers each with an HExit that readHarness routes to the owning client and uses
-// to drop the pane bookkeeping — the same path a naturally-exiting pane takes.
-func (s *Server) killPanesFor(id string) {
-	if id == "" {
+// killPanesFor tears down the selected live panes after the primary daemon has
+// accepted a StopsEngine action. Workgroup membership is derived from the cached
+// pre-action authoritative snapshot, never from a local store read. Sending
+// MKill is enough: the harness answers with HExit through the normal cleanup path.
+func (s *Server) killPanesFor(ids []string) {
+	if len(ids) == 0 {
 		return
-	}
-	ids, err := wsops.AgentIDsUnder(id)
-	if err != nil || len(ids) == 0 {
-		ids = []string{id} // fall back to the id itself (e.g. store lookup failed)
 	}
 	want := make(map[string]bool, len(ids))
 	for _, a := range ids {
@@ -330,6 +425,19 @@ func (s *Server) killPanesFor(id string) {
 	for _, hp := range kill {
 		_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: hp})
 	}
+}
+
+func sessionIDsUnder(sessions []core.Session, id string) []string {
+	if id == "" {
+		return nil
+	}
+	ids := []string{id}
+	for _, session := range sessions {
+		if session.RootID == id && session.ID != id {
+			ids = append(ids, session.ID)
+		}
+	}
+	return ids
 }
 
 func (s *Server) harnessPane(cl *client, clientPane string) string {
@@ -366,7 +474,7 @@ func (s *Server) pollLoop(ctx context.Context) {
 		case <-t.C:
 		case <-s.pollCh:
 		}
-		s.broadcast()
+		s.broadcast(ctx)
 	}
 }
 
@@ -377,15 +485,19 @@ func (s *Server) pollNow() {
 	}
 }
 
-func (s *Server) broadcast() {
-	sess, err := s.src.Poll(context.Background())
+func (s *Server) broadcast(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, primaryReadTimeout)
+	sess, err := s.primary.Snapshot(ctx)
+	cancel()
 	if err != nil {
+		s.suspend()
 		return
 	}
 	b, _ := json.Marshal(sess)
 	s.mu.Lock()
 	changed := !bytes.Equal(b, s.lastSnap)
 	s.lastSnap = b
+	s.lastSessions = append(s.lastSessions[:0], sess...)
 	var subs []*client
 	for cl := range s.clients {
 		if cl.sub {
@@ -400,6 +512,71 @@ func (s *Server) broadcast() {
 	for _, cl := range subs {
 		cl.send(msg)
 	}
+}
+
+// suspend revokes every cached grant when the primary daemon can no longer be
+// authenticated/read. Existing clients are disconnected and every mux-owned
+// pane is killed; a later successful poll does not resurrect either. This makes
+// the one-second poll interval an explicit maximum freshness lease instead of
+// retaining host authority indefinitely through a daemon failure/revocation.
+func (s *Server) suspend() {
+	s.mu.Lock()
+	clients := make([]*client, 0, len(s.clients))
+	for cl := range s.clients {
+		clients = append(clients, cl)
+		cl.panes = map[string]string{}
+	}
+	panes := make([]string, 0, len(s.routes))
+	for pane := range s.routes {
+		panes = append(panes, pane)
+	}
+	s.clients = map[*client]bool{}
+	s.routes = map[string]route{}
+	s.lastSnap = nil
+	s.lastSessions = nil
+	s.mu.Unlock()
+	for _, cl := range clients {
+		cl.stop()
+	}
+	for _, pane := range panes {
+		if s.hconn != nil {
+			_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: pane})
+		}
+	}
+}
+
+func (s *Server) remember(sessions []core.Session) {
+	s.mu.Lock()
+	s.rememberLocked(sessions)
+	s.mu.Unlock()
+}
+
+func (s *Server) rememberLocked(sessions []core.Session) {
+	b, _ := json.Marshal(sessions)
+	s.lastSnap = b
+	s.lastSessions = append(s.lastSessions[:0], sessions...)
+}
+
+func (s *Server) rememberFor(cl *client, sessions []core.Session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.clients[cl] {
+		return false
+	}
+	s.rememberLocked(sessions)
+	return true
+}
+
+func (s *Server) clientActive(cl *client) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clients[cl]
+}
+
+func (s *Server) sessions() []core.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]core.Session(nil), s.lastSessions...)
 }
 
 // ---- client write pump ----

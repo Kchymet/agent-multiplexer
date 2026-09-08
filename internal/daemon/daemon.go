@@ -581,7 +581,7 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case core.ActionPaneClose:
 			cl.paneClose(a.PaneID)
 		case core.ActionQuery:
-			d.query(cl, a)
+			d.query(clientCtx, cl, a)
 		default:
 			res := d.handle(clientCtx, a)
 			if a.Action != "" {

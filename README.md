@@ -37,28 +37,30 @@ backend you can run locally or on a remote box.
 
 ## System design
 
-amux is split into three roles connected by two wire protocols. The UI owns no
-agent processes; the **multiplexer server** owns the model and routes I/O; the
-**agent harness** owns the actual PTYs. (See `docs/client-server.md`.)
+amux has a primary daemon plus an optional legacy compatibility relay. The
+native UI talks directly to the authenticated primary daemon. The legacy
+**multiplexer server** relays state and lifecycle operations to that daemon and
+routes pane I/O to an embedded **agent harness**. (See
+`docs/client-server.md`.)
 
 ```
         UI ⇄ Server protocol                     Server ⇄ Harness protocol
           (muxproto, line-JSON)                    (harnessproto, line-JSON)
-┌──────────────┐   unix / TCP    ┌────────────────────────┐   stdio / pipe   ┌───────────────┐
+┌──────────────┐   TLS + token   ┌────────────────────────┐  inherited pipe  ┌───────────────┐
 │   UI client  │ ───────────────▶│   Multiplexer Server   │ ────────────────▶│ Agent Harness │
 │ (native TUI) │◀─ snapshots,    │      (amux serve)      │◀─ pane output,   │  (amux harness)│
-│  renders     │   pane output   │  • store  (SQLite)     │   exit           │  • PTY per pane│
-│  vterms      │ ─ actions,      │  • source (rail state) │ ─ spawn, input,  │  • claude /    │
-│  forwards    │   pane input ──▶│  • wsops  (lifecycle)  │   resize, kill ─▶│    editor /    │
+│  renders     │   pane output   │  • authenticated relay │   exit           │  • PTY per pane│
+│  vterms      │ ─ actions,      │  • no direct DB access │ ─ spawn, input,  │  • claude /    │
+│  forwards    │   pane input ──▶│  • typed launch grants │   resize, kill ─▶│    editor /    │
 │  keystrokes  │                 │  • panespec (pane spec)│                  │    jailed shell│
 └──────────────┘                 └────────────────────────┘                  └───────────────┘
    one UI can connect to a local server and many remote servers at once
 ```
 
-- **Local & remote** — `amux serve` listens on a local unix socket and, if asked
-  (`amux serve tcp:0.0.0.0:7077`), on TCP. A UI points at a server with
-  `AMUX_SERVER` (`host:port`, or empty for local). A remote server orchestrates
-  agents on *its* machine; the UI just renders bytes.
+- **Local & remote** — `amux serve` uses TLS even on its local Unix socket and
+  can additionally listen on `tls:HOST:PORT`. Both sides require a nonempty
+  `AMUX_MUX_TOKEN`; clients pin the server with `AMUX_TLS_CA` and, for Unix
+  paths, `AMUX_TLS_SERVERNAME`. Plain TCP is refused.
 - **Why a harness** — putting pane execution behind a protocol is what lets the
   server run agents locally, in a jail, in a container, or over ssh on another
   host, without the server (or UI) caring.
@@ -68,8 +70,8 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | Component | Package | Responsibility |
 |-----------|---------|----------------|
 | **UI / native TUI** | `internal/nativetui` | The full-screen client: rail switcher, embedded agent panes (vterm), per-agent tabs, modal forms/confirms, all keybindings. Renders; owns no agent lifecycle. |
-| **Multiplexer server** | `internal/mux` | The backend (`amux serve`). Serves `muxproto` to UI clients over unix/TCP, broadcasts rail snapshots, applies lifecycle actions, and multiplexes pane I/O between clients and a harness. |
-| **Agent harness** | `internal/harness` | Owns the real processes (`amux harness`). Spawns each pane in a PTY, streams its output, accepts input/resize/kill. The unit that can run jailed/remote. |
+| **Multiplexer server** | `internal/mux` | Authenticated legacy relay (`amux serve`). It obtains snapshots, applies lifecycle actions, and resolves pane launch grants through the singleton primary daemon; it never opens the store or authority. |
+| **Agent harness** | `internal/harness` | Owns the relay's PTY processes over a parent-created inherited pipe. Standalone `amux harness` is disabled because raw stdio authenticates no peer. |
 | **UI ⇄ Server protocol** | `internal/muxproto` | Message types + helpers for hello/welcome, subscribe/snapshot, action/result, and pane open/input/resize/close/output/exit. |
 | **Server ⇄ Harness protocol** | `harnessproto` (published module) | Message types for spawn/input/resize/kill and ready/output/exit. |
 | **Wire transport** | `internal/wire` | Shared line-framed JSON codec used by both protocols over any stream (unix/TCP/stdio/pipe). |
@@ -88,10 +90,9 @@ agent processes; the **multiplexer server** owns the model and routes I/O; the
 | **Codex config** | `internal/codexcfg` | The Codex-CLI counterpart: `$CODEX_HOME` layout, rollout-session discovery/resume, project trust in `config.toml`, model defaults. |
 | **Daemon** | `internal/daemon` | Owns agent processes in an engine and polls sources so UIs can attach/detach without stopping agents. |
 
-> Status: the protocols, server, harness, and client are complete and covered by
-> an end-to-end test (`internal/mux`). The default `amux` native TUI still spawns
-> panes locally; migrating it onto the client (so the default app is a thin client
-> of `amux serve`) is the final wiring step.
+> Status: the authenticated compatibility relay is covered by end-to-end tests.
+> The default native TUI continues to use the singleton primary daemon directly;
+> it does not auto-start or fall back to the legacy mux.
 
 ---
 
@@ -221,10 +222,9 @@ rather than the model chosen when the session was created.
 
 ```sh
 amux                       # native TUI (default; local)
-amux serve                 # run the multiplexer server (local unix socket)
-amux serve tcp:0.0.0.0:7077  # also accept remote UIs over TCP
-amux harness               # run an agent harness over stdio (remote/decoupled)
-AMUX_SERVER=host:7077 amux # point a UI at a remote server  (planned TUI wiring)
+amux serve                 # authenticated legacy relay (TLS over local Unix)
+amux serve tls:0.0.0.0:7443 # optional TLS listener; plaintext TCP is refused
+amux harness               # disabled without an authenticated inherited channel
 ```
 
 ## Keys (native TUI)
@@ -275,8 +275,8 @@ apply changes.
 
 ```
 amux                       # native TUI
-amux serve [listen...]     # multiplexer server (unix + optional tcp:/unix: specs)
-amux harness               # agent harness over stdio
+amux serve [listen...]     # legacy relay (TLS unix + optional tls: specs)
+amux harness               # standalone raw-stdio mode is disabled
 amux repo add <src>        # track a repo: git URL | local path | OWNER/REPO (gh)
 amux repo ls | rm <name>   # list / untrack repos (rm refuses if agents use it)
 amux workgroup repo <repo> # start a repo-scoped agent (short form: wg)

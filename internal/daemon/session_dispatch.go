@@ -137,7 +137,7 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 		}
 		value = normalizeRestrictedSnapshot(snapshot).Sessions
 	case core.QueryVersion:
-		rows, err := r.d.readModel(action)
+		rows, err := r.d.readModel(ctx, action)
 		if err != nil {
 			return nil, err
 		}
@@ -148,7 +148,7 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 		info.DatabaseError = ""
 		value = info
 	case core.QueryCodexControl:
-		rows, err := r.d.readModel(action)
+		rows, err := r.d.readModel(ctx, action)
 		if err != nil {
 			return nil, err
 		}

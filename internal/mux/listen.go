@@ -9,14 +9,16 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"amux/internal/core"
 	"amux/internal/wiretls"
 )
 
-// Listen opens a listener for a spec: "unix:/path", "tcp:host:port",
-// "tls:host:port" (TLS over TCP, cert/key from AMUX_TLS_* — see wiretls), or a
-// bare "host:port" (assumed TCP). A unix socket is removed first if stale.
+// Listen opens a TLS-authenticated listener for "unix:/path" or
+// "tls:host:port". Even the Unix transport is wrapped in TLS: the pathname is
+// only routing and must not be able to solicit the mux bearer from a client.
+// Plain TCP/bare-address listeners are refused.
 func Listen(spec string) (net.Listener, error) {
 	network, addr := "unix", spec
 	switch {
@@ -26,25 +28,24 @@ func Listen(spec string) (net.Listener, error) {
 		// TLS wraps a TCP listener; message framing above the seam is unchanged.
 		network, addr = "tls", trimScheme(spec, "tls:")
 	case strings.HasPrefix(spec, "tcp:"):
-		network, addr = "tcp", strings.TrimPrefix(spec, "tcp:")
+		return nil, fmt.Errorf("plaintext mux transport %q is disabled; use tls:", spec)
 	case strings.Contains(spec, ":") && !strings.Contains(spec, "/"):
-		network, addr = "tcp", spec
+		return nil, fmt.Errorf("plaintext mux transport %q is disabled; use tls:", spec)
 	}
-	if network == "tls" {
-		cfg, err := wiretls.ServerConfigFromEnv()
-		if err != nil {
-			return nil, err
-		}
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			return nil, err
-		}
-		return tls.NewListener(ln, cfg), nil
+	cfg, err := wiretls.ServerConfigFromEnv()
+	if err != nil {
+		return nil, err
 	}
 	if network == "unix" {
 		_ = os.Remove(addr)
+	} else {
+		network = "tcp"
 	}
-	return net.Listen(network, addr)
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return tls.NewListener(ln, cfg), nil
 }
 
 // trimScheme strips a "scheme:" prefix and any leading "//" so both "tls:addr"
@@ -53,16 +54,27 @@ func trimScheme(spec, scheme string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(spec, scheme), "//")
 }
 
-// Run starts a server listening on the local unix socket plus any extra listen
-// specs (e.g. "tcp:0.0.0.0:7077" for remote access), until interrupted.
+// Run starts a server listening with TLS on the local Unix socket plus any extra
+// TLS listen specs, until interrupted.
 func Run(extra ...string) error {
-	return RunWithLaunchResolver(nil, extra...)
+	return RunWithPrimary(daemonPrimary{}, extra...)
 }
 
-// RunWithLaunchResolver is the authority-injection seam for a daemon/provider
-// that owns current SessionAccess. A nil resolver deliberately leaves legacy
-// pane-open fail-closed; this package never opens an authority of its own.
-func RunWithLaunchResolver(resolver LaunchSpecResolver, extra ...string) error {
+// RunWithPrimary is the authority-injection seam. Production passes the
+// authenticated primary-daemon relay; tests may pass an inert implementation.
+func RunWithPrimary(primary Primary, extra ...string) error {
+	if strings.TrimSpace(os.Getenv("AMUX_MUX_TOKEN")) == "" {
+		return fmt.Errorf("legacy mux requires a nonempty AMUX_MUX_TOKEN")
+	}
+	if primary == nil {
+		return fmt.Errorf("legacy mux requires an authenticated primary daemon relay")
+	}
+	preflightCtx, cancelPreflight := context.WithTimeout(context.Background(), 5*time.Second)
+	initial, err := primary.Snapshot(preflightCtx)
+	cancelPreflight()
+	if err != nil {
+		return fmt.Errorf("authenticate primary daemon relay: %w", err)
+	}
 	specs := append([]string{"unix:" + core.MuxSocketPath()}, extra...)
 	var lns []net.Listener
 	for _, spec := range specs {
@@ -76,5 +88,7 @@ func RunWithLaunchResolver(resolver LaunchSpecResolver, extra ...string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return New(resolver).Serve(ctx, lns...)
+	server := New(primary)
+	server.remember(initial)
+	return server.Serve(ctx, lns...)
 }

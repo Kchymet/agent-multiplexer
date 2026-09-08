@@ -1,29 +1,20 @@
 package main
 
 import (
-	"os"
+	"fmt"
 
-	"amux/internal/harness"
 	"amux/internal/mux"
-	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// cmdServe runs the multiplexer server (the backend). Extra args are additional
-// listen specs, e.g. `amux serve tcp:0.0.0.0:7077` for a trusted-network remote
-// UI, or `amux serve tls:0.0.0.0:7443` for TLS (cert/key from $AMUX_TLS_CERT /
-// $AMUX_TLS_KEY; set $AMUX_MUX_TOKEN to also require a bearer token). See
-// docs/client-server.md.
+// cmdServe runs the authenticated legacy multiplexer relay. Extra args may add
+// TLS listeners, e.g. `amux serve tls:0.0.0.0:7443`; the default Unix listener
+// is TLS-wrapped too. Certificate/key, client trust, and the mandatory bearer
+// come from AMUX_TLS_* / AMUX_MUX_TOKEN. See docs/client-server.md.
 func cmdServe(args []string) error { return mux.Run(args...) }
 
-// cmdHarness runs the agent harness over stdio — spawned by the server (or run
-// manually / over ssh) to own agent pane processes on this machine.
+// cmdHarness used to expose arbitrary process spawning over unauthenticated
+// stdio. The authenticated mux embeds its harness over a parent-owned net.Pipe;
+// no standalone CLI trust assertion can substitute for that inherited channel.
 func cmdHarness() error {
-	return harness.Serve(harnessproto.NewConn(stdio{}))
+	return fmt.Errorf("standalone harness requires an authenticated inherited host channel")
 }
-
-// stdio adapts the process's stdin/stdout to one io.ReadWriteCloser.
-type stdio struct{}
-
-func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
-func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
-func (stdio) Close() error                { return nil }
