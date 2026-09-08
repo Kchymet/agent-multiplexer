@@ -50,7 +50,7 @@ func (d *Daemon) bindRuntimeRecord(id string, rec core.RuntimeRecord) core.Runti
 	for _, pending := range open {
 		generation, err := d.bindPermissionRequest(id, pending.RequestID)
 		if err == nil && generation != "" {
-			rec.PermissionBindings[pending.RequestID] = generation
+			rec.PermissionBindings[pending.Occurrence] = generation
 		}
 	}
 	return rec

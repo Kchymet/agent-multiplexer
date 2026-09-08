@@ -82,7 +82,7 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.PermissionBindings["live-first"] != firstGeneration || first.PermissionBindings["historical"] != "" {
+	if len(first.PermissionBindings) != 1 || onlyBinding(first.PermissionBindings) != firstGeneration {
 		t.Fatalf("first runtime bindings = %v", first.PermissionBindings)
 	}
 
@@ -114,8 +114,7 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.PermissionBindings["live-second"] != secondGeneration ||
-		restarted.PermissionBindings["live-first"] != "" || restarted.PermissionBindings["historical"] != "" {
+	if len(restarted.PermissionBindings) != 1 || onlyBinding(restarted.PermissionBindings) != secondGeneration {
 		t.Fatalf("second runtime bindings = %v", restarted.PermissionBindings)
 	}
 
@@ -144,18 +143,162 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	}
 	select {
 	case batch := <-ch:
-		if len(batch.Events) != 1 || batch.Events[0].Type != harnessproto.TypePermissionRequest {
+		if len(batch.Events) != 3 {
 			t.Fatalf("published events = %+v", batch.Events)
+		}
+		for i, event := range batch.Events {
+			if event.Type != harnessproto.TypePermissionRequest {
+				t.Fatalf("event %d type = %q", i, event.Type)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			generation, answerable := payload[harnessproto.FieldRuntimeGeneration]
+			if i < 2 && answerable {
+				t.Fatalf("historical event %d was relabeled answerable: %v", i, payload)
+			}
+			if i == 2 && (payload[harnessproto.FieldRequestID] != "live-second" || generation != secondGeneration) {
+				t.Fatalf("published live permission tuple = %v", payload)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bound permission replay")
+	}
+
+	// The live resolution must retain the generation of the request occurrence
+	// that was actually published, even though the daemon no longer reports the
+	// request open when the resolution reaches the tailer.
+	appendRequest = func(id string) {
+		t.Helper()
+		f, err := os.OpenFile(rec.Permissions, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString(`{"request_id":"` + id + `","decision":"allow"}` + "\n")
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRequest("live-second")
+	select {
+	case batch := <-ch:
+		if len(batch.Events) != 1 || batch.Events[0].Type != harnessproto.TypePermissionResolved {
+			t.Fatalf("live resolution events = %+v", batch.Events)
 		}
 		var payload map[string]any
 		if err := json.Unmarshal(batch.Events[0].Payload, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload[harnessproto.FieldRequestID] != "live-second" ||
-			payload[harnessproto.FieldRuntimeGeneration] != secondGeneration {
-			t.Fatalf("published permission tuple = %v", payload)
+		if payload[harnessproto.FieldRuntimeGeneration] != secondGeneration {
+			t.Fatalf("live resolution generation = %v, want %q", payload, secondGeneration)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for bound permission replay")
+		t.Fatal("timed out waiting for bound permission resolution")
 	}
+	cancel()
+	for range ch {
+	}
+
+	// Reuse exactly the same native request id in a third runtime. A fresh replay
+	// must leave the old request/resolution readable but generation-free and bind
+	// only the new occurrence. The two occurrence ItemIDs must be distinct.
+	d.permissions.retire("a1")
+	engine.mu.Lock()
+	delete(engine.insts, secondRuntime.Key())
+	engine.mu.Unlock()
+	thirdRuntime := engine.running("a1")
+	_, thirdGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
+		return thirdRuntime, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendRequest = func(id string) {
+		t.Helper()
+		f, err := os.OpenFile(rec.Permissions, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString(`{"request_id":"` + id + `","tool":"Bash","action":"echo reused"}` + "\n")
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRequest("live-second")
+	db, _ = store.Open()
+	reused, err := d.runtimeRecord(db, "a1")
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reused.PermissionBindings) != 1 || onlyBinding(reused.PermissionBindings) != thirdGeneration {
+		t.Fatalf("reused-id runtime bindings = %v", reused.PermissionBindings)
+	}
+	replayCtx, replayCancel := context.WithCancel(context.Background())
+	replay := runtimeevents.Stream(func(id string) (runtimeevents.Record, bool) {
+		db, err := store.Open()
+		if err != nil {
+			t.Errorf("open replay store: %v", err)
+			return runtimeevents.Record{}, false
+		}
+		defer db.Close()
+		current, err := d.runtimeRecord(db, id)
+		if err != nil {
+			t.Errorf("resolve reused-id runtime record: %v", err)
+			return runtimeevents.Record{}, false
+		}
+		return runtimeEventRecord(current), true
+	}, time.Millisecond)
+	replayCh, ok := replay(replayCtx, "a1", 0)
+	if !ok {
+		t.Fatal("reused-id replay rejected daemon record")
+	}
+	select {
+	case batch := <-replayCh:
+		var reusedEvents []harnessproto.RuntimeEvent
+		for _, event := range batch.Events {
+			var payload map[string]any
+			if json.Unmarshal(event.Payload, &payload) == nil && payload[harnessproto.FieldRequestID] == "live-second" {
+				reusedEvents = append(reusedEvents, event)
+			}
+		}
+		if len(reusedEvents) != 3 {
+			t.Fatalf("same-id replay events = %+v, want old request/resolution and new request", reusedEvents)
+		}
+		if reusedEvents[0].ItemID == "" || reusedEvents[0].ItemID != reusedEvents[1].ItemID || reusedEvents[2].ItemID == reusedEvents[0].ItemID {
+			t.Fatalf("same-id occurrence keys = %q, %q, %q", reusedEvents[0].ItemID, reusedEvents[1].ItemID, reusedEvents[2].ItemID)
+		}
+		for i, event := range reusedEvents {
+			var payload map[string]any
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			generation, present := payload[harnessproto.FieldRuntimeGeneration]
+			if i < 2 && present {
+				t.Fatalf("old same-id event %d relabeled with current generation: %v", i, payload)
+			}
+			if i == 2 && generation != thirdGeneration {
+				t.Fatalf("new same-id request generation = %v, want %q", payload, thirdGeneration)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for same-id replay")
+	}
+	replayCancel()
+	for range replayCh {
+	}
+}
+
+func onlyBinding(bindings map[string]string) string {
+	for _, generation := range bindings {
+		return generation
+	}
+	return ""
 }
