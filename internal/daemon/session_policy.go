@@ -20,6 +20,7 @@ type policyStore interface {
 	Repos() ([]store.Repo, error)
 	Roots() ([]store.Session, error)
 	Children(string) ([]store.Session, error)
+	CoordinatorRepoGrants(string) ([]string, bool, error)
 }
 
 type policyStoreHandle struct {
@@ -30,7 +31,7 @@ type policyStoreHandle struct {
 type policyStoreOpen func() (policyStoreHandle, error)
 
 func openPolicyStore() (policyStoreHandle, error) {
-	db, err := store.Open()
+	db, err := store.OpenReadOnly()
 	if err != nil {
 		return policyStoreHandle{}, err
 	}
@@ -99,7 +100,11 @@ func (r *daemonAccessResolver) RepoGranted(ctx context.Context, subjectID, repo 
 		}
 		switch subject.Role() {
 		case store.RoleCoordinator:
-			granted = containsString(store.SplitRepos(subject.Repo), repo)
+			grants, initialized, grantErr := db.CoordinatorRepoGrants(subject.ID)
+			if grantErr != nil {
+				return grantErr
+			}
+			granted = initialized && containsString(grants, repo)
 		case store.RoleRepo:
 			granted = subject.Repo == repo
 		case store.RoleConsole:
@@ -212,13 +217,21 @@ func (r *daemonAccessResolver) scopedRepoRows(ctx context.Context, principal acc
 		if err != nil {
 			return err
 		}
+		var coordinatorGrants []string
+		coordinatorGrantsInitialized := false
+		if subject.Role() == store.RoleCoordinator {
+			coordinatorGrants, coordinatorGrantsInitialized, err = db.CoordinatorRepoGrants(subject.ID)
+			if err != nil {
+				return err
+			}
+		}
 		for _, repo := range repos {
 			visible := false
 			switch subject.Role() {
 			case store.RoleConsole:
 				visible = true
 			case store.RoleCoordinator:
-				visible = containsString(store.SplitRepos(subject.Repo), repo.Name)
+				visible = coordinatorGrantsInitialized && containsString(coordinatorGrants, repo.Name)
 			case store.RoleRepo:
 				visible = subject.Repo == repo.Name
 			}

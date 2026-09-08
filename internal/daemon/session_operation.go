@@ -120,6 +120,8 @@ func validateSessionAction(req access.Request) error {
 		return nil
 	case core.ActionAgentSetRepos:
 		return joinValidation(requireID(), noTarget(), fields("repos"), requireField(req.Fields, "repos"))
+	case core.ActionCoordinatorSetRepos:
+		return fmt.Errorf("coordinator grant changes require the authenticated host")
 	case core.ActionAddRepo:
 		return joinValidation(noID(), noTarget(), fields("source"), requireNonemptyField(req.Fields, "source"))
 	case core.ActionAddAgent:

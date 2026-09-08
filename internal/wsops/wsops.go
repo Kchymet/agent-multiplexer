@@ -39,13 +39,13 @@ type AgentSpec struct {
 // (its repos, model, mode, and prompt are honored). Pass nil to create an empty
 // workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
-	return createWorkspace(ctx, name, agent.DefaultKind(), "", "", defaultAgent)
+	return createWorkspace(ctx, name, agent.DefaultKind(), "", "", defaultAgent, nil)
 }
 
 // createWorkspace is the action-path variant of CreateWorkspace. It lets a
 // remote client choose the coordinator harness, model, and initial prompt while
 // preserving the public helper's long-standing defaults for local callers.
-func createWorkspace(ctx context.Context, name, kind, model, prompt string, defaultAgent *AgentSpec) (string, error) {
+func createWorkspace(ctx context.Context, name, kind, model, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
 	if !agent.Known(kind) {
 		return "", fmt.Errorf("unknown agent kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
 	}
@@ -68,6 +68,21 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 	}
 	if err := db.PutSession(root); err != nil {
 		return "", err
+	}
+	grants := []string(nil)
+	if selectedGrants == nil {
+		repos, err := db.Repos()
+		if err != nil {
+			return rootID, err
+		}
+		for _, repo := range repos {
+			grants = append(grants, repo.Name)
+		}
+	} else {
+		grants = append(grants, (*selectedGrants)...)
+	}
+	if err := db.SetCoordinatorRepoGrants(rootID, grants); err != nil {
+		return rootID, err
 	}
 	if defaultAgent != nil {
 		if _, err := addAgent(ctx, db, rootID, *defaultAgent); err != nil {
@@ -120,6 +135,41 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	// mint a session that errors on every launch and can only be deleted.
 	if !agent.Known(spec.Agent) {
 		return store.Session{}, fmt.Errorf("unknown agent kind %q\n  known kinds: %s", spec.Agent, strings.Join(agent.Kinds(), ", "))
+	}
+	root, ok, err := db.GetSession(rootID)
+	if err != nil {
+		return store.Session{}, err
+	}
+	if !ok || !root.IsRoot() {
+		return store.Session{}, fmt.Errorf("no such workgroup %q", rootID)
+	}
+	// The persisted coordinator ceiling is an execution-time invariant, not
+	// merely an RPC-policy hint. Host/UI creation and restricted mailbox calls
+	// converge here, before a directory or checkout is created. Repo-scoped
+	// hidden roots have their separate single-repo construction contract.
+	if root.Role() == store.RoleCoordinator {
+		grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+		if err != nil {
+			return store.Session{}, err
+		}
+		if !initialized {
+			return store.Session{}, fmt.Errorf("coordinator %q has no initialized repository grants", rootID)
+		}
+		allowed := make(map[string]bool, len(grants))
+		for _, repo := range grants {
+			allowed[repo] = true
+		}
+		for _, repoName := range spec.Repos {
+			repoName = strings.TrimSpace(repoName)
+			if repoName == "" {
+				continue
+			}
+			if _, tracked, lookupErr := db.Repo(repoName); lookupErr != nil {
+				return store.Session{}, lookupErr
+			} else if tracked && !allowed[repoName] {
+				return store.Session{}, fmt.Errorf("repository %q is outside coordinator %q grants", repoName, rootID)
+			}
+		}
 	}
 	agentID := db.NewID()
 	dir := store.AgentDir(rootID, agentID)
@@ -669,6 +719,13 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		// adding/removing worktrees to match. This is the "pull a repo into scope"
 		// action.
 		return "", SetAgentRepos(ctx, a.ID, store.SplitRepos(a.Fields["repos"]))
+	case core.ActionCoordinatorSetRepos:
+		db, err := store.Open()
+		if err != nil {
+			return "", err
+		}
+		defer db.Close()
+		return "", db.SetCoordinatorRepoGrants(a.ID, store.SplitRepos(a.Fields["repos"]))
 	case core.ActionNewRepoAgent:
 		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
 			Agent:  agentOf(a.Fields),
@@ -690,6 +747,10 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	case core.ActionNewWorkgroup:
 		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
 		repos := store.SplitRepos(a.Fields["repos"])
+		var grants *[]string
+		if _, explicit := a.Fields["repos"]; explicit {
+			grants = &repos
+		}
 		var def *AgentSpec
 		// The workgroup root is its default coordinator session, so the form's
 		// prompt and model configure that session directly. Repositories still
@@ -697,20 +758,25 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		if len(repos) > 0 {
 			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: prompt}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], prompt, def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], prompt, def, grants)
 	case core.ActionCreateWorkspace:
 		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
 		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
 		// with an explicit mode/model/prompt. When the interactive flow configures
 		// its own agents it passes defaultAgent="" and follows up with add-agent.
 		var def *AgentSpec
+		repos := store.SplitRepos(a.Fields["repos"])
+		var grants *[]string
+		if _, explicit := a.Fields["repos"]; explicit {
+			grants = &repos
+		}
 		if a.Fields["defaultAgent"] == "1" {
 			def = &AgentSpec{
-				Agent: agentOf(a.Fields), Repos: store.SplitRepos(a.Fields["repos"]),
+				Agent: agentOf(a.Fields), Repos: repos,
 				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
 			}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], "", def)
+		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], "", def, grants)
 	}
 	// A verb that reaches here is one no dispatch path claims. The CLI screens
 	// these before they leave the machine, so this is the answer for anything

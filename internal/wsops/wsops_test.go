@@ -706,6 +706,92 @@ func TestCreateWorkspaceRepoLessAgent(t *testing.T) {
 	}
 }
 
+func TestHostCreatedCoordinatorOmittedGrantsPermitFirstRepoAgent(t *testing.T) {
+	isolateStore(t)
+	ctx := context.Background()
+	gitDir := bareRepoWithCommit(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "api", Source: gitDir, GitDir: gitDir}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rootID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "payments"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+	_ = db.Close()
+	if err != nil || !initialized || len(grants) != 1 || grants[0] != "api" {
+		t.Fatalf("omitted creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
+	}
+
+	agentID, err := ApplyResult(ctx, core.Action{
+		Action: core.ActionAddAgent, ID: rootID,
+		Fields: map[string]string{"agent": "claude", "repos": "api"},
+	})
+	if err != nil || agentID == "" {
+		t.Fatalf("first allowed agent = %q, err=%v", agentID, err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	agentSession, found, err := db.GetSession(agentID)
+	if err != nil || !found || agentSession.RootID != rootID || agentSession.Repo != "api" {
+		t.Fatalf("first agent = %+v, found=%v, err=%v", agentSession, found, err)
+	}
+}
+
+func TestHostCreatedCoordinatorExplicitEmptyGrantCeiling(t *testing.T) {
+	isolateStore(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "api"}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := ApplyResult(context.Background(), core.Action{
+		Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "sealed", "repos": ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+	if err != nil || !initialized || len(grants) != 0 {
+		t.Fatalf("explicit empty creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyResult(context.Background(), core.Action{
+		Action: core.ActionAddAgent, ID: rootID,
+		Fields: map[string]string{"agent": "claude", "repos": "api"},
+	}); err == nil || !strings.Contains(err.Error(), "outside coordinator") {
+		t.Fatalf("explicit empty ceiling accepted first repo agent: %v", err)
+	}
+}
+
 // TestSetAgentReposSkipsUntracked verifies re-scoping an agent to an untracked
 // repo name is a no-op that never errors (defensive against stale/typo names) —
 // the reported "unknown repo" hard-fail is gone.
