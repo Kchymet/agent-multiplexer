@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"amux/internal/hostprep"
 )
 
 // library holds the skill sources shipped with amux. Each subdirectory under
@@ -57,5 +59,28 @@ func Install(dest string) error {
 			return err
 		}
 		return os.WriteFile(dst, b, 0o644)
+	})
+}
+
+// InstallRooted materializes the embedded library beneath a pinned session
+// root. Existing files are replaced atomically without following aliases.
+func InstallRooted(root *hostprep.Root, dest string) error {
+	relRoot, err := root.Rel(dest)
+	if err != nil {
+		return err
+	}
+	return fs.WalkDir(library, libraryRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(p, libraryRoot), "/")
+		if rel == "" || d.IsDir() {
+			return nil
+		}
+		b, err := library.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return root.AtomicWrite(filepath.Join(relRoot, filepath.FromSlash(rel)), b, 0o644)
 	})
 }

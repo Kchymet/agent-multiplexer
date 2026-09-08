@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"io/fs"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -79,7 +81,7 @@ func (claudeHarness) Config(s store.Session) (cfghome.Spec, bool) {
 	if s.Dir == "" {
 		return cfghome.Spec{}, false
 	}
-	return claudecfg.Template(s.ID, claudecfg.AgentHome(s.Dir)), true
+	return claudecfg.Template(s.ID, s.Dir), true
 }
 
 // home is the agent's private Claude home — where its transcripts, trust, and
@@ -101,68 +103,90 @@ func (h claudeHarness) home(s store.Session) claudecfg.Home {
 // were private has its conversation in the user's home; the first launch after
 // the switch carries that project dir over (once), so the switch never costs a
 // conversation.
-func (h claudeHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
+func (h claudeHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 	s := req.Session
 	home := h.home(s)
 	for _, cwd := range req.ResumeCwds {
-		carryOver(home, cwd)
+		if err := carryOver(req.Root, home, cwd); err != nil {
+			return LaunchDecision{}, err
+		}
 	}
-	switch {
-	case s.ClaudeID != "":
-		if cwd, ok := home.FindSession(s.ClaudeID, req.ResumeCwds...); ok {
+	if s.ClaudeID != "" {
+		if cwd, ok, err := home.FindSessionRooted(req.Root, s.ClaudeID, req.ResumeCwds...); err != nil {
+			return LaunchDecision{}, err
+		} else if ok {
 			core.ClearNotice(s.ClaudeID)
-			return LaunchDecision{Dir: cwd, Extra: []string{"--resume", s.ClaudeID}}
+			return LaunchDecision{Dir: cwd, Extra: []string{"--resume", s.ClaudeID}}, nil
 		}
 		// Pinned but no transcript under any candidate path: don't silently start
 		// fresh — make the fallback visible in the log and on the rail.
 		warnResumeFailed(req)
-		return LaunchDecision{Dir: req.Dir, Extra: append([]string{"--session-id", s.ClaudeID}, freshExtra(req.Prompt)...)}
-	case home.AnySession(req.Dir):
-		return LaunchDecision{Dir: req.Dir, Extra: []string{"--continue"}}
-	default:
-		return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}
+		return LaunchDecision{Dir: req.Dir, Extra: append([]string{"--session-id", s.ClaudeID}, freshExtra(req.Prompt)...)}, nil
 	}
+	any, err := home.AnySessionRooted(req.Root, req.Dir)
+	if err != nil {
+		return LaunchDecision{}, err
+	}
+	if any {
+		return LaunchDecision{Dir: req.Dir, Extra: []string{"--continue"}}, nil
+	}
+	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}, nil
 }
 
 // carryOver copies cwd's project dir (its transcripts and their per-session
 // working areas) from the user's home into home when home has none for cwd and
 // the user's does — the one-time migration of a conversation recorded before the
 // agent had a private home. A home that is the user's own is left alone.
-func carryOver(home claudecfg.Home, cwd string) {
+func carryOver(root *hostprep.Root, home claudecfg.Home, cwd string) error {
 	user := claudecfg.User()
 	if home.Dir == user.Dir {
-		return
+		return nil
 	}
 	dst := home.ProjectDir(cwd)
-	if _, err := os.Stat(dst); err == nil {
-		return
+	dstRel, err := root.Rel(dst)
+	if err != nil {
+		return err
+	}
+	if sub, err := root.Sub(dstRel, false, 0); err == nil {
+		_ = sub.Close()
+		return nil
+	} else if hostprep.IsUnsafe(err) {
+		return err
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	src := user.ProjectDir(cwd)
 	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
-		return
+		return nil
 	}
-	if err := copyTree(src, dst); err != nil {
-		log.Printf("amux: carrying %s into the agent's config home: %v", src, err)
-		return
+	if err := copyTreeRooted(root, src, dstRel); err != nil {
+		return err
 	}
 	log.Printf("amux: carried transcripts for %s into the agent's private Claude home", cwd)
+	return nil
 }
 
-// copyTree copies the regular files under src to dst, preserving modes.
-func copyTree(src, dst string) error {
+func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(src, p)
-		target := filepath.Join(dst, rel)
+		target := filepath.Join(dstRel, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			if target == "." {
+				return nil
+			}
+			dir, err := root.Sub(target, true, 0o755)
+			if err == nil {
+				_ = dir.Close()
+			}
+			return err
 		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		b, err := os.ReadFile(p)
+		f, err := os.Open(p)
 		if err != nil {
 			return err
 		}
@@ -170,7 +194,12 @@ func copyTree(src, dst string) error {
 		if fi, err := d.Info(); err == nil {
 			mode = fi.Mode().Perm()
 		}
-		return os.WriteFile(target, b, mode)
+		err = root.AtomicWriteFrom(target, f, mode)
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		return closeErr
 	})
 }
 
@@ -179,9 +208,11 @@ func copyTree(src, dst string) error {
 // pointed at the stable installed binary. Claude loads settings.local.json only
 // from the launch dir. Safe launches use the session root, outside its private
 // repository clone; do not invoke host-side Git against session-writable config.
-func (h claudeHarness) PrepareLaunch(s store.Session, dir string) {
-	_ = h.home(s).TrustDir(dir)
-	_ = claudecfg.InstallHooksIn(dir, h.home(s).Dir, core.InstalledBinPath())
+func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
+	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
+		return err
+	}
+	return claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.InstalledBinPath())
 }
 
 // Keys are Claude Code's interactive bindings (see claudeKeys).
@@ -223,11 +254,11 @@ func (claudeHarness) RailState(s store.Session) string {
 // copy is missing or staler. Because that is the exact location resume detection
 // reads, a successful restore makes the subsequent launch resume the
 // conversation via --resume.
-func (h claudeHarness) RestoreTranscript(s store.Session, cwd string) (bool, error) {
+func (h claudeHarness) RestoreTranscript(root *hostprep.Root, s store.Session, cwd string) (bool, error) {
 	if cwd == "" || s.ClaudeID == "" {
 		return false, nil
 	}
-	return core.RestoreCapturedTranscript(s.ClaudeID, h.home(s).TranscriptPath(cwd, s.ClaudeID))
+	return restoreCapturedRooted(root, s.ClaudeID, h.home(s).TranscriptPath(cwd, s.ClaudeID))
 }
 
 // SkillsDir / GuideFile: Claude Code's own conventions — .claude/skills and

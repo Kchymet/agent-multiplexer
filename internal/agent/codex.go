@@ -3,13 +3,13 @@ package agent
 import (
 	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	"amux/internal/cfghome"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -90,7 +90,7 @@ func (codexHarness) Config(s store.Session) (cfghome.Spec, bool) {
 	if s.Dir == "" {
 		return cfghome.Spec{}, false
 	}
-	return codexcfg.Template(s.ID, codexcfg.AgentHome(s.Dir)), true
+	return codexcfg.Template(s.ID, s.Dir), true
 }
 
 // home is the agent's private Codex home (its rollouts, config, trust), or the
@@ -111,14 +111,18 @@ func (h codexHarness) home(s store.Session) codexcfg.Home {
 //
 // Rollouts live in the agent's private home; one recorded in the user's home
 // before homes were private is carried over on first sight.
-func (h codexHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
+func (h codexHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 	s := req.Session
 	home := h.home(s)
 	if s.ClaudeID != "" {
-		carryOverRollout(home, s.ClaudeID)
-		if _, ok := home.RolloutPath(s.ClaudeID); ok {
+		if err := carryOverRollout(req.Root, home, s.ClaudeID); err != nil {
+			return LaunchDecision{}, err
+		}
+		if _, ok, err := home.RolloutPathRooted(req.Root, s.ClaudeID); err != nil {
+			return LaunchDecision{}, err
+		} else if ok {
 			core.ClearNotice(s.ClaudeID)
-			return LaunchDecision{Dir: req.Dir, Extra: []string{"resume", s.ClaudeID}}
+			return LaunchDecision{Dir: req.Dir, Extra: []string{"resume", s.ClaudeID}}, nil
 		}
 		warnResumeFailed(req)
 	}
@@ -128,55 +132,63 @@ func (h codexHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
 	// A rollout the user's home recorded for this dir before homes were private is
 	// carried over first, so the adoption sees it.
 	if id, ok := codexcfg.UserHome().LatestSession(req.Dir); ok {
-		carryOverRollout(home, id)
+		if err := carryOverRollout(req.Root, home, id); err != nil {
+			return LaunchDecision{}, err
+		}
 	}
-	if id, ok := home.LatestSession(req.Dir); ok {
+	if id, ok, err := home.LatestSessionRooted(req.Root, req.Dir); err != nil {
+		return LaunchDecision{}, err
+	} else if ok {
 		if s.ClaudeID != "" && id != s.ClaudeID {
 			_ = core.WriteNotice(id, "couldn't resume pinned conversation — resumed the newest one instead")
 		}
 		persistConvID(s.ID, id)
-		return LaunchDecision{Dir: req.Dir, Extra: []string{"resume", id}}
+		return LaunchDecision{Dir: req.Dir, Extra: []string{"resume", id}}, nil
 	}
 	if s.ClaudeID != "" {
 		persistConvID(s.ID, "")
 	}
-	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}
+	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}, nil
 }
 
 // carryOverRollout copies uuid's rollout from the user's home into home when
 // home lacks it and the user's has it — the one-time migration of a
 // conversation recorded before the agent had a private home.
-func carryOverRollout(home codexcfg.Home, uuid string) {
+func carryOverRollout(root *hostprep.Root, home codexcfg.Home, uuid string) error {
 	user := codexcfg.UserHome()
 	if home == user {
-		return
+		return nil
 	}
-	if _, ok := home.RolloutPath(uuid); ok {
-		return
+	if _, ok, err := home.RolloutPathRooted(root, uuid); err != nil || ok {
+		return err
 	}
 	src, ok := user.RolloutPath(uuid)
 	if !ok {
-		return
+		return nil
 	}
-	b, err := os.ReadFile(src)
+	f, err := os.Open(src)
 	if err != nil {
-		return
+		return nil
 	}
+	defer f.Close()
 	dst := home.NewRolloutPath(uuid)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return
+	rel, err := root.Rel(dst)
+	if err != nil {
+		return err
 	}
-	if err := os.WriteFile(dst, b, 0o644); err != nil {
-		log.Printf("amux: carrying rollout %s into the agent's config home: %v", uuid, err)
-		return
+	if err := root.AtomicWriteFrom(rel, f, 0o644); err != nil {
+		return err
 	}
 	log.Printf("amux: carried rollout %s into the agent's private Codex home", uuid)
+	return nil
 }
 
 // PrepareLaunch pre-trusts the launch dir in the agent's own home so Codex
 // doesn't prompt to trust the folder on startup. Codex has no hook mechanism to
 // install.
-func (h codexHarness) PrepareLaunch(s store.Session, dir string) { _ = h.home(s).TrustDir(dir) }
+func (h codexHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
+	return h.home(s).TrustDirRooted(root, dir)
+}
 
 // Keys are Codex's interactive bindings (see codexKeys).
 func (codexHarness) Keys() Keys { return codexKeys() }
@@ -252,16 +264,19 @@ func (h codexHarness) RailState(s store.Session) string {
 // path in the agent's home so a subsequent `codex resume <id>` can still discover
 // the gap-filled transcript. cwd is unused — Codex keys rollouts by uuid, not by
 // munged cwd.
-func (h codexHarness) RestoreTranscript(s store.Session, cwd string) (bool, error) {
+func (h codexHarness) RestoreTranscript(root *hostprep.Root, s store.Session, cwd string) (bool, error) {
 	if s.ClaudeID == "" {
 		return false, nil
 	}
 	home := h.home(s)
-	dst, ok := home.RolloutPath(s.ClaudeID)
+	dst, ok, err := home.RolloutPathRooted(root, s.ClaudeID)
+	if err != nil {
+		return false, err
+	}
 	if !ok {
 		dst = home.NewRolloutPath(s.ClaudeID)
 	}
-	return core.RestoreCapturedTranscript(s.ClaudeID, dst)
+	return restoreCapturedRooted(root, s.ClaudeID, dst)
 }
 
 // SkillsDir / GuideFile: Codex reads the vendor-neutral Agent Skills layout —
