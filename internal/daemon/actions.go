@@ -69,7 +69,14 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// Acceptance is final once this result is returned. The client normally
 		// closes immediately after observing it, so its connection context must
 		// not cancel the already-authorized shutdown during the response grace.
-		time.AfterFunc(shutdownResponseGrace, d.requestShutdown)
+		if !d.startDeferredWork(func() {
+			timer := time.NewTimer(shutdownResponseGrace)
+			defer timer.Stop()
+			<-timer.C
+			d.requestShutdown()
+		}) {
+			return fail("daemon shutdown is already in progress")
+		}
 		return ok()
 	case "", core.ActionRefresh:
 		d.triggerPoll()

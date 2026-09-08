@@ -157,7 +157,9 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	// which is far longer than the caller will wait. Hand the start to a goroutine
 	// and return: the relay that carried this verb answers immediately, and the
 	// progress arrives on the session's runtime-events stream instead.
-	go d.startForSteer(ctx, a.ID, key, payload)
+	if !d.startDeferredWork(func() { d.startForSteer(ctx, a.ID, key, payload) }) {
+		return context.Canceled
+	}
 	return nil
 }
 
@@ -252,7 +254,9 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 		if text == "" {
 			return fmt.Errorf("%s: need %q", verb, core.SteerText)
 		}
-		go d.runStructuredPrompt(ctx, id, sup, text)
+		if !d.startDeferredWork(func() { d.runStructuredPrompt(ctx, id, sup, text) }) {
+			return context.Canceled
+		}
 		return nil
 	case core.SteerInterject:
 		text := fields[core.SteerText]
@@ -326,7 +330,7 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 	if text == "" {
 		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
 	}
-	go func() {
+	if !d.startDeferredWork(func() {
 		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
 		var sup *codexapp.Supervisor
 		err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
@@ -344,7 +348,9 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 		}
 		d.triggerPoll()
 		d.runStructuredPrompt(ctx, sess.ID, sup, text)
-	}()
+	}) {
+		return context.Canceled
+	}
 	return nil
 }
 
