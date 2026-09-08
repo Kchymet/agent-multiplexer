@@ -7,6 +7,9 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"amux/internal/runtimeevents"
+	"amux/internal/store"
 )
 
 // runtimePermissionGate binds permission decisions to one live runtime
@@ -18,11 +21,35 @@ type runtimePermissionGate struct {
 	runtimes map[string]permissionRuntime
 }
 
+// permissionBaseline snapshots requests already open in durable history before
+// a runtime identity is admitted. A replacement runtime must not inherit them.
+func (d *Daemon) loadPermissionBaseline(subject string) ([]string, error) {
+	db, err := store.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rec, err := d.runtimeRecordUnbound(db, subject)
+	if err != nil {
+		return nil, err
+	}
+	open := runtimeevents.OpenPermissions(runtimeEventRecord(rec))
+	ids := make([]string, 0, len(open))
+	for _, pending := range open {
+		ids = append(ids, pending.RequestID)
+	}
+	return ids, nil
+}
+
 type permissionRuntime struct {
 	identity   string
 	generation string
 	requests   map[string]struct{}
 	claimed    map[string]struct{}
+	// excluded contains requests already open when this runtime identity was
+	// observed. They are historical (or raced the conservative boundary) and
+	// must never be relabeled with this incarnation's generation.
+	excluded map[string]struct{}
 }
 
 type permissionRuntimeToken struct {
@@ -35,15 +62,19 @@ func newRuntimePermissionGate() *runtimePermissionGate {
 }
 
 func (g *runtimePermissionGate) observe(subject string, runtime any) (string, error) {
+	return g.observeExcluding(subject, runtime, nil)
+}
+
+func (g *runtimePermissionGate) observeExcluding(subject string, runtime any, excluded []string) (string, error) {
 	if g == nil || strings.TrimSpace(subject) == "" || runtime == nil {
 		return "", fmt.Errorf("permission runtime unavailable")
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.observeLocked(subject, runtime)
+	return g.observeLocked(subject, runtime, excluded)
 }
 
-func (g *runtimePermissionGate) observeLocked(subject string, runtime any) (string, error) {
+func (g *runtimePermissionGate) observeLocked(subject string, runtime any, excluded []string) (string, error) {
 	identity := permissionRuntimeIdentity(runtime)
 	if current, ok := g.runtimes[subject]; ok && current.identity == identity {
 		return current.generation, nil
@@ -53,9 +84,15 @@ func (g *runtimePermissionGate) observeLocked(subject string, runtime any) (stri
 		return "", fmt.Errorf("create runtime generation: %w", err)
 	}
 	generation := hex.EncodeToString(nonce)
+	baseline := make(map[string]struct{}, len(excluded))
+	for _, requestID := range excluded {
+		if strings.TrimSpace(requestID) != "" {
+			baseline[requestID] = struct{}{}
+		}
+	}
 	g.runtimes[subject] = permissionRuntime{
 		identity: identity, generation: generation,
-		requests: make(map[string]struct{}), claimed: make(map[string]struct{}),
+		requests: make(map[string]struct{}), claimed: make(map[string]struct{}), excluded: baseline,
 	}
 	return generation, nil
 }
@@ -65,11 +102,27 @@ func (g *runtimePermissionGate) observeLocked(subject string, runtime any) (stri
 // old-generation decision can cross Engine.Ensure/AppServer publication before
 // the replacement generation is installed.
 func (g *runtimePermissionGate) publish(subject string, create func() (any, error)) (any, string, error) {
+	return g.publishWithBaseline(subject, nil, create)
+}
+
+// publishWithBaseline also records every unresolved durable request that
+// predates runtime creation. Baseline capture, creation visibility, and
+// generation publication occur under the one gate lock, so a request cannot
+// fall into a gap and later be relabeled as belonging to the replacement.
+func (g *runtimePermissionGate) publishWithBaseline(subject string, baseline func() ([]string, error), create func() (any, error)) (any, string, error) {
 	if g == nil || strings.TrimSpace(subject) == "" || create == nil {
 		return nil, "", fmt.Errorf("permission runtime unavailable")
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	var excluded []string
+	var err error
+	if baseline != nil {
+		excluded, err = baseline()
+		if err != nil {
+			return nil, "", fmt.Errorf("capture permission boundary: %w", err)
+		}
+	}
 	runtime, err := create()
 	if err != nil {
 		return nil, "", err
@@ -77,8 +130,16 @@ func (g *runtimePermissionGate) publish(subject string, create func() (any, erro
 	if runtime == nil {
 		return nil, "", fmt.Errorf("permission runtime unavailable")
 	}
-	generation, err := g.observeLocked(subject, runtime)
+	generation, err := g.observeLocked(subject, runtime, excluded)
 	return runtime, generation, err
+}
+
+func (d *Daemon) publishPermissionRuntime(subject string, create func() (any, error)) (any, string, error) {
+	var baseline func() ([]string, error)
+	if d.permissionBaseline != nil {
+		baseline = func() ([]string, error) { return d.permissionBaseline(subject) }
+	}
+	return d.permissions.publishWithBaseline(subject, baseline, create)
 }
 
 func permissionRuntimeIdentity(runtime any) string {
@@ -171,6 +232,12 @@ func (g *runtimePermissionGate) bindRequest(subject, requestID string, handle an
 	runtime, ok := g.runtimes[subject]
 	if !ok || runtime.identity != permissionRuntimeIdentity(handle) {
 		return "", fmt.Errorf("permission runtime was replaced")
+	}
+	if _, excluded := runtime.excluded[requestID]; excluded {
+		return "", fmt.Errorf("permission request %q predates this runtime", requestID)
+	}
+	if _, claimed := runtime.claimed[requestID]; claimed {
+		return "", fmt.Errorf("permission request %q was already consumed", requestID)
 	}
 	if err := validate(); err != nil {
 		return "", err

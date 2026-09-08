@@ -2,6 +2,7 @@ package runtimeevents
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,63 @@ func streamFor(t *testing.T, path string, afterSeq int64) (<-chan harnessproto.R
 		t.Fatal("ClaudeStream ok=false for a resolvable path")
 	}
 	return ch, cancel
+}
+
+func TestPermissionRequestCarriesCurrentRuntimeGeneration(t *testing.T) {
+	dir := t.TempDir()
+	permissions := filepath.Join(dir, "permissions.jsonl")
+	write(t, permissions, `{"request_id":"permission-1","tool":"Bash","action":"echo ok","options":["allow","deny"]}`+"\n")
+
+	resolves := 0
+	resolve := func(context.Context, string) (Record, bool) {
+		resolves++
+		generation := "runtime-before-subscribe"
+		if resolves > 1 {
+			generation = "runtime-at-publication"
+		}
+		return Record{
+			Runtime:            harnessproto.RuntimeClaude,
+			Path:               filepath.Join(dir, "not-yet-created-transcript.jsonl"),
+			Permissions:        permissions,
+			PermissionBindings: map[string]string{"permission-1": generation},
+		}, true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := StreamContext(resolve, testPoll)
+	ch, ok := stream(ctx, "a1", 0)
+	if !ok {
+		t.Fatal("permission stream was not admitted")
+	}
+	select {
+	case batch := <-ch:
+		if len(batch.Events) != 1 || batch.Events[0].Type != harnessproto.TypePermissionRequest {
+			t.Fatalf("batch = %+v", batch)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(batch.Events[0].Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if got := payload[harnessproto.FieldRuntimeGeneration]; got != "runtime-at-publication" {
+			t.Fatalf("runtime_generation = %v, want current generation", got)
+		}
+		if payload["request_id"] != "permission-1" || payload["tool"] != "Bash" {
+			t.Fatalf("permission payload fields were not preserved: %v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for permission event")
+	}
+}
+
+func TestMissingCurrentGenerationNeverPublishesPermissionAsCurrent(t *testing.T) {
+	events := []harnessproto.RuntimeEvent{
+		{Type: harnessproto.TypePermissionRequest, Payload: json.RawMessage(`{"request_id":"r1","runtime_generation":"stale"}`)},
+		{Type: harnessproto.TypeNotice, Payload: json.RawMessage(`{"text":"still visible"}`)},
+	}
+	got := bindPermissionEvents(events, nil)
+	if len(got) != 1 || got[0].Type != harnessproto.TypeNotice {
+		t.Fatalf("events without current generation = %+v, want only non-permission event", got)
+	}
 }
 
 func TestTailBasicAndGrowth(t *testing.T) {

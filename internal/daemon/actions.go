@@ -277,7 +277,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		}
 		d.killRuntimeFor(id)
 		session := spec.Session
-		published, _, err := d.permissions.publish(id, func() (any, error) {
+		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
 			return d.codex.Ensure(id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
 		})
 		if err != nil {
@@ -299,7 +299,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		return err
 	}
 	d.killRuntimeFor(id)
-	published, _, err := d.permissions.publish(id, func() (any, error) {
+	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
 		return d.engine.Ensure(ctx, engine.Spec{
 			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env, Argv: argv,
 		})

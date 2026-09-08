@@ -128,6 +128,10 @@ type Daemon struct {
 	// permissions owns runtime-generation binding and atomic request consumption
 	// for every caller role. It is initialized even in tests that do not Run.
 	permissions *runtimePermissionGate
+	// permissionBaseline records unresolved durable requests before a newly
+	// observed runtime is assigned a generation. Tests inject a record-free
+	// resolver; production reads through the daemon's runtime-record seam.
+	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
 }
@@ -156,6 +160,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		permissions:    newRuntimePermissionGate(),
 	}
 	d.launchSpec = d.launchSpecFor
+	d.permissionBaseline = d.loadPermissionBaseline
 	return d
 }
 
@@ -759,7 +764,7 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	}
 	var inst engine.Instance
 	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
-		published, _, publishErr := d.permissions.publish(a.ID, func() (any, error) {
+		published, _, publishErr := d.publishPermissionRuntime(a.ID, func() (any, error) {
 			return d.engine.Ensure(ctx, engineSpec)
 		})
 		err = publishErr
@@ -856,7 +861,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	if err := revalidateDeferred(ctx); err != nil {
 		return err
 	}
-	published, _, err := d.permissions.publish(aid, func() (any, error) {
+	published, _, err := d.publishPermissionRuntime(aid, func() (any, error) {
 		return d.engine.Ensure(ctx, engine.Spec{
 			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
 			Dir: dir, Env: env, Argv: argv,
@@ -903,7 +908,7 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 		return nil, err
 	}
 	sess := spec.Session
-	published, _, err := d.permissions.publish(agentID, func() (any, error) {
+	published, _, err := d.publishPermissionRuntime(agentID, func() (any, error) {
 		return d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
 	})
 	if err != nil {

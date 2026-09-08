@@ -20,6 +20,28 @@ func bindPermission(t *testing.T, gate *runtimePermissionGate, subject, requestI
 	return generation
 }
 
+func TestPermissionBindingRequiresExactRuntimeAndExcludesBaseline(t *testing.T) {
+	gate := newRuntimePermissionGate()
+	first := new(int)
+	generation, err := gate.observeExcluding("a1", first, []string{"old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.bindRequest("a1", "old", first, func() error { return nil }); err == nil || !strings.Contains(err.Error(), "predates") {
+		t.Fatalf("historical request binding = %v", err)
+	}
+	if got, err := gate.bindRequest("a1", "new", first, func() error { return nil }); err != nil || got != generation {
+		t.Fatalf("live request binding = %q, %v", got, err)
+	}
+	replacement := new(int)
+	if _, err := gate.observeExcluding("a1", replacement, []string{"old", "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.bindRequest("a1", "new", first, func() error { return nil }); err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("old handle binding after replacement = %v", err)
+	}
+}
+
 func TestRuntimePermissionGateConsumesExactlyOnceConcurrently(t *testing.T) {
 	gate := newRuntimePermissionGate()
 	runtime := &permissionRuntimeFixture{}

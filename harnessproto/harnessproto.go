@@ -168,6 +168,10 @@ const (
 	FieldRequestID = "request_id" // permission: the request_id from the permission_request event
 	FieldDecision  = "decision"   // permission: DecisionAllow | DecisionDeny
 	FieldReason    = "reason"     // permission: optional free-text rationale
+	// FieldRuntimeGeneration is the daemon-issued opaque identity of the live
+	// runtime that published a permission request. A permission decision must
+	// echo it so a request id cannot be replayed against a replacement runtime.
+	FieldRuntimeGeneration = "runtime_generation"
 )
 
 // Permission decisions (the FieldDecision value on a VerbPermission action).

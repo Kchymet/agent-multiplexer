@@ -55,7 +55,7 @@ func (s *tailSource) reset() {
 //     the file start and re-reads. Because the ordinal space is shared, a resync
 //     of any source restarts them all and ordinals recount from 1; the
 //     orchestrator dedups by ordinal, so a stable prefix re-sends idempotently.
-func tail(ctx context.Context, rec Record, specs []sourceSpec, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
+func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID string, specs []sourceSpec, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
 	defer close(out)
 	if poll <= 0 {
 		poll = DefaultPollInterval
@@ -93,6 +93,20 @@ func tail(ctx context.Context, rec Record, specs []sourceSpec, afterSeq int64, p
 			batch = harnessproto.RuntimeEventBatch{}
 		}
 		if len(batch.Events) > 0 {
+			bindings := map[string]string(nil)
+			// A subscription can outlive a runtime replacement. Resolve again at
+			// the publication boundary so permission cards carry the generation
+			// of the runtime currently owned by the daemon, not the one that was
+			// live when the transcript tail first opened.
+			if refresh != nil {
+				if current, ok := refresh(ctx, sessionID); ok {
+					bindings = current.PermissionBindings
+				}
+			}
+			batch.Events = bindPermissionEvents(batch.Events, bindings)
+			if len(batch.Events) == 0 {
+				continue
+			}
 			batch.Runtime = rec.Runtime
 			select {
 			case out <- batch:
@@ -231,6 +245,9 @@ type PathResolver func(sessionID string) (path string, ok bool)
 type Record struct {
 	Runtime string
 	Path    string
+	// PermissionBindings contains only request ids that the daemon proved open
+	// on the exact current runtime. It is refreshed at publication time.
+	PermissionBindings map[string]string
 	// Permissions is amux's own permission journal for the session, read as a
 	// second source alongside Path. It exists because a runtime may resolve
 	// permission prompts entirely in its TUI without recording them (Claude Code
@@ -364,7 +381,7 @@ func StreamContext(resolve ContextResolver, poll time.Duration) func(ctx context
 			return nil, false
 		}
 		ch := make(chan harnessproto.RuntimeEventBatch, 8)
-		go tail(ctx, rec, specs, afterSeq, poll, ch)
+		go tail(ctx, rec, resolve, sessionID, specs, afterSeq, poll, ch)
 		return ch, true
 	}
 }

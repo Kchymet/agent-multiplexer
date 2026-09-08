@@ -36,7 +36,8 @@ func TestStructuredSourceIsIdentityMapped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := Record{Runtime: harnessproto.RuntimeCodex, Path: path, Structured: true}
+	rec := Record{Runtime: harnessproto.RuntimeCodex, Path: path, Structured: true,
+		PermissionBindings: map[string]string{"ap1": "runtime-1"}}
 	stream := Stream(func(string) (Record, bool) { return rec, true }, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

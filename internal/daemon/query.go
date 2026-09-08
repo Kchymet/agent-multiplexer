@@ -161,6 +161,14 @@ func (d *Daemon) structuredResolvable(id string) bool {
 }
 
 func (d *Daemon) runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
+	record, err := d.runtimeRecordUnbound(db, id)
+	if err != nil {
+		return core.RuntimeRecord{}, err
+	}
+	return d.bindRuntimeRecord(id, record), nil
+}
+
+func (d *Daemon) runtimeRecordUnbound(db *store.DB, id string) (core.RuntimeRecord, error) {
 	s, ok, err := db.GetSession(id)
 	if err != nil {
 		return core.RuntimeRecord{}, err
