@@ -38,16 +38,17 @@ route=query, verb=runtime-events, id=<tracked session id>
 fields: cursor=<opaque token> | after_sequence=<non-negative decimal>
 ```
 
-`cursor` and `after_sequence` are mutually exclusive. Omission starts before
-sequence 1. Unknown/duplicate representations, negative/overflowing sequence
-values, malformed or stale cursors, and a cursor bound to another target are
-invalid requests. `after_sequence` is accepted only as a bounded initial scan
-hint: the pager advances through a bounded amount of source per call and returns
-a continuation cursor even when no event was produced. A cursor binds the target,
-runtime/source layout, source file identities, byte-boundary anchors, decoder
-state, and last assigned sequence. Append-only growth preserves it; truncation,
-replacement, source-layout/runtime change, or daemon restart invalidates it
-explicitly.
+`cursor` and `after_sequence` are mutually exclusive by field presence. An
+explicit empty, whitespace-padded, or noncanonical base64url cursor is invalid;
+omission alone starts before sequence 1. Unknown/duplicate representations,
+negative/overflowing sequence values, stale cursors, and a cursor bound to
+another target are invalid requests. `after_sequence` is accepted only as a
+bounded initial scan hint: the pager advances through a bounded amount of source
+per call and returns a continuation cursor even when no event was produced. A
+cursor binds the target, runtime/source layout, source file identities,
+byte-boundary anchors, decoder state, and last assigned sequence. Append-only
+growth preserves it; truncation, replacement, source-layout/runtime change, or
+daemon restart invalidates it explicitly.
 
 The normalized response is `core.RuntimeEventPage`:
 
@@ -76,20 +77,23 @@ does not fit, it remains for the next cursor. If one event cannot fit in an empt
 page, the response advances past it and reports deterministic `oversized`
 metadata (`sequence`, normalized `type`, exact encoded byte count); no oversized
 payload is partially returned or silently skipped. `truncated` is true for that
-page. A source record exceeding the decoder line cap is discarded in bounded
-chunks and reported distinctly as `raw_record` with only its raw byte count and
-reason. Because it was not parsed, the response claims neither a normalized type
-nor an encoded-event byte count.
+page. A normalized type longer than 128 bytes is represented by the fixed
+`type_omitted` label so omission metadata itself cannot break the wrapper cap;
+the complete wrapper is measured again. A source record exceeding the decoder
+line cap is discarded in bounded chunks and reported distinctly as `raw_record`
+with only its raw byte count and reason. Because it was not parsed, the response
+claims neither a normalized type nor an encoded-event byte count.
 
 Each request is capped at 256 KiB of source bytes, 2,048 complete records, 256
 normalized events, and repeated context cancellation checks. Decoder/cursor
 state is capped at 256 KiB. The cache admits at most eight entries/2 MiB per
 subject and 128 entries/32 MiB globally, with five-minute idle expiry; admission
-evicts least-recently-used entries. Cancellation works on a cloned state and
-publishes no successor/cache mutation. Hitting a work cap returns a valid empty
-or partial page with `has_more=true`; it is not permission to allocate or scan
-the rest of a transcript. An expired or evicted cursor returns `cursor_invalid`
-rather than replaying unbounded history.
+evicts least-recently-used entries. Page computation, final authorization, and
+cache commit are separate phases: cancellation or final denial publishes no
+successor and changes no original cursor, expiry, or LRU state. Hitting a work
+cap returns a valid empty or partial page with `has_more=true`; it is not
+permission to allocate or scan the rest of a transcript. An expired or evicted
+cursor returns `cursor_invalid` rather than replaying unbounded history.
 
 ## CLI and ownership split
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,20 +15,37 @@ import (
 
 func cmdAgentEvents(args []string) error {
 	var target, cursor, after string
+	var cursorSet, afterSet bool
 	asJSON := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--json":
 			asJSON = true
 		case args[i] == "--cursor" && i+1 < len(args):
+			if cursorSet {
+				return fmt.Errorf("--cursor may be specified only once")
+			}
+			cursorSet = true
 			cursor = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--cursor="):
+			if cursorSet {
+				return fmt.Errorf("--cursor may be specified only once")
+			}
+			cursorSet = true
 			cursor = strings.TrimPrefix(args[i], "--cursor=")
 		case args[i] == "--after" && i+1 < len(args):
+			if afterSet {
+				return fmt.Errorf("--after may be specified only once")
+			}
+			afterSet = true
 			after = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--after="):
+			if afterSet {
+				return fmt.Errorf("--after may be specified only once")
+			}
+			afterSet = true
 			after = strings.TrimPrefix(args[i], "--after=")
 		case strings.HasPrefix(args[i], "-"):
 			return fmt.Errorf("unknown events option %q", args[i])
@@ -36,10 +55,13 @@ func cmdAgentEvents(args []string) error {
 			return fmt.Errorf("usage: amux agent events [<session-id>] [--after <sequence> | --cursor <token>] [--json]")
 		}
 	}
-	if cursor != "" && after != "" {
+	if cursorSet && afterSet {
 		return fmt.Errorf("--cursor and --after are mutually exclusive")
 	}
-	if after != "" {
+	if cursorSet && !canonicalRuntimeEventCursor(cursor) {
+		return fmt.Errorf("--cursor must be a non-empty canonical token")
+	}
+	if afterSet {
 		value, err := strconv.ParseInt(after, 10, 64)
 		if err != nil || value < 0 || strings.TrimSpace(after) != after {
 			return fmt.Errorf("--after must be a non-negative integer")
@@ -53,10 +75,10 @@ func cmdAgentEvents(args []string) error {
 		target = ctx.SubjectID
 	}
 	fields := make(map[string]string)
-	if cursor != "" {
+	if cursorSet {
 		fields[core.RuntimeEventsCursorField] = cursor
 	}
-	if after != "" {
+	if afterSet {
 		fields[core.RuntimeEventsAfterSequenceField] = after
 	}
 	var page core.RuntimeEventPage
@@ -91,4 +113,13 @@ func cmdAgentEvents(args []string) error {
 		fmt.Printf("next cursor: %s\n", page.NextCursor)
 	}
 	return nil
+}
+
+func canonicalRuntimeEventCursor(cursor string) bool {
+	if cursor == "" || strings.TrimSpace(cursor) != cursor ||
+		len(cursor) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	return err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == cursor
 }
