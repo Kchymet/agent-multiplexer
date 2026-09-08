@@ -1,7 +1,7 @@
 // Package wsops holds session lifecycle operations shared by the daemon (rail
 // actions) and the CLI. A workgroup (root) is a pure container: it checks out
 // nothing itself; its agents (subs) each work on a subset of the tracked repos,
-// one independent clone per repo under the agent's own directory.
+// one isolated linked worktree per repo under the agent's own directory.
 package wsops
 
 import (
@@ -140,8 +140,11 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 			log.Printf("amux: skipping unknown repo %q while creating agent under %s", repoName, rootID)
 			continue
 		}
-		if err := git.AddCheckout(ctx, checkoutSource(repo.Source), filepath.Join(dir, repoName), branch,
-			gitStagingDir(), core.SessionsDir(), gitLayoutPath(agentID, repoName)); err != nil {
+		req, err := checkoutRequest(repo, agentID, filepath.Join(dir, repoName), branch, core.SessionsDir())
+		if err != nil {
+			return store.Session{}, err
+		}
+		if err := git.AddCheckout(ctx, req); err != nil {
 			return store.Session{}, err
 		}
 		repos = append(repos, repoName)
@@ -285,8 +288,11 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 			if err != nil {
 				return err
 			}
-			if err := git.AddCheckout(ctx, checkoutSource(repo.Source), filepath.Join(a.Dir, r), a.Branch,
-				gitStagingDir(), managedRoot, gitLayoutPath(a.ID, r)); err != nil {
+			req, err := checkoutRequest(repo, a.ID, filepath.Join(a.Dir, r), a.Branch, managedRoot)
+			if err != nil {
+				return err
+			}
+			if err := git.AddCheckout(ctx, req); err != nil {
 				return err
 			}
 		}

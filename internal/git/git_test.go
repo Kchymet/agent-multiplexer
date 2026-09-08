@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func testGit(t *testing.T, dir string, args ...string) string {
+func testGit(t testing.TB, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -28,7 +28,7 @@ func testGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func testRemote(t *testing.T) string {
+func testRemote(t testing.TB) string {
 	t.Helper()
 	root := t.TempDir()
 	src := filepath.Join(root, "src")
@@ -49,24 +49,46 @@ func testRemote(t *testing.T) string {
 func testAddCheckout(t *testing.T, ctx context.Context, source, path, branch, staging string) string {
 	t.Helper()
 	layout := filepath.Join(t.TempDir(), "layout")
-	if err := AddCheckout(ctx, source, path, branch, staging, filepath.Dir(path), layout); err != nil {
+	if err := AddCheckout(ctx, testCheckoutRequest(source, path, branch, staging, filepath.Dir(path), layout)); err != nil {
 		t.Fatal(err)
 	}
 	return layout
 }
 
-func TestAddCheckoutCreatesIndependentRepositories(t *testing.T) {
+func testCheckoutRequest(source, path, branch, staging, managed, layout string) CheckoutRequest {
+	return CheckoutRequest{
+		Source: source, Path: path, Branch: branch, RepoKey: SourceKey(source),
+		PoolRoot: filepath.Join(filepath.Dir(staging), "pool"), StagingRoot: staging,
+		ManagedRoot: managed, LayoutPath: layout, AllowLocalSource: true,
+	}
+}
+
+func TestAddCheckoutCreatesPrivateCommonLinkedWorktrees(t *testing.T) {
 	ctx := context.Background()
 	remote := testRemote(t)
 	root := t.TempDir()
-	a := filepath.Join(root, "a")
-	b := filepath.Join(root, "b")
+	a := filepath.Join(root, "a", "repo")
+	b := filepath.Join(root, "b", "repo")
+	if err := os.MkdirAll(filepath.Dir(a), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(b), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	staging := filepath.Join(root, "staging")
-	testAddCheckout(t, ctx, remote, a, "amux/root-a", staging)
-	testAddCheckout(t, ctx, remote, b, "amux/root-b", staging)
+	layouts := map[string]string{
+		a: testAddCheckout(t, ctx, remote, a, "amux/root-a", staging),
+		b: testAddCheckout(t, ctx, remote, b, "amux/root-b", staging),
+	}
+	commons := map[string]string{}
 	for path, branch := range map[string]string{a: "amux/root-a", b: "amux/root-b"} {
-		if err := validateIndependentCheckout(ctx, path); err != nil {
-			t.Fatalf("%s is not independent: %v", path, err)
+		if err := ValidateCheckoutLayout(layouts[path], path, filepath.Dir(path)); err != nil {
+			t.Fatalf("%s layout is invalid: %v", path, err)
+		}
+		common := testGit(t, path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		commons[path] = common
+		if common == filepath.Join(path, ".git") {
+			t.Fatalf("%s is a standalone clone, want linked worktree", path)
 		}
 		if got := testGit(t, path, "branch", "--show-current"); got != branch {
 			t.Fatalf("%s branch = %q, want %q", path, got, branch)
@@ -74,9 +96,12 @@ func TestAddCheckoutCreatesIndependentRepositories(t *testing.T) {
 		if got := testGit(t, path, "remote", "get-url", "origin"); got != remote {
 			t.Fatalf("%s origin = %q, want %q", path, got, remote)
 		}
-		if data, err := os.ReadFile(filepath.Join(path, ".git", "objects", "info", "alternates")); err == nil && strings.TrimSpace(string(data)) != "" {
-			t.Fatalf("%s has object alternate %q", path, data)
+		if data, err := os.ReadFile(filepath.Join(common, "objects", "info", "alternates")); err != nil || strings.TrimSpace(string(data)) == "" {
+			t.Fatalf("%s missing immutable pool alternate: %q, %v", path, data, err)
 		}
+	}
+	if commons[a] == commons[b] {
+		t.Fatal("sessions unexpectedly share a writable Git common directory")
 	}
 
 	// Session-local config and commits cannot affect the sibling or source.
@@ -96,7 +121,8 @@ func TestAddCheckoutCreatesIndependentRepositories(t *testing.T) {
 		}
 	}
 
-	// Removing the source proves neither checkout depends on shared object bytes.
+	// Removing the authoritative source proves both worktrees use the retained
+	// immutable pool rather than the legacy source repository.
 	if err := os.RemoveAll(remote); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +130,138 @@ func TestAddCheckoutCreatesIndependentRepositories(t *testing.T) {
 		if got := testGit(t, repo, "show", "--format=%s", "--no-patch", "HEAD"); got == "" {
 			t.Fatalf("%s lost its history with the source", repo)
 		}
+	}
+}
+
+func TestLayoutValidationRejectsBlockingPointerFilesWithoutWaiting(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(string, CheckoutLayout) string
+	}{
+		{"checkout-dot-git", func(checkout string, _ CheckoutLayout) string { return filepath.Join(checkout, ".git") }},
+		{"admin-gitdir", func(_ string, layout CheckoutLayout) string { return filepath.Join(layout.AdminDir, "gitdir") }},
+		{"private-alternates", func(_ string, layout CheckoutLayout) string {
+			return filepath.Join(layout.CommonDir, "objects", "info", "alternates")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := testRemote(t)
+			root := t.TempDir()
+			checkout, layout := pooledTestCheckout(t, root, remote, SourceKey(remote), "session")
+			target := tt.target(checkout, layout)
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(target, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			if err := ValidateCheckoutLayout(filepath.Join(root, "session.json"), checkout, root); err == nil {
+				t.Fatal("validation accepted a FIFO pointer")
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Fatalf("validation blocked on FIFO for %s", elapsed)
+			}
+		})
+	}
+}
+
+func TestLayoutValidationBoundsPointerSizes(t *testing.T) {
+	tests := []struct {
+		name   string
+		limit  int
+		target func(string, CheckoutLayout) string
+	}{
+		{"checkout-dot-git", gitPointerMaxBytes, func(checkout string, _ CheckoutLayout) string { return filepath.Join(checkout, ".git") }},
+		{"admin-gitdir", gitPointerMaxBytes, func(_ string, layout CheckoutLayout) string { return filepath.Join(layout.AdminDir, "gitdir") }},
+		{"private-alternates", gitAlternatesMaxBytes, func(_ string, layout CheckoutLayout) string {
+			return filepath.Join(layout.CommonDir, "objects", "info", "alternates")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := testRemote(t)
+			root := t.TempDir()
+			checkout, layout := pooledTestCheckout(t, root, remote, SourceKey(remote), "session")
+			target := tt.target(checkout, layout)
+			if err := os.WriteFile(target, make([]byte, tt.limit+1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			err := ValidateCheckoutLayout(filepath.Join(root, "session.json"), checkout, root)
+			if err == nil || !strings.Contains(err.Error(), "limit") {
+				t.Fatalf("oversized pointer error = %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Fatalf("oversized pointer validation took %s", elapsed)
+			}
+		})
+	}
+}
+
+func TestAnchoredReadNeverFollowsRacingFinalSymlink(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "session")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "pointer")
+	outside := filepath.Join(t.TempDir(), "secret")
+	const safe = "expected\n"
+	const secret = "outside-secret\n"
+	if err := os.WriteFile(outside, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(safe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				errCh <- err
+				return
+			}
+			if err := os.Symlink(outside, target); err != nil && !os.IsExist(err) {
+				errCh <- err
+				return
+			}
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				errCh <- err
+				return
+			}
+			if err := os.WriteFile(target, []byte(safe), 0o600); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	var escaped []byte
+	for i := 0; i < 1000; i++ {
+		b, err := readRegularFileAnchored(root, target, gitPointerMaxBytes)
+		if err == nil && string(b) == secret {
+			escaped = b
+			break
+		}
+	}
+	close(done)
+	<-finished
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+	if escaped != nil {
+		t.Fatalf("anchored read escaped to racing target: %q", escaped)
 	}
 }
 
@@ -124,10 +282,10 @@ func TestAddCheckoutTransfersOnlyDefaultBranchReachability(t *testing.T) {
 	checkout := filepath.Join(t.TempDir(), "session")
 	testAddCheckout(t, ctx, remote, checkout, "amux/root-own", filepath.Join(t.TempDir(), "staging"))
 	if cmd := exec.Command("git", "-C", checkout, "cat-file", "-e", secretCommit+"^{commit}"); cmd.Run() == nil {
-		t.Fatalf("single-branch clone copied sibling-only object %s", secretCommit)
+		t.Fatalf("authorized pool exposed sibling-only object %s", secretCommit)
 	}
 	if cmd := exec.Command("git", "-C", checkout, "show-ref", "--verify", "refs/remotes/origin/amux/sibling-unpublished"); cmd.Run() == nil {
-		t.Fatal("single-branch clone copied sibling unpublished ref")
+		t.Fatal("pooled worktree copied sibling unpublished ref")
 	}
 }
 
@@ -151,8 +309,9 @@ func TestAddCheckoutRejectsExtTransport(t *testing.T) {
 	}
 	t.Setenv("AMUX_TEST_MARKER", marker)
 	root := t.TempDir()
-	err := AddCheckout(ctx, "ext::"+helper, filepath.Join(root, "session"), "amux/root-own",
-		filepath.Join(t.TempDir(), "staging"), root, filepath.Join(t.TempDir(), "layout"))
+	staging := filepath.Join(t.TempDir(), "staging")
+	err := AddCheckout(ctx, testCheckoutRequest("ext::"+helper, filepath.Join(root, "session"), "amux/root-own",
+		staging, root, filepath.Join(t.TempDir(), "layout")))
 	if err == nil {
 		t.Fatal("ext transport unexpectedly allowed")
 	}
@@ -236,8 +395,9 @@ func TestAddCheckoutRejectsSymlinkedSessionAncestor(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(managed, "session")); err != nil {
 		t.Fatal(err)
 	}
-	err := AddCheckout(context.Background(), remote, filepath.Join(managed, "session", "repo"), "amux/own",
-		filepath.Join(t.TempDir(), "staging"), managed, filepath.Join(t.TempDir(), "layout"))
+	staging := filepath.Join(t.TempDir(), "staging")
+	err := AddCheckout(context.Background(), testCheckoutRequest(remote, filepath.Join(managed, "session", "repo"), "amux/own",
+		staging, managed, filepath.Join(t.TempDir(), "layout")))
 	if err == nil {
 		t.Fatal("published through symlinked session ancestor")
 	}
@@ -257,8 +417,9 @@ func TestAddCheckoutDoesNotReplaceDestinationEntry(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := AddCheckout(context.Background(), remote, destination, "amux/own",
-		filepath.Join(t.TempDir(), "staging"), managed, filepath.Join(t.TempDir(), "layout"))
+	staging := filepath.Join(t.TempDir(), "staging")
+	err := AddCheckout(context.Background(), testCheckoutRequest(remote, destination, "amux/own",
+		staging, managed, filepath.Join(t.TempDir(), "layout")))
 	if err == nil {
 		t.Fatal("replaced an existing destination entry")
 	}
@@ -319,7 +480,7 @@ func TestRemoveCheckoutFailsClosedAfterSessionAncestorReplacement(t *testing.T) 
 	checkout := filepath.Join(session, "repo")
 	staging := filepath.Join(t.TempDir(), "staging")
 	layout := filepath.Join(t.TempDir(), "layout")
-	if err := AddCheckout(ctx, remote, checkout, "amux/own", staging, managed, layout); err != nil {
+	if err := AddCheckout(ctx, testCheckoutRequest(remote, checkout, "amux/own", staging, managed, layout)); err != nil {
 		t.Fatal(err)
 	}
 	original := filepath.Join(managed, "original-session")

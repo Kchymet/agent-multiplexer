@@ -228,6 +228,9 @@ func cmdDoctor() error {
 		if incompatible {
 			fmt.Println("\n✗ incompatible amux components (see Versions above)")
 		}
+		if reconciliationFailed {
+			fmt.Println("\n✗ reconciliation incomplete (see Reconciliation above)")
+		}
 		if daemonUnknown {
 			fmt.Println("\n✗ daemon state unknown (see Runtime above)")
 			return fmt.Errorf("health check failed: daemon connection: %w", daemonStateErr)
@@ -235,9 +238,6 @@ func cmdDoctor() error {
 		if statsErr != nil {
 			fmt.Println("\n✗ daemon query failed (see Runtime above)")
 			return fmt.Errorf("health check failed: daemon query: %w", statsErr)
-		}
-		if reconciliationFailed {
-			fmt.Println("\n✗ reconciliation incomplete (see Reconciliation above)")
 		}
 		return fmt.Errorf("health check failed")
 	}

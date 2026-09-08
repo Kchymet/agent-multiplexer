@@ -751,6 +751,7 @@ func TestSetAgentReposSkipsUntracked(t *testing.T) {
 }
 
 func TestSetAgentReposPropagatesTrustedCleanupFailure(t *testing.T) {
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
 	isolateStore(t)
 	ctx := context.Background()
 	gitDir := bareRepoWithCommit(t)
