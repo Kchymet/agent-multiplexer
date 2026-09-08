@@ -31,7 +31,7 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 		ClaudeID: "33333333-3333-4333-8333-333333333333"}); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := (&Daemon{permissions: newRuntimePermissionGate()}).runtimeRecord(db, "a1")
+	rec, err := (&Daemon{permissions: newRuntimePermissionGate()}).runtimeRecordRaw(db, "a1")
 	db.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -55,13 +55,13 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	}
 
 	appendRequest("historical")
-	d := testDaemon(t)
-	baseline, err := d.loadPermissionBaseline("a1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstRuntime := new(int)
-	firstGeneration, err := d.permissions.observeExcluding("a1", firstRuntime, baseline)
+	d := New("", nil, time.Hour)
+	engine := newFakeEngine()
+	d.engine = engine
+	firstRuntime := engine.running("a1")
+	_, firstGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
+		return firstRuntime, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,11 +87,13 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	}
 
 	d.permissions.retire("a1")
-	restartBaseline, err := d.loadPermissionBaseline("a1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondGeneration, err := d.permissions.observeExcluding("a1", new(int), restartBaseline)
+	engine.mu.Lock()
+	delete(engine.insts, firstRuntime.Key())
+	engine.mu.Unlock()
+	secondRuntime := engine.running("a1")
+	_, secondGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
+		return secondRuntime, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

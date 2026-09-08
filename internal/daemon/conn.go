@@ -22,13 +22,15 @@ import (
 // and leaves ghost text. obuf coalesces bytes instead of dropping them; only a
 // client that falls catastrophically far behind triggers a resync (see obuf).
 type connState struct {
-	out chan any
+	out  chan any
+	conn net.Conn
 	// valid is checked immediately before every socket write. nil is reserved
 	// for transport-only unit tests; authenticated daemon connections always
 	// provide a generation/revocation check.
-	valid func() bool
-	done  chan struct{}
-	once  sync.Once
+	valid      func() bool
+	done       chan struct{}
+	writerDone chan struct{}
+	once       sync.Once
 
 	mu    sync.Mutex
 	panes map[string]paneRoute // client pane id -> engine route
@@ -73,12 +75,14 @@ func newConnState(conn net.Conn) *connState {
 
 func newAuthenticatedConnState(conn net.Conn, valid func() bool) *connState {
 	cl := &connState{
-		valid: valid,
-		out:   make(chan any, 512),
-		done:  make(chan struct{}),
-		panes: map[string]paneRoute{},
-		obuf:  map[string]*paneOut{},
-		wake:  make(chan struct{}, 1),
+		valid:      valid,
+		out:        make(chan any, 512),
+		conn:       conn,
+		done:       make(chan struct{}),
+		writerDone: make(chan struct{}),
+		panes:      map[string]paneRoute{},
+		obuf:       map[string]*paneOut{},
+		wake:       make(chan struct{}, 1),
 	}
 	go cl.writeLoop(conn)
 	return cl
@@ -89,6 +93,7 @@ func newAuthenticatedConnState(conn net.Conn, valid func() bool) *connState {
 // the poll broadcaster never touch the connection directly. Discrete frames
 // arrive on out; pane output is drained losslessly from obuf when wake fires.
 func (cl *connState) writeLoop(conn net.Conn) {
+	defer close(cl.writerDone)
 	enc := json.NewEncoder(conn)
 	for {
 		select {
@@ -240,6 +245,10 @@ func (cl *connState) shutdown() {
 		r.cancel()
 	}
 	cl.stop()
+	// Closing the transport releases a writer blocked in Encode. Joining it keeps
+	// the authority-backed validity callback from outliving the serve handler.
+	_ = cl.conn.Close()
+	<-cl.writerDone
 }
 
 func (cl *connState) addRoute(paneID string, r paneRoute) {

@@ -73,9 +73,13 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 				if err := checkStructuredPermissionRequest(sup, requestID); err != nil {
 					return err
 				}
-				return d.permissions.consume(a.ID, a.Fields[access.RuntimeGenerationField], requestID, func() error {
+				return d.permissions.consume(a.ID, a.Fields[access.RuntimeGenerationField], requestID, sup, func() error {
 					if err := revalidateDeferred(ctx); err != nil {
 						return err
+					}
+					current, ok := d.codex.Get(a.ID)
+					if !ok || current != sup {
+						return fmt.Errorf("permission runtime was replaced")
 					}
 					return checkStructuredPermissionRequest(sup, requestID)
 				}, func() error {
@@ -117,9 +121,13 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 				return err
 			}
 			requestID := a.Fields[core.SteerRequestID]
-			return d.permissions.consume(a.ID, a.Fields[access.RuntimeGenerationField], requestID, func() error {
+			return d.permissions.consume(a.ID, a.Fields[access.RuntimeGenerationField], requestID, in, func() error {
 				if err := revalidateDeferred(ctx); err != nil {
 					return err
+				}
+				current, ok := d.engine.Lookup(key)
+				if !ok || current != in {
+					return fmt.Errorf("permission runtime was replaced")
 				}
 				return checkPermissionRequest(h, sess, requestID)
 			}, func() error {
@@ -170,6 +178,43 @@ func checkStructuredPermissionRequest(runtime structuredSteerer, requestID strin
 		return fmt.Errorf("permission: no pending request %q (the runtime has no prompt open)", requestID)
 	}
 	return fmt.Errorf("permission: no pending request %q (the runtime is waiting on %s)", requestID, strings.Join(open, ", "))
+}
+
+// bindPermissionRequest is the production seam used by permission-event
+// producers before emitting runtime_generation. It binds only an exact request
+// proven open on the exact currently published runtime handle; replayed history
+// after a restart cannot acquire the replacement generation.
+func (d *Daemon) bindPermissionRequest(id, requestID string) (string, error) {
+	if d.codex != nil {
+		if sup, ok := d.codex.Get(id); ok {
+			return d.permissions.bindRequest(id, requestID, sup, func() error {
+				current, currentOK := d.codex.Get(id)
+				if !currentOK || current != sup {
+					return fmt.Errorf("permission runtime was replaced")
+				}
+				return checkStructuredPermissionRequest(sup, requestID)
+			})
+		}
+	}
+	if d.engine == nil {
+		return "", fmt.Errorf("engine unavailable")
+	}
+	h, session, err := d.steerTarget(id)
+	if err != nil {
+		return "", err
+	}
+	key := engine.Key{AgentID: id, Tab: panespec.TabAgent}
+	in, ok := d.engine.Lookup(key)
+	if !ok {
+		return "", fmt.Errorf("agent %s is not running", id)
+	}
+	return d.permissions.bindRequest(id, requestID, in, func() error {
+		current, currentOK := d.engine.Lookup(key)
+		if !currentOK || current != in {
+			return fmt.Errorf("permission runtime was replaced")
+		}
+		return checkPermissionRequest(h, session, requestID)
+	})
 }
 
 // steerStructured serves a steering verb for a session under the App Server

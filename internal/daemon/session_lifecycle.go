@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,10 +13,12 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/console"
+	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 const (
@@ -29,20 +32,24 @@ const (
 )
 
 type sessionRuntime struct {
-	d           *Daemon
-	resolver    *daemonAccessResolver
-	policy      access.Policy
-	poll        time.Duration
-	now         func() time.Time
-	dispatchMu  sync.Mutex
-	servers     map[string]*sessionrpc.Server
-	completions *completionRegistry
+	d            *Daemon
+	resolver     *daemonAccessResolver
+	policy       access.Policy
+	applyResult  func(context.Context, core.Action) (string, error)
+	encodeResult func(core.Result) ([]byte, error)
+	poll         time.Duration
+	now          func() time.Time
+	dispatchMu   sync.Mutex
+	servers      map[string]*sessionrpc.Server
+	completions  *completionRegistry
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
 	r := &sessionRuntime{
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
 		now: time.Now, servers: make(map[string]*sessionrpc.Server),
+		applyResult:  wsops.ApplyResult,
+		encodeResult: func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
@@ -235,12 +242,15 @@ func (r *sessionRuntime) close() {
 	for id := range r.servers {
 		r.closeServer(id)
 	}
+	r.completions.close()
 }
 
 type completionRegistry struct {
 	mu      sync.Mutex
 	d       *Daemon
 	entries map[string]*completionEntry
+	closed  bool
+	wg      sync.WaitGroup
 	receipt time.Duration
 	abandon time.Duration
 	minimum time.Duration
@@ -252,7 +262,11 @@ type completionEntry struct {
 	principal access.Principal
 	requestID string
 	digest    string
+	runtime   permissionRuntimeToken
 	settling  bool
+	cancelled bool
+	settle    chan struct{}
+	cancel    chan struct{}
 }
 
 func newCompletionRegistry(d *Daemon) *completionRegistry {
@@ -264,11 +278,21 @@ func newCompletionRegistry(d *Daemon) *completionRegistry {
 }
 
 func (c *completionRegistry) begin(principal access.Principal, requestID, subjectID string) *sessionrpc.ReceiptHooks {
-	entry := &completionEntry{principal: principal, requestID: requestID}
+	runtime, _ := c.d.permissions.token(subjectID)
+	entry := &completionEntry{
+		principal: principal, requestID: requestID, runtime: runtime,
+		settle: make(chan struct{}), cancel: make(chan struct{}),
+	}
 	c.mu.Lock()
-	c.entries[subjectID] = entry
+	if !c.closed {
+		if previous := c.entries[subjectID]; previous != nil {
+			c.cancelEntryLocked(subjectID, previous)
+		}
+		c.entries[subjectID] = entry
+		c.wg.Add(1)
+		go c.run(subjectID, entry)
+	}
 	c.mu.Unlock()
-	time.AfterFunc(c.abandon, func() { c.settle(subjectID, requestID) })
 	return &sessionrpc.ReceiptHooks{
 		Grace: c.receipt,
 		ResponsePersisted: func(p sessionrpc.PersistedResponse) {
@@ -299,42 +323,93 @@ func (c *completionRegistry) has(subjectID string) bool {
 func (c *completionRegistry) settle(subjectID, requestID string) {
 	c.mu.Lock()
 	entry := c.entries[subjectID]
-	if entry == nil || entry.requestID != requestID || entry.settling {
+	if entry == nil || entry.requestID != requestID || entry.settling || entry.cancelled {
 		c.mu.Unlock()
 		return
 	}
 	entry.settling = true
+	close(entry.settle)
 	c.mu.Unlock()
-	go c.finish(subjectID, entry)
+}
+
+func (c *completionRegistry) run(subjectID string, entry *completionEntry) {
+	defer c.wg.Done()
+	abandon := time.NewTimer(c.abandon)
+	defer abandon.Stop()
+	select {
+	case <-entry.settle:
+	case <-abandon.C:
+		c.mu.Lock()
+		if current := c.entries[subjectID]; current != entry || entry.cancelled {
+			c.mu.Unlock()
+			return
+		}
+		entry.settling = true
+		c.mu.Unlock()
+	case <-entry.cancel:
+		return
+	}
+	c.finish(subjectID, entry)
 }
 
 func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
+	defer func() {
+		c.mu.Lock()
+		if c.entries[subjectID] == entry {
+			delete(c.entries, subjectID)
+		}
+		c.mu.Unlock()
+	}()
 	minimum := time.NewTimer(c.minimum)
-	<-minimum.C
+	defer minimum.Stop()
+	select {
+	case <-minimum.C:
+	case <-entry.cancel:
+		return
+	}
 	deadline := time.NewTimer(c.runtime)
 	defer deadline.Stop()
 	ticker := time.NewTicker(c.poll)
 	defer ticker.Stop()
-	for c.runtimeLive(subjectID) && c.d.instanceActivity(engine.Key{AgentID: subjectID, Tab: panespec.TabAgent}) != engine.ActivitySafe {
+	for c.runtimeLive(subjectID, entry.runtime) && c.d.instanceActivity(engine.Key{AgentID: subjectID, Tab: panespec.TabAgent}) != engine.ActivitySafe {
 		select {
 		case <-deadline.C:
 			goto stop
 		case <-ticker.C:
+		case <-entry.cancel:
+			return
 		}
 	}
 stop:
-	c.d.killEngineFor(subjectID)
-	if c.d.authority != nil {
+	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
+		return
+	}
+	if !c.d.killRuntimeToken(subjectID, entry.runtime) {
+		return
+	}
+	// Revoke only the credential generation that authorized completion. The
+	// explicit restore API will supersede/cancel this entry before issuing a new
+	// generation; arbitrary reconciliation can never regrant it.
+	if c.d.authority != nil && c.d.authority.Valid(context.Background(), entry.principal) == nil {
 		_ = c.d.authority.Revoke(context.Background(), access.SubjectSession, subjectID)
 	}
-	c.mu.Lock()
-	if c.entries[subjectID] == entry {
-		delete(c.entries, subjectID)
-	}
-	c.mu.Unlock()
 }
 
-func (c *completionRegistry) runtimeLive(subjectID string) bool {
+func (c *completionRegistry) owns(subjectID string, entry *completionEntry) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && !entry.cancelled && c.entries[subjectID] == entry
+}
+
+func (c *completionRegistry) archived(subjectID string) bool {
+	session, ok, err := lookupSession(subjectID)
+	return err == nil && ok && session.Archived
+}
+
+func (c *completionRegistry) runtimeLive(subjectID string, token permissionRuntimeToken) bool {
+	if !c.d.permissions.matches(subjectID, token) {
+		return false
+	}
 	if c.d.engine != nil {
 		if instance, ok := c.d.engine.Lookup(engine.Key{AgentID: subjectID, Tab: panespec.TabAgent}); ok && instance.Alive() {
 			return true
@@ -345,4 +420,35 @@ func (c *completionRegistry) runtimeLive(subjectID string) bool {
 		return ok
 	}
 	return false
+}
+
+func (c *completionRegistry) cancel(subjectID string) {
+	c.mu.Lock()
+	if entry := c.entries[subjectID]; entry != nil {
+		c.cancelEntryLocked(subjectID, entry)
+	}
+	c.mu.Unlock()
+}
+
+func (c *completionRegistry) cancelEntryLocked(subjectID string, entry *completionEntry) {
+	if entry.cancelled {
+		return
+	}
+	entry.cancelled = true
+	if c.entries[subjectID] == entry {
+		delete(c.entries, subjectID)
+	}
+	close(entry.cancel)
+}
+
+func (c *completionRegistry) close() {
+	c.mu.Lock()
+	if !c.closed {
+		c.closed = true
+		for subjectID, entry := range c.entries {
+			c.cancelEntryLocked(subjectID, entry)
+		}
+	}
+	c.mu.Unlock()
+	c.wg.Wait()
 }

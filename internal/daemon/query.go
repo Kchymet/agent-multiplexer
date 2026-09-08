@@ -161,6 +161,14 @@ func (d *Daemon) structuredResolvable(id string) bool {
 }
 
 func (d *Daemon) runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, error) {
+	rec, err := d.runtimeRecordRaw(db, id)
+	if err != nil {
+		return core.RuntimeRecord{}, err
+	}
+	return d.bindRuntimeRecord(id, rec), nil
+}
+
+func (d *Daemon) runtimeRecordRaw(db *store.DB, id string) (core.RuntimeRecord, error) {
 	s, ok, err := db.GetSession(id)
 	if err != nil {
 		return core.RuntimeRecord{}, err
@@ -196,18 +204,18 @@ func (d *Daemon) runtimeRecord(db *store.DB, id string) (core.RuntimeRecord, err
 		// persisted identity still resolves it too, so history stays readable after the
 		// App Server exits (and after the gate is later turned off).
 		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && d.structuredResolvable(id) {
-			return d.bindRuntimeRecord(id, core.RuntimeRecord{
+			return core.RuntimeRecord{
 				Runtime:    harnessproto.RuntimeCodex,
 				Path:       codexapp.EventLogPathFor(id),
 				Structured: true,
-			}), nil
+			}, nil
 		}
 		h := agent.HarnessFor(s.Agent)
 		path, _ := h.RuntimeTranscriptPath(s)
 		perms, _ := h.RuntimePermissionPath(s)
-		return d.bindRuntimeRecord(id, core.RuntimeRecord{
+		return core.RuntimeRecord{
 			Runtime: s.Agent, Path: path, Permissions: perms, Journal: core.JournalPath(id),
-		}), nil
+		}, nil
 	}
 	kind := agent.DefaultKind()
 	h := agent.HarnessFor(kind)
