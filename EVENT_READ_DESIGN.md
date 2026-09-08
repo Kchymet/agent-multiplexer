@@ -114,8 +114,10 @@ owns the minimal integration glue:
 2. canonicalization must preserve those fields into `core.Action.Fields`;
 3. policy must allow archived *targets* only for the read exception above while
    continuing to deny archived callers;
-4. after that final scope check, call the pager outside the global effect mutex
-   so bounded file I/O does not block unrelated mutation admission;
+4. after the initial scope check, call `pageForRelease` outside the global effect
+   mutex so bounded file I/O does not block unrelated mutation admission; supply
+   its callback with a short final authoritative scope recheck, which runs after
+   I/O and immediately before the protected response is released;
 5. map malformed/stale cursors to stable restricted error codes and close the
    pager on daemon shutdown.
 
