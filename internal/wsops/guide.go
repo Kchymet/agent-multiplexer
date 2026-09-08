@@ -81,9 +81,9 @@ are assigned (the subdirectories here). %s
 When you need to interact with amux itself, use the self-scoped `+"`amux agent ...`"+`
 commands by default. They infer which agent you are, so you do not need to look
 up or pass your own id. Run `+"`amux agent --help`"+` to see the available commands;
-the ones you will normally need are `+"`amux agent sessions`"+` to find conversation
-history, `+"`amux agent name <display name>`"+` to name yourself, and `+"`amux agent done`"+`
-to mark your task complete.
+the ones you will normally need are `+"`amux agent events --json`"+` to read your own
+normalized history, `+"`amux agent name <display name>`"+` to name yourself, and
+`+"`amux agent done`"+` to mark your task complete.
 
 Other command families such as `+"`amux do`"+`, `+"`amux workgroup`"+`, `+"`amux repo`"+`,
 `+"`amux config`"+`, and `+"`amux sandbox`"+` operate the wider control plane. Do not use
@@ -132,15 +132,19 @@ to edit.
 The filesystem namespace exposes only this session's own files. Use the
 authenticated amux commands for session context rather than searching sibling,
 parent, state, or transcript paths. List the sessions your current server-issued
-role may read with:
+role may see, then read one bounded normalized event page with:
 
-    amux agent sessions
+    amux status --json
+    amux agent events <session-id> --json
 
-Add ` + "`--json`" + ` for machine-readable records. Ordinary agents receive
-only their own normalized context; coordinators receive their current direct
-members; repo homes receive their granted repo sessions; the console receives
-its explicit machine coordination view. Responses do not grant host paths or
-filesystem access to another session.
+Omit ` + "`<session-id>`" + ` to read yourself. Continue with the returned opaque cursor:
+
+    amux agent events <session-id> --cursor <next-cursor> --json
+
+Ordinary agents receive only their own normalized events; coordinators may read
+their current direct members, including archived members still belonging to the
+workgroup; repo homes receive their granted repo descendants. Responses are at
+most 64 KiB and do not grant host paths or filesystem access to another session.
 `
 	// guideRegenNote tells a long-lived session where durable instructions go,
 	// since its guide is rewritten at every launch.
@@ -205,8 +209,8 @@ a native TUI and mirrored to a web dashboard.
 ## Rules
 - Never edit a worktree, another session's sandbox, a bare clone, or the store.
   Change amux state through the CLI; put code changes in an agent, not here.
-- Verify before you report: an agent's transcript, its branch, and its PR are
-  the evidence — not its last status word.
+- Verify before you report: an agent's authenticated normalized event history,
+  its branch, and its PR are the evidence — not its last status word.
 
 `, s.Dir, guideRegenNote, steeringVerbs)
 	b.WriteString(configHomeSection)

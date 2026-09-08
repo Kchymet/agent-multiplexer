@@ -12,20 +12,22 @@ conversation UUID, source path, transcript path, or filesystem root.
 
 The dispatcher must authenticate and authorize the exact canonical request
 before calling the pager. The pager then reopens the read-only store, requires
-the target to still be a tracked row, and derives its source from that row using
-daemon-owned runtime-record logic with the untracked `ListSessions`/UUID fallback
-disabled. A missing, deleted, foreign, or removed-member target fails closed.
+the target to still be a tracked row, and derives its source only from that
+subject's private harness home or an amux-owned journal. A tracked row does not
+authorize a matching UUID in UserHome or another global transcript tree, and the
+untracked `ListSessions`/UUID fallback is disabled. A missing, deleted, foreign,
+or removed-member target fails closed.
 The current caller must be unarchived. An ordinary worker can read only itself;
 a repo-home can read only its authoritative repo descendants; a coordinator can
 read itself and current direct members, including archived members that still
 retain that coordinator as `RootID`. This history exception grants no start,
 steer, restore, PTY, or other lifecycle authority.
 
-Source files are opened only from that daemon-derived record. Opened handles
-must be regular files and must still name the derived path; symlink, non-regular,
-and changed/replaced handles are rejected before any bytes are decoded. The
-reader never calls the existing whole-history replay helpers and never reads a
-caller-selected path.
+Source files are opened only from that daemon-derived record. `hostprep.Root`
+pins each private-harness or daemon-owned safe root, walks parent components by
+descriptor, and opens the final unlinked regular file without following a
+symlink. There is no Lstat/absolute-open race. The reader never calls the
+existing whole-history replay helpers and never reads a caller-selected path.
 
 ## Request and response
 
@@ -53,31 +55,41 @@ The normalized response is `core.RuntimeEventPage`:
 {
   "target": "agent-id",
   "runtime": "codex",
-  "after_sequence": 12,
+  "cursor_sequence": 12,
+  "scanned_sequence": 14,
   "events": [{"sequence": 13, "event": {"type": "text"}}],
   "next_cursor": "opaque",
   "has_more": true,
   "truncated": false,
-  "oversized": {"sequence": 14, "type": "raw", "encoded_bytes": 90000}
+  "oversized": {"kind": "event", "sequence": 14, "type": "raw", "encoded_bytes": 90000, "reason": "event_exceeds_page_limit"}
 }
 ```
 
 `events` are the existing `harnessproto.RuntimeEvent` normalization, each with
-an explicit sequence. The JSON encoding of the complete page, including its
-wrapper and cursor, must be at most `sessionrpc.MaxResponseBody` (64 KiB).
+an explicit sequence. Sequence is stable within this cursor chain's ordered
+source sweeps. It is deliberately not a provider-stream resume sequence:
+independent readers can observe later multi-source appends in a different order.
+The JSON encoding of the complete page, including its wrapper and cursor, must
+be at most `sessionrpc.MaxResponseBody` (64 KiB).
 Events are added only after measuring the whole candidate page. If the next event
 does not fit, it remains for the next cursor. If one event cannot fit in an empty
 page, the response advances past it and reports deterministic `oversized`
 metadata (`sequence`, normalized `type`, exact encoded byte count); no oversized
 payload is partially returned or silently skipped. `truncated` is true for that
-page. A source record exceeding the decoder line cap is handled the same way and
-discarded in bounded chunks through an explicit cursor state.
+page. A source record exceeding the decoder line cap is discarded in bounded
+chunks and reported distinctly as `raw_record` with only its raw byte count and
+reason. Because it was not parsed, the response claims neither a normalized type
+nor an encoded-event byte count.
 
-Each request is capped by source bytes, complete records, normalized events, and
-wall/context cancellation checks. Hitting a work cap returns a valid empty or
-partial page with `has_more=true`; it is not permission to allocate or scan the
-rest of a transcript. Cursor state/cache admission and expiry are bounded; an
-evicted cursor returns `cursor_invalid` rather than replaying unbounded history.
+Each request is capped at 256 KiB of source bytes, 2,048 complete records, 256
+normalized events, and repeated context cancellation checks. Decoder/cursor
+state is capped at 256 KiB. The cache admits at most eight entries/2 MiB per
+subject and 128 entries/32 MiB globally, with five-minute idle expiry; admission
+evicts least-recently-used entries. Cancellation works on a cloned state and
+publishes no successor/cache mutation. Hitting a work cap returns a valid empty
+or partial page with `has_more=true`; it is not permission to allocate or scan
+the rest of a transcript. An expired or evicted cursor returns `cursor_invalid`
+rather than replaying unbounded history.
 
 ## CLI and ownership split
 
@@ -102,9 +114,10 @@ owns the minimal integration glue:
 2. canonicalization must preserve those fields into `core.Action.Fields`;
 3. policy must allow archived *targets* only for the read exception above while
    continuing to deny archived callers;
-4. `restrictedQuery` calls the pager only after its existing execution-boundary
-   reauthorization and maps invalid/stale cursor errors to stable restricted RPC
-   codes without exposing host paths.
+4. after that final scope check, call the pager outside the global effect mutex
+   so bounded file I/O does not block unrelated mutation admission;
+5. map malformed/stale cursors to stable restricted error codes and close the
+   pager on daemon shutdown.
 
 The hook/report owner retains authenticated report routes. The permission
 producer retains occurrence binding and live-generation authority. The pager

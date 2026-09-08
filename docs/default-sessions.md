@@ -17,9 +17,9 @@ wrapper around a one-off agent) hosts no session.
 
 ## What each one is for
 
-- **The console** has machine-wide context: every workgroup, agent, and repo,
-  what each agent was asked to do and what it did (their transcripts are
-  readable), and the CLI to operate all of it. Its guide carries a launch-time
+- **The console** has an explicit machine coordination view: every granted
+  workgroup, agent, and repo, plus bounded normalized event queries for their
+  history and the CLI to operate them. Its guide carries a launch-time
   inventory and the `amux do` vocabulary. It coordinates *across* workgroups;
   it does not write code.
 - **A workgroup coordinator** supervises that workgroup's agents: scopes the
@@ -35,15 +35,13 @@ wrapper around a one-off agent) hosts no session.
 
 ## Scope
 
-A default session launches through the same path as an agent: a bubblewrap
-scope with its sandbox writable, the amux data tree readable, and a private
-copy of your harness config under `<sandbox>/.amux/` (see
-`docs/sandbox-config.md`). That is what makes the scoping fall out of the
-directory layout: the coordinator's sandbox *is* the container that holds its
-members' sandboxes, so it can read every member's worktree, guide, and
-transcript; the repo home and the console read the data tree. None of them gets
-a writable bare clone — they change amux through the CLI and change code by
-steering an agent, and their guides say so.
+A default session launches through the same restricted path as an agent: its
+own sandbox is writable and its private harness config lives under
+`<sandbox>/.amux/` (see `docs/sandbox-config.md`). Inventory, normalized runtime
+history, and control are authenticated daemon operations; coordinator scope no
+longer depends on mounting member sandboxes, transcript trees, or the amux data
+tree. None of these sessions gets a writable bare clone — they change amux
+through the CLI and change code by steering an agent, and their guides say so.
 
 ## Guides
 

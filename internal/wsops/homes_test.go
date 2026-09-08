@@ -227,7 +227,7 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = cr.Close()
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent sessions"} {
+	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
 		}
