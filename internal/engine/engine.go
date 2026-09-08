@@ -17,6 +17,8 @@ package engine
 import (
 	"context"
 	"time"
+
+	"amux/internal/launchenv"
 )
 
 // Key identifies one running instance. An agent exposes several panes (the agent
@@ -58,12 +60,13 @@ type ActivityFunc func(Key) Activity
 // sandboxing) before handing it to the engine, so the engine needs no knowledge
 // of repos, worktrees, or Claude resume logic.
 type Spec struct {
-	Key  Key
-	Dir  string   // working directory
-	Env  []string // KEY=VALUE additions to the engine's base environment
-	Argv []string // command + args
-	Cols int      // initial terminal width
-	Rows int      // initial terminal height
+	Key         Key
+	Dir         string                    // working directory
+	Env         []string                  // non-authority KEY=VALUE additions
+	ModelAccess launchenv.ModelCapability // daemon-selected model auth capability
+	Argv        []string                  // command + args
+	Cols        int                       // initial terminal width
+	Rows        int                       // initial terminal height
 }
 
 // Sink receives an instance's output and its eventual exit. Both callbacks fire

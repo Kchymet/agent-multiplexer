@@ -7,6 +7,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/wsops"
 )
@@ -136,7 +137,8 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 	}
 	d.killRuntimeFor(id)
 	instance, err := d.engine.Ensure(ctx, engine.Spec{
-		Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env, Argv: argv,
+		Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
+		ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 	})
 	if err != nil {
 		return err

@@ -21,26 +21,20 @@ func hasBind(binds [][]string, src string) bool {
 	return false
 }
 
-// The agent scope must expose the Windows drive on WSL2 so Claude's clipboard
-// interop (invoking a Windows .exe to read the clipboard, e.g. pasting an
-// image) can find and launch it. Without /mnt/c the read fails with "can't
-// find image on clipboard". See configBinds' TabAgent case.
-func TestAgentScopeBindsWindowsDriveForWSLClipboard(t *testing.T) {
-	binds := configBinds(TabAgent, store.Session{Agent: "claude"}, "/home/tester")
-	if !hasBind(binds, "/mnt/c") {
-		t.Errorf("TabAgent scope missing /mnt/c bind (needed for WSL clipboard interop); got %v", binds)
-	}
-	if !hasBind(binds, "/mnt/wsl") {
-		t.Errorf("TabAgent scope missing /mnt/wsl bind; got %v", binds)
-	}
-}
-
-// The terminal tab already bound /mnt/wsl (for the Docker CLI symlink); make
-// sure that stays intact and unaffected by the agent-scope change.
-func TestTerminalScopeStillBindsMntWsl(t *testing.T) {
-	binds := configBinds(TabTerminal, store.Session{Agent: "claude"}, "/home/tester")
-	if !hasBind(binds, "/mnt/wsl") {
-		t.Errorf("TabTerminal scope missing /mnt/wsl bind; got %v", binds)
+// Every tab is callable through the agent-facing pane API. None may silently
+// acquire host operator capabilities such as Windows drives, Docker, or human
+// shell history merely by selecting a different tab number.
+func TestTabsDoNotAcquireHostOperatorCapabilities(t *testing.T) {
+	for _, tab := range []int{TabAgent, TabEditor, TabTerminal} {
+		binds := configBinds(tab, store.Session{Agent: "claude"}, "/home/tester")
+		for _, denied := range []string{
+			"/mnt/c", "/mnt/wsl", "/run/docker.sock",
+			"/home/tester/.zsh_history", "/home/tester/.bash_history",
+		} {
+			if hasBind(binds, denied) {
+				t.Errorf("tab %d acquired host capability %q: %v", tab, denied, binds)
+			}
+		}
 	}
 }
 
@@ -155,7 +149,7 @@ func TestScopeRejectsSharedWritableGitMount(t *testing.T) {
 
 // TestScopeReaches pins the visibility rule doctor uses to tell a $BROWSER (or
 // any third tool) that is hidden by the scope's tmpfs $HOME apart from one that
-// is missing outright: system roots, the WSL interop mounts, and the amux data
+// is missing outright: system roots and the amux data
 // tree are visible; the rest of $HOME and unbound trees like /snap are not.
 func TestScopeReaches(t *testing.T) {
 	const data = "/home/tester/.local/share/amux"
@@ -167,8 +161,8 @@ func TestScopeReaches(t *testing.T) {
 		{"/usr/bin/xdg-open", true},
 		{"/home/linuxbrew/.linuxbrew/bin/browser", true},
 		{"/opt/google/chrome/chrome", true},
-		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", true},
-		{"/mnt/wsl/helper", true},
+		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", false},
+		{"/mnt/wsl/helper", false},
 		{data + "/bin/amux", false},
 		{"/home/tester/.local/bin/open-browser", false}, // $HOME is a tmpfs inside the scope
 		{"/home/tester/bin/firefox", false},
@@ -195,7 +189,7 @@ func TestScopeRootsMatchBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
+	for _, r := range systemRoots {
 		if !strings.Contains(joined, " "+r+" "+r+" ") {
 			t.Errorf("scope does not bind %s, but ScopeReaches reports it visible:\n%s", r, joined)
 		}

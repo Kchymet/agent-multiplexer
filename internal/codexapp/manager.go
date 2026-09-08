@@ -3,6 +3,8 @@ package codexapp
 import (
 	"context"
 	"sync"
+
+	"amux/internal/launchenv"
 )
 
 // manager.go owns the set of live supervisors for the daemon (AGE-181). It is the
@@ -100,6 +102,7 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 		Bin:           m.bin,
 		Dir:           dir,
 		Env:           env,
+		ModelAccess:   launchenv.ForRuntime("codex"),
 		Model:         model,
 		Endpoint:      endpoint,
 		InitialPrompt: initialPrompt,

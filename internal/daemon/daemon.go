@@ -29,6 +29,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
+	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/source"
 	"amux/internal/store"
@@ -687,7 +688,8 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	}
 	inst, err := d.engine.Ensure(ctx, engine.Spec{
 		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
-		Dir: dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
+		Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent),
+		Argv: argv, Cols: a.Cols, Rows: a.Rows,
 	})
 	if err != nil {
 		paneExit(err.Error())
@@ -774,7 +776,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	}
 	inst, err := d.engine.Ensure(ctx, engine.Spec{
 		Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-		Dir: dir, Env: env, Argv: argv,
+		Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 	})
 	if err != nil {
 		return err
