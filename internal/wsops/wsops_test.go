@@ -1220,7 +1220,7 @@ func TestWriteAgentGuide(t *testing.T) {
 		}
 		// Ordinary agents should use the self-scoped agent namespace rather
 		// than reaching for amux's operator-facing control-plane commands.
-		for _, want := range []string{"amux agent --help", "amux agent sessions", "amux agent name <display name>", "amux agent done"} {
+		for _, want := range []string{"amux agent --help", "amux agent events", "amux agent name <display name>", "amux agent done"} {
 			if !strings.Contains(string(b), want) {
 				t.Errorf("kind %q: %s missing agent command guidance %q", tc.kind, tc.file, want)
 			}
