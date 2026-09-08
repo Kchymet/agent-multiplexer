@@ -21,6 +21,11 @@ const (
 	CodexModelAccount
 )
 
+// ToolBinDir is a fresh, read-only namespace directory populated by panespec
+// with the exact running amux executable. It keeps bare `amux` functional
+// without retaining or mounting the host user's ~/.local/bin.
+const ToolBinDir = "/amux-bin"
+
 // ModelCapability is an opaque, daemon-owned grant for exactly one model
 // account. Generic launch overlays cannot add model credentials. The optional
 // explicit values exist for daemon-authorized synthetic endpoints and env-only
@@ -71,6 +76,10 @@ func ForModelEnvironment(account ModelAccount, entries []string) (ModelCapabilit
 var ambientNames = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
 	"LANG": true, "LANGUAGE": true, "TZ": true,
+	"LC_ALL": true, "LC_COLLATE": true, "LC_CTYPE": true, "LC_MESSAGES": true,
+	"LC_MONETARY": true, "LC_NUMERIC": true, "LC_TIME": true,
+	"LC_ADDRESS": true, "LC_IDENTIFICATION": true, "LC_MEASUREMENT": true,
+	"LC_NAME": true, "LC_PAPER": true, "LC_TELEPHONE": true,
 	"TERM": true, "COLORTERM": true, "COLORFGBG": true,
 	"TERM_PROGRAM": true, "TERM_PROGRAM_VERSION": true,
 	"NO_COLOR": true, "FORCE_COLOR": true, "CLICOLOR": true, "CLICOLOR_FORCE": true,
@@ -163,13 +172,13 @@ func executablePath(value string) string {
 		}
 	}
 	if len(kept) == 0 {
-		return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		return ToolBinDir + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	}
-	return strings.Join(kept, string(filepath.ListSeparator))
+	return ToolBinDir + string(filepath.ListSeparator) + strings.Join(kept, string(filepath.ListSeparator))
 }
 
 func allowedAmbient(name string) bool {
-	return ambientNames[name] || strings.HasPrefix(name, "LC_")
+	return ambientNames[name]
 }
 
 func split(entry string) (name, value string, ok bool) {

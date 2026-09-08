@@ -98,6 +98,12 @@ test ! -e /mnt/c
 test ! -e /var/run/docker.sock
 test ! -e "$HOME/.zsh_history"
 test ! -e "$HOME/.bash_history"
+test "$(command -v amux)" = /amux-bin/amux
+test -x /amux-bin/amux
+if mv /amux-bin /amux-bin-hidden 2>/dev/null; then exit 25; fi
+test "$(command -v amux)" = /amux-bin/amux
+amux -test.run='^$' >/dev/null
+"$PANESPEC_TEST_SELF" -test.run='^$' >/dev/null
 test "$(cat /amux-session-access/current)" = credential
 test "$(cat "$PANESPEC_TEST_MAILBOX/service.json")" = service
 echo request > "$PANESPEC_TEST_REQUESTS/request"
@@ -127,6 +133,14 @@ test "$(cat /amux-session-access/current)" = rotated
 	if err != nil {
 		t.Fatal(err)
 	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatal(err)
+	}
 	payloadEnvironment := []string{
 		"PANESPEC_TEST_MAILBOX=" + spec.Access.MailboxMountDir,
 		"PANESPEC_TEST_REQUESTS=" + spec.Access.RequestsMountDir,
@@ -139,6 +153,7 @@ test "$(cat /amux-session-access/current)" = rotated
 		"PANESPEC_TEST_STATE=" + core.StateDir(),
 		"PANESPEC_TEST_SOURCE_PARENT=" + filepath.Dir(spec.Access.MailboxHostDir),
 		"PANESPEC_TEST_CREDENTIAL_SOURCE=" + spec.Access.CredentialHostDir,
+		"PANESPEC_TEST_SELF=" + self,
 	}
 	argv = withPayloadEnvironment(t, argv, payloadEnvironment)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

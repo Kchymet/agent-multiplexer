@@ -23,7 +23,7 @@ func TestAppServerEnvironmentIsSanitizedBeforeExec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"PATH=/usr/bin:/bin", "OPENAI_API_KEY=selected-codex-key", "AMUX_SESSION_ID=subject"} {
+	for _, want := range []string{"PATH=/amux-bin:/usr/bin:/bin", "OPENAI_API_KEY=selected-codex-key", "AMUX_SESSION_ID=subject"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("AppServer environment omitted %q: %v", want, got)
 		}

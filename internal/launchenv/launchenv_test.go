@@ -10,6 +10,7 @@ func TestBuildAllowsOnlyFunctionalAmbientAndExplicitOverlay(t *testing.T) {
 	ambient := []string{
 		"PATH=/usr/bin:/bin", "HOME=/home/test", "LANG=en_US.UTF-8", "LC_TIME=C",
 		"COLORTERM=truecolor", "AWS_ACCESS_KEY_ID=ambient-aws",
+		"LC_SECRET=not-a-locale",
 		"AWS_SECRET_ACCESS_KEY=ambient-secret", "AWS_SESSION_TOKEN=ambient-session",
 		"AZURE_CLIENT_SECRET=ambient-azure", "GOOGLE_API_KEY=ambient-google",
 		"GH_ENTERPRISE_TOKEN=ambient-gh", "GITHUB_ENTERPRISE_TOKEN=ambient-github",
@@ -24,7 +25,7 @@ func TestBuildAllowsOnlyFunctionalAmbientAndExplicitOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"PATH=/usr/bin:/bin", "HOME=/home/test", "LANG=en_US.UTF-8", "LC_TIME=C",
+		"PATH=/amux-bin:/usr/bin:/bin", "HOME=/home/test", "LANG=en_US.UTF-8", "LC_TIME=C",
 		"COLORTERM=truecolor", "AMUX_SESSION_ID=session-1", "AMUX_ROLE=",
 		"CODEX_HOME=/session/.amux/codex", "CLAUDE_CODE_OAUTH_TOKEN=",
 		"TERM=xterm-256color",
@@ -36,7 +37,7 @@ func TestBuildAllowsOnlyFunctionalAmbientAndExplicitOverlay(t *testing.T) {
 	joined := strings.Join(got, "\n")
 	for _, denied := range []string{
 		"AWS_", "AZURE_", "GOOGLE_", "GH_ENTERPRISE_TOKEN=",
-		"GITHUB_ENTERPRISE_TOKEN=", "AMUX_MUX_TOKEN=", "LD_PRELOAD=",
+		"GITHUB_ENTERPRISE_TOKEN=", "AMUX_MUX_TOKEN=", "LD_PRELOAD=", "LC_SECRET=",
 	} {
 		if strings.Contains(joined, denied) {
 			t.Errorf("Build retained denied ambient %q: %v", denied, got)
@@ -146,7 +147,7 @@ func TestBuildDropsUnscopedExecutablePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(got, "PATH=/usr/local/bin:/bin") {
+	if !slices.Contains(got, "PATH=/amux-bin:/usr/local/bin:/bin") {
 		t.Fatalf("sanitized PATH = %v", got)
 	}
 }
