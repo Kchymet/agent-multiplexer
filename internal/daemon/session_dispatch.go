@@ -9,6 +9,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
 )
@@ -30,6 +31,9 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 		return access.ErrDenied
 	}
 	req := call.AccessRequest()
+	if isSessionReport(req) {
+		return r.authorizeSessionReport(ctx, principal, req)
+	}
 	if _, err := canonicalSessionOperation(req); err != nil {
 		return err
 	}
@@ -41,17 +45,23 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return rpcInvalid("invalid_call"), nil
 	}
 	req := request.Call.AccessRequest()
-	action, err := canonicalSessionOperation(req)
-	if err != nil {
-		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
-			return runtimeEventError(err), nil
+	if req.Route == access.RouteAction && req.Verb == sessionreport.Capture {
+		return r.dispatchSessionCapture(ctx, request.Principal, req), nil
+	}
+	var action core.Action
+	if !isSessionReport(req) {
+		var err error
+		action, err = canonicalSessionOperation(req)
+		if err != nil {
+			if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+				return runtimeEventError(err), nil
+			}
+			return rpcInvalid("invalid_operation"), nil
 		}
-		return rpcInvalid("invalid_operation"), nil
+		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+			return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
+		}
 	}
-	if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
-		return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
-	}
-
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
 	r.d.effectMu.Lock()
@@ -60,6 +70,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 
 	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
 		return rpcDenied("credential_invalid"), nil
+	}
+	if isSessionReport(req) {
+		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
 	// Authorize again under the dispatch lock, immediately before the exact
 	// canonical action executes. Membership, grants and archive state are live.

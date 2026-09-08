@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 )
 
@@ -78,6 +79,58 @@ func restrictedQueryRequest(query sessionrpc.Query, dst any) error {
 		return nil
 	}
 	return json.Unmarshal(result.Body, dst)
+}
+
+// restrictedReport publishes one self-only observation through the fixed
+// authenticated session context. The context query and action deliberately use
+// one client: the returned generation is only correlation, while the daemon's
+// final effect gate decides whether that incarnation is still current.
+func restrictedReport(verb string, fields map[string]string) error {
+	if !sessionreport.IsVerb(verb) {
+		return fmt.Errorf("unknown self report %q", verb)
+	}
+	client, err := openRestrictedSessionRPC()
+	if err != nil {
+		return fmt.Errorf("open fixed session report context: %w", err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	contextResult, err := client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
+	if err != nil {
+		return fmt.Errorf("read current report context: %w", err)
+	}
+	var reportContext struct {
+		RuntimeGeneration string `json:"runtime_generation"`
+	}
+	if len(contextResult.Body) == 0 || json.Unmarshal(contextResult.Body, &reportContext) != nil || reportContext.RuntimeGeneration == "" {
+		return fmt.Errorf("read current report context: invalid response")
+	}
+	reportFields := cloneCLIFields(fields)
+	if reportFields == nil {
+		reportFields = make(map[string]string)
+	}
+	reportFields[sessionreport.FieldRuntimeGeneration] = reportContext.RuntimeGeneration
+	result, callErr := client.Action(ctx, sessionrpc.Action{Verb: verb, Fields: reportFields})
+	var response core.Result
+	if len(result.Body) != 0 {
+		if err := json.Unmarshal(result.Body, &response); err != nil {
+			return fmt.Errorf("decode self report response: %w", err)
+		}
+	}
+	if callErr != nil {
+		if response.Error != "" {
+			return fmt.Errorf("%s: %w", response.Error, callErr)
+		}
+		return callErr
+	}
+	if len(result.Body) == 0 || !response.OK {
+		if response.Error == "" {
+			response.Error = "self report returned no successful result"
+		}
+		return fmt.Errorf("%s", response.Error)
+	}
+	return nil
 }
 
 func cloneCLIFields(fields map[string]string) map[string]string {

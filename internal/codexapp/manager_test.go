@@ -39,6 +39,61 @@ func TestManagerEnsureRejectsCancelledLifetimeBeforeStart(t *testing.T) {
 	}
 }
 
+func TestManagerInterruptsInProgressTransportAndRejectsLaterEnsure(t *testing.T) {
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
+	defer cancelLifetime()
+
+	upgraded := make(chan struct{})
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		close(upgraded)
+		// Do not read or answer initialize. Ensure is now blocked in a real RPC
+		// handshake over this manager-owned transport.
+		<-releaseServer
+	}))
+	t.Cleanup(func() {
+		close(releaseServer)
+		server.Close()
+	})
+
+	m := NewManager(lifetime, "")
+	defer m.Shutdown()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	ensureDone := make(chan error, 1)
+	go func() {
+		_, err := m.Ensure(context.Background(), "starting", "", nil, []string{"sleep", "60"}, endpoint, "", "", "")
+		ensureDone <- err
+	}()
+
+	select {
+	case <-upgraded:
+	case err := <-ensureDone:
+		t.Fatalf("Ensure returned before interrupt: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Ensure never attached its transport")
+	}
+
+	m.InterruptTransports()
+	select {
+	case err := <-ensureDone:
+		if err == nil {
+			t.Fatal("interrupted Ensure succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("transport interrupt did not release in-progress Ensure")
+	}
+
+	if _, err := m.Ensure(context.Background(), "after-drain", "", nil, nil, "unix:///unused", "", "", ""); !errors.Is(err, errManagerStopping) {
+		t.Fatalf("Ensure after transport drain = %v, want manager stopping", err)
+	}
+}
+
 // Concurrent starts (creation and native attach) submit once; a daemon restart
 // resumes the persisted identity without replaying the creation prompt.
 func TestManagerInitialPromptOnce(t *testing.T) {

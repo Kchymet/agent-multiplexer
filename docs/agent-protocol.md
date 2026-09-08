@@ -8,10 +8,11 @@ script, a custom agent) can implement.
 
 - **Status:** draft / v0.
 - **Compatibility:** the current `amux hook <state>` behavior is a strict subset
-  of this spec (see [§11 Compatibility](#11-compatibility-with-v0-hooks)). Existing
-  agents keep working unchanged.
+  of this spec (see [§11 Compatibility](#11-compatibility-with-v0-hooks)). Legacy
+  generated commands stay nondisruptive, but isolated sessions need the fixed
+  access context supplied at launch before reports have an effect.
 - **Baseline implementation today:** `internal/core/hookstate.go`,
-  `internal/claudecfg/claudecfg.go`, `cmd/amux/main.go` (`cmdHook`),
+  `internal/claudecfg/claudecfg.go`, `cmd/amux/agent.go`,
   `internal/source/workspace.go`, `internal/daemon`.
 
 ---
@@ -21,9 +22,9 @@ script, a custom agent) can implement.
 1. **Agents push; the harness never scrapes.** Activity is reported explicitly by
    the agent. No transcript/PTY parsing is used to *infer* meaning. (The harness
    independently observes process *liveness*; see §7.)
-2. **Reporting must never disrupt the agent.** A report call always exits `0`,
-   swallows its own errors, requires no live daemon, and writes through an atomic
-   rename. A down harness loses visibility, never correctness.
+2. **Generated reporting must never disrupt the agent.** Hook/status-line forms
+   swallow errors and exit `0`; explicit diagnostic commands preserve errors.
+   Both use bounded authenticated RPC and never regain direct shared-state access.
 3. **Two orthogonal signals, combined by the harness.** *Liveness* (is the process
    running — observed by the harness) gates *activity* (what the agent says it is
    doing — reported by the agent). Liveness always wins: a dead process is `idle`
@@ -44,7 +45,7 @@ script, a custom agent) can implement.
 |---|---|
 | **Agent** | A process doing work in a worktree; the reporter. |
 | **Harness / daemon** | The long-lived process that owns agent processes (the *engine*), polls reports, and broadcasts a `Snapshot` to UIs. |
-| **Session id** | The stable identity an agent reports under. In amux this is the pinned conversation uuid (`store.Session.ClaudeID`), chosen by the harness at launch. |
+| **Session subject/runtime** | The daemon-authoritative amux subject plus its current stored runtime identity. Neither component is selected by report input. |
 | **Rail** | A UI that renders the harness `Snapshot`. A pure consumer; never a party to this protocol. |
 | **Record** | The current reported state for one session (§6). |
 
@@ -52,110 +53,70 @@ script, a custom agent) can implement.
 
 ## 3. Identity & addressing
 
-Every report is made **on behalf of a session id**. An implementation MUST resolve
-the session id in this precedence order, stopping at the first hit:
+Every managed report uses the fixed read-only session access context mounted by
+the harness. Its signed credential identifies exactly one amux subject. The
+daemon resolves that current store row and current live runtime generation, then
+derives the record target from the authoritative subject/runtime pair. Explicit
+IDs, `$AMUX_SESSION_ID`, hook `session_id`, cwd, transcript paths, tmux metadata,
+and report-supplied UUIDs are never identity or storage authority.
 
-1. Explicit `--session <id>` flag (or `session` parameter).
-2. `$AMUX_SESSION_ID` environment variable (the harness SHOULD set this in every
-   agent process it launches).
-3. A field named `session_id` in a JSON object on **stdin** (the Claude Code hook
-   binding; see §11).
-4. The tmux `@amx_ws` window variable, if the agent runs inside an amux-managed
-   tmux window (the path `amux agent name` uses today).
-
-For telemetry reports, if no id resolves the report is a **silent no-op** (exit
-`0`): observability MUST NOT fail the agent merely because identity is unknown.
-The durable terminal control `report_done` uses store identity and fails when it
-cannot identify or archive an agent (§5.9).
-
-> **Planned: authenticated identity.** Today identity is *inferred*, not
-> *authenticated* — any process that can name a session id can report under it.
-> A future revision introduces per-agent identity (authn + authz): the harness
-> issues each agent a scoped credential at launch, and the `amux agent` commands
-> present it so a report can only be made *by* the agent it concerns. The
-> resolution order above is the pre-auth fallback and will remain as the local
-> trusted-path default.
-
-> **Why the harness picks the id.** amux mints the conversation id up front and
-> pins it onto the agent (`--resume`/`--session-id`), so reports written under that
-> id join cleanly to the store row without a registration handshake. Records whose
-> id matches no known session are surfaced as **untracked** rows rather than
-> dropped.
+Generated telemetry hooks are silent on missing/invalid context so observability
+cannot interrupt the runtime; explicit report commands return an error. Legacy
+UUID-only files and untracked host diagnostics remain preserved, but are outside
+the managed self-report authorization path.
 
 ---
 
 ## 4. Transport bindings
 
-The protocol defines one logical API (§5) with three interchangeable bindings.
-An agent runtime implements **whichever is convenient**; the harness MUST accept
-all three writing to the same record.
+Managed self-report has one authority-bearing binding: signed regular-file RPC
+through the fixed session access context. Legacy files remain diagnostics, not
+an interchangeable write path.
 
 ### 4a. CLI binding (normative, primary)
 
 The agent invokes the `amux` binary as a subprocess:
 
 ```
-amux agent <verb> [args...] [--session <id>] [--detail <text>]
+amux agent <verb> [args...]
 ```
 
-This is the lowest-common-denominator binding: any runtime that can spawn a
-process can report, including via shell hooks. The CLI resolves identity (§3),
-applies the update, and exits `0`. It is the binding shell hooks and
-language-agnostic agents should use.
+The CLI opens only the fixed context, queries the daemon's current opaque runtime
+generation, and submits a signed bounded report. Generated hooks exit `0` after
+one best-effort attempt; explicit invocations report errors.
 
-### 4b. File binding (normative, underlying contract)
+### 4b. Legacy files (diagnostic only)
 
-The CLI binding is sugar over a file write that other tools MAY perform directly.
+v0 UUID-only files under `hooks/`, `models/`, `permissions/`, and transcript
+backups are preserved for host diagnostics. Namespace-isolated sessions do not
+see those roots, and direct file writes are not a managed self-report binding.
+Daemon-owned managed records are keyed by authoritative subject plus runtime.
 
-- **Location:** `<StateDir>/reports/<sanitized-session-id>`, where `<StateDir>` is
-  `core.StateDir()` (today `~/.local/state/amux`). One file per session; no
-  extension; `sanitizeID` maps any char outside `[A-Za-z0-9-_]` to `_`.
-- **Format:** the JSON Record (§6), UTF-8.
-- **Write discipline:** **read-modify-write merge** — read the existing record,
-  overlay only the channels this update touches, set `updated`, then write
-  `<path>.tmp` and `os.Rename` over the target. Atomic rename guarantees readers
-  never see a torn file.
-- **Concurrency:** the sole writer is the agent (its own report calls, which are
-  short and serialized in practice); readers are the harness poll loop. Rename
-  atomicity is sufficient; no lock is required. If an implementation issues
-  concurrent reports, it SHOULD serialize them.
+### 4c. Host control socket
 
-> v0 used `…/hooks/<id>`; v1 uses `…/reports/<id>`. A v1 harness MUST read both
-> directories and merge, preferring the newer `updated`. See §11.
-
-### 4c. Socket binding (normative, for live connections)
-
-When a live daemon connection already exists, an agent (or a tool acting for it)
-MAY report over the control socket instead of the filesystem, using a `report`
-action on the existing newline-delimited-JSON envelope (§9):
-
-```json
-{"action":"report","id":"<session-id>","fields":{"status":"running","topic":"wiring oauth"}}
-```
-
-The daemon applies it to the same record as the file binding. This binding
-requires a running daemon and so is **not** suitable for the
-"must-never-disrupt" hot path; prefer 4a/4b for status from inside the agent.
+The ordinary daemon socket is a trusted host management surface, not a fallback
+for isolated self-report. A session report never dials it, starts a daemon, or
+uses caller-supplied `id` to select a record.
 
 ---
 
 ## 5. The reporting API (agent → harness)
 
-Language-neutral function surface. Each maps to a CLI verb (4a) and a Record
-channel (4b/§6). Telemetry functions are **idempotent** and **best-effort**
-(return void; never throw to the caller). The durable `report_done` control is
-idempotent but returns failure unless the requested archive is confirmed (§5.9).
+Language-neutral function surface. Generated telemetry bindings are
+**best-effort**; explicit CLI diagnostics preserve failures. The durable
+`report_done` control returns failure unless archive is confirmed (§5.9).
+Only state reporting, label/name, model/capture/permission diagnostics, and
+`done` are shipped today; the other channels below remain additive proposals and
+do not authorize a generic caller-defined report map.
 
 ### 5.1 `report_status(state, detail?)`
 
 Set the agent's lifecycle/activity state.
 
-- **CLI:** `amux agent status <state> [--detail <text>]`
-- **Channel:** `state` (+ optional `detail`)
-- **`state` ∈** the enum in §8. Unknown values are stored verbatim but rendered as
-  `unknown` by conformant harnesses.
-- **`detail`** is a short free-text qualifier (e.g. `"running tests"`); advisory,
-  rail MAY show it after the state.
+- **CLI:** `amux agent status <state>`
+- **Channel:** `state`
+- **`state` ∈** the enum in §8. Unknown values are rejected.
+- A richer `detail` qualifier remains a future additive channel.
 - **Idempotency:** re-reporting the same state only refreshes `updated`.
 
 ### 5.2 `set_label(text)`
@@ -216,9 +177,8 @@ Attach arbitrary structured key/values (branch, test counts, cost, queue depth�
 Append an **ephemeral** activity-log line (not retained state).
 
 - **CLI:** `amux agent event <message> [--level info|warn|error]`
-- **Transport:** SHOULD use the socket binding (4c) when available, since events
-  are a stream, not state. Over the file binding an implementation MAY keep a
-  small bounded ring in the record under `events`; harnesses MAY ignore it.
+- **Transport:** a future implementation must use a bounded authenticated report
+  operation. The host management socket and direct legacy files are not fallbacks.
 - Events are advisory and lossy by design; never use them to convey state that a
   channel above can hold.
 
@@ -241,11 +201,9 @@ its artifact calls this to retire itself from the active rail.
 - **Effect:** archives the agent's own session — it drops off the active rail into
   the ARCHIVED section (§SectionArchived). Reversible: it hides the row, it does
   **not** delete the worktree or branch (`amux workgroup unarchive <id>` restores it).
-- **Identity:** unlike the activity verbs, `done` acts on the *store* session id
-  (the id the archive/rename control actions take), which the harness sets on every
-  launched agent as `$AMUX_WORKGROUP`. Precedence: `--id <id>`, then
-  `$AMUX_WORKGROUP`, then its legacy `$AMUX_WORKSPACE` alias. When none resolves
-  the call fails nonzero because no agent was identified or archived.
+- **Identity:** unlike the activity verbs, `done` acts on the authenticated
+  principal's *store* subject (the id archive/rename actions take). It accepts no
+  `--id` or environment identity. Missing fixed context fails nonzero.
 - **Bridges the two planes (like §5.2 `set_label`).** `done` is reported through
   the control plane (the `set-archived` action, §9) because archival is durable
   store state the harness owns, not a volatile activity channel. It exits `0`
@@ -265,12 +223,15 @@ its artifact calls this to retire itself from the active rail.
 ## 6. Record schema (wire format)
 
 One JSON object per session, a backward-compatible superset of today's
-`HookRecord`. All fields except `updated` are optional; absent channels are simply
-not set.
+`HookRecord`. Managed records additionally bind `subject_id` and `runtime_id` to
+their daemon-derived storage tuple. All fields except `updated` are optional;
+absent channels are simply not set.
 
 ```jsonc
 {
   "protocol": 1,                       // omitted ⇒ treat as v0 legacy record
+  "subject_id":"agent-a",             // daemon-derived for managed records
+  "runtime_id":"conversation-1",      // daemon-derived for managed records
   "state":    "running",               // §8 enum  (v0: the only field besides cwd/updated)
   "detail":   "running tests",         // optional qualifier for state
   "label":    "auth spike",            // §5.2 display name
@@ -278,7 +239,7 @@ not set.
   "progress": { "value": 3, "total": 7, "detail": "file 3/7" },
   "attention":{ "reason": "permission: write outside cwd", "since": 1730000000000 },
   "fields":   { "git.branch": "feat/oauth", "tests.passed": "12/12" },
-  "cwd":      "/home/u/.../worktree",  // the session's working directory
+  "cwd":      "/home/u/.../worktree",  // daemon-derived session directory
   "updated":  1730000000123            // unix millis of the last report (REQUIRED)
 }
 ```
@@ -296,7 +257,9 @@ Field reference:
 | `attention` | object | 5.5 | `{reason:string, since:int}`. |
 | `fields` | object | 5.6 | string→string. |
 | `events` | array | 5.7 | Optional bounded ring; harness MAY ignore. |
-| `cwd` | string | — | Working directory; harness may use for grouping. |
+| `subject_id` | string | — | Authoritative managed subject; never report-selected. |
+| `runtime_id` | string | — | Authoritative stored runtime identity; never report-selected. |
+| `cwd` | string | — | Daemon-derived working directory; harness may use for grouping. |
 | `updated` | int | — | **Required.** Unix millis; freshness/ordering key. |
 
 ---
@@ -324,8 +287,9 @@ A conformant harness MUST:
    `unknown` (not trusted, but not dead). For a session with no liveness signal at
    all, staleness ⇒ treat as `idle`. Heartbeats (§5.8) and liveness both reset
    staleness.
-4. **Join records to sessions by id**, and surface records whose id matches no
-   known session as **untracked** rows (do not drop them).
+4. **Join managed records by subject/runtime**, and surface preserved legacy
+   UUID-only records separately as **untracked** diagnostics (do not let them
+   override a managed row).
 5. **Project channels to the Snapshot.** Map `label → Session.Title`,
    `state → Session.State`, and compose a human `Session.Status` (e.g.
    `"waiting · permission"` from `state` + `attention.reason` or `topic`).
@@ -334,8 +298,8 @@ A conformant harness MUST:
 6. **Broadcast** the resulting `Snapshot` to subscribed UIs (one JSON object per
    line over the control socket). The harness is the only writer of `Snapshot`.
 
-A harness MUST NOT require an agent to be reachable to report (file binding), and
-MUST NOT parse agent output to derive any channel.
+A harness MUST NOT parse agent output to derive a channel. It may independently
+observe liveness but applies report effects only after authenticated admission.
 
 ---
 
@@ -384,27 +348,26 @@ Request envelope (`core.Action`) and response (`core.Result`):
 Actions relevant to an agent's lifecycle (existing): `open`/`attach`, `delete`/
 `kill`, `move`, `archive`, `rename`, `new-repo-agent`, `add-agent`, `add-repo`,
 `new-workgroup`, plus the `pane.*` streaming verbs (attach/detach a live terminal
-without killing the agent). This spec adds `report` (§4c) as an action so a live
-client can push channels over the same socket.
+without killing the agent). Self-report verbs are a separate closed session-RPC
+namespace and are not added to this host action vocabulary.
 
-> The control plane and the reporting plane are deliberately separate: reporting is
-> connectionless and unkillable (file binding), while control is connection-oriented
-> (socket, request/response). `set_label` (§5.2) is the one channel that bridges
-> them — a reported `label` is equivalent to a `rename` action and SHOULD be
-> persisted the same way.
+> The control plane and reporting plane are deliberately separate. Both are
+> request/response, but session RPC authenticates one fixed subject and admits only
+> its bounded vocabulary; the host socket retains broader management authority.
 
 ---
 
 ## 10. Conformance
 
-**Agent (reporter) — MUST:** resolve identity per §3; exit `0` and never throw from
-any report; write via atomic rename with read-modify-write merge (file binding) so
-channels are independent; stamp `updated`. **SHOULD:** emit the §8 lifecycle
-mapping; set `$AMUX_SESSION_ID`-derived identity when launched by the harness.
+**Agent (reporter) — MUST:** use only the fixed authenticated context in §3 and
+never select a record path or subject; generated hooks exit `0`, while explicit
+commands preserve errors. **SHOULD:** emit the §8 lifecycle mapping.
 
 **Harness (consumer) — MUST:** observe liveness independently and gate per §7; age
-out stale records; join by id and surface untracked; project channels to `Snapshot`
-without parsing agent output; read both `reports/` and legacy `hooks/` (§11).
+out stale records; join managed records by authoritative subject/runtime; project
+channels to `Snapshot` without parsing agent output. Legacy UUID-only records may
+be surfaced separately as untracked host diagnostics but never override managed
+state.
 **SHOULD:** persist `label` durably; expose a TTL knob.
 
 A minimal conformant agent implements only `report_status` (= today's behavior).
@@ -417,20 +380,27 @@ Everything else is additive.
 The shipped mechanism is exactly the `state`-only profile of this protocol:
 
 - The `amux agent` namespace is in place. `amux agent hook <state>` is the
-  Claude-settings binding (identity from stdin `session_id`, §3 rule 3);
-  `amux agent status <state>` is the general verb; both write the same record.
+  nondisruptive Claude-settings binding; `amux agent status <state>` is the
+  explicit error-reporting form. Both use the fixed authenticated session
+  context. Stdin `session_id`, environment IDs, and paths are ignored for
+  authority and storage selection.
 - The pre-namespace top-level `amux hook <state>` and `amux name <text>` remain as
   deprecated aliases, so already-installed Claude settings keep working until the
   next `InstallHooks` run migrates them to the `amux agent hook` form.
 - The legacy `HookRecord` (`{state, cwd, updated}`) is a valid v1 Record with
   `protocol` absent — readers MUST treat a missing `protocol` as v0 and a bare
   state-word file as `{state}` (the existing tolerant reader).
-- Claude Code keeps writing via its installed `SessionStart/UserPromptSubmit/
+- Claude Code keeps reporting via its installed `SessionStart/UserPromptSubmit/
   Notification/Stop/SessionEnd → amux agent hook <state>` hooks
-  (`claudecfg.InstallHooks`). A v1 harness reading both directories sees these
-  unchanged.
+  (`claudecfg.InstallHooks`). Generated commands stay nondisruptive, while their
+  effect now requires the fixed authenticated session context.
 
-Migration is therefore non-breaking: the `amux agent` namespace ships first (done),
+Legacy UUID-only files remain preserved as host diagnostics, but managed readers
+use daemon-owned subject/runtime-scoped records. A new binary in an old namespace
+cannot restore the hidden shared-state mount: explicit reports fail and generated
+hooks exit zero until the session is relaunched with fixed session access.
+
+Migration is therefore fail closed: the `amux agent` namespace ships first (done),
 the merged reader and richer channels (`topic`/`progress`/`attention`/`fields`)
 follow, and the top-level `amux hook`/`amux name` aliases stay until callers move
 over.
@@ -442,7 +412,7 @@ over.
 A test-runner agent, from launch to blocked-on-permission:
 
 ```sh
-# harness launches it with AMUX_SESSION_ID=7f3a… in the env
+# harness launches it with a fixed authenticated session access context
 amux agent status ready
 amux agent label "ci triage"
 amux agent status running

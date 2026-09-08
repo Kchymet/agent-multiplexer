@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -37,12 +38,57 @@ import (
 //	wss://host:port      WebSocket over TLS (cross-machine). Verification is never
 //	                     downgraded.
 type wsConn struct {
-	c *websocket.Conn
+	c         *websocket.Conn
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// WriteMessage sends one JSON-RPC object as a WebSocket TEXT frame.
-func (w *wsConn) WriteMessage(b []byte) error {
-	return w.c.WriteMessage(websocket.TextMessage, b)
+// WriteMessage sends one JSON-RPC object as a WebSocket TEXT frame. Cancellation
+// closes the socket to interrupt a write already blocked in the kernel. The
+// callback is unregistered or joined before this method returns; no I/O goroutine
+// is abandoned. Gorilla connections are not reusable after any write failure.
+func (w *wsConn) WriteMessage(ctx context.Context, b []byte) error {
+	writeCtx, cancel := context.WithTimeout(ctx, maxMessageWriteLifetime)
+	defer cancel()
+
+	deadline, _ := writeCtx.Deadline()
+	if err := w.c.SetWriteDeadline(deadline); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := writeCtx.Err(); err != nil {
+		_ = w.Close()
+		return err
+	}
+
+	interrupted := make(chan struct{})
+	stopInterrupt := context.AfterFunc(writeCtx, func() {
+		_ = w.Close()
+		close(interrupted)
+	})
+	err := w.c.WriteMessage(websocket.TextMessage, b)
+	if !stopInterrupt() {
+		<-interrupted
+	}
+	if ctxErr := writeCtx.Err(); ctxErr != nil {
+		_ = w.Close()
+		return ctxErr
+	}
+	if err != nil {
+		_ = w.Close()
+		// The socket deadline can report its timeout just before the context's
+		// timer goroutine publishes Done. Preserve context deadline semantics for
+		// callers when that shared deadline has already elapsed.
+		if !time.Now().Before(deadline) {
+			return context.DeadlineExceeded
+		}
+		return err
+	}
+	if err := w.c.SetWriteDeadline(time.Time{}); err != nil {
+		_ = w.Close()
+		return err
+	}
+	return nil
 }
 
 // ReadMessage returns the next WebSocket message payload (text or binary).
@@ -51,7 +97,10 @@ func (w *wsConn) ReadMessage() ([]byte, error) {
 	return b, err
 }
 
-func (w *wsConn) Close() error { return w.c.Close() }
+func (w *wsConn) Close() error {
+	w.closeOnce.Do(func() { w.closeErr = w.c.Close() })
+	return w.closeErr
+}
 
 // dialWS connects to endpoint, completes the WebSocket handshake, and returns a
 // msgConn. It omits the Origin header by default (see the package note); a

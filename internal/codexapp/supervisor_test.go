@@ -63,6 +63,20 @@ func attach(t *testing.T, sup *Supervisor, client msgConn) {
 	}
 }
 
+func TestStartRejectsTransportInterruptBeforeProcessLaunch(t *testing.T) {
+	sup := New(Config{SessionID: "pre-interrupted", Endpoint: "unix:///unused"})
+	sup.interruptTransport()
+	if err := sup.Start(context.Background(), []string{"sleep", "60"}); err != errClosed {
+		t.Fatalf("Start after transport interrupt = %v, want %v", err, errClosed)
+	}
+	sup.mu.Lock()
+	proc := sup.proc
+	sup.mu.Unlock()
+	if proc != nil {
+		t.Fatal("pre-interrupted supervisor launched a process")
+	}
+}
+
 func TestHandshakeStart(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()

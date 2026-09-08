@@ -56,9 +56,9 @@ func convID(agentID string) string { return "conv-" + agentID }
 // markBusy writes the hook record Claude's harness reads for its turn state, so a
 // test can put a session mid-turn — the condition `stop` requires before it will
 // send Claude Code's Ctrl+C.
-func markBusy(t *testing.T, convID string) {
+func markBusy(t *testing.T, subjectID string) {
 	t.Helper()
-	if err := core.WriteHookState(convID, core.StateRunning, ""); err != nil {
+	if err := core.WriteSessionHookState(subjectID, convID(subjectID), core.StateRunning, ""); err != nil {
 		t.Fatalf("write hook state: %v", err)
 	}
 }
@@ -255,6 +255,7 @@ func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T
 func TestStartAgentPublishesReplacementGenerationAtomically(t *testing.T) {
 	isolateHome(t)
 	d := New("", nil, time.Hour)
+	d.permissionBaseline = func(string) ([]string, error) { return nil, nil }
 	eng := newFakeEngine()
 	d.engine = eng
 	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
@@ -428,12 +429,6 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 			"\x1b[200~skip the flaky one\x1b[201~\r"},
 		{"claude stop", "claude",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x03"},
-		{"claude allow", "claude",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow, core.SteerRequestID: "perm-1"},
-			"\r"},
-		{"claude deny", "claude",
-			map[string]string{core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny, core.SteerRequestID: "perm-1"},
-			"\x1b"},
 		{"codex prompt", "codex",
 			map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "hi"}, "hi\r"},
 		{"codex stop", "codex",
@@ -444,24 +439,10 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 			d, eng := steerDaemon(t)
 			putSession(t, "a1", tc.kind)
 			in := eng.running("a1")
-			if tc.fields[core.SteerVerb] == core.SteerPermission {
-				generation, err := d.permissions.observe("a1", in)
-				if err != nil {
-					t.Fatal(err)
-				}
-				tc.fields[access.RuntimeGenerationField] = generation
-				if err := core.AppendPermission(convID("a1"), core.PermissionRecord{RequestID: "perm-1", Tool: "Bash", Action: "test"}); err != nil {
-					t.Fatal(err)
-				}
-				bound, err := d.bindPermissionRequest("a1", "perm-1")
-				if err != nil || bound != generation {
-					t.Fatalf("bind live permission = %q, %v; want %q", bound, err, generation)
-				}
-			}
 			// `stop` only fires mid-turn for a harness whose interrupt key is unsafe
 			// at an idle prompt, so put the session in a turn.
 			if tc.fields[core.SteerVerb] == core.SteerStop {
-				markBusy(t, convID("a1"))
+				markBusy(t, "a1")
 			}
 
 			if err := d.steer(context.Background(), core.Action{
@@ -476,12 +457,10 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 	}
 }
 
-// TestSteerPermissionCorrelatesRequestID is the guarantee the request_id exists
-// for: a `permission` verb naming a prompt the runtime no longer has open is
-// refused, rather than having its allow/deny keystroke land on whatever prompt
-// happens to be up now. Without it a decision races the turn — the orchestrator
-// approves a `git push` and the keystroke approves the `rm -rf` that replaced it.
-func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
+// TestClaudePermissionObservationsCannotDriveThePane pins the fail-closed
+// compatibility boundary: even a legacy journal row plus a current generation
+// cannot turn session-controlled Claude telemetry into an answerable prompt.
+func TestClaudePermissionObservationsCannotDriveThePane(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
 	in := eng.running("a1")
@@ -490,84 +469,36 @@ func TestSteerPermissionCorrelatesRequestID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	allow := func(requestID string) error {
-		return d.steer(context.Background(), core.Action{
-			Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
-				core.SteerVerb:                core.SteerPermission,
-				core.SteerDecision:            core.SteerAllow,
-				core.SteerRequestID:           requestID,
-				access.RuntimeGenerationField: generation,
-			},
-		})
+	if err := core.AppendPermission(convID("a1"), core.PermissionRecord{RequestID: "reported", Tool: "Bash"}); err != nil {
+		t.Fatal(err)
 	}
-	openRequest := func(id, tool string) {
-		t.Helper()
-		if err := core.AppendPermission(convID("a1"), core.PermissionRecord{
-			RequestID: id, Tool: tool, Action: tool + " something",
-		}); err != nil {
-			t.Fatal(err)
-		}
-		bound, err := d.bindPermissionRequest("a1", id)
-		if err != nil || bound != generation {
-			t.Fatalf("bind live permission = %q, %v; want %q", bound, err, generation)
-		}
+	if _, err := d.bindPermissionRequest("a1", "reported"); err == nil {
+		t.Fatal("session-controlled Claude journal acquired an answerable binding")
 	}
-
-	// Nothing open at all: refused, and nothing reaches the pane.
-	err = allow("perm-gone")
-	if err == nil || !strings.Contains(err.Error(), `no pending request "perm-gone"`) {
-		t.Fatalf("stale id with no prompt open: err = %v, want a no-pending-request refusal", err)
-	}
-	if !strings.Contains(err.Error(), "no prompt open") {
-		t.Errorf("refusal %q should say the runtime has no prompt open", err)
-	}
-	if got := in.written(); got != "" {
-		t.Fatalf("a refused verb wrote %q to the pane", got)
-	}
-
-	// A different prompt is open: still refused, and the error names what is.
-	openRequest("perm-1", "Bash")
-	err = allow("perm-gone")
-	if err == nil || !strings.Contains(err.Error(), "waiting on perm-1") {
-		t.Fatalf("stale id while perm-1 is open: err = %v, want it to name perm-1", err)
-	}
-	if got := in.written(); got != "" {
-		t.Fatalf("a refused verb wrote %q to the pane", got)
-	}
-
-	// The id that is actually open is delivered.
-	if err := allow("perm-1"); err != nil {
-		t.Fatalf("matching id: %v", err)
-	}
-	if got := in.written(); got != "\r" {
-		t.Fatalf("pane received %q, want the allow keystroke", got)
-	}
-
-	// Once the prompt is answered its id is retired: the same verb replayed (a
-	// duplicate delivery, a slow orchestrator) must not answer the next prompt.
-	if _, ok := core.ResolvePermission(convID("a1"), "Bash", core.PermissionAllow); !ok {
-		t.Fatal("resolving the open request should have succeeded")
-	}
-	openRequest("perm-2", "Write")
-	if err := allow("perm-1"); err == nil || !strings.Contains(err.Error(), "waiting on perm-2") {
-		t.Fatalf("replayed id after resolution: err = %v, want a refusal naming perm-2", err)
-	}
-	if got := in.written(); got != "\r" {
-		t.Fatalf("pane received %q: the replay must not have been delivered", got)
-	}
-
-	// Empty request IDs are no longer a compatibility escape hatch: every role
-	// must name the exact live request and runtime generation.
-	if err := d.steer(context.Background(), core.Action{
+	err = d.steer(context.Background(), core.Action{
 		Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
-			core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerDeny,
+			core.SteerVerb: core.SteerPermission, core.SteerDecision: core.SteerAllow,
+			core.SteerRequestID:           "reported",
 			access.RuntimeGenerationField: generation,
 		},
-	}); err == nil || !strings.Contains(err.Error(), "request_id is required") {
-		t.Fatalf("empty request_id = %v", err)
+	})
+	if err == nil || !strings.Contains(err.Error(), `no pending request "reported"`) {
+		t.Fatalf("Claude self observation permission = %v", err)
 	}
+	if got := in.written(); got != "" {
+		t.Fatalf("nonanswerable Claude observation wrote %q to pane", got)
+	}
+}
+
+// TestAttachedPaneStillDeliversManualClaudePermissionKey distinguishes the
+// disabled remote permission verb from ordinary trusted-host pane interaction.
+// A human attached to the pane can still press Claude's real prompt keys.
+func TestAttachedPaneStillDeliversManualClaudePermissionKey(t *testing.T) {
+	in := &fakeInstance{}
+	client := &connState{panes: map[string]paneRoute{"pane": {inst: in}}}
+	client.paneInput("pane", []byte("\r"))
 	if got := in.written(); got != "\r" {
-		t.Fatalf("pane received %q, want only the correlated allow", got)
+		t.Fatalf("attached pane input = %q, want manual Enter", got)
 	}
 }
 
@@ -648,7 +579,7 @@ func TestStopRefusesAnIdleClaude(t *testing.T) {
 	}
 
 	// Mid-turn the same verb goes through.
-	markBusy(t, convID("a1"))
+	markBusy(t, "a1")
 	if err := d.steer(context.Background(), core.Action{
 		Action: core.ActionSteer, ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerStop},
 	}); err != nil {

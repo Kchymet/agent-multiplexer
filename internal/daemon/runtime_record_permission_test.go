@@ -3,13 +3,14 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"amux/internal/core"
 	"amux/internal/runtimeevents"
-	"amux/internal/store"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -19,23 +20,12 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
 
-	db, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := filepath.Join(home, "session")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PutSession(store.Session{ID: "a1", RootID: "wg", Agent: "claude", Dir: dir,
-		ClaudeID: "33333333-3333-4333-8333-333333333333"}); err != nil {
-		t.Fatal(err)
-	}
-	rec, err := (&Daemon{permissions: newRuntimePermissionGate()}).runtimeRecord(db, "a1")
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	rec := core.RuntimeRecord{Runtime: "claude", Path: filepath.Join(dir, "transcript.jsonl"),
+		Permissions: filepath.Join(dir, "authoritative-permissions.jsonl")}
 	if err := os.MkdirAll(filepath.Dir(rec.Permissions), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -56,61 +46,72 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 
 	appendRequest("historical")
 	d := New("", nil, time.Hour)
+	d.permissionBaseline = func(string) ([]string, error) {
+		open := runtimeevents.OpenPermissions(runtimeEventRecord(rec))
+		ids := make([]string, 0, len(open))
+		for _, pending := range open {
+			ids = append(ids, pending.RequestID)
+		}
+		return ids, nil
+	}
+	var currentRuntime *fakeInstance
+	record := func() core.RuntimeRecord {
+		out := rec
+		out.PermissionBindings = make(map[string]string)
+		open := runtimeevents.OpenPermissions(runtimeEventRecord(rec))
+		for _, pending := range open {
+			pending := pending
+			generation, err := d.permissions.bindRequest("a1", pending.RequestID, currentRuntime, func() error {
+				for _, candidate := range runtimeevents.OpenPermissions(runtimeEventRecord(rec)) {
+					if candidate.Occurrence == pending.Occurrence {
+						return nil
+					}
+				}
+				return fmt.Errorf("permission occurrence closed")
+			})
+			if err == nil && generation != "" {
+				out.PermissionBindings[pending.Occurrence] = generation
+			}
+		}
+		return out
+	}
 	eng := newFakeEngine()
 	d.engine = eng
 	firstRuntime := eng.running("a1")
+	currentRuntime = firstRuntime
 	_, firstGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
 		return firstRuntime, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, _ = store.Open()
-	first, err := d.runtimeRecord(db, "a1")
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := record()
 	if len(first.PermissionBindings) != 0 {
 		t.Fatalf("historical request rebound to first runtime: %v", first.PermissionBindings)
 	}
 
 	appendRequest("live-first")
-	db, _ = store.Open()
-	first, err = d.runtimeRecord(db, "a1")
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	first = record()
 	if len(first.PermissionBindings) != 1 || onlyBinding(first.PermissionBindings) != firstGeneration {
 		t.Fatalf("first runtime bindings = %v", first.PermissionBindings)
 	}
 
 	d.permissions.retireAnd("a1", func() { eng.Kill(firstRuntime.Key()) })
 	secondRuntime := eng.running("a1")
+	currentRuntime = secondRuntime
 	_, secondGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
 		return secondRuntime, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, _ = store.Open()
-	restarted, err := d.runtimeRecord(db, "a1")
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	restarted := record()
 	if len(restarted.PermissionBindings) != 0 {
 		t.Fatalf("restart rebound unresolved history: %v", restarted.PermissionBindings)
 	}
 
 	appendRequest("live-second")
-	db, _ = store.Open()
-	restarted, err = d.runtimeRecord(db, "a1")
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	restarted = record()
 	if len(restarted.PermissionBindings) != 1 || onlyBinding(restarted.PermissionBindings) != secondGeneration {
 		t.Fatalf("second runtime bindings = %v", restarted.PermissionBindings)
 	}
@@ -121,18 +122,7 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stream := runtimeevents.Stream(func(id string) (runtimeevents.Record, bool) {
-		db, err := store.Open()
-		if err != nil {
-			t.Errorf("open store from stream resolver: %v", err)
-			return runtimeevents.Record{}, false
-		}
-		defer db.Close()
-		current, err := d.runtimeRecord(db, id)
-		if err != nil {
-			t.Errorf("resolve runtime record from stream: %v", err)
-			return runtimeevents.Record{}, false
-		}
-		return runtimeEventRecord(current), true
+		return runtimeEventRecord(record()), id == "a1"
 	}, time.Millisecond)
 	ch, ok := stream(ctx, "a1", 0)
 	if !ok {
@@ -208,6 +198,7 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	delete(eng.insts, secondRuntime.Key())
 	eng.mu.Unlock()
 	thirdRuntime := eng.running("a1")
+	currentRuntime = thirdRuntime
 	_, thirdGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
 		return thirdRuntime, nil
 	})
@@ -229,29 +220,13 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 		}
 	}
 	appendRequest("live-second")
-	db, _ = store.Open()
-	reused, err := d.runtimeRecord(db, "a1")
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
+	reused := record()
 	if len(reused.PermissionBindings) != 1 || onlyBinding(reused.PermissionBindings) != thirdGeneration {
 		t.Fatalf("reused-id runtime bindings = %v", reused.PermissionBindings)
 	}
 	replayCtx, replayCancel := context.WithCancel(context.Background())
 	replay := runtimeevents.Stream(func(id string) (runtimeevents.Record, bool) {
-		db, err := store.Open()
-		if err != nil {
-			t.Errorf("open replay store: %v", err)
-			return runtimeevents.Record{}, false
-		}
-		defer db.Close()
-		current, err := d.runtimeRecord(db, id)
-		if err != nil {
-			t.Errorf("resolve reused-id runtime record: %v", err)
-			return runtimeevents.Record{}, false
-		}
-		return runtimeEventRecord(current), true
+		return runtimeEventRecord(record()), id == "a1"
 	}, time.Millisecond)
 	replayCh, ok := replay(replayCtx, "a1", 0)
 	if !ok {

@@ -603,18 +603,19 @@ func AgentWorkdir(s store.Session) string {
 	return s.Dir
 }
 
-// resumeCwds lists the working directories a Claude transcript for this agent
-// could live under, so resume detection isn't fooled by amux having changed its
-// workdir convention over time. The current launch dir — the agent's own root
-// dir (s.Dir) — comes first, preferred on a tie; then the per-repo worktree that
-// single-repo agents launched in under the older convention.
-func resumeCwds(s store.Session) []string {
+// AcceptedLaunchCwds lists the store-authoritative working directories a Claude
+// transcript for this agent could live under. It is also the complete source
+// search boundary for daemon-owned capture: callers must not add a reported cwd,
+// UUID-selected directory, or user-home fallback.
+func AcceptedLaunchCwds(s store.Session) []string {
 	cwds := []string{s.Dir}
 	if wd := AgentWorkdir(s); wd != s.Dir {
 		cwds = append(cwds, wd)
 	}
 	return cwds
 }
+
+func resumeCwds(s store.Session) []string { return AcceptedLaunchCwds(s) }
 
 // agentScope returns the scope ("work"|"repo") of an agent's workgroup root, or
 // "" if it can't be resolved (best-effort, for the AMUX_SCOPE hint).

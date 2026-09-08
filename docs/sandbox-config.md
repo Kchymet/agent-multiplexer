@@ -92,9 +92,9 @@ AMUX_CLAUDE_AUTH_SMOKE=1 go test ./internal/claudecfg -run TestClaudeSharedAuthS
 ```
 
 This checks credential-store selection, not a real server-side token rotation.
-The sandbox never mounts the amux data or auth root. It mounts only a Claude
-pane's exact selected store, so adding another harness's auth store does not
-expose it through a shared ancestor.
+The sandbox masks the auth root in every pane and mounts only a Claude pane's
+selected store, so adding another harness's auth store does not expose it through
+the otherwise-readable amux data tree.
 
 ### Git writes from Codex
 
@@ -198,9 +198,9 @@ MCP definitions, use `amux sandbox reset <id> config.toml` (this resets the whol
 config file). For a detached MCP credential, use
 `amux sandbox reset <id> .credentials.json`. Relaunch the agent after either reset.
 Existing private lock directories are overlaid with the shared directory inside
-the sandbox. Protected launches refuse a disabled or unsupported namespace
-rather than forwarding session credentials to a host-visible process; newly
-seeded homes link to the shared lock directory directly.
+the sandbox. When running with the amux sandbox disabled, an existing private
+lock directory must be reconciled before concurrent OAuth refreshes can share
+locks; newly seeded homes link to the shared lock directory directly.
 
 Two files get a small transform on the way in. `settings.json` has absolute
 references to the template dir rewritten to the copy, so a status-line script or

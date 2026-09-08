@@ -107,6 +107,10 @@ control support from the mere existence of a transcript:
     `request_id` the `permission` verb can quote back and the daemon can match to
     an open prompt (§3.1, §4.5). A runtime that streams a transcript but records
     no answerable prompt reports `permission:false`.
+    Claude PTY currently reports `permission:false`: its hooks are
+    session-controlled observations, not runtime-native proof of a prompt.
+    Codex structured control remains answerable through supervisor-owned
+    approvals.
 
 ### 2.2 Default sessions: the console, a workgroup's coordinator, a repo's home
 
@@ -315,8 +319,9 @@ writing to the agent's PTY: `prompt`/`interject` queue an atomic text-and-submit
 sequence. Claude text uses bracketed paste to preserve newlines, followed by a
 100ms wait after the paste write completes, then Enter; this prevents adjacent
 commands from mixing during the wait. Startup settling also occupies this FIFO.
-`stop` sends the runtime's own interrupt key, and `permission` sends the
-keystrokes that runtime's permission prompt expects. That is an implementation
+`stop` sends the runtime's own interrupt key. For a runtime whose capability is
+true, `permission` uses its authenticated native control mechanism (Codex's
+structured supervisor today). That is an implementation
 detail of the daemon, not the wire — the orchestrator sends the same four verbs
 regardless of how a given runtime is driven, and a daemon delivering them over a
 runtime's API instead is still conforming.
@@ -337,7 +342,7 @@ runtime means describing its keys rather than editing the delivery path. Today:
 
 | | submit (`prompt`/`interject`) | `stop` | `permission` allow | `permission` deny |
 | --- | --- | --- | --- | --- |
-| Claude Code | `Enter` (queued when a turn is running) | `Ctrl+C` | `Enter` on the focused **Yes** | `Esc` (its documented decline) |
+| Claude Code | `Enter` (queued when a turn is running) | `Ctrl+C` | local attached pane only; not advertised remotely | local attached pane only; not advertised remotely |
 | Codex | `Enter` (steers the running turn) | `Esc` (`chat.interrupt_turn`) | `y` (`approval.approve`) | `n` (`approval.decline`) |
 
 Three consequences a consumer should know.
@@ -525,46 +530,46 @@ Codex records a tool's effect only as that tool's own output — it has no
 per-call before/after the way Claude's `Edit`/`Write` inputs give — so a Codex
 `tool_result` carries an empty `diffs` list rather than a guess.
 
-### 4.5 Permission prompts (the second record)
+### 4.5 Claude permission hook observations (not an event source)
 
 Claude Code answers permission prompts in its TUI and writes none of them to the
 transcript: the prompt opens, the human picks, and nothing reaches disk. A reader
 of the transcript alone therefore cannot see that a session is blocked, and an
 orchestrator has no `request_id` to quote back at the `permission` verb (§3.1).
 
-So amux produces the record itself. Claude Code's hooks — which amux already
-installs per agent — carry the prompt's whole lifecycle, and each one appends a
-line to a per-session **permission journal** (`<state>/permissions/<id>.jsonl`):
+Historically amux treated its Claude Code hooks as that record's producer. This
+is not a sound approval boundary: an authenticated session can invoke the same
+hook command with fabricated tool/action/decision fields. Authentication proves
+which session spoke, and a live generation identifies its current engine
+incarnation, but neither proves Claude displayed the claimed prompt. A secret in
+the environment, parent-PID check, UUID, or signed self-report has the same
+problem.
 
-| Claude hook event | journal line |
+The hooks still send these facts as subject/runtime/generation-scoped diagnostic
+observations:
+
+| Claude hook event | diagnostic observation |
 | --- | --- |
 | `PermissionRequest` (fires just before the prompt is drawn) | opens a request: a fresh `request_id`, the tool, and a one-line summary of what it wants |
 | `PostToolUse` (the tool ran, so its prompt was allowed) | resolves it `allow` |
 | `PermissionDenied` | resolves it `deny` |
 | `Stop` / `SessionEnd` (a turn cannot end with a prompt up) | resolves anything still open `cleared` |
 
-The journal is read as a **second source** of the same session's stream: the
-tailer polls it alongside the transcript, under one shared ordinal space, so
-`permission_request` and `permission_resolved` arrive interleaved with the rest
-of the conversation and a consumer resumes both with one `afterSeq`. The
-consequence for a resync (§4.2) is that a rotation of *either* file restarts
-both, since the ordinals are shared.
-
-The `options` a Claude `permission_request` offers are the ones amux can actually
-deliver to the prompt (`allow`, `deny`) — not every choice the TUI draws. A
-consumer must not be shown a button the daemon has no keystroke for.
+The observation journal is deliberately separate from `RuntimePermissionPath`
+and is never read by `runtimeevents`, assigned an occurrence, bound to a live
+approval, or shown as an answerable card. Claude therefore advertises
+`caps.permission:false`; a human can still see and answer the real prompt in the
+local attached pane.
 
 A runtime that records its own prompts needs none of this: Codex's rollout
 carries them, so its `permission_request` events come from the transcript reader
 and there is no journal (§4.4).
 
-Degradation is honest at every step. A session whose hooks are not installed
-simply has no journal, so it publishes no `permission_request` — and, since the
-`permission` verb refuses an id it cannot find open, a consumer learns that by
-being refused rather than by having a keystroke land somewhere unintended. An
-upstream rename of one of the resolving hooks leaves a request open until the
-turn boundary clears it; a contract test pins the event names so the drift is
-visible.
+Restoring remote Claude approval requires an authenticated runtime-native Claude
+approval API, or another daemon-owned producer that independently proves the
+exact prompt. Until that exists, fail-closed capability and absent cards are an
+explicit product limitation, not fulfillment of the prior remote workflow.
+Codex's supervisor-owned `OpenApprovals` remains authoritative and answerable.
 
 ### 4.6 amux's own journal (the third record)
 
