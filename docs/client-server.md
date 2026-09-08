@@ -1,16 +1,16 @@
 # amux client/server architecture
 
-Splits amux into three roles connected by two protocols, so the UI is a thin
+Splits amux into three roles, so the UI is a thin
 client that can drive a **local** multiplexer or any number of **remote** ones,
 each orchestrating agents on its own machine.
 
 ```
-┌────────┐   UI ⇄ Server protocol    ┌────────────────┐  Server ⇄ Harness proto  ┌──────────────┐
-│   UI   │ ───── (muxproto) ───────▶ │  Multiplexer   │ ─── (harnessproto) ────▶ │ Agent Harness │
-│ client │ ◀──── newline-JSON ────── │     Server     │ ◀──── newline-JSON ───── │  (PTY owner)  │
-└────────┘   TLS over unix / TCP     └────────────────┘   inherited net.Pipe      └──────────────┘
-  renders        + bearer              authenticated relay                         runs claude /
-  vterms                               + pane routing                              editor / shell
+┌────────┐   UI ⇄ Server protocol    ┌────────────────┐   authenticated pane wire   ┌──────────────┐
+│   UI   │ ───── (muxproto) ───────▶ │  Multiplexer   │ ─────────────────────────▶ │ Primary daemon│
+│ client │ ◀──── newline-JSON ────── │     Server     │ ◀───────────────────────── │  (PTY owner)  │
+└────────┘   TLS over unix / TCP     └────────────────┘     pinned TLS + host proof └──────────────┘
+  renders        + bearer              protocol bridge                              owns engine /
+  vterms                               + epoch routing                              process lifetime
 ```
 
 ## Roles
@@ -23,22 +23,21 @@ each orchestrating agents on its own machine.
 
 - **Multiplexer Server** — a legacy compatibility translator. It authenticates
   to the singleton primary daemon for every snapshot, lifecycle action, and
-  typed pane launch specification; it never opens the store or access authority.
-  It delegates the resulting pane launch to an embedded harness and multiplexes
-  pane I/O to authenticated UI clients. `amux serve [tls:HOST:PORT]`.
+  pane stream; it never opens the store/access authority or receives a launch
+  path, environment, argv, or credential. It bridges primary-owned pane I/O to
+  authenticated UI clients. `amux serve [tls:HOST:PORT]`.
 
-- **Agent Harness** — owns the actual processes. Given a pane spec (argv, dir,
-  env) it spawns the process in a PTY and streams its output; it accepts input,
-  resize, and kill. This is the unit that could later run in a container, a jail,
-  or a different host. The legacy mux embeds one over a parent-owned `net.Pipe`.
-  Raw `amux harness` stdio is disabled because stdio alone authenticates no peer.
+- **Primary daemon** — is the sole local process, PTY, store, and access-grant
+  owner. Its existing pane wire resolves and starts/reuses engine instances,
+  streams output, and accepts input/resize/detach. Raw `amux harness` stdio
+  remains disabled because stdio alone authenticates no peer.
 
 ## Transport & framing
 
-Both protocols are **newline-delimited JSON** over a byte stream. One JSON object
+Both links use **newline-delimited JSON** over a byte stream. One JSON object
 per line; pane payload bytes are base64 in the `data` field. Client links use
-TLS over either Unix or TCP; the embedded harness uses a parent-created
-`net.Pipe`. Every client connection opens with `hello`/`welcome` carrying a
+TLS over either Unix or TCP; the upstream uses the primary daemon's pinned-TLS
+authenticated host socket. Every client connection opens with `hello`/`welcome` carrying a
 protocol `version`; all first-frame, version, and token failures receive the
 same terminal `unauthorized` response.
 
@@ -95,24 +94,19 @@ far behind (past a 4 MiB per-pane cap) is trimmed to the most recent 256 KiB tai
 preceded by `pane.reset`, bounding memory without silent corruption. Discrete
 frames (snapshots, results) remain droppable — each is a full state.
 
-## Protocol 2 — Multiplexer Server ⇄ Agent Harness (`harnessproto`)
+## Upstream pane bridge
 
-Server → Harness (`MuxMsg.type`):
-- `hello` `{version}`.
-- `spawn` `{paneId,dir,env,argv,cols,rows}` — run a process in a PTY.
-- `input` `{paneId,data}`.
-- `resize` `{paneId,cols,rows}`.
-- `kill` `{paneId}`.
-
-Harness → Server (`HarnessMsg.type`):
-- `ready` `{version}` — harness up.
-- `output` `{paneId,data}`.
-- `exit` `{paneId,error}` — process ended (clean or with error).
+Each legacy pane opens a separate freshly authenticated primary-daemon client
+stream. The mux translates pane open/input/resize/close to the existing daemon
+pane actions and translates pane output/reset/exit frames back to `muxproto`.
+Closing either side closes and joins the other. A suspension epoch prevents an
+in-flight admission/open or queued output from publishing after revocation, and
+each successful snapshot removes archived/deleted target routes before exposing
+the reduced inventory. The daemon, not the mux, decides process stop/regrant.
 
 ## How pane streaming replaces local PTYs
 
-Today the native TUI spawns the agent/editor/shell PTY itself and renders it. In
-the split, the **server** (via the harness) owns the PTY; the UI's vterm is fed
+The **primary daemon** owns the PTY; the UI's vterm is fed
 by `pane.output` frames and forwards keys via `pane.input`. The vterm already
 emulates a screen from a byte stream, so the only change on the UI side is the
 byte source: a server stream instead of a local `*os.File` PTY.
@@ -123,4 +117,4 @@ The native TUI retains its direct authenticated primary-daemon path. It does not
 auto-start or fall back to the legacy mux. Operators who explicitly run the
 compatibility relay must configure its TLS identity and nonempty bearer; the
 relay then reauthenticates to the primary daemon for each snapshot, action, and
-typed launch specification.
+pane stream.

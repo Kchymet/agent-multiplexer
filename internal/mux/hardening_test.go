@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,13 +125,194 @@ func TestAuthenticatedMuxRelaysOnlyAfterOneHello(t *testing.T) {
 	}
 }
 
+type blockingWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingWriteConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	return c.Conn.Write(p)
+}
+
+func TestSuspendClosesBlockedDownstreamWrite(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	raw := &blockingWriteConn{Conn: a, entered: make(chan struct{})}
+	s := New(testPrimary{})
+	cl := &client{
+		conn: muxproto.NewConn(raw), raw: raw, out: make(chan muxproto.ServerMsg, 4),
+		done: make(chan struct{}), panes: map[string]*route{}, obuf: map[string]*paneOut{},
+		wake: make(chan struct{}, 1), server: s, epoch: s.epoch,
+	}
+	s.clients[cl] = true
+	writerDone := make(chan struct{})
+	go func() { cl.writeLoop(); close(writerDone) }()
+	cl.send(muxproto.ServerMsg{Type: muxproto.SSnapshot, Sessions: []core.Session{{ID: "private"}}})
+	<-raw.entered
+	s.suspend()
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked downstream writer survived suspension")
+	}
+	_ = b.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if message, err := muxproto.NewConn(b).ReadServer(); err == nil {
+		t.Fatalf("peer received revoked blocked frame: %+v", message)
+	}
+}
+
+type gatedWriteRWC struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	writes  int
+}
+
+func (c *gatedWriteRWC) Read([]byte) (int, error) { return 0, net.ErrClosed }
+func (c *gatedWriteRWC) Close() error             { return nil }
+func (c *gatedWriteRWC) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	<-c.release
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return len(p), nil
+}
+
+func (c *gatedWriteRWC) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func TestTargetRevocationIsDownstreamWriteBarrier(t *testing.T) {
+	rwc := &gatedWriteRWC{entered: make(chan struct{}), release: make(chan struct{})}
+	srv := New(testPrimary{})
+	cl := &client{
+		conn: muxproto.NewConn(rwc), out: make(chan muxproto.ServerMsg, 4),
+		done: make(chan struct{}), panes: map[string]*route{}, obuf: map[string]*paneOut{},
+		wake: make(chan struct{}, 1), server: srv, epoch: srv.epoch,
+	}
+	srv.clients[cl] = true
+	ctx, cancel := context.WithCancel(context.Background())
+	routeDone := make(chan struct{})
+	close(routeDone) // no pump is needed for this downstream-only ordering test
+	r := &route{cl: cl, clientPane: "p1", agent: "a1", epoch: srv.epoch, ctx: ctx, cancel: cancel, done: routeDone}
+	cl.panes[r.clientPane] = r
+	srv.routes[r] = true
+
+	cl.paneOutputRoute(r, []byte("already-started"))
+	drainDone := make(chan error, 1)
+	go func() { drainDone <- cl.drainPanes() }()
+	<-rwc.entered
+
+	revokeDone := make(chan struct{})
+	go func() {
+		srv.closeRoute(r, true)
+		close(revokeDone)
+	}()
+	select {
+	case <-revokeDone:
+		t.Fatal("target revocation returned while its downstream frame was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(rwc.release)
+	select {
+	case <-revokeDone:
+	case <-time.After(time.Second):
+		t.Fatal("target revocation did not finish after the in-flight write settled")
+	}
+	if err := <-drainDone; err != nil {
+		t.Fatal(err)
+	}
+
+	// A late producer callback carrying the revoked route is non-authoritative,
+	// even though this client and unrelated routes remain connected.
+	cl.paneOutputRoute(r, []byte("stale"))
+	if err := cl.drainPanes(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rwc.writeCount(); got != 1 {
+		t.Fatalf("writes across target revocation = %d, want only the pre-barrier frame", got)
+	}
+}
+
+type stopAfterFirstWrite struct {
+	cl     *client
+	writes int
+}
+
+func (w *stopAfterFirstWrite) Read([]byte) (int, error) { return 0, net.ErrClosed }
+func (w *stopAfterFirstWrite) Close() error             { return nil }
+func (w *stopAfterFirstWrite) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == 1 {
+		w.cl.stop()
+	}
+	return len(p), nil
+}
+
+func TestPaneDrainRevalidatesAfterEveryFrame(t *testing.T) {
+	cl := &client{done: make(chan struct{}), panes: map[string]*route{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1)}
+	w := &stopAfterFirstWrite{cl: cl}
+	cl.conn = muxproto.NewConn(w)
+	cl.paneOutput("p1", []byte("one"))
+	cl.paneOutput("p2", []byte("two"))
+	if err := cl.drainPanes(); err == nil {
+		t.Fatal("drain succeeded after client revocation")
+	}
+	if w.writes != 1 {
+		t.Fatalf("writes after revocation = %d, want exactly the in-flight frame", w.writes)
+	}
+}
+
+func TestAdmissionCompletionCannotCrossSuspensionEpoch(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	s := New(testPrimary{snapshot: func(context.Context) ([]core.Session, error) {
+		close(entered)
+		<-release
+		return []core.Session{{ID: "old-grant"}}, nil
+	}})
+	s.token = "token"
+	a, b := net.Pipe()
+	defer b.Close()
+	done := make(chan struct{})
+	go func() { s.handleClient(a); close(done) }()
+	c := muxproto.NewConn(b)
+	if err := c.WriteClient(muxproto.ClientMsg{Type: muxproto.CHello, Version: muxproto.Version, Token: "token"}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	s.suspend()
+	close(release)
+	_ = b.SetReadDeadline(time.Now().Add(time.Second))
+	welcome, err := c.ReadServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if welcome.OK || welcome.Error != muxproto.ErrUnauthorized {
+		t.Fatalf("stale admission response = %+v", welcome)
+	}
+	if len(s.sessions()) != 0 {
+		t.Fatal("stale admission restored a suspended snapshot")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("rejected stale admission did not exit")
+	}
+}
+
 func TestMuxActionRelayRejectsDaemonInternalVocabulary(t *testing.T) {
 	dispatched := make(chan core.Action, 1)
 	srv := New(testPrimary{dispatch: func(_ context.Context, action core.Action) (string, error) {
 		dispatched <- action
 		return "", nil
 	}})
-	cl := &client{out: make(chan muxproto.ServerMsg, 4), done: make(chan struct{}), panes: map[string]string{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1)}
+	cl := &client{out: make(chan muxproto.ServerMsg, 4), done: make(chan struct{}), panes: map[string]*route{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1), epoch: srv.epoch, server: srv}
 	srv.clients[cl] = true
 
 	for _, action := range []string{"", "daemon.shutdown", "session.recreate", core.ActionQuery, core.ActionPaneOpen} {
@@ -311,7 +493,7 @@ func newTestClient(conn *muxproto.Conn) *client {
 		conn:  conn,
 		out:   make(chan muxproto.ServerMsg, 256),
 		done:  make(chan struct{}),
-		panes: map[string]string{},
+		panes: map[string]*route{},
 		obuf:  map[string]*paneOut{},
 		wake:  make(chan struct{}, 1),
 	}

@@ -13,8 +13,8 @@ import (
 func cmdServe(args []string) error { return mux.Run(args...) }
 
 // cmdHarness used to expose arbitrary process spawning over unauthenticated
-// stdio. The authenticated mux embeds its harness over a parent-owned net.Pipe;
-// no standalone CLI trust assertion can substitute for that inherited channel.
+// stdio. Legacy mux now bridges primary-daemon-owned panes and has no embedded
+// harness; no standalone CLI trust assertion can substitute for authentication.
 func cmdHarness() error {
 	return fmt.Errorf("standalone harness requires an authenticated inherited host channel")
 }

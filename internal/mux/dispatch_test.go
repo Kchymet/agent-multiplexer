@@ -3,189 +3,176 @@ package mux
 import (
 	"context"
 	"errors"
-	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"amux/internal/core"
 	"amux/internal/muxproto"
 	"amux/internal/panespec"
-	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// TestKillPanesForKillsOnlyTargetAgent verifies the mux-server side of the
-// AGE-132 fix: a StopsEngine verb (delete/archive) tears down exactly the target
-// agent's live panes — so its PTY-backed process doesn't leak — and leaves other
-// agents' panes running. Before, the mux server never killed a pane on a
-// lifecycle action, so a delete left the harness process alive.
-func TestKillPanesForKillsOnlyTargetAgent(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-
-	s := New()
-	s.hconn = harnessproto.NewConn(a)
-	s.routes = map[string]route{
-		"h1": {agent: "A", clientPane: "p1"},
-		"h2": {agent: "A", clientPane: "p2"},
-		"h3": {agent: "B", clientPane: "p3"},
+func attachedClient(s *Server) *client {
+	cl := &client{
+		out: make(chan muxproto.ServerMsg, 8), done: make(chan struct{}),
+		panes: map[string]*route{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1),
+		server: s, epoch: s.epoch,
 	}
-
-	// Drain MKill frames from the harness side of the pipe.
-	killed := make(chan string, 8)
-	go func() {
-		hconn := harnessproto.NewConn(b)
-		for {
-			m, err := hconn.ReadMux()
-			if err != nil {
-				return
-			}
-			if m.Type == harnessproto.MKill {
-				killed <- m.PaneID
-			}
-		}
-	}()
-
-	s.killPanesFor([]string{"A"})
-
-	// Both of agent A's panes are killed (order-independent).
-	got := map[string]bool{}
-	for i := 0; i < 2; i++ {
-		select {
-		case p := <-killed:
-			got[p] = true
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out; killed so far: %v", got)
-		}
-	}
-	if !got["h1"] || !got["h2"] {
-		t.Errorf("killed = %v, want h1 and h2", got)
-	}
-	// Agent B's pane must NOT be killed — no further frame arrives.
-	select {
-	case p := <-killed:
-		t.Errorf("unexpected kill of %q (belongs to agent B)", p)
-	case <-time.After(200 * time.Millisecond):
-	}
+	s.clients[cl] = true
+	return cl
 }
 
-func TestPrimarySuspensionBlocksInFlightPaneSpawn(t *testing.T) {
-	launchEntered := make(chan struct{})
-	releaseLaunch := make(chan struct{})
-	s := New(testPrimary{launch: func(context.Context, string) (panespec.LaunchSpec, error) {
-		close(launchEntered)
-		<-releaseLaunch
-		return panespec.LaunchSpec{}, nil
-	}})
-	cl := &client{out: make(chan muxproto.ServerMsg, 4), done: make(chan struct{}), panes: map[string]string{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1)}
-	s.clients[cl] = true
-	resolved := make(chan struct{}, 1)
-	s.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
-		resolved <- struct{}{}
-		return "", nil, []string{"forbidden"}, nil
+func waitRoute(t *testing.T, s *Server, cl *client, paneID string) *route {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		r := cl.panes[paneID]
+		ready := r != nil && r.relay != nil
+		s.mu.Unlock()
+		if ready {
+			return r
+		}
+		time.Sleep(time.Millisecond)
 	}
+	t.Fatalf("pane %q did not attach", paneID)
+	return nil
+}
+
+func TestSnapshotRemovalClosesOnlyRemovedPrimaryPane(t *testing.T) {
+	var mu sync.Mutex
+	relays := map[string]*testPaneRelay{}
+	sessions := []core.Session{{ID: "A"}, {ID: "B"}}
+	s := New(testPrimary{
+		snapshot: func(context.Context) ([]core.Session, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]core.Session(nil), sessions...), nil
+		},
+		openPane: func(_ context.Context, request PaneRequest) (PaneRelay, error) {
+			r := newTestPaneRelay()
+			mu.Lock()
+			relays[request.Agent] = r
+			mu.Unlock()
+			return r, nil
+		},
+	})
+	cl := attachedClient(s)
+	s.remember(sessions)
+	s.openPane(cl, muxproto.ClientMsg{PaneID: "pa", Agent: "A", Tab: panespec.TabAgent})
+	s.openPane(cl, muxproto.ClientMsg{PaneID: "pb", Agent: "B", Tab: panespec.TabAgent})
+	waitRoute(t, s, cl, "pa")
+	waitRoute(t, s, cl, "pb")
+
+	mu.Lock()
+	sessions = []core.Session{{ID: "A", Archived: true}, {ID: "B"}}
+	a, b := relays["A"], relays["B"]
+	mu.Unlock()
+	s.broadcast(context.Background())
+
+	select {
+	case <-a.closed:
+	case <-time.After(time.Second):
+		t.Fatal("archived target retained its primary pane relay")
+	}
+	select {
+	case <-b.closed:
+		t.Fatal("unrelated active target was revoked")
+	default:
+	}
+	if s.clientRoute(cl, "pa") != nil || s.clientRoute(cl, "pb") == nil {
+		t.Fatalf("routes after archive: %+v", cl.panes)
+	}
+	s.dropClient(cl)
+}
+
+func TestPrimarySuspensionCancelsInFlightPaneOpen(t *testing.T) {
+	openEntered := make(chan struct{})
+	s := New(testPrimary{openPane: func(ctx context.Context, _ PaneRequest) (PaneRelay, error) {
+		close(openEntered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}})
+	cl := attachedClient(s)
+	s.remember([]core.Session{{ID: "a1"}})
 	done := make(chan struct{})
 	go func() {
 		s.openPane(cl, muxproto.ClientMsg{PaneID: "p1", Agent: "a1", Tab: panespec.TabAgent})
 		close(done)
 	}()
-	<-launchEntered
+	<-openEntered
 	s.suspend()
-	close(releaseLaunch)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("in-flight pane open did not finish after suspension")
-	}
-	select {
-	case <-resolved:
-		t.Fatal("suspended pane open reached process resolution")
-	default:
+		t.Fatal("suspend did not cancel/join in-flight primary pane admission")
 	}
 	if len(s.routes) != 0 || len(cl.panes) != 0 {
-		t.Fatalf("suspended pane open retained routes: server=%v client=%v", s.routes, cl.panes)
+		t.Fatalf("stale pane open retained routes: server=%v client=%v", s.routes, cl.panes)
 	}
 }
 
-func TestStopsEngineWaitsForPrimarySuccessAndUsesAuthoritativeSnapshot(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-
-	fail := true
-	primary := testPrimary{dispatch: func(_ context.Context, got core.Action) (string, error) {
-		if got.Action != core.ActionArchive || got.ID != "root" {
-			t.Fatalf("dispatch = %+v", got)
-		}
-		if fail {
-			return "", errors.New("denied")
-		}
-		return "", nil
-	}}
-	s := New(primary)
-	s.hconn = harnessproto.NewConn(a)
-	s.remember([]core.Session{{ID: "root", IsRoot: true}, {ID: "a1", RootID: "root"}, {ID: "other", RootID: "else"}})
-	s.routes = map[string]route{
-		"h-root":  {agent: "root"},
-		"h-child": {agent: "a1"},
-		"h-other": {agent: "other"},
-	}
-	cl := &client{out: make(chan muxproto.ServerMsg, 4), done: make(chan struct{}), panes: map[string]string{}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1)}
-	s.clients[cl] = true
-	hc := harnessproto.NewConn(b)
-	killed := make(chan string, 4)
-	go func() {
-		for {
-			m, err := hc.ReadMux()
-			if err != nil {
-				return
-			}
-			if m.Type == harnessproto.MKill {
-				killed <- m.PaneID
-			}
-		}
-	}()
-
-	s.handleMsg(cl, muxproto.ClientMsg{Type: muxproto.CAction, Action: core.ActionArchive, ID: "root"})
-	select {
-	case pane := <-killed:
-		t.Fatalf("failed primary action killed %q", pane)
-	case <-time.After(50 * time.Millisecond):
-	}
-	fail = false
-	s.handleMsg(cl, muxproto.ClientMsg{Type: muxproto.CAction, Action: core.ActionArchive, ID: "root"})
-	got := map[string]bool{}
-	for len(got) < 2 {
-		select {
-		case pane := <-killed:
-			got[pane] = true
-		case <-time.After(time.Second):
-			t.Fatalf("kills = %v, want root and child", got)
-		}
-	}
-	if !got["h-root"] || !got["h-child"] || got["h-other"] {
-		t.Fatalf("kills = %v, want h-root/h-child only", got)
-	}
-}
-
-func TestPrimaryPollFailureRevokesClientsAndMuxPanes(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	s := New(testPrimary{snapshot: func(context.Context) ([]core.Session, error) {
-		return nil, errors.New("primary unavailable")
+func TestUnpublishedPaneTargetNeverReachesPrimary(t *testing.T) {
+	called := false
+	s := New(testPrimary{openPane: func(context.Context, PaneRequest) (PaneRelay, error) {
+		called = true
+		return newTestPaneRelay(), nil
 	}})
-	s.hconn = harnessproto.NewConn(a)
-	cl := &client{done: make(chan struct{}), panes: map[string]string{"p1": "h1"}, obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1)}
-	s.clients[cl] = true
-	s.routes["h1"] = route{cl: cl, clientPane: "p1", agent: "a1"}
-	s.remember([]core.Session{{ID: "a1"}})
+	cl := attachedClient(s)
+	s.remember([]core.Session{{ID: "published"}, {ID: "archived", Archived: true}})
+	for _, target := range []string{"unknown", "archived", "/tmp/alias"} {
+		s.openPane(cl, muxproto.ClientMsg{PaneID: "p-" + target, Agent: target, Tab: panespec.TabAgent})
+	}
+	if called {
+		t.Fatal("unpublished/path-shaped pane target reached primary daemon")
+	}
+	if len(s.routes) != 0 || len(cl.panes) != 0 {
+		t.Fatalf("unpublished targets retained routes: %v %v", s.routes, cl.panes)
+	}
+}
 
-	killed := make(chan harnessproto.MuxMsg, 1)
+func TestTargetRemovalCancelsInFlightPaneOpen(t *testing.T) {
+	entered := make(chan struct{})
+	s := New(testPrimary{
+		snapshot: func(context.Context) ([]core.Session, error) { return nil, nil },
+		openPane: func(ctx context.Context, _ PaneRequest) (PaneRelay, error) {
+			close(entered)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	cl := attachedClient(s)
+	s.remember([]core.Session{{ID: "a1"}})
+	done := make(chan struct{})
 	go func() {
-		m, _ := harnessproto.NewConn(b).ReadMux()
-		killed <- m
+		s.openPane(cl, muxproto.ClientMsg{PaneID: "p1", Agent: "a1", Tab: panespec.TabAgent})
+		close(done)
 	}()
+	<-entered
+	s.broadcast(context.Background())
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("target removal did not cancel/join in-flight pane open")
+	}
+	if len(s.routes) != 0 || len(cl.panes) != 0 {
+		t.Fatalf("removed target's stale open retained routes: %v %v", s.routes, cl.panes)
+	}
+}
+
+func TestPrimaryPollFailureRevokesClientAndPaneRelay(t *testing.T) {
+	relay := newTestPaneRelay()
+	s := New(testPrimary{
+		snapshot: func(context.Context) ([]core.Session, error) {
+			return nil, errors.New("primary unavailable")
+		},
+		openPane: func(context.Context, PaneRequest) (PaneRelay, error) { return relay, nil },
+	})
+	cl := attachedClient(s)
+	s.remember([]core.Session{{ID: "a1"}})
+	s.openPane(cl, muxproto.ClientMsg{PaneID: "p1", Agent: "a1", Tab: panespec.TabAgent})
+	waitRoute(t, s, cl, "p1")
+
 	s.broadcast(context.Background())
 	select {
 	case <-cl.done:
@@ -193,14 +180,80 @@ func TestPrimaryPollFailureRevokesClientsAndMuxPanes(t *testing.T) {
 		t.Fatal("client retained after primary poll failure")
 	}
 	select {
-	case m := <-killed:
-		if m.Type != harnessproto.MKill || m.PaneID != "h1" {
-			t.Fatalf("kill = %+v", m)
+	case <-relay.closed:
+	case <-time.After(time.Second):
+		t.Fatal("primary pane relay retained after poll failure")
+	}
+	if len(s.sessions()) != 0 || len(s.routes) != 0 {
+		t.Fatal("authority state retained after primary poll failure")
+	}
+}
+
+func TestSuccessfulActionDoesNotLocallyOwnRuntimeStop(t *testing.T) {
+	relay := newTestPaneRelay()
+	removed := false
+	s := New(testPrimary{
+		dispatch: func(_ context.Context, got core.Action) (string, error) {
+			if got.Action != core.ActionArchive || got.ID != "a1" {
+				t.Fatalf("dispatch = %+v", got)
+			}
+			removed = true
+			return "", nil
+		},
+		snapshot: func(context.Context) ([]core.Session, error) {
+			if removed {
+				return nil, nil
+			}
+			return []core.Session{{ID: "a1"}}, nil
+		},
+		openPane: func(context.Context, PaneRequest) (PaneRelay, error) { return relay, nil },
+	})
+	cl := attachedClient(s)
+	s.remember([]core.Session{{ID: "a1"}})
+	s.openPane(cl, muxproto.ClientMsg{PaneID: "p1", Agent: "a1", Tab: panespec.TabAgent})
+	waitRoute(t, s, cl, "p1")
+	s.handleMsg(cl, muxproto.ClientMsg{Type: muxproto.CAction, Action: core.ActionArchive, ID: "a1"})
+	select {
+	case <-relay.closed:
+		t.Fatal("mux locally stopped a primary-owned runtime before authoritative reconciliation")
+	default:
+	}
+	s.broadcast(context.Background())
+	select {
+	case <-relay.closed:
+	case <-time.After(time.Second):
+		t.Fatal("removed target retained relay after authoritative snapshot")
+	}
+}
+
+func TestServeShutdownClosesAndJoinsPrimaryPaneRelay(t *testing.T) {
+	relay := newTestPaneRelay()
+	s := New(testPrimary{openPane: func(context.Context, PaneRequest) (PaneRelay, error) { return relay, nil }})
+	cl := attachedClient(s)
+	s.remember([]core.Session{{ID: "a1"}})
+	s.openPane(cl, muxproto.ClientMsg{PaneID: "p1", Agent: "a1", Tab: panespec.TabAgent})
+	r := waitRoute(t, s, cl, "p1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("mux pane retained after primary poll failure")
+		t.Fatal("Serve did not join its relay work on cancellation")
 	}
-	if len(s.sessions()) != 0 {
-		t.Fatal("authoritative snapshot retained after primary poll failure")
+	select {
+	case <-relay.closed:
+	case <-time.After(time.Second):
+		t.Fatal("primary pane relay survived Serve")
+	}
+	select {
+	case <-r.done:
+	default:
+		t.Fatal("primary pane pump was not joined before Serve returned")
 	}
 }

@@ -9,17 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/access"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/muxclient"
-	"amux/internal/panespec"
 )
 
 type testPrimary struct {
 	snapshot func(context.Context) ([]core.Session, error)
 	dispatch func(context.Context, core.Action) (string, error)
-	launch   LaunchSpecResolver
+	openPane func(context.Context, PaneRequest) (PaneRelay, error)
 }
 
 func (p testPrimary) Snapshot(ctx context.Context) ([]core.Session, error) {
@@ -34,24 +31,54 @@ func (p testPrimary) Dispatch(ctx context.Context, a core.Action) (string, error
 	}
 	return p.dispatch(ctx, a)
 }
-func (p testPrimary) LaunchSpec(ctx context.Context, id string) (panespec.LaunchSpec, error) {
-	if p.launch == nil {
-		return panespec.LaunchSpec{}, fmt.Errorf("no launch")
+func (p testPrimary) OpenPane(ctx context.Context, request PaneRequest) (PaneRelay, error) {
+	if p.openPane == nil {
+		return nil, fmt.Errorf("no pane relay")
 	}
-	return p.launch(ctx, id)
+	return p.openPane(ctx, request)
+}
+
+type testPaneRelay struct {
+	frames chan core.PaneFrame
+	input  func([]byte) error
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newTestPaneRelay() *testPaneRelay {
+	return &testPaneRelay{frames: make(chan core.PaneFrame, 16), closed: make(chan struct{})}
+}
+
+func (r *testPaneRelay) Next(ctx context.Context) (core.PaneFrame, error) {
+	select {
+	case frame := <-r.frames:
+		return frame, nil
+	case <-r.closed:
+		return core.PaneFrame{}, fmt.Errorf("pane relay closed")
+	case <-ctx.Done():
+		return core.PaneFrame{}, ctx.Err()
+	}
+}
+func (r *testPaneRelay) Input(data []byte) error {
+	if r.input != nil {
+		return r.input(data)
+	}
+	return nil
+}
+func (r *testPaneRelay) Resize(int, int) error { return nil }
+func (r *testPaneRelay) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
 }
 
 // TestEndToEnd starts a real server on a unix socket and drives it with the real
-// client: subscribe yields a snapshot, and opening the console's terminal tab
-// runs a shell whose output streams back over the protocol.
+// client: subscribe yields a snapshot, and primary-owned pane output is bridged
+// back over the legacy protocol without starting a local process.
 func TestEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "run"))
-	t.Setenv("AMUX_JAIL", "off") // a plain shell; bwrap may be unavailable in CI
-	t.Setenv("SHELL", "/bin/sh")
-
 	sock := filepath.Join(dir, "mux.sock")
 	certFile, keyFile := genCert(t, dir)
 	t.Setenv("AMUX_TLS_CERT", certFile)
@@ -66,34 +93,24 @@ func TestEndToEnd(t *testing.T) {
 	defer ln.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	authority, err := access.Open(filepath.Join(dir, "access"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer authority.Close()
-	resolver := func(ctx context.Context, id string) (panespec.LaunchSpec, error) {
-		if id != console.ID {
-			return panespec.LaunchSpec{}, fmt.Errorf("unexpected session %q", id)
+	relay := newTestPaneRelay()
+	relay.input = func(data []byte) error {
+		if strings.Contains(string(data), "MUXOKMARKER") {
+			relay.frames <- core.PaneFrame{Type: core.FramePaneOutput, Data: []byte("MUXOKMARKER")}
 		}
-		if err := console.Ensure(); err != nil {
-			return panespec.LaunchSpec{}, err
-		}
-		session := console.Session()
-		grant, err := authority.EnsureSession(ctx, session.ID, session.Dir)
-		return panespec.LaunchSpec{Session: session, Access: grant}, err
+		return nil
 	}
 	srv := New(testPrimary{
 		snapshot: func(context.Context) ([]core.Session, error) {
-			return []core.Session{{ID: console.ID}}, nil
+			return []core.Session{{ID: "console"}}, nil
 		},
-		launch: resolver,
+		openPane: func(_ context.Context, request PaneRequest) (PaneRelay, error) {
+			if request.Agent != "console" || request.Tab != 2 {
+				return nil, fmt.Errorf("unexpected pane request %+v", request)
+			}
+			return relay, nil
+		},
 	})
-	// This test exercises mux routing, not namespace construction. Namespace
-	// behavior has its own tests and now correctly rejects credentials when the
-	// jail is disabled.
-	srv.resolve = func(spec panespec.LaunchSpec, tab int) (string, []string, []string, error) {
-		return spec.Session.Dir, nil, []string{"/bin/sh"}, nil
-	}
 	go func() { _ = srv.Serve(ctx, ln) }()
 
 	var mu sync.Mutex
@@ -136,10 +153,9 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal("no snapshot received")
 	}
 
-	if err := c.PaneOpen("p1", console.ID, 2 /*terminal*/, 80, 24); err != nil {
+	if err := c.PaneOpen("p1", "console", 2 /*terminal*/, 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(500 * time.Millisecond) // let the shell come up
 	if err := c.PaneInput("p1", []byte("echo MUXOKMARKER\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +169,9 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
-func TestNewWithoutLaunchSpecResolverFailsClosed(t *testing.T) {
-	_, err := New().launchSpec(context.Background(), console.ID)
-	if err == nil || !strings.Contains(err.Error(), "no daemon-authorized launch resolver") {
-		t.Fatalf("default legacy mux resolver error = %v", err)
+func TestNewWithoutPrimaryPaneRelayFailsClosed(t *testing.T) {
+	_, err := New().primary.OpenPane(context.Background(), PaneRequest{Agent: "console"})
+	if err == nil || !strings.Contains(err.Error(), "no authenticated primary pane relay") {
+		t.Fatalf("default legacy mux pane relay error = %v", err)
 	}
 }
