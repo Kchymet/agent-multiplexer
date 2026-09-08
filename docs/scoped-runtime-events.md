@@ -24,6 +24,11 @@ daemon's current authoritative membership. Deleted, removed, foreign, and
 untracked conversation IDs are denied. Read access does not grant PTY, start,
 restore, steering, or other lifecycle authority.
 
+The dispatcher checks scope before source I/O and again immediately before it
+releases the page. Revocation or membership change during the bounded read thus
+drops the protected response; file I/O does not run while holding the global
+effect mutex.
+
 Each response—including its wrapper—is at most 64 KiB and carries an opaque
 continuation cursor. A cursor expires after a bounded idle period and is
 invalidated by source replacement, truncation, runtime/source-layout changes,

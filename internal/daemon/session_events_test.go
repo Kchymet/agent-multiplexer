@@ -248,6 +248,42 @@ func TestSessionEventPagerBoundsAdmissionExpiryAndCancellation(t *testing.T) {
 	}
 }
 
+func TestSessionEventPagerFinalReleaseCheckRunsAfterIOAndDropsDeniedPage(t *testing.T) {
+	root := t.TempDir()
+	writeStructuredEvents(t, filepath.Join(root, "runtime.jsonl"), 1, 8)
+	set := testEventSourceSet(root, testEventSource(runtimeevents.PageSourceStructured, root, "runtime.jsonl"))
+	resolved := false
+	pager, err := newSessionEventPager(func(ctx context.Context, target string) (sessionEventSourceSet, error) {
+		resolved = true
+		return set, ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pager.close)
+	releaseCalls := 0
+	body, err := pager.pageForRelease(context.Background(), testEventPrincipal("reader"), set.target, nil,
+		func(context.Context) error {
+			releaseCalls++
+			if !resolved {
+				t.Fatal("final scope check ran before source resolution and page I/O")
+			}
+			pager.mu.Lock()
+			prepared := len(pager.entries) != 0
+			pager.mu.Unlock()
+			if !prepared {
+				t.Fatal("final scope check ran before the bounded page was prepared")
+			}
+			return access.ErrDenied
+		})
+	if !errors.Is(err, access.ErrDenied) || body != nil || releaseCalls != 1 {
+		t.Fatalf("release result body=%q err=%v calls=%d", body, err, releaseCalls)
+	}
+	if body, err := pager.pageForRelease(context.Background(), testEventPrincipal("reader"), set.target, nil, nil); !errors.Is(err, access.ErrDenied) || body != nil {
+		t.Fatalf("nil release check body=%q err=%v", body, err)
+	}
+}
+
 func TestSessionEventPagerRejectsGrowingDecoderState(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "runtime.jsonl")

@@ -73,6 +73,12 @@ type sessionEventSourceSet struct {
 
 type sessionEventSourceResolver func(context.Context, string) (sessionEventSourceSet, error)
 
+// sessionEventReleaseCheck revalidates the caller's current authoritative
+// scope after bounded source I/O and immediately before the protected page is
+// returned to the dispatcher. The lifecycle owner supplies the short check;
+// it must not retain the global effect lock while page I/O runs.
+type sessionEventReleaseCheck func(context.Context) error
+
 type sessionEventPager struct {
 	mu      sync.Mutex
 	resolve sessionEventSourceResolver
@@ -138,9 +144,33 @@ func (p *sessionEventPager) close() {
 	p.mu.Unlock()
 }
 
+// pageForRelease surrounds the bounded pager with the second half of the
+// dispatcher's authorization sandwich. The dispatcher authorizes before
+// calling this method; releaseCheck then closes the revoke-during-I/O window.
+// A denied final check discards the response body even though retryable cursor
+// state may already have been computed.
+func (p *sessionEventPager) pageForRelease(ctx context.Context, principal access.Principal, target string,
+	fields map[string]string, releaseCheck sessionEventReleaseCheck) ([]byte, error) {
+	if releaseCheck == nil {
+		return nil, access.ErrDenied
+	}
+	body, err := p.page(ctx, principal, target, fields)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := releaseCheck(ctx); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
 // page answers one already-authorized query. The lifecycle owner performs the
-// final current-scope policy check immediately before this call and keeps it out
-// of the global effect lock; this method independently requires a tracked source.
+// initial current-scope policy check before pageForRelease and keeps bounded I/O
+// out of the global effect lock; this method independently requires a tracked
+// source. Dispatcher integration must call pageForRelease, not page directly.
 func (p *sessionEventPager) page(ctx context.Context, principal access.Principal, target string, fields map[string]string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
