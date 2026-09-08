@@ -2,13 +2,13 @@ package wsops
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"amux/internal/agent"
 	"amux/internal/core"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -22,7 +22,7 @@ import (
 // launch (see AgentCommand), so an LLM agent never obeys stale instructions
 // after its scope, its workgroup, or the inventory changes. The dir is not a git
 // repo, so this never dirties a worktree.
-func writeGuide(s store.Session) {
+func writeGuide(root *hostprep.Root, s store.Session) error {
 	var guide string
 	switch s.Role() {
 	case store.RoleConsole:
@@ -34,12 +34,23 @@ func writeGuide(s store.Session) {
 	default:
 		guide = memberGuide(s)
 	}
-	_ = os.WriteFile(agent.HarnessFor(s.Agent).GuideFile(s.Dir), []byte(guide), 0o644)
+	rel, err := root.Rel(agent.HarnessFor(s.Agent).GuideFile(s.Dir))
+	if err != nil {
+		return err
+	}
+	return root.AtomicWrite(rel, []byte(guide), 0o644)
 }
 
 // writeAgentGuide is writeGuide under its historical name (creation paths call
 // it for a fresh agent).
-func writeAgentGuide(s store.Session) { writeGuide(s) }
+func writeAgentGuide(s store.Session) error {
+	root, err := hostprep.OpenSession(s.Dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return writeGuide(root, s)
+}
 
 // memberGuide is the guide for an ordinary agent: sandboxed to its dir, on its
 // own branch, shipping through the PR flow. It is templated from the session

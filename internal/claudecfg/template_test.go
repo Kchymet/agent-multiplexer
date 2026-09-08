@@ -39,7 +39,8 @@ func TestTemplateSeed(t *testing.T) {
 		[]byte(`{"hasCompletedOnboarding":true,"numStartups":7,"mcpServers":{"a":{}},"projects":{"/home/u":{"hasTrustDialogAccepted":true}}}`), 0o600))
 
 	agentDir := filepath.Join(root, "agent")
-	sp := Template("a1", AgentHome(agentDir))
+	must(os.MkdirAll(agentDir, 0o755))
+	sp := Template("a1", agentDir)
 	if sp.Env != "CLAUDE_CONFIG_DIR" || sp.Dir != filepath.Join(agentDir, ".amux", "claude") || sp.Template != user {
 		t.Fatalf("spec = %+v", sp)
 	}

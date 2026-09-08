@@ -19,12 +19,13 @@ func spec(t *testing.T) Spec {
 	must(t, os.WriteFile(filepath.Join(tmpl, "settings.json"), []byte(`{"a":1}`+"\n# state 1\n"), 0o600))
 	must(t, os.WriteFile(filepath.Join(tmpl, "commands", "x.md"), []byte("x"), 0o644))
 	must(t, os.WriteFile(filepath.Join(tmpl, "auth.json"), []byte("secret"), 0o600))
+	must(t, os.MkdirAll(filepath.Join(root, "agent"), 0o755))
 	// State that must never be copied.
 	must(t, os.MkdirAll(filepath.Join(tmpl, "projects", "p"), 0o755))
 	must(t, os.WriteFile(filepath.Join(tmpl, "projects", "p", "t.jsonl"), []byte("{}"), 0o644))
 	return Spec{
 		Kind: "k", AgentID: "a1", Env: "K_HOME",
-		Template: tmpl, Dir: filepath.Join(root, "agent", ".amux", "k"),
+		Template: tmpl, Root: filepath.Join(root, "agent"), Dir: filepath.Join(root, "agent", ".amux", "k"),
 		Entries: []Entry{
 			{Rel: "settings.json", Normalize: stripState},
 			{Rel: "commands"},

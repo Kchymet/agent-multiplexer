@@ -9,6 +9,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -59,12 +60,11 @@ type Harness interface {
 	// launch dir (which may move to where a transcript already lives) and the
 	// trailing args to pass before Argv's own. It may persist an adopted session
 	// id as a side effect (Codex).
-	PlanLaunch(req LaunchRequest) LaunchDecision
+	PlanLaunch(req LaunchRequest) (LaunchDecision, error)
 	// PrepareLaunch performs the pre-launch filesystem side effects the harness
 	// needs for session s launching in dir: trusting the folder (in the agent's
-	// own config home) and installing amux's hooks. Best-effort — a failure must
-	// never block the launch.
-	PrepareLaunch(s store.Session, dir string)
+	// own config home) and installing amux's hooks.
+	PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error
 
 	// Keys are the keystrokes that drive this harness's interactive TUI from
 	// outside: submit a line, interrupt a turn, answer a permission prompt. The
@@ -95,7 +95,7 @@ type Harness interface {
 	// cwd from amux's captured backup, when the harness's copy is missing or
 	// staler, so a relaunch resumes the real conversation. Never clobbers a fresher
 	// copy; returns whether it restored one.
-	RestoreTranscript(s store.Session, cwd string) (bool, error)
+	RestoreTranscript(root *hostprep.Root, s store.Session, cwd string) (bool, error)
 
 	// SkillsDir / GuideFile are the harness's own workspace-config locations under
 	// the launch root: where it discovers skills and reads its agent guide. Claude
@@ -147,9 +147,10 @@ type SessionInfo struct {
 // LaunchRequest carries everything a harness's PlanLaunch needs without coupling
 // it to how the caller derived the values.
 type LaunchRequest struct {
-	Session store.Session // the session being launched
-	Dir     string        // the stat-verified launch dir (the workspace root)
-	Prompt  string        // the trimmed initial prompt
+	Root    *hostprep.Root // pinned session root for all private-home access
+	Session store.Session  // the session being launched
+	Dir     string         // the stat-verified launch dir (the workspace root)
+	Prompt  string         // the trimmed initial prompt
 	// ResumeCwds are the candidate cwds a transcript for this session could live
 	// under (amux's workdir convention has shifted over time), preferred-first.
 	ResumeCwds []string
@@ -303,21 +304,23 @@ func (n noopHarness) Argv(string, ...string) ([]string, error) {
 	return nil, &unknownKindError{n.kind}
 }
 func (noopHarness) NewSessionID() string { return "" }
-func (noopHarness) PlanLaunch(req LaunchRequest) LaunchDecision {
-	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}
+func (noopHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
+	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}, nil
 }
-func (noopHarness) Keys() Keys                                            { return Keys{} }
-func (noopHarness) PrepareLaunch(store.Session, string)                   {}
-func (noopHarness) Config(store.Session) (cfghome.Spec, bool)             { return cfghome.Spec{}, false }
-func (noopHarness) Activity(store.Session) engine.Activity                { return engine.ActivityUnknown }
-func (n noopHarness) RailState(s store.Session) string                    { return railStateFromActivity(n.Activity(s)) }
-func (noopHarness) RestoreTranscript(store.Session, string) (bool, error) { return false, nil }
-func (noopHarness) SkillsDir(root string) string                          { return agentsSkillsDir(root) }
-func (noopHarness) GuideFile(root string) string                          { return agentsGuideFile(root) }
-func (noopHarness) ListSessions() []SessionInfo                           { return nil }
-func (noopHarness) RuntimeTranscriptPath(store.Session) (string, bool)    { return "", false }
-func (noopHarness) RuntimePermissionPath(store.Session) (string, bool)    { return "", false }
-func (noopHarness) Doctor() []string                                      { return nil }
+func (noopHarness) Keys() Keys                                                { return Keys{} }
+func (noopHarness) PrepareLaunch(*hostprep.Root, store.Session, string) error { return nil }
+func (noopHarness) Config(store.Session) (cfghome.Spec, bool)                 { return cfghome.Spec{}, false }
+func (noopHarness) Activity(store.Session) engine.Activity                    { return engine.ActivityUnknown }
+func (n noopHarness) RailState(s store.Session) string                        { return railStateFromActivity(n.Activity(s)) }
+func (noopHarness) RestoreTranscript(*hostprep.Root, store.Session, string) (bool, error) {
+	return false, nil
+}
+func (noopHarness) SkillsDir(root string) string                       { return agentsSkillsDir(root) }
+func (noopHarness) GuideFile(root string) string                       { return agentsGuideFile(root) }
+func (noopHarness) ListSessions() []SessionInfo                        { return nil }
+func (noopHarness) RuntimeTranscriptPath(store.Session) (string, bool) { return "", false }
+func (noopHarness) RuntimePermissionPath(store.Session) (string, bool) { return "", false }
+func (noopHarness) Doctor() []string                                   { return nil }
 
 // unknownKindError is returned by Argv for a kind no registered harness serves.
 type unknownKindError struct{ kind string }

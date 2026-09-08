@@ -32,13 +32,14 @@ var configEntries = []string{
 var configKeys = []string{"mcpServers", "model"}
 
 // Template describes how the user's Claude Code home (User()) is templated into
-// an agent's private home at dir — the spec cfghome executes. Config entries are
+// an agent's private home beneath sessionRoot — the spec cfghome executes. Config entries are
 // copied; .claude.json is copied minus its per-project trust table (amux
 // re-trusts the agent's own dir at launch) and compared only on its config
 // keys. After amux auth login, credentials use a dedicated shared directory;
 // until then the legacy credential symlink points back to the template.
-func Template(agentID, dir string) cfghome.Spec {
+func Template(agentID, sessionRoot string) cfghome.Spec {
 	user := User()
+	dir := AgentHome(sessionRoot)
 	entries := []cfghome.Entry{{
 		Rel: ".claude.json", Src: user.ConfigPath(),
 		Seed: seedClaudeJSON, Normalize: normalizeClaudeJSON, Merge: mergeClaudeJSON,
@@ -56,7 +57,7 @@ func Template(agentID, dir string) cfghome.Spec {
 	}
 	sp := cfghome.Spec{
 		Kind: "claude", AgentID: agentID, Env: Env,
-		Template: user.Dir, Dir: dir,
+		Template: user.Dir, Root: sessionRoot, Dir: dir,
 		Entries: entries,
 		Shared:  []string{CredentialsFile},
 	}

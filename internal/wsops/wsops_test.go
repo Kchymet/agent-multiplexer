@@ -12,6 +12,7 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -24,6 +25,272 @@ func isolateStore(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("AMUX_JAIL", "off")
+}
+
+func TestAgentCommandRefusesStaticPrivateConfigAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, config, outside, canary string)
+	}{
+		{
+			name: "config directory symlink",
+			plant: func(t *testing.T, config, outside, _ string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, config); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "final config symlink",
+			plant: func(t *testing.T, config, _, canary string) {
+				t.Helper()
+				if err := os.MkdirAll(config, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(canary, filepath.Join(config, "config.toml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "final config hardlink",
+			plant: func(t *testing.T, config, _, canary string) {
+				t.Helper()
+				if err := os.MkdirAll(config, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(canary, filepath.Join(config, "config.toml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStore(t)
+			template := filepath.Join(t.TempDir(), "codex-template")
+			t.Setenv("CODEX_HOME", template)
+			if err := os.MkdirAll(template, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			session := filepath.Join(t.TempDir(), "session")
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.MkdirAll(session, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(outside, "canary")
+			if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(session, ".amux", "codex")
+			tc.plant(t, config, outside, canary)
+			s := store.Session{ID: "n1", RootID: "root", Agent: "codex", Dir: session}
+			if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+				t.Fatalf("AgentCommand error = %v, want unsafe launch refusal", err)
+			}
+			if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+				t.Fatalf("outside canary = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestAgentCommandIgnoresPredictableTrustTempAlias(t *testing.T) {
+	isolateStore(t)
+	template := filepath.Join(t.TempDir(), "codex-template")
+	t.Setenv("CODEX_HOME", template)
+	if err := os.MkdirAll(template, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "session")
+	config := filepath.Join(session, ".amux", "codex")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(config, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, filepath.Join(config, "config.toml.amux.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "n1", RootID: "root", Agent: "codex", Dir: session}
+	if _, _, _, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside canary = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(config, "config.toml")); err != nil || !strings.Contains(string(got), "trusted") {
+		t.Fatalf("private config was not safely published: %q, %v", got, err)
+	}
+}
+
+func TestAgentCommandRefusesRacedConfigParentSymlink(t *testing.T) {
+	isolateStore(t)
+	template := filepath.Join(t.TempDir(), "codex-template")
+	t.Setenv("CODEX_HOME", template)
+	if err := os.MkdirAll(template, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "session")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(session, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := openPreparationRoot
+	defer func() { openPreparationRoot = original }()
+	openPreparationRoot = func(path string) (*hostprep.Root, error) {
+		root, err := original(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(outside, filepath.Join(session, ".amux")); err != nil {
+			_ = root.Close()
+			return nil, err
+		}
+		return root, nil
+	}
+	s := store.Session{ID: "n1", RootID: "root", Agent: "codex", Dir: session}
+	if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+		t.Fatalf("AgentCommand error = %v, want unsafe launch refusal", err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside canary = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "codex")); !os.IsNotExist(err) {
+		t.Fatalf("raced outside parent was populated: %v", err)
+	}
+}
+
+func TestAgentCommandRefusesRelaunchTranscriptAliases(t *testing.T) {
+	for _, hardlink := range []bool{false, true} {
+		name := "symlink"
+		if hardlink {
+			name = "hardlink"
+		}
+		t.Run(name, func(t *testing.T) {
+			isolateStore(t)
+			session := filepath.Join(t.TempDir(), "session")
+			if err := os.MkdirAll(session, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			const uuid = "77777777-7777-4777-8777-777777777777"
+			s := store.Session{ID: "n1", RootID: "root", Agent: "claude", Dir: session, ClaudeID: uuid}
+			if err := ensureConfigHome(s); err != nil {
+				t.Fatal(err)
+			}
+			project := filepath.Join(session, ".amux", "claude", "projects", munge(session))
+			if err := os.MkdirAll(project, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(t.TempDir(), "outside-transcript.jsonl")
+			if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dst := filepath.Join(project, uuid+".jsonl")
+			var err error
+			if hardlink {
+				err = os.Link(canary, dst)
+			} else {
+				err = os.Symlink(canary, dst)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+				t.Fatalf("AgentCommand error = %v, want unsafe relaunch refusal", err)
+			}
+			if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+				t.Fatalf("outside transcript = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestAgentCommandRefusesHookFinalAlias(t *testing.T) {
+	isolateStore(t)
+	session := filepath.Join(t.TempDir(), "session")
+	if err := os.MkdirAll(filepath.Join(session, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "n1", RootID: "root", Agent: "claude", Dir: session}
+	if err := ensureConfigHome(s); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "outside-settings.json")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(canary, filepath.Join(session, ".claude", "settings.local.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := AgentCommand(s); !hostprep.IsUnsafe(err) {
+		t.Fatalf("AgentCommand error = %v, want unsafe hook refusal", err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside hook settings = %q, %v", got, err)
+	}
+}
+
+func TestAgentCommandRestoresTranscriptPastPredictableTempAlias(t *testing.T) {
+	isolateStore(t)
+	session := filepath.Join(t.TempDir(), "session")
+	if err := os.MkdirAll(session, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const uuid = "88888888-8888-4888-8888-888888888888"
+	s := store.Session{ID: "n1", RootID: "root", Agent: "claude", Dir: session, ClaudeID: uuid}
+	if err := ensureConfigHome(s); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(session, ".amux", "claude", "projects", munge(session))
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "outside-temp")
+	if err := os.WriteFile(canary, []byte("outside-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(project, uuid+".jsonl")
+	if err := os.Symlink(canary, dst+".amux.tmp"); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(t.TempDir(), "live.jsonl")
+	if err := os.WriteFile(live, []byte("restored-transcript"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.CaptureTranscript(uuid, live, "Stop", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, argv, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	} else if !hasFlag(argv, "--resume") {
+		t.Fatalf("restored launch argv = %v, want --resume", argv)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != "outside-canary" {
+		t.Fatalf("outside temp canary = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "restored-transcript" {
+		t.Fatalf("restored transcript = %q, %v", got, err)
+	}
 }
 
 // TestAgentEnvExportsSessionID pins the intent env every pane inherits: the
