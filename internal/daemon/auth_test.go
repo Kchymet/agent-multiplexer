@@ -33,7 +33,7 @@ func TestAuthReloadDefersBusyAndUnknownAndOnlyResumesClaude(t *testing.T) {
 		e.running(id)
 	}
 	for _, id := range []string{"idle", "closed", "replaced"} {
-		if err := core.WriteHookState(convID(id), core.StateReady, ""); err != nil {
+		if err := core.WriteSessionHookState(id, convID(id), core.StateReady, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -56,7 +56,7 @@ func TestAuthReloadDefersBusyAndUnknownAndOnlyResumesClaude(t *testing.T) {
 	if _, ok := e.Lookup(shell); !ok {
 		t.Fatal("shell stopped")
 	}
-	if err := core.WriteHookState(convID("busy"), core.StateReady, ""); err != nil {
+	if err := core.WriteSessionHookState("busy", convID("busy"), core.StateReady, ""); err != nil {
 		t.Fatal(err)
 	}
 	d.resumeWithSharedAuth(context.Background())

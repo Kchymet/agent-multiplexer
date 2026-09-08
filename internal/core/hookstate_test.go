@@ -40,3 +40,21 @@ func TestHookStateRoundTrip(t *testing.T) {
 		t.Fatalf("legacy bare-word record: %+v ok=%v", rec, ok)
 	}
 }
+
+func TestSessionHookStateScopesEqualRuntimeIDsBySubject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := WriteSessionHookState("a", "same", StateReady, "/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSessionHookState("b", "same", StateRunning, "/b"); err != nil {
+		t.Fatal(err)
+	}
+	a, okA := SessionHookState("a", "same")
+	b, okB := SessionHookState("b", "same")
+	if !okA || !okB || a.State != StateReady || b.State != StateRunning {
+		t.Fatalf("scoped states a=%+v/%v b=%+v/%v", a, okA, b, okB)
+	}
+	if _, ok := HookState("same"); ok {
+		t.Fatal("managed activity leaked into legacy UUID-only state")
+	}
+}

@@ -11,20 +11,16 @@ import (
 	"time"
 )
 
-// Claude Code answers permission prompts in its TUI and records none of them in
-// the session transcript — the prompt opens, the human picks, and nothing
-// reaches disk. So amux's own hooks are the only producer of "this session is
-// blocked on this prompt" (docs/remote-provider-sessions.md §4.5): Claude's
-// PermissionRequest hook appends a request line here, and the hooks that prove
-// the prompt closed (PostToolUse, PermissionDenied, Stop, SessionEnd) append the
-// matching resolution.
+// This legacy journal format is preserved for existing trusted-host diagnostics
+// and authoritative-history replay. Managed Claude hooks no longer write it:
+// they are session-controlled observations and cannot prove that the runtime
+// displayed a prompt. A managed runtime may expose a journal through
+// RuntimePermissionPath only when a daemon-owned producer independently proves
+// its occurrences (docs/remote-provider-sessions.md §4.5).
 //
-// The journal is append-only JSONL, one file per Claude session id, alongside the
-// hook-state records (hookstate.go). That shape is deliberate: the runtime-events
-// reader tails it exactly the way it tails a transcript, so a permission_request
-// carries an ordinal like every other event, and the daemon reads the same file
-// back to decide whether an incoming `permission` verb names the request the
-// runtime actually has open.
+// The journal remains append-only JSONL, one file per legacy runtime session id.
+// Existing records are not deleted or migrated. Generation-free history can be
+// read but is deliberately nonanswerable under the live occurrence gate.
 
 // Permission decisions a journal line can carry. Allow/Deny are the two a human
 // (or the `permission` verb) can give; Cleared is amux's own honest answer for a

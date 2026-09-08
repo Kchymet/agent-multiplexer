@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/sessionreport"
+	"amux/internal/sessionrpc"
 )
 
 // withHookStdin runs fn with payload piped on stdin, the way Claude Code invokes
@@ -27,62 +31,59 @@ func withHookStdin(t *testing.T, payload string, fn func()) {
 	fn()
 }
 
-// TestAgentPermissionJournalsTheHookLifecycle drives `amux agent permission` with
-// the payloads Claude pipes to it and checks the journal that comes out — the
-// producer end of the permission_request events a remote orchestrator answers.
-// Identity and the tool come from the hook JSON, exactly as in a real session.
-func TestAgentPermissionJournalsTheHookLifecycle(t *testing.T) {
+func successfulReportRPC(t *testing.T) *fakeRestrictedRPC {
+	t.Helper()
+	result, err := json.Marshal(core.Result{Type: "result", OK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpc := &fakeRestrictedRPC{
+		query:  sessionrpc.Result{Status: sessionrpc.StatusOK, Body: []byte(`{"runtime_generation":"gen-1"}`)},
+		action: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: result},
+	}
+	installRestrictedRPC(t, rpc)
+	return rpc
+}
+
+// TestAgentPermissionReportsObservationWithoutAuthority verifies the CLI sends
+// bounded hook facts through fixed-context RPC and never writes the answerable
+// permission journal. Hook session_id is intentionally irrelevant to authority.
+func TestAgentPermissionReportsObservationWithoutAuthority(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AMUX_SESSION_ID", "")
+	rpc := successfulReportRPC(t)
 	const session = "33333333-3333-4333-8333-333333333333"
 	request := `{"session_id":"` + session + `","hook_event_name":"PermissionRequest",` +
 		`"tool_name":"Bash","tool_input":{"command":"rm -rf build/"}}`
 	postTool := `{"session_id":"` + session + `","hook_event_name":"PostToolUse","tool_name":"Bash"}`
 
 	withHookStdin(t, request, func() {
-		if err := cmdAgentPermission([]string{"request"}); err != nil {
+		if err := cmdAgentPermission([]string{"request", "--hook"}); err != nil {
 			t.Fatalf("request: %v", err)
 		}
 	})
-	open := core.PendingPermissions(session)
-	if len(open) != 1 {
-		t.Fatalf("pending = %+v, want the one request the hook opened", open)
+	if len(rpc.actions) != 1 || rpc.actions[0].Verb != sessionreport.PermissionRequest {
+		t.Fatalf("actions = %+v", rpc.actions)
 	}
-	if open[0].Tool != "Bash" || open[0].Action != "rm -rf build/" {
-		t.Errorf("request = %+v, want the tool and its command as the action", open[0])
+	fields := rpc.actions[0].Fields
+	if fields[sessionreport.FieldTool] != "Bash" || fields[sessionreport.FieldAction] != "rm -rf build/" {
+		t.Errorf("fields = %+v, want tool/action observation", fields)
 	}
-	if open[0].RequestID == "" {
-		t.Error("the request must carry an id: it is what a permission verb quotes back")
+	if fields[sessionreport.FieldRequestID] == "" || fields[sessionreport.FieldRuntimeGeneration] != "gen-1" {
+		t.Errorf("fields = %+v, want random request correlation and daemon-issued generation", fields)
 	}
-	// Only the options amux can actually deliver to the prompt are offered.
-	if len(open[0].Options) != 2 ||
-		open[0].Options[0] != core.PermissionAllow || open[0].Options[1] != core.PermissionDeny {
-		t.Errorf("options = %v, want allow/deny", open[0].Options)
+	if got := core.PendingPermissions(session); len(got) != 0 {
+		t.Fatalf("self observation entered answerable permission journal: %+v", got)
 	}
 
 	withHookStdin(t, postTool, func() {
-		if err := cmdAgentPermission([]string{core.PermissionAllow}); err != nil {
+		if err := cmdAgentPermission([]string{core.PermissionAllow, "--hook"}); err != nil {
 			t.Fatalf("allow: %v", err)
 		}
 	})
-	if got := core.PendingPermissions(session); len(got) != 0 {
-		t.Fatalf("the tool ran, so its prompt must be resolved; still open: %+v", got)
-	}
-
-	// The turn boundary clears whatever survived — a denial Claude reported through
-	// no hook we listen on, say.
-	withHookStdin(t, request, func() {
-		if err := cmdAgentPermission([]string{"request"}); err != nil {
-			t.Fatalf("second request: %v", err)
-		}
-	})
-	withHookStdin(t, `{"session_id":"`+session+`","hook_event_name":"Stop"}`, func() {
-		if err := cmdAgentPermission([]string{"clear"}); err != nil {
-			t.Fatalf("clear: %v", err)
-		}
-	})
-	if got := core.PendingPermissions(session); len(got) != 0 {
-		t.Fatalf("clear must leave nothing open, got %+v", got)
+	if len(rpc.actions) != 2 || rpc.actions[1].Verb != sessionreport.PermissionResolved ||
+		rpc.actions[1].Fields[sessionreport.FieldDecision] != core.PermissionAllow {
+		t.Fatalf("resolution action = %+v", rpc.actions)
 	}
 }
 
@@ -92,16 +93,16 @@ func TestAgentPermissionJournalsTheHookLifecycle(t *testing.T) {
 func TestAgentPermissionNeverDisrupts(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AMUX_SESSION_ID", "")
+	successfulReportRPC(t)
 	cases := []struct {
 		name    string
 		args    []string
 		payload string
 	}{
-		{"no verb", nil, `{"session_id":"s1"}`},
-		{"unknown verb", []string{"detonate"}, `{"session_id":"s1"}`},
-		{"no session to key on", []string{"request"}, `{"hook_event_name":"PermissionRequest"}`},
-		{"unparsable payload", []string{"request"}, `not json`},
-		{"resolving with nothing open", []string{core.PermissionAllow}, `{"session_id":"s1"}`},
+		{"unknown verb", []string{"detonate", "--hook"}, `{"session_id":"s1"}`},
+		{"no reported session needed", []string{"request", "--hook"}, `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`},
+		{"unparsable payload", []string{"request", "--hook"}, `not json`},
+		{"mismatched event", []string{core.PermissionAllow, "--hook"}, `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,24 +118,89 @@ func TestAgentPermissionNeverDisrupts(t *testing.T) {
 	}
 }
 
+func TestExplicitReportsPreserveErrorsWhileHooksAreNondisruptive(t *testing.T) {
+	rpc := &fakeRestrictedRPC{queryErr: errors.New("fixed context unavailable")}
+	installRestrictedRPC(t, rpc)
+	if err := cmdAgentStatus([]string{core.StateRunning}, false); err == nil {
+		t.Fatal("explicit status hid fixed-context failure")
+	}
+	withHookStdin(t, `{"hook_event_name":"UserPromptSubmit","session_id":"forged"}`, func() {
+		if err := cmdAgentStatus([]string{core.StateRunning}, true); err != nil {
+			t.Fatalf("generated activity hook disrupted runtime: %v", err)
+		}
+	})
+	if err := cmdAgentCapture([]string{"Stop"}); err == nil {
+		t.Fatal("explicit capture hid fixed-context failure")
+	}
+	withHookStdin(t, `{"hook_event_name":"Stop","transcript_path":"/host/foreign"}`, func() {
+		if err := cmdAgentCapture([]string{"--hook"}); err != nil {
+			t.Fatalf("generated capture hook disrupted runtime: %v", err)
+		}
+	})
+}
+
+func TestCaptureHookDoesNotForwardUUIDOrPath(t *testing.T) {
+	rpc := successfulReportRPC(t)
+	withHookStdin(t, `{"hook_event_name":"Stop","session_id":"foreign","transcript_path":"/host/foreign"}`, func() {
+		if err := cmdAgentCapture([]string{"--hook"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(rpc.actions) != 1 || rpc.actions[0].Verb != sessionreport.Capture {
+		t.Fatalf("capture actions = %+v", rpc.actions)
+	}
+	fields := rpc.actions[0].Fields
+	if len(fields) != 2 || fields[sessionreport.FieldEvent] != "Stop" || fields[sessionreport.FieldRuntimeGeneration] != "gen-1" {
+		t.Fatalf("capture forwarded untrusted identity/path fields: %+v", fields)
+	}
+}
+
+func TestLegacyGeneratedHookSpellingsRemainNondisruptive(t *testing.T) {
+	rpc := successfulReportRPC(t)
+	withHookStdin(t, `{"hook_event_name":"PermissionRequest","session_id":"foreign","tool_name":"Bash"}`, func() {
+		if err := cmdAgentPermission([]string{"request"}); err != nil {
+			t.Fatalf("legacy permission hook: %v", err)
+		}
+	})
+	withHookStdin(t, `{"hook_event_name":"Stop","session_id":"foreign","transcript_path":"/host/foreign"}`, func() {
+		if err := cmdAgentCapture(nil); err != nil {
+			t.Fatalf("legacy capture hook: %v", err)
+		}
+	})
+	if len(rpc.actions) != 2 || rpc.actions[0].Verb != sessionreport.PermissionRequest || rpc.actions[1].Verb != sessionreport.Capture {
+		t.Fatalf("legacy hook reports = %+v", rpc.actions)
+	}
+	rpc.queryErr = errors.New("daemon unavailable")
+	withHookStdin(t, `{"hook_event_name":"Stop"}`, func() {
+		if err := cmdAgentCapture(nil); err != nil {
+			t.Fatalf("legacy capture hook exposed report failure: %v", err)
+		}
+	})
+}
+
 func TestAgentModelRecordsStatusLineSelection(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AMUX_SESSION_ID", "")
+	rpc := successfulReportRPC(t)
 	const session = "33333333-3333-4333-8333-333333333333"
 	withHookStdin(t, `{"session_id":"`+session+`","model":{"id":"claude-opus-4-7","display_name":"Opus"}}`, func() {
 		if err := cmdAgentModel([]string{"--statusline"}); err != nil {
 			t.Fatal(err)
 		}
 	})
-	got, ok := core.RuntimeModel(session)
-	if !ok || got.Model != "claude-opus-4-7" {
-		t.Fatalf("RuntimeModel = %+v, %v", got, ok)
+	if len(rpc.actions) != 1 || rpc.actions[0].Verb != sessionreport.Model ||
+		rpc.actions[0].Fields[sessionreport.FieldModel] != "claude-opus-4-7" {
+		t.Fatalf("model report = %+v", rpc.actions)
+	}
+	if _, ok := core.RuntimeModel(session); ok {
+		t.Fatal("status line wrote the legacy UUID-only model record")
 	}
 }
 
 func TestAgentModelForwardsExistingStatusLine(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AMUX_SESSION_ID", "")
+	successfulReportRPC(t)
 	payload := `{"session_id":"s1","model":{"id":"claude-sonnet-4-6"}}`
 	r, w, err := os.Pipe()
 	if err != nil {

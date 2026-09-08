@@ -45,7 +45,7 @@ func (claudeHarness) PreferredModel() string { return claudecfg.PreferredModel()
 // `/model`) and falls back to the latest assistant transcript entry for sessions
 // launched before amux installed that callback.
 func (h claudeHarness) CurrentModel(s store.Session) (string, bool) {
-	if report, ok := core.RuntimeModel(s.ClaudeID); ok {
+	if report, ok := core.SessionRuntimeModel(s.ID, s.ClaudeID); ok {
 		return report.Model, true
 	}
 	if path, ok := h.RuntimeTranscriptPath(s); ok {
@@ -225,7 +225,7 @@ func (claudeHarness) Keys() Keys { return claudeKeys() }
 // blocked on the user (running/waiting) is Busy; a finished turn or exited agent
 // (ready/idle) is Safe; anything else, or no record, is Unknown.
 func (claudeHarness) Activity(s store.Session) engine.Activity {
-	rec, ok := core.HookState(s.ClaudeID)
+	rec, ok := core.SessionHookState(s.ID, s.ClaudeID)
 	if !ok {
 		return engine.ActivityUnknown
 	}
@@ -243,7 +243,7 @@ func (claudeHarness) Activity(s store.Session) engine.Activity {
 // ready/idle), or Unknown when no hook data has arrived yet — a granularity the
 // coarse Activity signal can't preserve.
 func (claudeHarness) RailState(s store.Session) string {
-	if rec, ok := core.HookState(s.ClaudeID); ok {
+	if rec, ok := core.SessionHookState(s.ID, s.ClaudeID); ok {
 		switch rec.State {
 		case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
 			return rec.State
@@ -261,7 +261,7 @@ func (h claudeHarness) RestoreTranscript(root *hostprep.Root, s store.Session, c
 	if cwd == "" || s.ClaudeID == "" {
 		return false, nil
 	}
-	return restoreCapturedRooted(root, s.ClaudeID, h.home(s).TranscriptPath(cwd, s.ClaudeID))
+	return restoreCapturedRooted(root, s.ID, s.ClaudeID, h.home(s).TranscriptPath(cwd, s.ClaudeID))
 }
 
 // SkillsDir / GuideFile: Claude Code's own conventions — .claude/skills and
@@ -324,18 +324,15 @@ func (h claudeHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
 	return "", false
 }
 
-// RuntimePermissionPath resolves a Claude session to amux's permission journal
-// for it. Claude Code answers permission prompts in its TUI and records none of
-// them in the transcript, so this journal — written by the hooks amux installs —
-// is the only place a prompt is durable, and the only reason a remote consumer
-// has a request_id to quote back. The path is answered whether or not the file
-// exists yet: the reader tolerates a record that has not appeared.
-func (h claudeHarness) RuntimePermissionPath(s store.Session) (string, bool) {
-	if s.ClaudeID == "" {
-		return "", false
-	}
-	return core.PermissionJournalPath(s.ClaudeID), true
-}
+// RuntimePermissionPath deliberately exposes no answerable Claude journal.
+// Claude writes no prompt to its transcript; historically this path pointed at
+// the journal produced entirely by session-controlled hooks. Authentication
+// scopes such a report but cannot prove the live runtime displayed that prompt,
+// so accepting it as an occurrence would let self telemetry mint approval
+// rights. Diagnostic observations live outside runtimeevents. A human can still
+// answer Claude directly in the attached pane; remote approval stays disabled
+// until Claude offers an authenticated runtime-native approval source.
+func (h claudeHarness) RuntimePermissionPath(store.Session) (string, bool) { return "", false }
 
 // Doctor checks the load-bearing Claude project-dir path munge against Claude's
 // actual on-disk layout in every home: a discovered transcript whose real project

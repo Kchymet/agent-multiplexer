@@ -9,6 +9,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
 )
@@ -30,6 +31,9 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 		return access.ErrDenied
 	}
 	req := call.AccessRequest()
+	if isSessionReport(req) {
+		return r.authorizeSessionReport(ctx, principal, req)
+	}
 	if _, err := canonicalSessionOperation(req); err != nil {
 		return err
 	}
@@ -37,6 +41,12 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 }
 
 func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
+	if request.Call.Kind == sessionrpc.CallOperation {
+		req := request.Call.AccessRequest()
+		if req.Route == access.RouteAction && req.Verb == sessionreport.Capture {
+			return r.dispatchSessionCapture(ctx, request.Principal, req), nil
+		}
+	}
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
 	r.d.effectMu.Lock()
@@ -50,6 +60,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return rpcInvalid("invalid_call"), nil
 	}
 	req := request.Call.AccessRequest()
+	if isSessionReport(req) {
+		return r.dispatchSessionReport(ctx, request.Principal, req), nil
+	}
 	action, err := canonicalSessionOperation(req)
 	if err != nil {
 		return rpcInvalid("invalid_operation"), nil

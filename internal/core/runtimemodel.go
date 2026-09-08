@@ -13,8 +13,54 @@ import (
 // transition, and runtimes without lifecycle hooks (notably Codex) can still
 // participate in the same reconciliation path.
 type RuntimeModelRecord struct {
-	Model   string `json:"model"`
-	Updated int64  `json:"updated"`
+	SubjectID string `json:"subject_id,omitempty"`
+	RuntimeID string `json:"runtime_id,omitempty"`
+	Model     string `json:"model"`
+	Updated   int64  `json:"updated"`
+}
+
+// WriteSessionRuntimeModel records model telemetry under the authoritative
+// amux subject/runtime pair. UUID-only WriteRuntimeModel is retained solely for
+// legacy host diagnostics.
+func WriteSessionRuntimeModel(subjectID, runtimeID, model string) error {
+	model = strings.TrimSpace(model)
+	path := sessionRecordPath(RuntimeModelDir(), subjectID, runtimeID, "")
+	if path == "" || model == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(RuntimeModelRecord{
+		SubjectID: subjectID, RuntimeID: runtimeID, Model: model,
+		Updated: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// SessionRuntimeModel returns only an exact managed subject/runtime report.
+func SessionRuntimeModel(subjectID, runtimeID string) (RuntimeModelRecord, bool) {
+	path := sessionRecordPath(RuntimeModelDir(), subjectID, runtimeID, "")
+	if path == "" {
+		return RuntimeModelRecord{}, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return RuntimeModelRecord{}, false
+	}
+	var rec RuntimeModelRecord
+	if json.Unmarshal(b, &rec) != nil || strings.TrimSpace(rec.Model) == "" ||
+		rec.SubjectID != subjectID || rec.RuntimeID != runtimeID {
+		return RuntimeModelRecord{}, false
+	}
+	return rec, true
 }
 
 // RuntimeModelDir holds model observations keyed by the runtime conversation id.

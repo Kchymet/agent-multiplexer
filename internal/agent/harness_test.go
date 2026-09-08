@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,10 +137,10 @@ func TestClaudeActivity(t *testing.T) {
 	}
 	for state, want := range cases {
 		sid := "sid-" + state
-		if err := core.WriteHookState(sid, state, "/cwd"); err != nil {
+		if err := core.WriteSessionHookState("a1", sid, state, "/cwd"); err != nil {
 			t.Fatal(err)
 		}
-		if got := h.Activity(store.Session{ClaudeID: sid}); got != want {
+		if got := h.Activity(store.Session{ID: "a1", ClaudeID: sid}); got != want {
 			t.Fatalf("state %q Activity=%v, want %v", state, got, want)
 		}
 	}
@@ -172,11 +173,7 @@ func TestClaudeRestoreTranscript(t *testing.T) {
 	}
 
 	// Capture a backup, then restore: the session becomes resumable.
-	live := filepath.Join(t.TempDir(), "live.jsonl")
-	if err := os.WriteFile(live, []byte(`{"role":"user"}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.CaptureTranscript(sid, live, "Stop", ""); err != nil {
+	if _, err := core.CaptureSessionTranscript(s.ID, sid, "Stop", strings.NewReader(`{"role":"user"}`+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := h.RestoreTranscript(root, s, cwd)

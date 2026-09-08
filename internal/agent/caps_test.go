@@ -12,16 +12,17 @@ import (
 // disables the controls instead of failing on them.
 func TestCapsFor(t *testing.T) {
 	steerable := harnessproto.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+	claude := harnessproto.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
 	for _, tc := range []struct {
 		kind string
 		want harnessproto.SessionCaps
 	}{
-		// Claude and Codex are fully steerable and both raise correlated
-		// permission_request events (journal / rollout), so every verb is on.
-		{"claude", steerable},
+		// Claude's session-controlled hooks are observations, not an authoritative
+		// permission source. Codex has structured supervisor-owned approvals.
+		{"claude", claude},
 		{"codex", steerable},
 		// An empty kind resolves to the default (claude).
-		{"", steerable},
+		{"", claude},
 		// Hermes has no steering keys (noopHarness), so nothing is advertised.
 		{"hermes", harnessproto.SessionCaps{}},
 		// An unrecognized kind is a no-op harness: honestly all-false.
@@ -39,12 +40,12 @@ func TestCapsFor(t *testing.T) {
 // derivation, so a future runtime that gains a transcript but lacks a deny key
 // still reports Permission=false.
 func TestPermissionRequiresAnswerKeys(t *testing.T) {
-	if !correlatesPermissions("claude") {
-		t.Fatal("claude must correlate permissions (precondition for this test)")
+	if correlatesPermissions("claude") {
+		t.Fatal("session-controlled Claude observations must not correlate permissions")
 	}
-	// Claude has both keys → permission on.
-	if !CapsFor("claude").Permission {
-		t.Error("claude should advertise Permission")
+	// Claude has both keys but no authoritative prompt source, so permission is off.
+	if CapsFor("claude").Permission {
+		t.Error("claude must not advertise Permission")
 	}
 	// A runtime that correlates but is missing an answer key would be caught by the
 	// len(Allow)/len(Deny) guard in CapsFor; assert the guard is actually consulted

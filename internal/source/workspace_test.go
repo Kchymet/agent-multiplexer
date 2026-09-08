@@ -84,14 +84,14 @@ func TestUntrackedRows(t *testing.T) {
 // identity — a Codex row is never mislabeled Claude); a non-steerable row keeps
 // its identity but gets an explicit non-nil all-false block.
 func TestWithCaps(t *testing.T) {
-	allOn := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
 
 	claude := (&Workspace{}).withCaps(core.Session{ID: "a", Kind: "claude"}, true)
 	if claude.Runtime != "claude" {
 		t.Errorf("claude row Runtime = %q, want claude", claude.Runtime)
 	}
-	if claude.Caps == nil || *claude.Caps != allOn {
-		t.Errorf("steerable claude row Caps = %+v, want all-on", claude.Caps)
+	if claude.Caps == nil || *claude.Caps != claudeCaps {
+		t.Errorf("steerable claude row Caps = %+v, want permission fail-closed", claude.Caps)
 	}
 
 	codex := (&Workspace{}).withCaps(core.Session{ID: "b", Kind: "codex"}, true)
@@ -190,14 +190,14 @@ func TestPollCapsByControlPath(t *testing.T) {
 		byID[r.ID] = r
 	}
 
-	allOn := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true}
+	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
 	off := core.SessionCaps{}
 
 	// Tracked, active agent — full caps.
 	if a, ok := byID["ag-active"]; !ok {
 		t.Fatal("active agent row missing from Poll")
-	} else if a.Caps == nil || *a.Caps != allOn {
-		t.Errorf("active agent Caps = %+v, want all-on", a.Caps)
+	} else if a.Caps == nil || *a.Caps != claudeCaps {
+		t.Errorf("active agent Caps = %+v, want Claude permission fail-closed", a.Caps)
 	}
 
 	// Archived agent — identity preserved, every verb off.
@@ -241,7 +241,7 @@ func TestPollReconcilesRuntimeModel(t *testing.T) {
 		}
 	}
 	db.Close()
-	if err := core.WriteRuntimeModel("runtime-id", "claude-opus-4-7"); err != nil {
+	if err := core.WriteSessionRuntimeModel("agent", "runtime-id", "claude-opus-4-7"); err != nil {
 		t.Fatal(err)
 	}
 

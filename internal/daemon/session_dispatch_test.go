@@ -323,7 +323,7 @@ func TestSelfCompletionPersistsBeforeBoundedRuntimeStopAndRevoke(t *testing.T) {
 	if _, err := d.permissions.observe(session.ID, instance); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.WriteHookState(session.ClaudeID, core.StateReady, ""); err != nil {
+	if err := core.WriteSessionHookState(session.ID, session.ClaudeID, core.StateReady, ""); err != nil {
 		t.Fatal(err)
 	}
 	runtime.completions.minimum = 30 * time.Millisecond

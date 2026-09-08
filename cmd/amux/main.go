@@ -79,7 +79,7 @@ var commands = []command{
 	{names: []string{"_vtdemo"}, run: vtdemo.Run, hidden: true},
 	{names: []string{"agent"}, run: cmdAgent},
 	// deprecated alias for "amux agent hook"
-	{names: []string{"hook"}, run: cmdAgentStatus, hidden: true},
+	{names: []string{"hook"}, run: func(args []string) error { return cmdAgentStatus(args, true) }, hidden: true},
 	{names: []string{"status"}, run: cmdStatus},
 	{names: []string{"refresh"}, run: func([]string) error { return cmdRefresh() }},
 	{names: []string{"doctor", "health", "check"}, run: func([]string) error { return cmdDoctor() }},

@@ -255,12 +255,11 @@ type Record struct {
 	// runtime and is refreshed at publication time. Request IDs are deliberately
 	// not keys because runtimes may reuse them across incarnations.
 	PermissionBindings map[string]string
-	// Permissions is amux's own permission journal for the session, read as a
-	// second source alongside Path. It exists because a runtime may resolve
-	// permission prompts entirely in its TUI without recording them (Claude Code
-	// does), leaving amux's hooks as the only producer of the permission_request
-	// events the `permission` verb correlates against. Empty when the runtime
-	// records its prompts itself (Codex) or none is written.
+	// Permissions is an independently authoritative permission journal for the
+	// session, read as a second source alongside Path. Session-controlled hook
+	// observations must never be placed here: doing so would let telemetry mint
+	// answerable permission events. Empty when the runtime records prompts itself
+	// (Codex) or no authoritative producer exists (Claude).
 	Permissions string
 	// Journal is amux's own session journal (core/journal.go), read as a further
 	// source: what amux did to the session, which the runtime never records —

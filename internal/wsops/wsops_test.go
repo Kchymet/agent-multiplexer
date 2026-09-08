@@ -277,8 +277,14 @@ func TestAgentCommandRestoresTranscriptPastPredictableTempAlias(t *testing.T) {
 	if err := os.WriteFile(live, []byte("restored-transcript"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.CaptureTranscript(uuid, live, "Stop", ""); err != nil {
+	f, err := os.Open(live)
+	if err != nil {
 		t.Fatal(err)
+	}
+	_, captureErr := core.CaptureSessionTranscript(s.ID, uuid, "Stop", f)
+	_ = f.Close()
+	if captureErr != nil {
+		t.Fatal(captureErr)
 	}
 	if _, _, argv, err := AgentCommand(s); err != nil {
 		t.Fatal(err)
@@ -432,8 +438,14 @@ func TestAgentCommandGapFillRestore(t *testing.T) {
 	if err := os.WriteFile(live, []byte(`{"backup":true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.CaptureTranscript(uuid, live, "Stop", ""); err != nil {
+	f, err := os.Open(live)
+	if err != nil {
 		t.Fatal(err)
+	}
+	_, captureErr := core.CaptureSessionTranscript(s.ID, uuid, "Stop", f)
+	_ = f.Close()
+	if captureErr != nil {
+		t.Fatal(captureErr)
 	}
 
 	dir, _, argv, err := AgentCommand(s)
