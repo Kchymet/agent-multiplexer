@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"amux/internal/core"
-	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 var ErrDenied = errors.New("access denied")
@@ -76,7 +75,7 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 	}
 
 	if req.Route == RouteQuery {
-		return authorizeQuery(subject, req)
+		return p.authorizeQuery(ctx, subject, req)
 	}
 	if req.Route == RoutePane {
 		return ErrDenied // restricted principals use one-shot mailbox RPC only
@@ -170,7 +169,7 @@ func (p Policy) repoOwns(ctx context.Context, subject, target Resource) (bool, e
 	return root.Role == "" && root.Scope == "repo" && root.Repo == subject.Repo, nil
 }
 
-func authorizeQuery(subject Resource, req Request) error {
+func (p Policy) authorizeQuery(ctx context.Context, subject Resource, req Request) error {
 	switch req.Verb {
 	case core.QueryVersion, core.QueryCodexControl, core.QuerySnapshot:
 		return nil
@@ -178,10 +177,27 @@ func authorizeQuery(subject Resource, req Request) error {
 		if subject.Role == "coordinator" || subject.Role == "repo" || subject.Role == "console" {
 			return nil
 		}
+	case core.QueryRuntimeEvents:
+		if strings.TrimSpace(req.ID) == "" {
+			return ErrDenied
+		}
+		target, ok, err := p.Resolver.Lookup(ctx, req.ID)
+		if err != nil {
+			return err
+		}
+		if !ok || target.Archived {
+			return ErrDenied
+		}
+		visible, err := p.visible(ctx, subject, target)
+		if err != nil {
+			return err
+		}
+		if visible {
+			return nil
+		}
 	}
 	// Raw runtime paths/records and untracked-conversation fallback are never
-	// exposed to restricted principals. A normalized event query will be added by
-	// the mailbox transport instead.
+	// exposed to restricted principals.
 	return ErrDenied
 }
 
@@ -192,7 +208,7 @@ func ordinaryAction(req Request) bool {
 	return req.Verb == core.ActionSetArchived && req.Fields["archived"] == "true"
 }
 
-const RuntimeGenerationField = harnessproto.FieldRuntimeGeneration
+const RuntimeGenerationField = "runtime_generation"
 
 func coordinatorAction(req Request, self bool) bool {
 	switch req.Verb {

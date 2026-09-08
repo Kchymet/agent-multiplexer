@@ -228,6 +228,10 @@ const (
 	// tell the orchestrator which runtime a session's events came from. Path is ""
 	// when the session has no supported record.
 	QueryRuntimeRecord = "runtime-record"
+	// QueryRuntimeEvents returns a daemon-normalized event projection for the
+	// session named by Action.ID. Restricted policy may authorize this scoped
+	// projection; it never exposes the underlying host path or runtime record.
+	QueryRuntimeEvents = "runtime-events"
 	// QueryVersion reports the daemon build, its CLI protocol, and the schema
 	// version of the database it owns. It is intentionally additive: a new CLI
 	// can identify an older daemon by the latter's unknown-query response.
