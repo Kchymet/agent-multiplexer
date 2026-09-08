@@ -241,9 +241,9 @@ func dialDaemon() (*daemon.Client, error) {
 	if err := ensureDaemon(self); err != nil {
 		return nil, fmt.Errorf("daemon unavailable: %w", err)
 	}
-	c, err := daemon.Dial()
+	c, err := startupDial()
 	if err != nil {
-		return nil, fmt.Errorf("daemon offline: %w", err)
+		return nil, daemonConnectionError(err)
 	}
 	return c, nil
 }
