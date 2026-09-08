@@ -40,7 +40,7 @@ func TestSharedAuthDirectoryIsVisibleOnlyToClaudePanes(t *testing.T) {
 		for _, tab := range []int{TabAgent, TabTerminal, TabEditor} {
 			s := store.Session{ID: "one", Agent: kind, Dir: filepath.Join(home, "agent")}
 			spec := testLaunchSpec(t, s)
-			argv, err := scope(s.Dir, tab, s, spec.Access, []string{"/usr/bin/true"}, nil)
+			argv, err := scope(s.Dir, tab, s, spec.Access, nil, []string{"/usr/bin/true"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -105,7 +105,7 @@ test -d .oauth_refresh.lock
 echo seen > "$1"
 `
 		spec := testLaunchSpec(t, s)
-		argv, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/sh", "-c", script, "auth-test", id}, nil)
+		argv, err := scope(s.Dir, TabAgent, s, spec.Access, nil, []string{"/bin/sh", "-c", script, "auth-test", id})
 		if err != nil {
 			t.Fatal(err)
 		}

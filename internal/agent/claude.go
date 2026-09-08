@@ -206,16 +206,14 @@ func copyTreeRooted(root *hostprep.Root, src, dstRel string) error {
 // PrepareLaunch trusts the launch dir in the agent's own home and installs amux's
 // status/capture hooks into the launch dir (not the user-wide settings.json),
 // pointed at the stable installed binary. Claude loads settings.local.json only
-// from the launch dir. All writes are anchored under the pinned session root;
-// legacy worktree cleanup remains an explicit migration concern.
+// from the launch dir. Safe launches use the session root, outside its private
+// repository checkout; do not invoke host-side Git against session-writable
+// metadata here.
 func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir string) error {
 	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
 		return err
 	}
-	if err := claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.InstalledBinPath()); err != nil {
-		return err
-	}
-	return nil
+	return claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.InstalledBinPath())
 }
 
 // Keys are Claude Code's interactive bindings (see claudeKeys).
@@ -324,15 +322,12 @@ func (h claudeHarness) RuntimeTranscriptPath(s store.Session) (string, bool) {
 	return "", false
 }
 
-// RuntimePermissionPath deliberately exposes no answerable Claude journal.
-// Claude writes no prompt to its transcript; historically this path pointed at
-// the journal produced entirely by session-controlled hooks. Authentication
-// scopes such a report but cannot prove the live runtime displayed that prompt,
-// so accepting it as an occurrence would let self telemetry mint approval
-// rights. Diagnostic observations live outside runtimeevents. A human can still
-// answer Claude directly in the attached pane; remote approval stays disabled
-// until Claude offers an authenticated runtime-native approval source.
-func (h claudeHarness) RuntimePermissionPath(store.Session) (string, bool) { return "", false }
+// RuntimePermissionPath is deliberately unavailable for Claude PTY sessions.
+// Claude hooks are session-authenticated observations, not runtime-native proof
+// that a permission UI prompt exists, so they cannot mint answerable approvals.
+// The pane's own local UI remains the trusted path until a daemon-owned runtime
+// approval bridge exists.
+func (claudeHarness) RuntimePermissionPath(store.Session) (string, bool) { return "", false }
 
 // Doctor checks the load-bearing Claude project-dir path munge against Claude's
 // actual on-disk layout in every home: a discovered transcript whose real project

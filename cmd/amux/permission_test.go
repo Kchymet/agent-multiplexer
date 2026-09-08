@@ -100,6 +100,7 @@ func TestAgentPermissionNeverDisrupts(t *testing.T) {
 		payload string
 	}{
 		{"unknown verb", []string{"detonate", "--hook"}, `{"session_id":"s1"}`},
+		{"invalid flag before hook marker", []string{"request", "--unknown", "--hook"}, `{"hook_event_name":"PermissionRequest"}`},
 		{"no reported session needed", []string{"request", "--hook"}, `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`},
 		{"unparsable payload", []string{"request", "--hook"}, `not json`},
 		{"mismatched event", []string{core.PermissionAllow, "--hook"}, `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`},

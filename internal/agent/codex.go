@@ -49,6 +49,9 @@ func (codexHarness) PreferredModel() string { return codexcfg.PreferredModel() }
 // for every turn and therefore reflects `/model` changes. Unlike Claude, Codex
 // exposes no command-hook or status-line callback.
 func (h codexHarness) CurrentModel(s store.Session) (string, bool) {
+	if report, ok := core.SessionRuntimeModel(s.ID, s.ClaudeID); ok {
+		return report.Model, true
+	}
 	if path, ok := h.RuntimeTranscriptPath(s); ok {
 		return latestModelLine(path, codexModelLine)
 	}

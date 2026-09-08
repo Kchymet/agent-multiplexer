@@ -16,6 +16,7 @@ import (
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 func reportRequest(principal access.Principal, verb string, fields map[string]string) sessionrpc.DispatchRequest {
@@ -213,6 +214,37 @@ func TestSessionCaptureUsesAuthoritativePrivateTranscript(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != content {
 		t.Fatalf("captured transcript = %q, %v", got, err)
+	}
+}
+
+func TestReviewerCaptureFindsHistoricalAcceptedLaunchCWD(t *testing.T) {
+	const runtimeID = "77777777-7777-4777-8777-777777777777"
+	session := store.Session{
+		ID: "a1", RootID: "root", Agent: "claude", Repo: "acme/api",
+		Dir: t.TempDir(), ClaudeID: runtimeID,
+	}
+	historicalCwd := wsops.AgentWorkdir(session)
+	if historicalCwd == session.Dir {
+		t.Fatal("single-repo fixture did not produce its historical launch cwd")
+	}
+	home := claudecfg.At(claudecfg.AgentHome(session.Dir))
+	source := home.TranscriptPath(historicalCwd, runtimeID)
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const content = "{\"role\":\"assistant\",\"content\":\"historical cwd\"}\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openSessionTranscriptSource(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil || string(got) != content {
+		t.Fatalf("historical accepted launch cwd capture = %q, %v", got, err)
 	}
 }
 

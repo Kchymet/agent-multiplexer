@@ -19,6 +19,7 @@ import (
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -384,8 +385,18 @@ func openSessionTranscriptSource(session store.Session) (*os.File, error) {
 	}
 	defer root.Close()
 	home := claudecfg.At(claudecfg.AgentHome(session.Dir))
-	cwd, found, err := home.FindSessionRooted(root, session.ClaudeID, session.Dir)
-	if err != nil || !found {
+	var cwd string
+	for _, candidate := range wsops.AcceptedLaunchCwds(session) {
+		foundCwd, found, findErr := home.FindSessionRooted(root, session.ClaudeID, candidate)
+		if findErr != nil {
+			return nil, fmt.Errorf("%w: %v", errReportCapture, findErr)
+		}
+		if found {
+			cwd = foundCwd
+			break
+		}
+	}
+	if cwd == "" {
 		return nil, fmt.Errorf("%w: managed transcript not found", errReportCapture)
 	}
 	source := home.TranscriptPath(cwd, session.ClaudeID)

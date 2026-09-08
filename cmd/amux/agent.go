@@ -210,6 +210,14 @@ func cmdAgentPermission(args []string) error {
 	// Settings generated before authenticated reports did not include --hook.
 	// Preserve only that exact stdin-fed shape as nondisruptive compatibility.
 	hook := len(args) == 1 && stdinPiped()
+	// Generated hook invocations must stay nondisruptive even when a future
+	// producer inserts an invalid flag before the exact --hook spelling.
+	for _, arg := range args[1:] {
+		if arg == "--hook" {
+			hook = true
+			break
+		}
+	}
 	fields := make(map[string]string)
 	for i := 1; i < len(args); i++ {
 		name, value, consumed, err := reportFlag(args, i)

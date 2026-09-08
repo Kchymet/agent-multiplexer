@@ -299,6 +299,36 @@ func TestAgentCommandRestoresTranscriptPastPredictableTempAlias(t *testing.T) {
 	}
 }
 
+func TestAgentCommandDoesNotWriteSessionControlledGitExclude(t *testing.T) {
+	isolateStore(t)
+	session := filepath.Join(t.TempDir(), "session")
+	cmd := exec.Command("git", "init", "--quiet", session)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	exclude := filepath.Join(session, ".git", "info", "exclude")
+	if err := os.Remove(exclude); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "outside-exclude")
+	const original = "outside-canary\n"
+	if err := os.WriteFile(canary, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, exclude); err != nil {
+		t.Fatal(err)
+	}
+
+	s := store.Session{ID: "hp1", RootID: "root", Agent: "claude", Dir: session}
+	if _, _, _, err := AgentCommand(s); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(canary); err != nil || string(got) != original {
+		t.Fatalf("session-controlled .git/info/exclude redirected a host write: %q, %v", got, err)
+	}
+}
+
 // TestAgentEnvExportsSessionID pins the intent env every pane inherits: the
 // canonical harness kind and — the fix — the harness session id, so a harness
 // with no hook stream (unlike Claude) can still self-report via `amux agent
@@ -985,92 +1015,6 @@ func TestCreateWorkspaceRepoLessAgent(t *testing.T) {
 	}
 }
 
-func TestHostCreatedCoordinatorOmittedGrantsPermitFirstRepoAgent(t *testing.T) {
-	isolateStore(t)
-	ctx := context.Background()
-	gitDir := bareRepoWithCommit(t)
-	db, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.PutRepo(store.Repo{Name: "api", Source: gitDir, GitDir: gitDir}); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	rootID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "payments"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err = store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
-	_ = db.Close()
-	if err != nil || !initialized || len(grants) != 1 || grants[0] != "api" {
-		t.Fatalf("omitted creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
-	}
-
-	agentID, err := ApplyResult(ctx, core.Action{
-		Action: core.ActionAddAgent, ID: rootID,
-		Fields: map[string]string{"agent": "claude", "repos": "api"},
-	})
-	if err != nil || agentID == "" {
-		t.Fatalf("first allowed agent = %q, err=%v", agentID, err)
-	}
-	db, err = store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	agentSession, found, err := db.GetSession(agentID)
-	if err != nil || !found || agentSession.RootID != rootID || agentSession.Repo != "api" {
-		t.Fatalf("first agent = %+v, found=%v, err=%v", agentSession, found, err)
-	}
-}
-
-func TestHostCreatedCoordinatorExplicitEmptyGrantCeiling(t *testing.T) {
-	isolateStore(t)
-	db, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.PutRepo(store.Repo{Name: "api"}); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	rootID, err := ApplyResult(context.Background(), core.Action{
-		Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "sealed", "repos": ""},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err = store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
-	if err != nil || !initialized || len(grants) != 0 {
-		t.Fatalf("explicit empty creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ApplyResult(context.Background(), core.Action{
-		Action: core.ActionAddAgent, ID: rootID,
-		Fields: map[string]string{"agent": "claude", "repos": "api"},
-	}); err == nil || !strings.Contains(err.Error(), "outside coordinator") {
-		t.Fatalf("explicit empty ceiling accepted first repo agent: %v", err)
-	}
-}
-
 // TestSetAgentReposSkipsUntracked verifies re-scoping an agent to an untracked
 // repo name is a no-op that never errors (defensive against stale/typo names) —
 // the reported "unknown repo" hard-fail is gone.
@@ -1116,6 +1060,7 @@ func TestSetAgentReposSkipsUntracked(t *testing.T) {
 }
 
 func TestSetAgentReposPropagatesTrustedCleanupFailure(t *testing.T) {
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
 	isolateStore(t)
 	ctx := context.Background()
 	gitDir := bareRepoWithCommit(t)
@@ -1129,9 +1074,6 @@ func TestSetAgentReposPropagatesTrustedCleanupFailure(t *testing.T) {
 	rootID := db.NewID()
 	if err := db.PutSession(store.Session{ID: rootID, Scope: store.ScopeWork, Mode: store.ModeTask,
 		Dir: filepath.Join(core.SessionsDir(), rootID)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SetCoordinatorRepoGrants(rootID, []string{"acme"}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := addAgent(ctx, db, rootID, AgentSpec{Agent: "codex", Repos: []string{"acme"}})
@@ -1248,10 +1190,11 @@ func bareRepoWithCommit(t *testing.T) string {
 	return gitDir
 }
 
-// Legacy roots share coordinator and member storage. A broad delete cannot prove
-// ownership of dirty/transcript/unknown files, so it fails before touching any
-// session row, path, or branch and requires host-authorized recovery.
-func TestDeleteLegacyRootFailsClosedWithoutDataLoss(t *testing.T) {
+// TestDeleteLegacyAgentRemovesBranch pins the delete contract ("worktrees +
+// branch") for a session imported from the legacy workspaces/ layout. Its record
+// has no stored branch, so cleanup derives the legacy amux/<root> name rather
+// than asking session-writable Git state and leaving a branch behind.
+func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		dirGone bool
@@ -1291,15 +1234,15 @@ func TestDeleteLegacyRootFailsClosedWithoutDataLoss(t *testing.T) {
 				}
 			}
 
-			if err := DeleteByID(ctx, rootID); err == nil || !strings.Contains(err.Error(), "host-authorized migration or recreation") {
-				t.Fatalf("DeleteByID legacy root error = %v, want explicit recovery refusal", err)
+			if err := DeleteByID(ctx, rootID); err != nil {
+				t.Fatal(err)
 			}
 
-			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 1 || got[0] != core.LegacyBranchFor(rootID) {
-				t.Errorf("legacy branch changed during refused delete: %v", got)
+			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 0 {
+				t.Errorf("legacy branch survived delete: %v", got)
 			}
-			if _, err := os.Stat(dir); tt.dirGone != os.IsNotExist(err) {
-				t.Errorf("legacy dir existence changed during refused delete: %v", err)
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("legacy dir %s still exists (stat err %v)", dir, err)
 			}
 			db, err = store.Open()
 			if err != nil {
@@ -1307,8 +1250,8 @@ func TestDeleteLegacyRootFailsClosedWithoutDataLoss(t *testing.T) {
 			}
 			defer db.Close()
 			for _, id := range []string{rootID, agentID} {
-				if _, ok, _ := db.GetSession(id); !ok {
-					t.Errorf("session %s was removed by refused delete", id)
+				if _, ok, _ := db.GetSession(id); ok {
+					t.Errorf("session %s survived delete", id)
 				}
 			}
 		})
