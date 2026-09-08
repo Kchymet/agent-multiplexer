@@ -100,6 +100,8 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 func (r *sessionRuntime) reconcile(ctx context.Context) error {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
 	if err := r.d.ensureHostCredential(ctx, r.now()); err != nil {
 		return fmt.Errorf("renew host credential: %w", err)
 	}
@@ -350,11 +352,15 @@ func nonPanickingReceiptHooks(hooks *sessionrpc.ReceiptHooks) *sessionrpc.Receip
 		Grace: hooks.Grace,
 		ResponsePersisted: func(response sessionrpc.PersistedResponse) {
 			defer func() { _ = recover() }()
-			hooks.ResponsePersisted(response)
+			if hooks.ResponsePersisted != nil {
+				hooks.ResponsePersisted(response)
+			}
 		},
 		Settled: func(settlement sessionrpc.ReceiptSettlement) {
 			defer func() { _ = recover() }()
-			hooks.Settled(settlement)
+			if hooks.Settled != nil {
+				hooks.Settled(settlement)
+			}
 		},
 	}
 }
@@ -435,6 +441,8 @@ func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
 		}
 	}
 stop:
+	c.d.effectMu.Lock()
+	defer c.d.effectMu.Unlock()
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return
 	}

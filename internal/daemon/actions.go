@@ -26,6 +26,23 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	if !effectAdmissionHeld(ctx) {
+		// Use the same lock order as mailbox serving: dispatch ownership, then
+		// effect admission. For an explicit restore, drain the old completion
+		// owner before taking effectMu; its cleanup may already be waiting there.
+		// Holding dispatchMu prevents another old-principal call entering between
+		// that drain and the final admission lock.
+		if d.sessionRPC != nil {
+			d.sessionRPC.dispatchMu.Lock()
+			defer d.sessionRPC.dispatchMu.Unlock()
+			if restore, _ := hostRestoreRequested(a); restore {
+				d.sessionRPC.completions.cancelAndWait(a.ID)
+			}
+		}
+		d.effectMu.Lock()
+		defer d.effectMu.Unlock()
+		ctx = withEffectAdmission(ctx)
+	}
 	if err := revalidateDeferred(ctx); err != nil {
 		return fail("authorization changed before execution: %v", err)
 	}
@@ -151,12 +168,6 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 	if !session.Archived {
 		return wsops.Dispatch(ctx, action, d.killEngineFor)
 	}
-	if d.sessionRPC != nil {
-		d.sessionRPC.dispatchMu.Lock()
-		defer d.sessionRPC.dispatchMu.Unlock()
-		d.sessionRPC.completions.cancelAndWait(action.ID)
-	}
-
 	expected, regrant, err := d.restoreCredentialState(ctx, action.ID)
 	if err != nil {
 		return "", err

@@ -227,6 +227,70 @@ func TestSessionRPCCallbacksAreDeadlineBoundAndNonPanicking(t *testing.T) {
 	hooks.Settled(sessionrpc.ReceiptSettlement{})
 }
 
+func TestFinalSessionEffectAdmissionSerializesHostPolicyMutation(t *testing.T) {
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: t.TempDir(), ClaudeID: "effect-admission",
+	}
+	daemon, runtime, principals := sessionRuntimeFixture(t, session)
+	daemon.sessionRPC = runtime
+	t.Cleanup(runtime.completions.close)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runtime.applyResult = func(ctx context.Context, action core.Action) (string, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return wsops.ApplyResult(ctx, action)
+	}
+	request := sessionrpc.DispatchRequest{
+		Principal: principals[session.ID],
+		RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{
+			Kind: sessionrpc.CallOperation, Route: access.RouteAction,
+			Verb: core.ActionSetArchived, ID: session.ID,
+			Fields: map[string]string{"archived": "true"},
+		},
+	}
+	dispatchDone := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), request)
+		dispatchDone <- result
+	}()
+	<-entered
+	hostDone := make(chan core.Result, 1)
+	go func() {
+		hostDone <- daemon.handle(context.Background(), core.Action{
+			Action: core.ActionRename, ID: session.ID,
+			Fields: map[string]string{"name": "host-name"},
+		})
+	}()
+	select {
+	case result := <-hostDone:
+		t.Fatalf("host mutation crossed admitted session effect: %+v", result)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if result := <-dispatchDone; result.Status != sessionrpc.StatusOK || result.Receipt == nil {
+		t.Fatalf("session completion result = %+v", result)
+	}
+	if result := <-hostDone; !result.OK {
+		t.Fatalf("serialized host mutation failed: %+v", result)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, err := db.GetSession(session.ID)
+	if err != nil || !ok || !got.Archived || got.Name != "host-name" {
+		t.Fatalf("serialized final state = %+v, found=%v err=%v", got, ok, err)
+	}
+}
+
 func TestRestrictedDiagnosticsOmitHostPathsAndRawOverrides(t *testing.T) {
 	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
 	d, runtime, principals := sessionRuntimeFixture(t, session)

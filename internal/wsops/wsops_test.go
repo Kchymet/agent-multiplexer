@@ -852,6 +852,9 @@ func TestSetAgentReposPropagatesTrustedCleanupFailure(t *testing.T) {
 		Dir: filepath.Join(core.SessionsDir(), rootID)}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetCoordinatorRepoGrants(rootID, []string{"acme"}); err != nil {
+		t.Fatal(err)
+	}
 	a, err := addAgent(ctx, db, rootID, AgentSpec{Agent: "codex", Repos: []string{"acme"}})
 	db.Close()
 	if err != nil {

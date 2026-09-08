@@ -110,6 +110,12 @@ type Daemon struct {
 	authMu      sync.Mutex
 	authPending map[engine.Key]authReload
 
+	// effectMu is the final principal/policy/effect admission boundary shared by
+	// authenticated host actions, session mailbox dispatch, credential rotation,
+	// and completion revocation. A policy mutation cannot commit between a
+	// session's last current-generation check and admission of its exact effect.
+	effectMu sync.Mutex
+
 	// shutdown is closed only by the authenticated host control path. Process
 	// IDs are diagnostics, never authority to signal a process.
 	shutdown     chan struct{}
@@ -593,9 +599,19 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 }
 
 type accessGuardContextKey struct{}
+type effectAdmissionContextKey struct{}
 
 func withAccessGuard(ctx context.Context, valid func() error) context.Context {
 	return context.WithValue(ctx, accessGuardContextKey{}, valid)
+}
+
+func withEffectAdmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, effectAdmissionContextKey{}, true)
+}
+
+func effectAdmissionHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(effectAdmissionContextKey{}).(bool)
+	return held
 }
 
 // revalidateDeferred is a no-op for internal/test callers without a streaming
