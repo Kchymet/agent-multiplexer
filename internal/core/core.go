@@ -105,21 +105,22 @@ const (
 // from one table instead of re-deciding from raw strings and drifting — which
 // they did: the CLI's archive once skipped the engine stop the TUI's performed.
 const (
-	ActionRefresh         = "refresh"          // re-poll only; no store change
-	ActionSubscribe       = "subscribe"        // transport subscribe; a no-op in the store dispatch
-	ActionDelete          = "delete"           // permanently remove a session (worktrees + branch)
-	ActionKill            = "kill"             // alias of delete
-	ActionArchive         = "archive"          // TUI one-key toggle: archive⇄restore
-	ActionSetArchived     = "set-archived"     // CLI explicit archive/unarchive (Fields["archived"]=="true")
-	ActionMove            = "move"             // re-parent an agent into another workgroup (Target)
-	ActionRename          = "rename"           // set a session's display name (Fields["name"])
-	ActionRmRepo          = "rm-repo"          // stop tracking a repo
-	ActionAgentSetRepos   = "agent-set-repos"  // re-scope an agent to exactly Fields["repos"]
-	ActionNewRepoAgent    = "new-repo-agent"   // create a repo-scoped workgroup + its agent
-	ActionAddAgent        = "add-agent"        // add an agent to an existing workgroup
-	ActionAddRepo         = "add-repo"         // track a new repo (Fields["source"])
-	ActionNewWorkgroup    = "new-workgroup"    // create a work-scoped workgroup (+ optional first agent)
-	ActionCreateWorkspace = "create-workspace" // CLI create: workgroup + optional default agent
+	ActionRefresh             = "refresh"               // re-poll only; no store change
+	ActionSubscribe           = "subscribe"             // transport subscribe; a no-op in the store dispatch
+	ActionDelete              = "delete"                // permanently remove a session (worktrees + branch)
+	ActionKill                = "kill"                  // alias of delete
+	ActionArchive             = "archive"               // TUI one-key toggle: archive⇄restore
+	ActionSetArchived         = "set-archived"          // CLI explicit archive/unarchive (Fields["archived"]=="true")
+	ActionMove                = "move"                  // re-parent an agent into another workgroup (Target)
+	ActionRename              = "rename"                // set a session's display name (Fields["name"])
+	ActionRmRepo              = "rm-repo"               // stop tracking a repo
+	ActionAgentSetRepos       = "agent-set-repos"       // re-scope an agent to exactly Fields["repos"]
+	ActionCoordinatorSetRepos = "coordinator-set-repos" // host-only: replace a coordinator's repo grant ceiling
+	ActionNewRepoAgent        = "new-repo-agent"        // create a repo-scoped workgroup + its agent
+	ActionAddAgent            = "add-agent"             // add an agent to an existing workgroup
+	ActionAddRepo             = "add-repo"              // track a new repo (Fields["source"])
+	ActionNewWorkgroup        = "new-workgroup"         // create a work-scoped workgroup (+ optional first agent)
+	ActionCreateWorkspace     = "create-workspace"      // CLI create: workgroup + optional default agent
 )
 
 // controlActions is the vocabulary a caller may drive from outside the UI —
@@ -143,6 +144,7 @@ var controlActions = []string{
 	ActionAddRepo,
 	ActionRmRepo,
 	ActionAgentSetRepos,
+	ActionCoordinatorSetRepos,
 	ActionAddAgent,
 	ActionNewRepoAgent,
 	ActionNewWorkgroup,
@@ -232,10 +234,6 @@ const (
 	// session named by Action.ID. Restricted policy may authorize this scoped
 	// projection; it never exposes the underlying host path or runtime record.
 	QueryRuntimeEvents = "runtime-events"
-	// QueryLaunchSpec returns the complete daemon-authorized pane launch input
-	// for Action.ID. It is served only on the authenticated host stream; the
-	// legacy mux consumes it without opening the store or access authority.
-	QueryLaunchSpec = "launch-spec"
 	// QueryVersion reports the daemon build, its CLI protocol, and the schema
 	// version of the database it owns. It is intentionally additive: a new CLI
 	// can identify an older daemon by the latter's unknown-query response.

@@ -3,6 +3,7 @@
 package sessionrpc
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -12,7 +13,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"amux/internal/access"
@@ -33,6 +37,8 @@ const (
 	MaxReceiptGrace     = 30 * time.Second
 	DefaultReceiptGrace = 3 * time.Second
 	DefaultPollInterval = 20 * time.Millisecond
+	MaxPendingReceipts  = MaxQueuedRequests
+	MaxResponseFiles    = MaxQueuedRequests
 	// Request temporaries older than every valid request lifetime are abandoned.
 	// A scanner must preserve newer temporaries because the publishing client
 	// may still hold and fsync the file before its no-replace rename.
@@ -44,12 +50,16 @@ const (
 	// SignedRequest/Response bodies are base64 JSON strings. Bound the encoded
 	// file independently while retaining access.MaxBodyBytes exact body bytes.
 	maxEnvelopeFileBytes = ((access.MaxBodyBytes+2)/3)*4 + (8 << 10)
+	// MaxResponseBytes is the per-subject bound for daemon-created response
+	// files. Count admission remains independently enforced.
+	MaxResponseBytes = int64(8 << 20)
 )
 
 var (
 	ErrInvalidRecord    = errors.New("invalid session RPC record")
 	ErrInvalidSignature = errors.New("invalid session RPC signature")
 	ErrQueueFull        = errors.New("session RPC queue capacity exceeded")
+	ErrResponseCapacity = errors.New("session RPC response capacity exceeded")
 	ErrRestarted        = errors.New("session RPC daemon boot changed")
 	ErrIndeterminate    = errors.New("session RPC outcome is indeterminate")
 	ErrClosed           = errors.New("session RPC endpoint is closed")
@@ -219,13 +229,30 @@ type PersistedResponse struct {
 type ReceiptSettlement struct {
 	RequestID string
 	Received  bool
+	Reason    SettlementReason
 	At        time.Time
 }
 
+type SettlementReason string
+
+const (
+	SettlementReceipt        SettlementReason = "receipt"
+	SettlementGraceExpired   SettlementReason = "grace_expired"
+	SettlementResponseFailed SettlementReason = "response_failed"
+	SettlementCapacity       SettlementReason = "capacity"
+	SettlementServerClosed   SettlementReason = "server_closed"
+)
+
 type ReceiptHooks struct {
-	Grace             time.Duration
+	Grace time.Duration
+	// ResponsePersisted and Settled are synchronous ordering boundaries. Trusted
+	// daemon integration must make them bounded, nonblocking, and non-panicking;
+	// the transport does not detach lifecycle completion from these callbacks.
 	ResponsePersisted func(PersistedResponse)
-	Settled           func(ReceiptSettlement)
+	// Settled is required when ReceiptHooks is returned. It runs exactly once,
+	// including when signing or durable response publication fails after the
+	// operation committed. ResponsePersisted is never called on those failures.
+	Settled func(ReceiptSettlement)
 }
 
 type DispatchResult struct {
@@ -235,9 +262,42 @@ type DispatchResult struct {
 	Receipt *ReceiptHooks
 }
 
+// ResponseBudget atomically admits daemon-wide response amplification across
+// independently served subjects. A daemon implementation must include both
+// file count and MaxBytes in one reservation decision. Each returned lease is
+// committed after durable publication and released only after the corresponding
+// response file is removed. ReserveResponse must serialize admission across
+// subjects and idempotently return the existing lease when Existing is true.
+// Existing adopts disk reality and must succeed even when retained files exceed
+// the current admission limit; new amplification stays blocked until cleanup
+// releases enough leases. All lease methods must be idempotent.
+type ResponseBudget interface {
+	ReserveResponse(context.Context, ResponseReservation) (ResponseLease, error)
+}
+
+type ResponseReservation struct {
+	SubjectID   string
+	RequestID   string
+	MaxBytes    int64
+	Existing    bool
+	ReceiptSlot bool
+}
+
+type ResponseLease interface {
+	Commit(actualBytes int64, receiptPending bool)
+	ReleaseReceipt()
+	Release()
+}
+
 type Callbacks struct {
+	// All callbacks are trusted synchronous boundaries. Implementations must
+	// honor context cancellation, return within a bounded time, and not panic.
+	// The package serializes calls per subject but does not isolate daemon code.
 	Authorize func(context.Context, access.Principal, Call) error
-	Dispatch  func(context.Context, DispatchRequest) (DispatchResult, error)
+	// Dispatch is the execution boundary. Integration must compare the
+	// authenticated Principal.Generation with current authority and policy under
+	// the same lock or transaction that admits the operation's effects.
+	Dispatch func(context.Context, DispatchRequest) (DispatchResult, error)
 }
 
 func validateCall(call Call) error {
@@ -407,8 +467,141 @@ func unmarshalBounded(data []byte, max int, out any) error {
 	if len(data) == 0 || len(data) > max {
 		return ErrInvalidRecord
 	}
-	if err := json.Unmarshal(data, out); err != nil {
+	target := reflect.TypeOf(out)
+	if target == nil || target.Kind() != reflect.Pointer || target.Elem().Kind() != reflect.Struct {
+		return ErrInvalidRecord
+	}
+	if err := rejectNoncanonicalJSON(data, target.Elem()); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	return nil
+}
+
+func rejectNoncanonicalJSON(data []byte, target reflect.Type) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := consumeStrictJSONValue(decoder, target); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeStrictJSONValue(decoder *json.Decoder, target reflect.Type) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		fields, mapValue, arbitrary := canonicalObjectFields(target)
+		keys := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("non-string JSON object key")
+			}
+			if _, duplicate := keys[key]; duplicate {
+				return fmt.Errorf("duplicate JSON object key %q", key)
+			}
+			keys[key] = struct{}{}
+			fieldTarget := mapValue
+			if !arbitrary {
+				var found bool
+				fieldTarget, found = fields[key]
+				if !found {
+					return fmt.Errorf("noncanonical JSON object key %q", key)
+				}
+			}
+			if err := consumeStrictJSONValue(decoder, fieldTarget); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		element := canonicalElementType(target)
+		for decoder.More() {
+			if err := consumeStrictJSONValue(decoder, element); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return errors.New("unexpected closing JSON delimiter")
+	}
+	return nil
+}
+
+// canonicalObjectFields returns the exact JSON spellings accepted for a wire
+// struct. Maps intentionally retain arbitrary string keys (for Call.Fields),
+// while their values are still recursively checked for duplicate structure.
+func canonicalObjectFields(target reflect.Type) (map[string]reflect.Type, reflect.Type, bool) {
+	target = indirectType(target)
+	if target == nil || target.Kind() == reflect.Interface {
+		return nil, nil, true
+	}
+	if target.Kind() == reflect.Map && target.Key().Kind() == reflect.String {
+		return nil, target.Elem(), true
+	}
+	fields := make(map[string]reflect.Type)
+	if target.Kind() != reflect.Struct {
+		return fields, nil, false
+	}
+	for index := 0; index < target.NumField(); index++ {
+		field := target.Field(index)
+		if !field.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields, nil, false
+}
+
+func canonicalElementType(target reflect.Type) reflect.Type {
+	target = indirectType(target)
+	if target == nil || target.Kind() == reflect.Interface {
+		return nil
+	}
+	if target.Kind() == reflect.Array || target.Kind() == reflect.Slice {
+		return target.Elem()
+	}
+	return nil
+}
+
+func indirectType(target reflect.Type) reflect.Type {
+	for target != nil && target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	return target
 }

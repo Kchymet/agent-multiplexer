@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"amux/internal/hostprep"
 	"amux/internal/store"
 )
 
@@ -109,9 +110,17 @@ func TestPlanLaunchFresh(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	dir := t.TempDir()
+	root, err := hostprep.OpenSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 	for _, kind := range []string{"claude", "codex", "hermes"} {
-		req := LaunchRequest{Session: store.Session{ID: "a1", Agent: kind}, Dir: dir, Prompt: "do it"}
-		got := HarnessFor(kind).PlanLaunch(req)
+		req := LaunchRequest{Root: root, Session: store.Session{ID: "a1", Agent: kind, Dir: dir}, Dir: dir, Prompt: "do it"}
+		got, err := HarnessFor(kind).PlanLaunch(req)
+		if err != nil {
+			t.Fatalf("%s PlanLaunch: %v", kind, err)
+		}
 		if got.Dir != dir {
 			t.Errorf("%s PlanLaunch dir = %q, want %q", kind, got.Dir, dir)
 		}

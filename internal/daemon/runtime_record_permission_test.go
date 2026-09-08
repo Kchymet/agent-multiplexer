@@ -31,7 +31,7 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 		ClaudeID: "33333333-3333-4333-8333-333333333333"}); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := (&Daemon{permissions: newRuntimePermissionGate()}).runtimeRecordRaw(db, "a1")
+	rec, err := (&Daemon{permissions: newRuntimePermissionGate()}).runtimeRecord(db, "a1")
 	db.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -56,9 +56,9 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 
 	appendRequest("historical")
 	d := New("", nil, time.Hour)
-	engine := newFakeEngine()
-	d.engine = engine
-	firstRuntime := engine.running("a1")
+	eng := newFakeEngine()
+	d.engine = eng
+	firstRuntime := eng.running("a1")
 	_, firstGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
 		return firstRuntime, nil
 	})
@@ -86,11 +86,8 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 		t.Fatalf("first runtime bindings = %v", first.PermissionBindings)
 	}
 
-	d.permissions.retire("a1")
-	engine.mu.Lock()
-	delete(engine.insts, firstRuntime.Key())
-	engine.mu.Unlock()
-	secondRuntime := engine.running("a1")
+	d.permissions.retireAnd("a1", func() { eng.Kill(firstRuntime.Key()) })
+	secondRuntime := eng.running("a1")
 	_, secondGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
 		return secondRuntime, nil
 	})
@@ -207,10 +204,10 @@ func TestPermissionBindingsDoNotRelabelHistoryAcrossRuntimeRestart(t *testing.T)
 	// must leave the old request/resolution readable but generation-free and bind
 	// only the new occurrence. The two occurrence ItemIDs must be distinct.
 	d.permissions.retire("a1")
-	engine.mu.Lock()
-	delete(engine.insts, secondRuntime.Key())
-	engine.mu.Unlock()
-	thirdRuntime := engine.running("a1")
+	eng.mu.Lock()
+	delete(eng.insts, secondRuntime.Key())
+	eng.mu.Unlock()
+	thirdRuntime := eng.running("a1")
 	_, thirdGeneration, err := d.publishPermissionRuntime("a1", func() (any, error) {
 		return thirdRuntime, nil
 	})

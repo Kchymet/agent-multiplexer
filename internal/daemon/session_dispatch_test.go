@@ -96,6 +96,201 @@ func TestSessionDispatchRechecksCurrentMembershipAtExecution(t *testing.T) {
 	}
 }
 
+func TestRestartDerivesArchivedCompletionCleanupWithoutInMemoryHooks(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: filepath.Join(core.SessionsDir(), "root1", "a1"),
+	}
+	if err := os.MkdirAll(session.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	authorityRoot := filepath.Join(t.TempDir(), "authority")
+	first, err := access.Open(authorityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.EnsureSession(ctx, session.ID, session.Dir); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := access.LoadCredential(first.CredentialDir(access.SubjectSession, session.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := credentialPrincipal(credential)
+	// Model a crash after the durable archive commit and before any receipt hook,
+	// timer, or in-memory completion registry can run. Closing the first authority
+	// drops all process memory while preserving its durable registry and mailbox.
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, true, store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := access.Open(authorityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	daemon := New("", nil, time.Hour)
+	daemon.authority = second
+	runtime := newSessionRuntime(daemon)
+	if err := runtime.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.completions.has(session.ID) {
+		t.Fatal("restart fabricated an in-memory completion owner")
+	}
+	if _, ok := runtime.servers[session.ID]; ok {
+		t.Fatal("restart served an archived subject without a pending receipt")
+	}
+	if err := second.Valid(ctx, principal); err == nil {
+		t.Fatal("restart left the crash-surviving completion credential current")
+	}
+	if current, err := second.Current(ctx, access.SubjectSession, session.ID); err == nil {
+		t.Fatalf("restart retained current archived credential: %+v", current)
+	}
+}
+
+func TestSessionRPCCallbacksAreDeadlineBoundAndNonPanicking(t *testing.T) {
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: t.TempDir(), ClaudeID: "callback-safety",
+	}
+	_, runtime, principals := sessionRuntimeFixture(t, session)
+	t.Cleanup(runtime.completions.close)
+	runtime.callbackTimeout = 20 * time.Millisecond
+	call := sessionrpc.Call{
+		Kind: sessionrpc.CallOperation, Route: access.RouteAction,
+		Verb: core.ActionSetArchived, ID: session.ID,
+		Fields: map[string]string{"archived": "true"},
+	}
+	request := sessionrpc.DispatchRequest{
+		Principal: principals[session.ID],
+		RequestID: "0123456789abcdef0123456789abcdef",
+		Call:      call,
+	}
+
+	runtime.applyResult = func(ctx context.Context, _ core.Action) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	started := time.Now()
+	result, err := runtime.dispatchCallback(context.Background(), request)
+	if err != nil || result.Status != sessionrpc.StatusIndeterminate {
+		t.Fatalf("deadline callback = %+v, err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cooperative callback exceeded deadline bound: %v", elapsed)
+	}
+
+	runtime.applyResult = func(context.Context, core.Action) (string, error) {
+		panic("planted dispatch panic")
+	}
+	result, err = runtime.dispatchCallback(context.Background(), request)
+	if err != nil || result.Status != sessionrpc.StatusFailed || result.Code != "callback_failed" {
+		t.Fatalf("dispatch panic escaped callback: %+v, err=%v", result, err)
+	}
+
+	runtime.resolver.open = func() (policyStoreHandle, error) {
+		panic("planted authorize panic")
+	}
+	if err := runtime.authorizeCallback(context.Background(), principals[session.ID], call); err == nil {
+		t.Fatal("authorization panic was accepted")
+	}
+
+	hooks := nonPanickingReceiptHooks(&sessionrpc.ReceiptHooks{
+		ResponsePersisted: func(sessionrpc.PersistedResponse) { panic("persisted") },
+		Settled:           func(sessionrpc.ReceiptSettlement) { panic("settled") },
+	})
+	hooks.ResponsePersisted(sessionrpc.PersistedResponse{})
+	hooks.Settled(sessionrpc.ReceiptSettlement{})
+}
+
+func TestFinalSessionEffectAdmissionSerializesHostPolicyMutation(t *testing.T) {
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: t.TempDir(), ClaudeID: "effect-admission",
+	}
+	daemon, runtime, principals := sessionRuntimeFixture(t, session)
+	daemon.sessionRPC = runtime
+	t.Cleanup(runtime.completions.close)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runtime.applyResult = func(ctx context.Context, action core.Action) (string, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return wsops.ApplyResult(ctx, action)
+	}
+	request := sessionrpc.DispatchRequest{
+		Principal: principals[session.ID],
+		RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{
+			Kind: sessionrpc.CallOperation, Route: access.RouteAction,
+			Verb: core.ActionSetArchived, ID: session.ID,
+			Fields: map[string]string{"archived": "true"},
+		},
+	}
+	dispatchDone := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), request)
+		dispatchDone <- result
+	}()
+	<-entered
+	hostDone := make(chan core.Result, 1)
+	go func() {
+		hostDone <- daemon.handle(context.Background(), core.Action{
+			Action: core.ActionRename, ID: session.ID,
+			Fields: map[string]string{"name": "host-name"},
+		})
+	}()
+	select {
+	case result := <-hostDone:
+		t.Fatalf("host mutation crossed admitted session effect: %+v", result)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if result := <-dispatchDone; result.Status != sessionrpc.StatusOK || result.Receipt == nil {
+		t.Fatalf("session completion result = %+v", result)
+	}
+	if result := <-hostDone; !result.OK {
+		t.Fatalf("serialized host mutation failed: %+v", result)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, err := db.GetSession(session.ID)
+	if err != nil || !ok || !got.Archived || got.Name != "host-name" {
+		t.Fatalf("serialized final state = %+v, found=%v err=%v", got, ok, err)
+	}
+}
+
 func TestRestrictedDiagnosticsOmitHostPathsAndRawOverrides(t *testing.T) {
 	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
 	d, runtime, principals := sessionRuntimeFixture(t, session)

@@ -53,6 +53,22 @@ func TestParseCreateFlagsAgent(t *testing.T) {
 	})
 }
 
+func TestCreateWorkspaceFieldsDistinguishOmittedAndSelectedRepos(t *testing.T) {
+	cfg := createCfg{name: "group", agent: "claude", mode: "task", model: "opus"}
+	fields := createWorkspaceFields(nil, cfg)
+	if _, explicit := fields["repos"]; explicit {
+		t.Fatalf("zero repos must omit the initial grant field, got %q", fields["repos"])
+	}
+	if fields["defaultAgent"] != "1" || fields["name"] != "group" {
+		t.Fatalf("create fields lost non-repository values: %#v", fields)
+	}
+
+	fields = createWorkspaceFields([]string{"api", "web"}, cfg)
+	if fields["repos"] != "api,web" {
+		t.Fatalf("selected repos = %q, want api,web", fields["repos"])
+	}
+}
+
 // TestCycleHarness verifies the interactive Harness toggle walks the registered
 // kinds and wraps, and that an unknown current value snaps back to the first.
 func TestCycleHarness(t *testing.T) {

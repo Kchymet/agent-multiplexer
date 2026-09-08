@@ -16,7 +16,6 @@ import (
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
-	"amux/internal/panespec"
 )
 
 // outBuf bounds the client's outbound queue. Actions and pane input/responses
@@ -521,21 +520,6 @@ func (c *Client) RuntimeRecord(id string) (core.RuntimeRecord, error) {
 		return rec, nil
 	}
 	return rec, json.Unmarshal(raw, &rec)
-}
-
-// LaunchSpec asks the primary daemon to resolve and provision the complete
-// typed launch input for id. The mux never derives a session path or opens an
-// access authority itself.
-func (c *Client) LaunchSpec(id string) (panespec.LaunchSpec, error) {
-	raw, err := c.queryAction(core.Action{Action: core.ActionQuery, Query: core.QueryLaunchSpec, ID: id})
-	if err != nil {
-		return panespec.LaunchSpec{}, err
-	}
-	var spec panespec.LaunchSpec
-	if len(raw) == 0 {
-		return spec, fmt.Errorf("daemon returned no launch spec for %q", id)
-	}
-	return spec, json.Unmarshal(raw, &spec)
 }
 
 // Frame is a decoded inbound message: exactly one of Snapshot/Result/Pane/Data

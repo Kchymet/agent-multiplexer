@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/git"
 	"amux/internal/store"
 )
 
@@ -21,26 +22,20 @@ func hasBind(binds [][]string, src string) bool {
 	return false
 }
 
-// The agent scope must expose the Windows drive on WSL2 so Claude's clipboard
-// interop (invoking a Windows .exe to read the clipboard, e.g. pasting an
-// image) can find and launch it. Without /mnt/c the read fails with "can't
-// find image on clipboard". See configBinds' TabAgent case.
-func TestAgentScopeBindsWindowsDriveForWSLClipboard(t *testing.T) {
-	binds := configBinds(TabAgent, store.Session{Agent: "claude"}, "/home/tester")
-	if !hasBind(binds, "/mnt/c") {
-		t.Errorf("TabAgent scope missing /mnt/c bind (needed for WSL clipboard interop); got %v", binds)
-	}
-	if !hasBind(binds, "/mnt/wsl") {
-		t.Errorf("TabAgent scope missing /mnt/wsl bind; got %v", binds)
-	}
-}
-
-// The terminal tab already bound /mnt/wsl (for the Docker CLI symlink); make
-// sure that stays intact and unaffected by the agent-scope change.
-func TestTerminalScopeStillBindsMntWsl(t *testing.T) {
-	binds := configBinds(TabTerminal, store.Session{Agent: "claude"}, "/home/tester")
-	if !hasBind(binds, "/mnt/wsl") {
-		t.Errorf("TabTerminal scope missing /mnt/wsl bind; got %v", binds)
+// Every tab is callable through the agent-facing pane API. None may silently
+// acquire host operator capabilities such as Windows drives, Docker, or human
+// shell history merely by selecting a different tab number.
+func TestTabsDoNotAcquireHostOperatorCapabilities(t *testing.T) {
+	for _, tab := range []int{TabAgent, TabEditor, TabTerminal} {
+		binds := configBinds(tab, store.Session{Agent: "claude"}, "/home/tester")
+		for _, denied := range []string{
+			"/mnt/c", "/mnt/wsl", "/run/docker.sock",
+			"/home/tester/.zsh_history", "/home/tester/.bash_history",
+		} {
+			if hasBind(binds, denied) {
+				t.Errorf("tab %d acquired host capability %q: %v", tab, denied, binds)
+			}
+		}
 	}
 }
 
@@ -55,7 +50,7 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex")) // empty: pinned rollout is missing
 	useFakeSecureBwrap(t)
 
-	dir := filepath.Join(t.TempDir(), "agent")
+	dir := filepath.Join(core.SessionsDir(), "r", "agent")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -140,22 +135,47 @@ func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	}
 }
 
-// Native Claude installs live under ~/.local, above amux's default data dir.
-// Its read-only binary mount must not hide the writable worktree/git mounts.
-func TestScopeRejectsSharedWritableGitMount(t *testing.T) {
+func TestLaunchSpecRejectsBroadOrAliasedGitObjectMounts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	useFakeSecureBwrap(t)
 	s := store.Session{ID: "a", Agent: "codex", Dir: filepath.Join(home, "agent")}
 	spec := testLaunchSpec(t, s)
-	if _, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/true"}, []string{"/shared/repo.git"}); err == nil || !strings.Contains(err.Error(), "shared writable") {
-		t.Fatalf("scope shared Git mount error = %v", err)
+	pool := filepath.Join(t.TempDir(), "repo", "generation")
+	objects := filepath.Join(pool, "objects")
+	if err := os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	valid := git.GitObjectMount{RepoKey: "repo-key", Generation: "generation", ObjectsHostDir: objects, ObjectsMountDir: objects}
+	spec.GitObjects = []git.GitObjectMount{valid}
+	if _, err := validateLaunchSpec(spec); err != nil {
+		t.Fatalf("valid exact object grant: %v", err)
+	}
+
+	alias := filepath.Join(t.TempDir(), "objects")
+	if err := os.Symlink(objects, alias); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*git.GitObjectMount){
+		"different destination": func(m *git.GitObjectMount) { m.ObjectsMountDir += "-other" },
+		"pool parent":           func(m *git.GitObjectMount) { m.ObjectsHostDir, m.ObjectsMountDir = pool, pool },
+		"source alias":          func(m *git.GitObjectMount) { m.ObjectsHostDir, m.ObjectsMountDir = alias, alias },
+		"unsafe repository key": func(m *git.GitObjectMount) { m.RepoKey = "../peer" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := valid
+			mutate(&bad)
+			spec.GitObjects = []git.GitObjectMount{bad}
+			if _, err := validateLaunchSpec(spec); err == nil || !strings.Contains(err.Error(), "Git object grant") {
+				t.Fatalf("invalid object grant error = %v", err)
+			}
+		})
 	}
 }
 
 // TestScopeReaches pins the visibility rule doctor uses to tell a $BROWSER (or
 // any third tool) that is hidden by the scope's tmpfs $HOME apart from one that
-// is missing outright: system roots, the WSL interop mounts, and the amux data
+// is missing outright: system roots and the amux data
 // tree are visible; the rest of $HOME and unbound trees like /snap are not.
 func TestScopeReaches(t *testing.T) {
 	const data = "/home/tester/.local/share/amux"
@@ -167,8 +187,8 @@ func TestScopeReaches(t *testing.T) {
 		{"/usr/bin/xdg-open", true},
 		{"/home/linuxbrew/.linuxbrew/bin/browser", true},
 		{"/opt/google/chrome/chrome", true},
-		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", true},
-		{"/mnt/wsl/helper", true},
+		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", false},
+		{"/mnt/wsl/helper", false},
 		{data + "/bin/amux", false},
 		{"/home/tester/.local/bin/open-browser", false}, // $HOME is a tmpfs inside the scope
 		{"/home/tester/bin/firefox", false},
@@ -190,12 +210,12 @@ func TestScopeRootsMatchBinds(t *testing.T) {
 	useFakeSecureBwrap(t)
 	s := store.Session{ID: "a", Agent: "claude", Dir: t.TempDir()}
 	spec := testLaunchSpec(t, s)
-	args, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/usr/bin/true"}, nil)
+	args, err := scope(s.Dir, TabAgent, s, spec.Access, nil, []string{"/usr/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
+	for _, r := range systemRoots {
 		if !strings.Contains(joined, " "+r+" "+r+" ") {
 			t.Errorf("scope does not bind %s, but ScopeReaches reports it visible:\n%s", r, joined)
 		}

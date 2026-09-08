@@ -40,20 +40,19 @@ backend you can run locally or on a remote box.
 amux has a primary daemon plus an optional legacy compatibility relay. The
 native UI talks directly to the authenticated primary daemon. The legacy
 **multiplexer server** relays state and lifecycle operations to that daemon and
-routes pane I/O to an embedded **agent harness**. (See
-`docs/client-server.md`.)
+bridges its primary-owned pane streams. (See `docs/client-server.md`.)
 
 ```
-        UI ⇄ Server protocol                     Server ⇄ Harness protocol
-          (muxproto, line-JSON)                    (harnessproto, line-JSON)
-┌──────────────┐   TLS + token   ┌────────────────────────┐  inherited pipe  ┌───────────────┐
-│   UI client  │ ───────────────▶│   Multiplexer Server   │ ────────────────▶│ Agent Harness │
-│ (native TUI) │◀─ snapshots,    │      (amux serve)      │◀─ pane output,   │  (amux harness)│
-│  renders     │   pane output   │  • authenticated relay │   exit           │  • PTY per pane│
-│  vterms      │ ─ actions,      │  • no direct DB access │ ─ spawn, input,  │  • claude /    │
-│  forwards    │   pane input ──▶│  • typed launch grants │   resize, kill ─▶│    editor /    │
-│  keystrokes  │                 │  • panespec (pane spec)│                  │    jailed shell│
-└──────────────┘                 └────────────────────────┘                  └───────────────┘
+        UI ⇄ Server protocol                     authenticated pane wire
+          (muxproto, line-JSON)                  (pinned TLS + host proof)
+┌──────────────┐   TLS + token   ┌────────────────────────┐                 ┌───────────────┐
+│   UI client  │ ───────────────▶│   Multiplexer Server   │ ───────────────▶│ Primary daemon│
+│ (legacy UI)  │◀─ snapshots,    │      (amux serve)      │◀─ pane output,  │ • engine/PTY  │
+│  renders     │   pane output   │ • protocol bridge      │   reset, exit   │ • policy/store│
+│  vterms      │ ─ actions,      │ • no process/store/    │ ─ open, input,  │ • lifecycle   │
+│  forwards    │   pane input ──▶│   authority ownership  │   resize, close▶│   authority   │
+│  keystrokes  │                 │ • revocation epochs    │                 │               │
+└──────────────┘                 └────────────────────────┘                 └───────────────┘
    one UI can connect to a local server and many remote servers at once
 ```
 
@@ -61,19 +60,19 @@ routes pane I/O to an embedded **agent harness**. (See
   can additionally listen on `tls:HOST:PORT`. Both sides require a nonempty
   `AMUX_MUX_TOKEN`; clients pin the server with `AMUX_TLS_CA` and, for Unix
   paths, `AMUX_TLS_SERVERNAME`. Plain TCP is refused.
-- **Why a harness** — putting pane execution behind a protocol is what lets the
-  server run agents locally, in a jail, in a container, or over ssh on another
-  host, without the server (or UI) caring.
+- **One runtime owner** — the primary daemon remains the only local process,
+  PTY, store, and access-grant owner. Closing the relay only detaches streams;
+  runtime stop/regrant decisions remain daemon-authoritative.
 
 ### Components
 
 | Component | Package | Responsibility |
 |-----------|---------|----------------|
 | **UI / native TUI** | `internal/nativetui` | The full-screen client: rail switcher, embedded agent panes (vterm), per-agent tabs, modal forms/confirms, all keybindings. Renders; owns no agent lifecycle. |
-| **Multiplexer server** | `internal/mux` | Authenticated legacy relay (`amux serve`). It obtains snapshots, applies lifecycle actions, and resolves pane launch grants through the singleton primary daemon; it never opens the store or authority. |
-| **Agent harness** | `internal/harness` | Owns the relay's PTY processes over a parent-created inherited pipe. Standalone `amux harness` is disabled because raw stdio authenticates no peer. |
+| **Multiplexer server** | `internal/mux` | Authenticated legacy relay (`amux serve`). It obtains snapshots, applies lifecycle actions, and bridges primary-owned pane streams through the singleton daemon; it never opens the store/authority or receives launch argv, paths, environments, or credentials. |
+| **Agent harness** | `internal/harness` | Provider-side process implementation. It is not a second local mux owner; standalone raw-stdio `amux harness` is disabled because stdio alone authenticates no peer. |
 | **UI ⇄ Server protocol** | `internal/muxproto` | Message types + helpers for hello/welcome, subscribe/snapshot, action/result, and pane open/input/resize/close/output/exit. |
-| **Server ⇄ Harness protocol** | `harnessproto` (published module) | Message types for spawn/input/resize/kill and ready/output/exit. |
+| **Provider protocol** | `harnessproto` (published module) | Remote provider registration, inventory/runtime events, optional compute, and control messages. It is not the local legacy mux authority. |
 | **Wire transport** | `internal/wire` | Shared line-framed JSON codec used by both protocols over any stream (unix/TCP/stdio/pipe). |
 | **UI client lib** | `internal/muxclient` | Dials a local/remote server and exposes its state stream + per-pane I/O to a UI. |
 | **Session model / store** | `internal/store` | SQLite store (`~/.local/share/amux/amux.db`): repos, sessions (a one-level `root_id` tree), `scope` (work/repo) and `archived` flags, idempotent migrations. |
@@ -98,8 +97,8 @@ routes pane I/O to an embedded **agent harness**. (See
 
 ## Concepts
 
-- **Repository** — a tracked repo, cloned as a local **bare** clone (the worktree
-  source) under `~/.local/share/amux/repos/`. Add with `amux repo add <url|path|OWNER/REPO>`,
+- **Repository** — a tracked upstream with daemon-managed shared object storage
+  backing session-private Git worktrees. Add with `amux repo add <url|path|OWNER/REPO>`,
   or no-arg to fuzzy-find from your GitHub remotes via `gh`.
 - **Workgroup** — a container of agents, in one of two **scopes**:
   - **repo-scoped** — pinned to a single repo, **single-member** (one agent).
@@ -116,17 +115,27 @@ routes pane I/O to an embedded **agent harness**. (See
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
   **1** the agent (Claude Code or Codex), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
   **3** a terminal. **All three are scoped to the agent's worktree** with a
-  bubblewrap mount namespace: the system is read-only, the rest of your home —
-  other projects, your files, secrets — is replaced by an empty tmpfs, and the
-  amux data tree (`~/.local/share/amux`) is mounted **read-only** so git can read
-  the bare clone its worktree is sourced from. Writable: the agent's **worktree**
-  (to edit) and **its repo's bare clone** (so git can commit to its branch). Only
-  what each tool needs is bound back: the editor's config, the shell's rc/theme —
+  bubblewrap mount and PID namespace: the system is read-only, `/proc` is private,
+  and the rest of your home — other projects, files, state, and secrets — is
+  replaced by an empty tmpfs. Only the exact session directory is writable.
+  Each repository keeps its writable Git common/admin metadata there; only the
+  daemon-authorized immutable base-object generation directories are added as
+  exact read-only mounts. Those admitted object bytes are intentionally readable.
+  Daemon-private access storage, global transcripts/hooks, sibling directories,
+  Docker, Windows/WSL drives, and host shell histories are not mounted. Only what
+  each tool needs is bound back explicitly: the editor's config, the shell's rc/theme —
   e.g. `~/.zshrc` + oh-my-zsh — so the terminal keeps your prompt/aliases/plugins,
   and your **git/GitHub auth** (`~/.gitconfig` + `~/.config/gh`) so agents push and
-  use `gh` without logging in again. Network works (DNS included). It's a
-  filesystem scope, not a hardened jail (network/pids are shared); `AMUX_JAIL=off`
-  disables it.
+  use `gh` without logging in again. The daemon-selected model account is the only
+  ambient credential environment projected into the launcher; cloud/operator keys
+  are excluded before bubblewrap starts. Bare `amux` resolves through the exact
+  running binary in read-only `/amux-bin`. Claude's generated hooks and model
+  status line retain the stable installed absolute path through a second
+  read-only alias of that same running executable, even if the host installation
+  is missing or older; the containing `~/.local/bin` directory stays absent.
+  Network remains shared (DNS included), so this is not a network
+  sandbox. Protected launch fails closed when isolation is disabled or
+  unsupported. See `docs/namespace-rollout.md` before deployment.
 - **Harness config is a private copy, not a mount.** Your `~/.claude` /
   `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
@@ -378,11 +387,10 @@ something we have actually used here; ⚠️ is something we *expect* to work bu
 
 Two things are OS-specific by design:
 
-- **The filesystem jail is Linux-only.** It shells out to `bwrap` (bubblewrap),
-  which exists on Linux/WSL but not macOS. Where `bwrap` is absent the scope is
-  **silently skipped** — panes still run, just unscoped to the worktree
-  (`AMUX_JAIL=off` is the explicit form). Docker-in-the-pane and `proctree`
-  process mapping are likewise Linux-only. Inside the jail `$HOME` is an empty
+- **The filesystem jail is Linux-only.** It requires `bwrap` (bubblewrap) 0.12.0
+  or newer plus usable user/PID namespaces. Missing, older, disabled, or non-Linux
+  isolation fails protected launch explicitly; it never silently forwards session
+  credentials to an unscoped process. Inside the jail `$HOME` is an empty
   tmpfs, so anything a pane launches — including `$BROWSER`, which agents use
   for `gh --web` and Claude's login — must live under a system root (`/usr`,
   `/opt`, `/home/linuxbrew`, …). `amux doctor` checks that; on WSL set
@@ -393,11 +401,11 @@ Two things are OS-specific by design:
 |------------|:---------:|:------------:|:-----:|
 | Native TUI (`amux`) | ✅ | ⚠️ | ⚠️ |
 | Client/server (`amux serve` / `harness`) | ✅ | ⚠️ | ⚠️ |
-| Worktrees + bare-clone store | ✅ | ⚠️ | ⚠️ |
+| Private worktrees + shared object pool | ⚠️ | ➖ | ⚠️ |
 | Agent / editor / terminal tabs | ✅ | ⚠️ | ⚠️ |
-| Filesystem jail (`bwrap`) | ✅ | ➖ | ⚠️ |
-| Docker inside the terminal pane | ✅ | ⚠️¹ | ⚠️ |
-| Process-tree mapping (`proctree`) | ✅ | ➖ | ⚠️ |
+| Filesystem/PID jail (`bwrap` ≥ 0.12) | ✅ | ➖ | ⚠️ |
+| Docker inside protected panes | ➖ | ➖ | ➖ |
+| Private process-tree mapping | ✅ | ➖ | ⚠️ |
 
 **Legend** — ✅ run & exercised here (WSL2)  ·  ⚠️ expected to work (shared code
 path / build-verified) but **not directly validated**  ·  ➖ not applicable

@@ -13,6 +13,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"amux/internal/hostprep"
 )
 
 var mu sync.Mutex // serialize our own read-modify-write of config.toml
@@ -192,6 +196,30 @@ func (h Home) RolloutPath(uuid string) (string, bool) {
 	return found, found != ""
 }
 
+// RolloutPathRooted locates a private rollout through a pinned session root.
+func (h Home) RolloutPathRooted(root *hostprep.Root, uuid string) (string, bool, error) {
+	if uuid == "" {
+		return "", false, nil
+	}
+	base, err := root.Rel(h.sessionsRoot())
+	if err != nil {
+		return "", false, err
+	}
+	suffix := "-" + uuid + ".jsonl"
+	var found string
+	err = root.WalkFiles(base, func(name string, _ fs.FileInfo) error {
+		if strings.HasPrefix(filepath.Base(name), "rollout-") && strings.HasSuffix(filepath.Base(name), suffix) {
+			found = filepath.Join(h.sessionsRoot(), name)
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	return found, found != "", err
+}
+
 // LatestRolloutTime is the mtime of the most recently written rollout anywhere in
 // this home, and whether the home holds one at all. It answers "when did this
 // Codex last write?" without knowing which uuid to look for — the question
@@ -282,6 +310,35 @@ func (h Home) LatestSession(cwd string) (uuid string, ok bool) {
 	return best.uuid, ok
 }
 
+// LatestSessionRooted is LatestSession for an untrusted private home.
+func (h Home) LatestSessionRooted(root *hostprep.Root, cwd string) (uuid string, ok bool, err error) {
+	base, err := root.Rel(h.sessionsRoot())
+	if err != nil {
+		return "", false, err
+	}
+	var newest time.Time
+	err = root.WalkFiles(base, func(name string, info fs.FileInfo) error {
+		id, isRollout := rolloutUUID(filepath.Base(name))
+		if !isRollout {
+			return nil
+		}
+		f, err := root.OpenFile(filepath.Join(base, name))
+		if err != nil {
+			return err
+		}
+		gotCwd := rolloutCwdReader(f)
+		_ = f.Close()
+		if sameDir(gotCwd, cwd) && (!ok || info.ModTime().After(newest)) {
+			uuid, ok, newest = id, true, info.ModTime()
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	return uuid, ok, err
+}
+
 // SessionInfo describes one saved Codex rollout discovered under the sessions
 // tree: its session uuid, the working directory it ran in, the day-grouping it
 // is stored under, the rollout path, and file metadata. It mirrors
@@ -336,7 +393,11 @@ func rolloutCwd(path string) string {
 		return ""
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	return rolloutCwdReader(f)
+}
+
+func rolloutCwdReader(r io.Reader) string {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // rollout lines can be large
 	for i := 0; sc.Scan() && i < 16; i++ {           // only the first few lines carry meta
 		line := bytes.TrimSpace(sc.Bytes())
@@ -470,6 +531,73 @@ func (h Home) TrustDir(dir string) error {
 	}
 	lines = append(lines, header, trustLine)
 	return writeLines(path, lines)
+}
+
+// TrustDirRooted is TrustDir for a private session home. Existing config is
+// read without following a final symlink or accepting a multiply linked file,
+// and publication is anchored to the pinned session root.
+func (h Home) TrustDirRooted(root *hostprep.Root, dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	path, err := root.Rel(h.ConfigPath())
+	if err != nil {
+		return err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+
+	var lines []string
+	if b, err := root.ReadFile(path); err == nil {
+		lines = strings.Split(string(b), "\n")
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	lines, changed := trustLines(lines, abs)
+	if !changed {
+		return nil
+	}
+	return root.AtomicWrite(path, joinedLines(lines), 0o600)
+}
+
+func trustLines(lines []string, abs string) ([]string, bool) {
+	header := "[projects." + tomlQuote(abs) + "]"
+	const trustLine = `trust_level = "trusted"`
+	hdr := -1
+	for i, ln := range lines {
+		if isProjectsHeaderFor(ln, abs) {
+			hdr = i
+			break
+		}
+	}
+	if hdr >= 0 {
+		for i := hdr + 1; i < len(lines); i++ {
+			if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
+				break
+			}
+			if val, ok := keyValue(lines[i], "trust_level"); ok {
+				if val == "trusted" {
+					return lines, false
+				}
+				lines[i] = trustLine
+				return lines, true
+			}
+		}
+		return insertAt(lines, hdr+1, trustLine), true
+	}
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+		lines = append(lines, "")
+	}
+	return append(lines, header, trustLine), true
+}
+
+func joinedLines(lines []string) []byte {
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return []byte(out)
 }
 
 // isProjectsHeaderFor reports whether line is the [projects."<abs>"] table

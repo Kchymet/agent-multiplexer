@@ -313,10 +313,8 @@ func cmdSession(args []string) error {
 		// amux workgroup create <repo>... [--name n] [--prompt t] [--mode m] [--model M]
 		// Creates a workgroup plus one default agent scoped to the given repos.
 		repos, cfg := parseCreateFlags(args[1:])
-		rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: map[string]string{
-			"name": cfg.name, "repos": strings.Join(repos, ","), "agent": cfg.agent,
-			"mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
-		}})
+		fields := createWorkspaceFields(repos, cfg)
+		rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: fields})
 		if err != nil {
 			return err
 		}
@@ -368,6 +366,19 @@ func cmdSession(args []string) error {
 			return err
 		}
 		fmt.Printf("agent %s repos: %s\n", args[1], orNone(strings.Join(repos, ", ")))
+		return nil
+	case "grants":
+		// Host-only grant administration. An empty repo list deliberately stores
+		// an initialized empty ceiling; omission during low-level creation is the
+		// distinct documented default of all currently tracked repositories.
+		if len(args) < 2 {
+			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [repo...]")
+		}
+		repos := args[2:]
+		if err := sendAction(core.Action{Action: core.ActionCoordinatorSetRepos, ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
+			return err
+		}
+		fmt.Printf("coordinator %s grants: %s\n", args[1], orNone(strings.Join(repos, ", ")))
 		return nil
 	case "rm", "delete":
 		if len(args) < 2 {
@@ -453,6 +464,7 @@ usage: amux workgroup [command]
   ls                 list workgroups and their agents  (alias: list)
   move <agent> [<root>|--new]  re-parent an agent into another workgroup
   repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
+  grants <coordinator> [repo...]  replace its host-managed repo ceiling
   rename <id> <name>  set a display name (the id is unchanged)
   archive <id>       drop a session off the active rail  (alias: done)
   unarchive <id>     put an archived session back  (alias: restore)
@@ -776,6 +788,17 @@ func querySessions() ([]core.WorkgroupRow, error) {
 // ---- shared helpers ------------------------------------------------------
 
 type createCfg struct{ name, prompt, mode, model, agent string }
+
+func createWorkspaceFields(repos []string, cfg createCfg) map[string]string {
+	fields := map[string]string{
+		"name": cfg.name, "agent": cfg.agent, "mode": cfg.mode,
+		"model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
+	}
+	if len(repos) > 0 {
+		fields["repos"] = strings.Join(repos, ",")
+	}
+	return fields
+}
 
 func parseCreateFlags(args []string) ([]string, createCfg) {
 	// Same rational defaults as the interactive flow: the claude harness and task

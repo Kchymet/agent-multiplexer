@@ -29,27 +29,34 @@ const (
 	completionMinimumGrace = 500 * time.Millisecond
 	completionRuntimeGrace = 10 * time.Second
 	completionActivityPoll = 50 * time.Millisecond
+	sessionCallbackTimeout = 10 * time.Minute
 )
 
 type sessionRuntime struct {
-	d            *Daemon
-	resolver     *daemonAccessResolver
-	policy       access.Policy
-	applyResult  func(context.Context, core.Action) (string, error)
-	encodeResult func(core.Result) ([]byte, error)
-	poll         time.Duration
-	now          func() time.Time
-	dispatchMu   sync.Mutex
-	servers      map[string]*sessionrpc.Server
-	completions  *completionRegistry
+	d               *Daemon
+	resolver        *daemonAccessResolver
+	policy          access.Policy
+	applyResult     func(context.Context, core.Action) (string, error)
+	encodeResult    func(core.Result) ([]byte, error)
+	poll            time.Duration
+	now             func() time.Time
+	callbackTimeout time.Duration
+	dispatchMu      sync.Mutex
+	servers         map[string]*sessionrpc.Server
+	initialized     map[string]bool
+	completions     *completionRegistry
+	responseBudget  sessionrpc.ResponseBudget
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
 	r := &sessionRuntime{
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
-		now: time.Now, servers: make(map[string]*sessionrpc.Server),
-		applyResult:  wsops.ApplyResult,
-		encodeResult: func(result core.Result) ([]byte, error) { return json.Marshal(result) },
+		now: time.Now, callbackTimeout: sessionCallbackTimeout,
+		servers:        make(map[string]*sessionrpc.Server),
+		initialized:    make(map[string]bool),
+		responseBudget: newSessionResponseBudget(),
+		applyResult:    wsops.ApplyResult,
+		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
@@ -79,11 +86,37 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 	if err := r.reconcile(ctx); err != nil {
 		return err
 	}
+	return r.serveCurrent(ctx)
+}
+
+func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 	ids := make([]string, 0, len(r.servers))
 	for id := range r.servers {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	ready := true
+	var initializeErr error
+	for _, id := range ids {
+		if r.initialized[id] {
+			continue
+		}
+		err := r.servers[id].Initialize(ctx)
+		if err == nil {
+			r.initialized[id] = true
+			continue
+		}
+		ready = false
+		if !errors.Is(err, sessionrpc.ErrResponseCapacity) && !errors.Is(err, sessionrpc.ErrClosed) {
+			initializeErr = errors.Join(initializeErr, fmt.Errorf("initialize session RPC %s: %w", id, err))
+		}
+	}
+	if !ready {
+		// ErrResponseCapacity is the package's bounded-progress sentinel during
+		// startup adoption. Do not dispatch any mailbox until every current
+		// subject is initialized; the next poll resumes unfinished scans.
+		return initializeErr
+	}
 	for _, id := range ids {
 		if _, err := r.servers[id].ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
 			log.Printf("session RPC %s: %v", id, err)
@@ -95,6 +128,8 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 func (r *sessionRuntime) reconcile(ctx context.Context) error {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
 	if err := r.d.ensureHostCredential(ctx, r.now()); err != nil {
 		return fmt.Errorf("renew host credential: %w", err)
 	}
@@ -165,7 +200,8 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
-		sessionrpc.Callbacks{Authorize: r.authorize, Dispatch: r.dispatch}, sessionrpc.ServerOptions{})
+		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget})
 	if err != nil {
 		return err
 	}
@@ -174,7 +210,36 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	r.servers[session.ID] = server
+	r.initialized[session.ID] = false
 	return nil
+}
+
+// authorizeCallback and dispatchCallback are the only transport callback
+// entrypoints. They never let an integration panic take down mailbox service,
+// and they give every cooperative DB/process operation a fixed upper deadline.
+// The callbacks stay synchronous: on timeout no detached mutation is left
+// running and an accepted/uncertain effect is never retried by this boundary.
+func (r *sessionRuntime) authorizeCallback(ctx context.Context, principal access.Principal, call sessionrpc.Call) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("session authorization callback failed")
+		}
+	}()
+	return r.authorize(ctx, principal, call)
+}
+
+func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrpc.DispatchRequest) (result sessionrpc.DispatchResult, err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			result = rpcFailed("callback_failed")
+			err = nil
+		}
+	}()
+	return r.dispatch(ctx, request)
 }
 
 func (r *sessionRuntime) renewCurrent(ctx context.Context, session store.Session) {
@@ -227,6 +292,7 @@ func (r *sessionRuntime) closeServer(id string) {
 		_ = server.Close()
 		delete(r.servers, id)
 	}
+	delete(r.initialized, id)
 }
 
 func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
@@ -234,6 +300,10 @@ func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
 	if err := r.d.authority.Revoke(ctx, access.SubjectSession, id); err != nil {
 		log.Printf("session RPC %s revoke: %v", id, err)
 	}
+	// Reconciliation is also the durable post-crash/post-callback cleanup path.
+	// Revoke before making the old runtime disappear so observing it stopped can
+	// never race ahead of credential invalidation.
+	r.d.killRuntimeFor(id)
 }
 
 func (r *sessionRuntime) close() {
@@ -267,6 +337,7 @@ type completionEntry struct {
 	cancelled bool
 	settle    chan struct{}
 	cancel    chan struct{}
+	done      chan struct{}
 }
 
 func newCompletionRegistry(d *Daemon) *completionRegistry {
@@ -281,7 +352,7 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 	runtime, _ := c.d.permissions.token(subjectID)
 	entry := &completionEntry{
 		principal: principal, requestID: requestID, runtime: runtime,
-		settle: make(chan struct{}), cancel: make(chan struct{}),
+		settle: make(chan struct{}), cancel: make(chan struct{}), done: make(chan struct{}),
 	}
 	c.mu.Lock()
 	if !c.closed {
@@ -293,7 +364,7 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 		go c.run(subjectID, entry)
 	}
 	c.mu.Unlock()
-	return &sessionrpc.ReceiptHooks{
+	hooks := &sessionrpc.ReceiptHooks{
 		Grace: c.receipt,
 		ResponsePersisted: func(p sessionrpc.PersistedResponse) {
 			c.mu.Lock()
@@ -303,6 +374,28 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 			c.mu.Unlock()
 		},
 		Settled: func(s sessionrpc.ReceiptSettlement) { c.settle(subjectID, s.RequestID) },
+	}
+	return nonPanickingReceiptHooks(hooks)
+}
+
+func nonPanickingReceiptHooks(hooks *sessionrpc.ReceiptHooks) *sessionrpc.ReceiptHooks {
+	if hooks == nil {
+		return nil
+	}
+	return &sessionrpc.ReceiptHooks{
+		Grace: hooks.Grace,
+		ResponsePersisted: func(response sessionrpc.PersistedResponse) {
+			defer func() { _ = recover() }()
+			if hooks.ResponsePersisted != nil {
+				hooks.ResponsePersisted(response)
+			}
+		},
+		Settled: func(settlement sessionrpc.ReceiptSettlement) {
+			defer func() { _ = recover() }()
+			if hooks.Settled != nil {
+				hooks.Settled(settlement)
+			}
+		},
 	}
 }
 
@@ -334,6 +427,7 @@ func (c *completionRegistry) settle(subjectID, requestID string) {
 
 func (c *completionRegistry) run(subjectID string, entry *completionEntry) {
 	defer c.wg.Done()
+	defer close(entry.done)
 	abandon := time.NewTimer(c.abandon)
 	defer abandon.Stop()
 	select {
@@ -381,18 +475,23 @@ func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
 		}
 	}
 stop:
+	c.d.effectMu.Lock()
+	defer c.d.effectMu.Unlock()
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
-		return
-	}
-	if !c.d.killRuntimeToken(subjectID, entry.runtime) {
 		return
 	}
 	// Revoke only the credential generation that authorized completion. The
 	// explicit restore API will supersede/cancel this entry before issuing a new
-	// generation; arbitrary reconciliation can never regrant it.
-	if c.d.authority != nil && c.d.authority.Valid(context.Background(), entry.principal) == nil {
-		_ = c.d.authority.Revoke(context.Background(), access.SubjectSession, subjectID)
+	// generation; arbitrary reconciliation can never regrant it. Revoke before
+	// publishing runtime death so a caller cannot observe the process disappear
+	// while its credential is still current.
+	if c.d.authority != nil {
+		if err := c.d.authority.RevokeCurrent(context.Background(), entry.principal); err != nil {
+			log.Printf("session RPC %s completion revoke: %v", subjectID, err)
+			return
+		}
 	}
+	c.d.killRuntimeToken(subjectID, entry.runtime)
 }
 
 func (c *completionRegistry) owns(subjectID string, entry *completionEntry) bool {
@@ -428,6 +527,21 @@ func (c *completionRegistry) cancel(subjectID string) {
 		c.cancelEntryLocked(subjectID, entry)
 	}
 	c.mu.Unlock()
+}
+
+// cancelAndWait is the authenticated restore boundary. It prevents a stale
+// completion from crossing the restore/regrant transition after it has already
+// passed its final ownership check.
+func (c *completionRegistry) cancelAndWait(subjectID string) {
+	c.mu.Lock()
+	entry := c.entries[subjectID]
+	if entry != nil {
+		c.cancelEntryLocked(subjectID, entry)
+	}
+	c.mu.Unlock()
+	if entry != nil {
+		<-entry.done
+	}
 }
 
 func (c *completionRegistry) cancelEntryLocked(subjectID string, entry *completionEntry) {

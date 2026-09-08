@@ -17,9 +17,10 @@ const Env = "CODEX_HOME"
 var configEntries = []string{ConfigFile, "AGENTS.md", "prompts", "skills", "rules"}
 
 // Template describes how the user's Codex home (UserHome()) is templated into an
-// agent's private home at dir. config.toml is compared without its [projects.*]
+// agent's private home beneath sessionRoot. config.toml is compared without its [projects.*]
 // trust tables, which amux itself writes into the copy at launch (TrustDir).
-func Template(agentID, dir string) cfghome.Spec {
+func Template(agentID, sessionRoot string) cfghome.Spec {
+	dir := AgentHome(sessionRoot)
 	entries := make([]cfghome.Entry, 0, len(configEntries))
 	for _, rel := range configEntries {
 		e := cfghome.Entry{Rel: rel}
@@ -30,7 +31,7 @@ func Template(agentID, dir string) cfghome.Spec {
 	}
 	return cfghome.Spec{
 		Kind: "codex", AgentID: agentID, Env: Env,
-		Template: UserHome().Dir(), Dir: dir,
+		Template: UserHome().Dir(), Root: sessionRoot, Dir: dir,
 		Entries: entries,
 		Shared:  []string{AuthFile, MCPCredentialsFile, "mcp-oauth-locks"},
 		// Codex opens MCP credentials with O_NOFOLLOW when refreshing tokens.

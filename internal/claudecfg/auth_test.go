@@ -31,7 +31,7 @@ func TestSharedAuthSurvivesAtomicRotationAndIgnoresDetachedFiles(t *testing.T) {
 	}
 	var specs []cfghome.Spec
 	for _, id := range []string{"one", "two"} {
-		sp := Template(id, filepath.Join(t.TempDir(), ".amux", "claude"))
+		sp := Template(id, t.TempDir())
 		if _, err := cfghome.Seed(sp); err != nil {
 			t.Fatal(err)
 		}

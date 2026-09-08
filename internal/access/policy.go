@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"amux/internal/core"
-
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 

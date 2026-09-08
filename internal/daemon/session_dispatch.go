@@ -39,6 +39,9 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
+	ctx = withEffectAdmission(ctx)
 
 	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
 		return rpcDenied("credential_invalid"), nil
@@ -137,7 +140,7 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 		}
 		value = normalizeRestrictedSnapshot(snapshot).Sessions
 	case core.QueryVersion:
-		rows, err := r.d.readModel(ctx, action)
+		rows, err := r.d.readModel(action)
 		if err != nil {
 			return nil, err
 		}
@@ -148,7 +151,7 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 		info.DatabaseError = ""
 		value = info
 	case core.QueryCodexControl:
-		rows, err := r.d.readModel(ctx, action)
+		rows, err := r.d.readModel(action)
 		if err != nil {
 			return nil, err
 		}

@@ -74,7 +74,11 @@ type fakeInstance struct {
 func (f *fakeInstance) Key() engine.Key              { return f.key }
 func (f *fakeInstance) Subscribe(engine.Sink) func() { return func() {} }
 func (f *fakeInstance) Resize(int, int)              {}
-func (f *fakeInstance) Alive() bool                  { return !f.dead }
+func (f *fakeInstance) Alive() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.dead
+}
 func (f *fakeInstance) Input(p []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -114,6 +118,8 @@ type fakeEngine struct {
 	// ensurePublished runs after the replacement is visible through Lookup but
 	// before Ensure returns, reproducing the production publication interval.
 	ensurePublished func(engine.Instance)
+	killObserved    func(engine.Instance)
+	killRefuses     bool
 	ensured         []engine.Key
 }
 
@@ -151,7 +157,6 @@ func TestStartAgentRevalidatesAtRuntimeExecution(t *testing.T) {
 
 func TestStartAgentPublishesReplacementGenerationAtomically(t *testing.T) {
 	d := New("", nil, time.Hour)
-	d.permissionBaseline = func(string) ([]string, error) { return nil, nil }
 	eng := newFakeEngine()
 	d.engine = eng
 	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
@@ -241,8 +246,18 @@ func (e *fakeEngine) Live() []engine.Key {
 }
 func (e *fakeEngine) Kill(key engine.Key) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.insts, key)
+	instance := e.insts[key]
+	if instance != nil && !e.killRefuses {
+		instance.mu.Lock()
+		instance.dead = true
+		instance.mu.Unlock()
+		delete(e.insts, key)
+	}
+	hook := e.killObserved
+	e.mu.Unlock()
+	if hook != nil && instance != nil {
+		hook(instance)
+	}
 }
 func (e *fakeEngine) Shutdown() {}
 

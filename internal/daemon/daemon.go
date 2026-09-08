@@ -29,6 +29,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
+	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/source"
 	"amux/internal/store"
@@ -110,6 +111,12 @@ type Daemon struct {
 	authMu      sync.Mutex
 	authPending map[engine.Key]authReload
 
+	// effectMu is the final principal/policy/effect admission boundary shared by
+	// authenticated host actions, session mailbox dispatch, credential rotation,
+	// and completion revocation. A policy mutation cannot commit between a
+	// session's last current-generation check and admission of its exact effect.
+	effectMu sync.Mutex
+
 	// shutdown is closed only by the authenticated host control path. Process
 	// IDs are diagnostics, never authority to signal a process.
 	shutdown     chan struct{}
@@ -128,8 +135,9 @@ type Daemon struct {
 	// permissions owns runtime-generation binding and atomic request consumption
 	// for every caller role. It is initialized even in tests that do not Run.
 	permissions *runtimePermissionGate
-	// permissionBaseline lists durable requests already open before a replacement
-	// runtime is published. Such history cannot be rebound to the new handle.
+	// permissionBaseline records unresolved durable requests before a newly
+	// observed runtime is assigned a generation. Tests inject a record-free
+	// resolver; production reads through the daemon's runtime-record seam.
 	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
@@ -581,7 +589,7 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case core.ActionPaneClose:
 			cl.paneClose(a.PaneID)
 		case core.ActionQuery:
-			d.query(clientCtx, cl, a)
+			d.query(cl, a)
 		default:
 			res := d.handle(clientCtx, a)
 			if a.Action != "" {
@@ -592,9 +600,19 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 }
 
 type accessGuardContextKey struct{}
+type effectAdmissionContextKey struct{}
 
 func withAccessGuard(ctx context.Context, valid func() error) context.Context {
 	return context.WithValue(ctx, accessGuardContextKey{}, valid)
+}
+
+func withEffectAdmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, effectAdmissionContextKey{}, true)
+}
+
+func effectAdmissionHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(effectAdmissionContextKey{}).(bool)
+	return held
 }
 
 // revalidateDeferred is a no-op for internal/test callers without a streaming
@@ -759,7 +777,8 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	}
 	engineSpec := engine.Spec{
 		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
-		Dir: dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
+		Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent),
+		Argv: argv, Cols: a.Cols, Rows: a.Rows,
 	}
 	var inst engine.Instance
 	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
@@ -863,7 +882,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	published, _, err := d.publishPermissionRuntime(aid, func() (any, error) {
 		return d.engine.Ensure(ctx, engine.Spec{
 			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-			Dir: dir, Env: env, Argv: argv,
+			Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})
 	})
 	if err != nil {

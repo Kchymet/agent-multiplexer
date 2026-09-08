@@ -18,6 +18,7 @@ import (
 	"github.com/creack/pty"
 
 	"amux/internal/engine"
+	"amux/internal/launchenv"
 )
 
 // scrollbackBytes bounds the per-instance replay buffer. It's enough to repaint
@@ -226,7 +227,11 @@ const inputBuf = 1024
 func spawn(spec engine.Spec, onExit func(engine.Key, *instance), activity engine.ActivityFunc) (*instance, error) {
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
-	cmd.Env = buildEnv(spec.Env)
+	var err error
+	cmd.Env, err = buildEnv(spec.Env, spec.ModelAccess)
+	if err != nil {
+		return nil, err
+	}
 	cols, rows := spec.Cols, spec.Rows
 	if cols <= 0 {
 		cols = 80
@@ -519,15 +524,29 @@ func (in *instance) signal(sig syscall.Signal) {
 // Launcher color overrides (notably NO_COLOR from automation shells) describe
 // the launcher's output, not the pane's PTY. Drop them alongside TMUX and TERM,
 // then apply explicit pane preferences and a default TERM if none was set.
-func buildEnv(extra []string) []string {
-	env := stripEnv(os.Environ(), "TMUX", "TERM", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE")
-	env = append(env, extra...)
+func buildEnv(extra []string, access launchenv.ModelCapability) ([]string, error) {
+	env, err := launchenv.Build(os.Environ(), nil, access)
+	if err != nil {
+		return nil, err
+	}
+	env = stripEnv(env, "TMUX", "TERM", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE")
+	explicit, err := launchenv.Build(nil, extra, launchenv.ModelCapability{})
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(explicit))
+	for _, entry := range explicit {
+		name, _, _ := strings.Cut(entry, "=")
+		keys = append(keys, name)
+	}
+	env = stripEnv(env, keys...)
+	env = append(env, explicit...)
 	for _, e := range extra {
 		if strings.HasPrefix(e, "TERM=") {
-			return env
+			return env, nil
 		}
 	}
-	return append(env, "TERM=xterm-256color")
+	return append(env, "TERM=xterm-256color"), nil
 }
 
 func stripEnv(env []string, keys ...string) []string {

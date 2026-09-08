@@ -68,7 +68,7 @@ type DB struct{ sql *sql.DB }
 // version only after their changes have completed successfully.
 const (
 	MinSchemaVersion     = 0
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 )
 
 // SchemaVersionError means the database is outside the range this daemon can
@@ -107,7 +107,33 @@ func Open() (*DB, error) {
 		// Non-fatal: a failed import shouldn't block usage.
 		_ = err
 	}
-	_ = d.BackfillWorkspaceRepos()
+	if err := d.migrateCoordinatorGrants(); err != nil {
+		_ = sqldb.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// OpenReadOnly opens the already-migrated store without creating directories,
+// importing legacy data, running schema migration, or performing backfills.
+// Authorization and restricted projections use this path so reads can never
+// initialize or widen a coordinator's repository ceiling.
+func OpenReadOnly() (*DB, error) {
+	dsn := "file:" + core.DBPath() + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)&_pragma=foreign_keys(on)"
+	sqldb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	d := &DB{sql: sqldb}
+	version, err := d.SchemaVersion()
+	if err != nil {
+		_ = sqldb.Close()
+		return nil, err
+	}
+	if version != CurrentSchemaVersion {
+		_ = sqldb.Close()
+		return nil, &SchemaVersionError{Have: version, Min: CurrentSchemaVersion, Max: CurrentSchemaVersion}
+	}
 	return d, nil
 }
 
@@ -145,6 +171,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   archived_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_id);
+CREATE TABLE IF NOT EXISTS coordinator_grant_state (
+  coordinator_id TEXT PRIMARY KEY,
+  initialized    INTEGER NOT NULL CHECK(initialized = 1)
+);
+CREATE TABLE IF NOT EXISTS coordinator_repo_grants (
+  coordinator_id TEXT NOT NULL,
+  repo           TEXT NOT NULL,
+  PRIMARY KEY(coordinator_id, repo)
+);
+CREATE TABLE IF NOT EXISTS coordinator_grant_migrations (
+  version INTEGER PRIMARY KEY
+);
 `); err != nil {
 		return err
 	}
@@ -232,8 +270,18 @@ func (d *DB) Repo(name string) (Repo, bool, error) {
 }
 
 func (d *DB) DeleteRepo(name string) error {
-	_, err := d.sql.Exec(`DELETE FROM repos WHERE name=?`, name)
-	return err
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM coordinator_repo_grants WHERE repo=?`, name); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM repos WHERE name=?`, name); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---- sessions ------------------------------------------------------------
@@ -375,8 +423,21 @@ func (d *DB) Children(rootID string) ([]Session, error) {
 
 // DeleteSession removes a single session row.
 func (d *DB) DeleteSession(id string) error {
-	_, err := d.sql.Exec(`DELETE FROM sessions WHERE id=?`, id)
-	return err
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM coordinator_repo_grants WHERE coordinator_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM coordinator_grant_state WHERE coordinator_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // NewID returns a short unique session id.
