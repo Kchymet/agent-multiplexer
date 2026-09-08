@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/git"
 	"amux/internal/launchenv"
 	"amux/internal/store"
 )
@@ -29,7 +30,15 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	useFakeSecureBwrap(t)
 	s := store.Session{ID: "agent-a", RootID: "root", Agent: "codex", Dir: filepath.Join(home, "sessions", "old-root", "agent-a")}
 	spec := testLaunchSpec(t, s)
-	argv, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/usr/bin/true"}, nil)
+	objects := filepath.Join(t.TempDir(), "repo-key", "generation", "objects")
+	if err := os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec.GitObjects = []git.GitObjectMount{{
+		RepoKey: "repo-key", Generation: "generation",
+		ObjectsHostDir: objects, ObjectsMountDir: objects,
+	}}
+	argv, err := scope(s.Dir, TabAgent, s, spec.Access, spec.GitObjects, []string{"/usr/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +65,7 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	}
 	want := [][]string{
 		{"--bind", s.Dir, s.Dir},
+		{"--ro-bind", objects, objects},
 		{"--ro-bind", spec.Access.CredentialHostDir, core.SessionAccessDir()},
 		{"--ro-bind", spec.Access.MailboxHostDir, spec.Access.MailboxMountDir},
 		{"--bind", spec.Access.RequestsHostDir, spec.Access.RequestsMountDir},
@@ -76,7 +86,7 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		core.DataDir(), core.StateDir(), core.HookStateDir(), core.TranscriptDir(),
-		filepath.Dir(spec.Access.MailboxHostDir), "/run",
+		filepath.Dir(spec.Access.MailboxHostDir), filepath.Dir(objects), "/run",
 	} {
 		if slices.Contains(argv, forbidden) {
 			t.Errorf("manifest exposes forbidden broad path %q: %v", forbidden, argv)

@@ -66,5 +66,5 @@ jobs:
           AMUX_REQUIRE_NAMESPACE_TEST: "1"
         run: |
           go test ./internal/panespec \
-            -run 'Test(RuntimeNamespaceRejectsAliasesFDsAndFutureSiblings|RuntimeGeneratedClaudeHookUsesExactInstalledAlias|ScopeRejectsSiblingSessionSocket)$' \
+            -run 'Test(RuntimeNamespaceRejectsAliasesFDsAndFutureSiblings|RuntimeGeneratedClaudeHookUsesExactInstalledAlias|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket)$' \
             -count=1 -timeout=60s -v

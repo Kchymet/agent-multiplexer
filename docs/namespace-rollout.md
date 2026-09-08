@@ -49,12 +49,13 @@ pool generations. Any data readable through those accounts or deliberately
 admitted object pools is outside the filesystem-confidentiality claim.
 
 `/amux-bin/amux` grants the exact running executable. Claude configuration also
-contains host-compatible absolute hook and status-line commands, so the stable
-installed amux executable is granted as one read-only exact-file alias at that
-same absolute path. The alias is resolved and validated by the trusted host
-launcher; its parent directory and neighboring user-installed tools are not
-mounted. If that host-owned executable disappears or changes during launch,
-bubblewrap fails closed rather than widening to the parent.
+contains host-compatible absolute hook and status-line commands, so the trusted
+launcher binds that same running executable read-only at the stable installed
+path. Protected bare and generated absolute commands therefore cannot select
+different amux versions, and a missing host installation does not break the
+hook. The alias's parent directory and neighboring user-installed tools are not
+mounted. Host commands outside protected panes retain the normal installed-path
+behavior.
 
 The daemon-private access and socket source parents are mode-restricted and never
 mounted. This prevents a restricted session from replacing their path entries

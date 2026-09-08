@@ -11,6 +11,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/panespec"
 	"amux/internal/store"
+	"amux/internal/wsops"
 
 	"golang.org/x/sys/unix"
 )
@@ -56,6 +57,9 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 	if !filepath.IsAbs(session.Dir) || filepath.Clean(session.Dir) != filepath.Clean(expected) {
 		return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q uses unsupported legacy/shared directory %q", id, session.Dir)
 	}
+	if err := wsops.ValidateAgentGit(session); err != nil {
+		return store.Session{}, access.SessionAccess{}, err
+	}
 	// EnsureSession is sticky across revocation/expiry and repairs only a
 	// recoverable publication gap. It cannot turn an old subject into a fresh
 	// credential; explicit lifecycle recovery remains the sole regrant path.
@@ -74,7 +78,11 @@ func (d *Daemon) launchSpecFor(ctx context.Context, id string) (panespec.LaunchS
 	if err != nil {
 		return panespec.LaunchSpec{}, err
 	}
-	return panespec.LaunchSpec{Session: session, Access: grant}, nil
+	objects, err := wsops.AgentGitObjectMounts(session)
+	if err != nil {
+		return panespec.LaunchSpec{}, fmt.Errorf("resolve session Git object grants: %w", err)
+	}
+	return panespec.LaunchSpec{Session: session, Access: grant, GitObjects: objects}, nil
 }
 
 // validateStoredAgentDir deliberately does not derive a path from RootID: a

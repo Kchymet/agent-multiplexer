@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/git"
 	"amux/internal/store"
 )
 
@@ -134,16 +135,41 @@ func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	}
 }
 
-// Native Claude installs live under ~/.local, above amux's default data dir.
-// Its read-only binary mount must not hide the writable worktree/git mounts.
-func TestScopeRejectsSharedWritableGitMount(t *testing.T) {
+func TestLaunchSpecRejectsBroadOrAliasedGitObjectMounts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	useFakeSecureBwrap(t)
 	s := store.Session{ID: "a", Agent: "codex", Dir: filepath.Join(home, "agent")}
 	spec := testLaunchSpec(t, s)
-	if _, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/true"}, []string{"/shared/repo.git"}); err == nil || !strings.Contains(err.Error(), "shared writable") {
-		t.Fatalf("scope shared Git mount error = %v", err)
+	pool := filepath.Join(t.TempDir(), "repo", "generation")
+	objects := filepath.Join(pool, "objects")
+	if err := os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	valid := git.GitObjectMount{RepoKey: "repo-key", Generation: "generation", ObjectsHostDir: objects, ObjectsMountDir: objects}
+	spec.GitObjects = []git.GitObjectMount{valid}
+	if _, err := validateLaunchSpec(spec); err != nil {
+		t.Fatalf("valid exact object grant: %v", err)
+	}
+
+	alias := filepath.Join(t.TempDir(), "objects")
+	if err := os.Symlink(objects, alias); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*git.GitObjectMount){
+		"different destination": func(m *git.GitObjectMount) { m.ObjectsMountDir += "-other" },
+		"pool parent":           func(m *git.GitObjectMount) { m.ObjectsHostDir, m.ObjectsMountDir = pool, pool },
+		"source alias":          func(m *git.GitObjectMount) { m.ObjectsHostDir, m.ObjectsMountDir = alias, alias },
+		"unsafe repository key": func(m *git.GitObjectMount) { m.RepoKey = "../peer" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := valid
+			mutate(&bad)
+			spec.GitObjects = []git.GitObjectMount{bad}
+			if _, err := validateLaunchSpec(spec); err == nil || !strings.Contains(err.Error(), "Git object grant") {
+				t.Fatalf("invalid object grant error = %v", err)
+			}
+		})
 	}
 }
 
@@ -184,7 +210,7 @@ func TestScopeRootsMatchBinds(t *testing.T) {
 	useFakeSecureBwrap(t)
 	s := store.Session{ID: "a", Agent: "claude", Dir: t.TempDir()}
 	spec := testLaunchSpec(t, s)
-	args, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/usr/bin/true"}, nil)
+	args, err := scope(s.Dir, TabAgent, s, spec.Access, nil, []string{"/usr/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
