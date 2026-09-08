@@ -47,9 +47,7 @@ func TestSocketScopeProbe(t *testing.T) {
 }
 
 func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
-	if err := IsolationSupport(); err != nil {
-		t.Skipf("protected namespace unavailable: %v", err)
-	}
+	requireRuntimeIsolation(t)
 	home, err := os.MkdirTemp("", "cx-scope-")
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +146,7 @@ func TestScopeRejectsSiblingSessionSocket(t *testing.T) {
 		t.Helper()
 		s := store.Session{ID: id, Agent: "codex", Dir: dir}
 		spec := testLaunchSpec(t, s)
-		argv, err := scope(dir, TabAgent, s, spec.Access, []string{exe, "-test.run=^TestSocketScopeProbe$", "-test.v"}, nil)
+		argv, err := scope(dir, TabAgent, s, spec.Access, nil, []string{exe, "-test.run=^TestSocketScopeProbe$", "-test.v"})
 		if err != nil {
 			t.Fatal(err)
 		}

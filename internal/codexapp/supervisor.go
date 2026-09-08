@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"amux/internal/codexcfg"
+	"amux/internal/launchenv"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -59,11 +60,12 @@ const (
 // session (identity persistence); Endpoint is the WebSocket listen/dial address
 // (unix://<per-session socket> by default, inside the session's private scope).
 type Config struct {
-	SessionID string
-	Bin       string   // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
-	Dir       string   // working directory (the worktree)
-	Env       []string // extra KEY=VALUE additions to the child environment
-	Model     string   // selected amux model; sticky on the thread and explicit on turns
+	SessionID   string
+	Bin         string                    // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
+	Dir         string                    // working directory (the worktree)
+	Env         []string                  // extra KEY=VALUE additions to the child environment
+	ModelAccess launchenv.ModelCapability // daemon-selected Codex auth capability
+	Model       string                    // selected amux model; sticky on the thread and explicit on turns
 	// Endpoint is the App Server WebSocket endpoint: unix://<path> (default,
 	// per-session, sandbox-scoped), ws://127.0.0.1:<port> (loopback), or
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
@@ -259,7 +261,11 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = s.cfg.Dir
-	cmd.Env = append(os.Environ(), s.cfg.Env...)
+	launchEnv, err := appServerEnvironment(os.Environ(), s.cfg.Env, s.cfg.ModelAccess)
+	if err != nil {
+		return fmt.Errorf("codexapp: build app-server environment: %w", err)
+	}
+	cmd.Env = launchEnv
 	// Capture the child's stderr into a bounded ring so a startup failure inside the
 	// sandbox wrapper (an execvp ENOENT, a bwrap mount error) is explained in the
 	// error below instead of only surfacing as a generic dial timeout — os/exec would
@@ -299,6 +305,10 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 		_ = s.Close()
 	}()
 	return nil
+}
+
+func appServerEnvironment(ambient, overlay []string, access launchenv.ModelCapability) ([]string, error) {
+	return launchenv.Build(ambient, overlay, access)
 }
 
 // withStderrTail appends the captured child-stderr tail to a launch/dial/handshake
@@ -567,11 +577,24 @@ func (s *Supervisor) killProc() {
 // turn/completed notification resolves it, bracketing the turn with
 // turn_start/turn_end events on the runtime-event stream.
 func (s *Supervisor) Prompt(ctx context.Context, text string) error {
+	wait, err := s.BeginPrompt(ctx, text)
+	if err != nil {
+		return err
+	}
+	return wait(ctx)
+}
+
+// BeginPrompt performs only the bounded turn/start admission round trip and
+// returns a waiter for the potentially long model turn. Daemon lifecycle code
+// uses this split to serialize the exact turn-start effect with membership and
+// credential changes without holding its global admission lock while the model
+// runs. The caller must invoke the returned waiter at most once.
+func (s *Supervisor) BeginPrompt(ctx context.Context, text string) (func(context.Context) error, error) {
 	done := make(chan *turnResult, 1)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return errors.New("codexapp: session closed")
+		return nil, errors.New("codexapp: session closed")
 	}
 	// Open a fresh ownership generation for this Prompt. ownTurn stays unbound until
 	// our own turn/start response returns; earlyTerm retains any terminal observed for
@@ -605,7 +628,7 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 		// (curTurn) must survive our failed start.
 		s.abandonLocalTurn(gen)
 		s.emit(turnEndEvent(threadID, "", "error"))
-		return err
+		return nil, err
 	}
 	// Bind ownership to the ACTUAL turn/start response id, scoped to this generation.
 	// If a superseding Prompt (or cancellation) already replaced our waiter, do not
@@ -631,16 +654,18 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	}
 	s.mu.Unlock()
 
-	select {
-	case <-ctx.Done():
-		// The caller's context ended; the turn continues server-side and its observed
-		// turn/completed will bracket and clear it. Don't emit a synthetic end here.
-		return ctx.Err()
-	case <-done:
-		// turn/completed was observed: onNotify already emitted turn_end and cleared
-		// the turn + open approvals. Nothing to do but return.
-		return nil
-	}
+	return func(waitCtx context.Context) error {
+		select {
+		case <-waitCtx.Done():
+			// The waiter ended; the turn continues server-side and its observed
+			// turn/completed will bracket and clear it. Don't emit a synthetic end here.
+			return waitCtx.Err()
+		case <-done:
+			// turn/completed was observed: onNotify already emitted turn_end and cleared
+			// the turn + open approvals. Nothing to do but return.
+			return nil
+		}
+	}, nil
 }
 
 func turnIDFromResult(res json.RawMessage) string {

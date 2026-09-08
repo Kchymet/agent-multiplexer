@@ -36,6 +36,11 @@ import (
 // rather than "applied".
 const steerStartSettle = 2 * time.Second
 
+// steerEffectAdmissionTimeout bounds only a deferred launch or structured
+// turn/start admission. The model turn itself waits outside the global daemon
+// admission lock.
+const steerEffectAdmissionTimeout = 10 * time.Second
+
 // steer delivers one steering verb to a session's agent pane. It returns an
 // error the caller surfaces verbatim, so every refusal says why: an unsteerable
 // agent kind, a stopped agent, a missing field, an unparseable decision.
@@ -236,6 +241,10 @@ type structuredSteerer interface {
 	Resolve(ctx context.Context, requestID, decision string) error
 }
 
+type structuredPromptStarter interface {
+	BeginPrompt(ctx context.Context, text string) (func(context.Context) error, error)
+}
+
 func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredSteerer, verb string, fields map[string]string) error {
 	switch verb {
 	case core.SteerPrompt:
@@ -271,8 +280,28 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 // caller's connection) and reports any failure to the session journal — the
 // caller has already been told "accepted".
 func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structuredSteerer, text string) {
-	if err := revalidateDeferred(ctx); err != nil {
-		structuredJournal(id, core.JournalError, "prompt cancelled: access revoked")
+	starter, ok := sup.(structuredPromptStarter)
+	if !ok {
+		structuredJournal(id, core.JournalError, "prompt cancelled: runtime lacks bounded admission")
+		return
+	}
+	var wait func(context.Context) error
+	err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
+		if d.codex != nil {
+			current, currentOK := d.codex.Get(id)
+			if !currentOK || current != sup {
+				return fmt.Errorf("prompt runtime was replaced")
+			}
+		}
+		var beginErr error
+		wait, beginErr = starter.BeginPrompt(admitCtx, text)
+		if beginErr == nil && wait == nil {
+			beginErr = fmt.Errorf("prompt runtime returned no turn waiter")
+		}
+		return beginErr
+	})
+	if err != nil {
+		structuredJournal(id, core.JournalError, fmt.Sprintf("prompt cancelled before turn start: %v", err))
 		return
 	}
 	if d.steerStarted != nil {
@@ -283,7 +312,7 @@ func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structu
 			}
 		}()
 	}
-	if err := sup.Prompt(ctx, text); err != nil {
+	if err := wait(ctx); err != nil {
 		structuredJournal(id, core.JournalError, fmt.Sprintf("prompt: %v", err))
 	}
 }
@@ -298,12 +327,13 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
 	}
 	go func() {
-		if err := revalidateDeferred(ctx); err != nil {
-			structuredJournal(sess.ID, core.JournalError, "prompt cancelled: access revoked")
-			return
-		}
 		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
-		sup, err := d.ensureSupervisor(ctx, sess.ID)
+		var sup *codexapp.Supervisor
+		err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
+			var ensureErr error
+			sup, ensureErr = d.ensureSupervisor(admitCtx, sess.ID)
+			return ensureErr
+		})
 		if err != nil {
 			// steerStartFailed writes the human journal + daemon log; also surface the
 			// failure on the session's single structured event source so a subscriber
@@ -331,10 +361,6 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 // its disconnect would leave the session exactly as stuck as the timeout this
 // change exists to remove.
 func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, payload []engine.InputStep) {
-	if err := revalidateDeferred(ctx); err != nil {
-		journal(id, core.JournalError, "prompt cancelled: access revoked")
-		return
-	}
 	if d.steerStarted != nil {
 		defer func() {
 			select {
@@ -347,24 +373,46 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	// Start exactly the steered session: a prompt to a workgroup id is a prompt to
 	// its coordinator, not a "start every member" (which is what `start <root>`
 	// means — see startEngineFor).
-	if err := d.startAgent(ctx, id); err != nil {
+	err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
+		if err := d.startAgent(admitCtx, id); err != nil {
+			return err
+		}
+		in, ok := d.engine.Lookup(key)
+		if !ok {
+			return fmt.Errorf("agent %s did not come up", id)
+		}
+		// The runtime is a TUI that has to boot before it will accept typed input,
+		// so reserve a delay in the input FIFO instead of sleeping here. Queueing is
+		// the exact bounded effect and occurs under final admission; the later delay
+		// cannot redirect the bytes to a replacement runtime handle.
+		d.deferInput(in, payload)
+		return nil
+	})
+	if err != nil {
 		d.steerStartFailed(id, fmt.Errorf("start agent %s: %w", id, err))
 		return
 	}
 	d.triggerPoll()
-	in, ok := d.engine.Lookup(key)
-	if !ok {
-		d.steerStartFailed(id, fmt.Errorf("agent %s did not come up", id))
-		return
+}
+
+// admitDeferredEffect reacquires the daemon's final execution gate even when
+// ctx was captured while the original request held it. A detached goroutine
+// must never trust that inherited marker: the original handler releases the
+// lock before this work runs. The callback is bounded to admission/queueing;
+// callers wait for a model turn only after this function returns.
+func (d *Daemon) admitDeferredEffect(ctx context.Context, effect func(context.Context) error) error {
+	if d.sessionRPC != nil {
+		d.sessionRPC.dispatchMu.Lock()
+		defer d.sessionRPC.dispatchMu.Unlock()
 	}
+	d.effectMu.Lock()
+	defer d.effectMu.Unlock()
 	if err := revalidateDeferred(ctx); err != nil {
-		d.steerStartFailed(id, fmt.Errorf("prompt cancelled: access revoked"))
-		return
+		return err
 	}
-	// The runtime is a TUI that has to boot before it will accept typed input, so
-	// reserve a delay in the input FIFO instead of sleeping on this goroutine. The
-	// verb is already "accepted" at this point; this is not a readiness check.
-	d.deferInput(in, payload)
+	admitCtx, cancel := context.WithTimeout(ctx, steerEffectAdmissionTimeout)
+	defer cancel()
+	return effect(admitCtx)
 }
 
 // steerStartFailed reports a start that failed after the verb was already

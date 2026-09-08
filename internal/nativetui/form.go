@@ -816,12 +816,25 @@ func (m *model) submitForm() tea.Cmd {
 	fs := m.form
 	m.form = nil
 	m.status = fs.submit + "…"
-	cmd := m.sendCmd(core.Action{Action: fs.action, ID: fs.id, Fields: fs.values()})
+	fields := formFieldsForSubmit(fs)
+	cmd := m.sendCmd(core.Action{Action: fs.action, ID: fs.id, Fields: fields})
 	if fs.action == core.ActionAddRepo && m.pendingPicker != nil {
 		m.picker = m.pendingPicker
 		m.pendingPicker = nil
 	}
 	return cmd
+}
+
+func formFieldsForSubmit(fs *formState) map[string]string {
+	fields := fs.values()
+	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" {
+		// An untouched first-agent picker means "create an empty but immediately
+		// usable coordinator", not an explicitly empty authorization ceiling.
+		// Omission lets wsops initialize all currently tracked repositories; the
+		// dedicated host grants action is how an operator deliberately seals it.
+		delete(fields, "repos")
+	}
+	return fields
 }
 
 // minValueCells is the narrowest a text field's rows may get beside their label

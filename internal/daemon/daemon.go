@@ -29,6 +29,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
+	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/source"
 	"amux/internal/store"
@@ -776,7 +777,8 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	}
 	engineSpec := engine.Spec{
 		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
-		Dir: dir, Env: env, Argv: argv, Cols: a.Cols, Rows: a.Rows,
+		Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent),
+		Argv: argv, Cols: a.Cols, Rows: a.Rows,
 	}
 	var inst engine.Instance
 	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
@@ -880,7 +882,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	published, _, err := d.publishPermissionRuntime(aid, func() (any, error) {
 		return d.engine.Ensure(ctx, engine.Spec{
 			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-			Dir: dir, Env: env, Argv: argv,
+			Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})
 	})
 	if err != nil {

@@ -71,10 +71,17 @@ type mockSteerer struct {
 }
 
 func (m *mockSteerer) Prompt(_ context.Context, text string) error {
+	wait, err := m.BeginPrompt(context.Background(), text)
+	if err != nil {
+		return err
+	}
+	return wait(context.Background())
+}
+func (m *mockSteerer) BeginPrompt(_ context.Context, text string) (func(context.Context) error, error) {
 	m.mu.Lock()
 	m.prompt = text
 	m.mu.Unlock()
-	return m.promptErr
+	return func(context.Context) error { return m.promptErr }, nil
 }
 func (m *mockSteerer) Interject(_ context.Context, text string) error {
 	m.mu.Lock()

@@ -9,6 +9,16 @@ import (
 	"amux/internal/store"
 )
 
+func requireRuntimeIsolation(t *testing.T) {
+	t.Helper()
+	if err := IsolationSupport(); err != nil {
+		if os.Getenv("AMUX_REQUIRE_NAMESPACE_TEST") == "1" {
+			t.Fatalf("required protected namespace unavailable: %v", err)
+		}
+		t.Skipf("protected namespace unavailable: %v", err)
+	}
+}
+
 func testLaunchSpec(t *testing.T, s store.Session) LaunchSpec {
 	t.Helper()
 	if err := os.MkdirAll(s.Dir, 0o755); err != nil {

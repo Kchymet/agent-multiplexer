@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/git"
+	"amux/internal/launchenv"
 	"amux/internal/store"
 )
 
@@ -28,7 +30,15 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	useFakeSecureBwrap(t)
 	s := store.Session{ID: "agent-a", RootID: "root", Agent: "codex", Dir: filepath.Join(home, "sessions", "old-root", "agent-a")}
 	spec := testLaunchSpec(t, s)
-	argv, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/usr/bin/true"}, nil)
+	objects := filepath.Join(t.TempDir(), "repo-key", "generation", "objects")
+	if err := os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec.GitObjects = []git.GitObjectMount{{
+		RepoKey: "repo-key", Generation: "generation",
+		ObjectsHostDir: objects, ObjectsMountDir: objects,
+	}}
+	argv, err := scope(s.Dir, TabAgent, s, spec.Access, spec.GitObjects, []string{"/usr/bin/true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,12 +50,25 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	if argvSequence(argv, "--proc", "/proc") < 0 {
 		t.Fatalf("manifest lacks private procfs: %v", argv)
 	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argvSequence(argv, "--tmpfs", launchenv.ToolBinDir) < 0 ||
+		argvSequence(argv, "--ro-bind", self, filepath.Join(launchenv.ToolBinDir, "amux")) < 0 ||
+		argvSequence(argv, "--remount-ro", launchenv.ToolBinDir) < 0 {
+		t.Fatalf("manifest lacks protected bare-amux tool directory: %v", argv)
+	}
 	want := [][]string{
 		{"--bind", s.Dir, s.Dir},
+		{"--ro-bind", objects, objects},
 		{"--ro-bind", spec.Access.CredentialHostDir, core.SessionAccessDir()},
 		{"--ro-bind", spec.Access.MailboxHostDir, spec.Access.MailboxMountDir},
 		{"--bind", spec.Access.RequestsHostDir, spec.Access.RequestsMountDir},
-		{"--ro-bind", spec.Access.CredentialHostDir, spec.Access.CredentialMountDir},
 	}
 	last := -1
 	for _, sequence := range want {
@@ -58,9 +81,12 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 		}
 		last = at
 	}
+	if argvSequence(argv, "--ro-bind", spec.Access.CredentialHostDir, spec.Access.CredentialMountDir) >= 0 {
+		t.Fatalf("manifest mounts credentials below the read-only mailbox: %v", argv)
+	}
 	for _, forbidden := range []string{
 		core.DataDir(), core.StateDir(), core.HookStateDir(), core.TranscriptDir(),
-		filepath.Dir(spec.Access.MailboxHostDir), "/run",
+		filepath.Dir(spec.Access.MailboxHostDir), filepath.Dir(objects), "/run",
 	} {
 		if slices.Contains(argv, forbidden) {
 			t.Errorf("manifest exposes forbidden broad path %q: %v", forbidden, argv)
@@ -71,7 +97,7 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	}
 }
 
-func TestTypedLaunchPathsStripInheritedHostAuthority(t *testing.T) {
+func TestTypedLaunchPathsDoNotSerializeHostAuthority(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
@@ -101,13 +127,18 @@ func TestTypedLaunchPathsStripInheritedHostAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	for label, argv := range map[string][]string{"agent": agentArgv, "app-server": serverArgv, "attach": attachArgv} {
-		for _, name := range secrets {
-			if argvSequence(argv, "--unsetenv", name) < 0 {
-				t.Errorf("%s did not strip %s: %v", label, name, argv)
-			}
+		separator := slices.Index(argv, "--")
+		if separator < 0 || separator+2 >= len(argv) || argv[separator+2] != payloadExecArg {
+			t.Errorf("%s does not pass through the descriptor-clean payload trampoline: %v", label, argv)
+		}
+		if argvSequence(argv, "--setenv", payloadExecEnv, "1") < 0 {
+			t.Errorf("%s does not activate the descriptor-clean payload trampoline: %v", label, argv)
 		}
 		if strings.Contains(strings.Join(argv, "\x00"), "planted-host-only") {
 			t.Errorf("%s serialized a host credential value: %v", label, argv)
+		}
+		if slices.Contains(argv, "--unsetenv") || slices.Contains(argv, "--clearenv") {
+			t.Errorf("%s relies on payload-time environment cleanup instead of launcher sanitation: %v", label, argv)
 		}
 	}
 }
