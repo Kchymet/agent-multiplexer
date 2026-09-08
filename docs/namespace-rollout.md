@@ -30,9 +30,11 @@ A host-authorized rollout must therefore:
    completed. Leave the original filesystem and database state intact for
    explicit host recovery; never discard or silently relocate it from a read.
 6. Start the replacements only after the old runtimes are gone, then verify the
-   fixed `/amux-session-access` context, `/amux-bin`, private PID/proc state,
-   launcher environment, access mounts, and private worktree metadata/object
-   grants in the new processes.
+   fixed `/amux-session-access` context, `/amux-bin`, the read-only exact-file
+   installed-amux alias used by generated Claude hooks/status, private PID/proc
+   state, launcher environment, access mounts, and private worktree
+   metadata/object grants in the new processes. Verify that the installed
+   alias's containing directory and sibling executables remain absent.
 
 These are deployment preconditions, not an instruction to perform host work.
 Installation, daemon restart, live-state migration, and recreation require
@@ -45,6 +47,14 @@ their selected model account, harness auth, Git/GitHub account files, configured
 editor/shell resources, the exact own directory, and daemon-authorized Git object
 pool generations. Any data readable through those accounts or deliberately
 admitted object pools is outside the filesystem-confidentiality claim.
+
+`/amux-bin/amux` grants the exact running executable. Claude configuration also
+contains host-compatible absolute hook and status-line commands, so the stable
+installed amux executable is granted as one read-only exact-file alias at that
+same absolute path. The alias is resolved and validated by the trusted host
+launcher; its parent directory and neighboring user-installed tools are not
+mounted. If that host-owned executable disappears or changes during launch,
+bubblewrap fails closed rather than widening to the parent.
 
 The daemon-private access and socket source parents are mode-restricted and never
 mounted. This prevents a restricted session from replacing their path entries

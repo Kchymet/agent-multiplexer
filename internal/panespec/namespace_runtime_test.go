@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/launchenv"
 	"amux/internal/store"
@@ -223,6 +225,88 @@ test "$(cat /amux-session-access/current)" = rotated
 	}
 	if got, err := os.ReadFile(peerCanary); err != nil || string(got) != "peer-secret" {
 		t.Fatalf("peer canary changed: %q, %v", got, err)
+	}
+}
+
+func TestRuntimeGeneratedClaudeHookUsesExactInstalledAlias(t *testing.T) {
+	requireRuntimeIsolation(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("AMUX_JAIL", "on")
+
+	installed := core.InstalledBinPath()
+	if err := os.MkdirAll(filepath.Dir(installed), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, []byte("#!/bin/sh\nprintf installed-hook-ok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(filepath.Dir(installed), "sibling-canary")
+	if err := os.WriteFile(sibling, []byte("must-stay-hidden"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := store.Session{ID: "hook-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "hook-owner")}
+	spec := testLaunchSpec(t, s)
+	claudeHome := filepath.Join(s.Dir, ".amux", "claude")
+	if err := claudecfg.InstallHooksIn(s.Dir, claudeHome, installed); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(claudecfg.ProjectSettingsLocalPath(s.Dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+		StatusLine struct {
+			Command string `json:"command"`
+		} `json:"statusLine"`
+	}
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	groups := settings.Hooks["SessionStart"]
+	if len(groups) == 0 || len(groups[0].Hooks) == 0 {
+		t.Fatalf("generated settings lack SessionStart hook: %s", b)
+	}
+	hook := groups[0].Hooks[0].Command
+	if !strings.HasPrefix(hook, installed+" agent hook ") {
+		t.Fatalf("generated SessionStart hook = %q, want installed alias %q", hook, installed)
+	}
+	if !strings.HasPrefix(settings.StatusLine.Command, installed+" agent model --statusline") {
+		t.Fatalf("generated statusLine command = %q, want installed alias %q", settings.StatusLine.Command, installed)
+	}
+
+	script := `set -eu
+test ! -e "$1"
+exec /bin/sh -c "$2"
+`
+	argv, err := scope(s.Dir, TabAgent, s, spec.Access, []string{"/bin/sh", "-c", script, "probe", sibling, hook}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchEnv, err := launchenv.Build([]string{
+		"HOME=" + home,
+		"PATH=" + filepath.Dir(installed) + ":/usr/bin:/bin",
+	}, nil, launchenv.ForRuntime(s.Agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = launchEnv
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated SessionStart hook through exact installed alias: %v: %s", err, out)
+	}
+	if string(out) != "installed-hook-ok" {
+		t.Fatalf("generated SessionStart hook output = %q", out)
 	}
 }
 

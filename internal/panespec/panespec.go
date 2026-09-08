@@ -464,6 +464,19 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 		"--remount-ro", launchenv.ToolBinDir,
 		"--setenv", payloadExecEnv, "1",
 	)
+	// Claude's generated hooks and model-status command deliberately use the
+	// stable install path so they also work outside a protected pane. A daemon
+	// may itself be a development binary elsewhere, so /amux-bin alone cannot
+	// satisfy those absolute commands. Restore only the canonical installed file
+	// at that exact compatibility alias; never expose its ~/.local/bin parent.
+	installed := core.InstalledBinPath()
+	if installed != self {
+		if installedReal, err := filepath.EvalSymlinks(installed); err == nil {
+			if info, statErr := os.Stat(installedReal); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+				args = append(args, "--ro-bind", installedReal, installed)
+			}
+		}
+	}
 	// A launcher may resolve into a different home subtree (for example Codex's
 	// ~/.local/bin launcher into ~/.codex/packages). Bind the resolved package or
 	// executable and run it directly, without exposing the launcher subtree too.
