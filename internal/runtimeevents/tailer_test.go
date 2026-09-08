@@ -240,6 +240,35 @@ func TestStreamPicksReaderPerRuntime(t *testing.T) {
 	}
 }
 
+func TestStreamContextPassesCancellationToResolver(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	src := StreamContext(func(ctx context.Context, _ string) (Record, bool) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return Record{}, false
+	}, testPoll)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_, _ = src(ctx, "sess", 0)
+		close(done)
+	}()
+	<-started
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not receive stream cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("StreamContext did not return after resolver cancellation")
+	}
+}
+
 // TestClaudeStreamStampsRuntime pins that the Claude path keeps labelling its
 // batches too, so a consumer never has to fall back to assuming a runtime.
 func TestClaudeStreamStampsRuntime(t *testing.T) {

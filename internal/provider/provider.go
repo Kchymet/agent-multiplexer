@@ -43,6 +43,10 @@ type Config struct {
 	ServerName        string            // TLS server-name override (SNI / verification)
 	MaxPanes          int               // capability: max concurrent panes
 	Features          []string          // capability: opaque feature strings from config
+	// AllowCompute deliberately grants the remote peer arbitrary local process
+	// and PTY control (spawn/input/resize/kill). It is independent of inventory,
+	// runtime-event, and session-action grants and is fail-closed by default.
+	AllowCompute bool
 
 	// PublishSessions opts into the "sessions" feature (docs/remote-provider-sessions.md):
 	// the provider advertises "sessions" in register and, once the orchestrator
@@ -54,12 +58,16 @@ type Config struct {
 	// spec's read-only publishing policy). Ignored unless PublishSessions is set.
 	ReadOnlySessions bool
 	// Sessions returns the current session rail to publish. Required for the
-	// "sessions" feature; nil disables it regardless of PublishSessions.
+	// "sessions" feature; nil disables it regardless of PublishSessions. It must
+	// return when ctx is cancelled so a dropped connection cannot retain a poll
+	// goroutine or block reconnect.
 	Sessions func(context.Context) ([]core.Session, error)
 	// ApplyAction executes one session lifecycle verb against the daemon's store,
 	// returning the id of any session it created (see wsops.ApplyResult). Nil
 	// rejects every verb (read-only). The provider validates the verb set and maps
-	// the wire action to a core.Action before calling this.
+	// the wire action to a core.Action before calling this. It must honor ctx:
+	// removal, poll failure, and connection teardown cancel admitted work before
+	// waiting for the authorization barrier.
 	ApplyAction func(context.Context, core.Action) (newID string, err error)
 	// SessionPollInterval debounces inventory publishing: the provider re-polls
 	// Sessions at this cadence and pushes only when the snapshot changed. Defaults
@@ -75,7 +83,9 @@ type Config struct {
 	// RuntimeEventStream produces seq-ordered event batches for one session,
 	// resumable from afterSeq, running until ctx is cancelled. ok=false ⇒ the
 	// session has no structured record (the feature is advertised but that session
-	// emits nothing — honest degradation). Required for "runtime-events".
+	// emits nothing — honest degradation). Opening and tailing must both honor ctx
+	// so removal and connection teardown can revoke an in-flight subscription.
+	// Required for "runtime-events".
 	RuntimeEventStream func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool)
 
 	// OnStatus, when set, receives a snapshot every time the connection state
@@ -222,14 +232,42 @@ type session struct {
 	subscribe chan struct{}
 	subOnce   sync.Once
 
+	// Published-session grants and admitted work are connection-local. opMu is
+	// the admission gate: removal deletes the target and cancels its operations
+	// under this lock, then waits on their done channels without blocking work for
+	// retained targets. Runtime batch writes revalidate membership under the same
+	// lock, so no queued batch crosses a completed revoke barrier.
+	opMu      sync.Mutex
+	published map[string]core.Session
+	actions   map[uint64]*sessionActionCall
+	nextOpID  uint64
+
 	// "runtime-events" feature: rtCtx is cancelled on session teardown to stop all
-	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session;
-	// rtWG waits the pumps out before the connection is considered torn down.
-	rtCtx    context.Context
-	rtCancel context.CancelFunc
-	rtMu     sync.Mutex
-	rtSubs   map[string]bool
-	rtWG     sync.WaitGroup
+	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session
+	// and carries its cancellation handle; rtOpening tracks resolver calls before
+	// a pump exists. rtWG waits pumps out before teardown. Both maps use opMu.
+	rtCtx     context.Context
+	rtCancel  context.CancelFunc
+	rtOpening map[string]*runtimeOpening
+	rtSubs    map[string]*runtimeSubscription
+	rtWG      sync.WaitGroup
+}
+
+type runtimeSubscription struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type runtimeOpening struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type sessionActionCall struct {
+	target string
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func (s *session) cancel() { s.once.Do(func() { close(s.done) }) }
@@ -311,9 +349,12 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 		wake:      make(chan struct{}, 1),
 		lastPong:  time.Now().UnixNano(),
 		subscribe: make(chan struct{}),
+		published: map[string]core.Session{},
+		actions:   map[uint64]*sessionActionCall{},
 		rtCtx:     rtCtx,
 		rtCancel:  rtCancel,
-		rtSubs:    map[string]bool{},
+		rtOpening: map[string]*runtimeOpening{},
+		rtSubs:    map[string]*runtimeSubscription{},
 	}
 	p.mu.Lock()
 	p.wake = s.wake
@@ -328,7 +369,7 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	// starts fresh per connection, so a reconnect re-publishes a full snapshot.
 	if p.publishing() {
 		wg.Add(1)
-		go func() { defer wg.Done(); p.publishLoop(ctx, s) }()
+		go func() { defer wg.Done(); p.publishLoop(s.rtCtx, s) }()
 	}
 
 	select {
@@ -336,8 +377,9 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	case <-ctx.Done():
 	}
 	s.cancel()
-	rtCancel()       // stop the per-session runtime-events pumps
-	_ = conn.Close() // unblock the reader's ReadMux
+	_ = conn.Close() // unblock a reader or writer before waiting on revoke barriers
+	rtCancel()       // cancel daemon-backed hooks before revoke waits for their barrier
+	s.revokeAllPublished()
 	wg.Wait()
 	s.rtWG.Wait()
 
@@ -378,6 +420,7 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 	_, err := exec.LookPath("bwrap")
 	return &harnessproto.Capabilities{
 		Execution: p.cfg.Execution,
+		Compute:   p.cfg.AllowCompute,
 		MaxPanes:  p.cfg.MaxPanes,
 		Bwrap:     err == nil,
 		OS:        runtime.GOOS,
@@ -439,19 +482,31 @@ func (p *Provider) paneOffers() []harnessproto.PaneOffer {
 // their afterSeq (so output replays from there); every other surviving pane is
 // killed (the orchestrator either listed it under kill or omitted it, both of
 // which mean terminate).
-func (p *Provider) applyDirectives(adopt []harnessproto.AdoptPane, _ []string) map[string]int64 {
+func (p *Provider) applyDirectives(adopt []harnessproto.AdoptPane, kill []string) map[string]int64 {
 	sent := map[string]int64{}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	killed := make(map[string]bool, len(kill))
+	for _, id := range kill {
+		killed[id] = true
+	}
 	adopted := map[string]bool{}
-	for _, a := range adopt {
-		if _, ok := p.panes[a.PaneID]; ok {
+	if p.cfg.AllowCompute {
+		for _, a := range adopt {
+			pn, ok := p.panes[a.PaneID]
+			if !ok || killed[a.PaneID] || a.AfterSeq < 0 {
+				continue
+			}
+			last, _ := pn.buf.snapshot()
+			if a.AfterSeq > last {
+				continue
+			}
 			sent[a.PaneID] = a.AfterSeq
 			adopted[a.PaneID] = true
 		}
 	}
 	for id, pn := range p.panes {
-		if !adopted[id] {
+		if killed[id] || !adopted[id] {
 			pn.terminate()
 			delete(p.panes, id)
 		}
@@ -471,19 +526,27 @@ func (p *Provider) readLoop(s *session) {
 		}
 		switch m.Type {
 		case harnessproto.MSpawn:
-			p.spawn(m)
+			if p.cfg.AllowCompute {
+				p.spawn(m)
+			}
 		case harnessproto.MInput:
-			if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil {
-				_, _ = pn.ptmx.Write(m.Data)
+			if p.cfg.AllowCompute {
+				if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil {
+					_, _ = pn.ptmx.Write(m.Data)
+				}
 			}
 		case harnessproto.MResize:
-			if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil && m.Cols > 0 && m.Rows > 0 {
-				_ = pty.Setsize(pn.ptmx, &pty.Winsize{Cols: uint16(m.Cols), Rows: uint16(m.Rows)})
+			if p.cfg.AllowCompute {
+				if pn := p.getPane(m.PaneID); pn != nil && pn.ptmx != nil && m.Cols > 0 && m.Rows > 0 {
+					_ = pty.Setsize(pn.ptmx, &pty.Winsize{Cols: uint16(m.Cols), Rows: uint16(m.Rows)})
+				}
 			}
 		case harnessproto.MKill:
-			p.mu.Lock()
-			p.killLocked(m.PaneID)
-			p.mu.Unlock()
+			if p.cfg.AllowCompute {
+				p.mu.Lock()
+				p.killLocked(m.PaneID)
+				p.mu.Unlock()
+			}
 		case harnessproto.MPong:
 			atomic.StoreInt64(&s.lastPong, time.Now().UnixNano())
 			// The heartbeat is the liveness signal a report can actually trust: a
