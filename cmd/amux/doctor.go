@@ -22,12 +22,13 @@ import (
 
 // cmdDoctor prints a health summary: required/optional CLI dependencies and the
 // amux runtime (daemon, database). Exits non-zero if a required dependency is
-// missing or a known component contract is incompatible.
+// missing, a known component contract is incompatible, or an unexpected daemon
+// probe/query error leaves runtime state unknown.
 func cmdDoctor() error {
 	ctx := context.Background()
 	fmt.Print("amux doctor\n\n")
 
-	versions := collectVersions()
+	versions := collectVersionReport()
 	versionOutput, incompatible := versionLines(versions, true)
 	fmt.Println("Versions")
 	for _, line := range versionOutput {
@@ -94,11 +95,20 @@ func cmdDoctor() error {
 	}
 
 	fmt.Println("\nRuntime")
-	daemonUp := versions.Connected
+	daemonStateErr := versionStateError(versions)
+	daemonUp := versions.Connected && daemonStateErr == nil
+	daemonDenied := daemonAccessDenied(daemonStateErr)
+	daemonUnknown := daemonStateErr != nil
 	if daemonUp {
 		fmt.Printf("  ✓ daemon    running (socket %s)\n", core.SocketPath())
+	} else if daemonDenied {
+		fmt.Printf("  ✗ daemon    state unknown; access denied at %s: %v\n", core.SocketPath(), daemonStateErr)
+		fmt.Println("              unable to determine daemon liveness; doctor never attempts startup")
+	} else if daemonUnknown {
+		fmt.Printf("  ✗ daemon    state unknown at %s: %v\n", core.SocketPath(), daemonStateErr)
+		fmt.Println("              refusing to infer offline from an unexpected daemon error")
 	} else {
-		fmt.Printf("  · daemon    offline — starts on `amux`\n")
+		fmt.Printf("  · daemon    offline (%v) — starts on `amux` outside an agent session\n", versions.ConnectErr)
 	}
 	// The daemon is the sole owner of the store, so ask it for the counts over
 	// the socket rather than opening the database here. With the daemon offline
@@ -106,10 +116,14 @@ func cmdDoctor() error {
 	var repos []core.RepoRow
 	var roots []core.WorkgroupRow
 	statsOK := false
-	if !daemonUp {
+	var statsErr error
+	if daemonUnknown {
+		fmt.Printf("  ✗ database  unavailable because daemon state is unknown\n")
+	} else if !daemonUp {
 		fmt.Printf("  · database  %s (start the daemon to read stats)\n", core.DBPath())
 	} else if r, rt, err := doctorStats(); err != nil {
 		fmt.Printf("  ✗ database  %v\n", err)
+		statsErr = err
 	} else {
 		repos, roots, statsOK = r, rt, true
 		agents := 0
@@ -128,7 +142,9 @@ func cmdDoctor() error {
 
 	fmt.Println("\nReconciliation")
 	reconciliationFailed := false
-	if !statsOK {
+	if daemonUnknown {
+		fmt.Printf("  ✗ agents    unavailable because daemon state is unknown\n")
+	} else if !statsOK {
 		fmt.Printf("  · agents    (start the daemon to reconcile store vs disk)\n")
 	} else if err := reconcileSessions(ctx, repos, roots); err != nil {
 		reconciliationFailed = true
@@ -160,7 +176,9 @@ func cmdDoctor() error {
 	// config; edits an agent made to its copy await the user's decision to
 	// propagate or discard. Counted through the daemon (it resolves the agents).
 	fmt.Println("\nSandbox config")
-	if !daemonUp {
+	if daemonUnknown {
+		fmt.Printf("  ✗ agents    unavailable because daemon state is unknown\n")
+	} else if !daemonUp {
 		fmt.Printf("  · agents    (start the daemon to compare config copies with your templates)\n")
 	} else if agents, edits, err := sandboxDriftSummary(); err != nil {
 		fmt.Printf("  ⚠ agents    could not compare config copies: %v\n", err)
@@ -203,7 +221,7 @@ func cmdDoctor() error {
 	fmt.Printf("  data     %s\n", core.DataDir())
 	fmt.Printf("  state    %s\n", core.StateDir())
 
-	if missingRequired || incompatible || reconciliationFailed {
+	if missingRequired || incompatible || daemonUnknown || statsErr != nil || reconciliationFailed {
 		if missingRequired {
 			fmt.Println("\n✗ missing a required dependency (see above)")
 		}
@@ -212,6 +230,14 @@ func cmdDoctor() error {
 		}
 		if reconciliationFailed {
 			fmt.Println("\n✗ reconciliation incomplete (see Reconciliation above)")
+		}
+		if daemonUnknown {
+			fmt.Println("\n✗ daemon state unknown (see Runtime above)")
+			return fmt.Errorf("health check failed: daemon connection: %w", daemonStateErr)
+		}
+		if statsErr != nil {
+			fmt.Println("\n✗ daemon query failed (see Runtime above)")
+			return fmt.Errorf("health check failed: daemon query: %w", statsErr)
 		}
 		return fmt.Errorf("health check failed")
 	}

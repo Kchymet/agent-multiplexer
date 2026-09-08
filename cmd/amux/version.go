@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"amux/internal/buildinfo"
 	"amux/internal/core"
@@ -9,25 +10,53 @@ import (
 )
 
 // versionReport separates "no daemon" from "a daemon too old to answer the
-// version query". Both are normal diagnostic states, but the latter deserves a
-// restart hint because it may be a stale binary left running after an upgrade.
+// version query", and preserves connection errors so diagnostics can distinguish
+// expected offline states from denied or otherwise unknown daemon state.
 type versionReport struct {
-	CLI       string
-	Connected bool
-	Runtime   core.VersionInfo
-	QueryErr  error
+	CLI        string
+	Connected  bool
+	ConnectErr error
+	Runtime    core.VersionInfo
+	QueryErr   error
 }
+
+var versionDial = daemon.Dial
+var collectVersionReport = collectVersions
 
 func collectVersions() versionReport {
 	r := versionReport{CLI: buildinfo.Version}
-	c, err := daemon.Dial()
+	c, err := versionDial()
 	if err != nil {
+		r.ConnectErr = err
 		return r
 	}
 	defer c.Close()
 	r.Connected = true
 	r.Runtime, r.QueryErr = c.Version()
 	return r
+}
+
+// versionQueryUnsupported recognizes the daemon's explicit legacy response.
+// Transport failures, malformed replies, timeouts, EOF, and authorization
+// rejection are not compatibility evidence and must not recommend a restart.
+func versionQueryUnsupported(err error) bool {
+	return err != nil && strings.TrimSpace(err.Error()) == fmt.Sprintf("unknown query %q", core.QueryVersion)
+}
+
+// versionStateError is non-nil when diagnostics could not establish runtime
+// state. A missing/stale listener is an expected offline state, and an explicit
+// legacy unsupported-query response proves a responsive older daemon.
+func versionStateError(r versionReport) error {
+	if !r.Connected {
+		if r.ConnectErr != nil && !daemonMayStart(r.ConnectErr) {
+			return r.ConnectErr
+		}
+		return nil
+	}
+	if r.QueryErr != nil && !versionQueryUnsupported(r.QueryErr) {
+		return r.QueryErr
+	}
+	return nil
 }
 
 // versionLines renders the same facts for `amux version` and doctor. Doctor uses
@@ -42,15 +71,31 @@ func versionLines(r versionReport, doctor bool) (lines []string, incompatible bo
 	}
 	lines = append(lines, line("✓", "cli", fmt.Sprintf("%s (protocol %d)", r.CLI, buildinfo.DaemonProtocol)))
 	if !r.Connected {
+		if r.ConnectErr != nil && !daemonMayStart(r.ConnectErr) {
+			detail := fmt.Sprintf("state unknown; connection failed (%v)", r.ConnectErr)
+			if daemonAccessDenied(r.ConnectErr) {
+				detail = fmt.Sprintf("state unknown; access denied (%v)", r.ConnectErr)
+			}
+			return append(lines,
+				line("✗", "daemon", detail),
+				line("·", "database", "unavailable (daemon state unknown)"),
+			), false
+		}
 		return append(lines,
 			line("·", "daemon", "offline"),
 			line("·", "database", "unavailable (daemon offline)"),
 		), false
 	}
 	if r.QueryErr != nil {
+		if !versionQueryUnsupported(r.QueryErr) {
+			return append(lines,
+				line("✗", "daemon", fmt.Sprintf("state unknown; version query failed (%v)", r.QueryErr)),
+				line("·", "database", "schema unavailable (daemon state unknown)"),
+			), false
+		}
 		return append(lines,
-			line("⚠", "daemon", fmt.Sprintf("running; version unavailable (%v) — restart to load the current binary", r.QueryErr)),
-			line("·", "database", "schema unavailable (daemon version query unsupported)"),
+			line("⚠", "daemon", fmt.Sprintf("running; version query unsupported (%v) — restart to load the current binary", r.QueryErr)),
+			line("·", "database", "schema unavailable (legacy daemon)"),
 		), false
 	}
 
@@ -91,9 +136,13 @@ func schemaRange(min, max int) string {
 }
 
 func cmdVersion() error {
-	lines, _ := versionLines(collectVersions(), false)
+	r := collectVersionReport()
+	lines, _ := versionLines(r, false)
 	for _, line := range lines {
 		fmt.Println(line)
+	}
+	if err := versionStateError(r); err != nil {
+		return fmt.Errorf("daemon state unknown: %w", err)
 	}
 	return nil
 }

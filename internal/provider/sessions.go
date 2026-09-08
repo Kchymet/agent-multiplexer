@@ -73,28 +73,141 @@ func (p *Provider) publishLoop(ctx context.Context, s *session) {
 
 // publishOnce polls the inventory and, if it changed since last, pushes a new
 // sessions frame with the next seq. It returns the (possibly advanced) seq and
-// the snapshot bytes to compare against next time. A poll error keeps the prior
-// state (nothing is pushed); a write error cancels the session.
+// the snapshot bytes to compare against next time. A poll error immediately
+// suspends the current grants; a write error cancels the session.
 func (p *Provider) publishOnce(ctx context.Context, s *session, seq int64, last []byte) (int64, []byte) {
 	sess, err := p.cfg.Sessions(ctx)
 	if err != nil {
-		return seq, last
+		// Inventory is the authority source, not merely display data. A failed poll
+		// cannot retain stale grants indefinitely: suspend everything immediately,
+		// cancel live runtime subscriptions, and force the next successful poll to
+		// publish before restoring any target.
+		s.revokeAllPublished()
+		return seq, nil
 	}
 	if sess == nil {
 		sess = []core.Session{}
 	}
+	next := publishedSessions(sess)
 	b, err := json.Marshal(sess)
 	if err != nil || bytes.Equal(b, last) {
 		return seq, last
 	}
 	seq++
-	if werr := s.hc.WriteHarness(harnessproto.HarnessMsg{
+	if werr := s.writePublishedSnapshot(next, harnessproto.HarnessMsg{
 		Type: harnessproto.HSessions, Seq: seq, Sessions: sess,
 	}); werr != nil {
 		s.cancel()
 		return seq, last
 	}
 	return seq, b
+}
+
+// publishedSessions returns the exact non-empty IDs in a successful snapshot.
+// Runtime path validation is stricter at subscription time; the inventory map
+// also gates lifecycle targets whose IDs need not be filesystem components.
+func publishedSessions(sessions []core.Session) map[string]core.Session {
+	out := make(map[string]core.Session, len(sessions))
+	for _, row := range sessions {
+		if row.ID != "" {
+			out[row.ID] = row
+		}
+	}
+	return out
+}
+
+// writePublishedSnapshot revokes removed IDs and waits only for work admitted
+// against those IDs. Retained actions and streams continue across ordinary
+// metadata churn. The final write+install holds opMu, so removals precede bytes
+// becoming observable and additions are usable as soon as the peer can respond.
+func (s *session) writePublishedSnapshot(next map[string]core.Session, msg harnessproto.HarnessMsg) error {
+	waits := s.revokeMissingPublished(next)
+	waitForRevokedWork(waits)
+
+	s.opMu.Lock()
+	if err := s.rtCtx.Err(); err != nil {
+		s.opMu.Unlock()
+		return err
+	}
+	if err := s.hc.WriteHarness(msg); err != nil {
+		waits = s.revokeAllPublishedLocked()
+		s.opMu.Unlock()
+		waitForRevokedWork(waits)
+		return err
+	}
+	s.published = next
+	s.opMu.Unlock()
+	return nil
+}
+
+func (s *session) revokeMissingPublished(next map[string]core.Session) []<-chan struct{} {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	removed := map[string]bool{}
+	for id := range s.published {
+		if _, ok := next[id]; !ok {
+			removed[id] = true
+			delete(s.published, id)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	var waits []<-chan struct{}
+	for _, call := range s.actions {
+		if removed[call.target] {
+			call.cancel()
+			waits = append(waits, call.done)
+		}
+	}
+	for id, opening := range s.rtOpening {
+		if removed[id] {
+			opening.cancel()
+			waits = append(waits, opening.done)
+			delete(s.rtOpening, id)
+		}
+	}
+	for id, sub := range s.rtSubs {
+		if removed[id] {
+			sub.cancel()
+			waits = append(waits, sub.done)
+			delete(s.rtSubs, id)
+		}
+	}
+	return waits
+}
+
+func (s *session) revokeAllPublished() {
+	s.opMu.Lock()
+	waits := s.revokeAllPublishedLocked()
+	s.opMu.Unlock()
+	waitForRevokedWork(waits)
+}
+
+func (s *session) revokeAllPublishedLocked() []<-chan struct{} {
+	s.published = map[string]core.Session{}
+	var waits []<-chan struct{}
+	for _, call := range s.actions {
+		call.cancel()
+		waits = append(waits, call.done)
+	}
+	for id, opening := range s.rtOpening {
+		opening.cancel()
+		waits = append(waits, opening.done)
+		delete(s.rtOpening, id)
+	}
+	for id, sub := range s.rtSubs {
+		sub.cancel()
+		waits = append(waits, sub.done)
+		delete(s.rtSubs, id)
+	}
+	return waits
+}
+
+func waitForRevokedWork(waits []<-chan struct{}) {
+	for _, done := range waits {
+		<-done
+	}
 }
 
 // handleSessionAction executes one verb and replies with a session-result
@@ -112,7 +225,7 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	}
 	started := time.Now()
 	res := harnessproto.HarnessMsg{Type: harnessproto.HSessionResult, ReqID: m.ReqID}
-	newID, err := p.applySessionAction(m)
+	newID, err := p.applyAuthorizedSessionAction(s, m)
 	if err != nil {
 		res.Error = err.Error()
 	} else {
@@ -136,6 +249,47 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	if werr := s.hc.WriteHarness(res); werr != nil {
 		s.cancel()
 	}
+}
+
+var errSessionNotPublished = errors.New("session is not currently published")
+
+// applyAuthorizedSessionAction binds every targeted verb to the connection's
+// current published inventory. Admission registers a cancellable call and its
+// completion barrier under opMu. Removing that target cancels and waits for the
+// call without disturbing retained targets; once revocation completes no queued
+// action can use the old ID.
+// New-workgroup is the one creation verb with no existing target; enabling the
+// session-control hook deliberately grants it. A newly created ID is not usable
+// until a later successful snapshot publishes it.
+func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMsg) (string, error) {
+	if _, ok := sessionActionFor(m); !ok {
+		return p.applySessionAction(s.rtCtx, m)
+	}
+	if m.Action != harnessproto.VerbNewWorkgroup && m.ID == "" {
+		return "", errSessionNotPublished
+	}
+
+	s.opMu.Lock()
+	if m.Action != harnessproto.VerbNewWorkgroup {
+		if _, ok := s.published[m.ID]; !ok {
+			s.opMu.Unlock()
+			return "", errSessionNotPublished
+		}
+	}
+	ctx, cancel := context.WithCancel(s.rtCtx)
+	s.nextOpID++
+	opID := s.nextOpID
+	call := &sessionActionCall{target: m.ID, cancel: cancel, done: make(chan struct{})}
+	s.actions[opID] = call
+	s.opMu.Unlock()
+
+	newID, err := p.applySessionAction(ctx, m)
+	cancel()
+	close(call.done)
+	s.opMu.Lock()
+	delete(s.actions, opID)
+	s.opMu.Unlock()
+	return newID, err
 }
 
 // logSessionAction records one relayed verb: which session, which verb, how it
@@ -188,7 +342,7 @@ var errUnsupportedVerb = errors.New(harnessproto.ErrUnsupportedVerb)
 // "unsupported verb", and read-only mode rejects every verb — steering verbs
 // (spec §3.1) exactly as much as lifecycle ones. Accepted verbs map to the
 // daemon's own lifecycle core.Actions and run through ApplyAction (wsops).
-func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
+func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg) (string, error) {
 	act, ok := sessionActionFor(m)
 	if !ok {
 		if harnessproto.SessionVerbs[m.Action] {
@@ -209,7 +363,7 @@ func (p *Provider) applySessionAction(m harnessproto.MuxMsg) (string, error) {
 			return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
 		}
 	}
-	return p.cfg.ApplyAction(context.Background(), act)
+	return p.cfg.ApplyAction(ctx, act)
 }
 
 // sessionActionFor maps an accepted wire verb to the equivalent daemon

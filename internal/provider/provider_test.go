@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -93,7 +94,7 @@ func accept(t *testing.T, oc *harnessproto.Conn, version int, adopt []harnesspro
 // an in-process fake orchestrator (net.Pipe).
 func TestRoundTrip(t *testing.T) {
 	conns := make(chan net.Conn, 1)
-	p := newFast(Config{Orchestrator: "pipe", Token: "s3cr3t", Name: "box", Dial: pipeDialer(conns)})
+	p := newFast(Config{Orchestrator: "pipe", Token: "s3cr3t", Name: "box", AllowCompute: true, Dial: pipeDialer(conns)})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runErr := make(chan error, 1)
@@ -106,6 +107,9 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if reg.Capabilities == nil || reg.Capabilities.OS == "" {
 		t.Fatalf("register missing capabilities: %+v", reg.Capabilities)
+	}
+	if !reg.Capabilities.Compute {
+		t.Fatal("explicit compute provider did not advertise compute")
 	}
 	if len(reg.Panes) != 0 {
 		t.Fatalf("cold start offered panes: %v", reg.Panes)
@@ -132,6 +136,136 @@ func TestRoundTrip(t *testing.T) {
 
 	cancel()
 	<-runErr
+}
+
+// TestComputeFramesRequireExplicitGrant proves the registration bearer alone
+// cannot exercise process or PTY control. A pong is the read-loop barrier: once
+// observed, every preceding frame has been handled.
+func TestComputeFramesRequireExplicitGrant(t *testing.T) {
+	processed := make(chan struct{}, 1)
+	p := New(Config{OnStatus: func(st Status) {
+		if !st.HeartbeatAt.IsZero() {
+			select {
+			case processed <- struct{}{}:
+			default:
+			}
+		}
+	}})
+	p.panes["existing"] = &pane{buf: &paneBuf{}}
+
+	a, b := net.Pipe()
+	s := &session{hc: harnessproto.NewConn(a), done: make(chan struct{})}
+	go p.readLoop(s)
+	orch := harnessproto.NewConn(b)
+	defer orch.Close()
+
+	for _, m := range []harnessproto.MuxMsg{
+		{Type: harnessproto.MSpawn, PaneID: "new", Argv: []string{"sh", "-c", "sleep 30"}},
+		{Type: harnessproto.MInput, PaneID: "existing", Data: []byte("x")},
+		{Type: harnessproto.MResize, PaneID: "existing", Cols: 80, Rows: 24},
+		{Type: harnessproto.MKill, PaneID: "existing"},
+		{Type: harnessproto.MPong},
+	} {
+		if err := orch.WriteMux(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-processed:
+	case <-time.After(time.Second):
+		t.Fatal("read loop did not reach pong barrier")
+	}
+	if p.getPane("new") != nil {
+		t.Fatal("compute-false provider accepted spawn")
+	}
+	if p.getPane("existing") == nil {
+		t.Fatal("compute-false provider accepted pane control")
+	}
+}
+
+// TestComputeFalseRegistrationRevokesOfferedPanes freezes the reconnect edge:
+// reconciliation is a revoke boundary, not an ordinary compute frame. Even an
+// inconsistent peer that both adopts and kills one pane, and tries to adopt a
+// second, cannot retain either when local compute is off.
+func TestComputeFalseRegistrationRevokesOfferedPanes(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	p := newFast(Config{Orchestrator: "pipe", Dial: pipeDialer(conns)})
+	p.panes["kill-me"] = &pane{buf: &paneBuf{}}
+	sleeper := exec.Command("sh", "-c", "sleep 30")
+	if err := sleeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- sleeper.Wait() }()
+	processExited := false
+	defer func() {
+		if !processExited {
+			_ = sleeper.Process.Kill()
+			<-exited
+		}
+	}()
+	p.panes["adopt-only"] = &pane{cmd: sleeper, buf: &paneBuf{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- p.Run(ctx) }()
+
+	orch := harnessproto.NewConn(<-conns)
+	reg := expectRegister(t, orch)
+	if reg.Capabilities == nil || reg.Capabilities.Compute {
+		t.Fatalf("compute-false registration capabilities = %+v", reg.Capabilities)
+	}
+	if len(reg.Panes) != 2 {
+		t.Fatalf("resume offer = %+v, want two preexisting panes", reg.Panes)
+	}
+	if err := orch.WriteMux(harnessproto.MuxMsg{
+		Type: harnessproto.MRegistered, OK: true, Version: 2,
+		HeartbeatSeconds: 1, GraceSeconds: 60,
+		Adopt: []harnessproto.AdoptPane{
+			{PaneID: "kill-me", AfterSeq: 0},
+			{PaneID: "adopt-only", AfterSeq: 0},
+		},
+		Kill: []string{"kill-me"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for p.paneCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := p.paneCount(); got != 0 {
+		t.Fatalf("compute-false reconnect retained %d offered pane(s)", got)
+	}
+	select {
+	case <-exited:
+		processExited = true
+	case <-time.After(time.Second):
+		t.Fatal("compute-false reconnect removed pane bookkeeping without terminating its process")
+	}
+	cancel()
+	<-runErr
+}
+
+func TestApplyDirectivesComputeGrantValidatesAdoption(t *testing.T) {
+	p := newFast(Config{AllowCompute: true})
+	for _, id := range []string{"adopt", "explicit-kill", "negative", "ahead", "omitted"} {
+		buf := &paneBuf{}
+		buf.appendOutput([]byte("x")) // last valid cursor is 1
+		p.panes[id] = &pane{buf: buf}
+	}
+	sent := p.applyDirectives([]harnessproto.AdoptPane{
+		{PaneID: "adopt", AfterSeq: 1},
+		{PaneID: "explicit-kill", AfterSeq: 0},
+		{PaneID: "negative", AfterSeq: -1},
+		{PaneID: "ahead", AfterSeq: 2},
+		{PaneID: "unknown", AfterSeq: 0},
+	}, []string{"explicit-kill"})
+	if len(sent) != 1 || sent["adopt"] != 1 {
+		t.Fatalf("adopted cursors = %+v, want only adopt:1", sent)
+	}
+	if p.paneCount() != 1 || p.getPane("adopt") == nil {
+		t.Fatalf("remaining panes = %+v, want only valid adoption", p.panes)
+	}
 }
 
 // TestDiscoveryRefreshesBeforeEachDial ensures a provider never reuses a stale
@@ -174,7 +308,7 @@ func TestDiscoveryRefreshesBeforeEachDial(t *testing.T) {
 // replays byte-exact from the orchestrator's afterSeq on adopt.
 func TestReconnectAdoptReplay(t *testing.T) {
 	conns := make(chan net.Conn, 1)
-	p := newFast(Config{Orchestrator: "pipe", Dial: pipeDialer(conns)})
+	p := newFast(Config{Orchestrator: "pipe", AllowCompute: true, Dial: pipeDialer(conns)})
 	p.graceScale = time.Second // keep the pane alive across the reconnect
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -243,7 +377,7 @@ func TestReconnectAdoptReplay(t *testing.T) {
 // without a reconnect: the next registration offers none.
 func TestGraceExpiryKills(t *testing.T) {
 	conns := make(chan net.Conn, 1)
-	p := newFast(Config{Orchestrator: "pipe", Dial: pipeDialer(conns)})
+	p := newFast(Config{Orchestrator: "pipe", AllowCompute: true, Dial: pipeDialer(conns)})
 	// A short grace (5ms) with a much longer reconnect backoff (>=40ms) guarantees
 	// the pane is killed before the next registration snapshots its offer.
 	p.graceScale = 5 * time.Millisecond
@@ -356,7 +490,7 @@ func TestRoundTripTLS(t *testing.T) {
 		accepted <- c
 	}()
 
-	p := New(Config{Orchestrator: "tls://" + ln.Addr().String(), CAFile: certFile})
+	p := New(Config{Orchestrator: "tls://" + ln.Addr().String(), CAFile: certFile, AllowCompute: true})
 	p.hbScale = time.Hour
 	p.backoffMin = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
