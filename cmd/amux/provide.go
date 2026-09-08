@@ -84,6 +84,7 @@ rotating it is one write and no reinstall.
   --ca <pem>         private CA to trust on top of the system roots
   --server-name <n>  TLS server name for SNI/verification
   --max-panes <n>    capability: max concurrent panes
+  --allow-compute    allow remote spawn/input/resize/kill (off by default)
   --harness <name>   verify and advertise only this harness (repeat; auto restores discovery)
   --identity-mode <m> credential source (currently machine only)
   --label k=v        scheduling label (repeatable)
@@ -122,6 +123,7 @@ type provideFlags struct {
 	caFile       string
 	serverName   string
 	maxPanes     int
+	allowCompute bool
 	publishSes   bool
 	readOnly     bool
 	rtEvents     bool
@@ -138,6 +140,7 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
 	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
 	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
+	fs.BoolVar(&f.allowCompute, "allow-compute", false, "allow remote spawn/input/resize/kill (default $AMUX_PROVIDER_ALLOW_COMPUTE; off by default)")
 	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
 	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
 	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
@@ -216,6 +219,7 @@ func provideRun(args []string) error {
 	publish := f.publishSes || envBool("AMUX_PROVIDER_PUBLISH_SESSIONS") || file.PublishSessions
 	readonly := f.readOnly || envBool("AMUX_PROVIDER_SESSIONS_READONLY") || file.ReadOnlySessions
 	runtimeEvents := f.rtEvents || envBool("AMUX_PROVIDER_RUNTIME_EVENTS") || file.RuntimeEvents
+	allowCompute := resolvedBool(fs, "allow-compute", f.allowCompute, "AMUX_PROVIDER_ALLOW_COMPUTE", file.AllowCompute)
 
 	execution, err := executionConfig(f, file, os.Getenv)
 	if err != nil {
@@ -230,6 +234,7 @@ func provideRun(args []string) error {
 		CAFile:            ca,
 		ServerName:        sni,
 		MaxPanes:          mp,
+		AllowCompute:      allowCompute,
 		Features:          mergeFeatures(os.Getenv("AMUX_PROVIDER_FEATURES"), append(multiFlag(file.Features), f.features...)),
 		Logf:              func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
 		// The status file is how `amux doctor` — and anyone looking at a headless
@@ -256,7 +261,7 @@ func provideRun(args []string) error {
 			// runtime. Read-only; a session with no record on disk simply emits
 			// nothing (honest degradation).
 			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.Stream(runtimeRecordViaDaemon(), 0)
+			cfg.RuntimeEventStream = runtimeevents.StreamContext(runtimeRecordViaDaemon(), 0)
 		}
 	}
 
@@ -296,6 +301,25 @@ func envBool(key string) bool {
 	return false
 }
 
+// resolvedBool applies the documented flag > environment > file precedence for
+// a security-sensitive boolean. Presence matters: an explicit false flag or
+// environment value must be able to revoke a true installed setting.
+func resolvedBool(fs *flag.FlagSet, flagName string, flagValue bool, envName string, fileValue bool) bool {
+	flagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == flagName {
+			flagSet = true
+		}
+	})
+	if flagSet {
+		return flagValue
+	}
+	if _, ok := os.LookupEnv(envName); ok {
+		return envBool(envName)
+	}
+	return fileValue
+}
+
 // sessionsViaDaemon fetches the published session rail from the local daemon —
 // the store owner — instead of opening the store in this process. The daemon
 // serves its already-computed snapshot (engine liveness baked in), so the
@@ -303,12 +327,30 @@ func envBool(key string) bool {
 // fresh per poll; an unreachable daemon returns an error the provider handles by
 // publishing nothing that cycle.
 func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c, err := daemon.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("daemon unreachable: %w", err)
 	}
 	defer c.Close()
-	return c.Snapshot()
+	type result struct {
+		sessions []core.Session
+		err      error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		sessions, err := c.Snapshot()
+		ch <- result{sessions: sessions, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = c.Close()
+		return nil, ctx.Err()
+	case got := <-ch:
+		return got.sessions, got.err
+	}
 }
 
 // runtimeRecordViaDaemon resolves a published session id to its on-disk
@@ -321,9 +363,9 @@ func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
 // A record with no transcript but an amux journal is still worth tailing: that is
 // a session which has not run yet, and an accepted `prompt` cold-starting it
 // reports its progress into that journal before any transcript exists.
-func runtimeRecordViaDaemon() runtimeevents.Resolver {
-	return func(sessionID string) (runtimeevents.Record, bool) {
-		if sessionID == "" {
+func runtimeRecordViaDaemon() runtimeevents.ContextResolver {
+	return func(ctx context.Context, sessionID string) (runtimeevents.Record, bool) {
+		if sessionID == "" || ctx.Err() != nil {
 			return runtimeevents.Record{}, false
 		}
 		c, err := daemon.Dial()
@@ -331,7 +373,23 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 			return runtimeevents.Record{}, false
 		}
 		defer c.Close()
-		rec, err := c.RuntimeRecord(sessionID)
+		type result struct {
+			rec core.RuntimeRecord
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			rec, err := c.RuntimeRecord(sessionID)
+			ch <- result{rec: rec, err: err}
+		}()
+		var rec core.RuntimeRecord
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+			return runtimeevents.Record{}, false
+		case got := <-ch:
+			rec, err = got.rec, got.err
+		}
 		if err != nil || (rec.Path == "" && rec.Journal == "") {
 			return runtimeevents.Record{}, false
 		}
@@ -349,6 +407,9 @@ func runtimeRecordViaDaemon() runtimeevents.Resolver {
 // action, and returns the id of any session it created. Snapshot frames that
 // arrive first are skipped; a non-OK result surfaces the daemon's error.
 func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	c, err := daemon.Dial()
 	if err != nil {
 		return "", fmt.Errorf("daemon unreachable: %w", err)
@@ -358,7 +419,7 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 		return "", err
 	}
 	for {
-		f, err := c.Next()
+		f, err := nextDaemonFrame(ctx, c)
 		if err != nil {
 			return "", err
 		}
@@ -368,6 +429,29 @@ func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
 			}
 			return f.Result.NewID, nil
 		}
+	}
+}
+
+// nextDaemonFrame makes the legacy daemon client's blocking read cancellable
+// without changing that shared client package (owned by the primary daemon
+// work). Closing the per-call client unblocks Next; the buffered result channel
+// lets the reader finish without depending on its caller after cancellation.
+func nextDaemonFrame(ctx context.Context, c *daemon.Client) (daemon.Frame, error) {
+	type result struct {
+		frame daemon.Frame
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		frame, err := c.Next()
+		ch <- result{frame: frame, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = c.Close()
+		return daemon.Frame{}, ctx.Err()
+	case got := <-ch:
+		return got.frame, got.err
 	}
 }
 

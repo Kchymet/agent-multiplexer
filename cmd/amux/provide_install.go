@@ -173,6 +173,7 @@ func applyProvideFlags(cfg *providercfg.Config, f *provideFlags, fset *flag.Flag
 	assign("ca", func() { cfg.CAFile = f.caFile })
 	assign("server-name", func() { cfg.ServerName = f.serverName })
 	assign("max-panes", func() { cfg.MaxPanes = f.maxPanes })
+	assign("allow-compute", func() { cfg.AllowCompute = f.allowCompute })
 	assign("publish-sessions", func() { cfg.PublishSessions = f.publishSes })
 	assign("read-only-sessions", func() { cfg.ReadOnlySessions = f.readOnly })
 	assign("runtime-events", func() { cfg.RuntimeEvents = f.rtEvents })

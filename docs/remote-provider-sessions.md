@@ -615,6 +615,7 @@ The feature is off by default. Enable it on `amux provide`:
 
 | Flag | Env | Effect |
 | --- | --- | --- |
+| `--allow-compute` | `AMUX_PROVIDER_ALLOW_COMPUTE=1` | explicitly permit remote spawn/input/resize/kill and reconnect adoption; independent of the session features below |
 | `--publish-sessions` | `AMUX_PROVIDER_PUBLISH_SESSIONS=1` | advertise `sessions`, publish inventory, accept lifecycle verbs |
 | `--read-only-sessions` | `AMUX_PROVIDER_SESSIONS_READONLY=1` | publish inventory but reject every verb with an error — lifecycle (§3) and steering (§3.1) alike |
 | `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code and Codex CLI). Requires `--publish-sessions`. |
