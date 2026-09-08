@@ -32,24 +32,26 @@ const (
 )
 
 type sessionRuntime struct {
-	d            *Daemon
-	resolver     *daemonAccessResolver
-	policy       access.Policy
-	applyResult  func(context.Context, core.Action) (string, error)
-	encodeResult func(core.Result) ([]byte, error)
-	poll         time.Duration
-	now          func() time.Time
-	dispatchMu   sync.Mutex
-	servers      map[string]*sessionrpc.Server
-	completions  *completionRegistry
+	d              *Daemon
+	resolver       *daemonAccessResolver
+	policy         access.Policy
+	applyResult    func(context.Context, core.Action) (string, error)
+	encodeResult   func(core.Result) ([]byte, error)
+	poll           time.Duration
+	now            func() time.Time
+	dispatchMu     sync.Mutex
+	servers        map[string]*sessionrpc.Server
+	completions    *completionRegistry
+	responseBudget sessionrpc.ResponseBudget
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
 	r := &sessionRuntime{
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
 		now: time.Now, servers: make(map[string]*sessionrpc.Server),
-		applyResult:  wsops.ApplyResult,
-		encodeResult: func(result core.Result) ([]byte, error) { return json.Marshal(result) },
+		responseBudget: newSessionResponseBudget(),
+		applyResult:    wsops.ApplyResult,
+		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
@@ -165,7 +167,8 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
-		sessionrpc.Callbacks{Authorize: r.authorize, Dispatch: r.dispatch}, sessionrpc.ServerOptions{})
+		sessionrpc.Callbacks{Authorize: r.authorize, Dispatch: r.dispatch},
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget})
 	if err != nil {
 		return err
 	}
@@ -267,6 +270,7 @@ type completionEntry struct {
 	cancelled bool
 	settle    chan struct{}
 	cancel    chan struct{}
+	done      chan struct{}
 }
 
 func newCompletionRegistry(d *Daemon) *completionRegistry {
@@ -281,7 +285,7 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 	runtime, _ := c.d.permissions.token(subjectID)
 	entry := &completionEntry{
 		principal: principal, requestID: requestID, runtime: runtime,
-		settle: make(chan struct{}), cancel: make(chan struct{}),
+		settle: make(chan struct{}), cancel: make(chan struct{}), done: make(chan struct{}),
 	}
 	c.mu.Lock()
 	if !c.closed {
@@ -334,6 +338,7 @@ func (c *completionRegistry) settle(subjectID, requestID string) {
 
 func (c *completionRegistry) run(subjectID string, entry *completionEntry) {
 	defer c.wg.Done()
+	defer close(entry.done)
 	abandon := time.NewTimer(c.abandon)
 	defer abandon.Stop()
 	select {
@@ -390,8 +395,8 @@ stop:
 	// Revoke only the credential generation that authorized completion. The
 	// explicit restore API will supersede/cancel this entry before issuing a new
 	// generation; arbitrary reconciliation can never regrant it.
-	if c.d.authority != nil && c.d.authority.Valid(context.Background(), entry.principal) == nil {
-		_ = c.d.authority.Revoke(context.Background(), access.SubjectSession, subjectID)
+	if c.d.authority != nil {
+		_ = c.d.authority.RevokeCurrent(context.Background(), entry.principal)
 	}
 }
 
@@ -428,6 +433,21 @@ func (c *completionRegistry) cancel(subjectID string) {
 		c.cancelEntryLocked(subjectID, entry)
 	}
 	c.mu.Unlock()
+}
+
+// cancelAndWait is the authenticated restore boundary. It prevents a stale
+// completion from crossing the restore/regrant transition after it has already
+// passed its final ownership check.
+func (c *completionRegistry) cancelAndWait(subjectID string) {
+	c.mu.Lock()
+	entry := c.entries[subjectID]
+	if entry != nil {
+		c.cancelEntryLocked(subjectID, entry)
+	}
+	c.mu.Unlock()
+	if entry != nil {
+		<-entry.done
+	}
 }
 
 func (c *completionRegistry) cancelEntryLocked(subjectID string, entry *completionEntry) {
