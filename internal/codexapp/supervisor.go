@@ -105,6 +105,9 @@ type Supervisor struct {
 	// performs that later teardown after all admitted callers have returned.
 	interrupted bool
 	threadID    string
+	// startCancel exists only while Start is launching/dialing/handshaking. It lets
+	// manager drain abort an in-progress supervisor before any RPC transport exists.
+	startCancel context.CancelFunc
 
 	// curTurn is the OBSERVED active turn on our pinned thread, from ANY origin (a
 	// native TUI turn raises turn/started too). It is the target for Cancel/Interject,
@@ -241,15 +244,27 @@ func (s *Supervisor) ThreadID() string {
 // identity scope instead of a bare exec. A nil wrappedArgv falls back to the inner
 // AppServerArgv (used only by the opt-in smoke test, which runs codex directly).
 func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
-	s.mu.Lock()
-	if s.closed {
+	startCtx, cancelStart := context.WithCancel(ctx)
+	started := false
+	defer func() {
+		s.mu.Lock()
+		s.startCancel = nil
 		s.mu.Unlock()
-		return errors.New("codexapp: supervisor closed")
+		if !started {
+			cancelStart()
+		}
+	}()
+
+	s.mu.Lock()
+	if s.closed || s.interrupted {
+		s.mu.Unlock()
+		return errClosed
 	}
 	if s.proc != nil {
 		s.mu.Unlock()
 		return errors.New("codexapp: already started")
 	}
+	s.startCancel = cancelStart
 	s.mu.Unlock()
 
 	if s.cfg.Endpoint == "" {
@@ -285,6 +300,9 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	// Own process group: signals aimed at the foreground pane never reach the
 	// background server (independent lifetime).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := startCtx.Err(); err != nil {
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexapp: start app-server: %w", err)
 	}
@@ -292,12 +310,12 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	s.proc = cmd
 	s.mu.Unlock()
 
-	conn, err := s.dialWithRetry(ctx)
+	conn, err := s.dialWithRetry(startCtx)
 	if err != nil {
 		s.killProc() // waits for the child + stderr copier, so the tail below is complete
 		return withStderrTail(err, stderr)
 	}
-	if err := s.attach(ctx, conn); err != nil {
+	if err := s.attach(startCtx, conn); err != nil {
 		s.killProc()
 		return withStderrTail(err, stderr)
 	}
@@ -308,6 +326,7 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 		<-ctx.Done()
 		_ = s.Close()
 	}()
+	started = true
 	return nil
 }
 
@@ -538,10 +557,14 @@ func (s *Supervisor) Close() error {
 	}
 	s.closed = true
 	s.interrupted = true
+	startCancel := s.startCancel
 	cancel := s.runCancel
 	rpc := s.rpc
 	s.mu.Unlock()
 
+	if startCancel != nil {
+		startCancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -565,9 +588,13 @@ func (s *Supervisor) Close() error {
 func (s *Supervisor) interruptTransport() {
 	s.mu.Lock()
 	s.interrupted = true
+	startCancel := s.startCancel
 	cancel := s.runCancel
 	rpc := s.rpc
 	s.mu.Unlock()
+	if startCancel != nil {
+		startCancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
