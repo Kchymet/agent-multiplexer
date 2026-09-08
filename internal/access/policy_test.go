@@ -77,7 +77,7 @@ func TestPolicyRoleMatrix(t *testing.T) {
 		{"agent sibling normalized runtime", Principal{Kind: SubjectSession, SubjectID: "a1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a2"}, false},
 		{"coordinator member normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a2"}, true},
 		{"coordinator foreign normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
-		{"coordinator archived normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "old"}, false},
+		{"coordinator archived normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "old"}, true},
 		{"repo owned normalized runtime", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "one"}, true},
 		{"repo same-name workgroup denied", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
 		{"console normalized runtime", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, true},

@@ -46,6 +46,8 @@ type sessionRuntime struct {
 	initialized     map[string]bool
 	completions     *completionRegistry
 	responseBudget  sessionrpc.ResponseBudget
+	events          *sessionEventPager
+	eventsErr       error
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -60,10 +62,14 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
+	r.events, r.eventsErr = newDaemonSessionEventPager(d)
 	return r
 }
 
 func (r *sessionRuntime) start(ctx context.Context) error {
+	if r.eventsErr != nil {
+		return fmt.Errorf("initialize session event pager: %w", r.eventsErr)
+	}
 	return r.reconcile(ctx)
 }
 
@@ -313,6 +319,9 @@ func (r *sessionRuntime) close() {
 		r.closeServer(id)
 	}
 	r.completions.close()
+	if r.events != nil {
+		r.events.close()
+	}
 }
 
 type completionRegistry struct {

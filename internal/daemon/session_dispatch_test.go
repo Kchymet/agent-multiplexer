@@ -96,6 +96,99 @@ func TestSessionDispatchRechecksCurrentMembershipAtExecution(t *testing.T) {
 	}
 }
 
+func TestRuntimeEventDispatchReadsOutsideEffectGateAndRechecksScopeBeforeRelease(t *testing.T) {
+	root := store.Session{ID: "root1", Name: "root", Agent: "claude", Scope: store.ScopeWork, Dir: t.TempDir()}
+	member := store.Session{ID: "a1", RootID: root.ID, Name: "agent", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, root, member)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pager, err := newSessionEventPager(func(ctx context.Context, target string) (sessionEventSourceSet, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return sessionEventSourceSet{}, ctx.Err()
+		}
+		return sessionEventSourceSet{target: target, runtime: "claude"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.events = pager
+	t.Cleanup(pager.close)
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: member.ID}
+	done := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+			Principal: principals[root.ID], RequestID: "0123456789abcdef0123456789abcdef", Call: call,
+		})
+		done <- result
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("runtime event source read did not begin")
+	}
+
+	// The bounded source read must not monopolize unrelated lifecycle admission.
+	gate := make(chan struct{})
+	go func() {
+		d.effectMu.Lock()
+		close(gate)
+		d.effectMu.Unlock()
+	}()
+	select {
+	case <-gate:
+	case <-time.After(time.Second):
+		t.Fatal("runtime event source read held the global effect gate")
+	}
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetRootID(member.ID, "different-root"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case result := <-done:
+		if result.Status != sessionrpc.StatusDenied || result.Code != "access_denied" || len(result.Body) != 0 {
+			t.Fatalf("runtime events released after membership changed: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime event dispatch did not finish")
+	}
+}
+
+func TestRuntimeEventDispatchAllowsArchivedTargetStillInCurrentScope(t *testing.T) {
+	root := store.Session{ID: "root1", Name: "root", Agent: "claude", Scope: store.ScopeWork, Dir: t.TempDir()}
+	member := store.Session{ID: "a1", RootID: root.ID, Name: "agent", Agent: "claude", Dir: t.TempDir(), Archived: true}
+	_, runtime, principals := sessionRuntimeFixture(t, root, member)
+	pager, err := newSessionEventPager(func(_ context.Context, target string) (sessionEventSourceSet, error) {
+		return sessionEventSourceSet{target: target, runtime: "claude"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.events = pager
+	t.Cleanup(pager.close)
+	result, err := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+		Principal: principals[root.ID], RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: member.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != sessionrpc.StatusOK || len(result.Body) == 0 {
+		t.Fatalf("archived member event query = %+v", result)
+	}
+}
+
 func TestRestartDerivesArchivedCompletionCleanupWithoutInMemoryHooks(t *testing.T) {
 	isolateHome(t)
 	ctx := context.Background()

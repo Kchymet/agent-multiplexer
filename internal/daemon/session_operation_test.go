@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"amux/internal/access"
@@ -26,6 +27,11 @@ func TestCanonicalSessionOperationClosedVocabulary(t *testing.T) {
 		{"query fields", access.Request{Route: access.RouteQuery, Verb: core.QuerySessions, Fields: map[string]string{"all": "1"}}, false},
 		{"runtime needs id", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeRecord}, false},
 		{"runtime recognized", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeRecord, ID: "a1"}, true},
+		{"runtime events cursor", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1", Fields: map[string]string{core.RuntimeEventsCursorField: strings.Repeat("a", eventCursorEncodedLength)}}, true},
+		{"runtime events after", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1", Fields: map[string]string{core.RuntimeEventsAfterSequenceField: "7"}}, true},
+		{"runtime events unknown field", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1", Fields: map[string]string{"path": "/host/transcript"}}, false},
+		{"runtime events ambiguous position", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1", Fields: map[string]string{core.RuntimeEventsCursorField: strings.Repeat("a", eventCursorEncodedLength), core.RuntimeEventsAfterSequenceField: "7"}}, false},
+		{"runtime events invalid sequence", access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1", Fields: map[string]string{core.RuntimeEventsAfterSequenceField: "-1"}}, false},
 		{"start", access.Request{Route: access.RouteAction, Verb: core.ActionStart, ID: "a1"}, true},
 		{"start missing id", access.Request{Route: access.RouteAction, Verb: core.ActionStart}, false},
 		{"streaming tab", access.Request{Route: access.RouteAction, Verb: core.ActionStart, ID: "a1", Tab: 1}, false},
@@ -81,5 +87,22 @@ func TestCanonicalSessionOperationIsExactCopy(t *testing.T) {
 	fields["name"] = "changed after authorization"
 	if got.Fields["name"] != "renamed" {
 		t.Fatalf("canonical action aliased caller fields: %+v", got)
+	}
+}
+
+func TestCanonicalRuntimeEventQueryPreservesOnlyNormalizedPosition(t *testing.T) {
+	fields := map[string]string{core.RuntimeEventsAfterSequenceField: "9"}
+	req := access.Request{Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a1", Fields: fields}
+	got, err := canonicalSessionOperation(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := core.Action{Action: core.ActionQuery, Query: core.QueryRuntimeEvents, ID: "a1", Fields: map[string]string{core.RuntimeEventsAfterSequenceField: "9"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("action = %+v, want %+v", got, want)
+	}
+	fields[core.RuntimeEventsAfterSequenceField] = "10"
+	if got.Fields[core.RuntimeEventsAfterSequenceField] != "9" {
+		t.Fatalf("canonical query aliased caller fields: %+v", got)
 	}
 }
