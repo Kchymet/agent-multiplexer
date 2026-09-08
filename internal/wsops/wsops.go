@@ -209,11 +209,9 @@ func ensureConfigHomeRooted(root *hostprep.Root, s store.Session) error {
 	if fresh {
 		log.Printf("amux: seeded agent %s's private %s config from %s", s.ID, spec.Kind, spec.Template)
 	}
-	// A legacy agent whose dir is itself a worktree must not see its config home
-	// as untracked files.
-	if git.IsGitRepo(context.Background(), s.Dir) {
-		_ = git.Exclude(context.Background(), s.Dir, ".amux/")
-	}
+	// New repositories live beneath s.Dir, so the private config is outside Git.
+	// Do not run host-side Git against a legacy session-writable checkout here;
+	// explicit migration owns any needed exclusions and dirty-state handling.
 	return nil
 }
 
@@ -454,15 +452,11 @@ func AgentCommand(s store.Session) (dir string, env, argv []string, err error) {
 	// the running binary. Where it goes is the harness's call — Claude reads
 	// .claude/skills, others .agents/skills. Ordinary failures just mean the agent
 	// lacks the skills; unsafe destination failures refuse launch. The launch dir
-	// is normally the agent's own root dir (not a git repo); if resuming into a
-	// worktree, git-exclude the tree so it never dirties the repo.
+	// is the agent's own root, outside its repository checkouts. Do not query or
+	// write session-controlled Git metadata during launch preparation.
 	skillsDir := h.SkillsDir(dir)
 	if err := optionalPreparation("prepare agent skills", skills.InstallRooted(root, skillsDir)); err != nil {
 		return "", nil, nil, err
-	} else if git.IsGitRepo(context.Background(), dir) {
-		if rel, err := filepath.Rel(dir, skillsDir); err == nil {
-			_ = git.Exclude(context.Background(), dir, rel+"/")
-		}
 	}
 	argv, err = h.Argv(s.Model, plan.Extra...)
 	if err != nil {
