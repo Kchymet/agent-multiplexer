@@ -504,6 +504,38 @@ func TestPromptBracketsTurn(t *testing.T) {
 	}
 }
 
+func TestBeginPromptReturnsAfterTurnStartBeforeModelCompletion(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	wait, err := sup.BeginPrompt(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("BeginPrompt: %v", err)
+	}
+	if _, ok := fs.sawCall("turn/start"); !ok {
+		t.Fatal("BeginPrompt returned before turn/start admission")
+	}
+	done := make(chan error, 1)
+	go func() { done <- wait(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("turn waiter returned before completion: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	fs.pushTurnStarted()
+	fs.completeTurn("completed")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("turn waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn waiter did not observe completion")
+	}
+}
+
 // TestObservedTurnFromAnyOrigin checks that a turn started by *another* client
 // (only turn/started + turn/completed observed, no local Prompt) is still tracked
 // and bracketed — so web steer/interrupt can target a TUI-initiated turn.

@@ -59,6 +59,10 @@ func restrictedAction(action core.Action) (string, error) {
 }
 
 func restrictedQuery(name string, dst any) error {
+	return restrictedQueryRequest(sessionrpc.Query{Verb: name}, dst)
+}
+
+func restrictedQueryRequest(query sessionrpc.Query, dst any) error {
 	client, err := openRestrictedSessionRPC()
 	if err != nil {
 		return fmt.Errorf("open fixed session control context: %w", err)
@@ -66,7 +70,7 @@ func restrictedQuery(name string, dst any) error {
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	result, err := client.Query(ctx, sessionrpc.Query{Verb: name})
+	result, err := client.Query(ctx, query)
 	if err != nil {
 		return err
 	}

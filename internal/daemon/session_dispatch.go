@@ -37,6 +37,21 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 }
 
 func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
+	if request.Call.Kind != sessionrpc.CallOperation {
+		return rpcInvalid("invalid_call"), nil
+	}
+	req := request.Call.AccessRequest()
+	action, err := canonicalSessionOperation(req)
+	if err != nil {
+		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+			return runtimeEventError(err), nil
+		}
+		return rpcInvalid("invalid_operation"), nil
+	}
+	if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+		return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
+	}
+
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
 	r.d.effectMu.Lock()
@@ -45,14 +60,6 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 
 	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
 		return rpcDenied("credential_invalid"), nil
-	}
-	if request.Call.Kind != sessionrpc.CallOperation {
-		return rpcInvalid("invalid_call"), nil
-	}
-	req := request.Call.AccessRequest()
-	action, err := canonicalSessionOperation(req)
-	if err != nil {
-		return rpcInvalid("invalid_operation"), nil
 	}
 	// Authorize again under the dispatch lock, immediately before the exact
 	// canonical action executes. Membership, grants and archive state are live.
@@ -116,6 +123,62 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return rpcFailed("execution_failed"), nil
 	}
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
+}
+
+// dispatchRuntimeEvents performs bounded source I/O without monopolizing the
+// lifecycle effect gate. Authorization is checked under the gate immediately
+// before the read and again immediately before the normalized result is
+// released, so a move, archive, deletion, or credential revocation crossing the
+// read prevents disclosure. The pager accepts no caller-selected path.
+func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal access.Principal, req access.Request, action core.Action) (sessionrpc.DispatchResult, error) {
+	if r.events == nil || r.eventsErr != nil {
+		return rpcFailed("runtime_events_unavailable"), nil
+	}
+	if err := r.withFinalAdmission(ctx, principal, req); err != nil {
+		return rpcDenied("access_denied"), nil
+	}
+	body, err := r.events.page(ctx, principal, action.ID, action.Fields)
+	if err != nil {
+		return runtimeEventError(err), nil
+	}
+	if err := r.withFinalAdmission(ctx, principal, req); err != nil {
+		return rpcDenied("access_denied"), nil
+	}
+	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
+}
+
+func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
+	return r.finalAuthorize(withEffectAdmission(ctx), principal, req)
+}
+
+func (r *sessionRuntime) finalAuthorize(ctx context.Context, principal access.Principal, req access.Request) error {
+	if err := r.d.authority.Valid(ctx, principal); err != nil {
+		return err
+	}
+	// Recheck membership, grants, and archive state at the exact effect or
+	// disclosure boundary using the same canonical request that executes.
+	return r.policy.Authorize(ctx, principal, req)
+}
+
+func runtimeEventError(err error) sessionrpc.DispatchResult {
+	switch {
+	case errors.Is(err, access.ErrDenied):
+		return rpcDenied("access_denied")
+	case errors.Is(err, errEventQueryInvalid):
+		return rpcInvalid("runtime_events_invalid")
+	case errors.Is(err, errEventCursorInvalid):
+		return rpcInvalid("runtime_events_cursor_invalid")
+	case errors.Is(err, errEventStateTooLarge):
+		return rpcFailed("runtime_events_state_too_large")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return rpcFailed("runtime_events_cancelled")
+	default:
+		return rpcFailed("query_failed")
+	}
 }
 
 func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.Principal, action core.Action) ([]byte, error) {
