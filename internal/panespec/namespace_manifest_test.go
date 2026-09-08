@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"amux/internal/core"
+	"amux/internal/launchenv"
 	"amux/internal/store"
 )
 
@@ -39,6 +40,19 @@ func TestOwnOnlyManifestMountsTypedAccessAndFreshPIDProc(t *testing.T) {
 	}
 	if argvSequence(argv, "--proc", "/proc") < 0 {
 		t.Fatalf("manifest lacks private procfs: %v", argv)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argvSequence(argv, "--tmpfs", launchenv.ToolBinDir) < 0 ||
+		argvSequence(argv, "--ro-bind", self, filepath.Join(launchenv.ToolBinDir, "amux")) < 0 ||
+		argvSequence(argv, "--remount-ro", launchenv.ToolBinDir) < 0 {
+		t.Fatalf("manifest lacks protected bare-amux tool directory: %v", argv)
 	}
 	want := [][]string{
 		{"--bind", s.Dir, s.Dir},

@@ -21,6 +21,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
+	"amux/internal/launchenv"
 	"amux/internal/store"
 	"amux/internal/wsops"
 )
@@ -456,7 +457,13 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, arg
 	if err != nil {
 		return nil, fmt.Errorf("resolve payload trampoline path: %w", err)
 	}
-	args = append(args, "--ro-bind", self, self, "--setenv", payloadExecEnv, "1")
+	args = append(args,
+		"--ro-bind", self, self,
+		"--tmpfs", launchenv.ToolBinDir,
+		"--ro-bind", self, filepath.Join(launchenv.ToolBinDir, "amux"),
+		"--remount-ro", launchenv.ToolBinDir,
+		"--setenv", payloadExecEnv, "1",
+	)
 	// A launcher may resolve into a different home subtree (for example Codex's
 	// ~/.local/bin launcher into ~/.codex/packages). Bind the resolved package or
 	// executable and run it directly, without exposing the launcher subtree too.
@@ -574,9 +581,6 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
 			binds = cfghome.Binds(spec)
 		}
-		binds = append(binds,
-			[]string{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
-		)
 		return append(binds, gitBinds(home)...)
 	case TabEditor:
 		name := filepath.Base(editorBin())
