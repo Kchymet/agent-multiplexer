@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,5 +165,45 @@ func TestCloseInterruptsBlockedNext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Close did not interrupt blocked Next")
+	}
+}
+
+type observedWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *observedWriteConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	return c.Conn.Write(p)
+}
+
+func TestCloseJoinsBlockedWriter(t *testing.T) {
+	srv, raw := net.Pipe()
+	cli := &observedWriteConn{Conn: raw, entered: make(chan struct{})}
+	c := newClient(cli)
+	defer srv.Close()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- c.PaneInputContext(context.Background(), "pane", []byte("blocked"))
+	}()
+	<-cli.entered
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-c.writerDone:
+	default:
+		t.Fatal("Close returned before the blocked writer exited")
+	}
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("blocked write returned no error after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked write did not return after Close")
 	}
 }

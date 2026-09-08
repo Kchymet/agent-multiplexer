@@ -53,7 +53,10 @@ type Client struct {
 
 	out  chan clientWrite
 	done chan struct{}
-	once sync.Once
+	// writerDone lets Close provide a complete transport-lifetime barrier. The
+	// write loop never calls Close, so waiting here cannot self-join.
+	writerDone chan struct{}
+	once       sync.Once
 }
 
 // Dial connects to the daemon socket (single attempt).
@@ -138,10 +141,11 @@ func newClient(conn net.Conn) *Client {
 
 func newClientReader(conn net.Conn, reader *bufio.Reader) *Client {
 	c := &Client{
-		conn: conn,
-		r:    reader,
-		out:  make(chan clientWrite, outBuf),
-		done: make(chan struct{}),
+		conn:       conn,
+		r:          reader,
+		out:        make(chan clientWrite, outBuf),
+		done:       make(chan struct{}),
+		writerDone: make(chan struct{}),
 	}
 	go c.writeLoop()
 	return c
@@ -153,6 +157,7 @@ func newClientReader(conn net.Conn, reader *bufio.Reader) *Client {
 // the broken connection as an error from Next, which the UI turns into a
 // reconnect.
 func (c *Client) writeLoop() {
+	defer close(c.writerDone)
 	for {
 		select {
 		case <-c.done:
@@ -228,7 +233,9 @@ func (c *Client) stop() { c.once.Do(func() { close(c.done) }) }
 // Close stops the writer and closes the connection.
 func (c *Client) Close() error {
 	c.stop()
-	return c.conn.Close()
+	err := c.conn.Close()
+	<-c.writerDone
+	return err
 }
 
 // Send enqueues an action for the writer goroutine without blocking the caller.
