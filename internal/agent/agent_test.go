@@ -50,7 +50,7 @@ func TestResolveFindsNvmBinaryOffPath(t *testing.T) {
 	}
 }
 
-// Codex Argv: the default sandbox (workspace-write) plus --model when a model is
+// Codex Argv: automatic approval review, the default sandbox, plus --model when a model is
 // set, the AMUX_CODEX_BIN override, and AMUX_CODEX_SANDBOX=none omitting the
 // sandbox flag entirely. PATH/SHELL are dead ends so resolve() degrades to the
 // bare override name, keeping the argv comparison stable.
@@ -65,11 +65,11 @@ func TestArgvCodex(t *testing.T) {
 		want                 []string
 	}{
 		{"default sandbox + model", "", "gpt-5.5",
-			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "--sandbox", "workspace-write", "--model", "gpt-5.5"}},
+			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "-c", `approval_policy="on-request"`, "-c", `approvals_reviewer="auto_review"`, "--sandbox", "workspace-write", "--model", "gpt-5.5"}},
 		{"explicit sandbox, no model", "read-only", "",
-			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "--sandbox", "read-only"}},
+			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "-c", `approval_policy="on-request"`, "-c", `approvals_reviewer="auto_review"`, "--sandbox", "read-only"}},
 		{"sandbox none omits flag", "none", "gpt-5.4",
-			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "--model", "gpt-5.4"}},
+			[]string{"codex-amux-test", "-c", `tui.alternate_screen="always"`, "-c", `approval_policy="on-request"`, "-c", `approvals_reviewer="auto_review"`, "--model", "gpt-5.4"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

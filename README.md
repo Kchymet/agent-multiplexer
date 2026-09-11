@@ -208,7 +208,10 @@ Override the launch binary per harness with `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN`
 **pre-trusted** and with `--permission-mode auto` (a safe classifier, *not*
 `--dangerously-skip-permissions`); override with `AMUX_PERMISSION_MODE`. See
 `scripts/claude-launch.example.sh`. Codex agents launch pre-trusted (project trust
-written to the agent's private copy of `config.toml`) inside a `--sandbox workspace-write` scope;
+written to the agent's private copy of `config.toml`) with **Approve for me**
+(`approval_policy="on-request"`, `approvals_reviewer="auto_review"`) inside a
+`--sandbox workspace-write` scope. This applies to terminal launches and new or
+resumed app-server threads;
 override the sandbox level with `AMUX_CODEX_SANDBOX`
 (`read-only`|`workspace-write`|`danger-full-access`, or `none` to omit the flag).
 
