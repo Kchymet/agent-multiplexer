@@ -139,6 +139,26 @@ func TestFormsCarryHarnessField(t *testing.T) {
 	}
 }
 
+func TestNewWorkgroupUntouchedReposAreOmitted(t *testing.T) {
+	m := &model{}
+	m.openNewWorkgroupForm()
+	fields := formFieldsForSubmit(m.form)
+	if _, explicit := fields["repos"]; explicit {
+		t.Fatalf("untouched new-workgroup repos must be omitted, got %q", fields["repos"])
+	}
+	if fields["agent"] != agent.DefaultKind() {
+		t.Fatalf("other form defaults were lost: agent = %q", fields["agent"])
+	}
+
+	// Blank repos on other actions retain their established exact-empty meaning;
+	// only host workgroup creation has the deliberate omitted-grant default.
+	m.openAddAgentForm("root", "Root")
+	fields = formFieldsForSubmit(m.form)
+	if value, explicit := fields["repos"]; !explicit || value != "" {
+		t.Fatalf("add-agent blank repos = %q, explicit=%v; want explicit empty", value, explicit)
+	}
+}
+
 // Cycling the Harness selector reconciles the dependent Model selector: codex's
 // models replace claude's, and the now-invalid opus default resets to codex's
 // default. Cycling back to claude restores the claude models (and default).

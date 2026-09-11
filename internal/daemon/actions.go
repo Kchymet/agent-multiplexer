@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"amux/internal/access"
+	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/launchenv"
@@ -24,6 +27,26 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	if !effectAdmissionHeld(ctx) {
+		// Use the same lock order as mailbox serving: dispatch ownership, then
+		// effect admission. For an explicit restore, drain the old completion
+		// owner before taking effectMu; its cleanup may already be waiting there.
+		// Holding dispatchMu prevents another old-principal call entering between
+		// that drain and the final admission lock.
+		if d.sessionRPC != nil {
+			d.sessionRPC.dispatchMu.Lock()
+			defer d.sessionRPC.dispatchMu.Unlock()
+			if restore, _ := hostRestoreRequested(a); restore {
+				d.sessionRPC.completions.cancelAndWait(a.ID)
+			}
+		}
+		d.effectMu.Lock()
+		defer d.effectMu.Unlock()
+		ctx = withEffectAdmission(ctx)
+	}
+	if err := revalidateDeferred(ctx); err != nil {
+		return fail("authorization changed before execution: %v", err)
+	}
 	switch a.Action {
 	case actionSessionRecreate:
 		if a.ID == "" || a.Kind != "" || a.Cwd != "" || a.Target != "" || a.Query != "" ||
@@ -46,7 +69,14 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// Acceptance is final once this result is returned. The client normally
 		// closes immediately after observing it, so its connection context must
 		// not cancel the already-authorized shutdown during the response grace.
-		time.AfterFunc(shutdownResponseGrace, d.requestShutdown)
+		if !d.startDeferredWork(func() {
+			timer := time.NewTimer(shutdownResponseGrace)
+			defer timer.Stop()
+			<-timer.C
+			d.requestShutdown()
+		}) {
+			return fail("daemon shutdown is already in progress")
+		}
 		return ok()
 	case "", core.ActionRefresh:
 		d.triggerPoll()
@@ -76,7 +106,15 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// old inline switch missed, so the CLI's archive left the process running
 		// while the TUI's stopped it. killEngineFor runs before the store mutation so
 		// a root delete still reads its children from the pre-deletion snapshot.
-		newID, err := wsops.Dispatch(ctx, a, d.killEngineFor)
+		var newID string
+		var err error
+		if restore, restoreErr := hostRestoreRequested(a); restoreErr != nil {
+			return fail("%v", restoreErr)
+		} else if restore {
+			newID, err = d.restoreSessionAccess(ctx, a)
+		} else {
+			newID, err = wsops.Dispatch(ctx, a, d.killEngineFor)
+		}
 		if err != nil {
 			return fail("%v", err)
 		}
@@ -104,6 +142,180 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	}
 }
 
+func hostRestoreRequested(action core.Action) (bool, error) {
+	switch action.Action {
+	case core.ActionSetArchived:
+		return action.Fields["archived"] == "false", nil
+	case core.ActionArchive:
+		session, found, err := lookupSession(action.ID)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, fmt.Errorf("session %s not found", action.ID)
+		}
+		return session.Archived, nil
+	default:
+		return false, nil
+	}
+}
+
+// restoreSessionAccess is reached only through the authenticated host stream.
+// It drains any completion owner and proves the old runtime quiescent, then
+// explicitly regrants exactly the latest revoked credential while archived
+// policy remains fail-closed. Only a confirmed successor permits the active
+// store transition. Partial publication is observed, never blindly retried;
+// archived/current and archived/revoked are both explicit retryable states.
+func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (string, error) {
+	session, found, err := lookupSession(action.ID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("session %s not found", action.ID)
+	}
+	expected, regrant, err := d.restoreCredentialState(ctx, action.ID)
+	if err != nil {
+		return "", err
+	}
+	if !session.Archived && !regrant {
+		return wsops.Dispatch(ctx, action, d.killEngineFor)
+	}
+	if !session.Archived {
+		// Repair an active/revoked row left by an older partial restore before
+		// attempting a successor publication. The archived policy state is the
+		// durable recovery marker; an explicit retry can always resume from it.
+		_, archiveErr := wsops.ApplyResult(ctx, core.Action{
+			Action: core.ActionSetArchived,
+			ID:     action.ID,
+			Fields: map[string]string{"archived": "true"},
+		})
+		current, currentFound, lookupErr := lookupSession(action.ID)
+		if lookupErr != nil || !currentFound || !current.Archived {
+			return "", errors.Join(archiveErr, lookupErr, fmt.Errorf("restore recovery could not preserve archived state"))
+		}
+	}
+	var newID string
+	d.authMu.Lock()
+	d.permissions.retireAnd(action.ID, func() {
+		if err = d.quiesceSessionRuntimeLocked(action.ID); err != nil {
+			return
+		}
+		var successor access.Principal
+		if regrant {
+			if _, regrantErr := d.authority.Regrant(ctx, access.SubjectSession, action.ID, expected); regrantErr != nil {
+				current, currentErr := d.authority.Current(ctx, access.SubjectSession, action.ID)
+				if currentErr != nil || current.Generation != expected+1 {
+					err = fmt.Errorf("restore credential regrant: %w", regrantErr)
+					return
+				}
+			}
+			current, currentErr := d.authority.Current(ctx, access.SubjectSession, action.ID)
+			if currentErr != nil || current.Generation != expected+1 {
+				err = errors.Join(currentErr, fmt.Errorf("restore successor generation was not published"))
+				return
+			}
+			successor = access.Principal{
+				KeyID: current.KeyID, SubjectID: current.SubjectID, Kind: current.Kind, Generation: current.Generation,
+			}
+		}
+
+		// Only now publish the active store row. Until the successor is confirmed,
+		// archived policy denies every operation even though the fresh key may be
+		// cryptographically readable from the stable credential directory.
+		var applyErr error
+		newID, applyErr = wsops.Dispatch(ctx, action, nil)
+		if applyErr == nil {
+			return
+		}
+		current, currentFound, lookupErr := lookupSession(action.ID)
+		if lookupErr == nil && currentFound && !current.Archived {
+			// The store mutation committed but its caller observed an uncertain
+			// failure. Do not retry it; the intended state is already durable.
+			return
+		}
+		err = applyErr
+		if regrant && successor.KeyID != "" {
+			// The store stayed archived, so retire the unused successor when
+			// possible. Failure is still fail-closed: archived policy denies this
+			// credential, and a later explicit retry can finish the transition.
+			if revokeErr := d.authority.RevokeCurrent(ctx, successor); revokeErr != nil && !errors.Is(revokeErr, access.ErrGenerationChanged) {
+				err = errors.Join(err, fmt.Errorf("retire unused restore credential: %w", revokeErr))
+			}
+		}
+	})
+	d.authMu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return newID, nil
+}
+
+// quiesceSessionRuntimeLocked terminates every process that could retain this
+// session's stable credential-directory mount. Engine.Kill and Supervisor.Close
+// are synchronous: their production implementations return only after the
+// launched process has been reaped. We additionally verify the exact captured
+// handles are no longer live before a caller may publish a successor key.
+// d.authMu and the permission gate are held by the caller.
+func (d *Daemon) quiesceSessionRuntimeLocked(subjectID string) error {
+	delete(d.authPending, engine.Key{AgentID: subjectID, Tab: panespec.TabAgent})
+	var instances []engine.Instance
+	if d.engine != nil {
+		for tab := 0; tab < 3; tab++ {
+			key := engine.Key{AgentID: subjectID, Tab: tab}
+			if instance, ok := d.engine.Lookup(key); ok {
+				instances = append(instances, instance)
+			}
+			d.engine.Kill(key)
+		}
+	}
+	var supervisor *codexapp.Supervisor
+	if d.codex != nil {
+		supervisor, _ = d.codex.Get(subjectID)
+		d.codex.Close(subjectID)
+	}
+	for _, instance := range instances {
+		if instance.Alive() {
+			return fmt.Errorf("session %s runtime did not terminate", subjectID)
+		}
+		if current, ok := d.engine.Lookup(instance.Key()); ok && current == instance {
+			return fmt.Errorf("session %s runtime remains published", subjectID)
+		}
+	}
+	if supervisor != nil {
+		if current, ok := d.codex.Get(subjectID); ok && current == supervisor {
+			return fmt.Errorf("session %s App Server did not terminate", subjectID)
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) restoreCredentialState(ctx context.Context, subjectID string) (uint64, bool, error) {
+	if d.authority == nil {
+		return 0, false, fmt.Errorf("credential authority unavailable")
+	}
+	if _, err := d.authority.Current(ctx, access.SubjectSession, subjectID); err == nil {
+		return 0, false, nil
+	} else if errors.Is(err, access.ErrNotProvisioned) {
+		return 0, false, nil
+	} else if errors.Is(err, access.ErrExpired) {
+		credential, loadErr := access.LoadCredential(d.authority.CredentialDir(access.SubjectSession, subjectID))
+		if loadErr != nil {
+			return 0, false, loadErr
+		}
+		if revokeErr := d.authority.RevokeCurrent(ctx, credentialPrincipal(credential)); revokeErr != nil {
+			return 0, false, revokeErr
+		}
+	} else if !errors.Is(err, access.ErrRevoked) {
+		return 0, false, err
+	}
+	revoked, err := d.authority.LastRevoked(ctx, access.SubjectSession, subjectID)
+	if err != nil {
+		return 0, false, err
+	}
+	return revoked.Generation, true, nil
+}
+
 // recreateSession is the explicit compatibility boundary for a process that
 // predates fixed session access mounts. It validates the complete replacement
 // launch before stopping the old runtime, touches no worktree/config/transcript
@@ -119,14 +331,21 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		if err := revalidateDeferred(ctx); err != nil {
+			return err
+		}
 		d.killRuntimeFor(id)
 		session := spec.Session
-		supervisor, err := d.codex.Ensure(id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
+		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
+			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID)
+		})
 		if err != nil {
 			return err
 		}
-		_, err = d.permissions.observe(id, supervisor)
-		return err
+		if _, ok := published.(*codexapp.Supervisor); !ok {
+			return fmt.Errorf("App Server returned no runtime")
+		}
+		return nil
 	}
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
@@ -135,16 +354,23 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := revalidateDeferred(ctx); err != nil {
+		return err
+	}
 	d.killRuntimeFor(id)
-	instance, err := d.engine.Ensure(ctx, engine.Spec{
-		Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
-		ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
+	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
+		return d.engine.Ensure(ctx, engine.Spec{
+			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
+			ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
+		})
 	})
 	if err != nil {
 		return err
 	}
-	_, err = d.permissions.observe(id, instance)
-	return err
+	if _, ok := published.(engine.Instance); !ok {
+		return fmt.Errorf("engine returned no runtime")
+	}
+	return nil
 }
 
 func ok() core.Result { return core.Result{Type: "result", OK: true} }

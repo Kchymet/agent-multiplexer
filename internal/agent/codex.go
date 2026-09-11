@@ -49,6 +49,9 @@ func (codexHarness) PreferredModel() string { return codexcfg.PreferredModel() }
 // for every turn and therefore reflects `/model` changes. Unlike Claude, Codex
 // exposes no command-hook or status-line callback.
 func (h codexHarness) CurrentModel(s store.Session) (string, bool) {
+	if report, ok := core.SessionRuntimeModel(s.ID, s.ClaudeID); ok {
+		return report.Model, true
+	}
 	if path, ok := h.RuntimeTranscriptPath(s); ok {
 		return latestModelLine(path, codexModelLine)
 	}
@@ -206,7 +209,7 @@ const codexBusyWindow = 45 * time.Second
 // rolloutWrite) — written within codexBusyWindow reads as Busy, an older rollout
 // as Safe, and no rollout at all as Unknown (never blocks a shutdown).
 func (h codexHarness) Activity(s store.Session) engine.Activity {
-	if rec, ok := core.HookState(s.ClaudeID); ok {
+	if rec, ok := core.SessionHookState(s.ID, s.ClaudeID); ok {
 		switch rec.State {
 		case core.StateRunning, core.StateWaiting:
 			return engine.ActivityBusy
@@ -277,7 +280,7 @@ func (h codexHarness) RestoreTranscript(root *hostprep.Root, s store.Session, cw
 	if !ok {
 		dst = home.NewRolloutPath(s.ClaudeID)
 	}
-	return restoreCapturedRooted(root, s.ClaudeID, dst)
+	return restoreCapturedRooted(root, s.ID, s.ClaudeID, dst)
 }
 
 // SkillsDir / GuideFile: Codex reads the vendor-neutral Agent Skills layout —

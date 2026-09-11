@@ -63,6 +63,20 @@ func attach(t *testing.T, sup *Supervisor, client msgConn) {
 	}
 }
 
+func TestStartRejectsTransportInterruptBeforeProcessLaunch(t *testing.T) {
+	sup := New(Config{SessionID: "pre-interrupted", Endpoint: "unix:///unused"})
+	sup.interruptTransport()
+	if err := sup.Start(context.Background(), []string{"sleep", "60"}); err != errClosed {
+		t.Fatalf("Start after transport interrupt = %v, want %v", err, errClosed)
+	}
+	sup.mu.Lock()
+	proc := sup.proc
+	sup.mu.Unlock()
+	if proc != nil {
+		t.Fatal("pre-interrupted supervisor launched a process")
+	}
+}
+
 func TestHandshakeStart(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()
@@ -548,6 +562,38 @@ func TestPromptBracketsTurn(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("Prompt returned %v", err)
+	}
+}
+
+func TestBeginPromptReturnsAfterTurnStartBeforeModelCompletion(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	wait, err := sup.BeginPrompt(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("BeginPrompt: %v", err)
+	}
+	if _, ok := fs.sawCall("turn/start"); !ok {
+		t.Fatal("BeginPrompt returned before turn/start admission")
+	}
+	done := make(chan error, 1)
+	go func() { done <- wait(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("turn waiter returned before completion: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	fs.pushTurnStarted()
+	fs.completeTurn("completed")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("turn waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn waiter did not observe completion")
 	}
 }
 

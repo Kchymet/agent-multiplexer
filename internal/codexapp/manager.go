@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"amux/internal/launchenv"
@@ -18,33 +19,55 @@ import (
 // log, resume thread) from the persisted identity and delegates everything else
 // to the Supervisor.
 type Manager struct {
-	ctx context.Context // daemon lifetime; every supervisor's Start is bound to it
-	bin string          // codex binary override (AMUX_CODEX_BIN), "" ⇒ "codex"
+	ctx context.Context // daemon admission lifetime; cancellation starts transport drain
+	// supervisorCtx is cancelled only by Shutdown. Separating it from ctx lets a
+	// daemon cancel interrupt control I/O before joins without concurrently killing
+	// the process; full process teardown remains ordered after the joins.
+	supervisorCtx     context.Context
+	cancelSupervisors context.CancelFunc
+	stopContextWatch  func() bool
+	bin               string // codex binary override (AMUX_CODEX_BIN), "" ⇒ "codex"
 
-	mu     sync.Mutex
-	sup    map[string]*Supervisor
-	starts map[string]*sync.Mutex // per-session creation lock (serialize Ensure before spawn)
+	mu       sync.Mutex
+	sup      map[string]*Supervisor
+	starting map[string]*Supervisor   // visible to shutdown before Start attaches its transport
+	starts   map[string]chan struct{} // per-session creation gate (serialize Ensure before spawn)
+	stopping bool                     // one-way: no supervisor may publish after drain begins
 }
+
+var errManagerStopping = errors.New("codexapp: manager stopping")
 
 // NewManager builds a Manager bound to the daemon's context. bin overrides the
 // codex binary (pass the resolved AMUX_CODEX_BIN or "").
 func NewManager(ctx context.Context, bin string) *Manager {
-	return &Manager{ctx: ctx, bin: bin, sup: map[string]*Supervisor{}, starts: map[string]*sync.Mutex{}}
+	supervisorCtx, cancelSupervisors := context.WithCancel(context.WithoutCancel(ctx))
+	m := &Manager{
+		ctx:               ctx,
+		supervisorCtx:     supervisorCtx,
+		cancelSupervisors: cancelSupervisors,
+		bin:               bin,
+		sup:               map[string]*Supervisor{},
+		starting:          map[string]*Supervisor{},
+		starts:            map[string]chan struct{}{},
+	}
+	m.stopContextWatch = context.AfterFunc(ctx, m.InterruptTransports)
+	return m
 }
 
-// startLock returns the per-session creation mutex, creating it once. Serializing
-// Ensure per session BEFORE spawning is what prevents two callers from each
-// launching an App Server on the same socket and the loser's cleanup unlinking the
-// winner's listener (ROOT audit).
-func (m *Manager) startLock(sessionID string) *sync.Mutex {
+// startGate returns the per-session creation semaphore, creating it once.
+// Serializing Ensure per session BEFORE spawning prevents two callers from each
+// launching an App Server on the same socket and the loser's cleanup unlinking
+// the winner's listener, while still allowing a queued caller to honor context.
+func (m *Manager) startGate(sessionID string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	l := m.starts[sessionID]
-	if l == nil {
-		l = &sync.Mutex{}
-		m.starts[sessionID] = l
+	gate := m.starts[sessionID]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		gate <- struct{}{}
+		m.starts[sessionID] = gate
 	}
-	return l
+	return gate
 }
 
 // Get returns the live supervisor for a session id, or false. It is the daemon's
@@ -54,6 +77,20 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 	defer m.mu.Unlock()
 	s, ok := m.sup[sessionID]
 	return s, ok
+}
+
+// existingForEnsure performs the live lookup together with the one-way shutdown
+// check. Ensure must not return even an already-live handle once transport drain
+// has started, because its caller could otherwise begin new RPC work after the
+// manager's interrupt snapshot.
+func (m *Manager) existingForEnsure(sessionID string) (*Supervisor, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopping {
+		return nil, false, errManagerStopping
+	}
+	s, ok := m.sup[sessionID]
+	return s, ok, nil
 }
 
 // SetModel updates a live supervisor's default for subsequent turns. It is a
@@ -83,17 +120,40 @@ func (m *Manager) SetModel(sessionID, model string) {
 // over. Creation is serialized per session, so two callers never spawn competing
 // servers. initialPrompt is submitted only when starting a fresh thread, never
 // when reusing or resuming a supervisor.
-func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string) (*Supervisor, error) {
+func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string) (*Supervisor, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := m.ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Fast path: already live.
-	if s, ok := m.Get(sessionID); ok {
+	if s, ok, err := m.existingForEnsure(sessionID); err != nil {
+		return nil, err
+	} else if ok {
 		return s, nil
 	}
-	// Serialize creation for this session, then re-check under the lock so only one
-	// caller ever spawns.
-	lock := m.startLock(sessionID)
-	lock.Lock()
-	defer lock.Unlock()
-	if s, ok := m.Get(sessionID); ok {
+	// Serialize creation for this session with context-aware admission, then
+	// re-check under the gate so only one caller ever spawns. A request waiting
+	// behind another cold start must not outlive its final-admission deadline.
+	gate := m.startGate(sessionID)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.ctx.Done():
+		return nil, m.ctx.Err()
+	case <-gate:
+	}
+	defer func() { gate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := m.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s, ok, err := m.existingForEnsure(sessionID); err != nil {
+		return nil, err
+	} else if ok {
 		return s, nil
 	}
 
@@ -111,13 +171,52 @@ func (m *Manager) Ensure(sessionID, dir string, env, wrappedArgv []string, endpo
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
 
 	sup := New(cfg)
-	if err := sup.Start(m.ctx, wrappedArgv); err != nil {
+	// Publish the handle to the shutdown interrupter before Start can attach an RPC
+	// transport. A drain racing this point either marks the supervisor interrupted
+	// (so attach fails closed) or prevents registration and process launch entirely.
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		return nil, errManagerStopping
+	}
+	m.starting[sessionID] = sup
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.starting[sessionID] == sup {
+			delete(m.starting, sessionID)
+		}
+		m.mu.Unlock()
+	}()
+	// Startup is admitted by ctx but the successfully published supervisor lives
+	// for the manager/daemon lifetime. Stop forwarding admission cancellation once
+	// Start completes; until then either context interrupts dial/handshake/write.
+	startCtx, cancelStart := context.WithCancel(m.supervisorCtx)
+	stopAdmission := context.AfterFunc(ctx, cancelStart)
+	if err := sup.Start(startCtx, wrappedArgv); err != nil {
+		stopAdmission()
+		cancelStart()
 		return nil, err
+	}
+	if !stopAdmission() || ctx.Err() != nil || m.ctx.Err() != nil {
+		cancelStart()
+		_ = sup.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, m.ctx.Err()
 	}
 	_ = SaveIdentity(sup.Identity())
 
 	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		cancelStart()
+		_ = sup.Close()
+		return nil, errManagerStopping
+	}
 	m.sup[sessionID] = sup
+	delete(m.starting, sessionID)
 	m.mu.Unlock()
 	return sup, nil
 }
@@ -176,12 +275,58 @@ func (m *Manager) Forget(sessionID string) {
 // Shutdown stops every supervisor (daemon shutdown). Identities are left on disk
 // so the next daemon run can resume them.
 func (m *Manager) Shutdown() {
+	m.stopContextWatch()
 	m.mu.Lock()
-	all := m.sup
+	m.stopping = true
+	all := make([]*Supervisor, 0, len(m.sup)+len(m.starting))
+	seen := make(map[*Supervisor]struct{}, len(m.sup)+len(m.starting))
+	for _, s := range m.sup {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			all = append(all, s)
+		}
+	}
+	for _, s := range m.starting {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			all = append(all, s)
+		}
+	}
 	m.sup = map[string]*Supervisor{}
+	m.starting = map[string]*Supervisor{}
 	m.mu.Unlock()
+	m.cancelSupervisors()
 	for _, s := range all {
 		_ = s.Close()
+	}
+}
+
+// InterruptTransports begins the manager's one-way shutdown drain and closes
+// every live or in-progress supervisor transport. It deliberately does not kill
+// App Server processes: Run invokes it immediately after context cancellation so
+// blocked JSON-RPC I/O releases admission locks, joins those callers, and only
+// then calls Shutdown for process teardown.
+func (m *Manager) InterruptTransports() {
+	m.mu.Lock()
+	m.stopping = true
+	all := make([]*Supervisor, 0, len(m.sup)+len(m.starting))
+	seen := make(map[*Supervisor]struct{}, len(m.sup)+len(m.starting))
+	for _, s := range m.sup {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			all = append(all, s)
+		}
+	}
+	for _, s := range m.starting {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			all = append(all, s)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, s := range all {
+		s.interruptTransport()
 	}
 }
 

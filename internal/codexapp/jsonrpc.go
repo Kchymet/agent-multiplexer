@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // errClosed is returned by the rpc layer once the transport is torn down.
@@ -49,9 +50,17 @@ var errClosed = errors.New("codexapp: connection closed")
 // real binary closes such a connection immediately — ROOT audit f4483d7e).
 type msgConn interface {
 	ReadMessage() ([]byte, error)
-	WriteMessage([]byte) error
+	// WriteMessage must honor ctx while waiting for and performing the actual
+	// transport write. Once writing has begun, any error leaves the transport
+	// unusable; the implementation must interrupt its I/O and return only after
+	// that interrupt has finished.
+	WriteMessage(context.Context, []byte) error
 	Close() error
 }
+
+// maxMessageWriteLifetime bounds every outbound frame, including notifications
+// and server-request responses whose existing API has no caller context.
+const maxMessageWriteLifetime = 10 * time.Second
 
 // rpcError is a JSON-RPC error object.
 type rpcError struct {
@@ -75,7 +84,9 @@ type rpcResponse struct {
 type rpcConn struct {
 	transport msgConn
 
-	writeMu sync.Mutex // serialize writes to the transport
+	// writeGate serializes writes while allowing a caller to abandon admission
+	// before it has touched the transport.
+	writeGate chan struct{}
 
 	mu      sync.Mutex
 	nextID  int64
@@ -88,7 +99,13 @@ type rpcConn struct {
 }
 
 func newRPCConn(t msgConn) *rpcConn {
-	return &rpcConn{transport: t, pending: map[int64]chan rpcResponse{}}
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &rpcConn{
+		transport: t,
+		writeGate: gate,
+		pending:   map[int64]chan rpcResponse{},
+	}
 }
 
 // incoming is the union shape of every message on the wire; classification keys
@@ -108,11 +125,11 @@ func (c *rpcConn) run(ctx context.Context) error {
 	for {
 		msg, err := c.transport.ReadMessage()
 		if err != nil {
-			c.failPending()
+			_ = c.close()
 			return err
 		}
 		if ctx.Err() != nil {
-			c.failPending()
+			_ = c.close()
 			return ctx.Err()
 		}
 		line := bytes.TrimSpace(msg)
@@ -170,6 +187,9 @@ func (c *rpcConn) deliver(rawID json.RawMessage, resp rpcResponse) {
 // call issues a request and blocks until its response arrives, ctx is done, or
 // the connection closes.
 func (c *rpcConn) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -181,7 +201,7 @@ func (c *rpcConn) call(ctx context.Context, method string, params any) (json.Raw
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if err := c.write(map[string]any{"method": method, "id": id, "params": params}); err != nil {
+	if err := c.write(ctx, map[string]any{"method": method, "id": id, "params": params}); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -203,27 +223,40 @@ func (c *rpcConn) call(ctx context.Context, method string, params any) (json.Raw
 
 // notify sends a fire-and-forget notification (no id, no response).
 func (c *rpcConn) notify(method string, params any) error {
-	return c.write(map[string]any{"method": method, "params": params})
+	return c.write(context.Background(), map[string]any{"method": method, "params": params})
 }
 
 // respond answers a server-initiated request, echoing its id verbatim so the
 // server correlates the reply to its request.
 func (c *rpcConn) respond(id json.RawMessage, result any) error {
-	return c.write(map[string]any{"id": id, "result": result})
+	return c.write(context.Background(), map[string]any{"id": id, "result": result})
 }
 
 // respondErr answers a server-initiated request with a JSON-RPC error.
 func (c *rpcConn) respondErr(id json.RawMessage, code int, message string) error {
-	return c.write(map[string]any{"id": id, "error": rpcError{Code: code, Message: message}})
+	return c.write(context.Background(), map[string]any{"id": id, "error": rpcError{Code: code, Message: message}})
 }
 
-func (c *rpcConn) write(obj any) error {
+func (c *rpcConn) write(ctx context.Context, obj any) error {
 	b, err := json.Marshal(obj)
 	if err != nil {
 		return err
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	writeCtx, cancel := context.WithTimeout(ctx, maxMessageWriteLifetime)
+	defer cancel()
+
+	select {
+	case <-writeCtx.Done():
+		return writeCtx.Err()
+	case <-c.writeGate:
+	}
+	defer func() { c.writeGate <- struct{}{} }()
+
+	// Cancellation while queued has not touched the transport and must not retire
+	// it. Recheck after admission before beginning the actual write.
+	if err := writeCtx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
@@ -231,8 +264,16 @@ func (c *rpcConn) write(obj any) error {
 		return errClosed
 	}
 	// One JSON-RPC object per WebSocket message — never a newline-framed byte
-	// stream to the App Server listener.
-	return c.transport.WriteMessage(b)
+	// stream to the App Server listener. Any error after transport admission may
+	// represent a partial frame, so permanently retire the connection.
+	if err := c.transport.WriteMessage(writeCtx, b); err != nil {
+		_ = c.close()
+		if ctxErr := writeCtx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return err
+	}
+	return nil
 }
 
 // failPending drains every waiting call with a closed-connection error so no
@@ -258,7 +299,9 @@ func (c *rpcConn) close() error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	err := c.transport.Close()
+	// Release response waiters before entering transport Close. The transport
+	// contract requires Close to interrupt I/O, but pending RPC liveness must not
+	// depend on the speed of that interrupt.
 	c.failPending()
-	return err
+	return c.transport.Close()
 }

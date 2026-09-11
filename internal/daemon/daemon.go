@@ -55,6 +55,10 @@ type Daemon struct {
 	// launchSpec captures the authoritative session row and access grant
 	// together. It is injectable only for isolated engine tests.
 	launchSpec launchSpecResolver
+	// listen publishes the authenticated host listener. Production uses
+	// listenOwnedUnix; lifecycle tests inject a blocking in-memory listener so
+	// shutdown ordering does not require a host socket.
+	listen func(string, string) (net.Listener, func(), error)
 	// agentsUnder resolves an id (agent or workgroup root) to the agent ids whose
 	// process should run. Defaults to wsops.AgentIDsUnder; overridable in tests.
 	agentsUnder func(id string) ([]string, error)
@@ -111,14 +115,43 @@ type Daemon struct {
 	authMu      sync.Mutex
 	authPending map[engine.Key]authReload
 
+	// effectMu is the final principal/policy/effect admission boundary shared by
+	// authenticated host actions, session mailbox dispatch, credential rotation,
+	// and completion revocation. A policy mutation cannot commit between a
+	// session's last current-generation check and admission of its exact effect.
+	effectMu sync.Mutex
+
 	// shutdown is closed only by the authenticated host control path. Process
 	// IDs are diagnostics, never authority to signal a process.
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 
+	// serving tracks every accepted host transport. Run closes and joins these
+	// handlers before it closes the session RPC servers or releases authority
+	// ownership. That ordering matters for blocked TLS writes and for handlers
+	// whose invalidation watcher selected ctx.Done during shutdown.
+	servingMu       sync.Mutex
+	serving         map[uint64]net.Conn
+	servingNext     uint64
+	servingDraining bool
+	servingWG       sync.WaitGroup
+
+	// deferred owns asynchronous work accepted by a control action after its
+	// immediate response is committed (cold starts and structured prompts).
+	// Shutdown closes admission before waiting, so WaitGroup.Add can never race
+	// Wait and no acknowledged effect can outlive the engines or authority it
+	// may still use.
+	deferredMu       sync.Mutex
+	deferredDraining bool
+	deferredWG       sync.WaitGroup
+
 	// permissions owns runtime-generation binding and atomic request consumption
 	// for every caller role. It is initialized even in tests that do not Run.
 	permissions *runtimePermissionGate
+	// permissionBaseline records unresolved durable requests before a newly
+	// observed runtime is assigned a generation. Tests inject a record-free
+	// resolver; production reads through the daemon's runtime-record seam.
+	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
 }
@@ -143,9 +176,12 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		liveAgentsPath: core.LiveAgentsPath(),
 		firstPoll:      make(chan struct{}),
 		shutdown:       make(chan struct{}),
+		serving:        make(map[uint64]net.Conn),
 		permissions:    newRuntimePermissionGate(),
 	}
 	d.launchSpec = d.launchSpecFor
+	d.listen = listenOwnedUnix
+	d.permissionBaseline = d.loadPermissionBaseline
 	return d
 }
 
@@ -222,15 +258,75 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return d.configErr
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
-	go func() {
+	ctx = runCtx
+	var runWG sync.WaitGroup
+	startRunWorker := func(work func()) {
+		runWG.Add(1)
+		go func() {
+			defer runWG.Done()
+			work()
+		}()
+	}
+	var (
+		lock                *os.File
+		ln                  net.Listener
+		cleanupSocket       func()
+		authorityOwned      bool
+		sessionRPCOwned     bool
+		codexOwned          bool
+		engineOwned         bool
+		persistLiveOnReturn bool
+	)
+	// One teardown path owns both normal cancellation and every partial startup
+	// failure after the daemon lifetime context exists. Do not replace this with
+	// independent defers: their LIFO ordering previously stopped engines before
+	// RPC completion and background owners had drained.
+	defer func() {
+		d.stopDeferredAdmission()
+		cancelRun()
+		// Retire structured-control transports before joining anything that may be
+		// blocked in an admitted JSON-RPC write. This is intentionally earlier than
+		// Shutdown below: process/engine teardown and authority release still happen
+		// only after every admitted caller and serving connection has returned.
+		if codexOwned {
+			d.codex.InterruptTransports()
+		}
+		if ln != nil {
+			_ = ln.Close()
+		}
+		d.drainServingConnections()
+		runWG.Wait()
+		// Deferred effects may enter the same admission locks used by completion
+		// cleanup. Join them before sessionRuntime.close takes dispatch ownership
+		// and waits for completion owners, avoiding an inverted shutdown wait.
+		d.deferredWG.Wait()
+		if sessionRPCOwned {
+			d.sessionRPC.close()
+		}
+		if persistLiveOnReturn {
+			d.persistLiveAgents()
+		}
+		if codexOwned {
+			d.codex.Shutdown()
+		}
+		if engineOwned {
+			d.engine.Shutdown()
+		}
+		if cleanupSocket != nil {
+			cleanupSocket()
+		}
+		if authorityOwned {
+			_ = d.authority.Close()
+		}
+		releaseSingletonLock(lock)
+	}()
+	startRunWorker(func() {
 		select {
 		case <-d.shutdown:
 			cancelRun()
 		case <-runCtx.Done():
 		}
-	}()
-	ctx = runCtx
+	})
 	log.Printf("codex control: %s (source=%s, config=%s, persisted=%q, override_set=%t, override=%q)",
 		d.codexControl.Effective, d.codexControl.Source, d.codexControl.ConfigPath,
 		d.codexControl.Persisted, d.codexControl.OverrideSet, d.codexControl.Override)
@@ -240,76 +336,68 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := os.MkdirAll(core.StateDir(), 0o755); err != nil {
 		return err
 	}
-	lock, err := acquireSingletonLock()
+	var err error
+	lock, err = acquireSingletonLock()
 	if err != nil {
 		return err
 	}
-	defer releaseSingletonLock(lock)
+	// Acquiring singleton ownership commits this Run to owning the injected or
+	// default engine through every later startup failure. Persistence begins only
+	// after the listener and restore state are ready, but engine teardown does not
+	// depend on reaching that point.
+	engineOwned = d.engine != nil
 	if d.authority == nil {
 		d.authority, err = access.OpenDefault()
 		if err != nil {
 			return fmt.Errorf("open daemon authority: %w", err)
 		}
 	}
-	defer d.authority.Close()
+	authorityOwned = true
 	if err := d.ensureHostCredential(ctx, time.Now()); err != nil {
 		return fmt.Errorf("provision host credential: %w", err)
 	}
 	d.sessionRPC = newSessionRuntime(d)
+	sessionRPCOwned = true
 	if err := d.sessionRPC.start(ctx); err != nil {
 		return fmt.Errorf("start session RPC: %w", err)
 	}
-	sessionRPCDone := make(chan struct{})
-	go func() {
+	startRunWorker(func() {
 		d.sessionRPC.run(ctx)
-		close(sessionRPCDone)
-	}()
-	defer func() {
-		cancelRun()
-		<-sessionRPCDone
-		d.sessionRPC.close()
-	}()
+	})
 	sock := core.SocketPath()
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		return err
 	}
-	ln, cleanupSocket, err := listenOwnedUnix(sock, d.authority.BootID())
+	ln, cleanupSocket, err = d.listen(sock, d.authority.BootID())
 	if err != nil {
 		return err
 	}
-	defer cleanupSocket()
 
 	// The structured-control supervisor manager is bound to the daemon's context:
 	// its App Servers live and die with the daemon, not with any pane or client.
 	// It stays inert unless the captured startup selection enables App Server control.
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
-	defer d.codex.Shutdown()
+	codexOwned = true
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
 	// Persist the live set before killing them, so the next startup relaunches it.
-	if d.engine != nil {
-		defer func() {
-			d.persistLiveAgents()
-			d.engine.Shutdown()
-		}()
-	}
-
 	// Read the previously-live set BEFORE any poll persists over the file, then
 	// relaunch it once sessions/specs are resolvable (after the first poll).
 	d.pendingRestore = d.readLiveAgents()
-	go func() {
+	persistLiveOnReturn = d.engine != nil
+	startRunWorker(func() {
 		select {
 		case <-ctx.Done():
 		case <-d.firstPoll:
 			d.restoreLiveAgents(ctx)
 		}
-	}()
+	})
 
-	go d.pollLoop(ctx)
+	startRunWorker(func() { d.pollLoop(ctx) })
 
 	// Close the listener when ctx ends so Accept returns.
-	go func() { <-ctx.Done(); _ = ln.Close() }()
+	startRunWorker(func() { <-ctx.Done(); _ = ln.Close() })
 
 	for {
 		conn, err := ln.Accept()
@@ -319,8 +407,77 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			return err
 		}
-		go d.serve(ctx, conn)
+		d.startServingConnection(ctx, conn)
 	}
+}
+
+// startDeferredWork registers action-owned asynchronous work before launching
+// it. Registration and shutdown admission share deferredMu, preventing Add from
+// racing the shutdown Wait. The work receives the already-derived daemon
+// lifetime context from its caller; cancellation precedes the shutdown wait.
+func (d *Daemon) startDeferredWork(work func()) bool {
+	d.deferredMu.Lock()
+	if d.deferredDraining {
+		d.deferredMu.Unlock()
+		return false
+	}
+	d.deferredWG.Add(1)
+	d.deferredMu.Unlock()
+	go func() {
+		defer d.deferredWG.Done()
+		work()
+	}()
+	return true
+}
+
+func (d *Daemon) stopDeferredAdmission() {
+	d.deferredMu.Lock()
+	d.deferredDraining = true
+	d.deferredMu.Unlock()
+}
+
+// startServingConnection registers an accepted transport before its handler is
+// launched. Once draining starts, no new handler can race WaitGroup.Wait.
+func (d *Daemon) startServingConnection(ctx context.Context, conn net.Conn) {
+	d.servingMu.Lock()
+	if d.servingDraining {
+		d.servingMu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	id := d.servingNext
+	d.servingNext++
+	d.serving[id] = conn
+	d.servingWG.Add(1)
+	d.servingMu.Unlock()
+
+	go func() {
+		defer func() {
+			d.servingMu.Lock()
+			delete(d.serving, id)
+			d.servingMu.Unlock()
+			d.servingWG.Done()
+		}()
+		d.serve(ctx, conn)
+	}()
+}
+
+// drainServingConnections closes all accepted transports before waiting for
+// their handlers. Closing the raw connection unblocks both TLS handshakes and
+// writes; the authority remains owned until every handler has returned.
+func (d *Daemon) drainServingConnections() {
+	d.servingMu.Lock()
+	d.servingDraining = true
+	connections := make([]net.Conn, 0, len(d.serving))
+	for _, conn := range d.serving {
+		connections = append(connections, conn)
+	}
+	d.servingMu.Unlock()
+
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	d.servingWG.Wait()
 }
 
 func (d *Daemon) requestShutdown() {
@@ -441,8 +598,10 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	}
 	defer cancelWatch()
 	cl := newAuthenticatedConnState(secure, func() bool { return d.authority.Valid(ctx, principal) == nil })
-	defer cl.shutdown()
+	watchDone := make(chan struct{})
+	var snapshotDone chan struct{}
 	go func() {
+		defer close(watchDone)
 		select {
 		case <-invalidated:
 			// Abort a blocked TLS write as well as queued frames. A write that has
@@ -451,6 +610,13 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case <-cl.done:
 		case <-ctx.Done():
 		}
+	}()
+	defer func() {
+		cl.shutdown()
+		if snapshotDone != nil {
+			<-snapshotDone
+		}
+		<-watchDone
 	}()
 
 	ch := make(chan core.Snapshot, 4)
@@ -470,7 +636,9 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	cl.send(d.snapshot())
 
 	// Push subsequent snapshots.
+	snapshotDone = make(chan struct{})
 	go func() {
+		defer close(snapshotDone)
 		for {
 			select {
 			case <-ctx.Done():
@@ -525,9 +693,19 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 }
 
 type accessGuardContextKey struct{}
+type effectAdmissionContextKey struct{}
 
 func withAccessGuard(ctx context.Context, valid func() error) context.Context {
 	return context.WithValue(ctx, accessGuardContextKey{}, valid)
+}
+
+func withEffectAdmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, effectAdmissionContextKey{}, true)
+}
+
+func effectAdmissionHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(effectAdmissionContextKey{}).(bool)
+	return held
 }
 
 // revalidateDeferred is a no-op for internal/test callers without a streaming
@@ -671,7 +849,7 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	// first so the server is up and the thread pinned, then resolve the attach argv.
 	if a.Tab == panespec.TabAgent {
 		if d.structuredControl(spec.Session) {
-			sup, e := d.ensureSupervisorSpec(spec)
+			sup, e := d.ensureSupervisorSpec(ctx, spec)
 			if e != nil {
 				paneExit(e.Error())
 				return
@@ -686,23 +864,34 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		paneExit(err.Error())
 		return
 	}
-	inst, err := d.engine.Ensure(ctx, engine.Spec{
+	if err := revalidateDeferred(ctx); err != nil {
+		paneExit(err.Error())
+		return
+	}
+	engineSpec := engine.Spec{
 		Key: engine.Key{AgentID: a.ID, Tab: a.Tab},
 		Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent),
 		Argv: argv, Cols: a.Cols, Rows: a.Rows,
-	})
+	}
+	var inst engine.Instance
+	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
+		published, _, publishErr := d.publishPermissionRuntime(a.ID, func() (any, error) {
+			return d.engine.Ensure(ctx, engineSpec)
+		})
+		err = publishErr
+		if err == nil {
+			inst, _ = published.(engine.Instance)
+		}
+	} else {
+		inst, err = d.engine.Ensure(ctx, engineSpec)
+	}
 	if err != nil {
 		paneExit(err.Error())
 		return
 	}
-	// Permission generations identify the runtime that owns the prompt. Human
-	// editor/terminal panes are unrelated, and a structured native attach is a
-	// client of the supervisor rather than the supervisor itself.
-	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
-		if _, err := d.permissions.observe(a.ID, inst); err != nil {
-			paneExit(err.Error())
-			return
-		}
+	if inst == nil {
+		paneExit("engine returned no runtime")
+		return
 	}
 	// Replace any prior subscription on this pane id, then subscribe afresh.
 	cl.paneClose(a.PaneID)
@@ -736,6 +925,9 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
 	}
+	if err := revalidateDeferred(ctx); err != nil {
+		return err
+	}
 	ids, err := d.agentsUnder(id)
 	if err != nil {
 		return err
@@ -745,6 +937,9 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	}
 	var firstErr error
 	for _, aid := range ids {
+		if err := revalidateDeferred(ctx); err != nil {
+			return err
+		}
 		err := d.startAgent(ctx, aid)
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -767,22 +962,29 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 		return err
 	}
 	if d.structuredControl(spec.Session) {
-		_, err := d.ensureSupervisorSpec(spec)
+		_, err := d.ensureSupervisorSpec(ctx, spec)
 		return err
 	}
 	dir, env, argv, err := d.resolve(spec, panespec.TabAgent)
 	if err != nil {
 		return err
 	}
-	inst, err := d.engine.Ensure(ctx, engine.Spec{
-		Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
-		Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
+	if err := revalidateDeferred(ctx); err != nil {
+		return err
+	}
+	published, _, err := d.publishPermissionRuntime(aid, func() (any, error) {
+		return d.engine.Ensure(ctx, engine.Spec{
+			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
+			Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
+		})
 	})
 	if err != nil {
 		return err
 	}
-	_, err = d.permissions.observe(aid, inst)
-	return err
+	if _, ok := published.(engine.Instance); !ok {
+		return fmt.Errorf("engine returned no runtime")
+	}
+	return nil
 }
 
 // ensureSupervisor starts (or returns) the App Server supervisor for a structured
@@ -798,10 +1000,10 @@ func (d *Daemon) ensureSupervisor(ctx context.Context, agentID string) (*codexap
 	if err != nil {
 		return nil, err
 	}
-	return d.ensureSupervisorSpec(spec)
+	return d.ensureSupervisorSpec(ctx, spec)
 }
 
-func (d *Daemon) ensureSupervisorSpec(spec panespec.LaunchSpec) (*codexapp.Supervisor, error) {
+func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchSpec) (*codexapp.Supervisor, error) {
 	agentID := spec.Session.ID
 	if sup, ok := d.codex.Get(agentID); ok {
 		return sup, nil
@@ -813,13 +1015,19 @@ func (d *Daemon) ensureSupervisorSpec(spec panespec.LaunchSpec) (*codexapp.Super
 	if err != nil {
 		return nil, err
 	}
+	if err := revalidateDeferred(ctx); err != nil {
+		return nil, err
+	}
 	sess := spec.Session
-	sup, err := d.codex.Ensure(agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
+	published, _, err := d.publishPermissionRuntime(agentID, func() (any, error) {
+		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
+	})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.permissions.observe(agentID, sup); err != nil {
-		return nil, err
+	sup, ok := published.(*codexapp.Supervisor)
+	if !ok {
+		return nil, fmt.Errorf("App Server returned no runtime")
 	}
 	return sup, nil
 }
@@ -964,19 +1172,42 @@ func (d *Daemon) killRuntimeFor(id string) {
 	d.killRuntimeLocked(id)
 }
 
-func (d *Daemon) killRuntimeLocked(id string) {
-	d.permissions.retire(id)
-	delete(d.authPending, engine.Key{AgentID: id, Tab: panespec.TabAgent})
-	if d.engine != nil {
-		for tab := 0; tab < 3; tab++ { // agent | editor | terminal
-			d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
+// killRuntimeToken stops only the exact incarnation captured by a lifecycle
+// owner. A stale completion must never kill a replacement published under the
+// same session id.
+func (d *Daemon) killRuntimeToken(id string, token permissionRuntimeToken) bool {
+	if d.engine == nil && d.codex == nil {
+		return false
+	}
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	return d.permissions.retireTokenAnd(id, token, func() {
+		delete(d.authPending, engine.Key{AgentID: id, Tab: panespec.TabAgent})
+		if d.engine != nil {
+			for tab := 0; tab < 3; tab++ {
+				d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
+			}
 		}
-	}
-	// A structured session runs under the supervisor, not a pane. Close keeps
-	// its persisted identity so recreation/unarchive resumes the same thread.
-	if d.codex != nil {
-		d.codex.Close(id)
-	}
+		if d.codex != nil {
+			d.codex.Close(id)
+		}
+	})
+}
+
+func (d *Daemon) killRuntimeLocked(id string) {
+	d.permissions.retireAnd(id, func() {
+		delete(d.authPending, engine.Key{AgentID: id, Tab: panespec.TabAgent})
+		if d.engine != nil {
+			for tab := 0; tab < 3; tab++ { // agent | editor | terminal
+				d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
+			}
+		}
+		// A structured session runs under the supervisor, not a pane. Close keeps
+		// its persisted identity so recreation/unarchive resumes the same thread.
+		if d.codex != nil {
+			d.codex.Close(id)
+		}
+	})
 }
 
 func (d *Daemon) find(id string) (core.Session, bool) {

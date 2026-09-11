@@ -55,7 +55,7 @@ func (s *tailSource) reset() {
 //     the file start and re-reads. Because the ordinal space is shared, a resync
 //     of any source restarts them all and ordinals recount from 1; the
 //     orchestrator dedups by ordinal, so a stable prefix re-sends idempotently.
-func tail(ctx context.Context, rec Record, specs []sourceSpec, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
+func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID string, specs []sourceSpec, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
 	defer close(out)
 	if poll <= 0 {
 		poll = DefaultPollInterval
@@ -70,8 +70,12 @@ func tail(ctx context.Context, rec Record, specs []sourceSpec, afterSeq int64, p
 		sources = append(sources, s)
 	}
 	var ordinal int64
+	occurrences := newPermissionOccurrenceTracker()
+	binder := newPermissionEventBinder()
 	resyncAll := func() {
 		ordinal = 0
+		occurrences = newPermissionOccurrenceTracker()
+		binder = newPermissionEventBinder()
 		for _, s := range sources {
 			s.reset()
 		}
@@ -87,12 +91,23 @@ func tail(ctx context.Context, rec Record, specs []sourceSpec, afterSeq int64, p
 		var batch harnessproto.RuntimeEventBatch
 		for attempt := 0; attempt < 2; attempt++ {
 			batch = harnessproto.RuntimeEventBatch{}
-			if sweep(sources, &ordinal, afterSeq, &batch, resyncAll) {
+			if sweep(sources, occurrences, &ordinal, afterSeq, &batch, resyncAll) {
 				break
 			}
 			batch = harnessproto.RuntimeEventBatch{}
 		}
+		bindings := map[string]string(nil)
+		// Resolve on every sweep, including one whose events were all skipped by
+		// afterSeq. The latter seeds the exact open occurrence so a resolution
+		// appended later can retain its originally bound generation.
+		if refresh != nil {
+			if current, ok := refresh(ctx, sessionID); ok {
+				bindings = current.PermissionBindings
+			}
+		}
+		binder.seed(bindings)
 		if len(batch.Events) > 0 {
+			batch.Events = binder.bind(batch.Events, bindings)
 			batch.Runtime = rec.Runtime
 			select {
 			case out <- batch:
@@ -112,7 +127,7 @@ func tail(ctx context.Context, rec Record, specs []sourceSpec, afterSeq int64, p
 // under the shared ordinal. It returns false when a source turned out to have
 // rotated or been truncated — it calls resyncAll and stops, leaving the caller to
 // sweep again from the first source rather than emit a half-renumbered batch.
-func sweep(sources []*tailSource, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch, resyncAll func()) bool {
+func sweep(sources []*tailSource, occurrences *permissionOccurrenceTracker, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch, resyncAll func()) bool {
 	for _, s := range sources {
 		fi, err := os.Stat(s.path)
 		if err != nil {
@@ -139,7 +154,7 @@ func sweep(sources []*tailSource, ordinal *int64, afterSeq int64, batch *harness
 			resyncAll()
 			return false
 		}
-		s.offset = readFrom(s.path, s.offset, s.mapper, ordinal, afterSeq, batch)
+		s.offset = readFrom(s.path, s.offset, s.mapper, occurrences, ordinal, afterSeq, batch)
 	}
 	return true
 }
@@ -149,7 +164,7 @@ func sweep(sources []*tailSource, ordinal *int64, afterSeq int64, batch *harness
 // afterSeq to batch, and returns the new offset (past the last complete line). A
 // partial trailing line is not consumed. batch is passed in rather than returned
 // so one poll's sources accumulate into a single batch under one ordinal space.
-func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch) int64 {
+func readFrom(path string, offset int64, mapper LineMapper, occurrences *permissionOccurrenceTracker, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch) int64 {
 	f, err := os.Open(path)
 	if err != nil {
 		return offset
@@ -169,7 +184,11 @@ func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afte
 			break
 		}
 		consumed += int64(len(line))
-		for _, ev := range mapper(line) {
+		events := mapper(line)
+		if occurrences != nil {
+			events = occurrences.decorate(events)
+		}
+		for _, ev := range events {
 			*ordinal++
 			if *ordinal > afterSeq {
 				batch.Events = append(batch.Events, ev)
@@ -186,7 +205,7 @@ func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afte
 func mapEachLine(path string, mapper LineMapper) []harnessproto.RuntimeEvent {
 	var ordinal int64
 	var batch harnessproto.RuntimeEventBatch
-	readFrom(path, 0, mapper, &ordinal, 0, &batch)
+	readFrom(path, 0, mapper, nil, &ordinal, 0, &batch)
 	return batch.Events
 }
 
@@ -231,12 +250,16 @@ type PathResolver func(sessionID string) (path string, ok bool)
 type Record struct {
 	Runtime string
 	Path    string
-	// Permissions is amux's own permission journal for the session, read as a
-	// second source alongside Path. It exists because a runtime may resolve
-	// permission prompts entirely in its TUI without recording them (Claude Code
-	// does), leaving amux's hooks as the only producer of the permission_request
-	// events the `permission` verb correlates against. Empty when the runtime
-	// records its prompts itself (Codex) or none is written.
+	// PermissionBindings maps exact permission occurrence ItemIDs to generations.
+	// It contains only occurrences the daemon proved open on the exact current
+	// runtime and is refreshed at publication time. Request IDs are deliberately
+	// not keys because runtimes may reuse them across incarnations.
+	PermissionBindings map[string]string
+	// Permissions is an independently authoritative permission journal for the
+	// session, read as a second source alongside Path. Session-controlled hook
+	// observations must never be placed here: doing so would let telemetry mint
+	// answerable permission events. Empty when the runtime records prompts itself
+	// (Codex) or no authoritative producer exists (Claude).
 	Permissions string
 	// Journal is amux's own session journal (core/journal.go), read as a further
 	// source: what amux did to the session, which the runtime never records —
@@ -364,7 +387,7 @@ func StreamContext(resolve ContextResolver, poll time.Duration) func(ctx context
 			return nil, false
 		}
 		ch := make(chan harnessproto.RuntimeEventBatch, 8)
-		go tail(ctx, rec, specs, afterSeq, poll, ch)
+		go tail(ctx, rec, resolve, sessionID, specs, afterSeq, poll, ch)
 		return ch, true
 	}
 }

@@ -611,9 +611,10 @@ func HookEventNames() []string {
 }
 
 // HookPayload is the JSON Claude Code pipes to amux's hook commands on stdin — the
-// load-bearing hook wire shape. amux reads the session id and cwd for status, the
-// transcript path and event name for capture, and the tool name and input for the
-// permission journal. Defined here (the Claude surface) and consumed by the
+// load-bearing hook wire shape. Identity, cwd, and transcript path are retained
+// for compatibility but ignored as authority; activity uses only the configured
+// state, capture uses the event name, and permission diagnostics use tool/input.
+// Defined here (the Claude surface) and consumed by the
 // `amux agent hook`/`capture`/`permission` handlers, so a contract test can pin
 // the field names against a recorded payload.
 type HookPayload struct {
@@ -637,12 +638,12 @@ type StatusLinePayload struct {
 	} `json:"model"`
 }
 
-// permissionHooks maps each Claude Code hook event that moves a permission
-// prompt's lifecycle to the `amux agent permission` verb it runs. Claude answers
-// its prompts in the TUI and writes none of them to the transcript, so this table
-// is the entire producer of the permission_request / permission_resolved events
-// the runtime-events stream carries and the `permission` steering verb correlates
-// against (docs/remote-provider-sessions.md §4.5):
+// permissionHooks maps each Claude Code hook event that appears to move a
+// permission prompt's lifecycle to the diagnostic `amux agent permission`
+// report it runs. Claude writes no prompt to its transcript, and these hooks are
+// the entire historical producer. Because the session can fabricate the same
+// report, the daemon keeps it outside runtimeevents and never treats it as
+// answerable approval authority:
 //
 //   - PermissionRequest fires just before the prompt is drawn — the request opens.
 //   - PostToolUse means the tool actually ran, so the prompt gating it was allowed.
@@ -650,9 +651,8 @@ type StatusLinePayload struct {
 //   - Stop / SessionEnd prove no prompt can still be up (the turn ended), so
 //     anything still open is retired without claiming to know the answer.
 //
-// A Claude release that renames or drops one of these degrades honestly: the
-// request is opened but never resolved by that path, and the turn boundary still
-// clears it. The contract test pins the set so the drift is visible.
+// A Claude release that renames or drops one degrades diagnostic fidelity only.
+// The contract test pins the set so drift is visible.
 var permissionHooks = []struct{ event, verb string }{
 	{"PermissionRequest", PermissionVerbRequest},
 	{"PostToolUse", core.PermissionAllow},
@@ -681,7 +681,7 @@ func PermissionHookVerb(event string) (verb string, ok bool) {
 }
 
 // PermissionHookEvents returns, in order, the Claude hook events that drive the
-// permission journal.
+// diagnostic permission observation journal.
 func PermissionHookEvents() []string {
 	out := make([]string, len(permissionHooks))
 	for i, ph := range permissionHooks {
@@ -717,6 +717,18 @@ func SummarizeToolInput(input json.RawMessage) string {
 // Distinct from hookEvents, which drive activity state.
 var captureEvents = []string{
 	"UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop", "PreCompact", "SessionEnd",
+}
+
+// CaptureHookEvent reports whether event is a Claude hook on which amux takes a
+// transcript snapshot. The daemon uses the same closed set when validating an
+// authenticated capture report.
+func CaptureHookEvent(event string) bool {
+	for _, candidate := range captureEvents {
+		if event == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // ProjectSettingsLocalPath is the per-directory Claude Code settings file amux
@@ -805,18 +817,18 @@ func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any)
 		root["hooks"] = hooks
 	}
 	// Build the amux commands per event: the status hook (activity state), the
-	// transcript-snapshot hook on the capture events, and the permission-journal
-	// hook on the events that move a prompt's lifecycle. Some events (Stop,
+	// transcript-snapshot hook on the capture events, and the diagnostic
+	// permission-observation hook on prompt lifecycle events. Some events (Stop,
 	// SessionEnd, UserPromptSubmit, PostToolUse) get more than one.
 	amuxCmds := map[string][]string{}
 	for _, he := range hookEvents {
 		amuxCmds[he.event] = append(amuxCmds[he.event], amuxPath+" agent hook "+he.state)
 	}
 	for _, ev := range captureEvents {
-		amuxCmds[ev] = append(amuxCmds[ev], amuxPath+" agent capture")
+		amuxCmds[ev] = append(amuxCmds[ev], amuxPath+" agent capture --hook")
 	}
 	for _, ph := range permissionHooks {
-		amuxCmds[ph.event] = append(amuxCmds[ph.event], amuxPath+" agent permission "+ph.verb)
+		amuxCmds[ph.event] = append(amuxCmds[ph.event], amuxPath+" agent permission "+ph.verb+" --hook")
 	}
 	events := make([]string, 0, len(amuxCmds))
 	for ev := range amuxCmds {

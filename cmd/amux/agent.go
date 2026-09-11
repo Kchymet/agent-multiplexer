@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
+	"amux/internal/sessionreport"
 )
 
 // cmdAgent namespaces the commands an agent runs to describe *itself* to the
@@ -22,29 +24,23 @@ import (
 // management verbs (workgroup/do), which act on some other agent by id,
 // these are scoped to the caller and resolve its own identity implicitly.
 //
-// Identity today is inferred, not authenticated: from the Claude hook payload on
-// stdin, then $AMUX_SESSION_ID, then the tmux window (see cmdAgentStatus and
-// cmdName). Per-agent identity (authn + authz) is planned so these commands can
-// be scoped to the agent that actually issued them.
+// Report identity comes only from the fixed authenticated sessionrpc context.
+// Hook stdin and environment values are untrusted telemetry and cannot select a
+// subject, runtime, path, journal, or permission target.
 func cmdAgent(args []string) error {
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
 	}
 	switch sub {
-	case "status", "hook":
-		// "hook" is the Claude-settings binding name; "status" is the general
-		// verb. Both record activity state; they differ only in where identity
-		// comes from (stdin for hook, stdin/env/flag for status).
-		return cmdAgentStatus(args[1:])
+	case "status":
+		return cmdAgentStatus(args[1:], false)
+	case "hook":
+		return cmdAgentStatus(args[1:], true)
 	case "capture":
-		// Claude-hook binding that snapshots the conversation transcript (identity
-		// and transcript path come from the hook JSON on stdin).
-		return cmdAgentCapture()
+		return cmdAgentCapture(args[1:])
 	case "permission":
-		// Claude-hook binding that journals the runtime's permission prompts, which
-		// the transcript never records (identity and tool come from the hook JSON on
-		// stdin).
+		// Claude-hook binding for nonauthoritative permission diagnostics.
 		return cmdAgentPermission(args[1:])
 	case "model":
 		// Claude status-line binding: record the current model, then faithfully
@@ -54,6 +50,10 @@ func cmdAgent(args []string) error {
 		// List every agent session on the machine (Claude Code + Codex) so an agent
 		// can reason across conversations (not scoped to the caller — shared context).
 		return cmdAgentSessions(args[1:])
+	case "events":
+		// Authenticated bounded history. The daemon derives and opens the source;
+		// this client never receives a transcript path.
+		return cmdAgentEvents(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
 	case "done":
@@ -73,67 +73,91 @@ func cmdAgent(args []string) error {
 func agentUsage() {
 	fmt.Fprint(os.Stderr, `amux agent — commands an agent runs to describe itself to the harness
 
-Scoped to the calling agent: they resolve the caller's own identity (from the
-Claude hook payload on stdin, else $AMUX_SESSION_ID, else the tmux window)
-rather than taking an id like the management verbs. Telemetry hooks are
-best-effort so they never disrupt the agent; control verbs such as name and done
-return nonzero when the requested durable change was not made.
+Scoped to the calling agent by the fixed authenticated session context. Stdin,
+environment variables, UUIDs, and paths never select identity or storage.
+Generated hook forms are best-effort so telemetry never disrupts the agent;
+explicit report and control commands return nonzero when the daemon did not
+confirm the requested operation.
 
 usage: amux agent <command>
 
-  status <state>     report activity state: idle | ready | waiting | running
-                     identity: stdin session_id, else $AMUX_SESSION_ID,
-                     else --session <id>
-  hook <state>       Claude-hook binding of "status" (identity from the hook
-                     JSON on stdin); amux wires this into Claude's settings.json
-  permission <verb>  Claude-hook binding that journals permission prompts:
-                     request | allow | deny | clear. amux wires this into
-                     Claude's settings.json; the journal is what gives a remote
-                     orchestrator a request_id to answer.
-  model [--statusline]  report the runtime's current model. Claude's installed
-                     status-line wrapper invokes this automatically and preserves
-                     any pre-existing status-line command.
+  status <state>     strictly report activity: idle | ready | waiting | running
+  hook <state>       nondisruptive Claude-hook activity binding
+  permission <verb>  report a diagnostic permission observation:
+                     request | allow | deny | clear. Generated hooks add --hook.
+                     These reports never create answerable approval rights.
+  capture <event>    request a daemon-owned transcript snapshot; generated
+                     Claude hooks use capture --hook and supply only the event
+  model <model>      strictly report the runtime's current model
+  model --statusline  report the model from Claude's status-line JSON. Claude's
+                     installed status-line wrapper invokes this automatically
+                     and preserves any pre-existing status-line command.
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
   done               report the task complete: archive this agent off the active
                      rail (reversible — amux workgroup unarchive <id>).
-                     identity: $AMUX_WORKGROUP, else --id <id>
-  sessions [--json]  list every agent session on this machine — Claude Code and
-                     Codex, tagged by harness — most recent first, so you can
-                     reason about work that spans conversations. Read a transcript
-                     with your normal file tools; --json emits the full records.
+	                     identity comes only from the fixed session context
+	  sessions [--json]  list host-visible agent sessions (legacy host diagnostic)
+	  events [<id>]      read one bounded normalized event page through authenticated
+	                     session RPC (--after/--cursor, --json)
 
 Further self-reporting channels (topic, progress, attention, fields) are
-specified in docs/agent-protocol.md and planned. Per-agent identity (authn +
-authz) is planned to properly scope every command in this namespace.
+specified in docs/agent-protocol.md and planned.
 `)
 }
 
 // cmdAgentModel consumes Claude Code's status-line JSON, records its current
 // model, and optionally runs the status-line command that amux wrapped. A status
 // line is the only Claude callback whose payload follows `/model` changes; normal
-// hooks carry the model only at SessionStart. Like all self-reporting commands,
-// failures are swallowed so telemetry can never interrupt the runtime.
+// hooks carry the model only at SessionStart. Failures are swallowed only in
+// --statusline mode; an explicit model report returns its exact failure.
 func cmdAgentModel(args []string) error {
-	var forward64 string
+	var forward64, explicitModel string
+	statusLine := false
+	for _, arg := range args {
+		if arg == "--statusline" {
+			statusLine = true
+		}
+	}
 	for i := 0; i < len(args); i++ {
 		switch {
-		case args[i] == "--forward-base64" && i+1 < len(args):
+		case args[i] == "--statusline":
+			// Hook mode was detected before parsing so malformed generated
+			// invocations remain nondisruptive regardless of flag order.
+		case args[i] == "--forward-base64":
+			if i+1 >= len(args) {
+				return hookResult(statusLine, fmt.Errorf("amux agent model: --forward-base64 requires a value"))
+			}
 			forward64 = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--forward-base64="):
 			forward64 = strings.TrimPrefix(args[i], "--forward-base64=")
+		case strings.HasPrefix(args[i], "--"):
+			return hookResult(statusLine, fmt.Errorf("amux agent model: unknown option %q", args[i]))
+		case explicitModel == "":
+			explicitModel = args[i]
+		default:
+			return hookResult(statusLine, fmt.Errorf("amux agent model: unexpected argument %q", args[i]))
 		}
 	}
-
-	var input []byte
-	if stdinPiped() {
-		input, _ = io.ReadAll(os.Stdin)
+	if !statusLine {
+		if forward64 != "" {
+			return fmt.Errorf("amux agent model: --forward-base64 requires --statusline")
+		}
+		if strings.TrimSpace(explicitModel) == "" {
+			return fmt.Errorf("amux agent model: model is required")
+		}
+		return restrictedReport(sessionreport.Model, map[string]string{sessionreport.FieldModel: explicitModel})
 	}
+	if explicitModel != "" {
+		return nil
+	}
+
+	input, overflow, readErr := readBoundedHookInput()
 	var payload claudecfg.StatusLinePayload
-	_ = json.Unmarshal(input, &payload)
-	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
-	_ = core.WriteRuntimeModel(sessionID, payload.Model.ID)
+	if readErr == nil && !overflow && decodeHookJSON(input, &payload) == nil {
+		_ = restrictedReport(sessionreport.Model, map[string]string{sessionreport.FieldModel: payload.Model.ID})
+	}
 
 	if forward64 == "" {
 		return nil
@@ -143,7 +167,10 @@ func cmdAgentModel(args []string) error {
 		return nil
 	}
 	cmd := exec.Command("sh", "-c", string(forward))
-	cmd.Stdin = strings.NewReader(string(input))
+	// readBoundedHookInput consumes at most limit+1. If the input was oversized,
+	// stitch that prefix back to the unread tail so the wrapped status command
+	// receives the exact original byte stream without unbounded buffering.
+	cmd.Stdin = io.MultiReader(bytes.NewReader(input), os.Stdin)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
@@ -151,111 +178,104 @@ func cmdAgentModel(args []string) error {
 	return nil
 }
 
-// cmdAgentStatus records the agent's current activity state for the daemon's
-// poll loop to surface in the rail. It is the general form of the Claude-hook
-// binding ("amux agent hook <state>"): the state word is the first argument, and
-// the session identity + cwd come from, in order, a Claude hook JSON payload on
-// stdin, then $AMUX_SESSION_ID, then a --session flag. It must never disrupt the
-// agent, so it swallows all errors and exits 0.
-func cmdAgentStatus(args []string) error {
-	var state, sessionFlag string
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "--session" && i+1 < len(args):
-			sessionFlag = args[i+1]
-			i++
-		case strings.HasPrefix(args[i], "--session="):
-			sessionFlag = strings.TrimPrefix(args[i], "--session=")
-		case state == "":
-			state = args[i]
+// cmdAgentStatus reports activity through fixed-context RPC. Explicit status
+// returns errors; the generated hook form validates bounded JSON but ignores its
+// identity/path fields and remains intentionally nondisruptive.
+func cmdAgentStatus(args []string, hook bool) error {
+	if len(args) != 1 {
+		return hookResult(hook, fmt.Errorf("activity state is required"))
+	}
+	if hook {
+		var payload claudecfg.HookPayload
+		if err := readHookJSON(&payload); err != nil {
+			return nil
 		}
 	}
-	if state == "" {
-		return nil
-	}
-
-	// Claude Code pipes its hook event as JSON on stdin (the claudecfg.HookPayload
-	// shape); other callers leave it empty. Only read when stdin is not a terminal,
-	// or a manually-typed `amux agent status running` would block on the tty
-	// forever. We use just session_id and cwd here.
-	var payload claudecfg.HookPayload
-	if stdinPiped() {
-		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
-			_ = json.Unmarshal(b, &payload)
-		}
-	}
-
-	// Explicit override wins, then the harness-set env, then the hook payload
-	// (see docs/agent-protocol.md §3). In practice these agree when present.
-	sessionID := firstNonEmpty(sessionFlag, os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
-	cwd := payload.Cwd
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	_ = core.WriteHookState(sessionID, state, cwd)
-	return nil
+	return hookResult(hook, restrictedReport(sessionreport.Activity,
+		map[string]string{sessionreport.FieldState: args[0]}))
 }
 
-// cmdAgentPermission journals the lifecycle of one permission prompt, the signal
-// Claude Code's transcript does not carry: the prompt opens in the TUI, the human
-// answers, and nothing reaches disk. amux's hooks are the only producer, so this
-// is what lets the runtime-events stream publish a `permission_request` with a
-// request_id and the daemon refuse a `permission` verb that names a prompt which
-// has since been answered (docs/remote-provider-sessions.md §4.5).
+// cmdAgentPermission reports the lifecycle a Claude hook claims it observed.
+// These are diagnostics only: the session can fabricate an identical report, so
+// neither authentication nor generation correlation can turn one into an
+// answerable permission occurrence.
 //
 // The verbs mirror the hook events claudecfg binds (claudecfg.permissionHooks):
 // `request` opens one, `allow`/`deny` close it with that decision, and `clear`
 // retires whatever is still open at a turn boundary. Identity and the tool being
-// asked about come from the hook JSON on stdin. Like every `amux agent` verb it
-// must never disrupt the agent, so it swallows all errors and exits 0.
+// asked about come from hook JSON. Generated --hook calls swallow errors;
+// explicit diagnostics preserve validation and transport failures.
 func cmdAgentPermission(args []string) error {
-	verb := ""
-	if len(args) > 0 {
-		verb = args[0]
+	if len(args) == 0 {
+		return fmt.Errorf("amux agent permission: verb is required")
 	}
-	if verb == "" {
-		return nil
-	}
-
-	var payload claudecfg.HookPayload
-	if stdinPiped() {
-		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
-			_ = json.Unmarshal(b, &payload)
+	verb := args[0]
+	// Settings generated before authenticated reports did not include --hook.
+	// Preserve only that exact stdin-fed shape as nondisruptive compatibility.
+	hook := len(args) == 1 && stdinPiped()
+	// Generated hook invocations must stay nondisruptive even when a future
+	// producer inserts an invalid flag before the exact --hook spelling.
+	for _, arg := range args[1:] {
+		if arg == "--hook" {
+			hook = true
+			break
 		}
 	}
-	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
-	if sessionID == "" {
-		return nil // not an identifiable session: nothing to journal against
+	fields := make(map[string]string)
+	for i := 1; i < len(args); i++ {
+		name, value, consumed, err := reportFlag(args, i)
+		if err != nil {
+			return hookResult(hook, err)
+		}
+		if name == "hook" {
+			hook = true
+		} else {
+			fields[name] = value
+		}
+		i += consumed
 	}
-
+	var payload claudecfg.HookPayload
+	if hook {
+		if err := readHookJSON(&payload); err != nil {
+			return nil
+		}
+		if expected, ok := claudecfg.PermissionHookVerb(payload.HookEventName); !ok || expected != verb {
+			return nil
+		}
+		fields[sessionreport.FieldTool] = payload.ToolName
+	}
+	var reportVerb string
 	switch verb {
 	case claudecfg.PermissionVerbRequest:
-		_ = core.AppendPermission(sessionID, core.PermissionRecord{
-			RequestID: core.NewPermissionID(),
-			Tool:      payload.ToolName,
-			Action:    claudecfg.SummarizeToolInput(payload.ToolInput),
-			// The offered options are what amux can actually deliver to the prompt
-			// (agent.Keys), not every choice the TUI draws: a consumer must not be
-			// shown a button the daemon has no keystroke for.
-			Options: []string{core.PermissionAllow, core.PermissionDeny},
-		})
+		reportVerb = sessionreport.PermissionRequest
+		if hook {
+			fields[sessionreport.FieldAction] = claudecfg.SummarizeToolInput(payload.ToolInput)
+		}
+		if fields[sessionreport.FieldRequestID] == "" {
+			fields[sessionreport.FieldRequestID] = core.NewPermissionID()
+		}
+		options, _ := json.Marshal([]string{core.PermissionAllow, core.PermissionDeny})
+		fields[sessionreport.FieldOptions] = string(options)
 	case core.PermissionAllow, core.PermissionDeny:
-		// These hooks fire on every tool call, prompted or not; resolving nothing is
-		// the common case and not an error.
-		_, _ = core.ResolvePermission(sessionID, payload.ToolName, verb)
+		reportVerb = sessionreport.PermissionResolved
+		fields[sessionreport.FieldDecision] = verb
 	case claudecfg.PermissionVerbClear:
-		_ = core.ClearPermissions(sessionID)
+		reportVerb = sessionreport.PermissionClear
+		if hook {
+			delete(fields, sessionreport.FieldTool)
+		}
+		fields[sessionreport.FieldDecision] = core.PermissionCleared
+	default:
+		return hookResult(hook, fmt.Errorf("unknown permission observation verb %q", verb))
 	}
-	return nil
+	return hookResult(hook, restrictedReport(reportVerb, fields))
 }
 
 // cmdAgentDone is the terminal self-report: an agent declares its task finished
 // and archives its own session so it drops off the active rail. It is the
 // self-scoped form of the management verb `amux workgroup archive <id>` —
-// instead of taking an id, it resolves the caller's own store id (the one the
-// harness sets in the agent's environment as $AMUX_WORKGROUP, see
-// wsops.AgentCommand), so a one-off agent that has integrated its artifact can
-// mark itself done without knowing its own id.
+// instead of taking an id, it resolves the caller's own store id solely from the
+// fixed authenticated session context.
 //
 // Unlike telemetry hooks, this durable control operation must report failure:
 // exit 0 means the daemon confirmed archival. Archiving is reversible (`amux
@@ -280,12 +300,11 @@ func cmdAgentDone(args []string) error {
 }
 
 // selfAgentID resolves the store id of the agent issuing a self-scoped control
-// report (currently `done`). Precedence: an explicit --id flag, then the
-// $AMUX_WORKGROUP the harness sets on every launched agent, then its legacy
-// $AMUX_WORKSPACE alias. Empty when the caller isn't an amux-launched agent.
+// report (currently `done`). It accepts no caller identity: the fixed regular
+// session context is the only source of the authenticated subject.
 //
-// This is the *store* session id (used by the archive/rename actions), distinct
-// from the Claude session id that the activity-report verbs (status/hook) key on.
+// This is the *store* subject id (used by archive/rename), distinct from the
+// stored runtime id paired with it for activity/model/capture records.
 func selfAgentID(args []string, load func() (access.SessionContext, error)) (string, error) {
 	if len(args) != 0 {
 		return "", fmt.Errorf("self completion accepts no id; identity comes only from %s", core.SessionContextPath())
@@ -297,24 +316,87 @@ func selfAgentID(args []string, load func() (access.SessionContext, error)) (str
 	return context.SubjectID, nil
 }
 
-// cmdAgentCapture snapshots the agent's Claude transcript into amux's own
-// transcript dir, keyed by Claude's session id, on each hook event that carries a
-// transcript_path (see claudecfg.captureEvents). This is a diagnostic for the
-// "restarting" bug: it gives us a durable copy of the conversation, captured at
-// every turn/tool boundary, to compare against the transcript Claude Code
-// persists itself — so we can tell whether Claude's own copy was written and
-// lost, or never written. Like status reporting, it must never disrupt the agent,
-// so it swallows all errors and exits 0.
-func cmdAgentCapture() error {
-	var payload claudecfg.HookPayload
-	if stdinPiped() {
-		if b, err := io.ReadAll(os.Stdin); err == nil && len(b) > 0 {
-			_ = json.Unmarshal(b, &payload)
+// cmdAgentCapture asks the daemon to snapshot the authenticated subject's
+// authoritative Claude transcript on a known hook event. Hook UUID/path fields
+// are ignored; the daemon derives and securely opens the source. This is a
+// diagnostic for the "restarting" bug: it gives us a durable copy of the
+// conversation at turn/tool boundaries to compare against the transcript Claude
+// Code persists itself. Generated --hook use is nondisruptive; an explicit
+// capture reports errors.
+func cmdAgentCapture(args []string) error {
+	// The empty stdin-fed spelling is retained for settings generated before
+	// --hook made the nondisruptive mode explicit.
+	hook := (len(args) == 1 && args[0] == "--hook") || (len(args) == 0 && stdinPiped())
+	event := ""
+	if hook {
+		var payload claudecfg.HookPayload
+		if err := readHookJSON(&payload); err != nil {
+			return nil
+		}
+		event = payload.HookEventName
+	} else if len(args) == 1 {
+		event = args[0]
+	} else {
+		return fmt.Errorf("amux agent capture: event is required")
+	}
+	return hookResult(hook, restrictedReport(sessionreport.Capture,
+		map[string]string{sessionreport.FieldEvent: event}))
+}
+
+func hookResult(hook bool, err error) error {
+	if hook {
+		return nil
+	}
+	return err
+}
+
+func readBoundedHookInput() ([]byte, bool, error) {
+	if !stdinPiped() {
+		return nil, false, fmt.Errorf("hook input is required")
+	}
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, int64(sessionreport.MaxHookInputBytes)+1))
+	return b, len(b) > sessionreport.MaxHookInputBytes, err
+}
+
+func readHookJSON(dst any) error {
+	b, overflow, err := readBoundedHookInput()
+	if err != nil {
+		return err
+	}
+	if overflow {
+		return fmt.Errorf("hook input exceeds %d bytes", sessionreport.MaxHookInputBytes)
+	}
+	return decodeHookJSON(b, dst)
+}
+
+func decodeHookJSON(b []byte, dst any) error {
+	if len(b) == 0 || json.Unmarshal(b, dst) != nil {
+		return fmt.Errorf("invalid hook JSON")
+	}
+	return nil
+}
+
+func reportFlag(args []string, i int) (name, value string, consumed int, err error) {
+	arg := args[i]
+	if arg == "--hook" {
+		return "hook", "", 0, nil
+	}
+	for flag, field := range map[string]string{
+		"--request-id": sessionreport.FieldRequestID,
+		"--tool":       sessionreport.FieldTool,
+		"--action":     sessionreport.FieldAction,
+	} {
+		if arg == flag {
+			if i+1 >= len(args) {
+				return "", "", 0, fmt.Errorf("%s requires a value", flag)
+			}
+			return field, args[i+1], 1, nil
+		}
+		if strings.HasPrefix(arg, flag+"=") {
+			return field, strings.TrimPrefix(arg, flag+"="), 0, nil
 		}
 	}
-	sessionID := firstNonEmpty(os.Getenv("AMUX_SESSION_ID"), payload.SessionID)
-	_ = core.CaptureTranscript(sessionID, payload.TranscriptPath, payload.HookEventName, os.Getenv("AMUX_WORKGROUP"))
-	return nil
+	return "", "", 0, fmt.Errorf("unknown permission observation argument %q", arg)
 }
 
 // sessionRow is one agent conversation for `amux agent sessions`, merging the

@@ -59,6 +59,7 @@ func testDaemon(t *testing.T) *Daemon {
 	d.engine = local.New()
 	t.Cleanup(d.engine.Shutdown)
 	d.launchSpec = testLaunchSpecResolver
+	d.permissionBaseline = func(string) ([]string, error) { return nil, nil }
 	d.resolve = func(spec panespec.LaunchSpec, tab int) (string, []string, []string, error) {
 		return "", nil, []string{"sh", "-c", "printf MARKER; sleep 30"}, nil
 	}

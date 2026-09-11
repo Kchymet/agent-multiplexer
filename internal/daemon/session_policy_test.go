@@ -12,8 +12,14 @@ import (
 )
 
 type fakePolicyStore struct {
-	sessions map[string]store.Session
-	repos    map[string]store.Repo
+	sessions          map[string]store.Session
+	repos             map[string]store.Repo
+	coordinatorRepos  map[string][]string
+	grantsInitialized map[string]bool
+}
+
+func (f *fakePolicyStore) CoordinatorRepoGrants(id string) ([]string, bool, error) {
+	return append([]string(nil), f.coordinatorRepos[id]...), f.grantsInitialized[id], nil
 }
 
 func (f *fakePolicyStore) GetSession(id string) (store.Session, bool, error) {
@@ -77,6 +83,8 @@ func policyFixture() *fakePolicyStore {
 			"web":    {Name: "web", Source: "/host/repos/web", GitDir: "/secret/repos/web.git"},
 			"hidden": {Name: "hidden", Source: "/host/repos/hidden", GitDir: "/secret/repos/hidden.git"},
 		},
+		coordinatorRepos:  map[string][]string{"wg1": {"api", "web"}, "wg2": {"api"}},
+		grantsInitialized: map[string]bool{"wg1": true, "wg2": true},
 	}
 }
 
@@ -102,14 +110,75 @@ func TestDaemonAccessResolverUsesCurrentStoredRoleAndGrant(t *testing.T) {
 	// effect without retaining the old Resource or repository ceiling.
 	s := db.sessions["wg1"]
 	s.Archived = true
-	s.Repo = ""
 	db.sessions["wg1"] = s
+	db.coordinatorRepos["wg1"] = nil
 	if yes, err := r.RepoGranted(context.Background(), "wg1", "api"); err != nil || yes {
 		t.Fatalf("RepoGranted after archive = %v, %v", yes, err)
 	}
 	got, ok, err = r.Lookup(context.Background(), "wg1")
 	if err != nil || !ok || !got.Archived {
 		t.Fatalf("Lookup archived = %+v, %v, %v", got, ok, err)
+	}
+}
+
+func TestDaemonAccessResolverNeverDerivesCoordinatorGrantFromChildren(t *testing.T) {
+	isolateHome(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(store.Repo{Name: "api"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []store.Session{
+		{ID: "blank", Scope: store.ScopeWork},
+		{ID: "blank-child", RootID: "blank", Repo: "api"},
+		{ID: "empty", Scope: store.ScopeWork},
+		{ID: "empty-child", RootID: "empty", Repo: "api"},
+	} {
+		if err := db.PutSession(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SetCoordinatorRepoGrants("empty", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := newDaemonAccessResolver()
+	for _, coordinator := range []string{"blank", "empty"} {
+		granted, err := resolver.RepoGranted(context.Background(), coordinator, "api")
+		if err != nil {
+			t.Fatalf("RepoGranted(%s): %v", coordinator, err)
+		}
+		if granted {
+			t.Fatalf("coordinator %s inherited api from child history", coordinator)
+		}
+		rows, err := resolver.scopedRepoRows(context.Background(), access.Principal{
+			Kind: access.SubjectSession, SubjectID: coordinator,
+		})
+		if err != nil {
+			t.Fatalf("scopedRepoRows(%s): %v", coordinator, err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("coordinator %s saw repos from child history: %+v", coordinator, rows)
+		}
+	}
+
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCoordinatorRepoGrants("empty", []string{"api"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if granted, err := resolver.RepoGranted(context.Background(), "empty", "api"); err != nil || !granted {
+		t.Fatalf("explicit host grant was not observed: granted=%v err=%v", granted, err)
 	}
 }
 

@@ -1,11 +1,17 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/core"
 )
 
@@ -64,5 +70,202 @@ func TestSendPreservesOrder(t *testing.T) {
 		if a.Action != core.ActionPaneInput || len(a.Data) != 1 || a.Data[0] != byte(i) {
 			t.Fatalf("frame %d out of order: got action=%q data=%v", i, a.Action, a.Data)
 		}
+	}
+}
+
+func TestNextRejectsOversizedFrameAndRetiresConnection(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	go func() {
+		_, _ = srv.Write(bytes.Repeat([]byte("x"), clientFrameLimit+1))
+	}()
+	if _, err := c.Next(); !errors.Is(err, ErrClientFrameTooLarge) {
+		t.Fatalf("oversized frame error = %v", err)
+	}
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("oversized frame left client connection reusable")
+	}
+}
+
+func TestNextContextCancellationInterruptsRead(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, err := c.NextContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled read error = %v", err)
+	}
+	select {
+	case <-c.done:
+	default:
+		t.Fatal("interrupted partial-frame read left client connection reusable")
+	}
+}
+
+func TestNextPreservesPaneReset(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	go func() {
+		_ = json.NewEncoder(srv).Encode(core.PaneFrame{Type: core.FramePaneReset, PaneID: "pane"})
+	}()
+	frame, err := c.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Pane == nil || frame.Pane.Type != core.FramePaneReset || frame.Pane.PaneID != "pane" {
+		t.Fatalf("pane reset decoded as %+v", frame)
+	}
+}
+
+func TestPaneInputContextInterruptsBlockedWrite(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if err := c.PaneInputContext(ctx, "pane", []byte("blocked")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled write error = %v", err)
+	}
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("interrupted write did not retire client connection")
+	}
+}
+
+func TestCloseInterruptsBlockedNext(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := newClient(cli)
+	defer srv.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.Next()
+		result <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("blocked Next returned no error after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not interrupt blocked Next")
+	}
+}
+
+type observedWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *observedWriteConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	return c.Conn.Write(p)
+}
+
+func TestCloseJoinsBlockedWriter(t *testing.T) {
+	srv, raw := net.Pipe()
+	cli := &observedWriteConn{Conn: raw, entered: make(chan struct{})}
+	c := newClient(cli)
+	defer srv.Close()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- c.PaneInputContext(context.Background(), "pane", []byte("blocked"))
+	}()
+	<-cli.entered
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-c.writerDone:
+	default:
+		t.Fatal("Close returned before the blocked writer exited")
+	}
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("blocked write returned no error after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked write did not return after Close")
+	}
+}
+
+func TestAuthenticateClientContextCancellationInterruptsPostTLSRead(t *testing.T) {
+	authority, err := access.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.EnsureHost(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := access.LoadCredential(authority.CredentialDir(access.SubjectHost, access.LocalHostSubject))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConfig, err := authority.ServerTLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server, rawClient := net.Pipe()
+	secureServer := tls.Server(server, serverConfig)
+	defer secureServer.Close()
+	handshake := make(chan error, 1)
+	go func() { handshake <- secureServer.Handshake() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type authResult struct {
+		client *Client
+		err    error
+	}
+	result := make(chan authResult, 1)
+	go func() {
+		client, err := authenticateClientContext(ctx, rawClient, credential)
+		result <- authResult{client: client, err: err}
+	}()
+	select {
+	case err := <-handshake:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS handshake did not complete")
+	}
+
+	// The server deliberately withholds the challenge after TLS. Cancellation
+	// must close that read and join authentication instead of waiting for the
+	// fixed authentication deadline.
+	cancel()
+	select {
+	case got := <-result:
+		if got.client != nil {
+			got.client.Close()
+			t.Fatal("canceled authentication returned a usable client")
+		}
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("canceled authentication error = %v", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("post-TLS challenge read ignored context cancellation")
 	}
 }

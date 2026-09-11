@@ -107,6 +107,10 @@ control support from the mere existence of a transcript:
     `request_id` the `permission` verb can quote back and the daemon can match to
     an open prompt (§3.1, §4.5). A runtime that streams a transcript but records
     no answerable prompt reports `permission:false`.
+    Claude PTY currently reports `permission:false`: its hooks are
+    session-controlled observations, not runtime-native proof of a prompt.
+    Codex structured control remains answerable through supervisor-owned
+    approvals.
 
 ### 2.2 Default sessions: the console, a workgroup's coordinator, a repo's home
 
@@ -267,24 +271,19 @@ access, still the daemon's choice of delivery mechanism, still rejectable.
 | `prompt` | `text` | Deliver a new user turn to the session's agent. If the agent is not running, the daemon MAY start it with `text` as its initial prompt (the `start` path with a prompt) rather than failing, and MAY answer before that start finishes. |
 | `interject` | `text` | Deliver text to the agent *while a turn is running* — a steer, not a new turn. |
 | `stop` | — | Interrupt the current turn **without killing the session**. The agent stays alive and ready for the next verb; this is not `kill`. |
-| `permission` | `request_id`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` echoes that event's `request_id`; `decision` is `allow` or `deny`; `reason` is optional free text. |
+| `permission` | `request_id`, `runtime_generation`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` and the opaque `runtime_generation` echo that exact event; `decision` is `allow` or `deny`; `reason` is optional free text. |
 
 `id` names the target session for all four, and is required. `decision` accepts
 exactly `allow` or `deny` — a daemon MUST reject any other value rather than
 guess at a permission prompt.
 
-`request_id` is correlated, not decorative. The daemon matches it against the
-requests the runtime actually has open — the ones it published as
-`permission_request` events (§4.5) — and refuses an id that names none of them
-with `ok:false, error:"permission: no pending request …"`. That refusal is the
-point of the field: if the turn moves on between the orchestrator seeing a prompt
-and its `permission` arriving, the keystroke would otherwise land on a *different*
-prompt, allowing or denying an action nobody decided on. A refused verb is
-recoverable — re-read the stream and answer the request that is open now.
-
-An **empty** `request_id` still answers whatever prompt is open. That is the
-older, uncorrelated behavior, kept as the explicit way to say "whatever it is
-asking, allow it"; a caller that can name the request should.
+`request_id` and `runtime_generation` are correlated authority, not decorative.
+The daemon atomically consumes that request from that exact live runtime and
+refuses a missing, stale, already-consumed, or no-longer-open pair. If the runtime
+is replaced between publication and decision, its new generation cannot inherit
+the old request id. There is no missing-generation or empty-request fallback to
+"whatever is current". A refused verb is recoverable only by reading and
+answering a newly published request carrying its current pair.
 
 Steering is asynchronous by nature: writing a prompt to a running agent does not
 wait for the turn it starts. A successful steering result is therefore
@@ -320,8 +319,9 @@ writing to the agent's PTY: `prompt`/`interject` queue an atomic text-and-submit
 sequence. Claude text uses bracketed paste to preserve newlines, followed by a
 100ms wait after the paste write completes, then Enter; this prevents adjacent
 commands from mixing during the wait. Startup settling also occupies this FIFO.
-`stop` sends the runtime's own interrupt key, and `permission` sends the
-keystrokes that runtime's permission prompt expects. That is an implementation
+`stop` sends the runtime's own interrupt key. For a runtime whose capability is
+true, `permission` uses its authenticated native control mechanism (Codex's
+structured supervisor today). That is an implementation
 detail of the daemon, not the wire — the orchestrator sends the same four verbs
 regardless of how a given runtime is driven, and a daemon delivering them over a
 runtime's API instead is still conforming.
@@ -342,7 +342,7 @@ runtime means describing its keys rather than editing the delivery path. Today:
 
 | | submit (`prompt`/`interject`) | `stop` | `permission` allow | `permission` deny |
 | --- | --- | --- | --- | --- |
-| Claude Code | `Enter` (queued when a turn is running) | `Ctrl+C` | `Enter` on the focused **Yes** | `Esc` (its documented decline) |
+| Claude Code | `Enter` (queued when a turn is running) | `Ctrl+C` | local attached pane only; not advertised remotely | local attached pane only; not advertised remotely |
 | Codex | `Enter` (steers the running turn) | `Esc` (`chat.interrupt_turn`) | `y` (`approval.approve`) | `n` (`approval.decline`) |
 
 Three consequences a consumer should know.
@@ -430,11 +430,18 @@ nothing for it (honest degradation) — the feature stays advertised.
   `permission_resolved`, `notice` (`meta`), `turn_end`, and `raw`. `raw` carries
   `{runtime, native_type, body}` and is the passthrough for any record entry the
   reader has no mapping for — **never dropped**.
-- `permission_request` carries `{request_id, tool, action, options}` and says the
-  session is blocked on a prompt; `permission_resolved` carries
-  `{request_id, decision}` and retires it. Both use the `request_id` as `item_id`,
-  so a consumer coalesces the pair into one card. A request is answerable — by the
-  `permission` verb (§3.1) — from the moment it is published until its
+- `permission_request` carries
+  `{request_id, runtime_generation?, tool, action, options}` and says the
+  session asked for permission; `permission_resolved` carries
+  `{request_id, runtime_generation?, decision}`. The producer assigns a stable,
+  opaque occurrence `item_id`, and a live request plus its resolution use the
+  same one. Runtimes may reuse `request_id` after restart, so consumers match a
+  live resolution by the full `(request_id, runtime_generation)` tuple (and may
+  coalesce its matching occurrence by `item_id`), never by request ID alone. A
+  generation-free request or resolution is readable legacy/history only: it is
+  not answerable and cannot close a newer generation-bearing card. A request is
+  answerable — by the `permission` verb (§3.1) — only for the exact live runtime
+  generation, from the moment it is published until its matching
   `permission_resolved` arrives, and never after. `decision` is `allow`, `deny`,
   or `cleared`: the last means amux knows the prompt closed (the turn ended) but
   not which way it went.
@@ -523,46 +530,46 @@ Codex records a tool's effect only as that tool's own output — it has no
 per-call before/after the way Claude's `Edit`/`Write` inputs give — so a Codex
 `tool_result` carries an empty `diffs` list rather than a guess.
 
-### 4.5 Permission prompts (the second record)
+### 4.5 Claude permission hook observations (not an event source)
 
 Claude Code answers permission prompts in its TUI and writes none of them to the
 transcript: the prompt opens, the human picks, and nothing reaches disk. A reader
 of the transcript alone therefore cannot see that a session is blocked, and an
 orchestrator has no `request_id` to quote back at the `permission` verb (§3.1).
 
-So amux produces the record itself. Claude Code's hooks — which amux already
-installs per agent — carry the prompt's whole lifecycle, and each one appends a
-line to a per-session **permission journal** (`<state>/permissions/<id>.jsonl`):
+Historically amux treated its Claude Code hooks as that record's producer. This
+is not a sound approval boundary: an authenticated session can invoke the same
+hook command with fabricated tool/action/decision fields. Authentication proves
+which session spoke, and a live generation identifies its current engine
+incarnation, but neither proves Claude displayed the claimed prompt. A secret in
+the environment, parent-PID check, UUID, or signed self-report has the same
+problem.
 
-| Claude hook event | journal line |
+The hooks still send these facts as subject/runtime/generation-scoped diagnostic
+observations:
+
+| Claude hook event | diagnostic observation |
 | --- | --- |
 | `PermissionRequest` (fires just before the prompt is drawn) | opens a request: a fresh `request_id`, the tool, and a one-line summary of what it wants |
 | `PostToolUse` (the tool ran, so its prompt was allowed) | resolves it `allow` |
 | `PermissionDenied` | resolves it `deny` |
 | `Stop` / `SessionEnd` (a turn cannot end with a prompt up) | resolves anything still open `cleared` |
 
-The journal is read as a **second source** of the same session's stream: the
-tailer polls it alongside the transcript, under one shared ordinal space, so
-`permission_request` and `permission_resolved` arrive interleaved with the rest
-of the conversation and a consumer resumes both with one `afterSeq`. The
-consequence for a resync (§4.2) is that a rotation of *either* file restarts
-both, since the ordinals are shared.
-
-The `options` a Claude `permission_request` offers are the ones amux can actually
-deliver to the prompt (`allow`, `deny`) — not every choice the TUI draws. A
-consumer must not be shown a button the daemon has no keystroke for.
+The observation journal is deliberately separate from `RuntimePermissionPath`
+and is never read by `runtimeevents`, assigned an occurrence, bound to a live
+approval, or shown as an answerable card. Claude therefore advertises
+`caps.permission:false`; a human can still see and answer the real prompt in the
+local attached pane.
 
 A runtime that records its own prompts needs none of this: Codex's rollout
 carries them, so its `permission_request` events come from the transcript reader
 and there is no journal (§4.4).
 
-Degradation is honest at every step. A session whose hooks are not installed
-simply has no journal, so it publishes no `permission_request` — and, since the
-`permission` verb refuses an id it cannot find open, a consumer learns that by
-being refused rather than by having a keystroke land somewhere unintended. An
-upstream rename of one of the resolving hooks leaves a request open until the
-turn boundary clears it; a contract test pins the event names so the drift is
-visible.
+Restoring remote Claude approval requires an authenticated runtime-native Claude
+approval API, or another daemon-owned producer that independently proves the
+exact prompt. Until that exists, fail-closed capability and absent cards are an
+explicit product limitation, not fulfillment of the prior remote workflow.
+Codex's supervisor-owned `OpenApprovals` remains authoritative and answerable.
 
 ### 4.6 amux's own journal (the third record)
 

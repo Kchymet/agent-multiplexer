@@ -2,8 +2,10 @@ package runtimeevents
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +59,184 @@ func streamFor(t *testing.T, path string, afterSeq int64) (<-chan harnessproto.R
 		t.Fatal("ClaudeStream ok=false for a resolvable path")
 	}
 	return ch, cancel
+}
+
+func TestPermissionRequestCarriesCurrentRuntimeGeneration(t *testing.T) {
+	dir := t.TempDir()
+	permissions := filepath.Join(dir, "permissions.jsonl")
+	write(t, permissions, `{"request_id":"permission-1","tool":"Bash","action":"echo ok","options":["allow","deny"]}`+"\n")
+
+	resolves := 0
+	resolve := func(context.Context, string) (Record, bool) {
+		resolves++
+		generation := "runtime-before-subscribe"
+		if resolves > 1 {
+			generation = "runtime-at-publication"
+		}
+		return Record{
+			Runtime:            harnessproto.RuntimeClaude,
+			Path:               filepath.Join(dir, "not-yet-created-transcript.jsonl"),
+			Permissions:        permissions,
+			PermissionBindings: map[string]string{permissionOccurrenceID("permission-1", 1): generation},
+		}, true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := StreamContext(resolve, testPoll)
+	ch, ok := stream(ctx, "a1", 0)
+	if !ok {
+		t.Fatal("permission stream was not admitted")
+	}
+	select {
+	case batch := <-ch:
+		if len(batch.Events) != 1 || batch.Events[0].Type != harnessproto.TypePermissionRequest {
+			t.Fatalf("batch = %+v", batch)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(batch.Events[0].Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if got := payload[harnessproto.FieldRuntimeGeneration]; got != "runtime-at-publication" {
+			t.Fatalf("runtime_generation = %v, want current generation", got)
+		}
+		if payload["request_id"] != "permission-1" || payload["tool"] != "Bash" {
+			t.Fatalf("permission payload fields were not preserved: %v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for permission event")
+	}
+}
+
+func TestMissingCurrentGenerationPreservesPermissionAsReadOnlyHistory(t *testing.T) {
+	events := []harnessproto.RuntimeEvent{
+		{Type: harnessproto.TypePermissionRequest, ItemID: permissionOccurrenceID("r1", 1), Payload: json.RawMessage(`{"request_id":"r1","runtime_generation":"stale"}`)},
+		{Type: harnessproto.TypeNotice, Payload: json.RawMessage(`{"text":"still visible"}`)},
+	}
+	got := newPermissionEventBinder().bind(events, nil)
+	if len(got) != 2 || got[0].Type != harnessproto.TypePermissionRequest || got[1].Type != harnessproto.TypeNotice {
+		t.Fatalf("events without current generation = %+v, want readable permission history and notice", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, answerable := payload[harnessproto.FieldRuntimeGeneration]; answerable {
+		t.Fatalf("unbound history retained an answerable generation: %v", payload)
+	}
+}
+
+func TestPermissionResolutionCarriesOriginallyBoundGeneration(t *testing.T) {
+	occurrence := permissionOccurrenceID("r1", 1)
+	binder := newPermissionEventBinder()
+	request := []harnessproto.RuntimeEvent{{
+		Type: harnessproto.TypePermissionRequest, ItemID: occurrence,
+		Payload: json.RawMessage(`{"request_id":"r1"}`),
+	}}
+	binder.bind(request, map[string]string{occurrence: "runtime-old"})
+	resolved := []harnessproto.RuntimeEvent{{
+		Type: harnessproto.TypePermissionResolved, ItemID: occurrence,
+		Payload: json.RawMessage(`{"request_id":"r1","decision":"allow","runtime_generation":"untrusted-current"}`),
+	}}
+	binder.bind(resolved, map[string]string{permissionOccurrenceID("r1", 2): "runtime-new"})
+	var payload map[string]any
+	if err := json.Unmarshal(resolved[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload[harnessproto.FieldRuntimeGeneration]; got != "runtime-old" {
+		t.Fatalf("resolution generation = %v, want originally bound runtime-old", got)
+	}
+}
+
+func TestLegacyResolutionCannotCloseReusedLiveOccurrence(t *testing.T) {
+	oldOccurrence := permissionOccurrenceID("r1", 1)
+	newOccurrence := permissionOccurrenceID("r1", 2)
+	binder := newPermissionEventBinder()
+	binder.seed(map[string]string{newOccurrence: "runtime-new"})
+
+	oldResolution := []harnessproto.RuntimeEvent{{
+		Type: harnessproto.TypePermissionResolved, ItemID: oldOccurrence,
+		Payload: json.RawMessage(`{"request_id":"r1","decision":"allow"}`),
+	}}
+	binder.bind(oldResolution, map[string]string{newOccurrence: "runtime-new"})
+	var oldPayload map[string]any
+	if err := json.Unmarshal(oldResolution[0].Payload, &oldPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, relabeled := oldPayload[harnessproto.FieldRuntimeGeneration]; relabeled {
+		t.Fatalf("legacy resolution guessed the newer generation: %v", oldPayload)
+	}
+
+	newResolution := []harnessproto.RuntimeEvent{{
+		Type: harnessproto.TypePermissionResolved, ItemID: newOccurrence,
+		Payload: json.RawMessage(`{"request_id":"r1","decision":"deny"}`),
+	}}
+	binder.bind(newResolution, nil)
+	var newPayload map[string]any
+	if err := json.Unmarshal(newResolution[0].Payload, &newPayload); err != nil {
+		t.Fatal(err)
+	}
+	if newPayload[harnessproto.FieldRuntimeGeneration] != "runtime-new" {
+		t.Fatalf("legacy resolution closed the newer occurrence: %v", newPayload)
+	}
+}
+
+func TestPermissionResolutionAfterResumeUsesSkippedRequestGeneration(t *testing.T) {
+	dir := t.TempDir()
+	permissions := filepath.Join(dir, "permissions.jsonl")
+	write(t, permissions, `{"request_id":"r1","tool":"Bash","action":"echo ok"}`+"\n")
+	occurrence := permissionOccurrenceID("r1", 1)
+	var open atomic.Bool
+	open.Store(true)
+	resolved := make(chan struct{}, 4)
+	resolve := func(context.Context, string) (Record, bool) {
+		select {
+		case resolved <- struct{}{}:
+		default:
+		}
+		bindings := map[string]string(nil)
+		if open.Load() {
+			bindings = map[string]string{occurrence: "runtime-original"}
+		}
+		return Record{
+			Runtime: harnessproto.RuntimeClaude, Path: filepath.Join(dir, "missing-transcript.jsonl"),
+			Permissions: permissions, PermissionBindings: bindings,
+		}, true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := StreamContext(resolve, testPoll)
+	ch, ok := stream(ctx, "a1", 1) // the consumer already persisted the request
+	if !ok {
+		t.Fatal("resumed permission stream was not admitted")
+	}
+	// The first resolve admits the stream; the second follows the empty initial
+	// sweep and seeds the skipped open occurrence.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-resolved:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for skipped-request binding refresh")
+		}
+	}
+	open.Store(false)
+	write(t, permissions, `{"request_id":"r1","decision":"deny"}`+"\n")
+	select {
+	case batch := <-ch:
+		if len(batch.Events) != 1 || batch.Events[0].Type != harnessproto.TypePermissionResolved {
+			t.Fatalf("resumed resolution batch = %+v", batch)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(batch.Events[0].Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload[harnessproto.FieldRuntimeGeneration] != "runtime-original" {
+			t.Fatalf("resumed resolution generation = %v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for resumed permission resolution")
+	}
+	cancel()
+	for range ch {
+	}
 }
 
 func TestTailBasicAndGrowth(t *testing.T) {

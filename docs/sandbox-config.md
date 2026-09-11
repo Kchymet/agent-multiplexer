@@ -92,9 +92,9 @@ AMUX_CLAUDE_AUTH_SMOKE=1 go test ./internal/claudecfg -run TestClaudeSharedAuthS
 ```
 
 This checks credential-store selection, not a real server-side token rotation.
-The sandbox never mounts the amux data or auth root. It mounts only a Claude
-pane's exact selected store, so adding another harness's auth store does not
-expose it through a shared ancestor.
+The sandbox masks the auth root in every pane and mounts only a Claude pane's
+selected store, so adding another harness's auth store does not expose it through
+the otherwise-readable amux data tree.
 
 ### Git writes from Codex
 
@@ -119,14 +119,11 @@ transfers zero object payload and duplicates zero base-pack bytes: it initialize
 only private metadata, lists the selected generation closure as flat alternates,
 and checks out the assigned linked worktree.
 
-This pooled-worktree policy and the protected pane namespace form the boundary
-together. The namespace consumes daemon-authoritative `GitObjectMount` values
-and binds each exact generation's objects directory read-only. It mounts only
-the exact session directory and never a pool parent, pool refs/config/hooks, the
-legacy cache, another session's common directory, or the amux data/state roots.
-An explicit network fetch can still retrieve objects the remote and granted
-account advertise, and every object admitted to a shared pool is intentionally
-readable by sessions authorized for that generation.
+The pane namespace consumes daemon-authoritative GitObjectMount values and binds
+each exact generation objects directory read-only. It never binds a pool parent,
+pool refs/config/hooks, the legacy cache, another session's common directory, or
+the broad amux data/state roots. Objects readable through an explicit network
+fetch with shared upstream credentials remain outside this filesystem boundary.
 
 Worktree and private-common publication uses anchored renames from the
 StateDir()/git-staging directory into session storage. State-directory staging
@@ -201,9 +198,9 @@ MCP definitions, use `amux sandbox reset <id> config.toml` (this resets the whol
 config file). For a detached MCP credential, use
 `amux sandbox reset <id> .credentials.json`. Relaunch the agent after either reset.
 Existing private lock directories are overlaid with the shared directory inside
-the sandbox. Protected launches refuse a disabled or unsupported namespace
-rather than forwarding session credentials to a host-visible process; newly
-seeded homes link to the shared lock directory directly.
+the sandbox. When running with the amux sandbox disabled, an existing private
+lock directory must be reconciled before concurrent OAuth refreshes can share
+locks; newly seeded homes link to the shared lock directory directly.
 
 Two files get a small transform on the way in. `settings.json` has absolute
 references to the template dir rewritten to the copy, so a status-line script or

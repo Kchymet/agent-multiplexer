@@ -284,7 +284,7 @@ func secondClientInitializes(ctx context.Context, endpoint string) error {
 			"capabilities": map[string]any{"experimentalApi": true},
 		},
 	})
-	if err := conn.WriteMessage(req); err != nil {
+	if err := conn.WriteMessage(ctx, req); err != nil {
 		return err
 	}
 	msg, err := conn.ReadMessage()

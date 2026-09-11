@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 type completionRaceStore struct {
@@ -94,6 +96,321 @@ func TestSessionDispatchRechecksCurrentMembershipAtExecution(t *testing.T) {
 	}
 }
 
+func TestRuntimeEventDispatchReadsOutsideEffectGateAndRechecksScopeBeforeRelease(t *testing.T) {
+	root := store.Session{ID: "root1", Name: "root", Agent: "claude", Scope: store.ScopeWork, Dir: t.TempDir()}
+	member := store.Session{ID: "a1", RootID: root.ID, Name: "agent", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, root, member)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pager, err := newSessionEventPager(func(ctx context.Context, target string) (sessionEventSourceSet, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return sessionEventSourceSet{}, ctx.Err()
+		}
+		return sessionEventSourceSet{target: target, runtime: "claude"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.events = pager
+	t.Cleanup(pager.close)
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: member.ID}
+	done := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+			Principal: principals[root.ID], RequestID: "0123456789abcdef0123456789abcdef", Call: call,
+		})
+		done <- result
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("runtime event source read did not begin")
+	}
+
+	// The bounded source read must not monopolize unrelated lifecycle admission.
+	gate := make(chan struct{})
+	go func() {
+		d.effectMu.Lock()
+		close(gate)
+		d.effectMu.Unlock()
+	}()
+	select {
+	case <-gate:
+	case <-time.After(time.Second):
+		t.Fatal("runtime event source read held the global effect gate")
+	}
+
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetRootID(member.ID, "different-root"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case result := <-done:
+		if result.Status != sessionrpc.StatusDenied || result.Code != "access_denied" || len(result.Body) != 0 {
+			t.Fatalf("runtime events released after membership changed: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime event dispatch did not finish")
+	}
+}
+
+func TestRuntimeEventDispatchAllowsArchivedTargetStillInCurrentScope(t *testing.T) {
+	root := store.Session{ID: "root1", Name: "root", Agent: "claude", Scope: store.ScopeWork, Dir: t.TempDir()}
+	member := store.Session{ID: "a1", RootID: root.ID, Name: "agent", Agent: "claude", Dir: t.TempDir(), Archived: true}
+	_, runtime, principals := sessionRuntimeFixture(t, root, member)
+	pager, err := newSessionEventPager(func(_ context.Context, target string) (sessionEventSourceSet, error) {
+		return sessionEventSourceSet{target: target, runtime: "claude"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.events = pager
+	t.Cleanup(pager.close)
+	result, err := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+		Principal: principals[root.ID], RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QueryRuntimeEvents, ID: member.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != sessionrpc.StatusOK || len(result.Body) == 0 {
+		t.Fatalf("archived member event query = %+v", result)
+	}
+}
+
+func TestRuntimeEventDispatchReturnsStableInvalidRequestCodes(t *testing.T) {
+	session := store.Session{ID: "a1", Agent: "claude", Dir: t.TempDir()}
+	_, runtime, principals := sessionRuntimeFixture(t, session)
+	for _, tc := range []struct {
+		name   string
+		fields map[string]string
+		code   string
+	}{
+		{"unknown field", map[string]string{"path": "/host/transcript"}, "runtime_events_invalid"},
+		{"malformed cursor", map[string]string{core.RuntimeEventsCursorField: "not-a-cursor"}, "runtime_events_cursor_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+				Principal: principals[session.ID], RequestID: "0123456789abcdef0123456789abcdef",
+				Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery,
+					Verb: core.QueryRuntimeEvents, ID: session.ID, Fields: tc.fields},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != sessionrpc.StatusInvalid || result.Code != tc.code || len(result.Body) != 0 {
+				t.Fatalf("invalid runtime event query = %+v", result)
+			}
+		})
+	}
+}
+
+func TestRestartDerivesArchivedCompletionCleanupWithoutInMemoryHooks(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: filepath.Join(core.SessionsDir(), "root1", "a1"),
+	}
+	if err := os.MkdirAll(session.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	authorityRoot := filepath.Join(t.TempDir(), "authority")
+	first, err := access.Open(authorityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.EnsureSession(ctx, session.ID, session.Dir); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := access.LoadCredential(first.CredentialDir(access.SubjectSession, session.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := credentialPrincipal(credential)
+	// Model a crash after the durable archive commit and before any receipt hook,
+	// timer, or in-memory completion registry can run. Closing the first authority
+	// drops all process memory while preserving its durable registry and mailbox.
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, true, store.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := access.Open(authorityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	daemon := New("", nil, time.Hour)
+	daemon.authority = second
+	runtime := newSessionRuntime(daemon)
+	if err := runtime.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.completions.has(session.ID) {
+		t.Fatal("restart fabricated an in-memory completion owner")
+	}
+	if _, ok := runtime.servers[session.ID]; ok {
+		t.Fatal("restart served an archived subject without a pending receipt")
+	}
+	if err := second.Valid(ctx, principal); err == nil {
+		t.Fatal("restart left the crash-surviving completion credential current")
+	}
+	if current, err := second.Current(ctx, access.SubjectSession, session.ID); err == nil {
+		t.Fatalf("restart retained current archived credential: %+v", current)
+	}
+}
+
+func TestSessionRPCCallbacksAreDeadlineBoundAndNonPanicking(t *testing.T) {
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: t.TempDir(), ClaudeID: "callback-safety",
+	}
+	_, runtime, principals := sessionRuntimeFixture(t, session)
+	t.Cleanup(runtime.completions.close)
+	runtime.callbackTimeout = 20 * time.Millisecond
+	call := sessionrpc.Call{
+		Kind: sessionrpc.CallOperation, Route: access.RouteAction,
+		Verb: core.ActionSetArchived, ID: session.ID,
+		Fields: map[string]string{"archived": "true"},
+	}
+	request := sessionrpc.DispatchRequest{
+		Principal: principals[session.ID],
+		RequestID: "0123456789abcdef0123456789abcdef",
+		Call:      call,
+	}
+
+	runtime.applyResult = func(ctx context.Context, _ core.Action) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	started := time.Now()
+	result, err := runtime.dispatchCallback(context.Background(), request)
+	if err != nil || result.Status != sessionrpc.StatusIndeterminate {
+		t.Fatalf("deadline callback = %+v, err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cooperative callback exceeded deadline bound: %v", elapsed)
+	}
+
+	runtime.applyResult = func(context.Context, core.Action) (string, error) {
+		panic("planted dispatch panic")
+	}
+	result, err = runtime.dispatchCallback(context.Background(), request)
+	if err != nil || result.Status != sessionrpc.StatusFailed || result.Code != "callback_failed" {
+		t.Fatalf("dispatch panic escaped callback: %+v, err=%v", result, err)
+	}
+
+	runtime.resolver.open = func() (policyStoreHandle, error) {
+		panic("planted authorize panic")
+	}
+	if err := runtime.authorizeCallback(context.Background(), principals[session.ID], call); err == nil {
+		t.Fatal("authorization panic was accepted")
+	}
+
+	hooks := nonPanickingReceiptHooks(&sessionrpc.ReceiptHooks{
+		ResponsePersisted: func(sessionrpc.PersistedResponse) { panic("persisted") },
+		Settled:           func(sessionrpc.ReceiptSettlement) { panic("settled") },
+	})
+	hooks.ResponsePersisted(sessionrpc.PersistedResponse{})
+	hooks.Settled(sessionrpc.ReceiptSettlement{})
+}
+
+func TestFinalSessionEffectAdmissionSerializesHostPolicyMutation(t *testing.T) {
+	session := store.Session{
+		ID: "a1", RootID: "root1", Agent: "claude",
+		Dir: t.TempDir(), ClaudeID: "effect-admission",
+	}
+	daemon, runtime, principals := sessionRuntimeFixture(t, session)
+	daemon.sessionRPC = runtime
+	t.Cleanup(runtime.completions.close)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runtime.applyResult = func(ctx context.Context, action core.Action) (string, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return wsops.ApplyResult(ctx, action)
+	}
+	request := sessionrpc.DispatchRequest{
+		Principal: principals[session.ID],
+		RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{
+			Kind: sessionrpc.CallOperation, Route: access.RouteAction,
+			Verb: core.ActionSetArchived, ID: session.ID,
+			Fields: map[string]string{"archived": "true"},
+		},
+	}
+	dispatchDone := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), request)
+		dispatchDone <- result
+	}()
+	<-entered
+	hostDone := make(chan core.Result, 1)
+	go func() {
+		hostDone <- daemon.handle(context.Background(), core.Action{
+			Action: core.ActionRename, ID: session.ID,
+			Fields: map[string]string{"name": "host-name"},
+		})
+	}()
+	select {
+	case result := <-hostDone:
+		t.Fatalf("host mutation crossed admitted session effect: %+v", result)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if result := <-dispatchDone; result.Status != sessionrpc.StatusOK || result.Receipt == nil {
+		t.Fatalf("session completion result = %+v", result)
+	}
+	if result := <-hostDone; !result.OK {
+		t.Fatalf("serialized host mutation failed: %+v", result)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, ok, err := db.GetSession(session.ID)
+	if err != nil || !ok || !got.Archived || got.Name != "host-name" {
+		t.Fatalf("serialized final state = %+v, found=%v err=%v", got, ok, err)
+	}
+}
+
 func TestRestrictedDiagnosticsOmitHostPathsAndRawOverrides(t *testing.T) {
 	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
 	d, runtime, principals := sessionRuntimeFixture(t, session)
@@ -126,7 +443,7 @@ func TestSelfCompletionPersistsBeforeBoundedRuntimeStopAndRevoke(t *testing.T) {
 	if _, err := d.permissions.observe(session.ID, instance); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.WriteHookState(session.ClaudeID, core.StateReady, ""); err != nil {
+	if err := core.WriteSessionHookState(session.ID, session.ClaudeID, core.StateReady, ""); err != nil {
 		t.Fatal(err)
 	}
 	runtime.completions.minimum = 30 * time.Millisecond
@@ -184,6 +501,93 @@ func TestSelfCompletionPersistsBeforeBoundedRuntimeStopAndRevoke(t *testing.T) {
 	}
 	if err := d.authority.Valid(context.Background(), principals[session.ID]); err == nil {
 		t.Fatal("completion credential remained valid after settled runtime stop")
+	}
+}
+
+func TestSelfCompletionPostCommitFailuresAlwaysSettle(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*sessionRuntime)
+		want      sessionrpc.Status
+		omitHooks bool
+	}{
+		{
+			name: "apply reports an error after commit",
+			configure: func(runtime *sessionRuntime) {
+				runtime.applyResult = func(ctx context.Context, action core.Action) (string, error) {
+					if _, err := wsops.ApplyResult(ctx, action); err != nil {
+						return "", err
+					}
+					return "", errors.New("injected post-commit failure")
+				}
+			},
+			want: sessionrpc.StatusIndeterminate,
+		},
+		{
+			name: "result encoding fails after commit",
+			configure: func(runtime *sessionRuntime) {
+				runtime.encodeResult = func(core.Result) ([]byte, error) {
+					return nil, errors.New("injected encoding failure")
+				}
+			},
+			want: sessionrpc.StatusFailed,
+		},
+		{
+			name:      "transport never persists response",
+			configure: func(*sessionRuntime) {},
+			want:      sessionrpc.StatusOK,
+			omitHooks: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := store.Session{ID: "a1", RootID: "root1", Name: "agent", Agent: "claude", Dir: t.TempDir()}
+			d, runtime, principals := sessionRuntimeFixture(t, session)
+			eng := newFakeEngine()
+			d.engine = eng
+			instance := eng.running(session.ID)
+			if _, err := d.permissions.observe(session.ID, instance); err != nil {
+				t.Fatal(err)
+			}
+			runtime.completions.abandon = 5 * time.Millisecond
+			runtime.completions.minimum = time.Millisecond
+			runtime.completions.runtime = 10 * time.Millisecond
+			runtime.completions.poll = time.Millisecond
+			tt.configure(runtime)
+
+			requestID := "0123456789abcdef0123456789abcdef"
+			call := sessionrpc.Call{
+				Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSetArchived,
+				ID: session.ID, Fields: map[string]string{"archived": "true"},
+			}
+			result, err := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{
+				Principal: principals[session.ID], RequestID: requestID, Call: call,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != tt.want {
+				t.Fatalf("completion result = %+v, want status %s", result, tt.want)
+			}
+			if tt.omitHooks && result.Receipt == nil {
+				t.Fatal("successful completion did not return receipt hooks")
+			}
+			// Deliberately invoke no receipt hook. The registry's independent
+			// abandonment path owns every failure after the archive commit.
+			key := instance.Key()
+			deadline := time.Now().Add(time.Second)
+			_, live := eng.Lookup(key)
+			for live && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+				_, live = eng.Lookup(key)
+			}
+			if live {
+				t.Fatal("post-commit failure left the runtime alive")
+			}
+			if err := d.authority.Valid(context.Background(), principals[session.ID]); err == nil {
+				t.Fatal("post-commit failure left the credential valid")
+			}
+		})
 	}
 }
 
@@ -259,6 +663,17 @@ func TestCompletionRuntimeGraceIsBoundedWhenAcknowledgementUnknown(t *testing.T)
 	runtime.completions.minimum = time.Millisecond
 	runtime.completions.runtime = 25 * time.Millisecond
 	runtime.completions.poll = time.Millisecond
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, true, time.Now().UnixMilli()); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	hooks := runtime.completions.begin(principals[session.ID], "0123456789abcdef0123456789abcdef", session.ID)
 	hooks.ResponsePersisted(sessionrpc.PersistedResponse{RequestID: "0123456789abcdef0123456789abcdef", ResponseDigest: "abcd"})
 	hooks.Settled(sessionrpc.ReceiptSettlement{RequestID: "0123456789abcdef0123456789abcdef", Received: false})
@@ -274,6 +689,85 @@ func TestCompletionRuntimeGraceIsBoundedWhenAcknowledgementUnknown(t *testing.T)
 	}
 	if _, ok := d.permissions.generation(session.ID); ok {
 		t.Fatal("runtime generation survived completion stop")
+	}
+}
+
+func TestCompletionDoesNotStopReplacementRuntime(t *testing.T) {
+	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	eng := newFakeEngine()
+	d.engine = eng
+	old := eng.running(session.ID)
+	if _, err := d.permissions.observe(session.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, true, time.Now().UnixMilli()); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.completions.minimum = 30 * time.Millisecond
+	runtime.completions.runtime = 20 * time.Millisecond
+	runtime.completions.poll = time.Millisecond
+	requestID := "0123456789abcdef0123456789abcdef"
+	hooks := runtime.completions.begin(principals[session.ID], requestID, session.ID)
+	hooks.Settled(sessionrpc.ReceiptSettlement{RequestID: requestID, Received: true})
+
+	// Model the authenticated restore boundary during the observation grace:
+	// supersede archive state and publish a new exact runtime incarnation.
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(session.ID, false, 0); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var replacement *fakeInstance
+	if _, _, err := d.permissions.publish(session.ID, func() (any, error) {
+		replacement = eng.running(session.ID)
+		return replacement, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if current, ok := eng.Lookup(replacement.Key()); !ok || current != replacement {
+		t.Fatal("stale completion stopped the replacement runtime")
+	}
+	if err := d.authority.Valid(context.Background(), principals[session.ID]); err != nil {
+		t.Fatalf("stale completion revoked credential after restore superseded it: %v", err)
+	}
+}
+
+func TestCompletionRegistryCloseDrainsTimersWithoutLateActions(t *testing.T) {
+	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	eng := newFakeEngine()
+	d.engine = eng
+	instance := eng.running(session.ID)
+	if _, err := d.permissions.observe(session.ID, instance); err != nil {
+		t.Fatal(err)
+	}
+	runtime.completions.abandon = 10 * time.Millisecond
+	runtime.completions.minimum = 10 * time.Millisecond
+	runtime.completions.runtime = 10 * time.Millisecond
+	runtime.completions.begin(principals[session.ID], "0123456789abcdef0123456789abcdef", session.ID)
+	runtime.completions.close()
+	time.Sleep(50 * time.Millisecond)
+	if current, ok := eng.Lookup(instance.Key()); !ok || current != instance {
+		t.Fatal("completion timer acted after registry close")
+	}
+	if err := d.authority.Valid(context.Background(), principals[session.ID]); err != nil {
+		t.Fatalf("completion callback acted after registry close: %v", err)
 	}
 }
 

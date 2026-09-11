@@ -9,9 +9,9 @@ import (
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
-	"amux/internal/wsops"
 )
 
 func (r *sessionRuntime) authorize(ctx context.Context, principal access.Principal, call sessionrpc.Call) error {
@@ -31,6 +31,9 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 		return access.ErrDenied
 	}
 	req := call.AccessRequest()
+	if isSessionReport(req) {
+		return r.authorizeSessionReport(ctx, principal, req)
+	}
 	if _, err := canonicalSessionOperation(req); err != nil {
 		return err
 	}
@@ -38,19 +41,38 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 }
 
 func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-
-	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
-		return rpcDenied("credential_invalid"), nil
-	}
 	if request.Call.Kind != sessionrpc.CallOperation {
 		return rpcInvalid("invalid_call"), nil
 	}
 	req := request.Call.AccessRequest()
-	action, err := canonicalSessionOperation(req)
-	if err != nil {
-		return rpcInvalid("invalid_operation"), nil
+	if req.Route == access.RouteAction && req.Verb == sessionreport.Capture {
+		return r.dispatchSessionCapture(ctx, request.Principal, req), nil
+	}
+	var action core.Action
+	if !isSessionReport(req) {
+		var err error
+		action, err = canonicalSessionOperation(req)
+		if err != nil {
+			if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+				return runtimeEventError(err), nil
+			}
+			return rpcInvalid("invalid_operation"), nil
+		}
+		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
+			return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
+		}
+	}
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
+	ctx = withEffectAdmission(ctx)
+
+	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
+		return rpcDenied("credential_invalid"), nil
+	}
+	if isSessionReport(req) {
+		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
 	// Authorize again under the dispatch lock, immediately before the exact
 	// canonical action executes. Membership, grants and archive state are live.
@@ -76,12 +98,21 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		}
 		// Completion is deliberately not d.handle/wsops.Dispatch: those stop the
 		// runtime before the durable response and its receipt can be observed.
-		if _, err := wsops.ApplyResult(ctx, action); err != nil {
+		if _, err := r.applyResult(ctx, action); err != nil {
+			archived, known := r.completionArchiveState(ctx, action.ID)
+			if archived || !known {
+				// The mutation may already be committed even though its caller saw an
+				// error. Keep the narrow archived receipt window and, independently
+				// of transport hooks, guarantee bounded runtime stop/revocation.
+				r.d.triggerPoll()
+				r.completions.begin(request.Principal, request.RequestID, action.ID)
+				return rpcIndeterminate("completion_commit_uncertain"), nil
+			}
 			return rpcFailed("completion_failed"), nil
 		}
 		r.d.triggerPoll()
 		hooks := r.completions.begin(request.Principal, request.RequestID, action.ID)
-		body, err := json.Marshal(core.Result{Type: "result", OK: true})
+		body, err := r.encodeResult(core.Result{Type: "result", OK: true})
 		if err != nil {
 			return rpcFailed("encode_failed"), nil
 		}
@@ -95,7 +126,7 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return r.policy.Authorize(ctx, request.Principal, req)
 	})
 	result := r.d.handle(guarded, action)
-	body, err := json.Marshal(result)
+	body, err := r.encodeResult(result)
 	if err != nil {
 		return rpcFailed("encode_failed"), nil
 	}
@@ -105,6 +136,61 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return rpcFailed("execution_failed"), nil
 	}
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
+}
+
+// dispatchRuntimeEvents performs bounded source I/O without monopolizing the
+// lifecycle effect gate. Authorization is checked under the gate immediately
+// before the read and again immediately before the normalized result is
+// released, so a move, archive, deletion, or credential revocation crossing the
+// read prevents disclosure. The pager accepts no caller-selected path.
+func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal access.Principal, req access.Request, action core.Action) (sessionrpc.DispatchResult, error) {
+	if r.events == nil || r.eventsErr != nil {
+		return rpcFailed("runtime_events_unavailable"), nil
+	}
+	if err := r.withFinalAdmission(ctx, principal, req); err != nil {
+		return rpcDenied("access_denied"), nil
+	}
+	body, err := r.events.pageForRelease(ctx, principal, action.ID, action.Fields, func(checkCtx context.Context) error {
+		return r.withFinalAdmission(checkCtx, principal, req)
+	})
+	if err != nil {
+		return runtimeEventError(err), nil
+	}
+	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
+}
+
+func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
+	return r.finalAuthorize(withEffectAdmission(ctx), principal, req)
+}
+
+func (r *sessionRuntime) finalAuthorize(ctx context.Context, principal access.Principal, req access.Request) error {
+	if err := r.d.authority.Valid(ctx, principal); err != nil {
+		return err
+	}
+	// Recheck membership, grants, and archive state at the exact effect or
+	// disclosure boundary using the same canonical request that executes.
+	return r.policy.Authorize(ctx, principal, req)
+}
+
+func runtimeEventError(err error) sessionrpc.DispatchResult {
+	switch {
+	case errors.Is(err, access.ErrDenied):
+		return rpcDenied("access_denied")
+	case errors.Is(err, errEventQueryInvalid):
+		return rpcInvalid("runtime_events_invalid")
+	case errors.Is(err, errEventCursorInvalid):
+		return rpcInvalid("runtime_events_cursor_invalid")
+	case errors.Is(err, errEventStateTooLarge):
+		return rpcFailed("runtime_events_state_too_large")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return rpcFailed("runtime_events_cancelled")
+	default:
+		return rpcFailed("query_failed")
+	}
 }
 
 func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.Principal, action core.Action) ([]byte, error) {
@@ -172,6 +258,17 @@ func (r *sessionRuntime) isSelfCompletion(ctx context.Context, principal access.
 	return err == nil && ok && resource.Role == store.RoleAgent && !resource.Archived
 }
 
+// completionArchiveState distinguishes a known pre-commit failure from an
+// accepted mutation whose commit outcome cannot be proven. Unknown state stays
+// on the fail-closed cleanup path and is never automatically retried.
+func (r *sessionRuntime) completionArchiveState(ctx context.Context, id string) (archived, known bool) {
+	resource, ok, err := r.resolver.Lookup(ctx, id)
+	if err != nil || !ok {
+		return false, false
+	}
+	return resource.Archived, true
+}
+
 func selfCompletionShape(principal access.Principal, action core.Action) bool {
 	return principal.Kind == access.SubjectSession && principal.SubjectID == action.ID &&
 		action.Action == core.ActionSetArchived && action.Fields["archived"] == "true"
@@ -187,4 +284,8 @@ func rpcInvalid(code string) sessionrpc.DispatchResult {
 
 func rpcFailed(code string) sessionrpc.DispatchResult {
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: code}
+}
+
+func rpcIndeterminate(code string) sessionrpc.DispatchResult {
+	return sessionrpc.DispatchResult{Status: sessionrpc.StatusIndeterminate, Code: code}
 }

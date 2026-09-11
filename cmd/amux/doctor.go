@@ -239,6 +239,9 @@ func cmdDoctor() error {
 			fmt.Println("\n✗ daemon query failed (see Runtime above)")
 			return fmt.Errorf("health check failed: daemon query: %w", statsErr)
 		}
+		if reconciliationFailed {
+			fmt.Println("\n✗ reconciliation incomplete (see Reconciliation above)")
+		}
 		return fmt.Errorf("health check failed")
 	}
 	fmt.Println("\n✓ all required dependencies present")

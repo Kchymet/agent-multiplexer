@@ -228,6 +228,33 @@ func TestConcurrentOneShotCalls(t *testing.T) {
 	}
 }
 
+func TestInitializeIsCallbackFree(t *testing.T) {
+	var authorized, dispatched atomic.Int32
+	f := newFixture(t, Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error {
+			authorized.Add(1)
+			return nil
+		},
+		Dispatch: countDispatch(&dispatched),
+	}, ServerOptions{})
+	envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+		Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot",
+	})
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	if err := f.server.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if authorized.Load() != 0 || dispatched.Load() != 0 {
+		t.Fatalf("Initialize invoked callbacks: authorize=%d dispatch=%d", authorized.Load(), dispatched.Load())
+	}
+	if processed, err := f.server.ServeOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("ServeOnce after Initialize = %d, %v", processed, err)
+	}
+	if authorized.Load() != 1 || dispatched.Load() != 1 {
+		t.Fatalf("ServeOnce callbacks: authorize=%d dispatch=%d", authorized.Load(), dispatched.Load())
+	}
+}
+
 func TestServerScanPreservesSyncedInFlightAtomicPublication(t *testing.T) {
 	f := newFixture(t, Callbacks{}, ServerOptions{})
 	readyToPublish := make(chan struct{})

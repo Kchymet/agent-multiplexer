@@ -99,10 +99,17 @@ type Supervisor struct {
 	approvals *approvalTracker
 	state     *streamState // owned by the read loop only
 
-	mu       sync.Mutex
-	proc     *exec.Cmd
-	closed   bool
-	threadID string
+	mu     sync.Mutex
+	proc   *exec.Cmd
+	closed bool
+	// interrupted is set during daemon drain before deferred callers are joined.
+	// It retires the control transport without killing the owned process; Close
+	// performs that later teardown after all admitted callers have returned.
+	interrupted bool
+	threadID    string
+	// startCancel exists only while Start is launching/dialing/handshaking. It lets
+	// manager drain abort an in-progress supervisor before any RPC transport exists.
+	startCancel context.CancelFunc
 
 	// curTurn is the OBSERVED active turn on our pinned thread, from ANY origin (a
 	// native TUI turn raises turn/started too). It is the target for Cancel/Interject,
@@ -242,15 +249,27 @@ func (s *Supervisor) ThreadID() string {
 // identity scope instead of a bare exec. A nil wrappedArgv falls back to the inner
 // AppServerArgv (used only by the opt-in smoke test, which runs codex directly).
 func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
-	s.mu.Lock()
-	if s.closed {
+	startCtx, cancelStart := context.WithCancel(ctx)
+	started := false
+	defer func() {
+		s.mu.Lock()
+		s.startCancel = nil
 		s.mu.Unlock()
-		return errors.New("codexapp: supervisor closed")
+		if !started {
+			cancelStart()
+		}
+	}()
+
+	s.mu.Lock()
+	if s.closed || s.interrupted {
+		s.mu.Unlock()
+		return errClosed
 	}
 	if s.proc != nil {
 		s.mu.Unlock()
 		return errors.New("codexapp: already started")
 	}
+	s.startCancel = cancelStart
 	s.mu.Unlock()
 
 	if s.cfg.Endpoint == "" {
@@ -286,6 +305,9 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	// Own process group: signals aimed at the foreground pane never reach the
 	// background server (independent lifetime).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := startCtx.Err(); err != nil {
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexapp: start app-server: %w", err)
 	}
@@ -293,12 +315,12 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	s.proc = cmd
 	s.mu.Unlock()
 
-	conn, err := s.dialWithRetry(ctx)
+	conn, err := s.dialWithRetry(startCtx)
 	if err != nil {
 		s.killProc() // waits for the child + stderr copier, so the tail below is complete
 		return withStderrTail(err, stderr)
 	}
-	if err := s.attach(ctx, conn); err != nil {
+	if err := s.attach(startCtx, conn); err != nil {
 		s.killProc()
 		return withStderrTail(err, stderr)
 	}
@@ -309,6 +331,7 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 		<-ctx.Done()
 		_ = s.Close()
 	}()
+	started = true
 	return nil
 }
 
@@ -361,6 +384,11 @@ func (s *Supervisor) attach(ctx context.Context, transport msgConn) error {
 	rpc.onNotify = s.onNotify
 	rpc.onRequest = s.onRequest
 	s.mu.Lock()
+	if s.closed || s.interrupted {
+		s.mu.Unlock()
+		_ = transport.Close()
+		return errClosed
+	}
 	s.rpc = rpc
 	s.mu.Unlock()
 
@@ -540,10 +568,15 @@ func (s *Supervisor) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.interrupted = true
+	startCancel := s.startCancel
 	cancel := s.runCancel
 	rpc := s.rpc
 	s.mu.Unlock()
 
+	if startCancel != nil {
+		startCancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -554,6 +587,32 @@ func (s *Supervisor) Close() error {
 	s.closeLog()
 	s.killProc()
 	return nil
+}
+
+// interruptTransport retires the supervisor's client transport without killing
+// its App Server process. Daemon shutdown calls this before joining admitted
+// effects: closing the transport interrupts a blocked WebSocket read or write and
+// releases every pending JSON-RPC caller. Full process, hub, log, and identity
+// teardown remains Close's job after those callers have drained.
+//
+// Setting interrupted before reading rpc also covers a cold start which has not
+// attached yet: attach will reject and close any subsequently dialed transport.
+func (s *Supervisor) interruptTransport() {
+	s.mu.Lock()
+	s.interrupted = true
+	startCancel := s.startCancel
+	cancel := s.runCancel
+	rpc := s.rpc
+	s.mu.Unlock()
+	if startCancel != nil {
+		startCancel()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if rpc != nil {
+		_ = rpc.close()
+	}
 }
 
 func (s *Supervisor) killProc() {
@@ -589,11 +648,24 @@ func (s *Supervisor) killProc() {
 // turn/completed notification resolves it, bracketing the turn with
 // turn_start/turn_end events on the runtime-event stream.
 func (s *Supervisor) Prompt(ctx context.Context, text string) error {
+	wait, err := s.BeginPrompt(ctx, text)
+	if err != nil {
+		return err
+	}
+	return wait(ctx)
+}
+
+// BeginPrompt performs only the bounded turn/start admission round trip and
+// returns a waiter for the potentially long model turn. Daemon lifecycle code
+// uses this split to serialize the exact turn-start effect with membership and
+// credential changes without holding its global admission lock while the model
+// runs. The caller must invoke the returned waiter at most once.
+func (s *Supervisor) BeginPrompt(ctx context.Context, text string) (func(context.Context) error, error) {
 	done := make(chan *turnResult, 1)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return errors.New("codexapp: session closed")
+		return nil, errors.New("codexapp: session closed")
 	}
 	// Open a fresh ownership generation for this Prompt. ownTurn stays unbound until
 	// our own turn/start response returns; earlyTerm retains any terminal observed for
@@ -627,7 +699,7 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 		// (curTurn) must survive our failed start.
 		s.abandonLocalTurn(gen)
 		s.emit(turnEndEvent(threadID, "", "error"))
-		return err
+		return nil, err
 	}
 	// Bind ownership to the ACTUAL turn/start response id, scoped to this generation.
 	// If a superseding Prompt (or cancellation) already replaced our waiter, do not
@@ -653,16 +725,18 @@ func (s *Supervisor) Prompt(ctx context.Context, text string) error {
 	}
 	s.mu.Unlock()
 
-	select {
-	case <-ctx.Done():
-		// The caller's context ended; the turn continues server-side and its observed
-		// turn/completed will bracket and clear it. Don't emit a synthetic end here.
-		return ctx.Err()
-	case <-done:
-		// turn/completed was observed: onNotify already emitted turn_end and cleared
-		// the turn + open approvals. Nothing to do but return.
-		return nil
-	}
+	return func(waitCtx context.Context) error {
+		select {
+		case <-waitCtx.Done():
+			// The waiter ended; the turn continues server-side and its observed
+			// turn/completed will bracket and clear it. Don't emit a synthetic end here.
+			return waitCtx.Err()
+		case <-done:
+			// turn/completed was observed: onNotify already emitted turn_end and cleared
+			// the turn + open approvals. Nothing to do but return.
+			return nil
+		}
+	}, nil
 }
 
 func turnIDFromResult(res json.RawMessage) string {

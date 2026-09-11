@@ -216,7 +216,7 @@ func TestInstallHooks(t *testing.T) {
 		groups, _ := hooks[ev].([]any)
 		capture := 0
 		for _, g := range groups {
-			if groupCommand(g) == "/opt/amux agent capture" {
+			if groupCommand(g) == "/opt/amux agent capture --hook" {
 				capture++
 			}
 		}
@@ -230,7 +230,7 @@ func TestInstallHooks(t *testing.T) {
 		groups, _ := hooks[ph.event].([]any)
 		perms := 0
 		for _, g := range groups {
-			if groupCommand(g) == "/opt/amux agent permission "+ph.verb {
+			if groupCommand(g) == "/opt/amux agent permission "+ph.verb+" --hook" {
 				perms++
 			}
 		}

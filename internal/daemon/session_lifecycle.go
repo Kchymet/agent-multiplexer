@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,10 +13,12 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/console"
+	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 const (
@@ -26,30 +29,47 @@ const (
 	completionMinimumGrace = 500 * time.Millisecond
 	completionRuntimeGrace = 10 * time.Second
 	completionActivityPoll = 50 * time.Millisecond
+	sessionCallbackTimeout = 10 * time.Minute
 )
 
 type sessionRuntime struct {
-	d           *Daemon
-	resolver    *daemonAccessResolver
-	policy      access.Policy
-	poll        time.Duration
-	now         func() time.Time
-	dispatchMu  sync.Mutex
-	servers     map[string]*sessionrpc.Server
-	completions *completionRegistry
+	d               *Daemon
+	resolver        *daemonAccessResolver
+	policy          access.Policy
+	applyResult     func(context.Context, core.Action) (string, error)
+	encodeResult    func(core.Result) ([]byte, error)
+	poll            time.Duration
+	now             func() time.Time
+	callbackTimeout time.Duration
+	dispatchMu      sync.Mutex
+	servers         map[string]*sessionrpc.Server
+	initialized     map[string]bool
+	completions     *completionRegistry
+	responseBudget  sessionrpc.ResponseBudget
+	events          *sessionEventPager
+	eventsErr       error
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
 	r := &sessionRuntime{
 		d: d, resolver: newDaemonAccessResolver(), poll: sessionMailboxPoll,
-		now: time.Now, servers: make(map[string]*sessionrpc.Server),
+		now: time.Now, callbackTimeout: sessionCallbackTimeout,
+		servers:        make(map[string]*sessionrpc.Server),
+		initialized:    make(map[string]bool),
+		responseBudget: newSessionResponseBudget(),
+		applyResult:    wsops.ApplyResult,
+		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
+	r.events, r.eventsErr = newDaemonSessionEventPager(d)
 	return r
 }
 
 func (r *sessionRuntime) start(ctx context.Context) error {
+	if r.eventsErr != nil {
+		return fmt.Errorf("initialize session event pager: %w", r.eventsErr)
+	}
 	return r.reconcile(ctx)
 }
 
@@ -72,11 +92,37 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 	if err := r.reconcile(ctx); err != nil {
 		return err
 	}
+	return r.serveCurrent(ctx)
+}
+
+func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 	ids := make([]string, 0, len(r.servers))
 	for id := range r.servers {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	ready := true
+	var initializeErr error
+	for _, id := range ids {
+		if r.initialized[id] {
+			continue
+		}
+		err := r.servers[id].Initialize(ctx)
+		if err == nil {
+			r.initialized[id] = true
+			continue
+		}
+		ready = false
+		if !errors.Is(err, sessionrpc.ErrResponseCapacity) && !errors.Is(err, sessionrpc.ErrClosed) {
+			initializeErr = errors.Join(initializeErr, fmt.Errorf("initialize session RPC %s: %w", id, err))
+		}
+	}
+	if !ready {
+		// ErrResponseCapacity is the package's bounded-progress sentinel during
+		// startup adoption. Do not dispatch any mailbox until every current
+		// subject is initialized; the next poll resumes unfinished scans.
+		return initializeErr
+	}
 	for _, id := range ids {
 		if _, err := r.servers[id].ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
 			log.Printf("session RPC %s: %v", id, err)
@@ -88,6 +134,8 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 func (r *sessionRuntime) reconcile(ctx context.Context) error {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
 	if err := r.d.ensureHostCredential(ctx, r.now()); err != nil {
 		return fmt.Errorf("renew host credential: %w", err)
 	}
@@ -158,7 +206,8 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
-		sessionrpc.Callbacks{Authorize: r.authorize, Dispatch: r.dispatch}, sessionrpc.ServerOptions{})
+		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget})
 	if err != nil {
 		return err
 	}
@@ -167,7 +216,36 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		return err
 	}
 	r.servers[session.ID] = server
+	r.initialized[session.ID] = false
 	return nil
+}
+
+// authorizeCallback and dispatchCallback are the only transport callback
+// entrypoints. They never let an integration panic take down mailbox service,
+// and they give every cooperative DB/process operation a fixed upper deadline.
+// The callbacks stay synchronous: on timeout no detached mutation is left
+// running and an accepted/uncertain effect is never retried by this boundary.
+func (r *sessionRuntime) authorizeCallback(ctx context.Context, principal access.Principal, call sessionrpc.Call) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("session authorization callback failed")
+		}
+	}()
+	return r.authorize(ctx, principal, call)
+}
+
+func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrpc.DispatchRequest) (result sessionrpc.DispatchResult, err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			result = rpcFailed("callback_failed")
+			err = nil
+		}
+	}()
+	return r.dispatch(ctx, request)
 }
 
 func (r *sessionRuntime) renewCurrent(ctx context.Context, session store.Session) {
@@ -220,6 +298,7 @@ func (r *sessionRuntime) closeServer(id string) {
 		_ = server.Close()
 		delete(r.servers, id)
 	}
+	delete(r.initialized, id)
 }
 
 func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
@@ -227,6 +306,10 @@ func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
 	if err := r.d.authority.Revoke(ctx, access.SubjectSession, id); err != nil {
 		log.Printf("session RPC %s revoke: %v", id, err)
 	}
+	// Reconciliation is also the durable post-crash/post-callback cleanup path.
+	// Revoke before making the old runtime disappear so observing it stopped can
+	// never race ahead of credential invalidation.
+	r.d.killRuntimeFor(id)
 }
 
 func (r *sessionRuntime) close() {
@@ -235,12 +318,18 @@ func (r *sessionRuntime) close() {
 	for id := range r.servers {
 		r.closeServer(id)
 	}
+	r.completions.close()
+	if r.events != nil {
+		r.events.close()
+	}
 }
 
 type completionRegistry struct {
 	mu      sync.Mutex
 	d       *Daemon
 	entries map[string]*completionEntry
+	closed  bool
+	wg      sync.WaitGroup
 	receipt time.Duration
 	abandon time.Duration
 	minimum time.Duration
@@ -252,7 +341,12 @@ type completionEntry struct {
 	principal access.Principal
 	requestID string
 	digest    string
+	runtime   permissionRuntimeToken
 	settling  bool
+	cancelled bool
+	settle    chan struct{}
+	cancel    chan struct{}
+	done      chan struct{}
 }
 
 func newCompletionRegistry(d *Daemon) *completionRegistry {
@@ -264,12 +358,22 @@ func newCompletionRegistry(d *Daemon) *completionRegistry {
 }
 
 func (c *completionRegistry) begin(principal access.Principal, requestID, subjectID string) *sessionrpc.ReceiptHooks {
-	entry := &completionEntry{principal: principal, requestID: requestID}
+	runtime, _ := c.d.permissions.token(subjectID)
+	entry := &completionEntry{
+		principal: principal, requestID: requestID, runtime: runtime,
+		settle: make(chan struct{}), cancel: make(chan struct{}), done: make(chan struct{}),
+	}
 	c.mu.Lock()
-	c.entries[subjectID] = entry
+	if !c.closed {
+		if previous := c.entries[subjectID]; previous != nil {
+			c.cancelEntryLocked(subjectID, previous)
+		}
+		c.entries[subjectID] = entry
+		c.wg.Add(1)
+		go c.run(subjectID, entry)
+	}
 	c.mu.Unlock()
-	time.AfterFunc(c.abandon, func() { c.settle(subjectID, requestID) })
-	return &sessionrpc.ReceiptHooks{
+	hooks := &sessionrpc.ReceiptHooks{
 		Grace: c.receipt,
 		ResponsePersisted: func(p sessionrpc.PersistedResponse) {
 			c.mu.Lock()
@@ -279,6 +383,28 @@ func (c *completionRegistry) begin(principal access.Principal, requestID, subjec
 			c.mu.Unlock()
 		},
 		Settled: func(s sessionrpc.ReceiptSettlement) { c.settle(subjectID, s.RequestID) },
+	}
+	return nonPanickingReceiptHooks(hooks)
+}
+
+func nonPanickingReceiptHooks(hooks *sessionrpc.ReceiptHooks) *sessionrpc.ReceiptHooks {
+	if hooks == nil {
+		return nil
+	}
+	return &sessionrpc.ReceiptHooks{
+		Grace: hooks.Grace,
+		ResponsePersisted: func(response sessionrpc.PersistedResponse) {
+			defer func() { _ = recover() }()
+			if hooks.ResponsePersisted != nil {
+				hooks.ResponsePersisted(response)
+			}
+		},
+		Settled: func(settlement sessionrpc.ReceiptSettlement) {
+			defer func() { _ = recover() }()
+			if hooks.Settled != nil {
+				hooks.Settled(settlement)
+			}
+		},
 	}
 }
 
@@ -299,42 +425,99 @@ func (c *completionRegistry) has(subjectID string) bool {
 func (c *completionRegistry) settle(subjectID, requestID string) {
 	c.mu.Lock()
 	entry := c.entries[subjectID]
-	if entry == nil || entry.requestID != requestID || entry.settling {
+	if entry == nil || entry.requestID != requestID || entry.settling || entry.cancelled {
 		c.mu.Unlock()
 		return
 	}
 	entry.settling = true
+	close(entry.settle)
 	c.mu.Unlock()
-	go c.finish(subjectID, entry)
+}
+
+func (c *completionRegistry) run(subjectID string, entry *completionEntry) {
+	defer c.wg.Done()
+	defer close(entry.done)
+	abandon := time.NewTimer(c.abandon)
+	defer abandon.Stop()
+	select {
+	case <-entry.settle:
+	case <-abandon.C:
+		c.mu.Lock()
+		if current := c.entries[subjectID]; current != entry || entry.cancelled {
+			c.mu.Unlock()
+			return
+		}
+		entry.settling = true
+		c.mu.Unlock()
+	case <-entry.cancel:
+		return
+	}
+	c.finish(subjectID, entry)
 }
 
 func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
+	defer func() {
+		c.mu.Lock()
+		if c.entries[subjectID] == entry {
+			delete(c.entries, subjectID)
+		}
+		c.mu.Unlock()
+	}()
 	minimum := time.NewTimer(c.minimum)
-	<-minimum.C
+	defer minimum.Stop()
+	select {
+	case <-minimum.C:
+	case <-entry.cancel:
+		return
+	}
 	deadline := time.NewTimer(c.runtime)
 	defer deadline.Stop()
 	ticker := time.NewTicker(c.poll)
 	defer ticker.Stop()
-	for c.runtimeLive(subjectID) && c.d.instanceActivity(engine.Key{AgentID: subjectID, Tab: panespec.TabAgent}) != engine.ActivitySafe {
+	for c.runtimeLive(subjectID, entry.runtime) && c.d.instanceActivity(engine.Key{AgentID: subjectID, Tab: panespec.TabAgent}) != engine.ActivitySafe {
 		select {
 		case <-deadline.C:
 			goto stop
 		case <-ticker.C:
+		case <-entry.cancel:
+			return
 		}
 	}
 stop:
-	c.d.killEngineFor(subjectID)
+	c.d.effectMu.Lock()
+	defer c.d.effectMu.Unlock()
+	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
+		return
+	}
+	// Revoke only the credential generation that authorized completion. The
+	// explicit restore API will supersede/cancel this entry before issuing a new
+	// generation; arbitrary reconciliation can never regrant it. Revoke before
+	// publishing runtime death so a caller cannot observe the process disappear
+	// while its credential is still current.
 	if c.d.authority != nil {
-		_ = c.d.authority.Revoke(context.Background(), access.SubjectSession, subjectID)
+		if err := c.d.authority.RevokeCurrent(context.Background(), entry.principal); err != nil {
+			log.Printf("session RPC %s completion revoke: %v", subjectID, err)
+			return
+		}
 	}
-	c.mu.Lock()
-	if c.entries[subjectID] == entry {
-		delete(c.entries, subjectID)
-	}
-	c.mu.Unlock()
+	c.d.killRuntimeToken(subjectID, entry.runtime)
 }
 
-func (c *completionRegistry) runtimeLive(subjectID string) bool {
+func (c *completionRegistry) owns(subjectID string, entry *completionEntry) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && !entry.cancelled && c.entries[subjectID] == entry
+}
+
+func (c *completionRegistry) archived(subjectID string) bool {
+	session, ok, err := lookupSession(subjectID)
+	return err == nil && ok && session.Archived
+}
+
+func (c *completionRegistry) runtimeLive(subjectID string, token permissionRuntimeToken) bool {
+	if !c.d.permissions.matches(subjectID, token) {
+		return false
+	}
 	if c.d.engine != nil {
 		if instance, ok := c.d.engine.Lookup(engine.Key{AgentID: subjectID, Tab: panespec.TabAgent}); ok && instance.Alive() {
 			return true
@@ -345,4 +528,50 @@ func (c *completionRegistry) runtimeLive(subjectID string) bool {
 		return ok
 	}
 	return false
+}
+
+func (c *completionRegistry) cancel(subjectID string) {
+	c.mu.Lock()
+	if entry := c.entries[subjectID]; entry != nil {
+		c.cancelEntryLocked(subjectID, entry)
+	}
+	c.mu.Unlock()
+}
+
+// cancelAndWait is the authenticated restore boundary. It prevents a stale
+// completion from crossing the restore/regrant transition after it has already
+// passed its final ownership check.
+func (c *completionRegistry) cancelAndWait(subjectID string) {
+	c.mu.Lock()
+	entry := c.entries[subjectID]
+	if entry != nil {
+		c.cancelEntryLocked(subjectID, entry)
+	}
+	c.mu.Unlock()
+	if entry != nil {
+		<-entry.done
+	}
+}
+
+func (c *completionRegistry) cancelEntryLocked(subjectID string, entry *completionEntry) {
+	if entry.cancelled {
+		return
+	}
+	entry.cancelled = true
+	if c.entries[subjectID] == entry {
+		delete(c.entries, subjectID)
+	}
+	close(entry.cancel)
+}
+
+func (c *completionRegistry) close() {
+	c.mu.Lock()
+	if !c.closed {
+		c.closed = true
+		for subjectID, entry := range c.entries {
+			c.cancelEntryLocked(subjectID, entry)
+		}
+	}
+	c.mu.Unlock()
+	c.wg.Wait()
 }
