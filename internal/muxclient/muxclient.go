@@ -1,7 +1,7 @@
 // Package muxclient is the UI side of the muxproto protocol: it dials a local or
 // remote multiplexer server and exposes its state stream and per-pane I/O. The
-// same client drives a local server (unix socket) or any remote one (TCP), so a
-// UI can attach to several servers at once.
+// same client drives a local server (TLS over Unix) or any remote one (TLS over
+// TCP), so a UI can attach to several servers at once.
 package muxclient
 
 import (
@@ -41,19 +41,23 @@ type Client struct {
 // Server returns the server's advertised identity (from the welcome frame).
 func (c *Client) Server() string { return c.server }
 
-// Dial connects to a server. spec: "" / "local" => the local unix socket;
-// "unix:/path" => a unix socket; "tcp:host:port" or bare "host:port" => plain
-// TCP; "tls:host:port" (or "tls://host:port") => TLS over TCP, verifying the
-// server per wiretls (system roots plus $AMUX_TLS_CA). When $AMUX_MUX_TOKEN is
-// set it is sent as the hello bearer token.
+// Dial connects to a server. spec: "" / "local" => TLS over the local Unix
+// socket; "unix:/path" => TLS over that Unix socket; "tls:host:port" (or
+// "tls://host:port") => TLS over TCP. Plain TCP/bare addresses are rejected.
+// The server is verified per wiretls (system roots plus $AMUX_TLS_CA), and the
+// required $AMUX_MUX_TOKEN is sent only after that verification succeeds.
 func Dial(spec string, h Handlers) (*Client, error) {
+	token := os.Getenv("AMUX_MUX_TOKEN")
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("mux: AMUX_MUX_TOKEN is required")
+	}
 	nc, err := dialConn(spec)
 	if err != nil {
 		return nil, err
 	}
 	c := &Client{conn: muxproto.NewConn(nc), h: h}
 	if err := c.conn.WriteClient(muxproto.ClientMsg{
-		Type: muxproto.CHello, Version: muxproto.Version, Token: os.Getenv("AMUX_MUX_TOKEN"),
+		Type: muxproto.CHello, Version: muxproto.Version, Token: token,
 	}); err != nil {
 		_ = nc.Close()
 		return nil, err
@@ -84,7 +88,10 @@ func dialConn(spec string) (net.Conn, error) {
 	if network == "tls" {
 		return wiretls.Dial("tcp", addr)
 	}
-	return net.Dial(network, addr)
+	if network == "unix" {
+		return wiretls.Dial("unix", addr)
+	}
+	return nil, fmt.Errorf("mux: plaintext transport is disabled; use tls:")
 }
 
 func resolve(spec string) (network, addr string) {
@@ -167,7 +174,8 @@ func (c *Client) PaneResize(paneID string, cols, rows int) error {
 	return c.conn.WriteClient(muxproto.ClientMsg{Type: muxproto.CPaneResize, PaneID: paneID, Cols: cols, Rows: rows})
 }
 
-// PaneClose stops a pane.
+// PaneClose detaches this legacy stream; the primary daemon retains process and
+// runtime-lifecycle ownership.
 func (c *Client) PaneClose(paneID string) error {
 	return c.conn.WriteClient(muxproto.ClientMsg{Type: muxproto.CPaneClose, PaneID: paneID})
 }

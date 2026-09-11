@@ -53,12 +53,25 @@ type Client struct {
 
 	out  chan clientWrite
 	done chan struct{}
-	once sync.Once
+	// writerDone lets Close provide a complete transport-lifetime barrier. The
+	// write loop never calls Close, so waiting here cannot self-join.
+	writerDone chan struct{}
+	once       sync.Once
 }
 
 // Dial connects to the daemon socket (single attempt).
 func Dial() (*Client, error) {
-	conn, err := net.DialTimeout("unix", core.SocketPath(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second+authDeadline)
+	defer cancel()
+	return DialContext(ctx)
+}
+
+// DialContext connects and authenticates to the daemon while respecting ctx.
+// It is used by compatibility relays whose upstream authorization lease must
+// not leave a blocked dial alive after the downstream client is revoked.
+func DialContext(ctx context.Context) (*Client, error) {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", core.SocketPath())
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +80,20 @@ func Dial() (*Client, error) {
 		conn.Close()
 		return nil, fmt.Errorf("load daemon host credential: %w", err)
 	}
-	return authenticateClient(conn, credential)
+	return authenticateClientContext(ctx, conn, credential)
 }
 
 func authenticateClient(conn net.Conn, credential access.Credential) (*Client, error) {
+	return authenticateClientContext(context.Background(), conn, credential)
+}
+
+func authenticateClientContext(ctx context.Context, conn net.Conn, credential access.Credential) (*Client, error) {
+	if ctx == nil {
+		_ = conn.Close()
+		return nil, context.Canceled
+	}
+	stopCancellation := watchAuthCancellation(ctx, conn)
+	defer stopCancellation()
 	_ = conn.SetDeadline(time.Now().Add(authDeadline))
 	tlsConfig, err := access.ClientTLSConfig(credential)
 	if err != nil {
@@ -78,8 +101,11 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 		return nil, fmt.Errorf("load daemon TLS pin: %w", err)
 	}
 	secure := tls.Client(conn, tlsConfig)
-	if err := secure.Handshake(); err != nil {
+	if err := secure.HandshakeContext(ctx); err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("verify daemon TLS identity: %w", err)
 	}
 	defer secure.SetDeadline(time.Time{})
@@ -87,6 +113,9 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 	line, err := readBoundedLine(reader, access.MaxBodyBytes)
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("read daemon challenge: %w", err)
 	}
 	var challenge access.SocketChallenge
@@ -101,11 +130,17 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 	}
 	if err := json.NewEncoder(secure).Encode(proof); err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	line, err = readBoundedLine(reader, access.MaxBodyBytes)
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("read daemon authentication: %w", err)
 	}
 	var welcome access.SocketWelcome
@@ -113,7 +148,36 @@ func authenticateClient(conn net.Conn, credential access.Credential) (*Client, e
 		conn.Close()
 		return nil, fmt.Errorf("daemon authentication failed")
 	}
+	// Define successful authentication as completion before cancellation wins.
+	// If cancellation already began, wait for its close callback and fail rather
+	// than returning a client whose authenticated transport is being retired.
+	if !stopCancellation() {
+		return nil, ctx.Err()
+	}
 	return newClientReader(secure, reader), nil
+}
+
+// watchAuthCancellation closes the raw connection on cancellation across the
+// complete challenge/proof/welcome exchange, not only TLS HandshakeContext.
+// Its returned function is idempotent and waits for any winning close callback,
+// making the authentication lifetime a real join barrier.
+func watchAuthCancellation(ctx context.Context, conn net.Conn) func() bool {
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+		close(closed)
+	})
+	var once sync.Once
+	completed := false
+	return func() bool {
+		once.Do(func() {
+			completed = stop()
+			if !completed {
+				<-closed
+			}
+		})
+		return completed
+	}
 }
 
 // newClient wraps a connection and starts its writer goroutine. Used by Dial and
@@ -124,10 +188,11 @@ func newClient(conn net.Conn) *Client {
 
 func newClientReader(conn net.Conn, reader *bufio.Reader) *Client {
 	c := &Client{
-		conn: conn,
-		r:    reader,
-		out:  make(chan clientWrite, outBuf),
-		done: make(chan struct{}),
+		conn:       conn,
+		r:          reader,
+		out:        make(chan clientWrite, outBuf),
+		done:       make(chan struct{}),
+		writerDone: make(chan struct{}),
 	}
 	go c.writeLoop()
 	return c
@@ -139,6 +204,7 @@ func newClientReader(conn net.Conn, reader *bufio.Reader) *Client {
 // the broken connection as an error from Next, which the UI turns into a
 // reconnect.
 func (c *Client) writeLoop() {
+	defer close(c.writerDone)
 	for {
 		select {
 		case <-c.done:
@@ -214,7 +280,9 @@ func (c *Client) stop() { c.once.Do(func() { close(c.done) }) }
 // Close stops the writer and closes the connection.
 func (c *Client) Close() error {
 	c.stop()
-	return c.conn.Close()
+	err := c.conn.Close()
+	<-c.writerDone
+	return err
 }
 
 // Send enqueues an action for the writer goroutine without blocking the caller.
@@ -327,6 +395,28 @@ func (c *Client) RecreateSession(id string) error {
 			return fmt.Errorf("%s", frame.Result.Error)
 		}
 		return nil
+	}
+}
+
+// Dispatch applies one host lifecycle/control action through the authenticated
+// primary daemon and returns the created session id, if any. Snapshot frames
+// may precede the result on this subscribed stream and are skipped.
+func (c *Client) Dispatch(a core.Action) (string, error) {
+	if err := c.Send(a); err != nil {
+		return "", err
+	}
+	for {
+		frame, err := c.Next()
+		if err != nil {
+			return "", err
+		}
+		if frame.Result == nil {
+			continue
+		}
+		if !frame.Result.OK {
+			return "", fmt.Errorf("%s", frame.Result.Error)
+		}
+		return frame.Result.NewID, nil
 	}
 }
 
@@ -564,7 +654,7 @@ func (c *Client) NextContext(ctx context.Context) (Frame, error) {
 			return Frame{}, err
 		}
 		return Frame{Result: &r}, nil
-	case core.FramePaneOutput, core.FramePaneExit:
+	case core.FramePaneReset, core.FramePaneOutput, core.FramePaneExit:
 		var p core.PaneFrame
 		if err := json.Unmarshal(line, &p); err != nil {
 			return Frame{}, err
