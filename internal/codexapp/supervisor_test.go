@@ -84,6 +84,53 @@ func TestHandshakeStart(t *testing.T) {
 	}
 }
 
+// Every handshake path must select the reviewer explicitly, including the
+// persistence resume for a fresh thread and the fallback for a missing rollout.
+func TestHandshakeApprovalsReviewer(t *testing.T) {
+	for _, reviewer := range []string{"", "user"} {
+		for _, mode := range []string{"fresh", "resume", "missing rollout"} {
+			t.Run(reviewer+"/"+mode, func(t *testing.T) {
+				client, server := newMemPair()
+				fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}}
+				cfg := Config{SessionID: "reviewer", ApprovalsReviewer: reviewer}
+				if mode != "fresh" {
+					cfg.ResumeThreadID = "thr_saved"
+				}
+				if mode == "missing rollout" {
+					fs.resumeErr = "no rollout found"
+				}
+				go fs.loop()
+				defer fs.close()
+				sup := New(cfg)
+				defer sup.Close()
+				attach(t, sup, client)
+				want := reviewer
+				if want == "" {
+					want = "auto_review"
+				}
+				fs.mu.Lock()
+				defer fs.mu.Unlock()
+				for _, call := range fs.calls {
+					if call.Method != "thread/start" && call.Method != "thread/resume" {
+						continue
+					}
+					var params struct {
+						Policy   string `json:"approvalPolicy"`
+						Reviewer string `json:"approvalsReviewer"`
+						Sandbox  string `json:"sandbox"`
+					}
+					if err := json.Unmarshal(call.Params, &params); err != nil {
+						t.Fatal(err)
+					}
+					if params.Policy != "on-request" || params.Reviewer != want || params.Sandbox != "workspace-write" {
+						t.Fatalf("%s lost configured permissions: %s", call.Method, call.Params)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestHandshakeInitialPrompt(t *testing.T) {
 	const prompt = "Fix the 'Codex' launch\nPreserve $HOME, `quotes`, and Unicode: café."
 	for _, tc := range []struct {

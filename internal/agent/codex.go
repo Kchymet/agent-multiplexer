@@ -63,8 +63,9 @@ func (h codexHarness) CurrentModel(s store.Session) (string, bool) {
 	return "", false
 }
 
-// Argv builds Codex's launch argv. It defaults to autonomous operation, mirroring
-// claude's permission-mode convention: a sandbox unless the user opts out with
+// Argv builds Codex's launch argv. It defaults to "Approve for me": on-request
+// approvals routed to Codex's automatic reviewer, mirroring Claude's auto mode.
+// It uses a sandbox unless the user opts out with
 // AMUX_CODEX_SANDBOX=none. Override the level with AMUX_CODEX_SANDBOX=
 // read-only|workspace-write|danger-full-access.
 func (codexHarness) Argv(model string, extra ...string) ([]string, error) {
@@ -76,7 +77,7 @@ func (codexHarness) Argv(model string, extra ...string) ([]string, error) {
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	return codexcfg.FullscreenTUI(finishArgv(bin, args, extra)), nil
+	return codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(finishArgv(bin, args, extra))), nil
 }
 
 // NewSessionID returns "" — Codex mints its own uuid on its first run and can't be

@@ -35,15 +35,16 @@ import (
 //   - attach(ctx, msgConn): the protocol core over a message-framed transport —
 //     exercised in tests against an in-memory fake App Server.
 
-// Thread/start policy. The values are the App Server's HYPHENATED enums, verified
+// Thread/start policy. The policy and sandbox use HYPHENATED enums, verified
 // against Codex 0.153.4 by the ROOT probe: `onRequest`/`workspaceWrite` are
-// rejected -32600. on-request so the server actually raises answerable approvals,
-// confined to workspace-write, never danger-full-access. The process-level sandbox
+// rejected -32600. "Approve for me" pairs on-request with auto_review (the reviewer
+// enum uses underscores), confined to workspace-write. The process-level sandbox
 // is amux's own launcher (panespec); these are the thread-level request defaults.
 const (
-	defaultApprovalPolicy = "on-request"
-	defaultSandbox        = "workspace-write"
-	defaultDialTimeout    = 15 * time.Second
+	defaultApprovalPolicy    = "on-request"
+	defaultApprovalsReviewer = "auto_review"
+	defaultSandbox           = "workspace-write"
+	defaultDialTimeout       = 15 * time.Second
 	// killWaitDelay bounds how long killProc's cmd.Wait blocks after the process is
 	// killed, waiting for os/exec's stderr-copier goroutine to drain. Normally the
 	// copier hits EOF the instant the child exits; but if the child spawned a
@@ -68,12 +69,13 @@ type Config struct {
 	// per-session, sandbox-scoped), ws://127.0.0.1:<port> (loopback), or
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
 	// --listen <Endpoint> and dials the same value.
-	Endpoint       string
-	ResumeThreadID string        // non-empty ⇒ thread/resume instead of thread/start
-	InitialPrompt  string        // submitted only when the handshake creates a fresh thread
-	ApprovalPolicy string        // "" ⇒ defaultApprovalPolicy
-	Sandbox        string        // "" ⇒ defaultSandbox
-	DialTimeout    time.Duration // "" ⇒ defaultDialTimeout
+	Endpoint          string
+	ResumeThreadID    string        // non-empty ⇒ thread/resume instead of thread/start
+	InitialPrompt     string        // submitted only when the handshake creates a fresh thread
+	ApprovalPolicy    string        // "" ⇒ defaultApprovalPolicy
+	ApprovalsReviewer string        // "" ⇒ defaultApprovalsReviewer ("Approve for me")
+	Sandbox           string        // "" ⇒ defaultSandbox
+	DialTimeout       time.Duration // "" ⇒ defaultDialTimeout
 	// Origin, when set, is sent as the WebSocket Origin header. Default empty ⇒ no
 	// Origin (codex's loopback/wss listeners 403 any Origin). Set only for a server
 	// deployment that allowlists a specific Origin.
@@ -129,6 +131,9 @@ func New(cfg Config) *Supervisor {
 	if cfg.ApprovalPolicy == "" {
 		cfg.ApprovalPolicy = defaultApprovalPolicy
 	}
+	if cfg.ApprovalsReviewer == "" {
+		cfg.ApprovalsReviewer = defaultApprovalsReviewer
+	}
 	if cfg.Sandbox == "" {
 		cfg.Sandbox = defaultSandbox
 	}
@@ -181,7 +186,7 @@ func AttachArgv(bin, endpoint, threadID string) []string {
 	if threadID != "" {
 		argv = append(argv, "resume", threadID)
 	}
-	return codexcfg.FullscreenTUI(argv)
+	return codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(argv))
 }
 
 // Identity is the durable server/thread identity amux persists for a structured
@@ -381,8 +386,9 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 
 	start := func() (json.RawMessage, error) {
 		params := map[string]any{
-			"approvalPolicy": s.cfg.ApprovalPolicy,
-			"sandbox":        s.cfg.Sandbox,
+			"approvalPolicy":    s.cfg.ApprovalPolicy,
+			"approvalsReviewer": s.cfg.ApprovalsReviewer,
+			"sandbox":           s.cfg.Sandbox,
 		}
 		if s.cfg.Model != "" {
 			params["model"] = s.cfg.Model
@@ -398,9 +404,10 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		// restarted server can fall back to read-only and omit the Git grants
 		// supplied through sandbox_workspace_write.writable_roots at launch.
 		params := map[string]any{
-			"threadId":       s.cfg.ResumeThreadID,
-			"approvalPolicy": s.cfg.ApprovalPolicy,
-			"sandbox":        s.cfg.Sandbox,
+			"threadId":          s.cfg.ResumeThreadID,
+			"approvalPolicy":    s.cfg.ApprovalPolicy,
+			"approvalsReviewer": s.cfg.ApprovalsReviewer,
+			"sandbox":           s.cfg.Sandbox,
 		}
 		if s.cfg.Model != "" {
 			params["model"] = s.cfg.Model
@@ -437,7 +444,12 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		}); err != nil {
 			return fmt.Errorf("codexapp name fresh thread: %w", err)
 		}
-		params := map[string]any{"threadId": id}
+		params := map[string]any{
+			"threadId":          id,
+			"approvalPolicy":    s.cfg.ApprovalPolicy,
+			"approvalsReviewer": s.cfg.ApprovalsReviewer,
+			"sandbox":           s.cfg.Sandbox,
+		}
 		if s.cfg.Model != "" {
 			params["model"] = s.cfg.Model
 		}
