@@ -180,6 +180,37 @@ func TestSessionEventPagerReportsRawRecordAndNormalizedEventOversizeSeparately(t
 			t.Fatalf("oversized = %+v", page.Oversized)
 		}
 	})
+
+	t.Run("oversized type metadata", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "runtime.jsonl")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		event := harnessproto.RuntimeEvent{
+			Type: strings.Repeat("t", 65400), Direction: harnessproto.DirOut, Payload: json.RawMessage(`{}`),
+		}
+		if err := json.NewEncoder(f).Encode(event); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		set := testEventSourceSet(root, testEventSource(runtimeevents.PageSourceStructured, root, "runtime.jsonl"))
+		body, err := testSessionEventPager(t, set).page(context.Background(), testEventPrincipal("reader"), set.target, nil)
+		if err != nil {
+			t.Fatalf("bounded source event did not produce a page: %v", err)
+		}
+		if len(body) > sessionrpc.MaxResponseBody {
+			t.Fatalf("page bytes = %d", len(body))
+		}
+		page := decodeEventPage(t, body)
+		if page.Oversized == nil || page.Oversized.Kind != "event" || page.Oversized.Type != eventOversizedTypeLabel ||
+			page.Oversized.EncodedBytes == 0 {
+			t.Fatalf("oversized type metadata = %+v", page.Oversized)
+		}
+	})
 }
 
 func TestSessionEventPagerBoundsAdmissionExpiryAndCancellation(t *testing.T) {
@@ -269,19 +300,91 @@ func TestSessionEventPagerFinalReleaseCheckRunsAfterIOAndDropsDeniedPage(t *test
 				t.Fatal("final scope check ran before source resolution and page I/O")
 			}
 			pager.mu.Lock()
-			prepared := len(pager.entries) != 0
+			published := len(pager.entries)
 			pager.mu.Unlock()
-			if !prepared {
-				t.Fatal("final scope check ran before the bounded page was prepared")
+			if published != 0 {
+				t.Fatalf("pager published %d cursor entries before final scope check", published)
 			}
 			return access.ErrDenied
 		})
 	if !errors.Is(err, access.ErrDenied) || body != nil || releaseCalls != 1 {
 		t.Fatalf("release result body=%q err=%v calls=%d", body, err, releaseCalls)
 	}
+	pager.mu.Lock()
+	published := len(pager.entries)
+	pager.mu.Unlock()
+	if published != 0 {
+		t.Fatalf("denied final check published %d cursor entries", published)
+	}
 	if body, err := pager.pageForRelease(context.Background(), testEventPrincipal("reader"), set.target, nil, nil); !errors.Is(err, access.ErrDenied) || body != nil {
 		t.Fatalf("nil release check body=%q err=%v", body, err)
 	}
+}
+
+func TestSessionEventPagerCancellationLeavesCacheStateUntouched(t *testing.T) {
+	t.Run("initial admission", func(t *testing.T) {
+		set := testEventSourceSet(t.TempDir())
+		pager := testSessionEventPager(t, set)
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		pager.now = func() time.Time {
+			calls++
+			if calls == 2 {
+				cancel()
+			}
+			return time.Unix(100, 0)
+		}
+		body, err := pager.pageForRelease(ctx, testEventPrincipal("reader"), set.target, nil,
+			func(context.Context) error { return nil })
+		if !errors.Is(err, context.Canceled) || body != nil {
+			t.Fatalf("cancelled initial page body=%q err=%v", body, err)
+		}
+		pager.mu.Lock()
+		entries := len(pager.entries)
+		pager.mu.Unlock()
+		if entries != 0 {
+			t.Fatalf("cancelled initial page published %d cursor entries", entries)
+		}
+	})
+
+	t.Run("continuation retry state", func(t *testing.T) {
+		root := t.TempDir()
+		writeStructuredEvents(t, filepath.Join(root, "runtime.jsonl"), 300, 8)
+		set := testEventSourceSet(root, testEventSource(runtimeevents.PageSourceStructured, root, "runtime.jsonl"))
+		pager := testSessionEventPager(t, set)
+		principal := testEventPrincipal("reader")
+		body, err := pager.page(context.Background(), principal, set.target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor := decodeEventPage(t, body).NextCursor
+		pager.mu.Lock()
+		entry := pager.entries[cursor]
+		before := cloneSessionEventCursor(entry)
+		beforeBytes := entry.bytes
+		entryCount := len(pager.entries)
+		pager.mu.Unlock()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		pager.resolve = func(context.Context, string) (sessionEventSourceSet, error) {
+			cancel()
+			return set, nil
+		}
+		pager.now = func() time.Time { return before.lastUsed.Add(time.Minute) }
+		if body, err := pager.pageForRelease(ctx, principal, set.target,
+			map[string]string{core.RuntimeEventsCursorField: cursor}, func(context.Context) error { return nil }); !errors.Is(err, context.Canceled) || body != nil {
+			t.Fatalf("cancelled continuation body=%q err=%v", body, err)
+		}
+		pager.mu.Lock()
+		after := pager.entries[cursor]
+		afterCount := len(pager.entries)
+		pager.mu.Unlock()
+		if after != entry || afterCount != entryCount || !after.lastUsed.Equal(before.lastUsed) || after.bytes != beforeBytes ||
+			len(after.page) != 0 || after.nextCursor != "" {
+			t.Fatalf("cancelled continuation mutated retry state: before=%+v after=%+v counts=%d/%d",
+				before, after, entryCount, afterCount)
+		}
+	})
 }
 
 func TestSessionEventPagerRejectsGrowingDecoderState(t *testing.T) {
@@ -328,6 +431,10 @@ func TestSessionEventPagerRejectsGrowingDecoderState(t *testing.T) {
 func TestSessionEventFieldsRejectAmbiguousOrMalformedValues(t *testing.T) {
 	bad := []map[string]string{
 		{"other": "1"},
+		{core.RuntimeEventsCursorField: ""},
+		{core.RuntimeEventsCursorField: "   "},
+		{core.RuntimeEventsCursorField: "", core.RuntimeEventsAfterSequenceField: "1"},
+		{core.RuntimeEventsCursorField: strings.Repeat("a", eventCursorEncodedLength-1) + "b"},
 		{core.RuntimeEventsCursorField: strings.Repeat("a", 43), core.RuntimeEventsAfterSequenceField: "1"},
 		{core.RuntimeEventsAfterSequenceField: "-1"},
 		{core.RuntimeEventsAfterSequenceField: " 1"},
@@ -336,6 +443,11 @@ func TestSessionEventFieldsRejectAmbiguousOrMalformedValues(t *testing.T) {
 	for _, fields := range bad {
 		if _, _, err := parseSessionEventFields(fields); err == nil {
 			t.Fatalf("fields accepted: %#v", fields)
+		}
+	}
+	for _, cursor := range []string{"", "   ", strings.Repeat("a", eventCursorEncodedLength-1) + "b"} {
+		if _, _, err := parseSessionEventFields(map[string]string{core.RuntimeEventsCursorField: cursor}); !errors.Is(err, errEventCursorInvalid) {
+			t.Fatalf("cursor %q error = %v, want cursor invalid", cursor, err)
 		}
 	}
 }

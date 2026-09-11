@@ -65,6 +65,41 @@ func TestAgentEventsRejectsAmbiguousCursorLocally(t *testing.T) {
 	}
 }
 
+func TestAgentEventsForwardsCanonicalCursor(t *testing.T) {
+	body, _ := json.Marshal(core.RuntimeEventPage{Target: "self"})
+	rpc := &fakeRestrictedRPC{query: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: body}}
+	installRestrictedRPC(t, rpc)
+	token := strings.Repeat("A", 43)
+	_ = captureAgentEventsStdout(t, func() error {
+		return cmdAgentEvents([]string{"self", "--cursor", token, "--json"})
+	})
+	if got := rpc.lastQuery.Fields[core.RuntimeEventsCursorField]; got != token {
+		t.Fatalf("cursor field = %q, want %q", got, token)
+	}
+}
+
+func TestAgentEventsPreservesFlagPresenceAndRejectsEmptyOrDuplicatePositions(t *testing.T) {
+	for _, args := range [][]string{
+		{"self", "--cursor="},
+		{"self", "--cursor", "   "},
+		{"self", "--cursor", strings.Repeat("a", 42) + "b"},
+		{"self", "--cursor=", "--after", "1"},
+		{"self", "--cursor", "one", "--cursor", "two"},
+		{"self", "--after", "1", "--after=2"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			rpc := &fakeRestrictedRPC{}
+			installRestrictedRPC(t, rpc)
+			if err := cmdAgentEvents(args); err == nil {
+				t.Fatalf("args %q unexpectedly accepted", args)
+			}
+			if rpc.queryCalls != 0 {
+				t.Fatalf("args %q made %d query calls", args, rpc.queryCalls)
+			}
+		})
+	}
+}
+
 func captureAgentEventsStdout(t *testing.T, run func() error) string {
 	t.Helper()
 	r, w, err := os.Pipe()

@@ -43,7 +43,9 @@ independently started readers can observe later appends to multiple sources in a
 different order.
 
 An event too large for an otherwise empty response is omitted with explicit
-normalized-event metadata. A raw source record larger than the decoder limit is
+normalized-event metadata. An abnormally large normalized type uses the fixed
+`type_omitted` label, and the complete omission wrapper is measured before
+release. A raw source record larger than the decoder limit is
 discarded in bounded chunks and reported separately with only its raw byte size
 and reason; amux does not claim a normalized type or encoded size for content it
 did not parse.
