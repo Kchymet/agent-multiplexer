@@ -49,6 +49,8 @@ const (
 	eventSourceWalkEntries   = 8192
 	eventSourceAnchorBytes   = 32
 	eventCursorEncodedLength = 43 // base64url SHA-256
+	eventOversizedTypeBytes  = 128
+	eventOversizedTypeLabel  = "type_omitted"
 )
 
 var (
@@ -104,7 +106,13 @@ type sessionEventCursor struct {
 	bytes      int
 	page       []byte
 	nextCursor string
-	pageErr    error
+}
+
+type sessionEventPageAttempt struct {
+	body      []byte
+	token     string
+	original  *sessionEventCursor
+	successor *sessionEventCursor
 }
 
 type sessionEventCursorSource struct {
@@ -147,24 +155,21 @@ func (p *sessionEventPager) close() {
 // pageForRelease surrounds the bounded pager with the second half of the
 // dispatcher's authorization sandwich. The dispatcher authorizes before
 // calling this method; releaseCheck then closes the revoke-during-I/O window.
-// A denied final check discards the response body even though retryable cursor
-// state may already have been computed.
+// A denied or cancelled final check discards the response body and every staged
+// cache/LRU mutation, preserving the original cursor for a retry.
 func (p *sessionEventPager) pageForRelease(ctx context.Context, principal access.Principal, target string,
 	fields map[string]string, releaseCheck sessionEventReleaseCheck) ([]byte, error) {
 	if releaseCheck == nil {
 		return nil, access.ErrDenied
 	}
-	body, err := p.page(ctx, principal, target, fields)
+	attempt, err := p.preparePage(ctx, principal, target, fields)
 	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := releaseCheck(ctx); err != nil {
 		return nil, err
 	}
-	return body, nil
+	return p.commitPage(ctx, attempt)
 }
 
 // page answers one already-authorized query. The lifecycle owner performs the
@@ -172,6 +177,15 @@ func (p *sessionEventPager) pageForRelease(ctx context.Context, principal access
 // out of the global effect lock; this method independently requires a tracked
 // source. Dispatcher integration must call pageForRelease, not page directly.
 func (p *sessionEventPager) page(ctx context.Context, principal access.Principal, target string, fields map[string]string) ([]byte, error) {
+	attempt, err := p.preparePage(ctx, principal, target, fields)
+	if err != nil {
+		return nil, err
+	}
+	return p.commitPage(ctx, attempt)
+}
+
+func (p *sessionEventPager) preparePage(ctx context.Context, principal access.Principal, target string,
+	fields map[string]string) (*sessionEventPageAttempt, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -184,6 +198,9 @@ func (p *sessionEventPager) page(ctx context.Context, principal access.Principal
 	}
 	sources, err := p.resolve(ctx, target)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if sources.target != target {
@@ -199,76 +216,96 @@ func (p *sessionEventPager) page(ctx context.Context, principal access.Principal
 		if err != nil {
 			return nil, err
 		}
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.closed {
-			return nil, errEventCursorInvalid
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		p.admitLocked(next)
-		return page, nil
+		return &sessionEventPageAttempt{body: page, successor: next}, nil
 	}
 
+	observedAt := p.now()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return nil, errEventCursorInvalid
 	}
-	p.expireLocked(p.now())
 	entry := p.entries[cursorToken]
-	if entry == nil || entry.subject != principal.SubjectID || entry.target != target || entry.signature != sources.signature {
+	if entry == nil || observedAt.Sub(entry.lastUsed) > eventCursorTTL || entry.subject != principal.SubjectID ||
+		entry.target != target || entry.signature != sources.signature {
 		p.mu.Unlock()
 		return nil, errEventCursorInvalid
 	}
-	entry.lastUsed = p.now()
-	if len(entry.page) != 0 || entry.pageErr != nil {
+	if len(entry.page) != 0 {
 		page := append([]byte(nil), entry.page...)
-		cachedErr := entry.pageErr
 		p.mu.Unlock()
-		if cachedErr != nil {
-			return nil, cachedErr
-		}
 		if err := validateCursorSources(entry, sources); err != nil {
 			return nil, err
 		}
-		return page, nil
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return &sessionEventPageAttempt{body: page, token: cursorToken, original: entry}, nil
 	}
-	attempt := cloneSessionEventCursor(entry)
+	state := cloneSessionEventCursor(entry)
 	p.mu.Unlock()
 
-	page, next, computeErr := p.computePage(ctx, attempt, sources)
-	if ctx.Err() != nil {
-		return nil, ctx.Err() // clone and successor are discarded
+	page, next, err := p.computePage(ctx, state, sources)
+	if err != nil {
+		return nil, err
 	}
-	p.mu.Lock()
-	current := p.entries[cursorToken]
-	if current == nil || current != entry || p.closed {
-		p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err // clone and successor are discarded
+	}
+	return &sessionEventPageAttempt{body: page, token: cursorToken, original: entry, successor: next}, nil
+}
+
+func (p *sessionEventPager) commitPage(ctx context.Context, attempt *sessionEventPageAttempt) ([]byte, error) {
+	if attempt == nil {
 		return nil, errEventCursorInvalid
 	}
-	if len(entry.page) != 0 || entry.pageErr != nil {
-		if entry.pageErr != nil {
-			p.mu.Unlock()
-			return nil, entry.pageErr
-		}
-		cached := append([]byte(nil), entry.page...)
-		p.mu.Unlock()
-		if err := validateCursorSources(entry, sources); err != nil {
-			return nil, err
-		}
-		return cached, nil
+	if attempt.original == nil && attempt.successor == nil {
+		return nil, errEventCursorInvalid
 	}
-	if computeErr != nil {
-		entry.pageErr = computeErr
-		p.mu.Unlock()
-		return nil, computeErr
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	entry.page = append([]byte(nil), page...)
-	entry.nextCursor = next.token
+	committedAt := p.now()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.closed {
+		return nil, errEventCursorInvalid
+	}
+	p.expireLocked(committedAt)
+	if attempt.original == nil {
+		p.admitLocked(attempt.successor, committedAt)
+		return append([]byte(nil), attempt.body...), nil
+	}
+	entry := p.entries[attempt.token]
+	if entry == nil || entry != attempt.original {
+		return nil, errEventCursorInvalid
+	}
+	if len(entry.page) != 0 {
+		entry.lastUsed = committedAt
+		return append([]byte(nil), entry.page...), nil
+	}
+	if attempt.successor == nil {
+		return nil, errEventCursorInvalid
+	}
+	entry.lastUsed = committedAt
+	entry.page = append([]byte(nil), attempt.body...)
+	entry.nextCursor = attempt.successor.token
 	entry.bytes = cursorMemoryBytes(entry)
-	p.admitLocked(next)
-	p.enforceLimitsLocked(entry.subject)
-	p.mu.Unlock()
-	return page, nil
+	p.admitLocked(attempt.successor, committedAt)
+	p.enforceLimitsLocked(entry.subject, committedAt)
+	return append([]byte(nil), attempt.body...), nil
 }
 
 func parseSessionEventFields(fields map[string]string) (cursor string, after int64, err error) {
@@ -277,19 +314,20 @@ func parseSessionEventFields(fields map[string]string) (cursor string, after int
 			return "", 0, fmt.Errorf("%w: unknown field %q", errEventQueryInvalid, key)
 		}
 	}
-	cursor = strings.TrimSpace(fields[core.RuntimeEventsCursorField])
+	cursorText, hasCursor := fields[core.RuntimeEventsCursorField]
 	afterText, hasAfter := fields[core.RuntimeEventsAfterSequenceField]
-	if cursor != "" && hasAfter {
+	if hasCursor && hasAfter {
 		return "", 0, fmt.Errorf("%w: cursor and after_sequence are mutually exclusive", errEventQueryInvalid)
 	}
-	if cursor != "" {
-		if len(cursor) != eventCursorEncodedLength {
+	if hasCursor {
+		if cursorText == "" || strings.TrimSpace(cursorText) != cursorText || len(cursorText) != eventCursorEncodedLength {
 			return "", 0, errEventCursorInvalid
 		}
-		if _, decodeErr := base64.RawURLEncoding.DecodeString(cursor); decodeErr != nil {
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(cursorText)
+		if decodeErr != nil || len(decoded) != sha256.Size || base64.RawURLEncoding.EncodeToString(decoded) != cursorText {
 			return "", 0, errEventCursorInvalid
 		}
-		return cursor, 0, nil
+		return cursorText, 0, nil
 	}
 	if !hasAfter {
 		return "", 0, nil
@@ -326,7 +364,6 @@ func cloneSessionEventCursor(in *sessionEventCursor) *sessionEventCursor {
 	out.decoder = in.decoder.Clone()
 	out.page = nil
 	out.nextCursor = ""
-	out.pageErr = nil
 	out.sources = make([]sessionEventCursorSource, len(in.sources))
 	for i, source := range in.sources {
 		out.sources[i] = source
@@ -398,7 +435,11 @@ func (p *sessionEventPager) computePage(ctx context.Context, state *sessionEvent
 			}
 			page.Truncated = true
 			page.Oversized = &core.OversizedRuntimeEvent{
-				Kind: "event", Sequence: seq, Type: event.Type, EncodedBytes: len(encoded), Reason: "event_exceeds_page_limit",
+				Kind: "event", Sequence: seq, Type: boundedOversizedEventType(event.Type),
+				EncodedBytes: len(encoded), Reason: "event_exceeds_page_limit",
+			}
+			if !pageFits(page) {
+				page.Oversized.Type = eventOversizedTypeLabel
 			}
 			break
 		}
@@ -564,6 +605,13 @@ func pageFits(page core.RuntimeEventPage) bool {
 	return err == nil && len(body) <= sessionrpc.MaxResponseBody
 }
 
+func boundedOversizedEventType(eventType string) string {
+	if eventType == "" || len(eventType) > eventOversizedTypeBytes {
+		return eventOversizedTypeLabel
+	}
+	return eventType
+}
+
 func openSessionEventSource(source *sessionEventCursorSource) (*os.File, error) {
 	root, err := hostprep.OpenSession(source.spec.root)
 	if err != nil {
@@ -702,7 +750,7 @@ func (p *sessionEventPager) tokenFor(cursor *sessionEventCursor) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (p *sessionEventPager) admitLocked(cursor *sessionEventCursor) {
+func (p *sessionEventPager) admitLocked(cursor *sessionEventCursor, now time.Time) {
 	if cursor == nil || p.closed {
 		return
 	}
@@ -711,11 +759,12 @@ func (p *sessionEventPager) admitLocked(cursor *sessionEventCursor) {
 		return
 	}
 	if old := p.entries[cursor.token]; old != nil {
-		old.lastUsed = cursor.lastUsed
+		old.lastUsed = now
 		return
 	}
+	cursor.lastUsed = now
 	p.entries[cursor.token] = cursor
-	p.enforceLimitsLocked(cursor.subject)
+	p.enforceLimitsLocked(cursor.subject, now)
 }
 
 func (p *sessionEventPager) expireLocked(now time.Time) {
@@ -726,8 +775,8 @@ func (p *sessionEventPager) expireLocked(now time.Time) {
 	}
 }
 
-func (p *sessionEventPager) enforceLimitsLocked(subject string) {
-	p.expireLocked(p.now())
+func (p *sessionEventPager) enforceLimitsLocked(subject string, now time.Time) {
+	p.expireLocked(now)
 	for {
 		count, subjectBytes, globalBytes := 0, 0, 0
 		for _, entry := range p.entries {
