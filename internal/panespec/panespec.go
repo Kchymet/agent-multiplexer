@@ -148,7 +148,7 @@ func AttachCommand(agentID, endpoint, threadID string) (dir string, env, argv []
 	if threadID != "" {
 		inner = append(inner, "resume", threadID)
 	}
-	inner = codexcfg.FullscreenTUI(inner)
+	inner = codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(inner))
 	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), nil
 }
 
