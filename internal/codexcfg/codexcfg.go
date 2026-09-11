@@ -71,6 +71,18 @@ const (
 	MCPCredentialsFile = ".credentials.json"
 )
 
+// AutomaticApprovals selects Codex's "Approve for me" permission mode for a
+// launch, including a native TUI attaching to an app-server thread. Keep these
+// defaults before caller arguments so explicit CLI overrides still win.
+func AutomaticApprovals(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := make([]string, 0, len(argv)+4)
+	out = append(out, argv[0], "-c", `approval_policy="on-request"`, "-c", `approvals_reviewer="auto_review"`)
+	return append(out, argv[1:]...)
+}
+
 // FullscreenTUI adds the invocation-local Codex config needed when its TUI is
 // embedded in amux. Codex's "auto" alternate-screen mode can choose the normal
 // screen based on inherited terminal environment (notably Zellij); amux mirrors
