@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"amux/internal/codexcfg"
+	"amux/internal/launchenv"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -60,11 +61,12 @@ const (
 // session (identity persistence); Endpoint is the WebSocket listen/dial address
 // (unix://<per-session socket> by default, inside the session's private scope).
 type Config struct {
-	SessionID string
-	Bin       string   // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
-	Dir       string   // working directory (the worktree)
-	Env       []string // extra KEY=VALUE additions to the child environment
-	Model     string   // selected amux model; sticky on the thread and explicit on turns
+	SessionID   string
+	Bin         string                    // codex binary; "" ⇒ "codex" (resolved by the caller / PATH)
+	Dir         string                    // working directory (the worktree)
+	Env         []string                  // extra KEY=VALUE additions to the child environment
+	ModelAccess launchenv.ModelCapability // daemon-selected Codex auth capability
+	Model       string                    // selected amux model; sticky on the thread and explicit on turns
 	// Endpoint is the App Server WebSocket endpoint: unix://<path> (default,
 	// per-session, sandbox-scoped), ws://127.0.0.1:<port> (loopback), or
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
@@ -264,7 +266,11 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = s.cfg.Dir
-	cmd.Env = append(os.Environ(), s.cfg.Env...)
+	launchEnv, err := appServerEnvironment(os.Environ(), s.cfg.Env, s.cfg.ModelAccess)
+	if err != nil {
+		return fmt.Errorf("codexapp: build app-server environment: %w", err)
+	}
+	cmd.Env = launchEnv
 	// Capture the child's stderr into a bounded ring so a startup failure inside the
 	// sandbox wrapper (an execvp ENOENT, a bwrap mount error) is explained in the
 	// error below instead of only surfacing as a generic dial timeout — os/exec would
@@ -304,6 +310,10 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 		_ = s.Close()
 	}()
 	return nil
+}
+
+func appServerEnvironment(ambient, overlay []string, access launchenv.ModelCapability) ([]string, error) {
+	return launchenv.Build(ambient, overlay, access)
 }
 
 // withStderrTail appends the captured child-stderr tail to a launch/dial/handshake

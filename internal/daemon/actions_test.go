@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -12,6 +13,82 @@ import (
 	"amux/internal/store"
 	"amux/internal/wsops"
 )
+
+func TestAuthenticatedShutdownAcknowledgesBeforeStoppingRun(t *testing.T) {
+	d := New("/amux", nil, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := d.handle(ctx, core.Action{Action: actionDaemonShutdown})
+	if !result.OK {
+		t.Fatalf("shutdown result = %+v", result)
+	}
+	// A real client closes after reading the acknowledgement. That must not
+	// retract an operation the authenticated daemon already accepted.
+	cancel()
+	select {
+	case <-d.shutdown:
+		t.Fatal("shutdown began before the authenticated response grace")
+	default:
+	}
+	select {
+	case <-d.shutdown:
+	case <-time.After(2 * shutdownResponseGrace):
+		t.Fatal("shutdown was not requested after response grace")
+	}
+}
+
+func TestAuthenticatedShutdownRejectsSmuggledArguments(t *testing.T) {
+	d := New("/amux", nil, time.Second)
+	result := d.handle(context.Background(), core.Action{Action: actionDaemonShutdown, ID: "other"})
+	if result.OK {
+		t.Fatalf("shutdown with target succeeded: %+v", result)
+	}
+	select {
+	case <-d.shutdown:
+		t.Fatal("rejected shutdown stopped daemon")
+	default:
+	}
+}
+
+func TestHostSessionRecreationPreflightsBeforeStoppingAndRotatesRuntimeGeneration(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	original := eng.running("a1")
+	firstGeneration, err := d.permissions.observe("a1", original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, nil, fmt.Errorf("unsupported legacy layout")
+	}
+	if result := d.handle(context.Background(), core.Action{Action: actionSessionRecreate, ID: "a1"}); result.OK {
+		t.Fatalf("recreation unexpectedly succeeded: %+v", result)
+	}
+	if got, ok := eng.Lookup(original.Key()); !ok || got != original {
+		t.Fatal("failed recreation stopped the existing runtime")
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
+	if result := d.handle(context.Background(), core.Action{Action: actionSessionRecreate, ID: "a1"}); !result.OK {
+		t.Fatalf("recreation failed: %+v", result)
+	}
+	replacement, ok := eng.Lookup(original.Key())
+	if !ok || replacement == original {
+		t.Fatal("recreation did not replace the named runtime")
+	}
+	secondGeneration, ok := d.permissions.generation("a1")
+	if !ok || secondGeneration == firstGeneration {
+		t.Fatal("recreated runtime reused stale permission generation")
+	}
+}
+
+func TestHostSessionRecreationRejectsSmuggledFields(t *testing.T) {
+	d := New("", nil, time.Hour)
+	result := d.handle(context.Background(), core.Action{Action: actionSessionRecreate, ID: "a1", Fields: map[string]string{"target": "other"}})
+	if result.OK || !strings.Contains(result.Error, "exactly one session id") {
+		t.Fatalf("smuggled recreation = %+v", result)
+	}
+}
 
 // Creation must launch the coordinator without any pane.open or follow-up start
 // action. New-workgroup configures that default session directly; the older

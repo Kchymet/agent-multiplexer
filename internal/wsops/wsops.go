@@ -38,8 +38,8 @@ type AgentSpec struct {
 // CreateWorkspace creates a workgroup (root): a container of agents that checks
 // out nothing itself and holds no repos of its own (a repo is an attribute of
 // an agent, via its worktrees), but which IS a session — the workgroup's
-// coordinator (store.RoleCoordinator), sandboxed to the container dir that
-// holds every member's sandbox, with a conversation pinned now so it resumes
+// coordinator (store.RoleCoordinator), sandboxed to a dedicated own directory
+// beside member sandboxes, with a conversation pinned now so it resumes
 // durably. When defaultAgent is non-nil it also creates one agent from that spec
 // (its repos, model, mode, and prompt are honored). Pass nil to create an empty
 // workgroup. Returns the workgroup id.
@@ -65,7 +65,7 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
 		Agent: kind, Model: model, Mode: store.ModeInteractive, Prompt: prompt,
-		Dir: store.RootDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
+		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
 	if err := os.MkdirAll(root.Dir, 0o755); err != nil {
@@ -601,17 +601,24 @@ func DeleteByID(ctx context.Context, id string) error {
 		if s.Role() == store.RoleRepo {
 			return fmt.Errorf("%q is repo %s's home session; it goes with the repo (amux repo rm %s)", id, s.Repo, s.Repo)
 		}
+		// Validate before touching members. A legacy coordinator shares its parent
+		// with member and unknown files; partial deletion would silently destroy
+		// exactly the state that explicit host recovery must preserve.
+		if err := validateContainerHome(s, store.CoordinatorDir(s.ID), "workgroup coordinator"); err != nil {
+			return fmt.Errorf("refusing to delete legacy workgroup: %w", err)
+		}
 		agents, _ := db.Children(id)
 		for _, a := range agents {
 			if err := removeAgent(ctx, db, a); err != nil {
 				return err
 			}
 		}
-		// The coordinator's own files go; the container dir itself is removed only
-		// if that leaves it empty. A re-parented agent can still physically live
-		// under this root's tree (move is DB-only), so we must never blow the whole
-		// tree away.
-		removeContainerFiles(db, s)
+		// Remove exactly the dedicated coordinator own directory. A re-parented
+		// agent can still physically live under this root's parent (move is DB-only),
+		// so the parent is never scanned or recursively removed.
+		if err := removeContainerFiles(db, s); err != nil {
+			return err
+		}
 		return db.DeleteSession(id)
 	}
 	return removeAgent(ctx, db, s)

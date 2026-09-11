@@ -6,20 +6,39 @@ package panespec
 
 import (
 	"crypto/sha256"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
+	"amux/internal/access"
 	"amux/internal/agent"
 	"amux/internal/cfghome"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
+	"amux/internal/git"
+	"amux/internal/launchenv"
 	"amux/internal/store"
 	"amux/internal/wsops"
 )
+
+var (
+	ErrAccessRequired       = errors.New("daemon-provisioned session access is required")
+	ErrIsolationUnsupported = errors.New("protected filesystem isolation is unsupported")
+)
+
+// LaunchSpec is the complete daemon-authorized input to a pane launch. The
+// session row and access grant are captured together so panespec never reopens
+// the store or invents authority from an id, environment variable, or cwd.
+type LaunchSpec struct {
+	Session    store.Session
+	Access     access.SessionAccess
+	GitObjects []git.GitObjectMount
+}
 
 // Tabs an agent exposes.
 const (
@@ -36,8 +55,8 @@ const (
 // agent's .claude config and CLAUDE.md), the dir AgentCommand returns. The editor
 // and terminal instead drop into the per-repo worktree subdir (AgentWorkdir), so
 // the human lands directly in the repo.
-func Resolve(agentID string, tab int) (dir string, env, argv []string, err error) {
-	s, err := sessionFor(agentID)
+func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err error) {
+	s, err := validateLaunchSpec(spec)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -55,11 +74,8 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 			return "", nil, nil, err
 		}
 	}
-	sources := agentRepoSources(agentID)
-	if tab == TabAgent && agent.Canonical(s.Agent) == "codex" {
-		argv = codexWritableRepos(argv, sources)
-	}
-	return dir, env, scope(dir, tab, s, argv, sources), nil
+	argv, err = scope(dir, tab, s, spec.Access, spec.GitObjects, argv)
+	return dir, env, argv, err
 }
 
 // AppServerCommand resolves the launch spec for a Codex App Server supervising an
@@ -73,8 +89,8 @@ func Resolve(agentID string, tab int) (dir string, env, argv []string, err error
 // The returned Unix-WebSocket endpoint lives in a dedicated socket tree. Every
 // pane hides that tree, then mounts only its own session's socket directory. A
 // read-only mount of a sibling's socket would still permit connecting to it.
-func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint string, err error) {
-	s, err := sessionFor(agentID)
+func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint string, err error) {
+	s, err := validateLaunchSpec(spec)
 	if err != nil {
 		return "", nil, nil, "", err
 	}
@@ -90,27 +106,13 @@ func AppServerCommand(agentID string) (dir string, env, argv []string, endpoint 
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
-	sources := agentRepoSources(agentID)
-	inner = codexWritableRepos(inner, sources)
-	return dir, env, scope(dir, TabAgent, s, inner, sources), endpoint, nil
+	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
+	return dir, env, argv, endpoint, err
 }
 
-// Codex applies its own tool sandbox inside amux's mount namespace. This helper
-// remains for non-Git writable roots, but independent session repositories need
-// no override: their .git directories are already beneath the session workspace.
-func codexWritableRepos(argv, sources []string) []string {
-	if len(argv) == 0 || len(sources) == 0 {
-		return argv
-	}
-	// JSON string arrays are valid TOML and safely quote spaces and path escapes.
-	roots, _ := json.Marshal(sources)
-	out := []string{argv[0], "-c", "sandbox_workspace_write.writable_roots=" + string(roots)}
-	return append(out, argv[1:]...)
-}
-
-// The root stays outside session worktrees, including coordinator directories
-// that contain their members. Masking it once also hides sockets created after
-// a pane has started; enumerating today's siblings would leave that race open.
+// The socket root stays outside every session directory. It is never mounted;
+// each namespace receives only its hashed own socket directory, so current and
+// future sibling sockets remain absent without enumeration or masks.
 func appServerSocketRoot() string { return filepath.Join(core.DataDir(), "cx") }
 
 func appServerSocketPath(sessionID string) string {
@@ -135,8 +137,8 @@ func AppServerEndpoint(agentID string) (string, error) {
 // <threadID>`, in the agent's sandbox scope. This is the pane path for a structured
 // session — it never starts a standalone Codex runtime. threadID may be empty
 // (attach without a resume, e.g. a thread not yet created).
-func AttachCommand(agentID, endpoint, threadID string) (dir string, env, argv []string, err error) {
-	s, err := sessionFor(agentID)
+func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env, argv []string, err error) {
+	s, err := validateLaunchSpec(spec)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -149,7 +151,8 @@ func AttachCommand(agentID, endpoint, threadID string) (dir string, env, argv []
 		inner = append(inner, "resume", threadID)
 	}
 	inner = codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(inner))
-	return dir, env, scope(dir, TabAgent, s, inner, agentRepoSources(agentID)), nil
+	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
+	return dir, env, argv, err
 }
 
 // codexBin is the resolved codex executable from an agent's command argv (argv[0]),
@@ -162,72 +165,98 @@ func codexBin(agentArgv []string) string {
 	return "codex"
 }
 
-// agentRepoSources no longer returns shared writable Git common directories.
-// Pooled worktrees require typed read-only GitObjectMounts in LaunchSpec; that
-// namespace integration is deliberately separate from this legacy []string seam.
-func agentRepoSources(agentID string) []string {
-	return nil
-}
-
 // systemRoots are the host trees every pane sees read-only, in bind order: the
 // first two (/usr, /etc) are required, the rest are bound with -try so a system
 // that lacks one (non-merged /usr, no Nix, no linuxbrew) still scopes. Anything
 // a pane runs — the harness, the editor, $BROWSER — has to live under one of
-// these, under the amux data tree, or under the pane binary's own $HOME subtree;
-// the rest of $HOME is a tmpfs inside the scope. ScopeReaches is the query side
-// of this list, so doctor can tell a hidden binary apart from a missing one.
-var systemRoots = []string{"/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew", "/run"}
+// these or an exact explicit runtime/config grant; the rest of $HOME is a tmpfs
+// inside the scope. ScopeReaches is the query side of the system-root list.
+var systemRoots = []string{"/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew"}
 
-// interopRoots are the WSL2 mounts the agent pane binds so Windows interop
-// (clipboard .exe helpers, path translation) works from inside the scope. They
-// are -try binds, so this is a no-op off WSL.
-var interopRoots = []string{"/mnt/c", "/mnt/wsl"}
-
-// jail resolves what scope needs to build a sandbox — the bwrap binary and the
-// home dir it hides — and reports false when panes run unscoped: AMUX_JAIL=off,
-// no bwrap on this host (macOS), or no resolvable $HOME.
-func jail() (bwrap, home string, ok bool) {
+// jail resolves the protected namespace implementation. Secure launches never
+// silently degrade to host filesystem access: Linux, a usable HOME, and
+// bubblewrap >= 0.12.0 are required. Older bubblewrap releases follow attacker-
+// controlled destination symlinks during setup (GHSA-pxhw-h44j-8pfx).
+func jail() (bwrap, home string, disabled bool, err error) {
 	if envOr("AMUX_JAIL", "on") == "off" {
-		return "", "", false
+		return "", "", true, nil
+	}
+	if runtime.GOOS != "linux" {
+		return "", "", false, fmt.Errorf("%w: %s has no supported mount/PID namespace backend", ErrIsolationUnsupported, runtime.GOOS)
 	}
 	bw, err := exec.LookPath("bwrap")
 	if err != nil {
-		return "", "", false
+		return "", "", false, fmt.Errorf("%w: bubblewrap not found", ErrIsolationUnsupported)
 	}
 	home, err = os.UserHomeDir()
 	if err != nil || home == "" {
-		return "", "", false
+		return "", "", false, fmt.Errorf("%w: resolve home directory", ErrIsolationUnsupported)
 	}
-	return bw, home, true
+	if err := requireBubblewrapVersion(bw); err != nil {
+		return "", "", false, err
+	}
+	return bw, home, false, nil
 }
 
-// Jailed reports whether panes on this host run inside the bwrap scope. False
-// means every pane sees the host filesystem as-is (AMUX_JAIL=off, or no bwrap),
-// so a visibility question like ScopeReaches has no bearing.
+func requireBubblewrapVersion(binary string) error {
+	out, err := exec.Command(binary, "--version").Output()
+	if err != nil {
+		return fmt.Errorf("%w: query bubblewrap version: %v", ErrIsolationUnsupported, err)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) == 0 {
+		return fmt.Errorf("%w: unrecognized bubblewrap version", ErrIsolationUnsupported)
+	}
+	version := fields[len(fields)-1]
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return fmt.Errorf("%w: unrecognized bubblewrap version %q", ErrIsolationUnsupported, version)
+	}
+	major, majorErr := strconv.Atoi(parts[0])
+	minor, minorErr := strconv.Atoi(parts[1])
+	if majorErr != nil || minorErr != nil || major < 0 || minor < 0 {
+		return fmt.Errorf("%w: unrecognized bubblewrap version %q", ErrIsolationUnsupported, version)
+	}
+	if major == 0 && minor < 12 {
+		return fmt.Errorf("%w: bubblewrap %s is vulnerable to destination symlink traversal; require >= 0.12.0", ErrIsolationUnsupported, version)
+	}
+	return nil
+}
+
+// Jailed reports whether this host supports the protected bwrap scope. False no
+// longer means a transparent fallback: typed launches return an explicit error.
 func Jailed() bool {
-	_, _, ok := jail()
-	return ok
+	_, _, disabled, err := jail()
+	return !disabled && err == nil
+}
+
+// IsolationSupport reports why protected launches cannot run on this host.
+// AMUX_JAIL=off is a deliberate unprotected development mode, not support.
+func IsolationSupport() error {
+	_, _, disabled, err := jail()
+	if disabled {
+		return fmt.Errorf("%w: disabled by AMUX_JAIL=off", ErrIsolationUnsupported)
+	}
+	return err
 }
 
 // ScopeReaches reports whether an absolute host path is visible from inside an
-// agent pane's scope: under one of the read-only system roots, the WSL interop
-// mounts, or the amux data tree (dataDir, a parameter so the rule is testable).
-// Everything else under $HOME is replaced by an empty tmpfs (only the pane
-// binary's own subtree and the agent's dir come back, neither of which a caller
-// should rely on for a third tool), and paths outside the listed roots (/var,
-// /snap, /srv, …) are not bound at all. The path is checked as given; a caller
+// agent pane's scope: under one of the read-only system roots. The dataDir
+// parameter remains for API compatibility but is never a
+// visibility grant: only an exact own directory is mounted by a LaunchSpec.
+// Everything else under $HOME is replaced by an empty tmpfs; exact runtime,
+// session and configuration grants are not inferable from this global helper.
+// Paths outside the listed roots (/var, /snap, /srv, …) are not bound at all.
+// The path is checked as given; a caller
 // that cares about a symlink's target (Ubuntu's /usr/bin/firefox → /snap/…)
 // should resolve it and ask about both.
-func ScopeReaches(dataDir, path string) bool {
+func ScopeReaches(_ string, path string) bool {
 	path = filepath.Clean(path)
 	under := func(root string) bool {
 		root = filepath.Clean(root)
 		return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
 	}
-	if dataDir != "" && under(dataDir) {
-		return true
-	}
-	for _, r := range append(append([]string{}, systemRoots...), interopRoots...) {
+	for _, r := range systemRoots {
 		if under(r) {
 			return true
 		}
@@ -235,31 +264,180 @@ func ScopeReaches(dataDir, path string) bool {
 	return false
 }
 
-// scope wraps a pane's command in a bubblewrap mount namespace confined to the
-// worktree: the system is read-only (so tools/libraries run), only the worktree
-// (and a private /tmp) is writable, and the rest of $HOME — other repos, other
-// agents' worktrees, the store, your files — is replaced by an empty tmpfs. Only
-// what the tool itself needs is bound back: the agent gets its own runtime and
-// the one shared auth file (its harness config is a private copy already inside
-// its dir — see agent.Harness.Config); the editor gets its config; the shell gets
-// nothing. This is a filesystem scope, not a hardened jail (network and pids are
-// shared), and it's skipped if AMUX_JAIL=off or bwrap is missing.
-func scope(dir string, tab int, s store.Session, argv []string, rwSources []string) []string {
-	if len(argv) == 0 {
-		return argv
+func validateLaunchSpec(spec LaunchSpec) (store.Session, error) {
+	s := spec.Session
+	g := spec.Access
+	if s.ID == "" || s.Dir == "" || g.SubjectID == "" {
+		return store.Session{}, ErrAccessRequired
 	}
-	bw, home, ok := jail()
-	if !ok {
-		return argv
+	if g.SubjectID != s.ID {
+		return store.Session{}, fmt.Errorf("%w: grant subject %q does not match session %q", ErrAccessRequired, g.SubjectID, s.ID)
+	}
+	if err := requireRealDirectory(s.Dir); err != nil {
+		return store.Session{}, fmt.Errorf("session %q own directory: %w", s.ID, err)
+	}
+	wantMailbox := filepath.Join(s.Dir, ".amux", access.MailboxDirName)
+	wantRequests := filepath.Join(wantMailbox, "requests")
+	wantCredential := filepath.Join(wantMailbox, access.CredentialDirName)
+	for label, pair := range map[string][2]string{
+		"mailbox":    {g.MailboxMountDir, wantMailbox},
+		"requests":   {g.RequestsMountDir, wantRequests},
+		"credential": {g.CredentialMountDir, wantCredential},
+	} {
+		if !sameCleanAbsolute(pair[0], pair[1]) {
+			return store.Session{}, fmt.Errorf("%w: %s target %q is not authoritative %q", ErrAccessRequired, label, pair[0], pair[1])
+		}
+	}
+	for label, source := range map[string]string{
+		"mailbox": g.MailboxHostDir, "requests": g.RequestsHostDir, "credential": g.CredentialHostDir,
+	} {
+		if err := requireRealDirectory(source); err != nil {
+			return store.Session{}, fmt.Errorf("%w: %s source: %v", ErrAccessRequired, label, err)
+		}
+		if pathWithin(s.Dir, source) {
+			return store.Session{}, fmt.Errorf("%w: %s source overlaps session directory", ErrAccessRequired, label)
+		}
+	}
+	if !sameCleanAbsolute(g.RequestsHostDir, filepath.Join(g.MailboxHostDir, "requests")) {
+		return store.Session{}, fmt.Errorf("%w: requests source is not the mailbox child", ErrAccessRequired)
+	}
+	if filepath.Clean(g.CredentialHostDir) == filepath.Clean(g.MailboxHostDir) || pathWithin(g.MailboxHostDir, g.CredentialHostDir) {
+		return store.Session{}, fmt.Errorf("%w: credential source must be independent from mailbox", ErrAccessRequired)
+	}
+	if err := validateExistingDestinationParents(s.Dir,
+		".amux",
+		filepath.Join(".amux", access.MailboxDirName),
+		filepath.Join(".amux", access.MailboxDirName, "requests"),
+		filepath.Join(".amux", access.MailboxDirName, access.CredentialDirName),
+	); err != nil {
+		return store.Session{}, fmt.Errorf("session %q access destination: %w", s.ID, err)
+	}
+	if err := validateGitObjectMounts(spec.GitObjects, s, g); err != nil {
+		return store.Session{}, err
+	}
+	if err := IsolationSupport(); err != nil {
+		return store.Session{}, err
+	}
+	return s, nil
+}
+
+func validateGitObjectMounts(mounts []git.GitObjectMount, s store.Session, grant access.SessionAccess) error {
+	seen := make(map[string]bool, len(mounts))
+	for i, mount := range mounts {
+		if !singlePathComponent(mount.RepoKey) || !singlePathComponent(mount.Generation) {
+			return fmt.Errorf("invalid Git object grant %d: missing or unsafe repository/generation identity", i)
+		}
+		if !sameCleanAbsolute(mount.ObjectsHostDir, mount.ObjectsMountDir) {
+			return fmt.Errorf("invalid Git object grant %d: source and destination must be the same clean absolute path", i)
+		}
+		if filepath.Base(mount.ObjectsHostDir) != "objects" {
+			return fmt.Errorf("invalid Git object grant %d: path must name only an objects directory", i)
+		}
+		if seen[mount.ObjectsHostDir] {
+			return fmt.Errorf("invalid Git object grant %d: duplicate objects directory", i)
+		}
+		seen[mount.ObjectsHostDir] = true
+		if err := requireRealDirectory(mount.ObjectsHostDir); err != nil {
+			return fmt.Errorf("invalid Git object grant %d: %w", i, err)
+		}
+		canonical, err := filepath.EvalSymlinks(mount.ObjectsHostDir)
+		if err != nil || canonical != mount.ObjectsHostDir {
+			return fmt.Errorf("invalid Git object grant %d: objects directory is not canonical", i)
+		}
+		if pathWithin(s.Dir, mount.ObjectsHostDir) || pathWithin(mount.ObjectsHostDir, s.Dir) {
+			return fmt.Errorf("invalid Git object grant %d: objects directory overlaps the session", i)
+		}
+		for _, authority := range []string{grant.MailboxHostDir, grant.RequestsHostDir, grant.CredentialHostDir} {
+			if pathWithin(authority, mount.ObjectsHostDir) || pathWithin(mount.ObjectsHostDir, authority) {
+				return fmt.Errorf("invalid Git object grant %d: objects directory overlaps access authority", i)
+			}
+		}
+	}
+	return nil
+}
+
+func singlePathComponent(s string) bool {
+	return s != "" && s != "." && s != ".." && filepath.Base(s) == s
+}
+
+func sameCleanAbsolute(got, want string) bool {
+	return filepath.IsAbs(got) && got == filepath.Clean(got) && filepath.Clean(got) == filepath.Clean(want)
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func requireRealDirectory(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("path %q is not absolute and clean", path)
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	if canonical != path {
+		return fmt.Errorf("path %q contains a symlink", path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("path %q is not a real directory", path)
+	}
+	return nil
+}
+
+// validateExistingDestinationParents rejects attacker-planted aliases without
+// creating or rewriting anything on the host. Missing components are safe:
+// bubblewrap >= 0.12 creates mount destinations relative to the fresh namespace
+// root without following an attacker symlink through /oldroot.
+func validateExistingDestinationParents(root string, paths ...string) error {
+	for _, rel := range paths {
+		path := root
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%q is not a real directory", path)
+			}
+		}
+	}
+	return nil
+}
+
+// scope wraps a pane command in a fresh user, mount, and PID namespace. Only
+// the authoritative own directory, exact daemon-issued access directories, the
+// own App Server socket directory, and explicit runtime/account capabilities
+// enter the namespace. Network remains shared for provider and Git access.
+func scope(dir string, tab int, s store.Session, grant access.SessionAccess, gitObjects []git.GitObjectMount, argv []string) ([]string, error) {
+	if len(argv) == 0 {
+		return argv, nil
+	}
+	bw, home, disabled, err := jail()
+	if err != nil {
+		return nil, err
+	}
+	if disabled {
+		return nil, fmt.Errorf("%w: AMUX_JAIL=off cannot receive session credentials", ErrIsolationUnsupported)
 	}
 
-	args := []string{bw, "--die-with-parent", "--unshare-user"}
+	args := []string{bw, "--die-with-parent", "--unshare-user", "--unshare-pid"}
 	// Required core for a functional sandbox: binaries/libraries (/usr) and system
 	// config (/etc — provides resolv.conf for DNS and passwd for user resolution).
 	args = append(args, "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc")
 	// Non-merged-/usr systems also need these as real dirs; on merged systems they
 	// are symlinks already covered by /usr, so -try skips whatever's absent. /opt,
-	// /nix, /home/linuxbrew (brew prefix), and /run cover this host's toolchain.
+	// /nix, and /home/linuxbrew cover additional host toolchains without exposing
+	// the host's runtime-service namespace under /run.
 	for _, p := range systemRoots[2:] {
 		args = append(args, "--ro-bind-try", p, p)
 	}
@@ -271,11 +449,37 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 		args = append(args, "--ro-bind-try", real, real)
 	}
 	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
-	// Empty $HOME, then add back the amux data tree read-only (the worktrees are
-	// sourced from here — each worktree's .git points back to a bare clone under
-	// ~/.local/share/amux/repos, so git needs to read it), and finally the agent's
-	// own worktree read-write on top so it can edit its files.
+	// Empty $HOME, then restore only the exact runtime and authoritative own dir.
 	args = append(args, "--tmpfs", home)
+	// Bubblewrap deliberately preserves descriptors passed to it. Execute every
+	// payload through this binary once inside the private namespace so the init
+	// trampoline can mark all descriptors above stderr close-on-exec. Mount the
+	// exact executable after /tmp and $HOME are hidden because test/development
+	// binaries commonly live beneath one of those tmpfs roots.
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve payload trampoline: %w", err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		return nil, fmt.Errorf("resolve payload trampoline path: %w", err)
+	}
+	args = append(args,
+		"--ro-bind", self, self,
+		"--tmpfs", launchenv.ToolBinDir,
+		"--ro-bind", self, filepath.Join(launchenv.ToolBinDir, "amux"),
+		"--remount-ro", launchenv.ToolBinDir,
+		"--setenv", payloadExecEnv, "1",
+	)
+	// Claude's generated hooks and model-status command deliberately use the
+	// stable install path so they also work outside a protected pane. Inside the
+	// pane that path must identify the same trusted running executable supplied by
+	// /amux-bin, even when the host installation is absent or older. Restore only
+	// that exact-file alias; never expose its ~/.local/bin parent.
+	installed := core.InstalledBinPath()
+	if installed != self {
+		args = append(args, "--ro-bind", self, installed)
+	}
 	// A launcher may resolve into a different home subtree (for example Codex's
 	// ~/.local/bin launcher into ~/.codex/packages). Bind the resolved package or
 	// executable and run it directly, without exposing the launcher subtree too.
@@ -285,22 +489,12 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 	if real, root := resolvedInstallRoot(home, argv[0]); root != "" {
 		args = append(args, "--ro-bind-try", root, root)
 		launchArgv = append([]string{real}, argv[1:]...)
-	} else if sub := homeSubtree(home, argv[0]); sub != "" {
-		args = append(args, "--ro-bind-try", sub, sub)
+	} else if root := directInstallRoot(home, argv[0]); root != "" {
+		args = append(args, "--ro-bind-try", root, root)
 	}
-	args = append(args, "--ro-bind-try", core.DataDir(), core.DataDir())
-	args = append(args, "--bind", dir, dir)
-	// The agent's own bare clones, read-write, so git can commit to its branch.
-	for _, src := range rwSources {
-		args = append(args, "--bind-try", src, src)
-	}
-	args = append(args, "--chdir", dir)
-	// Mask all credential stores, including ones created after this pane starts.
-	// Per-harness directory binds below expose only the selected store.
-	_ = os.MkdirAll(core.AuthDir(), 0700)
-	args = append(args, "--tmpfs", core.AuthDir())
-	if canonical, err := filepath.EvalSymlinks(core.AuthDir()); err == nil && canonical != core.AuthDir() {
-		args = append(args, "--tmpfs", canonical)
+	args = append(args, "--bind", s.Dir, s.Dir)
+	for _, mount := range gitObjects {
+		args = append(args, "--ro-bind", mount.ObjectsHostDir, mount.ObjectsMountDir)
 	}
 	for _, b := range configBinds(tab, s, home) {
 		args = append(args, b...)
@@ -312,51 +506,82 @@ func scope(dir string, tab int, s store.Session, argv []string, rwSources []stri
 			args = append(args, "--bind", spec.AuthDir, spec.AuthDir)
 		}
 	}
-	// Create the mountpoint before the read-only data bind is applied. If this
-	// fails, keep the mask in argv so bubblewrap fails closed rather than exposing it.
-	_ = os.MkdirAll(appServerSocketRoot(), 0700)
-	// Apply after all other mounts so a broader runtime/config/workgroup bind
-	// cannot reveal peer sockets again. Only this session's directory is restored.
-	socketRoot := appServerSocketRoot()
-	args = append(args, "--tmpfs", socketRoot)
-	// XDG_DATA_HOME may be a symlink. A runtime subtree bind can expose the
-	// canonical path too, so hide that alias before restoring the own endpoint.
-	if canonical, err := filepath.EvalSymlinks(socketRoot); err == nil && canonical != socketRoot {
-		args = append(args, "--tmpfs", canonical)
-	}
 	if s.ID != "" {
 		ownSockets := filepath.Dir(appServerSocketPath(s.ID))
 		// Mount the directory even before the server exists, so a terminal opened
 		// first can attach when its session starts the server later.
-		_ = os.MkdirAll(ownSockets, 0700)
-		args = append(args, "--bind", ownSockets, ownSockets)
+		if err := os.MkdirAll(ownSockets, 0700); err != nil {
+			return nil, fmt.Errorf("create own App Server socket directory: %w", err)
+		}
+		ownSocketsSource, err := filepath.EvalSymlinks(ownSockets)
+		if err != nil {
+			return nil, fmt.Errorf("resolve own App Server socket directory: %w", err)
+		}
+		if err := requireRealDirectory(ownSocketsSource); err != nil {
+			return nil, fmt.Errorf("validate own App Server socket directory: %w", err)
+		}
+		args = append(args, "--bind", ownSocketsSource, ownSockets)
 	}
+	// The daemon-private parent is never mounted. Mailbox is read-only, requests
+	// is its only writable overlay, and the independent credential source is
+	// mounted at the immutable immediate-root context path. Do not add a nested
+	// credential overlay below the read-only mailbox: bubblewrap would either
+	// need to mutate the private mailbox source to manufacture that mountpoint or
+	// fail closed with EROFS before the payload starts.
+	args = append(args,
+		"--ro-bind", grant.CredentialHostDir, core.SessionAccessDir(),
+		"--ro-bind", grant.MailboxHostDir, grant.MailboxMountDir,
+		"--bind", grant.RequestsHostDir, grant.RequestsMountDir,
+		"--chdir", dir,
+	)
 	args = append(args, "--")
-	return append(args, launchArgv...)
+	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
-// resolvedInstallRoot handles a launcher symlink whose target is in a different
-// home subtree. A nested package's bin directory needs its package root (sibling
-// resources may be required). Other layouts bind only the executable: never add
-// a mount of the whole home or top-level config subtree for a launcher target.
-// Running the resolved path also avoids missing intermediate symlinks in scope.
+const (
+	payloadExecEnv = "AMUX_PAYLOAD_CLEAN_EXEC"
+	payloadExecArg = "--amux-payload-clean-exec"
+)
+
+// resolvedInstallRoot handles a launcher symlink. A nested package's bin
+// directory gets its package root (sibling resources may be required); other
+// layouts get only the resolved executable. The target is run directly, so no
+// writable or attacker-controlled launcher ancestor is needed in the namespace.
 func resolvedInstallRoot(home, p string) (real, root string) {
 	r, err := filepath.EvalSymlinks(p)
 	if err != nil || r == p {
 		return "", ""
 	}
-	subtree := homeSubtree(home, r)
-	if subtree == "" || subtree == homeSubtree(home, p) {
+	if homeSubtree(home, r) == "" {
 		return "", ""
 	}
 	dir := filepath.Dir(r)
 	if filepath.Base(dir) == "bin" {
 		pkg := filepath.Dir(dir)
-		if pkg != filepath.Clean(home) && pkg != subtree {
+		if pkg != filepath.Clean(home) && pkg != homeSubtree(home, r) {
 			return r, pkg
 		}
 	}
 	return r, r
+}
+
+// directInstallRoot returns the narrowest useful mount for a non-symlinked
+// executable under HOME. Node installed by nvm needs its selected version tree;
+// ordinary user binaries are mounted as one file. In particular, ~/.local is
+// never restored wholesale because it commonly contains amux data and state.
+func directInstallRoot(home, p string) string {
+	clean := filepath.Clean(p)
+	if homeSubtree(home, clean) == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(home, clean)
+	if err == nil {
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) >= 5 && parts[0] == ".nvm" && parts[1] == "versions" && parts[2] == "node" {
+			return filepath.Join(home, parts[0], parts[1], parts[2], parts[3])
+		}
+	}
+	return clean
 }
 
 // configBinds is the minimal per-tool config/state mounted into the scope so the
@@ -368,34 +593,12 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 	j := filepath.Join
 	switch tab {
 	case TabAgent:
-		// amux's hooks/gap-fill run inside the scope and must reach amux's state
-		// dirs: the hook-state dir (activity) and the transcript-capture dir (a
-		// durable copy of the conversation for the "restarting" diagnostic).
-		// --bind-try skips missing paths, so create the capture dir first.
-		_ = os.MkdirAll(core.TranscriptDir(), 0o755)
 		// Shared auth files or a dedicated credential directory. Credentials and
 		// refresh locks must not diverge per agent. Everything below is shared by
 		// every agent pane regardless of harness.
 		var binds [][]string
 		if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
 			binds = cfghome.Binds(spec)
-		}
-		binds = append(binds,
-			[]string{"--bind-try", core.HookStateDir(), core.HookStateDir()},
-			[]string{"--bind-try", core.TranscriptDir(), core.TranscriptDir()},
-			[]string{"--ro-bind-try", core.InstalledBinPath(), core.InstalledBinPath()},
-		)
-		if exe, err := os.Executable(); err == nil {
-			binds = append(binds, []string{"--ro-bind-try", exe, exe})
-		}
-		// On WSL2, Claude reaches the Windows clipboard (e.g. pasting an image) by
-		// invoking a Windows .exe via interop; those live under /mnt/c, and the
-		// launcher path-translates through the DrvFs mount. Without /mnt/c in the
-		// scope the .exe can't be found and the read fails ("can't find image on
-		// clipboard"). Bind it read-only; /mnt/wsl backs some interop helpers too.
-		// --ro-bind-try is a no-op off WSL, so this stays cross-platform.
-		for _, p := range interopRoots {
-			binds = append(binds, []string{"--ro-bind-try", p, p})
 		}
 		return append(binds, gitBinds(home)...)
 	case TabEditor:
@@ -421,17 +624,6 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 		} {
 			binds = append(binds, []string{"--ro-bind-try", j(home, p), j(home, p)})
 		}
-		// History, writable so the shell can append to it.
-		binds = append(binds, []string{"--bind-try", j(home, ".zsh_history"), j(home, ".zsh_history")})
-		binds = append(binds, []string{"--bind-try", j(home, ".bash_history"), j(home, ".bash_history")})
-		// Docker, in the terminal only (the human shell), not the agent pane. On
-		// WSL2 the CLI is a symlink into /mnt/wsl (Docker Desktop); bind that so it
-		// resolves. The CLI defaults to /var/run/docker.sock, but the scope has no
-		// /var — the real socket is /run/docker.sock (bound), so re-expose it at
-		// the default path. NB: docker reaches the host daemon, bypassing the
-		// worktree scope — kept off the agent pane on purpose.
-		binds = append(binds, []string{"--ro-bind-try", "/mnt/wsl", "/mnt/wsl"})
-		binds = append(binds, []string{"--ro-bind-try", "/run/docker.sock", "/var/run/docker.sock"})
 		return append(binds, gitBinds(home)...)
 	}
 	return nil

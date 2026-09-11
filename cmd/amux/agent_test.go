@@ -7,64 +7,45 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"amux/internal/access"
 )
 
 // TestSelfAgentID covers how `amux agent done` resolves the caller's own store id
-// without being handed one: an explicit --id flag wins, then $AMUX_WORKGROUP,
-// then its legacy $AMUX_WORKSPACE alias, and it's empty when nothing identifies
-// the agent (so the verb no-ops rather than archiving the wrong session).
+// only from the fixed mounted session context. Arguments and legacy environment
+// hints cannot select completion authority.
 func TestSelfAgentID(t *testing.T) {
-	env := func(m map[string]string) func(string) string {
-		return func(k string) string { return m[k] }
-	}
-
 	tests := []struct {
 		name string
 		args []string
-		env  map[string]string
+		ctx  access.SessionContext
+		err  error
 		want string
 	}{
 		{
-			name: "AMUX_WORKGROUP resolves the id",
-			env:  map[string]string{"AMUX_WORKGROUP": "wg-1"},
+			name: "fixed context resolves the id",
+			ctx:  access.SessionContext{Protocol: access.ProtocolVersion, SubjectID: "wg-1", MailboxDir: "/mailbox"},
 			want: "wg-1",
 		},
 		{
-			name: "AMUX_WORKSPACE is the fallback alias",
-			env:  map[string]string{"AMUX_WORKSPACE": "wg-2"},
-			want: "wg-2",
-		},
-		{
-			name: "AMUX_WORKGROUP wins over the alias",
-			env:  map[string]string{"AMUX_WORKGROUP": "wg-1", "AMUX_WORKSPACE": "wg-2"},
-			want: "wg-1",
-		},
-		{
-			name: "--id flag overrides the environment",
+			name: "id argument cannot select authority",
 			args: []string{"--id", "flag-id"},
-			env:  map[string]string{"AMUX_WORKGROUP": "wg-1"},
-			want: "flag-id",
+			ctx:  access.SessionContext{Protocol: access.ProtocolVersion, SubjectID: "wg-1", MailboxDir: "/mailbox"},
 		},
 		{
-			name: "--id=value form",
-			args: []string{"--id=flag-id"},
-			want: "flag-id",
+			name: "missing fixed context",
+			err:  os.ErrNotExist,
 		},
 		{
-			name: "no id anywhere is empty (no-op)",
-			env:  map[string]string{},
-			want: "",
-		},
-		{
-			name: "blank env var is treated as unset",
-			env:  map[string]string{"AMUX_WORKGROUP": "  "},
-			want: "",
+			name: "blank fixed subject",
+			ctx:  access.SessionContext{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := selfAgentID(tt.args, env(tt.env)); got != tt.want {
-				t.Errorf("selfAgentID(%v) = %q, want %q", tt.args, got, tt.want)
+			got, err := selfAgentID(tt.args, func() (access.SessionContext, error) { return tt.ctx, tt.err })
+			if got != tt.want || (tt.want == "" && err == nil) || (tt.want != "" && err != nil) {
+				t.Errorf("selfAgentID(%v) = %q, %v; want %q", tt.args, got, err, tt.want)
 			}
 		})
 	}
@@ -72,11 +53,23 @@ func TestSelfAgentID(t *testing.T) {
 
 func TestAgentDoneReturnsFailures(t *testing.T) {
 	sandboxCLI(t)
-	if err := cmdAgentDone(nil); err == nil || !strings.Contains(err.Error(), "$AMUX_WORKGROUP unset") {
+	if err := cmdAgentDone(nil); err == nil || !strings.Contains(err.Error(), "not inside") {
 		t.Fatalf("missing identity error = %v", err)
 	}
 
-	t.Setenv("AMUX_WORKGROUP", "agent-123")
+	oldLoad := loadAgentSessionContext
+	oldRestricted := sessionContextRestricted
+	oldOpen := openRestrictedSessionRPC
+	loadAgentSessionContext = func() (access.SessionContext, error) {
+		return access.SessionContext{Protocol: access.ProtocolVersion, SubjectID: "agent-123", MailboxDir: "/mailbox"}, nil
+	}
+	sessionContextRestricted = func() bool { return true }
+	openRestrictedSessionRPC = func() (restrictedSessionRPC, error) { return nil, errors.New("daemon offline (test)") }
+	t.Cleanup(func() {
+		loadAgentSessionContext = oldLoad
+		sessionContextRestricted = oldRestricted
+		openRestrictedSessionRPC = oldOpen
+	})
 	err := cmdAgentDone(nil)
 	if err == nil || !strings.Contains(err.Error(), "archive agent-123") || !strings.Contains(err.Error(), "daemon offline (test)") {
 		t.Fatalf("daemon failure = %v", err)
@@ -111,10 +104,10 @@ func TestAgentDoneFailureExitsNonzero(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
 		t.Fatalf("amux agent done exit = %v, output:\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "archive agent-123") {
-		t.Fatalf("amux agent done output lost target identity:\n%s", out)
+	if !strings.Contains(string(out), "not inside") {
+		t.Fatalf("amux agent done did not require fixed session context:\n%s", out)
 	}
-	if !strings.Contains(string(out), "not starting") && !strings.Contains(string(out), "refusing to start") {
-		t.Fatalf("amux agent done output did not explain startup refusal:\n%s", out)
+	if strings.Contains(string(out), "daemon started") {
+		t.Fatalf("amux agent done attempted a host daemon operation:\n%s", out)
 	}
 }

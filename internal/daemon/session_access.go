@@ -9,7 +9,9 @@ import (
 	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/panespec"
 	"amux/internal/store"
+	"amux/internal/wsops"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,15 +33,20 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 	if session.Archived {
 		return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q is archived", id)
 	}
+	// The console is synthetic and its read-side projection deliberately has no
+	// materialization side effect. Launch is the lifecycle boundary that creates
+	// its private directory before path validation and authority provisioning.
+	if session.Role() == store.RoleConsole {
+		if err := console.Ensure(); err != nil {
+			return store.Session{}, access.SessionAccess{}, fmt.Errorf("ensure console launch directory: %w", err)
+		}
+	}
 	expected := session.Dir
 	switch session.Role() {
 	case store.RoleConsole:
 		expected = console.Dir()
 	case store.RoleCoordinator:
-		// Coordinator and repo-home layouts require their dedicated namespace
-		// directories. The namespace integration supplies that role-aware
-		// validator; never preserve the unsafe shared RootDir as authority.
-		return store.Session{}, access.SessionAccess{}, fmt.Errorf("root session %q has no secure dedicated launch layout", id)
+		expected = store.CoordinatorDir(session.ID)
 	case store.RoleRepo:
 		expected = store.RootDir(session.ID)
 	case store.RoleAgent:
@@ -50,11 +57,32 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 	if !filepath.IsAbs(session.Dir) || filepath.Clean(session.Dir) != filepath.Clean(expected) {
 		return store.Session{}, access.SessionAccess{}, fmt.Errorf("session %q uses unsupported legacy/shared directory %q", id, session.Dir)
 	}
+	if err := wsops.ValidateAgentGit(session); err != nil {
+		return store.Session{}, access.SessionAccess{}, err
+	}
+	// EnsureSession is sticky across revocation/expiry and repairs only a
+	// recoverable publication gap. It cannot turn an old subject into a fresh
+	// credential; explicit lifecycle recovery remains the sole regrant path.
 	grant, err := d.authority.EnsureSession(ctx, session.ID, session.Dir)
 	if err != nil {
 		return store.Session{}, access.SessionAccess{}, err
 	}
 	return session, grant, nil
+}
+
+// launchSpecFor is the one typed bridge from daemon-owned provisioning into
+// panespec. All launch call sites use this result; none resolve the session or
+// access grant independently.
+func (d *Daemon) launchSpecFor(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+	session, grant, err := d.sessionAccessForLaunch(ctx, id)
+	if err != nil {
+		return panespec.LaunchSpec{}, err
+	}
+	objects, err := wsops.AgentGitObjectMounts(session)
+	if err != nil {
+		return panespec.LaunchSpec{}, fmt.Errorf("resolve session Git object grants: %w", err)
+	}
+	return panespec.LaunchSpec{Session: session, Access: grant, GitObjects: objects}, nil
 }
 
 // validateStoredAgentDir deliberately does not derive a path from RootID: a

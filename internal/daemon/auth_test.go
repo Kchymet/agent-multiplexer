@@ -20,8 +20,9 @@ func TestAuthReloadDefersBusyAndUnknownAndOnlyResumesClaude(t *testing.T) {
 	d := New("", nil, time.Hour)
 	e := newFakeEngine()
 	d.engine = e
-	d.resolve = func(id string, tab int) (string, []string, []string, error) {
-		return "/session/" + id, []string{"AUTH=shared"}, []string{"claude", "--resume", convID(id)}, nil
+	d.launchSpec = testLaunchSpecResolver
+	d.resolve = func(spec panespec.LaunchSpec, tab int) (string, []string, []string, error) {
+		return "/session/" + spec.Session.ID, []string{"AUTH=shared"}, []string{"claude", "--resume", convID(spec.Session.ID)}, nil
 	}
 	for _, id := range []string{"idle", "busy", "unknown", "codex", "closed", "replaced"} {
 		kind := "claude"
@@ -86,7 +87,8 @@ func TestAuthReloadResolveFailurePreservesProcess(t *testing.T) {
 	e := newFakeEngine()
 	d.engine = e
 	original := e.running("idle")
-	d.resolve = func(string, int) (string, []string, []string, error) {
+	d.launchSpec = testLaunchSpecResolver
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
 		return "", nil, nil, fmt.Errorf("missing executable")
 	}
 	if err := d.queueAuthReload(core.Action{Fields: map[string]string{"force": "true"}}); err != nil {

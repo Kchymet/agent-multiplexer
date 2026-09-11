@@ -9,6 +9,7 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/launchenv"
 	"amux/internal/panespec"
 )
 
@@ -76,7 +77,13 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 			continue
 		}
 		// Resolve before stopping so a launch/config error preserves the old pane.
-		dir, env, argv, err := d.resolve(k.AgentID, k.Tab)
+		spec, err := d.launchSpec(ctx, k.AgentID)
+		if err != nil {
+			log.Printf("amux: auth reload %s: %v", k.AgentID, err)
+			delete(d.authPending, k)
+			continue
+		}
+		dir, env, argv, err := d.resolve(spec, k.Tab)
 		if err != nil {
 			log.Printf("amux: auth reload %s: %v", k.AgentID, err)
 			delete(d.authPending, k)
@@ -88,7 +95,9 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 		}
 		d.engine.Kill(k)
 		delete(d.authPending, k)
-		if _, err := d.engine.Ensure(ctx, engine.Spec{Key: k, Dir: dir, Env: env, Argv: argv}); err != nil {
+		if _, err := d.engine.Ensure(ctx, engine.Spec{
+			Key: k, Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
+		}); err != nil {
 			log.Printf("amux: auth reload %s could not resume: %v; reopen its agent pane", k.AgentID, err)
 		}
 	}

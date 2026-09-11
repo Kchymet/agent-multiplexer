@@ -1178,11 +1178,10 @@ func bareRepoWithCommit(t *testing.T) string {
 	return gitDir
 }
 
-// TestDeleteLegacyAgentRemovesBranch pins the delete contract ("worktrees +
-// branch") for a session imported from the legacy workspaces/ layout. Its record
-// has no stored branch, so cleanup derives the legacy amux/<root> name rather
-// than asking session-writable Git state and leaving a branch behind.
-func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
+// Legacy roots share coordinator and member storage. A broad delete cannot prove
+// ownership of dirty/transcript/unknown files, so it fails before touching any
+// session row, path, or branch and requires host-authorized recovery.
+func TestDeleteLegacyRootFailsClosedWithoutDataLoss(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		dirGone bool
@@ -1222,15 +1221,15 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 				}
 			}
 
-			if err := DeleteByID(ctx, rootID); err != nil {
-				t.Fatal(err)
+			if err := DeleteByID(ctx, rootID); err == nil || !strings.Contains(err.Error(), "host-authorized migration or recreation") {
+				t.Fatalf("DeleteByID legacy root error = %v, want explicit recovery refusal", err)
 			}
 
-			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 0 {
-				t.Errorf("legacy branch survived delete: %v", got)
+			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 1 || got[0] != core.LegacyBranchFor(rootID) {
+				t.Errorf("legacy branch changed during refused delete: %v", got)
 			}
-			if _, err := os.Stat(dir); !os.IsNotExist(err) {
-				t.Errorf("legacy dir %s still exists (stat err %v)", dir, err)
+			if _, err := os.Stat(dir); tt.dirGone != os.IsNotExist(err) {
+				t.Errorf("legacy dir existence changed during refused delete: %v", err)
 			}
 			db, err = store.Open()
 			if err != nil {
@@ -1238,8 +1237,8 @@ func TestDeleteLegacyAgentRemovesBranch(t *testing.T) {
 			}
 			defer db.Close()
 			for _, id := range []string{rootID, agentID} {
-				if _, ok, _ := db.GetSession(id); ok {
-					t.Errorf("session %s survived delete", id)
+				if _, ok, _ := db.GetSession(id); !ok {
+					t.Errorf("session %s was removed by refused delete", id)
 				}
 			}
 		})
