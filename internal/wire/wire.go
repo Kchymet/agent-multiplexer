@@ -1,15 +1,23 @@
 // Package wire is the shared transport for amux's client/server protocols: one
 // JSON object per line over any byte stream (unix socket, TCP, stdio, net.Pipe).
-// Writes are serialized; reads return whole lines regardless of length, so large
-// base64 pane payloads stream fine.
+// Writes are serialized; reads accept bounded whole lines large enough for the
+// protocol's base64 pane payloads.
 package wire
 
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 )
+
+// MaxFrameBytes bounds one JSON line before decoding. Pane output is capped at
+// four MiB before base64 encoding, so eight MiB preserves valid frames while a
+// newline-free or oversized peer cannot grow memory without limit.
+const MaxFrameBytes = 8 << 20
+
+var ErrFrameTooLarge = errors.New("wire: frame exceeds 8 MiB")
 
 // Conn frames JSON messages over a byte stream.
 type Conn struct {
@@ -38,11 +46,22 @@ func (c *Conn) Write(v any) error {
 
 // Read decodes the next line into v.
 func (c *Conn) Read(v any) error {
-	line, err := c.r.ReadBytes('\n')
-	if err != nil {
-		return err
+	line := make([]byte, 0, 64*1024)
+	for {
+		fragment, err := c.r.ReadSlice('\n')
+		if len(line)+len(fragment) > MaxFrameBytes {
+			return ErrFrameTooLarge
+		}
+		line = append(line, fragment...)
+		switch err {
+		case nil:
+			return json.Unmarshal(line, v)
+		case bufio.ErrBufferFull:
+			continue
+		default:
+			return err
+		}
 	}
-	return json.Unmarshal(line, v)
 }
 
 // Close closes the underlying stream.

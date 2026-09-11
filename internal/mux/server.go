@@ -1,8 +1,7 @@
 // Package mux is amux's multiplexer server: the backend half of the client/server
-// split. It speaks muxproto to any number of UI clients (local unix socket or
-// remote TCP), owns the session model via store/source/wsops, and routes agent
-// pane I/O between clients and an agent harness (harnessproto). See
-// docs/client-server.md.
+// split. It speaks muxproto to authenticated UI clients, relays authoritative
+// state/control to the primary daemon, and bridges primary-owned pane streams to
+// legacy clients. See docs/client-server.md.
 package mux
 
 import (
@@ -12,47 +11,90 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"amux/internal/core"
-	"amux/internal/harness"
 	"amux/internal/muxproto"
 	"amux/internal/panespec"
-	"amux/internal/source"
-	"amux/internal/wsops"
-	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Server is a running multiplexer server.
 type Server struct {
-	src   *source.Workspace
-	token string // bearer token required of clients; empty disables auth
+	primary Primary
+	token   string // nonempty bearer required inside an authenticated TLS channel
 
-	mu       sync.Mutex
-	clients  map[*client]bool
-	routes   map[string]route // harness pane id -> owning client + its pane id
-	hconn    *harnessproto.Conn
-	paneSeq  int64
-	lastSnap []byte // last broadcast snapshot, for change detection
+	mu           sync.Mutex
+	clients      map[*client]bool
+	accepted     map[*client]bool // registered before the first downstream read
+	routes       map[*route]bool
+	epoch        uint64
+	terminal     bool
+	serving      bool
+	serveCtx     context.Context
+	serveCancel  context.CancelFunc
+	lastSnap     []byte // last broadcast snapshot, for change detection
+	lastSessions []core.Session
 
-	pollCh chan struct{}
-
-	// launchSpec is injected by the daemon/provider integration that owns the
-	// current session record and access authority. The legacy mux must not derive
-	// identity or provision a second authority from an outer pane-open message.
-	launchSpec LaunchSpecResolver
-	resolve    paneResolver
+	pollCh    chan struct{}
+	acceptors sync.WaitGroup
+	handlers  sync.WaitGroup
 }
 
-type LaunchSpecResolver func(context.Context, string) (panespec.LaunchSpec, error)
-type paneResolver func(panespec.LaunchSpec, int) (dir string, env, argv []string, err error)
+// PaneRequest is the only pane authority the mux may pass upstream. It contains
+// the daemon wire's already-public target and viewport fields, never a launch
+// path, environment, argv, credential, or access grant.
+type PaneRequest struct {
+	Agent      string
+	Tab        int
+	Cols, Rows int
+}
+
+// PaneRelay is one primary-daemon-owned pane stream. Closing it detaches this
+// subscriber and interrupts a blocked Next/Input/Resize operation; it does not
+// kill the daemon-owned agent runtime.
+type PaneRelay interface {
+	Next(context.Context) (core.PaneFrame, error)
+	Input([]byte) error
+	Resize(cols, rows int) error
+	Close() error
+}
+
+// Primary is the mux's only state/authority seam. Production implements it by
+// authenticating to the singleton daemon as the host for every operation. Tests
+// inject inert fakes; no mux path opens the store or a FileAuthority.
+type Primary interface {
+	Snapshot(context.Context) ([]core.Session, error)
+	Dispatch(context.Context, core.Action) (string, error)
+	OpenPane(context.Context, PaneRequest) (PaneRelay, error)
+}
+
+type unavailablePrimary struct{}
+
+func (unavailablePrimary) Snapshot(context.Context) ([]core.Session, error) {
+	return nil, fmt.Errorf("legacy mux has no authenticated primary daemon relay")
+}
+func (unavailablePrimary) Dispatch(context.Context, core.Action) (string, error) {
+	return "", fmt.Errorf("legacy mux has no authenticated primary daemon relay")
+}
+func (unavailablePrimary) OpenPane(context.Context, PaneRequest) (PaneRelay, error) {
+	return nil, fmt.Errorf("legacy mux has no authenticated primary pane relay")
+}
 
 type route struct {
 	cl         *client
 	clientPane string
-	agent      string // agent id this pane belongs to, so a delete/archive can find it
+	agent      string
+	epoch      uint64
+	ctx        context.Context
+	cancel     context.CancelFunc
+	relay      PaneRelay
+	done       chan struct{}
+	doneOnce   sync.Once
 }
+
+func (r *route) finish() { r.doneOnce.Do(func() { close(r.done) }) }
 
 // client is one connected UI. Two outbound paths share the single socket writer
 // (writeLoop), mirroring internal/daemon/conn.go: discrete frames (welcome,
@@ -63,12 +105,21 @@ type route struct {
 // and ghosts text. obuf coalesces instead of dropping; only a client that falls
 // catastrophically far behind (past paneOutCap) triggers a trim-to-tail + reset.
 type client struct {
-	conn  *muxproto.Conn
-	out   chan muxproto.ServerMsg
-	done  chan struct{}
-	once  sync.Once
-	panes map[string]string // client pane id -> harness pane id
-	sub   bool
+	conn       *muxproto.Conn
+	raw        net.Conn
+	out        chan muxproto.ServerMsg
+	done       chan struct{}
+	writerDone chan struct{}
+	once       sync.Once
+	server     *Server
+	ctx        context.Context
+	cancel     context.CancelFunc
+	epoch      uint64
+	panes      map[string]*route // client pane id -> primary pane relay
+	sub        bool
+	writeMu    sync.Mutex // target revocation waits for an already-started frame
+	workMu     sync.Mutex
+	work       sync.WaitGroup // primary calls owned by the current client
 
 	obMu sync.Mutex
 	obuf map[string]*paneOut // client pane id -> pending lossless output
@@ -83,9 +134,13 @@ type paneOut struct {
 	reset   bool
 	exit    bool
 	exitErr string
+	route   *route // nil only in transport-only tests
 }
 
 const (
+	primaryReadTimeout     = 5 * time.Second
+	primaryActionTimeout   = 30 * time.Second
+	downstreamWriteTimeout = 5 * time.Second
 	// paneOutCap is how many unsent output bytes we coalesce for one pane before
 	// giving up on streaming losslessly (a wedged socket, not a merely slow one,
 	// is what fills it). Matches the replay cap in docs/remote-provider.md.
@@ -95,110 +150,167 @@ const (
 	paneOutKeep = 256 << 10
 )
 
-// New creates a server. When $AMUX_MUX_TOKEN is set, clients must present a
-// matching token in their hello (constant-time checked); an empty value leaves
-// auth off, appropriate for the trusted local unix socket.
-func New(resolvers ...LaunchSpecResolver) *Server {
-	launchSpec := LaunchSpecResolver(func(context.Context, string) (panespec.LaunchSpec, error) {
-		return panespec.LaunchSpec{}, fmt.Errorf("legacy mux has no daemon-authorized launch resolver")
-	})
-	if len(resolvers) != 0 && resolvers[0] != nil {
-		launchSpec = resolvers[0]
+// New creates a server backed only by an injected primary-daemon relay. A
+// missing relay is fail-closed. Client authentication is mandatory: an empty
+// AMUX_MUX_TOKEN never enables a trusted-local bypass.
+func New(primaries ...Primary) *Server {
+	var primary Primary = unavailablePrimary{}
+	if len(primaries) != 0 && primaries[0] != nil {
+		primary = primaries[0]
 	}
 	return &Server{
-		src:        source.NewWorkspace(),
-		token:      os.Getenv("AMUX_MUX_TOKEN"),
-		clients:    map[*client]bool{},
-		routes:     map[string]route{},
-		pollCh:     make(chan struct{}, 1),
-		launchSpec: launchSpec,
-		resolve:    panespec.Resolve,
+		primary:  primary,
+		token:    os.Getenv("AMUX_MUX_TOKEN"),
+		clients:  map[*client]bool{},
+		accepted: map[*client]bool{},
+		routes:   map[*route]bool{},
+		epoch:    1,
+		pollCh:   make(chan struct{}, 1),
 	}
 }
 
-// Serve starts the harness and the poll loop, then accepts clients on every
-// listener until ctx is cancelled. Blocks.
+// Serve starts the poll loop and accepts clients until ctx is cancelled. The
+// primary daemon owns every process and PTY; there is no embedded harness to
+// outlive this relay.
 func (s *Server) Serve(ctx context.Context, lns ...net.Listener) error {
-	s.startHarness()
-	go s.pollLoop(ctx)
-	for _, ln := range lns {
-		go s.acceptLoop(ln)
-	}
-	<-ctx.Done()
-	return nil
-}
-
-// ---- harness (in-process over net.Pipe; the protocol is real either way) ----
-
-func (s *Server) startHarness() {
-	a, b := net.Pipe()
-	s.hconn = harnessproto.NewConn(a)
-	go func() { _ = harness.Serve(harnessproto.NewConn(b)) }()
-	if r, err := s.hconn.ReadHarness(); err != nil || r.Type != harnessproto.HReady {
-		return
-	}
-	go s.readHarness()
-}
-
-// readHarness routes harness output/exit frames to the client that owns the pane.
-func (s *Server) readHarness() {
-	for {
-		m, err := s.hconn.ReadHarness()
-		if err != nil {
-			return
-		}
-		r, ok := s.lookup(m.PaneID)
-		if !ok {
-			continue
-		}
-		switch m.Type {
-		case harnessproto.HOutput:
-			// Lossless: coalesce into the per-pane buffer, never drop bytes.
-			r.cl.paneOutput(r.clientPane, m.Data)
-		case harnessproto.HExit:
-			// Ordered after any buffered output so the client sees final bytes first.
-			r.cl.paneExit(r.clientPane, m.Error)
-			s.mu.Lock()
-			delete(s.routes, m.PaneID)
-			delete(r.cl.panes, r.clientPane)
-			s.mu.Unlock()
-		}
-	}
-}
-
-func (s *Server) lookup(harnessPane string) (route, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.routes[harnessPane]
-	return r, ok
+	if s.serving || s.terminal {
+		s.mu.Unlock()
+		return fmt.Errorf("legacy mux server cannot be served more than once")
+	}
+	s.serveCtx, s.serveCancel = context.WithCancel(ctx)
+	s.serving = true
+	serveCtx := s.serveCtx
+	s.mu.Unlock()
+
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		s.pollLoop(serveCtx)
+	}()
+	s.acceptors.Add(len(lns))
+	for _, ln := range lns {
+		go func(ln net.Listener) {
+			defer s.acceptors.Done()
+			s.acceptLoop(ln)
+		}(ln)
+	}
+	<-serveCtx.Done()
+	s.shutdown(lns)
+	<-pollDone
+	return nil
 }
 
 // ---- clients ----
 
 func (s *Server) acceptLoop(ln net.Listener) {
 	for {
-		c, err := ln.Accept()
+		nc, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go s.handleClient(c)
+		cl, ok := s.registerClient(nc)
+		if !ok {
+			return
+		}
+		go s.serveClient(cl)
 	}
 }
 
 func (s *Server) handleClient(nc net.Conn) {
-	cl := &client{
-		conn:  muxproto.NewConn(nc),
-		out:   make(chan muxproto.ServerMsg, 256),
-		done:  make(chan struct{}),
-		panes: map[string]string{},
-		obuf:  map[string]*paneOut{},
-		wake:  make(chan struct{}, 1),
+	cl, ok := s.registerClient(nc)
+	if !ok {
+		return
 	}
+	s.serveClient(cl)
+}
+
+func (s *Server) registerClient(nc net.Conn) (*client, bool) {
 	s.mu.Lock()
-	s.clients[cl] = true
+	if s.terminal {
+		s.mu.Unlock()
+		_ = nc.Close()
+		return nil, false
+	}
+	parent := s.serveCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	clientCtx, clientCancel := context.WithCancel(parent)
+	cl := &client{
+		conn:       muxproto.NewConn(nc),
+		raw:        nc,
+		out:        make(chan muxproto.ServerMsg, 256),
+		done:       make(chan struct{}),
+		server:     s,
+		ctx:        clientCtx,
+		cancel:     clientCancel,
+		panes:      map[string]*route{},
+		obuf:       map[string]*paneOut{},
+		wake:       make(chan struct{}, 1),
+		writerDone: make(chan struct{}),
+	}
+	s.accepted[cl] = true
+	s.handlers.Add(1)
 	s.mu.Unlock()
 	go cl.writeLoop()
-	defer s.dropClient(cl)
+	return cl, true
+}
+
+func (s *Server) serveClient(cl *client) {
+	defer func() {
+		s.dropClient(cl)
+		s.mu.Lock()
+		delete(s.accepted, cl)
+		s.mu.Unlock()
+		s.handlers.Done()
+	}()
+	nc := cl.raw
+	// Authentication is a strict first-frame gate. Before it succeeds the client
+	// is absent from subscriptions/routes and no protected state is queued to its
+	// writer, so no snapshot or pane byte can precede a successful hello.
+	_ = nc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	hello, err := cl.conn.ReadClient()
+	if err != nil || hello.Type != muxproto.CHello || hello.Version != muxproto.Version ||
+		strings.TrimSpace(s.token) == "" || !muxproto.TokenOK(s.token, hello.Token) {
+		cl.reject(muxproto.ErrUnauthorized)
+		return
+	}
+	_ = nc.SetReadDeadline(time.Time{})
+	// The mux bearer is not primary-daemon authority. Admit the connection only
+	// after a fresh authenticated primary read; this also prevents new clients
+	// from entering while a prior poll failure has suspended cached grants.
+	s.mu.Lock()
+	admissionEpoch := s.epoch
+	s.mu.Unlock()
+	authCtx, cancelAuth, ok := cl.beginWork(primaryReadTimeout)
+	if !ok {
+		return
+	}
+	sessions, err := s.primary.Snapshot(authCtx)
+	cancelAuth()
+	if err != nil {
+		cl.reject(muxproto.ErrUnauthorized)
+		return
+	}
+	s.mu.Lock()
+	if s.epoch != admissionEpoch {
+		s.mu.Unlock()
+		cl.reject(muxproto.ErrUnauthorized)
+		return
+	}
+	cl.epoch = admissionEpoch
+	s.clients[cl] = true
+	revoked := s.rememberLocked(sessions)
+	s.mu.Unlock()
+	closeRoutes(revoked, true)
+	if !s.clientActive(cl) {
+		return
+	}
+	host, _ := os.Hostname()
+	if err := cl.writeServer(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: true, Version: muxproto.Version, Server: host}); err != nil {
+		return
+	}
 	for {
 		m, err := cl.conn.ReadClient()
 		if err != nil {
@@ -213,34 +325,55 @@ func (s *Server) handleClient(nc net.Conn) {
 // handleMsg processes one client message; it returns false when the connection
 // must be torn down (a terminal hello rejection).
 func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
+	if !s.clientActive(cl) {
+		return false
+	}
 	switch m.Type {
 	case muxproto.CHello:
-		// Version negotiation: a single supported version, so any mismatch has no
-		// overlap and fails loudly. Auth is a constant-time token compare.
-		if m.Version != muxproto.Version {
-			cl.reject(muxproto.ErrBadVersion)
-			return false
-		}
-		if !muxproto.TokenOK(s.token, m.Token) {
-			cl.reject(muxproto.ErrBadToken)
-			return false
-		}
-		host, _ := os.Hostname()
-		cl.send(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: true, Version: muxproto.Version, Server: host})
+		return false // hello is valid exactly once and only as the first frame
 	case muxproto.CSubscribe:
-		s.mu.Lock()
-		cl.sub = true
-		s.mu.Unlock()
-		if sess, err := s.src.Poll(context.Background()); err == nil {
+		ctx, finish, ok := cl.beginWork(primaryReadTimeout)
+		if !ok {
+			return false
+		}
+		sess, err := s.primary.Snapshot(ctx)
+		if err == nil {
+			defer finish()
+			revoked, active := s.rememberFor(cl, sess)
+			closeRoutes(revoked, true)
+			if !active || !s.clientActive(cl) {
+				return false
+			}
+			s.mu.Lock()
+			cl.sub = true
+			s.mu.Unlock()
 			cl.send(muxproto.ServerMsg{Type: muxproto.SSnapshot, Sessions: sess})
+		} else {
+			// Release this handler's work token before it invokes the global
+			// suspension barrier; otherwise it would wait for itself.
+			finish()
+			s.suspend()
+			return false
 		}
 	case muxproto.CAction:
-		// One descriptor-driven path, shared with the daemon: Dispatch tears down the
-		// agent's live panes (killPanesFor — the mux analog of the daemon's engine
-		// kill) for a StopsEngine verb so a delete/archive doesn't leak a PTY, then
-		// applies the store mutation and returns any created id (previously discarded).
 		act := core.Action{Action: m.Action, ID: m.ID, Target: m.Target, Fields: m.Fields}
-		newID, err := wsops.Dispatch(context.Background(), act, s.killPanesFor)
+		// The compatibility token grants only the public control vocabulary. In
+		// particular, it must not turn daemon-internal host operations (shutdown,
+		// runtime recreation, queries, or pane frames) into remote actions merely
+		// because this relay itself authenticates as a host upstream.
+		if !core.KnownAction(act.Action) {
+			cl.send(muxproto.ServerMsg{Type: muxproto.SResult, OK: false, Error: "unsupported action"})
+			return true
+		}
+		ctx, finish, ok := cl.beginWork(primaryActionTimeout)
+		if !ok {
+			return false
+		}
+		defer finish()
+		newID, err := s.primary.Dispatch(ctx, act)
+		if !s.clientActive(cl) {
+			return false
+		}
 		res := muxproto.ServerMsg{Type: muxproto.SResult, OK: err == nil, NewID: newID}
 		if err != nil {
 			res.Error = err.Error()
@@ -250,108 +383,219 @@ func (s *Server) handleMsg(cl *client, m muxproto.ClientMsg) bool {
 	case muxproto.CPaneOpen:
 		s.openPane(cl, m)
 	case muxproto.CPaneInput:
-		if hp := s.harnessPane(cl, m.PaneID); hp != "" {
-			_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MInput, PaneID: hp, Data: m.Data})
+		if r := s.clientRoute(cl, m.PaneID); r != nil {
+			if err := r.relay.Input(m.Data); err != nil {
+				s.closeRoute(r, true)
+			}
 		}
 	case muxproto.CPaneResize:
-		if hp := s.harnessPane(cl, m.PaneID); hp != "" {
-			_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MResize, PaneID: hp, Cols: m.Cols, Rows: m.Rows})
+		if r := s.clientRoute(cl, m.PaneID); r != nil {
+			if err := r.relay.Resize(m.Cols, m.Rows); err != nil {
+				s.closeRoute(r, true)
+			}
 		}
 	case muxproto.CPaneClose:
 		s.closePane(cl, m.PaneID)
+	default:
+		return false
 	}
 	return true
 }
 
 func (s *Server) openPane(cl *client, m muxproto.ClientMsg) {
-	spec, err := s.launchSpec(context.Background(), m.Agent)
-	if err != nil {
-		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: err.Error()})
+	if strings.TrimSpace(m.PaneID) == "" || strings.TrimSpace(m.Agent) == "" ||
+		m.Tab < panespec.TabAgent || m.Tab > panespec.TabTerminal {
+		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: "invalid pane request"})
 		return
 	}
-	dir, env, argv, err := s.resolve(spec, m.Tab)
-	if err != nil {
-		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: err.Error()})
-		return
-	}
-	env = append(env, "TERM=xterm-256color")
 	s.mu.Lock()
-	s.paneSeq++
-	hp := "h" + itoa(s.paneSeq)
-	s.routes[hp] = route{cl: cl, clientPane: m.PaneID, agent: m.Agent}
-	cl.panes[m.PaneID] = hp
+	if !s.clientActiveLocked(cl) {
+		s.mu.Unlock()
+		return
+	}
+	if !s.sessionActiveLocked(m.Agent) {
+		s.mu.Unlock()
+		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: "pane target is not active"})
+		return
+	}
+	if _, duplicate := cl.panes[m.PaneID]; duplicate {
+		s.mu.Unlock()
+		cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: m.PaneID, Error: "pane id already open"})
+		return
+	}
+	parent := cl.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	routeCtx, routeCancel := context.WithCancel(parent)
+	openCtx, cancelOpen := context.WithTimeout(routeCtx, primaryActionTimeout)
+	r := &route{
+		cl: cl, clientPane: m.PaneID, agent: m.Agent, epoch: cl.epoch,
+		ctx: routeCtx, cancel: routeCancel, done: make(chan struct{}),
+	}
+	cl.panes[m.PaneID] = r // reserve the connection-scoped id across the blocking open
+	s.routes[r] = true
 	s.mu.Unlock()
-	_ = s.hconn.WriteMux(harnessproto.MuxMsg{
-		Type: harnessproto.MSpawn, PaneID: hp, Dir: dir, Env: env, Argv: argv, Cols: m.Cols, Rows: m.Rows,
-	})
+
+	relay, err := s.primary.OpenPane(openCtx, PaneRequest{Agent: m.Agent, Tab: m.Tab, Cols: m.Cols, Rows: m.Rows})
+	cancelOpen()
+	if err != nil {
+		s.failOpeningRoute(r, err)
+		return
+	}
+	s.mu.Lock()
+	if !s.clientActiveLocked(cl) || cl.panes[m.PaneID] != r || r.epoch != s.epoch {
+		s.mu.Unlock()
+		_ = relay.Close()
+		r.cancel()
+		r.finish()
+		return
+	}
+	r.relay = relay
+	s.mu.Unlock()
+	go s.pumpRoute(r)
 }
 
 func (s *Server) closePane(cl *client, clientPane string) {
 	s.mu.Lock()
-	hp := cl.panes[clientPane]
-	delete(cl.panes, clientPane)
-	delete(s.routes, hp)
+	r := cl.panes[clientPane]
+	active := s.clientActiveLocked(cl)
 	s.mu.Unlock()
-	cl.obMu.Lock()
-	delete(cl.obuf, clientPane) // drop any pending output for a detached pane
-	cl.obMu.Unlock()
-	if hp != "" {
-		_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: hp})
+	if active && r != nil {
+		s.closeRoute(r, true)
 	}
 }
 
-// killPanesFor tears down every live pane of an agent — the mux-server analog of
-// the daemon killing an agent's engine instance — so a StopsEngine verb
-// (delete/archive/…) doesn't leave a PTY-backed process running after the session
-// is gone. For a workgroup root it cascades to the root's agents (resolved via
-// wsops before the store record is removed). Sending MKill is enough: the harness
-// answers each with an HExit that readHarness routes to the owning client and uses
-// to drop the pane bookkeeping — the same path a naturally-exiting pane takes.
-func (s *Server) killPanesFor(id string) {
-	if id == "" {
-		return
-	}
-	ids, err := wsops.AgentIDsUnder(id)
-	if err != nil || len(ids) == 0 {
-		ids = []string{id} // fall back to the id itself (e.g. store lookup failed)
-	}
-	want := make(map[string]bool, len(ids))
-	for _, a := range ids {
-		want[a] = true
-	}
+func (s *Server) failOpeningRoute(r *route, err error) {
 	s.mu.Lock()
-	var kill []string
-	for hp, r := range s.routes {
-		if want[r.agent] {
-			kill = append(kill, hp)
+	current := s.routes[r] && r.cl.panes[r.clientPane] == r && s.clientActiveLocked(r.cl)
+	delete(s.routes, r)
+	if r.cl.panes[r.clientPane] == r {
+		delete(r.cl.panes, r.clientPane)
+	}
+	s.mu.Unlock()
+	r.cancel()
+	r.finish()
+	if current {
+		r.cl.send(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: r.clientPane, Error: err.Error()})
+	}
+}
+
+func (s *Server) pumpRoute(r *route) {
+	defer r.finish()
+	defer r.cancel()
+	defer func() { _ = r.relay.Close() }()
+	for {
+		frame, err := r.relay.Next(r.ctx)
+		if err != nil {
+			if r.ctx.Err() == nil && s.routeCurrent(r) {
+				r.cl.paneExitRoute(r, err.Error())
+				return
+			}
+			s.forgetRoute(r)
+			return
+		}
+		if !s.routeCurrent(r) {
+			return
+		}
+		switch frame.Type {
+		case core.FramePaneReset:
+			r.cl.paneResetRoute(r)
+		case core.FramePaneOutput:
+			r.cl.paneOutputRoute(r, frame.Data)
+		case core.FramePaneExit:
+			r.cl.paneExitRoute(r, frame.Error)
+			return
 		}
 	}
+}
+
+func (s *Server) routeCurrent(r *route) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.routes[r] && s.clientActiveLocked(r.cl) && r.cl.panes[r.clientPane] == r && r.epoch == s.epoch
+}
+
+func (s *Server) forgetRoute(r *route) {
+	s.mu.Lock()
+	delete(s.routes, r)
+	if r.cl.panes[r.clientPane] == r {
+		delete(r.cl.panes, r.clientPane)
+	}
 	s.mu.Unlock()
-	for _, hp := range kill {
-		_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: hp})
+}
+
+func (s *Server) closeRoute(r *route, wait bool) {
+	s.forgetRoute(r)
+	r.cancel()
+	if r.relay != nil {
+		_ = r.relay.Close()
+	} else {
+		// An opening route owns no pump yet. Its OpenPane call must honor ctx and
+		// closes done as it unwinds through failOpeningRoute/stale admission.
+	}
+	r.cl.obMu.Lock()
+	delete(r.cl.obuf, r.clientPane)
+	r.cl.obMu.Unlock()
+	r.cl.writeMu.Lock()
+	r.cl.writeMu.Unlock()
+	if wait {
+		<-r.done
 	}
 }
 
-func (s *Server) harnessPane(cl *client, clientPane string) string {
+func closeRoutes(routes []*route, wait bool) {
+	clients := make(map[*client]bool)
+	for _, r := range routes {
+		r.cancel()
+		if r.relay != nil {
+			_ = r.relay.Close()
+		}
+		r.cl.obMu.Lock()
+		delete(r.cl.obuf, r.clientPane)
+		r.cl.obMu.Unlock()
+		clients[r.cl] = true
+	}
+	for cl := range clients {
+		cl.writeMu.Lock()
+		cl.writeMu.Unlock()
+	}
+	if wait {
+		for _, r := range routes {
+			<-r.done
+		}
+	}
+}
+
+func (s *Server) clientRoute(cl *client, clientPane string) *route {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cl.panes[clientPane]
+	if !s.clientActiveLocked(cl) {
+		return nil
+	}
+	r := cl.panes[clientPane]
+	if r == nil || r.relay == nil || r.epoch != s.epoch {
+		return nil
+	}
+	return r
 }
 
 func (s *Server) dropClient(cl *client) {
 	s.mu.Lock()
 	delete(s.clients, cl)
-	var kill []string
-	for _, hp := range cl.panes {
-		kill = append(kill, hp)
-		delete(s.routes, hp)
+	var routes []*route
+	for _, r := range cl.panes {
+		delete(s.routes, r)
+		routes = append(routes, r)
 	}
-	cl.panes = map[string]string{}
+	cl.panes = map[string]*route{}
 	s.mu.Unlock()
-	for _, hp := range kill {
-		_ = s.hconn.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MKill, PaneID: hp})
-	}
 	cl.stop()
+	cl.waitWork()
+	if cl.writerDone != nil {
+		<-cl.writerDone
+	}
+	closeRoutes(routes, true)
 }
 
 // ---- snapshots ----
@@ -366,7 +610,7 @@ func (s *Server) pollLoop(ctx context.Context) {
 		case <-t.C:
 		case <-s.pollCh:
 		}
-		s.broadcast()
+		s.broadcast(ctx)
 	}
 }
 
@@ -377,15 +621,18 @@ func (s *Server) pollNow() {
 	}
 }
 
-func (s *Server) broadcast() {
-	sess, err := s.src.Poll(context.Background())
+func (s *Server) broadcast(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, primaryReadTimeout)
+	sess, err := s.primary.Snapshot(ctx)
+	cancel()
 	if err != nil {
+		s.suspend()
 		return
 	}
 	b, _ := json.Marshal(sess)
 	s.mu.Lock()
 	changed := !bytes.Equal(b, s.lastSnap)
-	s.lastSnap = b
+	revoked := s.rememberLocked(sess)
 	var subs []*client
 	for cl := range s.clients {
 		if cl.sub {
@@ -393,6 +640,10 @@ func (s *Server) broadcast() {
 		}
 	}
 	s.mu.Unlock()
+	// Route revocation commits before the reduced snapshot is emitted. Closing
+	// both directions interrupts blocked reads/writes; join prevents pane-id reuse
+	// from racing a stale primary frame.
+	closeRoutes(revoked, true)
 	if !changed {
 		return
 	}
@@ -402,29 +653,188 @@ func (s *Server) broadcast() {
 	}
 }
 
+func activeSessionIDs(sessions []core.Session) map[string]bool {
+	active := make(map[string]bool, len(sessions))
+	for _, session := range sessions {
+		if session.ID != "" && !session.Archived {
+			active[session.ID] = true
+		}
+	}
+	return active
+}
+
+// suspend revokes every cached grant when the primary daemon can no longer be
+// authenticated/read. Existing clients are disconnected and every upstream
+// pane relay is detached; the primary daemon remains the runtime owner. A later
+// successful poll does not resurrect either client or route.
+func (s *Server) suspend() {
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return
+	}
+	s.epoch++
+	clients := make([]*client, 0, len(s.clients))
+	for cl := range s.clients {
+		clients = append(clients, cl)
+		cl.panes = map[string]*route{}
+	}
+	routes := make([]*route, 0, len(s.routes))
+	for r := range s.routes {
+		routes = append(routes, r)
+	}
+	s.clients = map[*client]bool{}
+	s.routes = map[*route]bool{}
+	s.lastSnap = nil
+	s.lastSessions = nil
+	s.mu.Unlock()
+	for _, cl := range clients {
+		cl.stop()
+	}
+	closeRoutes(routes, true)
+	for _, cl := range clients {
+		cl.waitWork()
+		if cl.writerDone != nil {
+			<-cl.writerDone
+		}
+	}
+}
+
+// shutdown is terminal, unlike suspend: it permanently refuses registration,
+// closes the listeners used by this Serve call, and joins every accepted
+// handler (including sockets still waiting for hello or primary admission).
+// Primary effects that completed before cancellation are not rolled back; the
+// barrier only proves that no mux-owned callback or transport survives return.
+func (s *Server) shutdown(lns []net.Listener) {
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return
+	}
+	s.terminal = true
+	s.serving = false
+	s.epoch++
+	if s.serveCancel != nil {
+		s.serveCancel()
+	}
+	accepted := make([]*client, 0, len(s.accepted))
+	for cl := range s.accepted {
+		accepted = append(accepted, cl)
+	}
+	routes := make([]*route, 0, len(s.routes))
+	for r := range s.routes {
+		routes = append(routes, r)
+	}
+	for cl := range s.clients {
+		cl.panes = map[string]*route{}
+	}
+	s.clients = map[*client]bool{}
+	s.routes = map[*route]bool{}
+	s.lastSnap = nil
+	s.lastSessions = nil
+	s.mu.Unlock()
+
+	for _, ln := range lns {
+		_ = ln.Close()
+	}
+	for _, cl := range accepted {
+		cl.stop()
+	}
+	closeRoutes(routes, true)
+	s.acceptors.Wait()
+	s.handlers.Wait()
+}
+
+func (s *Server) remember(sessions []core.Session) {
+	s.mu.Lock()
+	revoked := s.rememberLocked(sessions)
+	s.mu.Unlock()
+	closeRoutes(revoked, true)
+}
+
+func (s *Server) rememberLocked(sessions []core.Session) []*route {
+	b, _ := json.Marshal(sessions)
+	s.lastSnap = b
+	s.lastSessions = append(s.lastSessions[:0], sessions...)
+	active := activeSessionIDs(sessions)
+	var revoked []*route
+	for r := range s.routes {
+		if !active[r.agent] {
+			delete(s.routes, r)
+			if r.cl.panes[r.clientPane] == r {
+				delete(r.cl.panes, r.clientPane)
+			}
+			revoked = append(revoked, r)
+		}
+	}
+	return revoked
+}
+
+func (s *Server) rememberFor(cl *client, sessions []core.Session) ([]*route, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.clientActiveLocked(cl) {
+		return nil, false
+	}
+	return s.rememberLocked(sessions), true
+}
+
+func (s *Server) clientActive(cl *client) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientActiveLocked(cl)
+}
+
+func (s *Server) clientActiveLocked(cl *client) bool {
+	return s.clients[cl] && cl.epoch == s.epoch
+}
+
+func (s *Server) sessionActiveLocked(id string) bool {
+	for _, session := range s.lastSessions {
+		if session.ID == id && !session.Archived {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) sessions() []core.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]core.Session(nil), s.lastSessions...)
+}
+
 // ---- client write pump ----
 
 // writeLoop is the single writer for this client: it serializes every frame to
-// the socket, so the harness reader and the poll broadcaster never touch the
+// the socket, so primary pane pumps and the poll broadcaster never touch the
 // connection directly. Discrete frames arrive on out; lossless pane output is
 // drained from obuf when wake fires. On a write error or teardown it closes the
 // connection, which unblocks the reader.
 func (cl *client) writeLoop() {
+	if cl.writerDone != nil {
+		defer close(cl.writerDone)
+	}
 	for {
 		select {
 		case <-cl.done:
-			_ = cl.conn.Close()
 			return
 		case m := <-cl.out:
-			if err := cl.conn.WriteServer(m); err != nil {
+			if !cl.authorized() {
 				cl.stop()
-				_ = cl.conn.Close()
+				return
+			}
+			if err := cl.writeServer(m); err != nil {
+				cl.stop()
 				return
 			}
 		case <-cl.wake:
+			if !cl.authorized() {
+				cl.stop()
+				return
+			}
 			if err := cl.drainPanes(); err != nil {
 				cl.stop()
-				_ = cl.conn.Close()
 				return
 			}
 		}
@@ -433,9 +843,12 @@ func (cl *client) writeLoop() {
 
 // send enqueues a discrete frame without blocking. The channel is never closed,
 // so a send racing with teardown can't panic; if the buffer is full (a stuck or
-// slow client) the frame is dropped rather than stalling the harness — each such
+// slow client) the frame is dropped rather than stalling a primary pane pump — each such
 // frame is a full state the client recovers on the next one.
 func (cl *client) send(m muxproto.ServerMsg) {
+	if !cl.authorized() {
+		return
+	}
 	select {
 	case cl.out <- m:
 	case <-cl.done:
@@ -446,21 +859,35 @@ func (cl *client) send(m muxproto.ServerMsg) {
 // reject writes a terminal welcome synchronously (so it reaches the client
 // before the socket closes) and tears the connection down.
 func (cl *client) reject(errCode string) {
-	_ = cl.conn.WriteServer(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: false, Error: errCode})
+	_ = cl.writeServer(muxproto.ServerMsg{Type: muxproto.SWelcome, OK: false, Error: errCode})
 	cl.stop()
 }
 
-// paneOutput coalesces streamed output for a pane without blocking the harness
-// reader that calls it. If the unsent backlog exceeds paneOutCap the client is
+// paneOutput coalesces streamed output without blocking its primary pane pump.
+// If the unsent backlog exceeds paneOutCap the client is
 // hopelessly behind; rather than drop bytes from the middle of the stream (which
 // corrupts the emulator), we keep only the recent tail and flag a reset so the
 // client clears its screen before applying it.
 func (cl *client) paneOutput(paneID string, data []byte) {
+	cl.paneOutputFor(paneID, nil, data)
+}
+
+func (cl *client) paneOutputRoute(r *route, data []byte) {
+	cl.paneOutputFor(r.clientPane, r, data)
+}
+
+func (cl *client) paneOutputFor(paneID string, route *route, data []byte) {
+	if !cl.authorized() {
+		return
+	}
 	cl.obMu.Lock()
 	b := cl.obuf[paneID]
 	if b == nil {
 		b = &paneOut{}
 		cl.obuf[paneID] = b
+	}
+	if route != nil {
+		b.route = route
 	}
 	b.data = append(b.data, data...)
 	if len(b.data) > paneOutCap {
@@ -474,14 +901,54 @@ func (cl *client) paneOutput(paneID string, data []byte) {
 	cl.signalWrite()
 }
 
-// paneExit records a pane's exit after any buffered output, so the client sees
-// the final bytes before the exit frame.
-func (cl *client) paneExit(paneID, exitErr string) {
+func (cl *client) paneReset(paneID string) {
+	cl.paneResetFor(paneID, nil)
+}
+
+func (cl *client) paneResetRoute(r *route) {
+	cl.paneResetFor(r.clientPane, r)
+}
+
+func (cl *client) paneResetFor(paneID string, route *route) {
+	if !cl.authorized() {
+		return
+	}
 	cl.obMu.Lock()
 	b := cl.obuf[paneID]
 	if b == nil {
 		b = &paneOut{}
 		cl.obuf[paneID] = b
+	}
+	if route != nil {
+		b.route = route
+	}
+	b.reset = true
+	cl.obMu.Unlock()
+	cl.signalWrite()
+}
+
+// paneExit records a pane's exit after any buffered output, so the client sees
+// the final bytes before the exit frame.
+func (cl *client) paneExit(paneID, exitErr string) {
+	cl.paneExitFor(paneID, nil, exitErr)
+}
+
+func (cl *client) paneExitRoute(r *route, exitErr string) {
+	cl.paneExitFor(r.clientPane, r, exitErr)
+}
+
+func (cl *client) paneExitFor(paneID string, route *route, exitErr string) {
+	if !cl.authorized() {
+		return
+	}
+	cl.obMu.Lock()
+	b := cl.obuf[paneID]
+	if b == nil {
+		b = &paneOut{}
+		cl.obuf[paneID] = b
+	}
+	if route != nil {
+		b.route = route
 	}
 	b.exit, b.exitErr = true, exitErr
 	cl.obMu.Unlock()
@@ -490,10 +957,13 @@ func (cl *client) paneExit(paneID, exitErr string) {
 
 // drainPanes flushes every pane's pending output to the socket in order (reset,
 // then bytes, then exit). WriteServer may block on a slow socket; that only
-// stalls this writer, never the harness reader — which appends into obuf under
+// stalls this writer, never a primary pane pump — which appends into obuf under
 // obMu and returns immediately. Runs until no pane has pending work.
 func (cl *client) drainPanes() error {
 	for {
+		if !cl.authorized() {
+			return net.ErrClosed
+		}
 		cl.obMu.Lock()
 		var paneID string
 		var b *paneOut
@@ -507,7 +977,7 @@ func (cl *client) drainPanes() error {
 			cl.obMu.Unlock()
 			return nil
 		}
-		reset, data, exit, exitErr := b.reset, b.data, b.exit, b.exitErr
+		reset, data, exit, exitErr, route := b.reset, b.data, b.exit, b.exitErr, b.route
 		b.reset, b.data = false, nil
 		if exit {
 			delete(cl.obuf, paneID) // terminal: nothing more will arrive
@@ -515,18 +985,25 @@ func (cl *client) drainPanes() error {
 		cl.obMu.Unlock()
 
 		if reset {
-			if err := cl.conn.WriteServer(muxproto.ServerMsg{Type: muxproto.SPaneReset, PaneID: paneID}); err != nil {
+			if _, err := cl.writePane(route, muxproto.ServerMsg{Type: muxproto.SPaneReset, PaneID: paneID}); err != nil {
 				return err
 			}
 		}
 		if len(data) > 0 {
-			if err := cl.conn.WriteServer(muxproto.ServerMsg{Type: muxproto.SPaneOutput, PaneID: paneID, Data: data}); err != nil {
+			if _, err := cl.writePane(route, muxproto.ServerMsg{Type: muxproto.SPaneOutput, PaneID: paneID, Data: data}); err != nil {
 				return err
 			}
 		}
 		if exit {
-			if err := cl.conn.WriteServer(muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: paneID, Error: exitErr}); err != nil {
+			delivered, err := cl.writePane(route, muxproto.ServerMsg{Type: muxproto.SPaneExit, PaneID: paneID, Error: exitErr})
+			if err != nil {
 				return err
+			}
+			// A natural primary-pane exit keeps the client pane id reserved until
+			// the terminal frame crosses the downstream barrier. This prevents a
+			// newly opened pane from reusing the id while old output is queued.
+			if delivered && route != nil && cl.server != nil {
+				cl.server.forgetRoute(route)
 			}
 		}
 	}
@@ -542,7 +1019,93 @@ func (cl *client) signalWrite() {
 }
 
 // stop signals writeLoop to exit; idempotent.
-func (cl *client) stop() { cl.once.Do(func() { close(cl.done) }) }
+func (cl *client) authorized() bool {
+	select {
+	case <-cl.done:
+		return false
+	default:
+	}
+	return cl.server == nil || cl.server.clientActive(cl)
+}
+
+// beginWork binds one primary operation to this accepted client's lifetime.
+// stop closes admission under workMu before waitWork begins, so WaitGroup.Add
+// can never race with Wait after revocation.
+func (cl *client) beginWork(timeout time.Duration) (context.Context, context.CancelFunc, bool) {
+	cl.workMu.Lock()
+	select {
+	case <-cl.done:
+		cl.workMu.Unlock()
+		return nil, nil, false
+	default:
+	}
+	parent := cl.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	cl.work.Add(1)
+	cl.workMu.Unlock()
+	return ctx, func() {
+		cancel()
+		cl.work.Done()
+	}, true
+}
+
+func (cl *client) waitWork() {
+	// Synchronize with the last possible beginWork before waiting.
+	cl.workMu.Lock()
+	cl.workMu.Unlock()
+	cl.work.Wait()
+}
+
+func (cl *client) writeServer(message muxproto.ServerMsg) error {
+	_, err := cl.writeFrame(nil, false, message)
+	return err
+}
+
+// writePane serializes one frame and binds pane frames to the exact route that
+// produced them. Target revocation removes the route before waiting on writeMu:
+// a write that already owns the lock completes before the revocation barrier,
+// while every later write observes the missing route and is discarded.
+func (cl *client) writePane(route *route, message muxproto.ServerMsg) (bool, error) {
+	return cl.writeFrame(route, true, message)
+}
+
+func (cl *client) writeFrame(route *route, requireAuthorization bool, message muxproto.ServerMsg) (bool, error) {
+	cl.writeMu.Lock()
+	defer cl.writeMu.Unlock()
+	if requireAuthorization && !cl.authorized() {
+		return false, net.ErrClosed
+	}
+	if route != nil && (cl.server == nil || !cl.server.routeCurrent(route)) {
+		return false, nil
+	}
+	if cl.raw != nil {
+		if err := cl.raw.SetWriteDeadline(time.Now().Add(downstreamWriteTimeout)); err != nil {
+			return false, err
+		}
+		defer cl.raw.SetWriteDeadline(time.Time{})
+	}
+	if err := cl.conn.WriteServer(message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (cl *client) stop() {
+	cl.once.Do(func() {
+		cl.workMu.Lock()
+		close(cl.done)
+		if cl.cancel != nil {
+			cl.cancel()
+		}
+		cl.workMu.Unlock()
+		if cl.conn != nil {
+			_ = cl.conn.Close()
+		}
+	})
+}
 
 func itoa(n int64) string {
 	if n == 0 {

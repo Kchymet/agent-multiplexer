@@ -47,13 +47,16 @@ const (
 const (
 	ErrBadToken   = "bad-token"           // token missing or mismatched
 	ErrBadVersion = "unsupported-version" // no common protocol version
+	// ErrUnauthorized deliberately combines first-frame, token, and version
+	// failures so an unauthenticated peer learns no endpoint configuration.
+	ErrUnauthorized = "unauthorized"
 )
 
 // ClientMsg is a UI -> server message. Type selects which fields apply.
 type ClientMsg struct {
 	Type    string            `json:"type"`
 	Version int               `json:"version,omitempty"` // hello
-	Token   string            `json:"token,omitempty"`   // hello: bearer credential (blank when auth is off)
+	Token   string            `json:"token,omitempty"`   // hello: mandatory nonempty bearer credential
 	Action  string            `json:"action,omitempty"`  // action: lifecycle verb (mirrors core.Action)
 	ID      string            `json:"id,omitempty"`      // action / pane target id
 	Target  string            `json:"target,omitempty"`  // action: move destination
@@ -103,12 +106,11 @@ func (c *Conn) ReadClient() (ClientMsg, error) {
 	return m, err
 }
 
-// TokenOK reports whether a presented token authenticates against the configured
-// one. An empty configured token disables auth (local, trusted transports). The
-// comparison is constant-time so a caller can't learn the token by timing.
+// TokenOK reports whether a nonempty presented token authenticates against a
+// nonempty configured one. There is no implicit trusted-local mode.
 func TokenOK(configured, presented string) bool {
-	if configured == "" {
-		return true
+	if configured == "" || presented == "" {
+		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(configured), []byte(presented)) == 1
 }
