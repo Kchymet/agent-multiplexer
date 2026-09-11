@@ -150,7 +150,7 @@ func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env,
 	if threadID != "" {
 		inner = append(inner, "resume", threadID)
 	}
-	inner = codexcfg.FullscreenTUI(inner)
+	inner = codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(inner))
 	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
 	return dir, env, argv, err
 }

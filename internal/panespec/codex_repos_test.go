@@ -76,6 +76,11 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	}
 	check(argv, nil)
 	checkFullscreen(argv, true)
+	for _, setting := range []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`} {
+		if !slices.Contains(argv, setting) {
+			t.Fatalf("terminal launch missing %s: %v", setting, argv)
+		}
+	}
 	_, _, argv, _, err = AppServerCommand(spec)
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +92,11 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkFullscreen(argv, true)
+	for _, setting := range []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`} {
+		if !slices.Contains(argv, setting) {
+			t.Fatalf("native attach missing %s: %v", setting, argv)
+		}
+	}
 	// A coordinator may carry repo names, but owns no worktrees or writable clones.
 	s.RootID = ""
 	if err := db.PutSession(s); err != nil {
