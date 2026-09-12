@@ -372,22 +372,52 @@ func ListSessions() []SessionInfo { return UserHome().ListSessions() }
 
 // ListSessions enumerates this home's rollouts, most recent first.
 func (h Home) ListSessions() []SessionInfo {
-	var out []SessionInfo
-	root := h.sessionsRoot()
-	for _, r := range h.eachRollout() {
-		proj, err := filepath.Rel(root, filepath.Dir(r.path))
-		if err != nil {
-			proj = ""
-		}
-		out = append(out, SessionInfo{
-			ID:       r.uuid,
-			Cwd:      rolloutCwd(r.path),
-			Project:  filepath.ToSlash(proj),
-			Path:     r.path,
-			Size:     r.info.Size(),
-			Modified: r.info.ModTime(),
-		})
+	root, err := hostprep.OpenAbsolute(h.sessionsRoot())
+	if err != nil {
+		return nil
 	}
+	defer root.Close()
+	var out []SessionInfo
+	var walk func(*hostprep.Root, string)
+	walk = func(dir *hostprep.Root, prefix string) {
+		entries, err := dir.ReadDir(".")
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			name := filepath.Join(prefix, entry.Name())
+			if entry.IsDir() {
+				child, err := dir.Sub(entry.Name(), false, 0)
+				if err != nil {
+					continue
+				}
+				walk(child, name)
+				child.Close()
+				continue
+			}
+			id, ok := rolloutUUID(entry.Name())
+			if !ok {
+				continue
+			}
+			f, err := dir.OpenFile(entry.Name())
+			if err != nil {
+				continue
+			}
+			info, err := f.Stat()
+			if err != nil {
+				f.Close()
+				continue
+			}
+			cwd := rolloutCwdReader(io.LimitReader(f, 1<<20))
+			f.Close()
+			out = append(out, SessionInfo{
+				ID: id, Cwd: cwd, Project: filepath.ToSlash(filepath.Dir(name)),
+				Path: filepath.Join(h.sessionsRoot(), name), Size: info.Size(), Modified: info.ModTime(),
+			})
+		}
+	}
+	walk(root, "")
+
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Modified.After(out[j].Modified)
 	})

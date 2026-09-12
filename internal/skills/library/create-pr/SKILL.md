@@ -173,7 +173,7 @@ active rail. This is reversible — it archives, it does not delete.
   deliverables, don't archive; just report the PR.
 
 `amux` is on `PATH`. Mark yourself done with the self-reporting verb — it resolves
-your own session from the environment, so you don't pass an id:
+your own session from the fixed launch context, so you don't pass an id:
 
 ```sh
 if [ "$AMUX_MODE" = "task" ]; then

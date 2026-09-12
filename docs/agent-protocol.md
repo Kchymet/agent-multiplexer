@@ -85,6 +85,12 @@ The CLI opens only the fixed context, queries the daemon's current opaque runtim
 generation, and submits a signed bounded report. Generated hooks exit `0` after
 one best-effort attempt; explicit invocations report errors.
 
+The complete implemented command/alias/flag inventory and discovery exception
+are documented in [Agent CLI sandbox access](agent-cli-sandbox.md). Self rename
+and completion resolve the fixed session subject without environment hints.
+`agent sessions [--json]` preserves cross-session discovery through a read-only,
+paged mailbox query; it does not grant cross-session mutations or file mounts.
+
 ### 4b. Legacy files (diagnostic only)
 
 v0 UUID-only files under `hooks/`, `models/`, `permissions/`, and transcript

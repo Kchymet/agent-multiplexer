@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -354,8 +355,12 @@ func ListSessions() []SessionInfo { return User().ListSessions() }
 
 // ListSessions enumerates this home's transcripts, most recent first.
 func (h Home) ListSessions() []SessionInfo {
-	root := h.ProjectsRoot()
-	projects, err := os.ReadDir(root)
+	root, err := hostprep.OpenAbsolute(h.ProjectsRoot())
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	projects, err := root.ReadDir(".")
 	if err != nil {
 		return nil
 	}
@@ -364,27 +369,30 @@ func (h Home) ListSessions() []SessionInfo {
 		if !p.IsDir() {
 			continue
 		}
-		projDir := filepath.Join(root, p.Name())
-		ents, err := os.ReadDir(projDir)
+		ents, err := root.ReadDir(p.Name())
 		if err != nil {
 			continue
 		}
 		for _, e := range ents {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			if !strings.HasSuffix(e.Name(), ".jsonl") {
 				continue
 			}
-			fi, err := e.Info()
+			rel := filepath.Join(p.Name(), e.Name())
+			f, err := root.OpenFile(rel)
 			if err != nil {
 				continue
 			}
-			path := filepath.Join(projDir, e.Name())
+			fi, err := f.Stat()
+			if err != nil {
+				f.Close()
+				continue
+			}
+			cwd := transcriptCwdReader(io.LimitReader(f, 1<<20))
+			f.Close()
 			out = append(out, SessionInfo{
-				ID:       strings.TrimSuffix(e.Name(), ".jsonl"),
-				Cwd:      transcriptCwd(path),
-				Project:  p.Name(),
-				Path:     path,
-				Size:     fi.Size(),
-				Modified: fi.ModTime(),
+				ID: strings.TrimSuffix(e.Name(), ".jsonl"), Cwd: cwd,
+				Project: p.Name(), Path: filepath.Join(h.ProjectsRoot(), rel),
+				Size: fi.Size(), Modified: fi.ModTime(),
 			})
 		}
 	}
@@ -404,7 +412,11 @@ func transcriptCwd(path string) string {
 		return ""
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	return transcriptCwdReader(f)
+}
+
+func transcriptCwdReader(r io.Reader) string {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // transcript lines can be large
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())

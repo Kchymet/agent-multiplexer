@@ -172,7 +172,7 @@ func (p Policy) repoOwns(ctx context.Context, subject, target Resource) (bool, e
 
 func (p Policy) authorizeQuery(ctx context.Context, subject Resource, req Request) error {
 	switch req.Verb {
-	case core.QueryVersion, core.QueryCodexControl, core.QuerySnapshot:
+	case core.QueryVersion, core.QueryCodexControl, core.QuerySnapshot, core.QueryAgentSessions:
 		return nil
 	case core.QuerySessions, core.QueryRepos:
 		if subject.Role == "coordinator" || subject.Role == "repo" || subject.Role == "console" {

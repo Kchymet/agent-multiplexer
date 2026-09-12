@@ -76,7 +76,7 @@ func restrictedQueryRequest(query sessionrpc.Query, dst any) error {
 		return err
 	}
 	if len(result.Body) == 0 {
-		return nil
+		return fmt.Errorf("session query returned no result")
 	}
 	return json.Unmarshal(result.Body, dst)
 }
