@@ -185,6 +185,9 @@ func AppServerArgv(bin, endpoint string) []string {
 // the SAME supervised server/thread — the whole point of AGE-181: the terminal UI
 // and the web bridge drive one server/thread, not separate processes.
 //
+// Remote resume inherits permissions from the existing server thread; passing
+// approval overrides here makes the native TUI exit before it can attach.
+//
 // The handshake persists fresh threads before exposing this command, including
 // the empty rollout required by the native TUI's paginated resume in Codex 0.153.4.
 func AttachArgv(bin, endpoint, threadID string) []string {
@@ -195,7 +198,7 @@ func AttachArgv(bin, endpoint, threadID string) []string {
 	if threadID != "" {
 		argv = append(argv, "resume", threadID)
 	}
-	return codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(argv))
+	return codexcfg.FullscreenTUI(argv)
 }
 
 // Identity is the durable server/thread identity amux persists for a structured
