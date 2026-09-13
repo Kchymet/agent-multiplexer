@@ -89,6 +89,11 @@ the agent pane of a structured session launches `codex --remote <endpoint> resum
 <thread-id>` (`panespec.AttachCommand`) — the native TUI attaches to the supervised
 thread rather than starting a standalone Codex.
 
+The attach client inherits the existing thread's permissions. Do not pass
+approval or sandbox overrides on remote resume: Codex 0.154.0 rejects them with
+`Permission overrides are not supported when resuming a remote task.` TUI-only
+settings, such as alternate-screen mode, remain on the attach command.
+
 Per-session creation is **serialized** (a per-session lock taken before spawn).
 Only `Supervisor.Start` removes a stale socket under that lock. Constructing a
 second launch command leaves an existing listener connectable.

@@ -93,8 +93,8 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	}
 	checkFullscreen(argv, true)
 	for _, setting := range []string{`approval_policy="on-request"`, `approvals_reviewer="auto_review"`} {
-		if !slices.Contains(argv, setting) {
-			t.Fatalf("native attach missing %s: %v", setting, argv)
+		if slices.Contains(argv, setting) {
+			t.Fatalf("native attach overrides server permission setting %s: %v", setting, argv)
 		}
 	}
 	// A coordinator may carry repo names, but owns no worktrees or writable clones.
