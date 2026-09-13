@@ -70,13 +70,24 @@ type paneKey struct {
 	tab int
 }
 
+// daemonClient is the connection used by the dashboard and its pane callbacks.
+type daemonClient interface {
+	Next() (daemon.Frame, error)
+	Send(core.Action) error
+	PaneOpen(string, string, int, int, int) error
+	PaneInput(string, []byte) error
+	PaneResize(string, int, int) error
+	Close() error
+}
+
 type model struct {
-	client        *daemon.Client
-	sessions      []core.Session
-	keys          keymap.Keymap      // global hotkeys; zero value = built-in defaults
-	cursor        int                // index into the full snapshot when a session is selected
-	sectionCursor string             // selected section header, or empty for a session
-	collapsed     map[railGroup]bool // local to this TUI; survives snapshot refreshes
+	client         daemonClient
+	reconnectPanes bool // rebuild connection-bound mirrors after the next inventory
+	sessions       []core.Session
+	keys           keymap.Keymap      // global hotkeys; zero value = built-in defaults
+	cursor         int                // index into the full snapshot when a session is selected
+	sectionCursor  string             // selected section header, or empty for a session
+	collapsed      map[railGroup]bool // local to this TUI; survives snapshot refreshes
 	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
 	// so the selected row stays visible when the rail overflows its height.
 	railScroll int
@@ -112,7 +123,7 @@ const (
 )
 
 // ---- messages ----
-type connectedMsg struct{ c *daemon.Client }
+type connectedMsg struct{ c daemonClient }
 type frameMsg struct{ f daemon.Frame }
 type disconnectedMsg struct{}
 type termDataMsg struct{}
@@ -128,7 +139,7 @@ func connectCmd() tea.Msg {
 	return connectedMsg{c}
 }
 
-func readCmd(c *daemon.Client) tea.Cmd {
+func readCmd(c daemonClient) tea.Cmd {
 	return func() tea.Msg {
 		f, err := c.Next()
 		if err != nil {
@@ -156,10 +167,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case connectedMsg:
 		m.client = msg.c
+		m.reconnectPanes = len(m.terms) > 0
 		m.status = ""
 		return m, readCmd(msg.c)
 
 	case disconnectedMsg:
+		if m.client != nil {
+			_ = m.client.Close()
+		}
 		m.client = nil
 		m.status = "daemon offline — reconnecting…"
 		return m, tea.Tick(time.Second, func(time.Time) tea.Msg { return connectCmd() })
@@ -178,6 +193,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s := msg.f.Snapshot; s != nil {
 			m.refreshSessions(s.Sessions)
+			if m.reconnectPanes {
+				m.reconnectPanes = false
+				cmds = append(cmds, m.restorePanes()...)
+			}
 		}
 		if p := msg.f.Pane; p != nil {
 			m.handlePaneFrame(p)
@@ -661,6 +680,29 @@ func (m *model) switchTab(t int) tea.Cmd {
 	}
 	m.status = "opening " + tabNames[t] + "…"
 	return m.launchPane(m.attached, t)
+}
+
+// restorePanes recreates the mirrors whose input/resize callbacks captured the
+// disconnected client and registers their streams on the new connection. Wait
+// for its inventory so deleted sessions are not relaunched from stale rows.
+// Closing a remote mirror does not stop its daemon-owned process.
+func (m *model) restorePanes() []tea.Cmd {
+	attached, tab, focused := m.attached, m.tab, m.focus
+	previous := m.terms
+	m.terms = map[paneKey]*vterm.Terminal{}
+	m.byPane = map[string]paneKey{}
+	var cmds []tea.Cmd
+	for key, term := range previous {
+		s := m.sessionByID(key.id)
+		reopen := !term.Closed() && s != nil && attachable(s)
+		_ = term.Close()
+		if reopen {
+			cmds = append(cmds, m.launchPane(key.id, key.tab))
+		}
+	}
+	m.attached, m.tab, m.focus = attached, tab, focused
+	m.reapClosed()
+	return cmds
 }
 
 // launchPane opens a tab of an agent on the daemon and mirrors its streamed

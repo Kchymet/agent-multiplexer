@@ -63,6 +63,14 @@ This prevents a substituted Unix endpoint from soliciting the bearer. Native
 local UI continues to use the primary daemon directly; it does not silently
 start or fall back to this compatibility service.
 
+When the native dashboard reconnects to the primary daemon, it waits for fresh
+session inventory and reopens every previously open tab that still exists. Its
+terminal mirrors bind input and resize callbacks to the new connection, and the
+daemon replays their screens. The selected tab and sidebar focus are preserved.
+Closing and reopening the dashboard also reattaches to existing agents; it does
+not stop their processes. Older dashboards that show a saved screen but ignore
+keys after a daemon restart need to be reopened once after upgrading.
+
 ## Protocol 1 — UI ⇄ Multiplexer Server (`internal/muxproto`)
 
 Client → Server (`ClientMsg.type`):
