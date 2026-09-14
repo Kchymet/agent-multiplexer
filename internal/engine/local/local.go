@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
 
 	"amux/internal/engine"
 	"amux/internal/launchenv"
@@ -193,13 +192,15 @@ type instance struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
 
-	mu         sync.Mutex
-	ring       []byte
-	subs       map[int]*subscriber
-	nextSub    int
-	exited     bool
-	exitErr    string
-	ptmxClosed bool
+	mu            sync.Mutex
+	ring          []byte
+	subs          map[int]*subscriber
+	nextSub       int
+	exited        bool
+	exitErr       string
+	ptmxClosed    bool
+	resizeSeq     uint64
+	pendingResize *pty.Winsize
 
 	// done is closed by pump once the process has been reaped, so kill() can
 	// wait for a graceful exit before escalating to SIGKILL.
@@ -357,19 +358,40 @@ func (in *instance) Resize(cols, rows int) {
 	if in.ptmxClosed || in.ptmx == nil || cols <= 0 || rows <= 0 {
 		return
 	}
+	target := &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}
+	if in.pendingResize != nil && in.pendingResize.Cols == target.Cols && in.pendingResize.Rows == target.Rows {
+		return // Keep concurrent attachments from collapsing the redraw interval.
+	}
+	in.resizeSeq++
+	seq := in.resizeSeq
+	in.pendingResize = nil
 	previous, err := pty.GetsizeFull(in.ptmx)
-	if resizeErr := pty.Setsize(in.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); resizeErr != nil {
+	if err != nil || previous.Cols != target.Cols || previous.Rows != target.Rows {
+		_ = pty.Setsize(in.ptmx, target)
 		return
 	}
-	// A new subscriber can replay only a tail of incremental screen updates.
-	// paneOpen calls Resize after subscribing, but TIOCSWINSZ sends no SIGWINCH
-	// when the dimensions match. Request that redraw explicitly so same-size
-	// reattachments recover the screen too, without injecting keys or restarting.
-	if err == nil && int(previous.Cols) == cols && int(previous.Rows) == rows {
-		if foreground, err := unix.IoctlGetInt(int(in.ptmx.Fd()), unix.TIOCGPGRP); err == nil && foreground > 0 {
-			_ = unix.Kill(-foreground, unix.SIGWINCH)
-		}
+	// paneOpen resizes after subscribing, but the replay may contain only a
+	// truncated tail of incremental updates. Codex ignores same-size SIGWINCH,
+	// so briefly change the width to invalidate its cached screen, then restore
+	// the requested viewport. A later resize always supersedes this restoration.
+	intermediate := *target
+	if intermediate.Cols > 1 {
+		intermediate.Cols--
+	} else {
+		intermediate.Cols++
 	}
+	if err := pty.Setsize(in.ptmx, &intermediate); err != nil {
+		return
+	}
+	in.pendingResize = target
+	time.AfterFunc(150*time.Millisecond, func() {
+		in.mu.Lock()
+		defer in.mu.Unlock()
+		if !in.ptmxClosed && in.resizeSeq == seq {
+			in.pendingResize = nil
+			_ = pty.Setsize(in.ptmx, target)
+		}
+	})
 }
 
 // closePtmx closes the PTY at most once and stops inputLoop. Caller holds in.mu.
