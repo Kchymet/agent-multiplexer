@@ -111,8 +111,11 @@ AMUX_REQUIRE_NAMESPACE_TEST=1 go test ./internal/daemon \
 ```
 
 The transport, lifecycle, policy, paging and hostile-file regressions are also
-covered by their package tests. This fixture does **not** claim real Claude Bash,
-interactive Codex tool-turn, or App Server acceptance. Those require real runtime
-launches and tool-result/exit-status evidence; a mock provider's final text alone
-is insufficient. See the candidate's [validation record](agent-cli-validation.md)
-for available results and runtime blockers.
+covered by their package tests. `TestAgentRuntimeCommandSurface` additionally
+runs the same script through real Claude Bash, interactive Codex on a PTY, and
+Codex App Server with the production Supervisor. It uses a local deterministic
+provider, synthetic conversations and credentials, and requires the actual tool
+result to report success. An outer-writable ephemeral file must become unwritable
+inside the harness tool sandbox. The provider's final text is not an acceptance
+signal. CI pins the runtime archives and verifies their checksums. See the
+[validation record](agent-cli-validation.md) for versions, results and reproduction.

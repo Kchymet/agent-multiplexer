@@ -27,6 +27,25 @@ import (
 // process is already inside the harness sandbox when invoked from an agent.
 // It does not substitute for real Claude/Codex tool-turn acceptance.
 func TestAgentNamespaceCommandSurface(t *testing.T) {
+	testAgentCommandSurface(t, "shell")
+}
+
+// Opt-in: pinned native runtimes are external test dependencies, never host
+// account state. A local deterministic provider requests an ordinary tool call.
+func TestAgentRuntimeCommandSurface(t *testing.T) {
+	mode := os.Getenv("AMUX_TEST_AGENT_RUNTIME")
+	if mode == "" {
+		t.Skip("set AMUX_TEST_AGENT_RUNTIME to claude, codex, or codex-app-server")
+	}
+	switch mode {
+	case "claude", "codex", "codex-app-server":
+	default:
+		t.Fatalf("unknown runtime %q", mode)
+	}
+	testAgentCommandSurface(t, mode)
+}
+
+func testAgentCommandSurface(t *testing.T, mode string) {
 	if err := panespec.IsolationSupport(); err != nil {
 		if os.Getenv("AMUX_REQUIRE_NAMESPACE_TEST") == "1" {
 			t.Fatal(err)
@@ -92,6 +111,9 @@ func TestAgentNamespaceCommandSurface(t *testing.T) {
 	cancel, stopped := start()
 	defer func() { cancel(); <-stopped; r.close() }()
 	script := `set -eux
+test -e /amux-session-access/context.json
+# The authenticated context must remain read-only in every launch mode.
+if touch /amux-session-access/tamper 2>/dev/null; then exit 30; fi
 for help in help -h --help; do amux agent "$help" 2>/dev/null; done
 amux agent 2>/dev/null
 for state in idle ready waiting running; do amux agent status "$state"; done
@@ -112,7 +134,11 @@ printf '%s' '{"hook_event_name":"PostToolUse","tool_name":"Bash"}' | amux agent 
 printf '%s' '{"hook_event_name":"Stop"}' | amux agent permission clear --hook
 printf '%s' '{"hook_event_name":"PermissionRequest","tool_name":"Bash"}' | amux agent permission request --hook
 printf '%s' '{"hook_event_name":"PermissionDenied","tool_name":"Bash"}' | amux agent permission deny --hook
+if [ "${AMUX_AGENT:-claude}" = claude ]; then
 amux agent capture Stop
+else
+if amux agent capture Stop; then exit 31; fi
+fi
 printf '%s' '{"hook_event_name":"Stop","transcript_path":"/host/foreign"}' | amux agent capture --hook
 printf '%s' '{"hook_event_name":"Stop"}' | amux agent capture
 AMUX_WORKGROUP=peer AMUX_WORKSPACE=peer amux agent name First Name
@@ -155,9 +181,26 @@ amux agent name AfterRestart
 amux agent done
 if amux agent done; then exit 29; fi
 `
+	if mode != "shell" {
+		script = "set -eu\ntest \"$(cat /amux-inner-write-probe)\" = outer\nif echo inner > /amux-inner-write-probe 2>/dev/null; then exit 32; fi\n" + script
+	}
+	script += "touch surface-finished\n"
 	scriptPath := filepath.Join(own.Dir, "surface.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
 		t.Fatal(err)
+	}
+	var runtime *surfaceRuntime
+	if mode != "shell" {
+		runtime = prepareSurfaceRuntime(t, mode, &own, scriptPath, candidate, grant)
+		defer runtime.close()
+		db, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutSession(own); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
 	}
 	dir, env, argv, err := panespec.Resolve(panespec.LaunchSpec{Session: own, Access: grant}, panespec.TabTerminal)
 	if err != nil {
@@ -172,7 +215,11 @@ if amux agent done; then exit 29; fi
 			argv[i+1] = candidate
 		}
 	}
-	argv = append(argv, scriptPath)
+	if runtime == nil {
+		argv = append(argv, scriptPath)
+	} else {
+		argv, env = runtime.launch(t, argv, env, own)
+	}
 	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
 	defer stop()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -184,11 +231,15 @@ if amux agent done; then exit 29; fi
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
 	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	if runtime == nil {
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		go func() { exited <- cmd.Wait() }()
+	} else {
+		runtime.start(t, ctx, cmd, &output, exited)
+	}
 	ready := filepath.Join(own.Dir, "restart-ready")
 	for {
 		if _, err := os.Stat(ready); err == nil {
@@ -206,7 +257,7 @@ if amux agent done; then exit 29; fi
 	if record, ok := core.SessionRuntimeModel(own.ID, own.ClaudeID); !ok || record.Model != "concurrent-model" {
 		t.Fatalf("model did not reach the authoritative record: %+v", record)
 	}
-	if _, _, ok := core.SessionCapturedTranscript(own.ID, own.ClaudeID); !ok {
+	if _, _, ok := core.SessionCapturedTranscript(own.ID, own.ClaudeID); own.Agent == "claude" && !ok {
 		t.Fatal("capture did not reach daemon-owned storage")
 	}
 	if _, ok := core.SessionHookState(peer.ID, peer.ClaudeID); ok {
@@ -262,6 +313,9 @@ if amux agent done; then exit 29; fi
 	if err := <-exited; err != nil {
 		t.Fatalf("surface: %v\n%s", err, output.String())
 	}
+	if runtime != nil {
+		output.WriteString(runtime.result())
+	}
 	if !strings.Contains(output.String(), "marked done: archived own") {
 		t.Fatalf("missing acknowledgement:\n%s", output.String())
 	}
@@ -278,5 +332,5 @@ if amux agent done; then exit 29; fi
 	if other.Archived || other.Name != "" {
 		t.Fatalf("foreign mutated: %+v", other)
 	}
-	t.Log("real CLI surface, peer discovery, self-only writes, concurrent reports, restart and archive acknowledgement passed inside production bubblewrap")
+	t.Logf("%s: real CLI surface, peer discovery, self-only writes, concurrent reports, restart and archive acknowledgement passed inside production bubblewrap", mode)
 }

@@ -1,66 +1,120 @@
 # Agent CLI candidate validation
 
-Date: 2026-09-12. Base: `88a7d6d` (merged lifecycle #138). Branch:
-`amux/291907-bedb20`. These results apply to this branch's implementation, not
-the earlier workgroup 840db1 runtime candidates.
+Date: 2026-09-13. Branch: `amux/291907-bedb20`. Implementation: `f4b16df`,
+merged with upstream `1caab4a` at `81ff6f7`, plus the runtime acceptance and CI
+fixtures included in this PR. These results cover this candidate's complete
+command surface, not the earlier workgroup 840db1 completion-only candidates.
 
-## Passed
+## Real runtime acceptance
 
-- `TestAgentNamespaceCommandSurface`, including a race-enabled run: compiled CLI,
-  real production bubblewrap mounts, signed file transport, daemon dispatch, and
-  isolated SQLite. The test covers the command inventory, aliases, forwarding,
-  authoritative telemetry/capture records, renamed self with changed/unset IDs,
-  foreign discovery and denied foreign writes/control operations, concurrent
-  requests, offline publication before service/authority restart, retry, confirmed
-  durable completion, and rejection of a repeated completion.
-- Focused CLI, discovery paging, hostile-file, report, completion and transport
-  regressions, including race checks. The transport cases include strict JSON,
-  duplicate envelopes, rotation, restart reconnect, and indeterminate in-flight
-  mutations without replay. Existing access/regrant tests passed in the package
-  suite. Discovery tests cover 1,000 rows across multiple bounded pages, keeping
-  valid rows after hostile files, and suppressing partial CLI output on failure.
-- Full package tests for `internal/access`, `internal/agent`, `internal/core`,
-  `internal/claudecfg`, `internal/codexcfg`, `internal/hostprep`,
-  `internal/sessionrpc`, `internal/wsops`, and the separate `harnessproto` module.
-- `make vet` (both Go modules) and `git diff --check`.
-- Linux amd64/arm64 and Darwin amd64/arm64 `make cross` builds.
-- `make build` with `GOFLAGS=-buildvcs=false`. Default VCS stamping cannot obtain
-  Git status in the nested build environment; this flag only omits build metadata
-  and was also used for cross-builds.
+| Launch path | Runtime | Result |
+| --- | --- | --- |
+| Claude agent launch, ordinary Bash tool | Claude Code 2.1.263 | Passed |
+| Interactive Codex agent launch on a PTY, ordinary `exec_command` | Codex 0.153.4 | Passed |
+| Codex App Server through the production Supervisor, ordinary `exec_command` | Codex 0.153.4 | Passed |
 
-The namespace fixture ran from the existing ordinary Codex tool shell with its
-sandbox enabled; no escalation was requested. It added the production amux
-bubblewrap confinement and did not remove inherited syscall restrictions.
-Bubblewrap was the previously recorded 0.12.0 fixture at
-`840db1/558e17/.fixtures/bwrap-0.12.0/bin/bwrap`. Go was 1.26.4. Public dependencies
-were read from existing local fixture caches with `GOPROXY=off`, `GOSUMDB=off` and
-`GOCACHE=/tmp/amux-bedb20-go-cache`; no account credentials or host daemon were
-used. Cross-build dependencies were copied into `/tmp/amux-bedb20-modcache`.
+`TestAgentRuntimeCommandSurface` shares the complete command script with
+`TestAgentNamespaceCommandSurface`. It builds the CLI, obtains real signed
+session credentials from an isolated authority, serves the production mailbox
+and daemon dispatch against SQLite, and launches through production `panespec`.
+The only executable bind substitution replaces the Go test image with that
+compiled CLI at the production trampoline and hook paths.
 
-Reproduction of the main integration gate, after making bubblewrap 0.12+ and the
-Go dependencies available:
+The local provider deterministically requests a real tool call. Acceptance
+requires the returned tool result to report successful execution and the archive
+acknowledgement, plus direct assertions of daemon-owned state. A synthetic final
+model message cannot pass the test. Claude runs with `sandbox.enabled` and
+`failIfUnavailable`, with unsandboxed fallback disabled; its permission rule
+allows only the exact fixture script. Both Codex modes use the production
+workspace-write and approval defaults; the requested tool execution specifies
+`use_default`. No test tool call requests escalation.
+
+An ephemeral root file is first written inside the outer namespace. The tool
+must read its contents and fail to write the same file, proving an additional
+inner filesystem boundary. The fixed authentication context must remain
+read-only, the peer filesystem hidden, and foreign/control-plane writes denied.
+No broad daemon socket is mounted into the tool sandbox.
+
+The script covers the documented dispatcher inventory, aliases and flag forms,
+model forwarding, authoritative telemetry/capture, rename with changed/unset
+environment IDs, text/JSON foreign discovery, bounded events, concurrent reports,
+offline request publication before authority restart, reconnection and explicit
+retry, confirmed durable archival, and rejection of repeated completion. Explicit
+Claude-only capture still fails on Codex; generated capture remains best effort.
+Codex resumes a synthetic persisted UUID, while Claude starts a fresh pinned UUID.
+No host conversations, live model credentials, or running host daemon are used.
+
+## Checks and environment
+
+- Full `make test`, including the separate `harnessproto` module: passed.
+- `make vet`, both modules: passed.
+- `make build GOFLAGS=-buildvcs=false`: passed. This only omits Git build metadata.
+- Namespace and all three real runtime acceptance paths with `go test -race`:
+  passed.
+- `git diff --check`: passed.
+- Earlier focused CLI/security/discovery/transport race regressions passed,
+  including bounded paging, hostile files, duplicate requests, stale generation,
+  restart reconnect and indeterminate mutations without replay. Existing
+  access/regrant and lifecycle tests cover restored sessions and durable receipts.
+- Linux/Darwin amd64/arm64 cross-builds passed on the implementation before the
+  upstream merge; subsequent changes in this PR add tests, CI and documentation.
+
+Go is 1.26.4; production outer bubblewrap is 0.12.0. Runtime packages are copied
+into each synthetic session so their complete binaries/helpers remain visible
+under the real production mounts. Claude also receives the same pinned outer
+bubblewrap executable in its fixture dependency PATH. Locally, missing `socat`
+and `libwrap` were extracted from public Ubuntu packages into this workspace;
+only that helper process receives its private library path. CI installs `socat`
+on its ephemeral runner. The Codex package includes its paired sandbox helper.
+
+The initial ordinary tool sandbox denied provider and test sockets. A supported,
+narrowly approved test-runner escalation resolved that environment limitation.
+The runner itself uses an additional bubblewrap wrapper with a read-only root,
+only this workspace and `/tmp` writable, a synthetic HOME/environment, and the
+live `/amux-session-access` hidden. This permits the fixture's local services;
+it does not remove the production outer namespace or either real harness's
+command sandbox. Network access was also narrowly approved for public fixture
+and Go dependency downloads and GitHub operations. CLI access itself remains a
+file-mailbox operation requiring no network exception.
+
+The former socket failures and unavailable real-runtime gates recorded on
+2026-09-12 are superseded by these successful runs. Live paid provider/model
+behavior and an interactive Claude UI are not exercised: Claude's actual Bash
+runtime uses print mode, and both providers are local deterministic fixtures.
+
+## Reproduction and CI
+
+Install bubblewrap 0.12+, Go dependencies, and `socat`; extract the pinned native
+packages below. No authenticated harness account is necessary.
 
 ```sh
-AMUX_REQUIRE_NAMESPACE_TEST=1 go test -race ./internal/daemon \
-  -run '^TestAgentNamespaceCommandSurface$' -count=1 -v
+export AMUX_REQUIRE_NAMESPACE_TEST=1 TERM=xterm-256color
+export AMUX_TEST_CODEX_PACKAGE=/absolute/path/to/extracted/codex-package
+export AMUX_TEST_CLAUDE_BIN=/absolute/path/to/claude/package/claude
+
+go test -race ./internal/daemon \
+  -run '^TestAgentNamespaceCommandSurface$' -count=1 -timeout=120s -v
+for runtime in claude codex codex-app-server; do
+  AMUX_TEST_AGENT_RUNTIME="$runtime" go test -race ./internal/daemon \
+    -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v || break
+done
 ```
 
-## Unavailable acceptance and broader checks
+When running from an existing managed agent, hide its live fixed session context
+and use a synthetic HOME before running the broader suite. If the parent command
+sandbox denies local fixture sockets, use only the supported narrow test-runner
+approval path; do not disable the tested harness sandbox. Optional
+`AMUX_TEST_SOCAT_ROOT` supplies an extracted Ubuntu package tree when system
+`socat` is absent.
 
-| Check | Observed limitation |
+CI's `namespace-runtime` job installs the pinned bubblewrap runner, verifies
+these archive digests, and runs the namespace fixture and all three real modes
+without permitting skips. See the PR's checks for the current remote result.
+
+| Archive | SHA-256 |
 | --- | --- |
-| Real Claude Bash tool turn | Claude 2.1.263 is available in the old fixture, but the current outer command sandbox denies both TCP and Unix socket creation. A local deterministic provider/relay cannot start. No live model turn was substituted. |
-| Interactive Codex tool turn | Codex 0.153.4 is available, but the same provider socket limitation blocks a tool-turn fixture. Direct `codex sandbox -c 'sandbox_mode="workspace-write"' -- /bin/sh ...` also failed: `bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted`. No network-enabled profile was used to work around this. |
-| Codex App Server mode | Unix socket creation is denied (`Operation not permitted`), so the actual App Server endpoint and nested command tool cannot be validated here. |
-| Full `make test` | Existing socket tests fail in `cmd/amux`, `codexapp`, `daemon`, `mux`, `panespec`, `provider`, and `wiretls`. `TestScopeRootsMatchBinds` also attempts to create a socket directory under the read-only host data root. The full suite is **not green** in this environment. |
-| Remote refresh / PR | `git fetch origin` fails with `Could not resolve host: github.com`; `gh pr view` fails connecting to `api.github.com`. No push, PR, CI, merge, or session completion is claimed. |
+| OpenAI `rust-v0.153.4/codex-package-x86_64-unknown-linux-musl.tar.gz` | `a822187e1a2420c61c5926721bfbd878701ed95547c9bb0d4de4498a16ba1821` |
+| npm `@anthropic-ai/claude-code-linux-x64` 2.1.263 | `8b6207348ad56fdcde085a0ad1f7cff0dfe06ce2c6c1bf97f69f1a1a7b6d0945` |
 
-The namespace fixture is useful integration evidence, but does not replace real
-Claude/Codex launch-path acceptance. Interactive Codex and App Server mode remain
-explicit acceptance gates on an appropriately provisioned runner that can start
-local test services while keeping its agent tools confined. The earlier workgroup
-completion-only runtime evidence has not been relabeled as full-command coverage.
-
-Raw local logs for this run are in `/tmp/amux-bedb20-{test,vet,race,final-focused,
-namespace-final,build,cross}.log`. No checks were made green by disabling amux confinement, the
-harness command sandbox, authentication, or write authorization.
+Local raw logs: `/tmp/amux-bedb20-final-checks.log` and
+`/tmp/amux-bedb20-runtime-{claude,codex,codex-app-server}.log`.
