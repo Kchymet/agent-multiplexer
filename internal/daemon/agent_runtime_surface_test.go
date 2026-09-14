@@ -200,13 +200,34 @@ func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd,
 			t.Fatal(err)
 		}
 		drained := make(chan struct{})
-		go func() { defer close(drained); _, _ = io.Copy(output, terminal) }()
+		ready := make(chan struct{})
 		go func() {
-			// The resumed interactive TUI accepts an ordinary prompt on its PTY.
-			time.Sleep(1500 * time.Millisecond)
-			_, _ = terminal.Write([]byte("Run the fixture command once with exec_command."))
-			time.Sleep(300 * time.Millisecond)
-			_, _ = terminal.Write([]byte("\r"))
+			defer close(drained)
+			var signaled bool
+			buf := make([]byte, 4096)
+			for {
+				n, err := terminal.Read(buf)
+				output.Write(buf[:n])
+				// Native startup probes can consume stdin before the composer
+				// exists. Observe the loaded model footer, not elapsed time.
+				if !signaled && bytes.Contains(output.Bytes(), []byte("stub-model default")) {
+					close(ready)
+					signaled = true
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+		go func() {
+			select {
+			case <-ready:
+				_, _ = terminal.Write([]byte("\x1b[200~Run the fixture command once with exec_command.\x1b[201~"))
+				// Submit after the paste event has been processed by the TUI.
+				time.Sleep(300 * time.Millisecond)
+				_, _ = terminal.Write([]byte("\r"))
+			case <-ctx.Done():
+			}
 			err := r.requireVerified(ctx)
 			_ = cmd.Process.Kill()
 			_ = terminal.Close()
