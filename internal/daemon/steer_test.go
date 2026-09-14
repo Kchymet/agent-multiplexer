@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,7 +142,7 @@ func TestStartAgentRevalidatesAtRuntimeExecution(t *testing.T) {
 		allowed = false // policy changes after resolution but before Engine.Ensure
 		return t.TempDir(), nil, []string{"agent"}, nil
 	}
-	ctx := withAccessGuard(context.Background(), func() error {
+	ctx := withAccessGuard(context.Background(), func(context.Context) error {
 		if !allowed {
 			return access.ErrDenied
 		}
@@ -201,7 +203,7 @@ func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T
 
 	validationEntered := make(chan struct{})
 	releaseValidation := make(chan struct{})
-	guarded := withAccessGuard(withEffectAdmission(context.Background()), func() error {
+	guarded := withAccessGuard(withEffectAdmission(context.Background()), func(context.Context) error {
 		close(validationEntered)
 		<-releaseValidation
 		return runtime.authorize(context.Background(), principals[root.ID], call)
@@ -249,6 +251,127 @@ func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T
 	case <-d.steerStarted:
 	case <-time.After(time.Second):
 		t.Fatal("structured prompt waiter did not finish")
+	}
+}
+
+// TestSessionDispatchAcceptedPromptOutlivesCallbackContext reproduces the
+// mailbox path: dispatch returns the durable ACK while the deferred cold start
+// is still waiting to reacquire dispatchMu. dispatchCallback cancels its bounded
+// callback context on return, but that local timeout must not cancel work the
+// daemon already accepted; the deferred effect remains bound to daemon lifetime
+// and revalidates the same principal/policy immediately before Engine.Ensure.
+func TestSessionDispatchAcceptedPromptOutlivesCallbackContext(t *testing.T) {
+	root := store.Session{ID: "callback-root", Scope: store.ScopeWork, Agent: "claude", Dir: t.TempDir()}
+	member := store.Session{ID: "callback-member", RootID: root.ID, Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixture(t, root, member)
+	defer runtime.close()
+	d.sessionRPC = runtime
+	d.permissionBaseline = func(string) ([]string, error) { return nil, nil }
+	eng := newFakeEngine()
+	d.engine = eng
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{Session: member}, nil
+	}
+	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return member.Dir, nil, []string{"agent"}, nil
+	}
+	d.steerStarted = make(chan string, 1)
+
+	call := sessionrpc.Call{
+		Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSteer, ID: member.ID,
+		Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "continue release work"},
+	}
+	if err := runtime.authorize(context.Background(), principals[root.ID], call); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	result, err := runtime.dispatchCallback(context.Background(), sessionrpc.DispatchRequest{
+		Principal: principals[root.ID], RequestID: "0123456789abcdef0123456789abcdef", Call: call,
+	})
+	if err != nil || result.Status != sessionrpc.StatusOK {
+		t.Fatalf("dispatch callback = %+v, %v", result, err)
+	}
+	waitStarted(t, d)
+	if got := eng.ensuredKeys(); len(got) != 1 || got[0].AgentID != member.ID {
+		t.Fatalf("accepted prompt did not start target after callback returned: %v", got)
+	}
+}
+
+func TestStructuredPromptRebindsCallbackCancellationToServingLifetime(t *testing.T) {
+	d := New("", nil, time.Hour)
+	runtime := newSessionRuntime(d)
+	d.sessionRPC = runtime
+	d.steerStarted = make(chan string, 1)
+	defer runtime.close()
+
+	servingCtx, stopServing := context.WithCancel(context.Background())
+	callbackCtx, finishCallback := context.WithCancel(servingCtx)
+	callbackCtx = withDeferredLifetime(callbackCtx, servingCtx)
+	validated := make(chan struct{}, 1)
+	guarded := withAccessGuard(withEffectAdmission(callbackCtx), func(checkCtx context.Context) error {
+		if err := checkCtx.Err(); err != nil {
+			return err
+		}
+		validated <- struct{}{}
+		return nil
+	})
+	sink := &gatedPromptSteerer{started: make(chan struct{}), release: make(chan struct{})}
+
+	// Keep the deferred prompt behind final admission until the callback-local
+	// context has ended, matching dispatchCallback's ACK/cancel ordering.
+	runtime.dispatchMu.Lock()
+	if err := d.steerStructured(guarded, "structured", sink, core.SteerPrompt,
+		map[string]string{core.SteerText: "bounded prompt"}); err != nil {
+		runtime.dispatchMu.Unlock()
+		t.Fatal(err)
+	}
+	finishCallback()
+	runtime.dispatchMu.Unlock()
+
+	select {
+	case <-sink.started:
+	case <-time.After(time.Second):
+		t.Fatal("turn/start inherited the completed callback cancellation")
+	}
+	select {
+	case <-validated:
+	case <-time.After(time.Second):
+		t.Fatal("deferred prompt skipped final authorization revalidation")
+	}
+
+	// The callback timeout was detached, not all cancellation: daemon/session-RPC
+	// lifetime end still cancels the accepted turn waiter and joins the work.
+	stopServing()
+	select {
+	case <-d.steerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("serving lifetime cancellation did not stop deferred prompt")
+	}
+}
+
+func TestDeferredContextAlreadyCancelledLifetimeDeniesEffect(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+
+	for i := 0; i < 1000; i++ {
+		d := New("", nil, time.Hour)
+		lifetime, stop := context.WithCancel(context.Background())
+		stop()
+		callback := withDeferredLifetime(context.Background(), lifetime)
+		callback = withAccessGuard(callback, func(checkCtx context.Context) error {
+			return checkCtx.Err()
+		})
+		var effects atomic.Int32
+		if !d.startDeferredContext(callback, func(workCtx context.Context) {
+			if revalidateDeferred(workCtx) == nil {
+				effects.Add(1)
+			}
+		}) {
+			t.Fatal("work unexpectedly rejected")
+		}
+		d.deferredWG.Wait()
+		if effects.Load() != 0 {
+			t.Fatalf("iteration %d: deferred effect passed its guard after serving lifetime ended", i)
+		}
 	}
 }
 

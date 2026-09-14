@@ -508,6 +508,64 @@ func TestForeignThreadTurnNotTracked(t *testing.T) {
 	}
 }
 
+func TestForeignThreadStatusAndStartDoNotContaminateSupervisor(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	col := subscribeCollector(context.Background(), sup)
+	fs.mu.Lock()
+	fs.turnID = "primary-turn"
+	fs.mu.Unlock()
+	fs.pushTurnStarted()
+	col.waitFor(t, harnessproto.TypeTurnStart)
+
+	// App Server may broadcast auxiliary review threads on the same transport.
+	// thread/started carries its id nested, while thread/status/changed carries a
+	// top-level threadId. Neither belongs to this supervisor's pinned thread.
+	fs.pushNotify("thread/started", map[string]any{
+		"thread": map[string]any{"id": "review-thread"},
+	})
+	fs.pushNotify("thread/status/changed", map[string]any{
+		"threadId": "review-thread", "status": map[string]any{"type": "idle"},
+	})
+	if ev, ok := col.tryGet(); ok {
+		t.Fatalf("foreign thread notification entered primary stream: %+v", ev)
+	}
+	if got := sup.ThreadID(); got != "thr_1" {
+		t.Fatalf("foreign thread/start changed pinned identity to %q", got)
+	}
+	if got := sup.Identity().ThreadID; got != "thr_1" {
+		t.Fatalf("foreign thread/start changed durable identity to %q", got)
+	}
+	if err := sup.Interject(context.Background(), "continue primary"); err != nil {
+		t.Fatalf("interject after auxiliary notifications: %v", err)
+	}
+	interject, ok := fs.sawCall("turn/steer")
+	if !ok {
+		t.Fatal("interject did not reach fake App Server")
+	}
+	var steer struct {
+		ThreadID       string `json:"threadId"`
+		ExpectedTurnID string `json:"expectedTurnId"`
+	}
+	if err := json.Unmarshal(interject.Params, &steer); err != nil {
+		t.Fatal(err)
+	}
+	if steer.ThreadID != "thr_1" || steer.ExpectedTurnID != "primary-turn" {
+		t.Fatalf("auxiliary thread corrupted interject target: %+v", steer)
+	}
+
+	// Filtering the auxiliary thread must not suppress status observations for
+	// the actual pinned thread; these remain raw, correlated history.
+	fs.pushNotify("thread/status/changed", map[string]any{
+		"threadId": "thr_1", "status": map[string]any{"type": "active"},
+	})
+	if ev := col.waitFor(t, harnessproto.TypeRaw); !strings.Contains(string(ev.Payload), "thr_1") {
+		t.Fatalf("primary status event lost correlation: %+v", ev)
+	}
+}
+
 func TestPromptBracketsTurn(t *testing.T) {
 	sup, fs, client := newFakePair(t)
 	defer fs.close()

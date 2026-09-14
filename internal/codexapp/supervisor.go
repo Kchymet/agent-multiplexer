@@ -241,6 +241,21 @@ func (s *Supervisor) ThreadID() string {
 	return s.threadID
 }
 
+// live reports whether the manager can safely route another operation to this
+// supervisor. Process presence alone is insufficient: rpc.run permanently
+// retires the JSON-RPC connection on read/write failure, and a handle whose
+// transport is closed cannot accept a prompt even if its child has not exited.
+func (s *Supervisor) live() bool {
+	s.mu.Lock()
+	if s.closed || s.interrupted || s.rpc == nil {
+		s.mu.Unlock()
+		return false
+	}
+	rpc := s.rpc
+	s.mu.Unlock()
+	return rpc.live()
+}
+
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 // Start launches the background App Server under the amux sandbox launcher, dials
@@ -852,13 +867,6 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 		s.emit(rawEvent("$unparsable", params))
 		return
 	}
-	if method == "thread/started" {
-		if id := threadIDFromResult(params); id != "" {
-			s.mu.Lock()
-			s.threadID = id
-			s.mu.Unlock()
-		}
-	}
 	// The server authoritatively resolves an approval — answered by ANY client —
 	// via serverRequest/resolved, which arrives while the turn is still active. Clear
 	// it and emit permission_resolved immediately so every client converges before
@@ -868,12 +876,12 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 		s.handleServerResolved(params)
 		return
 	}
-	// A turn lifecycle or item notification for a DIFFERENT thread belongs to another
-	// session/thread: it must neither mutate our state nor enter our event stream
-	// (ROOT audit: foreign notifications must not contaminate our stream). A missing
-	// threadId is left to the downstream correlation checks, which never treat it as
-	// ours.
-	if (method == "turn/started" || method == "turn/completed" || strings.HasPrefix(method, "item/")) && s.foreignThread(params) {
+	// Any thread-scoped notification for a DIFFERENT thread belongs to another
+	// session (including auxiliary reviewer threads): it must neither mutate our
+	// identity/control state nor enter our event stream. App Server uses both a
+	// top-level threadId and thread:{id}, so foreignThread recognizes both. A
+	// missing id is left to downstream exact-correlation checks.
+	if (strings.HasPrefix(method, "thread/") || strings.HasPrefix(method, "turn/") || strings.HasPrefix(method, "item/")) && s.foreignThread(params) {
 		return
 	}
 	// Track the active turn from ANY origin (ROOT audit): a turn started in the
@@ -961,15 +969,22 @@ func (s *Supervisor) handleTurnCompleted(res *turnResult) {
 func (s *Supervisor) foreignThread(params json.RawMessage) bool {
 	var p struct {
 		ThreadID string `json:"threadId"`
+		Thread   struct {
+			ID string `json:"id"`
+		} `json:"thread"`
 	}
 	_ = json.Unmarshal(params, &p)
-	if p.ThreadID == "" {
+	threadID := p.ThreadID
+	if threadID == "" {
+		threadID = p.Thread.ID
+	}
+	if threadID == "" {
 		return false
 	}
 	s.mu.Lock()
 	pinned := s.threadID
 	s.mu.Unlock()
-	return pinned != "" && p.ThreadID != pinned
+	return pinned != "" && threadID != pinned
 }
 
 // trackTurn records the OBSERVED active turn from a turn/started notification on our

@@ -74,8 +74,15 @@ func (m *Manager) startGate(sessionID string) chan struct{} {
 // "is this session structured right now?" test as well as the route target.
 func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s, ok := m.sup[sessionID]
+	if ok && !s.live() {
+		delete(m.sup, sessionID)
+		ok = false
+	}
+	m.mu.Unlock()
+	if !ok && s != nil {
+		_ = s.Close()
+	}
 	return s, ok
 }
 
@@ -85,11 +92,19 @@ func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 // manager's interrupt snapshot.
 func (m *Manager) existingForEnsure(sessionID string) (*Supervisor, bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.stopping {
+		m.mu.Unlock()
 		return nil, false, errManagerStopping
 	}
 	s, ok := m.sup[sessionID]
+	if ok && !s.live() {
+		delete(m.sup, sessionID)
+		ok = false
+	}
+	m.mu.Unlock()
+	if !ok && s != nil {
+		_ = s.Close()
+	}
 	return s, ok, nil
 }
 
@@ -334,10 +349,19 @@ func (m *Manager) InterruptTransports() {
 // annotation (a structured session has a supervisor, not an engine pane).
 func (m *Manager) Live() map[string]bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	out := make(map[string]bool, len(m.sup))
-	for id := range m.sup {
+	var dead []*Supervisor
+	for id, s := range m.sup {
+		if !s.live() {
+			delete(m.sup, id)
+			dead = append(dead, s)
+			continue
+		}
 		out[id] = true
+	}
+	m.mu.Unlock()
+	for _, s := range dead {
+		_ = s.Close()
 	}
 	return out
 }

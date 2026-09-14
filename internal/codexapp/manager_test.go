@@ -181,6 +181,43 @@ func TestManagerEmptyLookups(t *testing.T) {
 	m.Close("nope") // idempotent after shutdown
 }
 
+func TestManagerDoesNotKeepDisconnectedSupervisorLiveWithPendingTool(t *testing.T) {
+	m := NewManager(context.Background(), "")
+	sup, fs, client := newFakePair(t)
+	attach(t, sup, client)
+	m.mu.Lock()
+	m.sup["disconnected"] = sup
+	m.mu.Unlock()
+	defer m.Shutdown()
+
+	if _, ok := m.Get("disconnected"); !ok {
+		t.Fatal("attached supervisor was not live")
+	}
+	col := subscribeCollector(context.Background(), sup)
+	fs.pushNotify("item/started", map[string]any{
+		"threadId": "thr_1", "turnId": "turn_1",
+		"item": map[string]any{"id": "tool_1", "type": "commandExecution", "command": "synthetic"},
+	})
+	if ev := col.waitFor(t, "tool_call"); ev.ItemID != "tool_1" {
+		t.Fatalf("pending tool event = %+v", ev)
+	}
+	fs.close() // no item/completed: the tool remains outstanding in history
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, ok := m.Get("disconnected"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("dead transport remained published as a live supervisor")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if m.Live()["disconnected"] {
+		t.Fatal("dead transport with a pending tool remained in liveness snapshot")
+	}
+}
+
 // TestManagerForgetRemovesIdentity checks that Forget drops the persisted identity
 // (session deleted for good), while Close alone leaves it (archive → resumable).
 func TestManagerForgetRemovesIdentity(t *testing.T) {
