@@ -411,17 +411,22 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 // lock before this work runs. The callback is bounded to admission/queueing;
 // callers wait for a model turn only after this function returns.
 func (d *Daemon) admitDeferredEffect(ctx context.Context, effect func(context.Context) error) error {
+	admitCtx, cancel := context.WithTimeout(ctx, steerEffectAdmissionTimeout)
+	defer cancel()
+	if d.steerAdmission != nil {
+		if err := d.steerAdmission(admitCtx); err != nil {
+			return err
+		}
+	}
 	if d.sessionRPC != nil {
 		d.sessionRPC.dispatchMu.Lock()
 		defer d.sessionRPC.dispatchMu.Unlock()
 	}
 	d.effectMu.Lock()
 	defer d.effectMu.Unlock()
-	if err := revalidateDeferred(ctx); err != nil {
+	if err := revalidateDeferred(admitCtx); err != nil {
 		return err
 	}
-	admitCtx, cancel := context.WithTimeout(ctx, steerEffectAdmissionTimeout)
-	defer cancel()
 	return effect(admitCtx)
 }
 
