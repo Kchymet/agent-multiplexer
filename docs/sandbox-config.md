@@ -314,3 +314,14 @@ credential links are filled in at launch. The agent guide
 | `panespec.configBinds` | binds shared auth and OAuth locks for the agent pane |
 | `source.configSuffix` | the rail's `⚙ N config edits` |
 | `cmd/amux/sandbox.go` | `amux sandbox drift / promote / reset / path` |
+
+### Agent CLI mailbox access
+
+All existing `amux agent ...` commands remain available through the ordinary
+sandboxed shell. The launch's fixed credential and per-session request mailbox
+support both bubblewrap confinement and the harness workspace-write policy. No
+daemon socket exception or sandbox escalation is required. `name`/`label` and
+`done` use the fixed launched subject; `sessions [--json]` uses a deliberate
+read-only host discovery query. This query grants neither sibling mounts nor
+cross-session write access. See [the dispatcher and transport audit](agent-cli-sandbox.md)
+for flags, hook compatibility, restart/receipt semantics and validation limits.

@@ -71,7 +71,7 @@ are assigned (the subdirectories here). %s
   index, locks, hooks, config, and new objects) is private under this session.
   Immutable objects reachable from the authorized upstream base are shared read-only;
   do not edit other agents' worktrees or amux's host-side state/cache.
-  Reading the shared agent sessions below is also allowed.
+  Use the read-only session discovery commands below for shared context.
 - You may commit, fetch, merge, push your assigned branch, and open or update its
   pull request with gh using the host's shared GitHub authentication. These are
   normal sandbox operations; keep the sandbox enabled.
@@ -83,9 +83,13 @@ are assigned (the subdirectories here). %s
 When you need to interact with amux itself, use the self-scoped `+"`amux agent ...`"+`
 commands by default. They infer which agent you are, so you do not need to look
 up or pass your own id. Run `+"`amux agent --help`"+` to see the available commands;
-the ones you will normally need are `+"`amux agent events --json`"+` to read your own
+the ones you will normally need are `+"`amux agent sessions --json`"+` for cross-session
+discovery, `+"`amux agent events --json`"+` to read your own
 normalized history, `+"`amux agent name <display name>`"+` to name yourself, and
-`+"`amux agent done`"+` to mark your task complete.
+`+"`amux agent done`"+` to mark your task complete. These commands work from the
+ordinary sandboxed shell through a private file mailbox. Keep both sandboxes
+enabled. Name and done target the launched session even if environment IDs change;
+explicit commands report failure when the daemon cannot confirm the operation.
 
 Other command families such as `+"`amux do`"+`, `+"`amux workgroup`"+`, `+"`amux repo`"+`,
 `+"`amux config`"+`, and `+"`amux sandbox`"+` operate the wider control plane. Do not use
@@ -133,8 +137,15 @@ to edit.
 	transcriptsSection = `## Authorized session context
 The filesystem namespace exposes only this session's own files. Use the
 authenticated amux commands for session context rather than searching sibling,
-parent, state, or transcript paths. List the sessions your current server-issued
-role may see, then read one bounded normalized event page with:
+parent, state, or transcript paths. Discover conversations across Claude and Codex:
+
+    amux agent sessions
+    amux agent sessions --json
+
+This intentionally includes other sessions and user conversations. Returned paths
+are descriptive metadata; discovery does not grant filesystem or write access.
+For normalized history, list the sessions your current role may read and query a
+bounded event page:
 
     amux status --json
     amux agent events <session-id> --json

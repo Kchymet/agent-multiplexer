@@ -213,9 +213,10 @@ func DescriptorFor(action string) ActionDescriptor { return actionDescriptors[ac
 // standalone mux server own store access directly; the CLI/provider do not.)
 const (
 	// QueryCodexControl reports the running daemon's startup selection.
-	QueryCodexControl = "codex-control"
-	QueryRepos        = "repos"    // tracked repositories -> []RepoRow
-	QuerySessions     = "sessions" // workgroups + their agents -> []WorkgroupRow
+	QueryCodexControl  = "codex-control"
+	QueryRepos         = "repos"          // tracked repositories -> []RepoRow
+	QueryAgentSessions = "agent-sessions" // cross-session conversation discovery, read-only
+	QuerySessions      = "sessions"       // workgroups + their agents -> []WorkgroupRow
 	// QuerySnapshot returns the daemon's current session rail ([]Session) — the same
 	// inventory it broadcasts to subscribers — so a peer process (the provider)
 	// publishes it without opening the store itself.

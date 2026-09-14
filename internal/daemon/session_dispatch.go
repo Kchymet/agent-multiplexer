@@ -58,6 +58,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 			}
 			return rpcInvalid("invalid_operation"), nil
 		}
+		if req.Route == access.RouteQuery && req.Verb == core.QueryAgentSessions {
+			return r.dispatchAgentSessions(ctx, request.Principal, req), nil
+		}
 		if req.Route == access.RouteQuery && req.Verb == core.QueryRuntimeEvents {
 			return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
 		}

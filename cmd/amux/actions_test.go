@@ -70,7 +70,7 @@ func TestActionGlossesCoverVocabulary(t *testing.T) {
 func TestNotInsideAgentExplainsWhere(t *testing.T) {
 	msg := notInsideAgent("amux agent done", "amux workgroup archive <id>")
 	for _, want := range []string{
-		"$AMUX_WORKGROUP unset",
+		"fixed session context unavailable",
 		"terminal tab",
 		"amux workgroup archive <id>",
 		"amux workgroup ls",

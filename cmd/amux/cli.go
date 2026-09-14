@@ -23,37 +23,31 @@ import (
 // the store and the agent engine) does. Only genuinely client-side interaction
 // (fzf menus, the gh owner browser) lives here, since it needs a real TTY.
 
-// cmdName sets the display name of the agent the caller is running inside. Agents
-// launch with $AMUX_WORKGROUP set to their id (see wsops.AgentCommand), so this
-// works from an agent's own shell or terminal tab. Exposed as "amux agent name"
-// (and the "label" alias); "amux name" is kept as a deprecated top-level alias.
+// cmdName sets the launched session's display name using its fixed context.
+// Environment hints cannot redirect a self-rename, including for coordinators.
+// The deprecated top-level name alias shares this implementation.
 func cmdName(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: amux agent name <display name>")
 	}
-	id := strings.TrimSpace(os.Getenv("AMUX_WORKGROUP"))
-	if id == "" {
+	session, err := loadAgentSessionContext()
+	if err != nil || strings.TrimSpace(session.SubjectID) == "" {
 		return fmt.Errorf("%s", notInsideAgent("amux agent name", "amux workgroup rename <id> <name>"))
 	}
+	id := session.SubjectID
 	name := strings.Join(args, " ")
-	if err := sendAction(core.Action{Action: core.ActionRename, ID: id, Fields: map[string]string{"name": name}}); err != nil {
+	if _, err := restrictedAction(core.Action{Action: core.ActionRename, ID: id, Fields: map[string]string{"name": name}}); err != nil {
 		return err
 	}
 	fmt.Printf("renamed agent %s to %q\n", id, name)
 	return nil
 }
 
-// notInsideAgent explains a failed self-scoped command: one that acts on
-// *whoever ran it* rather than on an id. Those commands know their caller only by
-// the $AMUX_WORKGROUP amux exports into every pane it launches, so from a plain
-// terminal there is no caller to act on. Naming the unset variable isn't enough —
-// say where the command does work, and give the by-id form for everywhere else.
+// notInsideAgent describes the fixed identity required by self-scoped commands.
 func notInsideAgent(cmd, byID string) string {
-	return "not inside an amux agent ($AMUX_WORKGROUP unset)\n" +
-		"  `" + cmd + "` acts on the agent that runs it, so it only works from that\n" +
-		"  agent's own terminal tab inside amux (where amux sets $AMUX_WORKGROUP to the\n" +
-		"  agent's id). From a plain shell, name the target instead: `" + byID + "`\n" +
-		"  (`amux workgroup ls` lists the ids)."
+	return "not inside an amux agent (fixed session context unavailable)\n" +
+		"  `" + cmd + "` acts on the launched session from its own terminal tab.\n" +
+		"  From a plain shell, use `" + byID + "` (`amux workgroup ls` lists ids)."
 }
 
 // agentCfg is one agent's configuration gathered in the interactive create flow,

@@ -10,13 +10,13 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
 	"amux/internal/access"
 	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/sessionreport"
+	"amux/internal/sessionrpc"
 )
 
 // cmdAgent namespaces the commands an agent runs to describe *itself* to the
@@ -96,10 +96,13 @@ usage: amux agent <command>
   label <text>       alias of "name"
   done               report the task complete: archive this agent off the active
                      rail (reversible — amux workgroup unarchive <id>).
-	                     identity comes only from the fixed session context
-	  sessions [--json]  list host-visible agent sessions (legacy host diagnostic)
-	  events [<id>]      read one bounded normalized event page through authenticated
-	                     session RPC (--after/--cursor, --json)
+                     identity comes only from the fixed session context
+  sessions [--json]  discover all host agent conversations (read-only)
+  events [<id>]      read one bounded normalized event page through authenticated
+                     session RPC (--after/--cursor, --json)
+
+Commands use the private file mailbox from the ordinary sandboxed shell.
+Keep both sandboxes enabled. Discovery grants no cross-session write access.
 
 Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned.
@@ -202,9 +205,10 @@ func cmdAgentStatus(args []string, hook bool) error {
 //
 // The verbs mirror the hook events claudecfg binds (claudecfg.permissionHooks):
 // `request` opens one, `allow`/`deny` close it with that decision, and `clear`
-// retires whatever is still open at a turn boundary. Identity and the tool being
-// asked about come from hook JSON. Generated --hook calls swallow errors;
-// explicit diagnostics preserve validation and transport failures.
+// retires whatever is still open at a turn boundary. The tool description comes
+// from hook JSON; identity comes only from the fixed context. Generated --hook
+// calls swallow errors; explicit diagnostics preserve validation and transport
+// failures.
 func cmdAgentPermission(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("amux agent permission: verb is required")
@@ -288,7 +292,7 @@ func cmdAgentDone(args []string) error {
 	if err != nil {
 		return fmt.Errorf("amux agent done: %w", err)
 	}
-	if err := sendAction(core.Action{
+	if _, err := restrictedAction(core.Action{
 		Action: core.ActionSetArchived,
 		ID:     id,
 		Fields: map[string]string{"archived": "true"},
@@ -402,15 +406,7 @@ func reportFlag(args []string, i int) (name, value string, consumed int, err err
 // sessionRow is one agent conversation for `amux agent sessions`, merging the
 // per-harness session listings into a single shape tagged with its harness so
 // text and --json output stay consistent across Claude Code and Codex.
-type sessionRow struct {
-	Harness  string    `json:"harness"` // claude | codex
-	ID       string    `json:"id"`
-	Cwd      string    `json:"cwd"`
-	Project  string    `json:"project"`
-	Path     string    `json:"path"`
-	Size     int64     `json:"size"`
-	Modified time.Time `json:"modified"`
-}
+type sessionRow = core.AgentSessionRow
 
 // cmdAgentSessions lists every agent session on the machine — both Claude Code
 // and Codex — so an agent can reason about tasks that recur across conversations:
@@ -426,17 +422,29 @@ func cmdAgentSessions(args []string) error {
 		}
 	}
 
-	// Merge every registered harness's on-disk conversations, tagged by kind, so
-	// adding a harness surfaces its sessions here without touching this command.
 	var rows []sessionRow
-	for _, h := range agent.Harnesses() {
-		for _, s := range h.ListSessions() {
-			rows = append(rows, sessionRow{
-				Harness: h.Kind(), ID: s.ID, Cwd: s.Cwd, Project: s.Project,
-				Path: s.Path, Size: s.Size, Modified: s.Modified,
-			})
+	if restrictedSessionClient(os.Getenv) {
+		cursor := ""
+		for {
+			var page core.AgentSessionsPage
+			if err := restrictedQueryRequest(sessionrpc.Query{
+				Verb: core.QueryAgentSessions, Fields: map[string]string{"cursor": cursor},
+			}, &page); err != nil {
+				return fmt.Errorf("list agent sessions: %w", err)
+			}
+			rows = append(rows, page.Sessions...)
+			if page.NextCursor == "" {
+				break
+			}
+			if page.NextCursor == cursor || len(page.Sessions) == 0 {
+				return fmt.Errorf("list agent sessions: invalid continuation")
+			}
+			cursor = page.NextCursor
 		}
+	} else {
+		rows = agent.ListSessionRows()
 	}
+
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Modified.After(rows[j].Modified) })
 
 	if asJSON {

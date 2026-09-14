@@ -47,6 +47,12 @@ func validateSessionQuery(req access.Request) error {
 			return fmt.Errorf("query %q does not accept an id", req.Verb)
 		}
 		return nil
+	case core.QueryAgentSessions:
+		if req.ID != "" || validateFields(req.Fields, "cursor") != nil {
+			return fmt.Errorf("agent discovery accepts only a continuation cursor")
+		}
+		_, err := decodeDiscoveryCursor(req.Fields["cursor"])
+		return err
 	case core.QueryRuntimeEvents:
 		if strings.TrimSpace(req.ID) == "" {
 			return fmt.Errorf("query %q requires an id", req.Verb)

@@ -48,7 +48,7 @@ jobs:
       - name: install ephemeral bubblewrap build dependency
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libcap-dev
+          sudo apt-get install --yes --no-install-recommends libcap-dev socat
       - name: build private bubblewrap runner
         shell: bash
         run: |
@@ -68,3 +68,33 @@ jobs:
           go test ./internal/panespec \
             -run 'Test(RuntimeNamespaceRejectsAliasesFDsAndFutureSiblings|RuntimeGeneratedClaudeHookUsesExactInstalledAlias|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket)$' \
             -count=1 -timeout=60s -v
+          go test ./internal/daemon \
+            -run '^TestAgentNamespaceCommandSurface$' \
+            -count=1 -timeout=120s -v
+      - name: download pinned native harness fixtures
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-runtimes/codex" "$RUNNER_TEMP/agent-runtimes/claude"
+          cd "$RUNNER_TEMP/agent-runtimes"
+          curl --fail --location --retry 3 \
+            https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-package-x86_64-unknown-linux-musl.tar.gz \
+            -o codex.tar.gz
+          curl --fail --location --retry 3 \
+            https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.263.tgz \
+            -o claude.tgz
+          echo 'a822187e1a2420c61c5926721bfbd878701ed95547c9bb0d4de4498a16ba1821  codex.tar.gz' | sha256sum -c -
+          echo '8b6207348ad56fdcde085a0ad1f7cff0dfe06ce2c6c1bf97f69f1a1a7b6d0945  claude.tgz' | sha256sum -c -
+          tar -xzf codex.tar.gz -C codex
+          tar -xzf claude.tgz -C claude
+      - name: test real nested harness command surfaces
+        shell: bash
+        env:
+          AMUX_REQUIRE_NAMESPACE_TEST: "1"
+          TERM: xterm-256color
+        run: |
+          export AMUX_TEST_CODEX_PACKAGE="$RUNNER_TEMP/agent-runtimes/codex"
+          export AMUX_TEST_CLAUDE_BIN="$RUNNER_TEMP/agent-runtimes/claude/package/claude"
+          for runtime in claude codex codex-app-server; do
+            AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
+              -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
+          done
