@@ -31,13 +31,13 @@ func keyToBytes(k tea.KeyMsg) []byte {
 	case tea.KeyDelete:
 		return []byte("\x1b[3~")
 	case tea.KeyUp:
-		return []byte("\x1b[A")
+		return arrowBytes('A', k.Alt)
 	case tea.KeyDown:
-		return []byte("\x1b[B")
+		return arrowBytes('B', k.Alt)
 	case tea.KeyRight:
-		return []byte("\x1b[C")
+		return arrowBytes('C', k.Alt)
 	case tea.KeyLeft:
-		return []byte("\x1b[D")
+		return arrowBytes('D', k.Alt)
 	case tea.KeyHome:
 		return []byte("\x1b[H")
 	case tea.KeyEnd:
@@ -60,6 +60,15 @@ func keyToBytes(k tea.KeyMsg) []byte {
 		return []byte{byte(k.Type)}
 	}
 	return nil
+}
+
+// Alt-arrows use the xterm modifier parameter (3 = Alt). Dropping it turns
+// Codex's Alt+Up question shortcut into ordinary history navigation.
+func arrowBytes(direction byte, alt bool) []byte {
+	if alt {
+		return []byte{'\x1b', '[', '1', ';', '3', direction}
+	}
+	return []byte{'\x1b', '[', direction}
 }
 
 // mouseToVT translates a Bubble Tea mouse event into the emulator's mouse event

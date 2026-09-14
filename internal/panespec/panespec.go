@@ -150,7 +150,9 @@ func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env,
 	if threadID != "" {
 		inner = append(inner, "resume", threadID)
 	}
-	inner = codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(inner))
+	// The existing server thread owns permissions. Codex rejects permission
+	// overrides on remote resume; only TUI presentation belongs on this client.
+	inner = codexcfg.FullscreenTUI(inner)
 	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
 	return dir, env, argv, err
 }

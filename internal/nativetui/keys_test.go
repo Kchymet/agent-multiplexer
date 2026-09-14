@@ -21,6 +21,10 @@ func TestKeyToBytesCtrl(t *testing.T) {
 		{"rune", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}, []byte("a")},
 		{"alt+rune", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b"), Alt: true}, []byte{0x1b, 'b'}},
 		{"up", tea.KeyMsg{Type: tea.KeyUp}, []byte("\x1b[A")},
+		{"alt+up", tea.KeyMsg{Type: tea.KeyUp, Alt: true}, []byte("\x1b[1;3A")},
+		{"alt+down", tea.KeyMsg{Type: tea.KeyDown, Alt: true}, []byte("\x1b[1;3B")},
+		{"alt+right", tea.KeyMsg{Type: tea.KeyRight, Alt: true}, []byte("\x1b[1;3C")},
+		{"alt+left", tea.KeyMsg{Type: tea.KeyLeft, Alt: true}, []byte("\x1b[1;3D")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

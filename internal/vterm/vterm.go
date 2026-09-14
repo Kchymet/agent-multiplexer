@@ -107,6 +107,15 @@ func New(cols, rows int) *Terminal {
 		rows:       rows,
 		mouseModes: make(map[ansi.Mode]bool),
 	}
+	// Replayed output may have been produced in a taller viewport. The pinned
+	// emulator accepts an out-of-range bottom margin and later panics in scroll
+	// operations. Consume those invalid bounds before its default handler; valid
+	// margins still use the normal implementation.
+	t.emu.RegisterCsiHandler('r', func(params ansi.Params) bool {
+		top, _, _ := params.Param(0, 1)
+		bottom, _, _ := params.Param(1, t.emu.Height())
+		return top > t.emu.Height() || bottom > t.emu.Height()
+	})
 	// Watch the child's private-mode changes so MouseEvent knows whether it wants
 	// raw mouse events (any mouse-tracking mode) and which cursor-key form it
 	// expects (DECCKM). These callbacks run under t.mu (see field docs).

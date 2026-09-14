@@ -72,8 +72,9 @@ const (
 )
 
 // AutomaticApprovals selects Codex's "Approve for me" permission mode for a
-// launch, including a native TUI attaching to an app-server thread. Keep these
-// defaults before caller arguments so explicit CLI overrides still win.
+// local launch. Remote TUI attachments must inherit their server thread's
+// permissions instead. Keep these defaults before caller arguments so explicit
+// CLI overrides still win.
 func AutomaticApprovals(argv []string) []string {
 	if len(argv) == 0 {
 		return argv

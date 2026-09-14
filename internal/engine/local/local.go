@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 
 	"amux/internal/engine"
 	"amux/internal/launchenv"
@@ -356,7 +357,19 @@ func (in *instance) Resize(cols, rows int) {
 	if in.ptmxClosed || in.ptmx == nil || cols <= 0 || rows <= 0 {
 		return
 	}
-	_ = pty.Setsize(in.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	previous, err := pty.GetsizeFull(in.ptmx)
+	if resizeErr := pty.Setsize(in.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); resizeErr != nil {
+		return
+	}
+	// A new subscriber can replay only a tail of incremental screen updates.
+	// paneOpen calls Resize after subscribing, but TIOCSWINSZ sends no SIGWINCH
+	// when the dimensions match. Request that redraw explicitly so same-size
+	// reattachments recover the screen too, without injecting keys or restarting.
+	if err == nil && int(previous.Cols) == cols && int(previous.Rows) == rows {
+		if foreground, err := unix.IoctlGetInt(int(in.ptmx.Fd()), unix.TIOCGPGRP); err == nil && foreground > 0 {
+			_ = unix.Kill(-foreground, unix.SIGWINCH)
+		}
+	}
 }
 
 // closePtmx closes the PTY at most once and stops inputLoop. Caller holds in.mu.
