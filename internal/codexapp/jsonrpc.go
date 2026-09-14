@@ -305,3 +305,9 @@ func (c *rpcConn) close() error {
 	c.failPending()
 	return c.transport.Close()
 }
+
+func (c *rpcConn) live() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed
+}

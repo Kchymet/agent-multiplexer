@@ -430,6 +430,24 @@ func (d *Daemon) startDeferredWork(work func()) bool {
 	return true
 }
 
+// startDeferredContext is the action-owned form of startDeferredWork. Session
+// mailbox callbacks carry a short callback deadline, but an accepted cold start
+// or prompt is explicitly asynchronous and must outlive the response that ACKs
+// it. deferredContext preserves the request's values/authorization guard while
+// rebinding cancellation to the serving lifetime; shutdown still joins it via
+// deferredWG before engines, supervisors, or authority are torn down.
+func (d *Daemon) startDeferredContext(ctx context.Context, work func(context.Context)) bool {
+	workCtx, release := deferredContext(ctx)
+	if !d.startDeferredWork(func() {
+		defer release()
+		work(workCtx)
+	}) {
+		release()
+		return false
+	}
+	return true
+}
+
 func (d *Daemon) stopDeferredAdmission() {
 	d.deferredMu.Lock()
 	d.deferredDraining = true
@@ -660,7 +678,9 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 
 	// Deferred work carries the same generation guard and rechecks it at the
 	// actual execution boundary, not merely when this loop accepts the frame.
-	clientCtx := withAccessGuard(ctx, func() error { return d.authority.Valid(ctx, principal) })
+	clientCtx := withAccessGuard(ctx, func(checkCtx context.Context) error {
+		return d.authority.Valid(checkCtx, principal)
+	})
 
 	// Read actions from the client until it disconnects.
 	dec := json.NewDecoder(reader)
@@ -694,9 +714,36 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 
 type accessGuardContextKey struct{}
 type effectAdmissionContextKey struct{}
+type deferredLifetimeContextKey struct{}
 
-func withAccessGuard(ctx context.Context, valid func() error) context.Context {
+func withAccessGuard(ctx context.Context, valid func(context.Context) error) context.Context {
 	return context.WithValue(ctx, accessGuardContextKey{}, valid)
+}
+
+// withDeferredLifetime records the owner that remains valid after a bounded
+// transport callback returns. Values added below this marker (notably the
+// current-principal authorization guard) are retained by deferredContext, while
+// cancellation is rebound from the callback-local deadline to this lifetime.
+func withDeferredLifetime(ctx, lifetime context.Context) context.Context {
+	return context.WithValue(ctx, deferredLifetimeContextKey{}, lifetime)
+}
+
+// deferredContext detaches only a session-RPC callback's local timeout. The
+// resulting context is still cancelled by the daemon/session-RPC serving
+// lifetime and still carries the authorization guard that is re-run under final
+// effect admission. Ordinary host and internal callers have no lifetime marker
+// and keep their original context unchanged.
+func deferredContext(ctx context.Context) (context.Context, func()) {
+	lifetime, _ := ctx.Value(deferredLifetimeContextKey{}).(context.Context)
+	if lifetime == nil {
+		return ctx, func() {}
+	}
+	deferred, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopLifetime := context.AfterFunc(lifetime, cancel)
+	return deferred, func() {
+		stopLifetime()
+		cancel()
+	}
 }
 
 func withEffectAdmission(ctx context.Context) context.Context {
@@ -711,11 +758,11 @@ func effectAdmissionHeld(ctx context.Context) bool {
 // revalidateDeferred is a no-op for internal/test callers without a streaming
 // principal. Work accepted from an authenticated connection carries a guard.
 func revalidateDeferred(ctx context.Context) error {
-	valid, _ := ctx.Value(accessGuardContextKey{}).(func() error)
+	valid, _ := ctx.Value(accessGuardContextKey{}).(func(context.Context) error)
 	if valid == nil {
 		return nil
 	}
-	return valid()
+	return valid(ctx)
 }
 
 const authDeadline = 5 * time.Second

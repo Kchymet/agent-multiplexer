@@ -157,7 +157,9 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	// which is far longer than the caller will wait. Hand the start to a goroutine
 	// and return: the relay that carried this verb answers immediately, and the
 	// progress arrives on the session's runtime-events stream instead.
-	if !d.startDeferredWork(func() { d.startForSteer(ctx, a.ID, key, payload) }) {
+	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
+		d.startForSteer(workCtx, a.ID, key, payload)
+	}) {
 		return context.Canceled
 	}
 	return nil
@@ -254,7 +256,9 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 		if text == "" {
 			return fmt.Errorf("%s: need %q", verb, core.SteerText)
 		}
-		if !d.startDeferredWork(func() { d.runStructuredPrompt(ctx, id, sup, text) }) {
+		if !d.startDeferredContext(ctx, func(workCtx context.Context) {
+			d.runStructuredPrompt(workCtx, id, sup, text)
+		}) {
 			return context.Canceled
 		}
 		return nil
@@ -330,10 +334,10 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 	if text == "" {
 		return fmt.Errorf("%s: need %q", core.SteerPrompt, core.SteerText)
 	}
-	if !d.startDeferredWork(func() {
+	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
 		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
 		var sup *codexapp.Supervisor
-		err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
+		err := d.admitDeferredEffect(workCtx, func(admitCtx context.Context) error {
 			var ensureErr error
 			sup, ensureErr = d.ensureSupervisor(admitCtx, sess.ID)
 			return ensureErr
@@ -347,7 +351,7 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 			return
 		}
 		d.triggerPoll()
-		d.runStructuredPrompt(ctx, sess.ID, sup, text)
+		d.runStructuredPrompt(workCtx, sess.ID, sup, text)
 	}) {
 		return context.Canceled
 	}

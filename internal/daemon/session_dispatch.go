@@ -119,11 +119,11 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body, Receipt: hooks}, nil
 	}
 
-	guarded := withAccessGuard(ctx, func() error {
-		if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
+	guarded := withAccessGuard(ctx, func(checkCtx context.Context) error {
+		if err := r.d.authority.Valid(checkCtx, request.Principal); err != nil {
 			return err
 		}
-		return r.policy.Authorize(ctx, request.Principal, req)
+		return r.policy.Authorize(checkCtx, request.Principal, req)
 	})
 	result := r.d.handle(guarded, action)
 	body, err := r.encodeResult(result)

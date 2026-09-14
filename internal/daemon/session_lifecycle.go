@@ -237,7 +237,12 @@ func (r *sessionRuntime) authorizeCallback(ctx context.Context, principal access
 }
 
 func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrpc.DispatchRequest) (result sessionrpc.DispatchResult, err error) {
+	// Preserve the serving lifetime separately from this callback's bounded
+	// execution window. A successful dispatch may ACK asynchronous work; that work
+	// must survive cancel below, while remaining cancellable by daemon shutdown.
+	lifetime := ctx
 	ctx, cancel := context.WithTimeout(ctx, r.callbackTimeout)
+	ctx = withDeferredLifetime(ctx, lifetime)
 	defer cancel()
 	defer func() {
 		if recover() != nil {

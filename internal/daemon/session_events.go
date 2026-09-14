@@ -300,6 +300,15 @@ func (p *sessionEventPager) commitPage(ctx context.Context, attempt *sessionEven
 		return nil, errEventCursorInvalid
 	}
 	entry.lastUsed = committedAt
+	if attempt.successor.token == attempt.token {
+		// EOF with no decoded or source-position advancement deterministically
+		// returns the same cursor. Caching that JSON body on the cursor would make
+		// every later request take preparePage's retry fast path forever, hiding
+		// records appended after this poll. Leave unchanged EOF polls recomputable;
+		// pages that consumed state have a distinct successor and retain exact
+		// same-cursor retry semantics below.
+		return append([]byte(nil), attempt.body...), nil
+	}
 	entry.page = append([]byte(nil), attempt.body...)
 	entry.nextCursor = attempt.successor.token
 	entry.bytes = cursorMemoryBytes(entry)

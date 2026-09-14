@@ -113,6 +113,45 @@ func TestSessionEventPagerCursorRetryAndAppend(t *testing.T) {
 	}
 }
 
+func TestSessionEventPagerEOFResponseDoesNotHideLaterAppend(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "runtime.jsonl")
+	writeStructuredEvents(t, path, 0, 0)
+	set := testEventSourceSet(root, testEventSource(runtimeevents.PageSourceStructured, root, "runtime.jsonl"))
+	pager := testSessionEventPager(t, set)
+	principal := testEventPrincipal("reader")
+
+	body, err := pager.page(context.Background(), principal, set.target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEOF := decodeEventPage(t, body)
+	if len(firstEOF.Events) != 0 || firstEOF.NextCursor == "" {
+		t.Fatalf("initial EOF page = %+v", firstEOF)
+	}
+	body, err = pager.page(context.Background(), principal, set.target,
+		map[string]string{core.RuntimeEventsCursorField: firstEOF.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedEOF := decodeEventPage(t, body)
+	if len(unchangedEOF.Events) != 0 || unchangedEOF.NextCursor != firstEOF.NextCursor {
+		t.Fatalf("unchanged EOF page = %+v, want stable cursor %q", unchangedEOF, firstEOF.NextCursor)
+	}
+
+	appendStructuredEvent(t, path, 1, 8)
+	body, err = pager.page(context.Background(), principal, set.target,
+		map[string]string{core.RuntimeEventsCursorField: unchangedEOF.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterAppend := decodeEventPage(t, body)
+	if len(afterAppend.Events) != 1 || afterAppend.Events[0].Sequence != 1 ||
+		afterAppend.Events[0].Event.Type != harnessproto.TypeText {
+		t.Fatalf("append after cached EOF was hidden: %+v", afterAppend)
+	}
+}
+
 func TestSessionEventPagerRejectsReplacementAndWrongSubject(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "runtime.jsonl")
