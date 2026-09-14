@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,6 +345,33 @@ func TestStructuredPromptRebindsCallbackCancellationToServingLifetime(t *testing
 	case <-d.steerStarted:
 	case <-time.After(time.Second):
 		t.Fatal("serving lifetime cancellation did not stop deferred prompt")
+	}
+}
+
+func TestDeferredContextAlreadyCancelledLifetimeDeniesEffect(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+
+	for i := 0; i < 1000; i++ {
+		d := New("", nil, time.Hour)
+		lifetime, stop := context.WithCancel(context.Background())
+		stop()
+		callback := withDeferredLifetime(context.Background(), lifetime)
+		callback = withAccessGuard(callback, func(checkCtx context.Context) error {
+			return checkCtx.Err()
+		})
+		var effects atomic.Int32
+		if !d.startDeferredContext(callback, func(workCtx context.Context) {
+			if revalidateDeferred(workCtx) == nil {
+				effects.Add(1)
+			}
+		}) {
+			t.Fatal("work unexpectedly rejected")
+		}
+		d.deferredWG.Wait()
+		if effects.Load() != 0 {
+			t.Fatalf("iteration %d: deferred effect passed its guard after serving lifetime ended", i)
+		}
 	}
 }
 

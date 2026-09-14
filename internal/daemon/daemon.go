@@ -105,6 +105,11 @@ type Daemon struct {
 	// asked for it. The send never blocks the start.
 	steerStarted chan string
 
+	// steerAdmission, when non-nil, runs after a deferred steering admission is
+	// bounded but before it takes the final effect locks. Production leaves it
+	// nil; tests use it to hold accepted work beyond its durable response.
+	steerAdmission func(context.Context) error
+
 	// firstPoll is closed after the first pollOnce completes, so restore waits
 	// until sessions/specs are resolvable.
 	firstPoll     chan struct{}
@@ -740,6 +745,12 @@ func deferredContext(ctx context.Context) (context.Context, func()) {
 	}
 	deferred, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	stopLifetime := context.AfterFunc(lifetime, cancel)
+	// AfterFunc schedules asynchronously when lifetime is already done. Close
+	// that admission window synchronously; cancellation racing this check is
+	// still covered by the registered callback.
+	if lifetime.Err() != nil {
+		cancel()
+	}
 	return deferred, func() {
 		stopLifetime()
 		cancel()
