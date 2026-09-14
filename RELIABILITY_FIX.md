@@ -63,8 +63,8 @@ primary model or suppress automatic review activity.
 
 ## PR and operational follow-up
 
-Draft PR: pending creation from `amux/c22e02-d5885a`; this line will be updated
-with the exact URL before the PR is marked ready.
+Draft PR: <https://github.com/Kchymet/agent-multiplexer/pull/148> from
+`amux/c22e02-d5885a`.
 
 No daemon install or restart was performed. After merge, the release owner must
 install the merged binary and restart the daemon before existing sessions can use
