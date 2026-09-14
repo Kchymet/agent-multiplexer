@@ -24,18 +24,18 @@ func TestUnchangedViewportRequestsRepaint(t *testing.T) {
 	output := make(chan string, 100)
 	cancel := in.Subscribe(engine.Sink{Output: func(b []byte) { output <- string(b) }})
 	defer cancel()
+	var all strings.Builder
 	wait := func(want string) {
 		t.Helper()
 		timer := time.NewTimer(3 * time.Second)
 		defer timer.Stop()
-		var all strings.Builder
 		for {
+			if strings.Contains(all.String(), want) {
+				return
+			}
 			select {
 			case s := <-output:
 				all.WriteString(s)
-				if strings.Contains(all.String(), want) {
-					return
-				}
 			case <-timer.C:
 				t.Fatalf("terminal did not emit %s", want)
 			}
