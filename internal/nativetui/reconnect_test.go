@@ -159,3 +159,20 @@ func TestReconnectDoesNotReopenDeletedSessionsOrExitedTabs(t *testing.T) {
 		t.Fatal("reconnect stole sidebar focus")
 	}
 }
+
+func TestAgentPaneForwardsAltUp(t *testing.T) {
+	c := &reconnectClient{}
+	m := &model{client: c, w: 100, h: 30, dataCh: make(chan struct{}, 1)}
+	runReconnectCommands(m.launchPane("agent", tabAgent))
+	defer m.cur().Close()
+	m.handleKey(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if m.focus != focusAgent {
+		t.Fatal("Alt+Up was intercepted by dashboard navigation")
+	}
+	for _, a := range c.recorded() {
+		if a.Action == core.ActionPaneInput && string(a.Data) == "\x1b[1;3A" {
+			return
+		}
+	}
+	t.Fatal("agent did not receive Alt+Up")
+}
