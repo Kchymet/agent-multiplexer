@@ -247,10 +247,36 @@ host daemon, or nesting a harness sandbox probe on the development host.
 
 macOS uses `/usr/bin/sandbox-exec` with a default-deny profile inherited by all
 children. It grants system tools read-only, the exact own session writable,
-selected config/account paths, immutable Git objects read-only, and only the
-own Unix socket paths. Original host paths are used; there are no bind mounts
+selected config/account paths, immutable Git objects read-only, and the
+own Unix socket paths plus the system DNS broker. Original host paths are used; there are no bind mounts
 or private PID namespace. Signals and process inspection are limited to the
-same sandbox. IP networking remains shared.
+same sandbox. IP networking remains shared. Native DNS resolution is permitted
+through the exact system `/private/var/run/mDNSResponder` socket; other host Unix
+sockets remain excluded. This is needed by model APIs and remote MCP servers,
+even when outbound IP connections are allowed.
+
+Browser authentication uses the native `/usr/bin/open` and LaunchServices APIs.
+The profile allows application discovery/launch services, reads installed
+`/Applications` bundles, and permits `lsopen`. **This is a broader host
+application-launch capability, not a URL-only broker.** Seatbelt cannot filter
+`lsopen` by URL scheme or restrict it to web browsers; an agent can launch other
+applications outside its sandbox. Direct filesystem/socket denials below still
+apply to session processes, but do not confine these launched host applications.
+Browser profile directories, clipboard and Apple Events automation are not
+added as direct grants.
+
+`TestSeatbeltRuntimeDNSService` checks the native DNS broker in ordinary macOS
+CI without depending on external Internet availability. Additional integration
+checks are opt-in:
+
+```sh
+AMUX_TEST_NETWORK=1 go test ./internal/panespec -run '^TestSeatbeltRuntimePublicHTTPS$' -count=1 -v
+AMUX_TEST_BROWSER=1 go test ./internal/panespec -run '^TestSeatbeltRuntimeBrowser' -count=1 -v
+```
+
+The HTTPS check uses unauthenticated model/MCP endpoints and verifies certificate
+validation. The browser check opens two local test pages and requires actual
+HTTP callbacks through both the command-line and native API launch paths.
 
 `AMUX_SESSION_ACCESS` locates the daemon-owned read-only credential/context.
 The signed subject and kernel policy determine authority; changing or clearing

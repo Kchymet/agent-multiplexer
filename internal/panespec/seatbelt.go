@@ -43,6 +43,9 @@ const seatbeltBase = `(version 1)
   (global-name "com.apple.networkd")
   (global-name "com.apple.trustd.agent"))
 (allow system-socket (socket-domain AF_INET) (socket-domain AF_INET6) (socket-domain AF_UNIX))
+; Native getaddrinfo/DNSService clients use this system DNS broker even when
+; outbound IP sockets are allowed. This does not admit other host Unix sockets.
+(allow network-outbound (remote unix-socket (literal "/private/var/run/mDNSResponder")))
 (allow network-outbound (remote ip))
 (allow network-inbound network-bind (local ip))
 (allow file-read* (literal "/dev/null") (literal "/dev/zero")
@@ -55,8 +58,23 @@ const seatbeltBase = `(version 1)
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+$"))
 `
 
+// Native harnesses call LaunchServices directly as well as /usr/bin/open.
+// lsopen cannot be restricted to HTTP URLs: it deliberately permits launching
+// host applications outside this Seatbelt profile, including the user's browser.
+// It does not grant Apple Events automation, browser profile files or keychains.
+const seatbeltBrowser = `
+(allow lsopen)
+(allow mach-lookup
+ (global-name "com.apple.coreservices.launchservicesd")
+ (global-name "com.apple.CoreServices.coreservicesd")
+ (global-name "com.apple.coreservices.quarantine-resolver")
+ (global-name "com.apple.lsd.mapdb")
+ (global-name "com.apple.lsd.open"))
+(allow sysctl-read (sysctl-name "kern.willshutdown"))
+`
+
 var darwinSystemRoots = []string{
-	"/System", "/usr", "/bin", "/sbin", "/opt", "/Library/Apple",
+	"/System", "/usr", "/bin", "/sbin", "/opt", "/Library/Apple", "/Applications",
 	"/private/etc", "/private/var/db/dyld", "/private/var/db/timezone",
 	"/private/var/select", "/private/var/db/xcode_select_link",
 	"/Library/Developer", "/Applications/Xcode.app/Contents",
@@ -252,6 +270,7 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	}
 	var policy seatbeltPolicy
 	policy.WriteString(seatbeltBase)
+	policy.WriteString(seatbeltBrowser)
 	for _, path := range darwinReadRoots() {
 		if err := policy.grantExcluding(path, false, true, []string{home, core.DataDir(), core.StateDir()}); err != nil {
 			return nil, err
