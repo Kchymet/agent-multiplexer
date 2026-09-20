@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -23,7 +24,11 @@ func TestAppServerEnvironmentIsSanitizedBeforeExec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"PATH=/amux-bin:/usr/bin:/bin", "OPENAI_API_KEY=selected-codex-key", "AMUX_SESSION_ID=subject"} {
+	path := "PATH=/amux-bin:/usr/bin:/bin"
+	if runtime.GOOS == "darwin" {
+		path = "PATH=/usr/bin:/bin"
+	}
+	for _, want := range []string{path, "OPENAI_API_KEY=selected-codex-key", "AMUX_SESSION_ID=subject"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("AppServer environment omitted %q: %v", want, got)
 		}

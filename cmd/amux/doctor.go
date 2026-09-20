@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/gh"
 	"amux/internal/git"
+	"amux/internal/panespec"
 	"amux/internal/provider"
 	"amux/internal/providercfg"
 )
@@ -56,6 +58,15 @@ func cmdDoctor() error {
 	}
 
 	missingRequired := false
+	fmt.Println("Isolation")
+	if err := panespec.IsolationSupport(); err != nil {
+		missingRequired = true
+		fmt.Printf("  ✗ %v\n", err)
+	} else if runtime.GOOS == "darwin" {
+		fmt.Println("  ✓ macOS Seatbelt (sandbox-exec)")
+	} else {
+		fmt.Println("  ✓ Linux bubblewrap >= 0.12.0 (user/PID namespaces required)")
+	}
 	fmt.Println("Dependencies")
 	for _, d := range deps {
 		if agent.Known(d.bin) {

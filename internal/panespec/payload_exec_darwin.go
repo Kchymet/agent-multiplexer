@@ -1,20 +1,16 @@
-//go:build linux
+//go:build darwin
 
 package panespec
 
 import (
-	"golang.org/x/sys/unix"
 	"os"
 	"strconv"
+
+	"golang.org/x/sys/unix"
 )
 
 func closePayloadDescriptors() error {
-	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err == nil {
-		return nil
-	} else if err != unix.ENOSYS && err != unix.EINVAL {
-		return err
-	}
-	entries, err := os.ReadDir("/proc/self/fd")
+	entries, err := os.ReadDir("/dev/fd")
 	if err != nil {
 		return err
 	}

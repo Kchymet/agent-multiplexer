@@ -1,10 +1,12 @@
 package core
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 )
 
@@ -143,11 +145,34 @@ func LogPath() string {
 // or hostile listener must never cause a new daemon to unlink a live socket.
 func DaemonLockPath() string { return filepath.Join(StateDir(), "daemon.lock") }
 
-// SessionAccessDir is the immediate-root directory mount used by every
-// restricted agent namespace. Launch code read-only binds the stable
-// CredentialHostDir here; current and context.json therefore rotate together
-// without a writable ancestor that the session could rename or cover.
-func SessionAccessDir() string { return "/amux-session-access" }
+// SessionAccessEnv locates the daemon-issued credential on macOS. Linux uses
+// a fixed mount and ignores this variable.
+const SessionAccessEnv = "AMUX_SESSION_ACCESS"
+
+// SessionAccessDir locates the stable read-only credential directory. The OS
+// policy protects it and its ancestors across credential/context rotation.
+func SessionAccessDir() string {
+	// Seatbelt restricts access to host paths rather than remapping mounts.
+	// This is a locator, not authority: the sandbox permits reading only the
+	// daemon-issued credential directory and denies all host credentials.
+	if runtime.GOOS == "darwin" {
+		if path := os.Getenv(SessionAccessEnv); path != "" {
+			return path
+		}
+	}
+	return "/amux-session-access"
+}
+
+// SessionBinPath names the trusted executable used by generated agent hooks.
+// macOS cannot bind-mount an executable alias, so its launcher publishes a
+// private copy outside the writable session and grants only that exact file.
+func SessionBinPath(id string) string {
+	if runtime.GOOS == "darwin" {
+		key := sha256.Sum256([]byte(id))
+		return filepath.Join(StateDir(), "tools", fmt.Sprintf("%x", key[:16]), "amux")
+	}
+	return InstalledBinPath()
+}
 
 func SessionContextPath() string { return filepath.Join(SessionAccessDir(), "context.json") }
 

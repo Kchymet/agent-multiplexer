@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package daemon
 
@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	platform "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -181,7 +182,10 @@ amux agent name AfterRestart
 amux agent done
 if amux agent done; then exit 29; fi
 `
-	if mode != "shell" {
+	if platform.GOOS == "darwin" {
+		script = strings.ReplaceAll(script, "/amux-session-access", `"$AMUX_SESSION_ACCESS"`)
+	}
+	if mode != "shell" && platform.GOOS == "linux" {
 		script = "set -eu\ntest \"$(cat /amux-inner-write-probe)\" = outer\nif echo inner > /amux-inner-write-probe 2>/dev/null; then exit 32; fi\n" + script
 	}
 	script += "touch surface-finished\n"
@@ -214,6 +218,9 @@ if amux agent done; then exit 29; fi
 		if argv[i] == "--ro-bind" && argv[i+1] == self {
 			argv[i+1] = candidate
 		}
+	}
+	if platform.GOOS == "darwin" {
+		replaceNativeTestTool(t, candidate, own.ID)
 	}
 	if runtime == nil {
 		argv = append(argv, scriptPath)
@@ -332,5 +339,5 @@ if amux agent done; then exit 29; fi
 	if other.Archived || other.Name != "" {
 		t.Fatalf("foreign mutated: %+v", other)
 	}
-	t.Logf("%s: real CLI surface, peer discovery, self-only writes, concurrent reports, restart and archive acknowledgement passed inside production bubblewrap", mode)
+	t.Logf("%s: real CLI surface, peer discovery, self-only writes, concurrent reports, restart and archive acknowledgement passed inside production OS sandbox", mode)
 }

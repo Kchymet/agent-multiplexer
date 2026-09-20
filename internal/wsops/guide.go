@@ -87,8 +87,8 @@ the ones you will normally need are `+"`amux agent sessions --json`"+` for cross
 discovery, `+"`amux agent events --json`"+` to read your own
 normalized history, `+"`amux agent name <display name>`"+` to name yourself, and
 `+"`amux agent done`"+` to mark your task complete. These commands work from the
-ordinary sandboxed shell through a private file mailbox. Keep both sandboxes
-enabled. Name and done target the launched session even if environment IDs change;
+ordinary sandboxed shell through a private file mailbox. Keep amux’s OS sandbox
+and the configured approval controls enabled. Name and done target the launched session even if environment IDs change;
 explicit commands report failure when the daemon cannot confirm the operation.
 
 Other command families such as `+"`amux do`"+`, `+"`amux workgroup`"+`, `+"`amux repo`"+`,

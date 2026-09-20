@@ -1,6 +1,6 @@
 # Sandbox configuration: templates, private copies, and the feedback loop
 
-Every amux agent runs its harness — Claude Code or Codex — inside a bubblewrap
+Every amux agent runs its harness — Claude Code or Codex — inside a macOS Seatbelt or Linux/WSL2 bubblewrap
 scope confined to the agent's own directory. This document describes how the
 harness's *configuration* reaches that scope, why it is a copy rather than a
 mount, and how an agent's edits to its configuration come back to amux.
@@ -243,6 +243,33 @@ bubblewrap 0.12.0 or newer and enables unprivileged user and PID namespaces. Thi
 tests the real mount/PID boundary without installing packages, restarting the
 host daemon, or nesting a harness sandbox probe on the development host.
 
+### macOS Seatbelt
+
+macOS uses `/usr/bin/sandbox-exec` with a default-deny profile inherited by all
+children. It grants system tools read-only, the exact own session writable,
+selected config/account paths, immutable Git objects read-only, and only the
+own Unix socket paths. Original host paths are used; there are no bind mounts
+or private PID namespace. Signals and process inspection are limited to the
+same sandbox. IP networking remains shared.
+
+`AMUX_SESSION_ACCESS` locates the daemon-owned read-only credential/context.
+The signed subject and kernel policy determine authority; changing or clearing
+the locator cannot read another credential or gain host control. The original
+mailbox is read-only except for its own `requests` directory. The launcher
+publishes a protected executable copy for bare `amux` and generated hooks, and
+sets both `TMPDIR` and `CLAUDE_CODE_TMPDIR` to a private session temporary directory.
+Inherited descriptors above standard error are closed before payload execution.
+
+macOS does not support applying a second Seatbelt profile inside the first.
+The protected launcher therefore disables Claude's inner sandbox and sets
+Codex's inner mode to `danger-full-access`, including app-server thread policy.
+**amux's outer Seatbelt profile remains enforced** and approval controls remain
+unchanged. `AMUX_CODEX_SANDBOX=read-only` further makes the agent's session tree
+read-only, except for private harness configuration, temporary files, and mailbox
+requests. Shell/editor tabs retain their ordinary writable session grant.
+New settings take effect only when the process is relaunched.
+
+
 ## The feedback loop
 
 Because a copy could otherwise drift from the template in silence, amux records
@@ -318,8 +345,8 @@ credential links are filled in at launch. The agent guide
 ### Agent CLI mailbox access
 
 All existing `amux agent ...` commands remain available through the ordinary
-sandboxed shell. The launch's fixed credential and per-session request mailbox
-support both bubblewrap confinement and the harness workspace-write policy. No
+sandboxed shell. The launch's protected credential and per-session request mailbox
+support Seatbelt on macOS and nested bubblewrap/harness policies on Linux. No
 daemon socket exception or sandbox escalation is required. `name`/`label` and
 `done` use the fixed launched subject; `sessions [--json]` uses a deliberate
 read-only host discovery query. This query grants neither sibling mounts nor

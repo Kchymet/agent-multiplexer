@@ -3,11 +3,27 @@ package panespec
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"amux/internal/access"
 	"amux/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	// macOS spells its temp root through /var -> /private/var. Production
+	// launch validation deliberately rejects symlink ancestors, so fixtures
+	// use the canonical spelling rather than weakening that validation.
+	if dir, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
+		_ = os.Setenv("TMPDIR", dir)
+	}
+	// Darwin Unix sockets have a 104-byte pathname limit. Its default temp
+	// prefix alone consumes most of that, before a per-test directory is added.
+	if runtime.GOOS == "darwin" {
+		_ = os.Setenv("TMPDIR", "/private/tmp")
+	}
+	os.Exit(m.Run())
+}
 
 func requireRuntimeIsolation(t *testing.T) {
 	t.Helper()
@@ -45,6 +61,9 @@ func testLaunchSpec(t *testing.T, s store.Session) LaunchSpec {
 
 func useFakeSecureBwrap(t *testing.T) string {
 	t.Helper()
+	previous := isolationPlatform
+	isolationPlatform = "linux"
+	t.Cleanup(func() { isolationPlatform = previous })
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bwrap")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.12.0'; exit 0; fi\nexit 99\n"), 0o755); err != nil {

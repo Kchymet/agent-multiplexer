@@ -12,12 +12,21 @@ on:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Short canonical paths fit Darwin Unix sockets and no-follow traversal.
+      TMPDIR: /tmp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: canonical macOS temporary directory
+        if: runner.os == 'macOS'
+        run: echo 'TMPDIR=/private/tmp' >> "$GITHUB_ENV"
       - name: gofmt
         run: |
           out=$(gofmt -l .)
@@ -98,3 +107,48 @@ jobs:
             AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
               -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
           done
+
+  seatbelt-runtime:
+    runs-on: macos-14
+    env:
+      TMPDIR: /private/tmp
+      AMUX_REQUIRE_NAMESPACE_TEST: "1"
+      TERM: xterm-256color
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test real Seatbelt boundary
+        run: |
+          go test ./internal/panespec \
+            -run 'Test(SeatbeltRuntime.*|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket)$' \
+            -count=1 -timeout=120s -v
+          go test ./internal/daemon \
+            -run '^TestAgent(Seatbelt|Namespace)CommandSurface$' \
+            -count=1 -timeout=120s -v
+      - name: download pinned native harness fixtures
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p "$RUNNER_TEMP/agent-runtimes/codex" "$RUNNER_TEMP/agent-runtimes/claude"
+          cd "$RUNNER_TEMP/agent-runtimes"
+          curl --fail --location --retry 3 \
+            https://github.com/openai/codex/releases/download/rust-v0.155.1/codex-package-aarch64-apple-darwin.tar.gz \
+            -o codex.tar.gz
+          curl --fail --location --retry 3 \
+            https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-2.1.278.tgz \
+            -o claude.tgz
+          echo 'e6e08717da9e35b72332eff753527fe79a9ae876081033c5c6820a8e5f58b943  codex.tar.gz' | shasum -a 256 -c -
+          echo '934a258c59e90ed6ba768d0d46502d3163607dec949845650af80e5f1228330c  claude.tgz' | shasum -a 256 -c -
+          tar -xzf codex.tar.gz -C codex
+          tar -xzf claude.tgz -C claude
+      - name: test real harness command surfaces
+        run: |
+          export AMUX_TEST_CODEX_PACKAGE="$RUNNER_TEMP/agent-runtimes/codex"
+          export AMUX_TEST_CLAUDE_BIN="$RUNNER_TEMP/agent-runtimes/claude/package/claude"
+          for runtime in claude codex codex-app-server; do
+            AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
+              -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
+          done
+      - name: cross compile supported targets
+        run: make cross

@@ -213,7 +213,7 @@ func (h claudeHarness) PrepareLaunch(root *hostprep.Root, s store.Session, dir s
 	if err := h.home(s).TrustDirRooted(root, dir); err != nil {
 		return err
 	}
-	return claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.InstalledBinPath())
+	return claudecfg.InstallHooksInRooted(root, dir, h.home(s).Dir, core.SessionBinPath(s.ID))
 }
 
 // Keys are Claude Code's interactive bindings (see claudeKeys).

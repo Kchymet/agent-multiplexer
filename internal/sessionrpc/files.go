@@ -19,16 +19,21 @@ func openAbsoluteDirNoFollow(path string) (*os.File, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("%w: directory path is not clean and absolute", ErrInvalidRecord)
 	}
-	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open("/", traversalOpenFlag|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	current := os.NewFile(uintptr(fd), "/")
-	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for i, component := range components {
 		if component == "" {
 			continue
 		}
-		next, err := openDirAt(current, component)
+		flag := traversalOpenFlag
+		if i == len(components)-1 {
+			flag = unix.O_RDONLY
+		}
+		next, err := openDirAtFlags(current, component, flag)
 		if err != nil {
 			_ = current.Close()
 			return nil, err
@@ -40,10 +45,14 @@ func openAbsoluteDirNoFollow(path string) (*os.File, error) {
 }
 
 func openDirAt(parent *os.File, name string) (*os.File, error) {
+	return openDirAtFlags(parent, name, unix.O_RDONLY)
+}
+
+func openDirAtFlags(parent *os.File, name string, flags int) (*os.File, error) {
 	if !validComponent(name) {
 		return nil, ErrInvalidRecord
 	}
-	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(parent.Fd()), name, flags|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}

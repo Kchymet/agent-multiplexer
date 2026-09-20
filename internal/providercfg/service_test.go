@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -316,6 +317,9 @@ func TestLingerVia(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := &fakeRunner{reply: map[string]string{cmd: tc.reply}, fail: map[string]bool{cmd: tc.fail}}
 			got, ok := lingerVia(r.run)
+			if runtime.GOOS != "linux" {
+				tc.want, tc.wantOK = false, false
+			}
 			if got != tc.want || ok != tc.wantOK {
 				t.Errorf("lingerVia = (%v, %v), want (%v, %v)", got, ok, tc.want, tc.wantOK)
 			}

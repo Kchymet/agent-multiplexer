@@ -1078,7 +1078,7 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 	}
 	sess := spec.Session
 	published, _, err := d.publishPermissionRuntime(agentID, func() (any, error) {
-		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID)
+		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch()})
 	})
 	if err != nil {
 		return nil, err
