@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +34,9 @@ import (
 )
 
 func main() {
+	if filepath.Base(os.Args[0]) == "security" {
+		os.Exit(credentialSecurity(os.Args[1:], os.Stdin, os.Stdout))
+	}
 	if len(os.Args) < 2 {
 		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print
 		// usage (those carry an arg, so they fall through to the switch below).

@@ -125,7 +125,7 @@ jobs:
             -run 'Test(SeatbeltRuntime.*|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket)$' \
             -count=1 -timeout=120s -v
           go test ./internal/daemon \
-            -run '^TestAgent(Seatbelt|Namespace)CommandSurface$' \
+            -run '^Test(Agent(Seatbelt|Namespace)CommandSurface|CredentialBrokerSeatbeltRoundTrip)$' \
             -count=1 -timeout=120s -v
       - name: download pinned native harness fixtures
         run: |

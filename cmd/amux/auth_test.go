@@ -54,3 +54,30 @@ func TestClaudeAuthRejectsInvalidArgumentsWithoutLogin(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeAuthStatusDefaultsToHost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "host-config"))
+	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+	t.Setenv("ANTHROPIC_API_KEY", "mock-host-key")
+	bin := filepath.Join(home, "claude")
+	script := `#!/bin/sh
+set -eu
+test "$#" = 2
+test "$1" = auth
+test "$2" = status
+test "$CLAUDE_CONFIG_DIR" = "$HOME/host-config"
+test "${CLAUDE_SECURESTORAGE_CONFIG_DIR+set}" = set
+test -z "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
+test "$ANTHROPIC_API_KEY" = mock-host-key
+`
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUX_CLAUDE_BIN", bin)
+	if err := cmdAuth([]string{"status"}); err != nil {
+		t.Fatal(err)
+	}
+}

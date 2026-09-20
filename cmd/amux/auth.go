@@ -29,17 +29,18 @@ var authSubcommands = map[string]func([]string) error{
 }
 
 func authUsage() {
-	fmt.Fprint(os.Stderr, `amux auth — one Claude login for all amux sessions
+	fmt.Fprint(os.Stderr, `amux auth — host Claude identity shared by default
 
 usage: amux auth <command>
 
   login             sign in once, then queue running Claude agents to resume
                     with the shared login when they are idle
-  status            show Claude's status for the shared login
+  status            show Claude's status for the active host/shared login
   restart [--force]  queue running Claude agents to resume with current credentials
                     --force also interrupts busy or unknown-state agents
 
-Run login from your host terminal. This creates a separate amux login; it does
+New sessions inherit your host login automatically. The login command is optional.
+Run login from your host terminal to create a separate amux login; it does
 not copy your existing refresh token. Claude manages refreshes in the shared
 credential directory. Requires Claude's CLAUDE_SECURESTORAGE_CONFIG_DIR support.
 Unknown-state and busy agents wait; use restart --force if they are stuck at login.
@@ -51,18 +52,12 @@ func authRestart(args []string) error {
 	if len(args) > 1 || (len(args) == 1 && args[0] != "--force") {
 		return fmt.Errorf("usage: amux auth restart [--force]")
 	}
-	if !claudecfg.SharedAuthEnabled() {
-		return fmt.Errorf("no shared Claude login configured; run amux auth login first")
-	}
 	return reloadClaudeAuth(len(args) == 1)
 }
 
 func authStatus(args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("usage: amux auth status")
-	}
-	if !claudecfg.SharedAuthEnabled() {
-		return fmt.Errorf("no shared Claude login configured; run amux auth login first")
 	}
 	return runClaudeAuth("status")
 }
@@ -89,8 +84,14 @@ func runClaudeAuth(verb string) error {
 		return err
 	}
 	cmd := exec.Command(argv[0], "auth", verb)
-	cmd.Dir = claudecfg.SharedAuthDir()
-	cmd.Env = claudecfg.AuthCommandEnv(os.Environ())
+	if verb == "login" || claudecfg.SharedAuthEnabled() {
+		cmd.Dir = claudecfg.SharedAuthDir()
+		cmd.Env = claudecfg.AuthCommandEnv(os.Environ())
+	} else {
+		// Without an explicit amux login, inspect the host account that new
+		// sessions inherit, including its environment credential overrides.
+		cmd.Env = os.Environ()
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("Claude auth %s failed: %w", verb, err)
@@ -106,6 +107,6 @@ func reloadClaudeAuth(force bool) error {
 	if err := sendAction(core.Action{Action: core.ActionAuthReload, Fields: fields}); err != nil {
 		return err
 	}
-	fmt.Println("Claude agents queued to resume with the shared login; busy and unknown-state agents wait unless --force is set.")
+	fmt.Println("Claude agents queued to resume with the active login; busy and unknown-state agents wait unless --force is set.")
 	return nil
 }

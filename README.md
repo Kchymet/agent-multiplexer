@@ -399,8 +399,9 @@ Windows `.exe`. macOS permits native browser opening for authentication through 
 **This also permits launching other host applications outside the session sandbox:**
 Seatbelt's `lsopen` permission cannot be restricted to browser URLs. The direct
 file/socket restrictions still apply to the session process, but applications
-launched through LaunchServices do not inherit them. Host keychain credential
-helpers remain outside the grants; use the configured file/API credentials.
+launched through LaunchServices do not inherit them. Claude inherits the host login through a scoped daemon credential broker; general
+Keychain access remains blocked. Codex continues to share the host credential
+files. Session settings and conversation histories remain private.
 
 ### Validation
 

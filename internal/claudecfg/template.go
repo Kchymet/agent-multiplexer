@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"sort"
 
 	"amux/internal/cfghome"
@@ -36,7 +37,8 @@ var configKeys = []string{"mcpServers", "model"}
 // copied; .claude.json is copied minus its per-project trust table (amux
 // re-trusts the agent's own dir at launch) and compared only on its config
 // keys. After amux auth login, credentials use a dedicated shared directory;
-// until then the legacy credential symlink points back to the template.
+// otherwise macOS uses the host Keychain through the daemon broker and Linux
+// uses the host credential-file link.
 func Template(agentID, sessionRoot string) cfghome.Spec {
 	user := User()
 	dir := AgentHome(sessionRoot)
@@ -65,7 +67,14 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		sp.Shared = nil
 		sp.AuthDir = SharedAuthDir()
 		sp.AuthEnv = SecureStorageEnv
+		sp.AuthValue = sp.AuthDir
 		sp.AuthUnsetEnv = credentialOverrides
+	} else if runtime.GOOS == "darwin" {
+		// Preserve the host's exact Keychain selector. Unset and empty differ:
+		// an explicit empty value selects the default host login instead of the
+		// private config directory's otherwise empty Keychain entry.
+		sp.AuthEnv = SecureStorageEnv
+		sp.AuthValue = CredentialSelector()
 	}
 	return sp
 }

@@ -6,7 +6,6 @@ import (
 	"log"
 
 	"amux/internal/agent"
-	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/launchenv"
@@ -26,9 +25,6 @@ func (d *Daemon) queueAuthReload(a core.Action) error {
 		if k != "force" || (v != "true" && v != "false") {
 			return fmt.Errorf("auth-reload accepts only force=true|false")
 		}
-	}
-	if !claudecfg.SharedAuthEnabled() {
-		return fmt.Errorf("no shared Claude login; run amux auth login first")
 	}
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")

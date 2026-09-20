@@ -27,6 +27,27 @@ var credentialOverrides = []string{
 // login: that would fork an existing rotating refresh-token chain.
 func SharedAuthDir() string { return filepath.Join(core.AuthDir(), "claude") }
 
+// CredentialSelector preserves Claude's exact host store selection, including
+// an explicit empty string (the default Keychain entry). Private configuration
+// directories must never silently select another account.
+func CredentialSelector() string {
+	if SharedAuthEnabled() {
+		return SharedAuthDir()
+	}
+	if value, ok := os.LookupEnv(SecureStorageEnv); ok {
+		return value
+	}
+	return os.Getenv(Env)
+}
+
+func CredentialDirectory() string {
+	if value := CredentialSelector(); value != "" {
+		return value
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude")
+}
+
 func SharedAuthEnabled() bool {
 	b, err := os.ReadFile(filepath.Join(SharedAuthDir(), "enabled"))
 	return err == nil && string(b) == "1\n"
