@@ -274,7 +274,7 @@ func ScopeReaches(_ string, path string) bool {
 	}
 	roots := systemRoots
 	if isolationPlatform == "darwin" {
-		roots = darwinSystemRoots
+		roots = darwinReadRoots()
 	}
 	for _, r := range roots {
 		if under(r) {

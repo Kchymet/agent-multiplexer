@@ -71,7 +71,12 @@ if touch "$3/session-write" 2>/dev/null; then exit 31; fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	launchEnv, err := launchenv.Build([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, nil, launchenv.ForRuntime(s.Agent))
+	overlay := platformLaunchEnv(spec)
+	if isolationPlatform == "darwin" {
+		// Exercise Apple's Git shim even when the runner also has Homebrew Git.
+		overlay = append(overlay, "PATH=/usr/bin:/bin")
+	}
+	launchEnv, err := launchenv.Build([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, overlay, launchenv.ForRuntime(s.Agent))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,8 +59,19 @@ var darwinSystemRoots = []string{
 	"/System", "/usr", "/bin", "/sbin", "/opt", "/Library/Apple",
 	"/private/etc", "/private/var/db/dyld", "/private/var/db/timezone",
 	"/private/var/select", "/private/var/db/xcode_select_link",
-	"/Library/Developer/CommandLineTools", "/Applications/Xcode.app/Contents/Developer",
+	"/Library/Developer", "/Applications/Xcode.app/Contents",
+	"/Library/Preferences/com.apple.dt.Xcode.plist",
 	"/Library/Preferences/Logging", "/Library/Keychains/System.keychain",
+}
+
+// xcode-select may point to a versioned Xcode bundle, without an Xcode.app alias.
+// Its command shims also load Info.plist and frameworks beside Developer.
+func darwinReadRoots() []string {
+	roots := append([]string(nil), darwinSystemRoots...)
+	if developer, err := filepath.EvalSymlinks("/private/var/db/xcode_select_link"); err == nil && filepath.Base(developer) == "Developer" && filepath.Base(filepath.Dir(developer)) == "Contents" {
+		roots = append(roots, filepath.Dir(developer))
+	}
+	return roots
 }
 
 func nativeTempDir(s store.Session) string {
@@ -241,7 +252,7 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	}
 	var policy seatbeltPolicy
 	policy.WriteString(seatbeltBase)
-	for _, path := range darwinSystemRoots {
+	for _, path := range darwinReadRoots() {
 		if err := policy.grantExcluding(path, false, true, []string{home, core.DataDir(), core.StateDir()}); err != nil {
 			return nil, err
 		}
