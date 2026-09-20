@@ -172,3 +172,21 @@ Reproduction: extract these archives, set `AMUX_TEST_CODEX_PACKAGE` and
 `AMUX_TEST_CLAUDE_BIN` as above, and run the same three-mode loop on a macOS host.
 Linux runtime execution must use the Linux CI job or a suitable Linux/WSL2 host;
 it was not repeated on this Mac.
+
+## macOS networking and browser follow-up — 2026-09-20
+
+The localhost provider tests above did not exercise the macOS DNS broker.
+Before this follow-up, unauthenticated HTTPS requests to Anthropic, OpenAI and
+Linear MCP succeeded on the host but failed DNS resolution under Seatbelt.
+Kernel logs also recorded the same denied `mDNSResponder` connection for the
+running Claude and Codex processes. Allowing that exact system Unix socket
+restored certificate-verified HTTPS to Anthropic, OpenAI, ChatGPT's Codex API
+and Linear MCP; no credentials or paid requests were used.
+
+A native DNSService connection regression now runs in the ordinary macOS CI
+suite. Browser discovery also runs by default. Opt-in browser acceptance was
+verified locally with actual HTTP callbacks from the default browser, through
+both `/usr/bin/open` and the AppKit/NSWorkspace API used by native harnesses.
+The host explicitly approved native LaunchServices access after being informed
+that `lsopen` cannot be restricted to browsers or URLs and permits launching
+host applications outside Seatbelt. Documentation and doctor report this grant.

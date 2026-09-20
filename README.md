@@ -395,8 +395,12 @@ Missing or disabled isolation is an error; protected panes never fall back to
 unrestricted host execution. Docker sockets, WSL host drives, and sibling
 sessions are not available in protected panes. IP networking remains shared.
 On WSL, install `wslu` and set `BROWSER=wslview` rather than pointing at a
-Windows `.exe`. macOS GUI application launching and host keychain credential
-helpers are not implicit sandbox grants; use the configured file/API credentials.
+Windows `.exe`. macOS permits native browser opening for authentication through LaunchServices.
+**This also permits launching other host applications outside the session sandbox:**
+Seatbelt's `lsopen` permission cannot be restricted to browser URLs. The direct
+file/socket restrictions still apply to the session process, but applications
+launched through LaunchServices do not inherit them. Host keychain credential
+helpers remain outside the grants; use the configured file/API credentials.
 
 ### Validation
 
