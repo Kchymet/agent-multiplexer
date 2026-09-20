@@ -118,3 +118,57 @@ without permitting skips. See the PR's checks for the current remote result.
 
 Local raw logs: `/tmp/amux-bedb20-final-checks.log` and
 `/tmp/amux-bedb20-runtime-{claude,codex,codex-app-server}.log`.
+
+## macOS platform validation — 2026-09-20
+
+The macOS implementation was exercised locally on macOS 26.5.2 arm64. These
+results apply to the platform changes in this working tree; the historical
+Linux candidate record above remains separate.
+
+| Check | Result |
+| --- | --- |
+| `make test` (root module and `harnessproto`) | Passed |
+| `make vet` (both modules) | Passed |
+| `make cross` (Linux/macOS × amd64/arm64) | Passed |
+| Real Seatbelt files, hardlinks/symlinks, inherited descriptors, host signals | Passed |
+| Read-only Codex worktree with writable private state/mailbox | Passed |
+| Own/peer and future Unix socket boundaries | Passed |
+| Git checkout reading immutable objects, denied pool metadata/writes | Passed |
+| Compiled CLI mailbox, spoofed/cleared locator, denied host control | Passed |
+| Claude Code 2.1.278 ordinary Bash command | Passed |
+| Codex 0.155.1 interactive PTY `exec_command` | Passed |
+| Codex 0.155.1 App Server/Supervisor `exec_command` | Passed |
+
+All three real harness modes use the same complete CLI command/restart/archive
+fixture described above, through the production Seatbelt launcher. The pinned
+native archives were downloaded, hashed, and tested locally. The fixture uses
+synthetic credentials and a local deterministic HTTP provider; no host accounts,
+conversations, paid model calls, or interactive Claude UI are exercised.
+
+macOS cannot apply nested Seatbelt profiles. The launcher disables Claude's
+inner sandbox and gives Codex an inner `danger-full-access` policy while
+retaining **amux's inherited OS sandbox and harness approval controls**. The
+Linux test's additional inner-write-denial probe is Linux-only. macOS instead
+verifies actual tool calls can use their own workspace and signed mailbox while
+credentials remain read-only and peer/host operations fail. Direct Seatbelt
+regressions also exercise a custom HOME under a system read grant.
+
+`make test` works with the normal macOS environment. Relevant fixtures use a
+short canonical `/private/tmp` root to avoid `/var` symlink traversal and
+Darwin's Unix socket pathname limit. No-follow production checks remain intact.
+Running these tests from an already sandboxed agent requires a host test-runner
+approval because macOS cannot nest Seatbelt.
+
+CI now includes a macOS build/test job and a `seatbelt-runtime` job with all three
+pinned runtime modes, in addition to the existing Linux namespace job. Those
+remote CI jobs have not been executed as part of this local validation.
+
+| macOS arm64 archive | SHA-256 |
+| --- | --- |
+| OpenAI `rust-v0.155.1/codex-package-aarch64-apple-darwin.tar.gz` | `e6e08717da9e35b72332eff753527fe79a9ae876081033c5c6820a8e5f58b943` |
+| npm `@anthropic-ai/claude-code-darwin-arm64` 2.1.278 | `934a258c59e90ed6ba768d0d46502d3163607dec949845650af80e5f1228330c` |
+
+Reproduction: extract these archives, set `AMUX_TEST_CODEX_PACKAGE` and
+`AMUX_TEST_CLAUDE_BIN` as above, and run the same three-mode loop on a macOS host.
+Linux runtime execution must use the Linux CI job or a suitable Linux/WSL2 host;
+it was not repeated on this Mac.

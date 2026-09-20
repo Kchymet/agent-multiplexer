@@ -7,6 +7,7 @@ package launchenv
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -93,6 +94,7 @@ var overlayNames = map[string]bool{
 	"AMUX_AGENT": true, "AMUX_MODE": true, "AMUX_ROLE": true,
 	"AMUX_ROOT": true, "AMUX_SCOPE": true, "AMUX_SESSION_ID": true,
 	"AMUX_WORKGROUP": true, "AMUX_WORKSPACE": true,
+	"AMUX_SESSION_ACCESS": true, "TMPDIR": true, "CLAUDE_CODE_TMPDIR": true,
 	"CLAUDE_CONFIG_DIR": true, "CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
 	"CODEX_HOME": true,
 }
@@ -172,9 +174,18 @@ func executablePath(value string) string {
 		}
 	}
 	if len(kept) == 0 {
-		return ToolBinDir + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		kept = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
 	}
-	return ToolBinDir + string(filepath.ListSeparator) + strings.Join(kept, string(filepath.ListSeparator))
+	if runtime.GOOS != "darwin" {
+		kept = append([]string{ToolBinDir}, kept...)
+	}
+	return strings.Join(kept, string(filepath.ListSeparator))
+}
+
+// PathWithTool prepends a daemon-owned tool directory to the filtered system
+// search path. Seatbelt authorizes that exact executable, never its siblings.
+func PathWithTool(dir, ambient string) string {
+	return dir + string(filepath.ListSeparator) + executablePath(ambient)
 }
 
 func allowedAmbient(name string) bool {

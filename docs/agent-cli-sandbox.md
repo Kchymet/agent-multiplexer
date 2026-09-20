@@ -1,8 +1,9 @@
-# Agent CLI access from nested sandboxes
+# Agent CLI access from protected sessions
 
 `amux agent ...` uses the signed regular-file mailbox already implemented in
-`internal/sessionrpc`. Both amux bubblewrap confinement and the harness command
-sandbox remain enabled. No network permission, socket exception, external tool,
+`internal/sessionrpc`. Linux keeps both bubblewrap and the harness command
+sandbox enabled. macOS uses amux Seatbelt with harness approval controls; its
+inner harness OS sandbox is disabled because Seatbelt cannot be nested. No network permission, socket exception, external tool,
 or host command runner is needed for these commands.
 
 ## Existing work and remaining gaps
@@ -46,7 +47,9 @@ As before, words following `name` are the name, not ID-selection flags. Existing
 
 ## Authority and discovery
 
-The launch mounts `/amux-session-access` read-only. Signed credentials identify
+Linux mounts `/amux-session-access` read-only. macOS grants the original
+daemon-private credential path read-only and locates it with
+`AMUX_SESSION_ACCESS`; the locator itself conveys no authority. Signed credentials identify
 one store subject. The mailbox and responses are read-only; only its `requests/`
 overlay is writable, beneath the session workspace, where the harness's ordinary
 workspace-write policy can publish requests. The daemon private parent, store,
@@ -97,13 +100,15 @@ relaunched: see [namespace rollout](namespace-rollout.md).
 ## Validation
 
 `TestAgentNamespaceCommandSurface` builds the real CLI, uses the production
-`panespec.Resolve` bubblewrap mounts, and serves the production daemon file RPC
+`panespec.Resolve` platform sandbox, and serves the production daemon file RPC
 against isolated SQLite state. It exercises the dispatcher, hook forwarding,
 rename aliases with changed/unset environment IDs, foreign discovery, denied
 foreign/control-plane requests, concurrent reports, daemon authority restart,
 retry, and acknowledged durable archive. It never starts the host daemon.
 
-Run it from an ordinary harness sandbox with bubblewrap 0.12+ on PATH:
+Run with bubblewrap 0.12+ on Linux, or from a host terminal on macOS
+(macOS cannot nest Seatbelt). On macOS use `TMPDIR=/private/tmp` for short,
+canonical test paths:
 
 ```sh
 AMUX_REQUIRE_NAMESPACE_TEST=1 go test ./internal/daemon \
@@ -115,7 +120,8 @@ covered by their package tests. `TestAgentRuntimeCommandSurface` additionally
 runs the same script through real Claude Bash, interactive Codex on a PTY, and
 Codex App Server with the production Supervisor. It uses a local deterministic
 provider, synthetic conversations and credentials, and requires the actual tool
-result to report success. An outer-writable ephemeral file must become unwritable
-inside the harness tool sandbox. The provider's final text is not an acceptance
+result to report success. On Linux an outer-writable ephemeral file must become unwritable
+inside the harness tool sandbox. macOS tests the inherited amux Seatbelt policy
+and verifies that protected authority remains read-only through actual tools. The provider's final text is not an acceptance
 signal. CI pins the runtime archives and verifies their checksums. See the
 [validation record](agent-cli-validation.md) for versions, results and reproduction.

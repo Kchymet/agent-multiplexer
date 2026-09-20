@@ -78,7 +78,7 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
 | **Session model / store** | `internal/store` | SQLite store (`~/.local/share/amux/amux.db`): repos, sessions (a one-level `root_id` tree), `scope` (work/repo) and `archived` flags, idempotent migrations. |
 | **Rail state** | `internal/source` | Derives the rail snapshot (`[]core.Session`) from the store: console, workgroups + nested agents, repos + their agents, archived, detached. |
 | **Lifecycle ops** | `internal/wsops` | Create/add/move/archive/delete workgroups & agents, worktree setup, and the shared action dispatch (`Apply`). Used by the server, daemon, and CLI. |
-| **Pane spec** | `internal/panespec` | Resolves what to run for a tab (agent / editor / shell) and scopes every pane to the agent's worktree (bubblewrap), shared by the TUI and the server. |
+| **Pane spec** | `internal/panespec` | Resolves what to run for a tab (agent / editor / shell) and scopes every pane to the agent's worktree (Seatbelt on macOS, bubblewrap on Linux/WSL2), shared by the TUI and the server. |
 | **Shared types** | `internal/core` | The normalized `Session`, the `Action` wire type, well-known paths/sockets. |
 | **Agent resolver** | `internal/agent` | Maps an agent kind (`claude`, `codex`) to an absolute argv (+ per-harness flags/config paths); robustly finds `claude`/`codex` even when version managers keep them off PATH. |
 | **Embedded terminal** | `internal/vterm` | A VT emulator over a PTY (and, for the client path, over a byte stream) so a full-screen agent renders inside a pane. |
@@ -114,28 +114,22 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   work-scoped workgroup (with a confirmation dialog).
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
   **1** the agent (Claude Code or Codex), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
-  **3** a terminal. **All three are scoped to the agent's worktree** with a
-  bubblewrap mount and PID namespace: the system is read-only, `/proc` is private,
-  and the rest of your home — other projects, files, state, and secrets — is
-  replaced by an empty tmpfs. Only the exact session directory is writable.
-  Each repository keeps its writable Git common/admin metadata there; only the
-  daemon-authorized immutable base-object generation directories are added as
-  exact read-only mounts. Those admitted object bytes are intentionally readable.
-  Daemon-private access storage, global transcripts/hooks, sibling directories,
-  Docker, Windows/WSL drives, and host shell histories are not mounted. Only what
-  each tool needs is bound back explicitly: the editor's config, the shell's rc/theme —
-  e.g. `~/.zshrc` + oh-my-zsh — so the terminal keeps your prompt/aliases/plugins,
-  and your **git/GitHub auth** (`~/.gitconfig` + `~/.config/gh`) so agents push and
-  use `gh` without logging in again. The daemon-selected model account is the only
-  ambient credential environment projected into the launcher; cloud/operator keys
-  are excluded before bubblewrap starts. Bare `amux` resolves through the exact
-  running binary in read-only `/amux-bin`. Claude's generated hooks and model
-  status line retain the stable installed absolute path through a second
-  read-only alias of that same running executable, even if the host installation
-  is missing or older; the containing `~/.local/bin` directory stays absent.
-  Network remains shared (DNS included), so this is not a network
-  sandbox. Protected launch fails closed when isolation is disabled or
-  unsupported. See `docs/namespace-rollout.md` before deployment.
+  **3** a terminal. **All three are scoped to the agent's own directory** by
+  macOS Seatbelt or Linux/WSL2 bubblewrap. System tools and authorized immutable
+  Git object generations are read-only. Other sessions, host state, transcripts,
+  shell histories, and daemon control credentials are inaccessible. Each checkout
+  keeps its writable Git metadata inside its session.
+  Explicit grants supply the selected harness account, Git/GitHub authentication,
+  editor configuration, and shell rc/theme files. Only the selected model's
+  credential environment reaches the child; cloud/operator keys are excluded.
+  Bare `amux` and generated Claude hooks use an exact protected copy or mount of
+  the running executable. The signed file mailbox permits session commands
+  without exposing the daemon's host control socket.
+  IP networking remains shared. Linux also has a private PID namespace and
+  `/proc`; macOS restricts process inspection and signals with Seatbelt but has
+  no private PID namespace. Protected launch fails closed if isolation is
+  disabled or unavailable. See [platform support](#platform-support) and
+  [rollout requirements](docs/namespace-rollout.md).
 - **Harness config is a private copy, not a mount.** Your `~/.claude` /
   `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
@@ -209,11 +203,15 @@ Override the launch binary per harness with `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN`
 `--dangerously-skip-permissions`); override with `AMUX_PERMISSION_MODE`. See
 `scripts/claude-launch.example.sh`. Codex agents launch pre-trusted (project trust
 written to the agent's private copy of `config.toml`) with **Approve for me**
-(`approval_policy="on-request"`, `approvals_reviewer="auto_review"`) inside a
-`--sandbox workspace-write` scope. This applies to terminal launches and new or
-resumed app-server threads;
-override the sandbox level with `AMUX_CODEX_SANDBOX`
-(`read-only`|`workspace-write`|`danger-full-access`, or `none` to omit the flag).
+(`approval_policy="on-request"`, `approvals_reviewer="auto_review"`). On Linux,
+Codex additionally uses `--sandbox workspace-write`; override with
+`AMUX_CODEX_SANDBOX` (`read-only`|`workspace-write`|`danger-full-access`, or `none`).
+On macOS, amux owns the Seatbelt boundary because nested Seatbelt application is
+unsupported: Claude's inner sandbox is disabled and Codex uses
+`danger-full-access` **inside amux's restricted process**. Approval controls stay
+in place. `AMUX_CODEX_SANDBOX=read-only` makes the macOS agent's worktree read-only
+while allowing private harness config, temporary files, and mailbox requests.
+This applies to native terminal launches and new/resumed app-server threads.
 
 The model picker is live, not a baked-in list: Codex agents offer whatever your
 Codex has cached as available to your account (`~/.codex/models_cache.json`, the
@@ -381,68 +379,44 @@ amux do add-repo -f source=OWNER/REPO
 
 ## Platform support
 
-amux is developed and run on **WSL2** (the day-to-day environment). Everything
-else is either build-verified (`make cross` compiles linux+darwin, amd64+arm64)
-or relies on a shared, platform-agnostic code path — but has **not been run and
-exercised on that platform**. The matrix marks the difference explicitly: ✅ is
-something we have actually used here; ⚠️ is something we *expect* to work but have
-**not directly validated**.
+Targets: **native macOS and Linux/WSL2**, on arm64 and amd64. Native Windows is
+not supported; use WSL2. The native TUI hosts panes over PTYs and needs no tmux.
 
-Two things are OS-specific by design:
+| Capability | macOS | Linux / WSL2 |
+| --- | --- | --- |
+| Agent, editor, terminal, TUI and client/server | Native Unix implementation | Native Unix implementation |
+| Filesystem isolation | Seatbelt via `/usr/bin/sandbox-exec` | bubblewrap ≥ 0.12.0, usable user/PID namespaces |
+| Process isolation | Seatbelt limits inspection and signals | Private PID namespace and `/proc` |
+| Worktrees, private Git metadata, shared read-only object pool | Supported | Supported |
+| Claude, Codex PTY, Codex App Server | amux OS sandbox; harness approval controls retained | amux namespace plus harness command sandbox |
+| Provider service | launchd | systemd user service |
 
-- **The filesystem jail is Linux-only.** It requires `bwrap` (bubblewrap) 0.12.0
-  or newer plus usable user/PID namespaces. Missing, older, disabled, or non-Linux
-  isolation fails protected launch explicitly; it never silently forwards session
-  credentials to an unscoped process. Inside the jail `$HOME` is an empty
-  tmpfs, so anything a pane launches — including `$BROWSER`, which agents use
-  for `gh --web` and Claude's login — must live under a system root (`/usr`,
-  `/opt`, `/home/linuxbrew`, …). `amux doctor` checks that; on WSL set
-  `BROWSER=wslview` (package `wslu`) rather than a `/mnt/c/...` `.exe` path.
-- **The native TUI needs no tmux.** It hosts every pane in-process over a PTY.
+Missing or disabled isolation is an error; protected panes never fall back to
+unrestricted host execution. Docker sockets, WSL host drives, and sibling
+sessions are not available in protected panes. IP networking remains shared.
+On WSL, install `wslu` and set `BROWSER=wslview` rather than pointing at a
+Windows `.exe`. macOS GUI application launching and host keychain credential
+helpers are not implicit sandbox grants; use the configured file/API credentials.
 
-| Capability | Win (WSL) | Mac (iTerm2) | Linux |
-|------------|:---------:|:------------:|:-----:|
-| Native TUI (`amux`) | ✅ | ⚠️ | ⚠️ |
-| Client/server (`amux serve` / `harness`) | ✅ | ⚠️ | ⚠️ |
-| Private worktrees + shared object pool | ⚠️ | ➖ | ⚠️ |
-| Agent / editor / terminal tabs | ✅ | ⚠️ | ⚠️ |
-| Filesystem/PID jail (`bwrap` ≥ 0.12) | ✅ | ➖ | ⚠️ |
-| Docker inside protected panes | ➖ | ➖ | ➖ |
-| Private process-tree mapping | ✅ | ➖ | ⚠️ |
+### Validation
 
-**Legend** — ✅ run & exercised here (WSL2)  ·  ⚠️ expected to work (shared code
-path / build-verified) but **not directly validated**  ·  ➖ not applicable
-(degrades gracefully — pane runs unjailed).
+The macOS suite exercises the real Seatbelt boundary, signed CLI mailbox,
+credential rotation, denied peer/host access, inherited descriptors, Unix sockets,
+and Git object access. Real Claude Bash, interactive Codex and Codex App Server
+acceptance tests use local deterministic providers without paid model calls.
+CI includes macOS runtime checks and the existing Linux bubblewrap/nested-harness
+checks. `make cross` builds all four OS/architecture combinations. Cross-building
+alone does not verify runtime behavior on each CPU or a live remote provider.
 
-¹ Would run unjailed (no `bwrap` on macOS) and needs Docker Desktop — untested.
-
-### Notes on testing
-
-Be clear-eyed about what the ✅ / ⚠️ above actually mean:
-
-- **Directly validated (WSL2 only).** The native TUI, git worktrees, the
-  `bwrap` filesystem jail, docker-inside-the-terminal-pane, and the
-  agent/editor/terminal tabs have all been run and used on WSL2 (recent commits
-  fix WSL2-specific resolv.conf/docker paths). The Go test suite — `go test
-  ./...`, including the `internal/mux` end-to-end client/server test — passes; it
-  runs **with the jail disabled** (`AMUX_JAIL=off`), so it does not cover the
-  `bwrap` path.
-- **macOS: never executed.** It is only **cross-compiled** (`make cross`),
-  never launched. No TUI, pane, or git behavior has been observed on a
-  Mac. The jail (`bwrap`) does not exist there, so panes would run **unscoped**;
-  this fallback is in the code but unverified on macOS.
-- **Bare/native Linux: not directly validated.** We develop on WSL2, which is a
-  Linux kernel but differs in meaningful ways (e.g. `/etc/resolv.conf`
-  symlinking, networking, Docker integration). The code paths are shared, so a
-  desktop/server Linux install *should* behave like WSL — but we have not run it
-  there.
-
-If you run amux on macOS or native Linux and confirm a row, please send the
-result so we can promote a ⚠️ to ✅ (or file what broke).
+See [sandbox configuration](docs/sandbox-config.md),
+[agent CLI access](docs/agent-cli-sandbox.md), and the
+[validation record](docs/agent-cli-validation.md) for boundaries and reproduction.
 
 ## Install
 
-Requires Go 1.24+ and (for the jailed terminal, Linux/WSL only) `bwrap`.
+Requires Go 1.25+, Git, and a supported isolation backend: macOS
+`/usr/bin/sandbox-exec`, or Linux/WSL2 `bwrap` ≥ 0.12.0 with usable user/PID
+namespaces. Run `amux doctor` to check local dependencies.
 
 ```sh
 make install

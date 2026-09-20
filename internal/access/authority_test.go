@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -795,7 +796,11 @@ func TestEnsureSessionFreezesMailboxAndCredentialPaths(t *testing.T) {
 	if err := readJSON(filepath.Join(got.CredentialHostDir, ContextFileName), &sessionContext); err != nil {
 		t.Fatal(err)
 	}
-	if sessionContext.Protocol != ProtocolVersion || sessionContext.SubjectID != "a1" || sessionContext.MailboxDir != got.MailboxMountDir {
+	wantMailbox := got.MailboxMountDir
+	if runtime.GOOS == "darwin" {
+		wantMailbox = got.MailboxHostDir
+	}
+	if sessionContext.Protocol != ProtocolVersion || sessionContext.SubjectID != "a1" || sessionContext.MailboxDir != wantMailbox {
 		t.Fatalf("fixed session context = %+v", sessionContext)
 	}
 }

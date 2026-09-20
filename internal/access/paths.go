@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"amux/internal/core"
@@ -22,9 +23,9 @@ const (
 )
 
 // SessionAccess is the frozen path contract shared with filesystem launch code.
-// CredentialHostDir is daemon-private. Launch code mounts that stable directory
-// read-only both at core.SessionAccessDir and, for compatibility, at
-// CredentialMountDir. MailboxHostDir contains regular files, never FIFOs.
+// CredentialHostDir is daemon-private. Linux mounts it read-only at the fixed
+// session access path and CredentialMountDir; macOS grants its original path
+// read-only through Seatbelt. MailboxHostDir holds regular files, never FIFOs.
 type SessionAccess struct {
 	SubjectID          string
 	MailboxHostDir     string
@@ -36,10 +37,9 @@ type SessionAccess struct {
 }
 
 // SessionContext is written by the daemon into the stable read-only credential
-// directory. Namespace launch code bind-mounts that entire directory read-only
-// at core.SessionAccessDir, so current and context.json share one stable source.
-// Restricted clients read it only through core.SessionContextPath; environment
-// variables are optional hints and never select authority.
+// directory. Linux bind-mounts it at a fixed location; macOS passes its original
+// path as a locator. Both expose only the own credential read-only. Authority
+// comes from the signed credential and OS policy, never from the environment.
 type SessionContext struct {
 	Protocol   int    `json:"protocol"`
 	SubjectID  string `json:"subjectId"`
@@ -87,6 +87,9 @@ func (a *FileAuthority) EnsureSession(_ context.Context, subjectID, sessionDir s
 	}
 	mailboxMount := filepath.Join(sessionDir, ".amux", MailboxDirName)
 	contextFile := SessionContext{Protocol: ProtocolVersion, SubjectID: subjectID, MailboxDir: mailboxMount}
+	if runtime.GOOS == "darwin" {
+		contextFile.MailboxDir = mailboxHost
+	}
 	if err := atomicJSON(filepath.Join(credDir, ContextFileName), contextFile, 0o400); err != nil {
 		return SessionAccess{}, fmt.Errorf("publish fixed session context: %w", err)
 	}

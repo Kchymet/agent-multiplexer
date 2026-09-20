@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package daemon
 
@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/codexapp"
 	"amux/internal/codexcfg"
+	"amux/internal/core"
 	"amux/internal/panespec"
 	"amux/internal/store"
 	"github.com/creack/pty"
@@ -62,19 +64,21 @@ func prepareSurfaceRuntime(t *testing.T, mode string, own *store.Session, script
 		// CI builds bubblewrap in a private tool directory, which the production
 		// PATH filter correctly removes. Package this exact dependency inside
 		// the synthetic runtime just as we package the pinned native executable.
-		bw, err := exec.LookPath("bwrap")
-		if err != nil {
-			t.Fatal(err)
-		}
-		copyRuntime(t, bw, filepath.Join(binDir, "bwrap"))
-		r.helperBin = binDir
-		if source := os.Getenv("AMUX_TEST_SOCAT_ROOT"); source != "" {
-			root := filepath.Join(binDir, "socat-package")
-			copyRuntime(t, source, root)
-			// Only the public library dependency is added to this helper process.
-			wrapper := fmt.Sprintf("#!/bin/sh\nLD_LIBRARY_PATH=%s/usr/lib/x86_64-linux-gnu exec %s/usr/bin/socat \"$@\"\n", root, root)
-			if err := os.WriteFile(filepath.Join(binDir, "socat"), []byte(wrapper), 0700); err != nil {
+		if runtime.GOOS == "linux" {
+			bw, err := exec.LookPath("bwrap")
+			if err != nil {
 				t.Fatal(err)
+			}
+			copyRuntime(t, bw, filepath.Join(binDir, "bwrap"))
+			r.helperBin = binDir
+			if source := os.Getenv("AMUX_TEST_SOCAT_ROOT"); source != "" {
+				root := filepath.Join(binDir, "socat-package")
+				copyRuntime(t, source, root)
+				// Only the public library dependency is added to this helper process.
+				wrapper := fmt.Sprintf("#!/bin/sh\nLD_LIBRARY_PATH=%s/usr/lib/x86_64-linux-gnu exec %s/usr/bin/socat \"$@\"\n", root, root)
+				if err := os.WriteFile(filepath.Join(binDir, "socat"), []byte(wrapper), 0700); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 		// Use a synthetic provider and require the real Bash sandbox. No blanket
@@ -121,7 +125,16 @@ func copyRuntime(t *testing.T, source, target string) {
 	if !filepath.IsAbs(source) {
 		t.Fatal("runtime source must be absolute")
 	}
-	if out, err := exec.Command("cp", "-a", "--reflink=auto", source, target).CombinedOutput(); err != nil {
+	var err error
+	source, err = filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-a", "--reflink=auto", source, target}
+	if runtime.GOOS == "darwin" {
+		args = []string{"-R", source, target}
+	}
+	if out, err := exec.Command("cp", args...).CombinedOutput(); err != nil {
 		t.Fatalf("copy runtime: %v: %s", err, out)
 	}
 }
@@ -159,6 +172,9 @@ func (r *surfaceRuntime) launch(t *testing.T, _ []string, _ []string, own store.
 			argv[i+1] = r.candidate
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		replaceNativeTestTool(t, r.candidate, own.ID)
+	}
 	if r.mode == "claude" {
 		argv = append(argv, "--print", "--verbose", "--output-format", "stream-json", "--permission-mode", "default", "Use Bash once to run the fixture command, then finish.")
 	}
@@ -179,7 +195,7 @@ func (r *surfaceRuntime) launch(t *testing.T, _ []string, _ []string, own store.
 func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd, output *bytes.Buffer, exited chan error) {
 	t.Helper()
 	if r.mode == "codex-app-server" {
-		r.supervisor = codexapp.New(codexapp.Config{SessionID: r.own.ID, Dir: r.dir, Env: r.env, Model: r.own.Model, Endpoint: r.endpoint, ResumeThreadID: r.own.ClaudeID})
+		r.supervisor = codexapp.New(codexapp.Config{SessionID: r.own.ID, Dir: r.dir, Env: r.env, Model: r.own.Model, Endpoint: r.endpoint, ResumeThreadID: r.own.ClaudeID, Sandbox: panespec.CodexSandboxForLaunch()})
 		if err := r.supervisor.Start(ctx, cmd.Args); err != nil {
 			t.Fatal(err)
 		}
@@ -390,5 +406,22 @@ func writeSSE(w http.ResponseWriter, named bool, events []map[string]any) {
 	}
 	if !named {
 		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+}
+
+// Replace the test executable published by panespec with the compiled CLI.
+func replaceNativeTestTool(t *testing.T, candidate, sessionID string) {
+	t.Helper()
+	dest := core.SessionBinPath(sessionID)
+	body, err := os.ReadFile(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := dest + ".test"
+	if err := os.WriteFile(staged, body, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staged, dest); err != nil {
+		t.Fatal(err)
 	}
 }

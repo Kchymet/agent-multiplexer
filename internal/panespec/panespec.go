@@ -31,6 +31,9 @@ var (
 	ErrIsolationUnsupported = errors.New("protected filesystem isolation is unsupported")
 )
 
+// Replaced by manifest tests to exercise both backends on either build host.
+var isolationPlatform = runtime.GOOS
+
 // LaunchSpec is the complete daemon-authorized input to a pane launch. The
 // session row and access grant are captured together so panespec never reopens
 // the store or invents authority from an id, environment variable, or cwd.
@@ -74,7 +77,11 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 			return "", nil, nil, err
 		}
 	}
+	if isolationPlatform == "darwin" {
+		argv = seatbeltHarnessArgv(s, tab, argv)
+	}
 	argv, err = scope(dir, tab, s, spec.Access, spec.GitObjects, argv)
+	env = append(env, platformLaunchEnv(spec)...)
 	return dir, env, argv, err
 }
 
@@ -106,7 +113,11 @@ func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
+	if isolationPlatform == "darwin" {
+		inner = seatbeltHarnessArgv(s, TabAgent, inner)
+	}
 	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
+	env = append(env, platformLaunchEnv(spec)...)
 	return dir, env, argv, endpoint, err
 }
 
@@ -154,6 +165,7 @@ func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env,
 	// overrides on remote resume; only TUI presentation belongs on this client.
 	inner = codexcfg.FullscreenTUI(inner)
 	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
+	env = append(env, platformLaunchEnv(spec)...)
 	return dir, env, argv, err
 }
 
@@ -175,16 +187,25 @@ func codexBin(agentArgv []string) string {
 // inside the scope. ScopeReaches is the query side of the system-root list.
 var systemRoots = []string{"/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/nix", "/home/linuxbrew"}
 
-// jail resolves the protected namespace implementation. Secure launches never
-// silently degrade to host filesystem access: Linux, a usable HOME, and
-// bubblewrap >= 0.12.0 are required. Older bubblewrap releases follow attacker-
-// controlled destination symlinks during setup (GHSA-pxhw-h44j-8pfx).
+// jail selects Seatbelt on macOS or bubblewrap >= 0.12.0 on Linux/WSL2.
+// Unsupported or disabled isolation never silently grants host filesystem access.
+// Older bubblewrap follows destination symlinks (GHSA-pxhw-h44j-8pfx).
 func jail() (bwrap, home string, disabled bool, err error) {
 	if envOr("AMUX_JAIL", "on") == "off" {
 		return "", "", true, nil
 	}
-	if runtime.GOOS != "linux" {
-		return "", "", false, fmt.Errorf("%w: %s has no supported mount/PID namespace backend", ErrIsolationUnsupported, runtime.GOOS)
+	if isolationPlatform == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", "", false, fmt.Errorf("%w: resolve home directory", ErrIsolationUnsupported)
+		}
+		if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
+			return "", "", false, fmt.Errorf("%w: macOS sandbox-exec unavailable: %v", ErrIsolationUnsupported, err)
+		}
+		return "/usr/bin/sandbox-exec", home, false, nil
+	}
+	if isolationPlatform != "linux" {
+		return "", "", false, fmt.Errorf("%w: %s; use Linux/WSL2 or macOS", ErrIsolationUnsupported, isolationPlatform)
 	}
 	bw, err := exec.LookPath("bwrap")
 	if err != nil {
@@ -225,7 +246,7 @@ func requireBubblewrapVersion(binary string) error {
 	return nil
 }
 
-// Jailed reports whether this host supports the protected bwrap scope. False no
+// Jailed reports whether this host supports its protected OS scope. False no
 // longer means a transparent fallback: typed launches return an explicit error.
 func Jailed() bool {
 	_, _, disabled, err := jail()
@@ -242,23 +263,20 @@ func IsolationSupport() error {
 	return err
 }
 
-// ScopeReaches reports whether an absolute host path is visible from inside an
-// agent pane's scope: under one of the read-only system roots. The dataDir
-// parameter remains for API compatibility but is never a
-// visibility grant: only an exact own directory is mounted by a LaunchSpec.
-// Everything else under $HOME is replaced by an empty tmpfs; exact runtime,
-// session and configuration grants are not inferable from this global helper.
-// Paths outside the listed roots (/var, /snap, /srv, …) are not bound at all.
-// The path is checked as given; a caller
-// that cares about a symlink's target (Ubuntu's /usr/bin/firefox → /snap/…)
-// should resolve it and ask about both.
+// ScopeReaches reports whether a path falls under a platform's read-only system
+// roots. Exact session, runtime and config grants need a LaunchSpec and cannot
+// be inferred here. Callers should also check symlink targets.
 func ScopeReaches(_ string, path string) bool {
 	path = filepath.Clean(path)
 	under := func(root string) bool {
 		root = filepath.Clean(root)
 		return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
 	}
-	for _, r := range systemRoots {
+	roots := systemRoots
+	if isolationPlatform == "darwin" {
+		roots = darwinReadRoots()
+	}
+	for _, r := range roots {
 		if under(r) {
 			return true
 		}
@@ -430,6 +448,9 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 	}
 	if disabled {
 		return nil, fmt.Errorf("%w: AMUX_JAIL=off cannot receive session credentials", ErrIsolationUnsupported)
+	}
+	if isolationPlatform == "darwin" {
+		return scopeSeatbelt(dir, tab, s, grant, gitObjects, argv, home)
 	}
 
 	args := []string{bw, "--die-with-parent", "--unshare-user", "--unshare-pid"}

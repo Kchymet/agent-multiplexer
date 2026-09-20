@@ -62,3 +62,16 @@ mounted. This prevents a restricted session from replacing their path entries
 before bubblewrap resolves them; established bind mounts pin the selected inode.
 It does not defend against the trusted host operator or a compromised daemon
 running under the same host identity.
+
+## macOS rollout
+
+The same stop-before-replace and host-authorization requirements apply to
+Seatbelt processes. macOS uses original host paths rather than the Linux mount
+names above: verify the read-only credential/context at `AMUX_SESSION_ACCESS`,
+the protected session tool under amux's state `tools` directory, and the private
+`TMPDIR`/`CLAUDE_CODE_TMPDIR`. Verify denied peer/host files, Unix sockets and
+signals, plus allowed own worktree and signed mailbox operations. There is no
+private PID namespace on macOS; do not claim Linux `/proc` isolation there.
+Claude and Codex use amux's outer Seatbelt boundary with their approval controls,
+without attempting a second Seatbelt application. All three tabs and app-server
+processes must be relaunched to adopt a changed profile.

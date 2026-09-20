@@ -1,6 +1,7 @@
 package launchenv
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -24,8 +25,12 @@ func TestBuildAllowsOnlyFunctionalAmbientAndExplicitOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantPath := "PATH=/amux-bin:/usr/bin:/bin"
+	if runtime.GOOS == "darwin" {
+		wantPath = "PATH=/usr/bin:/bin"
+	}
 	for _, want := range []string{
-		"PATH=/amux-bin:/usr/bin:/bin", "HOME=/home/test", "LANG=en_US.UTF-8", "LC_TIME=C",
+		wantPath, "HOME=/home/test", "LANG=en_US.UTF-8", "LC_TIME=C",
 		"COLORTERM=truecolor", "AMUX_SESSION_ID=session-1", "AMUX_ROLE=",
 		"CODEX_HOME=/session/.amux/codex", "CLAUDE_CODE_OAUTH_TOKEN=",
 		"TERM=xterm-256color",
@@ -147,7 +152,11 @@ func TestBuildDropsUnscopedExecutablePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(got, "PATH=/amux-bin:/usr/local/bin:/bin") {
+	wantPath := "PATH=/amux-bin:/usr/local/bin:/bin"
+	if runtime.GOOS == "darwin" {
+		wantPath = "PATH=/usr/local/bin:/bin"
+	}
+	if !slices.Contains(got, wantPath) {
 		t.Fatalf("sanitized PATH = %v", got)
 	}
 }

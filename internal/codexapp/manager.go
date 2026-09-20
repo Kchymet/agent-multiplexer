@@ -116,6 +116,12 @@ func (m *Manager) SetModel(sessionID, model string) {
 	}
 }
 
+type LaunchOptions struct {
+	// Sandbox is selected by the protected launcher. Empty retains the default.
+	// This does not change approvals or their reviewer.
+	Sandbox string
+}
+
 // Ensure returns the supervisor for a session, starting one if none is live. It
 // fills the durable parts of the Config from the persisted identity (endpoint and,
 // when known, the thread to resume) and the per-session event log, launches the
@@ -135,7 +141,8 @@ func (m *Manager) SetModel(sessionID, model string) {
 // over. Creation is serialized per session, so two callers never spawn competing
 // servers. initialPrompt is submitted only when starting a fresh thread, never
 // when reusing or resuming a supervisor.
-func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string) (*Supervisor, error) {
+
+func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappedArgv []string, endpoint, model, initialPrompt, legacyThreadID string, launch ...LaunchOptions) (*Supervisor, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -184,6 +191,9 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 		EventLogPath:  EventLogPathFor(sessionID),
 	}
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
+	if len(launch) > 0 {
+		cfg.Sandbox = launch[0].Sandbox
+	}
 
 	sup := New(cfg)
 	// Publish the handle to the shutdown interrupter before Start can attach an RPC

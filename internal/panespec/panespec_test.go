@@ -185,7 +185,8 @@ func TestScopeReaches(t *testing.T) {
 	}{
 		{"/usr/bin/wslview", true},
 		{"/usr/bin/xdg-open", true},
-		{"/home/linuxbrew/.linuxbrew/bin/browser", true},
+		{"/System/Library/Frameworks", isolationPlatform == "darwin"},
+		{"/home/linuxbrew/.linuxbrew/bin/browser", isolationPlatform == "linux"},
 		{"/opt/google/chrome/chrome", true},
 		{"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", false},
 		{"/mnt/wsl/helper", false},
