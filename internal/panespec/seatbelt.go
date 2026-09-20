@@ -10,6 +10,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/agent"
+	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/launchenv"
@@ -185,6 +186,19 @@ func publishNativeTool(s store.Session) (string, error) {
 	if err := os.Rename(tmp.Name(), dest); err != nil {
 		return "", err
 	}
+	// Claude resolves its native Keychain helper through PATH. This protected
+	// alias forwards only selected-account operations to the signed mailbox.
+	alias := filepath.Join(parent, "security")
+	if target, err := os.Readlink(alias); err != nil || target != "amux" {
+		staged := tmp.Name() + "-security"
+		if err := os.Symlink("amux", staged); err != nil {
+			return "", err
+		}
+		defer os.Remove(staged)
+		if err := os.Rename(staged, alias); err != nil {
+			return "", err
+		}
+	}
 	return dest, nil
 }
 
@@ -271,12 +285,31 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	var policy seatbeltPolicy
 	policy.WriteString(seatbeltBase)
 	policy.WriteString(seatbeltBrowser)
+	if agent.Canonical(s.Agent) == "claude" {
+		// Claude's host and sandbox instances must coordinate token refreshes.
+		// Permit only the native lock paths, including creation when absent;
+		// neither the host configuration tree nor the Keychain is exposed.
+		root := claudecfg.CredentialDirectory()
+		if real, err := filepath.EvalSymlinks(root); err == nil {
+			root = real
+		}
+		for _, name := range []string{".oauth_refresh.lock", ".storage-write.lock"} {
+			fmt.Fprintf(&policy.Builder, "(allow file-read* file-write* (subpath %s))\n", strconv.Quote(filepath.Join(root, name)))
+		}
+		fmt.Fprintf(&policy.Builder, "(allow file-read* file-write* (subpath %s))\n", strconv.Quote(root+".lock"))
+		for path := root; ; path = filepath.Dir(path) {
+			fmt.Fprintf(&policy.Builder, "(allow file-read-metadata (literal %s))\n", strconv.Quote(path))
+			if filepath.Dir(path) == path {
+				break
+			}
+		}
+	}
 	for _, path := range darwinReadRoots() {
 		if err := policy.grantExcluding(path, false, true, []string{home, core.DataDir(), core.StateDir()}); err != nil {
 			return nil, err
 		}
 	}
-	for _, path := range []string{tool, grant.CredentialHostDir, grant.MailboxHostDir} {
+	for _, path := range []string{tool, filepath.Join(filepath.Dir(tool), "security"), grant.CredentialHostDir, grant.MailboxHostDir} {
 		if err := policy.grant(path, false, false); err != nil {
 			return nil, err
 		}

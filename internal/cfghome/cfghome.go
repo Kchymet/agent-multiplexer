@@ -75,6 +75,10 @@ type Spec struct {
 	// AuthEnv tells the harness to use it independently of its private config.
 	AuthDir string
 	AuthEnv string
+	// AuthValue can select an OS credential store independently of a filesystem
+	// grant. In particular, an empty Claude store selector means the default
+	// macOS Keychain entry, even with a private CLAUDE_CONFIG_DIR.
+	AuthValue string
 	// AuthUnsetEnv clears inherited credential overrides when the user opts in
 	// to this store. Otherwise an old environment token could shadow a new login.
 	AuthUnsetEnv []string
@@ -266,8 +270,8 @@ func (sp Spec) EnvEntry() string { return sp.Env + "=" + sp.Dir }
 // EnvEntries routes configuration and, when configured, shared authentication.
 func (sp Spec) EnvEntries() []string {
 	env := []string{sp.EnvEntry()}
-	if sp.AuthDir != "" && sp.AuthEnv != "" {
-		env = append(env, sp.AuthEnv+"="+sp.AuthDir)
+	if sp.AuthEnv != "" {
+		env = append(env, sp.AuthEnv+"="+sp.AuthValue)
 		for _, key := range sp.AuthUnsetEnv {
 			env = append(env, key+"=")
 		}

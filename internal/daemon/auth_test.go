@@ -77,11 +77,8 @@ func TestAuthReloadDefersBusyAndUnknownAndOnlyResumesClaude(t *testing.T) {
 	}
 }
 
-func TestAuthReloadResolveFailurePreservesProcess(t *testing.T) {
+func TestHostAuthReloadResolveFailurePreservesProcess(t *testing.T) {
 	isolateHome(t)
-	if err := claudecfg.Login(func() error { return nil }); err != nil {
-		t.Fatal(err)
-	}
 	putSession(t, "idle", "claude")
 	d := New("", nil, time.Hour)
 	e := newFakeEngine()

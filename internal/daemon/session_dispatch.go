@@ -9,6 +9,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/credentialbroker"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
@@ -31,6 +32,9 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 		return access.ErrDenied
 	}
 	req := call.AccessRequest()
+	if credentialbroker.IsVerb(req.Verb) {
+		return r.authorizeCredential(ctx, principal, req)
+	}
 	if isSessionReport(req) {
 		return r.authorizeSessionReport(ctx, principal, req)
 	}
@@ -45,6 +49,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return rpcInvalid("invalid_call"), nil
 	}
 	req := request.Call.AccessRequest()
+	if credentialbroker.IsVerb(req.Verb) {
+		return r.dispatchCredential(ctx, request)
+	}
 	if req.Route == access.RouteAction && req.Verb == sessionreport.Capture {
 		return r.dispatchSessionCapture(ctx, request.Principal, req), nil
 	}

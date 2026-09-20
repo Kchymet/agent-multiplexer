@@ -20,14 +20,55 @@ mount, and how an agent's edits to its configuration come back to amux.
 - **The agent may edit its copy.** Settings, memory (`CLAUDE.md`), commands,
   skills, MCP servers, plugins — it is the agent's own configuration. What the
   agent does there stays there until you say otherwise.
-- **Shared auth.** `amux auth login` establishes a dedicated Claude credential
+- **Host auth by default.** Claude sessions inherit the host account. On macOS,
+  a daemon credential broker forwards only the selected Claude account’s Keychain
+  operations; sessions cannot access unrelated Keychain items. On Linux/WSL2,
+  existing host credential-file sharing remains in place.
+- **Optional separate login.** `amux auth login` establishes a dedicated Claude credential
   store shared by all its sessions, including credential-write and refresh locks.
   The scope mounts the directory so atomic credential replacement remains visible.
-  Until enabled, Claude retains the legacy template credential symlink. Codex
+  Until enabled, Linux Claude retains the template credential symlink. Codex
   account auth uses a symlink; its MCP credentials use a hard link because Codex
   requires a regular file when writing refreshed tokens.
 
-### One Claude login for all sessions
+### Inherit the host Claude account
+
+New Claude sessions use the host login automatically; no `amux auth login` is
+needed. macOS preserves the host’s `CLAUDE_SECURESTORAGE_CONFIG_DIR` selector (or
+`CLAUDE_CONFIG_DIR` when the former is unset). An explicit empty selector uses
+the default host Keychain entry even though session settings and history live
+in a private config directory. Host API-key and OAuth-token environment overrides
+also remain available to the selected harness.
+
+The macOS daemon publishes a protected `security` helper on the pane’s `PATH`.
+Claude’s native credential reads, updates, and deletes go through the existing
+signed session mailbox. The daemon derives the permitted account from host
+configuration and the harness from its session records. Only the selected
+`Claude Code` API-key and `Claude Code-credentials` entries are available.
+Other accounts, other Keychain items, arbitrary commands, and keychain paths
+are rejected. Archived or revoked sessions lose broker access. General Keychain
+Mach services and the login keychain file remain blocked in the sandbox.
+
+The broker operates on the original store; it does not copy a rotating refresh
+token into a second account. Claude continues to perform OAuth refreshes and
+coordinate with host Claude through the same `.oauth_refresh.lock`, legacy
+credential-directory lock, and `.storage-write.lock`. Only those exact lock
+paths are writable outside the session, not the host config/history tree.
+A `/login` or `/logout` in a session changes this shared account, just as it would
+in a host Claude terminal. The signed mailbox has bounded credential payloads
+(currently 24 KiB per item); oversized values fail instead of being truncated.
+
+`amux auth status` checks the active host or explicitly configured shared login.
+`amux auth restart` reloads it in idle Claude panes; `--force` also interrupts
+busy/unknown panes. Reopen existing terminal/editor tabs after upgrading to pick
+up the helper and environment.
+
+Codex PTY and App Server continue to inherit `auth.json` and MCP credential files.
+The App Server uses the same sandbox and config grants as a Codex pane; it still
+needs credentials, but file-backed Codex authentication does not need this
+macOS Claude Keychain broker.
+
+### Optional separate Claude login for all sessions
 
 After installing the updated CLI **and restarting the amux daemon**, run from
 your host terminal:
@@ -46,7 +87,7 @@ panes are not restarted. Reopen existing editor/terminal processes to inherit
 the new environment. A failed/cancelled first login does not activate the store.
 
 ```sh
-amux auth status          # Claude's status for the shared login
+amux auth status          # status of the selected host/shared login
 amux auth restart         # queue running Claude agents to resume when idle
 amux auth restart --force # also interrupt busy/unknown agents stuck at login
 ```
@@ -172,7 +213,7 @@ starts with an empty transcript tree, history, and caches:
 
 | harness | copied (config) | not copied (state) | shared (auth) |
 |---------|-----------------|--------------------|---------------|
-| claude  | `settings.json`, `settings.local.json`, `CLAUDE.md`, `keybindings.json`, `statusline-command.sh`, `commands/`, `skills/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`, `.claude.json` (minus its per-project trust table) | `projects/`, `history.jsonl`, `sessions/`, `session-env/`, `shell-snapshots/`, `file-history/`, caches, `statsig/`, `todos/` | dedicated auth directory after `amux auth login`; legacy `.credentials.json` symlink until then |
+| claude  | `settings.json`, `settings.local.json`, `CLAUDE.md`, `keybindings.json`, `statusline-command.sh`, `commands/`, `skills/`, `agents/`, `hooks/`, `output-styles/`, `plugins/`, `.claude.json` (minus its per-project trust table) | `projects/`, `history.jsonl`, `sessions/`, `session-env/`, `shell-snapshots/`, `file-history/`, caches, `statsig/`, `todos/` | host Keychain through the scoped daemon broker on macOS; host `.credentials.json` on Linux/WSL2; optional separate account after `amux auth login` |
 | codex   | `config.toml`, `AGENTS.md`, `prompts/`, `skills/`, `rules/` | `sessions/`, `history.jsonl`, `log/`, `memories/` | `auth.json`, `.credentials.json` (MCP OAuth), `mcp-oauth-locks/` |
 
 ### MCP inheritance

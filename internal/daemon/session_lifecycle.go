@@ -14,6 +14,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/credentialbroker"
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/sessionrpc"
@@ -33,21 +34,22 @@ const (
 )
 
 type sessionRuntime struct {
-	d               *Daemon
-	resolver        *daemonAccessResolver
-	policy          access.Policy
-	applyResult     func(context.Context, core.Action) (string, error)
-	encodeResult    func(core.Result) ([]byte, error)
-	poll            time.Duration
-	now             func() time.Time
-	callbackTimeout time.Duration
-	dispatchMu      sync.Mutex
-	servers         map[string]*sessionrpc.Server
-	initialized     map[string]bool
-	completions     *completionRegistry
-	responseBudget  sessionrpc.ResponseBudget
-	events          *sessionEventPager
-	eventsErr       error
+	d                   *Daemon
+	resolver            *daemonAccessResolver
+	policy              access.Policy
+	applyResult         func(context.Context, core.Action) (string, error)
+	encodeResult        func(core.Result) ([]byte, error)
+	poll                time.Duration
+	now                 func() time.Time
+	callbackTimeout     time.Duration
+	dispatchMu          sync.Mutex
+	servers             map[string]*sessionrpc.Server
+	initialized         map[string]bool
+	completions         *completionRegistry
+	responseBudget      sessionrpc.ResponseBudget
+	events              *sessionEventPager
+	eventsErr           error
+	credentialOperation func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error)
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
