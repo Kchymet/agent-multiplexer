@@ -120,9 +120,11 @@ PTY sessions receive a one-time continuation prompt when resuming an existing
 conversation with an explicit running hook state. Idle, waiting-for-input and
 unknown sessions reopen without submitting work. The creation prompt is not
 replayed, and a missing transcript never receives an interrupted-work prompt.
-Claude supplies this state through its hooks; Codex's default App Server mode
+Claude supplies this state through its hooks; Codex's App Server mode
 uses the native state described below. Legacy Codex PTY mode has no built-in
 running hook, so it reopens without automatic submission unless one is reported.
+Enable native Codex goal tracking with `amux config set codex.control app-server`,
+then restart the daemon to apply it.
 
 For supervised Codex sessions, amux observes the native goal state before
 shutdown. A previously active goal resumes automatically, preserving its
