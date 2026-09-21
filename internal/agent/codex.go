@@ -126,7 +126,7 @@ func (h codexHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 			return LaunchDecision{}, err
 		} else if ok {
 			core.ClearNotice(s.ClaudeID)
-			return LaunchDecision{Dir: req.Dir, Extra: []string{"resume", s.ClaudeID}}, nil
+			return LaunchDecision{Dir: req.Dir, Extra: resumedExtra(req, "resume", s.ClaudeID)}, nil
 		}
 		warnResumeFailed(req)
 	}
@@ -145,9 +145,10 @@ func (h codexHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 	} else if ok {
 		if s.ClaudeID != "" && id != s.ClaudeID {
 			_ = core.WriteNotice(id, "couldn't resume pinned conversation — resumed the newest one instead")
+			req.ResumeWork = false // prior running intent belongs to the lost conversation
 		}
 		persistConvID(s.ID, id)
-		return LaunchDecision{Dir: req.Dir, Extra: []string{"resume", id}}, nil
+		return LaunchDecision{Dir: req.Dir, Extra: resumedExtra(req, "resume", id)}, nil
 	}
 	if s.ClaudeID != "" {
 		persistConvID(s.ID, "")

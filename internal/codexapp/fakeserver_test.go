@@ -72,6 +72,7 @@ type fakeServer struct {
 	turnID     string
 	failMethod string // optional RPC failure for initialization tests
 	resumeErr  string // when set, thread/resume replies with this JSON-RPC error message
+	goal       *threadGoal
 }
 
 func newFakePair(t *testing.T) (*Supervisor, *fakeServer, *memConn) {
@@ -119,6 +120,26 @@ func (fs *fakeServer) handleCall(m incoming) {
 	switch m.Method {
 	case "initialize":
 		result = map[string]any{"capabilities": map[string]any{}}
+	case "thread/goal/get":
+		fs.mu.Lock()
+		result = map[string]any{"goal": fs.goal}
+		fs.mu.Unlock()
+	case "thread/goal/set":
+		var p struct {
+			ThreadID string `json:"threadId"`
+			Status   string `json:"status"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		fs.mu.Lock()
+		if fs.goal != nil {
+			copy := *fs.goal
+			copy.Status = p.Status
+			fs.goal = &copy
+		}
+		goal := fs.goal
+		fs.mu.Unlock()
+		fs.write(map[string]any{"method": "thread/goal/updated", "params": map[string]any{"threadId": p.ThreadID, "goal": goal}})
+		result = map[string]any{"goal": goal}
 	case "thread/start":
 		var p struct {
 			ApprovalPolicy string `json:"approvalPolicy"`

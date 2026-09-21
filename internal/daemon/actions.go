@@ -332,6 +332,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 	if spec.Session.Archived {
 		return fmt.Errorf("session %s is archived; restore it before restarting", id)
 	}
+	work := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent}).apply(&spec)
 	kill := func() {
 		if allTabs {
 			d.killRuntimeFor(id)
@@ -361,7 +362,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		kill()
 		session := spec.Session
 		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch()})
+			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work})
 		})
 		if err != nil {
 			return err

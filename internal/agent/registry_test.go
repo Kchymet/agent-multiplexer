@@ -116,7 +116,8 @@ func TestPlanLaunchFresh(t *testing.T) {
 	}
 	defer root.Close()
 	for _, kind := range []string{"claude", "codex", "hermes"} {
-		req := LaunchRequest{Root: root, Session: store.Session{ID: "a1", Agent: kind, Dir: dir}, Dir: dir, Prompt: "do it"}
+		// Even with saved running intent, missing history must start fresh.
+		req := LaunchRequest{Root: root, Session: store.Session{ID: "a1", Agent: kind, Dir: dir}, Dir: dir, Prompt: "do it", ResumeWork: true}
 		got, err := HarnessFor(kind).PlanLaunch(req)
 		if err != nil {
 			t.Fatalf("%s PlanLaunch: %v", kind, err)

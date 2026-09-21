@@ -116,7 +116,7 @@ func (h claudeHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 			return LaunchDecision{}, err
 		} else if ok {
 			core.ClearNotice(s.ClaudeID)
-			return LaunchDecision{Dir: cwd, Extra: []string{"--resume", s.ClaudeID}}, nil
+			return LaunchDecision{Dir: cwd, Extra: resumedExtra(req, "--resume", s.ClaudeID)}, nil
 		}
 		// Pinned but no transcript under any candidate path: don't silently start
 		// fresh — make the fallback visible in the log and on the rail.
@@ -128,7 +128,7 @@ func (h claudeHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 		return LaunchDecision{}, err
 	}
 	if any {
-		return LaunchDecision{Dir: req.Dir, Extra: []string{"--continue"}}, nil
+		return LaunchDecision{Dir: req.Dir, Extra: resumedExtra(req, "--continue")}, nil
 	}
 	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}, nil
 }

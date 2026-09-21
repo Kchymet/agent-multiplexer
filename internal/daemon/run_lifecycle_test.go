@@ -243,12 +243,14 @@ func TestRunInterruptsStalledStructuredWriteBeforeDeferredJoin(t *testing.T) {
 				result = map[string]any{"thread": map[string]any{"id": "run-thread"}}
 			case "thread/resume":
 				result = map[string]any{"thread": map[string]any{"id": "run-thread"}}
+			case "thread/goal/get":
+				result = map[string]any{"goal": nil}
 			}
 			if err := conn.WriteJSON(map[string]any{"id": call.ID, "result": result}); err != nil {
 				serverErr <- fmt.Errorf("handshake response: %w", err)
 				return
 			}
-			if call.Method == "thread/resume" {
+			if call.Method == "thread/goal/get" {
 				close(protocolReady)
 				break
 			}

@@ -115,6 +115,30 @@ terminal/editor tabs remain running. For Codex App Server sessions, both the
 supervised server and its attached agent UI are replaced using the saved thread.
 The shortcut is configurable as `keys.restart-agent`.
 
+Restarts automatically continue work that was running. Claude Code and Codex
+PTY sessions receive a one-time continuation prompt when resuming an existing
+conversation with an explicit running hook state. Idle, waiting-for-input and
+unknown sessions reopen without submitting work. The creation prompt is not
+replayed, and a missing transcript never receives an interrupted-work prompt.
+Claude supplies this state through its hooks; Codex's App Server mode
+uses the native state described below. Legacy Codex PTY mode has no built-in
+running hook, so it reopens without automatic submission unless one is reported.
+Enable native Codex goal tracking with `amux config set codex.control app-server`,
+then restart the daemon to apply it.
+
+For supervised Codex sessions, amux observes the native goal state before
+shutdown. A previously active goal resumes automatically, preserving its
+objective, token budget and usage. A goal paused before restart stays paused;
+blocked, completed and budget/usage-limited goals are never reactivated. Codex
+continues already-active goals itself, avoiding an extra model turn from amux.
+An ordinary running turn without a native goal receives the continuation prompt.
+
+The same behavior applies to `amux daemon restart`: its restore journal records
+work state as well as running processes, including headless Codex supervisors.
+Each saved session restores individually, so an archived workgroup member cannot
+prevent its coordinator or siblings from restarting. Reopening or reconnecting
+a dashboard does not submit continuation work.
+
 ### Optional separate Claude login for all sessions
 
 After installing the updated CLI **and restarting the amux daemon**, run from

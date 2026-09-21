@@ -41,6 +41,7 @@ type LaunchSpec struct {
 	Session    store.Session
 	Access     access.SessionAccess
 	GitObjects []git.GitObjectMount
+	ResumeWork bool // host restart intent; never inferred from session-controlled environment
 }
 
 // Tabs an agent exposes.
@@ -72,7 +73,7 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 	case TabTerminal:
 		dir, env, argv = wsops.AgentWorkdir(s), wsops.AgentEnv(s), []string{shellBin()}
 	default:
-		dir, env, argv, err = wsops.AgentCommand(s)
+		dir, env, argv, err = wsops.AgentCommand(s, spec.ResumeWork)
 		if err != nil {
 			return "", nil, nil, err
 		}
