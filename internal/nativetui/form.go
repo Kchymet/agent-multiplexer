@@ -13,6 +13,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 var cursorStyle = lipgloss.NewStyle().Reverse(true)
@@ -75,8 +76,12 @@ func (m *model) openNewWorkgroupForm() {
 		fields: []*formField{
 			{key: "name", label: "Name"},
 			{key: "prompt", label: "Prompt"},
+			// The coordinator runs the prompt; the goal runtime is the default and
+			// the only kind with native goal mode. Its model is its harness default
+			// unless set here — the first agent's model below never applies to it.
+			{key: wsops.FieldCoordinator, label: "Coordinator", value: agent.GoalRuntime, options: agent.Kinds()},
 			{key: "repos", label: "Repos (first agent)", picker: true},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
+			{key: "mode", label: "Mode (first agent)", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 			{key: "linear", label: "Linear issue/URL"},

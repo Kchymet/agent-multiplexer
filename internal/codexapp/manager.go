@@ -121,6 +121,7 @@ type LaunchOptions struct {
 	// This does not change approvals or their reviewer.
 	Sandbox     string
 	RestartWork *RestartWork
+	Goals       bool // goal session: observed user tasks become the native goal
 }
 
 // Ensure returns the supervisor for a session, starting one if none is live. It
@@ -195,6 +196,7 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	if len(launch) > 0 {
 		cfg.Sandbox = launch[0].Sandbox
 		cfg.RestartWork = launch[0].RestartWork
+		cfg.Goals = launch[0].Goals
 	}
 
 	sup := New(cfg)

@@ -114,6 +114,11 @@ func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
+	if agent.NativeGoals(s) {
+		// The goal session's server owns the thread goal; enable the feature for
+		// this process regardless of the templated user config.
+		inner = codexcfg.NativeGoals(inner)
+	}
 	if isolationPlatform == "darwin" {
 		inner = seatbeltHarnessArgv(s, TabAgent, inner)
 	}
@@ -165,6 +170,9 @@ func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env,
 	// The existing server thread owns permissions. Codex rejects permission
 	// overrides on remote resume; only TUI presentation belongs on this client.
 	inner = codexcfg.FullscreenTUI(inner)
+	if agent.NativeGoals(s) {
+		inner = codexcfg.NativeGoals(inner) // render the goal state the server supervises
+	}
 	argv, err = scope(dir, TabAgent, s, spec.Access, spec.GitObjects, inner)
 	env = append(env, platformLaunchEnv(spec)...)
 	return dir, env, argv, err

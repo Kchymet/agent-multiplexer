@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/agent"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -362,7 +363,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		kill()
 		session := spec.Session
 		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work})
+			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work, Goals: agent.NativeGoals(session)})
 		})
 		if err != nil {
 			return err

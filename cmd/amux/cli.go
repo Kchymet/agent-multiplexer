@@ -14,6 +14,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/gh"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // This file is the CLI surface for repos and workgroups. It is deliberately a
@@ -452,6 +453,9 @@ usage: amux workgroup [command]
                      pre-attaching an agent scoped to the given repos
   create <repo>...   non-interactive: workgroup + one agent on those repos
                      [--name n] [--prompt t] [--agent a] [--mode m] [--model M]
+                     [--coordinator claude|codex] [--coordinator-model M]
+                     the prompt is the coordinator's task (its goal on the
+                     default codex coordinator); the agent starts idle for it
   repo <repo>        create a single-repo (repo-scoped) agent on a tracked repo
   add <root> [repo...]  add another agent to an existing workgroup
   open <id>          open the dashboard on a workgroup or agent  (alias: switch)
@@ -781,12 +785,20 @@ func querySessions() ([]core.WorkgroupRow, error) {
 
 // ---- shared helpers ------------------------------------------------------
 
-type createCfg struct{ name, prompt, mode, model, agent string }
+type createCfg struct{ name, prompt, mode, model, agent, coordinator, coordinatorModel string }
 
 func createWorkspaceFields(repos []string, cfg createCfg) map[string]string {
 	fields := map[string]string{
 		"name": cfg.name, "agent": cfg.agent, "mode": cfg.mode,
 		"model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
+	}
+	// The coordinator runtime is chosen only when asked for: absent, the daemon
+	// picks the goal runtime with its own default model (never the worker's).
+	if cfg.coordinator != "" {
+		fields[wsops.FieldCoordinator] = cfg.coordinator
+	}
+	if cfg.coordinatorModel != "" {
+		fields[wsops.FieldCoordinatorModel] = cfg.coordinatorModel
 	}
 	if len(repos) > 0 {
 		fields["repos"] = strings.Join(repos, ",")
@@ -832,6 +844,16 @@ func parseCreateFlags(args []string) ([]string, createCfg) {
 			i++
 		case strings.HasPrefix(a, "--agent="):
 			cfg.agent = strings.TrimPrefix(a, "--agent=")
+		case a == "--coordinator" && i+1 < len(args):
+			cfg.coordinator = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--coordinator="):
+			cfg.coordinator = strings.TrimPrefix(a, "--coordinator=")
+		case a == "--coordinator-model" && i+1 < len(args):
+			cfg.coordinatorModel = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--coordinator-model="):
+			cfg.coordinatorModel = strings.TrimPrefix(a, "--coordinator-model=")
 		default:
 			repos = append(repos, a)
 		}

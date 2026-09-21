@@ -91,10 +91,19 @@ const (
 	SteerRequestID = "request_id" // permission: the request the decision answers; a stale one is refused
 	SteerReason    = "reason"     // permission: optional free-text rationale
 
+	SteerGoalStatus    = "status"       // goal: active | paused | complete | clear
+	SteerGoalObjective = "objective"    // goal: optional replacement objective
+	SteerGoalBudget    = "token_budget" // goal: optional token budget (positive integer)
+
 	SteerPrompt     = "prompt"     // deliver a new user turn
 	SteerInterject  = "interject"  // deliver text while a turn is running
 	SteerStop       = "stop"       // interrupt the turn without killing the session
 	SteerPermission = "permission" // answer a pending permission prompt
+	// SteerGoal controls a goal session's native goal explicitly (host/console
+	// only): SteerGoalStatus active | paused | complete | clear, with an optional
+	// SteerGoalObjective and SteerGoalBudget. Pausing and resuming here are the
+	// user's decisions; ordinary prompts never override them.
+	SteerGoal = "goal"
 
 	SteerAllow = "allow"
 	SteerDeny  = "deny"
