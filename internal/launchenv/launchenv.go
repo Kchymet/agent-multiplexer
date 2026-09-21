@@ -99,6 +99,8 @@ var overlayNames = map[string]bool{
 	"CODEX_HOME": true,
 	// Public CA bundles selected and granted by the native sandbox launcher.
 	"SSL_CERT_FILE": true, "CODEX_CA_CERTIFICATE": true,
+	// Protected native GitHub helper config, never ambient Git-control values.
+	"GH_CONFIG_DIR": true, "GH_HOST": true, "GIT_CONFIG_GLOBAL": true,
 }
 
 var modelAccountNames = map[ModelAccount]map[string]bool{

@@ -68,6 +68,32 @@ The App Server uses the same sandbox and config grants as a Codex pane; it still
 needs credentials, but file-backed Codex authentication does not need this
 macOS Claude Keychain broker.
 
+### GitHub CLI and Git HTTPS credentials
+
+On macOS, every harness and its terminal/editor panes inherit the host's active
+GitHub account through the daemon broker. A protected `gh` launcher requests the
+token over the signed mailbox and passes it to that command and its children.
+The token is not added to the harness environment or copied into an auth file.
+The daemon invokes the host's native `gh auth token` for each request, preserving
+GitHub CLI's Keychain encoding and active-account selection. Host account switches
+take effect on the next command. Only configured hosts and the active account are
+available; archived/revoked sessions, account overrides and credential mutations
+are rejected. This grants sessions the same GitHub permissions as that account.
+
+`gh api`, repository commands and `gh auth status` use the broker. The protected
+Git configuration also routes HTTPS credential lookups through it, including
+host configurations whose helpers name an absolute Homebrew `gh` path. Existing
+Git identity/settings remain included. GitHub Enterprise host/repository overrides
+are supported; token environment overrides explicitly set inside a session retain
+GitHub CLI precedence. Run login, logout, refresh and account switching in a host
+terminal. `gh auth status` in a session checks only the selected active account.
+
+Use bare `gh` on the session's `PATH`: directly invoking the native binary by its
+absolute path bypasses the launcher and cannot read macOS Keychain credentials.
+Restart existing agent panes and reopen terminal/editor tabs after installing the
+broker update so they receive its protected helpers, policy and Git configuration.
+Linux/WSL2 retain their existing read-only GitHub configuration sharing.
+
 ### macOS certificate trust and restarting a session
 
 The native sandbox blocks general Keychain IPC, which can prevent Codex from

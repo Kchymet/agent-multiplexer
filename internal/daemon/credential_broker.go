@@ -30,7 +30,8 @@ func (r *sessionRuntime) authorizeCredential(ctx context.Context, principal acce
 		(o.Verb != credentialbroker.Read && req.Route != access.RouteAction) {
 		return access.ErrDenied
 	}
-	if o.Account != credentialbroker.HostAccount() || !slices.Contains(credentialbroker.ClaudeServices(claudecfg.CredentialSelector()), o.Service) {
+	github := credentialbroker.GitHubAllowed(o)
+	if !github && (o.Account != credentialbroker.HostAccount() || !slices.Contains(credentialbroker.ClaudeServices(claudecfg.CredentialSelector()), o.Service)) {
 		return access.ErrDenied
 	}
 	return r.resolver.withStore(func(db policyStore) error {
@@ -38,7 +39,7 @@ func (r *sessionRuntime) authorizeCredential(ctx context.Context, principal acce
 		if err != nil {
 			return err
 		}
-		if !ok || s.Archived || agent.Canonical(s.Agent) != "claude" {
+		if !ok || s.Archived || (!github && agent.Canonical(s.Agent) != "claude") {
 			return access.ErrDenied
 		}
 		return nil
@@ -61,6 +62,9 @@ func (r *sessionRuntime) dispatchCredential(ctx context.Context, request session
 	execute := r.credentialOperation
 	if execute == nil {
 		execute = (credentialbroker.Keychain{Env: os.Environ()}).Execute
+		if _, github := credentialbroker.GitHubHost(o); github {
+			execute = (credentialbroker.GitHub{Env: os.Environ()}).Execute
+		}
 	}
 	result, err := execute(ctx, o)
 	if err != nil {
