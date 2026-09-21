@@ -187,6 +187,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch {
 			case r.Error != "":
 				m.status = "action failed: " + r.Error
+			case r.RestartedID != "":
+				key := paneKey{r.RestartedID, tabAgent}
+				if term := m.terms[key]; term != nil {
+					_ = term.Close()
+					delete(m.terms, key)
+				}
+				delete(m.byPane, paneIDOf(key.id, key.tab))
+				m.pending = r.RestartedID
 			case r.NewID != "":
 				m.pending = r.NewID
 			}
@@ -330,6 +338,20 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.switchTab(tabEditor)
 	case keymap.TabTerm:
 		return m, m.switchTab(tabTerminal)
+	case keymap.RestartAgent:
+		s := m.selected()
+		if m.focus == focusAgent {
+			s = m.sessionByID(m.attached)
+		}
+		if s == nil || !attachable(s) || s.Archived || s.Section == core.SectionArchived {
+			m.status = "select an active agent to restart"
+			return m, nil
+		}
+		m.confirm = &confirmState{
+			message: "Restart " + s.Title + "?\nIts current turn will stop, then its saved conversation will resume.",
+			action:  core.Action{Action: core.ActionRestart, ID: s.ID},
+		}
+		return m, nil
 	}
 
 	// Agent focused: forward every other key straight to the agent.

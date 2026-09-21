@@ -15,13 +15,13 @@ import (
 // after something the daemon then rejects. A verb may fail for its *own* reason
 // (no such id, no such repo) — it may not fail as unknown.
 //
-// Start, steer and auth reload operate on the daemon's running processes
+// Start, restart, steer and auth reload operate on the daemon's running processes
 // without changing store state — so daemon.handle intercepts them before
 // ApplyResult ever sees them.
 func TestControlActionsAreDispatchable(t *testing.T) {
 	isolateStore(t)
 	for _, verb := range core.ControlActions() {
-		if verb == core.ActionStart || verb == core.ActionSteer || verb == core.ActionAuthReload {
+		if verb == core.ActionStart || verb == core.ActionRestart || verb == core.ActionSteer || verb == core.ActionAuthReload {
 			continue // engine-only; handled in daemon.handle, never reaches here
 		}
 		t.Run(verb, func(t *testing.T) {

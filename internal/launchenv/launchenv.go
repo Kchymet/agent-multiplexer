@@ -97,6 +97,8 @@ var overlayNames = map[string]bool{
 	"AMUX_SESSION_ACCESS": true, "TMPDIR": true, "CLAUDE_CODE_TMPDIR": true,
 	"CLAUDE_CONFIG_DIR": true, "CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
 	"CODEX_HOME": true,
+	// Public CA bundles selected and granted by the native sandbox launcher.
+	"SSL_CERT_FILE": true, "CODEX_CA_CERTIFICATE": true,
 }
 
 var modelAccountNames = map[ModelAccount]map[string]bool{

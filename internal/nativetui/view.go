@@ -369,6 +369,7 @@ func (m *model) renderHelp() string {
 			{m.tabsHint(), "tabs"},
 			{keyLabel(m.keys.Chord(keymap.FocusRail)), "rail"},
 			{keyLabel(m.keys.Chord(keymap.ToggleFocus)), "toggle"},
+			{keyLabel(m.keys.Chord(keymap.RestartAgent)), "restart"},
 			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
 		})
 	default:
