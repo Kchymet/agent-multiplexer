@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"amux/internal/access"
@@ -11,6 +13,59 @@ import (
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
 )
+
+func TestGitHubBrokerAllHarnessesReadOnly(t *testing.T) {
+	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
+	codex := store.Session{ID: "codex", Agent: "codex", Dir: t.TempDir()}
+	archived := store.Session{ID: "archived", Agent: "codex", Dir: t.TempDir(), Archived: true}
+	d, r, principals := sessionRuntimeFixture(t, claude, codex, archived)
+	dir := t.TempDir()
+	t.Setenv("GH_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("github.com:\n  user: selected\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	r.credentialOperation = func(_ context.Context, o credentialbroker.Operation) (credentialbroker.Result, error) {
+		calls++
+		return credentialbroker.Result{Value: "synthetic"}, nil
+	}
+	o := credentialbroker.Operation{Verb: credentialbroker.Read, Service: "gh:github.com", Account: credentialbroker.GitHubAccount}
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: o.Verb, Fields: o.Fields()}
+	ctx := context.Background()
+	for _, id := range []string{claude.ID, codex.ID} {
+		res, _ := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[id], Call: call})
+		if res.Status != sessionrpc.StatusOK {
+			t.Fatal("active session denied GitHub credentials")
+		}
+	}
+	for _, tc := range []struct {
+		id string
+		op credentialbroker.Operation
+	}{
+		{archived.ID, o},
+		{claude.ID, credentialbroker.Operation{Verb: credentialbroker.Read, Service: o.Service, Account: "other-user"}},
+		{codex.ID, credentialbroker.Operation{Verb: credentialbroker.Read, Service: "gh:unconfigured.example", Account: o.Account}},
+		{claude.ID, credentialbroker.Operation{Verb: credentialbroker.Write, Service: o.Service, Account: o.Account, Value: "synthetic"}},
+		{codex.ID, credentialbroker.Operation{Verb: credentialbroker.Delete, Service: o.Service, Account: o.Account}},
+	} {
+		bad := call
+		bad.Verb, bad.Fields = tc.op.Verb, tc.op.Fields()
+		if tc.op.Verb != credentialbroker.Read {
+			bad.Route = access.RouteAction
+		}
+		res, _ := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[tc.id], Call: bad})
+		if res.Status != sessionrpc.StatusDenied || calls != 2 {
+			t.Fatal("unauthorized GitHub operation reached backend")
+		}
+	}
+	if err := d.authority.Revoke(ctx, access.SubjectSession, codex.ID); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[codex.ID], Call: call})
+	if res.Status != sessionrpc.StatusDenied || calls != 2 {
+		t.Fatal("revoked session reached GitHub credentials")
+	}
+}
 
 func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}

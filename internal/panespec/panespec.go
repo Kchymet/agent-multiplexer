@@ -655,8 +655,9 @@ func configBinds(tab int, s store.Session, home string) [][]string {
 // gitBinds mounts the user's git + GitHub-CLI auth read-only so agents inherit
 // the host's authentication instead of each one having to log in: ~/.gitconfig
 // (identity + the `gh auth git-credential` helper for HTTPS) and ~/.config/gh
-// (the gh token in hosts.yml). The gh binary itself is already on the read-only
-// system path. NB: this hands the agent your GitHub token — it can act on GitHub
+// (hosts.yml may contain a token; macOS Keychain tokens use the daemon broker).
+// The gh binary itself is already on the read-only system path.
+// NB: this hands the agent your GitHub token — it can act on GitHub
 // as you (push, open PRs, etc.), which is the point.
 func gitBinds(home string) [][]string {
 	j := filepath.Join

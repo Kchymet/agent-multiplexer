@@ -15,6 +15,8 @@ import (
 	"amux/internal/git"
 	"amux/internal/launchenv"
 	"amux/internal/store"
+
+	"github.com/cli/go-gh/v2/pkg/config"
 )
 
 // Seatbelt grants access to the original host paths. Unlike Linux it cannot
@@ -121,7 +123,7 @@ func platformLaunchEnv(spec LaunchSpec) []string {
 			env = append(env, key+"="+path)
 		}
 	}
-	return env
+	return append(env, nativeGitHubEnv(filepath.Dir(core.SessionBinPath(spec.Session.ID)))...)
 }
 
 // CodexSandboxForLaunch is passed only alongside a successfully constructed
@@ -203,16 +205,11 @@ func publishNativeTool(s store.Session) (string, error) {
 	}
 	// Claude resolves its native Keychain helper through PATH. This protected
 	// alias forwards only selected-account operations to the signed mailbox.
-	alias := filepath.Join(parent, "security")
-	if target, err := os.Readlink(alias); err != nil || target != "amux" {
-		staged := tmp.Name() + "-security"
-		if err := os.Symlink("amux", staged); err != nil {
-			return "", err
-		}
-		defer os.Remove(staged)
-		if err := os.Rename(staged, alias); err != nil {
-			return "", err
-		}
+	if err := publishNativeAlias(parent, "security", "amux"); err != nil {
+		return "", err
+	}
+	if err := publishNativeGitHub(parent); err != nil {
+		return "", err
 	}
 	return dest, nil
 }
@@ -337,6 +334,11 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	}
 	for _, path := range []string{tool, filepath.Join(filepath.Dir(tool), "security"), grant.CredentialHostDir, grant.MailboxHostDir} {
 		if err := policy.grant(path, false, false); err != nil {
+			return nil, err
+		}
+	}
+	for _, path := range []string{filepath.Join(filepath.Dir(tool), "gh"), filepath.Join(filepath.Dir(tool), "gh-real"), filepath.Join(filepath.Dir(tool), "gitconfig"), config.ConfigDir()} {
+		if err := policy.grant(path, false, true); err != nil {
 			return nil, err
 		}
 	}

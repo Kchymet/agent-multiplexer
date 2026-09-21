@@ -37,6 +37,9 @@ func main() {
 	if filepath.Base(os.Args[0]) == "security" {
 		os.Exit(credentialSecurity(os.Args[1:], os.Stdin, os.Stdout))
 	}
+	if filepath.Base(os.Args[0]) == "gh" {
+		os.Exit(credentialGitHub(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
 		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print
 		// usage (those carry an arg, so they fall through to the switch below).
