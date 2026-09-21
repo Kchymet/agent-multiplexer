@@ -146,13 +146,25 @@ type SessionInfo struct {
 // LaunchRequest carries everything a harness's PlanLaunch needs without coupling
 // it to how the caller derived the values.
 type LaunchRequest struct {
-	Root    *hostprep.Root // pinned session root for all private-home access
-	Session store.Session  // the session being launched
-	Dir     string         // the stat-verified launch dir (the workspace root)
-	Prompt  string         // the trimmed initial prompt
+	Root       *hostprep.Root // pinned session root for all private-home access
+	Session    store.Session  // the session being launched
+	Dir        string         // the stat-verified launch dir (the workspace root)
+	Prompt     string         // the trimmed initial prompt
+	ResumeWork bool           // continue interrupted work only when an existing conversation is found
 	// ResumeCwds are the candidate cwds a transcript for this session could live
 	// under (amux's workdir convention has shifted over time), preferred-first.
 	ResumeCwds []string
+}
+
+// ResumeWorkPrompt is submitted once on a host-authorized restart of an active
+// task. It neither replays the creation prompt nor authorizes paused work.
+const ResumeWorkPrompt = "This session was restarted while you were working. Continue the in-progress task from the existing conversation and current workspace state. Preserve the current goal, progress and budget. Do not resume any goal or task the user explicitly paused, and do not repeat work already completed."
+
+func resumedExtra(req LaunchRequest, args ...string) []string {
+	if req.ResumeWork {
+		return append(args, ResumeWorkPrompt)
+	}
+	return args
 }
 
 // LaunchDecision is a PlanLaunch result: the (possibly relocated) launch dir and

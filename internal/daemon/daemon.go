@@ -91,7 +91,7 @@ type Daemon struct {
 
 	// pendingRestore holds the live set read from disk at startup, relaunched
 	// once after the first poll resolves sessions/specs.
-	pendingRestore []engine.Key
+	pendingRestore []restartRecord
 
 	// steerSettle is how long a `prompt` that had to start the agent waits for the
 	// runtime's TUI to paint before typing into it. Zero means steerStartSettle;
@@ -1011,7 +1011,7 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 // Ensure is idempotent, so a running session is a no-op. This is the single
 // session-start primitive: startEngineFor fans a root out to its members through
 // it, and a `prompt` to a stopped session starts exactly that session with it.
-func (d *Daemon) startAgent(ctx context.Context, aid string) error {
+func (d *Daemon) startAgent(ctx context.Context, aid string, restart ...restartRecord) error {
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
 	}
@@ -1019,8 +1019,12 @@ func (d *Daemon) startAgent(ctx context.Context, aid string) error {
 	if err != nil {
 		return err
 	}
+	var work *codexapp.RestartWork
+	if len(restart) > 0 {
+		work = restart[0].apply(&spec)
+	}
 	if d.structuredControl(spec.Session) {
-		_, err := d.ensureSupervisorSpec(ctx, spec)
+		_, err := d.ensureSupervisorSpec(ctx, spec, work)
 		return err
 	}
 	dir, env, argv, err := d.resolve(spec, panespec.TabAgent)
@@ -1061,7 +1065,7 @@ func (d *Daemon) ensureSupervisor(ctx context.Context, agentID string) (*codexap
 	return d.ensureSupervisorSpec(ctx, spec)
 }
 
-func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchSpec) (*codexapp.Supervisor, error) {
+func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchSpec, restart ...*codexapp.RestartWork) (*codexapp.Supervisor, error) {
 	agentID := spec.Session.ID
 	if sup, ok := d.codex.Get(agentID); ok {
 		return sup, nil
@@ -1077,8 +1081,12 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 		return nil, err
 	}
 	sess := spec.Session
+	var work *codexapp.RestartWork
+	if len(restart) > 0 {
+		work = restart[0]
+	}
 	published, _, err := d.publishPermissionRuntime(agentID, func() (any, error) {
-		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch()})
+		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work})
 	})
 	if err != nil {
 		return nil, err
@@ -1101,17 +1109,39 @@ func (d *Daemon) structuredControl(s store.Session) bool {
 // the set is unchanged from the last one, so the per-poll call is cheap. Failures
 // are logged, never fatal — persistence is best-effort.
 func (d *Daemon) persistLiveAgents() {
-	if d.engine == nil || d.liveAgentsPath == "" {
+	if d.liveAgentsPath == "" {
 		return
 	}
-	keys := d.engine.Live()
+	var keys []engine.Key
+	if d.engine != nil {
+		keys = d.engine.Live()
+	}
+	if d.codex != nil {
+		for id := range d.codex.RestartSnapshot() {
+			key := engine.Key{AgentID: id, Tab: panespec.TabAgent}
+			found := false
+			for _, k := range keys {
+				if k == key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				keys = append(keys, key)
+			}
+		}
+	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].AgentID != keys[j].AgentID {
 			return keys[i].AgentID < keys[j].AgentID
 		}
 		return keys[i].Tab < keys[j].Tab
 	})
-	buf, err := json.Marshal(keys)
+	records := make([]restartRecord, 0, len(keys))
+	for _, key := range keys {
+		records = append(records, d.captureRestart(key))
+	}
+	buf, err := json.Marshal(records)
 	if err != nil {
 		return
 	}
@@ -1135,7 +1165,7 @@ func (d *Daemon) persistLiveAgents() {
 
 // readLiveAgents reads the persisted live set. A missing/garbage file yields nil
 // (nothing to restore), never an error — restore is best-effort.
-func (d *Daemon) readLiveAgents() []engine.Key {
+func (d *Daemon) readLiveAgents() []restartRecord {
 	if d.liveAgentsPath == "" {
 		return nil
 	}
@@ -1143,7 +1173,7 @@ func (d *Daemon) readLiveAgents() []engine.Key {
 	if err != nil {
 		return nil
 	}
-	var keys []engine.Key
+	var keys []restartRecord
 	if err := json.Unmarshal(buf, &keys); err != nil {
 		log.Printf("read live agents: %v", err)
 		return nil
@@ -1170,7 +1200,7 @@ func (d *Daemon) restoreLiveAgents(ctx context.Context) {
 		if !d.restorable(k.AgentID) {
 			continue // deleted or archived while the daemon was down
 		}
-		if err := d.startEngineFor(ctx, k.AgentID); err != nil {
+		if err := d.startAgent(ctx, k.AgentID, k); err != nil {
 			log.Printf("restore agent %s: %v", k.AgentID, err)
 			continue
 		}

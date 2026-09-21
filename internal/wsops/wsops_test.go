@@ -817,7 +817,8 @@ func TestAgentCommandCodexLostPinAdoptsNewest(t *testing.T) {
 	}
 	db.Close()
 
-	_, _, argv, err := AgentCommand(s)
+	// Saved work for the lost conversation must not be submitted to its replacement.
+	_, _, argv, err := AgentCommand(s, true)
 	if err != nil {
 		t.Fatal(err)
 	}

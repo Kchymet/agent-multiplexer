@@ -73,6 +73,7 @@ type Config struct {
 	// --listen <Endpoint> and dials the same value.
 	Endpoint          string
 	ResumeThreadID    string        // non-empty ⇒ thread/resume instead of thread/start
+	RestartWork       *RestartWork  // host-captured work state before restarting this thread
 	InitialPrompt     string        // submitted only when the handshake creates a fresh thread
 	ApprovalPolicy    string        // "" ⇒ defaultApprovalPolicy
 	ApprovalsReviewer string        // "" ⇒ defaultApprovalsReviewer ("Approve for me")
@@ -131,7 +132,10 @@ type Supervisor struct {
 	logW   io.WriteCloser // EventLogPath sink, opened lazily on first emit
 	logErr bool           // a prior log write failed; stop retrying (never fatal)
 
-	resumable bool // a rollout exists; native attach and later resume are safe
+	resumable    bool // a rollout exists; native attach and later resume are safe
+	goal         *threadGoal
+	goalRevision uint64
+	restartWork  *RestartWork // frozen before shutdown clears active-turn state
 }
 
 // New builds a supervisor from cfg. It does not start anything — call Start (or
@@ -523,6 +527,9 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	// Manager.Ensure can persist this identity for native attach and restarts.
 	s.resumable = true
 	s.mu.Unlock()
+	if err := s.restoreGoal(ctx, resumed); err != nil {
+		return err
+	}
 	if prompt := strings.TrimSpace(s.cfg.InitialPrompt); !resumed && prompt != "" {
 		// The App Server has no positional prompt. Submit it on the canonical
 		// thread before exposing the supervisor, waiting only for acceptance so
@@ -617,6 +624,10 @@ func (s *Supervisor) Close() error {
 // attached yet: attach will reject and close any subsequently dialed transport.
 func (s *Supervisor) interruptTransport() {
 	s.mu.Lock()
+	if !s.interrupted {
+		work := s.restartWorkLocked()
+		s.restartWork = &work
+	}
 	s.interrupted = true
 	startCancel := s.startCancel
 	cancel := s.runCancel
@@ -863,6 +874,7 @@ func (s *Supervisor) Subscribe(ctx context.Context, afterSeq int64) <-chan harne
 // ── read-loop handlers (run on rpcConn.run's goroutine) ──────────────────────
 
 func (s *Supervisor) onNotify(method string, params json.RawMessage) {
+	s.observeGoal(method, params)
 	if method == unparsableMethod {
 		s.emit(rawEvent("$unparsable", params))
 		return

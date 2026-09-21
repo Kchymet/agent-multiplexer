@@ -119,7 +119,8 @@ func (m *Manager) SetModel(sessionID, model string) {
 type LaunchOptions struct {
 	// Sandbox is selected by the protected launcher. Empty retains the default.
 	// This does not change approvals or their reviewer.
-	Sandbox string
+	Sandbox     string
+	RestartWork *RestartWork
 }
 
 // Ensure returns the supervisor for a session, starting one if none is live. It
@@ -193,6 +194,7 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
 	if len(launch) > 0 {
 		cfg.Sandbox = launch[0].Sandbox
+		cfg.RestartWork = launch[0].RestartWork
 	}
 
 	sup := New(cfg)
@@ -244,6 +246,20 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	delete(m.starting, sessionID)
 	m.mu.Unlock()
 	return sup, nil
+}
+
+// RestartSnapshot includes headless supervisors and stays readable while their
+// transports drain. It never performs RPC or starts/stops a runtime.
+func (m *Manager) RestartSnapshot() map[string]RestartWork {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]RestartWork, len(m.sup))
+	for id, s := range m.sup {
+		if work := s.RestartWork(); work.ThreadID != "" {
+			out[id] = work
+		}
+	}
+	return out
 }
 
 // resumeThreadFor returns the thread to resume, or "" for an identity known never
