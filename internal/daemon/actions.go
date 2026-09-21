@@ -48,16 +48,20 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		return fail("authorization changed before execution: %v", err)
 	}
 	switch a.Action {
-	case actionSessionRecreate:
+	case actionSessionRecreate, core.ActionRestart:
 		if a.ID == "" || a.Kind != "" || a.Cwd != "" || a.Target != "" || a.Query != "" ||
 			len(a.Fields) != 0 || a.PaneID != "" || a.Tab != 0 || a.Cols != 0 || a.Rows != 0 || len(a.Data) != 0 {
-			return fail("session recreation accepts exactly one session id")
+			return fail("session restart/recreation accepts exactly one session id")
 		}
-		if err := d.recreateSession(ctx, a.ID); err != nil {
+		if err := d.replaceSession(ctx, a.ID, a.Action == actionSessionRecreate); err != nil {
 			return fail("%v", err)
 		}
 		d.triggerPoll()
-		return ok()
+		r := ok()
+		if a.Action == core.ActionRestart {
+			r.RestartedID = a.ID
+		}
+		return r
 	case actionDaemonShutdown:
 		if a.ID != "" || a.Kind != "" || a.Cwd != "" || a.Target != "" || a.Query != "" ||
 			len(a.Fields) != 0 || a.PaneID != "" || a.Tab != 0 || a.Cols != 0 || a.Rows != 0 || len(a.Data) != 0 {
@@ -316,15 +320,35 @@ func (d *Daemon) restoreCredentialState(ctx context.Context, subjectID string) (
 	return revoked.Generation, true, nil
 }
 
-// recreateSession is the explicit compatibility boundary for a process that
-// predates fixed session access mounts. It validates the complete replacement
-// launch before stopping the old runtime, touches no worktree/config/transcript
-// files, and replaces only the named runtime (a coordinator does not cascade to
-// its members). The socket transport admitting this verb is host-only.
-func (d *Daemon) recreateSession(ctx context.Context, id string) error {
+// replaceSession preflights a host-authorized replacement before stopping the
+// old runtime. A restart replaces the named agent and App Server, preserving
+// conversation identity, sibling sessions and terminal/editor processes.
+// Compatibility recreation also stops tabs retaining obsolete access mounts.
+func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) error {
 	spec, err := d.launchSpec(ctx, id)
 	if err != nil {
 		return err
+	}
+	if spec.Session.Archived {
+		return fmt.Errorf("session %s is archived; restore it before restarting", id)
+	}
+	kill := func() {
+		if allTabs {
+			d.killRuntimeFor(id)
+			return
+		}
+		d.authMu.Lock()
+		defer d.authMu.Unlock()
+		d.permissions.retireAnd(id, func() {
+			key := engine.Key{AgentID: id, Tab: panespec.TabAgent}
+			delete(d.authPending, key)
+			if d.engine != nil {
+				d.engine.Kill(key)
+			}
+			if d.codex != nil {
+				d.codex.Close(id)
+			}
+		})
 	}
 	if d.structuredControl(spec.Session) {
 		dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
@@ -334,7 +358,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 		if err := revalidateDeferred(ctx); err != nil {
 			return err
 		}
-		d.killRuntimeFor(id)
+		kill()
 		session := spec.Session
 		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
 			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch()})
@@ -357,7 +381,7 @@ func (d *Daemon) recreateSession(ctx context.Context, id string) error {
 	if err := revalidateDeferred(ctx); err != nil {
 		return err
 	}
-	d.killRuntimeFor(id)
+	kill()
 	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
 		return d.engine.Ensure(ctx, engine.Spec{
 			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,

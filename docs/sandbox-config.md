@@ -68,6 +68,27 @@ The App Server uses the same sandbox and config grants as a Codex pane; it still
 needs credentials, but file-backed Codex authentication does not need this
 macOS Claude Keychain broker.
 
+### macOS certificate trust and restarting a session
+
+The native sandbox blocks general Keychain IPC, which can prevent Codex from
+enumerating TLS roots even when its login is available. amux supplies
+`SSL_CERT_FILE=/etc/ssl/cert.pem` so Codex can verify HTTPS and WebSocket peers
+using macOS's public PEM CA bundle. TLS verification remains enabled.
+
+If the host daemon has `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE` set, amux keeps
+that selection and grants read access to the specific certificate file. Set an
+explicit PEM bundle for corporate/private roots; changes made only to the host
+Keychain are not exported into the default bundle. Codex gives
+`CODEX_CA_CERTIFICATE` precedence over `SSL_CERT_FILE`.
+
+After updating the daemon, use **Alt+r** (then confirm) or
+`amux do restart <id>` from the host to restart one Claude/Codex agent with its
+saved conversation and current sandbox settings. This interrupts its current
+turn. Workgroup coordinators restart independently of their agents, and
+terminal/editor tabs remain running. For Codex App Server sessions, both the
+supervised server and its attached agent UI are replaced using the saved thread.
+The shortcut is configurable as `keys.restart-agent`.
+
 ### Optional separate Claude login for all sessions
 
 After installing the updated CLI **and restarting the amux daemon**, run from

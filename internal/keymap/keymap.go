@@ -17,13 +17,14 @@ import (
 
 // Actions — the config key under "keys" is "keys.<action>" on the CLI.
 const (
-	FocusRail   = "focus-rail"
-	FocusAgent  = "focus-agent"
-	ToggleFocus = "toggle-focus"
-	Quit        = "quit"
-	TabAgent    = "tab-agent"
-	TabEditor   = "tab-editor"
-	TabTerm     = "tab-term"
+	FocusRail    = "focus-rail"
+	FocusAgent   = "focus-agent"
+	ToggleFocus  = "toggle-focus"
+	Quit         = "quit"
+	TabAgent     = "tab-agent"
+	TabEditor    = "tab-editor"
+	TabTerm      = "tab-term"
+	RestartAgent = "restart-agent"
 )
 
 // actions lists every configurable action in display order, with the help
@@ -36,16 +37,18 @@ var actions = []struct{ name, desc string }{
 	{TabAgent, "switch to the agent tab"},
 	{TabEditor, "switch to the editor tab"},
 	{TabTerm, "switch to the terminal tab"},
+	{RestartAgent, "restart the selected agent and resume its conversation"},
 }
 
 var defaults = map[string]string{
-	FocusRail:   "alt+h",
-	FocusAgent:  "alt+l",
-	ToggleFocus: "alt+a",
-	Quit:        "alt+q",
-	TabAgent:    "alt+1",
-	TabEditor:   "alt+2",
-	TabTerm:     "alt+3",
+	FocusRail:    "alt+h",
+	FocusAgent:   "alt+l",
+	ToggleFocus:  "alt+a",
+	Quit:         "alt+q",
+	TabAgent:     "alt+1",
+	TabEditor:    "alt+2",
+	TabTerm:      "alt+3",
+	RestartAgent: "alt+r",
 }
 
 // Keymap is the effective action→chord map. The zero value behaves as the

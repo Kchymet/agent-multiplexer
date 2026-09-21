@@ -104,6 +104,8 @@ func validateSessionAction(req access.Request) error {
 		return joinValidation(noID(), noTarget(), fields())
 	case core.ActionStart:
 		return joinValidation(requireID(), noTarget(), fields())
+	case core.ActionRestart:
+		return fmt.Errorf("restarting a session requires the authenticated host")
 	case core.ActionAuthReload:
 		if err := joinValidation(noID(), noTarget(), fields("force")); err != nil {
 			return err

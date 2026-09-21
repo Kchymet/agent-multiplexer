@@ -101,12 +101,27 @@ func platformLaunchEnv(spec LaunchSpec) []string {
 	if isolationPlatform != "darwin" {
 		return nil
 	}
-	return []string{
+	env := []string{
 		core.SessionAccessEnv + "=" + spec.Access.CredentialHostDir,
 		"PATH=" + launchenv.PathWithTool(filepath.Dir(core.SessionBinPath(spec.Session.ID)), os.Getenv("PATH")),
 		"TMPDIR=" + nativeTempDir(spec.Session),
 		"CLAUDE_CODE_TMPDIR=" + nativeTempDir(spec.Session),
 	}
+	// Native certificate enumeration needs general Keychain IPC, which remains
+	// denied. Codex's HTTPS and WebSocket clients support a PEM trust bundle.
+	// Respect explicit host CA configuration; otherwise use macOS's public CAs.
+	if os.Getenv("SSL_CERT_FILE") == "" && os.Getenv("CODEX_CA_CERTIFICATE") == "" {
+		env = append(env, "SSL_CERT_FILE=/etc/ssl/cert.pem")
+	}
+	for _, key := range []string{"SSL_CERT_FILE", "CODEX_CA_CERTIFICATE"} {
+		if path := os.Getenv(key); path != "" {
+			if absolute, err := filepath.Abs(path); err == nil {
+				path = absolute
+			}
+			env = append(env, key+"="+path)
+		}
+	}
+	return env
 }
 
 // CodexSandboxForLaunch is passed only alongside a successfully constructed
@@ -285,6 +300,17 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	var policy seatbeltPolicy
 	policy.WriteString(seatbeltBase)
 	policy.WriteString(seatbeltBrowser)
+	for _, key := range []string{"SSL_CERT_FILE", "CODEX_CA_CERTIFICATE"} {
+		if path := os.Getenv(key); path != "" {
+			info, err := os.Stat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("%s must name a readable CA certificate file", key)
+			}
+			if err := policy.grant(path, false, false); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if agent.Canonical(s.Agent) == "claude" {
 		// Claude's host and sandbox instances must coordinate token refreshes.
 		// Permit only the native lock paths, including creation when absent;

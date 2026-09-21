@@ -68,6 +68,7 @@ const (
 // CLI-created session comes up running the way the TUI starts one on open.
 const (
 	ActionStart      = "start"       // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
+	ActionRestart    = "restart"     // restart only the named agent, preserving its conversation (host only)
 	ActionAuthReload = "auth-reload" // resume live Claude agents with the shared login
 	ActionQuery      = "query"       // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
 	// ActionSteer drives the agent *inside* a running session rather than the
@@ -133,6 +134,7 @@ const (
 var controlActions = []string{
 	ActionRefresh,
 	ActionStart,
+	ActionRestart,
 	ActionAuthReload,
 	ActionSteer,
 	ActionRename,
@@ -305,10 +307,11 @@ type Action struct {
 
 // Result is the daemon -> client action response.
 type Result struct {
-	Type  string `json:"type"` // always "result"
-	OK    bool   `json:"ok"`
-	NewID string `json:"newId,omitempty"` // id of a session the action created (so a client can switch to it)
-	Error string `json:"error,omitempty"`
+	Type        string `json:"type"` // always "result"
+	OK          bool   `json:"ok"`
+	NewID       string `json:"newId,omitempty"`       // id of a session the action created (so a client can switch to it)
+	RestartedID string `json:"restartedId,omitempty"` // replace the client's agent pane after a restart
+	Error       string `json:"error,omitempty"`
 }
 
 // Pane frame types (PaneFrame.Type), streamed daemon -> client for an attached
