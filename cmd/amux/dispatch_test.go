@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/core"
 	"amux/internal/daemon"
 )
 
@@ -353,8 +354,11 @@ func captureOutput(t *testing.T, fn func() error) (string, error) {
 // moves to a temp home, the daemon connection is cut (so no command reaches — or
 // spawns — the developer's own daemon), stdin becomes /dev/null, and the CLI is
 // told it has no terminal so the interactive create pages report that instead of
-// opening an fzf screen.
-func sandboxCLI(t *testing.T) {
+// opening an fzf screen. The fixed session authority — which HOME/XDG cannot
+// redirect, and which a suite run inside an amux worker inherits — is replaced
+// by the fail-closed fake from session_isolation_test.go, so a real `agent
+// done`/`agent name`/`do` verb can never reach the worker's own mailbox.
+func sandboxCLI(t *testing.T) *isolatedSessionAuthority {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -365,6 +369,8 @@ func sandboxCLI(t *testing.T) {
 	t.Setenv("AMUX_WORKGROUP", "")
 	t.Setenv("AMUX_WORKSPACE", "")
 	t.Setenv("AMUX_SESSION_ID", "")
+	t.Setenv(core.SessionAccessEnv, "")
+	authority := isolateSessionAuthority(t)
 
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -381,4 +387,5 @@ func sandboxCLI(t *testing.T) {
 		protectedHostStartup = startupAuthBak
 		_ = devNull.Close()
 	})
+	return authority
 }
