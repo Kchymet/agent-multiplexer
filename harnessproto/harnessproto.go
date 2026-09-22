@@ -118,6 +118,13 @@ const (
 //     that does not name the request the runtime currently has open (the prompt
 //     it named has since been answered, so the keystroke would land on a
 //     different one) rather than answering blind.
+//   - VerbGoal controls the native goal of a goal session (SessionCaps.Goal):
+//     FieldGoalStatus is GoalActive | GoalPaused | GoalComplete | GoalClear,
+//     with an optional FieldGoalObjective and FieldGoalBudget. Pausing, resuming
+//     and clearing a goal are the USER's decisions — the runtime and the agent
+//     never make them — so a remote consumer needs this verb to offer the same
+//     control a host terminal has. A daemon MUST refuse it for a session that is
+//     not a goal session rather than steering something else.
 //
 // Steering is inherently asynchronous: a successful result means the daemon
 // accepted the verb (ResultAccepted), not that the agent has finished acting on
@@ -128,6 +135,7 @@ const (
 	VerbInterject  = "interject"
 	VerbStop       = "stop"
 	VerbPermission = "permission"
+	VerbGoal       = "goal"
 )
 
 // SessionVerbs is the closed set of accepted session-action verbs. A consumer
@@ -147,6 +155,7 @@ var SessionVerbs = map[string]bool{
 	VerbInterject:    true,
 	VerbStop:         true,
 	VerbPermission:   true,
+	VerbGoal:         true,
 }
 
 // SteeringVerbs is the subset of SessionVerbs that steers the agent inside a
@@ -158,6 +167,7 @@ var SteeringVerbs = map[string]bool{
 	VerbInterject:  true,
 	VerbStop:       true,
 	VerbPermission: true,
+	VerbGoal:       true,
 }
 
 // session-action field keys (MuxMsg.Fields) for the steering verbs. Lifecycle
@@ -173,7 +183,34 @@ const (
 	// echo it so a request id cannot be replayed against a replacement runtime;
 	// the matching permission_resolved payload carries the same original value.
 	FieldRuntimeGeneration = "runtime_generation"
+
+	// goal: the native goal controls (VerbGoal). A goal is identified by the
+	// session it belongs to, so there is no goal id to quote back.
+	FieldGoalStatus    = "status"       // one of the Goal* statuses below
+	FieldGoalObjective = "objective"    // optional: replace the objective text
+	FieldGoalBudget    = "token_budget" // optional: a positive token budget
 )
+
+// Goal statuses a VerbGoal action may set (the FieldGoalStatus value). This is
+// the control vocabulary only — the set of transitions a USER may ask for — not
+// the full status machine a runtime reports back on its own (blocked,
+// usageLimited and budgetLimited are runtime observations that no caller sets).
+// Anything outside this set is rejected rather than guessed at.
+const (
+	GoalActive   = "active"   // start, or resume, pursuing the objective
+	GoalPaused   = "paused"   // stop pursuing it until the user resumes
+	GoalComplete = "complete" // the objective is met
+	GoalClear    = "clear"    // remove the goal entirely
+)
+
+// GoalStatuses is the closed set of GoalActive/GoalPaused/GoalComplete/GoalClear,
+// for a peer that validates before a round-trip.
+var GoalStatuses = map[string]bool{
+	GoalActive:   true,
+	GoalPaused:   true,
+	GoalComplete: true,
+	GoalClear:    true,
+}
 
 // Permission decisions (the FieldDecision value on a VerbPermission action).
 // Anything else is rejected: the daemon must never guess at an ambiguous

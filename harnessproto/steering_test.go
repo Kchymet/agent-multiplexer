@@ -23,10 +23,18 @@ func TestSteeringVerbStrings(t *testing.T) {
 		{VerbInterject, "interject"},
 		{VerbStop, "stop"},
 		{VerbPermission, "permission"},
+		{VerbGoal, "goal"},
 		{FieldText, "text"},
 		{FieldRequestID, "request_id"},
 		{FieldDecision, "decision"},
 		{FieldReason, "reason"},
+		{FieldGoalStatus, "status"},
+		{FieldGoalObjective, "objective"},
+		{FieldGoalBudget, "token_budget"},
+		{GoalActive, "active"},
+		{GoalPaused, "paused"},
+		{GoalComplete, "complete"},
+		{GoalClear, "clear"},
 		{DecisionAllow, "allow"},
 		{DecisionDeny, "deny"},
 		{ResultApplied, "applied"},
@@ -42,9 +50,9 @@ func TestSteeringVerbStrings(t *testing.T) {
 
 // TestSteeringVerbsAccepted asserts the steering verbs joined the closed set —
 // an orchestrator screens against SessionVerbs before sending, so a verb missing
-// here is unsendable — and that SteeringVerbs is exactly the new four.
+// here is unsendable — and that SteeringVerbs is exactly the steering set.
 func TestSteeringVerbsAccepted(t *testing.T) {
-	want := map[string]bool{VerbPrompt: true, VerbInterject: true, VerbStop: true, VerbPermission: true}
+	want := map[string]bool{VerbPrompt: true, VerbInterject: true, VerbStop: true, VerbPermission: true, VerbGoal: true}
 	if !reflect.DeepEqual(SteeringVerbs, want) {
 		t.Fatalf("SteeringVerbs = %v, want %v", SteeringVerbs, want)
 	}

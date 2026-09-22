@@ -293,7 +293,9 @@ func (w *Workspace) withCaps(s core.Session, steerable bool) core.Session {
 	}
 	var caps core.SessionCaps
 	if steerable {
-		caps = agent.CapsFor(s.Runtime)
+		// Role as well as runtime: the goal control is served only for a session
+		// under native goal supervision, not for every session of that runtime.
+		caps = agent.CapsForRole(s.Runtime, s.Role)
 	}
 	s.Caps = &caps
 	// ControlMode says HOW those caps are delivered (§2.2): a supervised session is

@@ -99,9 +99,13 @@ control support from the mere existence of a transcript:
   `runtime`, and its `kind` is only a layout label (`repo`, `""`). A consumer
   picks the transcript renderer and the affordance set for this value.
 - `caps` is the honest control surface for the session — one boolean per steering
-  verb (§3.1): `prompt`, `interject`, `cancel`, `permission`. Each says whether
-  the daemon can serve that verb for *this* session, so a consumer disables an
-  affordance it would only fail on.
+  verb (§3.1): `prompt`, `interject`, `cancel`, `permission`, `goal`. Each says
+  whether the daemon can serve that verb for *this* session, so a consumer
+  disables an affordance it would only fail on.
+  - `goal` is true only for a session whose runtime actually supervises a native
+    goal — a workgroup coordinator on the goal runtime, not every session of that
+    runtime. An ordinary agent on the same runtime reports `goal:false`, and a
+    daemon MUST refuse the verb for it rather than steering something else.
   - `permission` is deliberately **not** "a transcript exists". It is true only
     when the runtime raises *correlated* `permission_request` events — a
     `request_id` the `permission` verb can quote back and the daemon can match to
@@ -261,8 +265,8 @@ local configuration (e.g. read-only publishing: inventory yes, verbs no).
 
 ### 3.1 Steering verbs
 
-The lifecycle verbs manage a session from the outside; these four steer the
-agent *inside* one that is already running, so an orchestrator can drive a turn
+The lifecycle verbs manage a session from the outside; these steer the agent
+*inside* one that is already running, so an orchestrator can drive a turn
 without a terminal. They are session verbs like any other — still no pane
 access, still the daemon's choice of delivery mechanism, still rejectable.
 
@@ -272,10 +276,20 @@ access, still the daemon's choice of delivery mechanism, still rejectable.
 | `interject` | `text` | Deliver text to the agent *while a turn is running* — a steer, not a new turn. |
 | `stop` | — | Interrupt the current turn **without killing the session**. The agent stays alive and ready for the next verb; this is not `kill`. |
 | `permission` | `request_id`, `runtime_generation`, `decision`, `reason?` | Resolve a permission request the runtime surfaced as a `permission_request` event on the `runtime-events` stream (§4). `request_id` and the opaque `runtime_generation` echo that exact event; `decision` is `allow` or `deny`; `reason` is optional free text. |
+| `goal` | `status?`, `objective?`, `token_budget?` | Control the native goal of a goal session (`caps.goal`). `status` is `active` (start or resume pursuing it), `paused`, `complete`, or `clear` (remove it); `objective` replaces the objective text; `token_budget` is a positive integer. At least one field is required, and `clear` takes neither of the other two. |
 
-`id` names the target session for all four, and is required. `decision` accepts
-exactly `allow` or `deny` — a daemon MUST reject any other value rather than
-guess at a permission prompt.
+`id` names the target session for all of them, and is required. `decision`
+accepts exactly `allow` or `deny` — a daemon MUST reject any other value rather
+than guess at a permission prompt.
+
+`goal` exists because pausing, resuming and clearing a goal are the **user's**
+decisions — the runtime pursues the objective on its own and the agent must
+never pause itself — so a consumer with no host terminal needs this verb to
+offer the same control the host CLI has. `status` accepts only the four values
+above: a runtime also *reports* statuses no caller may set (`blocked`,
+`usageLimited`, `budgetLimited`), and a daemon MUST reject those rather than
+translate them. Raising a budget on a budget-limited goal is `status:active`
+with a larger `token_budget`.
 
 `request_id` and `runtime_generation` are correlated authority, not decorative.
 The daemon atomically consumes that request from that exact live runtime and
