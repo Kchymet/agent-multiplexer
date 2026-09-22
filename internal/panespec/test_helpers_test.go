@@ -20,7 +20,12 @@ func TestMain(m *testing.M) {
 	// Darwin Unix sockets have a 104-byte pathname limit. Its default temp
 	// prefix alone consumes most of that, before a per-test directory is added.
 	if runtime.GOOS == "darwin" {
-		_ = os.Setenv("TMPDIR", "/private/tmp")
+		// A sandboxed run that cannot write /private/tmp keeps its own TMPDIR.
+		if f, err := os.CreateTemp("/private/tmp", ".amux-test-*"); err == nil {
+			f.Close()
+			os.Remove(f.Name())
+			_ = os.Setenv("TMPDIR", "/private/tmp")
+		}
 	}
 	os.Exit(m.Run())
 }

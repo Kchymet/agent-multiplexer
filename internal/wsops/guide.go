@@ -210,8 +210,11 @@ a native TUI and mirrored to a web dashboard.
 
 ## Operate amux
 %s
-- `+"`amux do new-workgroup -f name=\"…\" -f repos=a,b -f prompt=\"…\"`"+` creates a
-  workgroup with a first agent; `+"`amux do add-agent <workgroup> -f repos=… -f prompt=\"…\"`"+`
+- `+"`amux do new-workgroup -f name=\"…\" -f prompt=\"…\" [-f repos=a,b]`"+` creates a
+  workgroup whose coordinator runs the prompt as a native goal on the default
+  coordinator runtime (`+"`codex`"+`; `+"`-f coordinator=claude`"+` opts out of goal mode,
+  `+"`-f coordinator_model=…`"+` picks its model), optionally with an idle first agent
+  on the repos; `+"`amux do add-agent <workgroup> -f repos=… -f prompt=\"…\"`"+`
   adds one (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are optional);
   `+"`amux do new-repo-agent <repo> -f prompt=\"…\"`"+` starts a one-off agent on a repo;
   `+"`amux do move <agent> --target <workgroup>`"+` re-parents an agent.
@@ -235,7 +238,10 @@ a native TUI and mirrored to a web dashboard.
 }
 
 // coordinatorGuide is the guide for a workgroup root's own session: the
-// coordinator of that workgroup's agents, working in its dedicated own dir.
+// coordinator of that workgroup's agents, working in its dedicated own dir. The
+// operating vocabulary it teaches is exactly what the coordinator's mailbox
+// grant authorizes (access.Policy: same-root add-agent, steering/starting/
+// renaming/archiving current direct members) — nothing host-only is advertised.
 func coordinatorGuide(root store.Session) string {
 	var b strings.Builder
 	name := root.Display()
@@ -247,6 +253,15 @@ you scope the work, dispatch and steer agents, verify what they produce against
 evidence, and keep the user informed. Prompting this workgroup from the rail or
 the web reaches you.
 
+## Decide and keep going
+The user's task is yours to finish with minimal intervention. When a detail is
+unspecified, choose the sensible default a careful engineer would, record the
+assumption (in `+"`COORDINATION.md`"+` and your report) and proceed. Ask the user only
+when a decision is genuinely theirs and different answers would change the work
+materially — and even then, first do everything that does not depend on the
+answer, and never stop or idle waiting for a reply to an optional question.
+Report completion only when the requested end state is verified from evidence.
+
 ## Your sandbox
 This directory (%s) is your dedicated writable sandbox. Member sandboxes are
 siblings outside this filesystem namespace, not children you can read by path.
@@ -255,14 +270,33 @@ grant. Keep your own notes here (a `+"`COORDINATION.md`"+` with the roster,
 decisions, and acceptance criteria is the record that survives your context). %s
 
 ## Operate this workgroup
-%s
-- `+"`amux do add-agent %s -f repos=… -f prompt=\"…\"`"+` adds an agent to this
-  workgroup (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are optional).
-- Every agent commits on its own branch (`+"`amux/%s-<agent>`"+`) and ships through a
+These are the commands your grant authorizes; they act on this workgroup and its
+current direct members (`+"`<member>`"+` is a member id from the roster below).
+- `+"`amux status --json`"+` — the live view of this workgroup's members, with
+  normalized state (idle | ready | waiting | running), title, and repos.
+- `+"`amux agent events <member> --json`"+` — a member's normalized history: the
+  evidence for what it did (continue with `+"`--cursor`"+`).
+- `+"`amux do add-agent %s -f repos=a,b -f prompt=\"…\"`"+` — add a member to this
+  workgroup (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are
+  optional). Pass `+"`-f model=…`"+` explicitly when a task calls for a specific model;
+  otherwise the member gets its harness's default.
+- `+"`amux do steer <member> -f verb=prompt -f text=\"…\"`"+` — send a member a prompt
+  (this starts a stopped member); `+"`-f verb=interject`"+` speaks mid-turn,
+  `+"`-f verb=stop`"+` interrupts its turn, and `+"`-f verb=permission`"+`
+  `+"`-f decision=allow|deny -f request_id=… -f runtime_generation=…`"+` answers a
+  permission request (both ids come from the member's `+"`permission_request`"+` event).
+- `+"`amux do start <member>`"+` — bring a stopped member up without prompting it;
+  `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
+- `+"`amux do set-archived <member> -f archived=true`"+` — mark a member done. Restoring
+  an archived member, and archiving or restoring this workgroup itself, are the
+  user's operations from the host, not yours.
+- Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
   pull request; review its authenticated session view and PR evidence, not only
-  the agent's summary.
+  the member's summary.
 
-`, name, name, root.ID, root.Dir, guideRegenNote, steeringVerbs, root.ID, root.ID)
+`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
+	b.WriteString(goalSection(root))
+	b.WriteString("\n")
 	b.WriteString(membersSection(root))
 	b.WriteString("\n")
 	b.WriteString(configHomeSection)
@@ -490,3 +524,42 @@ func firstOf(list string) string {
 }
 
 func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
+
+// goalSection tells a coordinator how its task lifecycle actually works. On the
+// default goal runtime the host and Codex do the establishing and continuing;
+// the guide's job is to keep the model honest about completion, input and
+// pausing. Any other harness gets the plain truth instead of a goal claim.
+func goalSection(root store.Session) string {
+	if !agent.NativeGoals(root) {
+		return fmt.Sprintf(`## Goal mode
+This coordinator runs on %s, which has no native goal engine: a task arrives as
+an ordinary turn and is not continued for you between turns. Keep your own
+progress record in `+"`COORDINATION.md`"+` and finish each task within the turns the
+user gives you. The default coordinator runtime (%s) runs every task as a native
+goal instead; this session was created with an explicit harness choice.
+`, agent.Canonical(root.Agent), agent.GoalRuntime)
+	}
+	return fmt.Sprintf(`## Goal mode (native)
+This session runs under a native Codex thread goal. Every task this workgroup
+receives — from the rail, the web dashboard, `+"`amux do steer %s -f verb=prompt`"+`,
+or typed into this terminal — is established as your active goal by amux, and
+Codex itself continues that goal on every idle turn until it is complete. You
+never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, budget and usage.
+- Pursue the goal to the requested end state: scope it, dispatch members
+  (`+"`add-agent`"+`, `+"`steer`"+`), verify their evidence (session views, branches, PRs,
+  CI), and fix or re-dispatch what falls short. Progress must change real state.
+- Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
+  verified — never because you are stopping, out of ideas, or near a budget.
+  A finished goal stays finished: the next task the user sends becomes a new goal.
+- Ask the user only for genuine input (`+"`request_user_input`"+`); an open question is
+  not a reason to shrink the objective. Use status `+"`blocked`"+` only after the same
+  blocker repeats across consecutive goal turns, as the tool describes.
+- Only the user pauses, resumes or clears the goal
+  (`+"`amux do steer %s -f verb=goal -f status=paused|active|clear`"+`, optionally
+  `+"`-f token_budget=N`"+`). Never pause on your own initiative; a paused goal stays
+  paused until the user resumes it, including across restarts.
+- A restart preserves the goal, its objective, progress and token accounting and
+  resumes an active goal by itself; `+"`stop`"+` interrupts the current turn and the
+  goal continues on the next prompt.
+`, root.ID, root.ID)
+}
