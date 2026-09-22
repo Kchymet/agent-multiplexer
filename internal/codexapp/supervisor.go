@@ -147,6 +147,14 @@ type Supervisor struct {
 	goalTasks  map[string]string // userMessage item id → the turn it was admitted in
 	goalOpen   map[string]int    // turn id → tasks still deciding against that turn
 	endedTurns map[string]string // recent turn id → stop reason, for late task decisions
+	// goalCancel counts explicit cancellations of the goal (a clear by the user
+	// or another client). It is deliberately separate from goalRevision, which
+	// counts observed STATE changes: clearing a thread that has no goal changes
+	// no state, yet it is exactly the intent that must invalidate a task waiting
+	// to establish one. selfClear swallows the echo of a clear amux performed
+	// itself, so its own work is not counted as a cancellation of itself.
+	goalCancel uint64
+	selfClear  int
 }
 
 // New builds a supervisor from cfg. It does not start anything — call Start (or

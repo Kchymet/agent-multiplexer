@@ -165,6 +165,15 @@ func (s *Supervisor) observeGoal(method string, params json.RawMessage) {
 	if p.ThreadID != s.threadID || s.closed || s.interrupted {
 		return
 	}
+	if method == "thread/goal/cleared" {
+		// An explicit cancellation, whoever made it — even on a thread that had
+		// no goal, where nothing about the state changes.
+		if s.selfClear > 0 {
+			s.selfClear--
+		} else {
+			s.goalCancel++
+		}
+	}
 	s.recordGoalLocked(p.Goal)
 }
 
@@ -250,6 +259,7 @@ type goalTask struct {
 	turnID   string // the live turn the message was observed in
 	text     string
 	revision uint64 // s.goalRevision at observation
+	cancel   uint64 // s.goalCancel at observation
 }
 
 // observeUserTask admits a user message observed on a goal session
@@ -308,7 +318,7 @@ func (s *Supervisor) observeUserTask(method string, params json.RawMessage) {
 			s.goalTasks[wrap.Item.ID] = s.curTurn
 		}
 	}
-	task := goalTask{itemID: wrap.Item.ID, turnID: s.curTurn, text: text, revision: s.goalRevision}
+	task := goalTask{itemID: wrap.Item.ID, turnID: s.curTurn, text: text, revision: s.goalRevision, cancel: s.goalCancel}
 	if admit {
 		// Hold the turn's outcome until this task has decided against it.
 		if s.goalOpen == nil {
@@ -397,7 +407,7 @@ func (s *Supervisor) establishGoal(ctx context.Context, task goalTask) error {
 		// between — a user clear, a new goal, a stop — fails the guard and the
 		// task is abandoned rather than activated.
 		completed := func(g *threadGoal) bool { return g != nil && g.Status == GoalComplete && g.key() == goal.key() }
-		if err := s.clearGoal(ctx, "", s.admit(task, task.revision, completed)); err != nil {
+		if err := s.clearGoal(ctx, "", false, s.admit(task, task.revision, completed)); err != nil {
 			if errors.Is(err, errGoalMoved) {
 				return nil
 			}
@@ -445,6 +455,9 @@ func (s *Supervisor) taskLiveLocked(task goalTask, gen uint64) (string, bool) {
 	if s.closed || s.interrupted || s.threadID == "" || s.goalRevision != gen {
 		return "", false
 	}
+	if s.goalCancel != task.cancel {
+		return "", false // the goal was explicitly cleared after this task was admitted
+	}
 	if s.curTurn != task.turnID {
 		if stop, ended := s.endedTurns[task.turnID]; !ended || stop != "completed" {
 			return "", false
@@ -490,16 +503,30 @@ func (s *Supervisor) setGoal(ctx context.Context, params map[string]any, text st
 
 // clearGoal issues thread/goal/clear under the same expectation and
 // fresher-evidence rules as setGoal.
-func (s *Supervisor) clearGoal(ctx context.Context, text string, expect func(*threadGoal) bool) error {
+func (s *Supervisor) clearGoal(ctx context.Context, text string, cancels bool, expect func(*threadGoal) bool) error {
 	s.mu.Lock()
 	threadID := s.threadID
 	before := s.goalRevision
 	moved := expect != nil && !expect(s.goal)
+	if !moved {
+		// The server echoes this clear back as a notification; count it once,
+		// here, so a task admitted before a user's clear is invalidated while
+		// amux's own replacement clear does not invalidate its own second step.
+		s.selfClear++
+		if cancels {
+			s.goalCancel++
+		}
+	}
 	s.mu.Unlock()
 	if moved {
 		return errGoalMoved
 	}
 	if _, err := s.rpc.call(ctx, "thread/goal/clear", map[string]any{"threadId": threadID}); err != nil {
+		s.mu.Lock()
+		if s.selfClear > 0 {
+			s.selfClear-- // no clear happened, so no echo is coming
+		}
+		s.mu.Unlock()
 		if isRPCUnsupported(err) {
 			return ErrGoalsUnsupported
 		}
@@ -542,7 +569,7 @@ func (s *Supervisor) SetGoal(ctx context.Context, u GoalUpdate) error {
 		return errors.New("codexapp: no thread to set a goal on")
 	}
 	if u.Status == GoalClear {
-		return s.clearGoal(ctx, "goal cleared by user", nil)
+		return s.clearGoal(ctx, "goal cleared by user", true, nil)
 	}
 	params := map[string]any{"threadId": threadID}
 	switch u.Status {
@@ -605,6 +632,13 @@ func (s *Supervisor) pruneTurnHistoryLocked() {
 			continue
 		}
 		delete(s.endedTurns, id)
+		// Drop that turn's task ids with it: kept alone they could never be
+		// evicted (their turn no longer reads as ended) and would grow forever.
+		for item, turn := range s.goalTasks {
+			if turn == id {
+				delete(s.goalTasks, item)
+			}
+		}
 		if len(s.endedTurns) <= maxTurnHistory {
 			return
 		}

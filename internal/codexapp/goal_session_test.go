@@ -461,3 +461,75 @@ func seedHistory(s *Supervisor, n int) {
 		s.endedTurns[turn] = "completed"
 	}
 }
+
+// A clear the user makes BEFORE the first task has been established must win,
+// even though the thread had no goal and so nothing about the goal state
+// changed: the intent is a cancellation, not a state transition, and an
+// equality-based view of the state alone cannot see it.
+func TestClearBeforeFirstGoalCancelsPendingTask(t *testing.T) {
+	for _, origin := range []string{"another client", "the goal verb"} {
+		t.Run(origin, func(t *testing.T) {
+			s, fs := goalSession(t, true)
+			release := fs.holdResponse("thread/goal/get")
+			peerTurn(s, "turn_x")
+			userMessage(s, "turn_x", "item_x", "a task the user cancels")
+			if !fs.awaitCall("thread/goal/get", 2*time.Second) {
+				t.Fatal("observer never read the goal")
+			}
+			if origin == "another client" {
+				cleared, _ := json.Marshal(map[string]any{"threadId": s.ThreadID()})
+				s.onNotify("thread/goal/cleared", cleared)
+			} else {
+				// The host's own goal verb, racing the queued observer.
+				go func() { _ = s.SetGoal(context.Background(), GoalUpdate{Status: GoalClear}) }()
+				if !fs.awaitCall("thread/goal/clear", 2*time.Second) {
+					t.Fatal("explicit clear never reached the server")
+				}
+			}
+			close(release)
+			settle()
+			if _, set := fs.sawCall("thread/goal/set"); set {
+				t.Fatal("a cancelled task still established a goal")
+			}
+			if g := fs.goalState(); g != nil {
+				t.Fatalf("goal = %+v, want none after the user's clear", g)
+			}
+		})
+	}
+}
+
+// amux's own clear, the first half of replacing a finished goal, must not read
+// as a cancellation of the very task performing it — otherwise no completed
+// goal could ever be replaced.
+func TestOwnReplacementClearIsNotACancellation(t *testing.T) {
+	s, fs := goalSessionWith(t, true, &threadGoal{ThreadID: "thr_1", Objective: "finished", Status: GoalComplete, CreatedAt: 3})
+	peerTurn(s, "turn_y")
+	userMessage(s, "turn_y", "item_y", "the next piece of work")
+	g := awaitGoal(t, fs, func(g *threadGoal) bool { return g != nil && g.Objective == "the next piece of work" }, 3*time.Second)
+	if g == nil || g.Objective != "the next piece of work" || g.Status != GoalActive {
+		t.Fatalf("replacement goal = %+v", g)
+	}
+	if _, cleared := fs.sawCall("thread/goal/clear"); !cleared {
+		t.Fatal("the finished goal was replaced without clearing its accounting")
+	}
+	if g.TokensUsed != 0 || g.CreatedAt == 3 {
+		t.Fatalf("replacement inherited the finished goal's accounting: %+v", g)
+	}
+}
+
+// Evicting an ended turn drops the task ids that belong to it, so neither map
+// can grow without bound while the other is pruned.
+func TestTurnHistoryEvictionDropsItsTaskIDs(t *testing.T) {
+	s, _ := goalSession(t, true)
+	seedHistory(s, maxTurnHistory+64)
+	s.mu.Lock()
+	s.pruneTurnHistoryLocked()
+	turns, tasks := len(s.endedTurns), len(s.goalTasks)
+	s.mu.Unlock()
+	if turns > maxTurnHistory {
+		t.Fatalf("ended turns unbounded: %d", turns)
+	}
+	if tasks > maxTurnHistory {
+		t.Fatalf("task ids stranded by turn eviction: %d entries for %d turns", tasks, turns)
+	}
+}
