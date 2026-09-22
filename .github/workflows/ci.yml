@@ -154,7 +154,7 @@ jobs:
         run: |
           export PATH="$RUNNER_TEMP/agent-runtimes/codex/bin:$RUNNER_TEMP/agent-runtimes/claude/package:$PATH"
           AMUX_CODEX_APP_SERVER_SMOKE=1 go test ./internal/codexapp \
-            -run '^TestSmokeGoalRestart$' -count=1 -timeout=90s -v
+            -run '^TestSmokeGoal(Restart|Automatic)$' -count=1 -timeout=300s -v
           AMUX_CLAUDE_RESUME_SMOKE=1 go test ./internal/agent \
             -run '^TestSmokeClaudeResumeWork$' -count=1 -timeout=70s -v
       - name: cross compile supported targets
