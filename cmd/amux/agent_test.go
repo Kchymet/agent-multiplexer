@@ -52,9 +52,15 @@ func TestSelfAgentID(t *testing.T) {
 }
 
 func TestAgentDoneReturnsFailures(t *testing.T) {
-	sandboxCLI(t)
+	// The first call runs with no identity at all. sandboxCLI's isolated
+	// authority — not the inherited worker context — must be what answers it,
+	// or a suite run inside an amux worker would archive that worker here.
+	isolated := sandboxCLI(t)
 	if err := cmdAgentDone(nil); err == nil || !strings.Contains(err.Error(), "not inside") {
 		t.Fatalf("missing identity error = %v", err)
+	}
+	if isolated.loads.Load() != 1 || isolated.opens.Load() != 0 {
+		t.Fatalf("identity lookup loads=%d opens=%d, want the isolated loader alone", isolated.loads.Load(), isolated.opens.Load())
 	}
 
 	oldLoad := loadAgentSessionContext
@@ -78,6 +84,9 @@ func TestAgentDoneReturnsFailures(t *testing.T) {
 
 // TestAgentDoneCLIChild calls the real main entrypoint in a subprocess so the
 // regression covers the shell-visible exit status, not only a returned error.
+// The child is this same test binary, so TestMain's isolated session authority
+// is installed before main() runs: neither an inherited macOS locator nor the
+// Linux fixed mount can hand the child a live context to archive.
 func TestAgentDoneCLIChild(t *testing.T) {
 	if os.Getenv("AMUX_TEST_AGENT_DONE_EXIT") != "1" {
 		return
@@ -98,6 +107,7 @@ func TestAgentDoneFailureExitsNonzero(t *testing.T) {
 		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"),
 		"XDG_DATA_HOME=" + filepath.Join(home, "data"),
 		"XDG_RUNTIME_DIR=" + filepath.Join(home, "run"),
+		"TMPDIR=" + os.Getenv("TMPDIR"),
 	}
 	out, err := cmd.CombinedOutput()
 	var exitErr *exec.ExitError
