@@ -407,7 +407,7 @@ func (s *Supervisor) establishGoal(ctx context.Context, task goalTask) error {
 		// between — a user clear, a new goal, a stop — fails the guard and the
 		// task is abandoned rather than activated.
 		completed := func(g *threadGoal) bool { return g != nil && g.Status == GoalComplete && g.key() == goal.key() }
-		if err := s.clearGoal(ctx, "", false, s.admit(task, task.revision, completed)); err != nil {
+		if err := s.clearGoal(ctx, "", s.admit(task, task.revision, completed)); err != nil {
 			if errors.Is(err, errGoalMoved) {
 				return nil
 			}
@@ -503,19 +503,16 @@ func (s *Supervisor) setGoal(ctx context.Context, params map[string]any, text st
 
 // clearGoal issues thread/goal/clear under the same expectation and
 // fresher-evidence rules as setGoal.
-func (s *Supervisor) clearGoal(ctx context.Context, text string, cancels bool, expect func(*threadGoal) bool) error {
+func (s *Supervisor) clearGoal(ctx context.Context, text string, expect func(*threadGoal) bool) error {
 	s.mu.Lock()
 	threadID := s.threadID
 	before := s.goalRevision
 	moved := expect != nil && !expect(s.goal)
 	if !moved {
-		// The server echoes this clear back as a notification; count it once,
-		// here, so a task admitted before a user's clear is invalidated while
-		// amux's own replacement clear does not invalidate its own second step.
+		// The server echoes this clear back as a notification. Swallow that echo:
+		// the user's clear already counted its cancellation at SetGoal's entry,
+		// and amux's own replacement clear must not cancel its own second step.
 		s.selfClear++
-		if cancels {
-			s.goalCancel++
-		}
 	}
 	s.mu.Unlock()
 	if moved {
@@ -562,6 +559,14 @@ const GoalClear = "clear"
 // any task admitted before it is dropped by that task's own guard. It never
 // starts a turn itself: Codex continues an activated goal on its own once idle.
 func (s *Supervisor) SetGoal(ctx context.Context, u GoalUpdate) error {
+	if u.Status == GoalClear {
+		// Record the cancellation before queueing behind goalOp: an observer that
+		// holds it — waiting on its own read — must be invalidated by the user's
+		// decision as soon as it is made, not once the clear finally gets its turn.
+		s.mu.Lock()
+		s.goalCancel++
+		s.mu.Unlock()
+	}
 	s.goalOp.Lock()
 	defer s.goalOp.Unlock()
 	threadID := s.ThreadID()
@@ -569,7 +574,7 @@ func (s *Supervisor) SetGoal(ctx context.Context, u GoalUpdate) error {
 		return errors.New("codexapp: no thread to set a goal on")
 	}
 	if u.Status == GoalClear {
-		return s.clearGoal(ctx, "goal cleared by user", true, nil)
+		return s.clearGoal(ctx, "goal cleared by user", nil)
 	}
 	params := map[string]any{"threadId": threadID}
 	switch u.Status {

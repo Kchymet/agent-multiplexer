@@ -130,6 +130,20 @@ func (fs *fakeServer) holdResponse(method string) chan struct{} {
 	return ch
 }
 
+// awaitCallCount waits until a method has been received at least n times. A
+// method the handshake also calls needs this rather than awaitCall, whose first
+// match may be that earlier call.
+func (fs *fakeServer) awaitCallCount(method string, n int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if len(fs.callsOf(method)) >= n {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
 // awaitCall waits for a method to be received (its response may still be held).
 func (fs *fakeServer) awaitCall(method string, d time.Duration) bool {
 	deadline := time.Now().Add(d)
@@ -282,6 +296,7 @@ func (fs *fakeServer) handleGoalCall(m incoming) any {
 	case "thread/goal/get":
 		goal := fs.goal
 		fs.mu.Unlock()
+		fs.gate(m.Method)
 		return map[string]any{"goal": goal}
 	case "thread/goal/clear":
 		fs.goal = nil

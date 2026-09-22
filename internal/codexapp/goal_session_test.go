@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -470,23 +471,46 @@ func TestClearBeforeFirstGoalCancelsPendingTask(t *testing.T) {
 	for _, origin := range []string{"another client", "the goal verb"} {
 		t.Run(origin, func(t *testing.T) {
 			s, fs := goalSession(t, true)
+			// The handshake already read the goal once, so the observer's own read
+			// is the one AFTER that — hold and wait for exactly it. Releasing is
+			// deferred: a failed assertion must not leave the server wedged.
+			reads := len(fs.callsOf("thread/goal/get"))
 			release := fs.holdResponse("thread/goal/get")
+			var once sync.Once
+			releaseRead := func() { once.Do(func() { close(release) }) }
+			defer releaseRead()
+
 			peerTurn(s, "turn_x")
 			userMessage(s, "turn_x", "item_x", "a task the user cancels")
-			if !fs.awaitCall("thread/goal/get", 2*time.Second) {
-				t.Fatal("observer never read the goal")
+			if !fs.awaitCallCount("thread/goal/get", reads+1, 2*time.Second) {
+				t.Fatal("the observer's own read never reached the server")
 			}
+
+			cleared := make(chan error, 1)
 			if origin == "another client" {
-				cleared, _ := json.Marshal(map[string]any{"threadId": s.ThreadID()})
-				s.onNotify("thread/goal/cleared", cleared)
+				raw, _ := json.Marshal(map[string]any{"threadId": s.ThreadID()})
+				s.onNotify("thread/goal/cleared", raw)
+				fs.setGoalState(nil)
+				cleared <- nil
 			} else {
-				// The host's own goal verb, racing the queued observer.
-				go func() { _ = s.SetGoal(context.Background(), GoalUpdate{Status: GoalClear}) }()
-				if !fs.awaitCall("thread/goal/clear", 2*time.Second) {
-					t.Fatal("explicit clear never reached the server")
+				// The host's own goal verb, racing the observer that holds goalOp:
+				// its cancellation must count immediately, even though its clear
+				// cannot reach the server until the held read returns.
+				go func() { cleared <- s.SetGoal(context.Background(), GoalUpdate{Status: GoalClear}) }()
+				settle()
+				if _, sent := fs.sawCall("thread/goal/clear"); sent {
+					t.Fatal("the clear jumped the queue while an observer held the goal lock")
 				}
 			}
-			close(release)
+			releaseRead()
+			select {
+			case err := <-cleared:
+				if err != nil {
+					t.Fatalf("explicit clear: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the clear never completed")
+			}
 			settle()
 			if _, set := fs.sawCall("thread/goal/set"); set {
 				t.Fatal("a cancelled task still established a goal")
