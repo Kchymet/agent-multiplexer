@@ -7,6 +7,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/core"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // canonicalSessionOperation validates the complete restricted RPC vocabulary
@@ -146,9 +147,12 @@ func validateSessionAction(req access.Request) error {
 	case core.ActionNewRepoAgent:
 		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model"), validateCreationMode(req.Fields))
 	case core.ActionNewWorkgroup:
-		return joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "linear"), validateCreationMode(req.Fields))
+		// coordinator/coordinator_model choose the workgroup's own session runtime
+		// (agent/model describe a member): the console's guide teaches them and the
+		// CLI sends them, so a restricted caller must be able to use them too.
+		return joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "linear", wsops.FieldCoordinator, wsops.FieldCoordinatorModel), validateCreationMode(req.Fields))
 	case core.ActionCreateWorkspace:
-		if err := joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "defaultAgent"), validateCreationMode(req.Fields)); err != nil {
+		if err := joinValidation(noID(), noTarget(), fields("name", "prompt", "mode", "model", "agent", "repos", "defaultAgent", wsops.FieldCoordinator, wsops.FieldCoordinatorModel), validateCreationMode(req.Fields)); err != nil {
 			return err
 		}
 		if value, ok := req.Fields["defaultAgent"]; ok && value != "1" {

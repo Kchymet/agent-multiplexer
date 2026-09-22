@@ -65,3 +65,15 @@ func TestMemberGuideMentionsNoGoals(t *testing.T) {
 		}
 	}
 }
+
+// The console dispatches creations for the user, so its guide must name the
+// creation fields the daemon actually accepts — a guide that teaches a field
+// the allowlist refuses sends the model into an error it cannot diagnose.
+func TestConsoleGuideTeachesCoordinatorFields(t *testing.T) {
+	guide := consoleGuide(store.Session{ID: "console", Agent: "claude", Dir: "/sandbox/console", Mode: store.ModeConsole})
+	for _, want := range []string{FieldCoordinator, FieldCoordinatorModel, agent.GoalRuntime} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("console guide does not teach %q", want)
+		}
+	}
+}
