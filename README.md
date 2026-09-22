@@ -153,7 +153,10 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   - **Control console** (`⚙`, id `console`) — machine-wide context: every
     workgroup, agent, and repo, their transcripts, and the CLI to operate them.
   - **Workgroup coordinator** (`▸`, id = the workgroup id) — supervises that
-    workgroup's agents from the container dir that holds their sandboxes.
+    workgroup's agents from the container dir that holds their sandboxes. Every
+    task you give a workgroup becomes its coordinator's native goal, which the
+    runtime pursues turn after turn until it is complete, blocked on real input,
+    or you pause it (`docs/default-sessions.md`).
   - **Repo home** (`⛁`, id = the repo name) — the long-lived context for a repo's
     one-off agents; dispatches and steers them, reads the bare clone.
   See `docs/default-sessions.md`.
