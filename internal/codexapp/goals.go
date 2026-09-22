@@ -115,6 +115,40 @@ func isRPCUnsupported(err error) bool {
 	return errors.As(err, &rpc) && (rpc.Code == -32601 || strings.Contains(strings.ToLower(rpc.Message), "goals feature is disabled"))
 }
 
+// sameGoal reports whether two observations describe the same goal state. The
+// App Server echoes a change to every client, so amux sees its own set/clear
+// twice (the RPC result and the broadcast notification); treating an identical
+// observation as no change keeps the goal generation below equal to the number
+// of genuine state changes.
+func sameGoal(a, b *threadGoal) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if (a.TokenBudget == nil) != (b.TokenBudget == nil) {
+		return false
+	}
+	if a.TokenBudget != nil && *a.TokenBudget != *b.TokenBudget {
+		return false
+	}
+	// Compare by value: every decode of the same goal allocates its own budget
+	// pointer, so struct equality would report each read as a change.
+	x, y := *a, *b
+	x.TokenBudget, y.TokenBudget = nil, nil
+	return x == y
+}
+
+// recordGoal installs an observed goal and advances the goal generation when
+// the state actually changed. The generation is what a host-side decision is
+// admitted against: it advances once per real change, whoever made it.
+func (s *Supervisor) recordGoalLocked(g *threadGoal) {
+	if sameGoal(s.goal, g) {
+		s.goal = g
+		return
+	}
+	s.goal = g
+	s.goalRevision++
+}
+
 func (s *Supervisor) observeGoal(method string, params json.RawMessage) {
 	if method != "thread/goal/updated" && method != "thread/goal/cleared" {
 		return
@@ -131,8 +165,7 @@ func (s *Supervisor) observeGoal(method string, params json.RawMessage) {
 	if p.ThreadID != s.threadID || s.closed || s.interrupted {
 		return
 	}
-	s.goal = p.Goal
-	s.goalRevision++
+	s.recordGoalLocked(p.Goal)
 }
 
 // readGoal fetches the authoritative goal. Older Codex builds and installations
@@ -160,7 +193,11 @@ func (s *Supervisor) readGoal(ctx context.Context) (*threadGoal, error) {
 	}
 	s.mu.Lock()
 	if s.goalRevision == revision {
-		s.goal = result.Goal
+		// A read is an observation like any other: when it learns a change no
+		// notification delivered, the goal generation advances too, so a task
+		// admitted against the previous state is dropped rather than acting on a
+		// goal that moved while its message was in flight.
+		s.recordGoalLocked(result.Goal)
 	}
 	goal := s.goal
 	s.mu.Unlock()
@@ -263,15 +300,22 @@ func (s *Supervisor) observeUserTask(method string, params json.RawMessage) {
 		s.curTurn != "" && (wrap.TurnID == "" || wrap.TurnID == s.curTurn) && !s.closed && !s.interrupted
 	if admit {
 		if s.goalTasks == nil {
-			s.goalTasks = map[string]bool{}
+			s.goalTasks = map[string]string{}
 		}
-		if s.goalTasks[wrap.Item.ID] {
+		if _, seen := s.goalTasks[wrap.Item.ID]; seen {
 			admit = false
 		} else {
-			s.goalTasks[wrap.Item.ID] = true
+			s.goalTasks[wrap.Item.ID] = s.curTurn
 		}
 	}
 	task := goalTask{itemID: wrap.Item.ID, turnID: s.curTurn, text: text, revision: s.goalRevision}
+	if admit {
+		// Hold the turn's outcome until this task has decided against it.
+		if s.goalOpen == nil {
+			s.goalOpen = map[string]int{}
+		}
+		s.goalOpen[task.turnID]++
+	}
 	s.mu.Unlock()
 	if !admit {
 		return
@@ -279,7 +323,16 @@ func (s *Supervisor) observeUserTask(method string, params json.RawMessage) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), goalOpTimeout)
 		defer cancel()
-		if err := s.establishGoal(ctx, task); err != nil {
+		err := s.establishGoal(ctx, task)
+		s.mu.Lock()
+		if n := s.goalOpen[task.turnID]; n > 1 {
+			s.goalOpen[task.turnID] = n - 1
+		} else {
+			delete(s.goalOpen, task.turnID)
+		}
+		s.pruneTaskHistoryLocked()
+		s.mu.Unlock()
+		if err != nil {
 			s.emit(notice("error", "goal: "+err.Error()))
 		}
 	}()
@@ -318,23 +371,17 @@ func (s *Supervisor) establishGoal(ctx context.Context, task goalTask) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	threadID := s.threadID
-	stale := s.closed || s.interrupted || s.goalRevision != task.revision
-	if !stale && s.curTurn != task.turnID {
-		stop, ended := s.endedTurns[task.turnID]
-		stale = !ended || stop != "completed"
-	}
-	s.mu.Unlock()
-	if stale {
+	// Admission: the task may only act while nothing has changed the goal since
+	// the message was observed (the model may have created or finished one while
+	// the read was in flight) and while the task is still live. Both are checked
+	// again before every side effect below, because each RPC can race either.
+	threadID, live := s.taskLive(task, task.revision)
+	if !live {
 		return nil
 	}
-	// Each set is admitted only while the observed goal still looks the way this
-	// decision assumed; a fresher native update (a notification that raced the
-	// RPC) wins and the task is dropped.
-	set := func(params map[string]any, text string, expect func(*threadGoal) bool) error {
+	set := func(params map[string]any, text string, gen uint64, expect func(*threadGoal) bool) error {
 		params["threadId"] = threadID
-		err := s.setGoal(ctx, params, text, expect)
+		err := s.setGoal(ctx, params, text, s.admit(task, gen, expect))
 		if errors.Is(err, errGoalMoved) {
 			return nil
 		}
@@ -343,25 +390,67 @@ func (s *Supervisor) establishGoal(ctx context.Context, task goalTask) error {
 	noGoal := func(g *threadGoal) bool { return g == nil }
 	switch {
 	case goal == nil:
-		return set(map[string]any{"objective": task.text, "status": GoalActive}, "goal established: "+taskSummary(task.text), noGoal)
+		return set(map[string]any{"objective": task.text, "status": GoalActive}, "goal established: "+taskSummary(task.text), task.revision, noGoal)
 	case goal.Status == GoalComplete:
+		// Replacing a finished goal takes two steps, so the second carries the
+		// generation this decision's own clear produces: any other change in
+		// between — a user clear, a new goal, a stop — fails the guard and the
+		// task is abandoned rather than activated.
 		completed := func(g *threadGoal) bool { return g != nil && g.Status == GoalComplete && g.key() == goal.key() }
-		if err := s.clearGoal(ctx, "", completed); err != nil {
+		if err := s.clearGoal(ctx, "", s.admit(task, task.revision, completed)); err != nil {
 			if errors.Is(err, errGoalMoved) {
 				return nil
 			}
 			return fmt.Errorf("clear completed goal: %w", err)
 		}
-		return set(map[string]any{"objective": task.text, "status": GoalActive}, "goal established (previous goal complete): "+taskSummary(task.text), noGoal)
+		return set(map[string]any{"objective": task.text, "status": GoalActive}, "goal established (previous goal complete): "+taskSummary(task.text), task.revision+1, noGoal)
 	case goal.Status == GoalBlocked || goal.Status == GoalUsageLimited:
 		same := func(g *threadGoal) bool { return g != nil && g.Status == goal.Status && g.key() == goal.key() }
-		return set(map[string]any{"status": GoalActive}, "goal resumed from "+goal.Status+" by user input: "+taskSummary(goal.Objective), same)
+		return set(map[string]any{"status": GoalActive}, "goal resumed from "+goal.Status+" by user input: "+taskSummary(goal.Objective), task.revision, same)
 	case goal.Status == GoalPaused || goal.Status == GoalBudgetLimited:
 		s.emit(notice("info", "goal stays "+goal.Status+" (explicit); the message runs as a plain turn — use the goal verb to resume or raise the budget"))
 		return nil
 	default:
 		return nil
 	}
+}
+
+// admit builds the guard one host-side goal RPC is issued under: the task must
+// still be live, the goal generation must be exactly the one this step expects
+// (so no change amux did not make has landed), and the observed goal must still
+// look the way the decision assumed. It runs under s.mu, immediately before the
+// call, so a notification or a stop that arrives first always wins.
+func (s *Supervisor) admit(task goalTask, gen uint64, expect func(*threadGoal) bool) func(*threadGoal) bool {
+	return func(g *threadGoal) bool {
+		if _, ok := s.taskLiveLocked(task, gen); !ok {
+			return false
+		}
+		return expect == nil || expect(g)
+	}
+}
+
+// taskLive reports whether an admitted task may still act on the goal, and the
+// thread it belongs to. A task is live while its session is up, the goal is at
+// the generation this step expects, and its turn is either still running or
+// ended by completing: a `stop` (an interrupted turn), a closed or draining
+// supervisor, or a goal change amux did not make means the user's message is no
+// longer work to establish.
+func (s *Supervisor) taskLive(task goalTask, gen uint64) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.taskLiveLocked(task, gen)
+}
+
+func (s *Supervisor) taskLiveLocked(task goalTask, gen uint64) (string, bool) {
+	if s.closed || s.interrupted || s.threadID == "" || s.goalRevision != gen {
+		return "", false
+	}
+	if s.curTurn != task.turnID {
+		if stop, ended := s.endedTurns[task.turnID]; !ended || stop != "completed" {
+			return "", false
+		}
+	}
+	return s.threadID, true
 }
 
 // setGoal issues thread/goal/set. expect, when given, must hold for the
@@ -389,8 +478,7 @@ func (s *Supervisor) setGoal(ctx context.Context, params map[string]any, text st
 	if json.Unmarshal(raw, &result) == nil && result.Goal != nil {
 		s.mu.Lock()
 		if s.goalRevision == before {
-			s.goal = result.Goal
-			s.goalRevision++
+			s.recordGoalLocked(result.Goal)
 		}
 		s.mu.Unlock()
 	}
@@ -419,8 +507,7 @@ func (s *Supervisor) clearGoal(ctx context.Context, text string, expect func(*th
 	}
 	s.mu.Lock()
 	if s.goalRevision == before {
-		s.goal = nil
-		s.goalRevision++
+		s.recordGoalLocked(nil)
 	}
 	s.mu.Unlock()
 	if text != "" {
@@ -499,4 +586,51 @@ func taskSummary(text string) string {
 		}
 	}
 	return ""
+}
+
+// maxTurnHistory bounds the turn outcomes and admitted task ids a long-lived
+// goal session keeps. Both are small bookkeeping maps: the first answers "was
+// this task's turn stopped?", the second de-duplicates a message observed twice.
+const maxTurnHistory = 256
+
+// pruneTurnHistoryLocked bounds endedTurns without dropping a turn some task is
+// still deciding against — losing that entry would read as "never ended", which
+// would let a stopped task act.
+func (s *Supervisor) pruneTurnHistoryLocked() {
+	if len(s.endedTurns) <= maxTurnHistory {
+		return
+	}
+	for id := range s.endedTurns {
+		if s.goalOpen[id] > 0 || id == s.curTurn {
+			continue
+		}
+		delete(s.endedTurns, id)
+		if len(s.endedTurns) <= maxTurnHistory {
+			return
+		}
+	}
+}
+
+// pruneTaskHistoryLocked bounds the admitted-task set. An id is forgotten only
+// once its turn is over and nothing can still refer to it: the same message is
+// broadcast twice (item/started, then item/completed), so an id whose turn is
+// the live one — or one a task is still deciding against — must be kept even
+// when the map is over its bound, or the second observation would be admitted
+// again and re-establish work that just finished.
+func (s *Supervisor) pruneTaskHistoryLocked() {
+	if len(s.goalTasks) <= maxTurnHistory {
+		return
+	}
+	for id, turn := range s.goalTasks {
+		if turn == s.curTurn || s.goalOpen[turn] > 0 {
+			continue
+		}
+		if _, ended := s.endedTurns[turn]; !ended && turn != "" {
+			continue // a turn still running elsewhere may yet repeat its message
+		}
+		delete(s.goalTasks, id)
+		if len(s.goalTasks) <= maxTurnHistory {
+			return
+		}
+	}
 }

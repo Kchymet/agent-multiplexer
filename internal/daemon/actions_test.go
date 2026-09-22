@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/engine"
 	localengine "amux/internal/engine/local"
@@ -502,6 +503,8 @@ func TestCreateWorkgroupStartsCoordinator(t *testing.T) {
 		for _, configured := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/configured=%v", action, configured), func(t *testing.T) {
 				d, eng := steerDaemon(t)
+				// `agent` describes a MEMBER; the coordinator's own runtime is
+				// the default goal runtime unless `coordinator` names another.
 				fields := map[string]string{"name": "payments", "agent": "claude"}
 				if configured {
 					fields["prompt"] = "fix the idempotency bug"
@@ -531,20 +534,30 @@ func TestCreateWorkgroupStartsCoordinator(t *testing.T) {
 				if err != nil || !ok || root.Role() != store.RoleCoordinator {
 					t.Fatalf("coordinator row: %+v, %v", root, err)
 				}
+				// The workgroup's task belongs to its coordinator on both verbs: it
+				// is that session's goal, and is never replayed into a member.
 				wantRootPrompt := ""
-				if action == core.ActionNewWorkgroup && configured {
+				if configured {
 					wantRootPrompt = fields["prompt"]
 				}
-				if root.Mode != store.ModeInteractive || root.Prompt != wantRootPrompt {
-					t.Fatalf("coordinator config = mode %q, prompt %q; want %q, %q", root.Mode, root.Prompt, store.ModeInteractive, wantRootPrompt)
+				if root.Agent != agent.GoalRuntime || !agent.NativeGoals(root) {
+					t.Fatalf("coordinator runtime = %q, want the goal runtime %q", root.Agent, agent.GoalRuntime)
+				}
+				if root.Mode != store.ModeTask || root.Prompt != wantRootPrompt {
+					t.Fatalf("coordinator config = mode %q, prompt %q; want %q, %q", root.Mode, root.Prompt, store.ModeTask, wantRootPrompt)
 				}
 				kids, err := db.Children(r.NewID)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if action == core.ActionCreateWorkspace && configured {
-					if len(kids) != 1 || kids[0].Prompt != fields["prompt"] {
-						t.Fatalf("first member lost its creation prompt: %+v", kids)
+					// A seeded member starts idle: the coordinator dispatches it, so
+					// the same task is never run twice.
+					if len(kids) != 1 || kids[0].Prompt != "" {
+						t.Fatalf("seeded member should start idle: %+v", kids)
+					}
+					if kids[0].Agent != "claude" {
+						t.Fatalf("member runtime = %q, want the requested claude", kids[0].Agent)
 					}
 				} else if len(kids) != 0 {
 					t.Fatalf("workgroup unexpectedly has members: %+v", kids)
@@ -610,7 +623,7 @@ func TestFailedWorkgroupCreationDoesNotLaunchCoordinator(t *testing.T) {
 	d, eng := steerDaemon(t)
 	r := d.handle(context.Background(), core.Action{
 		Action: core.ActionNewWorkgroup,
-		Fields: map[string]string{"prompt": "go", "agent": "unknown-harness"},
+		Fields: map[string]string{"prompt": "go", "coordinator": "unknown-harness"},
 	})
 	if r.OK {
 		t.Fatal("creation with an invalid harness succeeded")

@@ -45,7 +45,13 @@ type AgentSpec struct {
 // repos, model and mode are honored; it starts idle for the coordinator to
 // steer). Pass nil to create an empty workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
-	return createWorkspace(ctx, name, Coordinator{}, "", defaultAgent, nil)
+	// A spec's prompt is the workgroup's task, so it stays with the coordinator
+	// (createWorkspace starts the member idle) rather than being dropped.
+	task := ""
+	if defaultAgent != nil {
+		task = defaultAgent.Prompt
+	}
+	return createWorkspace(ctx, name, Coordinator{}, task, defaultAgent, nil)
 }
 
 // Coordinator selects a workgroup coordinator's runtime. Zero means the
@@ -72,19 +78,24 @@ func coordinatorOf(fields map[string]string) Coordinator {
 	return Coordinator{Kind: strings.TrimSpace(fields[FieldCoordinator]), Model: strings.TrimSpace(fields[FieldCoordinatorModel])}
 }
 
-// NonGoalCoordinatorNotice is the rail notice for an explicitly chosen
-// coordinator harness that has no native goal engine.
-const NonGoalCoordinatorNotice = "coordinator has no native goal mode on this harness — tasks run as ordinary turns; the default (codex) coordinator runs them as goals"
-
 // createWorkspace is the action-path variant of CreateWorkspace: the remote
 // caller chooses the coordinator runtime (coord), the workgroup's initial
 // prompt — which is the coordinator's task, never duplicated into a member —
 // and its repository grants.
-func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
-	kind := coord.Kind
-	if kind == "" {
-		kind = agent.GoalRuntime
+// CoordinatorKind resolves a requested coordinator harness to the kind that
+// will actually be launched: the default goal runtime when none was asked for.
+// Every caller that must know what a creation will run — the daemon, and a
+// remote provider validating its pool's capabilities — asks here rather than
+// re-deriving the default.
+func CoordinatorKind(requested string) string {
+	if strings.TrimSpace(requested) == "" {
+		return agent.GoalRuntime
 	}
+	return agent.Canonical(requested)
+}
+
+func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
+	kind := CoordinatorKind(coord.Kind)
 	if !agent.Known(kind) {
 		return "", fmt.Errorf("unknown coordinator kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
 	}
@@ -111,11 +122,6 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	}
 	if err := db.PutSession(root); err != nil {
 		return "", err
-	}
-	if !agent.NativeGoals(root) && root.ClaudeID != "" {
-		// An explicit non-goal coordinator: say so where the user looks (the
-		// rail), not only in a guide the user may never open.
-		_ = core.WriteNotice(root.ClaudeID, NonGoalCoordinatorNotice)
 	}
 	grants := []string(nil)
 	if selectedGrants == nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/console"
 	"amux/internal/core"
@@ -899,47 +900,114 @@ func TestApplyResultHonorsAgentField(t *testing.T) {
 	}
 }
 
-// TestNewWorkgroupConfiguresCoordinator keeps the selected harness, model, and
-// prompt on the workgroup's default coordinator session. A prompt alone must
-// not create a redundant child agent.
+// TestNewWorkgroupConfiguresCoordinator keeps the workgroup's task, and any
+// explicitly selected coordinator runtime and model, on its coordinator
+// session. A task alone must not create a redundant child agent, and the
+// member-facing `agent`/`model` fields must never reach the coordinator.
 func TestNewWorkgroupConfiguresCoordinator(t *testing.T) {
 	isolateStore(t)
 	ctx := context.Background()
 
-	codexID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{
-		"agent": "codex", "model": "gpt-6-astra", "prompt": "coordinate the rollout",
+	// Default: no coordinator field ⇒ the goal runtime, its own default model,
+	// and the task as the coordinator's own — while `agent`/`model` describe a
+	// member that only repositories request.
+	defaultID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{
+		"agent": "claude", "model": "claude-opus-5", "prompt": "coordinate the rollout",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claudeID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup})
+	def := getSession(t, defaultID)
+	if def.Agent != agent.GoalRuntime || !agent.NativeGoals(def) {
+		t.Errorf("default coordinator runtime = %q, want %q with native goals", def.Agent, agent.GoalRuntime)
+	}
+	if def.Model != "" {
+		t.Errorf("a member's model leaked onto the coordinator: %q", def.Model)
+	}
+	if def.Prompt != "coordinate the rollout" {
+		t.Errorf("new-workgroup lost the coordinator's task: %q", def.Prompt)
+	}
+	if def.Mode != store.ModeTask {
+		t.Errorf("goal coordinator mode = %q, want %q", def.Mode, store.ModeTask)
+	}
+
+	// Explicit: the named coordinator runtime and its model are honored, and an
+	// explicitly non-goal harness is not dressed up as a goal session.
+	claudeID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{
+		FieldCoordinator: "claude", FieldCoordinatorModel: "claude-opus-5", "prompt": "supervise",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	codex := getSession(t, codexID)
-	if got := codex.Agent; got != "codex" {
-		t.Errorf("new-workgroup agent=codex made a %q coordinator", got)
+	claude := getSession(t, claudeID)
+	if claude.Agent != "claude" || agent.NativeGoals(claude) {
+		t.Errorf("explicit coordinator = %q (nativeGoals=%t), want claude without goal mode", claude.Agent, agent.NativeGoals(claude))
 	}
-	if codex.Model != "gpt-6-astra" {
-		t.Errorf("new-workgroup lost the selected coordinator model: %q", codex.Model)
+	if claude.Model != "claude-opus-5" {
+		t.Errorf("explicit coordinator lost its model: %q", claude.Model)
 	}
-	if codex.Prompt != "coordinate the rollout" {
-		t.Errorf("new-workgroup lost the selected coordinator prompt: %q", codex.Prompt)
-	}
+
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	children, err := db.Children(codexID)
+	for _, id := range []string{defaultID, claudeID} {
+		children, err := db.Children(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(children) != 0 {
+			t.Fatalf("coordinator config created %d child agents, want none: %+v", len(children), children)
+		}
+	}
+}
+
+// A workgroup created with repositories gets one member for them — and that
+// member starts idle on the requested harness, so the coordinator dispatches
+// the task rather than two sessions racing to do the same work.
+func TestNewWorkgroupMemberStartsIdle(t *testing.T) {
+	isolateStore(t)
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
+	ctx := context.Background()
+	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(children) != 0 {
-		t.Fatalf("coordinator config created %d child agents, want none: %+v", len(children), children)
+	gitDir := bareRepoWithCommit(t)
+	if err := db.PutRepo(store.Repo{Name: "api", Source: gitDir, GitDir: gitDir}); err != nil {
+		t.Fatal(err)
 	}
-	if got := getSession(t, claudeID).Agent; got != "claude" {
-		t.Errorf("new-workgroup without an agent made a %q coordinator", got)
+	db.Close()
+
+	rootID, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{
+		"repos": "api", "agent": "claude", "model": "claude-opus-5", "prompt": "ship the feature",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := getSession(t, rootID)
+	if root.Prompt != "ship the feature" || root.Agent != agent.GoalRuntime {
+		t.Fatalf("coordinator = %q/%q, want the task on the goal runtime", root.Agent, root.Prompt)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	children, err := db.Children(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("repos requested %d members, want 1: %+v", len(children), children)
+	}
+	m := children[0]
+	if m.Prompt != "" {
+		t.Errorf("member duplicated the coordinator's task: %q", m.Prompt)
+	}
+	if m.Agent != "claude" || m.Model != "claude-opus-5" || m.Repo != "api" {
+		t.Errorf("member config = %q/%q/%q, want the requested claude/claude-opus-5/api", m.Agent, m.Model, m.Repo)
 	}
 }
 

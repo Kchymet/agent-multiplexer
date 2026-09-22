@@ -144,7 +144,8 @@ type Supervisor struct {
 	// goalOp serializes host-side goal operations (a read plus a set/clear) so an
 	// observed task and an explicit goal verb cannot interleave their decisions.
 	goalOp     sync.Mutex
-	goalTasks  map[string]bool   // userMessage item ids already admitted as tasks
+	goalTasks  map[string]string // userMessage item id → the turn it was admitted in
+	goalOpen   map[string]int    // turn id → tasks still deciding against that turn
 	endedTurns map[string]string // recent turn id → stop reason, for late task decisions
 }
 
@@ -953,10 +954,13 @@ func (s *Supervisor) handleTurnCompleted(res *turnResult) {
 	}
 	// How the turn ended decides whether a task observed in it may still become
 	// the goal after the fact (goals.go): an interrupted turn is a user stop.
-	if s.endedTurns == nil || len(s.endedTurns) > 64 {
+	// Entries a pending task still depends on are never dropped, so bounding
+	// this map evicts only turns no admitted task refers to.
+	if s.endedTurns == nil {
 		s.endedTurns = map[string]string{}
 	}
 	s.endedTurns[turnID] = res.StopReason
+	s.pruneTurnHistoryLocked()
 
 	// (2) Local-request ownership.
 	var deliverTo chan *turnResult

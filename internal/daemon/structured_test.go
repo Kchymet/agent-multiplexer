@@ -7,16 +7,20 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/agent"
 	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/store"
 )
 
-// TestStructuredControlGate checks the single opt-in gate that keeps structured
-// (App Server) control dark by default: it is on only for a Codex session, only
-// when AMUX_CODEX_CONTROL=app-server, and only when the manager exists — so the
-// PTY path is never affected unless a user explicitly opts in.
+// TestStructuredControlGate checks the gate that keeps structured (App Server)
+// control dark by default for ORDINARY sessions: it is on only for a Codex
+// agent, only when AMUX_CODEX_CONTROL=app-server, and only when the manager
+// exists — so the PTY path is never affected unless a user explicitly opts in.
+// A Codex workgroup coordinator is the one exception (TestGoalCoordinatorIsAlwaysStructured):
+// its native goal lives in the App Server, so that is the only runtime that can
+// run it, whatever the machine-wide selection says.
 func TestStructuredControlGate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -28,8 +32,9 @@ func TestStructuredControlGate(t *testing.T) {
 		return d
 	}
 
-	codex := store.Session{ID: "a", Agent: "codex"}
-	claude := store.Session{ID: "b", Agent: "claude"}
+	// Ordinary agents: members of a workgroup, not its coordinator.
+	codex := store.Session{ID: "a", RootID: "root", Agent: "codex"}
+	claude := store.Session{ID: "b", RootID: "root", Agent: "claude"}
 
 	// Flag unset ⇒ everything is pty.
 	t.Setenv("AMUX_CODEX_CONTROL", "")
@@ -180,5 +185,39 @@ func TestRunStructuredPromptJournalsError(t *testing.T) {
 	case <-d.steerStarted:
 	default:
 		t.Fatal("runStructuredPrompt did not signal completion")
+	}
+}
+
+// A workgroup coordinator on the goal runtime is always structured: the daemon
+// must supervise its App Server to own the native goal, so the machine-wide
+// codex.control selection — which governs ordinary Codex agents — cannot leave
+// it on the PTY path where no goal exists. A coordinator on another harness is
+// unaffected, as is every ordinary session.
+func TestGoalCoordinatorIsAlwaysStructured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	coordinator := store.Session{ID: "wg", Agent: agent.GoalRuntime}
+	claudeCoordinator := store.Session{ID: "wg2", Agent: "claude"}
+	member := store.Session{ID: "m", RootID: "wg", Agent: agent.GoalRuntime}
+	for _, control := range []string{"", "pty", "app-server"} {
+		t.Setenv("AMUX_CODEX_CONTROL", control)
+		d := New("", nil, time.Hour)
+		d.codex = codexapp.NewManager(ctx, "")
+		if !d.structuredControl(coordinator) {
+			t.Errorf("codex.control=%q left the goal coordinator unsupervised", control)
+		}
+		if d.structuredControl(claudeCoordinator) {
+			t.Errorf("codex.control=%q made a claude coordinator structured", control)
+		}
+		if want := control == "app-server"; d.structuredControl(member) != want {
+			t.Errorf("codex.control=%q: ordinary member structured=%t, want %t", control, !want, want)
+		}
+		// Cold event-source resolution follows the same rule, so a subscriber
+		// reads the coordinator's structured log from the first subscription.
+		if !d.structuredResolvable(coordinator) {
+			t.Errorf("codex.control=%q: coordinator events not resolved structured", control)
+		}
 	}
 }

@@ -73,6 +73,14 @@ type fakeServer struct {
 	failMethod string // optional RPC failure for initialization tests
 	resumeErr  string // when set, thread/resume replies with this JSON-RPC error message
 	goal       *threadGoal
+	// goalsDisabled makes every thread/goal/* call answer the way a Codex with
+	// the feature off does, so a goal session's hard failure is provable.
+	goalsDisabled bool
+	// hold gates a method's RESPONSE: handleCall performs the call's effect, then
+	// blocks on the channel before replying. A test closes it to release the
+	// reply, which makes an in-flight RPC racing a notification deterministic.
+	hold  map[string]chan struct{}
+	clock int64
 }
 
 func newFakePair(t *testing.T) (*Supervisor, *fakeServer, *memConn) {
@@ -111,6 +119,41 @@ func (fs *fakeServer) loop() {
 	}
 }
 
+func (fs *fakeServer) holdResponse(method string) chan struct{} {
+	ch := make(chan struct{})
+	fs.mu.Lock()
+	if fs.hold == nil {
+		fs.hold = map[string]chan struct{}{}
+	}
+	fs.hold[method] = ch
+	fs.mu.Unlock()
+	return ch
+}
+
+// awaitCall waits for a method to be received (its response may still be held).
+func (fs *fakeServer) awaitCall(method string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if _, ok := fs.sawCall(method); ok {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+func (fs *fakeServer) callsOf(method string) []incoming {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	var out []incoming
+	for _, c := range fs.calls {
+		if c.Method == method {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (fs *fakeServer) handleCall(m incoming) {
 	if m.Method == fs.failMethod {
 		fs.write(map[string]any{"id": m.ID, "error": map[string]any{"code": -32000, "message": "fixture failure"}})
@@ -120,26 +163,15 @@ func (fs *fakeServer) handleCall(m incoming) {
 	switch m.Method {
 	case "initialize":
 		result = map[string]any{"capabilities": map[string]any{}}
-	case "thread/goal/get":
+	case "thread/goal/get", "thread/goal/set", "thread/goal/clear":
 		fs.mu.Lock()
-		result = map[string]any{"goal": fs.goal}
+		disabled := fs.goalsDisabled
 		fs.mu.Unlock()
-	case "thread/goal/set":
-		var p struct {
-			ThreadID string `json:"threadId"`
-			Status   string `json:"status"`
+		if disabled {
+			fs.write(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "goals feature is disabled"}})
+			return
 		}
-		_ = json.Unmarshal(m.Params, &p)
-		fs.mu.Lock()
-		if fs.goal != nil {
-			copy := *fs.goal
-			copy.Status = p.Status
-			fs.goal = &copy
-		}
-		goal := fs.goal
-		fs.mu.Unlock()
-		fs.write(map[string]any{"method": "thread/goal/updated", "params": map[string]any{"threadId": p.ThreadID, "goal": goal}})
-		result = map[string]any{"goal": goal}
+		result = fs.handleGoalCall(m)
 	case "thread/start":
 		var p struct {
 			ApprovalPolicy string `json:"approvalPolicy"`
@@ -231,4 +263,88 @@ func (fs *fakeServer) sawCall(method string) (incoming, bool) {
 		}
 	}
 	return incoming{}, false
+}
+
+// handleGoalCall models the App Server's thread goal: set creates a goal from
+// an objective or edits the existing one's status/budget, clear removes it, and
+// both broadcast the notification real Codex sends. The objective, creation
+// time and usage counters survive a status-only set, exactly as they do live.
+func (fs *fakeServer) handleGoalCall(m incoming) any {
+	var p struct {
+		ThreadID    string  `json:"threadId"`
+		Status      string  `json:"status"`
+		Objective   *string `json:"objective"`
+		TokenBudget *int64  `json:"tokenBudget"`
+	}
+	_ = json.Unmarshal(m.Params, &p)
+	fs.mu.Lock()
+	switch m.Method {
+	case "thread/goal/get":
+		goal := fs.goal
+		fs.mu.Unlock()
+		return map[string]any{"goal": goal}
+	case "thread/goal/clear":
+		fs.goal = nil
+		fs.mu.Unlock()
+		// Real Codex broadcasts the change as it applies it, before the caller's
+		// response is written, so a held response models a slow reply — not a
+		// change no other client has seen yet.
+		fs.pushNotify("thread/goal/cleared", map[string]any{"threadId": p.ThreadID})
+		fs.gate(m.Method)
+		return map[string]any{"cleared": true}
+	}
+	if fs.goal == nil {
+		fs.goal = &threadGoal{ThreadID: p.ThreadID, Status: GoalActive, CreatedAt: fs.now()}
+	}
+	next := *fs.goal
+	if p.Objective != nil {
+		next.Objective = *p.Objective
+	}
+	if p.Status != "" {
+		next.Status = p.Status
+	}
+	if p.TokenBudget != nil {
+		next.TokenBudget = p.TokenBudget
+	}
+	next.UpdatedAt = fs.now()
+	fs.goal = &next
+	goal := fs.goal
+	fs.mu.Unlock()
+	fs.pushNotify("thread/goal/updated", map[string]any{"threadId": p.ThreadID, "goal": goal})
+	fs.gate(m.Method)
+	return map[string]any{"goal": goal}
+}
+
+// gate blocks a held method's reply until the test releases it. The call's
+// effect has already been applied, mirroring a server that acted before its
+// response reached the client.
+func (fs *fakeServer) gate(method string) {
+	fs.mu.Lock()
+	ch := fs.hold[method]
+	fs.mu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+}
+
+func (fs *fakeServer) now() int64 {
+	fs.clock++
+	return 1000 + fs.clock
+}
+
+// setGoalState installs a goal directly, as a thread that already has one.
+func (fs *fakeServer) setGoalState(g *threadGoal) {
+	fs.mu.Lock()
+	fs.goal = g
+	fs.mu.Unlock()
+}
+
+func (fs *fakeServer) goalState() *threadGoal {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.goal == nil {
+		return nil
+	}
+	g := *fs.goal
+	return &g
 }

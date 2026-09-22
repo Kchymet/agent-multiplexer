@@ -12,6 +12,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/core"
+	"amux/internal/wsops"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -356,13 +357,22 @@ func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg
 		return "", errors.New("read-only: session verbs are disabled")
 	}
 	if m.Action == harnessproto.VerbNewWorkgroup || m.Action == harnessproto.VerbAddAgent {
-		kind := agent.Canonical(m.Fields["agent"])
 		identity := m.Fields["identity_mode"]
 		if identity == "" {
 			identity = harnessproto.IdentityMachine
 		}
-		if identity != harnessproto.IdentityMachine || (p.cfg.Execution != nil && !p.cfg.Execution.Supports(kind, identity)) {
-			return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
+		if identity != harnessproto.IdentityMachine {
+			return "", fmt.Errorf("unsupported harness/identity: %s/%s", agent.Canonical(m.Fields["agent"]), identity)
+		}
+		for _, kind := range requestedHarnesses(m) {
+			if p.cfg.Execution != nil && !p.cfg.Execution.Supports(kind, identity) {
+				return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
+			}
+		}
+	}
+	if m.Action == harnessproto.VerbGoal {
+		if err := validateGoalFields(m.Fields); err != nil {
+			return "", err
 		}
 	}
 	if m.Action == harnessproto.VerbGoal {
@@ -371,6 +381,30 @@ func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg
 		}
 	}
 	return p.cfg.ApplyAction(ctx, act)
+}
+
+// requestedHarnesses lists the harnesses a creation verb will actually launch,
+// so a pool is checked against what it must run rather than one wire field.
+//
+//   - new-workgroup always creates a coordinator: the harness named in
+//     `coordinator`, or — when the field is absent — the default coordinator
+//     runtime wsops would pick (agent.GoalRuntime, whose native goal engine is
+//     the point of the default). The `agent` field names a MEMBER, which that
+//     verb only creates when repositories are requested, so it is checked only
+//     then. Checking Canonical(fields["agent"]) alone both rejected a valid
+//     default request on a Codex-only pool (it reads as Claude) and admitted one
+//     on a Claude-only pool whose Codex coordinator launch would then fail.
+//   - add-agent creates exactly one member: the `agent` field, defaulted.
+func requestedHarnesses(m harnessproto.MuxMsg) []string {
+	worker := agent.Canonical(m.Fields["agent"])
+	if m.Action != harnessproto.VerbNewWorkgroup {
+		return []string{worker}
+	}
+	kinds := []string{wsops.CoordinatorKind(m.Fields[wsops.FieldCoordinator])}
+	if strings.TrimSpace(m.Fields["repos"]) != "" && worker != kinds[0] {
+		kinds = append(kinds, worker)
+	}
+	return kinds
 }
 
 // validateGoalFields rejects a malformed VerbGoal before it costs a round-trip
