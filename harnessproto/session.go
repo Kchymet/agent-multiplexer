@@ -105,11 +105,17 @@ const (
 // an open prompt (AGE-172) — not merely because the session has a durable
 // transcript. A runtime that streams a transcript but cannot correlate an
 // answerable approval round-trip reports Permission=false.
+// Goal is the same honest reading for VerbGoal: it is true only for a session
+// whose runtime actually supervises a native goal (a workgroup coordinator on
+// the goal runtime), because that is the only session the daemon will serve the
+// verb for. It is a property of the session, not of its kind alone — an ordinary
+// agent on the same runtime reports Goal=false.
 type SessionCaps struct {
 	Prompt     bool `json:"prompt"`     // deliver a new user turn (may start a stopped agent)
 	Interject  bool `json:"interject"`  // deliver text while a turn is already running
 	Cancel     bool `json:"cancel"`     // interrupt the in-flight turn without killing the session
 	Permission bool `json:"permission"` // answer a correlated permission_request (see the type doc)
+	Goal       bool `json:"goal"`       // control the session's native goal (see above)
 }
 
 // Control modes for Session.ControlMode (AGE-181): how a published session's

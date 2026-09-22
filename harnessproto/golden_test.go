@@ -66,6 +66,12 @@ var goldenFrames = []struct {
 			FieldReason: "writes outside the worktree",
 		},
 	}},
+	{"session_action_goal", MuxMsg{
+		Type: MSessionAction, ReqID: "r4", Action: VerbGoal, ID: "wg1",
+		Fields: map[string]string{
+			FieldGoalStatus: GoalActive, FieldGoalBudget: "250000",
+		},
+	}},
 	{"session_result_accepted", HarnessMsg{
 		Type: HSessionResult, ReqID: "r2", OK: true, Result: ResultAccepted, Accepted: true,
 	}},
