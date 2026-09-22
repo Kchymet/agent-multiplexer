@@ -89,6 +89,14 @@ func TestSmokeGoalRestart(t *testing.T) {
 				Goal map[string]any `json:"goal"`
 			}
 			json.Unmarshal(raw, &before)
+			// The set's RESPONSE and the goal notification are separate messages:
+			// the supervisor learns the goal from the notification, on its read
+			// loop. Wait for that observation before reading restart intent, or
+			// this asserts on whichever arrived first.
+			if !awaitObservedGoal(s, status, 5*time.Second) {
+				st, ok := s.Goal()
+				t.Fatalf("supervisor never observed the %s goal: %+v (ok=%t)", status, st, ok)
+			}
 			work := s.RestartWork()
 			if (work.GoalKey != "") != running {
 				t.Fatal("incorrect pre-shutdown goal intent")
@@ -178,4 +186,19 @@ func TestSmokeGoalRestart(t *testing.T) {
 			}
 		})
 	}
+}
+
+// awaitObservedGoal waits until the supervisor has observed a goal in the given
+// status. Its own writes record the RPC result directly, but a goal set through
+// the raw transport (as this smoke does, to stand in for another client) is
+// learned only from the broadcast notification.
+func awaitObservedGoal(s *Supervisor, status string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if st, ok := s.Goal(); ok && st.Status == status {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }
