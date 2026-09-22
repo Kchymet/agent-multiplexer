@@ -66,6 +66,14 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	if err != nil {
 		return err
 	}
+	// The goal verb is scoped to exactly what amux advertises a goal for: a
+	// session whose role and runtime give it a supervised native goal (a
+	// workgroup coordinator on the goal runtime). An ordinary App Server worker
+	// keeps its upstream native goal tracking and restart behaviour untouched —
+	// amux simply does not establish or control goals on its behalf.
+	if verb == core.SteerGoal && !agent.NativeGoals(sess) {
+		return fmt.Errorf("goal: agent %s is not a goal session (native goals are the workgroup coordinator's, on the %s runtime)", a.ID, agent.GoalRuntime)
+	}
 
 	// Structured control (AGE-181): a Codex session under the App Server supervisor
 	// is steered by JSON-RPC, not keystrokes. Route to the supervisor and skip the
@@ -103,7 +111,7 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	}
 
 	if verb == core.SteerGoal {
-		return fmt.Errorf("goal: agent %s is not a goal session (native goals need a running Codex coordinator)", a.ID)
+		return fmt.Errorf("goal: agent %s has no supervised runtime to hold a goal (start it first)", a.ID)
 	}
 	keys := h.Keys()
 	if !keys.Steerable() {
