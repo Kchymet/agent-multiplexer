@@ -1,8 +1,9 @@
 # amux client/server architecture
 
-Splits amux into three roles, so the UI is a thin
-client that can drive a **local** multiplexer or any number of **remote** ones,
-each orchestrating agents on its own machine.
+amux's native TUI connects directly to the local primary daemon. The optional
+legacy relay and client library implement the architecture below for explicit
+integrations; multi-server selection is not exposed by the default native UI.
+Remote orchestrators normally connect through [provider mode](remote-provider.md).
 
 ```
 ┌────────┐   UI ⇄ Server protocol    ┌────────────────┐   authenticated pane wire   ┌──────────────┐

@@ -642,9 +642,9 @@ The feature is off by default. Enable it on `amux provide`:
 | `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code and Codex CLI). Requires `--publish-sessions`. |
 
 With `--publish-sessions`, the published rail is the daemon's own session
-inventory — a store-backed poll annotated with engine liveness (read from the
-file the running daemon persists, so no second daemon connection is needed to
-light up AAP-derived state). Lifecycle verbs run through the local daemon socket
+inventory, including engine liveness. The provider makes an authenticated
+daemon connection per inventory poll and does not open the store itself.
+An unreachable daemon makes that poll fail. Lifecycle verbs run through the local daemon socket
 so the daemon stays authoritative (it owns the engine that `start` needs and the
 re-poll that surfaces a change); if no daemon is reachable, verbs fail cleanly.
 Feature strings passed via `--feature`/`AMUX_PROVIDER_FEATURES` are orthogonal

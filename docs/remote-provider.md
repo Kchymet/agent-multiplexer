@@ -4,8 +4,8 @@ Status: Implemented. `amux provide` (package `internal/provider`) drives the v2
 protocol end to end.
 
 `amux provide install` runs it as a user service (systemd on Linux/WSL2, launchd
-on macOS) from a config file, and `amux doctor` reports it — see "The two-command
-laptop setup" below.
+on macOS) from a config file, and `amux doctor` reports it — see
+[User-service setup](#user-service-setup) below.
 
 Landed: the TLS + bearer-token seam at the wire boundary (`internal/wiretls`,
 shared with the mux server — see `client-server.md`), the harnessproto v2 message
@@ -51,16 +51,34 @@ features, but `spawn/input/resize/kill` and pane adoption are denied. Only grant
 compute to orchestrators you control or trust. Mitigations on the provider side:
 
 - Run the provider as a dedicated, minimally-privileged user.
-- amux's bubblewrap sandboxing travels inside the spawned argv; advertise
-  `bwrap` in capabilities and prefer orchestrators that use it.
+- Compute requests supply their own argv, environment and working directory.
+  Do not assume they use the protected local-session launcher. A reported
+  `bwrap` capability is availability information, not enforcement.
 - Labels let you constrain what the orchestrator schedules here by
   convention; they are advisory, not enforcement.
 - TLS is mandatory in provider mode; there is no plaintext option. The token
   is a bearer credential — protect it like an SSH key (file mode 0600,
   `--token-file`, never argv).
 
-Conversely, the orchestrator gets nothing else: providers only dial out, hold
-no inbound listener, and expose no filesystem/API beyond the panes it spawns.
+Session publication is a separate grant from compute:
+
+| Setting | Access granted to the authenticated orchestrator |
+| --- | --- |
+| None of the options below | Registration metadata, hostname/name, labels and verified harness versions |
+| `--publish-sessions` | Session inventory and supported lifecycle/steering commands, including creating/starting agents and submitting prompts |
+| Add `--read-only-sessions` | Inventory remains visible; lifecycle and steering commands are rejected |
+| Add `--runtime-events` | Conversation text, tool arguments/results and other normalized transcript events for published sessions |
+| `--allow-compute` | Independent arbitrary process/PTY execution as the provider's host user |
+
+`--read-only-sessions` and `--runtime-events` require `--publish-sessions`.
+Disabling compute does not revoke session control. Read-only publication can
+still disclose sensitive inventory and, with runtime events, transcript content.
+There is no general secret-redaction guarantee for transcripts or terminal I/O.
+The operator must trust the remote service with the enabled data and actions.
+
+The provider's control connection is outbound and needs no inbound listening
+port. That topology does not reduce the authority granted above. See
+[Security](../SECURITY.md) and [session publication](remote-provider-sessions.md).
 
 ## Connection model
 
@@ -79,8 +97,9 @@ no inbound listener, and expose no filesystem/API beyond the panes it spawns.
 
 v2 is an additive extension of the v1 protocol in `docs/client-server.md`.
 Message direction follows harnessproto: provider sends `HarnessMsg`, receives
-`MuxMsg`. v1 (in-process/stdio harness, `hello`/`ready`, no auth, no seq) is
-unchanged and still spoken by `amux harness`.
+`MuxMsg`. The package retains v1 codec types for compatibility, but standalone
+raw-stdio `amux harness` is disabled: stdio alone authenticates no peer. The
+legacy mux relay also requires TLS and a nonempty bearer token.
 
 ### Provider → orchestrator
 
@@ -148,24 +167,38 @@ a possible future extension, not part of v2.
 
 ## Provider mode UX
 
-### The two-command laptop setup
+### User-service setup
 
 Registering a machine should not mean a terminal that has to stay open. Install
 the provider as a **user service** — a systemd user unit on Linux/WSL2, a launchd
 agent on macOS — and it starts at login, restarts on exit, and survives a reboot:
 
 ```sh
-# 1. put the bearer token somewhere only you can read
-install -m 600 /dev/null ~/.config/amux/provider.token
-printf '%s' "$TOKEN" > ~/.config/amux/provider.token
+# 1. Prepare a private file without truncating any existing token.
+mkdir -p ~/.config/amux
+(umask 077; touch ~/.config/amux/provider.token)
+chmod 600 ~/.config/amux/provider.token
+# Save the orchestrator-issued token here using a trusted local editor or download.
+# Do not overwrite an existing token or put the token itself in shell history.
 
 # 2. write the config and install the service
 amux provide install --orchestrator orch.example.com:7443 \
                      --token-file ~/.config/amux/provider.token \
-                     --name laptop --label zone=home --allow-compute
+                     --name laptop --label zone=home \
+                     --allow-compute=false --publish-sessions=false \
+                     --runtime-events=false --read-only-sessions=false
 
 amux doctor          # Provider section: config, token, service, last heartbeat
 ```
+
+This registers the machine without publishing sessions or granting compute.
+Add the capabilities from the trust table only when you intend to grant them.
+The endpoint must be the orchestrator's provider TLS listener (`host:port`);
+its dashboard HTTPS URL may name a different service. Obtain the provider token
+and, for a private PKI, the public CA certificate from that service's operator.
+Pass the certificate with `--ca /path/to/ca.pem`; never copy its private key or
+disable TLS verification. Use `--server-name` only for the identity the server's
+certificate actually covers.
 
 `amux provide install` writes `~/.config/amux/provider.toml` and the service
 unit; `amux provide uninstall` stops and removes the service (the config file and
@@ -220,10 +253,10 @@ orchestrator = "orch.example.com:7443"
 token-file = "/home/you/.config/amux/provider.token"
 name = "laptop"
 max-panes = 8
-allow-compute = true
+allow-compute = false
 harnesses = ["claude", "codex"]
 identity-mode = "machine"
-publish-sessions = true
+publish-sessions = false
 features = ["bigdisk", "cuda"]
 
 [labels]
@@ -279,6 +312,12 @@ is fully configured by the file, while an ad-hoc run can still override any one
 setting.
 
 ### Status file and doctor
+
+Use `amux doctor` for status. There is no `amux provide status` or `restart`
+subcommand: an unrecognized positional word is interpreted as an orchestrator
+address. To restart the user service after a binary or token change, re-run
+`amux provide install` with its existing configuration. Token contents are read
+when the provider starts; replacing the file does not update a running process.
 
 The provider loop writes `~/.local/state/amux/provider-status.json` on every
 state change: `dialing` → `registered` → `disconnected`/`rejected`/`stopped`,

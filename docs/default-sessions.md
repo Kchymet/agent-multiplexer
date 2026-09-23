@@ -37,10 +37,13 @@ wrapper around a one-off agent) hosts no session.
 
 ## Scope
 
-A default session launches through the same typed bubblewrap boundary as an
-agent: only its dedicated own directory is writable, with private PID/proc state,
-fixed daemon-issued access mounts, and a private harness-config copy under
-`<sandbox>/.amux/` (see `docs/sandbox-config.md`). A coordinator does not mount
+A default session uses the same protected launcher as an ordinary agent:
+Seatbelt on macOS, bubblewrap with private PID/proc state on Linux/WSL2. It has
+its dedicated own directory, explicit daemon-issued access grants, and a private
+harness-config copy under `<sandbox>/.amux/`. macOS has no private PID namespace
+and allows host application launching for browser authentication; selected
+accounts and network access are shared. See [Security](../SECURITY.md) and
+[sandbox configuration](sandbox-config.md). A coordinator does not mount
 the workgroup parent containing members; repo homes and the console do not mount
 the amux data/state tree. Their wider views are explicit authenticated daemon
 grants, so they change amux through the CLI and change code by steering an agent.
@@ -96,7 +99,7 @@ with as little intervention as possible, so by default it runs on the runtime
 that supervises exactly that natively: Codex's App Server thread goal
 (`agent.GoalRuntime`). What this buys, and what it costs, in one place:
 
-- **Every task becomes the goal.** The supervisor observes the canonical
+- **A task becomes the goal, whenever one is establishable.** The supervisor observes the canonical
   `userMessage` item the App Server broadcasts for *every* client — a rail or
   web `prompt`, the creation prompt, or a native TUI typing straight into the
   shared thread — and establishes it as the thread goal. There is no second
@@ -114,8 +117,16 @@ that supervises exactly that natively: Codex's App Server thread goal
   input it was waiting for. A completed goal is never reopened — the next task
   starts a fresh goal with its own accounting.
 - **Restarts preserve it.** A restart (of the agent, or of the daemon) keeps the
-  objective, progress and accounting, and resumes a goal that was active; this
-  is the behaviour added in #158 and it is unchanged here.
+  objective, progress and accounting, and resumes only a goal observed `active`
+  before shutdown; this is the behaviour added in #158, unchanged here. Restart
+  and the next-task rules above are separate paths: restart never reactivates a
+  `blocked` or `usageLimited` goal — the user's next message does, being the
+  input it was waiting for — and neither of them resumes one the user paused.
+- **The supervisor is not the `codex.control` opt-in.** A coordinator on the goal
+  runtime is always App-Server-supervised, because that is where its goal lives.
+  `codex.control` still decides PTY vs structured control for *ordinary* Codex
+  agents only, and amux enables the goals feature for that one process rather
+  than through the user's own Codex config.
 - **Only the coordinator.** Ordinary member agents are unaffected: they keep
   their harness, their PTY or App Server control mode, and their upstream native
   goal tracking. amux neither establishes nor controls goals on their behalf,

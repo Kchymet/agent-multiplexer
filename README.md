@@ -1,12 +1,21 @@
 # amux
 
-An **AI-native terminal control plane** for orchestrating coding agents across
-many repositories. `amux` opens into a native full-screen UI: a switcher rail on
+An experimental terminal app for coordinating coding agents across repositories
+on **macOS and Linux/WSL2**. `amux` opens into a native full-screen UI: a switcher rail on
 the left, the selected agent embedded on the right. Agents are grouped into
 **workgroups**, each agent gets its own git **worktree** and a row of **tabs**
-(the agent, an editor, a jailed shell), and the whole thing is split into a
-**client/server** architecture so one UI can drive a local multiplexer *and* any
-number of remote ones.
+(the agent, an editor, a scoped shell). A local daemon owns the sessions so they
+survive closing the UI. An optional provider connects them to a remote
+orchestrator; the native TUI currently connects to the local daemon.
+
+**Start here:** [Install and first session](#install) ·
+[Security and trust boundaries](SECURITY.md) · [Documentation](docs/README.md) ·
+[Contributing](CONTRIBUTING.md).
+
+The sandbox deliberately grants network and selected account access. On macOS,
+browser authentication also permits launching host applications outside the
+sandbox. Read [Security](SECURITY.md) before running unfamiliar agents or
+connecting a remote orchestrator; this is not a hostile multi-tenant boundary.
 
 ```
 ┌ amux ──────────────── ⌥ l ▸┬ 1 agent  2 editor  3 term ──────────────────────┐
@@ -117,7 +126,9 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   **3** a terminal. **All three are scoped to the agent's own directory** by
   macOS Seatbelt or Linux/WSL2 bubblewrap. System tools and authorized immutable
   Git object generations are read-only. Other sessions, host state, transcripts,
-  shell histories, and daemon control credentials are inaccessible. Each checkout
+  shell histories, and daemon control credentials are excluded from direct access
+  by the session process. These restrictions have deliberate exceptions described
+  in [Security](SECURITY.md), including macOS host application launching. Each checkout
   keeps its writable Git metadata inside its session.
   Explicit grants supply the selected harness account, Git/GitHub authentication,
   editor configuration, and shell rc/theme files. Only the selected model's
@@ -134,8 +145,12 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
   or history) under its own dir, and `CLAUDE_CONFIG_DIR` / `CODEX_HOME` point the
-  harness at it. The agent may edit its copy. Only the OAuth credential is shared
-  (symlinked to yours and bound back as a single file), so tokens never diverge.
+  harness at it. The agent may edit its copy. Authentication is intentionally
+  shared: macOS Claude uses the daemon's scoped credential broker, Linux Claude
+  shares credential files, and Codex shares account/MCP credential files and
+  refresh locks. macOS GitHub authentication also uses the broker. Copied config
+  can itself contain secrets such as inline MCP tokens; it is readable by the
+  receiving session. See [account sharing](docs/sandbox-config.md#the-model).
   amux compares each copy with the template and flags an agent's edits on the rail
   (`⚙ N config edits`); `amux sandbox drift` lists them and `amux sandbox promote |
   reset <id> <path>` propagates or discards each one — nothing propagates on its
@@ -151,14 +166,17 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   repo name). Each gets its own sandbox, private harness config, pinned
   conversation, and a guide regenerated from the live inventory at every launch:
   - **Control console** (`⚙`, id `console`) — machine-wide context: every
-    workgroup, agent, and repo, their transcripts, and the CLI to operate them.
+    granted workgroup, agent, and repo, authorized event queries, and the CLI to
+    operate them. Other sessions' transcript directories are not mounted.
   - **Workgroup coordinator** (`▸`, id = the workgroup id) — supervises that
-    workgroup's agents from the container dir that holds their sandboxes. Every
-    task you give a workgroup becomes its coordinator's native goal, which the
-    runtime pursues turn after turn until it is complete, blocked on real input,
-    or you pause it (`docs/default-sessions.md`).
+    workgroup's agents from its own dedicated `coordinator/` directory. On the
+    default (Codex) coordinator a task you give the workgroup becomes its native
+    goal, which the runtime pursues turn after turn until it is complete or
+    blocked on real input; a goal you paused stays paused, and a coordinator
+    created on another harness runs tasks as ordinary turns
+    (`docs/default-sessions.md`).
   - **Repo home** (`⛁`, id = the repo name) — the long-lived context for a repo's
-    one-off agents; dispatches and steers them, reads the bare clone.
+    one-off agents; dispatches and steers them through authorized daemon commands.
   See `docs/default-sessions.md`.
 
 ### Identity: which id is which
@@ -184,11 +202,12 @@ So: an id from `amux workgroup ls` addresses something in the rail — pass it t
 says `$AMUX_WORKGROUP unset`, it is a self-scoped command asking to be run from
 inside an agent's own terminal tab; from anywhere else, name the target by id.
 
-## Philosophy: amux is a UI/orchestration layer, not an autonomy policy
+## Harness behavior and launch settings
 
-amux switches, displays, launches, and routes — it does **not** decide how an
-agent behaves. Autonomy (auto-accept, looping, retries) belongs to the **agent**
-or your **launch wrapper**. amux exports intent and gets out of the way:
+amux supplies isolation, account grants, launch settings and restart behavior.
+The harness controls model execution, approval decisions and native goal loops.
+`AMUX_MODE` conveys task/loop intent to wrappers; it does not itself implement a
+universal autonomous loop. Launch metadata includes:
 
 | env var            | meaning                                              |
 |--------------------|------------------------------------------------------|
@@ -201,9 +220,12 @@ or your **launch wrapper**. amux exports intent and gets out of the way:
 | `CLAUDE_CONFIG_DIR` / `CODEX_HOME` | the agent's private copy of your harness config (`<agent dir>/.amux/claude|codex`) |
 
 Override the launch binary per harness with `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN`
-(point either at a wrapper that branches on `$AMUX_MODE`). Claude agents launch
-**pre-trusted** and with `--permission-mode auto` (a safe classifier, *not*
-`--dangerously-skip-permissions`); override with `AMUX_PERMISSION_MODE`. See
+(point either at a wrapper that preserves launch arguments). Set launch variables
+in the environment that starts the daemon, then restart it; changing another
+shell's environment does not reconfigure a running daemon. Claude agents launch
+**pre-trusted** and with `--permission-mode auto` (Claude's automatic approval
+classifier); override with `AMUX_PERMISSION_MODE`. Automatic review can approve
+actions and is not a guarantee that an action is safe. See
 `scripts/claude-launch.example.sh`. Codex agents launch pre-trusted (project trust
 written to the agent's private copy of `config.toml`) with **Approve for me**
 (`approval_policy="on-request"`, `approvals_reviewer="auto_review"`). On Linux,
@@ -273,6 +295,12 @@ editor/terminal tabs keep running. Rebind the shortcut with
 `amux daemon restart` stops all hosted processes and, by default, relaunches the
 previously live agent sessions with their saved conversations. `AMUX_RESTORE=0`
 disables that automatic restore. Editor/terminal tabs reopen when attached.
+Claude continues an existing conversation when its hooks reported running work.
+Codex App Server mode records native goal state: only a previously active goal
+is eligible for automatic resumption. Paused, blocked, completed and limited
+goals remain stopped; the native UI may offer to resume them. The first upgrade
+from a daemon that did not record goal state cannot reconstruct that intent.
+See [restart behavior](docs/sandbox-config.md#macos-certificate-trust-and-restarting-a-session).
 
 **macOS note:** the `Alt+…` bindings require the terminal to send Option as
 ESC-prefixed Meta. With iTerm2's default profile (Option key = "Normal"),
@@ -310,7 +338,8 @@ amux workgroup archive | unarchive <id>
 amux workgroup rm|rename|ls
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
-amux config [ls|get|set|unset|path]  # show / change amux settings (TUI keybindings)
+amux config [ls|get|set|unset|path]  # TUI keybindings and Codex control mode
+amux auth status|login|restart     # shared Claude account selection / reload
 amux sandbox drift [<id>]  # config edits agents made to their private copy of your harness config
 amux sandbox promote | reset <id> <path>  # propagate an agent's config edit to yours / discard it
 amux do <action> ...       # drive any daemon action from scripts (see below)
@@ -328,13 +357,25 @@ daemon↔database schema, not equality of release strings. See
 
 Provider mode (`docs/remote-provider.md`) dials *out* to a remote orchestrator
 over TLS and serves agent panes to it, turning this machine into a compute node.
-Two commands set it up for good — no terminal left open, and it comes back after
-a reboot:
+Capabilities are opt-in: `--publish-sessions` shares inventory and allows session
+control; `--read-only-sessions` disables that control; `--runtime-events` also
+shares transcripts. `--allow-compute` separately permits arbitrary remote
+process execution as your host user. Session control can start agents and submit
+work even when compute is disabled. Trust the remote operator with each enabled
+capability. See the [provider trust model](docs/remote-provider.md#trust-model--read-this-first).
+
+For registration without publishing sessions or enabling compute:
 
 ```sh
-install -m 600 /dev/null ~/.config/amux/provider.token   # then write the token into it
+mkdir -p ~/.config/amux
+(umask 077; touch ~/.config/amux/provider.token)  # preserves existing contents
+chmod 600 ~/.config/amux/provider.token
+# Save the orchestrator-issued token in this file; do not overwrite an existing token.
+# Keep the token itself out of shell history.
 amux provide install --orchestrator orch.example.com:7443 \
-                     --token-file ~/.config/amux/provider.token --name laptop
+                     --token-file ~/.config/amux/provider.token --name laptop \
+                     --allow-compute=false --publish-sessions=false \
+                     --runtime-events=false --read-only-sessions=false
 amux doctor   # Provider: config, token mode, service state, last heartbeat
 ```
 
@@ -434,16 +475,44 @@ See [sandbox configuration](docs/sandbox-config.md),
 
 ## Install
 
-Requires Go 1.25+, Git, and a supported isolation backend: macOS
+Requires Go **1.26.8 or a newer patched release**, Git, and a supported isolation backend: macOS
 `/usr/bin/sandbox-exec`, or Linux/WSL2 `bwrap` ≥ 0.12.0 with usable user/PID
-namespaces. Run `amux doctor` to check local dependencies.
+namespaces. Install and authenticate at least one supported harness (Claude Code
+or Codex) in a normal host terminal first. `gh` is needed for GitHub discovery
+and authentication; the editor tab uses `nvim` unless `AMUX_EDITOR` is set.
+Run `amux doctor` to check local dependencies.
 
 ```sh
+git clone https://github.com/Kchymet/agent-multiplexer.git
+cd agent-multiplexer
 make install
+export PATH="$HOME/.local/bin:$PATH"
+amux doctor
+amux repo add OWNER/REPO       # replace with a repo you can access
+amux                         # select a repo and press a to create an agent
 ```
 
 Builds `~/.local/bin/amux`. Run `amux` from a normal terminal to launch the TUI —
 that is the standard way to invoke it.
+
+Use the latest patch of a supported Go release. The module's minimum version
+excludes known vulnerable older toolchains; with `GOTOOLCHAIN=auto`, Go can
+download the required toolchain. `GOTOOLCHAIN=local` requires installing it
+yourself. Go's standard library is compiled into amux: upgrading Go alone does
+not patch an existing amux binary. For an existing checkout:
+
+```sh
+git pull --ff-only
+make install
+amux daemon restart          # interrupts hosted processes; reloads the new binary
+```
+
+Quit and reopen existing dashboards to load their new CLI code. If a busy daemon
+outlasts the restart command's shutdown timeout, allow shutdown to finish, then
+run `amux daemon start`. See [upgrade boundaries](docs/namespace-rollout.md)
+before migrating a legacy session layout. Removing the executable with
+`make uninstall` preserves session data; stop the daemon and uninstall an
+optional provider service first if you want those processes stopped too.
 
 Auto-launching amux on terminal open is optional and off by default. If you want
 it, opt in by sourcing the shim (`scripts/amux.sh`) from your shell rc; set
@@ -463,8 +532,9 @@ config, the shell override, and the running daemon's reported selection. See the
 - **Thin-client TUI** — migrate the native TUI onto `muxclient` so the default app
   is a client of `amux serve` (vterm fed by the server, keystrokes forwarded), and
   it can attach to remote servers.
-- **Remote auth/TLS** — v1 TCP is unauthenticated; bind it to trusted networks.
 - **Linear** — currently the issue URL is woven into the agent's prompt; a real
   Linear API/sync is a follow-up.
-- **Two agent kinds** (Claude Code + Codex) wired today, selectable per agent; the resolver is ready for others.
+- **Additional harnesses** — Claude Code and Codex have full integrations. Hermes
+  can be discovered/launched but has no managed config, activity hooks or resume
+  integration; it does not have feature parity.
 - Upstream pulls into the bare-clone store; per-repo branch selection.

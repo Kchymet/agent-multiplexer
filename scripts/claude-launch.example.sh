@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Example agent launcher — AGENT-OWNED autonomy, not amux's.
+# Example pass-through launcher for Claude Code.
 #
-# amux is a UI layer: it launches the agent and exports the session's intent as
-# environment variables, but it does NOT decide how the agent runs. This wrapper
-# is where the session/agent owns that policy. Opt in by pointing amux at it:
+# amux supplies the model, permission policy, resume flags and prompt as separate
+# arguments. A wrapper must preserve those boundaries, including on restart.
+# Copy this file to the path below and make it executable before opting in:
 #
 #     export AMUX_CLAUDE_BIN="$HOME/.config/amux/claude-launch.sh"
 #
@@ -13,23 +13,11 @@
 #   AMUX_ROOT       the id of the workgroup it belongs to
 #   AMUX_AGENT      the agent kind (claude)
 #
-# Tune the two knobs below to taste; this is yours to edit.
+# Customize host launch settings through AMUX_PERMISSION_MODE before starting
+# the daemon. AMUX_MODE is intent metadata; use Claude's native conversation
+# commands or an explicit task prompt to request a loop. Do not turn "$*" into
+# a prompt: it would consume amux's --resume/--model/--permission-mode flags.
+# Ensure `claude` on PATH resolves to the real binary, not this wrapper.
 set -euo pipefail
 
-flags=()
-case "${AMUX_MODE:-task}" in
-  loop)
-    # (2) more autonomous permissions for a long-running, hands-off session.
-    flags+=(--permission-mode acceptEdits)
-    # (3) drive it as a loop via the /loop skill. amux passes the task as the
-    # positional prompt ("$@"); we wrap it so the agent keeps working.
-    if [ "$#" -gt 0 ]; then
-      exec claude "${flags[@]}" "/loop $*"
-    fi
-    exec claude "${flags[@]}"
-    ;;
-  *)
-    # task: a normal, single, interactive session seeded with the prompt.
-    exec claude "$@"
-    ;;
-esac
+exec claude "$@"

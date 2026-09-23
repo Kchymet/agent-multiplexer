@@ -4,3 +4,17 @@
 
 # Local, machine-specific Claude Code settings (not shared).
 .claude/settings.local.json
+
+# Local credentials and session state. Keep examples explicitly credential-free.
+.env
+.env.*
+!.env.example
+!.env.sample
+auth.json
+.credentials.json
+provider.token
+*.key
+*.p12
+*.pfx
+.amux/
+.DS_Store

@@ -13,7 +13,7 @@ There are three independent numbers:
   fields retain the protocol number; a breaking wire or behavior change bumps
   it. Doctor currently accepts an exact match.
 - SQLite `PRAGMA user_version` identifies the database schema. Schema zero is
-  the legacy unmarked database and migrates to schema one. Each daemon reports
+  the legacy unmarked database; the current schema is two. Each daemon reports
   the schema range it can migrate/open and refuses a database outside that range
   before applying migrations.
 
@@ -23,6 +23,13 @@ while a protocol or schema break cannot hide behind an unchanged executable
 name.
 
 ## Upgrade behavior
+
+Build with Go 1.26.8 or a newer patched release. The Go standard library is part
+of the binary, so updating a Go installation alone does not fix an old amux
+executable. Rebuild, reinstall and restart the daemon; reopen dashboards and
+restart any provider service. `go version -m /path/to/amux` reports the build's
+Go version and, for a Git checkout, revision. `make vuln` checks reachable
+vulnerabilities in both modules using the root module's selected toolchain.
 
 The version query is additive. A daemon from before version reporting responds
 with an unknown-query error; the CLI reports its version and database schema as
