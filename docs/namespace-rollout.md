@@ -42,6 +42,11 @@ separate host authorization.
 
 ## Deliberate remaining grants
 
+These are restrictions on direct session access, not a hostile multi-tenant
+security claim. In particular, macOS browser support permits launching host
+applications outside Seatbelt. See [Security](../SECURITY.md) for account,
+network, executable-configuration and remote-provider grants.
+
 Protected panes still share the host network and receive read-only system roots,
 their selected model account, harness auth, Git/GitHub account files, configured
 editor/shell resources, the exact own directory, and daemon-authorized Git object

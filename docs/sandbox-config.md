@@ -20,6 +20,10 @@ mount, and how an agent's edits to its configuration come back to amux.
 - **The agent may edit its copy.** Settings, memory (`CLAUDE.md`), commands,
   skills, MCP servers, plugins — it is the agent's own configuration. What the
   agent does there stays there until you say otherwise.
+  Config can contain inline credentials, including MCP tokens. Template copying
+  does not scrub these; review what you place in the host template and what you
+  promote back. Hooks, plugins and shell/editor configuration are executable
+  inputs, not just preferences. See [Security](../SECURITY.md).
 - **Host auth by default.** Claude sessions inherit the host account. On macOS,
   a daemon credential broker forwards only the selected Claude account’s Keychain
   operations; sessions cannot access unrelated Keychain items. On Linux/WSL2,
@@ -138,6 +142,12 @@ work state as well as running processes, including headless Codex supervisors.
 Each saved session restores individually, so an archived workgroup member cannot
 prevent its coordinator or siblings from restarting. Reopening or reconnecting
 a dashboard does not submit continuation work.
+
+An upgrade from an older daemon or PTY mode may have no saved native goal intent.
+The new daemon cannot infer whether a stopped goal was running or deliberately
+paused before that transition. It leaves the goal's stored status intact; the
+native UI can still ask to resume it. A `blocked` goal is also left stopped.
+Future restarts use the state observed by the upgraded daemon.
 
 ### Optional separate Claude login for all sessions
 

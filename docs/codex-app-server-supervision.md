@@ -2,10 +2,10 @@
 
 Status: **opt-in, experimental.** Default Codex control stays the PTY path
 (keystroke steering + rollout tailing). This document describes the structured
-control mode amux offers when it supervises a Codex App Server itself. It reflects
-the ROOT real-binary audit (Codex 0.153.4): the transport, protocol shapes, and
-launch integration below are the corrected forms; the remaining host-validation
-items are called out at the end.
+control mode amux offers when it supervises a Codex App Server itself. The
+original protocol audit used Codex 0.153.4; newer native attach/goal checks use
+0.155.1. Current pinned harness versions live in `.github/workflows/ci.yml`.
+Remaining end-to-end host-validation items are called out at the end.
 
 ## What it is
 
@@ -74,16 +74,17 @@ a pane or a client connection.**
   never reaches it.
 - Closing the native TUI, or a client disconnecting, does **not** stop the server
   or interrupt an in-flight turn. **No process is killed by client disconnect.**
-- `Supervisor.Close()` (archive/delete/leave-structured) *and* **daemon-context
-  cancellation** both tear the server down (a watcher goroutine closes on
-  `ctx.Done()`), so nothing is orphaned.
+- `Supervisor.Close()` tears down the server on archive/delete/replacement.
+  Daemon shutdown first interrupts transports and drains admitted operations,
+  saves restart intent, then shuts down the supervised processes and PTY engine.
 
 ## Launch under the amux sandbox
 
 The server is **not** a bare `exec`. The daemon resolves it through the same
-sandbox wrapper as the agent's own pane (`panespec.AppServerCommand` →
-`bwrap … -- codex app-server --listen <endpoint>`) so it inherits the session's
-mount/config/identity scope and auth binds; cwd alone does not enforce that. The
+sandbox wrapper as the agent's own pane (`panespec.AppServerCommand`): bubblewrap
+on Linux/WSL2, Seatbelt on macOS. It inherits the session's filesystem, config,
+identity and account grants, including the [documented exceptions](../SECURITY.md);
+cwd alone does not enforce that. The
 supervisor receives that wrapped argv (`Manager.Ensure(..., wrappedArgv)`). Opening
 the agent pane of a structured session launches `codex --remote <endpoint> resume
 <thread-id>` (`panespec.AttachCommand`) — the native TUI attaches to the supervised
@@ -97,6 +98,37 @@ settings, such as alternate-screen mode, remain on the attach command.
 Per-session creation is **serialized** (a per-session lock taken before spawn).
 Only `Supervisor.Start` removes a stale socket under that lock. Constructing a
 second launch command leaves an existing listener connectable.
+
+## Restart and goal continuation
+
+On an agent restart or daemon shutdown, amux records the pinned thread and the
+identity of a native goal observed as `active`. A restart may restore that same
+goal from `paused` to `active`, changing only status and preserving its objective,
+budget and usage. Already-active goals continue through Codex itself. Deliberate
+pauses observed before restart, blocked/completed/limited goals, different goals,
+and cleared goals are not reactivated. Ordinary running turns with no goal get
+one continuation prompt. Reattaching a dashboard does not submit another turn.
+
+The daemon journal includes headless supervisors. Old journal entries and the
+first transition from PTY mode have no native goal intent; amux cannot infer a
+past running state from a stopped goal. The native UI can therefore still offer
+to resume that goal. This is also expected for a goal that was already blocked.
+
+Claude Code uses its explicit running hook state and a continuation prompt in
+the existing conversation. Idle, waiting and unknown states reopen without
+automatic submission. Legacy Codex PTY has no built-in running hook. See
+[session restart behavior](sandbox-config.md#macos-certificate-trust-and-restarting-a-session).
+
+These opt-in tests use installed CLIs and isolated local model endpoints:
+
+```sh
+AMUX_CODEX_APP_SERVER_SMOKE=1 go test ./internal/codexapp -run '^TestSmokeGoalRestart$' -count=1 -timeout=90s -v
+AMUX_CLAUDE_RESUME_SMOKE=1 go test ./internal/agent -run '^TestSmokeClaudeResumeWork$' -count=1 -timeout=70s -v
+```
+
+The macOS CI job runs them with its pinned binaries. They cover active/paused
+native goals and same-conversation Claude continuation; they do not exercise
+an external orchestrator or its browser UI.
 
 ## Socket / thread identity persistence
 
@@ -334,6 +366,11 @@ Also confirmed against the schema/CLI: `--listen` accepts `stdio://`/`unix://`/
 2. Last-subscriber thread-unload grace (idle unload after the last client leaves).
 
 ### Private App Server socket mounts
+
+The mount layout below describes Linux/WSL2. macOS uses original host paths and
+explicit Seatbelt grants to the own socket directory; it does not have tmpfs
+overlays or bind mounts. The same sibling-socket denial is covered by the native
+Seatbelt suite. See [macOS isolation](sandbox-config.md#macos-seatbelt).
 
 A read-only bind of a Unix socket does not prevent connecting to it. App Server
 sockets therefore live under `<amux data>/cx/<session key>/`, outside the shared

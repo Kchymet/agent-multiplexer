@@ -190,3 +190,40 @@ both `/usr/bin/open` and the AppKit/NSWorkspace API used by native harnesses.
 The host explicitly approved native LaunchServices access after being informed
 that `lsopen` cannot be restricted to browsers or URLs and permits launching
 host applications outside Seatbelt. Documentation and doctor report this grant.
+
+## Public sharing review — 2026-09-23
+
+Review base: `c88b7d6` on `master`, plus the documentation and patched-toolchain
+changes accompanying this record. This is a bounded source/documentation and
+dependency review, not an independent penetration test.
+
+- Gitleaks 8.30.1 found no secrets in the current checkout. A scan of the fetched,
+  non-shallow Git history (`git --log-opts='--all'`) reported one generic-key
+  match in a coordinator-model flag test on a development branch. Inspection
+  confirmed it was a `--coordinator-model` argument, not a credential. No real
+  secret was identified; scanner reports were redacted and kept outside the repo.
+- GitHub secret scanning and push protection were enabled; its secret-alert API
+  returned no alerts. Dependabot alerts and private vulnerability reporting were
+  disabled at review time. The latter has a contact-request fallback documented
+  in [Security](../SECURITY.md#reporting-a-suspected-vulnerability).
+- Govulncheck 1.8.0 with the host's Go 1.26.4 found reachable standard-library
+  advisories GO-2026-4970, GO-2026-5856, GO-2026-5972 and GO-2026-6090 in the root
+  module. The application now requires Go 1.26.8. `make vuln` with that toolchain
+  reported no vulnerabilities in either module; the same check runs in macOS
+  and Linux CI. Existing executables require rebuilding and process restarts.
+- Setup and security claims were checked against the launcher, access policy,
+  credential broker and provider flag implementations. The guides now distinguish
+  direct sandbox restrictions from macOS host-app launching, account/network
+  grants, remote session control and arbitrary provider compute.
+
+To repeat the checks with Gitleaks installed:
+
+```sh
+gitleaks git --redact --log-opts='--all' .
+gitleaks dir --redact .
+make vuln
+```
+
+Review findings instead of suppressing all matches in test files. A clean scan
+only covers the fetched references, scanned files and known rules/advisories at
+that time; it does not prove that no sensitive information has ever been shared.
