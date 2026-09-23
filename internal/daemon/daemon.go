@@ -1086,7 +1086,7 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 		work = restart[0]
 	}
 	published, _, err := d.publishPermissionRuntime(agentID, func() (any, error) {
-		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work})
+		return d.codex.Ensure(ctx, agentID, dir, env, argv, endpoint, sess.Model, sess.Prompt, sess.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work, Goals: agent.NativeGoals(sess)})
 	})
 	if err != nil {
 		return nil, err
@@ -1099,9 +1099,15 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 }
 
 // structuredControl applies the startup selection to Codex sessions only.
-// Configuration is never re-read while routing existing or new sessions.
+// Configuration is never re-read while routing existing or new sessions. A
+// goal session (a Codex coordinator) is structured whatever the machine-wide
+// selection says: its native goal lives in the App Server, so that is the only
+// runtime that can run it. Ordinary Codex agents keep following codex.control.
 func (d *Daemon) structuredControl(s store.Session) bool {
-	return d.codex != nil && d.codexControl.Effective == amuxcfg.AppServer && agent.Canonical(s.Agent) == harnessproto.RuntimeCodex
+	if d.codex == nil || agent.Canonical(s.Agent) != harnessproto.RuntimeCodex {
+		return false
+	}
+	return d.codexControl.Effective == amuxcfg.AppServer || agent.NativeGoals(s)
 }
 
 // persistLiveAgents writes the current set of live engine keys to disk so a

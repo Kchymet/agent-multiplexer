@@ -169,7 +169,12 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
     granted workgroup, agent, and repo, authorized event queries, and the CLI to
     operate them. Other sessions' transcript directories are not mounted.
   - **Workgroup coordinator** (`▸`, id = the workgroup id) — supervises that
-    workgroup's agents from its own dedicated `coordinator/` directory.
+    workgroup's agents from its own dedicated `coordinator/` directory. On the
+    default (Codex) coordinator a task you give the workgroup becomes its native
+    goal, which the runtime pursues turn after turn until it is complete or
+    blocked on real input; a goal you paused stays paused, and a coordinator
+    created on another harness runs tasks as ordinary turns
+    (`docs/default-sessions.md`).
   - **Repo home** (`⛁`, id = the repo name) — the long-lived context for a repo's
     one-off agents; dispatches and steers them through authorized daemon commands.
   See `docs/default-sessions.md`.

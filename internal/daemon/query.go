@@ -152,10 +152,11 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 // will run — or is running — structured, so the canonical source is stable from cold)
 // OR a structured identity was persisted (history stays readable after the App Server
 // exits, and even after the gate is later turned off).
-func (d *Daemon) structuredResolvable(id string) bool {
-	if d.codexControl.Effective == amuxcfg.AppServer {
+func (d *Daemon) structuredResolvable(s store.Session) bool {
+	if d.codexControl.Effective == amuxcfg.AppServer || agent.NativeGoals(s) {
 		return true
 	}
+	id := s.ID
 	_, ok := codexapp.LoadIdentity(id)
 	return ok
 }
@@ -203,7 +204,7 @@ func (d *Daemon) runtimeRecordUnbound(db *store.DB, id string) (core.RuntimeReco
 		// (not-yet-written) log and follows it — no reconnect, no source switch. A
 		// persisted identity still resolves it too, so history stays readable after the
 		// App Server exits (and after the gate is later turned off).
-		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && d.structuredResolvable(id) {
+		if agent.Canonical(s.Agent) == harnessproto.RuntimeCodex && d.structuredResolvable(s) {
 			return core.RuntimeRecord{
 				Runtime:    harnessproto.RuntimeCodex,
 				Path:       codexapp.EventLogPathFor(id),

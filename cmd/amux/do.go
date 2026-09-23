@@ -69,7 +69,7 @@ var actionGlosses = map[string]string{
 	core.ActionStart:               "start an agent's (or a whole workgroup's) process",
 	core.ActionRestart:             "restart one agent and resume its conversation (interrupts its current turn; host only)",
 	core.ActionAuthReload:          "queue Claude agents to resume with shared credentials [-f force=true]",
-	core.ActionSteer:               "drive a running agent         -f verb=prompt|interject|stop|permission [-f text=… | -f decision=allow|deny]",
+	core.ActionSteer:               "drive a running agent         -f verb=prompt|interject|stop|permission|goal [-f text=… | -f decision=allow|deny | -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]]",
 	core.ActionRename:              "set a display name            -f name=…",
 	core.ActionMove:                "re-parent an agent            --target <workgroup> (omit for a new one)",
 	core.ActionArchive:             "toggle archived ⇄ restored",
@@ -82,7 +82,7 @@ var actionGlosses = map[string]string{
 	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web (host only)",
 	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
 	core.ActionNewRepoAgent:        "start a repo-scoped agent     id is the repo name",
-	core.ActionNewWorkgroup:        "create a work-scoped workgroup",
+	core.ActionNewWorkgroup:        "create a work-scoped workgroup -f name=… [-f prompt=…] [-f repos=a,b -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
 	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",
 }
 

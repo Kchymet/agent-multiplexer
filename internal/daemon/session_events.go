@@ -837,7 +837,7 @@ func (d *Daemon) resolveTrackedSessionEventSources(ctx context.Context, target s
 func (d *Daemon) sessionEventSourcesForTracked(ctx context.Context, session store.Session) (sessionEventSourceSet, error) {
 	runtime := agent.Canonical(session.Agent)
 	set := sessionEventSourceSet{target: session.ID, runtime: runtime}
-	if runtime == harnessproto.RuntimeCodex && d.structuredResolvable(session.ID) {
+	if runtime == harnessproto.RuntimeCodex && d.structuredResolvable(session) {
 		path := codexapp.EventLogPathFor(session.ID)
 		set.sources = append(set.sources, sourceBelow(runtimeevents.PageSourceStructured, core.DataDir(), path))
 	} else {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +66,14 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	if err != nil {
 		return err
 	}
+	// The goal verb is scoped to exactly what amux advertises a goal for: a
+	// session whose role and runtime give it a supervised native goal (a
+	// workgroup coordinator on the goal runtime). An ordinary App Server worker
+	// keeps its upstream native goal tracking and restart behaviour untouched —
+	// amux simply does not establish or control goals on its behalf.
+	if verb == core.SteerGoal && !agent.NativeGoals(sess) {
+		return fmt.Errorf("goal: agent %s is not a goal session (native goals are the workgroup coordinator's, on the %s runtime)", a.ID, agent.GoalRuntime)
+	}
 
 	// Structured control (AGE-181): a Codex session under the App Server supervisor
 	// is steered by JSON-RPC, not keystrokes. Route to the supervisor and skip the
@@ -101,6 +110,9 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 		}
 	}
 
+	if verb == core.SteerGoal {
+		return fmt.Errorf("goal: agent %s has no supervised runtime to hold a goal (start it first)", a.ID)
+	}
 	keys := h.Keys()
 	if !keys.Steerable() {
 		return fmt.Errorf("agent kind %q has no steering keys", agent.Canonical(sess.Agent))
@@ -249,6 +261,12 @@ type structuredPromptStarter interface {
 	BeginPrompt(ctx context.Context, text string) (func(context.Context) error, error)
 }
 
+// goalSteerer is the surface the `goal` verb needs: only a goal session's
+// supervisor (codexapp.Config.Goals) meaningfully serves it.
+type goalSteerer interface {
+	SetGoal(ctx context.Context, u codexapp.GoalUpdate) error
+}
+
 func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredSteerer, verb string, fields map[string]string) error {
 	switch verb {
 	case core.SteerPrompt:
@@ -269,7 +287,23 @@ func (d *Daemon) steerStructured(ctx context.Context, id string, sup structuredS
 		}
 		return sup.Interject(ctx, text)
 	case core.SteerStop:
+		// A native interrupt only. Codex keeps the goal active but defers its
+		// continuation until the next user turn; nothing here re-triggers it.
 		return sup.Cancel(ctx)
+	case core.SteerGoal:
+		g, ok := sup.(goalSteerer)
+		if !ok {
+			return fmt.Errorf("goal: agent %s is not a goal session", id)
+		}
+		u := codexapp.GoalUpdate{Status: fields[core.SteerGoalStatus], Objective: fields[core.SteerGoalObjective]}
+		if b := strings.TrimSpace(fields[core.SteerGoalBudget]); b != "" {
+			n, err := strconv.ParseInt(b, 10, 64)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("goal: %q must be a positive integer, got %q", core.SteerGoalBudget, b)
+			}
+			u.TokenBudget = n
+		}
+		return g.SetGoal(ctx, u)
 	case core.SteerPermission:
 		switch fields[core.SteerDecision] {
 		case core.SteerAllow, core.SteerDeny:

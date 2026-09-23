@@ -40,19 +40,64 @@ type AgentSpec struct {
 // an agent, via its worktrees), but which IS a session — the workgroup's
 // coordinator (store.RoleCoordinator), sandboxed to a dedicated own directory
 // beside member sandboxes, with a conversation pinned now so it resumes
-// durably. When defaultAgent is non-nil it also creates one agent from that spec
-// (its repos, model, mode, and prompt are honored). Pass nil to create an empty
-// workgroup. Returns the workgroup id.
+// durably. The coordinator runs on the default goal runtime (see Coordinator).
+// When defaultAgent is non-nil it also creates one agent from that spec (its
+// repos, model and mode are honored; it starts idle for the coordinator to
+// steer). Pass nil to create an empty workgroup. Returns the workgroup id.
 func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) (string, error) {
-	return createWorkspace(ctx, name, agent.DefaultKind(), "", "", defaultAgent, nil)
+	// A spec's prompt is the workgroup's task, so it stays with the coordinator
+	// (createWorkspace starts the member idle) rather than being dropped.
+	task := ""
+	if defaultAgent != nil {
+		task = defaultAgent.Prompt
+	}
+	return createWorkspace(ctx, name, Coordinator{}, task, defaultAgent, nil)
 }
 
-// createWorkspace is the action-path variant of CreateWorkspace. It lets a
-// remote client choose the coordinator harness, model, and initial prompt while
-// preserving the public helper's long-standing defaults for local callers.
-func createWorkspace(ctx context.Context, name, kind, model, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
+// Coordinator selects a workgroup coordinator's runtime. Zero means the
+// default: agent.GoalRuntime with that harness's own default model, which is
+// the only combination amux can run in native goal mode — every task the
+// workgroup receives becomes the coordinator's thread goal, continued by the
+// runtime itself until verified complete. An explicit Kind is honored as
+// given; when it is not the goal runtime the coordinator is an ordinary
+// interactive session and creation says so on its rail notice rather than
+// claiming goal mode. Model applies only to the coordinator (a worker's model
+// is never forwarded to a different harness).
+type Coordinator struct {
+	Kind  string
+	Model string
+}
+
+// The action-field spellings for Coordinator (new-workgroup, create-workspace).
+const (
+	FieldCoordinator      = "coordinator"
+	FieldCoordinatorModel = "coordinator_model"
+)
+
+func coordinatorOf(fields map[string]string) Coordinator {
+	return Coordinator{Kind: strings.TrimSpace(fields[FieldCoordinator]), Model: strings.TrimSpace(fields[FieldCoordinatorModel])}
+}
+
+// createWorkspace is the action-path variant of CreateWorkspace: the remote
+// caller chooses the coordinator runtime (coord), the workgroup's initial
+// prompt — which is the coordinator's task, never duplicated into a member —
+// and its repository grants.
+// CoordinatorKind resolves a requested coordinator harness to the kind that
+// will actually be launched: the default goal runtime when none was asked for.
+// Every caller that must know what a creation will run — the daemon, and a
+// remote provider validating its pool's capabilities — asks here rather than
+// re-deriving the default.
+func CoordinatorKind(requested string) string {
+	if strings.TrimSpace(requested) == "" {
+		return agent.GoalRuntime
+	}
+	return agent.Canonical(requested)
+}
+
+func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
+	kind := CoordinatorKind(coord.Kind)
 	if !agent.Known(kind) {
-		return "", fmt.Errorf("unknown agent kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
+		return "", fmt.Errorf("unknown coordinator kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
 	}
 	db, err := store.Open()
 	if err != nil {
@@ -64,9 +109,13 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Agent: kind, Model: model, Mode: store.ModeInteractive, Prompt: prompt,
+		Agent: kind, Model: coord.Model, Mode: store.ModeInteractive, Prompt: strings.TrimSpace(prompt),
 		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
+	}
+	if agent.NativeGoals(root) {
+		// A goal session is autonomous: it runs its task to verified completion.
+		root.Mode = store.ModeTask
 	}
 	if err := os.MkdirAll(root.Dir, 0o755); err != nil {
 		return "", err
@@ -90,7 +139,11 @@ func createWorkspace(ctx context.Context, name, kind, model, prompt string, defa
 		return rootID, err
 	}
 	if defaultAgent != nil {
-		if _, err := addAgent(ctx, db, rootID, *defaultAgent); err != nil {
+		// The task belongs to the coordinator; a first member starts idle and is
+		// dispatched by it, so the same work is never run twice.
+		spec := *defaultAgent
+		spec.Prompt = ""
+		if _, err := addAgent(ctx, db, rootID, spec); err != nil {
 			return rootID, err
 		}
 	}
@@ -810,18 +863,21 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 			grants = &repos
 		}
 		var def *AgentSpec
-		// The workgroup root is its default coordinator session, so the form's
-		// prompt and model configure that session directly. Repositories still
-		// explicitly request a first child agent; a prompt by itself must not.
+		// The workgroup root is its coordinator session: the prompt is its task
+		// (its goal, on the default runtime) and `coordinator`/`coordinator_model`
+		// select its runtime. `agent`/`model`/`mode` describe the first member
+		// agent, which repositories explicitly request; a prompt by itself must
+		// not create one, and the member never receives the coordinator's task.
 		if len(repos) > 0 {
-			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: prompt}
+			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"]}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], prompt, def, grants)
+		return createWorkspace(ctx, a.Fields["name"], coordinatorOf(a.Fields), prompt, def, grants)
 	case core.ActionCreateWorkspace:
-		// The CLI's `session create`/`new`: create a workgroup, optionally seeding
+		// The CLI's `workgroup create`/`new`: create a workgroup, optionally seeding
 		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
-		// with an explicit mode/model/prompt. When the interactive flow configures
-		// its own agents it passes defaultAgent="" and follows up with add-agent.
+		// with an explicit mode/model. The prompt is the coordinator's task, exactly
+		// as for new-workgroup. When the interactive flow configures its own agents
+		// it passes defaultAgent="" and follows up with add-agent.
 		var def *AgentSpec
 		repos := store.SplitRepos(a.Fields["repos"])
 		var grants *[]string
@@ -831,10 +887,10 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		if a.Fields["defaultAgent"] == "1" {
 			def = &AgentSpec{
 				Agent: agentOf(a.Fields), Repos: repos,
-				Mode: a.Fields["mode"], Model: a.Fields["model"], Prompt: a.Fields["prompt"],
+				Mode: a.Fields["mode"], Model: a.Fields["model"],
 			}
 		}
-		return createWorkspace(ctx, a.Fields["name"], agentOf(a.Fields), a.Fields["model"], "", def, grants)
+		return createWorkspace(ctx, a.Fields["name"], coordinatorOf(a.Fields), a.Fields["prompt"], def, grants)
 	}
 	// A verb that reaches here is one no dispatch path claims. The CLI screens
 	// these before they leave the machine, so this is the answer for anything

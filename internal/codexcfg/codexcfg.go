@@ -100,6 +100,21 @@ func FullscreenTUI(argv []string) []string {
 	return append(out, argv[1:]...)
 }
 
+// NativeGoals enables Codex's thread-goal feature for one process only: the
+// App Server that supervises a goal session, and the native TUI attaching to
+// it (which renders the goal state and offers the resume-paused-goal dialog).
+// Invocation-local like FullscreenTUI, so a user config that leaves goals off
+// for ordinary sessions is untouched, and an explicit `goals = false` there
+// does not silently strip a coordinator of its goal engine.
+func NativeGoals(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := make([]string, 0, len(argv)+2)
+	out = append(out, argv[0], "-c", `features.goals=true`)
+	return append(out, argv[1:]...)
+}
+
 // ConfigPath is the user home's config.toml.
 func ConfigPath() string { return UserHome().ConfigPath() }
 

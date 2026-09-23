@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"amux/internal/agent"
 	"amux/internal/core"
+	"amux/internal/wsops"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -354,22 +357,89 @@ func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg
 		return "", errors.New("read-only: session verbs are disabled")
 	}
 	if m.Action == harnessproto.VerbNewWorkgroup || m.Action == harnessproto.VerbAddAgent {
-		kind := agent.Canonical(m.Fields["agent"])
 		identity := m.Fields["identity_mode"]
 		if identity == "" {
 			identity = harnessproto.IdentityMachine
 		}
-		if identity != harnessproto.IdentityMachine || (p.cfg.Execution != nil && !p.cfg.Execution.Supports(kind, identity)) {
-			return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
+		if identity != harnessproto.IdentityMachine {
+			return "", fmt.Errorf("unsupported harness/identity: %s/%s", agent.Canonical(m.Fields["agent"]), identity)
+		}
+		for _, kind := range requestedHarnesses(m) {
+			if p.cfg.Execution != nil && !p.cfg.Execution.Supports(kind, identity) {
+				return "", fmt.Errorf("unsupported harness/identity: %s/%s", kind, identity)
+			}
+		}
+	}
+	if m.Action == harnessproto.VerbGoal {
+		if err := validateGoalFields(m.Fields); err != nil {
+			return "", err
 		}
 	}
 	return p.cfg.ApplyAction(ctx, act)
 }
 
+// requestedHarnesses lists the harnesses a creation verb will actually launch,
+// so a pool is checked against what it must run rather than one wire field.
+//
+//   - new-workgroup always creates a coordinator: the harness named in
+//     `coordinator`, or — when the field is absent — the default coordinator
+//     runtime wsops would pick (agent.GoalRuntime, whose native goal engine is
+//     the point of the default). The `agent` field names a MEMBER, which that
+//     verb only creates when repositories are requested, so it is checked only
+//     then. Checking Canonical(fields["agent"]) alone both rejected a valid
+//     default request on a Codex-only pool (it reads as Claude) and admitted one
+//     on a Claude-only pool whose Codex coordinator launch would then fail.
+//   - add-agent creates exactly one member: the `agent` field, defaulted.
+func requestedHarnesses(m harnessproto.MuxMsg) []string {
+	worker := agent.Canonical(m.Fields["agent"])
+	if m.Action != harnessproto.VerbNewWorkgroup {
+		return []string{worker}
+	}
+	kinds := []string{wsops.CoordinatorKind(m.Fields[wsops.FieldCoordinator])}
+	if strings.TrimSpace(m.Fields["repos"]) != "" && worker != kinds[0] {
+		kinds = append(kinds, worker)
+	}
+	return kinds
+}
+
+// validateGoalFields rejects a malformed VerbGoal before it costs a round-trip
+// to the daemon. It checks only the shape the wire defines — a status from the
+// closed control vocabulary, a positive integer budget, and something to set.
+// Whether the session HAS a goal, and every transition the runtime allows on it,
+// stay the daemon's decision: this is a spelling check, not a second authority.
+func validateGoalFields(fields map[string]string) error {
+	status := strings.TrimSpace(fields[harnessproto.FieldGoalStatus])
+	objective := strings.TrimSpace(fields[harnessproto.FieldGoalObjective])
+	budget := strings.TrimSpace(fields[harnessproto.FieldGoalBudget])
+	if status != "" && !harnessproto.GoalStatuses[status] {
+		return fmt.Errorf("goal: %s must be %s, %s, %s or %s, got %q",
+			harnessproto.FieldGoalStatus, harnessproto.GoalActive, harnessproto.GoalPaused,
+			harnessproto.GoalComplete, harnessproto.GoalClear, status)
+	}
+	if budget != "" {
+		n, err := strconv.ParseInt(budget, 10, 64)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("goal: %s must be a positive integer, got %q", harnessproto.FieldGoalBudget, budget)
+		}
+	}
+	// `clear` removes the goal outright, so an objective or budget sent with it
+	// would be silently dropped. Say so instead of accepting a half-honored verb.
+	if status == harnessproto.GoalClear && (objective != "" || budget != "") {
+		return fmt.Errorf("goal: %s=%s takes no %s or %s",
+			harnessproto.FieldGoalStatus, harnessproto.GoalClear,
+			harnessproto.FieldGoalObjective, harnessproto.FieldGoalBudget)
+	}
+	if status == "" && objective == "" && budget == "" {
+		return fmt.Errorf("goal: nothing to set (need %s, %s or %s)",
+			harnessproto.FieldGoalStatus, harnessproto.FieldGoalObjective, harnessproto.FieldGoalBudget)
+	}
+	return nil
+}
+
 // sessionActionFor maps an accepted wire verb to the equivalent daemon
 // core.Action, or reports ok=false for anything outside the fixed set. archive/
 // unarchive normalize to the daemon's explicit set-archived so the result is
-// deterministic (not a toggle); the four steering verbs (spec §3.1) all become
+// deterministic (not a toggle); the steering verbs (spec §3.1) all become
 // one core.ActionSteer whose Fields name which, so the daemon has a single
 // engine-only entry point for "drive the agent inside this session".
 func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
@@ -387,7 +457,7 @@ func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 	case harnessproto.VerbStart:
 		return core.Action{Action: core.ActionStart, ID: m.ID}, true
 	case harnessproto.VerbPrompt, harnessproto.VerbInterject,
-		harnessproto.VerbStop, harnessproto.VerbPermission:
+		harnessproto.VerbStop, harnessproto.VerbPermission, harnessproto.VerbGoal:
 		return core.Action{Action: core.ActionSteer, ID: m.ID, Fields: steerFields(m)}, true
 	default:
 		return core.Action{}, false
@@ -404,6 +474,7 @@ func steerFields(m harnessproto.MuxMsg) map[string]string {
 	for _, k := range []string{
 		harnessproto.FieldText, harnessproto.FieldRequestID,
 		harnessproto.FieldDecision, harnessproto.FieldReason,
+		harnessproto.FieldGoalStatus, harnessproto.FieldGoalObjective, harnessproto.FieldGoalBudget,
 	} {
 		if v, ok := m.Fields[k]; ok {
 			f[k] = v

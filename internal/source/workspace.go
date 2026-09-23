@@ -168,7 +168,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode), Model: r.Model,
 			Role:      store.RoleCoordinator,
 			State:     rootState,
-			Status:    fmt.Sprintf("%s · %d agent%s", stateLabel(ownState), len(active), plural(len(active))),
+			Status:    fmt.Sprintf("%s · %d agent%s%s", stateLabel(ownState), len(active), plural(len(active)), goalModeSuffix(r)),
 			Cwd:       containerDir(r),
 			CanAttach: true, // opens the coordinator
 			CanKill:   true, // delete the whole root
@@ -293,7 +293,9 @@ func (w *Workspace) withCaps(s core.Session, steerable bool) core.Session {
 	}
 	var caps core.SessionCaps
 	if steerable {
-		caps = agent.CapsFor(s.Runtime)
+		// Role as well as runtime: the goal control is served only for a session
+		// under native goal supervision, not for every session of that runtime.
+		caps = agent.CapsForRole(s.Runtime, s.Role)
 	}
 	s.Caps = &caps
 	// ControlMode says HOW those caps are delivered (§2.2): a supervised session is
@@ -552,4 +554,15 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// goalModeSuffix states a coordinator's task lifecycle on its rail/status line.
+// It is derived from the session record at every poll — not a one-shot notice —
+// so "this coordinator does not run tasks as goals" stays visible for the life
+// of a session created with an explicit non-goal harness.
+func goalModeSuffix(root store.Session) string {
+	if agent.NativeGoals(root) {
+		return " · goal mode"
+	}
+	return fmt.Sprintf(" · no goal mode (%s; tasks run as ordinary turns)", agent.Canonical(root.Agent))
 }

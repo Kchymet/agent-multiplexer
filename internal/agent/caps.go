@@ -39,6 +39,30 @@ func CapsFor(kind string) harnessproto.SessionCaps {
 	}
 }
 
+// CapsForRole is CapsFor plus the capabilities that depend on what the session
+// IS, not only on what runs it. Today that is the goal control: only a session
+// running under native goal supervision can be served VerbGoal, and that is a
+// role+kind property (see NativeGoals), so an ordinary agent on the goal runtime
+// advertises Goal=false and a consumer hides the control rather than offering an
+// affordance the daemon would refuse.
+//
+// role is the published Session.Role (harnessproto.Role*), which is the same
+// classification store.Session.Role() derives; goalCapability keeps the two
+// readings in one place.
+func CapsForRole(kind, role string) harnessproto.SessionCaps {
+	caps := CapsFor(kind)
+	caps.Goal = goalCapability(kind, role)
+	return caps
+}
+
+// goalCapability is the published reading of "this session has a native goal".
+// It answers the same question NativeGoals asks of a stored session, from the
+// role and kind a published row carries; a test pins the two together, so the
+// advertisement cannot drift from what the daemon and the launcher do.
+func goalCapability(kind, role string) bool {
+	return role == harnessproto.RoleCoordinator && Canonical(kind) == GoalRuntime
+}
+
 // correlatesPermissions reports whether a runtime raises permission_request
 // events with a request_id a VerbPermission verb can answer and the daemon can
 // correlate to an open prompt. These are exactly the runtimes amux has an

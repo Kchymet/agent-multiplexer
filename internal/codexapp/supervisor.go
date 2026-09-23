@@ -71,9 +71,13 @@ type Config struct {
 	// per-session, sandbox-scoped), ws://127.0.0.1:<port> (loopback), or
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
 	// --listen <Endpoint> and dials the same value.
-	Endpoint          string
-	ResumeThreadID    string        // non-empty ⇒ thread/resume instead of thread/start
-	RestartWork       *RestartWork  // host-captured work state before restarting this thread
+	Endpoint       string
+	ResumeThreadID string       // non-empty ⇒ thread/resume instead of thread/start
+	RestartWork    *RestartWork // host-captured work state before restarting this thread
+	// Goals marks a goal session: every user task observed on the thread is
+	// established as its native goal (see goals.go). The launcher must have
+	// enabled the goals feature for this server (codexcfg.NativeGoals).
+	Goals             bool
 	InitialPrompt     string        // submitted only when the handshake creates a fresh thread
 	ApprovalPolicy    string        // "" ⇒ defaultApprovalPolicy
 	ApprovalsReviewer string        // "" ⇒ defaultApprovalsReviewer ("Approve for me")
@@ -136,6 +140,21 @@ type Supervisor struct {
 	goal         *threadGoal
 	goalRevision uint64
 	restartWork  *RestartWork // frozen before shutdown clears active-turn state
+
+	// goalOp serializes host-side goal operations (a read plus a set/clear) so an
+	// observed task and an explicit goal verb cannot interleave their decisions.
+	goalOp     sync.Mutex
+	goalTasks  map[string]string // userMessage item id → the turn it was admitted in
+	goalOpen   map[string]int    // turn id → tasks still deciding against that turn
+	endedTurns map[string]string // recent turn id → stop reason, for late task decisions
+	// goalCancel counts explicit cancellations of the goal (a clear by the user
+	// or another client). It is deliberately separate from goalRevision, which
+	// counts observed STATE changes: clearing a thread that has no goal changes
+	// no state, yet it is exactly the intent that must invalidate a task waiting
+	// to establish one. selfClear swallows the echo of a clear amux performed
+	// itself, so its own work is not counted as a cancellation of itself.
+	goalCancel uint64
+	selfClear  int
 }
 
 // New builds a supervisor from cfg. It does not start anything — call Start (or
@@ -903,6 +922,9 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 	if method == "turn/started" {
 		s.trackTurn(params)
 	}
+	// A goal session turns every observed user message into its goal, whichever
+	// client submitted it (the native TUI starts turns without the daemon).
+	s.observeUserTask(method, params)
 	events, res := mapNotification(method, params, s.state)
 	for _, ev := range events {
 		s.emit(ev)
@@ -938,6 +960,15 @@ func (s *Supervisor) handleTurnCompleted(res *turnResult) {
 	if turnID == s.curTurn {
 		s.curTurn = ""
 	}
+	// How the turn ended decides whether a task observed in it may still become
+	// the goal after the fact (goals.go): an interrupted turn is a user stop.
+	// Entries a pending task still depends on are never dropped, so bounding
+	// this map evicts only turns no admitted task refers to.
+	if s.endedTurns == nil {
+		s.endedTurns = map[string]string{}
+	}
+	s.endedTurns[turnID] = res.StopReason
+	s.pruneTurnHistoryLocked()
 
 	// (2) Local-request ownership.
 	var deliverTo chan *turnResult

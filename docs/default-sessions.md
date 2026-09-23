@@ -69,9 +69,12 @@ memory (`.amux/claude/CLAUDE.md`), which survives regeneration.
   in its dedicated `coordinator/` directory, even for an empty workgroup or a
   CLI/remote creation with no UI attached. Opening
   its rail row attaches to that running session. When the workgroup creation
-  form includes a prompt or model, those configure this coordinator directly;
-  a prompt no longer creates a separate member agent. Without a prompt it starts
-  ready for input. A root that predates default sessions gets both the first
+  form includes a prompt, that is the coordinator's own task (see **Goal mode**
+  below); `coordinator`/`coordinator_model` choose its runtime, while
+  `agent`/`model`/`mode` describe a first member that repositories request. A
+  member is created idle for the coordinator to dispatch, so the same task never
+  runs twice, and a prompt alone creates no member at all. Without a prompt the
+  coordinator starts ready for input. A root that predates default sessions gets both the first
   time it is resolved. Deleting the workgroup
   removes the coordinator's own files and leaves any agent sandbox that still
   lives under the container (a moved-out agent) untouched. Moving the last
@@ -88,3 +91,50 @@ the field sees a root or repo row with a runtime and caps, which is enough to
 offer it the session affordances; one that sorts sectionless or `repo`-kind rows
 into a session list should stop — the console and a repo header are not
 one-off agents.
+
+## Goal mode
+
+A workgroup coordinator's job is to carry the user's task to a verified finish
+with as little intervention as possible, so by default it runs on the runtime
+that supervises exactly that natively: Codex's App Server thread goal
+(`agent.GoalRuntime`). What this buys, and what it costs, in one place:
+
+- **A task becomes the goal, whenever one is establishable.** The supervisor observes the canonical
+  `userMessage` item the App Server broadcasts for *every* client — a rail or
+  web `prompt`, the creation prompt, or a native TUI typing straight into the
+  shared thread — and establishes it as the thread goal. There is no second
+  kickoff turn: the goal is set inside the turn the message already started.
+- **Codex continues it.** An active goal is continued by the runtime itself on
+  every idle turn, with no TUI attached and nothing scheduled by amux. The
+  objective, token budget and usage are the runtime's own, and `get_goal` /
+  `update_goal` are the model's view of them. amux sets no budget of its own.
+- **Only the user pauses it.** `amux do steer <workgroup> -f verb=goal
+  -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]`,
+  and the same verb over the remote session wire, are the explicit controls. A
+  paused or budget-limited goal stays that way: a further prompt runs as an
+  ordinary turn rather than silently resuming what the user stopped. A `blocked`
+  or usage-limited goal is resumed by the user's next message, which is the
+  input it was waiting for. A completed goal is never reopened — the next task
+  starts a fresh goal with its own accounting.
+- **Restarts preserve it.** A restart (of the agent, or of the daemon) keeps the
+  objective, progress and accounting, and resumes only a goal observed `active`
+  before shutdown; this is the behaviour added in #158, unchanged here. Restart
+  and the next-task rules above are separate paths: restart never reactivates a
+  `blocked` or `usageLimited` goal — the user's next message does, being the
+  input it was waiting for — and neither of them resumes one the user paused.
+- **The supervisor is not the `codex.control` opt-in.** A coordinator on the goal
+  runtime is always App-Server-supervised, because that is where its goal lives.
+  `codex.control` still decides PTY vs structured control for *ordinary* Codex
+  agents only, and amux enables the goals feature for that one process rather
+  than through the user's own Codex config.
+- **Only the coordinator.** Ordinary member agents are unaffected: they keep
+  their harness, their PTY or App Server control mode, and their upstream native
+  goal tracking. amux neither establishes nor controls goals on their behalf,
+  and `SessionCaps.Goal` advertises exactly that scope.
+
+The default is a *runtime selection*, not a new engine: choosing another
+coordinator harness at creation (`-f coordinator=claude`, or the Runtime field
+on the interactive page) is supported and says so plainly — its rail status
+reads `no goal mode (claude; tasks run as ordinary turns)` and its guide
+describes the lifecycle it actually has. A goal session whose Codex has the
+feature disabled fails to start with a clear error rather than pretending.

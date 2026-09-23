@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/hostprep"
 	"amux/internal/store"
@@ -142,8 +143,17 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 	if root.Role() != store.RoleCoordinator {
 		t.Fatalf("role = %q, want coordinator", root.Role())
 	}
-	if root.Dir != store.CoordinatorDir(rootID) || root.ClaudeID == "" || root.Agent == "" {
+	if root.Dir != store.CoordinatorDir(rootID) || root.Agent == "" {
 		t.Fatalf("root not a session: %+v", root)
+	}
+	// The default coordinator runs the goal runtime (which mints its own
+	// conversation id on first run, hence no pinned ClaudeID here), while the
+	// member keeps the harness the caller asked for.
+	if root.Agent != agent.GoalRuntime || !agent.NativeGoals(root) {
+		t.Fatalf("coordinator runtime = %q, want %q with native goals", root.Agent, agent.GoalRuntime)
+	}
+	if kids[0].Agent != "claude" {
+		t.Fatalf("member runtime = %q, want claude", kids[0].Agent)
 	}
 	if filepath.Dir(root.Dir) != filepath.Dir(kids[0].Dir) || root.Dir == kids[0].Dir {
 		t.Fatalf("coordinator %q and member %q must be sibling own roots", root.Dir, kids[0].Dir)
@@ -172,7 +182,7 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 	if envOf(env, "AMUX_ROLE") != store.RoleCoordinator || envOf(env, "AMUX_SCOPE") != store.ScopeWork {
 		t.Fatalf("env = %v, want AMUX_ROLE=coordinator AMUX_SCOPE=work", env)
 	}
-	b, err := os.ReadFile(filepath.Join(root.Dir, "CLAUDE.md"))
+	b, err := os.ReadFile(agent.HarnessFor(root.Agent).GuideFile(root.Dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +215,7 @@ func TestGuidesByRole(t *testing.T) {
 	if _, err := EnsureRepoHome("api"); err != nil {
 		t.Fatal(err)
 	}
+	// The spec's prompt is the workgroup's task: it belongs to the coordinator.
 	rootID, err := CreateWorkspace(ctx, "payments", &AgentSpec{Agent: "claude", Prompt: "fix the idempotency bug"})
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +239,7 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = cr.Close()
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux console", "payments", rootID, "fix the idempotency bug", gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events"} {
+	for _, want := range []string{"amux console", "payments", rootID, gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
 		}
@@ -298,7 +309,7 @@ func TestDeleteWorkgroupKeepsMovedAgentDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = rr.Close()
-	guide := filepath.Join(root.Dir, "CLAUDE.md")
+	guide := agent.HarnessFor(root.Agent).GuideFile(root.Dir)
 	if _, err := os.Stat(guide); err != nil {
 		t.Fatal(err)
 	}

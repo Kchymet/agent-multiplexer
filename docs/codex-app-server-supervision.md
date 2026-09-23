@@ -1,8 +1,14 @@
 # Codex App Server supervision (AGE-181)
 
-Status: **opt-in, experimental.** Default Codex control stays the PTY path
-(keystroke steering + rollout tailing). This document describes the structured
-control mode amux offers when it supervises a Codex App Server itself. The
+Status: **opt-in, experimental for ordinary agents.** Their default Codex
+control stays the PTY path (keystroke steering + rollout tailing), selected by
+`codex.control`. A workgroup **coordinator** on the goal runtime is the one
+exception: its task is a native thread goal, which only the App Server can hold,
+so the daemon always supervises it structurally whatever `codex.control` says
+(`agent.NativeGoals` → `daemon.structuredControl`). That selection changes the
+coordinator alone — member agents keep the mode `codex.control` chooses, with
+their PTY steering and rollout tailing untouched. This document describes the
+structured control mode amux offers when it supervises a Codex App Server. The
 original protocol audit used Codex 0.153.4; newer native attach/goal checks use
 0.155.1. Current pinned harness versions live in `.github/workflows/ci.yml`.
 Remaining end-to-end host-validation items are called out at the end.
@@ -114,6 +120,17 @@ first transition from PTY mode have no native goal intent; amux cannot infer a
 past running state from a stopped goal. The native UI can therefore still offer
 to resume that goal. This is also expected for a goal that was already blocked.
 
+**A restart is not the same thing as a new task.** Restart restores only a goal
+that was observed `active` before shutdown, and only from `paused` back to
+`active`. A coordinator's *next user task* is a separate path
+(`codexapp.establishGoal`): a `blocked` or `usageLimited` goal is reactivated
+because that message is the input it was waiting for, keeping its objective,
+budget and usage. The two never overlap: a goal a user deliberately paused, or
+one that is `budgetLimited`, is reactivated by neither — a further task runs as
+an ordinary turn and leaves the goal exactly as it is, and only the explicit
+`goal` verb resumes it. A `complete` goal is never reopened by either: the next
+task starts a fresh goal with its own accounting.
+
 Claude Code uses its explicit running hook state and a continuation prompt in
 the existing conversation. Idle, waiting and unknown states reopen without
 automatic submission. Legacy Codex PTY has no built-in running hook. See
@@ -122,13 +139,18 @@ automatic submission. Legacy Codex PTY has no built-in running hook. See
 These opt-in tests use installed CLIs and isolated local model endpoints:
 
 ```sh
-AMUX_CODEX_APP_SERVER_SMOKE=1 go test ./internal/codexapp -run '^TestSmokeGoalRestart$' -count=1 -timeout=90s -v
+AMUX_CODEX_APP_SERVER_SMOKE=1 go test ./internal/codexapp -run '^TestSmokeGoal(Restart|Automatic)$' -count=1 -timeout=300s -v
 AMUX_CLAUDE_RESUME_SMOKE=1 go test ./internal/agent -run '^TestSmokeClaudeResumeWork$' -count=1 -timeout=70s -v
 ```
 
-The macOS CI job runs them with its pinned binaries. They cover active/paused
-native goals and same-conversation Claude continuation; they do not exercise
-an external orchestrator or its browser UI.
+The macOS CI job runs them with its pinned binaries. `TestSmokeGoalRestart`
+covers active/paused native goals across a restart; `TestSmokeGoalAutomatic`
+covers a coordinator's own lifecycle with **no TUI attached** — an ordinary
+prompt becoming the goal through amux's observer, Codex continuing it turn after
+turn with no further prompt or host RPC, a user pause quieting that loop, and a
+completed goal not lending its accounting to the next task. `TestSmokeClaudeResumeWork`
+covers same-conversation Claude continuation. None of them exercises an external
+orchestrator or its browser UI.
 
 ## Socket / thread identity persistence
 

@@ -100,7 +100,11 @@ func TestControlFrozenForDaemonLifetime(t *testing.T) {
 			t.Setenv(amuxcfg.ControlEnv, other)
 			// Both routing and cold transcript selection retain the startup value.
 			want := initial == amuxcfg.AppServer
-			if d.structuredControl(store.Session{ID: "codex", Agent: "codex"}) != want || d.structuredResolvable("codex") != want {
+			// An ordinary Codex MEMBER follows the startup selection; a workgroup
+			// coordinator is always structured (TestGoalCoordinatorIsAlwaysStructured),
+			// so it cannot show whether a later edit changed this daemon's routing.
+			member := store.Session{ID: "codex", RootID: "root", Agent: "codex"}
+			if d.structuredControl(member) != want || d.structuredResolvable(member) != want {
 				t.Fatal("config/environment edit changed the existing daemon's routing")
 			}
 			selection, err := c.CodexControl()

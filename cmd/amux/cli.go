@@ -14,6 +14,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/gh"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // This file is the CLI surface for repos and workgroups. It is deliberately a
@@ -452,6 +453,9 @@ usage: amux workgroup [command]
                      pre-attaching an agent scoped to the given repos
   create <repo>...   non-interactive: workgroup + one agent on those repos
                      [--name n] [--prompt t] [--agent a] [--mode m] [--model M]
+                     [--coordinator claude|codex] [--coordinator-model M]
+                     the prompt is the coordinator's task (its goal on the
+                     default codex coordinator); the agent starts idle for it
   repo <repo>        create a single-repo (repo-scoped) agent on a tracked repo
   add <root> [repo...]  add another agent to an existing workgroup
   open <id>          open the dashboard on a workgroup or agent  (alias: switch)
@@ -530,7 +534,8 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 		return err
 	}
 	in := bufio.NewReader(os.Stdin)
-	name := ""
+	name, task := "", ""
+	coordinator := ""
 	var agents []agentCfg
 	// A seed repo (e.g. from the rail) pre-configures a first agent scoped to it.
 	if len(seedRepos) > 0 {
@@ -540,6 +545,8 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 	for {
 		menu := []string{
 			fmt.Sprintf("Name   › %s", orOptional(name)),
+			fmt.Sprintf("Task   › %s", orOptional(task)),
+			fmt.Sprintf("Runtime › %s", wsops.CoordinatorKind(coordinator)),
 			"+ add agent",
 		}
 		for i, a := range agents {
@@ -554,6 +561,13 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 		switch {
 		case strings.HasPrefix(choice, "Name"):
 			name = promptLine(in, "Workgroup name (optional)")
+		case strings.HasPrefix(choice, "Task"):
+			// The coordinator's own task. On the default runtime this becomes its
+			// native goal: it is pursued until verified complete, not replayed to
+			// the agents below (each of those keeps its own prompt).
+			task = promptLine(in, "Task for the coordinator (optional)")
+		case strings.HasPrefix(choice, "Runtime"):
+			coordinator = pickCoordinatorKind(coordinator)
 		case strings.HasPrefix(choice, "+ add agent"):
 			if a, ok := configureAgent(ctx, in); ok {
 				agents = append(agents, a)
@@ -563,18 +577,22 @@ func sessionNew(ctx context.Context, seedRepos []string) error {
 				agents = append(agents[:i], agents[i+1:]...)
 			}
 		case strings.HasPrefix(choice, "✓"):
-			return createWorkspace(name, agents)
+			return createWorkspace(name, task, coordinator, agents)
 		case strings.HasPrefix(choice, "✗"):
 			return nil
 		}
 	}
 }
 
-// createWorkspace creates the workgroup over the daemon: when the user configured
-// no explicit agents we seed one default (repo-less) agent; otherwise we create
-// the bare workgroup and add each configured agent, scoped to its picked repos.
-func createWorkspace(name string, agents []agentCfg) error {
-	fields := map[string]string{"name": name}
+// createWorkspace creates the workgroup over the daemon: the coordinator gets
+// the workgroup's task (its goal on the default runtime) and, when the user
+// configured no explicit agents, one default (repo-less) agent is seeded;
+// otherwise each configured agent is added with its own prompt and repos.
+func createWorkspace(name, task, coordinator string, agents []agentCfg) error {
+	fields := map[string]string{"name": name, "prompt": task}
+	if coordinator != "" {
+		fields[wsops.FieldCoordinator] = coordinator
+	}
 	if len(agents) == 0 {
 		fields["defaultAgent"] = "1"
 		fields["agent"] = agent.DefaultKind()
@@ -781,12 +799,20 @@ func querySessions() ([]core.WorkgroupRow, error) {
 
 // ---- shared helpers ------------------------------------------------------
 
-type createCfg struct{ name, prompt, mode, model, agent string }
+type createCfg struct{ name, prompt, mode, model, agent, coordinator, coordinatorModel string }
 
 func createWorkspaceFields(repos []string, cfg createCfg) map[string]string {
 	fields := map[string]string{
 		"name": cfg.name, "agent": cfg.agent, "mode": cfg.mode,
 		"model": cfg.model, "prompt": cfg.prompt, "defaultAgent": "1",
+	}
+	// The coordinator runtime is chosen only when asked for: absent, the daemon
+	// picks the goal runtime with its own default model (never the worker's).
+	if cfg.coordinator != "" {
+		fields[wsops.FieldCoordinator] = cfg.coordinator
+	}
+	if cfg.coordinatorModel != "" {
+		fields[wsops.FieldCoordinatorModel] = cfg.coordinatorModel
 	}
 	if len(repos) > 0 {
 		fields["repos"] = strings.Join(repos, ",")
@@ -832,6 +858,16 @@ func parseCreateFlags(args []string) ([]string, createCfg) {
 			i++
 		case strings.HasPrefix(a, "--agent="):
 			cfg.agent = strings.TrimPrefix(a, "--agent=")
+		case a == "--coordinator" && i+1 < len(args):
+			cfg.coordinator = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--coordinator="):
+			cfg.coordinator = strings.TrimPrefix(a, "--coordinator=")
+		case a == "--coordinator-model" && i+1 < len(args):
+			cfg.coordinatorModel = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--coordinator-model="):
+			cfg.coordinatorModel = strings.TrimPrefix(a, "--coordinator-model=")
 		default:
 			repos = append(repos, a)
 		}
@@ -920,4 +956,18 @@ func defaultStr(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// pickCoordinatorKind cycles the coordinator runtime on the interactive page.
+// The default (the goal runtime) is the only one with native goal mode; the
+// others are an explicit opt-out, so the page shows what is actually chosen.
+func pickCoordinatorKind(current string) string {
+	kinds := agent.Kinds()
+	now := wsops.CoordinatorKind(current)
+	for i, k := range kinds {
+		if k == now {
+			return kinds[(i+1)%len(kinds)]
+		}
+	}
+	return wsops.CoordinatorKind("")
 }
