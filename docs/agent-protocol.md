@@ -7,6 +7,10 @@ agent-agnostic, multi-channel contract that any runtime (Claude Code, a shell
 script, a custom agent) can implement.
 
 - **Status:** draft / v0.
+  The full channel vocabulary below is a design target, not a list of accepted
+  CLI commands. For the currently implemented reporting surface and flags, use
+  [Agent CLI sandbox access](agent-cli-sandbox.md). Codex PTY's existing
+  rollout-based fallback is separate from this proposed push-report contract.
 - **Compatibility:** the current `amux hook <state>` behavior is a strict subset
   of this spec (see [§11 Compatibility](#11-compatibility-with-v0-hooks)). Legacy
   generated commands stay nondisruptive, but isolated sessions need the fixed

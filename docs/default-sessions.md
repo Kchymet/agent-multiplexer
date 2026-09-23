@@ -37,10 +37,13 @@ wrapper around a one-off agent) hosts no session.
 
 ## Scope
 
-A default session launches through the same typed bubblewrap boundary as an
-agent: only its dedicated own directory is writable, with private PID/proc state,
-fixed daemon-issued access mounts, and a private harness-config copy under
-`<sandbox>/.amux/` (see `docs/sandbox-config.md`). A coordinator does not mount
+A default session uses the same protected launcher as an ordinary agent:
+Seatbelt on macOS, bubblewrap with private PID/proc state on Linux/WSL2. It has
+its dedicated own directory, explicit daemon-issued access grants, and a private
+harness-config copy under `<sandbox>/.amux/`. macOS has no private PID namespace
+and allows host application launching for browser authentication; selected
+accounts and network access are shared. See [Security](../SECURITY.md) and
+[sandbox configuration](sandbox-config.md). A coordinator does not mount
 the workgroup parent containing members; repo homes and the console do not mount
 the amux data/state tree. Their wider views are explicit authenticated daemon
 grants, so they change amux through the CLI and change code by steering an agent.

@@ -1,6 +1,7 @@
 BINDIR  ?= $(HOME)/.local/bin
 CONFDIR ?= $(HOME)/.config/amux
 GOFLAGS ?=
+GOVULNCHECK_VERSION := v1.8.0
 VERSION ?= 0.1.0
 LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
 
@@ -10,7 +11,7 @@ LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
 # there would merge green.
 GO_MODULES := . ./harnessproto
 
-.PHONY: all build install uninstall test test-live fmt vet clean cross run
+.PHONY: all build install uninstall test test-live fmt vet vuln clean cross run
 
 all: build
 
@@ -50,6 +51,11 @@ fmt:
 
 vet:
 	@for m in $(GO_MODULES); do echo "== go vet $$m =="; (cd $$m && go vet ./...) || exit 1; done
+
+# Use the root module's selected, patched toolchain for both modules. The wire
+# module keeps a lower language floor for consumers; that is not a build policy.
+vuln:
+	@toolchain=$$(go env GOVERSION); for m in $(GO_MODULES); do echo "== govulncheck $$m =="; (cd $$m && GOTOOLCHAIN=$$toolchain go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...) || exit 1; done
 
 clean:
 	rm -rf bin
