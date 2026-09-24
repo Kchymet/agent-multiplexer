@@ -23,10 +23,10 @@ erase those existing copies. Local runtime files, amux JSONL, SQLite/WAL, RPC
 mailboxes and logs remain plaintext at the application layer. TLS protects
 transport; it is not storage encryption or E2EE against Harness. Proposed cloud
 application encryption does not encrypt local copies. See Harness's
-[session storage audit and proposed encryption rollout](https://github.com/Kchymet/harness/blob/amux/7165fd-659981/docs/session-storage-encryption.md)
+[session storage audit and encryption rollout documentation](https://github.com/Kchymet/harness/pull/182)
 for the source-backed inventory, residual risks and unverified live GCP settings.
-That proposal is **DO NOT MERGE/DEPLOY**, pending implementation and coordinator
-review; it is not a claim that encryption is complete.
+The document distinguishes audited candidate code from deployment evidence;
+it is not a claim that production encryption is complete.
 
 Everything below preserves provider mode's trust model:
 
