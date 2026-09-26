@@ -297,6 +297,11 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	var policy seatbeltPolicy
 	policy.WriteString(seatbeltBase)
 	policy.WriteString(seatbeltBrowser)
+	if tab == TabAgent && agent.Canonical(s.Agent) == "codex" {
+		if err := policy.codexSockets(s); err != nil {
+			return nil, fmt.Errorf("prepare native Codex sockets: %w", err)
+		}
+	}
 	for _, key := range []string{"SSL_CERT_FILE", "CODEX_CA_CERTIFICATE"} {
 		if path := os.Getenv(key); path != "" {
 			info, err := os.Stat(path)

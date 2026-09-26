@@ -157,7 +157,9 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   own. See `docs/sandbox-config.md`.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
   collapsed **ARCHIVED** section and its session is stopped. Reversible (`x` again,
-  or `amux wg unarchive <id>`).
+  or `amux wg unarchive <id>`). Goal-mode workgroups are marked done automatically
+  when their goal completes and the final turn finishes. Paused, blocked and
+  budget-limited goals stay on the active rail.
 - **Mode** — an agent runs as a **task** (short) or **loop** (long/autonomous),
   shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.
 - **Default sessions** — every container on the rail hosts one long-lived agent

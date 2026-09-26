@@ -136,10 +136,11 @@ type Supervisor struct {
 	logW   io.WriteCloser // EventLogPath sink, opened lazily on first emit
 	logErr bool           // a prior log write failed; stop retrying (never fatal)
 
-	resumable    bool // a rollout exists; native attach and later resume are safe
-	goal         *threadGoal
-	goalRevision uint64
-	restartWork  *RestartWork // frozen before shutdown clears active-turn state
+	resumable          bool // a rollout exists; native attach and later resume are safe
+	goal               *threadGoal
+	goalRevision       uint64
+	goalArchivePending bool         // a goal completed during this supervisor's lifetime
+	restartWork        *RestartWork // frozen before shutdown clears active-turn state
 
 	// goalOp serializes host-side goal operations (a read plus a set/clear) so an
 	// observed task and an explicit goal verb cannot interleave their decisions.

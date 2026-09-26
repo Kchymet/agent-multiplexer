@@ -108,6 +108,11 @@ that supervises exactly that natively: Codex's App Server thread goal
   every idle turn, with no TUI attached and nothing scheduled by amux. The
   objective, token budget and usage are the runtime's own, and `get_goal` /
   `update_goal` are the model's view of them. amux sets no budget of its own.
+- **A completed goal marks the workgroup done.** After the final turn finishes,
+  the daemon archives the workgroup and stops its coordinator and members. Its
+  transcripts and worktrees remain available. Paused, blocked and limited goals
+  do not archive the workgroup. Restore it from the host to give it another task;
+  loading its old completed goal does not immediately archive it again.
 - **Only the user pauses it.** `amux do steer <workgroup> -f verb=goal
   -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]`,
   and the same verb over the remote session wire, are the explicit controls. A

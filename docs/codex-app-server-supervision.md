@@ -58,6 +58,14 @@ Configurable endpoints (`Config.Endpoint` / `--listen`):
 | `ws://127.0.0.1:<port>` | loopback, colocated clients — now works (Origin omitted); `codexapp.LoopbackEndpoint()` allocates a free port. |
 | `wss://host:port` | cross-machine, **authenticated TLS** — verification never downgraded; a non-loopback `ws://` (no TLS) is refused before dialing. |
 
+On macOS, Codex 0.157.1 publishes the requested Unix path as a symlink to a
+physical socket in `/private/tmp/codex-daemon-<uid>/`. Seatbelt permits only the
+session's exact socket and startup lock (including its standalone control
+endpoint), plus metadata on the shared directory. It cannot list the directory,
+read other locks or connect to another session's socket. `TMPDIR` and
+`--no-daemon` do not relocate this directory. The native startup and isolation
+checks are in `internal/panespec/codex_start_darwin_test.go`.
+
 The AGE-179 harness pilot keeps its stdio transport (not converted gratuitously).
 
 ## Protocol shapes (corrected against 0.153.4)
@@ -104,6 +112,20 @@ settings, such as alternate-screen mode, remain on the attach command.
 Per-session creation is **serialized** (a per-session lock taken before spawn).
 Only `Supervisor.Start` removes a stale socket under that lock. Constructing a
 second launch command leaves an existing listener connectable.
+
+## Goal completion
+
+A live goal-mode coordinator transitioning to `complete` marks its workgroup
+done (archived) after its final turn and pending goal decisions finish. The
+daemon commits the archive against the current supervisor under the same
+admission locks used for start, steer, restart and restore, then stops the
+coordinator and its members. Transcripts and worktrees are retained. Paused,
+blocked and limited goals do not trigger completion.
+
+A host restore leaves the workgroup open: simply loading an old completed goal
+does not archive it again. Its next task establishes a fresh goal. Restart
+evidence of the same previously active goal can recover a completion observed
+during daemon downtime.
 
 ## Restart and goal continuation
 
