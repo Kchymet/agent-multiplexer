@@ -50,8 +50,9 @@ Harness's **Compute pools** view schedules onto. Work is placed by naming a
 pool; for a machine that is its provider ID.
 
 The pool reading is Harness policy, not a property of the wire: a registration
-Harness holds without an owner (a legacy provider nobody claimed) or one whose
-token was revoked is **not** a personal pool, and another orchestrator speaking
+Harness holds without an owner (a legacy provider nobody claimed) has no
+personal pool, a revoked one has no *usable* personal pool (Harness archives a
+revoked machine pool rather than deleting it), and another orchestrator speaking
 this protocol may model providers however it likes. `amux doctor` therefore
 reports the `providerId` as what it always was — the physical node's
 diagnostic id — and does not assert pool membership.
