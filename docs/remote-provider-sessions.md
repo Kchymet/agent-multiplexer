@@ -9,11 +9,12 @@ keystroke to the agent's PTY; a daemon that does not implement a verb answers
 `unsupported verb` (§3.2). Extends `docs/remote-provider.md`.
 
 Provider mode (`amux provide`) lets a remote orchestrator use this machine as
-compute: it spawns panes here and streams their I/O. This document specifies an
-**optional, additive extension** on the same dialed connection: publishing this
-daemon's own *session inventory* (workgroups and agents) to the orchestrator,
-and accepting a small set of lifecycle verbs back — so an orchestrator's UI can
-show and manage your local sessions remotely.
+compute (with Harness, as your personal compute pool): it spawns panes here and
+streams their I/O. This document specifies an **optional, additive extension**
+on the same dialed connection: publishing this daemon's own *session inventory*
+(workgroups and agents) to the orchestrator, and accepting a small set of
+lifecycle verbs back — so an orchestrator's UI can show and manage your local
+sessions remotely.
 
 **Storage notice:** with Harness as the orchestrator, `--publish-sessions`
 creates a durable cloud inventory copy; adding `--runtime-events` creates durable
