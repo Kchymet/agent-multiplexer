@@ -16,9 +16,10 @@ import (
 // RestartWork is host-owned evidence of work running before shutdown. A goal's
 // identity is retained without copying its objective into the restart journal.
 type RestartWork struct {
-	ThreadID string `json:"threadId"`
-	GoalKey  string `json:"goalKey,omitempty"`
-	Continue bool   `json:"continue,omitempty"`
+	ThreadID         string `json:"threadId"`
+	GoalKey          string `json:"goalKey,omitempty"`
+	CompletedGoalKey string `json:"completedGoalKey,omitempty"`
+	Continue         bool   `json:"continue,omitempty"`
 }
 
 // threadGoal mirrors the App Server's ThreadGoal. Codex owns every field: the
@@ -73,6 +74,31 @@ func (s *Supervisor) Goal() (GoalState, bool) {
 	return goalState(s.goal)
 }
 
+// CompleteWorkgroup commits completion only after the final turn and pending
+// goal decisions settle. commit must not call back into the supervisor. Holding
+// mu through the store write makes a new observed turn/goal and completion
+// mutually exclusive; the daemon also serializes its own prompt admission.
+// A completed goal loaded at attach is not a new completion: explicitly
+// restoring an archived workgroup must leave it open for the next task.
+func (s *Supervisor) CompleteWorkgroup(commit func() error) (bool, error) {
+	if !s.goalOp.TryLock() {
+		return false, nil
+	}
+	defer s.goalOp.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.cfg.Goals || s.closed || s.interrupted || !s.goalArchivePending ||
+		s.goal == nil || s.goal.Status != GoalComplete || s.curTurn != "" ||
+		s.turnDone != nil || len(s.goalOpen) != 0 {
+		return false, nil
+	}
+	if err := commit(); err != nil {
+		return false, err
+	}
+	s.goalArchivePending = false
+	return true, nil
+}
+
 func goalState(g *threadGoal) (GoalState, bool) {
 	if g == nil {
 		return GoalState{}, false
@@ -103,6 +129,8 @@ func (s *Supervisor) restartWorkLocked() RestartWork {
 	if s.goal != nil {
 		if s.goal.Status == GoalActive {
 			w.GoalKey = s.goal.key()
+		} else if s.goal.Status == GoalComplete && s.goalArchivePending {
+			w.CompletedGoalKey = s.goal.key()
 		}
 	} else if s.curTurn != "" && len(s.approvals.open()) == 0 {
 		w.Continue = true
@@ -144,6 +172,11 @@ func (s *Supervisor) recordGoalLocked(g *threadGoal) {
 	if sameGoal(s.goal, g) {
 		s.goal = g
 		return
+	}
+	if g == nil || g.Status != GoalComplete {
+		s.goalArchivePending = false
+	} else if s.goal != nil && s.goal.Status != GoalComplete {
+		s.goalArchivePending = true
 	}
 	s.goal = g
 	s.goalRevision++
@@ -223,6 +256,14 @@ func (s *Supervisor) restoreGoal(ctx context.Context, resumed bool) error {
 		return nil
 	}
 	if goal != nil {
+		if (w.GoalKey == goal.key() || w.CompletedGoalKey == goal.key()) && goal.Status == GoalComplete {
+			// The goal finished after the last restart snapshot but before resume.
+			s.mu.Lock()
+			if sameGoal(s.goal, goal) {
+				s.goalArchivePending = true
+			}
+			s.mu.Unlock()
+		}
 		if w.GoalKey != "" && w.GoalKey == goal.key() && goal.Status == GoalPaused {
 			// Change status only: preserve the objective, budget and usage. Never
 			// reactivate blocked, completed or limited goals, or a different goal.

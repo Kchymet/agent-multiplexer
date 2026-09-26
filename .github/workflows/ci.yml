@@ -159,5 +159,17 @@ jobs:
             -run '^TestSmokeGoal(Restart|Automatic)$' -count=1 -timeout=300s -v
           AMUX_CLAUDE_RESUME_SMOKE=1 go test ./internal/agent \
             -run '^TestSmokeClaudeResumeWork$' -count=1 -timeout=70s -v
+      - name: test Codex 0.157 socket relocation under Seatbelt
+        run: |
+          mkdir -p "$RUNNER_TEMP/codex-0.157.1"
+          cd "$RUNNER_TEMP/codex-0.157.1"
+          curl --fail --location --retry 3 \
+            https://github.com/openai/codex/releases/download/rust-v0.157.1/codex-package-aarch64-apple-darwin.tar.gz \
+            -o codex.tar.gz
+          echo '6cda538d19c2f4d9dce965369aa22011afa9dce8c7a73c234b66eb3611ea4aab  codex.tar.gz' | shasum -a 256 -c -
+          tar -xzf codex.tar.gz
+          cd "$GITHUB_WORKSPACE"
+          AMUX_TEST_CODEX_BIN="$RUNNER_TEMP/codex-0.157.1/bin/codex" go test ./internal/panespec \
+            -run '^TestSeatbeltCodex' -count=1 -timeout=60s -v
       - name: cross compile supported targets
         run: make cross

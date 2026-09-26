@@ -559,6 +559,7 @@ func (d *Daemon) pollOnce(ctx context.Context) {
 	d.sessions = all
 	d.mu.Unlock()
 	d.broadcast()
+	d.completeWorkgroupGoals(ctx)
 
 	// Snapshot the live engine set each poll so a crash leaves a recent record;
 	// then release restore, which waited for sessions/specs to resolve.

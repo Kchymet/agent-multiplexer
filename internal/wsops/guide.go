@@ -550,7 +550,10 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
   CI), and fix or re-dispatch what falls short. Progress must change real state.
 - Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
   verified — never because you are stopping, out of ideas, or near a budget.
-  A finished goal stays finished: the next task the user sends becomes a new goal.
+  When the final turn finishes, amux automatically marks the workgroup done
+  (archived) and stops its coordinator and members. Finish all member work and
+  give your final summary before ending that turn. The user can restore the
+  workgroup; their next task then becomes a fresh goal.
 - Ask the user only for genuine input (`+"`request_user_input`"+`); an open question is
   not a reason to shrink the objective. Use status `+"`blocked`"+` only after the same
   blocker repeats across consecutive goal turns, as the tool describes.
