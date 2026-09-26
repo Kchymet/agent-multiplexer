@@ -353,10 +353,17 @@ Version compatibility is based on the CLI↔daemon protocol and the
 daemon↔database schema, not equality of release strings. See
 [Versioning and compatibility](docs/versioning.md).
 
-### Lending this machine to a remote orchestrator
+### Providing this machine as remote compute (your personal compute pool)
 
 Provider mode (`docs/remote-provider.md`) dials *out* to a remote orchestrator
-over TLS and serves agent panes to it, turning this machine into a compute node.
+over TLS and serves agent panes to it. With Harness as the orchestrator, work is
+scheduled onto **compute pools**, and a machine registration owned by your
+account *is* one: a personal pool of kind `machine` whose pool id is the
+`providerId` Harness assigns (`amux doctor` prints it). People can also group
+their own machines into a provider pool, and organizations have pools of their
+own; both live on Harness, and amux neither creates nor names them. A
+registration with no owner is not a pool. See
+[Compute pools and machines](docs/remote-provider.md#compute-pools-and-machines).
 Capabilities are opt-in: `--publish-sessions` shares inventory and allows session
 control; `--read-only-sessions` disables that control; `--runtime-events` also
 shares transcripts. `--allow-compute` separately permits arbitrary remote
@@ -405,8 +412,9 @@ At registration, the provider verifies its installed agent CLIs with
 orchestrator. By default it discovers every supported local harness (Claude,
 Codex, and Hermes when installed). Use `--harness claude` or repeated
 `--harness` flags to restrict that list; `--harness auto` restores discovery.
-The local provider uses the machine's existing harness credentials and reports
-the `machine` identity mode. It does not inspect or send account identity.
+The local provider uses the physical machine's existing harness credentials and
+reports the `machine` identity mode — a credential source, unrelated to the pool
+kind. It does not inspect or send account identity.
 
 ### Scripting the daemon: `amux do`
 

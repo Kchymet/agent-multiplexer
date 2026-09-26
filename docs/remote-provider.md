@@ -23,11 +23,49 @@ sends `spawn/input/resize/kill`, the executing side streams `output/exit`
 back, as line-framed JSON over any byte stream. This document specifies
 **provider mode**: the amux daemon dials out to a **remote orchestrator**,
 registers itself, and serves that same protocol over the connection — turning
-any machine running amux into a compute node the orchestrator can schedule
-agent processes onto.
+any machine running amux into compute the orchestrator can schedule agent
+processes onto. With Harness as the orchestrator, that registration is your
+**personal compute pool** (see the next section).
 
 The orchestrator is any service that speaks this contract. amux contains no
 knowledge of, or code for, any particular orchestrator.
+
+## Compute pools and machines
+
+This section describes **Harness** as the orchestrator. Harness's user-facing
+unit of scheduling and ownership is a **compute pool**, and a machine registered
+with `amux provide` under your own account is one kind of pool:
+
+| Pool | Owner | How it comes to exist |
+| --- | --- | --- |
+| **Machine** (`kind=machine`) | the person whose account owns the registration | `amux provide` registers this host; an owned, non-revoked registration **is** the pool |
+| Grouped provider pool | a person | created on Harness from several of that person's own machines |
+| Organization pool | an organization | created and managed on Harness |
+| Global (paid) pool | — | reserved; unavailable until billing and budgets are designed |
+
+An owned personal machine **is** a pool of kind `machine`, not a node inside
+some implicit default pool. Its **pool ID is the `providerId`** Harness assigns
+in `registered`, so for such a machine the id `amux doctor` prints is the id
+Harness's **Compute pools** view schedules onto. Work is placed by naming a
+pool; for a machine that is its provider ID.
+
+The pool reading is Harness policy, not a property of the wire: a registration
+Harness holds without an owner (a legacy provider nobody claimed) or one whose
+token was revoked is **not** a personal pool, and another orchestrator speaking
+this protocol may model providers however it likes. `amux doctor` therefore
+reports the `providerId` as what it always was — the physical node's
+diagnostic id — and does not assert pool membership.
+
+Nothing about this changes what crosses the wire or what a machine is
+physically: the registration, its bearer token, the TLS transport, the
+`providerId`, the config keys, and the session verbs are exactly as specified
+below. In particular the `machine` **identity mode** is unrelated to the pool
+kind — it names the *credential source* (the harness CLI's existing
+configuration on this physical machine; see
+[Verified agent runtimes](#verified-agent-runtimes-for-remote-creation)), and
+every amux provider advertises it whether or not it is a pool. Grouped and
+organization pools are orchestrator-side objects: amux never creates, joins, or
+names a pool, and carries no billing or budget logic.
 
 ```
    provider machine (amux)                      remote orchestrator
@@ -169,7 +207,8 @@ a possible future extension, not part of v2.
 
 ### User-service setup
 
-Registering a machine should not mean a terminal that has to stay open. Install
+Registering a machine (with Harness, providing your personal compute pool)
+should not mean a terminal that has to stay open. Install
 the provider as a **user service** — a systemd user unit on Linux/WSL2, a launchd
 agent on macOS — and it starts at login, restarts on exit, and survives a reboot:
 
@@ -191,8 +230,9 @@ amux provide install --orchestrator orch.example.com:7443 \
 amux doctor          # Provider section: config, token, service, last heartbeat
 ```
 
-This registers the machine without publishing sessions or granting compute.
-Add the capabilities from the trust table only when you intend to grant them.
+This registers the machine without publishing sessions or granting compute;
+with Harness, an owned registration is your personal compute pool. Add the
+capabilities from the trust table only when you intend to grant them.
 The endpoint must be the orchestrator's provider TLS listener (`host:port`);
 its dashboard HTTPS URL may name a different service. Obtain the provider token
 and, for a private PKI, the public CA certificate from that service's operator.
@@ -337,6 +377,11 @@ Provider
               providerId prov-42 · registered 2m14s ago · heartbeat 3s ago · 2 panes
 ```
 
+`providerId` is the physical node's id from `registered`. With Harness, an
+owned registration's personal compute pool has that same id (see
+[Compute pools and machines](#compute-pools-and-machines)); doctor prints the
+node id and leaves the pool reading to the orchestrator.
+
 Nothing here can fail the health check — provider mode is opt-in, so "not
 configured" is a normal, healthy state. Doctor does contradict the one lie the
 file can tell: a `registered` record whose process is gone (a SIGKILL, a reboot)
@@ -369,9 +414,11 @@ provider; a present block with an empty `harnesses` array means discovery ran
 but verified none, and a scheduler must not substitute a default harness.
 
 amux providers advertise the `machine` identity mode: the selected CLI uses its
-existing configuration on the provider machine. The registration never includes
-an account, organization, API key, or other credential identity. `api-key` is a
-separate cloud-provider identity mode, not valid for `amux provide`.
+existing configuration on the physical provider machine. It is a credential
+source, not the pool kind — every amux provider advertises it. The
+registration never includes an account, organization, API key, or other
+credential identity. `api-key` is a separate cloud-provider identity mode, not
+valid for `amux provide`.
 
 At creation, the orchestrator sends the selected harness as the lifecycle
 action's `agent` field and may include `identity_mode` (`machine` when omitted).

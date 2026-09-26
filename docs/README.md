@@ -7,7 +7,7 @@
 - [Sandbox configuration, shared accounts and restarting sessions](sandbox-config.md)
 - [Default sessions: console, coordinators and repo homes](default-sessions.md)
 - [Codex App Server opt-in and rollback](codex-app-server-supervision.md#opt-in-and-fallback)
-- [Remote provider setup and trust model](remote-provider.md)
+- [Providing personal compute pool capacity: remote provider setup and trust model](remote-provider.md)
 - [Version compatibility and upgrades](versioning.md)
 - [Migrating older isolation/layout schemes](namespace-rollout.md)
 
