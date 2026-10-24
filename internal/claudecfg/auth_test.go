@@ -149,6 +149,8 @@ func TestHostKeychainSelectorSurvivesPrivateConfig(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateAuth(t)
+			// Keychain selector preservation is the explicit legacy host mode.
+			selectAuth(t, amuxcfg.AuthHost)
 			t.Setenv(Env, tc.config)
 			t.Setenv(SecureStorageEnv, tc.secure)
 			if !tc.secureSet {
