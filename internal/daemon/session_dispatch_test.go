@@ -905,3 +905,66 @@ func TestHostCredentialRenewsProactivelyButNotAfterRevocation(t *testing.T) {
 		t.Fatal("revoked host credential changed")
 	}
 }
+
+func TestExpiredHostCredentialIsReissuedOnStartupButRevokedIsNot(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	d := New("", nil, time.Hour)
+	var err error
+	d.authority, err = access.OpenWithClock(t.TempDir(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.authority.Close()
+	ctx := context.Background()
+	if err := d.ensureHostCredential(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	dir := d.authority.CredentialDir(access.SubjectHost, access.LocalHostSubject)
+	before, err := access.LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The daemon was down for longer than the credential lifetime: the same
+	// startup path that previously failed closed now re-issues the host key.
+	now = time.UnixMilli(before.NotAfter).Add(12 * 24 * time.Hour)
+	if err := d.ensureHostCredential(ctx, now); err != nil {
+		t.Fatalf("startup with expired host credential: %v", err)
+	}
+	after, err := access.LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.KeyID == before.KeyID || after.Generation != before.Generation+1 {
+		t.Fatalf("host credential after expiry = key %s gen %d, want new key at generation %d", after.KeyID, after.Generation, before.Generation+1)
+	}
+	if err := d.authority.Valid(ctx, credentialPrincipal(after)); err != nil {
+		t.Fatalf("reissued host credential invalid: %v", err)
+	}
+	if err := d.authority.Valid(ctx, credentialPrincipal(before)); err == nil {
+		t.Fatal("expired host credential still validates after reissue")
+	}
+	// A second startup with the fresh credential is a no-op.
+	if err := d.ensureHostCredential(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := access.LoadCredential(dir); err != nil || again.KeyID != after.KeyID {
+		t.Fatalf("fresh host credential changed on restart: key %q err %v", again.KeyID, err)
+	}
+
+	// Revocation remains sticky, even once the revoked key has also expired.
+	if err := d.authority.Revoke(ctx, access.SubjectHost, access.LocalHostSubject); err != nil {
+		t.Fatal(err)
+	}
+	now = time.UnixMilli(after.NotAfter).Add(12 * 24 * time.Hour)
+	if err := d.ensureHostCredential(ctx, now); err == nil {
+		t.Fatal("revoked and expired host credential was reissued")
+	}
+	final, err := access.LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.KeyID != after.KeyID || final.Generation != after.Generation {
+		t.Fatal("revoked host credential changed")
+	}
+}

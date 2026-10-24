@@ -6,7 +6,7 @@ focused pull request against `master`. For sensitive findings, follow
 
 ## Development setup
 
-Use Go 1.26.8 or a newer patched release and Git. Runtime tests need native
+Use Go 1.26.10 or a newer patched release and Git. Runtime tests need native
 macOS Seatbelt or Linux/WSL2 with bubblewrap 0.12.0+ and usable user/PID
 namespaces. Native Windows is unsupported. See the
 [installation guide](README.md#install) and [runtime validation](docs/agent-cli-validation.md).

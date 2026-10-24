@@ -1,6 +1,6 @@
 module amux
 
-go 1.26.8
+go 1.26.10
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10

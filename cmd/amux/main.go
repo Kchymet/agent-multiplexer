@@ -209,12 +209,24 @@ var protectedHostStartup = func() error {
 	if err != nil {
 		return err
 	}
+	return checkProtectedHostCredential(dir, time.Now())
+}
+
+// checkProtectedHostCredential reports why the credential in dir cannot
+// authorize automatic startup. Expiry is called out explicitly because it is
+// the one condition `amux daemon start` recovers from on its own; a lapsed
+// credential is not a forged or foreign one.
+func checkProtectedHostCredential(dir string, now time.Time) error {
 	credential, err := access.LoadCredential(dir)
 	if err != nil {
 		return err
 	}
-	if credential.Kind != access.SubjectHost || credential.SubjectID != access.LocalHostSubject || credential.NotAfter <= time.Now().UnixMilli() {
+	if credential.Kind != access.SubjectHost || credential.SubjectID != access.LocalHostSubject {
 		return access.ErrInvalidCredential
+	}
+	if credential.NotAfter <= now.UnixMilli() {
+		return fmt.Errorf("host credential expired at %s: %w",
+			time.UnixMilli(credential.NotAfter).UTC().Format(time.RFC3339), access.ErrExpired)
 	}
 	return nil
 }
