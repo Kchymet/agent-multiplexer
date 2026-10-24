@@ -576,7 +576,7 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 		"--chdir", dir,
 	)
 	args = append(args, "--")
-	launchArgv = centralLauncher(tab, s, filepath.Join(launchenv.ToolBinDir, "amux"), launchArgv)
+	launchArgv = centralLauncher(tab, s, launchArgv)
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
@@ -592,15 +592,15 @@ func agentAuthError(s store.Session) error {
 	return claudecfg.LaunchAuthError(sp, os.Environ())
 }
 
-// centralLauncher routes a central-mode Claude agent pane through amux's
-// hidden launcher, which the payload trampoline runs after closing inherited
-// descriptors. The token is fetched there, so it never appears in this argv,
-// the sandbox launcher's environment, or the engine spec.
-func centralLauncher(tab int, s store.Session, tool string, argv []string) []string {
+// centralLauncher routes a central-mode Claude agent pane through the payload
+// trampoline's credential launcher, which runs after inherited descriptors are
+// closed. The token is fetched there, so it never appears in this argv, the
+// sandbox launcher's environment, or the engine spec.
+func centralLauncher(tab int, s store.Session, argv []string) []string {
 	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || claudecfg.AuthMode() != amuxcfg.AuthCentral {
 		return argv
 	}
-	return append([]string{tool, centralauth.LauncherArg}, argv...)
+	return append([]string{centralauth.LauncherArg}, argv...)
 }
 
 const (

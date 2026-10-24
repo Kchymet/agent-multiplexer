@@ -27,7 +27,6 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
-	"amux/internal/centralauth"
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/nativetui"
@@ -40,9 +39,6 @@ func main() {
 	}
 	if filepath.Base(os.Args[0]) == "gh" {
 		os.Exit(credentialGitHub(os.Args[1:]))
-	}
-	if len(os.Args) >= 2 && os.Args[1] == centralauth.LauncherArg {
-		os.Exit(centralExec(os.Args[2:], os.Stderr))
 	}
 	if len(os.Args) < 2 {
 		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print

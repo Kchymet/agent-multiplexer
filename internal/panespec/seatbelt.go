@@ -404,5 +404,5 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	// an authority grant. The trampoline closes inherited descriptors before
 	// exec, on both platforms.
 	args := []string{"/usr/bin/sandbox-exec", "-p", policy.String(), "/usr/bin/env", payloadExecEnv + "=1", tool, payloadExecArg}
-	return append(args, centralLauncher(tab, s, tool, launchArgv)...), nil
+	return append(args, centralLauncher(tab, s, launchArgv)...), nil
 }

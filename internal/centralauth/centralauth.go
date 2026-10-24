@@ -136,7 +136,7 @@ type Delivery struct {
 	Generation uint64 `json:"generation"`
 }
 
-// LauncherArg selects amux's hidden in-sandbox Claude launcher. The payload
-// trampoline runs it after closing inherited descriptors; it fetches the
-// session's credential over the mailbox and execs Claude with ClaudeTokenEnv.
+// LauncherArg, as the first payload word, makes the protected payload
+// trampoline run Launch: after inherited descriptors are marked close-on-exec,
+// it fetches the session's credential over the mailbox and execs Claude.
 const LauncherArg = "--amux-claude-central-exec"

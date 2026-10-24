@@ -1,0 +1,137 @@
+package daemon
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"amux/internal/access"
+	"amux/internal/centralauth"
+	"amux/internal/core"
+	"amux/internal/launchenv"
+	"amux/internal/panespec"
+	"amux/internal/sessionrpc"
+	"amux/internal/store"
+)
+
+// TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace runs the real
+// central launch path end to end: daemon-provisioned session authority, the
+// signed mailbox served by the daemon's own session runtime, the protected
+// namespace from panespec.Resolve, the payload trampoline's launcher, and a
+// fake Claude. The token must reach only Claude's environment.
+func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) {
+	if err := panespec.IsolationSupport(); err != nil {
+		if os.Getenv("AMUX_REQUIRE_NAMESPACE_TEST") == "1" {
+			t.Fatalf("required protected namespace unavailable: %v", err)
+		}
+		t.Skipf("protected namespace unavailable: %v", err)
+	}
+	isolateHome(t)
+	s := store.Session{ID: "central-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "central-owner")}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d, runtime, _ := sessionRuntimeFixture(t, s)
+	t.Setenv("AMUX_JAIL", "on")
+	ctx := t.Context()
+
+	// A fake Claude under HOME: panespec mounts exactly this executable.
+	observed := filepath.Join(s.Dir, "observed-claude")
+	fake := filepath.Join(os.Getenv("HOME"), "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf 'token=%s\\napi=%s\\nargs=%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"${ANTHROPIC_API_KEY-unset}\" \"$*\" > " + observed + "\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUX_CLAUDE_BIN", fake)
+
+	tok, _ := centralauth.NewSecret(mockCentralToken)
+	if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	grant, err := d.authority.EnsureSession(ctx, s.ID, s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := sessionrpc.OpenServerMailbox(s.ID, grant.MailboxHostDir, d.authority, d.authority,
+		sessionrpc.Callbacks{Authorize: runtime.authorizeCallback, Dispatch: runtime.dispatchCallback}, sessionrpc.ServerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if err := server.PublishService(ctx); err != nil {
+		t.Fatal(err)
+	}
+	serving, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() { _ = server.Run(serving) }()
+
+	_, env, argv, err := panespec.Resolve(panespec.LaunchSpec{Session: s, Access: grant}, panespec.TabAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range append(append([]string(nil), argv...), env...) {
+		if strings.Contains(field, mockCentralToken) {
+			t.Fatalf("token in launch spec: %q", field)
+		}
+		if strings.Contains(field, core.AuthDir()) || strings.Contains(field, ".credentials.json") {
+			t.Fatalf("central launch exposes a credential store: %q", field)
+		}
+	}
+	if !strings.Contains(strings.Join(argv, " "), centralauth.LauncherArg+" "+fake) {
+		t.Fatalf("agent pane does not run the central launcher: %v", argv)
+	}
+	launchEnv, err := launchenv.Build(append(os.Environ(), "ANTHROPIC_API_KEY=inherited-must-not-reach-claude"), env, launchenv.ForRuntime(s.Agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(timeout time.Duration) (string, error) {
+		t.Helper()
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
+		cmd.Env = launchEnv
+		out, err := cmd.CombinedOutput()
+		if strings.Contains(string(out), mockCentralToken) {
+			t.Fatalf("token in pane output: %s", out)
+		}
+		return string(out), err
+	}
+
+	if out, err := run(30 * time.Second); err != nil {
+		t.Fatalf("central launch: %v: %s", err, out)
+	}
+	b, err := os.ReadFile(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "token="+mockCentralToken+"\n") || !strings.Contains(got, "api=unset\n") {
+		t.Fatalf("fake Claude observed:\n%s", got)
+	}
+	if !strings.Contains(got, "--permission-mode") {
+		t.Fatalf("Claude argv not preserved through the launcher:\n%s", got)
+	}
+
+	// A revoked session never receives the credential: the launcher explains
+	// and waits, and Claude never starts.
+	if err := os.Remove(observed); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.authority.Revoke(ctx, access.SubjectSession, s.ID); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(3 * time.Second)
+	if err == nil || !strings.Contains(out, "amux auth login") {
+		t.Fatalf("revoked launch = %v: %s", err, out)
+	}
+	if _, err := os.Stat(observed); !os.IsNotExist(err) {
+		t.Fatalf("Claude started for a revoked session: %v", err)
+	}
+}
