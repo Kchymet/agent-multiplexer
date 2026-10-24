@@ -637,3 +637,47 @@ func TestForeignLoginCompletionIgnored(t *testing.T) {
 	default:
 	}
 }
+
+// A 401 for a request still carrying the previous token can arrive after the
+// refresh that replaced it finished. It gets the current token without a
+// second forced rotation; a 401 after the debounce window forces again.
+func TestStraggler401DoesNotRotateAgain(t *testing.T) {
+	p := newStubProvider()
+	sup, fs, client := newAuthPair(t, p)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	forced := func() int {
+		n := 0
+		for _, r := range p.requests() {
+			if r.Refresh {
+				n++
+			}
+		}
+		return n
+	}
+	for i, id := range []string{"r-first", "r-straggler"} {
+		resp := refreshRequest(fs, id)
+		if resp.Error != nil {
+			t.Fatalf("refresh %d: %+v", i, resp.Error)
+		}
+	}
+	if n := forced(); n != 1 {
+		t.Fatalf("forced refreshes = %d, want 1 (straggler must not rotate)", n)
+	}
+	reqs := p.requests()
+	if last := reqs[len(reqs)-1]; last.Refresh || last.PreviousAccountID != "acct-1" {
+		t.Fatalf("straggler request = %+v, want current-token fetch for the bound account", last)
+	}
+
+	old := refreshDebounce
+	refreshDebounce = 0
+	defer func() { refreshDebounce = old }()
+	if resp := refreshRequest(fs, "r-later"); resp.Error != nil {
+		t.Fatalf("later refresh: %+v", resp.Error)
+	}
+	if n := forced(); n != 2 {
+		t.Fatalf("forced refreshes = %d, want 2 after the debounce window", n)
+	}
+}
