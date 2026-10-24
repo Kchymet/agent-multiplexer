@@ -30,13 +30,13 @@ func AuthModes(harness string) []string {
 	case "claude":
 		return []string{AuthCentral, AuthHost, AuthShared, AuthEnvironment}
 	case "codex":
-		return []string{AuthHost, AuthCentral, AuthEnvironment}
+		return []string{AuthCentral, AuthHost, AuthEnvironment}
 	}
 	return nil
 }
 
-// DefaultAuthMode is the effective mode when nothing is saved. Codex stays on
-// its host login until central delivery to its App Server is enabled.
+// DefaultAuthMode is the effective mode when nothing is saved: central for
+// every harness.
 func DefaultAuthMode(harness string) string {
 	if modes := AuthModes(harness); len(modes) > 0 {
 		return modes[0]

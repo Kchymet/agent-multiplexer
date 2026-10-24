@@ -69,6 +69,8 @@ type Daemon struct {
 	// launched with App Server control enabled, so the default PTY path is
 	// unaffected. nil in tests that don't exercise structured control.
 	codex *codexapp.Manager
+	// centralCodex owns the central Codex home when codex.auth is central.
+	centralCodex *centralCodex
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control
@@ -313,6 +315,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		if codexOwned {
 			d.codex.Shutdown()
+			d.closeCentralCodex()
 		}
 		if engineOwned {
 			d.engine.Shutdown()
@@ -383,6 +386,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// It stays inert unless the captured startup selection enables App Server control.
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
 	codexOwned = true
+	d.startCentralCodex(ctx)
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
@@ -1283,9 +1287,7 @@ func (d *Daemon) killRuntimeToken(id string, token permissionRuntimeToken) bool 
 				d.engine.Kill(engine.Key{AgentID: id, Tab: tab})
 			}
 		}
-		if d.codex != nil {
-			d.codex.Close(id)
-		}
+		d.closeCodex(id)
 	})
 }
 
@@ -1299,9 +1301,7 @@ func (d *Daemon) killRuntimeLocked(id string) {
 		}
 		// A structured session runs under the supervisor, not a pane. Close keeps
 		// its persisted identity so recreation/unarchive resumes the same thread.
-		if d.codex != nil {
-			d.codex.Close(id)
-		}
+		d.closeCodex(id)
 	})
 }
 

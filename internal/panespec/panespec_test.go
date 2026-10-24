@@ -91,6 +91,7 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	ch := t.TempDir()
 	t.Setenv("CODEX_HOME", ch)
+	useCodexAuth(t, amuxcfg.AuthHost)
 	auth := filepath.Join(ch, "auth.json")
 	mcpAuth := filepath.Join(ch, ".credentials.json")
 	for _, path := range []string{auth, mcpAuth} {

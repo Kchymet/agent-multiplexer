@@ -158,5 +158,18 @@ func ResolveCodexControl() (Control, error) {
 			c.Warning = fmt.Sprintf("unrecognized %s=%q; using legacy pty override (use app-server or pty, or unset it)", ControlEnv, c.Override)
 		}
 	}
+	// Central Codex auth delivers tokens through the supervised App Server's
+	// external-auth flow; a PTY Codex has no equivalent input. Explicit host and
+	// environment modes keep the selection above.
+	mode, err := AuthMode("codex")
+	if err != nil {
+		return c, err
+	}
+	if mode == AuthCentral && c.Effective != AppServer {
+		if c.Source != "default" {
+			c.Warning = fmt.Sprintf("codex.auth is central, which requires App Server control; ignoring codex.control %s from %s (run `amux config set codex.auth host` to keep it)", c.Effective, c.Source)
+		}
+		c.Effective, c.Source = AppServer, "codex.auth"
+	}
 	return c, nil
 }

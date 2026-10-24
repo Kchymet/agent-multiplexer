@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -46,30 +48,51 @@ var providerEnv = []string{
 	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
 }
 
-// inheritedOverrides are the Claude model-account variables the launcher can
-// pass from the daemon environment (see launchenv).
-var inheritedOverrides = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN"}
+// managedSettingsPaths are Claude's machine-wide managed settings files.
+var managedSettingsPaths = map[string]string{
+	"linux":  "/etc/claude-code/managed-settings.json",
+	"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
+}
 
-// CentralConflicts names (never values) the configuration that would outrank
-// or redirect the central token: nonempty inherited credential variables and,
-// in the agent's private settings, apiKeyHelper or a provider env entry.
-func CentralConflicts(sp cfghome.Spec, environ []string) []string {
+// enabled reports whether a provider/credential value is set. Claude treats
+// "0" and "false" as unset for its CLAUDE_CODE_USE_* switches.
+func enabled(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value != "0" && !strings.EqualFold(value, "false")
+}
+
+// CentralConflicts names (never values) configuration that would outrank or
+// redirect the central token: inherited credential, endpoint or cloud-provider
+// variables, and apiKeyHelper or a provider env entry in any settings layer
+// Claude reads for this launch — the agent's private user settings (the
+// template's before the copy is seeded), the project settings in projectDir,
+// and managed settings.
+func CentralConflicts(sp cfghome.Spec, projectDir string, environ []string) []string {
 	found := map[string]bool{}
 	for _, kv := range environ {
 		key, value, _ := strings.Cut(kv, "=")
-		for _, name := range inheritedOverrides {
-			if key == name && value != "" {
-				found["environment "+name] = true
-			}
+		if slices.Contains(providerEnv, key) && enabled(value) {
+			found["environment "+key] = true
 		}
 	}
-	// Before the first launch seeds the copy, its settings are the template's.
-	settingsDir := sp.Dir
+	userDir := sp.Dir
 	if !cfghome.Seeded(sp) {
-		settingsDir = sp.Template
+		userDir = sp.Template
 	}
-	for _, rel := range []string{"settings.json", "settings.local.json"} {
-		b, err := os.ReadFile(filepath.Join(settingsDir, rel))
+	layers := []struct{ label, path string }{
+		{"user settings.json", filepath.Join(userDir, "settings.json")},
+		{"user settings.local.json", filepath.Join(userDir, "settings.local.json")},
+	}
+	if projectDir != "" {
+		layers = append(layers,
+			struct{ label, path string }{"project .claude/settings.json", filepath.Join(projectDir, ".claude", "settings.json")},
+			struct{ label, path string }{"project .claude/settings.local.json", ProjectSettingsLocalPath(projectDir)})
+	}
+	if managed := managedSettingsPaths[runtime.GOOS]; managed != "" {
+		layers = append(layers, struct{ label, path string }{"managed settings", managed})
+	}
+	for _, layer := range layers {
+		b, err := os.ReadFile(layer.path)
 		if err != nil {
 			continue
 		}
@@ -81,11 +104,11 @@ func CentralConflicts(sp cfghome.Spec, environ []string) []string {
 			continue // Claude reports its own settings errors
 		}
 		if helper, ok := settings.APIKeyHelper.(string); ok && strings.TrimSpace(helper) != "" {
-			found[rel+" apiKeyHelper"] = true
+			found[layer.label+" apiKeyHelper"] = true
 		}
 		for _, name := range providerEnv {
-			if v, ok := settings.Env[name]; ok && v != nil && fmt.Sprint(v) != "" {
-				found[rel+" env."+name] = true
+			if v, ok := settings.Env[name]; ok && v != nil && enabled(fmt.Sprint(v)) {
+				found[layer.label+" env."+name] = true
 			}
 		}
 	}
@@ -103,7 +126,7 @@ var ErrCentralLoginRequired = errors.New("amux Claude central login required")
 
 // LaunchAuthError reports, before a Claude agent pane starts, why its selected
 // authentication cannot work. Messages name settings, never credential values.
-func LaunchAuthError(sp cfghome.Spec, environ []string) error {
+func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error {
 	mode, err := amuxcfg.AuthMode("claude")
 	if err != nil {
 		return err
@@ -120,7 +143,7 @@ func LaunchAuthError(sp cfghome.Spec, environ []string) error {
 				"`amux config set claude.auth shared` (older amux login) or "+
 				"`amux config set claude.auth environment` (API key, apiKeyHelper, cloud provider or gateway)", ErrCentralLoginRequired)
 		}
-		if conflicts := CentralConflicts(sp, environ); len(conflicts) > 0 {
+		if conflicts := CentralConflicts(sp, projectDir, environ); len(conflicts) > 0 {
 			return fmt.Errorf("claude.auth is central, but %s would override or redirect the central token; "+
 				"remove it, or run `amux config set claude.auth environment` to keep that method", strings.Join(conflicts, ", "))
 		}

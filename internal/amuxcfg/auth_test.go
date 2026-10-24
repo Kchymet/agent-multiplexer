@@ -10,7 +10,7 @@ import (
 
 func TestAuthModeDefaultsAndPersistence(t *testing.T) {
 	isolate(t)
-	for harness, want := range map[string]string{"claude": AuthCentral, "codex": AuthHost} {
+	for harness, want := range map[string]string{"claude": AuthCentral, "codex": AuthCentral} {
 		if got, err := AuthMode(harness); err != nil || got != want {
 			t.Fatalf("%s default = %q, %v; want %q", harness, got, err, want)
 		}
@@ -43,7 +43,7 @@ func TestAuthModeDefaultsAndPersistence(t *testing.T) {
 	if got, _ := CodexControl(); got != AppServer {
 		t.Fatalf("codex.control = %q after codex.auth unset", got)
 	}
-	if got, _ := AuthMode("codex"); got != AuthHost {
+	if got, _ := AuthMode("codex"); got != AuthCentral {
 		t.Fatalf("codex after unset = %q", got)
 	}
 }
@@ -75,5 +75,34 @@ func TestAuthModeRejectsUnknownValues(t *testing.T) {
 	}
 	if got, err := AuthMode("claude"); err != nil || got != AuthCentral {
 		t.Fatalf("repaired mode = %q, %v", got, err)
+	}
+}
+
+func TestCentralCodexAuthRequiresAppServerControl(t *testing.T) {
+	isolate(t)
+	c, err := ResolveCodexControl()
+	if err != nil || c.Effective != AppServer || c.Source != "codex.auth" || c.Warning != "" {
+		t.Fatalf("default central control = %+v, %v", c, err)
+	}
+	if err := SetCodexControl(PTY); err != nil {
+		t.Fatal(err)
+	}
+	c, err = ResolveCodexControl()
+	if err != nil || c.Effective != AppServer || !strings.Contains(c.Warning, "codex.auth host") {
+		t.Fatalf("central over saved pty = %+v, %v", c, err)
+	}
+	for _, mode := range []string{AuthHost, AuthEnvironment} {
+		if err := SetAuthMode("codex", mode); err != nil {
+			t.Fatal(err)
+		}
+		if c, err := ResolveCodexControl(); err != nil || c.Effective != PTY || c.Source != "config" {
+			t.Fatalf("%s keeps saved pty: %+v, %v", mode, c, err)
+		}
+	}
+	if err := os.WriteFile(core.ConfigPath(), []byte(`{"codex":{"auth":"chatgpt"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveCodexControl(); err == nil {
+		t.Fatal("invalid codex.auth must fail daemon startup")
 	}
 }

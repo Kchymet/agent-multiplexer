@@ -17,6 +17,15 @@ func isolate(t *testing.T) {
 	}
 }
 
+// legacyCodexAuth selects the host Codex login, under which codex.control
+// keeps its own precedence (central auth always requires the App Server).
+func legacyCodexAuth(t *testing.T) {
+	t.Helper()
+	if err := SetAuthMode("codex", AuthHost); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestControlPrecedence(t *testing.T) {
 	for _, saved := range []string{"", PTY, AppServer} {
 		for _, override := range []struct {
@@ -36,6 +45,7 @@ func TestControlPrecedence(t *testing.T) {
 		} {
 			t.Run(saved+"/"+override.name, func(t *testing.T) {
 				isolate(t)
+				legacyCodexAuth(t)
 				if saved != "" {
 					if err := SetCodexControl(saved); err != nil {
 						t.Fatal(err)
