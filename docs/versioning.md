@@ -24,7 +24,7 @@ name.
 
 ## Upgrade behavior
 
-Build with Go 1.26.8 or a newer patched release. The Go standard library is part
+Build with Go 1.26.10 or a newer patched release. The Go standard library is part
 of the binary, so updating a Go installation alone does not fix an old amux
 executable. Rebuild, reinstall and restart the daemon; reopen dashboards and
 restart any provider service. `go version -m /path/to/amux` reports the build's

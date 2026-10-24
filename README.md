@@ -477,7 +477,7 @@ See [sandbox configuration](docs/sandbox-config.md),
 
 ## Install
 
-Requires Go **1.26.8 or a newer patched release**, Git, and a supported isolation backend: macOS
+Requires Go **1.26.10 or a newer patched release**, Git, and a supported isolation backend: macOS
 `/usr/bin/sandbox-exec`, or Linux/WSL2 `bwrap` ≥ 0.12.0 with usable user/PID
 namespaces. Install and authenticate at least one supported harness (Claude Code
 or Codex) in a normal host terminal first. `gh` is needed for GitHub discovery
