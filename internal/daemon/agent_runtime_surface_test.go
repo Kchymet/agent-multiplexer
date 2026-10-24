@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 	"amux/internal/codexapp"
 	"amux/internal/codexcfg"
@@ -47,6 +48,17 @@ type surfaceRuntime struct {
 func prepareSurfaceRuntime(t *testing.T, mode string, own *store.Session, script, candidate string, grant access.SessionAccess) *surfaceRuntime {
 	t.Helper()
 	r := &surfaceRuntime{mode: mode, command: "/bin/sh " + script, dir: own.Dir, candidate: candidate, grant: grant, verified: make(chan struct{})}
+	// Each runtime below talks to a synthetic provider (a fixture endpoint and
+	// key), which is the explicit environment auth method, not the central
+	// default. Keep the selection in the isolated home's own config.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(os.Getenv("HOME"), "config"))
+	harness := "codex"
+	if mode == "claude" {
+		harness = "claude"
+	}
+	if err := amuxcfg.SetAuthMode(harness, amuxcfg.AuthEnvironment); err != nil {
+		t.Fatal(err)
+	}
 	r.server = httptest.NewServer(http.HandlerFunc(r.serve))
 	t.Cleanup(r.server.Close)
 	binDir := filepath.Join(own.Dir, "runtime-bin")
