@@ -1019,3 +1019,78 @@ func TestAuthorityRootHasSingleOwner(t *testing.T) {
 	}
 	_ = b.Close()
 }
+
+func TestRenewExpiredReissuesOnlyLapsedUnrevokedCurrent(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, err := open(t.TempDir(), func() time.Time { return now }, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	ctx := context.Background()
+
+	if _, err := a.RenewExpired(ctx, SubjectHost, LocalHostSubject, "deadbeef"); !errors.Is(err, ErrNotProvisioned) {
+		t.Fatalf("unprovisioned renew error = %v, want %v", err, ErrNotProvisioned)
+	}
+	dir, err := a.EnsureHost(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RenewExpired(ctx, SubjectHost, LocalHostSubject, first.KeyID); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("renew of still-valid credential error = %v, want %v", err, ErrGenerationChanged)
+	}
+	if _, err := a.RenewExpired(ctx, SubjectHost, LocalHostSubject, ""); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("renew without expected key error = %v, want %v", err, ErrGenerationChanged)
+	}
+
+	now = now.Add(31 * 24 * time.Hour)
+	if _, err := a.Rotate(ctx, SubjectHost, LocalHostSubject); !errors.Is(err, ErrExpired) {
+		t.Fatalf("rotate of expired credential error = %v, want %v (implicit reissue must stay closed)", err, ErrExpired)
+	}
+	if _, err := a.RenewExpired(ctx, SubjectHost, LocalHostSubject, "not-the-current-key"); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("renew with stale expected key error = %v, want %v", err, ErrGenerationChanged)
+	}
+	if got := a.registry.Current[currentKey(SubjectHost, LocalHostSubject)]; got != first.KeyID {
+		t.Fatalf("failed renew attempts changed current key to %q", got)
+	}
+
+	if _, err := a.RenewExpired(ctx, SubjectHost, LocalHostSubject, first.KeyID); err != nil {
+		t.Fatalf("renew of expired credential: %v", err)
+	}
+	second, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.KeyID == first.KeyID || second.Generation != first.Generation+1 {
+		t.Fatalf("renewed credential = key %s gen %d, want new key at generation %d", second.KeyID, second.Generation, first.Generation+1)
+	}
+	if second.NotAfter <= now.UnixMilli() {
+		t.Fatalf("renewed credential notAfter %d is not in the future of %d", second.NotAfter, now.UnixMilli())
+	}
+	if err := a.Valid(ctx, Principal{KeyID: second.KeyID, SubjectID: second.SubjectID, Kind: second.Kind, Generation: second.Generation}); err != nil {
+		t.Fatalf("renewed credential invalid: %v", err)
+	}
+	old := a.registry.Records[first.KeyID]
+	if old.RevokedAt == 0 {
+		t.Fatal("lapsed predecessor was not marked revoked")
+	}
+	if err := a.Valid(ctx, Principal{KeyID: first.KeyID, SubjectID: first.SubjectID, Kind: first.Kind, Generation: first.Generation}); err == nil {
+		t.Fatal("lapsed predecessor still validates after renewal")
+	}
+
+	// Explicit revocation stays sticky even once the credential has also expired.
+	if err := a.Revoke(ctx, SubjectHost, LocalHostSubject); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * 24 * time.Hour)
+	if _, err := a.RenewExpired(ctx, SubjectHost, LocalHostSubject, second.KeyID); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("renew of revoked credential error = %v, want %v", err, ErrRevoked)
+	}
+	if got := len(a.registry.Records); got != 2 {
+		t.Fatalf("revoked renew attempt changed record count to %d", got)
+	}
+}

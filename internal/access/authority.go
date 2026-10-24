@@ -176,6 +176,16 @@ func Open(root string) (*FileAuthority, error) {
 	return open(root, time.Now, rand.Reader)
 }
 
+// OpenWithClock is Open with an injected clock. Expiry and renewal decisions
+// are driven by now, which lets callers exercise lapsed credentials without
+// waiting out their lifetime.
+func OpenWithClock(root string, now func() time.Time) (*FileAuthority, error) {
+	if now == nil {
+		now = time.Now
+	}
+	return open(root, now, rand.Reader)
+}
+
 func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, error) {
 	if root == "" {
 		return nil, fmt.Errorf("access authority root is empty")
@@ -446,6 +456,48 @@ func (a *FileAuthority) Regrant(_ context.Context, kind SubjectKind, subjectID s
 		return "", err
 	}
 	if rec.RevokedAt == 0 || rec.Generation != expectedRevokedGeneration {
+		return "", ErrGenerationChanged
+	}
+	return a.issueLocked(kind, subjectID, rec.KeyID)
+}
+
+// RenewExpired is the explicit recovery decision for a subject whose current
+// generation lapsed without ever being revoked. Ensure and Rotate deliberately
+// fail closed on expiry; this is the one path that re-issues after it, and it
+// only does so when the registry still points at expectedKeyID, that record is
+// unrevoked, and its lifetime has actually elapsed. A revoked, missing, rotated
+// or still-valid predecessor fails closed so a stale caller cannot force a new
+// generation. The lapsed key is marked revoked as part of publication.
+func (a *FileAuthority) RenewExpired(_ context.Context, kind SubjectKind, subjectID, expectedKeyID string) (string, error) {
+	if err := validateSubject(kind, subjectID); err != nil {
+		return "", err
+	}
+	if expectedKeyID == "" {
+		return "", ErrGenerationChanged
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.rootDir == nil {
+		return "", ErrAuthorityClosed
+	}
+	keyID := a.registry.Current[currentKey(kind, subjectID)]
+	if keyID == "" {
+		if a.subjectWasIssuedLocked(kind, subjectID) {
+			return "", ErrRevoked
+		}
+		return "", ErrNotProvisioned
+	}
+	if keyID != expectedKeyID {
+		return "", ErrGenerationChanged
+	}
+	rec, ok := a.registry.Records[keyID]
+	if !ok || rec.KeyID != keyID || rec.Kind != kind || rec.SubjectID != subjectID {
+		return "", ErrInvalidCredential
+	}
+	if rec.RevokedAt != 0 {
+		return "", ErrRevoked
+	}
+	if rec.NotAfter > a.now().UnixMilli() {
 		return "", ErrGenerationChanged
 	}
 	return a.issueLocked(kind, subjectID, rec.KeyID)

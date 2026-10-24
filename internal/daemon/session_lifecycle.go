@@ -190,7 +190,21 @@ func (d *Daemon) ensureHostCredential(ctx context.Context, now time.Time) error 
 		return err
 	}
 	if err := d.authority.Valid(ctx, credentialPrincipal(credential)); err != nil {
-		return err // an explicitly revoked or expired host is never auto-reissued
+		// A revoked host is never auto-reissued. A host whose credential merely
+		// lapsed while no daemon was running is different: the operator reached
+		// this point through explicit `amux daemon start` (auto-start refuses an
+		// expired host credential in the CLI), and the alternative is a daemon
+		// that can never start again. Renew only when the registry agrees the
+		// loaded key is current, unrevoked and expired.
+		if _, currentErr := d.authority.Current(ctx, access.SubjectHost, access.LocalHostSubject); !errors.Is(currentErr, access.ErrExpired) {
+			return err
+		}
+		log.Printf("host credential %s expired at %s; reissuing on explicit daemon startup",
+			credential.KeyID, time.UnixMilli(credential.NotAfter).Format(time.RFC3339))
+		if _, renewErr := d.authority.RenewExpired(ctx, access.SubjectHost, access.LocalHostSubject, credential.KeyID); renewErr != nil {
+			return fmt.Errorf("renew expired host credential: %w", renewErr)
+		}
+		return nil
 	}
 	if now.Add(credentialRenewBefore).Before(time.UnixMilli(credential.NotAfter)) {
 		return nil
