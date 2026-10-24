@@ -164,6 +164,12 @@ live Codex session, performs one serialized native refresh on the central home
 token, account id and plan. Concurrent 401s share one refresh, and a refresh
 that would switch the session's ChatGPT account is refused.
 
+A session's `config.toml` is its own editable copy, so a central App Server
+pins `chatgpt_base_url` to the official ChatGPT backend and `model_provider` to
+`openai` with highest-precedence `-c` overrides. A `config.toml` edit therefore
+cannot send the central token to another server. Select `codex.auth host` or
+`environment` for a custom provider or endpoint.
+
 Session homes get no `auth.json`: a legacy link is unlinked without being
 followed. Inherited `OPENAI_API_KEY`, `CODEX_API_KEY` and `OPENAI_BASE_URL` are
 cleared. MCP credentials keep their existing sharing. A `codex` started by hand
