@@ -54,6 +54,7 @@ func testGitHubSandbox(t *testing.T, live bool) {
 		want = strings.TrimSpace(string(out))
 	}
 	isolateHome(t)
+	legacyClaudeAuth(t) // this exercises the legacy host Claude login path
 	t.Setenv("AMUX_JAIL", "on")
 	t.Setenv("SHELL", "/bin/sh")
 	t.Setenv("AMUX_EDITOR", "/bin/sh")

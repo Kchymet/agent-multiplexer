@@ -162,6 +162,7 @@ func TestCredentialBrokerSeatbeltRoundTrip(t *testing.T) {
 		t.Fatalf("build CLI: %v: %s", err, out)
 	}
 	isolateHome(t)
+	legacyClaudeAuth(t) // this exercises the legacy host Claude login path
 	t.Setenv("AMUX_JAIL", "on")
 	t.Setenv("SHELL", "/bin/sh")
 	t.Setenv(claudecfg.SecureStorageEnv, claudecfg.User().Dir)
