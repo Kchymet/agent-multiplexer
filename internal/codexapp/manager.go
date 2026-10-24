@@ -27,6 +27,7 @@ type Manager struct {
 	cancelSupervisors context.CancelFunc
 	stopContextWatch  func() bool
 	bin               string // codex binary override (AMUX_CODEX_BIN), "" ⇒ "codex"
+	chatgptAuth       TokenProvider
 
 	mu       sync.Mutex
 	sup      map[string]*Supervisor
@@ -106,6 +107,15 @@ func (m *Manager) existingForEnsure(sessionID string) (*Supervisor, bool, error)
 		_ = s.Close()
 	}
 	return s, ok, nil
+}
+
+// SetChatGPTAuth selects the central ChatGPT token provider for supervisors
+// started from now on (nil restores the legacy per-home credentials). Running
+// supervisors keep the provider they started with.
+func (m *Manager) SetChatGPTAuth(p TokenProvider) {
+	m.mu.Lock()
+	m.chatgptAuth = p
+	m.mu.Unlock()
 }
 
 // SetModel updates a live supervisor's default for subsequent turns. It is a
@@ -192,6 +202,9 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 		InitialPrompt: initialPrompt,
 		EventLogPath:  EventLogPathFor(sessionID),
 	}
+	m.mu.Lock()
+	cfg.ChatGPTAuth = m.chatgptAuth
+	m.mu.Unlock()
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
 	if len(launch) > 0 {
 		cfg.Sandbox = launch[0].Sandbox
