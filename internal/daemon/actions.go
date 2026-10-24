@@ -98,6 +98,11 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.triggerPoll()
 		return ok()
+	case core.ActionCodexLogin:
+		if err := d.codexLogin(a); err != nil {
+			return fail("%v", err)
+		}
+		return ok()
 	case core.ActionSteer:
 		// Engine-only like start: it drives the agent inside a running session and
 		// changes no store state, so it never reaches wsops.
@@ -277,8 +282,8 @@ func (d *Daemon) quiesceSessionRuntimeLocked(subjectID string) error {
 	var supervisor *codexapp.Supervisor
 	if d.codex != nil {
 		supervisor, _ = d.codex.Get(subjectID)
-		d.codex.Close(subjectID)
 	}
+	d.closeCodex(subjectID)
 	for _, instance := range instances {
 		if instance.Alive() {
 			return fmt.Errorf("session %s runtime did not terminate", subjectID)
@@ -347,9 +352,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 			if d.engine != nil {
 				d.engine.Kill(key)
 			}
-			if d.codex != nil {
-				d.codex.Close(id)
-			}
+			d.closeCodex(id)
 		})
 	}
 	if d.structuredControl(spec.Session) {

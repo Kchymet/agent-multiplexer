@@ -277,9 +277,9 @@ func (sp Spec) EnvEntries() []string {
 	env := []string{sp.EnvEntry()}
 	if sp.AuthEnv != "" {
 		env = append(env, sp.AuthEnv+"="+sp.AuthValue)
-		for _, key := range sp.AuthUnsetEnv {
-			env = append(env, key+"=")
-		}
+	}
+	for _, key := range sp.AuthUnsetEnv {
+		env = append(env, key+"=")
 	}
 	return env
 }

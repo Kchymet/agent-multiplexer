@@ -589,7 +589,9 @@ func agentAuthError(s store.Session) error {
 	if !ok {
 		return nil
 	}
-	return claudecfg.LaunchAuthError(sp, os.Environ())
+	// The agent pane launches in the session root, whose .claude settings are
+	// Claude's project layer for this launch.
+	return claudecfg.LaunchAuthError(sp, s.Dir, os.Environ())
 }
 
 // centralLauncher routes a central-mode Claude agent pane through the payload

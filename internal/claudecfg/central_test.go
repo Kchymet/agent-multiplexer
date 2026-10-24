@@ -128,7 +128,7 @@ func TestEnvironmentModePreservesInheritedProviderSelection(t *testing.T) {
 			t.Fatalf("environment mode overrode %s", kv)
 		}
 	}
-	if err := LaunchAuthError(sp, []string{"ANTHROPIC_API_KEY=mock"}); err != nil {
+	if err := LaunchAuthError(sp, "", []string{"ANTHROPIC_API_KEY=mock"}); err != nil {
 		t.Fatalf("environment mode launch error = %v", err)
 	}
 }
@@ -139,18 +139,18 @@ func TestLaunchAuthErrorGuidesMigrationAndNamesConflictsWithoutValues(t *testing
 	if _, err := cfghome.Seed(sp); err != nil {
 		t.Fatal(err)
 	}
-	err := LaunchAuthError(sp, nil)
+	err := LaunchAuthError(sp, "", nil)
 	if !errors.Is(err, ErrCentralLoginRequired) || !strings.Contains(err.Error(), "amux auth login") ||
 		!strings.Contains(err.Error(), "claude.auth environment") {
 		t.Fatalf("missing login error = %v", err)
 	}
 	saveCentral(t)
-	if err := LaunchAuthError(sp, []string{"PATH=/usr/bin", "ANTHROPIC_API_KEY="}); err != nil {
+	if err := LaunchAuthError(sp, "", []string{"PATH=/usr/bin", "ANTHROPIC_API_KEY="}); err != nil {
 		t.Fatalf("configured central launch error = %v", err)
 	}
 
 	const secretValue = "mock-gateway-secret-value"
-	err = LaunchAuthError(sp, []string{"ANTHROPIC_BASE_URL=https://gateway.invalid", "ANTHROPIC_AUTH_TOKEN=" + secretValue})
+	err = LaunchAuthError(sp, "", []string{"ANTHROPIC_BASE_URL=https://gateway.invalid", "ANTHROPIC_AUTH_TOKEN=" + secretValue})
 	if err == nil || !strings.Contains(err.Error(), "environment ANTHROPIC_BASE_URL") ||
 		!strings.Contains(err.Error(), "environment ANTHROPIC_AUTH_TOKEN") || strings.Contains(err.Error(), secretValue) {
 		t.Fatalf("inherited conflict error = %v", err)
@@ -159,19 +159,19 @@ func TestLaunchAuthErrorGuidesMigrationAndNamesConflictsWithoutValues(t *testing
 	if err := os.WriteFile(filepath.Join(sp.Dir, "settings.local.json"), []byte(settings), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = LaunchAuthError(sp, nil)
-	if err == nil || !strings.Contains(err.Error(), "settings.local.json apiKeyHelper") ||
-		!strings.Contains(err.Error(), "settings.local.json env.CLAUDE_CODE_USE_BEDROCK") ||
+	err = LaunchAuthError(sp, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "user settings.local.json apiKeyHelper") ||
+		!strings.Contains(err.Error(), "user settings.local.json env.CLAUDE_CODE_USE_BEDROCK") ||
 		strings.Contains(err.Error(), "ANTHROPIC_MODEL") || strings.Contains(err.Error(), secretValue) {
 		t.Fatalf("settings conflict error = %v", err)
 	}
 
 	selectAuth(t, amuxcfg.AuthShared)
-	if err := LaunchAuthError(sp, nil); err == nil || !strings.Contains(err.Error(), "no older amux shared Claude login") {
+	if err := LaunchAuthError(sp, "", nil); err == nil || !strings.Contains(err.Error(), "no older amux shared Claude login") {
 		t.Fatalf("shared without login = %v", err)
 	}
 	selectAuth(t, amuxcfg.AuthHost)
-	if err := LaunchAuthError(sp, []string{"ANTHROPIC_API_KEY=mock"}); err != nil {
+	if err := LaunchAuthError(sp, "", []string{"ANTHROPIC_API_KEY=mock"}); err != nil {
 		t.Fatalf("host mode launch error = %v", err)
 	}
 }
@@ -184,7 +184,51 @@ func TestInvalidCentralStoreFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp := Template("one", t.TempDir())
-	if err := LaunchAuthError(sp, nil); err == nil || !strings.Contains(err.Error(), "not private") {
+	if err := LaunchAuthError(sp, "", nil); err == nil || !strings.Contains(err.Error(), "not private") {
 		t.Fatalf("exposed store launch error = %v", err)
+	}
+}
+
+func TestCentralConflictsCoverProjectManagedAndProviderLayers(t *testing.T) {
+	isolateAuth(t)
+	saveCentral(t)
+	sp := Template("one", t.TempDir())
+	if _, err := cfghome.Seed(sp); err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	managed := filepath.Join(t.TempDir(), "managed-settings.json")
+	previous := managedSettingsPaths
+	managedSettingsPaths = map[string]string{"linux": managed, "darwin": managed}
+	t.Cleanup(func() { managedSettingsPaths = previous })
+	if got := CentralConflicts(sp, project, []string{"CLAUDE_CODE_USE_VERTEX=0", "CLAUDE_CODE_USE_BEDROCK=false"}); len(got) != 0 {
+		t.Fatalf("disabled switches reported: %v", got)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string]string{
+		filepath.Join(project, ".claude", "settings.json"): `{"env":{"ANTHROPIC_BASE_URL":"https://gateway.invalid"}}`,
+		ProjectSettingsLocalPath(project):                  `{"apiKeyHelper":"vault read key"}`,
+		managed:                                            `{"env":{"CLAUDE_CODE_USE_FOUNDRY":true}}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := CentralConflicts(sp, project, []string{"CLAUDE_CODE_USE_BEDROCK=1"})
+	want := []string{
+		"environment CLAUDE_CODE_USE_BEDROCK",
+		"managed settings env.CLAUDE_CODE_USE_FOUNDRY",
+		"project .claude/settings.json env.ANTHROPIC_BASE_URL",
+		"project .claude/settings.local.json apiKeyHelper",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("conflicts = %v\nwant %v", got, want)
+	}
+	err := LaunchAuthError(sp, project, nil)
+	if err == nil || !strings.Contains(err.Error(), "project .claude/settings.json env.ANTHROPIC_BASE_URL") ||
+		strings.Contains(err.Error(), "gateway.invalid") || strings.Contains(err.Error(), "vault read key") {
+		t.Fatalf("launch error = %v", err)
 	}
 }

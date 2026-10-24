@@ -70,7 +70,11 @@ const (
 	ActionStart      = "start"       // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
 	ActionRestart    = "restart"     // restart only the named agent, preserving its conversation (host only)
 	ActionAuthReload = "auth-reload" // resume live Claude agents with the shared login
-	ActionQuery      = "query"       // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
+	// ActionCodexLogin starts (or, with Fields["cancel"]="true", cancels) the
+	// daemon-owned central Codex ChatGPT login. Host only; poll QueryCodexAuth
+	// for the authorization URL and the outcome.
+	ActionCodexLogin = "codex-login"
+	ActionQuery      = "query" // read a store-backed model over the socket (Query names it); the daemon replies with a Data frame
 	// ActionSteer drives the agent *inside* a running session rather than the
 	// session itself: send it a prompt, interject mid-turn, interrupt the turn, or
 	// answer its permission prompt. ID is the agent id and Fields[SteerVerb] names
@@ -250,7 +254,32 @@ const (
 	// version of the database it owns. It is intentionally additive: a new CLI
 	// can identify an older daemon by the latter's unknown-query response.
 	QueryVersion = "version"
+	// QueryCodexAuth reports central Codex auth (-> CodexAuthStatus). Host only.
+	QueryCodexAuth = "codex-auth"
 )
+
+// CodexAuthStatus is the QueryCodexAuth read model. It never carries a token.
+type CodexAuthStatus struct {
+	Mode string `json:"mode"`
+	// Error explains why the central provider is unavailable, if it is.
+	Error   string           `json:"error,omitempty"`
+	Account CodexAccount     `json:"account"`
+	Login   CodexLoginStatus `json:"login"`
+}
+
+// CodexAccount is the central login's identity, without credentials.
+type CodexAccount struct {
+	Type     string `json:"type,omitempty"` // "chatgpt", "apiKey", or "" when logged out
+	Email    string `json:"email,omitempty"`
+	PlanType string `json:"planType,omitempty"`
+}
+
+// CodexLoginStatus is the state of the daemon-owned interactive login.
+type CodexLoginStatus struct {
+	State string `json:"state"` // idle | pending | succeeded | failed | cancelled
+	URL   string `json:"url,omitempty"`
+	Error string `json:"error,omitempty"`
+}
 
 // VersionInfo is the QueryVersion read model. Protocol compatibility is a
 // CLI-to-daemon concern; the schema range states what the reporting daemon can

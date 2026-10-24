@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"testing"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
 
@@ -16,6 +17,7 @@ import (
 func TestTemplateSeed(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	user := filepath.Join(root, "home", ".codex")
 	t.Setenv("CODEX_HOME", user)
 	must := func(err error) {
@@ -23,6 +25,8 @@ func TestTemplateSeed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Account sharing is the explicit legacy host selection.
+	must(amuxcfg.SetAuthMode("codex", amuxcfg.AuthHost))
 	must(os.MkdirAll(filepath.Join(user, "sessions", "2026"), 0o755))
 	config := "model = \"gpt-5.5\"\n\n[mcp_servers.linear]\nurl = \"https://mcp.linear.app/mcp\"\n"
 	must(os.WriteFile(filepath.Join(user, ConfigFile), []byte(config), 0o644))
@@ -92,5 +96,55 @@ func TestTemplateSeed(t *testing.T) {
 	ch, _ := cfghome.Scan(sp)
 	if len(ch) != 1 || ch[0].Rel != ConfigFile || ch[0].Status != cfghome.AgentChanged {
 		t.Fatalf("model change should read as an agent edit, got %v", ch)
+	}
+}
+
+// TestCentralTemplateSharesNoAccountLogin pins central and environment Codex
+// homes: no auth.json (a legacy link is unlinked without touching the host
+// login), MCP credentials still shared, and only central clears API keys.
+func TestCentralTemplateSharesNoAccountLogin(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	user := filepath.Join(root, "home", ".codex")
+	t.Setenv("CODEX_HOME", user)
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(user, 0o700))
+	must(os.WriteFile(filepath.Join(user, AuthFile), []byte(`{"tokens":"host-login"}`), 0o600))
+	must(os.WriteFile(filepath.Join(user, MCPCredentialsFile), []byte(`{"linear":"test-token"}`), 0o600))
+	must(amuxcfg.SetAuthMode("codex", amuxcfg.AuthHost))
+	agentDir := filepath.Join(root, "agent")
+	must(os.MkdirAll(agentDir, 0o755))
+	if _, err := cfghome.Seed(Template("a1", agentDir)); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{amuxcfg.AuthCentral, amuxcfg.AuthEnvironment} {
+		must(amuxcfg.SetAuthMode("codex", mode))
+		sp := Template("a1", agentDir)
+		if _, err := cfghome.Seed(sp); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(sp.Dir, AuthFile)); !os.IsNotExist(err) {
+			t.Fatalf("%s home has auth.json: %v", mode, err)
+		}
+		for _, b := range cfghome.Binds(sp) {
+			if strings.HasSuffix(b[1], AuthFile) {
+				t.Fatalf("%s binds the host login: %v", mode, b)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(sp.Dir, MCPCredentialsFile)); err != nil {
+			t.Fatalf("%s lost MCP credential sharing: %v", mode, err)
+		}
+		cleared := strings.Join(sp.EnvEntries(), " ")
+		if got := strings.Contains(cleared, "OPENAI_API_KEY="); got != (mode == amuxcfg.AuthCentral) {
+			t.Fatalf("%s API key cleared = %v: %s", mode, got, cleared)
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(user, AuthFile)); err != nil || string(b) != `{"tokens":"host-login"}` {
+		t.Fatalf("host login changed: %q, %v", b, err)
 	}
 }

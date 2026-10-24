@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +84,15 @@ func TestCentralCredentialDeliveredOnlyToAuthorizedClaudeSessions(t *testing.T) 
 		})
 	}
 
+	// A settings layer that selects another method blocks delivery.
+	project := claudeProjectSettings(t, claude.Dir, `{"apiKeyHelper":"/bin/echo synthetic"}`)
+	if res := dispatch(principals[claude.ID], centralCall()); res.Status != sessionrpc.StatusDenied || res.Code != "central_credential_conflict" {
+		t.Fatalf("conflicting settings delivery = %+v", res)
+	}
+	if err := os.Remove(project); err != nil {
+		t.Fatal(err)
+	}
+
 	// Selecting a legacy or environment mode withdraws central delivery.
 	for _, mode := range []string{amuxcfg.AuthHost, amuxcfg.AuthEnvironment} {
 		if err := amuxcfg.SetAuthMode("claude", mode); err != nil {
@@ -130,4 +141,16 @@ func TestCentralModeRefusesLegacyClaudeKeychainBroker(t *testing.T) {
 			}
 		}
 	}
+}
+
+func claudeProjectSettings(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"os"
 
 	"amux/internal/access"
 	"amux/internal/agent"
@@ -10,6 +11,7 @@ import (
 	"amux/internal/centralauth"
 	"amux/internal/claudecfg"
 	"amux/internal/sessionrpc"
+	"amux/internal/store"
 )
 
 // authorizeCentralCredential admits a session's request for its own harness's
@@ -18,18 +20,26 @@ import (
 // and the configured mode. Every tab of the session shares one principal, so
 // the grant is per session rather than per agent pane.
 func (r *sessionRuntime) authorizeCentralCredential(ctx context.Context, principal access.Principal, req access.Request) error {
+	_, err := r.centralCredentialSession(ctx, principal, req)
+	return err
+}
+
+// centralCredentialSession authorizes the request and returns the session it
+// was authorized for, read through the side-effect-free policy store.
+func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal access.Principal, req access.Request) (store.Session, error) {
 	if principal.Kind != access.SubjectSession || req.Route != access.RouteQuery ||
 		req.ID != "" || req.Target != "" || req.Tab != 0 ||
 		len(req.Fields) != 1 || req.Fields[centralauth.HarnessField] != string(centralauth.Claude) {
-		return access.ErrDenied
+		return store.Session{}, access.ErrDenied
 	}
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
-		return err
+		return store.Session{}, err
 	}
 	if mode, err := amuxcfg.AuthMode("claude"); err != nil || mode != amuxcfg.AuthCentral {
-		return access.ErrDenied
+		return store.Session{}, access.ErrDenied
 	}
-	return r.resolver.withStore(func(db policyStore) error {
+	var session store.Session
+	err := r.resolver.withStore(func(db policyStore) error {
 		s, ok, err := lookupPolicySession(db, principal.SubjectID)
 		if err != nil {
 			return err
@@ -37,8 +47,10 @@ func (r *sessionRuntime) authorizeCentralCredential(ctx context.Context, princip
 		if !ok || s.Archived || agent.Canonical(s.Agent) != string(centralauth.Claude) {
 			return access.ErrDenied
 		}
+		session = s
 		return nil
 	})
+	return session, err
 }
 
 // dispatchCentralCredential returns the central Claude token. It runs inside
@@ -52,8 +64,14 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 	defer r.d.effectMu.Unlock()
 	ctx = withEffectAdmission(ctx)
 	req := request.Call.AccessRequest()
-	if err := r.authorizeCentralCredential(ctx, request.Principal, req); err != nil {
+	s, err := r.centralCredentialSession(ctx, request.Principal, req)
+	if err != nil {
 		return rpcDenied("credential_access_denied"), nil
+	}
+	// Settings or inherited variables that would outrank or redirect the token
+	// mean the user intends another method: never deliver into that launch.
+	if sp, ok := agent.HarnessFor(s.Agent).Config(s); ok && len(claudecfg.CentralConflicts(sp, s.Dir, os.Environ())) > 0 {
+		return rpcDenied("central_credential_conflict"), nil
 	}
 	cred, err := centralauth.ClaudeStore().Load()
 	if err != nil {
