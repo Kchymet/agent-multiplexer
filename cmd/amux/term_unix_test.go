@@ -181,10 +181,10 @@ func TestReadHiddenLineInterruptRestoresAndEndsWithTheSignal(t *testing.T) {
 	if !p.echoOn() {
 		t.Fatal("Ctrl-C left the terminal without echo")
 	}
-	// The re-raised signal ends the helper asynchronously, so it may record
-	// an empty or error result first; it must never return the typed text.
-	if b, _ := os.ReadFile(p.result); strings.Contains(string(b), "partial-secret") {
-		t.Fatalf("an interrupted read returned the typed text: %q", b)
+	// An interrupt never returns to the caller: nothing, least of all the
+	// typed text, may be recorded.
+	if b, err := os.ReadFile(p.result); err == nil {
+		t.Fatalf("an interrupted read returned to its caller: %q", b)
 	}
 }
 
@@ -202,6 +202,9 @@ func TestReadHiddenLineTerminationAndHangupRestore(t *testing.T) {
 			}
 			if !p.echoOn() {
 				t.Fatalf("%v left the terminal without echo", sig)
+			}
+			if b, err := os.ReadFile(p.result); err == nil {
+				t.Fatalf("%v returned to its caller: %q", sig, b)
 			}
 		})
 	}

@@ -5,10 +5,10 @@ package main
 import (
 	"bufio"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"golang.org/x/sys/unix"
@@ -23,9 +23,9 @@ var hiddenReadSignals = []os.Signal{unix.SIGINT, unix.SIGTERM, unix.SIGHUP, unix
 
 // readHiddenLine reads one line from a terminal with echo disabled, restoring
 // the terminal state afterwards on every path: a completed or failed read,
-// and an interrupt, termination, hangup or quit (which then ends the process
-// with that same signal). A suspend restores the terminal while stopped and
-// hides input again on resume.
+// and an interrupt, termination, hangup or quit, which then ends the process
+// with that same signal without returning. A suspend restores the terminal
+// while stopped and hides input again on resume.
 func readHiddenLine(f *os.File) (string, error) {
 	fd := int(f.Fd())
 	old, err := unix.IoctlGetTermios(fd, termiosGet)
@@ -60,27 +60,6 @@ func readHiddenLine(f *os.File) (string, error) {
 		line, err := bufio.NewReader(io.LimitReader(f, 16<<10)).ReadString('\n')
 		done <- result{line, err}
 	}()
-	// handle restores the terminal for sig; it reports whether the read
-	// should continue (a resumed suspend). Other signals end the process.
-	handle := func(sig os.Signal) (bool, error) {
-		restore()
-		if sig == unix.SIGTSTP {
-			// Stop with echo restored. kill does not stop this thread
-			// synchronously, so hide input again only once resumed.
-			cont := make(chan os.Signal, 1)
-			signal.Notify(cont, unix.SIGCONT)
-			_ = unix.Kill(os.Getpid(), unix.SIGSTOP)
-			<-cont
-			signal.Stop(cont)
-			_ = unix.IoctlSetTermios(fd, termiosSet, &quiet)
-			return true, nil
-		}
-		signal.Stop(sigs)
-		signal.Reset(sig)
-		_ = unix.Kill(os.Getpid(), sig.(unix.Signal))
-		// The default action ends the process; reached only if it does not.
-		return false, fmt.Errorf("token entry interrupted (%v)", sig)
-	}
 	for {
 		select {
 		case r := <-done:
@@ -89,9 +68,34 @@ func readHiddenLine(f *os.File) (string, error) {
 			}
 			return r.line, nil
 		case sig := <-sigs:
-			if resume, err := handle(sig); !resume {
-				return "", err
+			restore()
+			if sig != unix.SIGTSTP {
+				signal.Stop(sigs)
+				terminate(sig.(unix.Signal))
 			}
+			// Stop with echo restored. kill does not stop this thread
+			// synchronously, so hide input again only once resumed.
+			cont := make(chan os.Signal, 1)
+			signal.Notify(cont, unix.SIGCONT)
+			_ = unix.Kill(os.Getpid(), unix.SIGSTOP)
+			<-cont
+			signal.Stop(cont)
+			_ = unix.IoctlSetTermios(fd, termiosSet, &quiet)
 		}
 	}
+}
+
+// terminate ends the process with sig's default action after the terminal is
+// restored, and never returns. Only signals not ignored at startup reach here,
+// and Reset restores their default (terminating) action. Delivery of a signal
+// a process sends itself is asynchronous, so returning to the caller could let
+// it exit first with its own status; wait for the signal instead, and use the
+// conventional 128+signal status only if it has somehow not ended the process.
+func terminate(sig unix.Signal) {
+	signal.Reset(sig)
+	_ = unix.Kill(os.Getpid(), sig)
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	os.Exit(128 + int(sig))
 }
