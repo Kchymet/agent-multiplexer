@@ -44,6 +44,11 @@ import (
 // A variable only so tests can shorten it.
 var refreshTimeout = 8 * time.Second
 
+// refreshDebounce is how long after a forced refresh a further 401 is taken
+// to be a straggler from the replaced token rather than a rejection of the
+// new one. A variable only for tests.
+var refreshDebounce = 15 * time.Second
+
 // loginCompletionTimeout bounds the wait for account/login/completed. Codex
 // gives its own workspace-routing discovery 15s, so this leaves it room to
 // report rather than amux guessing first. A variable only for tests.
@@ -115,6 +120,8 @@ type tokenAuth struct {
 	account  string
 	injected bool // the App Server holds a token amux installed
 	inflight *tokenRefresh
+	// refreshed is when the last forced refresh succeeded (see refresh).
+	refreshed time.Time
 	// completed receives the outcome of the pending token login. Codex
 	// acknowledges account/login/start before it finishes the login (it then
 	// discovers the workspace's routing), and reports the result in a later
@@ -330,17 +337,25 @@ func (a *tokenAuth) refresh(ctx context.Context) (ChatGPTToken, error) {
 			return ChatGPTToken{}, ctx.Err()
 		}
 	}
+	// A 401 for a request sent with the previous token can arrive just after
+	// a refresh replaced it. Forcing another rotation for it would burn a
+	// refresh-token generation (and fail if the issuer returns the same access
+	// token), so shortly after a refresh only the current token is fetched.
+	force := a.refreshed.IsZero() || time.Since(a.refreshed) >= refreshDebounce
 	f := &tokenRefresh{done: make(chan struct{})}
 	a.inflight = f
 	a.mu.Unlock()
 
-	tok, err := a.fetch(ctx, true, bound)
+	tok, err := a.fetch(ctx, force, bound)
 	if err == nil && tok.AccountID != bound {
 		tok, err = ChatGPTToken{}, errAccountChanged
 	}
 	f.tok, f.err = tok, err
 	a.mu.Lock()
 	a.inflight = nil
+	if err == nil && force {
+		a.refreshed = time.Now()
+	}
 	a.mu.Unlock()
 	close(f.done)
 	return tok, err
