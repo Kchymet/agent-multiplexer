@@ -43,12 +43,19 @@ func HostStoreShared() bool {
 // providerEnv are settings env keys that select another credential, provider
 // or endpoint. Claude ranks each above (or redirects) CLAUDE_CODE_OAUTH_TOKEN,
 // so central mode refuses to start rather than silently use something else.
+// The list follows Claude 2.1.x: alternate credentials (including the
+// descriptor inputs), the API endpoint and its unix-socket transport, and
+// every CLAUDE_CODE_USE_* provider switch.
 var providerEnv = []string{
 	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "ANTHROPIC_UNIX_SOCKET",
 	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+	"CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY",
 }
 
-// managedSettingsPaths are Claude's machine-wide managed settings files.
+// managedSettingsPaths are Claude's machine-wide managed settings files. Claude
+// also merges drop-ins from managed-settings.d beside each (managedDropIns).
 var managedSettingsPaths = map[string]string{
 	"linux":  "/etc/claude-code/managed-settings.json",
 	"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
@@ -90,6 +97,9 @@ func CentralConflicts(sp cfghome.Spec, projectDir string, environ []string) []st
 	}
 	if managed := managedSettingsPaths[runtime.GOOS]; managed != "" {
 		layers = append(layers, struct{ label, path string }{"managed settings", managed})
+		for _, path := range managedDropIns(managed) {
+			layers = append(layers, struct{ label, path string }{"managed settings " + filepath.Base(path), path})
+		}
 	}
 	for _, layer := range layers {
 		b, err := os.ReadFile(layer.path)
@@ -117,6 +127,24 @@ func CentralConflicts(sp cfghome.Spec, projectDir string, environ []string) []st
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// managedDropIns lists the managed-settings.d/*.json files Claude merges after
+// managed-settings.json: non-hidden names ending in .json, in name order.
+func managedDropIns(managed string) []string {
+	dir := filepath.Join(filepath.Dir(managed), "managed-settings.d")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries { // ReadDir sorts by name
+		name := e.Name()
+		if !e.IsDir() && strings.HasSuffix(name, ".json") && !strings.HasPrefix(name, ".") {
+			out = append(out, filepath.Join(dir, name))
+		}
+	}
 	return out
 }
 
