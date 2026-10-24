@@ -31,7 +31,7 @@ import (
 
 var (
 	// ErrNotLoggedIn: the central home has no ChatGPT login. Run Login.
-	ErrNotLoggedIn = errors.New("codexauth: no central Codex ChatGPT login; run amux auth codex login")
+	ErrNotLoggedIn = errors.New("codexauth: no central Codex ChatGPT login; run `amux auth login codex`")
 	// ErrUnsupportedAuth: the central home holds a non-ChatGPT credential (an API
 	// key) or malformed tokens. Never handed to sessions.
 	ErrUnsupportedAuth = errors.New("codexauth: central Codex login is not a ChatGPT login")
@@ -295,7 +295,7 @@ func (p *Provider) forceRefresh(ctx context.Context, sessionID string) (Tokens, 
 		return Tokens{}, err
 	}
 	if have && t.AccessToken == cur.AccessToken {
-		return Tokens{}, errors.New("codexauth: native refresh did not issue a new access token; run amux auth codex login")
+		return Tokens{}, errors.New("codexauth: native refresh did not issue a new access token; run `amux auth login codex`")
 	}
 	return t, nil
 }
@@ -356,7 +356,7 @@ func (p *Provider) refreshLocked(ctx context.Context) (Tokens, error) {
 	}
 	if !t.ExpiresAt.IsZero() && !p.cfg.Now().Before(t.ExpiresAt) {
 		p.forget()
-		return Tokens{}, errors.New("codexauth: native refresh produced an expired access token; run amux auth codex login")
+		return Tokens{}, errors.New("codexauth: native refresh produced an expired access token; run `amux auth login codex`")
 	}
 	if t.PlanType == "" {
 		t.PlanType = acct.PlanType
