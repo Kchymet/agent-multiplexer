@@ -30,6 +30,7 @@ type stubProvider struct {
 	account string
 	err     error
 	block   chan struct{} // when non-nil, refreshes wait for it (or ctx)
+	current string        // when set, the non-refresh token (another session rotated)
 	entered chan struct{} // signalled when a refresh starts waiting
 }
 
@@ -38,10 +39,13 @@ func newStubProvider() *stubProvider { return &stubProvider{account: "acct-1"} }
 func (p *stubProvider) CodexChatGPTToken(ctx context.Context, req TokenRequest) (ChatGPTToken, error) {
 	p.mu.Lock()
 	p.reqs = append(p.reqs, req)
-	block, entered, account, err := p.block, p.entered, p.account, p.err
+	block, entered, account, err, current := p.block, p.entered, p.account, p.err, p.current
 	p.mu.Unlock()
 	if !req.Refresh {
-		return ChatGPTToken{AccessToken: firstToken, AccountID: account, PlanType: "pro"}, nil
+		if current == "" {
+			current = firstToken
+		}
+		return ChatGPTToken{AccessToken: current, AccountID: account, PlanType: "pro"}, nil
 	}
 	if block != nil {
 		if entered != nil {
@@ -679,5 +683,64 @@ func TestStraggler401DoesNotRotateAgain(t *testing.T) {
 	}
 	if n := forced(); n != 2 {
 		t.Fatalf("forced refreshes = %d, want 2 after the debounce window", n)
+	}
+}
+
+// The straggler window cannot hide a genuine rejection of the new token for
+// longer than refreshDebounce: Codex's refresh request names no token
+// (ChatgptAuthTokensRefreshParams carries only reason and previousAccountId)
+// and retries each failing request once, so amux can only tell a straggler by
+// time. Within the window it must still hand out the provider's newest token,
+// stragglers must not extend the window, and the first 401 after it forces.
+func TestStragglerWindowNeitherHidesNorExtends(t *testing.T) {
+	old := refreshDebounce
+	refreshDebounce = 300 * time.Millisecond
+	defer func() { refreshDebounce = old }()
+	p := newStubProvider()
+	sup, fs, client := newAuthPair(t, p)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	token := func(resp incoming) string {
+		t.Helper()
+		if resp.Error != nil {
+			t.Fatalf("refresh error: %+v", resp.Error)
+		}
+		var r map[string]any
+		_ = json.Unmarshal(resp.Result, &r)
+		s, _ := r["accessToken"].(string)
+		return s
+	}
+	forced := func() int {
+		n := 0
+		for _, r := range p.requests() {
+			if r.Refresh {
+				n++
+			}
+		}
+		return n
+	}
+	start := time.Now()
+	if got := token(refreshRequest(fs, "r-rotate")); got != nextToken || forced() != 1 {
+		t.Fatalf("rotation = %q forced=%d", got, forced())
+	}
+	// Another session rotated since: the straggler gets that newer token,
+	// not the one this session last saw.
+	p.mu.Lock()
+	p.current = "tok-third-SECRET"
+	p.mu.Unlock()
+	time.Sleep(200 * time.Millisecond)
+	if got := token(refreshRequest(fs, "r-straggler")); got != "tok-third-SECRET" || forced() != 1 {
+		t.Fatalf("straggler = %q forced=%d, want provider's newest token without rotation", got, forced())
+	}
+	// 300ms after the ROTATION (not after the straggler) the window is over:
+	// a 401 now is a rejection of the current token and forces a refresh.
+	time.Sleep(time.Until(start.Add(refreshDebounce + 20*time.Millisecond)))
+	if got := token(refreshRequest(fs, "r-true-failure")); got != nextToken || forced() != 2 {
+		t.Fatalf("post-window refresh = %q forced=%d, want a forced rotation", got, forced())
+	}
+	if refreshDebounce > 30*time.Second || old > 30*time.Second {
+		t.Fatal("straggler window must stay short")
 	}
 }
