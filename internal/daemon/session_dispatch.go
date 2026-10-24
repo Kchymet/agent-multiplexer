@@ -8,6 +8,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
+	"amux/internal/centralauth"
 	"amux/internal/core"
 	"amux/internal/credentialbroker"
 	"amux/internal/sessionreport"
@@ -35,6 +36,9 @@ func (r *sessionRuntime) authorize(ctx context.Context, principal access.Princip
 	if credentialbroker.IsVerb(req.Verb) {
 		return r.authorizeCredential(ctx, principal, req)
 	}
+	if req.Verb == centralauth.QueryVerb {
+		return r.authorizeCentralCredential(ctx, principal, req)
+	}
 	if isSessionReport(req) {
 		return r.authorizeSessionReport(ctx, principal, req)
 	}
@@ -51,6 +55,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 	req := request.Call.AccessRequest()
 	if credentialbroker.IsVerb(req.Verb) {
 		return r.dispatchCredential(ctx, request)
+	}
+	if req.Verb == centralauth.QueryVerb {
+		return r.dispatchCentralCredential(ctx, request)
 	}
 	if req.Route == access.RouteAction && req.Verb == sessionreport.Capture {
 		return r.dispatchSessionCapture(ctx, request.Principal, req), nil
