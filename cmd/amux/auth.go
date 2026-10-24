@@ -196,6 +196,17 @@ func claudeLogin(fromStdin bool, in io.Reader, out io.Writer) error {
 		fmt.Fprintf(out, "claude.auth is %s, so sessions keep using it; run `amux config unset claude.auth` to use the central login.\n", mode)
 		return nil
 	}
+	// Probe without starting a daemon: with none running there is no agent to
+	// restart, and new sessions read the central login when they launch.
+	c, err := startupDial()
+	if err != nil {
+		if daemonMayStart(err) {
+			fmt.Fprintln(out, "No amux daemon is running, so no agents need restarting; new Claude sessions use the central login.")
+			return nil
+		}
+		return fmt.Errorf("login saved, but the amux daemon could not be reached to restart running agents: %w; run `amux auth restart` once it is reachable", err)
+	}
+	_ = c.Close()
 	if err := reloadClaudeAuth(false); err != nil {
 		return fmt.Errorf("login saved, but running sessions could not be queued: %w; run amux auth restart after updating the daemon", err)
 	}

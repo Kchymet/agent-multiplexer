@@ -20,6 +20,8 @@ func isolateCentralCLI(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	// Never reach a developer's real daemon socket.
+	t.Setenv("AMUX_SOCK", filepath.Join(home, "absent.sock"))
 	previous := dial
 	dial = func() (*daemon.Client, error) { return nil, errors.New("no daemon (test)") }
 	t.Cleanup(func() { dial = previous })
@@ -28,10 +30,10 @@ func isolateCentralCLI(t *testing.T) {
 func TestCentralClaudeLoginFromStdinStoresWithoutEchoingToken(t *testing.T) {
 	isolateCentralCLI(t)
 	var out bytes.Buffer
-	err := claudeLogin(true, strings.NewReader(mockSetupToken+"\n"), &out)
-	// The daemon is absent, so queueing a restart fails after the save.
-	if err == nil || !strings.Contains(err.Error(), "login saved") {
-		t.Fatalf("login = %v", err)
+	// No daemon is running: the save succeeds and there is nothing to restart.
+	if err := claudeLogin(true, strings.NewReader(mockSetupToken+"\n"), &out); err != nil ||
+		!strings.Contains(out.String(), "no agents need restarting") {
+		t.Fatalf("login = %v: %q", err, out.String())
 	}
 	cred, lerr := centralauth.ClaudeStore().Load()
 	if lerr != nil || cred.Token.Reveal() != mockSetupToken || cred.Generation != 1 {
@@ -93,5 +95,21 @@ func TestAuthArgumentsForHarnesses(t *testing.T) {
 		if err := cmdAuth(args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
+	}
+}
+
+func TestCentralClaudeLoginReportsAnUnreachableDaemon(t *testing.T) {
+	isolateCentralCLI(t)
+	previous := startupDial
+	// Not ENOENT/ECONNREFUSED: a daemon may be running but unhealthy.
+	startupDial = func() (*daemon.Client, error) { return nil, errors.New("mock authentication timeout") }
+	t.Cleanup(func() { startupDial = previous })
+	var out bytes.Buffer
+	err := claudeLogin(true, strings.NewReader(mockSetupToken+"\n"), &out)
+	if err == nil || !strings.Contains(err.Error(), "login saved") || !strings.Contains(err.Error(), "amux auth restart") {
+		t.Fatalf("login with unreachable daemon = %v", err)
+	}
+	if st, _ := centralauth.ClaudeStore().Status(); !st.Configured {
+		t.Fatal("token not saved before the restart attempt")
 	}
 }
