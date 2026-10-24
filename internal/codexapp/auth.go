@@ -92,6 +92,9 @@ var (
 	// errAccountChanged refuses a refresh that would move a session to another
 	// ChatGPT workspace mid-thread.
 	errAccountChanged = errors.New("codexapp: central ChatGPT auth returned a different account than this session uses")
+	// errNotInjected refuses a refresh request before amux installed a token:
+	// there is no account to refresh for, so nothing is handed out.
+	errNotInjected = errors.New("codexapp: no central ChatGPT token was injected")
 )
 
 // tokenAuth is a supervisor's view of central auth: the provider plus the
@@ -103,6 +106,7 @@ type tokenAuth struct {
 
 	mu       sync.Mutex
 	account  string
+	injected bool // a login on this App Server succeeded
 	inflight *tokenRefresh
 }
 
@@ -112,11 +116,22 @@ type tokenRefresh struct {
 	err  error
 }
 
-func newTokenAuth(p TokenProvider, sessionID string) *tokenAuth {
+func newTokenAuth(p TokenProvider, sessionID, account string) *tokenAuth {
 	if p == nil {
 		return nil
 	}
-	return &tokenAuth{provider: p, sessionID: sessionID}
+	return &tokenAuth{provider: p, sessionID: sessionID, account: account}
+}
+
+// boundAccount is the account injection established ("" before, or when the
+// session does not use central auth).
+func (a *tokenAuth) boundAccount() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.account
 }
 
 func (a *tokenAuth) fetch(ctx context.Context, refresh bool, previous string) (ChatGPTToken, error) {
@@ -134,8 +149,9 @@ func (a *tokenAuth) fetch(ctx context.Context, refresh bool, previous string) (C
 }
 
 // login installs a token on a freshly initialized App Server. It runs on every
-// handshake, so a reconnect re-establishes auth before any thread RPC; the
-// account bound by the first login is kept for the supervisor's lifetime.
+// handshake, so a reconnect re-establishes auth before any thread RPC. The
+// account is bound by the first login (or by the resumed thread's persisted
+// identity) and never changes afterwards.
 func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	a.mu.Lock()
 	previous := a.account
@@ -169,6 +185,7 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	}
 	a.mu.Lock()
 	a.account = tok.AccountID
+	a.injected = true
 	a.mu.Unlock()
 	return nil
 }
@@ -192,10 +209,16 @@ func loginError(err error) error {
 }
 
 // refresh answers one account/chatgptAuthTokens/refresh. Concurrent requests
-// (several backend calls failing together) share a single provider call.
-func (a *tokenAuth) refresh(ctx context.Context, previous string) (ChatGPTToken, error) {
+// (several backend calls failing together) share a single provider call. The
+// server's previousAccountId is only a hint: the bound account is what the
+// provider is asked for and what the result must match.
+func (a *tokenAuth) refresh(ctx context.Context) (ChatGPTToken, error) {
 	a.mu.Lock()
 	bound := a.account
+	if !a.injected || bound == "" {
+		a.mu.Unlock()
+		return ChatGPTToken{}, errNotInjected
+	}
 	if f := a.inflight; f != nil {
 		a.mu.Unlock()
 		select {
@@ -209,11 +232,8 @@ func (a *tokenAuth) refresh(ctx context.Context, previous string) (ChatGPTToken,
 	a.inflight = f
 	a.mu.Unlock()
 
-	if previous == "" {
-		previous = bound
-	}
-	tok, err := a.fetch(ctx, true, previous)
-	if err == nil && bound != "" && tok.AccountID != bound {
+	tok, err := a.fetch(ctx, true, bound)
+	if err == nil && tok.AccountID != bound {
 		tok, err = ChatGPTToken{}, errAccountChanged
 	}
 	f.tok, f.err = tok, err
@@ -226,11 +246,11 @@ func (a *tokenAuth) refresh(ctx context.Context, previous string) (ChatGPTToken,
 
 // handleTokenRefresh serves the App Server's refresh request off the read loop,
 // so a slow provider never stalls notifications or other responses.
-func (s *Supervisor) handleTokenRefresh(id json.RawMessage, params json.RawMessage) {
+func (s *Supervisor) handleTokenRefresh(id json.RawMessage, _ json.RawMessage) {
 	s.mu.Lock()
-	rpc := s.rpc
+	rpc, parent := s.rpc, s.runCtx
 	s.mu.Unlock()
-	if rpc == nil {
+	if rpc == nil || parent == nil {
 		return
 	}
 	if s.auth == nil {
@@ -238,20 +258,23 @@ func (s *Supervisor) handleTokenRefresh(id json.RawMessage, params json.RawMessa
 		_ = rpc.respondErr(id, -32601, "unsupported server request")
 		return
 	}
-	var p struct {
-		PreviousAccountID string `json:"previousAccountId"`
-	}
-	_ = json.Unmarshal(params, &p)
 	rawID := append(json.RawMessage(nil), id...)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		// Bounded by the read loop too: a refresh still running when the
+		// supervisor closes is abandoned rather than answered or logged late.
+		ctx, cancel := context.WithTimeout(parent, refreshTimeout)
 		defer cancel()
-		tok, err := s.auth.refresh(ctx, p.PreviousAccountID)
+		tok, err := s.auth.refresh(ctx)
+		if parent.Err() != nil {
+			return
+		}
 		if err != nil {
 			reason := "central ChatGPT auth refresh failed"
 			switch {
 			case errors.Is(err, errAccountChanged):
 				reason = "central ChatGPT auth returned a different account"
+			case errors.Is(err, errNotInjected):
+				reason = "no central ChatGPT token was injected"
 			case errors.Is(err, context.DeadlineExceeded):
 				reason = "central ChatGPT auth refresh timed out"
 			}

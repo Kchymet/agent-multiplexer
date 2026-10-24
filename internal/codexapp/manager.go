@@ -206,6 +206,7 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	cfg.ChatGPTAuth = m.chatgptAuth
 	m.mu.Unlock()
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
+	cfg.ChatGPTAccount = boundAccountFor(sessionID, cfg.ResumeThreadID)
 	if len(launch) > 0 {
 		cfg.Sandbox = launch[0].Sandbox
 		cfg.RestartWork = launch[0].RestartWork
@@ -305,6 +306,20 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 		// Current identity, known not-yet-run — start fresh to avoid a doomed resume.
 		return ""
 	}
+}
+
+// boundAccountFor returns the ChatGPT account a resumed thread ran under, so
+// central auth cannot silently move an existing conversation to another
+// account. A fresh thread is bound by its first injection instead.
+func boundAccountFor(sessionID, resumeThreadID string) string {
+	if resumeThreadID == "" {
+		return ""
+	}
+	id, ok := LoadIdentity(sessionID)
+	if !ok || id.ThreadID != resumeThreadID {
+		return ""
+	}
+	return id.ChatGPTAccount
 }
 
 // Close stops and forgets the supervisor for a session (its App Server exits). It
