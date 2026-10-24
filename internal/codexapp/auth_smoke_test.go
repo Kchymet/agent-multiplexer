@@ -78,13 +78,17 @@ func TestSmokeRealAppServerCentralAuth(t *testing.T) {
 	var mu sync.Mutex
 	var reqs []TokenRequest
 	provider := providerFunc(func(_ context.Context, r TokenRequest) (ChatGPTToken, error) {
+		// The provider contract: a refresh rotates, and a plain request returns
+		// the CURRENT token (the rotated one once a refresh happened).
 		mu.Lock()
 		reqs = append(reqs, r)
-		mu.Unlock()
 		tok := first
-		if r.Refresh {
-			tok = next
+		for _, prev := range reqs {
+			if prev.Refresh {
+				tok = next
+			}
 		}
+		mu.Unlock()
 		return ChatGPTToken{AccessToken: tok, AccountID: "acct-smoke", PlanType: "pro"}, nil
 	})
 	sup := New(Config{
@@ -127,6 +131,9 @@ func TestSmokeRealAppServerCentralAuth(t *testing.T) {
 	} else {
 		t.Logf("account/rateLimits/read: %s", res)
 	}
+	// The retry is made by Codex's own background backend calls, not by the
+	// rateLimits read above, so wait for it rather than sampling once.
+	waitFor(func() bool { return containsToken(backend.seen(), next) }, 20*time.Second)
 	seen := backend.seen()
 	backend.mu.Lock()
 	t.Logf("backend requests: %v", backend.paths)
