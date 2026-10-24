@@ -24,21 +24,169 @@ mount, and how an agent's edits to its configuration come back to amux.
   does not scrub these; review what you place in the host template and what you
   promote back. Hooks, plugins and shell/editor configuration are executable
   inputs, not just preferences. See [Security](../SECURITY.md).
-- **Host auth by default.** Claude sessions inherit the host account. On macOS,
-  a daemon credential broker forwards only the selected Claude account’s Keychain
-  operations; sessions cannot access unrelated Keychain items. On Linux/WSL2,
-  existing host credential-file sharing remains in place.
-- **Optional separate login.** `amux auth login` establishes a dedicated Claude credential
-  store shared by all its sessions, including credential-write and refresh locks.
-  The scope mounts the directory so atomic credential replacement remains visible.
-  Until enabled, Linux Claude retains the template credential symlink. Codex
-  account auth uses a symlink; its MCP credentials use a hard link because Codex
-  requires a regular file when writing refreshed tokens.
+- **Central authentication by default.** Log in once on the host with
+  `amux auth login` (Claude) and `amux auth login codex`. The daemon keeps each
+  central credential outside every sandbox and delivers only a session
+  credential to authorized sessions. No session receives a refresh token, the
+  host harness login, or another session's credential. See
+  [Central authentication](#central-authentication).
+- **Other methods are explicit selections.** `claude.auth` and `codex.auth`
+  (`amux config set …`) select `host` (the previous shared host login),
+  `shared` (Claude only: the older amux shared login) or `environment` (API key,
+  `apiKeyHelper`, cloud provider or gateway; amux supplies no credential).
+  Codex MCP OAuth credentials keep their existing sharing in every mode: a
+  hard link, because Codex requires a regular file when writing refreshed tokens.
 
-### Inherit the host Claude account
+### Central authentication
 
-New Claude sessions use the host login automatically; no `amux auth login` is
-needed. macOS preserves the host’s `CLAUDE_SECURESTORAGE_CONFIG_DIR` selector (or
+Central mode is the default for both harnesses. Run the logins from a host
+terminal; they refuse to run inside a session.
+
+#### Claude: one `setup-token` for every session
+
+```sh
+amux auth login            # runs `claude setup-token`, then asks for the token
+amux auth login --token-stdin < token.txt
+amux auth status           # mode, fingerprint, stored time, generation
+amux auth restart [--force]
+```
+
+`amux auth login` runs Claude Code's documented
+[`claude setup-token`](https://code.claude.com/docs/en/authentication.md#generate-a-long-lived-token)
+browser flow. Claude prints the token to the terminal and does not save it, so
+amux asks you to paste it with terminal echo disabled (`--token-stdin` reads it
+from standard input instead). The token is stored at
+`<amux data>/auth/central/claude/credential.json` (normally under
+`~/.local/share/amux`), mode 0600 in a 0700 directory, written atomically under
+a lock. No pane mounts the auth root. Status shows only a fingerprint (a short
+SHA-256 prefix).
+
+Per Claude's documentation, a setup-token is a one-year OAuth token for a Pro,
+Max, Team or Enterprise plan. It can only make model requests, so central
+sessions cannot establish Remote Control sessions, fetch claude.ai connectors
+or use Claude in Chrome. Locally configured MCP servers still work. Use
+`claude.auth host` if you need those account features in sessions.
+
+**Delivery.** A Claude agent pane runs amux's launcher inside the protected
+payload trampoline, after inherited descriptors are marked close-on-exec. The
+launcher asks the daemon for the credential over the session's signed mailbox.
+The daemon serves the request only if all of these hold:
+
+- the signed principal is a live, unarchived Claude session;
+- `claude.auth` is central;
+- no configuration selects another method (below).
+
+It authorizes again after reading the store. The launcher then execs Claude with
+the documented `CLAUDE_CODE_OAUTH_TOKEN` input. The token is never placed in
+argv, the sandbox launcher environment, the engine spec, logs or runtime events.
+The undocumented `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is not used.
+
+The mailbox response is the credential transport. It is a signed regular file in
+that session's own mailbox, readable only by that session. Like every mailbox
+response, it is pruned after 60 seconds, and it can remain longer if the daemon
+stops before pruning it. amux does not claim the token never touches disk.
+
+**Scope.** The grant is per session, not per pane: every process in the session
+shares the signed principal and can request the token, and Claude's own child
+processes inherit its environment. A session can therefore read and use its
+inference token. It cannot obtain a refresh token, the host login, or any other
+credential. An archived or revoked session is refused. amux cannot revoke a
+token it has already delivered.
+
+Only agent panes are credentialed. A `claude` started by hand in a terminal or
+editor tab gets no amux credential and no host credential store; `/login`
+there creates a login private to that session's config copy.
+
+**Renewal is not automatic refresh.** A setup-token has no refresh token. Run
+`amux auth login` again before it expires to reissue it. The new token gets the
+next generation, and idle Claude agents restart with their conversations
+resumed. Busy and unknown-state agents wait; `amux auth restart --force` also
+interrupts them. Claude reads `CLAUDE_CODE_OAUTH_TOKEN` once per process, so a
+running agent keeps its old token until it restarts. amux records when it
+stored the token, not an expiry: it cannot read one from the opaque token.
+Reissuing does not revoke the previous token. It stays valid until it expires
+or is revoked through your Claude account.
+
+**Conflicting configuration fails closed.** Claude ranks cloud providers,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` above
+`CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_BASE_URL` would send the token to
+another endpoint
+([precedence](https://code.claude.com/docs/en/authentication.md#authentication-precedence)).
+In central mode a launch is refused, and the daemon will not deliver, if either
+of these is set:
+
+- an inherited `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_OAUTH_TOKEN` or `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY`;
+- an `apiKeyHelper` or one of those `env` keys in the agent's user settings, the
+  project settings (`.claude/settings.json`, `.claude/settings.local.json`) in
+  the session root, or the managed settings.
+
+The error names the setting, never its value. Remove the setting, or select
+`claude.auth environment` to keep that method.
+
+**Migration.** After upgrading, Claude agent panes refuse to start until
+`amux auth login` succeeds, with this guidance:
+
+```sh
+amux auth login                          # recommended
+amux config set claude.auth host         # keep the previous host login
+amux config set claude.auth shared       # keep an older `amux auth login` store
+amux config set claude.auth environment  # API key, apiKeyHelper, provider or gateway
+```
+
+In central and environment modes, a credential symlink left in an agent's
+private config copy is unlinked without being followed, so nothing is written
+through to the host file. A private credential that is a regular file, the
+legacy shared store and the host login are never deleted. The macOS Keychain
+broker refuses all Claude operations. Claude stores MCP OAuth credentials with
+its login, so in central mode an MCP server that needs OAuth must be
+authenticated inside the session.
+
+#### Codex: a daemon-owned ChatGPT login
+
+```sh
+amux auth login codex   # prints a browser URL; Ctrl-C cancels
+amux auth status codex  # mode, account email/plan, login state
+```
+
+The daemon owns the one central Codex home, `<amux data>/auth/codex` (mode 0700,
+never mounted), through a host-only `codex app-server` that is never sandboxed.
+A cross-process lock keeps any second owner out. The CLI only starts the
+daemon's login and shows its URL.
+
+Central Codex sessions always run under the supervised App Server, whatever
+`codex.control` says. Before any thread starts, the supervisor installs the
+current ChatGPT access token with `account/login/start` (`chatgptAuthTokens`).
+When the App Server reports a 401, it asks for a newer token with
+`account/chatgptAuthTokens/refresh`. The daemon checks that the session is a
+live Codex session, performs one serialized native refresh on the central home
+(`account/read` with `refreshToken: true`), and returns only the new access
+token, account id and plan. Concurrent 401s share one refresh, and a refresh
+that would switch the session's ChatGPT account is refused.
+
+Session homes get no `auth.json`: a legacy link is unlinked without being
+followed. Inherited `OPENAI_API_KEY`, `CODEX_API_KEY` and `OPENAI_BASE_URL` are
+cleared. MCP credentials keep their existing sharing. A `codex` started by hand
+in a terminal tab is not credentialed. After the first central login, restart
+running Codex sessions (`amux do restart <id>`).
+
+**Support status.** OpenAI's public App Server documentation lists
+`chatgptAuthTokens` as an experimental authentication mode for host
+applications that own the user's auth lifecycle. The upstream protocol source
+annotates the same fields "UNSTABLE, FOR OPENAI INTERNAL USE ONLY". amux
+follows the public documentation. A Codex that rejects the mode fails the
+session launch with an upgrade message rather than falling back. This was
+checked against Codex 0.153.4 and 0.157.1. Select `codex.auth host` to keep the
+previous shared `auth.json` login.
+
+### Legacy modes: inherit the host account (`claude.auth host`, `codex.auth host`)
+
+These modes keep amux's previous behaviour. Every session can reach the host
+login, including its refresh token.
+
+Claude sessions use the host login. On Linux/WSL2 each private config copy
+links `.credentials.json` to the host file, which the scope binds read-write.
+macOS preserves the host’s `CLAUDE_SECURESTORAGE_CONFIG_DIR` selector (or
 `CLAUDE_CONFIG_DIR` when the former is unset). An explicit empty selector uses
 the default host Keychain entry even though session settings and history live
 in a private config directory. Host API-key and OAuth-token environment overrides
@@ -149,37 +297,14 @@ paused before that transition. It leaves the goal's stored status intact; the
 native UI can still ask to resume it. A `blocked` goal is also left stopped.
 Future restarts use the state observed by the upgraded daemon.
 
-### Optional separate Claude login for all sessions
+### Legacy shared Claude login (`claude.auth shared`)
 
-After installing the updated CLI **and restarting the amux daemon**, run from
-your host terminal:
-
-```sh
-amux auth login
-```
-
-This runs Claude's own `auth login` in a dedicated context under
-`<amux data>/auth/claude` (normally `~/.local/share/amux/auth/claude`). Complete
-the browser login once. A successful login enables this store for new sessions
-and queues the currently running Claude agent panes to resume their existing
-conversations with it. Agents wait until their hooks report idle; a busy or
-unknown-state pane is not interrupted automatically. Codex and editor/terminal
-panes are not restarted. Reopen existing editor/terminal processes to inherit
-the new environment. A failed/cancelled first login does not activate the store.
-
-```sh
-amux auth status          # status of the selected host/shared login
-amux auth restart         # queue running Claude agents to resume when idle
-amux auth restart --force # also interrupt busy/unknown agents stuck at login
-```
-
-`--force` applies to **all running Claude agent panes**, including ones doing
-work. It resumes saved conversations but can interrupt an unfinished turn.
-If the login succeeds but the daemon cannot accept the restart request, the CLI
-reports that separately: the saved login is still usable. Update/start the
-daemon and run `amux auth restart`. Pending reloads are local daemon work;
-restarting that daemon restores its live agents with the current auth settings.
-Restart failures are recorded in the daemon log; reopening that agent retries.
+Older amux versions offered a dedicated Claude login, created with Claude's own
+`auth login` under `<amux data>/auth/claude`, that every session shared
+read-write, refresh token included. It remains available to installations that
+select it explicitly with `amux config set claude.auth shared`. `amux auth
+status` and `amux auth restart` serve this store in that mode. New logins use
+central mode.
 
 Claude uses `CLAUDE_CONFIG_DIR` for each agent's private config/history and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` for the shared credential store. The shared
