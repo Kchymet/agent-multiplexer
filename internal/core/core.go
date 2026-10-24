@@ -69,7 +69,7 @@ const (
 const (
 	ActionStart      = "start"       // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
 	ActionRestart    = "restart"     // restart only the named agent, preserving its conversation (host only)
-	ActionAuthReload = "auth-reload" // resume live Claude agents with the shared login
+	ActionAuthReload = "auth-reload" // restart live Claude agents with the current login (conversations resume)
 	// ActionCodexLogin starts (or, with Fields["cancel"]="true", cancels) the
 	// daemon-owned central Codex ChatGPT login. Host only; poll QueryCodexAuth
 	// for the authorization URL and the outcome.
