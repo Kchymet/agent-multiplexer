@@ -563,3 +563,77 @@ func TestManagerEnsureCentralAuthLifecycle(t *testing.T) {
 		t.Fatal("restart changed the thread")
 	}
 }
+
+// Codex acknowledges account/login/start and only then finishes the login;
+// a later account/login/completed success=false (e.g. workspace routing
+// discovery failed) must fail the launch before any thread operation.
+func TestAsyncLoginFailureBlocksThread(t *testing.T) {
+	sup, fs, client := newAuthPair(t, newStubProvider())
+	fs.loginFailure = "selected workspace missing from routing discovery"
+	defer fs.close()
+	defer sup.Close()
+	err := sup.attach(context.Background(), client)
+	if err == nil || !strings.Contains(err.Error(), "selected workspace missing from routing discovery") {
+		t.Fatalf("attach = %v, want the completion failure", err)
+	}
+	for _, m := range []string{"thread/start", "thread/resume"} {
+		if _, ok := fs.sawCall(m); ok {
+			t.Fatalf("%s sent after a failed login", m)
+		}
+	}
+	assertNoSecrets(t, sup, err.Error())
+	// A refresh after the failed login is refused: the server holds no usable login.
+	if resp := refreshRequest(fs, "r-after-fail"); resp.Error == nil {
+		t.Fatalf("refresh after failed login answered: %+v", resp)
+	}
+}
+
+func TestMissingLoginCompletionTimesOut(t *testing.T) {
+	old := loginCompletionTimeout
+	loginCompletionTimeout = 100 * time.Millisecond
+	defer func() { loginCompletionTimeout = old }()
+	sup, fs, client := newAuthPair(t, newStubProvider())
+	fs.skipLoginCompleted = true
+	defer fs.close()
+	defer sup.Close()
+	err := sup.attach(context.Background(), client)
+	if err == nil || !strings.Contains(err.Error(), "no account/login/completed") {
+		t.Fatalf("attach = %v, want completion timeout", err)
+	}
+	if _, ok := fs.sawCall("thread/start"); ok {
+		t.Fatal("thread started without a completed login")
+	}
+}
+
+// A completion error that echoes the token is withheld, not repeated.
+func TestLoginCompletionErrorRedacted(t *testing.T) {
+	sup, fs, client := newAuthPair(t, newStubProvider())
+	fs.loginFailure = "bad token " + firstToken
+	defer fs.close()
+	defer sup.Close()
+	err := sup.attach(context.Background(), client)
+	if err == nil || !strings.Contains(err.Error(), "withheld") {
+		t.Fatalf("attach = %v, want withheld reason", err)
+	}
+	// The completion itself must not reach the event stream verbatim either.
+	if !waitFor(func() bool { return strings.Contains(eventLog(t, sup), "login") }, time.Second) {
+		t.Fatal("login outcome not surfaced")
+	}
+	assertNoSecrets(t, sup, err.Error())
+}
+
+// A completion for another login (a browser login started by a native
+// client carries a loginId) is not the token login's outcome.
+func TestForeignLoginCompletionIgnored(t *testing.T) {
+	a := newTokenAuth(newStubProvider(), "s", "")
+	ch := make(chan loginOutcome, 1)
+	a.completed = ch
+	if _, ok := a.loginCompleted(json.RawMessage(`{"loginId":"browser-1","success":true}`)); ok {
+		t.Fatal("foreign completion consumed")
+	}
+	select {
+	case out := <-ch:
+		t.Fatalf("foreign completion delivered: %+v", out)
+	default:
+	}
+}

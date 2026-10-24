@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // auth.go injects centrally owned ChatGPT credentials into a supervised App
@@ -41,6 +43,11 @@ import (
 // Server's own ~10s wait so the reply still arrives in time to be used.
 // A variable only so tests can shorten it.
 var refreshTimeout = 8 * time.Second
+
+// loginCompletionTimeout bounds the wait for account/login/completed. Codex
+// gives its own workspace-routing discovery 15s, so this leaves it room to
+// report rather than amux guessing first. A variable only for tests.
+var loginCompletionTimeout = 20 * time.Second
 
 const (
 	methodLoginStart   = "account/login/start"
@@ -106,8 +113,21 @@ type tokenAuth struct {
 
 	mu       sync.Mutex
 	account  string
-	injected bool // a login on this App Server succeeded
+	injected bool // the App Server holds a token amux installed
 	inflight *tokenRefresh
+	// completed receives the outcome of the pending token login. Codex
+	// acknowledges account/login/start before it finishes the login (it then
+	// discovers the workspace's routing), and reports the result in a later
+	// account/login/completed notification.
+	completed chan loginOutcome
+	// pending is the token being installed, kept only so a server message
+	// that echoes it can be withheld.
+	pending string
+}
+
+type loginOutcome struct {
+	success bool
+	err     string
 }
 
 type tokenRefresh struct {
@@ -173,6 +193,19 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	if tok.PlanType != "" {
 		params["chatgptPlanType"] = tok.PlanType
 	}
+	completed := make(chan loginOutcome, 1)
+	a.mu.Lock()
+	a.completed = completed
+	a.pending = tok.AccessToken
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.completed == completed {
+			a.completed = nil
+			a.pending = ""
+		}
+		a.mu.Unlock()
+	}()
 	res, err := rpc.call(ctx, methodLoginStart, params)
 	if err != nil {
 		return loginError(err)
@@ -183,11 +216,80 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	if json.Unmarshal(res, &r) != nil || r.Type != loginTypeTokens {
 		return errExternalAuthUnsupported
 	}
+	// The server holds the token from here on, so a 401 during its own login
+	// work (workspace discovery) may already ask for a refresh.
 	a.mu.Lock()
 	a.account = tok.AccountID
 	a.injected = true
 	a.mu.Unlock()
+
+	wait := time.NewTimer(loginCompletionTimeout)
+	defer wait.Stop()
+	var out loginOutcome
+	select {
+	case out = <-completed:
+	case <-wait.C:
+		out = loginOutcome{err: "no account/login/completed within " + loginCompletionTimeout.String()}
+	case <-ctx.Done():
+		out = loginOutcome{err: ctx.Err().Error()}
+	}
+	if !out.success {
+		a.mu.Lock()
+		a.injected = false
+		a.mu.Unlock()
+		return fmt.Errorf("codexapp: App Server did not complete the central ChatGPT login: %s", safeServerText(out.err, tok.AccessToken))
+	}
 	return nil
+}
+
+// loginCompleted consumes an account/login/completed for the token login
+// (loginId null): it delivers the outcome to the pending login and returns
+// the redacted notice that replaces the raw notification, whose error text
+// is server-supplied. ok is false for any other login (a native client's
+// browser login carries a loginId), which passes through unchanged.
+func (a *tokenAuth) loginCompleted(params json.RawMessage) (ev harnessproto.RuntimeEvent, ok bool) {
+	var p struct {
+		LoginID *string `json:"loginId"`
+		Success bool    `json:"success"`
+		Error   *string `json:"error"`
+	}
+	if a == nil || json.Unmarshal(params, &p) != nil || p.LoginID != nil {
+		return ev, false
+	}
+	out := loginOutcome{success: p.Success}
+	if p.Error != nil {
+		out.err = *p.Error
+	}
+	a.mu.Lock()
+	ch, pending := a.completed, a.pending
+	a.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- out:
+		default:
+		}
+	}
+	if out.success {
+		return notice("info", "codex: central ChatGPT login completed"), true
+	}
+	return notice("error", "codex: central ChatGPT login failed: "+safeServerText(out.err, pending)), true
+}
+
+// safeServerText bounds a server-supplied login error for amux's own error
+// text. Codex reduces these to structured reasons, but a token is never
+// repeated even if one were echoed.
+func safeServerText(text, token string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "unknown reason"
+	}
+	if token != "" && strings.Contains(text, token) || strings.Contains(text, "eyJ") {
+		return "reason withheld (contained credential material)"
+	}
+	if len(text) > 200 {
+		text = text[:200] + "…"
+	}
+	return text
 }
 
 // loginError maps a failed account/login/start onto a token-free error. The

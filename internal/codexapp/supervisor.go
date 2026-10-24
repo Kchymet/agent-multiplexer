@@ -917,6 +917,12 @@ func (s *Supervisor) Subscribe(ctx context.Context, afterSeq int64) <-chan harne
 
 func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 	s.observeGoal(method, params)
+	if method == "account/login/completed" {
+		if ev, ok := s.auth.loginCompleted(params); ok {
+			s.emit(ev)
+			return
+		}
+	}
 	if method == unparsableMethod {
 		s.emit(rawEvent("$unparsable", params))
 		return
