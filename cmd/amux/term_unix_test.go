@@ -98,8 +98,13 @@ func startHiddenRead(t *testing.T) *hiddenReadPTY {
 	return p
 }
 
+// echoOn reads the terminal's flags through the master. Darwin revokes the
+// slave when its session leader (the helper) exits, so a slave descriptor
+// cannot observe what the helper left behind; the master shares the same tty
+// state on both kernels (Linux redirects master termios ioctls to the slave,
+// XNU's pty master falls through to the shared tty) and stays valid.
 func (p *hiddenReadPTY) echoOn() bool {
-	tio, err := unix.IoctlGetTermios(int(p.slave.Fd()), termiosGet)
+	tio, err := unix.IoctlGetTermios(int(p.master.Fd()), termiosGet)
 	if err != nil {
 		p.t.Fatal(err)
 	}
@@ -207,9 +212,12 @@ func TestReadHiddenLineSuspendRestoresThenHidesOnResume(t *testing.T) {
 	if err := p.cmd.Process.Signal(syscall.SIGTSTP); err != nil {
 		t.Fatal(err)
 	}
+	// readHiddenLine suspends with SIGSTOP. Decode the stop directly:
+	// syscall's BSD WaitStatus.Stopped excludes SIGSTOP stops, unlike Linux,
+	// while the wait status encoding (0x7f, signal in bits 8-15) is shared.
 	ws := p.wait4(syscall.WUNTRACED)
-	if !ws.Stopped() {
-		t.Fatalf("helper status %v, want stopped", ws)
+	if raw := uint32(ws); raw&0xff != 0x7f || syscall.Signal(raw>>8&0xff) != syscall.SIGSTOP {
+		t.Fatalf("helper status %#x, want stopped by SIGSTOP", raw)
 	}
 	if !p.echoOn() {
 		t.Fatal("a suspended token prompt left the terminal without echo")
