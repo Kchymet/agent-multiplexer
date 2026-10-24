@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 )
 
@@ -16,6 +17,10 @@ func TestClaudeAuthCommandRoutesLoginAndStatusToSharedStore(t *testing.T) {
 	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/wrong/account")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "mock-stale-token")
 	t.Setenv("ANTHROPIC_API_KEY", "mock-key")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	if err := amuxcfg.SetAuthMode("claude", amuxcfg.AuthShared); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(home, "claude")
 	// Fail if auth gets agent flags, a different cwd/store, or inherited tokens.
 	script := `#!/bin/sh
@@ -55,13 +60,17 @@ func TestClaudeAuthRejectsInvalidArgumentsWithoutLogin(t *testing.T) {
 	}
 }
 
-func TestClaudeAuthStatusDefaultsToHost(t *testing.T) {
+func TestClaudeAuthStatusInHostModeAsksTheHostAccount(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "host-config"))
 	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
 	t.Setenv("ANTHROPIC_API_KEY", "mock-host-key")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	if err := amuxcfg.SetAuthMode("claude", amuxcfg.AuthHost); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(home, "claude")
 	script := `#!/bin/sh
 set -eu

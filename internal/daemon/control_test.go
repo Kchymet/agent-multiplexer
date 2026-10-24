@@ -26,6 +26,16 @@ func isolateControl(t *testing.T) {
 	if err := os.Unsetenv(amuxcfg.ControlEnv); err != nil {
 		t.Fatal(err)
 	}
+	legacyCodexAuth(t)
+}
+
+// legacyCodexAuth selects the host Codex login, under which codex.control
+// keeps its own selection; central Codex auth always requires the App Server.
+func legacyCodexAuth(t *testing.T) {
+	t.Helper()
+	if err := amuxcfg.SetAuthMode("codex", amuxcfg.AuthHost); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPersistedControlSurvivesFreshDaemon(t *testing.T) {
