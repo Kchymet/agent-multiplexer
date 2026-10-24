@@ -164,10 +164,19 @@ live Codex session, performs one serialized native refresh on the central home
 token, account id and plan. Concurrent 401s share one refresh, and a refresh
 that would switch the session's ChatGPT account is refused.
 
+All native operations on the central home are serialized, so a refresh waits
+while `amux auth login codex` is pending. A session's refresh is bounded at
+8 seconds, inside the App Server's own wait. If a login holds the native server
+longer than that, the refresh fails and the session sees an authentication
+error for that request. Requests made after the login finishes use the current
+token again. An access token that is still valid is served from the cache
+without waiting.
+
 A session's `config.toml` is its own editable copy, so a central App Server
-pins `chatgpt_base_url` to the official ChatGPT backend and `model_provider` to
-`openai` with highest-precedence `-c` overrides. A `config.toml` edit therefore
-cannot send the central token to another server. Select `codex.auth host` or
+pins `chatgpt_base_url` to the official ChatGPT backend, `model_provider` to
+`openai`, and `openai_base_url` to empty, all with highest-precedence `-c`
+overrides. A `config.toml` edit, including one made while the session runs,
+therefore cannot send the central token to another server. Select `codex.auth host` or
 `environment` for a custom provider or endpoint.
 
 Session homes get no `auth.json`: a legacy link is unlinked without being

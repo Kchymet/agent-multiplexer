@@ -68,7 +68,7 @@ var actionGlosses = map[string]string{
 	core.ActionRefresh:             "re-poll the daemon's sources now",
 	core.ActionStart:               "start an agent's (or a whole workgroup's) process",
 	core.ActionRestart:             "restart one agent and resume its conversation (interrupts its current turn; host only)",
-	core.ActionAuthReload:          "queue Claude agents to resume with shared credentials [-f force=true]",
+	core.ActionAuthReload:          "queue Claude agents to restart with current credentials [-f force=true]",
 	core.ActionSteer:               "drive a running agent         -f verb=prompt|interject|stop|permission|goal [-f text=… | -f decision=allow|deny | -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]]",
 	core.ActionRename:              "set a display name            -f name=…",
 	core.ActionMove:                "re-parent an agent            --target <workgroup> (omit for a new one)",
