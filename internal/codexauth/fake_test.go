@@ -2,6 +2,7 @@ package codexauth
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -27,12 +28,25 @@ const (
 	fakeSameToken    = "CODEXAUTH_FAKE_SAME_TOKEN"    // refresh rewrites the same access token
 	fakeAccount      = "CODEXAUTH_FAKE_ACCOUNT"       // account id written on refresh
 	fakeRefreshSleep = "CODEXAUTH_FAKE_REFRESH_SLEEP" // delay each refresh
-	refreshSecret    = "rt-secret-never-surface"
+	// fakeRevokeOnRefresh models Codex after a permanent refresh failure:
+	// account/read succeeds but reports no account (verified against 0.153.4
+	// and 0.157.1 with a revoked refresh token).
+	fakeRevokeOnRefresh = "CODEXAUTH_FAKE_REVOKE_ON_REFRESH"
+	refreshSecret       = "rt-secret-never-surface"
 )
+
+// helperOwnerEnv makes the test binary an amux-like owner process: it starts
+// a Provider over the fake server, prints the native pid, and blocks until
+// killed. The parent-death test SIGKILLs it.
+const helperOwnerEnv = "CODEXAUTH_HELPER_OWNER"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeEnv) == "1" {
 		runFake()
+		os.Exit(0)
+	}
+	if home := os.Getenv(helperOwnerEnv); home != "" {
+		runHelperOwner(home)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -132,6 +146,10 @@ func runFake() {
 				reply(map[string]any{"account": nil, "requiresOpenaiAuth": true})
 				continue
 			}
+			if p.RefreshToken && os.Getenv(fakeRevokeOnRefresh) == "1" {
+				reply(map[string]any{"account": nil, "requiresOpenaiAuth": true})
+				continue
+			}
 			if p.RefreshToken {
 				if d, _ := time.ParseDuration(os.Getenv(fakeRefreshSleep)); d > 0 {
 					time.Sleep(d)
@@ -164,3 +182,18 @@ func runFake() {
 }
 
 func must[T any](v T, _ error) T { return v }
+
+func runHelperOwner(home string) {
+	env := []string{fakeEnv + "=1", "PATH=" + os.Getenv("PATH")}
+	p, err := New(Config{Argv: []string{os.Args[0]}, Home: home, Env: env})
+	if err != nil {
+		fmt.Println("ERR", err)
+		return
+	}
+	if err := p.Start(context.Background()); err != nil {
+		fmt.Println("ERR", err)
+		return
+	}
+	fmt.Println("PID", p.srv.cmd.Process.Pid)
+	select {}
+}

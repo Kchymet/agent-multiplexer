@@ -16,6 +16,7 @@ import (
 	"amux/internal/codexauth"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
+	"amux/internal/store"
 )
 
 // codexLoginTimeout bounds one interactive central Codex login.
@@ -102,8 +103,7 @@ func (d *Daemon) closeCodex(id string) {
 type codexTokenSource struct{ d *Daemon }
 
 func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.TokenRequest) (codexapp.ChatGPTToken, error) {
-	session, ok, err := lookupSession(req.SessionID)
-	if err != nil || !ok || session.Archived || agent.Canonical(session.Agent) != "codex" {
+	if !s.authorized(req.SessionID) {
 		return codexapp.ChatGPTToken{}, errors.New("central Codex auth: session not authorized")
 	}
 	c := s.d.centralCodex
@@ -115,6 +115,18 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 		return codexapp.ChatGPTToken{}, err
 	}
 	return codexapp.ChatGPTToken{AccessToken: t.AccessToken, AccountID: t.AccountID, PlanType: t.PlanType}, nil
+}
+
+// authorized reads the session without wsops.ResolveSession's create/migrate
+// side effects: it must exist, be live, and run Codex.
+func (s codexTokenSource) authorized(id string) bool {
+	db, err := store.Open()
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	session, ok, err := db.GetSession(id)
+	return err == nil && ok && !session.Archived && agent.Canonical(session.Agent) == "codex"
 }
 
 // codexLogin starts the daemon-owned interactive login, or cancels it. A login

@@ -46,6 +46,12 @@ var (
 	ErrBusy = errors.New("codexauth: central Codex auth is owned by another amux process; run it through the daemon or stop the daemon first")
 	// ErrClosed: the Provider was closed.
 	ErrClosed = errors.New("codexauth: provider closed")
+	// ErrRefreshFailed: a native refresh ran but did not rotate the access
+	// token while the login itself survived. Codex's account/read reports a
+	// transient refresh failure (network, 5xx) only in its logs, keeping the
+	// ChatGPT account and the old token; a permanent one (revoked refresh
+	// token) clears the account and surfaces as ErrNotLoggedIn instead. Retry.
+	ErrRefreshFailed = errors.New("codexauth: central Codex token refresh did not complete (likely transient); it is retried on the next request — run `amux auth login codex` only if it persists")
 )
 
 // Tokens is the session-safe projection of the central login. It has no
@@ -295,7 +301,7 @@ func (p *Provider) forceRefresh(ctx context.Context, sessionID string) (Tokens, 
 		return Tokens{}, err
 	}
 	if have && t.AccessToken == cur.AccessToken {
-		return Tokens{}, errors.New("codexauth: native refresh did not issue a new access token; run `amux auth login codex`")
+		return Tokens{}, ErrRefreshFailed
 	}
 	return t, nil
 }
@@ -356,7 +362,9 @@ func (p *Provider) refreshLocked(ctx context.Context) (Tokens, error) {
 	}
 	if !t.ExpiresAt.IsZero() && !p.cfg.Now().Before(t.ExpiresAt) {
 		p.forget()
-		return Tokens{}, errors.New("codexauth: native refresh produced an expired access token; run `amux auth login codex`")
+		// The account survived, so the refresh failed transiently (see
+		// ErrRefreshFailed) and left the expired token in place.
+		return Tokens{}, ErrRefreshFailed
 	}
 	if t.PlanType == "" {
 		t.PlanType = acct.PlanType

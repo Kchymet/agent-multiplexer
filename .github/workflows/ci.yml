@@ -80,7 +80,7 @@ jobs:
             -run 'Test(RuntimeNamespaceRejectsAliasesFDsAndFutureSiblings|RuntimeGeneratedClaudeHookUsesExactInstalledAlias|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket)$' \
             -count=1 -timeout=60s -v
           go test ./internal/daemon \
-            -run '^TestAgentNamespaceCommandSurface$' \
+            -run '^Test(AgentNamespaceCommandSurface|CentralClaudeLaunchDeliversTokenInsideProtectedNamespace)$' \
             -count=1 -timeout=120s -v
       - name: download pinned native harness fixtures
         shell: bash

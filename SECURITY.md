@@ -29,11 +29,22 @@ operations according to their roles; they are more privileged than workers.
   services, and can bind/listen on IP ports. There is no per-session network
   isolation or general prevention of data exfiltration.
 - **Accounts:** selected model credentials, Git/GitHub authentication and MCP
-  credentials are intentional capabilities. The macOS broker restricts which
-  host account items it serves; it does not reduce the upstream account's
-  permissions or prevent a recipient from using disclosed credentials. Claude
-  login/logout can change the shared host account. Use accounts appropriate for
-  the repositories and services the agent should reach.
+  credentials are intentional capabilities. In the default central mode a
+  session receives only its harness's session credential: Claude's one-year
+  `setup-token` (inference only) or a short-lived ChatGPT access token for
+  Codex. It never receives a refresh token or the host login. That credential
+  is granted to the whole session, not to one pane, so any process in the
+  session can use or disclose it until it expires. amux cannot revoke a
+  delivered token, and reissuing the Claude token does not revoke the previous
+  one. The token travels in the session's signed mailbox response, which is
+  pruned after 60 seconds and can outlive a daemon stop. Explicit `host` and
+  `shared` modes instead expose the shared host or amux login, including its
+  refresh token, and a session `/login` or `/logout` changes that shared
+  account. The macOS broker restricts which host account items it serves; it
+  does not reduce the upstream account's permissions or prevent a recipient
+  from using disclosed credentials. Use accounts appropriate for the
+  repositories and services the agent should reach. See
+  [central authentication](docs/sandbox-config.md#central-authentication).
 - **Configuration:** copied harness settings can contain inline secrets. Hooks,
   plugins, MCP servers, shell rc files and editor configuration can execute code.
   Configuration copying does not sanitize them; promotion can affect subsequent

@@ -1,15 +1,19 @@
 package codexauth
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -258,8 +262,21 @@ func TestRefreshWithoutNewTokenFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := p.SessionToken(ctxT(t), "s1", true, "")
-	if err == nil || !strings.Contains(err.Error(), "did not issue a new access token") {
-		t.Fatalf("err = %v", err)
+	if !errors.Is(err, ErrRefreshFailed) || strings.Contains(err.Error(), ErrNotLoggedIn.Error()) {
+		t.Fatalf("err = %v, want retryable ErrRefreshFailed", err)
+	}
+}
+
+// A revoked refresh token makes Codex clear the account on account/read (no
+// RPC error), which is the one case that needs a new login.
+func TestRevokedRefreshNeedsLogin(t *testing.T) {
+	p, _, _ := newFake(t, fakeRevokeOnRefresh+"=1")
+	login(t, p)
+	if _, err := p.SessionToken(ctxT(t), "s1", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.SessionToken(ctxT(t), "s1", true, ""); !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("err = %v, want ErrNotLoggedIn", err)
 	}
 }
 
@@ -481,4 +498,76 @@ func TestCloseInterruptsUnboundedLogin(t *testing.T) {
 	if err := <-loginDone; !errors.Is(err, ErrClosed) {
 		t.Fatalf("login = %v, want ErrClosed", err)
 	}
+}
+
+// Pdeathsig follows the forking THREAD. A caller whose goroutine locked its
+// thread and then exits (so the runtime terminates that thread) must not take
+// the native server down with it.
+func TestServerSurvivesExitOfCallersThread(t *testing.T) {
+	p, _, _ := newFake(t)
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread() // never unlocked: this thread is retired on return
+		done <- p.Start(ctxT(t))
+	}()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	pid := p.srv.cmd.Process.Pid
+	time.Sleep(300 * time.Millisecond)
+	if err := syscall.Kill(pid, 0); err != nil || !p.srv.alive() {
+		t.Fatalf("native server died with its caller's thread: kill0=%v alive=%v", err, p.srv.alive())
+	}
+	if _, err := p.Status(ctxT(t)); err != nil {
+		t.Fatalf("server unusable after caller thread exit: %v", err)
+	}
+}
+
+// An abrupt owner death (SIGKILL, no Close) must take the native server with
+// it, so the released owner lock never coexists with a live refresh writer.
+func TestOwnerDeathKillsNativeServer(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("parent-death signal is Linux-only")
+	}
+	home := filepath.Join(t.TempDir(), "auth", "codex")
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), helperOwnerEnv+"="+home)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "PID ") {
+		_ = cmd.Process.Kill()
+		t.Fatalf("helper owner: %q %v", line, err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PID ")))
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("native server not running: %v", err)
+	}
+	// While the owner lives, nobody else can own the home.
+	if l, err := ownerLock(home); !errors.Is(err, ErrBusy) {
+		if l != nil {
+			_ = l.Close()
+		}
+		t.Fatalf("second owner = %v, want ErrBusy", err)
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatal("native server outlived its SIGKILLed owner")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	l, err := ownerLock(home)
+	if err != nil {
+		t.Fatalf("owner lock not released after owner death: %v", err)
+	}
+	_ = l.Close()
 }

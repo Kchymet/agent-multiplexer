@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // auth.go injects centrally owned ChatGPT credentials into a supervised App
@@ -41,6 +43,22 @@ import (
 // Server's own ~10s wait so the reply still arrives in time to be used.
 // A variable only so tests can shorten it.
 var refreshTimeout = 8 * time.Second
+
+// refreshDebounce is how long after a forced refresh a further 401 is taken
+// to be a straggler from the replaced token rather than a rejection of the
+// new one. Time is the only signal: the refresh request names no token
+// (reason and previousAccountId only), and Codex retries each failing
+// request once with whatever amux returns. Within the window amux returns
+// the provider's current token, so a straggler's retry succeeds, while a
+// genuine rejection of the new token costs at most this long before the next
+// 401 forces rotation. The window starts at the forced refresh and is never
+// extended by stragglers. A variable only for tests.
+var refreshDebounce = 15 * time.Second
+
+// loginCompletionTimeout bounds the wait for account/login/completed. Codex
+// gives its own workspace-routing discovery 15s, so this leaves it room to
+// report rather than amux guessing first. A variable only for tests.
+var loginCompletionTimeout = 20 * time.Second
 
 const (
 	methodLoginStart   = "account/login/start"
@@ -106,8 +124,23 @@ type tokenAuth struct {
 
 	mu       sync.Mutex
 	account  string
-	injected bool // a login on this App Server succeeded
+	injected bool // the App Server holds a token amux installed
 	inflight *tokenRefresh
+	// refreshed is when the last forced refresh succeeded (see refresh).
+	refreshed time.Time
+	// completed receives the outcome of the pending token login. Codex
+	// acknowledges account/login/start before it finishes the login (it then
+	// discovers the workspace's routing), and reports the result in a later
+	// account/login/completed notification.
+	completed chan loginOutcome
+	// pending is the token being installed, kept only so a server message
+	// that echoes it can be withheld.
+	pending string
+}
+
+type loginOutcome struct {
+	success bool
+	err     string
 }
 
 type tokenRefresh struct {
@@ -173,6 +206,19 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	if tok.PlanType != "" {
 		params["chatgptPlanType"] = tok.PlanType
 	}
+	completed := make(chan loginOutcome, 1)
+	a.mu.Lock()
+	a.completed = completed
+	a.pending = tok.AccessToken
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.completed == completed {
+			a.completed = nil
+			a.pending = ""
+		}
+		a.mu.Unlock()
+	}()
 	res, err := rpc.call(ctx, methodLoginStart, params)
 	if err != nil {
 		return loginError(err)
@@ -183,11 +229,80 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	if json.Unmarshal(res, &r) != nil || r.Type != loginTypeTokens {
 		return errExternalAuthUnsupported
 	}
+	// The server holds the token from here on, so a 401 during its own login
+	// work (workspace discovery) may already ask for a refresh.
 	a.mu.Lock()
 	a.account = tok.AccountID
 	a.injected = true
 	a.mu.Unlock()
+
+	wait := time.NewTimer(loginCompletionTimeout)
+	defer wait.Stop()
+	var out loginOutcome
+	select {
+	case out = <-completed:
+	case <-wait.C:
+		out = loginOutcome{err: "no account/login/completed within " + loginCompletionTimeout.String()}
+	case <-ctx.Done():
+		out = loginOutcome{err: ctx.Err().Error()}
+	}
+	if !out.success {
+		a.mu.Lock()
+		a.injected = false
+		a.mu.Unlock()
+		return fmt.Errorf("codexapp: App Server did not complete the central ChatGPT login: %s", safeServerText(out.err, tok.AccessToken))
+	}
 	return nil
+}
+
+// loginCompleted consumes an account/login/completed for the token login
+// (loginId null): it delivers the outcome to the pending login and returns
+// the redacted notice that replaces the raw notification, whose error text
+// is server-supplied. ok is false for any other login (a native client's
+// browser login carries a loginId), which passes through unchanged.
+func (a *tokenAuth) loginCompleted(params json.RawMessage) (ev harnessproto.RuntimeEvent, ok bool) {
+	var p struct {
+		LoginID *string `json:"loginId"`
+		Success bool    `json:"success"`
+		Error   *string `json:"error"`
+	}
+	if a == nil || json.Unmarshal(params, &p) != nil || p.LoginID != nil {
+		return ev, false
+	}
+	out := loginOutcome{success: p.Success}
+	if p.Error != nil {
+		out.err = *p.Error
+	}
+	a.mu.Lock()
+	ch, pending := a.completed, a.pending
+	a.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- out:
+		default:
+		}
+	}
+	if out.success {
+		return notice("info", "codex: central ChatGPT login completed"), true
+	}
+	return notice("error", "codex: central ChatGPT login failed: "+safeServerText(out.err, pending)), true
+}
+
+// safeServerText bounds a server-supplied login error for amux's own error
+// text. Codex reduces these to structured reasons, but a token is never
+// repeated even if one were echoed.
+func safeServerText(text, token string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "unknown reason"
+	}
+	if token != "" && strings.Contains(text, token) || strings.Contains(text, "eyJ") {
+		return "reason withheld (contained credential material)"
+	}
+	if len(text) > 200 {
+		text = text[:200] + "…"
+	}
+	return text
 }
 
 // loginError maps a failed account/login/start onto a token-free error. The
@@ -228,17 +343,25 @@ func (a *tokenAuth) refresh(ctx context.Context) (ChatGPTToken, error) {
 			return ChatGPTToken{}, ctx.Err()
 		}
 	}
+	// A 401 for a request sent with the previous token can arrive just after
+	// a refresh replaced it. Forcing another rotation for it would burn a
+	// refresh-token generation (and fail if the issuer returns the same access
+	// token), so shortly after a refresh only the current token is fetched.
+	force := a.refreshed.IsZero() || time.Since(a.refreshed) >= refreshDebounce
 	f := &tokenRefresh{done: make(chan struct{})}
 	a.inflight = f
 	a.mu.Unlock()
 
-	tok, err := a.fetch(ctx, true, bound)
+	tok, err := a.fetch(ctx, force, bound)
 	if err == nil && tok.AccountID != bound {
 		tok, err = ChatGPTToken{}, errAccountChanged
 	}
 	f.tok, f.err = tok, err
 	a.mu.Lock()
 	a.inflight = nil
+	if err == nil && force {
+		a.refreshed = time.Now()
+	}
 	a.mu.Unlock()
 	close(f.done)
 	return tok, err

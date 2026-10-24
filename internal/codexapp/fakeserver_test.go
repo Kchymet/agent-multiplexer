@@ -84,6 +84,12 @@ type fakeServer struct {
 	// rejectTokenLogin makes account/login/start chatgptAuthTokens fail the way a
 	// Codex without the experimental external-token mode does.
 	rejectTokenLogin bool
+	// loginFailure, when set, acknowledges the token login and then reports
+	// account/login/completed success=false with this error, as Codex does
+	// when workspace routing discovery fails. skipLoginCompleted sends no
+	// completion at all.
+	loginFailure       string
+	skipLoginCompleted bool
 	// writeMu serializes writes: a WebSocket allows one concurrent writer, and
 	// the login reply is written off the read loop.
 	writeMu sync.Mutex
@@ -186,6 +192,7 @@ func (fs *fakeServer) handleCall(m incoming) {
 	case "account/login/start":
 		fs.mu.Lock()
 		reject := fs.rejectTokenLogin
+		failure, skip := fs.loginFailure, fs.skipLoginCompleted
 		fs.mu.Unlock()
 		if reject {
 			// Real servers quote the rejected request; the client must not repeat it.
@@ -196,9 +203,16 @@ func (fs *fakeServer) handleCall(m incoming) {
 		// client's answers to server requests sent meanwhile.
 		go func() {
 			fs.gate(m.Method)
-			fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": true, "error": nil})
-			fs.pushNotify("account/updated", map[string]any{"authMode": "chatgptAuthTokens", "planType": "pro"})
+			// Real Codex acknowledges first and completes the login afterwards.
 			fs.write(map[string]any{"id": m.ID, "result": map[string]any{"type": "chatgptAuthTokens"}})
+			switch {
+			case skip:
+			case failure != "":
+				fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": false, "error": failure})
+			default:
+				fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": true, "error": nil})
+				fs.pushNotify("account/updated", map[string]any{"authMode": "chatgptAuthTokens", "planType": "pro"})
+			}
 		}()
 		return
 	case "thread/goal/get", "thread/goal/set", "thread/goal/clear":

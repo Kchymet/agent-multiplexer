@@ -79,12 +79,19 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 		// Refuse before AgentCommand's launch side effects when the selected
 		// Claude authentication cannot work, with guidance instead of a login
 		// prompt inside the session.
-		if err := agentAuthError(s); err != nil {
+		if err := agentAuthError(s, s.Dir); err != nil {
 			return "", nil, nil, err
 		}
 		dir, env, argv, err = wsops.AgentCommand(s, spec.ResumeWork)
 		if err != nil {
 			return "", nil, nil, err
+		}
+		// A resumed conversation can launch in its recorded cwd, whose project
+		// settings are then the layer Claude actually reads.
+		if dir != s.Dir {
+			if err := agentAuthError(s, dir); err != nil {
+				return "", nil, nil, err
+			}
 		}
 	}
 	if isolationPlatform == "darwin" {
@@ -123,6 +130,9 @@ func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
+	if codexcfg.AuthMode() == amuxcfg.AuthCentral {
+		inner = codexcfg.CentralChatGPTEndpoint(inner)
+	}
 	if agent.NativeGoals(s) {
 		// The goal session's server owns the thread goal; enable the feature for
 		// this process regardless of the templated user config.
@@ -580,8 +590,9 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
-// agentAuthError reports why a Claude agent pane's authentication cannot work.
-func agentAuthError(s store.Session) error {
+// agentAuthError reports why a Claude agent pane launched in launchDir cannot
+// authenticate with its selected method.
+func agentAuthError(s store.Session, launchDir string) error {
 	if agent.HarnessFor(s.Agent).Kind() != "claude" {
 		return nil
 	}
@@ -589,9 +600,7 @@ func agentAuthError(s store.Session) error {
 	if !ok {
 		return nil
 	}
-	// The agent pane launches in the session root, whose .claude settings are
-	// Claude's project layer for this launch.
-	return claudecfg.LaunchAuthError(sp, s.Dir, os.Environ())
+	return claudecfg.LaunchAuthError(sp, launchDir, os.Environ())
 }
 
 // centralLauncher routes a central-mode Claude agent pane through the payload
