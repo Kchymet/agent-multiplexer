@@ -262,7 +262,7 @@ func TestRefreshWithoutNewTokenFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := p.SessionToken(ctxT(t), "s1", true, "")
-	if !errors.Is(err, ErrRefreshFailed) || strings.Contains(err.Error(), "run amux auth codex login;") {
+	if !errors.Is(err, ErrRefreshFailed) || strings.Contains(err.Error(), ErrNotLoggedIn.Error()) {
 		t.Fatalf("err = %v, want retryable ErrRefreshFailed", err)
 	}
 }
