@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
 
@@ -18,6 +19,7 @@ import (
 func TestTemplateSeed(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	user := filepath.Join(root, "home", ".claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", user)
 	must := func(err error) {
@@ -35,6 +37,8 @@ func TestTemplateSeed(t *testing.T) {
 	must(os.WriteFile(filepath.Join(user, "history.jsonl"), []byte("{}\n"), 0o644))
 	must(os.WriteFile(filepath.Join(user, "projects", "-x", "t.jsonl"), []byte("{}\n"), 0o644))
 	must(os.WriteFile(filepath.Join(user, CredentialsFile), []byte(`{"token":"x"}`), 0o600))
+	// The legacy host mode is an explicit selection; central is the default.
+	must(amuxcfg.SetAuthMode("claude", amuxcfg.AuthHost))
 	must(os.WriteFile(User().ConfigPath(),
 		[]byte(`{"hasCompletedOnboarding":true,"numStartups":7,"mcpServers":{"a":{}},"projects":{"/home/u":{"hasTrustDialogAccepted":true}}}`), 0o600))
 

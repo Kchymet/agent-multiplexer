@@ -313,7 +313,7 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 			}
 		}
 	}
-	if agent.Canonical(s.Agent) == "claude" {
+	if agent.Canonical(s.Agent) == "claude" && claudecfg.HostStoreShared() {
 		// Claude's host and sandbox instances must coordinate token refreshes.
 		// Permit only the native lock paths, including creation when absent;
 		// neither the host configuration tree nor the Keychain is exposed.
@@ -404,5 +404,5 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	// an authority grant. The trampoline closes inherited descriptors before
 	// exec, on both platforms.
 	args := []string{"/usr/bin/sandbox-exec", "-p", policy.String(), "/usr/bin/env", payloadExecEnv + "=1", tool, payloadExecArg}
-	return append(args, launchArgv...), nil
+	return append(args, centralLauncher(tab, s, tool, launchArgv)...), nil
 }

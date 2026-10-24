@@ -17,7 +17,10 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/agent"
+	"amux/internal/amuxcfg"
+	"amux/internal/centralauth"
 	"amux/internal/cfghome"
+	"amux/internal/claudecfg"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/git"
@@ -73,6 +76,12 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 	case TabTerminal:
 		dir, env, argv = wsops.AgentWorkdir(s), wsops.AgentEnv(s), []string{shellBin()}
 	default:
+		// Refuse before AgentCommand's launch side effects when the selected
+		// Claude authentication cannot work, with guidance instead of a login
+		// prompt inside the session.
+		if err := agentAuthError(s); err != nil {
+			return "", nil, nil, err
+		}
 		dir, env, argv, err = wsops.AgentCommand(s, spec.ResumeWork)
 		if err != nil {
 			return "", nil, nil, err
@@ -567,7 +576,31 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 		"--chdir", dir,
 	)
 	args = append(args, "--")
+	launchArgv = centralLauncher(tab, s, filepath.Join(launchenv.ToolBinDir, "amux"), launchArgv)
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
+}
+
+// agentAuthError reports why a Claude agent pane's authentication cannot work.
+func agentAuthError(s store.Session) error {
+	if agent.HarnessFor(s.Agent).Kind() != "claude" {
+		return nil
+	}
+	sp, ok := agent.HarnessFor(s.Agent).Config(s)
+	if !ok {
+		return nil
+	}
+	return claudecfg.LaunchAuthError(sp, os.Environ())
+}
+
+// centralLauncher routes a central-mode Claude agent pane through amux's
+// hidden launcher, which the payload trampoline runs after closing inherited
+// descriptors. The token is fetched there, so it never appears in this argv,
+// the sandbox launcher's environment, or the engine spec.
+func centralLauncher(tab int, s store.Session, tool string, argv []string) []string {
+	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || claudecfg.AuthMode() != amuxcfg.AuthCentral {
+		return argv
+	}
+	return append([]string{tool, centralauth.LauncherArg}, argv...)
 }
 
 const (

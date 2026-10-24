@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/store"
@@ -121,6 +122,7 @@ func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	useClaudeAuth(t, amuxcfg.AuthHost)
 	cred := filepath.Join(cfg, ".credentials.json")
 	if err := os.WriteFile(cred, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)

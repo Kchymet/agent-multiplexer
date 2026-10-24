@@ -82,6 +82,11 @@ type Spec struct {
 	// AuthUnsetEnv clears inherited credential overrides when the user opts in
 	// to this store. Otherwise an old environment token could shadow a new login.
 	AuthUnsetEnv []string
+	// Retire are formerly Shared paths whose link in an existing copy must go:
+	// a symlink there is removed without being followed, so nothing is written
+	// through to the template. A regular file (a detached private credential)
+	// is never deleted.
+	Retire []string
 }
 
 // Entry is one configuration path of a template.
@@ -343,6 +348,9 @@ func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
 				return false, err
 			}
 		}
+		if err := retireLinks(d, sp); err != nil {
+			return false, err
+		}
 		if _, err := readManifest(sp); err == nil {
 			return false, nil
 		}
@@ -441,6 +449,27 @@ func linkShared(dst *destination, sp Spec, rel string) error {
 		return nil
 	}
 	return dst.symlink(rel, src)
+}
+
+// retireLinks unlinks retired symlinks in the copy. Lstat never follows the
+// link and Remove deletes only the link itself, not the file it names.
+func retireLinks(dst *destination, sp Spec) error {
+	for _, rel := range sp.Retire {
+		fi, err := dst.lstat(rel)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		if err := dst.remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("retire shared %s link: %w", rel, err)
+		}
+	}
+	return nil
 }
 
 // Binds are the bubblewrap arguments that make the shared (auth) files reachable
