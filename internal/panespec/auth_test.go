@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/store"
@@ -31,6 +32,7 @@ func TestSharedAuthDirectoryIsVisibleOnlyToClaudePanes(t *testing.T) {
 	}
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	useClaudeAuth(t, amuxcfg.AuthShared)
 	t.Setenv("AMUX_JAIL", "on")
 	useFakeSecureBwrap(t)
 	if err := claudecfg.Login(func() error { return nil }); err != nil {
@@ -81,6 +83,7 @@ func TestRunningClaudeScopesObserveCredentialReplacement(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("AMUX_JAIL", "on")
+	useClaudeAuth(t, amuxcfg.AuthShared)
 	if err := claudecfg.Login(func() error {
 		return os.WriteFile(filepath.Join(claudecfg.SharedAuthDir(), claudecfg.CredentialsFile), []byte("old"), 0600)
 	}); err != nil {

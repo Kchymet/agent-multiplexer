@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
 
@@ -29,7 +30,7 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		}
 		entries = append(entries, e)
 	}
-	return cfghome.Spec{
+	sp := cfghome.Spec{
 		Kind: "codex", AgentID: agentID, Env: Env,
 		Template: UserHome().Dir(), Root: sessionRoot, Dir: dir,
 		Entries: entries,
@@ -38,6 +39,33 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		// A hard link shares the credential without failing that regular-file check.
 		HardlinkShared: []string{MCPCredentialsFile},
 	}
+	if mode := AuthMode(); mode != amuxcfg.AuthHost {
+		// Central and environment modes never share the host account login
+		// (auth.json holds its refresh token): a legacy link is unlinked without
+		// being followed. MCP OAuth credentials are separate integration
+		// credentials and keep their existing sharing.
+		sp.Shared = []string{MCPCredentialsFile, "mcp-oauth-locks"}
+		sp.Retire = []string{AuthFile}
+		if mode == amuxcfg.AuthCentral {
+			// The daemon's App Server adapter supplies the ChatGPT tokens; an
+			// inherited API key would select a different account.
+			sp.AuthUnsetEnv = APIKeyEnv
+		}
+	}
+	return sp
+}
+
+// APIKeyEnv are the inherited Codex account variables (see launchenv).
+var APIKeyEnv = []string{"OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"}
+
+// AuthMode is the effective codex.auth selection. An invalid setting yields
+// central, which shares no host login; daemon startup reports the error.
+func AuthMode() string {
+	mode, err := amuxcfg.AuthMode("codex")
+	if err != nil {
+		return amuxcfg.AuthCentral
+	}
+	return mode
 }
 
 // AgentHome is where an agent's private Codex home lives: under its sandbox dir.

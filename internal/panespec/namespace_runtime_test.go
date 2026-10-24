@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/launchenv"
@@ -248,6 +249,7 @@ func TestRuntimeGeneratedClaudeHookUsesExactInstalledAlias(t *testing.T) {
 			t.Setenv("HOME", home)
 			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 			t.Setenv("AMUX_JAIL", "on")
+			useClaudeAuth(t, amuxcfg.AuthHost)
 
 			installed := core.InstalledBinPath()
 			if err := os.MkdirAll(filepath.Dir(installed), 0o700); err != nil {

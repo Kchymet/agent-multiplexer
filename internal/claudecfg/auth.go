@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/core"
 )
 
@@ -29,9 +30,10 @@ func SharedAuthDir() string { return filepath.Join(core.AuthDir(), "claude") }
 
 // CredentialSelector preserves Claude's exact host store selection, including
 // an explicit empty string (the default Keychain entry). Private configuration
-// directories must never silently select another account.
+// directories must never silently select another account. It is meaningful
+// only when HostStoreShared reports that sessions may reach a host store.
 func CredentialSelector() string {
-	if SharedAuthEnabled() {
+	if AuthMode() == amuxcfg.AuthShared && SharedAuthEnabled() {
 		return SharedAuthDir()
 	}
 	if value, ok := os.LookupEnv(SecureStorageEnv); ok {

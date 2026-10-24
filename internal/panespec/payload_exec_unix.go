@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"amux/internal/centralauth"
 )
 
 // init provides the final payload boundary for every protected pane. Bubblewrap
@@ -23,6 +25,10 @@ func init() {
 	if err := closePayloadDescriptors(); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "amux: close inherited payload descriptors: %v\n", err)
 		os.Exit(126)
+	}
+	if os.Args[2] == centralauth.LauncherArg {
+		// Central Claude: fetch only now, after descriptors are close-on-exec.
+		os.Exit(centralauth.Launch(os.Args[3:], os.Stderr, centralauth.FetchFromSession))
 	}
 	payload := os.Args[2]
 	if !strings.ContainsRune(payload, os.PathSeparator) {

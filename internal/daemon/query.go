@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,9 @@ func (d *Daemon) query(cl *connState, a core.Action) {
 func (d *Daemon) readModel(a core.Action) (any, error) {
 	if a.Query == core.QueryCodexControl {
 		return d.codexControl, d.configErr
+	}
+	if a.Query == core.QueryCodexAuth {
+		return d.codexAuthStatus(context.Background()), nil
 	}
 	if a.Query == core.QueryVersion {
 		info := core.VersionInfo{

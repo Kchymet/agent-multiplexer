@@ -31,7 +31,7 @@ import (
 
 var (
 	// ErrNotLoggedIn: the central home has no ChatGPT login. Run Login.
-	ErrNotLoggedIn = errors.New("codexauth: no central Codex ChatGPT login; run amux auth codex login")
+	ErrNotLoggedIn = errors.New("codexauth: no central Codex ChatGPT login; run `amux auth login codex`")
 	// ErrUnsupportedAuth: the central home holds a non-ChatGPT credential (an API
 	// key) or malformed tokens. Never handed to sessions.
 	ErrUnsupportedAuth = errors.New("codexauth: central Codex login is not a ChatGPT login")
@@ -51,7 +51,7 @@ var (
 	// transient refresh failure (network, 5xx) only in its logs, keeping the
 	// ChatGPT account and the old token; a permanent one (revoked refresh
 	// token) clears the account and surfaces as ErrNotLoggedIn instead. Retry.
-	ErrRefreshFailed = errors.New("codexauth: central Codex token refresh did not complete (likely transient); it is retried on the next request — run amux auth codex login only if it persists")
+	ErrRefreshFailed = errors.New("codexauth: central Codex token refresh did not complete (likely transient); it is retried on the next request — run `amux auth login codex` only if it persists")
 )
 
 // Tokens is the session-safe projection of the central login. It has no

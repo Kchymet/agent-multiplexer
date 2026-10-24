@@ -17,7 +17,10 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/agent"
+	"amux/internal/amuxcfg"
+	"amux/internal/centralauth"
 	"amux/internal/cfghome"
+	"amux/internal/claudecfg"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/git"
@@ -73,9 +76,22 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 	case TabTerminal:
 		dir, env, argv = wsops.AgentWorkdir(s), wsops.AgentEnv(s), []string{shellBin()}
 	default:
+		// Refuse before AgentCommand's launch side effects when the selected
+		// Claude authentication cannot work, with guidance instead of a login
+		// prompt inside the session.
+		if err := agentAuthError(s, s.Dir); err != nil {
+			return "", nil, nil, err
+		}
 		dir, env, argv, err = wsops.AgentCommand(s, spec.ResumeWork)
 		if err != nil {
 			return "", nil, nil, err
+		}
+		// A resumed conversation can launch in its recorded cwd, whose project
+		// settings are then the layer Claude actually reads.
+		if dir != s.Dir {
+			if err := agentAuthError(s, dir); err != nil {
+				return "", nil, nil, err
+			}
 		}
 	}
 	if isolationPlatform == "darwin" {
@@ -114,6 +130,9 @@ func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
+	if codexcfg.AuthMode() == amuxcfg.AuthCentral {
+		inner = codexcfg.CentralChatGPTEndpoint(inner)
+	}
 	if agent.NativeGoals(s) {
 		// The goal session's server owns the thread goal; enable the feature for
 		// this process regardless of the templated user config.
@@ -567,7 +586,32 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 		"--chdir", dir,
 	)
 	args = append(args, "--")
+	launchArgv = centralLauncher(tab, s, launchArgv)
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
+}
+
+// agentAuthError reports why a Claude agent pane launched in launchDir cannot
+// authenticate with its selected method.
+func agentAuthError(s store.Session, launchDir string) error {
+	if agent.HarnessFor(s.Agent).Kind() != "claude" {
+		return nil
+	}
+	sp, ok := agent.HarnessFor(s.Agent).Config(s)
+	if !ok {
+		return nil
+	}
+	return claudecfg.LaunchAuthError(sp, launchDir, os.Environ())
+}
+
+// centralLauncher routes a central-mode Claude agent pane through the payload
+// trampoline's credential launcher, which runs after inherited descriptors are
+// closed. The token is fetched there, so it never appears in this argv, the
+// sandbox launcher's environment, or the engine spec.
+func centralLauncher(tab int, s store.Session, argv []string) []string {
+	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || claudecfg.AuthMode() != amuxcfg.AuthCentral {
+		return argv
+	}
+	return append([]string{centralauth.LauncherArg}, argv...)
 }
 
 const (

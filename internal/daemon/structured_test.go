@@ -26,6 +26,7 @@ func TestStructuredControlGate(t *testing.T) {
 	defer cancel()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	legacyCodexAuth(t)
 	newDaemon := func() *Daemon {
 		d := New("", nil, time.Hour)
 		d.codex = codexapp.NewManager(ctx, "")
@@ -198,6 +199,7 @@ func TestGoalCoordinatorIsAlwaysStructured(t *testing.T) {
 	defer cancel()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	legacyCodexAuth(t)
 	coordinator := store.Session{ID: "wg", Agent: agent.GoalRuntime}
 	claudeCoordinator := store.Session{ID: "wg2", Agent: "claude"}
 	member := store.Session{ID: "m", RootID: "wg", Agent: agent.GoalRuntime}

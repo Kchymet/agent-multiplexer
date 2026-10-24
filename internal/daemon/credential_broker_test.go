@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"amux/internal/access"
+	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 	"amux/internal/credentialbroker"
 	"amux/internal/sessionrpc"
@@ -71,6 +72,10 @@ func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
 	codex := store.Session{ID: "codex", Agent: "codex", Dir: t.TempDir()}
 	d, r, principals := sessionRuntimeFixture(t, claude, codex)
+	// The Keychain broker serves only the explicitly selected legacy host mode.
+	if err := amuxcfg.SetAuthMode("claude", amuxcfg.AuthHost); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	selected := credentialbroker.ClaudeServices(claudecfg.CredentialSelector())[1]
 	o := credentialbroker.Operation{Verb: credentialbroker.Read, Service: selected, Account: credentialbroker.HostAccount()}
