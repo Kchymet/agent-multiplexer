@@ -46,7 +46,13 @@ var refreshTimeout = 8 * time.Second
 
 // refreshDebounce is how long after a forced refresh a further 401 is taken
 // to be a straggler from the replaced token rather than a rejection of the
-// new one. A variable only for tests.
+// new one. Time is the only signal: the refresh request names no token
+// (reason and previousAccountId only), and Codex retries each failing
+// request once with whatever amux returns. Within the window amux returns
+// the provider's current token, so a straggler's retry succeeds, while a
+// genuine rejection of the new token costs at most this long before the next
+// 401 forces rotation. The window starts at the forced refresh and is never
+// extended by stragglers. A variable only for tests.
 var refreshDebounce = 15 * time.Second
 
 // loginCompletionTimeout bounds the wait for account/login/completed. Codex
