@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -328,18 +332,6 @@ func TestTokenFormattingRedacts(t *testing.T) {
 	}
 }
 
-func TestManagerPassesProviderToConfig(t *testing.T) {
-	m := NewManager(context.Background(), "")
-	p := newStubProvider()
-	m.SetChatGPTAuth(p)
-	m.mu.Lock()
-	got := m.chatgptAuth
-	m.mu.Unlock()
-	if got != TokenProvider(p) {
-		t.Fatal("provider not retained")
-	}
-}
-
 type providerFunc func(context.Context, TokenRequest) (ChatGPTToken, error)
 
 func (f providerFunc) CodexChatGPTToken(ctx context.Context, r TokenRequest) (ChatGPTToken, error) {
@@ -365,4 +357,209 @@ func waitFor(cond func() bool, d time.Duration) bool {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return cond()
+}
+
+// A refresh request that arrives before amux injected anything (a confused or
+// hostile server) must not obtain a token.
+func TestRefreshBeforeInjectionRefused(t *testing.T) {
+	p := newStubProvider()
+	sup, fs, client := newAuthPair(t, p)
+	defer fs.close()
+	defer sup.Close()
+	hold := fs.holdResponse("account/login/start")
+	done := make(chan error, 1)
+	go func() { done <- sup.attach(context.Background(), client) }()
+	if !fs.awaitCall("account/login/start", time.Second) {
+		t.Fatal("login never sent")
+	}
+	resp := refreshRequest(fs, "r-early")
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "no central ChatGPT token") {
+		t.Fatalf("early refresh = %+v, want refusal", resp)
+	}
+	close(hold)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range p.requests() {
+		if r.Refresh {
+			t.Fatal("provider refreshed for an early request")
+		}
+	}
+}
+
+// The server's previousAccountId is a hint; the provider is asked for the
+// account amux bound, and a server naming another account cannot redirect it.
+func TestRefreshUsesBoundAccountNotServerHint(t *testing.T) {
+	p := newStubProvider()
+	sup, fs, client := newAuthPair(t, p)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	resp := fs.pushRequest(methodTokenRefresh, "r-hint", map[string]any{"reason": "unauthorized", "previousAccountId": "acct-evil"})
+	if resp.Error != nil {
+		t.Fatalf("refresh error: %+v", resp.Error)
+	}
+	reqs := p.requests()
+	if got := reqs[len(reqs)-1].PreviousAccountID; got != "acct-1" {
+		t.Fatalf("provider asked for %q, want bound acct-1", got)
+	}
+}
+
+// A refresh still running when the supervisor closes is abandoned: no late
+// reply, and no late event reopening the closed log.
+func TestRefreshAfterCloseIsDropped(t *testing.T) {
+	p := newStubProvider()
+	p.block = make(chan struct{})
+	p.entered = make(chan struct{}, 1)
+	sup, fs, client := newAuthPair(t, p)
+	defer fs.close()
+	attach(t, sup, client)
+
+	rawID, _ := json.Marshal("r-late")
+	ch := make(chan incoming, 1)
+	fs.mu.Lock()
+	fs.respByID[string(rawID)] = ch
+	fs.mu.Unlock()
+	fs.write(map[string]any{"method": methodTokenRefresh, "id": "r-late", "params": map[string]any{"reason": "unauthorized"}})
+	<-p.entered
+	before := eventLog(t, sup)
+	_ = sup.Close()
+	close(p.block)
+	select {
+	case resp := <-ch:
+		t.Fatalf("late refresh answered: %+v", resp)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if after, _ := os.ReadFile(sup.cfg.EventLogPath); string(after) != before {
+		t.Fatalf("event log changed after Close:\n%s", after)
+	}
+}
+
+// A resumed thread stays on the account it ran under: a central login now
+// pointing at another workspace fails the resume instead of moving it.
+func TestResumeRefusesDifferentPersistedAccount(t *testing.T) {
+	p := newStubProvider()
+	sup, fs, client := newAuthPair(t, p)
+	defer fs.close()
+	defer sup.Close()
+	sup.cfg.ResumeThreadID = "thr_1"
+	sup.auth = newTokenAuth(p, "s-auth", "acct-old")
+	if err := sup.attach(context.Background(), client); !errors.Is(err, errAccountChanged) {
+		t.Fatalf("attach = %v, want errAccountChanged", err)
+	}
+	if _, ok := fs.sawCall("account/login/start"); ok {
+		t.Fatal("token for another account was injected")
+	}
+	if _, ok := fs.sawCall("thread/resume"); ok {
+		t.Fatal("thread resumed under another account")
+	}
+}
+
+func TestIdentityRecordsBoundAccount(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", tmp)
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_RUNTIME_DIR", tmp)
+	sup, fs, client := newAuthPair(t, newStubProvider())
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+	id := sup.Identity()
+	if id.ChatGPTAccount != "acct-1" {
+		t.Fatalf("identity account = %q", id.ChatGPTAccount)
+	}
+	if err := SaveIdentity(id); err != nil {
+		t.Fatal(err)
+	}
+	if got := boundAccountFor("s-auth", id.ThreadID); got != "acct-1" {
+		t.Fatalf("boundAccountFor = %q", got)
+	}
+	if got := boundAccountFor("s-auth", "thr_other"); got != "" {
+		t.Fatalf("another thread inherited the account: %q", got)
+	}
+	data, _ := os.ReadFile(identityPath("s-auth"))
+	if strings.Contains(string(data), "SECRET") {
+		t.Fatal("identity persisted a token")
+	}
+}
+
+// TestManagerEnsureCentralAuthLifecycle drives the production wiring end to
+// end: Manager.SetChatGPTAuth → Ensure (real child process, WebSocket dial) →
+// injection before the thread → refresh over the wire → restart resumes the
+// thread only under the persisted account.
+func TestManagerEnsureCentralAuthLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	servers := make(chan *fakeServer, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		servers <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	ensure := func(m *Manager) (*Supervisor, error) {
+		return m.Ensure(ctx, "central", "", nil, []string{"sleep", "60"}, endpoint, "", "", "")
+	}
+
+	p := newStubProvider()
+	m := NewManager(ctx, "")
+	m.SetChatGPTAuth(p)
+	sup, err := ensure(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := <-servers
+	if li, ti := methodIndex(fs, "account/login/start"), methodIndex(fs, "thread/start"); li < 0 || li > ti {
+		t.Fatalf("login=%d thread/start=%d", li, ti)
+	}
+	resp := refreshRequest(fs, "r-ws")
+	var r map[string]any
+	_ = json.Unmarshal(resp.Result, &r)
+	if resp.Error != nil || r["accessToken"] != nextToken {
+		t.Fatalf("refresh over WebSocket = %+v", resp)
+	}
+	threadID := sup.ThreadID()
+	if id, ok := LoadIdentity("central"); !ok || id.ChatGPTAccount != "acct-1" {
+		t.Fatalf("identity = %+v", id)
+	}
+	assertNoSecrets(t, sup)
+	m.Shutdown()
+
+	// Central login now points at another workspace: the resume is refused.
+	other := newStubProvider()
+	other.account = "acct-other"
+	m2 := NewManager(ctx, "")
+	m2.SetChatGPTAuth(other)
+	if _, err := ensure(m2); !errors.Is(err, errAccountChanged) {
+		t.Fatalf("Ensure with another account = %v, want errAccountChanged", err)
+	}
+	refused := <-servers
+	if _, ok := refused.sawCall("thread/resume"); ok {
+		t.Fatal("thread resumed under another account")
+	}
+	m2.Shutdown()
+
+	// Same account: the restart logs in again, then resumes the same thread.
+	m3 := NewManager(ctx, "")
+	defer m3.Shutdown()
+	m3.SetChatGPTAuth(p)
+	sup3, err := ensure(m3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := <-servers
+	if li, ri := methodIndex(resumed, "account/login/start"), methodIndex(resumed, "thread/resume"); li < 0 || li > ri {
+		t.Fatalf("restart login=%d resume=%d", li, ri)
+	}
+	if sup3.ThreadID() != threadID {
+		t.Fatal("restart changed the thread")
+	}
 }

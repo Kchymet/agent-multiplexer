@@ -84,6 +84,9 @@ type fakeServer struct {
 	// rejectTokenLogin makes account/login/start chatgptAuthTokens fail the way a
 	// Codex without the experimental external-token mode does.
 	rejectTokenLogin bool
+	// writeMu serializes writes: a WebSocket allows one concurrent writer, and
+	// the login reply is written off the read loop.
+	writeMu sync.Mutex
 }
 
 func newFakePair(t *testing.T) (*Supervisor, *fakeServer, *memConn) {
@@ -189,9 +192,15 @@ func (fs *fakeServer) handleCall(m incoming) {
 			fs.write(map[string]any{"id": m.ID, "error": map[string]any{"code": -32600, "message": "account/login/start.chatgptAuthTokens requires experimentalApi capability: " + string(m.Params)}})
 			return
 		}
-		result = map[string]any{"type": "chatgptAuthTokens"}
-		fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": true, "error": nil})
-		fs.pushNotify("account/updated", map[string]any{"authMode": "chatgptAuthTokens", "planType": "pro"})
+		// Reply off the read loop so a held login still lets the fake read the
+		// client's answers to server requests sent meanwhile.
+		go func() {
+			fs.gate(m.Method)
+			fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": true, "error": nil})
+			fs.pushNotify("account/updated", map[string]any{"authMode": "chatgptAuthTokens", "planType": "pro"})
+			fs.write(map[string]any{"id": m.ID, "result": map[string]any{"type": "chatgptAuthTokens"}})
+		}()
+		return
 	case "thread/goal/get", "thread/goal/set", "thread/goal/clear":
 		fs.mu.Lock()
 		disabled := fs.goalsDisabled
@@ -238,6 +247,8 @@ func (fs *fakeServer) handleCall(m incoming) {
 
 func (fs *fakeServer) write(obj any) {
 	b, _ := json.Marshal(obj)
+	fs.writeMu.Lock()
+	defer fs.writeMu.Unlock()
 	_ = fs.conn.WriteMessage(context.Background(), b)
 }
 
