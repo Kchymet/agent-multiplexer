@@ -94,6 +94,10 @@ type Config struct {
 	// provider cannot reach the daemon's in-memory hub, so the file is the bridge.
 	// Empty ⇒ events go only to the in-memory hub (tests, in-daemon consumers).
 	EventLogPath string
+	// ChatGPTAuth, when set, makes this App Server authenticate with centrally
+	// owned ChatGPT tokens injected over the protocol (auth.go) instead of any
+	// credential in its own Codex home. Nil keeps the legacy behaviour.
+	ChatGPTAuth TokenProvider
 }
 
 // Supervisor is a running (or resumable) App Server plus the amux-side client.
@@ -103,6 +107,7 @@ type Supervisor struct {
 	hub       *eventHub
 	approvals *approvalTracker
 	state     *streamState // owned by the read loop only
+	auth      *tokenAuth   // nil unless Config.ChatGPTAuth is set
 
 	mu     sync.Mutex
 	proc   *exec.Cmd
@@ -181,6 +186,7 @@ func New(cfg Config) *Supervisor {
 		hub:       newEventHub(),
 		approvals: newApprovalTracker(),
 		state:     &streamState{},
+		auth:      newTokenAuth(cfg.ChatGPTAuth, cfg.SessionID),
 	}
 }
 
@@ -462,6 +468,13 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	}
 	if err := s.rpc.notify("initialized", map[string]any{}); err != nil {
 		return fmt.Errorf("codexapp initialized: %w", err)
+	}
+	// Injected tokens live only in the server's memory, so every handshake —
+	// including a reconnect — installs them before the first thread RPC.
+	if s.auth != nil {
+		if err := s.auth.login(ctx, s.rpc); err != nil {
+			return err
+		}
 	}
 
 	start := func() (json.RawMessage, error) {
@@ -1090,6 +1103,9 @@ func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.Ra
 		s.handleApproval(id, method, params)
 	case method == "tool/requestUserInput":
 		s.handleUserInput(id, params)
+	case method == methodTokenRefresh:
+		// Consumed, never passed through as raw: the reply carries a token.
+		s.handleTokenRefresh(id, params)
 	default:
 		s.emit(rawEvent(method, params))
 		_ = s.rpc.respondErr(id, -32601, "unsupported server request")
