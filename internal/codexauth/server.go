@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -110,7 +111,23 @@ func startServer(ctx context.Context, cfg Config, quit <-chan struct{}) (*server
 		return nil, fmt.Errorf("codexauth: app-server stdout: %w", err)
 	}
 	s.stdin = stdin
-	if err := cmd.Start(); err != nil {
+	// Linux delivers Pdeathsig when the THREAD that forked the child exits,
+	// not the process, and the Go runtime may terminate a thread (a locked
+	// goroutine exiting takes its thread with it). So fork from a goroutine
+	// that locks its thread and keeps it until the server has exited: the
+	// signal then fires only when the whole daemon dies, which is exactly
+	// when the owner flock is released, preserving the single refresh writer.
+	started := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread() // never unlocked: the thread retires with this goroutine
+		if err := cmd.Start(); err != nil {
+			started <- err
+			return
+		}
+		started <- nil
+		<-s.done
+	}()
+	if err := <-started; err != nil {
 		return nil, fmt.Errorf("codexauth: start codex app-server: %w", err)
 	}
 	go s.read(stdout)
