@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,7 +17,7 @@ import (
 func parseInstall(t *testing.T, base providercfg.Config, argv ...string) providercfg.Config {
 	t.Helper()
 	fset := flag.NewFlagSet("provide install", flag.ContinueOnError)
-	fset.SetOutput(os.NewFile(0, os.DevNull))
+	fset.SetOutput(io.Discard)
 	var f provideFlags
 	f.register(fset)
 	if err := fset.Parse(argv); err != nil {
@@ -178,7 +179,7 @@ func TestInstallAddressAndFlagsInAnyOrder(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			fset := flag.NewFlagSet("provide install", flag.ContinueOnError)
-			fset.SetOutput(os.NewFile(0, os.DevNull))
+			fset.SetOutput(io.Discard)
 			var f provideFlags
 			f.register(fset)
 			operands, err := parseFlagsAnyOrder(fset, argv)
