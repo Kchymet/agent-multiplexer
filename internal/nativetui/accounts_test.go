@@ -505,3 +505,42 @@ func TestAccountsNoticeVisibleAboveScrolledDetails(t *testing.T) {
 		t.Fatal("action feedback was hidden below scrollable details")
 	}
 }
+
+func TestAccountsPersistedCleanupStatusAfterReconnect(t *testing.T) {
+	for _, tc := range []struct{ code, state, want string }{
+		{"account_logout_cleanup_failed", "logged-out", "Local logout cleanup failed"},
+		{"account_login_cleanup_failed", "blocked", "Login rollback failed"},
+		{"credential_unavailable", "blocked", "Stored credential unavailable"},
+		{"native_status_unavailable", "ready", "Native account service unavailable"},
+		{"SYNTHETIC-SECRET https://auth.example.test/private", "blocked", "Account service reported a problem"},
+	} {
+		t.Run(tc.state+"/"+tc.want, func(t *testing.T) {
+			profile := harnessproto.AccountProfile{ID: "claude:central", Harness: "claude", Source: "central", State: tc.state, Error: tc.code, LoginMethod: "setup-token"}
+			m := &model{w: 110, h: 40}
+			m.accountCall = func(context.Context, accountRequest) (accountResponse, error) {
+				s := projectAccounts(harnessproto.AccountSnapshot{Version: 1, Profiles: []harnessproto.AccountProfile{profile}})
+				return accountResponse{snapshot: &s}, nil
+			}
+			// A newly connected modal has no remembered mutation error; only the
+			// safe persisted profile can explain cleanup and recovery to the user.
+			cmd := m.openAccounts()
+			m.Update(cmd())
+			view := m.View()
+			if !strings.Contains(view, tc.want) || strings.Contains(view, "SYNTHETIC-SECRET") || strings.Contains(view, "auth.example.test") {
+				t.Fatalf("unsafe or missing persisted status: %s", view)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", m.accounts.snapshot), "SYNTHETIC-SECRET") {
+				t.Fatal("raw backend error retained in view model")
+			}
+			if strings.HasPrefix(tc.code, "account_") && !strings.Contains(view, "Start login to recover.") {
+				t.Fatalf("cleanup status omitted recovery: %s", view)
+			}
+			profile.Error, profile.State = "", "ready"
+			_, cmd = m.handleKey(key("r"))
+			m.Update(cmd())
+			if strings.Contains(m.View(), tc.want) {
+				t.Fatal("successful recovery retained old cleanup status")
+			}
+		})
+	}
+}
