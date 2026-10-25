@@ -63,3 +63,23 @@ func TestCodexCurrentModelReadsRollout(t *testing.T) {
 		t.Fatalf("CurrentModel = %q, %v; want latest turn_context model", got, ok)
 	}
 }
+
+func TestCodexCurrentModelRejectsUnpinnedAuxiliaryRollout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	const auxiliaryID = "22222222-2222-4222-8222-222222222222"
+	s := store.Session{ID: "agent", Agent: "codex", Dir: dir, Model: "gpt-main"}
+	home := codexcfg.At(codexcfg.AgentHome(dir))
+	path := home.NewRolloutPath(auxiliaryID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"turn_context","payload":{"model":"gpt-auxiliary"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok := (codexHarness{}).CurrentModel(s); ok || got != "" {
+		t.Fatalf("CurrentModel without a pinned runtime = %q, %v; want no observation", got, ok)
+	}
+}
