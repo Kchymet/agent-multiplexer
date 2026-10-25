@@ -409,7 +409,7 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 	if state == "" {
 		state = "unavailable"
 	}
-	if stale || (state == "available" && (l.freshUntil.IsZero() || !now.Before(l.freshUntil) || l.observedAt.After(now))) {
+	if state == "available" && (stale || l.freshUntil.IsZero() || !now.Before(l.freshUntil) || l.observedAt.After(now)) {
 		state = "stale"
 	}
 	lines := []string{accountText(l.name) + ": " + accountText(state)}
@@ -506,11 +506,15 @@ func (m *model) renderAccounts() string {
 			}
 		}
 	}
+	if s.pending == "status" && len(s.snapshot.profiles) == 0 {
+		lines = []string{"Machine accounts", "Loading account status…"}
+	}
+	var notices []string
 	if s.pending != "" {
-		lines = append(lines, "", "Waiting for machine: "+s.pending+"…")
+		notices = append(notices, "Waiting for machine: "+s.pending+"…")
 	}
 	if s.notice != "" {
-		lines = append(lines, "", s.notice)
+		notices = append(notices, s.notice)
 	}
 	// Wrap instead of truncating ceremony URLs. Scrolling keeps every part of a
 	// long URL reachable on narrow terminals without emitting terminal escapes.
@@ -518,10 +522,18 @@ func (m *model) renderAccounts() string {
 	for _, line := range lines {
 		wrapped = append(wrapped, strings.Split(ansi.Hardwrap(line, max(1, w-2), true), "\n")...)
 	}
-	rows := max(1, h-1)
+	// Keep failures and progress visible even when the account details scroll.
+	var noticeLines []string
+	for _, line := range notices {
+		noticeLines = append(noticeLines, strings.Split(ansi.Hardwrap(line, max(1, w-2), true), "\n")...)
+	}
+	if len(noticeLines) > max(1, h/2) {
+		noticeLines = noticeLines[:max(1, h/2)]
+	}
+	rows := max(1, h-1-len(noticeLines))
 	s.scroll = min(s.scroll, max(0, len(wrapped)-rows))
 	end := min(len(wrapped), s.scroll+rows)
-	body := strings.Join(wrapped[s.scroll:end], "\n")
+	body := strings.Join(append(noticeLines, wrapped[s.scroll:end]...), "\n")
 	return lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(body)
 }
 

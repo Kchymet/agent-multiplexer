@@ -2,8 +2,10 @@ package nativetui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -304,6 +306,9 @@ func TestAccountsUnknownUsageNeverAppearsAsZeroOrUnlimited(t *testing.T) {
 	if strings.Contains(text, "0%") || strings.Contains(text, "unlimited") || !strings.Contains(text, "unknown") {
 		t.Fatal("unknown percentage was presented as measured usage")
 	}
+	if cached := strings.Join(accountLimitLines(l, time.Now(), true), "\n"); !strings.Contains(cached, "Weekly: unknown") || strings.Contains(cached, "Used:") {
+		t.Fatal("offline state turned an unknown limit into an old measurement")
+	}
 }
 
 type blockedAccountConnection struct {
@@ -364,5 +369,44 @@ func TestAccountsTimeoutClosesCeremonyOwner(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("context timeout did not close the owner connection")
+	}
+}
+
+func TestAccountsCanonicalWireFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../harnessproto/testdata/accounts-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot, started harnessproto.HarnessMsg
+	if err := json.Unmarshal(fixtures["snapshot"], &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(fixtures["started"], &started); err != nil {
+		t.Fatal(err)
+	}
+	projected := projectAccounts(*snapshot.Account.Snapshot)
+	if len(projected.profiles) != 1 || projected.profiles[0].account != "" || !projected.profiles[0].defaultProfile || projected.profiles[0].limits[0].usedPercent != nil {
+		t.Fatal("canonical unknown identity/limits fixture was misrepresented")
+	}
+	a := projectAccountCeremony(*started.Account.Ceremony)
+	if a.state != "pending" || a.expiresAt.UnixMilli() != 1792900800000 {
+		t.Fatal("ceremony state or expiry units do not match the canonical wire fixture")
+	}
+	if a.url != "" {
+		t.Fatal("synthetic non-provider fixture URL must not be presented as login destination")
+	}
+}
+
+func TestAccountsNoticeVisibleAboveScrolledDetails(t *testing.T) {
+	m := accountModel()
+	m.w, m.h = 65, 13
+	m.accounts.scroll = 10
+	m.accounts.notice = "Account changed elsewhere."
+	if !strings.Contains(m.renderAccounts(), m.accounts.notice) {
+		t.Fatal("action feedback was hidden below scrollable details")
 	}
 }
