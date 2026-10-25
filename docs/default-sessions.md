@@ -131,9 +131,12 @@ that supervises exactly that natively: Codex's App Server thread goal
 - **A completed goal leaves the workgroup open.** Nothing is archived when a
   goal completes: the completed goal stays visible, the coordinator and its
   members keep running, and the coordinator ends by asking the user whether to
-  archive the workgroup or give it another task. Archiving is the user's host
-  operation (`x` on the rail, `amux workgroup archive <id>`) and stops the
-  coordinator and its members; transcripts and worktrees remain available.
+  archive the workgroup or give it another task. After explicit user confirmation,
+  the coordinator can run `amux agent done` to archive its workgroup and members.
+  The host can also archive it (`x` on the rail, `amux workgroup archive <id>`).
+  Both stop runtimes and revoke credentials; transcripts and worktrees remain.
+  Only the host can restore: restoring the workgroup also restores its previously
+  active members. Already-completed members stay archived.
 - **Only the user pauses it.** `amux do steer <workgroup> -f verb=goal
   -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]`,
   and the same verb over the remote session wire, are the explicit controls. A

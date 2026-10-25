@@ -17,6 +17,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"amux/internal/clipboard"
 	"amux/internal/engine"
 	"amux/internal/launchenv"
 )
@@ -199,6 +200,7 @@ type instance struct {
 
 	mu            sync.Mutex
 	ring          []byte
+	ringStrip     clipboard.Stripper // keeps OSC 52 copies out of the replay
 	subs          map[int]*subscriber
 	nextSub       int
 	exited        bool
@@ -460,9 +462,11 @@ func (in *instance) pump() {
 }
 
 // appendRing appends to the scrollback, trimming the oldest bytes past the cap.
-// Caller holds in.mu.
+// OSC 52 clipboard writes are left out: live subscribers already received them,
+// and a replay re-running them would clobber the user's clipboard with stale
+// text on every reattach. Caller holds in.mu.
 func (in *instance) appendRing(p []byte) {
-	in.ring = append(in.ring, p...)
+	in.ring = in.ringStrip.Strip(in.ring, p)
 	if over := len(in.ring) - scrollbackBytes; over > 0 {
 		in.ring = in.ring[over:]
 	}
@@ -562,14 +566,17 @@ func (in *instance) signal(sig syscall.Signal) {
 
 // buildEnv presents a fresh terminal regardless of where the engine runs.
 // Launcher color overrides (notably NO_COLOR from automation shells) describe
-// the launcher's output, not the pane's PTY. Drop them alongside TMUX and TERM,
-// then apply explicit pane preferences and a default TERM if none was set.
+// the launcher's output, not the pane's PTY. Drop them alongside TMUX, TERM and
+// TERM_PROGRAM — the pane is amux's emulator, not the launcher's terminal, and a
+// leaked TERM_PROGRAM=tmux invites tmux-specific output (DCS passthrough) that
+// the emulator drops — then apply
+// explicit pane preferences and a default TERM if none was set.
 func buildEnv(extra []string, access launchenv.ModelCapability) ([]string, error) {
 	env, err := launchenv.Build(os.Environ(), nil, access)
 	if err != nil {
 		return nil, err
 	}
-	env = stripEnv(env, "TMUX", "TERM", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE")
+	env = stripEnv(env, "TMUX", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE")
 	explicit, err := launchenv.Build(nil, extra, launchenv.ModelCapability{})
 	if err != nil {
 		return nil, err

@@ -21,6 +21,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
+
+	"amux/internal/clipboard"
 )
 
 // altScrollLines is how many cursor-key presses one wheel notch turns into when
@@ -52,6 +54,10 @@ type Terminal struct {
 	closed bool
 
 	onData func() // fired when new output is parsed, to prompt a re-render
+
+	// onClipboard receives the text of each OSC 52 clipboard write the child
+	// makes (see OnClipboard). Read from the emulator's OSC handler, under t.mu.
+	onClipboard func([]byte)
 
 	// Mouse/cursor mode state the child has requested, tracked so MouseEvent can
 	// tell whether to forward raw mouse events or fall back to alternate-scroll.
@@ -136,8 +142,27 @@ func New(cols, rows int) *Terminal {
 		EnableMode:  func(m ansi.Mode) { t.noteMode(m, true) },
 		DisableMode: func(m ansi.Mode) { t.noteMode(m, false) },
 	})
+	// The emulator has no OSC 52 handler and silently drops the sequence, which
+	// is how agents copy a mouse selection; hand writes to the embedder, which
+	// owns the real terminal. Queries are swallowed unanswered: replying would
+	// hand the user's clipboard to the child.
+	t.emu.RegisterOscHandler(52, func(data []byte) bool {
+		if text, ok := clipboard.ParseOSC52(data); ok && t.onClipboard != nil {
+			t.onClipboard(text)
+		}
+		return true
+	})
 	t.installHistoryHooks()
 	return t
+}
+
+// OnClipboard registers f to receive the text of every OSC 52 clipboard write
+// the child emits. f runs on the parsing goroutine with t.mu held: it must not
+// block or call back into t, and must copy the text to keep it.
+func (t *Terminal) OnClipboard(f func(text []byte)) {
+	t.mu.Lock()
+	t.onClipboard = f
+	t.mu.Unlock()
 }
 
 // noteMode records a child mode change relevant to input translation. It runs

@@ -32,8 +32,7 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 		}
 	}
 	// Restoring an archived member is the user's operation, not the
-	// coordinator's: its grant refuses it. The workgroup archive command is named
-	// only as the user's host operation, never as a step the coordinator takes.
+	// coordinator's: its grant refuses restoration.
 	if strings.Contains(guide, "amux do unarchive") {
 		t.Error("coordinator guide advertises the host-only amux do unarchive")
 	}
@@ -93,8 +92,7 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 
 // Finishing a task must never read as "the workgroup gets archived": on every
 // harness the guide tells the coordinator the workgroup stays open, to ask the
-// user whether to archive it or continue, and that archiving is the user's host
-// operation — not something the coordinator (or a member on its behalf) does.
+// user whether to archive it or continue, and to wait for explicit confirmation.
 func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
 	t.Helper()
 	// The guide is hard-wrapped prose; match phrases against its unwrapped form.
@@ -102,14 +100,19 @@ func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
 	for _, want := range []string{
 		"archives nothing",
 		"ask the user whether to archive the workgroup",
-		"amux workgroup archive " + id,
-		"Never archive this workgroup yourself — not with `amux agent done`",
+		"Wait for explicit user confirmation before archiving",
+		"goal completion is not confirmation",
+		"After confirmation, run `amux agent done`",
+		"workgroup (" + id + ")",
+		"Restoration is host-only",
+		"Previously completed members stay archived",
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("%s guide missing %q", kind, want)
 		}
 	}
 	for _, forbidden := range []string{
+		"Never archive this workgroup yourself",
 		"automatically marks the workgroup done",
 		"marks the workgroup done",
 		"stops its coordinator and members",

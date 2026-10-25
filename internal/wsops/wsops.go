@@ -460,6 +460,13 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error
 		return "", fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
 	oldRoot := a.RootID
+	source, found, err := db.GetSession(oldRoot)
+	if err != nil {
+		return "", err
+	}
+	if found && source.Archived {
+		return "", fmt.Errorf("restore workgroup %q before moving member %q", oldRoot, agentID)
+	}
 
 	created := ""
 	if strings.TrimSpace(targetRootID) == "" {
@@ -899,8 +906,8 @@ func baselinePrompt(description, linear string) string {
 
 // SetArchived marks an agent (or workgroup) done/archived, or restores it. An
 // archived session drops off the active rail but stays in the store; the daemon
-// stops its engine instance (see killEngineFor) so it isn't holding a live
-// process.
+// stops its runtime. Members inherit their coordinator's archived state at runtime,
+// preserving their own flags so group restoration revives only eligible members.
 func SetArchived(ctx context.Context, id string, archived bool) error {
 	db, err := store.Open()
 	if err != nil {
@@ -910,6 +917,15 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 	s, ok, err := db.GetSession(id)
 	if err != nil || !ok {
 		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
+	}
+	if !archived && !s.IsRoot() {
+		parent, found, err := db.GetSession(s.RootID)
+		if err != nil {
+			return err
+		}
+		if found && parent.Archived {
+			return fmt.Errorf("restore workgroup %q before restoring member %q", parent.ID, id)
+		}
 	}
 	// Stamp the archive time so the rail can order the ARCHIVED section by when
 	// agents were archived. Only stamp on a false→true transition; re-archiving
@@ -933,12 +949,26 @@ func ToggleArchived(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	cur := false
-	if s, ok, _ := db.GetSession(id); ok {
-		cur = s.Archived
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		return err
 	}
-	db.Close()
-	return SetArchived(ctx, id, !cur)
+	if !ok {
+		return fmt.Errorf("no such workgroup or agent %q", id)
+	}
+	if !s.IsRoot() {
+		parent, found, err := db.GetSession(s.RootID)
+		if err != nil {
+			return err
+		}
+		// The rail and archive search show inherited archive state. Toggling
+		// a fenced member must not turn a restore attempt into completion.
+		if found && parent.Archived {
+			return fmt.Errorf("restore workgroup %q before restoring member %q", parent.ID, id)
+		}
+	}
+	return SetArchived(ctx, id, !s.Archived)
 }
 
 // Rename sets a session's display name.

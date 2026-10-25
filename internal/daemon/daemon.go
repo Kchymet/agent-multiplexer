@@ -1345,27 +1345,31 @@ func (d *Daemon) restorable(agentID string) bool {
 	return false
 }
 
-// killEngineFor stops the engine instances (all tabs) of an agent and, if id is a
-// workgroup root, its direct children — used when an agent is deleted or
-// archived so the process actually stops, not just the store record. It reads
-// the current snapshot (still pre-deletion when called from handle) to find
-// children.
+// killEngineFor stops all tabs of the target and its stored direct members.
+// Membership must come from the store: a stale rail can omit newly added members
+// or still list a member that has moved into a foreign workgroup.
 func (d *Daemon) killEngineFor(id string) {
 	if d.engine == nil && d.codex == nil {
 		return
 	}
-	// Serialize archive/delete with credential restarts so a pending reload
-	// cannot resurrect a session being removed.
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 	ids := map[string]bool{id: true}
-	d.mu.RLock()
-	for _, s := range d.sessions {
-		if s.RootID == id {
-			ids[s.ID] = true
+	if db, err := store.OpenReadOnly(); err == nil {
+		children, err := db.Children(id)
+		db.Close()
+		if err != nil {
+			log.Printf("session %s member shutdown lookup: %v", id, err)
+		} else {
+			for _, child := range children {
+				ids[child.ID] = true
+			}
 		}
+	} else {
+		// The durable parent archive flag also drives member reconciliation, including
+		// recovery after this lookup fails. Never fall back to stale ownership.
+		log.Printf("session %s shutdown store: %v", id, err)
 	}
-	d.mu.RUnlock()
 	for aid := range ids {
 		d.killRuntimeLocked(aid)
 	}

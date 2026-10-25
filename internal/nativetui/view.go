@@ -367,6 +367,7 @@ func stateColor(state string) lipgloss.Style {
 }
 
 func (m *model) renderMain() string {
+	m.shown.Store(m.cur()) // the pane allowed to copy (see model.clip)
 	if m.archiveSearch != nil {
 		return m.renderArchiveSearch()
 	}

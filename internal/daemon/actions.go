@@ -40,6 +40,28 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			defer d.sessionRPC.dispatchMu.Unlock()
 			if restore, _ := hostRestoreRequested(a); restore {
 				d.sessionRPC.completions.cancelAndWait(a.ID)
+				session, found, err := lookupSession(a.ID)
+				if err != nil {
+					return fail("restore session: %v", err)
+				}
+				if found && session.Role() == store.RoleCoordinator {
+					// A group restore also regrants eligible members. Drain any
+					// member completion owner before taking its cleanup effect lock.
+					db, err := store.OpenReadOnly()
+					if err != nil {
+						return fail("restore members: %v", err)
+					}
+					children, err := db.Children(a.ID)
+					db.Close()
+					if err != nil {
+						return fail("restore members: %v", err)
+					}
+					for _, child := range children {
+						if !child.Archived {
+							d.sessionRPC.completions.cancelAndWait(child.ID)
+						}
+					}
+				}
 			}
 		}
 		d.effectMu.Lock()
@@ -126,7 +148,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// for the verbs whose descriptor says so — including set-archived, which the
 		// old inline switch missed, so the CLI's archive left the process running
 		// while the TUI's stopped it. killEngineFor runs before the store mutation so
-		// a root delete still reads its children from the pre-deletion snapshot.
+		// a root delete still reads its children from the pre-deletion store.
 		if err := d.accountCreationReady(ctx, a); err != nil {
 			return fail("%v", err)
 		}
@@ -171,7 +193,7 @@ func hostRestoreRequested(action core.Action) (bool, error) {
 	case core.ActionSetArchived:
 		return action.Fields["archived"] == "false", nil
 	case core.ActionArchive:
-		session, found, err := lookupSession(action.ID)
+		session, found, err := wsops.ResolveSession(action.ID)
 		if err != nil {
 			return false, err
 		}
@@ -191,7 +213,7 @@ func hostRestoreRequested(action core.Action) (bool, error) {
 // store transition. Partial publication is observed, never blindly retried;
 // archived/current and archived/revoked are both explicit retryable states.
 func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (string, error) {
-	session, found, err := lookupSession(action.ID)
+	session, found, err := wsops.ResolveSession(action.ID)
 	if err != nil {
 		return "", err
 	}
@@ -200,6 +222,15 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 	}
 	if session.Mode == store.ModeConsole {
 		return "", d.restoreConsoleAccess(ctx, session)
+	}
+	if !session.IsRoot() {
+		parent, found, err := lookupSession(session.RootID)
+		if err != nil {
+			return "", err
+		}
+		if found && parent.Archived {
+			return "", fmt.Errorf("restore workgroup %q before restoring member %q", parent.ID, session.ID)
+		}
 	}
 	expected, regrant, lapsed, err := d.restoreCredentialState(ctx, action.ID)
 	if err != nil {
@@ -220,6 +251,28 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 		current, currentFound, lookupErr := lookupSession(action.ID)
 		if lookupErr != nil || !currentFound || !current.Archived {
 			return "", errors.Join(archiveErr, lookupErr, fmt.Errorf("restore recovery could not preserve archived state"))
+		}
+	}
+	if session.Role() == store.RoleCoordinator {
+		// Keep the root archived until every previously active member has a
+		// usable credential. Partial publication remains fenced by the parent
+		// and is safe to retry through this explicit host operation.
+		db, openErr := store.OpenReadOnly()
+		if openErr != nil {
+			return "", openErr
+		}
+		children, readErr := db.Children(session.ID)
+		db.Close()
+		if readErr != nil {
+			return "", readErr
+		}
+		for _, child := range children {
+			if child.Archived {
+				continue
+			}
+			if err := d.restoreDormantAccess(ctx, child, true); err != nil {
+				return "", fmt.Errorf("restore workgroup member %s: %w", child.ID, err)
+			}
 		}
 	}
 	var newID string
@@ -361,8 +414,14 @@ func (d *Daemon) restoreCredentialState(ctx context.Context, subjectID string) (
 // or revoked generation is regranted; nothing in the store changes. The
 // reconcile loop reopens the mailbox once a current credential exists.
 func (d *Daemon) restoreConsoleAccess(ctx context.Context, session store.Session) error {
+	return d.restoreDormantAccess(ctx, session, false)
+}
+
+// restoreDormantAccess reuses the host authority path for console recovery and
+// members fenced by an archived parent. It never changes a member's own flag.
+func (d *Daemon) restoreDormantAccess(ctx context.Context, session store.Session, quiesce bool) error {
 	expected, regrant, lapsed, err := d.restoreCredentialState(ctx, session.ID)
-	if err != nil || !regrant {
+	if err != nil || (!regrant && !quiesce) {
 		return err
 	}
 	d.authMu.Lock()
@@ -371,16 +430,19 @@ func (d *Daemon) restoreConsoleAccess(ctx context.Context, session store.Session
 		if err = d.quiesceSessionRuntimeLocked(session.ID); err != nil {
 			return
 		}
+		if !regrant {
+			return
+		}
 		if lapsed != nil {
 			if revokeErr := d.authority.RevokeCurrent(ctx, *lapsed); revokeErr != nil {
-				err = fmt.Errorf("retire expired console credential before regrant: %w", revokeErr)
+				err = fmt.Errorf("retire expired session credential before regrant: %w", revokeErr)
 				return
 			}
 		}
 		if _, regrantErr := d.authority.Regrant(ctx, access.SubjectSession, session.ID, expected); regrantErr != nil {
 			current, currentErr := d.authority.Current(ctx, access.SubjectSession, session.ID)
 			if currentErr != nil || current.Generation != expected+1 {
-				err = fmt.Errorf("restore console credential regrant: %w", regrantErr)
+				err = fmt.Errorf("restore session credential regrant: %w", regrantErr)
 			}
 		}
 	})
