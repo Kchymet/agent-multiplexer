@@ -18,7 +18,8 @@ amux agent events <member-id> --json
 amux agent events <member-id> --cursor <next-cursor> --json
 ```
 
-Use `amux status --json` for the scope-filtered session inventory. Ordinary
+Use `amux status --json` for the scope-filtered session inventory (see
+[control-API scopes](agent-cli-sandbox.md#control-api-scopes)). Ordinary
 workers are self-only; repo-home and coordinator reads are checked against the
 daemon's current authoritative membership. Deleted, removed, foreign, and
 untracked conversation IDs are denied. Read access does not grant PTY, start,

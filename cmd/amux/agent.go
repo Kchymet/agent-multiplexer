@@ -112,6 +112,8 @@ usage: amux agent <command>
 
 Commands use the private file mailbox from the ordinary sandboxed shell.
 Keep both sandboxes enabled. Discovery grants no cross-session write access.
+`+"`amux status`"+` and `+"`amux do`"+` from a session are scoped the same way: to the
+session itself, or for a coordinator to its workgroup and current direct members.
 
 Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned.

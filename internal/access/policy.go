@@ -64,69 +64,104 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 	if principal.Kind != SubjectSession || p.Resolver == nil {
 		return ErrDenied
 	}
+	// Default deny: an operation without an explicit classification is never
+	// reachable by a restricted principal, whatever its role.
+	rule, classified := RuleFor(req.Route, req.Verb)
+	if !classified {
+		return ErrDenied
+	}
+	// The subject is the authenticated grant's store subject. Request IDs only
+	// ever name the target; they never select the caller.
 	subject, ok, err := p.Resolver.Lookup(ctx, principal.SubjectID)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return ErrDenied
-	}
-	if subject.Archived {
+	if !ok || subject.Archived || !knownRole(subject.Role) {
 		return ErrDenied
 	}
 
-	if req.Route == RouteQuery {
-		return p.authorizeQuery(ctx, subject, req)
-	}
-	if req.Route == RoutePane {
-		return ErrDenied // restricted principals use one-shot mailbox RPC only
-	}
-	if req.Route != RouteAction {
+	switch rule.Scope {
+	case ScopeSession, ScopeFiltered:
+		// ScopeFiltered handlers project the result to InWorkgroupScope(subject).
+		return nil
+	case ScopeHost:
+		if subject.Role == "console" && rule.Console {
+			return nil
+		}
+		if subject.Role == "repo" && req.Verb == core.ActionNewWorkgroup && req.ID == "" && repoScopedWorkgroup(subject, req) {
+			return nil
+		}
 		return ErrDenied
-	}
-
-	target, targetOK, err := p.Resolver.Lookup(ctx, req.ID)
-	if err != nil {
-		return err
-	}
-	switch subject.Role {
-	case "console":
-		if consoleAction(req.Verb) {
-			return nil
-		}
-	case "coordinator":
-		// This permission belongs only to coordinators, not repo homes that
-		// share the direct-member control helper below. Restore remains host-only.
-		if req.Verb == core.ActionSetArchived && req.ID == subject.ID && req.Fields["archived"] == "true" {
-			return nil
-		}
-		if req.Verb == core.ActionAddAgent && req.ID == subject.ID {
-			if err := p.authorizeAddAgent(ctx, subject, req); err == nil {
-				return nil
-			}
-		}
-		if targetOK && (target.ID == subject.ID || target.RootID == subject.ID) && coordinatorAction(req, target.ID == subject.ID) {
-			return nil
-		}
-	case "repo":
-		if req.Verb == core.ActionNewWorkgroup && req.ID == "" && len(splitList(req.Fields["repos"])) == 1 && splitList(req.Fields["repos"])[0] == subject.Repo {
-			return nil
-		}
-		owned, err := p.repoOwns(ctx, subject, target)
-		if err != nil {
-			return err
-		}
-		if targetOK && owned && coordinatorAction(req, target.ID == subject.ID) {
-			return nil
-		}
-	case "": // ordinary agent: explicit self-only actions
-		if targetOK && target.ID == subject.ID && ordinaryAction(req) {
-			return nil
-		}
+	case ScopeWorkgroup:
 	default:
 		return ErrDenied
 	}
-	return ErrDenied
+
+	if strings.TrimSpace(req.ID) == "" {
+		return ErrDenied
+	}
+	// A self request reuses the subject row: one read decides both sides.
+	target, targetOK := subject, req.ID == subject.ID
+	if !targetOK {
+		if target, targetOK, err = p.Resolver.Lookup(ctx, req.ID); err != nil {
+			return err
+		}
+	}
+	if !targetOK {
+		return ErrDenied
+	}
+	if subject.Role == "console" && rule.Console {
+		return nil
+	}
+	self := target.ID == subject.ID
+	if !InWorkgroupScope(subject, target) {
+		return ErrDenied
+	}
+	// Reads may page an archived member while it still belongs to the scope;
+	// effects never target an archived session (restore is host-only).
+	if req.Route == RouteAction && target.Archived {
+		return ErrDenied
+	}
+	if rule.Allow != nil && !rule.Allow(req, self, target) {
+		return ErrDenied
+	}
+	if req.Verb == core.ActionAddAgent && subject.Role != "console" {
+		return p.authorizeAddAgent(ctx, subject, req)
+	}
+	return nil
+}
+
+// InWorkgroupScope reports whether target is within subject's workgroup scope:
+// itself, or for a coordinator, a current direct member of its workgroup. The
+// console is the operator's delegated global view. Ordinary agents and repo
+// homes are self-only: sharing a repository does not confer access to a
+// workgroup, whose coordinator owns its member sessions. Membership is the
+// target's current daemon-owned RootID, so a member moved out of the workgroup
+// leaves the scope immediately.
+func InWorkgroupScope(subject, target Resource) bool {
+	switch subject.Role {
+	case "console":
+		return true
+	case "coordinator":
+		return target.ID == subject.ID || target.RootID == subject.ID
+	case "repo", "":
+		return target.ID == subject.ID
+	default:
+		return false
+	}
+}
+
+func knownRole(role string) bool {
+	switch role {
+	case "", "console", "coordinator", "repo":
+		return true
+	}
+	return false
+}
+
+func repoScopedWorkgroup(subject Resource, req Request) bool {
+	repos := splitList(req.Fields["repos"])
+	return len(repos) == 1 && repos[0] == subject.Repo
 }
 
 func (p Policy) authorizeAddAgent(ctx context.Context, subject Resource, req Request) error {
@@ -158,85 +193,7 @@ func splitList(value string) []string {
 	return out
 }
 
-// Repo homes retain their own management context. Sharing a repository does
-// not confer access to a workgroup: its coordinator owns its member sessions.
-func (p Policy) repoOwns(ctx context.Context, subject, target Resource) (bool, error) {
-	return target.ID == subject.ID, nil
-}
-
-func (p Policy) authorizeQuery(ctx context.Context, subject Resource, req Request) error {
-	switch req.Verb {
-	case core.QueryVersion, core.QueryCodexControl, core.QuerySnapshot, core.QueryAgentSessions:
-		return nil
-	case core.QuerySessions, core.QueryRepos:
-		if subject.Role == "coordinator" || subject.Role == "repo" || subject.Role == "console" {
-			return nil
-		}
-	case core.QueryRuntimeEvents:
-		if strings.TrimSpace(req.ID) == "" {
-			return ErrDenied
-		}
-		target, ok, err := p.Resolver.Lookup(ctx, req.ID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrDenied
-		}
-		visible, err := p.visible(ctx, subject, target)
-		if err != nil {
-			return err
-		}
-		if visible {
-			return nil
-		}
-	}
-	// Raw runtime paths/records and untracked-conversation fallback are never
-	// exposed to restricted principals.
-	return ErrDenied
-}
-
-func ordinaryAction(req Request) bool {
-	if req.Verb == core.ActionRename {
-		return true
-	}
-	return req.Verb == core.ActionSetArchived && req.Fields["archived"] == "true"
-}
-
 const RuntimeGenerationField = harnessproto.FieldRuntimeGeneration
-
-func coordinatorAction(req Request, self bool) bool {
-	switch req.Verb {
-	case core.ActionStart, core.ActionRename:
-		return true
-	case core.ActionSetArchived:
-		if self {
-			return false // coordinator self-archive is granted separately above
-		}
-		return req.Fields["archived"] == "true" || req.Fields["archived"] == "false"
-	case core.ActionSteer:
-		verb := req.Fields[core.SteerVerb]
-		if verb != core.SteerPrompt && verb != core.SteerInterject && verb != core.SteerStop && verb != core.SteerPermission {
-			return false
-		}
-		if verb == core.SteerPermission && (strings.TrimSpace(req.Fields[core.SteerRequestID]) == "" || strings.TrimSpace(req.Fields[RuntimeGenerationField]) == "") {
-			return false
-		}
-		return true
-	}
-	return false
-}
-
-func consoleAction(verb string) bool {
-	switch verb {
-	case core.ActionRefresh, core.ActionStart, core.ActionSteer, core.ActionRename,
-		core.ActionMove, core.ActionArchive, core.ActionSetArchived, core.ActionDelete,
-		core.ActionKill, core.ActionAddRepo, core.ActionRmRepo, core.ActionAgentSetRepos,
-		core.ActionAddAgent, core.ActionNewWorkgroup, core.ActionCreateWorkspace:
-		return true
-	}
-	return false
-}
 
 func (p Policy) FilterSnapshot(ctx context.Context, principal Principal, snap core.Snapshot) (core.Snapshot, error) {
 	if principal.Kind == SubjectHost {
@@ -279,11 +236,7 @@ func (p Policy) FilterSnapshot(ctx context.Context, principal Principal, snap co
 		if err != nil {
 			return core.Snapshot{}, err
 		}
-		visible, err := p.visible(ctx, subject, resource)
-		if err != nil {
-			return core.Snapshot{}, err
-		}
-		if !found || !visible {
+		if !found || !InWorkgroupScope(subject, resource) {
 			continue
 		}
 		session.Cwd = ""
@@ -291,21 +244,6 @@ func (p Policy) FilterSnapshot(ctx context.Context, principal Principal, snap co
 		out.Sessions = append(out.Sessions, session)
 	}
 	return out, nil
-}
-
-func (p Policy) visible(ctx context.Context, subject, target Resource) (bool, error) {
-	switch subject.Role {
-	case "console":
-		return true, nil
-	case "coordinator":
-		return target.ID == subject.ID || target.RootID == subject.ID, nil
-	case "repo":
-		return p.repoOwns(ctx, subject, target)
-	case "":
-		return target.ID == subject.ID, nil
-	default:
-		return false, nil
-	}
 }
 
 func DeniedError(req Request) error {
