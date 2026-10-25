@@ -113,7 +113,7 @@ flags, and environment variables only ever name a target.
 | `steer` prompt / interject / stop | workgroup | itself | itself, members | |
 | `steer` permission | workgroup | no | members only | Never one's own prompt; needs request id and runtime generation. |
 | `steer` goal | host | no | no | Rejected for every session principal. |
-| `set-archived archived=true` (`amux agent done`) | workgroup | itself | members | Never a workgroup root (cascades). Console: any. |
+| `set-archived archived=true` (`amux agent done`) | workgroup | itself | members; its own workgroup (cascades to members) | Coordinators archive their workgroup only after explicit user confirmation. Repo homes never archive themselves. Console: any. |
 | `set-archived archived=false`, `archive` toggle | host | no | no | Restore needs host regrant. |
 | `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. |
 | `delete`, `kill`, `move`, `agent-set-repos` | host | no | no | Console. |
@@ -125,7 +125,7 @@ flags, and environment variables only ever name a target.
 
 Self reports (`amux agent status|hook|permission|model|capture`), the credential
 broker, and central auth queries are authorized by their own self-only checks
-before this table. Workgroup archive/restore, repo add/rm, auth, config,
+before this table. Workgroup restore, repo add/rm, auth, config,
 daemon control, and `amux sandbox` remain host commands.
 
 ## Availability, restart, and completion

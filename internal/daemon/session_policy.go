@@ -132,7 +132,25 @@ func lookupPolicySession(db policyStore, id string) (store.Session, bool, error)
 		// wsops.ResolveSession from authorization: a read must not create/migrate.
 		return console.Session(), true, nil
 	}
-	return db.GetSession(id)
+	s, found, err := db.GetSession(id)
+	if err != nil || !found {
+		return s, found, err
+	}
+	s, err = inheritParentArchive(s, db.GetSession)
+	return s, found, err
+}
+
+// inheritParentArchive is a read-side lifecycle projection. A parent's archive
+// fences its members without losing their independent completion state.
+func inheritParentArchive(s store.Session, lookup func(string) (store.Session, bool, error)) (store.Session, error) {
+	if !s.IsRoot() && !s.Archived {
+		parent, found, err := lookup(s.RootID)
+		if err != nil {
+			return s, err
+		}
+		s.Archived = found && parent.Archived
+	}
+	return s, nil
 }
 
 func policyResource(s store.Session) access.Resource {

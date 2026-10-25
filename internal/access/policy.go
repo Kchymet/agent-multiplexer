@@ -100,9 +100,12 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 	if strings.TrimSpace(req.ID) == "" {
 		return ErrDenied
 	}
-	target, targetOK, err := p.Resolver.Lookup(ctx, req.ID)
-	if err != nil {
-		return err
+	// A self request reuses the subject row: one read decides both sides.
+	target, targetOK := subject, req.ID == subject.ID
+	if !targetOK {
+		if target, targetOK, err = p.Resolver.Lookup(ctx, req.ID); err != nil {
+			return err
+		}
 	}
 	if !targetOK {
 		return ErrDenied

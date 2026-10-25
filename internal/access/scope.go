@@ -130,11 +130,16 @@ func allowSteer(req Request, self bool, _ Resource) bool {
 	return false
 }
 
-// allowArchive permits explicit archival of a member session: an ordinary
-// agent completing itself, or a coordinator archiving a direct member. A
-// workgroup root's archival cascades and is host-only, as is every restore.
-func allowArchive(req Request, _ bool, target Resource) bool {
-	return req.Fields["archived"] == "true" && target.RootID != ""
+// allowArchive permits explicit archival: an ordinary agent completing itself,
+// a coordinator archiving a direct member, or a coordinator archiving its own
+// workgroup (which cascades to its members; guides require explicit user
+// confirmation first). Repo homes and other roots never archive themselves,
+// and every restore is host-only.
+func allowArchive(req Request, self bool, target Resource) bool {
+	if req.Fields["archived"] != "true" {
+		return false
+	}
+	return target.RootID != "" || (self && target.Role == "coordinator")
 }
 
 // allowAddAgent permits a coordinator to add to its own workgroup only; its

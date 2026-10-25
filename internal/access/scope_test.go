@@ -188,7 +188,9 @@ func TestScopeMatrix(t *testing.T) {
 		{"coord archive member", session("wg1"), action(core.ActionSetArchived, "a1", archive), true},
 		{"coord add-agent own", session("wg1"), action(core.ActionAddAgent, "wg1", map[string]string{"repos": "api"}), true},
 		{"coord answer own permission", session("wg1"), action(core.ActionSteer, "wg1", permission), false},
-		{"coord archive workgroup", session("wg1"), action(core.ActionSetArchived, "wg1", archive), false},
+		{"coord archive own workgroup", session("wg1"), action(core.ActionSetArchived, "wg1", archive), true},
+		{"coord restore own workgroup", session("wg1"), action(core.ActionSetArchived, "wg1", restore), false},
+		{"coord archive foreign workgroup", session("wg1"), action(core.ActionSetArchived, "wg2", archive), false},
 		{"coord restore member", session("wg1"), action(core.ActionSetArchived, "old", restore), false},
 		{"coord act on archived member", session("wg1"), action(core.ActionStart, "old", nil), false},
 		{"coord rename archived member", session("wg1"), action(core.ActionRename, "old", rename), false},
@@ -209,7 +211,7 @@ func TestScopeMatrix(t *testing.T) {
 	// Host-only operations: denied to members and coordinators even on targets
 	// in their own scope, and always allowed for the host.
 	hostOnly := []Request{
-		action(core.ActionSetArchived, "wg1", archive),
+		action(core.ActionSetArchived, "wg1", restore),
 		action(core.ActionSetArchived, "old", restore),
 		action(core.ActionArchive, "a1", nil),
 		action(core.ActionDelete, "a1", nil),

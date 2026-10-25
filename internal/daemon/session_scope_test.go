@@ -106,7 +106,7 @@ func TestSessionRPCScopeEndToEnd(t *testing.T) {
 		{"coordinator rename foreign workgroup", "wg1", access.RouteAction, core.ActionRename, "wg2", rename("x"), sessionrpc.StatusDenied},
 		{"coordinator delete member", "wg1", access.RouteAction, core.ActionDelete, "a2", nil, sessionrpc.StatusDenied},
 		{"coordinator move member", "wg1", access.RouteAction, core.ActionMove, "a2", nil, sessionrpc.StatusDenied},
-		{"coordinator archive workgroup", "wg1", access.RouteAction, core.ActionSetArchived, "wg1", map[string]string{"archived": "true"}, sessionrpc.StatusDenied},
+		{"coordinator archive foreign workgroup", "wg1", access.RouteAction, core.ActionSetArchived, "wg2", map[string]string{"archived": "true"}, sessionrpc.StatusDenied},
 		{"coordinator grant repos", "wg1", access.RouteAction, core.ActionAgentSetRepos, "a2", map[string]string{"repos": "api"}, sessionrpc.StatusDenied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

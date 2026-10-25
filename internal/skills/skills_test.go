@@ -73,3 +73,31 @@ func TestInstallLeavesForeignFilesAlone(t *testing.T) {
 		t.Errorf("Install clobbered a user's own skill")
 	}
 }
+
+// Installed coordinator guidance must separate archive confirmation from task
+// completion, even when the same skill lets task-mode members retire themselves.
+func TestInstalledCreatePRRequiresCoordinatorArchiveConfirmation(t *testing.T) {
+	dest := t.TempDir()
+	if err := Install(dest); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dest, "create-pr", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(b)), " ")
+	for _, want := range []string{
+		"after explicit user confirmation",
+		"goal completion and a merged PR are not confirmation",
+		"`amux agent done`",
+		"archives its own workgroup and all its direct members",
+		"Restoration is host-only",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("installed coordinator policy missing %q", want)
+		}
+	}
+	if strings.Contains(text, "coordinator **never** archives") {
+		t.Fatal("installed skill still prohibits confirmed coordinator archive")
+	}
+}
