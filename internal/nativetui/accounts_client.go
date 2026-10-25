@@ -2,11 +2,9 @@ package nativetui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
 
-	"amux/internal/core"
 	"amux/internal/daemon"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -20,8 +18,7 @@ type machineAccountTransport struct {
 }
 
 type accountConnection interface {
-	SendContext(context.Context, core.Action) error
-	NextContext(context.Context) (daemon.Frame, error)
+	Accounts(harnessproto.AccountRequest, bool) (harnessproto.AccountResult, error)
 	Close() error
 }
 
@@ -62,44 +59,40 @@ func (t *machineAccountTransport) connection(ctx context.Context) (accountConnec
 	return c, nil
 }
 
-func accountWireRequest(req accountRequest) (core.Action, error) {
+func accountWireRequest(req accountRequest) (harnessproto.AccountRequest, bool, error) {
 	op := req.op
 	if op == "progress" {
-		op = "poll"
+		op = harnessproto.AccountPoll
 	}
-	query := "account-manage"
+	ceremony := false
 	switch op {
-	case "status":
-		return core.Action{Action: core.ActionQuery, Query: "accounts"}, nil
-	case "login", "poll", "cancel", "complete", "disconnect":
-		query = "account-ceremony"
-	case "default", "logout":
+	case harnessproto.AccountStatus:
+		return harnessproto.AccountRequest{Operation: op}, false, nil
+	case harnessproto.AccountLogin, harnessproto.AccountPoll, harnessproto.AccountCancel, harnessproto.AccountComplete, harnessproto.AccountDisconnect:
+		ceremony = true
+	case harnessproto.AccountDefault, harnessproto.AccountLogout:
 	default:
-		return core.Action{}, errAccountsUnsupported
+		return harnessproto.AccountRequest{}, false, errAccountsUnsupported
 	}
 	wire := harnessproto.AccountRequest{Operation: op, ProfileID: req.profile, Revision: req.revision, AttemptID: req.attempt}
-	if query == "account-ceremony" {
+	if ceremony {
 		// The daemon namespaces this label by the authenticated connection.
 		wire.Initiator = "native-tui"
 	}
-	if op == "complete" {
+	if op == harnessproto.AccountComplete {
 		wire.Secret = req.secret
 	}
-	if op == "poll" || op == "cancel" || op == "complete" {
+	if op == harnessproto.AccountPoll || op == harnessproto.AccountCancel || op == harnessproto.AccountComplete {
 		wire.Revision = 0
 	}
-	if !harnessproto.ValidateAccountRequest(wire, query == "account-ceremony") {
-		return core.Action{}, errors.New("invalid account request")
+	if !harnessproto.ValidateAccountRequest(wire, ceremony) {
+		return harnessproto.AccountRequest{}, false, errors.New("invalid account request")
 	}
-	raw, err := json.Marshal(wire)
-	if err != nil {
-		return core.Action{}, err
-	}
-	return core.Action{Action: core.ActionQuery, Query: query, Fields: map[string]string{"request": string(raw)}}, nil
+	return wire, ceremony, nil
 }
 
 func (t *machineAccountTransport) call(ctx context.Context, req accountRequest) (accountResponse, error) {
-	a, err := accountWireRequest(req)
+	wire, ceremony, err := accountWireRequest(req)
 	if err != nil {
 		return accountResponse{}, err
 	}
@@ -107,63 +100,53 @@ func (t *machineAccountTransport) call(ctx context.Context, req accountRequest) 
 	if err != nil {
 		return accountResponse{}, err
 	}
-	// A timeout closes the owner connection, fencing late completion. Do not
-	// reconnect and replay mutations: the next explicit refresh reconciles.
-	if err := c.SendContext(ctx, a); err != nil {
+	// Client.Accounts owns framing. Its bounded lifetime here closes the owner
+	// connection, fencing late completion. Never reconnect/replay a mutation.
+	stop := context.AfterFunc(ctx, t.close)
+	defer stop()
+	result, err := c.Accounts(wire, ceremony)
+	if err != nil || ctx.Err() != nil {
 		t.close()
-		return accountResponse{}, err
+		if err != nil && err.Error() == `unknown query "accounts"` {
+			return accountResponse{}, errAccountsUnsupported
+		}
+		return accountResponse{}, errors.New("account transport unavailable")
 	}
-	for {
-		frame, err := c.NextContext(ctx)
-		if err != nil {
-			t.close()
-			return accountResponse{}, err
-		}
-		if frame.Data == nil {
-			continue
-		}
-		d := frame.Data
-		if d.Query != a.Query || len(d.Rows) > 128<<10 {
-			t.close()
-			return accountResponse{}, errAccountsUnsupported
-		}
-		if !d.OK {
-			return accountResponse{}, classifyAccountError(d.Error)
-		}
-		var result harnessproto.AccountResult
-		if err := json.Unmarshal(d.Rows, &result); err != nil {
-			return accountResponse{}, errAccountsUnsupported
-		}
-		if !result.OK {
-			return accountResponse{}, classifyAccountError(result.Error)
-		}
-		var out accountResponse
-		if result.Snapshot != nil {
-			if result.Snapshot.Version != 1 {
-				return accountResponse{}, errAccountsUnsupported
-			}
-			s := projectAccounts(*result.Snapshot)
-			out.snapshot = &s
-		}
-		if result.Ceremony != nil && a.Query == "account-ceremony" {
-			ceremony := projectAccountCeremony(*result.Ceremony)
-			out.attempt = &ceremony
-		}
-		if req.op == "status" && out.snapshot == nil {
-			return accountResponse{}, errAccountsUnsupported
-		}
-		return out, nil
+	if !result.OK {
+		return accountResponse{}, classifyAccountError(result.Error)
 	}
+	var out accountResponse
+	if result.Snapshot != nil {
+		if result.Snapshot.Version != 1 {
+			return accountResponse{}, errAccountsUnsupported
+		}
+		s := projectAccounts(*result.Snapshot)
+		out.snapshot = &s
+	}
+	if result.Ceremony != nil && ceremony {
+		projected := projectAccountCeremony(*result.Ceremony)
+		out.attempt = &projected
+	}
+	if req.op == "status" && out.snapshot == nil {
+		return accountResponse{}, errAccountsUnsupported
+	}
+	return out, nil
 }
 
 func classifyAccountError(code string) error {
 	switch code {
-	case "access_denied", "denied", "forbidden":
+	case "account_access_denied", "access_denied", "denied", "forbidden":
 		return errAccountsDenied
-	case "revision_conflict", "conflict", "stale_revision":
+	case "account_revision_changed", "revision_conflict", "conflict", "stale_revision":
 		return errAccountsConflict
-	case "unsupported", "unknown_query", "unsupported_operation":
+	case "account_operation_unsupported", "unsupported", "unknown_query", "unsupported_operation":
 		return errAccountsUnsupported
+	case "account_native_unavailable", "account_login_unavailable":
+		return errAccountsNative
+	case "account_secret_invalid":
+		return errAccountsSecret
+	case "account_attempt_unknown", "account_attempt_finished":
+		return errAccountsAttempt
 	}
 	// Never return arbitrary native/provider error text to the view.
 	return errors.New("account request failed")

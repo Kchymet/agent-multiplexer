@@ -2,18 +2,16 @@ package nativetui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
-
-	"amux/internal/core"
 )
 
 func accountFixture() accountSnapshot {
@@ -170,24 +168,13 @@ func TestAccountsWireRequestsKeepSecretsOnCeremonyOnly(t *testing.T) {
 			if op == "disconnect" {
 				r.profile, r.revision = "", 0
 			}
-			a, err := accountWireRequest(r)
+			wire, ceremony, err := accountWireRequest(r)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if a.Action != core.ActionQuery {
-				t.Fatal("account RPC must use its dedicated data reply")
+			if op == "status" && (wire.ProfileID != "" || wire.Secret != "" || ceremony) {
+				t.Fatal("status carried ceremony fields")
 			}
-			if op == "status" {
-				if a.Query != "accounts" || len(a.Fields) != 0 {
-					t.Fatal("status carried ceremony fields")
-				}
-				return
-			}
-			var wire harnessproto.AccountRequest
-			if err := json.Unmarshal([]byte(a.Fields["request"]), &wire); err != nil {
-				t.Fatal(err)
-			}
-			ceremony := a.Query == "account-ceremony"
 			if !harnessproto.ValidateAccountRequest(wire, ceremony) {
 				t.Fatalf("wire contract rejects %s", op)
 			}
@@ -316,5 +303,66 @@ func TestAccountsUnknownUsageNeverAppearsAsZeroOrUnlimited(t *testing.T) {
 	text := strings.Join(accountLimitLines(l, time.Now(), false), "\n")
 	if strings.Contains(text, "0%") || strings.Contains(text, "unlimited") || !strings.Contains(text, "unknown") {
 		t.Fatal("unknown percentage was presented as measured usage")
+	}
+}
+
+type blockedAccountConnection struct {
+	started chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (c *blockedAccountConnection) Accounts(harnessproto.AccountRequest, bool) (harnessproto.AccountResult, error) {
+	close(c.started)
+	<-c.closed
+	return harnessproto.AccountResult{}, errors.New("fixture network error with fixture-token")
+}
+
+func (c *blockedAccountConnection) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestAccountsDismissalInterruptsPendingConnection(t *testing.T) {
+	m := accountModel()
+	c := &blockedAccountConnection{started: make(chan struct{}), closed: make(chan struct{})}
+	m.accounts.broker = &machineAccountTransport{client: c}
+	cmd := m.requestAccounts(m.accounts.request("login"))
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	<-c.started
+	m.handleKey(key("esc"))
+	select {
+	case msg := <-done:
+		if strings.Contains(fmt.Sprintf("%+v", msg), "fixture-token") {
+			t.Fatal("raw connection error retained in event")
+		}
+		m.Update(msg)
+	case <-time.After(time.Second):
+		t.Fatal("dismissal did not interrupt pending account request")
+	}
+	if m.accounts != nil {
+		t.Fatal("interrupted request reopened modal")
+	}
+}
+
+func TestAccountsTimeoutClosesCeremonyOwner(t *testing.T) {
+	c := &blockedAccountConnection{started: make(chan struct{}), closed: make(chan struct{})}
+	transport := &machineAccountTransport{client: c}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := transport.call(ctx, accountRequest{op: "status"})
+		done <- err
+	}()
+	<-c.started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || strings.Contains(err.Error(), "fixture-token") {
+			t.Fatal("timeout did not return a safe failure")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("context timeout did not close the owner connection")
 	}
 }
