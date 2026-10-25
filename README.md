@@ -300,6 +300,8 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Alt+a` | toggle focus between rail and agent |
 | `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |
 | `Alt+r` | restart the focused agent or rail selection and resume its saved conversation (confirm) |
+| `Alt+PgUp` / `Alt+PgDown` | scroll the active pane's history up / down one page |
+| `Alt+End` | return the active pane to live output |
 | `a` | add an agent — on a repo, a normal workgroup limited to that repo; on a workgroup, another member (settings form) |
 | `w` | new workgroup (coordinator settings; optional repos limit it and seed a first agent) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
@@ -315,6 +317,28 @@ its current turn and resumes the saved conversation with current launch settings
 Restarting a workgroup row restarts its coordinator only; other agents and the
 editor/terminal tabs keep running. Rebind the shortcut with
 `amux config set keys.restart-agent <chord>`.
+
+Wheel over the pane scrolls its local history when the child has not enabled
+mouse reporting. Reporting-enabled applications receive wheel events normally;
+hold **Shift** to force local history instead, even with Alt held. Wheel over
+the rail moves its selection. Local wheel handling never sends Up/Down keys to
+the child, including at empty history or either boundary.
+
+While viewing history, an `↑ offset/history` badge appears in the pane header
+(just `↑` when narrow), leaving the pane's text uncovered. `Alt+End`, actual
+child input, or new child output returns to live. Rebind history navigation
+with `keys.scroll-up`, `keys.scroll-down`, and `keys.scroll-live`:
+
+```sh
+amux config set keys.scroll-up ctrl+g
+amux config set keys.scroll-down alt+PageDown
+amux config set keys.scroll-live alt+End
+```
+
+History is bounded and local to the attached pane; alternate-screen history
+records completed synchronized redraws rather than reconstructing an entire
+conversation. See [pane scrollback](docs/pane-scrollback.md) for the policy and
+[real Codex evidence](docs/evidence/embedded-scroll/README.md) for validation.
 
 `amux daemon restart` stops all hosted processes and, by default, relaunches the
 previously live agent sessions with their saved conversations. `AMUX_RESTORE=0`

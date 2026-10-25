@@ -25,6 +25,10 @@ func TestKeyToBytesCtrl(t *testing.T) {
 		{"alt+down", tea.KeyMsg{Type: tea.KeyDown, Alt: true}, []byte("\x1b[1;3B")},
 		{"alt+right", tea.KeyMsg{Type: tea.KeyRight, Alt: true}, []byte("\x1b[1;3C")},
 		{"alt+left", tea.KeyMsg{Type: tea.KeyLeft, Alt: true}, []byte("\x1b[1;3D")},
+		{"alt+home", tea.KeyMsg{Type: tea.KeyHome, Alt: true}, []byte("\x1b[1;3H")},
+		{"alt+end", tea.KeyMsg{Type: tea.KeyEnd, Alt: true}, []byte("\x1b[1;3F")},
+		{"alt+pgup", tea.KeyMsg{Type: tea.KeyPgUp, Alt: true}, []byte("\x1b[5;3~")},
+		{"alt+pgdown", tea.KeyMsg{Type: tea.KeyPgDown, Alt: true}, []byte("\x1b[6;3~")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
