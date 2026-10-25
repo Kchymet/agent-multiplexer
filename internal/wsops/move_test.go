@@ -2,6 +2,7 @@ package wsops
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,5 +63,72 @@ func TestMoveAgentTargetsWorkgroupsOnly(t *testing.T) {
 	}
 	if same, err := MoveAgent(ctx, member.ID, created); err != nil || same != "" {
 		t.Fatalf("move into the current workgroup = %q, %v; want a no-op", same, err)
+	}
+}
+
+func TestMoveAgentArchiveFencesBeforeTargetCreation(t *testing.T) {
+	for _, tc := range []struct {
+		name                                           string
+		sourceArchived, targetArchived, memberArchived bool
+		target, wantError                              string
+	}{
+		{name: "archived source existing target", sourceArchived: true, target: "target", wantError: `restore workgroup "source" before moving member "member"`},
+		{name: "archived source new target", sourceArchived: true, wantError: `restore workgroup "source" before moving member "member"`},
+		{name: "archived target remains denied", targetArchived: true, target: "target", wantError: "not an active workgroup"},
+		{name: "completed member archived target remains denied", memberArchived: true, targetArchived: true, target: "target", wantError: "not an active workgroup"},
+		{name: "completed member may move between active groups", memberArchived: true, target: "target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStore(t)
+			db, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var archivedAt int64
+			if tc.memberArchived {
+				archivedAt = 77
+			}
+			for _, s := range []store.Session{
+				{ID: "source", Scope: store.ScopeWork, Archived: tc.sourceArchived},
+				{ID: "target", Scope: store.ScopeWork, Archived: tc.targetArchived},
+				{ID: "member", RootID: "source", Archived: tc.memberArchived, ArchivedAt: archivedAt, Branch: "amux/source-member", ClaudeID: "preserved-history"},
+			} {
+				if err := db.PutSession(s); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, id := range []string{"source", "target"} {
+				if err := db.SetCoordinatorRepoGrants(id, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := db.AllSessions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := ApplyResult(context.Background(), core.Action{Action: core.ActionMove, ID: "member", Target: tc.target})
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) || created != "" {
+					t.Fatalf("move returned %q, %v; want %s", created, err, tc.wantError)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			after, err := db.AllSessions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantError == "" {
+				for i := range before {
+					if before[i].ID == "member" {
+						before[i].RootID = "target"
+					}
+				}
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("move unexpectedly changed membership, history, or created a target: before=%+v after=%+v", before, after)
+			}
+		})
 	}
 }

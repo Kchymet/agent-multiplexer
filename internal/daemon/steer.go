@@ -592,7 +592,17 @@ func permissionRecord(h agent.Harness, s store.Session) runtimeevents.Record {
 // verb that reaches the daemon by id — steering from a remote rail included —
 // sees the same inventory the daemon publishes.
 func lookupSession(id string) (store.Session, bool, error) {
-	return wsops.ResolveSession(id)
+	s, found, err := wsops.ResolveSession(id)
+	if err != nil || !found || s.IsRoot() || s.Archived {
+		return s, found, err
+	}
+	db, err := store.OpenReadOnly()
+	if err != nil {
+		return s, false, err
+	}
+	defer db.Close()
+	s, err = inheritParentArchive(s, db.GetSession)
+	return s, found, err
 }
 
 // steerPayload turns a verb plus its fields into the byte writes that serve it,

@@ -272,7 +272,7 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 
 func (r *sessionRuntime) isSelfCompletion(ctx context.Context, principal access.Principal, action core.Action) bool {
 	resource, ok, err := r.resolver.Lookup(ctx, principal.SubjectID)
-	return err == nil && ok && resource.Role == store.RoleAgent && !resource.Archived
+	return err == nil && ok && (resource.Role == store.RoleAgent || resource.Role == store.RoleCoordinator) && !resource.Archived
 }
 
 // completionArchiveState distinguishes a known pre-commit failure from an
