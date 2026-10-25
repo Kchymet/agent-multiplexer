@@ -86,15 +86,13 @@ type Terminal struct {
 	// state spans chunk boundaries; pump and feedLoop both mutate it under t.mu.
 	scrub scrubber
 
-	// Pane-local history and viewport (history.go). offset is how many lines
-	// the viewport is scrolled back into primary history (0 = live). hist is
-	// the shape of the primary scrollback after the previous write, so
-	// afterWrite can tell real growth (lines scrolled off the top) from a
-	// cursor-only repaint. wasAlt is the screen the previous write left active.
-	// rev counts every change to what Render/Snapshot would show.
+	// Pane-local history and viewport (history.go). offset is how many rows
+	// the viewport is scrolled back into the active screen's history (0 =
+	// live). alt is the alternate screen's completed-frame history; the
+	// primary screen's history is the emulator's scrollback. rev counts every
+	// change to what Render/Snapshot would show.
 	offset int
-	hist   histMark
-	wasAlt bool
+	alt    frameHistory
 	rev    uint64
 }
 
@@ -277,7 +275,7 @@ func (t *Terminal) ingest(b []byte) {
 	t.mu.Lock()
 	t.scrub.scrub(b)
 	_, _ = t.emu.Write(b)
-	t.afterWrite()
+	t.afterWrite(len(b))
 	t.mu.Unlock()
 }
 
@@ -353,8 +351,8 @@ func (t *Terminal) drainResponses() {
 // pane, which is what a real terminal does.
 //
 // While the viewport is scrolled back (ScrollLines), the block shows history
-// rows above the live screen's top rows and carries the scroll indicator in the
-// top-right corner; see history.go.
+// rows above the live screen's top rows, cell for cell what Snapshot returns;
+// the scroll indicator is not drawn into it (Indicator). See history.go.
 func (t *Terminal) Render() string {
 	t.mu.Lock()
 	cols, rows := t.cols, t.rows
