@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
 
 	"amux/internal/access"
@@ -19,6 +18,7 @@ import (
 	"amux/internal/codexcfg"
 	"amux/internal/core"
 	"amux/internal/store"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // codexLoginTimeout bounds one interactive central Codex login.
@@ -30,13 +30,21 @@ var errCentralCodexUnavailable = errors.New("central Codex auth is unavailable i
 // the daemon (or, with no daemon running, the host CLI) may own it; the
 // provider's cross-process lock enforces that.
 type centralCodex struct {
-	provider *codexauth.Provider
+	provider centralCodexProvider
 	err      error // why provider is nil in central mode
 	lifetime context.Context
+}
 
-	mu     sync.Mutex
-	login  core.CodexLoginStatus
-	cancel context.CancelFunc
+// centralCodexProvider is the native boundary; production uses codexauth.Provider.
+type centralCodexProvider interface {
+	Start(context.Context) error
+	Close() error
+	ForgetSession(string)
+	SessionToken(context.Context, string, bool, string) (codexauth.Tokens, error)
+	Login(context.Context, func(string), ...func() error) error
+	Logout(context.Context) error
+	Status(context.Context) (codexauth.Account, error)
+	RateLimits(context.Context) (harnessproto.AccountLimits, error)
 }
 
 // codexExecutable is the host codex binary: AMUX_CODEX_BIN or codex on PATH.
@@ -58,7 +66,18 @@ func (d *Daemon) startCentralCodex(ctx context.Context) {
 	if d.codex == nil {
 		return
 	}
-	c := &centralCodex{lifetime: ctx, login: core.CodexLoginStatus{State: "idle"}}
+	_ = accounts.Update(func(s *accounts.State) error {
+		for id, p := range s.Profiles {
+			if p.State == "login-pending" {
+				p.State = "blocked"
+				p.DeliveryEpoch++
+				p.Revision++
+				s.Profiles[id] = p
+			}
+		}
+		return nil
+	})
+	c := &centralCodex{lifetime: ctx}
 	d.centralCodex = c
 	d.codex.SetChatGPTAuth(codexTokenSource{d: d})
 	bin, err := codexExecutable()
@@ -79,12 +98,8 @@ func (d *Daemon) startCentralCodex(ctx context.Context) {
 
 // closeCentralCodex stops the provider's native server at daemon shutdown.
 func (d *Daemon) closeCentralCodex() {
+	d.disconnectAccounts("", true)
 	if c := d.centralCodex; c != nil && c.provider != nil {
-		c.mu.Lock()
-		if c.cancel != nil {
-			c.cancel()
-		}
-		c.mu.Unlock()
 		_ = c.provider.Close()
 	}
 }
@@ -127,6 +142,9 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	if err = s.d.authority.Valid(ctx, principal); err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}
+	if binding.ExpectedAccount != "" && req.PreviousAccountID != "" && binding.ExpectedAccount != req.PreviousAccountID {
+		return codexapp.ChatGPTToken{}, codexauth.ErrAccountChanged
+	}
 	previous := binding.ExpectedAccount
 	if previous == "" {
 		previous = req.PreviousAccountID
@@ -135,12 +153,18 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	if err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}
-	s.d.effectMu.Lock()
-	defer s.d.effectMu.Unlock()
-	if !s.authorized(req.SessionID) || s.d.authority.Valid(ctx, principal) != nil {
-		return codexapp.ChatGPTToken{}, errors.New("central Codex auth: session not authorized")
-	}
-	if err = accounts.Accept(req.SessionID, binding.Revision, profile.DeliveryEpoch, t.AccountID, t.Generation); err != nil {
+	// Startup and Close hold the manager's per-session gate, sometimes below
+	// effectMu. Delivery must never acquire effectMu: that creates a cycle.
+	// The authority read lease plus metadata CAS is the delivery admission point.
+	err = accounts.AcceptAuthorized(req.SessionID, binding.Revision, profile.DeliveryEpoch, t.AccountID, t.Generation, func(commit func() error) error {
+		return s.d.authority.WithValid(ctx, principal, func() error {
+			if !s.authorized(req.SessionID) {
+				return errors.New("central Codex auth: session not authorized")
+			}
+			return commit()
+		})
+	})
+	if err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}
 	return codexapp.ChatGPTToken{AccessToken: t.AccessToken, AccountID: t.AccountID, PlanType: t.PlanType}, nil
@@ -161,55 +185,18 @@ func (s codexTokenSource) authorized(id string) bool {
 // codexLogin starts the daemon-owned interactive login, or cancels it. A login
 // already pending is left running so a retried CLI shows the same URL.
 func (d *Daemon) codexLogin(a core.Action) error {
+	if a.ID != "" || a.Target != "" {
+		return fmt.Errorf("codex-login takes no target")
+	}
 	for k, v := range a.Fields {
 		if k != "cancel" || (v != "true" && v != "false") {
 			return fmt.Errorf("codex-login accepts only cancel=true|false")
 		}
 	}
-	if a.ID != "" || a.Target != "" {
-		return fmt.Errorf("codex-login takes no target")
+	if d.centralCodex == nil || d.centralCodex.provider == nil {
+		return errCentralCodexUnavailable
 	}
-	c := d.centralCodex
-	if c == nil {
-		return fmt.Errorf("this daemon did not start with codex.auth central; run `amux config unset codex.auth` and `amux daemon restart`")
-	}
-	if c.provider == nil {
-		return fmt.Errorf("%w: %v", errCentralCodexUnavailable, c.err)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if a.Fields["cancel"] == "true" {
-		if c.cancel != nil {
-			c.cancel()
-		}
-		return nil
-	}
-	if c.login.State == "pending" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(c.lifetime, codexLoginTimeout)
-	c.cancel = cancel
-	c.login = core.CodexLoginStatus{State: "pending"}
-	go func() {
-		defer cancel()
-		err := c.provider.Login(ctx, func(url string) {
-			c.mu.Lock()
-			c.login.URL = url
-			c.mu.Unlock()
-		})
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.cancel = nil
-		switch {
-		case err == nil:
-			c.login = core.CodexLoginStatus{State: "succeeded"}
-		case errors.Is(err, context.Canceled):
-			c.login = core.CodexLoginStatus{State: "cancelled"}
-		default:
-			c.login = core.CodexLoginStatus{State: "failed", Error: err.Error()}
-		}
-	}()
-	return nil
+	return errors.New("account_ceremony_required")
 }
 
 // codexAuthStatus is the QueryCodexAuth read model.
@@ -222,11 +209,18 @@ func (d *Daemon) codexAuthStatus(ctx context.Context) core.CodexAuthStatus {
 		}
 		return st
 	}
-	c.mu.Lock()
-	st.Login = c.login
-	c.mu.Unlock()
+	d.accountMu.Lock()
+	for _, a := range d.accountAttempts {
+		if a.initiator == "legacy-host" {
+			st.Login = core.CodexLoginStatus{State: a.ceremony.State}
+			if st.Login.State == "failed" {
+				st.Login.Error = "account_login_failed"
+			}
+		}
+	}
+	d.accountMu.Unlock()
 	if c.provider == nil {
-		st.Error = c.err.Error()
+		st.Error = "account_native_unavailable"
 		return st
 	}
 	if st.Login.State == "pending" {
@@ -236,7 +230,7 @@ func (d *Daemon) codexAuthStatus(ctx context.Context) core.CodexAuthStatus {
 	defer cancel()
 	account, err := c.provider.Status(statusCtx)
 	if err != nil {
-		st.Error = err.Error()
+		st.Error = "account_native_unavailable"
 		return st
 	}
 	st.Account = core.CodexAccount{Type: account.Type, Email: account.Email, PlanType: account.PlanType}

@@ -140,7 +140,7 @@ type provideFlags struct {
 func (f *provideFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.accountStatus, "account-status", false, "allow remote machine account status")
 	fs.BoolVar(&f.accountManage, "account-manage", false, "allow remote account management and ephemeral login")
-	fs.BoolVar(&f.accountUse, "account-use", false, "allow remote workloads to use machine accounts")
+	fs.BoolVar(&f.accountUse, "account-use", false, "allow remote workloads to use machine accounts (defaults to writable session publishing)")
 	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
 	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
 	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
@@ -236,7 +236,7 @@ func provideRun(args []string) error {
 	cfg := provider.Config{
 		AccountStatus:     resolvedBool(fs, "account-status", f.accountStatus, "AMUX_PROVIDER_ACCOUNT_STATUS", file.AccountStatus),
 		AccountManage:     resolvedBool(fs, "account-manage", f.accountManage, "AMUX_PROVIDER_ACCOUNT_MANAGE", file.AccountManage),
-		AccountUse:        resolvedBool(fs, "account-use", f.accountUse, "AMUX_PROVIDER_ACCOUNT_USE", file.AccountUse),
+		AccountUse:        resolvedBool(fs, "account-use", f.accountUse, "AMUX_PROVIDER_ACCOUNT_USE", providerAccountUseDefault(file, publish, readonly)),
 		OpenAccounts:      openProviderAccounts,
 		DiscoverExecution: executionDiscovery(execution),
 		Orchestrator:      addr,

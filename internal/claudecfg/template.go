@@ -78,7 +78,7 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 			// an explicit empty value selects the default host login instead of
 			// the private config directory's otherwise empty Keychain entry.
 			sp.AuthEnv = SecureStorageEnv
-			sp.AuthValue = CredentialSelector()
+			sp.AuthValue = CredentialSelectorFor(agentID)
 		}
 	default:
 		// Central and environment modes (and an unusable shared selection,

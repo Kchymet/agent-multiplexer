@@ -93,13 +93,13 @@ func TestCentralCredentialDeliveredOnlyToAuthorizedClaudeSessions(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	// Selecting a legacy or environment mode withdraws central delivery.
+	// A later global mode change must not change this workload's pinned source.
 	for _, mode := range []string{amuxcfg.AuthHost, amuxcfg.AuthEnvironment} {
 		if err := amuxcfg.SetAuthMode("claude", mode); err != nil {
 			t.Fatal(err)
 		}
-		if res := dispatch(principals[claude.ID], centralCall()); res.Status != sessionrpc.StatusDenied {
-			t.Fatalf("%s mode delivery = %+v", mode, res)
+		if res := dispatch(principals[claude.ID], centralCall()); res.Status != sessionrpc.StatusOK {
+			t.Fatalf("%s mode changed existing central delivery = %+v", mode, res)
 		}
 	}
 	if err := amuxcfg.SetAuthMode("claude", ""); err != nil {

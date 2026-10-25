@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -9,6 +8,7 @@ import (
 
 	"amux/internal/centralauth"
 	"amux/internal/daemon"
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 const mockSetupToken = "mock-setup-token-0123456789abcdef"
@@ -27,50 +27,39 @@ func isolateCentralCLI(t *testing.T) {
 	t.Cleanup(func() { dial = previous })
 }
 
-func TestCentralClaudeLoginFromStdinStoresWithoutEchoingToken(t *testing.T) {
+type mockAccountService struct{ requests []hp.AccountRequest }
+
+func (s *mockAccountService) Accounts(r hp.AccountRequest, ephemeral bool) (hp.AccountResult, error) {
+	if !ephemeral || !hp.ValidateAccountRequest(r, ephemeral) {
+		return hp.AccountResult{}, errors.New("invalid transient request")
+	}
+	s.requests = append(s.requests, r)
+	return hp.AccountResult{OK: true}, nil
+}
+func TestCentralClaudeCompletionUsesProtectedDaemonTransaction(t *testing.T) {
 	isolateCentralCLI(t)
-	var out bytes.Buffer
-	// No daemon is running: the save succeeds and there is nothing to restart.
-	if err := claudeLogin(true, strings.NewReader(mockSetupToken+"\n"), &out); err != nil ||
-		!strings.Contains(out.String(), "no agents need restarting") {
-		t.Fatalf("login = %v: %q", err, out.String())
+	svc := &mockAccountService{}
+	r := hp.AccountRequest{ProfileID: "claude:central", AttemptID: "attempt", Initiator: "host-cli"}
+	if err := completeClaudeToken(svc, r, mockSetupToken+"\n"); err != nil {
+		t.Fatal(err)
 	}
-	cred, lerr := centralauth.ClaudeStore().Load()
-	if lerr != nil || cred.Token.Reveal() != mockSetupToken || cred.Generation != 1 {
-		t.Fatalf("stored = %+v, %v", cred, lerr)
+	if len(svc.requests) != 1 || svc.requests[0].Operation != hp.AccountComplete || svc.requests[0].Secret != mockSetupToken {
+		t.Fatal("missing protected completion")
 	}
-	if strings.Contains(out.String(), mockSetupToken) || !strings.Contains(out.String(), cred.Token.Fingerprint()) {
-		t.Fatalf("login output = %q", out.String())
-	}
-
-	out.Reset()
-	_ = claudeLogin(true, strings.NewReader(mockSetupToken+"-reissued\n"), &out)
-	if !strings.Contains(out.String(), "not revoked") || !strings.Contains(out.String(), "generation 2") {
-		t.Fatalf("reissue output = %q", out.String())
-	}
-
-	status, err := captureOutput(t, func() error { return cmdAuth([]string{"status"}) })
-	if err != nil || strings.Contains(status, mockSetupToken) ||
-		!strings.Contains(status, "claude.auth: central (default)") || !strings.Contains(status, "generation 2") ||
-		!strings.Contains(status, "one year") {
-		t.Fatalf("status = %q, %v", status, err)
+	if st, _ := centralauth.ClaudeStore().Status(); st.Configured {
+		t.Fatal("CLI wrote credential outside daemon transaction")
 	}
 }
-
 func TestCentralClaudeLoginRejectsInvalidTokensWithoutSaving(t *testing.T) {
 	isolateCentralCLI(t)
-	for _, input := range []string{"", "\n", "two words\n", strings.Repeat("x", 5000) + "\n"} {
-		var out bytes.Buffer
-		if err := claudeLogin(true, strings.NewReader(input), &out); err == nil || !strings.Contains(err.Error(), "nothing was saved") {
-			t.Fatalf("login(%.20q) = %v", input, err)
+	svc := &mockAccountService{}
+	for _, raw := range []string{"", "\n", "two words\n", strings.Repeat("x", 5000)} {
+		if err := completeClaudeToken(svc, hp.AccountRequest{}, raw); err == nil || err.Error() != "account_secret_invalid" {
+			t.Fatal(err)
 		}
 	}
-	if st, err := centralauth.ClaudeStore().Status(); err != nil || st.Configured {
-		t.Fatalf("invalid input saved: %+v, %v", st, err)
-	}
-	status, err := captureOutput(t, func() error { return cmdAuth([]string{"status", "claude"}) })
-	if err != nil || !strings.Contains(status, "run `amux auth login`") {
-		t.Fatalf("status without login = %q, %v", status, err)
+	if len(svc.requests) != 0 {
+		t.Fatal("invalid secret sent to daemon")
 	}
 }
 
@@ -98,18 +87,13 @@ func TestAuthArgumentsForHarnesses(t *testing.T) {
 	}
 }
 
-func TestCentralClaudeLoginReportsAnUnreachableDaemon(t *testing.T) {
+func TestCentralClaudeLoginRequiresAuthorizedDaemonBeforeTokenAcquisition(t *testing.T) {
 	isolateCentralCLI(t)
-	previous := startupDial
-	// Not ENOENT/ECONNREFUSED: a daemon may be running but unhealthy.
-	startupDial = func() (*daemon.Client, error) { return nil, errors.New("mock authentication timeout") }
-	t.Cleanup(func() { startupDial = previous })
-	var out bytes.Buffer
-	err := claudeLogin(true, strings.NewReader(mockSetupToken+"\n"), &out)
-	if err == nil || !strings.Contains(err.Error(), "login saved") || !strings.Contains(err.Error(), "amux auth restart") {
-		t.Fatalf("login with unreachable daemon = %v", err)
+	_, err := accountClient()
+	if err == nil {
+		t.Fatal("unreachable daemon accepted")
 	}
-	if st, _ := centralauth.ClaudeStore().Status(); !st.Configured {
-		t.Fatal("token not saved before the restart attempt")
+	if st, _ := centralauth.ClaudeStore().Status(); st.Configured {
+		t.Fatal("offline login persisted secret")
 	}
 }

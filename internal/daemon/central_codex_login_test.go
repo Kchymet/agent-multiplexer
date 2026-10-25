@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/core"
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // fakeCodexEnv makes this test binary act as a native `codex app-server` for
@@ -86,71 +86,81 @@ func fakeCodexDaemon(t *testing.T, outcome string) *Daemon {
 	return d
 }
 
-func waitCodexLogin(t *testing.T, d *Daemon, state string) core.CodexAuthStatus {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		st := d.codexAuthStatus(t.Context())
-		if st.Login.State == state {
-			return st
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("login state = %+v, want %s", st, state)
-		}
-		time.Sleep(20 * time.Millisecond)
+func TestCentralCodexLoginCompletesOnProtectedConnection(t *testing.T) {
+	for _, outcome := range []string{"success", "fail"} {
+		t.Run(outcome, func(t *testing.T) {
+			d := fakeCodexDaemon(t, outcome)
+			r := hp.AccountRequest{Operation: hp.AccountLogin, ProfileID: "codex:central", Revision: profileRevision(t, "codex:central"), Initiator: "owner"}
+			out := d.accountCall(t.Context(), r, true)
+			if !out.OK || out.Ceremony == nil {
+				t.Fatal(out)
+			}
+			r.Operation = hp.AccountPoll
+			r.Revision = 0
+			r.AttemptID = out.Ceremony.AttemptID
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				out = d.accountCall(t.Context(), r, true)
+				if out.Ceremony.State != "pending" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("pending native login")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			want := "succeeded"
+			if outcome == "fail" {
+				want = "failed"
+			}
+			if out.Ceremony.State != want || out.Ceremony.AuthURL != "" {
+				t.Fatal(out)
+			}
+			if outcome == "success" {
+				st := d.codexAuthStatus(t.Context())
+				if st.Account.Type != "chatgpt" || st.Login.URL != "" {
+					t.Fatal(st)
+				}
+			}
+		})
 	}
 }
 
-func TestCentralCodexLoginSucceedsThroughDaemonOwnedProvider(t *testing.T) {
-	d := fakeCodexDaemon(t, "success")
-	if st := d.codexAuthStatus(t.Context()); st.Account.Type != "" || st.Error != "" {
-		t.Fatalf("status before login = %+v", st)
-	}
-	if err := d.codexLogin(core.Action{Action: core.ActionCodexLogin}); err != nil {
-		t.Fatal(err)
-	}
-	st := waitCodexLogin(t, d, "succeeded")
-	if st.Account.Type != "chatgpt" || st.Account.Email != "user@example.com" || st.Account.PlanType != "plus" {
-		t.Fatalf("status after login = %+v", st)
-	}
-	if st.Login.URL != "" {
-		t.Fatalf("completed login still exposes its URL: %+v", st)
-	}
-}
-
-func TestCentralCodexLoginReportsFailure(t *testing.T) {
-	d := fakeCodexDaemon(t, "fail")
-	if err := d.codexLogin(core.Action{Action: core.ActionCodexLogin}); err != nil {
-		t.Fatal(err)
-	}
-	st := waitCodexLogin(t, d, "failed")
-	if st.Login.Error == "" || st.Account.Type != "" {
-		t.Fatalf("failed login status = %+v", st)
-	}
-}
-
-func TestCentralCodexLoginShowsURLAndCancels(t *testing.T) {
+func TestCentralCodexLoginURLIsInitiatorOnlyAndCancellationObservable(t *testing.T) {
 	d := fakeCodexDaemon(t, "hang")
-	if err := d.codexLogin(core.Action{Action: core.ActionCodexLogin}); err != nil {
-		t.Fatal(err)
+	r := hp.AccountRequest{Operation: hp.AccountLogin, ProfileID: "codex:central", Revision: profileRevision(t, "codex:central"), Initiator: "owning-connection"}
+	out := d.accountCall(t.Context(), r, true)
+	if !out.OK || out.Ceremony == nil {
+		t.Fatal(out)
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	r.Operation = hp.AccountPoll
+	r.Revision = 0
+	r.AttemptID = out.Ceremony.AttemptID
+	deadline := time.Now().Add(5 * time.Second)
 	for {
-		st := d.codexAuthStatus(t.Context())
-		if st.Login.State == "pending" && st.Login.URL == "https://auth.example/authorize?state=fake" {
+		out = d.accountCall(t.Context(), r, true)
+		if out.Ceremony != nil && out.Ceremony.AuthURL != "" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("pending login never showed its URL: %+v", st)
+			t.Fatal("no protected ceremony URL")
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-	// A retried CLI joins the pending login instead of starting another.
-	if err := d.codexLogin(core.Action{Action: core.ActionCodexLogin}); err != nil {
-		t.Fatal(err)
+	if st := d.codexAuthStatus(t.Context()); st.Login.URL != "" {
+		t.Fatal("legacy status leaked URL")
 	}
-	if err := d.codexLogin(core.Action{Action: core.ActionCodexLogin, Fields: map[string]string{"cancel": "true"}}); err != nil {
-		t.Fatal(err)
+	other := r
+	other.Initiator = "other-connection"
+	if d.accountCall(t.Context(), other, true).OK {
+		t.Fatal("other connection polled URL")
 	}
-	waitCodexLogin(t, d, "cancelled")
+	r.Operation = hp.AccountCancel
+	if out = d.accountCall(t.Context(), r, true); !out.OK || out.Ceremony.State != "cancelled" {
+		t.Fatal(out)
+	}
+	r.Operation = hp.AccountPoll
+	if out = d.accountCall(t.Context(), r, true); !out.OK || out.Ceremony.State != "cancelled" || out.Ceremony.AuthURL != "" {
+		t.Fatal(out)
+	}
 }

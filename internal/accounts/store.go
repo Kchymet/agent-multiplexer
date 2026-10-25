@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,7 @@ var ErrStale = errors.New("account_revision_changed")
 var ErrBlocked = errors.New("account_binding_blocked")
 
 type Binding struct {
+	DeliveredEpoch    uint64 `json:"deliveredEpoch,omitempty"`
 	ProfileID         string `json:"profileId"`
 	Harness           string `json:"harness"`
 	Source            string `json:"source"`
@@ -30,11 +32,12 @@ type Binding struct {
 	Origin            string `json:"origin"`
 }
 type State struct {
-	Version   int                          `json:"version"`
-	MachineID string                       `json:"machineId"`
-	Profiles  map[string]hp.AccountProfile `json:"profiles"`
-	Defaults  map[string]string            `json:"defaults"`
-	Bindings  map[string]Binding           `json:"bindings"`
+	DefaultRevisions map[string]uint64            `json:"defaultRevisions"`
+	Version          int                          `json:"version"`
+	MachineID        string                       `json:"machineId"`
+	Profiles         map[string]hp.AccountProfile `json:"profiles"`
+	Defaults         map[string]string            `json:"defaults"`
+	Bindings         map[string]Binding           `json:"bindings"`
 	// CredentialVersion fences opaque Claude replacement independently of epochs.
 	CredentialVersion map[string]uint64 `json:"credentialVersion"`
 }
@@ -46,7 +49,7 @@ func initial() (State, error) {
 	if _, e := rand.Read(nonce[:]); e != nil {
 		return State{}, e
 	}
-	s := State{Version: 1, MachineID: hex.EncodeToString(nonce[:]), Profiles: map[string]hp.AccountProfile{}, Defaults: map[string]string{}, Bindings: map[string]Binding{}, CredentialVersion: map[string]uint64{}}
+	s := State{DefaultRevisions: map[string]uint64{"claude": 1, "codex": 1}, Version: 1, MachineID: hex.EncodeToString(nonce[:]), Profiles: map[string]hp.AccountProfile{}, Defaults: map[string]string{}, Bindings: map[string]Binding{}, CredentialVersion: map[string]uint64{}}
 	for _, h := range []string{"claude", "codex"} {
 		mode, e := amuxcfg.AuthMode(h)
 		if e != nil {
@@ -80,6 +83,9 @@ func Update(fn func(*State) error) error {
 	dir := core.AuthDir()
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
+	}
+	if fi, e := os.Lstat(dir); e != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 {
+		return errors.New("account_store_insecure")
 	}
 	f, e := os.OpenFile(filepath.Join(dir, "accounts.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if e != nil {
@@ -128,7 +134,19 @@ func Update(fn func(*State) error) error {
 	return d.Sync()
 }
 func read() (State, error) {
-	b, e := os.ReadFile(Path())
+	f, e := os.OpenFile(Path(), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if os.IsNotExist(e) {
+		return initial()
+	}
+	if e != nil {
+		return State{}, errors.New("account_store_unavailable")
+	}
+	defer f.Close()
+	fi, e := f.Stat()
+	if e != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0077 != 0 {
+		return State{}, errors.New("account_store_insecure")
+	}
+	b, e := io.ReadAll(io.LimitReader(f, 8<<20))
 	if os.IsNotExist(e) {
 		return initial()
 	}
@@ -139,11 +157,14 @@ func read() (State, error) {
 	if json.Unmarshal(b, &s) != nil || s.Version != 1 || s.Profiles == nil || s.Bindings == nil || s.Defaults == nil || s.CredentialVersion == nil {
 		return s, errors.New("account_store_invalid")
 	}
+	if s.DefaultRevisions == nil {
+		s.DefaultRevisions = map[string]uint64{"claude": 1, "codex": 1}
+	}
 	return s, nil
 }
 func Read() (State, error) { return read() }
 func (s State) Snapshot() hp.AccountSnapshot {
-	out := hp.AccountSnapshot{Version: 1, Defaults: s.Defaults, Profiles: []hp.AccountProfile{}}
+	out := hp.AccountSnapshot{DefaultRevisions: s.DefaultRevisions, Version: 1, Defaults: s.Defaults, Profiles: []hp.AccountProfile{}}
 	for _, p := range s.Profiles {
 		out.Profiles = append(out.Profiles, p)
 	}
@@ -184,6 +205,9 @@ func Bind(session, h string) error {
 }
 func Mode(session, h string) string {
 	s, e := Read()
+	if e != nil {
+		return "blocked"
+	}
 	if e == nil {
 		if b, ok := s.Bindings[session]; ok && b.Harness == h {
 			return b.Source
@@ -213,24 +237,38 @@ func Delivery(session, h string) (Binding, hp.AccountProfile, error) {
 
 // Accept records the first account, and never rebinds a workload on refresh.
 func Accept(session string, revision, epoch uint64, account string, version uint64) error {
+	return AcceptAuthorized(session, revision, epoch, account, version, func(commit func() error) error { return commit() })
+}
+
+// AcceptAuthorized holds metadata ownership before acquiring an authority lease.
+// Admission performs only local validation; it must not wait for a runtime.
+func AcceptAuthorized(session string, revision, epoch uint64, account string, version uint64, admit func(func() error) error) error {
 	return Update(func(s *State) error {
-		b, ok := s.Bindings[session]
-		if !ok || b.Revision != revision {
-			return ErrBlocked
-		}
-		p := s.Profiles[b.ProfileID]
-		if p.DeliveryEpoch != epoch || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
-			return ErrStale
-		}
-		if b.ExpectedAccount != "" && b.ExpectedAccount != account {
-			return ErrBlocked
-		}
-		if b.Harness == "claude" && b.CredentialVersion != 0 && b.CredentialVersion != version {
-			return ErrBlocked
-		}
-		b.ExpectedAccount = account
-		b.CredentialVersion = version
-		s.Bindings[session] = b
-		return nil
+		return admit(func() error {
+			b, ok := s.Bindings[session]
+			if !ok || b.Revision != revision {
+				return ErrBlocked
+			}
+			p := s.Profiles[b.ProfileID]
+			if p.DeliveryEpoch != epoch || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
+				return ErrStale
+			}
+			if b.ExpectedAccount != "" && b.ExpectedAccount != account {
+				return ErrBlocked
+			}
+			if b.Harness == "claude" && b.CredentialVersion != 0 && b.CredentialVersion != version {
+				return ErrBlocked
+			}
+			b.DeliveredEpoch = epoch
+			if b.Harness == "claude" && s.CredentialVersion[p.ID] == 0 {
+				s.CredentialVersion[p.ID] = version
+				p.State = "ready"
+				s.Profiles[p.ID] = p
+			}
+			b.ExpectedAccount = account
+			b.CredentialVersion = version
+			s.Bindings[session] = b
+			return nil
+		})
 	})
 }

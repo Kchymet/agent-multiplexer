@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
@@ -73,6 +74,7 @@ type Daemon struct {
 	centralCodex    *centralCodex
 	accountMu       sync.Mutex
 	accountAttempts map[string]*accountAttempt
+	accountNow      func() time.Time
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control
@@ -578,6 +580,13 @@ func (d *Daemon) snapshot() core.Snapshot {
 	defer d.mu.RUnlock()
 	sess := make([]core.Session, len(d.sessions))
 	copy(sess, d.sessions)
+	if state, err := accounts.Read(); err == nil {
+		for i := range sess {
+			if b, ok := state.Bindings[sess[i].ID]; ok {
+				sess[i].AccountBinding = &harnessproto.AccountBinding{ProfileID: b.ProfileID, Source: b.Source}
+			}
+		}
+	}
 	return core.Snapshot{Type: "snapshot", Sessions: sess, UpdatedAt: time.Now().UnixMilli()}
 }
 
@@ -715,7 +724,7 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case core.ActionPaneClose:
 			cl.paneClose(a.PaneID)
 		case core.ActionQuery:
-			d.query(cl, a)
+			d.query(clientCtx, cl, a)
 		default:
 			res := d.handle(clientCtx, a)
 			if a.Action != "" {
@@ -777,6 +786,9 @@ func effectAdmissionHeld(ctx context.Context) bool {
 // revalidateDeferred is a no-op for internal/test callers without a streaming
 // principal. Work accepted from an authenticated connection carries a guard.
 func revalidateDeferred(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
 	valid, _ := ctx.Value(accessGuardContextKey{}).(func(context.Context) error)
 	if valid == nil {
 		return nil

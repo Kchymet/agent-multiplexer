@@ -180,3 +180,9 @@ func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error
 	}
 	return nil
 }
+
+// HostStoreSharedFor respects an existing workload's pinned source.
+func HostStoreSharedFor(id string) bool {
+	mode := accounts.Mode(id, "claude")
+	return mode == amuxcfg.AuthHost || mode == amuxcfg.AuthShared && SharedAuthEnabled()
+}

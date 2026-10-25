@@ -571,3 +571,39 @@ func TestOwnerDeathKillsNativeServer(t *testing.T) {
 	}
 	_ = l.Close()
 }
+
+func TestCancelledNativeLoginCannotPersistLateAccount(t *testing.T) {
+	p, home, _ := newFake(t, fakeHangLogin+"=1", "AMUX_FAKE_LATE_LOGIN=1")
+	writeAuth(home, 0, "original-account", time.Hour)
+	before, err := os.ReadFile(filepath.Join(home, authFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	err = p.Login(ctx, func(string) { cancel() })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(home, authFile))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("late native callback replaced persisted account")
+	}
+	if p.srv != nil {
+		t.Fatal("cancelled login writer still running")
+	}
+}
+
+func TestRejectedNativeCompletionRollsBackAuthPersistence(t *testing.T) {
+	p, home, _ := newFake(t)
+	writeAuth(home, 0, "original-account", time.Hour)
+	before, err := os.ReadFile(filepath.Join(home, authFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := errors.New("initiator revoked")
+	err = p.Login(ctxT(t), nil, func() error { return denied })
+	after, readErr := os.ReadFile(filepath.Join(home, authFile))
+	if !errors.Is(err, denied) || readErr != nil || !bytes.Equal(before, after) || p.srv != nil {
+		t.Fatal("rejected completion retained native write", err, readErr)
+	}
+}

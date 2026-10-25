@@ -644,8 +644,9 @@ type HookPayload struct {
 // Unlike ordinary hook payloads, model.id is the live selection and changes
 // immediately after `/model`.
 type StatusLinePayload struct {
-	SessionID string `json:"session_id"`
-	Model     struct {
+	RateLimits json.RawMessage `json:"rate_limits"`
+	SessionID  string          `json:"session_id"`
+	Model      struct {
 		ID string `json:"id"`
 	} `json:"model"`
 }

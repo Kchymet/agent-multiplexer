@@ -3,6 +3,7 @@ package main
 import (
 	"amux/internal/daemon"
 	"amux/internal/provider"
+	"amux/internal/providercfg"
 	"context"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -24,3 +25,10 @@ func (p *providerAccounts) Call(ctx context.Context, r hp.AccountRequest, ceremo
 	return p.c.Accounts(r, ceremony)
 }
 func (p *providerAccounts) Close() error { return p.c.Close() }
+
+func providerAccountUseDefault(c providercfg.Config, publish, readOnly bool) bool {
+	if c.AccountUseSet {
+		return c.AccountUse
+	}
+	return c.AccountUse || publish && !readOnly
+}

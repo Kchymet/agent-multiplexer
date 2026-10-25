@@ -5,6 +5,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/centralauth"
 	"amux/internal/codexapp"
+	"amux/internal/codexauth"
 	"amux/internal/core"
 	"amux/internal/store"
 	"context"
@@ -21,6 +22,9 @@ import (
 type accountAttempt struct {
 	profile, initiator string
 	epoch              uint64
+	retiredEpoch       uint64
+	prior              hp.AccountProfile
+	guard              context.Context
 	ceremony           hp.AccountCeremony
 	cancel             context.CancelFunc
 }
@@ -48,11 +52,17 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		d.effectMu.Lock()
 		defer d.effectMu.Unlock()
 	}
+	if ctx.Err() != nil || revalidateDeferred(ctx) != nil {
+		return fail("account_access_denied")
+	}
 	if r.Operation == hp.AccountDisconnect {
 		d.disconnectAccounts(r.Initiator, false)
 		return hp.AccountResult{OK: true}
 	}
 	if r.Operation == hp.AccountStatus && !ceremony {
+		d.accountMu.Lock()
+		d.expireAccountAttemptsLocked()
+		d.accountMu.Unlock()
 		s, e := d.accountSnapshot(ctx)
 		if e != nil {
 			return fail("account_status_unavailable")
@@ -74,23 +84,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	if d.accountAttempts == nil {
 		d.accountAttempts = map[string]*accountAttempt{}
 	}
-	// Expired attempts cannot publish or accept completions.
-	for id, a := range d.accountAttempts {
-		if time.Now().UnixMilli() > a.ceremony.ExpiresAt {
-			a.cancel()
-			delete(d.accountAttempts, id)
-			_ = accounts.Update(func(s *accounts.State) error {
-				p := s.Profiles[a.profile]
-				if p.DeliveryEpoch == a.epoch {
-					p.DeliveryEpoch++
-					p.Revision++
-					p.State = "blocked"
-					s.Profiles[p.ID] = p
-				}
-				return nil
-			})
-		}
-	}
+	d.expireAccountAttemptsLocked()
 	if r.Operation == hp.AccountPoll {
 		a := d.accountAttempts[r.AttemptID]
 		if a == nil || a.profile != r.ProfileID || a.initiator != r.Initiator {
@@ -116,6 +110,9 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				return fail("account_secret_invalid")
 			}
 			e = accounts.Update(func(s *accounts.State) error {
+				if revalidateDeferred(ctx) != nil || revalidateDeferred(a.guard) != nil {
+					return errors.New("account_access_denied")
+				}
 				p := s.Profiles[a.profile]
 				if p.DeliveryEpoch != a.epoch {
 					return accounts.ErrStale
@@ -138,28 +135,28 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			c := a.ceremony
 			return hp.AccountResult{OK: true, Ceremony: &c}
 		}
-		a.cancel()
-		a.ceremony.State = "cancelled"
-		a.ceremony.AuthURL = ""
-		e := accounts.Update(func(s *accounts.State) error {
-			p := s.Profiles[a.profile]
-			if p.DeliveryEpoch != a.epoch {
-				return accounts.ErrStale
-			}
-			p.DeliveryEpoch++
-			p.Revision++
-			p.State = "blocked"
-			s.Profiles[p.ID] = p
-			return nil
-		})
-		if e != nil {
-			return fail("account_revision_changed")
-		}
+		d.retireAccountAttemptLocked(a, "cancelled")
 		c := a.ceremony
 		return hp.AccountResult{OK: true, Ceremony: &c}
 	}
 	if r.Revision == 0 {
 		return fail("account_revision_required")
+	}
+	if r.Operation == hp.AccountDefault {
+		db, err := store.Open()
+		if err != nil {
+			return fail("account_store_unavailable")
+		}
+		rows, err := db.AllSessions()
+		db.Close()
+		if err != nil {
+			return fail("account_store_unavailable")
+		}
+		for _, row := range rows {
+			if err := accounts.Bind(row.ID, agent.Canonical(row.Agent)); err != nil {
+				return fail("account_binding_invalid")
+			}
+		}
 	}
 	if r.Operation == hp.AccountRebind {
 		db, err := store.Open()
@@ -176,7 +173,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			return fail("account_status_unavailable")
 		}
 		p, err := s.Profile(r.ProfileID, r.Revision)
-		if err != nil || p.Harness != agent.Canonical(row.Agent) {
+		if err != nil || p.Harness != agent.Canonical(row.Agent) || p.State != "ready" {
 			return fail("account_binding_invalid")
 		}
 		if p.Harness == "codex" {
@@ -185,16 +182,24 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				return fail("account_rebind_requires_new_workload")
 			}
 		}
+		// Runtime teardown may wait for startup/native auth. Do not hold the
+		// attempt mutex needed by native completion while waiting for that gate.
+		d.accountMu.Unlock()
 		d.killRuntimeFor(r.WorkloadID)
 		d.closeCodex(r.WorkloadID)
+		d.accountMu.Lock()
 	}
-	var p hp.AccountProfile
+	var p, prior hp.AccountProfile
 	e := accounts.Update(func(s *accounts.State) error {
+		if revalidateDeferred(ctx) != nil {
+			return errors.New("account_access_denied")
+		}
 		var err error
 		p, err = s.Profile(r.ProfileID, r.Revision)
 		if err != nil {
 			return err
 		}
+		prior = p
 		switch r.Operation {
 		case hp.AccountRebind:
 			b, ok := s.Bindings[r.WorkloadID]
@@ -212,6 +217,10 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			b.Origin = "explicit-rebind"
 			s.Bindings[r.WorkloadID] = b
 		case hp.AccountDefault:
+			if s.DefaultRevisions[p.Harness] != r.DefaultRevision {
+				return accounts.ErrStale
+			}
+			s.DefaultRevisions[p.Harness]++
 			s.Defaults[p.Harness] = p.ID
 			p.Revision++
 		case hp.AccountLogin, hp.AccountLogout:
@@ -223,6 +232,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			}
 			p.DeliveryEpoch++
 			p.Revision++
+			p.Error = ""
 			p.Limits.State = "unavailable"
 			p.Limits.Windows = nil
 			p.Identity = hp.AccountIdentity{State: "unknown", Evidence: p.Identity.Evidence}
@@ -263,6 +273,15 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			d.accountMu.Lock()
 		}
 		if e != nil {
+			_ = accounts.Update(func(s *accounts.State) error {
+				q := s.Profiles[p.ID]
+				if q.DeliveryEpoch == p.DeliveryEpoch {
+					q.Error = "account_logout_cleanup_failed"
+					q.Revision++
+					s.Profiles[q.ID] = q
+				}
+				return nil
+			})
 			return fail("account_logout_cleanup_failed")
 		}
 		return hp.AccountResult{OK: true}
@@ -277,8 +296,16 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		lifetime = d.centralCodex.lifetime
 	}
 	loginCtx, cancel := context.WithTimeout(lifetime, codexLoginTimeout)
-	a := &accountAttempt{profile: p.ID, initiator: r.Initiator, epoch: p.DeliveryEpoch, cancel: cancel, ceremony: hp.AccountCeremony{AttemptID: id, State: "pending", Method: p.LoginMethod, ExpiresAt: time.Now().Add(codexLoginTimeout).UnixMilli()}}
+	a := &accountAttempt{prior: prior, guard: ctx, profile: p.ID, initiator: r.Initiator, epoch: p.DeliveryEpoch, cancel: cancel, ceremony: hp.AccountCeremony{AttemptID: id, State: "pending", Method: p.LoginMethod, ExpiresAt: d.accountTime().Add(codexLoginTimeout).UnixMilli()}}
 	d.accountAttempts[id] = a
+	go func() {
+		<-loginCtx.Done()
+		d.accountMu.Lock()
+		defer d.accountMu.Unlock()
+		if a.ceremony.State == "pending" {
+			d.finishExpiredAccountLocked(a)
+		}
+	}()
 	if p.Harness == "codex" {
 		if d.centralCodex == nil || d.centralCodex.provider == nil {
 			cancel()
@@ -301,34 +328,56 @@ func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt) {
 	err := d.centralCodex.provider.Login(ctx, func(url string) {
 		d.accountMu.Lock()
 		defer d.accountMu.Unlock()
-		if ctx.Err() == nil && a.ceremony.State == "pending" {
+		if ctx.Err() == nil && revalidateDeferred(a.guard) == nil && a.ceremony.State == "pending" {
 			a.ceremony.AuthURL = url
 		}
+	}, func() error {
+		// This callback runs before the native owner releases its operation gate.
+		// Failure causes it to reap the writer and restore the prior auth file.
+		d.accountMu.Lock()
+		defer d.accountMu.Unlock()
+		if ctx.Err() != nil || revalidateDeferred(a.guard) != nil || a.ceremony.State != "pending" {
+			return errors.New("account_login_retired")
+		}
+		if err := accounts.Update(func(s *accounts.State) error {
+			if revalidateDeferred(a.guard) != nil {
+				return errors.New("account_access_denied")
+			}
+			p := s.Profiles[a.profile]
+			if p.DeliveryEpoch != a.epoch {
+				return accounts.ErrStale
+			}
+			p.State = "ready"
+			p.Error = ""
+			p.Revision++
+			s.Profiles[p.ID] = p
+			return nil
+		}); err != nil {
+			return err
+		}
+		a.ceremony.State = "succeeded"
+		a.ceremony.AuthURL = ""
+		return nil
 	})
 	d.accountMu.Lock()
 	defer d.accountMu.Unlock()
 	defer a.cancel()
-	if ctx.Err() != nil || a.ceremony.State != "pending" {
-		return
+	if a.ceremony.State == "pending" {
+		d.retireAccountAttemptLocked(a, "failed")
 	}
-	state := "ready"
-	a.ceremony.State = "succeeded"
-	if err != nil {
-		state = "blocked"
-		a.ceremony.State = "failed"
-	}
-	a.ceremony.AuthURL = ""
-	if accounts.Update(func(s *accounts.State) error {
-		p := s.Profiles[a.profile]
-		if p.DeliveryEpoch != a.epoch {
-			return accounts.ErrStale
-		}
-		p.State = state
-		p.Revision++
-		s.Profiles[p.ID] = p
-		return nil
-	}) != nil {
-		a.ceremony.State = "failed"
+	// Native rollback is finished before a prior ready credential becomes usable.
+	if err != nil && !errors.Is(err, codexauth.ErrLoginCleanup) {
+		d.restoreAccountAttemptLocked(a)
+	} else if errors.Is(err, codexauth.ErrLoginCleanup) {
+		_ = accounts.Update(func(s *accounts.State) error {
+			p := s.Profiles[a.profile]
+			if p.DeliveryEpoch == a.retiredEpoch {
+				p.Error = "account_login_cleanup_failed"
+				p.Revision++
+				s.Profiles[p.ID] = p
+			}
+			return nil
+		})
 	}
 }
 func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error) {
@@ -344,6 +393,7 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 		if p.Source != "central" || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
 			continue
 		}
+		p.Error = ""
 		if p.Harness == "claude" {
 			st, err := centralauth.ClaudeStore().Status()
 			if err != nil {
@@ -369,6 +419,10 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 					p.Identity.State = "known"
 				}
 			}
+			if err == nil && acct.Type == "" {
+				p.State = "unconfigured"
+				p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "native"}
+			}
 			limits, err := c.provider.RateLimits(qctx)
 			if err == nil {
 				p.Limits = limits
@@ -389,6 +443,11 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 		for id, p := range s.Profiles {
 			q := current.Profiles[id]
 			if q.DeliveryEpoch == p.DeliveryEpoch && q.Revision == p.Revision {
+				if q.Identity.AccountID != "" && p.Identity.AccountID != "" && q.Identity.AccountID != p.Identity.AccountID {
+					p.DeliveryEpoch++
+					p.Revision++
+					p.Limits.DeliveryEpoch = p.DeliveryEpoch
+				}
 				current.Profiles[id] = p
 			}
 		}
@@ -425,7 +484,12 @@ func accountManageFields(a core.Action) (hp.AccountRequest, error) {
 	r := hp.AccountRequest{Operation: a.Fields["operation"], ProfileID: a.Fields["profile_id"]}
 	rev, e := strconv.ParseUint(a.Fields["revision"], 10, 64)
 	r.Revision = rev
-	if len(a.Fields) != 3 || a.ID != "" || a.Target != "" {
+	fields := 3
+	if r.Operation == hp.AccountDefault {
+		fields = 4
+		r.DefaultRevision, e = strconv.ParseUint(a.Fields["default_revision"], 10, 64)
+	}
+	if len(a.Fields) != fields || a.ID != "" || a.Target != "" {
 		return r, errors.New("account_request_invalid")
 	}
 	return r, e
@@ -440,20 +504,70 @@ func (d *Daemon) disconnectAccounts(initiator string, prefix bool) {
 		if a.initiator != initiator && !(prefix && strings.HasPrefix(a.initiator, initiator)) {
 			continue
 		}
-		a.cancel()
+		d.retireAccountAttemptLocked(a, "cancelled")
 		delete(d.accountAttempts, id)
-		if a.ceremony.State != "pending" {
+	}
+}
+
+func (d *Daemon) accountTime() time.Time {
+	if d.accountNow != nil {
+		return d.accountNow()
+	}
+	return time.Now()
+}
+func (d *Daemon) expireAccountAttemptsLocked() {
+	for id, a := range d.accountAttempts {
+		if d.accountTime().UnixMilli() < a.ceremony.ExpiresAt {
 			continue
 		}
-		_ = accounts.Update(func(s *accounts.State) error {
-			p := s.Profiles[a.profile]
-			if p.DeliveryEpoch == a.epoch {
-				p.DeliveryEpoch++
-				p.Revision++
-				p.State = "blocked"
-				s.Profiles[p.ID] = p
-			}
-			return nil
-		})
+		if a.ceremony.State == "pending" {
+			d.finishExpiredAccountLocked(a)
+		} else {
+			a.cancel()
+			delete(d.accountAttempts, id)
+		}
 	}
+}
+func (d *Daemon) finishExpiredAccountLocked(a *accountAttempt) {
+	d.retireAccountAttemptLocked(a, "failed")
+}
+
+func (d *Daemon) retireAccountAttemptLocked(a *accountAttempt, state string) {
+	if a.ceremony.State != "pending" {
+		return
+	}
+	a.cancel()
+	a.ceremony.State = state
+	a.ceremony.AuthURL = ""
+	_ = accounts.Update(func(s *accounts.State) error {
+		p := s.Profiles[a.profile]
+		if p.DeliveryEpoch == a.epoch {
+			p.DeliveryEpoch++
+			p.Revision++
+			p.State = "blocked"
+			a.retiredEpoch = p.DeliveryEpoch
+			s.Profiles[p.ID] = p
+		}
+		return nil
+	})
+	if a.prior.Harness == "claude" {
+		d.restoreAccountAttemptLocked(a)
+	}
+}
+func (d *Daemon) restoreAccountAttemptLocked(a *accountAttempt) {
+	if a.prior.State != "ready" || a.retiredEpoch == 0 {
+		return
+	}
+	_ = accounts.Update(func(s *accounts.State) error {
+		p := s.Profiles[a.profile]
+		if p.DeliveryEpoch != a.retiredEpoch || p.State != "blocked" {
+			return nil
+		}
+		prior := a.prior
+		prior.DeliveryEpoch = p.DeliveryEpoch
+		prior.Revision = p.Revision + 1
+		prior.Limits = hp.AccountLimits{State: "unavailable", Source: prior.Limits.Source}
+		s.Profiles[p.ID] = prior
+		return nil
+	})
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/codexcfg"
 	"amux/internal/core"
@@ -40,6 +41,16 @@ func TestCentralCodexAppServerPinsOfficialChatGPTEndpoint(t *testing.T) {
 	pins := []string{`chatgpt_base_url="` + codexcfg.OfficialChatGPTBaseURL + `"`, `model_provider="openai"`, `openai_base_url=""`}
 	for mode, want := range map[string]bool{amuxcfg.AuthCentral: true, amuxcfg.AuthHost: false, amuxcfg.AuthEnvironment: false} {
 		useCodexAuth(t, mode)
+		if err := accounts.Update(func(st *accounts.State) error {
+			b := st.Bindings[s.ID]
+			b.Source = mode
+			b.ProfileID = "codex:" + mode
+			b.Revision++
+			st.Bindings[s.ID] = b
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		_, _, argv, _, err := AppServerCommand(testLaunchSpec(t, s))
 		if err != nil {
 			t.Fatal(err)
