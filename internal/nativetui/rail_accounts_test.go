@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"amux/internal/core"
-	"amux/internal/vterm"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
@@ -16,6 +15,8 @@ import (
 
 func TestArchivedSearchSeparateFromRail(t *testing.T) {
 	m := groupedRail()
+	spy := &reconnectClient{}
+	m.client = spy
 	m.sessions = append(m.sessions, core.Session{ID: "other", Title: "Old Unicode α", Archived: true, Section: core.SectionRepos})
 	original := m.sessions[5]
 	for _, entry := range m.railEntries() {
@@ -38,15 +39,30 @@ func TestArchivedSearchSeparateFromRail(t *testing.T) {
 	if m.attached != "" || m.sessions[5] != original {
 		t.Fatal("typing mutated the archived workload")
 	}
-	// An inert open mirror exercises navigation without spawning runtime or
-	// emulator goroutines; the existing pane tests cover launch transport.
-	m.terms = map[paneKey]*vterm.Terminal{{original.ID, tabAgent}: {}}
 	cursor, section := m.cursor, m.sectionCursor
 	_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil || m.attached != original.ID || m.confirm != nil || m.cursor != cursor || m.sectionCursor != section || m.sessions[5] != original {
-		t.Fatal("explicit open must attach the chosen ID without restoring it or changing rail selection")
+	// Execute any returned command against the actual daemonClient dispatch
+	// spy. With no existing mirror, the former implementation sent PaneOpen.
+	runReconnectCommands(cmd)
+	if actions := spy.recorded(); len(actions) != 0 {
+		t.Fatalf("archive details dispatched runtime/lifecycle actions: %+v", actions)
 	}
-	m.focus = focusSidebar
+	if m.attached != "" || len(m.terms) != 0 || m.confirm != nil || m.cursor != cursor || m.sectionCursor != section || m.sessions[5] != original {
+		t.Fatal("archive details changed runtime, archive state, or rail selection")
+	}
+	if m.archiveSearch == nil || m.archiveSearch.details != original.ID || !strings.Contains(plain(m.renderArchiveSearch()), "Restore before reopening") {
+		t.Fatal("fresh archived result did not open read-only details")
+	}
+	_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	runReconnectCommands(cmd)
+	if len(spy.recorded()) != 0 {
+		t.Fatal("Enter in details dispatched a runtime action")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}) // back to results
+	if m.archiveSearch == nil || m.archiveSearch.query != "archived-child" {
+		t.Fatal("details lost the search filter")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}) // close search
 	m.handleKey(key("/"))
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("other")})
 	_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlR})
@@ -107,6 +123,51 @@ func TestAccountsBarKeyboardMouseAndLegacyProjection(t *testing.T) {
 	}
 }
 
+func TestArchivedDetailsRestoreNeverOpensPane(t *testing.T) {
+	m := groupedRail()
+	spy := &reconnectClient{}
+	m.client = spy
+	for _, key := range []tea.KeyMsg{key("/"), {Type: tea.KeyEnter}, {Type: tea.KeyCtrlR}} {
+		_, cmd := m.handleKey(key)
+		runReconnectCommands(cmd)
+	}
+	if m.confirm == nil || len(spy.recorded()) != 0 {
+		t.Fatal("details restore must wait for confirmation")
+	}
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	runReconnectCommands(cmd)
+	actions := spy.recorded()
+	if len(actions) != 1 || actions[0].Action != core.ActionArchive || actions[0].ID != "archived" {
+		t.Fatalf("restore dispatched anything other than the reviewed lifecycle action: %+v", actions)
+	}
+	// The restored row arrives in the active inventory; it must still await a
+	// separate user action in the rail before any runtime is opened.
+	sessions := append([]core.Session(nil), m.sessions...)
+	sessions[5].Section = core.SectionWorkgroups
+	sessions[5].Archived = false
+	m.refreshSessions(sessions)
+	runReconnectCommands(m.tryPendingAttach())
+	if m.attached != "" || m.pending != "" || len(m.terms) != 0 || len(spy.recorded()) != 1 {
+		t.Fatal("restoring a search result opened or queued a runtime")
+	}
+}
+
+func TestArchivedDetailsCannotRetargetAfterInventoryChange(t *testing.T) {
+	m := groupedRail()
+	spy := &reconnectClient{}
+	m.client = spy
+	m.handleKey(key("/"))
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	sessions := append([]core.Session(nil), m.sessions...)
+	sessions[5].ID = "replacement"
+	m.refreshSessions(sessions)
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlR})
+	runReconnectCommands(cmd)
+	if m.confirm != nil || len(spy.recorded()) != 0 || !strings.Contains(plain(m.renderArchivedDetails()), "no longer in the archive") {
+		t.Fatal("details silently retargeted a changed inventory row")
+	}
+}
+
 func TestAccountOverviewFencesModalAndReconnectReplies(t *testing.T) {
 	m := groupedRail()
 	old := accountFixture()
@@ -155,9 +216,12 @@ func TestRailAccountRenderingEvidence(t *testing.T) {
 			snapshot.legacyDefaults["claude"] = true
 			snapshot.profiles[0].defaultProfile = false
 			m.accountOverview = &snapshot
-			for _, screen := range []string{"rail", "archive search", "accounts"} {
+			for _, screen := range []string{"rail", "archive search", "archive details", "accounts"} {
 				if screen == "archive search" {
 					m.archiveSearch = &archiveSearchState{}
+				}
+				if screen == "archive details" {
+					m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 				}
 				if screen == "accounts" {
 					m.archiveSearch = nil

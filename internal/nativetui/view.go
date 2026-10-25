@@ -370,7 +370,10 @@ func (m *model) renderDialog() string {
 func (m *model) renderHelp() string {
 	switch {
 	case m.archiveSearch != nil:
-		return ansi.Truncate(hints("archive", []hint{{"↑↓", "move"}, {"Enter", "open"}, {"Ctrl+R", "restore"}, {"Esc", "close"}}), m.w, "")
+		if m.archiveSearch.details != "" {
+			return ansi.Truncate(hints("read only", []hint{{"Ctrl+R", "restore"}, {"Esc", "results"}}), m.w, "")
+		}
+		return ansi.Truncate(hints("archive", []hint{{"↑↓", "move"}, {"Enter", "details"}, {"Ctrl+R", "restore"}, {"Esc", "close"}}), m.w, "")
 	case m.accounts != nil:
 		if s := m.accounts; s.pending != "" {
 			return hints("accounts", []hint{{"Esc", "close and disconnect"}})
