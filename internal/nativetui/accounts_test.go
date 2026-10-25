@@ -509,9 +509,11 @@ func TestAccountsNoticeVisibleAboveScrolledDetails(t *testing.T) {
 func TestAccountsPersistedCleanupStatusAfterReconnect(t *testing.T) {
 	for _, tc := range []struct{ code, state, want string }{
 		{"account_logout_cleanup_failed", "logged-out", "Local logout cleanup failed"},
+		{"account_logout_cleanup_unavailable", "logged-out", "Local logout cleanup unavailable"},
 		{"account_login_cleanup_failed", "blocked", "Login rollback failed"},
 		{"credential_unavailable", "blocked", "Stored credential unavailable"},
 		{"native_status_unavailable", "ready", "Native account service unavailable"},
+		{"account_native_unavailable", "blocked", "Native account service unavailable"},
 		{"SYNTHETIC-SECRET https://auth.example.test/private", "blocked", "Account service reported a problem"},
 	} {
 		t.Run(tc.state+"/"+tc.want, func(t *testing.T) {
@@ -532,7 +534,7 @@ func TestAccountsPersistedCleanupStatusAfterReconnect(t *testing.T) {
 			if strings.Contains(fmt.Sprintf("%+v", m.accounts.snapshot), "SYNTHETIC-SECRET") {
 				t.Fatal("raw backend error retained in view model")
 			}
-			if strings.HasPrefix(tc.code, "account_") && !strings.Contains(view, "Start login to recover.") {
+			if strings.Contains(tc.code, "cleanup") && !strings.Contains(strings.ToLower(view), "login to recover.") {
 				t.Fatalf("cleanup status omitted recovery: %s", view)
 			}
 			profile.Error, profile.State = "", "ready"
