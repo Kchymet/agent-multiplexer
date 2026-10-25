@@ -491,11 +491,20 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 			}
 			p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "opaque-token"}
 		} else if c := d.centralCodex; c != nil && c.provider != nil {
+			// A transient native failure keeps the last verified identity, which
+			// keeps the last-known limits attributable while they age.
+			prior := p.Identity
+			keepPrior := func() {
+				if prior.State == "known" && prior.AccountID != "" {
+					p.Identity = prior
+				}
+			}
 			qctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			acct, err := c.provider.Status(qctx)
 			if err != nil {
 				p.Error = "native_status_unavailable"
 				p.Identity.State = "unavailable"
+				keepPrior()
 			} else if acct.Type == "apiKey" && p.Mode == "api" {
 				p.State = "ready"
 				p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "api-key"}
@@ -505,8 +514,11 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 				if t, err := c.provider.SessionToken(qctx, "account-status", false, ""); err == nil {
 					p.Identity.AccountID = t.AccountID
 					p.Identity.State = "known"
+				} else if prior.Email == acct.Email {
+					keepPrior()
 				}
 			}
+			cancel()
 			if err == nil && acct.Type != "" && ((acct.Type == "apiKey") != (p.Mode == "api")) {
 				p.State, p.Error = "blocked", "credential_mode_mismatch"
 			}
@@ -514,16 +526,17 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 				p.State = "unconfigured"
 				p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "native"}
 			}
-			limits := hp.AccountLimits{State: "unavailable", Source: "unsupported"}
 			if p.Mode != "api" {
-				limits, err = c.provider.RateLimits(qctx)
+				// Limits get their own deadline so a slow identity probe does not
+				// starve them, and a failure keeps the last-known windows.
+				lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				limits, err := c.provider.RateLimits(lctx)
+				cancel()
+				if err != nil {
+					err = errors.New("native_limits_unavailable")
+				}
+				p.Limits = mergeAccountLimits(p, limits, err, d.accountTime())
 			}
-			if err == nil {
-				p.Limits = limits
-			} else {
-				p.Limits = hp.AccountLimits{State: "unavailable", Source: "codex-native"}
-			}
-			cancel()
 		} else {
 			p.Error = "native_unavailable"
 			p.Limits.State = "unavailable"
@@ -545,6 +558,11 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 					p.DeliveryEpoch++
 					p.Revision++
 					p.Limits.DeliveryEpoch = p.DeliveryEpoch
+				}
+				// A statusline report or background refresh may have landed
+				// while this snapshot was doing native IO.
+				if newerAccountLimits(q.Limits, p.Limits) {
+					p.Limits = q.Limits
 				}
 				current.Profiles[id] = p
 			}

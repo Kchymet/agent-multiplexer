@@ -64,13 +64,13 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		}
 		limits := p.Limits
 		confidence := "unknown"
-		if limits.Source == "codex-native" {
+		if limits.Source == "codex-native" || limits.Source == "claude-usage" {
 			confidence = "provider report"
 		} else if limits.Source == "claude-statusline" {
 			confidence = "session advisory"
 		}
 		base := accountLimit{name: "Account limits", state: "unavailable", source: limits.Source, confidence: confidence,
-			reason: "Unknown limits do not mean unlimited usage."}
+			reason: "Unknown limits do not mean unlimited usage.", refreshError: limits.RefreshError}
 		if limits.ObservedAt > 0 {
 			base.observedAt = time.UnixMilli(limits.ObservedAt)
 			base.freshUntil = base.observedAt.Add(accountObservationMaxAge)
@@ -79,7 +79,10 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		// observations are still useful when the daemon attributes them to the
 		// bound profile, delivery epoch, session, and runtime; label them advisory.
 		advisory := p.Harness == "claude" && p.Source == "central" && limits.Source == "claude-statusline" && limits.SessionID != "" && limits.RuntimeGeneration != ""
-		attributed := limits.ProfileID == p.ID && limits.DeliveryEpoch == p.DeliveryEpoch && (p.Identity.State == "known" || advisory)
+		// The central Claude usage report is read with the profile's own stored
+		// credential; its epoch fence retires it on login, logout, or mode change.
+		report := p.Harness == "claude" && p.Source == "central" && limits.Source == "claude-usage"
+		attributed := limits.ProfileID == p.ID && limits.DeliveryEpoch == p.DeliveryEpoch && (p.Identity.State == "known" || advisory || report)
 		if limits.State != "known" || len(limits.Windows) == 0 || !attributed {
 			if !attributed && len(limits.Windows) > 0 {
 				base.reason = "Observation is not attributable to this verified account and delivery epoch."
