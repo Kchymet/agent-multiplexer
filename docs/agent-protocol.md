@@ -204,8 +204,9 @@ Refresh `updated` without changing any channel.
 ### 5.9 `report_done()`
 
 Declare the agent's task **complete**. This is a *terminal* lifecycle report, not
-an activity state (§8): a one-off agent that has finished its task and integrated
-its artifact calls this to retire itself from the active rail.
+an activity state (§8): a task-mode workgroup member that has finished its task
+and integrated its artifact calls this to retire its own session from the active
+rail. The workgroup and its coordinator remain available.
 
 - **CLI:** `amux agent done`
 - **Effect:** archives the agent's own session — it drops off the active rail into
@@ -224,9 +225,9 @@ its artifact calls this to retire itself from the active rail.
 > Distinct from `status idle` (§5.1/§8): `idle` means "no live turn right now" and
 > flips back to `running` on the next message; `done` means "this session's job is
 > finished" and takes it off the active rail until a human restores it. Use `done`
-> only for genuinely task-driven, one-off sessions — never for an interactive
-> session (the human ends it) or a long-lived task loop, which is meant to keep
-> running.
+> only when a task-mode workgroup member has completed its entire assignment —
+> never for an interactive member (the human ends it), a coordinator, or a
+> long-lived task loop that still has work to do.
 
 ---
 
@@ -336,7 +337,7 @@ Lifecycle → state mapping that runtimes SHOULD emit (matches the Claude bindin
 | blocked on the user (permission / idle prompt) | `status waiting` (or `attention <reason>`) |
 | turn finished | `status ready` |
 | process exiting | `status idle` |
-| task complete (one-off agent) | `done` (§5.9) — terminal, archives the session |
+| assignment complete (task-mode workgroup member) | `done` (§5.9) — terminal, archives the session |
 
 ---
 
