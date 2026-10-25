@@ -59,7 +59,8 @@ making a socket visible would not authorize a sandboxed `connect` syscall.
 Mutations remain authorized against the signed subject and current daemon-owned
 store row, immediately before their effect. Changing `AMUX_WORKGROUP`,
 `AMUX_WORKSPACE`, UUIDs, cwd, or hook JSON cannot change self-report identity.
-Foreign rename/archive and ordinary-agent control-plane operations remain denied.
+Operations on sessions outside the caller's scope, and every host-only
+operation, are denied; see [control-API scopes](#control-api-scopes).
 
 `agent-sessions` is the intentional read exception: any active authenticated
 session can discover the existing host/user and managed Claude/Codex conversation
@@ -79,6 +80,53 @@ Discovery pins directories and opens regular files through `hostprep`, rejecting
 symlink components, hardlinks and special files. Cwd extraction reads at most
 1 MiB per transcript; missing/malformed metadata leaves cwd empty. Unreadable
 homes/files remain best-effort, as in the original diagnostic listing.
+
+## Control-API scopes
+
+Every daemon control-API action and query a session principal can name has one
+explicit scope in `internal/access/scope.go`. Anything unclassified is denied to
+every restricted role, and `TestEveryCoreOperationIsClassified` fails when a new
+`core.Action*` or `core.Query*` constant lacks a classification. The caller is
+always the store subject of the signed session grant; request IDs, fields,
+flags, and environment variables only ever name a target.
+
+- **host** — the authenticated host only. The operator console holds the rows
+  marked *console* as a delegated grant on any target.
+- **session** — any active session; names no session and returns no
+  per-session state (diagnostics, conversation discovery).
+- **filtered** — any active session; the result is projected to the caller's
+  scope instead of refused.
+- **workgroup** — the caller itself (self scope: ordinary members and repo
+  homes), or for a coordinator also each *current* direct member of its
+  workgroup. Membership is the member's live root, so a member moved out leaves
+  the scope immediately. Effects never target an archived session; reads may
+  page an archived member that still belongs to the workgroup.
+
+| Operation | Scope | Member (self) | Coordinator (workgroup) | Notes |
+| --- | --- | --- | --- | --- |
+| query `version`, `codex-control` | session | yes | yes | Host paths and overrides stripped. |
+| query `agent-sessions` | session | yes | yes | Read-only discovery (see above). |
+| query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members; granted repos | |
+| query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
+| `rename` (`amux agent name`) | workgroup | itself | itself, members | |
+| `start` | workgroup | itself | workgroup (cascades), members | |
+| `steer` prompt / interject / stop | workgroup | itself | itself, members | |
+| `steer` permission | workgroup | no | members only | Never one's own prompt; needs request id and runtime generation. |
+| `steer` goal | host | no | no | Rejected for every session principal. |
+| `set-archived archived=true` (`amux agent done`) | workgroup | itself | members | Never a workgroup root (cascades). Console: any. |
+| `set-archived archived=false`, `archive` toggle | host | no | no | Restore needs host regrant. |
+| `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. |
+| `delete`, `kill`, `move`, `agent-set-repos` | host | no | no | Console. |
+| `new-workgroup`, `create-workspace`, `refresh` | host | no | no | Console; a repo home may create a workgroup limited to its own repo. |
+| `add-repo`, `rm-repo` | host | no | no | Console. |
+| `coordinator-set-repos`, `restart`, `auth-reload`, `account-manage`, `codex-login`, `subscribe`, `query` | host | no | no | |
+| `pane.*` | host | no | no | Restricted principals use one-shot mailbox RPC only. |
+| query `runtime-path`, `runtime-record`, `accounts`, `account-manage`, `account-ceremony`, `codex-auth` | host | no | no | Raw host paths and credentials. |
+
+Self reports (`amux agent status|hook|permission|model|capture`), the credential
+broker, and central auth queries are authorized by their own self-only checks
+before this table. Workgroup archive/restore, repo add/rm, auth, config,
+daemon control, and `amux sandbox` remain host commands.
 
 ## Availability, restart, and completion
 
