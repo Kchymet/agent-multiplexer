@@ -276,11 +276,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse routes a mouse event. Wheel scrolling over the sidebar moves the
-// workspace selection; anything landing in the main pane is forwarded to the
-// embedded agent (translated into that pane's own coordinates) so you can scroll
-// or click an agent just by pointing at it — focus follows a button press. Events
-// over the borders/help line, or while a modal is up, are ignored.
+// handleMouse routes events by their screen coordinates. Wheel over the rail
+// moves its selection; pane wheel uses history unless the child requests mouse
+// reporting. Shift always forces local handling, including for reporting apps.
+// Borders/help and modal events never reach the child.
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.accounts != nil {
 		if ev.Button == tea.MouseButtonWheelUp {
@@ -304,7 +303,7 @@ func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if tea.MouseEvent(ev).IsWheel() && ev.X < sidebarWidth {
+	if tea.MouseEvent(ev).IsWheel() && ev.X >= 0 && ev.X < sidebarWidth && ev.Y >= 1 && ev.Y <= m.paneRows() {
 		switch ev.Button {
 		case tea.MouseButtonWheelUp:
 			m.move(-1)
@@ -411,6 +410,18 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.switchTab(tabEditor)
 	case keymap.TabTerm:
 		return m, m.switchTab(tabTerminal)
+	case keymap.ScrollUp, keymap.ScrollDown, keymap.ScrollLive:
+		if t := m.cur(); t != nil {
+			switch m.keys.Action(k.String()) {
+			case keymap.ScrollUp:
+				t.ScrollPages(1)
+			case keymap.ScrollDown:
+				t.ScrollPages(-1)
+			case keymap.ScrollLive:
+				t.ReturnLive()
+			}
+		}
+		return m, nil
 	case keymap.RestartAgent:
 		s := m.selected()
 		if m.focus == focusAgent {

@@ -1,6 +1,7 @@
 package vterm
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -33,35 +34,24 @@ func waitFor(d time.Duration, f func() bool) bool {
 	return f()
 }
 
-// TestAltScrollWithoutMouseTracking proves the alternate-scroll fallback: a
-// full-screen child on the alternate screen that hasn't armed mouse tracking
-// still scrolls, because a vertical wheel is translated into cursor-key presses
-// and delivered on the child's stdin. Without the fallback the emulator drops
-// the wheel and nothing reaches the child — the reported bug.
-func TestAltScrollWithoutMouseTracking(t *testing.T) {
-	got := make(chan []byte, 8)
-	term := NewRemote(80, 24, func(b []byte) { got <- append([]byte(nil), b...) }, nil)
-	defer term.Close()
-
-	// Child enters the alternate screen (DECSET 1049) but never enables mouse
-	// tracking — the situation for less/vim/tmux-without-mouse.
-	term.Feed([]byte("\x1b[?1049h"))
-	// Feed is async (the feed goroutine parses off the caller's thread), and the
-	// emulator/mode state is only safe to read under t.mu, so poll under the lock.
-	if !waitFor(time.Second, term.lockedGet(func() bool { return term.emu.IsAltScreen() })) {
-		t.Fatal("emulator did not enter alt screen")
-	}
-
-	term.MouseEvent(vt.MouseWheel{Button: vt.MouseWheelUp})
-	term.MouseEvent(vt.MouseWheel{Button: vt.MouseWheelDown})
-
-	up := readInput(t, got)
-	if want := strings.Repeat("\x1b[A", altScrollLines); up != want {
-		t.Fatalf("wheel-up sent %q, want %q (%d cursor-up presses)", up, want, altScrollLines)
-	}
-	down := readInput(t, got)
-	if want := strings.Repeat("\x1b[B", altScrollLines); down != want {
-		t.Fatalf("wheel-down sent %q, want %q", down, want)
+// A child that has not enabled reporting must never receive synthesized keys,
+// including on an empty alternate screen and with application cursor mode on.
+func TestWheelWithoutReportingNeverSendsKeys(t *testing.T) {
+	for _, modes := range []string{"", "\x1b[?1049h", "\x1b[?1049h\x1b[?1h"} {
+		t.Run(fmt.Sprintf("%q", modes), func(t *testing.T) {
+			got := make(chan []byte, 8)
+			term := NewRemote(80, 24, func(b []byte) { got <- append([]byte(nil), b...) }, nil)
+			defer term.Close()
+			term.ingest([]byte(modes))
+			for _, button := range []vt.MouseButton{vt.MouseWheelUp, vt.MouseWheelDown, vt.MouseWheelLeft, vt.MouseWheelRight} {
+				term.MouseEvent(vt.MouseWheel{Button: button})
+			}
+			select {
+			case b := <-got:
+				t.Fatalf("untracked wheel sent %q", b)
+			case <-time.After(20 * time.Millisecond):
+			}
+		})
 	}
 }
 
