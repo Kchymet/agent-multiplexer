@@ -105,19 +105,24 @@ type model struct {
 	picker     *pickerState                // a pending fuzzy repo picker, or nil
 	// pendingPicker holds a picker parked while its "track a new repo" form is up,
 	// reopened once the repo is tracked.
-	pendingPicker *pickerState
-	dataCh        chan struct{}
-	w, h          int
-	status        string
-	accounts      *accountsState
-	accountCall   accountCaller // nil uses the authenticated host account service
+	pendingPicker         *pickerState
+	dataCh                chan struct{}
+	w, h                  int
+	status                string
+	archiveSearch         *archiveSearchState
+	accountOverview       *accountSnapshot
+	accountOverviewStale  bool
+	accountOverviewSerial uint64
+	accounts              *accountsState
+	accountCall           accountCaller // nil uses the authenticated host account service
 }
 
 // confirmState is a pending yes/no confirmation modal: the question shown, and
 // the daemon action to dispatch if the user confirms.
 type confirmState struct {
-	message string
-	action  core.Action
+	archivedOnly bool // restore must never toggle a concurrently restored session back to archived
+	message      string
+	action       core.Action
 }
 
 type focus int
@@ -163,6 +168,13 @@ func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case accountOverviewReplyMsg:
+		return m, m.updateAccountOverview(msg)
+	case accountOverviewTickMsg:
+		if msg.serial == m.accountOverviewSerial && m.accounts == nil && m.client != nil {
+			return m, m.refreshAccountOverview()
+		}
+		return m, nil
 	case accountsReplyMsg:
 		return m, m.updateAccounts(msg)
 	case accountsExpiredMsg:
@@ -188,9 +200,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.client = msg.c
 		m.reconnectPanes = len(m.terms) > 0
 		m.status = ""
-		return m, readCmd(msg.c)
+		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview())
 
 	case disconnectedMsg:
+		m.accountOverviewSerial++
+		m.accountOverviewStale = true
 		if s := m.accounts; s != nil {
 			s.dispose()
 			s.serial++ // fence callbacks from the retired connection
@@ -268,8 +282,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // or click an agent just by pointing at it — focus follows a button press. Events
 // over the borders/help line, or while a modal is up, are ignored.
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.accounts != nil || m.form != nil || m.confirm != nil || m.picker != nil {
+	if m.archiveSearch != nil || m.accounts != nil || m.form != nil || m.confirm != nil || m.picker != nil {
 		return m, nil
+	}
+	if ev.Action == tea.MouseActionPress && ev.Button == tea.MouseButtonLeft && ev.X >= 0 && ev.X < sidebarWidth {
+		barY := 1 + max(1, m.paneRows()-len(m.accountOverviewLines())-len(m.railHints()))
+		if ev.Y >= barY && ev.Y < barY+3 {
+			m.focus = focusSidebar
+			return m, m.openAccounts()
+		}
+		if ev.Y == m.paneRows() {
+			m.focus = focusSidebar
+			m.archiveSearch = &archiveSearchState{}
+			return m, nil
+		}
 	}
 	if tea.MouseEvent(ev).IsWheel() && ev.X < sidebarWidth {
 		switch ev.Button {
@@ -320,6 +346,9 @@ func (m *model) reapClosed() {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.archiveSearch != nil {
+		return m.handleArchiveSearch(k)
+	}
 	if m.accounts != nil {
 		return m.handleAccounts(k)
 	}
@@ -336,6 +365,14 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch k.String() {
 		case "y", "enter":
 			a := m.confirm.action
+			if m.confirm.archivedOnly {
+				s := m.sessionByID(a.ID)
+				if s == nil || !archivedSession(*s) {
+					m.confirm = nil
+					m.status = "Session changed. Search again before restoring."
+					return m, nil
+				}
+			}
 			m.confirm = nil
 			m.status = ""
 			return m, m.sendCmd(a)
@@ -393,6 +430,9 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Sidebar focus.
 	switch k.String() {
+	case "/":
+		m.archiveSearch = &archiveSearchState{}
+		return m, nil
 	case "s":
 		return m, m.openAccounts()
 	case "q", "ctrl+c":
@@ -447,7 +487,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAddRepoForm()
 		return m, nil
 	case "ctrl+r": // force a state refresh (the daemon also auto-polls)
-		return m, m.sendCmd(core.Action{Action: core.ActionRefresh})
+		return m, tea.Batch(m.sendCmd(core.Action{Action: core.ActionRefresh}), m.refreshAccountOverview())
 	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
 		if s := m.selected(); s != nil && isAgent(s) && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{

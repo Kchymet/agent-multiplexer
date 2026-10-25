@@ -13,13 +13,18 @@ import (
 const accountObservationMaxAge = time.Duration(harnessproto.AccountLimitsTTLMillis) * time.Millisecond
 
 func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
-	out := accountSnapshot{canManage: true, defaultRevisions: in.DefaultRevisions}
+	out := accountSnapshot{canManage: true, defaultRevisions: in.DefaultRevisions, legacyDefaults: make(map[string]bool)}
+	for _, harness := range []string{"claude", "codex"} {
+		out.legacyDefaults[harness] = in.Defaults[harness] != "" && in.Defaults[harness] != harness+":central"
+	}
+	seen := make(map[string]bool)
 	for _, p := range in.Profiles {
-		if p.Harness != "claude" && p.Harness != "codex" {
+		if (p.Harness != "claude" && p.Harness != "codex") || p.Source != "central" || p.ID != p.Harness+":central" || seen[p.Harness] {
 			continue
 		}
+		seen[p.Harness] = true
 		row := accountProfile{
-			id: p.ID, harness: p.Harness, label: p.ID, mode: p.Source, state: p.State,
+			id: p.ID, harness: p.Harness, label: accountHarnessName(p.Harness), mode: p.Source, state: p.State,
 			revision: p.Revision, defaultProfile: in.Defaults[p.Harness] == p.ID,
 			identitySource: p.Identity.Evidence, plan: p.Identity.Plan,
 			statusDetail: accountProfileProblem(p.Error),
@@ -39,7 +44,7 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		case "browser":
 			row.loginHelp = "Enter: start browser login."
 		default:
-			row.loginHelp = "External source — manage login in the host tool. " + accountModeHelp(p.Source)
+			row.loginHelp = "Login unavailable. Check the installed harness and refresh."
 		}
 		limits := p.Limits
 		confidence := "unknown"
