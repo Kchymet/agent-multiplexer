@@ -151,13 +151,19 @@ and the row carries a `role` naming which:
   the repo name. All three accept every session verb (§3) like an agent — a
   `prompt` to a workgroup id reaches its coordinator (starting it if stopped),
   never its members — and stream `runtime-events` (§4) from their own transcript.
+- All workgroups, including those limited to one repository, publish a coordinator
+  root in `workgroups` and member rows with that actual root id. Repo home rows
+  remain management context; members no longer appear directly beneath repos.
+  `new-workgroup` with `fields.repos` set to one repo is the single-repo creation
+  contract. It returns the coordinator id and admission checks both coordinator
+  and requested member harnesses. No separate one-off creation verb is supported.
 - A root row's `state` is the most demanding of the coordinator's own state and
   its members'; its `status` leads with the coordinator's own.
 - A consumer that renders container rows as headers keeps doing so; it may
   additionally offer them the session affordances it offers an agent. A consumer
   that sorts sectionless or `repo`-kind rows into a session list must not: the
   console is sectionless by design and a repo row is a header that hosts a
-  session — neither is a one-off agent.
+  session — neither is an agent.
 
 **Backward compatibility.** These fields are additive (`omitempty` on `runtime`
 and `role`, a nullable object for `caps`). A provider that predates them omits both. A consumer

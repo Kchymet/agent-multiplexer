@@ -134,7 +134,7 @@ func TestMultilineFieldScrollsWithCursor(t *testing.T) {
 // per line either way, and never a stray carriage return.
 func TestPasteNormalizesLineEndings(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	m.handleForm(key("i"))
 	m.handleForm(paste("one\r\ntwo\rthree\nfour"))
 	if got := m.form.fields[0].value; got != "one\ntwo\nthree\nfour" {
@@ -146,7 +146,7 @@ func TestPasteNormalizesLineEndings(t *testing.T) {
 // commands: it lands in the field instead of being ignored or executed.
 func TestPasteInNormalModeInserts(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	m.handleForm(paste("x\ndd"))
 	if got := m.form.fields[0].value; got != "x\ndd" {
 		t.Fatalf("got %q, want the pasted text", got)
@@ -205,7 +205,7 @@ func TestCursorRow(t *testing.T) {
 // keep: it lands in the field and the operator is dropped.
 func TestPasteAfterPendingOperatorInserts(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	m.handleForm(key("i"))
 	m.handleForm(key("abc"))
 	m.handleForm(key("<esc>"))
@@ -223,7 +223,7 @@ func TestPasteAfterPendingOperatorInserts(t *testing.T) {
 // tabs and newlines do.
 func TestPasteDropsControlRunes(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	m.handleForm(key("i"))
 	m.handleForm(paste("hello \x1b[31mred\x1b[0m\a\tend\r\n\u0085two"))
 	if got := m.form.fields[0].value; got != "hello red\tend\ntwo" {
@@ -237,7 +237,7 @@ func TestPasteDropsControlRunes(t *testing.T) {
 func TestMultilineVimEditing(t *testing.T) {
 	open := func(v string, cursor int) *model {
 		m := &model{}
-		m.openNewRepoAgentForm("repo", "Repo")
+		m.openNewRepoWorkgroupForm("repo", "Repo")
 		m.form.fields[0].value, m.form.fields[0].cursor = v, cursor
 		return m
 	}

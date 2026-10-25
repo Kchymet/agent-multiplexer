@@ -13,11 +13,11 @@
  ○│ five_hour: available                                                     │·
   │   Used: 67% of the reported window                                       │·
  A│   Source:   Confidence:                                                  │·
- C│   Observed: 2026-10-25 18:26 UTC  Resets: 2030-01-02 03:04 UTC           │·
+ C│   Observed: 2026-10-25 18:36 UTC  Resets: 2030-01-02 03:04 UTC           │·
  5│ seven_day: available                                                     │·
  C│   Used: 67% of the reported window                                       │·
  5│   Source:   Confidence:                                                  │·
- ↵│   Observed: 2026-10-25 18:26 UTC  Resets: 2030-01-05 03:04 UTC           │·
+ ↵│   Observed: 2026-10-25 18:36 UTC  Resets: 2030-01-05 03:04 UTC           │·
  S│ PgUp/PgDn scroll · Esc close  11–26/26                                   │·
  /╰──────────────────────────────────────────────────────────────────────────╯·
 ──────────────────────────┴─────────────────────────────────────────────────────

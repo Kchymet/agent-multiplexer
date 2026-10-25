@@ -20,14 +20,13 @@ import (
 // lookups, the rail, and the CLI all see the same inventory:
 //
 //   - The console is synthetic (console.Session; never a store row).
-//   - A work-scoped root IS its coordinator. New roots have a dedicated own
+//   - A workgroup root IS its coordinator. New roots have a dedicated own
 //     directory beside (never above) member sandboxes.
 //   - A repo home is a repo-scoped root whose id is the repo name
 //     (store.RepoHomeID). It is created when a repo is tracked, and on first
 //     host-authorized creation for repos tracked before default sessions.
 //
-// A hidden single-member repo root (the wrapper around a one-off agent) hosts
-// nothing and resolves as a bare store row, as before.
+// Writable store opening promotes legacy hidden repo wrappers before resolution.
 
 // ResolveSession resolves an id the way every daemon-side lookup must: the
 // console or an existing store row (agent, coordinator root, or repo home).
@@ -133,7 +132,7 @@ func EnsureRepoHome(repo string) (store.Session, error) {
 
 // removeRepoHome deletes a repo's home session — its engine is stopped by the
 // daemon first (rm-repo stops the engine) — and its sandbox. The home never
-// holds a member's sandbox (an agent can't be moved into a repo-scoped root),
+// holds a member's sandbox (an agent can't be added to or moved into a repo home),
 // so the whole dir goes; a child row would be a bug, and is left alone with its
 // files rather than deleted along with them.
 func removeRepoHome(db *store.DB, repo string) {

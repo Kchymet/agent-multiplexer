@@ -14,7 +14,7 @@ import (
 // Every container row is a default session: the console, a workgroup root (its
 // coordinator), and a repo header (its home) carry a role, a runtime, steerable
 // caps, and a sandbox — so a consumer can open and steer them like an agent.
-// A bare single-member repo root still hosts nothing and stays hidden.
+// Legacy repo wrappers become visible coordinator workgroups.
 func TestPollDefaultSessions(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("HOME", t.TempDir())
@@ -96,11 +96,9 @@ func TestPollDefaultSessions(t *testing.T) {
 	if web.Role != store.RoleRepo || web.Cwd != "" || web.CanAttach || !strings.Contains(web.Status, "repair required") {
 		t.Errorf("unprovisioned repo home = %+v", web)
 	}
-	if _, ok := byID["hidden"]; ok {
-		t.Error("the hidden single-member repo root rendered as a row")
-	}
-	if one := byID["one"]; one.RootID != "api" || one.Section != core.SectionRepos || one.Role != "" {
-		t.Errorf("one-off row = %+v, want nested under the repo with no role", one)
+	check("hidden", store.RoleCoordinator, "claude", store.CoordinatorDir("hidden"))
+	if one := byID["one"]; one.RootID != "hidden" || one.Section != core.SectionWorkgroups || one.Role != "" {
+		t.Errorf("one-off row = %+v, want nested under its preserved workgroup with no role", one)
 	}
 	if a1 := byID["a1"]; a1.Role != "" || a1.RootID != "wg1" {
 		t.Errorf("member row = %+v", a1)
@@ -111,4 +109,51 @@ func TestPollDefaultSessions(t *testing.T) {
 			t.Error("repo home row flagged IsRoot")
 		}
 	}
+}
+
+func TestArchivedLegacyWorkgroupRemainsVisibleAndRestorable(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("HOME", t.TempDir())
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, s := range []store.Session{
+		{ID: "old", Scope: store.ScopeRepo, Repo: "api", Archived: true, ArchivedAt: 20},
+		{ID: "member", RootID: "old", Repo: "api", Agent: "claude", Archived: true, ArchivedAt: 21},
+	} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := NewWorkspace().Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRoot, foundMember := false, false
+	for _, row := range rows {
+		if row.ID == "old" {
+			foundRoot = row.Archived && row.IsRoot && row.Role == store.RoleCoordinator && row.Section == core.SectionArchived
+		}
+		if row.ID == "member" {
+			foundMember = row.Archived && row.RootID == "old"
+		}
+	}
+	if !foundRoot || !foundMember {
+		t.Fatalf("archive lost group or membership: %+v", rows)
+	}
+	if err := db.SetArchivedFlag("old", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = NewWorkspace().Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == "old" && !row.Archived && row.Section == core.SectionWorkgroups {
+			return
+		}
+	}
+	t.Fatalf("restored group missing: %+v", rows)
 }

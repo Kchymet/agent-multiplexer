@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	vt "github.com/charmbracelet/x/vt"
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 	"github.com/muesli/termenv"
 )
 
@@ -261,6 +262,16 @@ func TestAccountsPopupRenderEvidence(t *testing.T) {
 				save("stale-api-rail")
 				m.Update(m.openAccounts()())
 				save("stale-api")
+				m.accountOverview.legacyDefaults["claude"] = false
+				m.accountOverview.profiles[0].limits[0].freshUntil = time.Now().Add(time.Hour)
+				p := &m.accountOverview.profiles[1]
+				p.authMode = "subscription"
+				p.limits = nil
+				for i, name := range []string{"code-review:primary (300 minutes)", "code-review:secondary (10080 minutes)", "codex:primary (300 minutes)", "codex:secondary (10080 minutes)"} {
+					used := []float64{1, 2, 100, 95}[i]
+					p.limits = append(p.limits, accountLimit{name: name, state: "available", usedPercent: &used, observedAt: time.Now(), freshUntil: time.Now().Add(time.Hour), resetsAt: time.Date(2030, 1, 2, 3, 4, 0, 0, time.UTC)})
+				}
+				save("multi-bucket")
 			}
 		})
 	}
@@ -321,5 +332,64 @@ func TestAccountsNarrowConfirmationAndExtraWindowsScroll(t *testing.T) {
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.accounts == nil || m.accounts.confirm != nil || m.accounts.scroll != 0 {
 		t.Fatal("confirmation back did not restore summary")
+	}
+}
+
+func TestAccountsNativeBucketLabelsStayDistinct(t *testing.T) {
+	now := time.Now()
+	// These are the names emitted by codexauth.decodeLimits for separate
+	// rateLimitsByLimitId categories, sorted code-review before codex.
+	snapshot := projectAccounts(hp.AccountSnapshot{Profiles: []hp.AccountProfile{{
+		ID: "codex:central", Harness: "codex", Source: "central", State: "ready",
+		Identity: hp.AccountIdentity{State: "known"},
+		Limits: hp.AccountLimits{State: "known", Source: "codex-native", ProfileID: "codex:central", ObservedAt: now.UnixMilli(), Windows: []hp.AccountLimitWindow{
+			{Name: "code-review:primary", WindowMinutes: 300, UsedPercent: 1},
+			{Name: "code-review:secondary", WindowMinutes: 10080, UsedPercent: 2},
+			{Name: "codex:primary", WindowMinutes: 300, UsedPercent: 100},
+			{Name: "codex:secondary", WindowMinutes: 10080, UsedPercent: 95},
+		}},
+	}}})
+	p := snapshot.profiles[0]
+	if got := accountRailBudget(p, now, false); got != "limiting window 0%" {
+		t.Fatal(got)
+	}
+	if got := accountWindowName(p.limits[0]); got != "code-review:5h" {
+		t.Fatal(got)
+	}
+	if got := accountWindowName(p.limits[2]); got != "codex:5h" {
+		t.Fatal(got)
+	}
+	m := accountModel()
+	m.w, m.h = 80, 24
+	m.accounts.snapshot = snapshot
+	m.accounts.harness = "codex"
+	m.accounts.selectProfile()
+	out := ansi.Strip(m.renderAccounts())
+	for _, want := range []string{"code-review:5h 99% left", "code-review:7d 98% left", "2 more windows in details"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing scoped budget %q:\n%s", want, out)
+		}
+	}
+	var details strings.Builder
+	for i := 0; i < 100; i++ {
+		before := m.accounts.scroll
+		m.handleKey(key("pgdown"))
+		details.WriteString(ansi.Strip(m.renderAccounts()))
+		if m.accounts.scroll == before {
+			break
+		}
+	}
+	for _, want := range []string{"codex:primary", "codex:secondary", "Used: 100%", "Used: 95%"} {
+		if !strings.Contains(details.String(), want) {
+			t.Fatalf("missing extra bucket detail %q", want)
+		}
+	}
+	p.limits = p.limits[2:]
+	if got := accountRailBudget(p, now, false); got != "5h 0% · 7d 5%" {
+		t.Fatal(got)
+	}
+	p.limits[0].name = "custom-category (300 minutes)"
+	if got := accountWindowName(p.limits[0]); got != "custom-category" {
+		t.Fatal(got)
 	}
 }

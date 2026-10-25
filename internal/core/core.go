@@ -39,7 +39,7 @@ const (
 // pinned above them all.
 const (
 	SectionWorkgroups = harnessproto.SectionWorkgroups // cross-repo workgroups + nested agents
-	SectionRepos      = harnessproto.SectionRepos      // tracked repos + their single-repo agents
+	SectionRepos      = harnessproto.SectionRepos      // tracked repository management homes
 	SectionDetached   = harnessproto.SectionDetached   // Claude sessions amux didn't launch
 	SectionArchived   = harnessproto.SectionArchived   // agents marked done/archived (reversible)
 )
@@ -131,10 +131,9 @@ const (
 	ActionRmRepo              = "rm-repo"               // stop tracking a repo
 	ActionAgentSetRepos       = "agent-set-repos"       // re-scope an agent to exactly Fields["repos"]
 	ActionCoordinatorSetRepos = "coordinator-set-repos" // host-only: replace a coordinator's repo grant ceiling
-	ActionNewRepoAgent        = "new-repo-agent"        // create a repo-scoped workgroup + its agent
 	ActionAddAgent            = "add-agent"             // add an agent to an existing workgroup
 	ActionAddRepo             = "add-repo"              // track a new repo (Fields["source"])
-	ActionNewWorkgroup        = "new-workgroup"         // create a work-scoped workgroup (+ optional first agent)
+	ActionNewWorkgroup        = "new-workgroup"         // create a workgroup (+ optional first agent); Fields["repos"] sets its repo ceiling
 	ActionCreateWorkspace     = "create-workspace"      // CLI create: workgroup + optional default agent
 )
 
@@ -162,7 +161,6 @@ var controlActions = []string{
 	ActionAgentSetRepos,
 	ActionCoordinatorSetRepos,
 	ActionAddAgent,
-	ActionNewRepoAgent,
 	ActionNewWorkgroup,
 	ActionCreateWorkspace,
 }
@@ -213,7 +211,6 @@ var actionDescriptors = map[string]ActionDescriptor{
 	ActionKill:            {StopsEngine: true},
 	ActionArchive:         {StopsEngine: true},
 	ActionSetArchived:     {StopsEngine: true},
-	ActionNewRepoAgent:    {CreatesSession: true},
 	ActionAddAgent:        {CreatesSession: true},
 	ActionNewWorkgroup:    {CreatesSession: true, TargetsRoot: true},
 	ActionCreateWorkspace: {CreatesSession: true, TargetsRoot: true},
@@ -332,12 +329,12 @@ type RuntimeRecord struct {
 // verbs and the pane.* streaming verbs; the pane fields apply only to the latter.
 type Action struct {
 	Action string            `json:"action"`           // lifecycle verb (attach|delete|…) or a pane.* verb
-	ID     string            `json:"id,omitempty"`     // target session id (repo name for new-repo-agent; root id for add-agent; agent id for pane.open)
+	ID     string            `json:"id,omitempty"`     // target session id (root id for add-agent; agent id for pane.open)
 	Kind   string            `json:"kind,omitempty"`   // for "new": agent kind to spawn
 	Cwd    string            `json:"cwd,omitempty"`    // for "new": working directory
-	Target string            `json:"target,omitempty"` // for "move": destination root id ("" = new work-scoped)
+	Target string            `json:"target,omitempty"` // for "move": destination workgroup id ("" = a new workgroup of the agent's own)
 	Query  string            `json:"query,omitempty"`  // for ActionQuery: which read model to return (QueryRepos|QuerySessions)
-	Fields map[string]string `json:"fields,omitempty"` // form-driven actions (new-repo-agent, add-agent, new-workgroup, add-repo, rename)
+	Fields map[string]string `json:"fields,omitempty"` // form-driven actions (add-agent, new-workgroup, add-repo, rename)
 
 	// Pane streaming fields (pane.* verbs only).
 	PaneID string `json:"paneId,omitempty"` // client-minted stream id, scoped to the connection
@@ -403,13 +400,19 @@ type WorkgroupRow struct {
 	Scope   string     `json:"scope"`   // work | repo
 	Display string     `json:"display"` // name if set, else id
 	Agents  []AgentRow `json:"agents"`
-	// Role is the root's own session role: coordinator for a work-scoped
-	// workgroup, repo for a repo's home session, "" for a hidden single-member
-	// repo root (which hosts no session). Dir is that session's sandbox (the
-	// container dir), "" when the root hosts none or predates default sessions.
-	Role  string `json:"role,omitempty"`
-	Agent string `json:"agent,omitempty"` // the root session's runtime kind
-	Dir   string `json:"dir,omitempty"`
+	// Role is the root's own session role: coordinator for a workgroup or repo
+	// for a repo's management home. Dir is the session's private sandbox, empty
+	// only when provisioning predates default sessions.
+	Role string `json:"role,omitempty"`
+	// Grants is a workgroup coordinator's repository ceiling — the repos its
+	// agents may check out — and Granted whether that ceiling was ever
+	// initialized (a legacy coordinator may have none yet). This is what makes a
+	// workgroup "limited to one repo" visible in a listing: there is no separate
+	// scope for it, the ceiling simply names one repo. Additive/omitempty.
+	Grants  []string `json:"grants,omitempty"`
+	Granted bool     `json:"granted,omitempty"`
+	Agent   string   `json:"agent,omitempty"` // the root session's runtime kind
+	Dir     string   `json:"dir,omitempty"`
 }
 
 // AgentRow is one agent (child session) under a WorkgroupRow.

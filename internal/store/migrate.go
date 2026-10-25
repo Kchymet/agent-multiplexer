@@ -196,8 +196,8 @@ func NormalizeMode(m string) string {
 
 // Workgroup scopes (root sessions only).
 const (
-	ScopeWork = "work" // cross-repo workgroup: root + N agents
-	ScopeRepo = "repo" // single-repo, single-member workgroup nested under its repo
+	ScopeWork = "work" // coordinator workgroup: root + N agents, optional repo ceiling
+	ScopeRepo = "repo" // repository management home; legacy wrappers migrate to work
 )
 
 // Session roles: the built-in "default sessions" every container hosts. They
@@ -206,14 +206,16 @@ const (
 // source of truth and a test pins the two in step).
 //
 //   - RoleConsole: the machine-wide amux console (Mode == ModeConsole; synthetic).
-//   - RoleCoordinator: a work-scoped workgroup root's own session — the
-//     coordinator of its agents. Its id is the workgroup id and its sandbox is
-//     the workgroup's container dir, which holds every member's sandbox.
+//   - RoleCoordinator: a workgroup root's own session — the coordinator of its
+//     agents, whether the workgroup is granted one repo or several. Its id is
+//     the workgroup id and its sandbox is a dedicated coordinator dir beside
+//     the members' sandboxes.
 //   - RoleRepo: a tracked repo's home session — the long-lived context for the
-//     one-off agents run against that repo. Its id is the repo name (see
+//     repository management notes. Its id is the repo name (see
 //     RepoHomeID) and it is a repo-scoped root with no members of its own.
-//   - RoleAgent ("") : an ordinary agent, or a bare container (a hidden
-//     single-member repo root) that hosts no session.
+//   - RoleAgent ("") : an ordinary agent (a member of a workgroup). Every root
+//     hosts a session; the hidden single-member repo root of older daemons is
+//     promoted into a workgroup when the store is opened for writing.
 const (
 	RoleAgent       = ""
 	RoleConsole     = "console"
@@ -228,8 +230,9 @@ const (
 func RepoHomeID(repo string) string { return repo }
 
 // Role classifies a session (see the Role* constants). It is derived, not
-// stored: the console by its mode, a coordinator by being a work-scoped root, a
-// repo home by being the repo-scoped root whose id IS its repo name.
+// stored: the console by its mode, a repo home by being the repo-scoped root
+// whose id IS its repo name, and every other root by being a workgroup — its
+// coordinator.
 func (s Session) Role() string {
 	switch {
 	case s.Mode == ModeConsole:

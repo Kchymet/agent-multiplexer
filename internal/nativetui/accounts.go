@@ -350,14 +350,27 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch k.String() {
-	case "tab", "shift+tab", "left", "right", "h", "l":
-		if s.harness == "claude" {
-			s.harness = "codex"
-		} else {
-			s.harness = "claude"
+	case "tab", "shift+tab", "left", "right", "h", "l", "up", "down", "j", "k":
+		next := s.harness
+		switch k.String() {
+		case "up", "k":
+			next = "claude"
+		case "down", "j":
+			next = "codex"
+		default:
+			if s.harness == "claude" {
+				next = "codex"
+			} else {
+				next = "claude"
+			}
 		}
-		s.selected, s.scroll = "", 0
-		s.selectProfile()
+		// Vertical movement clamps at each end. Only an actual provider
+		// change resets the details viewport, just like Tab.
+		if next != s.harness {
+			s.harness = next
+			s.selected, s.scroll = "", 0
+			s.selectProfile()
+		}
 	case "r":
 		return m, m.requestAccounts(accountRequest{op: "status"})
 	case "e", "enter", "a", "d", "x":
@@ -518,6 +531,9 @@ func (m *model) renderAccounts() string {
 			if harness == "claude" {
 				source = "statusline advisory; identity unverified"
 			}
+			if len(p.limits) > 2 {
+				source += fmt.Sprintf(" · %d more windows in details", len(p.limits)-2)
+			}
 			lines = append(lines, dimStyle.Render("  "+source))
 		}
 		if s.snapshot.legacyDefaults[harness] {
@@ -525,7 +541,7 @@ func (m *model) renderAccounts() string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, dimStyle.Render("Tab: select · e: subscription · a: API key"), dimStyle.Render("d: default · x: logout · r: refresh"), "Existing workload bindings stay fixed.")
+	lines = append(lines, dimStyle.Render("Tab/↑↓/jk: select · e: subscription · a: API key"), dimStyle.Render("d: default · x: logout · r: refresh"), "Existing workload bindings stay fixed.")
 	if p := s.profile(); p != nil {
 		identity, plan := accountText(p.account), accountText(p.plan)
 		if identity == "" {
@@ -610,6 +626,12 @@ func (m *model) renderAccounts() string {
 	body := strings.Join(append(noticeLines, wrapped[s.scroll:end]...), "\n")
 	body = lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(body)
 	footer := fmt.Sprintf("PgUp/PgDn scroll · Esc close  %d–%d/%d", s.scroll+1, end, len(wrapped))
+	if s.pending == "" && s.confirm == nil && !s.attempt.active() {
+		footer = fmt.Sprintf("↑↓/jk select · PgUp/PgDn scroll · Esc close  %d–%d/%d", s.scroll+1, end, len(wrapped))
+		if w < 60 {
+			footer = fmt.Sprintf("↑↓/jk select · PgUp/Dn · Esc  %d–%d/%d", s.scroll+1, end, len(wrapped))
+		}
+	}
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accent).
 		Padding(0, 1).Render(cellPad(titleStyle.Render("Accounts · remaining budget"), w) + "\n" + body + "\n" + cellPad(dimStyle.Render(footer), w))
 }

@@ -1,0 +1,12 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor
+ ○ console                │work 00 · 界 ···········
+ A╭──────────────────────────────────────────────╮·
+ C│ Accounts · remaining budget                  │·
+  │ Selected: Claude                             │·
+ C│ Account: unknown (not verified)              │·
+  │ Plan: unknown                                │·
+ ↵│ Enter: configure a Claude token using protec │·
+ S│ ↑↓/jk select · PgUp/Dn · Esc  10–13/24       │·
+ /╰──────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────
+ accounts · e subscription · a API key · d default ·

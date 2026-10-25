@@ -1,0 +1,24 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor   3 term  ──────────────────
+ ○ console                │work 00 · 界 ·······································
+  ╭──────────────────────────────────────────────────────────────────────────╮·
+ ▾│ Accounts · remaining budget                                              │·
+ ▾│ Tab/↑↓/jk: select · e: subscription · a: API key                         │·
+  │ d: default · x: logout · r: refresh                                      │·
+  │ Existing workload bindings stay fixed.                                   │·
+ ▾│                                                                          │·
+ ▾│ Selected: Codex                                                          │·
+  │ Account: fixture@example.test                                            │·
+  │ Plan: fixture-plan                                                       │·
+ ▾│ Enter: start browser login.                                              │·
+ ○│ five_hour: available                                                     │·
+  │   Used: 67% of the reported window                                       │·
+ A│   Source:   Confidence:                                                  │·
+ C│   Observed: 2026-10-25 19:14 UTC  Resets: 2030-01-02 03:04 UTC           │·
+  │ seven_day: available                                                     │·
+ C│   Used: 67% of the reported window                                       │·
+  │   Source:   Confidence:                                                  │·
+ ↵│   Observed: 2026-10-25 19:14 UTC  Resets: 2030-01-05 03:04 UTC           │·
+ S│ ↑↓/jk select · PgUp/PgDn scroll · Esc close  11–26/26                    │·
+ /╰──────────────────────────────────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────────────────────────────────
+ accounts · e subscription · a API key · d default · x logout · r refresh · Esc

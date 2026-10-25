@@ -43,11 +43,11 @@ func TestAddAgentKeyOnWorkgroup(t *testing.T) {
 	}
 }
 
-// `a` on a repo header still opens the repo-scoped new-agent form.
+// `a` on a repo header creates a normal workgroup with an explicit repo grant.
 func TestAddAgentKeyOnRepo(t *testing.T) {
 	m := &model{sessions: []core.Session{{ID: "acme/api", Title: "acme/api", Kind: "repo", Section: core.SectionRepos}}}
 	m.handleKey(key("a"))
-	if m.form == nil || m.form.action != "new-repo-agent" || m.form.id != "acme/api" {
+	if m.form == nil || m.form.action != "new-workgroup" || m.form.id != "" || m.form.values()["repos"] != "acme/api" {
 		t.Fatalf("repo agent form not opened correctly: %+v", m.form)
 	}
 }
@@ -210,5 +210,15 @@ func TestRowStatusShowsID(t *testing.T) {
 	byID := core.Session{ID: "ag1-full-uuid", Title: "ag1-full", RootID: "wg1", Status: "ready · main", State: core.StateReady, Section: core.SectionWorkgroups}
 	if got := m.rowStatus(byID, " "); !strings.Contains(got, "ready · main") || strings.Contains(got, "ag1-full-uuid ·") {
 		t.Fatalf("sub-line should be just the status when the title is the id, got %q", got)
+	}
+}
+
+func TestClearingRepoShortcutDoesNotBroadenGrants(t *testing.T) {
+	m := &model{}
+	m.openNewRepoWorkgroupForm("api", "api")
+	m.form.field("repos").value = ""
+	fields := formFieldsForSubmit(m.form)
+	if value, explicit := fields["repos"]; !explicit || value != "" {
+		t.Fatalf("cleared repo shortcut broadened grants: %#v", fields)
 	}
 }

@@ -38,7 +38,7 @@ func TestAccountsNavigationAndConfirmationCaptureRevision(t *testing.T) {
 		return accountResponse{}, nil
 	}
 	m.accounts.snapshot.profiles[0].defaultProfile = false
-	m.handleKey(key("j"))
+	m.handleKey(key("k")) // clamp at the first provider; never expose legacy sources
 	if m.accounts.selected != "claude:central" {
 		t.Fatal("navigation exposed a legacy source")
 	}
