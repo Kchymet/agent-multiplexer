@@ -82,6 +82,7 @@ type AccountLimitWindow struct {
 	ResetsAt      int64   `json:"resetsAt,omitempty"` // Unix seconds
 }
 
+// Ceremony states: pending | succeeded | failed | cancelled. ExpiresAt is Unix milliseconds.
 // AccountCeremony is ephemeral and initiator-only. Poll using the returned
 // attemptId and the same initiator; status snapshots never include these fields.
 type AccountCeremony struct {
@@ -89,7 +90,7 @@ type AccountCeremony struct {
 	State     string `json:"state"`
 	Method    string `json:"method"`
 	AuthURL   string `json:"authUrl,omitempty"`
-	ExpiresAt int64  `json:"expiresAt"`
+	ExpiresAt int64  `json:"expiresAt"` // Unix milliseconds
 }
 
 type AccountResult struct {
