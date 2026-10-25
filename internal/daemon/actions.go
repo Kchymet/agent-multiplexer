@@ -13,6 +13,7 @@ import (
 	"amux/internal/engine"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
+	"amux/internal/store"
 	"amux/internal/wsops"
 )
 
@@ -184,7 +185,10 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 	if !found {
 		return "", fmt.Errorf("session %s not found", action.ID)
 	}
-	expected, regrant, err := d.restoreCredentialState(ctx, action.ID)
+	if session.Mode == store.ModeConsole {
+		return "", d.restoreConsoleAccess(ctx, session)
+	}
+	expected, regrant, lapsed, err := d.restoreCredentialState(ctx, action.ID)
 	if err != nil {
 		return "", err
 	}
@@ -213,6 +217,15 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 		}
 		var successor access.Principal
 		if regrant {
+			// Retire a merely lapsed key only now, with archived policy committed
+			// and the runtime proven quiescent, so an earlier failure in this
+			// flow cannot leave the subject revoked with no successor.
+			if lapsed != nil {
+				if revokeErr := d.authority.RevokeCurrent(ctx, *lapsed); revokeErr != nil {
+					err = fmt.Errorf("retire expired credential before regrant: %w", revokeErr)
+					return
+				}
+			}
 			if _, regrantErr := d.authority.Regrant(ctx, access.SubjectSession, action.ID, expected); regrantErr != nil {
 				current, currentErr := d.authority.Current(ctx, access.SubjectSession, action.ID)
 				if currentErr != nil || current.Generation != expected+1 {
@@ -300,30 +313,65 @@ func (d *Daemon) quiesceSessionRuntimeLocked(subjectID string) error {
 	return nil
 }
 
-func (d *Daemon) restoreCredentialState(ctx context.Context, subjectID string) (uint64, bool, error) {
+// restoreCredentialState reports, without mutating the authority, whether a
+// restore must regrant and which generation it must follow. For a merely
+// expired current key it also returns that principal so the caller can retire
+// it immediately before regranting, once every other precondition holds.
+func (d *Daemon) restoreCredentialState(ctx context.Context, subjectID string) (expected uint64, regrant bool, lapsed *access.Principal, err error) {
 	if d.authority == nil {
-		return 0, false, fmt.Errorf("credential authority unavailable")
+		return 0, false, nil, fmt.Errorf("credential authority unavailable")
 	}
-	if _, err := d.authority.Current(ctx, access.SubjectSession, subjectID); err == nil {
-		return 0, false, nil
-	} else if errors.Is(err, access.ErrNotProvisioned) {
-		return 0, false, nil
-	} else if errors.Is(err, access.ErrExpired) {
+	_, err = d.authority.Current(ctx, access.SubjectSession, subjectID)
+	switch {
+	case err == nil, errors.Is(err, access.ErrNotProvisioned):
+		return 0, false, nil, nil
+	case errors.Is(err, access.ErrExpired):
 		credential, loadErr := access.LoadCredential(d.authority.CredentialDir(access.SubjectSession, subjectID))
 		if loadErr != nil {
-			return 0, false, loadErr
+			return 0, false, nil, loadErr
 		}
-		if revokeErr := d.authority.RevokeCurrent(ctx, credentialPrincipal(credential)); revokeErr != nil {
-			return 0, false, revokeErr
+		principal := credentialPrincipal(credential)
+		return principal.Generation, true, &principal, nil
+	case errors.Is(err, access.ErrRevoked):
+		revoked, lastErr := d.authority.LastRevoked(ctx, access.SubjectSession, subjectID)
+		if lastErr != nil {
+			return 0, false, nil, lastErr
 		}
-	} else if !errors.Is(err, access.ErrRevoked) {
-		return 0, false, err
+		return revoked.Generation, true, nil, nil
+	default:
+		return 0, false, nil, err
 	}
-	revoked, err := d.authority.LastRevoked(ctx, access.SubjectSession, subjectID)
-	if err != nil {
-		return 0, false, err
+}
+
+// restoreConsoleAccess restores the built-in console, which has no store row
+// and is never archived. Its runtime is quiesced and exactly the latest lapsed
+// or revoked generation is regranted; nothing in the store changes. The
+// reconcile loop reopens the mailbox once a current credential exists.
+func (d *Daemon) restoreConsoleAccess(ctx context.Context, session store.Session) error {
+	expected, regrant, lapsed, err := d.restoreCredentialState(ctx, session.ID)
+	if err != nil || !regrant {
+		return err
 	}
-	return revoked.Generation, true, nil
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	d.permissions.retireAnd(session.ID, func() {
+		if err = d.quiesceSessionRuntimeLocked(session.ID); err != nil {
+			return
+		}
+		if lapsed != nil {
+			if revokeErr := d.authority.RevokeCurrent(ctx, *lapsed); revokeErr != nil {
+				err = fmt.Errorf("retire expired console credential before regrant: %w", revokeErr)
+				return
+			}
+		}
+		if _, regrantErr := d.authority.Regrant(ctx, access.SubjectSession, session.ID, expected); regrantErr != nil {
+			current, currentErr := d.authority.Current(ctx, access.SubjectSession, session.ID)
+			if currentErr != nil || current.Generation != expected+1 {
+				err = fmt.Errorf("restore console credential regrant: %w", regrantErr)
+			}
+		}
+	})
+	return err
 }
 
 // replaceSession preflights a host-authorized replacement before stopping the
