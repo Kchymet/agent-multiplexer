@@ -1,10 +1,17 @@
 # Machine login and broker identity: current behavior and proposed contract
 
 Status: discussion draft for review; no runtime or protocol change is proposed for immediate shipment. Source
-baseline: `e6e4d4aaf9fcd3e962713a57441602503b61755b`. Line references below refer to that revision. This
+baseline: `e6e4d4aaf9fcd3e962713a57441602503b61755b`. Source links are pinned to their reviewed revision. This
 document is a mathematical and transition-table specification, not an executable model or a verification
 claim. It follows the repository's Markdown design-document convention; discovery found no existing
 formal-model language, checker configuration, or checker target.
+
+Upstream delta reviewed through `b784ab5045b0aeff8fadc3fd1a9d14b8b0f57254`: coordinator creation/model
+selection changed, and Codex now reconnects its control transport to a still-running supervisor/process and
+exact thread, repeating token login before resume. A transport reconnect is therefore distinct from runtime
+replacement; neither implies a new broker credential or account binding. The credential/policy/account-store
+contracts below remain unchanged. See [manager lifecycle](https://github.com/Kchymet/agent-multiplexer/blob/b784ab5045b0aeff8fadc3fd1a9d14b8b0f57254/internal/codexapp/manager.go#L90)
+and [reconnect handshake](https://github.com/Kchymet/agent-multiplexer/blob/b784ab5045b0aeff8fadc3fd1a9d14b8b0f57254/internal/codexapp/supervisor.go#L635).
 
 Navigation: [current login inventory](#21-current-machine-login-inventory-e) · [state](#3-abstract-state) ·
 [judgments](#4-authentication-and-authorization-judgments) ·
@@ -19,8 +26,8 @@ The central design requirement is machine-scoped Claude/Codex login configuratio
 subscription-limit visibility through both amux TUI and web Harness, with new workloads using the configured
 default. The model connects this proposed account service to the existing access authority, session mailbox,
 policy, credential lifecycle, and runtime fencing. External account services and effects are abstract
-boundaries. Web Harness implementation is outside this assigned repo; its current evidence below was supplied
-by the coordinator's independent audit.
+boundaries. Web Harness is a separate repository; its evidence comes from a source review at the pinned
+revision in section 11. Cross-repository findings are distinguished from locally inspected code.
 
 - **E — enforced behavior:** a check or ordering visible in the cited code.
   This is source evidence, not an exhaustive proof of every caller.
@@ -31,8 +38,8 @@ by the coordinator's independent audit.
 - **Q — open question:** a choice or audit obligation not resolved here.
 
 The existing prose contract is [agent CLI
-lifecycle](agent-cli-sandbox.md#availability-restart-and-completion). The [security
-policy](../SECURITY.md#intended-environment) trusts the operator, daemon, installed executable, selected
+lifecycle](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/docs/agent-cli-sandbox.md#availability-restart-and-completion). The [security
+policy](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/SECURITY.md#intended-environment) trusts the operator, daemon, installed executable, selected
 harness binaries, and OS. Sessions share network access and selected accounts; macOS host application
 launching is a deliberate exception. This is not a hostile-tenant isolation specification.
 
@@ -43,16 +50,16 @@ sets is a type error in the model.
 
 | Entity / notation | Current meaning and lifetime | Evidence |
 | --- | --- | --- |
-| Subject `s = (kind, subjectID)` | `kind` is host, session, or provider. The local host subject is `local-operator`. A session subject identifies a store row or the synthetic console. | [authority.go:42–81,169](../internal/access/authority.go#L42), [session_policy.go:125](../internal/daemon/session_policy.go#L125) |
-| Principal `p = (s, k, g)` | Authenticated subject plus key ID `k` and **credential Generation** `g`, a positive integer. Role and scope are deliberately absent. | [authority.go:62–101](../internal/access/authority.go#L62) |
-| Credential key `k` | Ed25519 possession credential; registry contains public material and validity, client file contains private material and daemon trust pins. Normally valid for 30 days. | [authority.go:600–616](../internal/access/authority.go#L600) |
-| Daemon boot `b` | **BootID**, a fresh 32-byte random nonce on authority open. Registry, issuer, TLS identity, and replay ledger are loaded separately and can persist. Boot is not credential generation. | [authority.go:224–259](../internal/access/authority.go#L224) |
-| Conversation `c` | Persisted harness conversation identity (`ClaudeID` historically names the field, including Codex usage). A runtime restart can preserve it. It is not broker authority. | [store.go:30–40,325](../internal/store/store.go#L30), [actions.go:377](../internal/daemon/actions.go#L377) |
-| Runtime `(h, rho)` | Process-local handle identity `h` and opaque **runtime generation** `rho` (16 random bytes). Re-observing the same handle retains its generation; replacement or retirement changes the binding. | [session_permission.go:77–146](../internal/daemon/session_permission.go#L77) |
-| RPC request `q` | **RequestID**, normally 16 random bytes per signed envelope. Replay key is `(k,g,q)`; BootID and body digest are signed but are not components of that ledger key. | [authority.go:964–980](../internal/access/authority.go#L964), [authority.go:1077–1112](../internal/access/authority.go#L1077) |
-| Permission request `a` | Runtime approval ID, bound to `(session,rho,h)`. It is a separate namespace from RPC `q`, even though both use request-ID terminology. | [session_permission.go:222–286](../internal/daemon/session_permission.go#L222) |
-| Receipt | A new signed RPC envelope with its own `q`, containing the original RPC ID and response digest. | [client.go:280–310](../internal/sessionrpc/client.go#L280) |
-| Account token `t` | An upstream account capability, separate from the broker signing credential and its Generation. Central credential delivery also has its own account-store generation. | [central_credential.go:76–87](../internal/daemon/central_credential.go#L76) |
+| Subject `s = (kind, subjectID)` | `kind` is host, session, or provider. The local host subject is `local-operator`. A session subject identifies a store row or the synthetic console. | [authority.go:42–81,169](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L42), [session_policy.go:125](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_policy.go#L125) |
+| Principal `p = (s, k, g)` | Authenticated subject plus key ID `k` and **credential Generation** `g`, a positive integer. Role and scope are deliberately absent. | [authority.go:62–101](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L62) |
+| Credential key `k` | Ed25519 possession credential; registry contains public material and validity, client file contains private material and daemon trust pins. Normally valid for 30 days. | [authority.go:600–616](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L600) |
+| Daemon boot `b` | **BootID**, a fresh 32-byte random nonce on authority open. Registry, issuer, TLS identity, and replay ledger are loaded separately and can persist. Boot is not credential generation. | [authority.go:224–259](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L224) |
+| Conversation `c` | Persisted harness conversation identity (`ClaudeID` historically names the field, including Codex usage). A runtime restart can preserve it. It is not broker authority. | [store.go:30–40,325](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/store/store.go#L30), [actions.go:377](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/actions.go#L377) |
+| Runtime `(h, rho)` | Process-local handle identity `h` and opaque **runtime generation** `rho` (16 random bytes). Re-observing the same handle retains its generation; replacement or retirement changes the binding. | [session_permission.go:77–146](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_permission.go#L77) |
+| RPC request `q` | **RequestID**, normally 16 random bytes per signed envelope. Replay key is `(k,g,q)`; BootID and body digest are signed but are not components of that ledger key. | [authority.go:964–980](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L964), [authority.go:1077–1112](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L1077) |
+| Permission request `a` | Runtime approval ID, bound to `(session,rho,h)`. It is a separate namespace from RPC `q`, even though both use request-ID terminology. | [session_permission.go:222–286](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_permission.go#L222) |
+| Receipt | A new signed RPC envelope with its own `q`, containing the original RPC ID and response digest. | [client.go:280–310](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/client.go#L280) |
+| Account token `t` | An upstream account capability, separate from the broker signing credential and its Generation. Central credential delivery also has its own account-store generation. | [central_credential.go:76–87](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_credential.go#L76) |
 | Machine `m` (P) | Stable broker installation/owner identity, distinct from BootID and from the physical device's other OS users. Remote clients must bind to this authenticated machine, not choose authority by supplying a machine ID. | Proposed scope; current homes derive from local amux data directories. |
 | Profile `f`, account `u`, credential version `v` (P) | `f` is a machine-local configuration identity. `u=(provider,providerAccountID,workspace/tenant)` is verified upstream identity, or explicitly unknown; email is display data. `v` identifies a secret revision within a profile. None equals broker Generation, BootID, runtime generation, or another profile's version. | Proposed distinction; current central Claude and Codex token generations are unrelated counters. |
 
@@ -60,20 +67,20 @@ sets is a type error in the model.
 that session. There is no authenticated model, pane, tool, or individual process identity inside it. Fixed
 context and environment locators do not add authority. A stable read-only credential directory permits running
 mounts to see rotated `current` files. Thus rotation alone does not exclude a still-running process that can
-read the successor key. Sources: [central_credential.go:17–21](../internal/daemon/central_credential.go#L17),
-[paths.go:25–47](../internal/access/paths.go#L25), [authority.go:83–86](../internal/access/authority.go#L83).
+read the successor key. Sources: [central_credential.go:17–21](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_credential.go#L17),
+[paths.go:25–47](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/paths.go#L25), [authority.go:83–86](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L83).
 
 ### 2.1 Current machine login inventory (E)
 
 | Concern | Implemented behavior and boundary | Evidence |
 | --- | --- | --- |
-| Defaults and sources | Central is the default per harness. Claude supports central/host/shared/environment; Codex central/host/environment. These select local stores/config, not persisted workload profile IDs. Host/shared expose legacy shared login semantics; environment supplies no amux credential. | [amuxcfg/auth.go:10–44,91](../internal/amuxcfg/auth.go#L10), [store.go:30](../internal/store/store.go#L30) |
-| Claude acquisition | Host CLI runs setup-token and hidden paste or token-stdin, saves one private central token, and queues idle-agent restart. Status reports fingerprint, stored time and credential generation, not verified account ID/plan/expiry. Setup-token's reported one-year lifetime is not a parsed expiry. | [cmd/amux/auth.go:116–213](../cmd/amux/auth.go#L116) |
-| Claude delivery/overrides | Agent launcher fetches via signed mailbox; every credential-reading session process has that authority. Central conflicts with API-key/helper/provider/endpoint overrides fail closed. Host/shared use legacy file/Keychain sources; central/environment retire shared login links. Reissue does not revoke old tokens; busy agents retain them until restart. | [central_credential.go:17–93](../internal/daemon/central_credential.go#L17), [claudecfg/central.go:30–55,155](../internal/claudecfg/central.go#L30), [auth.go:57–101](../internal/daemon/auth.go#L57) |
-| Codex acquisition/status | Daemon owns central home/native App Server; host action starts/cancels login, host query returns mode, email, plan, state and URL. Central mode routes supervised sessions to this owner; changing into that mode can require daemon restart. | [central_codex.go:51–75,132–214](../internal/daemon/central_codex.go#L51), [core.go:257–281](../internal/core/core.go#L257) |
-| Codex delivery/continuity | Supervisor callback uses daemon-supplied session ID; shim checks existing unarchived Codex row, **not broker Valid or credential generation**, and does not recheck after provider I/O. Refreshes coalesce; nonempty previous-account binding rejects account changes. Binding persists in the structured identity sidecar, best-effort, and is restored for the matching resumed thread; it is not a creation-time profile record. | [central_codex.go:100–129](../internal/daemon/central_codex.go#L100), [codexauth.go:246–281](../internal/codexauth/codexauth.go#L246), [manager.go:311](../internal/codexapp/manager.go#L311), [identity.go:67–100](../internal/codexapp/identity.go#L67) |
-| Codex overrides/logout | Central strips selected API-key/endpoint variables, does not share host auth.json, and injects access tokens before thread use. Host mode shares host login. Provider has native Logout, but amux auth CLI exposes login/status/restart, not logout. Closing provider is not upstream logout. | [codexcfg/template.go:42–59](../internal/codexcfg/template.go#L42), [codexapp/auth.go:184–205](../internal/codexapp/auth.go#L184), [codexauth.go:471–509](../internal/codexauth/codexauth.go#L471), [cmd/amux/auth.go:35–39](../cmd/amux/auth.go#L35) |
-| UI/web and limits | No account-management TUI integration, account quota model, or account/rateLimits consumer found in this checkout. Claude statusline subset takes model/session only; usage events measure tokens/context, not remaining subscription. Provider creation accepts machine identity, meaning execution-machine config, and its advertisement intentionally contains no account IDs. See the independent Harness audit in section 11. | [claudecfg.go:643–651](../internal/claudecfg/claudecfg.go#L643), [codex.go:511–524](../internal/runtimeevents/codex.go#L511), [execution.go:3–19](../harnessproto/execution.go#L3), [sessions.go:348–378](../internal/provider/sessions.go#L348) |
+| Defaults and sources | Central is the default per harness. Claude supports central/host/shared/environment; Codex central/host/environment. These select local stores/config, not persisted workload profile IDs. Host/shared expose legacy shared login semantics; environment supplies no amux credential. | [amuxcfg/auth.go:10–44,91](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/amuxcfg/auth.go#L10), [store.go:30](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/store/store.go#L30) |
+| Claude acquisition | Host CLI runs setup-token and hidden paste or token-stdin, saves one private central token, and queues idle-agent restart. Status reports fingerprint, stored time and credential generation, not verified account ID/plan/expiry. Setup-token's reported one-year lifetime is not a parsed expiry. | [cmd/amux/auth.go:116–213](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/cmd/amux/auth.go#L116) |
+| Claude delivery/overrides | Agent launcher fetches via signed mailbox; every credential-reading session process has that authority. Central conflicts with API-key/helper/provider/endpoint overrides fail closed. Host/shared use legacy file/Keychain sources; central/environment retire shared login links. Reissue does not revoke old tokens; busy agents retain them until restart. | [central_credential.go:17–93](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_credential.go#L17), [claudecfg/central.go:30–55,155](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/claudecfg/central.go#L30), [auth.go:57–101](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/auth.go#L57) |
+| Codex acquisition/status | Daemon owns central home/native App Server; host action starts/cancels login, host query returns mode, email, plan, state and URL. Central mode routes supervised sessions to this owner; changing into that mode can require daemon restart. | [central_codex.go:51–75,132–214](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_codex.go#L51), [core.go:257–281](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/core/core.go#L257) |
+| Codex delivery/continuity | Supervisor callback uses daemon-supplied session ID; shim checks existing unarchived Codex row, **not broker Valid or credential generation**, and does not recheck after provider I/O. Refreshes coalesce; nonempty previous-account binding rejects account changes. Binding persists in the structured identity sidecar, best-effort, and is restored for the matching resumed thread; it is not a creation-time profile record. | [central_codex.go:100–129](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_codex.go#L100), [codexauth.go:246–281](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexauth/codexauth.go#L246), [manager.go:311](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexapp/manager.go#L311), [identity.go:67–100](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexapp/identity.go#L67) |
+| Codex overrides/logout | Central strips selected API-key/endpoint variables, does not share host auth.json, and injects access tokens before thread use. Host mode shares host login. Provider has native Logout, but amux auth CLI exposes login/status/restart, not logout. Closing provider is not upstream logout. | [codexcfg/template.go:42–59](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexcfg/template.go#L42), [codexapp/auth.go:184–205](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexapp/auth.go#L184), [codexauth.go:471–509](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexauth/codexauth.go#L471), [cmd/amux/auth.go:35–39](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/cmd/amux/auth.go#L35) |
+| UI/web and limits | No account-management TUI integration, account quota model, or account/rateLimits consumer found in this checkout. Claude statusline subset takes model/session only; usage events measure tokens/context, not remaining subscription. Provider creation accepts machine identity, meaning execution-machine config, and its advertisement intentionally contains no account IDs. See the independent Harness audit in section 11. | [claudecfg.go:643–651](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/claudecfg/claudecfg.go#L643), [codex.go:511–524](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/runtimeevents/codex.go#L511), [execution.go:3–19](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/harnessproto/execution.go#L3), [sessions.go:348–378](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/provider/sessions.go#L348) |
 
 **Documented adapter possibilities, not implemented guarantees:** Codex official docs expose account/read,
 login start/cancel/completed, logout, account updates, and rateLimits read/updated; external-token mode
@@ -84,7 +91,7 @@ account identity. Syntax validation is not issuer authentication; host Claude au
 different login. Native logout does not delete amux's separate setup-token store. The Codex adapter expects a
 browser authUrl, not a device-code result. Installed CLI version support was not verified; smoke quota calls
 are not proof of decoding support. Workgroup readiness must check each selected harness, including a Codex
-coordinator plus Claude workers. These limits incorporate independent audit 59cd05. Sources checked
+coordinator plus Claude workers. Sources checked
 2026-10-24: [Codex account APIs](https://learn.chatgpt.com/docs/app-server#auth-endpoints), [Claude
 CLI](https://code.claude.com/docs/en/cli-reference#cli-commands), [Claude
 statusline](https://code.claude.com/docs/en/statusline#available-data).
@@ -113,11 +120,12 @@ Let `None` denote absence and `map[X -> Y]` a partial map. A model state is:
 | `LoginAttempt[m,f,l]` (P) | Initiator, expected profile revision, expiring attempt ID, provider flow correlation, state; separate from RPC and permission IDs. Secrets stay in a private staging store until commit. |
 | `Quota[m,f,u,bucket]` (P) | Optional measurements, observedAt, receivedAt, source, freshness/unavailable reason, attribution confidence, profile revision and binding/runtime provenance where relevant. |
 | `MachineRights[actor,m]` (P) | Separately granted read-account-status and manage-login; neither follows merely from session membership, publication, compute access, or a request's machine ID. |
+| `ProfileUse[actor,m,f]` (P) | Explicit use-profile grant to an authenticated actor for a particular machine/profile. Default use may instead derive from existing authorized workload creation, as defined in section 9.1; it grants no account read/manage rights. |
 
 For persisted files, distinguish **visible** state from **sync-confirmed** state. The implementation's
 `committed` flag means rename has made the pathname visible; directory sync can subsequently fail. It does not
 mean confirmed power-loss durability. On such an error the authority still adopts visible registry/replay
-state in memory. [authority.go:1186–1222](../internal/access/authority.go#L1186)
+state in memory. [authority.go:1186–1222](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L1186)
 
 **A:** One authority owner; unforgeable signatures; collision-free fresh keys and nonces within the bounded
 run; no hostile alteration, deletion, or rollback of daemon storage; functioning OS isolation of other
@@ -143,7 +151,7 @@ Define the authority validity judgment, for `p=(s,k,g)`:
       and Cur[s] = k and Reg[k].revokedAt = 0
       and now < Reg[k].notAfter
 
-This describes [Valid](../internal/access/authority.go#L1003). It authenticates a current credential; it says
+This describes [Valid](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L1003). It authenticates a current credential; it says
 nothing about whether the subject is archived or allowed an operation.
 
 For envelope `e=(version,b,k,g,q,issued,expires,body,signature)`, define:
@@ -162,16 +170,16 @@ successful replay persistence. Verification derives the subject from the registr
 mailbox then requires `p.kind=session` and `p.subjectID=mailbox.subjectID`, decodes the exact accepted body,
 and performs authorization. A cryptographically accepted request can therefore consume its ID before being
 rejected for wrong mailbox, malformed operation, or policy.
-[authority.go:926–992](../internal/access/authority.go#L926),
-[server.go:395–458](../internal/sessionrpc/server.go#L395)
+[authority.go:926–992](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L926),
+[server.go:395–458](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/server.go#L395)
 
 For the host stream, pinned daemon TLS and an issuer-signed challenge establish server identity; a signed
 connection-specific proof establishes the client principal. Only host kind is admitted by this listener. This
 is a different protocol from mailbox `Seen`; one proof per connection consumes the challenge. Checks/watchers
 invalidate connections as credentials change, but are not a proof that an already-started socket write can be
-recalled. [socket.go:20–59,150–189](../internal/access/socket.go#L20),
-[daemon.go:786–826](../internal/daemon/daemon.go#L786),
-[authority.go:1029](../internal/access/authority.go#L1029), [conn.go:24–30](../internal/daemon/conn.go#L24)
+recalled. [socket.go:20–59,150–189](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/socket.go#L20),
+[daemon.go:786–826](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/daemon.go#L786),
+[authority.go:1029](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L1029), [conn.go:24–30](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/conn.go#L24)
 
 Define `Allowed(p,op,S)` separately from `Valid`. For ordinary session RPC:
 
@@ -183,8 +191,8 @@ Define `Allowed(p,op,S)` separately from `Valid`. For ordinary session RPC:
 The actual admission judgment is `Valid AND SessionAllowed`. No valid signature can bypass canonical request
 validation. Effective permission is the intersection of policy and dispatcher rules: for example, the policy
 helper lists some unarchive cases, but restricted canonical operations reject restore.
-[session_dispatch.go:19–48](../internal/daemon/session_dispatch.go#L19),
-[session_operation.go:13–36,128–142](../internal/daemon/session_operation.go#L13)
+[session_dispatch.go:19–48](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_dispatch.go#L19),
+[session_operation.go:13–36,128–142](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_operation.go#L13)
 
 | Subject / operation | Effective current rule (E) |
 | --- | --- |
@@ -197,10 +205,10 @@ helper lists some unarchive cases, but restricted canonical operations reject re
 | History | Ordinary self; coordinator current direct members (including archived members); repo home its owned descendants; console broader visibility. Caller archive and target archive have different meanings. |
 | Provider | Declared kind; policy delegates to an injected resolver. Missing callback denies. No production assignment of that callback was found in this baseline; do not equate remote bearer capabilities with this local principal. |
 
-Sources: [policy.go:47–245,303](../internal/access/policy.go#L47),
-[session_policy.go:88–140](../internal/daemon/session_policy.go#L88),
-[agent-cli-sandbox.md:48–81](agent-cli-sandbox.md#authority-and-discovery). Roles themselves are derived from
-store fields, not signed role assertions: [migrate.go:205–249](../internal/store/migrate.go#L205).
+Sources: [policy.go:47–245,303](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/policy.go#L47),
+[session_policy.go:88–140](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_policy.go#L88),
+[agent-cli-sandbox.md:48–81](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/docs/agent-cli-sandbox.md#authority-and-discovery). Roles themselves are derived from
+store fields, not signed role assertions: [migrate.go:205–249](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/store/migrate.go#L205).
 
 Specialized judgments bypass the general action vocabulary but not authentication:
 
@@ -208,20 +216,20 @@ Specialized judgments bypass the general action vocabulary but not authenticatio
   existing unarchived row, and matching harness where required. GitHub reads and
   Claude host-store operations have distinct allowlists. Central Claude delivery
   additionally checks configured mode and launch conflicts.
-  [credential_broker.go:16–80](../internal/daemon/credential_broker.go#L16),
-  [central_credential.go:29–93](../internal/daemon/central_credential.go#L29)
+  [credential_broker.go:16–80](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/credential_broker.go#L16),
+  [central_credential.go:29–93](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_credential.go#L29)
 - `ReportAllowed`: own live session; runtime generation must match for a report.
   The current generation is queryable using the session credential. It fences
   stale messages, not competing processes with the same session authority.
   Hook permission observations are diagnostic, not answerable approvals.
-  [session_reports.go:229–280](../internal/daemon/session_reports.go#L229),
-  [agent-cli-sandbox.md:35](agent-cli-sandbox.md#dispatcher-inventory)
+  [session_reports.go:229–280](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_reports.go#L229),
+  [agent-cli-sandbox.md:35](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/docs/agent-cli-sandbox.md#dispatcher-inventory)
 - `ReceiptAllowed`: valid exact completion principal, original request and
   response digest, live pending receipt/grace state. It is the narrow exception
   to ordinary denial after the caller is archived, not a new action capability.
-  [session_dispatch.go:23–30](../internal/daemon/session_dispatch.go#L23),
-  [session_lifecycle.go:458–463](../internal/daemon/session_lifecycle.go#L458),
-  [server.go:626](../internal/sessionrpc/server.go#L626)
+  [session_dispatch.go:23–30](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_dispatch.go#L23),
+  [session_lifecycle.go:458–463](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_lifecycle.go#L458),
+  [server.go:626](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/server.go#L626)
 
 ## 5. Current transitions and ordering points
 
@@ -231,23 +239,23 @@ linearization/ordering point, not a proof of whole-system linearizability.
 
 | Transition | Preconditions | State change / ordering point | Evidence |
 | --- | --- | --- | --- |
-| Open authority | Exclusive root ownership; persisted state readable | Load registry/replay/issuer/TLS; generate fresh `b`. Second owner fails. | [authority.go:189–259](../internal/access/authority.go#L189) |
-| Ensure first credential | Subject has never had a registry record | Stage generation 1, then commit and publish below. Existing revoked/expired subjects are not implicitly issued by Ensure. | [authority.go:348–379](../internal/access/authority.go#L348) |
-| Stage successor | Rotate: valid current; Regrant: no current and expected latest revoked generation; RenewExpired: exact current key, unrevoked, elapsed lifetime | Create fresh key at predecessor generation + 1; write/sync staged credential and directory ancestry. No authority yet; pre-registry failure leaves predecessor authority unchanged. | [authority.go:433–503,561–639](../internal/access/authority.go#L433) |
-| Commit registry | Staged credential available | Registry rename installs new record/current and marks predecessor revoked in one file; adopt in memory and notify old-key watchers even if later sync fails. **LP: registry rename**, serialized by authority mutex; sync is durability confirmation. | [authority.go:641–653](../internal/access/authority.go#L641), [authority.go:1186](../internal/access/authority.go#L1186) |
-| Publish credential | Registry points to staged successor | Rename stage to stable `current`, then sync directory. **Visibility point: credential rename.** `Current`/`Ensure` can recover committed staged publication; they do not mint another generation. | [authority.go:382–403,654–660](../internal/access/authority.go#L382) |
-| Revoke / RevokeCurrent | Revoke targets current subject; exact variant additionally requires matching `(s,k,g)` | Registry removes current mapping and marks record revoked. **LP: registry rename.** No-current ordinary revoke is a no-op; stale exact revoke fails. Not a store-archive or upstream-token operation. | [authority.go:873–923](../internal/access/authority.go#L873) |
-| Publish/claim RPC | Signed envelope, bounded files/queue | No-replace request rename makes request visible; server claims it and reserves response capacity. Claim alone does not authenticate or authorize it. | [files.go:174–187](../internal/sessionrpc/files.go#L174), [server.go:361–411](../internal/sessionrpc/server.go#L361) |
-| Accept RPC | `EnvelopeOK`, replay key absent, capacity | Persist `Seen[k,g,q]` before returning principal. **LP: replay rename**; dispatch proceeds only if Verify returns success. An uncertain commit consumes in memory but returns error. | [authority.go:964–992](../internal/access/authority.go#L964) |
-| Admit ordinary action | Valid, canonical, authorized under dispatch/effect gates | Recheck live authority and policy, then call exact action. Deferred work carries a guard and reacquires admission before its bounded effect/queueing. **Ordering point is path-specific admission**, not eventual external completion. | [session_dispatch.go:82–155](../internal/daemon/session_dispatch.go#L82), [steer.go:442–465](../internal/daemon/steer.go#L442) |
-| Read/disclose | Initial authorization; bounded read; final authorization | Discovery/history recheck after I/O; credential operations recheck within their gate. Return body to transport, which subsequently publishes it. Final check and response publication are distinct points. | [session_discovery.go:68–81](../internal/daemon/session_discovery.go#L68), [session_events.go:155–172](../internal/daemon/session_events.go#L155), [credential_broker.go:49–80](../internal/daemon/credential_broker.go#L49) |
-| Publish response | Dispatch returned a bounded result | Sign exact result and request correlation; no-replace rename, then directory sync. May become visible despite reported sync failure. No general authorization callback at this publication point. | [server.go:481–548](../internal/sessionrpc/server.go#L481) |
-| Observe response | Signature, boot, subject, key, generation, request ID, body digest match original request | Client accepts result; success can precede receipt. An existing matching response is checked before detecting a newer service boot. A lost result is indeterminate, not automatic re-execution. | [client.go:175–196,230–310](../internal/sessionrpc/client.go#L175) |
-| Set grants / move | Host-authorized grant change, or permitted management action; store validation | Grant ceiling replacement commits in one SQLite transaction. Move changes stored parent without moving worktree. Neither implies credential rotation or retroactive filesystem revocation. | [grants.go:40–82](../internal/store/grants.go#L40), [wsops.go:459–514](../internal/wsops/wsops.go#L459) |
-| Delegate child creation | Root valid; requested repos satisfy coordinator ceiling; canonical restricted call | Daemon creates distinct child ID/row/worktree; launch provisions its own key. No signed chain of attenuated credentials is passed from coordinator to child. Creation includes multiple non-atomic filesystem/store steps. | [policy.go:127–143](../internal/access/policy.go#L127), [wsops.go:190–235](../internal/wsops/wsops.go#L190), [session_access.go:65–81](../internal/daemon/session_access.go#L65) |
-| Publish runtime | Valid launch path; runtime creation succeeds | Under runtime gate: capture historical pending-request exclusions, create handle, install fresh `rho` when handle changes. Same handle preserves `rho`. Partial creation errors are not modeled as successful publication. | [session_permission.go:77–142](../internal/daemon/session_permission.go#L77) |
-| Bind / consume permission | Matching live handle; request observed/open, not historical or consumed; consumption also matches `rho` | Bind adds observed ID. Consume inserts into `claimed` under gate **before** final validation/delivery; even delivery failure cannot safely retry the same approval. | [session_permission.go:222–286](../internal/daemon/session_permission.go#L222) |
-| Restart runtime | Host-authorized, active session, launch preflight | Replace agent/App Server, preserve conversation and ordinary sibling tabs. Runtime generation is retired/replaced. This is not credential rotation or a new daemon boot. | [actions.go:377–450](../internal/daemon/actions.go#L377) |
+| Open authority | Exclusive root ownership; persisted state readable | Load registry/replay/issuer/TLS; generate fresh `b`. Second owner fails. | [authority.go:189–259](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L189) |
+| Ensure first credential | Subject has never had a registry record | Stage generation 1, then commit and publish below. Existing revoked/expired subjects are not implicitly issued by Ensure. | [authority.go:348–379](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L348) |
+| Stage successor | Rotate: valid current; Regrant: no current and expected latest revoked generation; RenewExpired: exact current key, unrevoked, elapsed lifetime | Create fresh key at predecessor generation + 1; write/sync staged credential and directory ancestry. No authority yet; pre-registry failure leaves predecessor authority unchanged. | [authority.go:433–503,561–639](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L433) |
+| Commit registry | Staged credential available | Registry rename installs new record/current and marks predecessor revoked in one file; adopt in memory and notify old-key watchers even if later sync fails. **LP: registry rename**, serialized by authority mutex; sync is durability confirmation. | [authority.go:641–653](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L641), [authority.go:1186](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L1186) |
+| Publish credential | Registry points to staged successor | Rename stage to stable `current`, then sync directory. **Visibility point: credential rename.** `Current`/`Ensure` can recover committed staged publication; they do not mint another generation. | [authority.go:382–403,654–660](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L382) |
+| Revoke / RevokeCurrent | Revoke targets current subject; exact variant additionally requires matching `(s,k,g)` | Registry removes current mapping and marks record revoked. **LP: registry rename.** No-current ordinary revoke is a no-op; stale exact revoke fails. Not a store-archive or upstream-token operation. | [authority.go:873–923](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L873) |
+| Publish/claim RPC | Signed envelope, bounded files/queue | No-replace request rename makes request visible; server claims it and reserves response capacity. Claim alone does not authenticate or authorize it. | [files.go:174–187](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/files.go#L174), [server.go:361–411](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/server.go#L361) |
+| Accept RPC | `EnvelopeOK`, replay key absent, capacity | Persist `Seen[k,g,q]` before returning principal. **LP: replay rename**; dispatch proceeds only if Verify returns success. An uncertain commit consumes in memory but returns error. | [authority.go:964–992](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority.go#L964) |
+| Admit ordinary action | Valid, canonical, authorized under dispatch/effect gates | Recheck live authority and policy, then call exact action. Deferred work carries a guard and reacquires admission before its bounded effect/queueing. **Ordering point is path-specific admission**, not eventual external completion. | [session_dispatch.go:82–155](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_dispatch.go#L82), [steer.go:442–465](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/steer.go#L442) |
+| Read/disclose | Initial authorization; bounded read; final authorization | Discovery/history recheck after I/O; credential operations recheck within their gate. Return body to transport, which subsequently publishes it. Final check and response publication are distinct points. | [session_discovery.go:68–81](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_discovery.go#L68), [session_events.go:155–172](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_events.go#L155), [credential_broker.go:49–80](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/credential_broker.go#L49) |
+| Publish response | Dispatch returned a bounded result | Sign exact result and request correlation; no-replace rename, then directory sync. May become visible despite reported sync failure. No general authorization callback at this publication point. | [server.go:481–548](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/server.go#L481) |
+| Observe response | Signature, boot, subject, key, generation, request ID, body digest match original request | Client accepts result; success can precede receipt. An existing matching response is checked before detecting a newer service boot. A lost result is indeterminate, not automatic re-execution. | [client.go:175–196,230–310](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/client.go#L175) |
+| Set grants / move | Host-authorized grant change, or permitted management action; store validation | Grant ceiling replacement commits in one SQLite transaction. Move changes stored parent without moving worktree. Neither implies credential rotation or retroactive filesystem revocation. | [grants.go:40–82](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/store/grants.go#L40), [wsops.go:459–514](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/wsops/wsops.go#L459) |
+| Delegate child creation | Root valid; requested repos satisfy coordinator ceiling; canonical restricted call | Daemon creates distinct child ID/row/worktree; launch provisions its own key. No signed chain of attenuated credentials is passed from coordinator to child. Creation includes multiple non-atomic filesystem/store steps. | [policy.go:127–143](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/policy.go#L127), [wsops.go:190–235](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/wsops/wsops.go#L190), [session_access.go:65–81](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_access.go#L65) |
+| Publish runtime | Valid launch path; runtime creation succeeds | Under runtime gate: capture historical pending-request exclusions, create handle, install fresh `rho` when handle changes. Same handle preserves `rho`. Partial creation errors are not modeled as successful publication. | [session_permission.go:77–142](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_permission.go#L77) |
+| Bind / consume permission | Matching live handle; request observed/open, not historical or consumed; consumption also matches `rho` | Bind adds observed ID. Consume inserts into `claimed` under gate **before** final validation/delivery; even delivery failure cannot safely retry the same approval. | [session_permission.go:222–286](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_permission.go#L222) |
+| Restart runtime | Host-authorized, active session, launch preflight | Replace agent/App Server, preserve conversation and ordinary sibling tabs. Runtime generation is retired/replaced. This is not credential rotation or a new daemon boot. | [actions.go:377–450](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/actions.go#L377) |
 
 ### 5.1 Limits of atomicity
 
@@ -255,19 +263,19 @@ linearization/ordering point, not a proof of whole-system linearizability.
 participate in daemon gates. Deferred steering reacquires them. This demonstrates ordering among those
 participating paths. It does not establish that every store writer, every call to authority methods, or every
 effect in another process participates. Policy lookups can use separate read-only store opens; there is no
-universal policy snapshot transaction. [actions.go:31–49](../internal/daemon/actions.go#L31),
-[session_lifecycle.go:136–140,534](../internal/daemon/session_lifecycle.go#L136),
-[session_policy.go:54–115](../internal/daemon/session_policy.go#L54)
+universal policy snapshot transaction. [actions.go:31–49](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/actions.go#L31),
+[session_lifecycle.go:136–140,534](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_lifecycle.go#L136),
+[session_policy.go:54–115](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_policy.go#L54)
 
 **E:** Authorization checks sample validity/expiry. Time passing is not blocked by a mutex. Input queueing may
 happen under admission while consumption and a model turn happen later. A successful steering response can
 mean accepted work, not an applied downstream result. Revocation cannot roll back those external effects.
-[steer.go:33–50,155–177](../internal/daemon/steer.go#L33)
+[steer.go:33–50,155–177](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/steer.go#L33)
 
 **E:** General response publication occurs after `Dispatch` returns and its deferred unlocks run. Final read
 authorization therefore does not imply `Valid/Allowed at response rename` or `Valid/Allowed at client
 observation`. Existing response bytes can outlive a daemon stop; delivered account tokens cannot be revoked by
-amux. [server.go:481–503](../internal/sessionrpc/server.go#L481), [SECURITY.md:31–45](../SECURITY.md#L31)
+amux. [server.go:481–503](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/server.go#L481), [SECURITY.md:31–45](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/SECURITY.md#L31)
 
 ## 6. Archive, completion, restore, and restart semantics
 
@@ -284,12 +292,12 @@ Archive state, key revocation, and runtime death are three separate facts.
 | Expiry maintenance | Active unrevoked credentials rotate near expiry; lapsed exact current keys can be renewed explicitly. Archived, revoked, or superseded keys cannot take that renewal path. Ensure alone does not renew. |
 | Daemon restart | Reopen persistent authority with a new BootID; old envelopes fail boot binding. Old matching responses may still establish earlier success. Accepted work without a response is indeterminate. Runtime permission bindings are re-established; historical approvals must not inherit a replacement generation. |
 
-Evidence: [session_dispatch.go:110–136](../internal/daemon/session_dispatch.go#L110),
-[session_lifecycle.go:407–463,505–550](../internal/daemon/session_lifecycle.go#L407),
-[session_lifecycle.go:351–359](../internal/daemon/session_lifecycle.go#L351),
-[actions.go:31–47,174–313](../internal/daemon/actions.go#L174),
-[session_lifecycle.go:284–332](../internal/daemon/session_lifecycle.go#L284),
-[client.go:230–310](../internal/sessionrpc/client.go#L230).
+Evidence: [session_dispatch.go:110–136](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_dispatch.go#L110),
+[session_lifecycle.go:407–463,505–550](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_lifecycle.go#L407),
+[session_lifecycle.go:351–359](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_lifecycle.go#L351),
+[actions.go:31–47,174–313](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/actions.go#L174),
+[session_lifecycle.go:284–332](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_lifecycle.go#L284),
+[client.go:230–310](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/client.go#L230).
 
 **A/Q:** Restore verifies tracked engine handles and supervisor state. Treating that as quiescence of *all*
 credential-reading descendants requires a process containment/lifecycle assumption not proven by this broker
@@ -361,6 +369,17 @@ replacement creates a new profile (or a new immutable account binding) rather th
 same-account refresh. Unknown Claude identity remains unknown: a changed opaque token cannot be certified as
 same-account refresh.
 
+`use-profile` authorizes binding a workload to an account source, not reading its secrets or managing login.
+Its principal is the authenticated initiating actor (local operator or explicitly mapped remote actor), and
+its resource is `(machine, profile)`, constrained by existing workload-create/management authority. Proposed
+default policy: an actor already authorized to create workloads on a machine may use that harness's current
+machine default without manage-login. Selecting an alternate profile requires an explicit `ProfileUse` grant;
+manage-login alone does not imply use-profile. Default resolution and this check occur together at creation.
+The recorded binding then authorizes delivery to that workload's fenced session/runtime; creation does not
+transfer the actor's general permissions to the session. Explicit rebind requires workload management,
+manage-login, and an explicit target-profile use grant, even when the target is today's default. Revoking a
+profile-use grant denies future selection/rebind; disabling a profile is the separate delivery cutoff.
+
     MachineAllowed(actor,m,op) = AuthenticatedMachineChannel(actor,m)
       AND CanonicalAccountOperation(op)
       AND MachineRights(actor,m,RequiredRight(op))
@@ -381,7 +400,7 @@ then permits already-delivered tokens to live until upstream expiry/revocation.
 | SetDefault | manage-login; same machine/harness, eligible profile, expected default revision | Commit Default only. Existing Bind rows unchanged. This is the linearization point against concurrent CreateWorkload; fail rather than pick an arbitrary racing value. |
 | CreateWorkload | Existing workload-create authorization plus right to use selected profile; selection valid, or explicit blocked/unconfigured state | Resolve and persist Bind with workload creation before launch, including default/override origin and expected account. A later launch reads Bind, not the latest machine default. No valid default means needs-login, not another account fallback. |
 | RefreshCredential | Same verified provider/account/tenant; current profile/revision/epoch; adapter supports refresh | Serialize refresh, advance v, keep f/u/Bind fixed; commit only if logout/rebind did not supersede operation. Unknown identity/token replacement requires explicit replacement semantics. |
-| RebindWorkload | Authorized workload management **and** manage-login/use-profile for target; expected old binding revision; user-visible restart policy | Persist rebind intent; fence old deliveries, quiesce affected runtime, commit new binding, restart with fresh runtime generation. Resume conversation only if provider permits account change; otherwise explicit new conversation. Failure leaves blocked/rebind-pending, never silent old/new fallback. |
+| RebindWorkload | Authorized workload management **and** manage-login **and** explicit use-profile for target; expected old binding revision; user-visible restart policy | Persist rebind intent; fence old deliveries, quiesce affected runtime, commit new binding, restart with fresh runtime generation. Resume conversation only if provider permits account change; otherwise explicit new conversation. Failure leaves blocked/rebind-pending, never silent old/new fallback. |
 | Logout / DisableProfile | manage-login; expected profile revision | Commit delivery-disabled epoch first, cancel attempts/refresh publication, invalidate quota freshness; then native logout/private-secret removal. Track external failure as cleanup-pending; local issuance remains disabled. Existing bound workloads become needs-login; no automatic account switch. Do not log out host/shared external stores without explicit scope/impact consent. |
 | ObserveAccount / ObserveQuota | read-account-status for caller; trusted broker adapter or authenticated scoped session reporter; matching profile/account revision | Store safe allowlisted metadata with provenance/times. Discard delayed results for replaced account/profile binding; unknown account stays unattributed. Session-provided telemetry is advisory, not authority or billing enforcement. |
 | Restart broker | Recover profile/default/Bind and disabled epochs from durable state | Reconcile incomplete login/rebind/logout by recorded intent; do not auto-replay acquisition or resurrect logged-out profiles. Replace BootID without changing machine/profile/account identity. |
@@ -495,8 +514,8 @@ recovery, capability negotiation, and quota freshness policy remain open, alongs
 
 ## 11. Source/test evidence appendix and next review step
 
-Harness evidence was supplied by coordinator-reviewed audit 767025 at
-`a225e888084c6880d35484f1452345f9b3e38a93`; these files were not read from another agent's checkout. The
+Harness evidence below comes from a separate source review at
+`a225e888084c6880d35484f1452345f9b3e38a93`, rather than a locally inspected checkout. The
 proposed additions in section 9 are not existing Harness APIs.
 
 | Audited current fact | Pinned cross-repository evidence |
@@ -506,35 +525,36 @@ proposed additions in section 9 are not existing Harness APIs.
 | Codex rate-limit updates survive raw session events, without typed machine quota summary | [reduce.ts:130](https://github.com/Kchymet/harness/blob/a225e888084c6880d35484f1452345f9b3e38a93/frontend/src/session/reduce.ts#L130) |
 | Web socket → durable Postgres relay → provider; authority revalidated at dispatch | [engine/provider/sessions.go:303](https://github.com/Kchymet/harness/blob/a225e888084c6880d35484f1452345f9b3e38a93/backend/engine/provider/sessions.go#L303) |
 
-The audit additionally reports personal BYOM beta requires immutable owner_user_id and blocks
+The cross-repository review additionally reports personal BYOM beta requires immutable owner_user_id and blocks
 shared/delegated/admin callers; legacy owner-email/admin and broader read visibility differ. No delegated
-account-management operator grant exists. These are coordinator-supplied findings, not a line-complete
-authorization proof here. The desired service must use explicit per-machine read/manage grants and preserve
-applicable owner restrictions, not repurpose those broader legacy rights.
+account-management operator grant exists. These findings lack a line-complete
+authorization proof in this appendix and require entry-point validation before implementation. The desired
+service must use explicit per-machine read/manage grants and preserve applicable owner restrictions, not
+repurpose those broader legacy rights.
 
 Local auth regression evidence:
-[codexauth_test.go:92,250,272,305,317](../internal/codexauth/codexauth_test.go#L92) covers token redaction,
+[codexauth_test.go:92,250,272,305,317](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/codexauth/codexauth_test.go#L92) covers token redaction,
 account continuity, refresh revocation, login cancellation, and internal logout;
-[centralauth_test.go:24](../internal/centralauth/centralauth_test.go#L24) covers secret formatting;
-[central_codex_test.go:67](../internal/daemon/central_codex_test.go#L67) covers the current store-row
+[centralauth_test.go:24](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/centralauth/centralauth_test.go#L24) covers secret formatting;
+[central_codex_test.go:67](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/central_codex_test.go#L67) covers the current store-row
 admission shim, not the proposed delivery epoch.
 
 Existing tests are examples and regression coverage, not formal verification:
 
-- [authority_test.go:133,217,563,633,948,1023](../internal/access/authority_test.go#L133):
+- [authority_test.go:133,217,563,633,948,1023](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/authority_test.go#L133):
   replay/restart, staged publication, exact regrant, uncertain commits, expiry.
-- [sessionrpc_test.go:457,507,1308,1373](../internal/sessionrpc/sessionrpc_test.go#L457):
+- [sessionrpc_test.go:457,507,1308,1373](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/sessionrpc/sessionrpc_test.go#L457):
   response failures, rotation/reconnect, indeterminate in-flight restart.
-- [session_dispatch_test.go:228,444,637,704,981](../internal/daemon/session_dispatch_test.go#L228):
+- [session_dispatch_test.go:228,444,637,704,981](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_dispatch_test.go#L228):
   archived restart cleanup, acknowledged completion, sticky revocation,
   replacement runtime protection, expiry-only renewal.
-- [session_dispatch_deferred_test.go](../internal/daemon/session_dispatch_deferred_test.go):
-  deferred action admission checks; [policy_test.go](../internal/access/policy_test.go)
-  and [grants_test.go](../internal/store/grants_test.go): role and grant cases.
+- [session_dispatch_deferred_test.go](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/daemon/session_dispatch_deferred_test.go):
+  deferred action admission checks; [policy_test.go](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/access/policy_test.go)
+  and [grants_test.go](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/internal/store/grants_test.go): role and grant cases.
 
 The repository uses Go tests and separate root/harnessproto module checks
-([Makefile:8–14,38–39](../Makefile#L8)); no heavyweight modeling dependency is introduced here. Before
+([Makefile:8–14,38–39](https://github.com/Kchymet/agent-multiplexer/blob/e6e4d4aaf9fcd3e962713a57441602503b61755b/Makefile#L8)); no heavyweight modeling dependency is introduced here. Before
 shipping, review the E/A/P classifications, choose the revocation/disclosure boundary, and agree the initial
 invariants. Then trace each selected transition to all production entry points and turn any counterexamples
-into focused tests or a small executable model. Runtime changes and PR publication are outside this draft's
-authorization.
+into focused tests or a small executable model. Runtime and protocol implementation should follow a separate
+review of the selected contract and migration plan.
