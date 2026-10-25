@@ -80,13 +80,20 @@ type AccountLimits struct {
 	// AttemptedAt and RefreshError describe the latest refresh. A failed
 	// refresh keeps the previous windows and ObservedAt so clients can show the
 	// last-known budget with its age; RefreshError is a fixed code.
-	AttemptedAt       int64                `json:"attemptedAt,omitempty"` // Unix milliseconds
-	RefreshError      string               `json:"refreshError,omitempty"`
+	AttemptedAt  int64  `json:"attemptedAt,omitempty"` // Unix milliseconds
+	RefreshError string `json:"refreshError,omitempty"`
+	// RetryAt is when the provider allows the next refresh after it asked
+	// amux to pause (for example a rate-limited read). Unix milliseconds.
+	RetryAt           int64                `json:"retryAt,omitempty"`
 	ProfileID         string               `json:"profileId,omitempty"`
 	DeliveryEpoch     uint64               `json:"deliveryEpoch,omitempty"`
 	SessionID         string               `json:"sessionId,omitempty"`
 	RuntimeGeneration string               `json:"runtimeGeneration,omitempty"`
 	Windows           []AccountLimitWindow `json:"windows,omitempty"`
+	// ResetsAvailable is how many rate-limit resets the provider says the
+	// account can still redeem (Codex rate-limit reset credits, Claude reset
+	// grants). Absent means the provider did not report a count, not zero.
+	ResetsAvailable *int64 `json:"resetsAvailable,omitempty"`
 }
 
 type AccountLimitWindow struct {

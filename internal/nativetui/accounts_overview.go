@@ -177,11 +177,41 @@ func accountRailBudget(p accountProfile, now time.Time, stale bool) string {
 	return "limiting window " + accountPercent(remaining) + suffix
 }
 
+// accountRailDetail is the rail's second budget line, such as
+// "2 resets · retry in 37m": the provider's redeemable reset count, and how
+// long a provider-requested refresh pause lasts. Empty when neither applies.
+func accountRailDetail(p accountProfile, now time.Time) string {
+	if p.authMode == "api" {
+		return ""
+	}
+	parts := []string{}
+	if r := accountResets(p); r != "" {
+		parts = append(parts, r)
+	}
+	if len(p.limits) > 0 {
+		if l := p.limits[0]; !l.retryAt.IsZero() && now.Before(l.retryAt) {
+			parts = append(parts, "retry in "+accountDuration(l.retryAt.Sub(now)))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// accountResets is "2 resets", or empty when the provider reported no count.
+func accountResets(p accountProfile) string {
+	if p.resets == nil {
+		return ""
+	}
+	if *p.resets == 1 {
+		return "1 reset"
+	}
+	return fmt.Sprintf("%d resets", *p.resets)
+}
+
 func (m *model) accountOverviewLines() []string {
 	lines := []string{sectionStyle.Render(cellPad(" Accounts · left", sidebarWidth-3)) + sectionKeyStyle.Render("s  ")}
 	now := time.Now()
 	for _, harness := range []string{"claude", "codex"} {
-		label, budget := accountHarnessName(harness), "loading…"
+		label, budget, detail := accountHarnessName(harness), "loading…", ""
 		if m.accountOverviewStale {
 			budget = "stale · open to refresh"
 		}
@@ -191,7 +221,8 @@ func (m *model) accountOverviewLines() []string {
 			for _, p := range m.accountOverview.profiles {
 				if p.harness == harness {
 					budget = accountRailBudget(p, now, m.accountOverviewStale)
-					if m.accountOverviewStale && p.authMode != "api" && !strings.HasSuffix(budget, " · stale") {
+					detail = accountRailDetail(p, now)
+					if m.accountOverviewStale && p.authMode != "api" && !strings.Contains(budget, " · stale") {
 						budget = "stale · open to refresh" // nothing last-known to show
 					}
 					if age := accountAge(accountOldest(p, now, m.accountOverviewStale), now); age != "" && p.authMode != "api" {
@@ -205,6 +236,9 @@ func (m *model) accountOverviewLines() []string {
 			}
 		}
 		lines = append(lines, cellPad(" "+keyStyle.Render(label), sidebarWidth), cellPad("   "+budget, sidebarWidth))
+		if detail != "" {
+			lines = append(lines, cellPad("   "+dimStyle.Render(detail), sidebarWidth))
+		}
 	}
 	return lines
 }

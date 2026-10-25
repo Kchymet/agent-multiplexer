@@ -26,6 +26,7 @@ import (
 	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
+	"amux/internal/claudecfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -75,8 +76,15 @@ type Daemon struct {
 	accountMu       sync.Mutex
 	accountAttempts map[string]*accountAttempt
 	accountNow      func() time.Time
-	// claudeUsage reads Claude subscription windows; nil uses the vendor API.
-	claudeUsage func(context.Context, string) ([]harnessproto.AccountLimitWindow, error)
+	// claudeUsage reads a Claude usage report; nil uses the vendor API.
+	claudeUsage func(context.Context, string) (claudeUsageReport, error)
+	// claudeLogin reads a host or shared Claude login; nil reads its store.
+	claudeLogin func(mode string) (claudecfg.OAuthLogin, error)
+	// hostCodexLimits reads the host Codex login's windows; nil runs codex.
+	hostCodexLimits func(context.Context) (harnessproto.AccountLimits, error)
+	// claudePaused fingerprints the credential each profile's persisted
+	// RetryAt pause applies to. Only the account limits loop touches it.
+	claudePaused map[string][32]byte
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control

@@ -3,6 +3,7 @@ package daemon
 import (
 	"amux/internal/accounts"
 	"amux/internal/centralauth"
+	"amux/internal/claudecfg"
 	"amux/internal/codexauth"
 	"context"
 	"errors"
@@ -131,21 +132,33 @@ func claudeLimits(t *testing.T) hp.AccountLimits {
 	return s.Profiles["claude:central"].Limits
 }
 
+// accountClock is a settable daemon account clock.
+func accountClock(d *Daemon) *time.Time {
+	now := time.Now()
+	d.accountNow = func() time.Time { return now }
+	return &now
+}
+
 // Previously Claude limits came only from a running session's statusline, so
 // with no Claude session they were never fetched and aged into "stale".
 func TestClaudeLimitsRefreshWithoutSession(t *testing.T) {
 	d := isolatedAccounts(t)
+	now := accountClock(d)
 	readyClaude(t)
 	var token string
 	var fail error
-	d.claudeUsage = func(_ context.Context, tok string) ([]hp.AccountLimitWindow, error) {
+	two := int64(2)
+	d.claudeUsage = func(_ context.Context, tok string) (claudeUsageReport, error) {
 		token = tok
-		return []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 30, WindowMinutes: 300}, {Name: "seven_day", UsedPercent: 60, WindowMinutes: 10080}}, fail
+		return claudeUsageReport{Windows: []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 30, WindowMinutes: 300}, {Name: "seven_day", UsedPercent: 60, WindowMinutes: 10080}}, Resets: &two}, fail
 	}
 	d.refreshAccountLimits(t.Context())
 	got := claudeLimits(t)
 	if token != "sk-ant-oat01-fixture" || got.State != "known" || got.Source != "claude-usage" || len(got.Windows) != 2 || got.ProfileID != "claude:central" || got.ObservedAt == 0 {
 		t.Fatalf("claude refresh: %+v", got)
+	}
+	if got.ResetsAvailable == nil || *got.ResetsAvailable != 2 {
+		t.Fatalf("reset count not recorded: %+v", got)
 	}
 	// The status path must neither discard nor overwrite the refreshed value.
 	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountStatus}, false)
@@ -154,13 +167,15 @@ func TestClaudeLimitsRefreshWithoutSession(t *testing.T) {
 			t.Fatalf("status dropped claude limits: %+v", p.Limits)
 		}
 	}
+	*now = now.Add(claudeUsageInterval)
 	fail = errors.New("PRIVATE vendor text")
 	d.refreshAccountLimits(t.Context())
 	after := claudeLimits(t)
-	if len(after.Windows) != 2 || after.ObservedAt != got.ObservedAt || after.RefreshError != "claude_usage_unavailable" {
+	if len(after.Windows) != 2 || after.ObservedAt != got.ObservedAt || after.RefreshError != "claude_usage_unavailable" || after.RetryAt != 0 {
 		t.Fatalf("failed claude refresh: %+v", after)
 	}
 	// API mode and logged-out profiles are never polled.
+	*now = now.Add(claudeUsageInterval)
 	token = ""
 	_ = accounts.Update(func(s *accounts.State) error {
 		p := s.Profiles["claude:central"]
@@ -171,6 +186,145 @@ func TestClaudeLimitsRefreshWithoutSession(t *testing.T) {
 	d.refreshAccountLimits(t.Context())
 	if token != "" {
 		t.Fatal("logged-out profile was polled")
+	}
+}
+
+// The usage endpoint locks a credential out for up to an hour once it is read
+// too often. Previously every 2-minute tick read it again, ignoring
+// Retry-After, and the budget went stale with no explanation.
+func TestClaudeUsageRateLimitBacksOff(t *testing.T) {
+	d := isolatedAccounts(t)
+	now := accountClock(d)
+	readyClaude(t)
+	calls := 0
+	var fail error
+	d.claudeUsage = func(context.Context, string) (claudeUsageReport, error) {
+		calls++
+		return claudeUsageReport{Windows: []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 30, WindowMinutes: 300}}}, fail
+	}
+	d.refreshAccountLimits(t.Context())
+	good := claudeLimits(t)
+	// Ticks inside the polling interval do not read again.
+	*now = now.Add(accountLimitsRefreshInterval)
+	d.refreshAccountLimits(t.Context())
+	if calls != 1 {
+		t.Fatalf("read %d times inside the polling interval", calls)
+	}
+	*now = now.Add(accountLimitsRefreshInterval)
+	fail = claudeUsageStatus(429, "1800", nil)
+	d.refreshAccountLimits(t.Context())
+	limited := claudeLimits(t)
+	if calls != 2 || limited.RefreshError != "claude_usage_rate_limited" || limited.RetryAt != now.Add(30*time.Minute).UnixMilli() {
+		t.Fatalf("rate limit not recorded with its retry time: %+v", limited)
+	}
+	if len(limited.Windows) != 1 || limited.ObservedAt != good.ObservedAt {
+		t.Fatalf("rate limit dropped the last-known budget: %+v", limited)
+	}
+	// Neither ticks during the pause nor a restarted daemon read again.
+	restarted := isolatedRestart(t, d)
+	for range 3 {
+		*now = now.Add(5 * time.Minute)
+		d.refreshAccountLimits(t.Context())
+		restarted.refreshAccountLimits(t.Context())
+	}
+	if calls != 2 || claudeLimits(t).RetryAt != limited.RetryAt {
+		t.Fatalf("read during the vendor's pause: %d calls, %+v", calls, claudeLimits(t))
+	}
+	*now = now.Add(16 * time.Minute)
+	fail = nil
+	d.refreshAccountLimits(t.Context())
+	if got := claudeLimits(t); calls != 3 || got.RefreshError != "" || got.RetryAt != 0 {
+		t.Fatalf("no recovery after the pause: %d calls, %+v", calls, got)
+	}
+}
+
+// isolatedRestart is a second daemon over the same account store, without
+// the first one's in-memory state.
+func isolatedRestart(t *testing.T, d *Daemon) *Daemon {
+	r := &Daemon{accountNow: d.accountNow, claudeUsage: d.claudeUsage}
+	t.Cleanup(func() { r.disconnectAccounts("", true) })
+	return r
+}
+
+func TestClaudeUsageStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		retry  string
+		body   string
+		code   string
+		pause  time.Duration
+	}{
+		{429, "", "", "claude_usage_rate_limited", 5 * time.Minute},
+		{429, "120", "", "claude_usage_rate_limited", 2 * time.Minute},
+		{429, "99999", "", "claude_usage_rate_limited", time.Hour},
+		{403, "", `{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement any_of(user:profile, user:office)","details":{"error_code":"oauth_scope_insufficient"}}}`, "claude_usage_scope", time.Hour},
+		{401, "", "", "claude_usage_unauthorized", time.Hour},
+		{500, "", "", "claude_usage_unavailable", 0},
+	} {
+		var ue *claudeUsageError
+		if !errors.As(claudeUsageStatus(tc.status, tc.retry, []byte(tc.body)), &ue) || ue.code != tc.code || ue.pause != tc.pause {
+			t.Fatalf("%d %q: %+v", tc.status, tc.retry, ue)
+		}
+	}
+}
+
+// Previously only central profiles were refreshed, so a host or shared login
+// selected for new workloads never had a budget.
+func TestHostLoginsRefresh(t *testing.T) {
+	d := isolatedAccounts(t)
+	now := accountClock(d)
+	if err := accounts.Update(func(s *accounts.State) error {
+		s.Defaults["claude"], s.Defaults["codex"] = "claude:host", "codex:host"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	login := claudecfg.OAuthLogin{AccessToken: "sk-ant-oat01-host", ExpiresAt: now.Add(time.Hour), Scopes: []string{"user:inference", "user:profile"}}
+	d.claudeLogin = func(mode string) (claudecfg.OAuthLogin, error) {
+		if mode != "host" {
+			t.Fatalf("read %s login", mode)
+		}
+		return login, nil
+	}
+	var token string
+	d.claudeUsage = func(_ context.Context, tok string) (claudeUsageReport, error) {
+		token = tok
+		return claudeUsageReport{Windows: []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 30, WindowMinutes: 300}}}, nil
+	}
+	one := int64(1)
+	d.hostCodexLimits = func(context.Context) (hp.AccountLimits, error) {
+		return hp.AccountLimits{State: "known", Source: "codex-native", Windows: []hp.AccountLimitWindow{{Name: "codex:primary", UsedPercent: 20, WindowMinutes: 300}}, ResetsAvailable: &one}, nil
+	}
+	d.refreshAccountLimits(t.Context())
+	s, err := accounts.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := s.Profiles["claude:host"].Limits; token != "sk-ant-oat01-host" || c.State != "known" || c.ProfileID != "claude:host" {
+		t.Fatalf("host claude: %q %+v", token, c)
+	}
+	if c := s.Profiles["codex:host"].Limits; c.State != "known" || c.ResetsAvailable == nil || *c.ResetsAvailable != 1 || c.ProfileID != "codex:host" {
+		t.Fatalf("host codex: %+v", c)
+	}
+	if s.Profiles["claude:shared"].Limits.State == "known" || s.Profiles["claude:environment"].Limits.State == "known" {
+		t.Fatal("polled a profile no workload uses")
+	}
+	// An expired access token or a login without the profile scope is
+	// reported, never refreshed or sent.
+	for _, tc := range []struct {
+		login claudecfg.OAuthLogin
+		code  string
+	}{
+		{claudecfg.OAuthLogin{AccessToken: "x", ExpiresAt: now.Add(-time.Minute)}, "credential_expired"},
+		{claudecfg.OAuthLogin{AccessToken: "x", Scopes: []string{"user:inference"}}, "claude_usage_scope"},
+	} {
+		*now = now.Add(claudeUsageInterval)
+		login, token = tc.login, ""
+		d.refreshAccountLimits(t.Context())
+		s, _ = accounts.Read()
+		if c := s.Profiles["claude:host"].Limits; token != "" || c.RefreshError != tc.code || len(c.Windows) != 1 {
+			t.Fatalf("%s: sent %q, %+v", tc.code, token, c)
+		}
 	}
 }
 
@@ -204,12 +358,22 @@ func TestAccountStatusKeepsConcurrentObservation(t *testing.T) {
 
 func TestDecodeClaudeUsage(t *testing.T) {
 	got, err := decodeClaudeUsage([]byte(`{"five_hour":{"utilization":6.0,"resets_at":"2025-11-04T04:59:59.943648+00:00"},"seven_day":{"utilization":35,"resets_at":null},"seven_day_opus":{"utilization":1}}`))
-	if err != nil || len(got) != 2 || got[0].Name != "five_hour" || got[0].UsedPercent != 6 || got[0].ResetsAt != 1762232399 || got[1].Name != "seven_day" || got[1].WindowMinutes != 10080 {
+	w := got.Windows
+	if err != nil || len(w) != 2 || w[0].Name != "five_hour" || w[0].UsedPercent != 6 || w[0].ResetsAt != 1762232399 || w[1].Name != "seven_day" || w[1].WindowMinutes != 10080 || got.Resets != nil {
 		t.Fatalf("%+v %v", got, err)
 	}
-	for _, bad := range []string{`not json`, `{"five_hour":{"utilization":101}}`, `{"five_hour":{"utilization":1,"resets_at":"soon"}}`} {
+	for _, bad := range []string{`not json`, `{"five_hour":{"utilization":101}}`, `{"five_hour":{"utilization":1,"resets_at":"soon"}}`, `{"cedar_ember":{"eligible":true,"grants":[{"resets_left":-1}]}}`} {
 		if _, err := decodeClaudeUsage([]byte(bad)); err == nil {
 			t.Fatalf("accepted %s", bad)
 		}
+	}
+	// Reset grants count what is left on each grant that is not paused.
+	got, err = decodeClaudeUsage([]byte(`{"five_hour":{"utilization":6},"cedar_ember":{"eligible":true,"grants":[{"id":"a","resets_total":3,"resets_left":2,"paused":false},{"id":"b","resets_left":1,"paused":true},{"id":"c","resets_left":1}]}}`))
+	if err != nil || got.Resets == nil || *got.Resets != 3 {
+		t.Fatalf("resets: %+v %v", got, err)
+	}
+	got, err = decodeClaudeUsage([]byte(`{"cedar_ember":{"eligible":false,"ineligible_reason":"tier"}}`))
+	if err != nil || got.Resets != nil {
+		t.Fatalf("an ineligible account reported a count: %+v %v", got, err)
 	}
 }

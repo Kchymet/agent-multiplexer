@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"os"
+	"path/filepath"
 	"sort"
+	"time"
 )
 
 // RateLimits reads native subscription windows, never inferring them from token
@@ -41,9 +44,20 @@ func decodeLimits(raw []byte, now int64) (hp.AccountLimits, error) {
 	var res struct {
 		Limits  *bucket           `json:"rateLimits"`
 		Buckets map[string]bucket `json:"rateLimitsByLimitId"`
+		// Resets are redeemable rate-limit reset credits (app-server
+		// RateLimitResetCreditsSummary); absent on older servers.
+		Resets *struct {
+			Available *int64 `json:"availableCount"`
+		} `json:"rateLimitResetCredits"`
 	}
 	if json.Unmarshal(raw, &res) != nil {
 		return out, errors.New("native_limits_invalid")
+	}
+	if res.Resets != nil && res.Resets.Available != nil {
+		if *res.Resets.Available < 0 {
+			return out, errors.New("native_limits_invalid")
+		}
+		out.ResetsAvailable = res.Resets.Available
 	}
 	buckets := res.Buckets
 	if len(buckets) == 0 && res.Limits != nil {
@@ -78,4 +92,31 @@ func decodeLimits(raw []byte, now int64) (hp.AccountLimits, error) {
 		out.State = "known"
 	}
 	return out, nil
+}
+
+// ReadRateLimits reads the native windows of an existing Codex home that amux
+// does not own (the host login under codex.auth host). It runs one transient
+// app server and owns no refresh lock: the native server refreshes the home's
+// login exactly as any other Codex process using that home would.
+func ReadRateLimits(ctx context.Context, cfg Config) (hp.AccountLimits, error) {
+	out := hp.AccountLimits{State: "unavailable", Source: "codex-native"}
+	if len(cfg.Argv) == 0 || cfg.Argv[0] == "" || !filepath.IsAbs(cfg.Home) {
+		return out, errors.New("native_limits_unavailable")
+	}
+	if cfg.Env == nil {
+		cfg.Env = os.Environ()
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	srv, err := startServer(ctx, cfg, nil)
+	if err != nil {
+		return out, errors.New("native_limits_unavailable")
+	}
+	defer srv.stop()
+	raw, err := srv.call(ctx, "account/rateLimits/read", map[string]any{})
+	if err != nil {
+		return out, errors.New("native_limits_unavailable")
+	}
+	return decodeLimits(raw, cfg.Now().UnixMilli())
 }
