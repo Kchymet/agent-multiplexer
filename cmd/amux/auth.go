@@ -61,7 +61,10 @@ instead. Codex sign-in prints a browser URL; the daemon owns that login.
 restart --force also interrupts busy or unknown-state agents. Conversations
 resume after a restart.
 
-Run logins in a host terminal. Sessions never hold a refresh token: Claude
+Run logins in a host terminal or the trusted amux console terminal. Console
+Claude login accepts a token through hidden input; obtain it with setup-token
+in a host terminal. Other agent sessions cannot configure accounts.
+Sessions never hold a refresh token: Claude
 receives the setup-token through CLAUDE_CODE_OAUTH_TOKEN, and Codex receives
 short-lived ChatGPT tokens from the daemon. A setup-token is valid for one
 year and is not refreshed; run login again to reissue it before then.
@@ -94,7 +97,11 @@ func authHarness(args []string) (string, []string) {
 
 func authStatus(args []string) error {
 	if sessionContextRestricted() {
-		return fmt.Errorf("machine account status requires a host terminal")
+		harness, rest := authHarness(args)
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: amux auth status [claude|codex]")
+		}
+		return authMachineStatus(harness)
 	}
 	harness, rest := authHarness(args)
 	if len(rest) != 0 {
@@ -112,9 +119,6 @@ func authStatus(args []string) error {
 
 func authLogin(args []string) error {
 	harness, rest := authHarness(args)
-	if sessionContextRestricted() {
-		return fmt.Errorf("amux auth login must run in a host terminal, not inside a session")
-	}
 	if harness == "codex" {
 		if len(rest) != 0 {
 			return fmt.Errorf("usage: amux auth login codex")

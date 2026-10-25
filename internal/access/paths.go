@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	MailboxDirName    = "control"
-	CredentialDirName = "credential"
-	ContextFileName   = "context.json"
-	MaxQueuedRequests = 128
-	MaxResponseAge    = 60 // seconds
+	MailboxDirName           = "control"
+	ConsoleAccountSocketName = "accounts"
+	CredentialDirName        = "credential"
+	ContextFileName          = "context.json"
+	MaxQueuedRequests        = 128
+	MaxResponseAge           = 60 // seconds
 )
 
 // SessionAccess is the frozen path contract shared with filesystem launch code.

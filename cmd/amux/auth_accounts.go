@@ -15,7 +15,7 @@ import (
 
 func accountClient() (*daemon.Client, error) {
 	if sessionContextRestricted() {
-		return nil, fmt.Errorf("machine account management requires a host terminal")
+		return daemon.DialConsoleAccounts()
 	}
 	return dial()
 }
@@ -130,7 +130,12 @@ func authMachineLogin(harness string, fromStdin bool) error {
 			if !isTerminal(os.Stdin) {
 				return fmt.Errorf("login requires terminal or --token-stdin")
 			}
-			if err = runClaudeSetupToken(); err != nil {
+			// Native setup-token prints the credential. In the console its
+			// stdout may be captured as a session event, so only the host CLI
+			// may run issuance. Console completion uses hidden input instead.
+			if sessionContextRestricted() {
+				fmt.Println("Obtain a setup-token in a trusted host terminal using claude setup-token.")
+			} else if err = runClaudeSetupToken(); err != nil {
 				return err
 			}
 			fmt.Print("\nPaste setup-token (input hidden): ")

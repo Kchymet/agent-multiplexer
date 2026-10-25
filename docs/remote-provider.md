@@ -122,8 +122,9 @@ Machine account configuration and compatibility are documented in
 [machine accounts v1](machine-accounts.md). Web account access is read-only.
 The provider advertises manage=false and rejects every account mutation even
 with an old saved manage grant. Status/use grants do not grant configuration
-access. Local CLI/TUI ceremonies remain protected; no new permission is granted
-for the existing amux console.
+access. Local CLI/TUI ceremonies remain protected. The trusted console terminal
+CLI uses its own narrowly authorized local socket; account-status does not grant
+console access. See the console output boundary in the account documentation.
 
 The provider's control connection is outbound and needs no inbound listening
 port. That topology does not reduce the authority granted above. See
