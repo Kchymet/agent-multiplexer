@@ -74,9 +74,14 @@ type AccountIdentity struct {
 }
 
 type AccountLimits struct {
-	State             string               `json:"state"`                // known | unknown | unavailable
-	Source            string               `json:"source"`               // codex-native | claude-statusline | unsupported
-	ObservedAt        int64                `json:"observedAt,omitempty"` // Unix milliseconds
+	State      string `json:"state"`                // known | unknown | unavailable
+	Source     string `json:"source"`               // codex-native | claude-usage | claude-statusline | unsupported
+	ObservedAt int64  `json:"observedAt,omitempty"` // Unix milliseconds
+	// AttemptedAt and RefreshError describe the latest refresh. A failed
+	// refresh keeps the previous windows and ObservedAt so clients can show the
+	// last-known budget with its age; RefreshError is a fixed code.
+	AttemptedAt       int64                `json:"attemptedAt,omitempty"` // Unix milliseconds
+	RefreshError      string               `json:"refreshError,omitempty"`
 	ProfileID         string               `json:"profileId,omitempty"`
 	DeliveryEpoch     uint64               `json:"deliveryEpoch,omitempty"`
 	SessionID         string               `json:"sessionId,omitempty"`

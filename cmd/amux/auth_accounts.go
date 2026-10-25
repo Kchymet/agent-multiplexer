@@ -223,6 +223,9 @@ func authMachineStatus(harness string) error {
 			}
 			fmt.Printf("  %s: %.1f%% used; resets %d (%s)\n", w.Name, w.UsedPercent, w.ResetsAt, fresh)
 		}
+		if p.Limits.RefreshError != "" {
+			fmt.Printf("  last limits refresh failed: %s\n", p.Limits.RefreshError)
+		}
 		if p.Error != "" {
 			fmt.Println(p.Error)
 		}

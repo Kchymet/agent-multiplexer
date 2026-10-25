@@ -31,6 +31,7 @@ type accountProfile struct {
 
 type accountLimit struct {
 	name, state, source, confidence, reason string
+	refreshError                            string
 	usedPercent                             *float64
 	observedAt, freshUntil, resetsAt        time.Time
 }
@@ -452,8 +453,10 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 	if state == "" {
 		state = "unavailable"
 	}
-	if state == "available" && (stale || l.freshUntil.IsZero() || !now.Before(l.freshUntil) || l.observedAt.After(now)) {
-		state = "stale"
+	if state == "available" {
+		if _, s := accountRemaining(l, now, stale); s == "stale" {
+			state = "stale"
+		}
 	}
 	lines := []string{accountText(l.name) + ": " + accountText(state)}
 	if state == "available" || state == "stale" {
@@ -463,8 +466,15 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 		}
 		lines = append(lines, "  Used: "+used+" of the reported window")
 	}
+	observed := accountTime(l.observedAt)
+	if age := accountAge(l.observedAt, now); age != "" {
+		observed += " (" + age + ")"
+	}
 	lines = append(lines, "  Source: "+accountText(l.source)+"  Confidence: "+accountText(l.confidence),
-		"  Observed: "+accountTime(l.observedAt)+"  Resets: "+accountTime(l.resetsAt))
+		"  Observed: "+observed+"  Resets: "+accountTime(l.resetsAt))
+	if l.refreshError != "" {
+		lines = append(lines, "  Last refresh failed: "+accountText(l.refreshError))
+	}
 	if l.reason != "" {
 		lines = append(lines, "  "+accountText(l.reason))
 	}
@@ -530,6 +540,9 @@ func (m *model) renderAccounts() string {
 			source := "provider report"
 			if harness == "claude" {
 				source = "statusline advisory; identity unverified"
+				if len(p.limits) > 0 && p.limits[0].source == "claude-usage" {
+					source = "provider report; identity unverified"
+				}
 			}
 			if len(p.limits) > 2 {
 				source += fmt.Sprintf(" · %d more windows in details", len(p.limits)-2)
@@ -719,7 +732,7 @@ func accountUsageSummary(l accountLimit, now time.Time, stale bool) string {
 	if !l.resetsAt.IsZero() {
 		reset = l.resetsAt.UTC().Format("01-02 15:04Z")
 	}
-	if state != "fresh" {
+	if state == "unknown" {
 		return "  " + name + ": " + state + " · reset " + reset
 	}
 	filled := int(remaining / 10)
@@ -728,5 +741,10 @@ func accountUsageSummary(l accountLimit, now time.Time, stale bool) string {
 	if remaining <= 20 {
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	}
-	return fmt.Sprintf("  %s %s %s · reset %s · fresh", name, style.Render(accountPercent(remaining)+" left"), style.Render(bar), reset)
+	freshness := "fresh"
+	if state == "stale" {
+		style = dimStyle
+		freshness = strings.TrimSpace("stale " + accountAge(l.observedAt, now))
+	}
+	return fmt.Sprintf("  %s %s %s · reset %s · %s", name, style.Render(accountPercent(remaining)+" left"), style.Render(bar), reset, freshness)
 }
