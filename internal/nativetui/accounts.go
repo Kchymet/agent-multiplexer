@@ -22,6 +22,7 @@ type accountProfile struct {
 	defaultProfile                  bool
 	canLogin, canLogout, canDefault bool
 	loginHelp                       string
+	statusDetail                    string
 	workloads                       *int
 	limits                          []accountLimit
 }
@@ -455,6 +456,9 @@ func (m *model) renderAccounts() string {
 		lines = append(lines, mark+label+" · "+accountText(p.mode)+" · "+accountText(p.state))
 	}
 	if p := s.profile(); p != nil {
+		if p.statusDetail != "" {
+			lines = append(lines, "", p.statusDetail)
+		}
 		identity := accountText(p.account)
 		if identity == "" {
 			identity = "unknown (not verified)"

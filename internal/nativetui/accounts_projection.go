@@ -22,9 +22,10 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			id: p.ID, harness: p.Harness, label: p.ID, mode: p.Source, state: p.State,
 			revision: p.Revision, defaultProfile: in.Defaults[p.Harness] == p.ID,
 			identitySource: p.Identity.Evidence, plan: p.Identity.Plan,
-			canLogin:   p.Source == "central" && (p.LoginMethod == "browser" || p.LoginMethod == "setup-token") && p.State != "login-pending",
-			canLogout:  p.Source == "central" && p.State != "logged-out" && p.State != "unconfigured",
-			canDefault: in.DefaultRevisions[p.Harness] > 0,
+			statusDetail: accountProfileProblem(p.Error),
+			canLogin:     p.Source == "central" && (p.LoginMethod == "browser" || p.LoginMethod == "setup-token") && p.State != "login-pending",
+			canLogout:    p.Source == "central" && p.State != "logged-out" && p.State != "unconfigured",
+			canDefault:   in.DefaultRevisions[p.Harness] > 0,
 		}
 		if p.Identity.State == "known" {
 			row.account = p.Identity.Email
@@ -89,6 +90,25 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		out.profiles = append(out.profiles, row)
 	}
 	return out
+}
+
+// Persisted status survives reconnect. Only fixed local copy crosses into the
+// view model; an unknown error must never retain native text or credentials.
+func accountProfileProblem(code string) string {
+	switch code {
+	case "":
+		return ""
+	case "account_logout_cleanup_failed":
+		return "Local logout cleanup failed. New credential delivery remains disabled.\nStart login to recover."
+	case "account_login_cleanup_failed":
+		return "Login rollback failed. New credential delivery remains blocked.\nStart login to recover."
+	case "credential_unavailable":
+		return "Stored credential unavailable. Start login to recover."
+	case "native_status_unavailable", "native_unavailable":
+		return "Native account service unavailable. Check the installed harness and refresh."
+	default:
+		return "Account service reported a problem. Refresh status before trying again."
+	}
 }
 
 func projectAccountCeremony(in harnessproto.AccountCeremony) accountAttempt {
