@@ -100,7 +100,20 @@ func (m *model) renderTopBorder() string {
 		// the divider on the left), then the agent's tab strip.
 		workHint = dimStyle.Render("◂") + keyStyle.Render(" "+keyLabel(m.keys.Chord(keymap.FocusRail))+" ") + m.tabStrip()
 	}
-	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, "")
+	// Reserve space for history state before truncating navigation hints. Even
+	// a one-cell pane gets an arrow; no badge ever covers terminal content.
+	badge := ""
+	if t := m.cur(); t != nil {
+		badge = strings.TrimSpace(t.Indicator())
+		if ansi.StringWidth(badge) > m.mainWidth() {
+			badge = "↑"
+		}
+	}
+	if badge != "" {
+		workHint = ansi.Truncate(workHint, max(0, m.mainWidth()-ansi.StringWidth(badge)), "")
+		badge = keyStyle.Render(badge)
+	}
+	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, badge)
 	return left + sepStyle.Render("┬") + right
 }
 

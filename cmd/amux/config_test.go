@@ -9,6 +9,35 @@ import (
 	"amux/internal/core"
 )
 
+func TestConfigHistoryBindings(t *testing.T) {
+	sandboxCLI(t)
+	for _, tc := range []struct{ action, chord string }{
+		{"scroll-up", "alt+pgup"},
+		{"scroll-down", "alt+pgdown"},
+		{"scroll-live", "alt+end"},
+	} {
+		key := "keys." + tc.action
+		out, err := captureOutput(t, func() error { return cmdConfig([]string{"get", key}) })
+		if err != nil || !strings.Contains(out, tc.chord) {
+			t.Fatalf("get %s: %q, %v", key, out, err)
+		}
+		if _, err := captureOutput(t, func() error { return cmdConfig([]string{"set", key, "ctrl+g"}) }); err != nil {
+			t.Fatal(err)
+		}
+		out, err = captureOutput(t, func() error { return cmdConfig([]string{"get", key}) })
+		if err != nil || !strings.Contains(out, "ctrl+g") {
+			t.Fatalf("rebound %s: %q, %v", key, out, err)
+		}
+		if _, err := captureOutput(t, func() error { return cmdConfig([]string{"unset", key}) }); err != nil {
+			t.Fatal(err)
+		}
+		out, err = captureOutput(t, func() error { return cmdConfig([]string{"get", key}) })
+		if err != nil || !strings.Contains(out, tc.chord) {
+			t.Fatalf("restored %s: %q, %v", key, out, err)
+		}
+	}
+}
+
 func TestConfigControlRoundTripPreservesOtherSettings(t *testing.T) {
 	sandboxCLI(t)
 	t.Setenv("AMUX_CODEX_CONTROL", "pty") // get/ls describe disk, not this override.

@@ -25,6 +25,9 @@ const (
 	TabEditor    = "tab-editor"
 	TabTerm      = "tab-term"
 	RestartAgent = "restart-agent"
+	ScrollUp     = "scroll-up"
+	ScrollDown   = "scroll-down"
+	ScrollLive   = "scroll-live"
 )
 
 // actions lists every configurable action in display order, with the help
@@ -38,6 +41,9 @@ var actions = []struct{ name, desc string }{
 	{TabEditor, "switch to the editor tab"},
 	{TabTerm, "switch to the terminal tab"},
 	{RestartAgent, "restart the selected agent and resume its conversation"},
+	{ScrollUp, "scroll pane history up one page"},
+	{ScrollDown, "scroll pane history down one page"},
+	{ScrollLive, "return the pane to live output"},
 }
 
 var defaults = map[string]string{
@@ -49,6 +55,9 @@ var defaults = map[string]string{
 	TabEditor:    "alt+2",
 	TabTerm:      "alt+3",
 	RestartAgent: "alt+r",
+	ScrollUp:     "alt+pgup",
+	ScrollDown:   "alt+pgdown",
+	ScrollLive:   "alt+end",
 }
 
 // Keymap is the effective action→chord map. The zero value behaves as the

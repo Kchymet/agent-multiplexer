@@ -16,10 +16,13 @@ viewport scrolls whichever screen the program has active.
 | Alternate | Completed, distinct rendered frames: each time the program begins a synchronized-output frame (`DECSET 2026`), the frame currently on display is committed, unless it is identical to the last committed frame or entirely blank. | The same row limit, dropping whole frames oldest first; the newest frame always survives, so at most the limit plus one screen. |
 
 amux scrolls both with `ScrollLines`, `ScrollPages`, `ScrollToTop` and
-`ReturnLive`. The program's own scrolling (raw mouse events when it tracks the
-mouse, `MouseTracked`; alternate-scroll cursor keys otherwise, `MouseEvent`)
-stays available, and is the only option when the active screen has no history:
-`ScrollLines` reports no movement then.
+`ReturnLive`. Wheel events go to the program when it enables mouse reporting;
+Shift forces local history instead. Without reporting, wheel stays local even
+when history is empty or at its boundary: `ScrollLines` reports no movement,
+and no cursor keys are synthesized. The configurable `keys.scroll-up`,
+`keys.scroll-down`, and `keys.scroll-live` actions default to Alt+PageUp,
+Alt+PageDown, and Alt+End. The history indicator lives in the TUI header and
+never covers pane cells.
 
 ### Primary screen
 
