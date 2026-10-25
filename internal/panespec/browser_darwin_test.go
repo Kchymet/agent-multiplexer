@@ -4,6 +4,7 @@ package panespec
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,8 @@ func browserDiscoveryFixture(t *testing.T) (LaunchSpec, string) {
 int main(void) {
  @autoreleasepool {
   NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
+  fprintf(stderr, "attempting default browser discovery\n");
+  fflush(stderr);
   NSURL *browser = [workspace URLForApplicationToOpenURL:[NSURL URLWithString:@"https://example.com"]];
   if (!browser) { fprintf(stderr, "default browser lookup denied\n"); return 20; }
   puts("browser discovered");
@@ -63,8 +66,23 @@ func TestSeatbeltRuntimeDeniesHostApplicationDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := cmd.CombinedOutput(); err == nil {
+	out, runErr := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("protected browser discovery timed out: %v: %s", ctx.Err(), out)
+	}
+	if runErr == nil {
 		t.Fatalf("protected session discovered a host browser through LaunchServices: %s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		t.Fatalf("start protected browser discovery probe: %v: %s", runErr, out)
+	}
+	const denial = "default browser lookup denied"
+	if exitErr.ExitCode() != 20 || !strings.Contains(string(out), denial) {
+		t.Fatalf("protected browser discovery failed outside the expected denial path (exit %d): %v: %s", exitErr.ExitCode(), runErr, out)
+	}
+	if !strings.Contains(string(out), "attempting default browser discovery") {
+		t.Fatalf("protected browser discovery never reached the LaunchServices call: %s", out)
 	}
 }
 
