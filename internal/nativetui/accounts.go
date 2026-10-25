@@ -27,6 +27,7 @@ type accountProfile struct {
 	statusDetail                    string
 	workloads                       *int
 	limits                          []accountLimit
+	resets                          *int64 // provider-reported redeemable rate-limit resets
 }
 
 type accountLimit struct {
@@ -34,6 +35,8 @@ type accountLimit struct {
 	refreshError                            string
 	usedPercent                             *float64
 	observedAt, freshUntil, resetsAt        time.Time
+	retryAt                                 time.Time // provider-requested pause end
+
 }
 
 type accountSnapshot struct {
@@ -473,7 +476,7 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 	lines = append(lines, "  Source: "+accountText(l.source)+"  Confidence: "+accountText(l.confidence),
 		"  Observed: "+observed+"  Resets: "+accountTime(l.resetsAt))
 	if l.refreshError != "" {
-		lines = append(lines, "  Last refresh failed: "+accountText(l.refreshError))
+		lines = append(lines, "  Last refresh failed: "+accountRefreshProblem(l.refreshError)+accountRetry(l, now))
 	}
 	if l.reason != "" {
 		lines = append(lines, "  "+accountText(l.reason))
@@ -522,7 +525,11 @@ func (m *model) renderAccounts() string {
 		}
 		lines = append(lines, heading)
 		if compact {
-			lines = append(lines, "  "+accountRailBudget(p, time.Now(), s.stale))
+			budget := accountRailBudget(p, time.Now(), s.stale)
+			if detail := accountRailDetail(p, time.Now()); detail != "" {
+				budget += " · " + detail
+			}
+			lines = append(lines, "  "+budget)
 			continue
 		}
 		if mode == "api" {
@@ -537,10 +544,13 @@ func (m *model) renderAccounts() string {
 				}
 				lines = append(lines, accountUsageSummary(l, time.Now(), s.stale))
 			}
+			if detail := accountRailDetail(p, time.Now()); detail != "" {
+				lines = append(lines, "  "+detail)
+			}
 			source := "provider report"
 			if harness == "claude" {
 				source = "statusline advisory; identity unverified"
-				if len(p.limits) > 0 && p.limits[0].source == "claude-usage" {
+				if len(p.limits) > 0 && (p.limits[0].source == "claude-usage" || p.limits[0].source == "claude-probe") {
 					source = "provider report; identity unverified"
 				}
 			}
@@ -569,6 +579,9 @@ func (m *model) renderAccounts() string {
 		}
 		if p.statusDetail != "" {
 			lines = append(lines, p.statusDetail)
+		}
+		if p.resets != nil {
+			lines = append(lines, fmt.Sprintf("Rate-limit resets available: %d", *p.resets))
 		}
 		for _, l := range p.limits {
 			lines = append(lines, accountLimitLines(l, time.Now(), s.stale)...)

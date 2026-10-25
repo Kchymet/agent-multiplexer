@@ -58,7 +58,12 @@ func ObserveClaude(session, generation string, raw []byte) error {
 		if len(windows) > 0 {
 			state = "known"
 		}
-		p.Limits = hp.AccountLimits{State: state, Source: "claude-statusline", ProfileID: p.ID, DeliveryEpoch: p.DeliveryEpoch, SessionID: session, RuntimeGeneration: generation, ObservedAt: time.Now().UnixMilli(), Windows: windows}
+		// The statusline carries no reset count; keep the usage report's.
+		var resets *int64
+		if p.Limits.ProfileID == p.ID && p.Limits.DeliveryEpoch == p.DeliveryEpoch {
+			resets = p.Limits.ResetsAvailable
+		}
+		p.Limits = hp.AccountLimits{State: state, Source: "claude-statusline", ProfileID: p.ID, DeliveryEpoch: p.DeliveryEpoch, SessionID: session, RuntimeGeneration: generation, ObservedAt: time.Now().UnixMilli(), Windows: windows, ResetsAvailable: resets}
 		s.Profiles[p.ID] = p
 		return nil
 	})

@@ -62,27 +62,50 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			out.profiles = append(out.profiles, row)
 			continue
 		}
-		limits := p.Limits
+		// Under a preserved legacy default, new workloads spend the host or
+		// shared login's budget, so the row shows that profile's limits.
+		lp := p
+		if out.legacyDefaults[p.Harness] {
+			for _, q := range in.Profiles {
+				if q.ID == in.Defaults[p.Harness] && q.Harness == p.Harness && (q.Source == "host" || q.Source == "shared") {
+					lp = q
+				}
+			}
+		}
+		limits := lp.Limits
 		confidence := "unknown"
-		if limits.Source == "codex-native" || limits.Source == "claude-usage" {
+		if limits.Source == "codex-native" || limits.Source == "claude-usage" || limits.Source == "claude-probe" {
 			confidence = "provider report"
 		} else if limits.Source == "claude-statusline" {
 			confidence = "session advisory"
 		}
 		base := accountLimit{name: "Account limits", state: "unavailable", source: limits.Source, confidence: confidence,
 			reason: "Unknown limits do not mean unlimited usage.", refreshError: limits.RefreshError}
+		if limits.RetryAt > 0 {
+			base.retryAt = time.UnixMilli(limits.RetryAt)
+		}
 		if limits.ObservedAt > 0 {
 			base.observedAt = time.UnixMilli(limits.ObservedAt)
 			base.freshUntil = base.observedAt.Add(accountObservationMaxAge)
+			// A provider-stated lifetime (a periodic quota probe) replaces the
+			// default, bounded so a bad value cannot hide a dead refresh.
+			if until := time.UnixMilli(limits.FreshUntil); limits.FreshUntil > 0 && until.After(base.observedAt) {
+				base.freshUntil = minTime(until, base.observedAt.Add(time.Hour))
+			}
 		}
 		// An opaque Claude token cannot verify account identity. Its statusline
 		// observations are still useful when the daemon attributes them to the
 		// bound profile, delivery epoch, session, and runtime; label them advisory.
-		advisory := p.Harness == "claude" && p.Source == "central" && limits.Source == "claude-statusline" && limits.SessionID != "" && limits.RuntimeGeneration != ""
+		advisory := p.Harness == "claude" && lp.Source == "central" && limits.Source == "claude-statusline" && limits.SessionID != "" && limits.RuntimeGeneration != ""
 		// The central Claude usage report is read with the profile's own stored
 		// credential; its epoch fence retires it on login, logout, or mode change.
-		report := p.Harness == "claude" && p.Source == "central" && limits.Source == "claude-usage"
-		attributed := limits.ProfileID == p.ID && limits.DeliveryEpoch == p.DeliveryEpoch && (p.Identity.State == "known" || advisory || report)
+		// A host Codex login is read through the host's own Codex home.
+		report := p.Harness == "claude" && (limits.Source == "claude-usage" || limits.Source == "claude-probe") || lp.Source == "host" && limits.Source == "codex-native"
+		attributed := limits.ProfileID == lp.ID && limits.DeliveryEpoch == lp.DeliveryEpoch && (lp.Identity.State == "known" || advisory || report)
+		if attributed && limits.ResetsAvailable != nil && *limits.ResetsAvailable >= 0 {
+			resets := *limits.ResetsAvailable
+			row.resets = &resets
+		}
 		if limits.State != "known" || len(limits.Windows) == 0 || !attributed {
 			if !attributed && len(limits.Windows) > 0 {
 				base.reason = "Observation is not attributable to this verified account and delivery epoch."
@@ -93,6 +116,12 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 				l := base
 				l.name, l.state = window.Name, "available"
 				l.reason = "Stale after 5 minutes; usage is an observation, not a billing guarantee."
+				if limits.Source == "claude-probe" {
+					l.reason = "Read from a one-token quota probe every 15 minutes; usage is an observation, not a billing guarantee."
+				}
+				if lp.ID != p.ID {
+					l.reason += " Read from the legacy default " + lp.ID + " login."
+				}
 				if advisory {
 					l.reason += " Reported by session " + limits.SessionID + ", runtime " + limits.RuntimeGeneration + "; account identity remains unverified."
 				}
@@ -135,6 +164,53 @@ func accountProfileProblem(code string) string {
 	default:
 		return "Account service reported a problem. Refresh status before trying again."
 	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// accountRefreshProblem explains a fixed refresh code; unknown codes pass
+// through sanitized, since they are fixed daemon codes rather than native text.
+func accountRefreshProblem(code string) string {
+	switch code {
+	case "claude_usage_rate_limited":
+		return "Claude usage report rate limited"
+	case "claude_usage_scope":
+		return "this Claude login lacks the user:profile scope the usage report needs"
+	case "claude_usage_unauthorized":
+		return "Claude rejected the stored credential; log in again"
+	case "credential_expired":
+		return "Claude login expired; it renews on Claude's next use"
+	case "credential_unavailable":
+		return "stored credential unavailable"
+	case "claude_probe_unavailable":
+		return "Claude quota probe failed"
+	case "native_limits_unavailable":
+		return "Codex rate limits unavailable"
+	}
+	return accountText(code)
+}
+
+// accountRetry is " (retry in 37m)" while a provider-requested pause lasts.
+func accountRetry(l accountLimit, now time.Time) string {
+	if l.retryAt.IsZero() || !now.Before(l.retryAt) {
+		return ""
+	}
+	return " (retry in " + accountDuration(l.retryAt.Sub(now)) + ")"
+}
+
+func accountDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int((d+time.Minute-1)/time.Minute))
+	}
+	return fmt.Sprintf("%dh%02dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
 }
 
 func projectAccountCeremony(in harnessproto.AccountCeremony) accountAttempt {
