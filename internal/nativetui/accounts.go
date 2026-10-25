@@ -37,6 +37,7 @@ type accountSnapshot struct {
 	profiles         []accountProfile
 	canManage        bool
 	defaultRevisions map[string]uint64
+	legacyDefaults   map[string]bool
 }
 
 type accountAttempt struct {
@@ -96,13 +97,12 @@ type accountsExpiredMsg struct {
 }
 
 func (s *accountsState) profiles() []accountProfile {
-	var out []accountProfile
 	for _, p := range s.snapshot.profiles {
-		if p.harness == s.harness {
-			out = append(out, p)
+		if p.harness == s.harness && p.mode == "central" && p.id == s.harness+":central" {
+			return []accountProfile{p}
 		}
 	}
-	return out
+	return nil
 }
 
 func (s *accountsState) profile() *accountProfile {
@@ -134,6 +134,8 @@ func (m *model) openAccounts() tea.Cmd {
 
 func (m *model) requestAccounts(req accountRequest) tea.Cmd {
 	s := m.accounts
+	m.accountOverviewSerial++ // fence a background status fetched before this operation
+	m.accountOverviewStale = true
 	s.serial++
 	s.pending = req.op
 	serial, call := s.serial, m.accountCall
@@ -179,6 +181,8 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 	}
 	if msg.response.snapshot != nil {
 		s.snapshot = *msg.response.snapshot
+		m.accountOverview = msg.response.snapshot
+		m.accountOverviewStale = false
 		s.stale = false
 		s.selectProfile()
 	}
@@ -195,7 +199,7 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 	if msg.response.attempt != nil {
 		switch s.attempt.state {
 		case "succeeded":
-			s.notice = "Login complete. Use d to select this profile for new workloads."
+			s.notice = "Login complete. Use d to choose this machine account for new workloads."
 		case "failed":
 			s.notice = "Login failed. Review the refreshed profile status before retrying."
 		case "cancelled":
@@ -244,7 +248,7 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.dispose() // socket close cancels all ceremonies, including a lost start reply
 		m.accounts = nil
-		return m, nil
+		return m, m.refreshAccountOverview()
 	}
 	if s.pending != "" {
 		return m, nil
@@ -329,19 +333,6 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		s.selected, s.scroll = "", 0
 		s.selectProfile()
-	case "up", "k", "down", "j":
-		profiles := s.profiles()
-		for i, p := range profiles {
-			if p.id == s.selected {
-				delta := 1
-				if k.String() == "up" || k.String() == "k" {
-					delta = -1
-				}
-				s.selected = profiles[(i+delta+len(profiles))%len(profiles)].id
-				s.scroll = 0
-				break
-			}
-		}
 	case "r":
 		return m, m.requestAccounts(accountRequest{op: "status"})
 	case "e", "enter", "d", "x":
@@ -354,9 +345,6 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "e", "enter":
 			if p != nil && p.canLogin {
 				req := s.request("login")
-				s.confirm = &req
-			} else if p != nil && p.canDefault && p.mode != "central" && k.String() == "e" {
-				req := s.request("default")
 				s.confirm = &req
 			} else {
 				s.notice = "Login unavailable here; inspect the profile's login instructions."
@@ -437,7 +425,7 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 func (m *model) renderAccounts() string {
 	s := m.accounts
 	w, h := m.mainWidth(), m.paneRows()
-	lines := []string{titleStyle.Render("Machine accounts · " + s.harness), "Tab: Claude / Codex · ↑/↓: profile · PgUp/PgDn: scroll", ""}
+	lines := []string{titleStyle.Render("Machine accounts · " + s.harness), "Tab: Claude / Codex · PgUp/PgDn: scroll", ""}
 	if s.stale {
 		lines = append(lines, "STALE — refresh required before changes")
 	}
@@ -452,8 +440,13 @@ func (m *model) renderAccounts() string {
 		}
 		if p.defaultProfile {
 			label += " [machine default]"
+		} else {
+			label += " [not default]"
 		}
-		lines = append(lines, mark+label+" · "+accountText(p.mode)+" · "+accountText(p.state))
+		lines = append(lines, mark+label+" · "+accountText(p.state))
+	}
+	if s.snapshot.legacyDefaults[s.harness] {
+		lines = append(lines, "Existing default retained. Press d to use this machine account for new workloads; confirmation required.")
 	}
 	if p := s.profile(); p != nil {
 		if p.statusDetail != "" {
@@ -482,7 +475,7 @@ func (m *model) renderAccounts() string {
 			lines = append(lines, accountLimitLines(l, time.Now(), s.stale)...)
 		}
 	} else {
-		lines = append(lines, "No profiles advertised by this machine. Press r to refresh.")
+		lines = append(lines, "Machine account unavailable. Press r to refresh.")
 	}
 	lines = append(lines, "", "New workloads use the machine default; existing bindings stay fixed.")
 	if !s.snapshot.canManage {
@@ -544,19 +537,6 @@ func (m *model) renderAccounts() string {
 	end := min(len(wrapped), s.scroll+rows)
 	body := strings.Join(append(noticeLines, wrapped[s.scroll:end]...), "\n")
 	return lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(body)
-}
-
-func accountModeHelp(mode string) string {
-	switch mode {
-	case "host":
-		return "Uses the host login. External account changes affect this source."
-	case "shared":
-		return "Uses a shared Claude login. External account changes affect this source."
-	case "environment":
-		return "Credentials come from the launch environment; amux cannot verify their account."
-	default:
-		return "The machine broker owns login and supplies credentials to authorized workloads."
-	}
 }
 
 func accountConfirmation(r accountRequest, p *accountProfile) string {
