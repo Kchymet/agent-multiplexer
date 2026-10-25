@@ -8,9 +8,22 @@ import (
 	"encoding/json"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
+
+type accountRetirementObservedConn struct {
+	net.Conn
+	retired chan struct{}
+	once    sync.Once
+}
+
+func (c *accountRetirementObservedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.retired) })
+	return err
+}
 
 // This regression fails on affcf94: synchronous dispatch prevents the read loop
 // from observing disconnect while a completion waits for effect admission.
@@ -33,10 +46,11 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 		t.Fatal(err)
 	}
 	srv, raw := net.Pipe()
+	observed := &accountRetirementObservedConn{Conn: srv, retired: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); d.serve(ctx, srv) }()
+	go func() { defer close(done); d.serve(ctx, observed) }()
 	c, err := authenticateClientContext(ctx, raw, credential)
 	if err != nil {
 		t.Fatal(err)
@@ -51,12 +65,27 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 	d.effectMu.Lock()
 	err = json.NewEncoder(c.conn).Encode(core.Action{Action: core.ActionQuery, Query: core.QueryAccountCeremony, Fields: map[string]string{"request": string(b)}})
 	// The full authenticated completion frame has been read, but its mutation
-	// cannot enter until we release effectMu. Disconnect before that admission.
+	// cannot enter until we release effectMu. Peer Close alone does not prove
+	// server observation. The server's connection watcher closes its transport
+	// after connection-context cancellation; wait for that retirement barrier.
 	raw.Close()
-	d.effectMu.Unlock()
 	if err != nil {
+		d.effectMu.Unlock()
 		t.Fatal(err)
 	}
+	select {
+	case <-observed.retired:
+		if ctx.Err() != nil {
+			d.effectMu.Unlock()
+			t.Fatal("server retired only after fixture lifetime cancellation")
+		}
+	case <-time.After(time.Second):
+		d.effectMu.Unlock()
+		cancel()
+		<-done
+		t.Fatal("server did not observe disconnect while account admission was blocked")
+	}
+	d.effectMu.Unlock()
 	select {
 	case <-done:
 	case <-ctx.Done():
