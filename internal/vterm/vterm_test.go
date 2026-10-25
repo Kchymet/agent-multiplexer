@@ -55,6 +55,20 @@ func TestWheelWithoutReportingNeverSendsKeys(t *testing.T) {
 	}
 }
 
+func TestEmptyInputKeepsHistoryViewport(t *testing.T) {
+	called := false
+	term := NewRemote(30, 4, func([]byte) { called = true }, nil)
+	defer term.Close()
+	term.ingest([]byte("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n"))
+	term.ScrollLines(2)
+	if n, err := term.Write(nil); n != 0 || err != nil {
+		t.Fatalf("empty write = %d, %v", n, err)
+	}
+	if term.Viewport().Offset != 2 || called {
+		t.Fatal("empty write changed the viewport or called the child")
+	}
+}
+
 // TestWheelForwardedWhenMouseTracked proves that once the child enables mouse
 // reporting (here SGR button-event tracking), the raw wheel event is encoded and
 // forwarded instead of being turned into cursor keys.

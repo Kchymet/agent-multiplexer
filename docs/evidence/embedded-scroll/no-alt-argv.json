@@ -1,0 +1,12 @@
+[
+  "/home/kchymet/.local/share/amux/sessions/6028f6/8589bb/agent-multiplexer/../pr2-notes/runtime/codex-x86_64-unknown-linux-musl",
+  "--no-daemon",
+  "-s",
+  "read-only",
+  "-a",
+  "on-request",
+  "-C",
+  "/tmp/TestCodexEmbeddedScrollno-alt3695276392/001",
+  "--no-alt-screen",
+  "Print 100 numbered conversation lines for an embedded terminal scroll probe; do not use tools."
+]

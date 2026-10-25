@@ -124,7 +124,8 @@ func New(cols, rows int) *Terminal {
 		return top > t.emu.Height() || bottom > t.emu.Height()
 	})
 	// Watch the child's private-mode changes so MouseEvent knows whether it wants
-	// raw mouse events (any mouse-tracking mode) instead of local history. These callbacks run under t.mu (see field docs).
+	// raw mouse events (any mouse-tracking mode) instead of local history.
+	// These callbacks run under t.mu (see field docs).
 	t.emu.SetCallbacks(vt.Callbacks{
 		EnableMode:  func(m ansi.Mode) { t.noteMode(m, true) },
 		DisableMode: func(m ansi.Mode) { t.noteMode(m, false) },
@@ -393,6 +394,9 @@ func pad(s string, cols, rows int) string {
 // terminal jumps its scrollback to the bottom; the emulator's own query replies
 // bypass Write and never do.
 func (t *Terminal) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	t.ReturnLive()
 	if t.onInput != nil {
 		t.onInput(p)

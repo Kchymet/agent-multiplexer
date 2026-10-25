@@ -1,0 +1,31 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h   1 agent   2 editor  3 term ───────────────────────────────────────────────────────↑ 420/1988
+                          │Print 100 numbered conversation lines for an embedded terminal scroll probe; do not use tools.      
+ ▾ WORKGROUPS         w + │  CODEX-HISTORY-070 deterministic conversation line for wheel probe.                                
+▌○ agent-00               │  CODEX-HISTORY-071 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-072 deterministic conversation line for wheel probe.                                
+ ▾ REPOS              R + │  CODEX-HISTORY-073 deterministic conversation line for wheel probe.                                
+ no repos — R to add      │  CODEX-HISTORY-074 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-075 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-076 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-077 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-078 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-079 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-080 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-081 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-082 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-083 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-084 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-085 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-086 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-087 deterministic conversation line for wheel probe.                                
+                          │  CODEX-HISTORY-088 deterministic conversation line for wheel probe.                                
+ Accounts · left       s  │  CODEX-HISTORY-089 deterministic conversation line for wheel probe.                                
+ Claude                   │  CODEX-HISTORY-090 deterministic conversation line for wheel probe.                                
+   loading…               │                                                                                                    
+ Codex                    │                                                                                                    
+   loading…               │› Ask Codex to do anything                                                                          
+ ↵ open  ↑↓ move ─────────│                                                                                                    
+ Space fold/unfold ───────│  gpt-5.6 default · /tmp/TestCodexEmbeddedScrollalways1400422469/001 · ⠋                            
+ / search archived ───────│  ? for shortcuts                                                          ⚠ 1 warning · f2 to view 
+──────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────
+ agent · ⌥ 1/2/3 tabs · ⌥ h rail · ⌥ a toggle · ⌥ r restart · ⌥ q quit                                                         
