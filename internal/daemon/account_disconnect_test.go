@@ -8,9 +8,22 @@ import (
 	"encoding/json"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
+
+type observedServerClose struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *observedServerClose) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.closed) })
+	return err
+}
 
 // This regression fails on affcf94: synchronous dispatch prevents the read loop
 // from observing disconnect while a completion waits for effect admission.
@@ -32,7 +45,8 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, raw := net.Pipe()
+	pipeServer, raw := net.Pipe()
+	srv := &observedServerClose{Conn: pipeServer, closed: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	done := make(chan struct{})
@@ -53,6 +67,17 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 	// The full authenticated completion frame has been read, but its mutation
 	// cannot enter until we release effectMu. Disconnect before that admission.
 	raw.Close()
+	// Client close does not order the server reader goroutine. Observe the
+	// server watcher closing its transport after EOF cancels connectionCtx,
+	// while effect admission is still held. The old synchronous reader cannot
+	// reach this observation and fails the bounded wait.
+	select {
+	case <-srv.closed:
+	case <-ctx.Done():
+		d.effectMu.Unlock()
+		<-done
+		t.Fatal("server did not observe disconnect while effect admission was held")
+	}
 	d.effectMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
