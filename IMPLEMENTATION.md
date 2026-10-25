@@ -20,6 +20,10 @@ No production behavior changes.
 - The assigned branch `amux/c22e02-2ee546` was clean at
   `04c3586bacd0aa8fbe9717b7e3aa9204c09da4b6`, then fetched and merged
   `origin/master`; it was already current at the same commit.
+- During verification, `origin/master` advanced to
+  `06806a9b0ed0e0da2b9c34e2e76a8aec876aff61`. That commit changed the same
+  runtime fixture to exercise yielded-process polling; it merged cleanly at
+  `47115e8abf27dae326bb056f32f4afa1e3f35507`, preserving both assertions.
 
 ## Bounded design and regression
 
@@ -56,13 +60,13 @@ deploy or restart a live daemon, or broaden product behavior.
   the race detector. It exercises model text and CSI cursor positioning split
   across four writes and rejects every incomplete state.
 - `TestAgentRuntimeCommandSurface` passed with the full 0.157.1 package in
-  native `codex` mode (4.85s) and `codex-app-server` mode (4.86s), with
+  native `codex` mode (5.73s) and `codex-app-server` mode (4.83s), with
   `AMUX_REQUIRE_NAMESPACE_TEST=1` and `TERM=xterm-256color`.
 - The same full native 0.157.1 command surface passed under the race detector
-  in 5.63s test time (6.65s package time).
-- The complete `internal/daemon` package passed in 20.77s.
+  on the final base in 7.93s test time (9.04s package time).
 - Repository `make test` passed for the root module and `harnessproto`; `make
-  vet` passed for both modules. `git diff --check` passed.
+  vet` passed for both modules. Its final-base daemon package took 26.02s.
+  `git diff --check` passed.
 - The App Server fixture requires a test-runner exception for its loopback
   `httptest` listener in this managed environment. The first restricted attempt
   failed at listener creation before launching Codex; the approved rerun retained
