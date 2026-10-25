@@ -31,12 +31,56 @@ func (m *model) View() string {
 		return "starting…"
 	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(), m.renderDivider(), m.renderMain())
-	return strings.Join([]string{
+	view := strings.Join([]string{
 		m.renderTopBorder(),
 		body,
 		m.renderBottomBorder(),
-		m.renderHelp(),
+		cellPad(m.renderHelp(), m.w),
 	}, "\n")
+	if m.accounts != nil {
+		box := m.renderAccounts()
+		return overlayCells(view, box, (m.w-lipgloss.Width(box))/2, (m.h-lipgloss.Height(box))/2, m.w, m.h)
+	}
+	return view
+}
+
+// overlayCells preserves the live pane outside the modal. Cut works in terminal
+// cells (including wide glyphs) and preserves ANSI styles on both exposed edges.
+func overlayCells(base, box string, x, y, width, height int) string {
+	back, front := strings.Split(base, "\n"), strings.Split(box, "\n")
+	lines := make([]string, height)
+	for row := range lines {
+		line := ""
+		if row < len(back) {
+			line = back[row]
+		}
+		line = cellPad(line, width)
+		if row >= y && row-y < len(front) {
+			fg := front[row-y]
+			start, end := max(0, x), min(width, x+ansi.StringWidth(fg))
+			if start < end {
+				fg = cellSlice(fg, start-x, end-x)
+				line = cellSlice(line, 0, start) + "\x1b[0m" + fg + "\x1b[0m" + cellSlice(line, end, width)
+			}
+		}
+		lines[row] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func cellSlice(s string, left, right int) string {
+	// Cut includes a whole glyph straddling its left edge. Replace that glyph's
+	// exposed cells with spaces so the suffix keeps its original columns.
+	start := left
+	for start < right && ansi.StringWidth(ansi.Truncate(s, start, "")) < start {
+		start++
+	}
+	return cellPad(strings.Repeat(" ", start-left)+ansi.Cut(s, start, right), right-left)
+}
+
+func cellPad(s string, width int) string {
+	s = ansi.Truncate(s, max(0, width), "")
+	return s + strings.Repeat(" ", max(0, width-ansi.StringWidth(s)))
 }
 
 // renderTopBorder is the per-pane hint row, mirroring tmux's pane-border-format:
@@ -56,7 +100,20 @@ func (m *model) renderTopBorder() string {
 		// the divider on the left), then the agent's tab strip.
 		workHint = dimStyle.Render("◂") + keyStyle.Render(" "+keyLabel(m.keys.Chord(keymap.FocusRail))+" ") + m.tabStrip()
 	}
-	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, "")
+	// Reserve space for history state before truncating navigation hints. Even
+	// a one-cell pane gets an arrow; no badge ever covers terminal content.
+	badge := ""
+	if t := m.cur(); t != nil {
+		badge = strings.TrimSpace(t.Indicator())
+		if ansi.StringWidth(badge) > m.mainWidth() {
+			badge = "↑"
+		}
+	}
+	if badge != "" {
+		workHint = ansi.Truncate(workHint, max(0, m.mainWidth()-ansi.StringWidth(badge)), "")
+		badge = keyStyle.Render(badge)
+	}
+	right := borderSeg(m.mainWidth(), m.borderStyle(focusAgent), workHint, badge)
 	return left + sepStyle.Render("┬") + right
 }
 
@@ -121,7 +178,7 @@ func (m *model) borderStyle(target focus) lipgloss.Style {
 func borderSeg(width int, fill lipgloss.Style, left, right string) string {
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
-		return padTo(left+right, width)
+		return cellPad(left+right, width)
 	}
 	return left + fill.Render(strings.Repeat("─", gap)) + right
 }
@@ -325,9 +382,6 @@ func stateColor(state string) lipgloss.Style {
 func (m *model) renderMain() string {
 	if m.archiveSearch != nil {
 		return m.renderArchiveSearch()
-	}
-	if m.accounts != nil {
-		return m.renderAccounts()
 	}
 	if m.picker != nil {
 		return m.renderPicker()
