@@ -5,6 +5,8 @@ import (
 	"amux/internal/centralauth"
 	"amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -54,5 +56,45 @@ func TestAccountMigrationPinsPreFeatureClaudeCredential(t *testing.T) {
 	} // Explicit blocked migration is safe.
 	if err = accounts.Accept("old", b.Revision, pf.DeliveryEpoch, "", fresh.Generation); err == nil {
 		t.Fatal("pre-feature workload silently accepted replacement opaque credential")
+	}
+}
+
+func TestUnreadableMigrationAllowsOnlyExplicitRebindAfterLogin(t *testing.T) {
+	d := isolatedAccounts(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.PutSession(store.Session{ID: "old", Agent: "claude", Dir: t.TempDir()})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := centralauth.ClaudeStore().Dir
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "credential.json"), []byte("corrupt legacy credential"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := beginClaude(t, d, "owner")
+	completeClaude(t, d, r)
+	if _, _, err = accounts.Delivery("old", "claude"); err == nil {
+		t.Fatal("old workload accepted replacement")
+	}
+	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountRebind, ProfileID: "claude:central", Revision: profileRevision(t, "claude:central"), WorkloadID: "old"}, false)
+	if !out.OK {
+		t.Fatal(out)
+	}
+	b, p, err := accounts.Delivery("old", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := centralauth.ClaudeStore().Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = accounts.Accept("old", b.Revision, p.DeliveryEpoch, "", credential.Generation); err != nil {
+		t.Fatal(err)
 	}
 }

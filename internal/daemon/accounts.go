@@ -217,6 +217,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			b.Source = p.Source
 			b.ExpectedAccount = p.Identity.AccountID
 			b.CredentialVersion = s.CredentialVersion[p.ID]
+			b.CredentialUnknown = false
 			b.Revision++
 			b.Origin = "explicit-rebind"
 			s.Bindings[r.WorkloadID] = b

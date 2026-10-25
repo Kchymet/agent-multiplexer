@@ -152,3 +152,75 @@ func TestMigrationCapturesPreexistingClaudeCredential(t *testing.T) {
 		t.Fatal("migration silently switched opaque accounts")
 	}
 }
+
+func TestUnreadableClaudeCredentialRequiresExplicitRebind(t *testing.T) {
+	isolated(t)
+	dir := centralauth.ClaudeStore().Dir
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credential.json"), []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Bind("legacy", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := Read()
+	token, _ := centralauth.NewSecret("REPLACEMENT-SYNTHETIC-TOKEN")
+	next, err := centralauth.ClaudeStore().Save(token, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Bind("legacy", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = Delivery("legacy", "claude"); !errors.Is(err, ErrBlocked) {
+		t.Fatal("unknown old account adopted replacement", err)
+	}
+	b := before.Bindings["legacy"]
+	if err = Accept("legacy", b.Revision, before.Profiles[b.ProfileID].DeliveryEpoch, "", next.Generation); !errors.Is(err, ErrBlocked) {
+		t.Fatal("direct acceptance bypassed unknown binding", err)
+	}
+	// Fresh workloads can use the now-readable credential; only the old binding is fenced.
+	if err = Bind("fresh", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, profile, err := Delivery("fresh", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Accept("fresh", fresh.Revision, profile.DeliveryEpoch, "", next.Generation); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit rebind is the sole recovery for an unknown old account.
+	if err = Update(func(s *State) error {
+		fresh.Revision = b.Revision + 1
+		fresh.Origin = "explicit-rebind"
+		s.Bindings["legacy"] = fresh
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = Delivery("legacy", "claude"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewWorkloadBeforeFirstClaudeLoginCanAcceptFirstCredential(t *testing.T) {
+	isolated(t)
+	if err := Bind("fresh", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := centralauth.NewSecret("FIRST-SYNTHETIC-TOKEN")
+	first, err := centralauth.ClaudeStore().Save(token, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, p, err := Delivery("fresh", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Accept("fresh", b.Revision, p.DeliveryEpoch, "", first.Generation); err != nil {
+		t.Fatal(err)
+	}
+}
