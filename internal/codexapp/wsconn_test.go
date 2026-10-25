@@ -46,6 +46,8 @@ func echoHandler() http.Handler {
 }
 
 func TestDialWSOverUnix(t *testing.T) {
+	// Codex 0.153.4 and 0.154.0 bind the requested path directly. Keep that
+	// transport behavior explicit alongside the 0.157 protected-alias fixture.
 	sock := filepath.Join(t.TempDir(), "ws.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {

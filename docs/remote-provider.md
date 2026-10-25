@@ -108,12 +108,21 @@ Session publication is a separate grant from compute:
 | Add `--read-only-sessions` | Inventory remains visible; lifecycle and steering commands are rejected |
 | Add `--runtime-events` | Conversation text, tool arguments/results and other normalized transcript events for published sessions |
 | `--allow-compute` | Independent arbitrary process/PTY execution as the provider's host user |
+| `--account-status` | Safe machine profile, identity and subscription-limit projections (off by default) |
+| `--account-manage` | Default/logout plus protected transient login ceremonies (off by default; does not imply status) |
+| `--account-use` | Machine-account use for remote creation/start/prompt; inherited from writable session publication unless explicitly disabled |
 
 `--read-only-sessions` and `--runtime-events` require `--publish-sessions`.
 Disabling compute does not revoke session control. Read-only publication can
 still disclose sensitive inventory and, with runtime events, transcript content.
 There is no general secret-redaction guarantee for transcripts or terminal I/O.
 The operator must trust the remote service with the enabled data and actions.
+
+Machine account configuration and the transient ceremony protocol are documented in
+[machine accounts v1](machine-accounts.md). The web account route must keep ceremony
+URLs and write-only tokens out of the durable database relay; `account-ceremony`
+frames are connection-scoped and never replayed. Account-manage does not authorize
+remote rebind of arbitrary workloads.
 
 The provider's control connection is outbound and needs no inbound listening
 port. That topology does not reduce the authority granted above. See

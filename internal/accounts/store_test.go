@@ -2,10 +2,12 @@ package accounts
 
 import (
 	"amux/internal/amuxcfg"
+	"amux/internal/centralauth"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func isolated(t *testing.T) {
@@ -116,5 +118,37 @@ func TestClaudeObservationProvenanceAndEpoch(t *testing.T) {
 	})
 	if e := ObserveClaude("w", "runtime-1", raw); !errors.Is(e, ErrStale) {
 		t.Fatal("stale runtime quota accepted", e)
+	}
+}
+
+func TestMigrationCapturesPreexistingClaudeCredential(t *testing.T) {
+	isolated(t)
+	// An older daemon created a workload before machine profiles existed.
+	if err := Bind("legacy", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := centralauth.NewSecret("LEGACY-OPAQUE-TOKEN")
+	old, err := centralauth.ClaudeStore().Save(token, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Bind("legacy", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := Read()
+	if s.Bindings["legacy"].CredentialVersion != old.Generation {
+		t.Fatal("legacy credential not pinned")
+	}
+	token, _ = centralauth.NewSecret("REPLACEMENT-OPAQUE-TOKEN")
+	next, err := centralauth.ClaudeStore().Save(token, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, p, err := Delivery("legacy", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", next.Generation); err == nil {
+		t.Fatal("migration silently switched opaque accounts")
 	}
 }

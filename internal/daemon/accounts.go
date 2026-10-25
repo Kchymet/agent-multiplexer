@@ -6,6 +6,7 @@ import (
 	"amux/internal/centralauth"
 	"amux/internal/codexapp"
 	"amux/internal/codexauth"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/store"
 	"context"
@@ -142,7 +143,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	if r.Revision == 0 {
 		return fail("account_revision_required")
 	}
-	if r.Operation == hp.AccountDefault {
+	if r.Operation == hp.AccountDefault || r.Operation == hp.AccountLogin || r.Operation == hp.AccountLogout {
 		db, err := store.Open()
 		if err != nil {
 			return fail("account_store_unavailable")
@@ -152,6 +153,8 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		if err != nil {
 			return fail("account_store_unavailable")
 		}
+		// The built-in console is synthetic and absent from SQL inventory.
+		rows = append(rows, console.Session())
 		for _, row := range rows {
 			if err := accounts.Bind(row.ID, agent.Canonical(row.Agent)); err != nil {
 				return fail("account_binding_invalid")
@@ -163,7 +166,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		if err != nil {
 			return fail("account_workload_unknown")
 		}
-		row, ok, err := db.GetSession(r.WorkloadID)
+		row, ok, err := lookupPolicySession(db, r.WorkloadID)
 		db.Close()
 		if err != nil || !ok || row.Archived {
 			return fail("account_workload_unknown")
@@ -296,10 +299,12 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		lifetime = d.centralCodex.lifetime
 	}
 	loginCtx, cancel := context.WithTimeout(lifetime, codexLoginTimeout)
+	stopOwner := context.AfterFunc(ctx, cancel)
 	a := &accountAttempt{prior: prior, guard: ctx, profile: p.ID, initiator: r.Initiator, epoch: p.DeliveryEpoch, cancel: cancel, ceremony: hp.AccountCeremony{AttemptID: id, State: "pending", Method: p.LoginMethod, ExpiresAt: d.accountTime().Add(codexLoginTimeout).UnixMilli()}}
 	d.accountAttempts[id] = a
 	go func() {
 		<-loginCtx.Done()
+		stopOwner()
 		d.accountMu.Lock()
 		defer d.accountMu.Unlock()
 		if a.ceremony.State == "pending" {

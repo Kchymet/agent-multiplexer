@@ -636,21 +636,26 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		return
 	}
 	defer cancelWatch()
-	cl := newAuthenticatedConnState(secure, func() bool { return d.authority.Valid(ctx, principal) == nil })
+	connectionCtx, cancelConnection := context.WithCancel(ctx)
+	defer cancelConnection()
+	cl := newAuthenticatedConnState(secure, func() bool { return connectionCtx.Err() == nil && d.authority.Valid(ctx, principal) == nil })
 	watchDone := make(chan struct{})
 	var snapshotDone chan struct{}
 	go func() {
 		defer close(watchDone)
+		defer cancelConnection()
+		defer conn.Close()
 		select {
 		case <-invalidated:
 			// Abort a blocked TLS write as well as queued frames. A write that has
 			// not completed when revocation commits must not drain afterward.
-			_ = secure.Close()
 		case <-cl.done:
-		case <-ctx.Done():
+		case <-connectionCtx.Done():
 		}
 	}()
 	defer func() {
+		cancelConnection()
+		_ = conn.Close()
 		d.disconnectAccounts(cl.accountID, true)
 		cl.shutdown()
 		if snapshotDone != nil {
@@ -704,14 +709,29 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		return d.authority.Valid(checkCtx, principal)
 	})
 
-	// Read actions from the client until it disconnects.
-	dec := json.NewDecoder(reader)
+	// Account attempts belong to the live socket as well as its principal.
+	// Ordinary acknowledged deferred actions retain their existing daemon
+	// lifetime; only account ceremonies use this connection-bound guard.
+	accountCtx := withAccessGuard(connectionCtx, func(checkCtx context.Context) error {
+		if err := connectionCtx.Err(); err != nil {
+			return err
+		}
+		return d.authority.Valid(checkCtx, principal)
+	})
+	actions, readDone := readHostActions(reader, cancelConnection)
+	defer func() { cancelConnection(); _ = conn.Close(); <-readDone }()
 	for {
 		var a core.Action
-		if err := dec.Decode(&a); err != nil {
-			return // deferred cl.shutdown detaches panes (without killing agents)
+		select {
+		case <-connectionCtx.Done():
+			return
+		case next, ok := <-actions:
+			if !ok {
+				return
+			}
+			a = next
 		}
-		if d.authority.Valid(ctx, principal) != nil {
+		if connectionCtx.Err() != nil || d.authority.Valid(ctx, principal) != nil {
 			return
 		}
 		switch a.Action {
@@ -724,14 +744,51 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		case core.ActionPaneClose:
 			cl.paneClose(a.PaneID)
 		case core.ActionQuery:
-			d.query(clientCtx, cl, a)
+			d.query(accountCtx, cl, a)
 		default:
-			res := d.handle(clientCtx, a)
+			actionCtx := clientCtx
+			if a.Action == core.ActionAccountManage {
+				actionCtx = accountCtx
+			}
+			res := d.handle(actionCtx, a)
 			if a.Action != "" {
 				cl.send(res)
 			}
 		}
 	}
+}
+
+// readHostActions keeps observing EOF while dispatch waits for effect admission.
+// Frames remain ordered. Bounds cover both frame bytes and outstanding actions;
+// overload retires the connection rather than hiding EOF behind a blocked queue
+// or accepting an unbounded amount of work. Client encoders use newline JSON.
+const hostActionQueue = 32
+const hostActionMaxBytes = clientFrameLimit
+
+func readHostActions(reader *bufio.Reader, retire context.CancelFunc) (<-chan core.Action, <-chan struct{}) {
+	actions := make(chan core.Action, hostActionQueue)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(actions)
+		defer retire()
+		for {
+			line, err := readBoundedLine(reader, hostActionMaxBytes)
+			if err != nil || len(line) > hostActionMaxBytes {
+				return
+			}
+			var action core.Action
+			if json.Unmarshal(line, &action) != nil {
+				return
+			}
+			select {
+			case actions <- action:
+			default:
+				return
+			}
+		}
+	}()
+	return actions, done
 }
 
 type accessGuardContextKey struct{}

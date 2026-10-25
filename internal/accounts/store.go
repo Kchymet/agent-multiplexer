@@ -5,6 +5,7 @@ package accounts
 
 import (
 	"amux/internal/amuxcfg"
+	"amux/internal/centralauth"
 	"amux/internal/core"
 	"crypto/rand"
 	"encoding/hex"
@@ -189,9 +190,20 @@ func Bind(session, h string) error {
 		return nil
 	}
 	return Update(func(s *State) error {
+		// Bootstrap the opaque version before any login/logout can replace the
+		// pre-account-service credential. Existing workloads must retain it too.
+		if h == "claude" && s.CredentialVersion[ID(h, "central")] == 0 {
+			if c, err := centralauth.ClaudeStore().Load(); err == nil {
+				s.CredentialVersion[ID(h, "central")] = c.Generation
+			}
+		}
 		if b, ok := s.Bindings[session]; ok {
 			if b.Harness != h {
 				return ErrBlocked
+			}
+			if b.Harness == "claude" && b.Source == "central" && b.CredentialVersion == 0 {
+				b.CredentialVersion = s.CredentialVersion[b.ProfileID]
+				s.Bindings[session] = b
 			}
 			return nil
 		}

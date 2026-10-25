@@ -148,13 +148,17 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   harness at it. The agent may edit its copy. Authentication is central by
   default: `amux auth login` (Claude `setup-token`) and `amux auth login codex`
   (ChatGPT) sign in once on the host, and the daemon delivers only a session
-  credential, never a refresh token, to each authorized session. `claude.auth`
-  and `codex.auth` can instead select the previous shared host login (`host`),
+  credential, never a refresh token, to each authorized session. TUI/web Accounts
+  and `amux auth accounts` show profiles and subscription limits;
+  `amux auth default <harness:source>` selects defaults for new workloads while
+  existing bindings stay fixed. Legacy `claude.auth` / `codex.auth` settings seed
+  the first defaults. Profiles can also select the previous shared host login (`host`),
   the older amux Claude login (`shared`) or `environment` (API keys, providers,
   gateways). Codex MCP credential files stay shared. macOS GitHub
   authentication uses the daemon broker. Copied config
   can itself contain secrets such as inline MCP tokens; it is readable by the
-  receiving session. See [central authentication](docs/sandbox-config.md#central-authentication).
+  receiving session. See [machine accounts](docs/machine-accounts.md) and
+  [central authentication](docs/sandbox-config.md#central-authentication).
   amux compares each copy with the template and flags an agent's edits on the rail
   (`⚙ N config edits`); `amux sandbox drift` lists them and `amux sandbox promote |
   reset <id> <path>` propagates or discards each one — nothing propagates on its
@@ -247,10 +251,17 @@ This applies to native terminal launches and new/resumed app-server threads.
 The model picker is live, not a baked-in list: Codex agents offer whatever your
 Codex has cached as available to your account (`~/.codex/models_cache.json`, the
 same list its own `/model` picker shows, in the same order), and Claude agents
-offer the built-in aliases plus any extra models Claude Code has cached for your
-account (`additionalModelOptionsCache` in `~/.claude.json`). The model set in each
-CLI's own config (`model` in `config.toml` / `.claude.json`) is always offered and
-pre-filled. Run the CLI once outside amux to refresh what it caches.
+offer the built-in aliases and `claude-opus-5-5` (Claude Opus 5.5), plus any extra
+models Claude Code has cached for your account (`additionalModelOptionsCache` in
+`~/.claude.json`). The model set in each CLI's own config (`model` in `config.toml`
+/ `.claude.json`) is always offered and pre-filled. Run the CLI once outside amux
+to refresh what it caches.
+
+To select Opus 5.5 explicitly, choose `claude-opus-5-5` in a Claude model picker
+or pass `--agent claude --model claude-opus-5-5` when creating an agent. For a
+workgroup coordinator, use `--coordinator claude --coordinator-model claude-opus-5-5`.
+The built-in Claude default remains `opus`. Opus 5.5 requires Claude Code
+v2.1.280 or newer; see the [official model configuration guide](https://code.claude.com/docs/en/model-config).
 
 An in-session `/model` switch is reconciled back into amux automatically. Claude
 reports its live `model.id` through an amux-installed status-line wrapper (which

@@ -40,14 +40,16 @@ mount, and how an agent's edits to its configuration come back to amux.
 ### Central authentication
 
 Central mode is the default for both harnesses. Run the logins from a host
-terminal; they refuse to run inside a session.
+terminal; they refuse to run inside a session. TUI/web Accounts also support
+protected login, limits and default selection. See [machine accounts v1](machine-accounts.md)
+for persisted workload bindings, replacement behavior and the remote grant setup.
 
 #### Claude: one `setup-token` for every session
 
 ```sh
 amux auth login            # runs `claude setup-token`, then asks for the token
 amux auth login --token-stdin < token.txt
-amux auth status           # mode, fingerprint, stored time, generation
+amux auth status           # selected profile, safe identity and limits
 amux auth restart [--force]
 ```
 
@@ -58,8 +60,7 @@ amux asks you to paste it with terminal echo disabled (`--token-stdin` reads it
 from standard input instead). The token is stored at
 `<amux data>/auth/central/claude/credential.json` (normally under
 `~/.local/share/amux`), mode 0600 in a 0700 directory, written atomically under
-a lock. No pane mounts the auth root. Status shows only a fingerprint (a short
-SHA-256 prefix).
+a lock. No pane mounts the auth root. Account status never returns the token.
 
 Per Claude's documentation, a setup-token is a one-year OAuth token for a Pro,
 Max, Team or Enterprise plan. It can only make model requests, so central
@@ -73,7 +74,7 @@ launcher asks the daemon for the credential over the session's signed mailbox.
 The daemon serves the request only if all of these hold:
 
 - the signed principal is a live, unarchived Claude session;
-- `claude.auth` is central;
+- its persisted account binding selects central and permits the current epoch/version;
 - no configuration selects another method (below).
 
 It authorizes again after reading the store. The launcher then execs Claude with
@@ -99,9 +100,9 @@ there creates a login private to that session's config copy.
 
 **Renewal is not automatic refresh.** A setup-token has no refresh token. Run
 `amux auth login` again before it expires to reissue it. The new token gets the
-next generation, and idle Claude agents restart with their conversations
-resumed. Busy and unknown-state agents wait; `amux auth restart --force` also
-interrupts them. Claude reads `CLAUDE_CODE_OAUTH_TOKEN` once per process, so a
+next generation. Existing workloads remain bound to the prior opaque credential
+version; explicitly rebind and start each workload that should use the replacement
+(see [rebind](machine-accounts.md#defaults-and-existing-workloads)). Claude reads `CLAUDE_CODE_OAUTH_TOKEN` once per process, so a
 running agent keeps its old token until it restarts. amux records when it
 stored the token, not an expiry: it cannot read one from the opaque token.
 Reissuing does not revoke the previous token. It stays valid until it expires
@@ -129,9 +130,9 @@ The error names the setting, never its value. Remove the setting, or select
 
 ```sh
 amux auth login                          # recommended
-amux config set claude.auth host         # keep the previous host login
-amux config set claude.auth shared       # keep an older `amux auth login` store
-amux config set claude.auth environment  # API key, apiKeyHelper, provider or gateway
+amux auth default claude:host            # new workloads use the host login
+amux auth default claude:shared          # new workloads use the older shared store
+amux auth default claude:environment     # API key, apiKeyHelper, provider or gateway
 ```
 
 In central and environment modes, a credential symlink left in an agent's
@@ -164,13 +165,13 @@ live Codex session, performs one serialized native refresh on the central home
 token, account id and plan. Concurrent 401s share one refresh, and a refresh
 that would switch the session's ChatGPT account is refused.
 
-All native operations on the central home are serialized, so a refresh waits
-while `amux auth login codex` is pending. A session's refresh is bounded at
+All native operations on the central home are serialized. New credential delivery
+is fenced while a machine login ceremony is pending. A session's refresh is bounded at
 8 seconds, inside the App Server's own wait. If a login holds the native server
 longer than that, the refresh fails and the session sees an authentication
 error for that request. Requests made after the login finishes use the current
-token again. An access token that is still valid is served from the cache
-without waiting.
+token again only when the bound native account matches. Cancellation restores
+the prior ready credential after the native writer has stopped.
 
 A session's `config.toml` is its own editable copy, so a central App Server
 pins `chatgpt_base_url` to the official ChatGPT backend, `model_provider` to
