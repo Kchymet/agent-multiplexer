@@ -517,28 +517,29 @@ through the exact system `/private/var/run/mDNSResponder` socket; other host Uni
 sockets remain excluded. This is needed by model APIs and remote MCP servers,
 even when outbound IP connections are allowed.
 
-Browser authentication uses the native `/usr/bin/open` and LaunchServices APIs.
-The profile allows application discovery/launch services, reads installed
-`/Applications` bundles, and permits `lsopen`. **This is a broader host
-application-launch capability, not a URL-only broker.** Seatbelt cannot filter
-`lsopen` by URL scheme or restrict it to web browsers; an agent can launch other
-applications outside its sandbox. Direct filesystem/socket denials below still
-apply to session processes, but do not confine these launched host applications.
-Browser profile directories, clipboard and Apple Events automation are not
-added as direct grants.
+Protected sessions do not receive `/usr/bin/open`, LaunchServices IPC or
+`lsopen` authority. Seatbelt cannot restrict `lsopen` to HTTP(S) or to a browser,
+so admitting it would permit arbitrary host-application launch outside the
+session profile. Authentication is therefore attended from a host terminal:
+run `amux auth login` for Claude or `amux auth login codex` for Codex, then copy
+any printed authorization URL into the host browser. This keeps the existing
+central credential/account broker and already enrolled model identity; it does
+not add a browser broker or another in-session opener.
 
 `TestSeatbeltRuntimeDNSService` checks the native DNS broker in ordinary macOS
-CI without depending on external Internet availability. Additional integration
-checks are opt-in:
+CI without depending on external Internet availability. An additional public
+network integration check is opt-in:
 
 ```sh
 AMUX_TEST_NETWORK=1 go test ./internal/panespec -run '^TestSeatbeltRuntimePublicHTTPS$' -count=1 -v
-AMUX_TEST_BROWSER=1 go test ./internal/panespec -run '^TestSeatbeltRuntimeBrowser' -count=1 -v
 ```
 
 The HTTPS check uses unauthenticated model/MCP endpoints and verifies certificate
-validation. The browser check opens two local test pages and requires actual
-HTTP callbacks through both the command-line and native API launch paths.
+validation. The ordinary macOS suite compares a harmless default-browser
+discovery control with the same query inside the protected profile and requires
+the protected query to fail; it never launches a host application. Passing that
+fixture is source/profile acceptance, not attended login acceptance on a real
+user Mac.
 
 `AMUX_SESSION_ACCESS` locates the daemon-owned read-only credential/context.
 The signed subject and kernel policy determine authority; changing or clearing

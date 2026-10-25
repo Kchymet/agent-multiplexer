@@ -4,9 +4,7 @@ package panespec
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +16,7 @@ import (
 	"amux/internal/store"
 )
 
-func browserFixture(t *testing.T) (LaunchSpec, string) {
+func browserDiscoveryFixture(t *testing.T) (LaunchSpec, string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -26,36 +24,40 @@ func browserFixture(t *testing.T) (LaunchSpec, string) {
 	t.Setenv("AMUX_JAIL", "on")
 	s := store.Session{ID: "browser", Agent: "codex", Dir: filepath.Join(home, "own")}
 	spec := testLaunchSpec(t, s)
-	probe := filepath.Join(s.Dir, "browser-probe")
+	probe := filepath.Join(s.Dir, "browser-discovery-probe")
 	build := exec.Command("/usr/bin/cc", "-x", "objective-c", "-", "-framework", "AppKit", "-Wno-deprecated-declarations", "-o", probe)
 	build.Stdin = strings.NewReader(`#import <AppKit/AppKit.h>
-int main(int argc, const char **argv) {
+int main(void) {
  @autoreleasepool {
   NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
+  fprintf(stderr, "attempting default browser discovery\n");
+  fflush(stderr);
   NSURL *browser = [workspace URLForApplicationToOpenURL:[NSURL URLWithString:@"https://example.com"]];
-  if (!browser) { fprintf(stderr, "default browser lookup failed\n"); return 1; }
-  if (argc == 1) { puts("browser discovered"); return 0; }
-  NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:argv[1]]];
-  NSError *error = nil;
-  NSRunningApplication *app = [workspace openURLs:@[url] withApplicationAtURL:browser options:NSWorkspaceLaunchWithoutActivation configuration:@{} error:&error];
-  if (!app) { fprintf(stderr, "browser open failed: %s\n", [[error description] UTF8String]); return 1; }
+  if (!browser) { fprintf(stderr, "default browser lookup denied\n"); return 20; }
+  puts("browser discovered");
   return 0;
  }
 }
 `)
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("compile browser probe: %v: %s", err, out)
+		t.Fatalf("compile browser discovery probe: %v: %s", err, out)
 	}
 	return spec, probe
 }
 
-func runBrowserProbe(t *testing.T, spec LaunchSpec, payload []string) {
-	t.Helper()
-	argv, err := scope(spec.Session.Dir, TabAgent, spec.Session, spec.Access, nil, payload)
+// The control proves this Mac has a discoverable browser; the protected run
+// then proves LaunchServices discovery is denied. The fixture never asks
+// NSWorkspace or /usr/bin/open to launch an application.
+func TestSeatbeltRuntimeDeniesHostApplicationDiscovery(t *testing.T) {
+	spec, probe := browserDiscoveryFixture(t)
+	if out, err := exec.Command(probe).CombinedOutput(); err != nil {
+		t.Fatalf("unsandboxed browser discovery control: %v: %s", err, out)
+	}
+
+	argv, err := scope(spec.Session.Dir, TabAgent, spec.Session, spec.Access, nil, []string{probe})
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -64,51 +66,45 @@ func runBrowserProbe(t *testing.T, spec LaunchSpec, payload []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox browser: %v: %s", err, out)
+	out, runErr := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("protected browser discovery timed out: %v: %s", ctx.Err(), out)
+	}
+	if runErr == nil {
+		t.Fatalf("protected session discovered a host browser through LaunchServices: %s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		t.Fatalf("start protected browser discovery probe: %v: %s", runErr, out)
+	}
+	const denial = "default browser lookup denied"
+	if exitErr.ExitCode() != 20 || !strings.Contains(string(out), denial) {
+		t.Fatalf("protected browser discovery failed outside the expected denial path (exit %d): %v: %s", exitErr.ExitCode(), runErr, out)
+	}
+	if !strings.Contains(string(out), "attempting default browser discovery") {
+		t.Fatalf("protected browser discovery never reached the LaunchServices call: %s", out)
 	}
 }
 
-// Default discovery exercises LaunchServices without launching a UI.
-func TestSeatbeltRuntimeBrowserDiscovery(t *testing.T) {
-	spec, probe := browserFixture(t)
-	runBrowserProbe(t, spec, []string{probe})
-}
-
-// A successful open exit status alone is insufficient: the real browser must
-// fetch the local callback. Opt-in because this opens two harmless browser tabs.
-func TestSeatbeltRuntimeBrowserCallback(t *testing.T) {
-	if os.Getenv("AMUX_TEST_BROWSER") != "1" {
-		t.Skip("set AMUX_TEST_BROWSER=1 to open local browser callback tabs")
+func TestSeatbeltProfileOmitsHostApplicationLaunchAuthority(t *testing.T) {
+	spec, probe := browserDiscoveryFixture(t)
+	argv, err := scope(spec.Session.Dir, TabAgent, spec.Session, spec.Access, nil, []string{probe})
+	if err != nil {
+		t.Fatal(err)
 	}
-	spec, probe := browserFixture(t)
-	for _, kind := range []string{"open", "native"} {
-		t.Run(kind, func(t *testing.T) {
-			seen := make(chan struct{}, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/amux-browser-check" {
-					http.NotFound(w, r)
-					return
-				}
-				select {
-				case seen <- struct{}{}:
-				default:
-				}
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				fmt.Fprint(w, "<title>amux browser check</title><p>amux browser authentication handoff works. You can close this tab.</p>")
-			}))
-			defer server.Close()
-			url := server.URL + "/amux-browser-check"
-			payload := []string{"/usr/bin/open", "-g", url}
-			if kind == "native" {
-				payload = []string{probe, url}
-			}
-			runBrowserProbe(t, spec, payload)
-			select {
-			case <-seen:
-			case <-time.After(15 * time.Second):
-				t.Fatal("browser never fetched the callback")
-			}
-		})
+	if len(argv) < 3 || argv[0] != "/usr/bin/sandbox-exec" || argv[1] != "-p" {
+		t.Fatalf("unexpected Seatbelt launch argv: %v", argv)
+	}
+	for _, forbidden := range []string{
+		"(allow lsopen)",
+		"com.apple.coreservices.launchservicesd",
+		"com.apple.CoreServices.coreservicesd",
+		"com.apple.coreservices.quarantine-resolver",
+		"com.apple.lsd.mapdb",
+		"com.apple.lsd.open",
+	} {
+		if strings.Contains(argv[2], forbidden) {
+			t.Errorf("Seatbelt profile grants host application authority %q", forbidden)
+		}
 	}
 }

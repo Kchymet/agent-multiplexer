@@ -40,8 +40,8 @@ func (h browserHost) probe(shell string, wsl, jailed bool) browserProbe {
 // TestCheckBrowser drives the $BROWSER check across the matrix a pane can
 // hit: unset (WSL and not), a command that is missing, one that resolves on
 // this PATH but is hidden by the sandbox's tmpfs $HOME, a symlink into an
-// unmounted tree (a snap), a Windows .exe on WSL (which must be steered to
-// wslview), and the healthy cases with the jail on and off.
+// unmounted tree (a snap), protected WSL's deliberately absent host interop,
+// and the healthy unprotected-host cases.
 func TestCheckBrowser(t *testing.T) {
 	host := browserHost{
 		bins: map[string]string{
@@ -65,8 +65,8 @@ func TestCheckBrowser(t *testing.T) {
 		absent []string // substrings it must not
 	}{
 		{
-			name: "unset on WSL steers to wslview", shell: "", wsl: true, jailed: true,
-			symbol: "·", want: []string{"$BROWSER is unset", "export BROWSER=wslview"},
+			name: "protected WSL uses attended host login", shell: "", wsl: true, jailed: true,
+			symbol: "✓", want: []string{"protected WSL", "Windows-drive and interop paths are absent", "copy any printed URL into the host browser"}, absent: []string{"wslview"},
 		},
 		{
 			name: "unset elsewhere is a hint", shell: "", wsl: false, jailed: true,
@@ -77,8 +77,8 @@ func TestCheckBrowser(t *testing.T) {
 			symbol: "⚠", want: []string{`"chromium" not found`}, absent: []string{"wslview"},
 		},
 		{
-			name: "missing command on WSL suggests wslview", shell: "chromium", wsl: true, jailed: true,
-			symbol: "⚠", want: []string{`"chromium" not found`, "export BROWSER=wslview"},
+			name: "protected WSL ignores configured browser", shell: "chromium", wsl: true, jailed: true,
+			symbol: "⚠", want: []string{"$BROWSER=chromium", "protected WSL", "host terminal"}, absent: []string{"wslview"},
 		},
 		{
 			name: "hidden by the sandbox", shell: "mybrowse", wsl: false, jailed: true,
@@ -93,20 +93,28 @@ func TestCheckBrowser(t *testing.T) {
 			symbol: "⚠", want: []string{"/usr/bin/firefox", "resolves to /snap/bin/firefox"},
 		},
 		{
-			name: "windows path with spaces on WSL", shell: "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", wsl: true, jailed: true,
-			symbol: "⚠", want: []string{"Windows binary", "export BROWSER=wslview"},
+			name: "windows path is unavailable in protected WSL", shell: "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe", wsl: true, jailed: true,
+			symbol: "⚠", want: []string{"cannot launch a host browser", "Windows-drive and interop paths are absent"}, absent: []string{"wslview"},
 		},
 		{
-			name: "windows exe on PATH on WSL", shell: "cmd.exe /c start", wsl: true, jailed: true,
-			symbol: "⚠", want: []string{"Windows binary", "/mnt/c/Windows/System32/cmd.exe", "export BROWSER=wslview"},
+			name: "windows exe is unavailable in protected WSL", shell: "cmd.exe /c start", wsl: true, jailed: true,
+			symbol: "⚠", want: []string{"cannot launch a host browser", "host terminal"}, absent: []string{"wslview"},
 		},
 		{
 			name: "windows path off WSL is just hidden", shell: "cmd.exe", wsl: false, jailed: true,
 			symbol: "✓", absent: []string{"wslview"},
 		},
 		{
-			name: "wslview healthy on WSL", shell: "wslview", wsl: true, jailed: true,
-			symbol: "✓", want: []string{"/usr/bin/wslview", "reachable from the agent sandbox"},
+			name: "wslview cannot cross protected WSL", shell: "wslview", wsl: true, jailed: true,
+			symbol: "⚠", want: []string{"$BROWSER=wslview", "cannot launch a host browser", "copy any printed URL into the host browser"},
+		},
+		{
+			name: "wslview remains valid in an unprotected host context", shell: "wslview", wsl: true, jailed: false,
+			symbol: "✓", want: []string{"/usr/bin/wslview", "unscoped"},
+		},
+		{
+			name: "unprotected WSL still steers Windows binaries to wslview", shell: "cmd.exe /c start", wsl: true, jailed: false,
+			symbol: "⚠", want: []string{"Windows binary", "/mnt/c/Windows/System32/cmd.exe", "export BROWSER=wslview"},
 		},
 		{
 			name: "command line with placeholder resolves its first word", shell: "xdg-open %s", wsl: false, jailed: true,
@@ -134,18 +142,29 @@ func TestCheckBrowser(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("protected macOS denies host application launch", func(t *testing.T) {
+		p := host.probe("open", false, true)
+		p.darwin = true
+		out := strings.Join(checkBrowser(p), "\n")
+		for _, want := range []string{"$BROWSER=open", "protected macOS", "LaunchServices is denied", "host terminal"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+	})
 }
 
-// TestCheckBrowserWslviewMissing: on WSL, $BROWSER=wslview with wslu not
-// installed must name the package, not just report a missing command.
+// TestCheckBrowserWslviewMissing covers only an unprotected WSL host context;
+// protected panes never recommend an interop helper they cannot use.
 func TestCheckBrowserWslviewMissing(t *testing.T) {
 	host := browserHost{bins: map[string]string{}}
-	out := strings.Join(checkBrowser(host.probe("wslview", true, true)), "\n")
+	out := strings.Join(checkBrowser(host.probe("wslview", true, false)), "\n")
 	if !strings.Contains(out, "wslview is not installed") || !strings.Contains(out, "apt install wslu") {
 		t.Errorf("missing wslview not steered to wslu:\n%s", out)
 	}
 	// And the unset case on such a host installs before it exports.
-	out = strings.Join(checkBrowser(host.probe("", true, true)), "\n")
+	out = strings.Join(checkBrowser(host.probe("", true, false)), "\n")
 	if !strings.Contains(out, "apt install wslu && export BROWSER=wslview") {
 		t.Errorf("unset $BROWSER on a WSL host without wslu should say to install it:\n%s", out)
 	}
@@ -156,7 +175,7 @@ func TestCheckBrowserWslviewMissing(t *testing.T) {
 // is flagged with the restart, and a matching daemon says nothing extra.
 func TestCheckBrowserDaemonDrift(t *testing.T) {
 	host := browserHost{bins: map[string]string{"wslview": "/usr/bin/wslview"}, visible: []string{"/usr"}}
-	p := host.probe("wslview", true, true)
+	p := host.probe("wslview", true, false)
 	p.daemonKnown, p.daemon = true, ""
 	out := strings.Join(checkBrowser(p), "\n")
 	if !strings.Contains(out, "running daemon has $BROWSER unset") || !strings.Contains(out, "amux daemon restart") {

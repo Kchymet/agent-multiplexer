@@ -20,11 +20,12 @@ operations according to their roles; they are more privileged than workers.
 
 ## Deliberate grants and limits
 
-- **macOS host applications:** native browser authentication permits
-  LaunchServices `lsopen`. It can launch other host applications outside the
-  session's Seatbelt profile. The profile does not confine those applications.
-  This is a substantial exception to the direct filesystem/process restrictions;
-  do not treat macOS sessions as a boundary for hostile tenants.
+- **Attended host authentication:** protected macOS sessions deny LaunchServices
+  and `lsopen`; protected WSL2 sessions omit Windows-drive and interop paths.
+  Run Claude/Codex login from a host terminal and copy any printed authorization
+  URL into the host browser. Existing central, Keychain and account-broker
+  credentials remain available through their scoped session grants; no protected
+  session receives blanket host-application launch authority.
 - **Shared network:** sessions can access IP services, including reachable local
   services, and can bind/listen on IP ports. There is no per-session network
   isolation or general prevention of data exfiltration.

@@ -61,21 +61,6 @@ const seatbeltBase = `(version 1)
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+$"))
 `
 
-// Native harnesses call LaunchServices directly as well as /usr/bin/open.
-// lsopen cannot be restricted to HTTP URLs: it deliberately permits launching
-// host applications outside this Seatbelt profile, including the user's browser.
-// It does not grant Apple Events automation, browser profile files or keychains.
-const seatbeltBrowser = `
-(allow lsopen)
-(allow mach-lookup
- (global-name "com.apple.coreservices.launchservicesd")
- (global-name "com.apple.CoreServices.coreservicesd")
- (global-name "com.apple.coreservices.quarantine-resolver")
- (global-name "com.apple.lsd.mapdb")
- (global-name "com.apple.lsd.open"))
-(allow sysctl-read (sysctl-name "kern.willshutdown"))
-`
-
 var darwinSystemRoots = []string{
 	"/System", "/usr", "/bin", "/sbin", "/opt", "/Library/Apple", "/Applications",
 	"/private/etc", "/private/var/db/dyld", "/private/var/db/timezone",
@@ -296,7 +281,6 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 	}
 	var policy seatbeltPolicy
 	policy.WriteString(seatbeltBase)
-	policy.WriteString(seatbeltBrowser)
 	if tab == TabAgent && agent.Canonical(s.Agent) == "codex" {
 		if err := policy.codexSockets(s); err != nil {
 			return nil, fmt.Errorf("prepare native Codex sockets: %w", err)

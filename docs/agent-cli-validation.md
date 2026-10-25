@@ -191,6 +191,15 @@ The host explicitly approved native LaunchServices access after being informed
 that `lsopen` cannot be restricted to browsers or URLs and permits launching
 host applications outside Seatbelt. Documentation and doctor report this grant.
 
+This historical acceptance was superseded on 2026-10-24. The protected profile
+no longer grants `lsopen` or LaunchServices IPC. An ordinary macOS runtime
+fixture now requires default-browser discovery to succeed as an unsandboxed
+control and fail inside the protected session, without launching an application.
+Claude/Codex authentication is attended from a host terminal and any printed URL
+is copied to the host browser. This is source/fixture acceptance only; the
+revised flow has not been accepted with a real customer account on a physical
+Mac in this review.
+
 ## Public sharing review — 2026-09-23
 
 Review base: `c88b7d6` on `master`, plus the documentation and patched-toolchain
