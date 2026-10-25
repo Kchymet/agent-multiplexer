@@ -104,7 +104,7 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 			return nil
 		}
 	case "repo":
-		if req.Verb == core.ActionNewRepoAgent && req.ID == subject.Repo {
+		if req.Verb == core.ActionNewWorkgroup && req.ID == "" && len(splitList(req.Fields["repos"])) == 1 && splitList(req.Fields["repos"])[0] == subject.Repo {
 			return nil
 		}
 		owned, err := p.repoOwns(ctx, subject, target)
@@ -153,21 +153,10 @@ func splitList(value string) []string {
 	return out
 }
 
-// repoOwns follows the target to its authoritative repo-scoped hidden root.
-// Merely sharing target.Repo is insufficient: an unrelated workgroup member can
-// be assigned the same repository.
+// Repo homes retain their own management context. Sharing a repository does
+// not confer access to a workgroup: its coordinator owns its member sessions.
 func (p Policy) repoOwns(ctx context.Context, subject, target Resource) (bool, error) {
-	if target.ID == subject.ID {
-		return true, nil
-	}
-	if target.RootID == "" {
-		return target.Role == "" && target.Scope == "repo" && target.Repo == subject.Repo, nil
-	}
-	root, ok, err := p.Resolver.Lookup(ctx, target.RootID)
-	if err != nil || !ok {
-		return false, err
-	}
-	return root.Role == "" && root.Scope == "repo" && root.Repo == subject.Repo, nil
+	return target.ID == subject.ID, nil
 }
 
 func (p Policy) authorizeQuery(ctx context.Context, subject Resource, req Request) error {
@@ -238,8 +227,7 @@ func consoleAction(verb string) bool {
 	case core.ActionRefresh, core.ActionStart, core.ActionSteer, core.ActionRename,
 		core.ActionMove, core.ActionArchive, core.ActionSetArchived, core.ActionDelete,
 		core.ActionKill, core.ActionAddRepo, core.ActionRmRepo, core.ActionAgentSetRepos,
-		core.ActionAddAgent, core.ActionNewRepoAgent, core.ActionNewWorkgroup,
-		core.ActionCreateWorkspace:
+		core.ActionAddAgent, core.ActionNewWorkgroup, core.ActionCreateWorkspace:
 		return true
 	}
 	return false

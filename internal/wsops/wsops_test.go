@@ -1171,10 +1171,8 @@ func TestHostCreatedCoordinatorExplicitEmptyGrantCeiling(t *testing.T) {
 	}
 }
 
-// TestSetAgentReposSkipsUntracked verifies re-scoping an agent to an untracked
-// repo name is a no-op that never errors (defensive against stale/typo names) —
-// the reported "unknown repo" hard-fail is gone.
-func TestSetAgentReposSkipsUntracked(t *testing.T) {
+// Re-scoping cannot turn unknown/ungranted repositories into new authority.
+func TestSetAgentReposRejectsUngranted(t *testing.T) {
 	isolateStore(t)
 	ctx := context.Background()
 
@@ -1192,8 +1190,8 @@ func TestSetAgentReposSkipsUntracked(t *testing.T) {
 	}
 	db.Close()
 
-	if err := SetAgentRepos(ctx, agentID, []string{"nope"}); err != nil {
-		t.Fatalf("SetAgentRepos with an untracked repo should not error, got %v", err)
+	if err := SetAgentRepos(ctx, agentID, []string{"nope"}); err == nil {
+		t.Fatal("SetAgentRepos accepted an uninitialized grant ceiling")
 	}
 
 	db, err = store.Open()

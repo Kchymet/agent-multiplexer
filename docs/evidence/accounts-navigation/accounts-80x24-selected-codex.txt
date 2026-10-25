@@ -1,0 +1,24 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor   3 term  ──────────────────
+ ○ console                │work 00 · 界 ·······································
+  ╭──────────────────────────────────────────────────────────────────────────╮·
+ ▾│ Accounts · remaining budget                                              │·
+ ▾│   Claude · subscription · ready                                          │·
+  │   5h 77% left ━━━━━━━─── · reset 01-02 03:04Z · fresh                    │·
+  │   7d 77% left ━━━━━━━─── · reset 01-05 03:04Z · fresh                    │·
+ ▾│   statusline advisory; identity unverified                               │·
+ ▾│                                                                          │·
+  │ › Codex · subscription · ready                                           │·
+  │   5h 33% left ━━━─────── · reset 01-02 03:04Z · fresh                    │·
+ ▾│   7d 33% left ━━━─────── · reset 01-05 03:04Z · fresh                    │·
+ ○│   provider report                                                        │·
+  │                                                                          │·
+ A│ Tab/↑↓/jk: select · e: subscription · a: API key                         │·
+ C│ d: default · x: logout · r: refresh                                      │·
+  │ Existing workload bindings stay fixed.                                   │·
+ C│                                                                          │·
+  │ Selected: Codex                                                          │·
+ ↵│ Account: fixture@example.test                                            │·
+ S│ ↑↓/jk select · PgUp/PgDn scroll · Esc close  1–16/26                     │·
+ /╰──────────────────────────────────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────────────────────────────────
+ accounts · e subscription · a API key · d default · x logout · r refresh · Esc

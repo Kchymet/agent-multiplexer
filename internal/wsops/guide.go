@@ -2,7 +2,6 @@ package wsops
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -187,9 +186,9 @@ func consoleGuide(s store.Session) string {
 You are the **amux console**: the built-in session with global context over
 everything amux runs on this machine. amux is an AI-native terminal control plane:
 it runs coding agents (Claude Code, Codex) in sandboxed sessions, grouped into
-**workgroups** (a coordinator plus agents working across repos) and **repos**
-(a home session plus one-off agents on a single tracked repo), shown on a rail in
-a native TUI and mirrored to a web dashboard.
+**workgroups** (a coordinator plus agents, optionally limited to one repo).
+Tracked **repos** have management home sessions. All work appears under workgroups
+in the native TUI and the provider session inventory.
 
 ## Your role
 - Answer for the whole machine: which workgroups, agents, and repos exist, what
@@ -199,8 +198,7 @@ a native TUI and mirrored to a web dashboard.
   rename them, track repos, tune amux's configuration.
 - Coordinate *across* workgroups when asked. Coordination *within* one belongs to
   that workgroup's coordinator session (open it from the rail, or steer it by its
-  workgroup id); context on one repo's one-off agents belongs to that repo's home
-  session (its id is the repo name).
+  workgroup id); repo management notes belong to that repo's home session (its id is the repo name).
 
 ## Where everything is
 - This directory (%s) is your own writable sandbox. No workgroup, repo cache,
@@ -217,7 +215,7 @@ a native TUI and mirrored to a web dashboard.
   `+"`-f coordinator_model=…`"+` picks its model), optionally with an idle first agent
   on the repos; `+"`amux do add-agent <workgroup> -f repos=… -f prompt=\"…\"`"+`
   adds one (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are optional);
-  `+"`amux do new-repo-agent <repo> -f prompt=\"…\"`"+` starts a one-off agent on a repo;
+  Supply a single repo in `+"`repos`"+` to limit the workgroup to that repo.
   `+"`amux do move <agent> --target <workgroup>`"+` re-parents an agent.
 - `+"`amux repo add <OWNER/REPO|url|path>`"+`, `+"`amux repo ls`"+`, `+"`amux workgroup ls`"+`.
 - `+"`amux sandbox drift`"+` reviews config edits agents made; `+"`amux doctor`"+` checks health;
@@ -308,48 +306,38 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 	return b.String()
 }
 
-// repoGuide is the guide for a tracked repo's home session: the long-lived
-// context for the one-off agents run against that repo.
+// repoGuide provides persistent repository management context without granting
+// access to unrelated workgroups that happen to use the same repository.
 func repoGuide(home store.Session) string {
 	var b strings.Builder
-	repoName := home.Repo
 	source := ""
 	if db, err := store.Open(); err == nil {
-		if r, ok, _ := db.Repo(repoName); ok {
+		if r, ok, _ := db.Repo(home.Repo); ok {
 			source = r.Source
 		}
 		db.Close()
 	}
 	fmt.Fprintf(&b, `# amux repo home — %s
 
-You are the **home session** of repo **%s** (`+"`%s`"+`): the long-lived context for
-the one-off agent sessions run against this repo. You know what has been tried on
-it, by whom, and where it stands; you dispatch new one-off agents and steer the
-ones running. Prompting this repo from the rail or the web reaches you.
+You are the **home session** of repo **%s**, a persistent management context.
+Keep repository notes here. All implementation work belongs to normal workgroups.
 
 ## This repo
-- Authoritative source: `+"`%s`"+`. Each dispatched agent receives a linked worktree
-  with private writable Git metadata and a read-only authorized base-object pool;
-  the legacy host cache and other sessions' private Git metadata are not yours.
-- You have no clone of your own: to change code, dispatch a one-off agent and
-  inspect it through your authenticated repo-scoped session view.
+- Authoritative source: %s.
+- Each member receives an isolated linked worktree. You have no clone of your own.
+- Your sandbox is %s. Other sessions' sandboxes are not mounted. %s
 
-## Your sandbox
-This directory (%s) is your writable sandbox; keep your notes here. One-off
-agent sandboxes are not mounted. Their normalized context and explicit control
-operations come through your authenticated repo-scoped grant. %s
+## Dispatch work
+- Use `+"`amux do new-workgroup -f repos=%s -f prompt=\"…\"`"+` to create a normal
+  coordinator workgroup limited to this repo. The returned id is the coordinator.
+- The coordinator receives the task and manages its members. Creating a workgroup
+  does not grant this home access to its member histories or control operations.
+  Use the host dashboard or console to manage existing workgroups.
+- `+"`amux agent events --json`"+` reads your own history. Repository discovery and
+  your own management context remain available through authenticated commands.
 
-## Operate
-%s
-- `+"`amux do new-repo-agent %s -f prompt=\"…\"`"+` dispatches a new one-off agent on
-  this repo (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are optional).
-
-`, repoName, repoName, source, source, home.Dir, guideRegenNote, steeringVerbs, repoName)
-	b.WriteString(repoSessionsSection(repoName))
-	b.WriteString("\n")
+`, home.Repo, home.Repo, source, home.Dir, guideRegenNote, home.Repo)
 	b.WriteString(configHomeSection)
-	b.WriteString("\n")
-	b.WriteString(transcriptsSection)
 	return b.String()
 }
 
@@ -374,55 +362,8 @@ func membersSection(root store.Session) string {
 	return b.String()
 }
 
-// repoSessionsSection lists the one-off agents on a repo: the members of every
-// hidden repo-scoped workgroup for it, active first, then archived (capped).
-func repoSessionsSection(repoName string) string {
-	db, err := store.Open()
-	if err != nil {
-		return "## One-off sessions on this repo\n(could not read the store: " + err.Error() + ")\n"
-	}
-	defer db.Close()
-	var active, archived []store.Session
-	roots, _ := db.Roots()
-	for _, r := range roots {
-		if r.Scope != store.ScopeRepo || r.Role() == store.RoleRepo || firstOf(r.Repo) != repoName {
-			continue
-		}
-		subs, _ := db.Children(r.ID)
-		for _, a := range subs {
-			if a.Archived || r.Archived {
-				archived = append(archived, a)
-			} else {
-				active = append(active, a)
-			}
-		}
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "## One-off sessions on this repo (at launch, %s)\n", launchStamp())
-	if len(active) == 0 {
-		b.WriteString("No active one-off sessions — dispatch one with the `new-repo-agent` verb above.\n")
-	}
-	for _, a := range active {
-		writeAgentLine(&b, a)
-	}
-	if len(archived) > 0 {
-		sort.SliceStable(archived, func(i, j int) bool { return archived[i].ArchivedAt > archived[j].ArchivedAt })
-		if len(archived) > guideArchivedCap {
-			archived = archived[:guideArchivedCap]
-		}
-		b.WriteString("\nArchived (most recent):\n")
-		for _, a := range archived {
-			writeAgentLine(&b, a)
-		}
-	}
-	return b.String()
-}
-
-// guideArchivedCap bounds how many archived agents a repo home's guide lists.
-const guideArchivedCap = 10
-
 // inventorySection is the console's launch-time snapshot of every workgroup,
-// its agents, and every tracked repo with its one-off agents.
+// its agents, and every tracked repo home.
 func inventorySection() string {
 	db, err := store.Open()
 	if err != nil {
@@ -432,22 +373,13 @@ func inventorySection() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Inventory (at launch, %s — `amux status --json` for the live view)\n", launchStamp())
 	roots, _ := db.Roots()
-	repoAgents := map[string][]store.Session{}
 	wrote := false
 	for _, r := range roots {
 		if r.Archived {
 			continue
 		}
 		subs, _ := db.Children(r.ID)
-		if r.Scope == store.ScopeRepo {
-			if r.Role() == store.RoleRepo {
-				continue
-			}
-			for _, a := range subs {
-				if !a.Archived {
-					repoAgents[firstOf(r.Repo)] = append(repoAgents[firstOf(r.Repo)], a)
-				}
-			}
+		if r.Role() == store.RoleRepo {
 			continue
 		}
 		if !wrote {
@@ -473,10 +405,7 @@ func inventorySection() string {
 	}
 	for _, r := range repos {
 		fmt.Fprintf(&b, "- **%s** (`%s`) — home session id `%s`; per-session linked-worktree metadata is isolated\n", r.Name, r.Source, store.RepoHomeID(r.Name))
-		for _, a := range repoAgents[r.Name] {
-			b.WriteString("  ")
-			writeAgentLine(&b, a)
-		}
+
 	}
 	return b.String()
 }

@@ -317,23 +317,22 @@ func cmdSession(args []string) error {
 		startCreated(rootID)
 		return nil
 	case "repo":
-		// amux workgroup repo <repo> [--name n] [--prompt t] [--mode m] [--model M]
-		// Creates a single-repo (repo-scoped) workgroup + its one agent.
-		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--mode m] [--model M]")
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--coordinator kind]")
 		}
-		_, cfg := parseCreateFlags(args[2:])
-		id, err := sendActionID(core.Action{Action: core.ActionNewRepoAgent, ID: args[1], Fields: map[string]string{
-			"agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
-		}})
+		_, cfg := parseCreateFlags(rest[1:])
+		fields := createWorkspaceFields([]string{rest[0]}, cfg)
+		id, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: fields})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created repo-scoped agent %s on %s\n", id, args[1])
+		fmt.Printf("created workgroup %s limited to repo %s (with one agent on it)\n", id, rest[0])
 		startCreated(id)
 		return nil
 	case "move":
 		// amux workgroup move <agentID> [<targetRootID> | --new]
+		// Moves an agent into an existing workgroup, or (no target / --new) into
+		// a new workgroup of its own, granted exactly the agent's repos.
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup move <agentID> [<targetRootID>|--new]")
 		}
@@ -341,12 +340,16 @@ func cmdSession(args []string) error {
 		if len(args) > 2 && args[2] != "--new" {
 			target = args[2]
 		}
-		if err := sendAction(core.Action{Action: core.ActionMove, ID: args[1], Target: target}); err != nil {
+		newID, err := sendActionID(core.Action{Action: core.ActionMove, ID: args[1], Target: target})
+		if err != nil {
 			return err
 		}
-		if target == "" {
-			fmt.Printf("moved agent %s into a new work-scoped workgroup\n", args[1])
-		} else {
+		switch {
+		case target == "" && newID != "":
+			fmt.Printf("moved agent %s into new workgroup %s\n", args[1], newID)
+		case target == "":
+			fmt.Printf("moved agent %s into a new workgroup\n", args[1])
+		default:
 			fmt.Printf("moved agent %s into workgroup %s\n", args[1], target)
 		}
 		return nil
@@ -430,9 +433,9 @@ func cmdSession(args []string) error {
 		return fmt.Errorf("unknown workgroup subcommand %q\nvalid subcommands:\n"+
 			"  new                          create a workgroup on a config page (default)\n"+
 			"  create <repo>...             create one non-interactively, with a first agent\n"+
-			"  repo <repo>                  start a repo-scoped agent on a tracked repo\n"+
+			"  repo <repo>                  create a workgroup limited to one tracked repo, with a first agent\n"+
 			"  add <id> [repo...]           add another agent to a workgroup\n"+
-			"  move <agent> [<id>|--new]    re-parent an agent into another workgroup\n"+
+			"  move <agent> [<id>|--new]    move an agent into another (or a new) workgroup\n"+
 			"  repos <agent> <repo>...      re-scope an agent to exactly these repos\n"+
 			"  rename <id> <name>           set a display name (the id is unchanged)\n"+
 			"  archive | unarchive <id>     mark done / bring back (reversible)\n"+
@@ -450,17 +453,24 @@ usage: amux workgroup [command]
 
   (bare)             the interactive create page (same as "new")
   new [repo...]      choose coordinator harness/model and optional repos;
-                     selected repos seed a first agent
-  create <repo>...   non-interactive: workgroup + one agent on those repos
+                     selected repos limit the workgroup to them and seed a
+                     first agent (one repo = a single-repo workgroup)
+  create <repo>...   non-interactive: workgroup limited to those repos + one
+                     agent on them
                      [--name n] [--prompt t] [--agent a] [--mode m] [--model M]
                      [--coordinator claude|codex] [--coordinator-model M]
                      the prompt is the coordinator's task (its goal on the
                      default codex coordinator); the agent starts idle for it
-  repo <repo>        create a single-repo (repo-scoped) agent on a tracked repo
-  add <root> [repo...]  add another agent to an existing workgroup
+  repo <repo>        non-interactive: workgroup limited to that one repo + one
+                     agent on it (same flags as create) — this is how work on a
+                     single repo is started; there is no agent outside a workgroup
+  add <root> [repo...]  add another agent to an existing workgroup (within its repos)
   open <id>          open the dashboard on a workgroup or agent  (alias: switch)
-  ls                 list workgroups and their agents  (alias: list)
-  move <agent> [<root>|--new]  re-parent an agent into another workgroup
+  ls                 list workgroups (with the repos each is limited to) and
+                     their agents  (alias: list)
+  move <agent> [<root>|--new]  move an agent into another workgroup (its repos
+                     must be within that workgroup's), or with --new / no target
+                     into a new workgroup of its own limited to its repos
   repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
   grants <coordinator> [repo...]  replace its host-managed repo ceiling
   rename <id> <name>  set a display name (the id is unchanged)
@@ -512,7 +522,7 @@ func sessionList() error {
 			// A repo's home session: listed under `amux repo ls`, not as a workgroup.
 			continue
 		}
-		fmt.Printf("%-8s %-6s %s\n", r.ID, defaultStr(r.Scope, "work"), orID(r.Display, r.ID))
+		fmt.Printf("%-8s %-6s %s%s\n", r.ID, defaultStr(r.Scope, "work"), orID(r.Display, r.ID), grantsTag(r))
 		for _, s := range r.Agents {
 			tag := ""
 			if s.Archived {
@@ -523,6 +533,19 @@ func sessionList() error {
 		}
 	}
 	return nil
+}
+
+// grantsTag renders a workgroup's repository ceiling for `workgroup ls`, so a
+// workgroup limited to one repo reads as such ("· repos: api") next to one
+// granted several or none. A legacy coordinator with no ceiling yet shows none.
+func grantsTag(r core.WorkgroupRow) string {
+	if !r.Granted {
+		return ""
+	}
+	if len(r.Grants) == 0 {
+		return " · repos: (none)"
+	}
+	return " · repos: " + strings.Join(r.Grants, ", ")
 }
 
 // workgroupForm is the interactive creation page. Coordinator settings are

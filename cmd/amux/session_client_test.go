@@ -110,3 +110,22 @@ func TestRestrictedReportQueriesAndEchoesCurrentGeneration(t *testing.T) {
 		t.Fatalf("runtime generation = %q", got)
 	}
 }
+
+func TestRepoShortcutCreatesAndStartsCoordinatorWorkgroup(t *testing.T) {
+	body, _ := json.Marshal(core.Result{Type: "result", OK: true, NewID: "group"})
+	rpc := &fakeRestrictedRPC{action: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: body}}
+	installRestrictedRPC(t, rpc)
+	if err := cmdSession([]string{"repo", "api", "--name", "fix", "--prompt", "repair it", "--coordinator", "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.actions) != 2 {
+		t.Fatalf("actions: %+v", rpc.actions)
+	}
+	create, start := rpc.actions[0], rpc.actions[1]
+	if create.Verb != core.ActionCreateWorkspace || create.ID != "" || create.Fields["repos"] != "api" || create.Fields["coordinator"] != "claude" || create.Fields["prompt"] != "repair it" || create.Fields["name"] != "fix" {
+		t.Fatalf("repo shortcut did not use normal creation: %+v", create)
+	}
+	if start.Verb != core.ActionStart || start.ID != "group" {
+		t.Fatalf("start targeted wrong session: %+v", start)
+	}
+}

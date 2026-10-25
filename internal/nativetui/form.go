@@ -18,18 +18,24 @@ import (
 
 var cursorStyle = lipgloss.NewStyle().Reverse(true)
 
-// openNewRepoAgentForm opens the settings form for a new repo-scoped agent.
-func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
+// openNewRepoWorkgroupForm opens the new-workgroup form for a repo header: a
+// normal workgroup whose repos are seeded with (and so limited to) that one
+// repo, with its first agent on it. There is no one-off agent on a repo.
+func (m *model) openNewRepoWorkgroupForm(repoID, repoTitle string) {
 	m.form = &formState{
-		title:  "New agent · " + repoTitle,
-		action: core.ActionNewRepoAgent,
-		id:     repoID,
-		submit: "Create agent",
+		explicitRepos: true,
+		title:         "New workgroup · " + repoTitle,
+		action:        core.ActionNewWorkgroup,
+		submit:        "Create workgroup",
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
+			{key: wsops.FieldCoordinator, label: "Coordinator harness", value: agent.GoalRuntime, options: agent.Kinds()},
+			coordinatorModelField(agent.GoalRuntime),
+			{key: "repos", label: "Repos", value: repoID, picker: true},
+			{key: "name", label: "Name"},
 		},
 	}
 }
@@ -67,7 +73,8 @@ func (m *model) openAddRepoForm() {
 	}
 }
 
-// openNewWorkgroupForm opens the settings form for a new work-scoped workgroup.
+// openNewWorkgroupForm opens the settings form for a new workgroup (the repos
+// picked limit it and seed a first agent; none = coordinator only).
 func (m *model) openNewWorkgroupForm() {
 	m.form = &formState{
 		title:  "New workgroup",
@@ -483,14 +490,15 @@ func isWordRune(r rune) bool  { return !isWordSpace(r) && r != '\n' }
 // (cursor == len(fields)). Text fields are vim-edited; `insert` is the vim mode
 // and `pending` holds a half-typed operator (d/c/r).
 type formState struct {
-	title   string
-	action  string
-	id      string
-	submit  string
-	fields  []*formField
-	cursor  int
-	insert  bool
-	pending string
+	explicitRepos bool // a seeded repo picker stays explicit even when cleared
+	title         string
+	action        string
+	id            string
+	submit        string
+	fields        []*formField
+	cursor        int
+	insert        bool
+	pending       string
 }
 
 func (fs *formState) values() map[string]string {
@@ -842,7 +850,7 @@ func (m *model) submitForm() tea.Cmd {
 
 func formFieldsForSubmit(fs *formState) map[string]string {
 	fields := fs.values()
-	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" {
+	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" && !fs.explicitRepos {
 		// An untouched first-agent picker means "create an empty but immediately
 		// usable coordinator", not an explicitly empty authorization ceiling.
 		// Omission lets wsops initialize all currently tracked repositories; the
@@ -886,7 +894,7 @@ func (m *model) renderForm() string {
 	if lipgloss.Width(footer[0]) > inner {
 		footer = []string{submit, m.formHint()}
 	}
-	if fs.action == core.ActionNewWorkgroup || fs.action == core.ActionNewRepoAgent || fs.action == core.ActionAddAgent {
+	if fs.action == core.ActionNewWorkgroup || fs.action == core.ActionAddAgent {
 		footer = append(footer, dimStyle.Render("Account: machine default at creation (rail: s)"))
 	}
 	// In a pane too short for the modal's chrome, give up the blank spacer rows
