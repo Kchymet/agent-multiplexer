@@ -38,11 +38,11 @@ func Launch(argv []string, stderr io.Writer, fetch func() (Secret, error)) int {
 		}
 	}
 	token, err := fetch()
-	for warned := false; err != nil; token, err = fetch() {
-		if !warned {
-			fmt.Fprintf(stderr, "amux: the central Claude credential is unavailable (%v).\n"+
-				"Run `amux auth login` in a host terminal; this pane starts Claude as soon as it can.\n", err)
-			warned = true
+	for previous := ""; err != nil; token, err = fetch() {
+		message := launchGuidance(err)
+		if message != previous {
+			fmt.Fprintln(stderr, "amux: "+message+"\nWaiting for authorized credential delivery; retrying automatically.")
+			previous = message
 		}
 		time.Sleep(LaunchRetry)
 	}
@@ -50,6 +50,52 @@ func Launch(argv []string, stderr io.Writer, fetch func() (Secret, error)) int {
 		fmt.Fprintf(stderr, "amux: exec Claude: %v\n", err)
 	}
 	return 126
+}
+
+// fetchFailure contains only a local classification, never native error text,
+// response bodies, paths or arbitrary remote codes. A transport failure does
+// not establish whether a credential exists.
+type fetchFailure string
+
+func (e fetchFailure) Error() string { return string(e) }
+
+const (
+	fetchMissing     fetchFailure = "central_login_required"
+	fetchUnavailable fetchFailure = "central_credential_unavailable"
+	fetchDenied      fetchFailure = "credential_access_denied"
+	fetchBlocked     fetchFailure = "account_binding_blocked"
+	fetchConflict    fetchFailure = "central_credential_conflict"
+	fetchMailbox     fetchFailure = "session mailbox unavailable"
+	fetchTimeout     fetchFailure = "session mailbox request timed out"
+	fetchTransport   fetchFailure = "session mailbox request failed"
+	fetchMalformed   fetchFailure = "malformed credential response"
+)
+
+func launchGuidance(err error) string {
+	var failure fetchFailure
+	if !errors.As(err, &failure) {
+		failure = fetchTransport
+	}
+	switch failure {
+	case fetchMissing:
+		return "No central Claude login is configured. Run `amux auth login claude` in a trusted host terminal."
+	case fetchDenied:
+		return "Claude credential access was denied. Check this workload's authorization in amux; logging in does not restore revoked access."
+	case fetchBlocked:
+		return "This workload's account binding is blocked. Check Accounts in amux; an account replacement may require explicit `amux auth rebind claude <workload-id>`."
+	case fetchConflict:
+		return "Claude settings conflict with central credential delivery. Check provider and credential overrides for this workload."
+	case fetchUnavailable:
+		return "The daemon could not read the central Claude credential. Check Accounts in amux; this does not establish that login is missing."
+	case fetchMailbox:
+		return "The protected session mailbox is unavailable. Check the workload's session access and daemon status from a trusted host terminal."
+	case fetchTimeout:
+		return "The daemon did not answer the protected session mailbox request within 10 seconds. Credential status is unknown; check daemon status from a trusted host terminal."
+	case fetchMalformed:
+		return "The daemon returned an invalid credential response. Check that the daemon and amux launcher versions match."
+	default:
+		return "The protected session mailbox request failed. Credential status is unknown; check daemon status and workload access from a trusted host terminal."
+	}
 }
 
 // LaunchEnv replaces inherited Claude credential inputs with the central
@@ -82,7 +128,7 @@ var openSession = func() (sessionQuerier, error) { return sessionrpc.OpenClient(
 func FetchFromSession() (Secret, error) {
 	client, err := openSession()
 	if err != nil {
-		return Secret{}, errors.New("session mailbox unavailable")
+		return Secret{}, fetchMailbox
 	}
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -92,18 +138,26 @@ func FetchFromSession() (Secret, error) {
 	})
 	if err != nil {
 		var remote *sessionrpc.RemoteError
-		if errors.As(err, &remote) && remote.Code != "" {
-			return Secret{}, errors.New(remote.Code)
+		if errors.As(err, &remote) {
+			switch remote.Code {
+			case string(fetchMissing), string(fetchUnavailable), string(fetchBlocked), string(fetchConflict):
+				return Secret{}, fetchFailure(remote.Code)
+			case "credential_access_denied", "credential_revoked", "credential_invalid", "access_denied", "authentication_failed", "expired":
+				return Secret{}, fetchDenied
+			}
 		}
-		return Secret{}, errors.New("daemon did not answer")
+		if errors.Is(err, context.DeadlineExceeded) {
+			return Secret{}, fetchTimeout
+		}
+		return Secret{}, fetchTransport
 	}
 	var d Delivery
 	if json.Unmarshal(result.Body, &d) != nil {
-		return Secret{}, errors.New("malformed response")
+		return Secret{}, fetchMalformed
 	}
 	token, err := NewSecret(d.Token)
 	if err != nil {
-		return Secret{}, errors.New("malformed response")
+		return Secret{}, fetchMalformed
 	}
 	return token, nil
 }
