@@ -156,19 +156,18 @@ merging:
 
 Either way, don't walk away from a red PR — at minimum leave CI green.
 
-## Phase 5 — Mark the amux session done (task-mode member agents only)
+## Phase 5 — Finish the amux session
 
-A **task-driven** amux agent session exists to produce one change. Once its PR is
+A **task-driven member** amux agent session exists to produce one change. Once its PR is
 open (and green), the session's job is finished, so mark it done to clear it from
 the active rail. This is reversible — it archives, it does not delete.
 
 **Only do this when all three hold:**
 
-- `$AMUX_ROLE` is not `coordinator` — a workgroup coordinator **never** archives
-  itself or its workgroup when a task finishes. The workgroup stays open; the
-  coordinator reports the outcome and asks the user whether they want it
-  archived (their host operation: `amux workgroup archive <id>`) or have another
-  task for it.
+- `$AMUX_ROLE` is not `coordinator`. A coordinator reports the outcome and asks
+  the user whether to archive the workgroup or give it another task. It must wait
+  for explicit user confirmation before self/workgroup archive; goal completion
+  and a merged PR are not confirmation.
 - `$AMUX_MODE` is `task` — **never** archive an `interactive` session. The human
   drives an interactive session and owns when it ends; archiving it out from under
   them defeats its purpose.
@@ -188,14 +187,21 @@ fi
 
 `amux agent done` exits nonzero unless the daemon confirms the archive. Treat a
 failure as a real incomplete lifecycle step and report it; do not claim the
-session was marked done. It's the self-scoped form of the management verb `amux
-workgroup archive <id>`, which you'd use to archive *another* agent by id. To undo
-either: `amux workgroup unarchive <id>`.
+session was marked done. Ordinary member completion archives only that member.
 
-Then report the outcome to the user: the PR URL and that the session was marked
-done. If you did **not** archive (coordinator, interactive session, a long-lived
-loop, or more work remains), say so and why — a coordinator ends by asking the
-user whether to archive the workgroup or continue.
+A coordinator may run `amux agent done` **after explicit user confirmation**.
+The authenticated command archives its own workgroup and all its direct members,
+then stops their runtimes and revokes their credentials. It cannot archive a
+foreign workgroup. Do not delegate this to a member: member completion archives
+only that member. If confirmation has not arrived, leave the workgroup open.
+
+Restoration is host-only: `amux workgroup unarchive <workgroup-id>` first, then
+explicitly restore any members the user wants resumed. Restoring the workgroup
+does not automatically revive members, including those already completed.
+
+Report the PR URL and the confirmed lifecycle outcome. If you did not archive
+(interactive session, a long-lived loop, more work remains, or no confirmation
+for the coordinator), say so and why.
 
 ## Guardrails
 

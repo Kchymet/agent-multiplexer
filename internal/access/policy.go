@@ -95,6 +95,11 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 			return nil
 		}
 	case "coordinator":
+		// This permission belongs only to coordinators, not repo homes that
+		// share the direct-member control helper below. Restore remains host-only.
+		if req.Verb == core.ActionSetArchived && req.ID == subject.ID && req.Fields["archived"] == "true" {
+			return nil
+		}
 		if req.Verb == core.ActionAddAgent && req.ID == subject.ID {
 			if err := p.authorizeAddAgent(ctx, subject, req); err == nil {
 				return nil
@@ -206,7 +211,7 @@ func coordinatorAction(req Request, self bool) bool {
 		return true
 	case core.ActionSetArchived:
 		if self {
-			return false // root archival cascades; self-completion uses a separate path
+			return false // coordinator self-archive is granted separately above
 		}
 		return req.Fields["archived"] == "true" || req.Fields["archived"] == "false"
 	case core.ActionSteer:

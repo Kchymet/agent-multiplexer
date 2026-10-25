@@ -134,9 +134,12 @@ A goal transitioning to `complete` archives nothing. The completed goal stays
 observable on the thread (`get_goal`, the rail's goal state), the workgroup
 stays on the active rail, and its coordinator and members keep running; the
 coordinator's guide tells it to finish with a summary and ask the user whether
-to archive the workgroup or hand it another task. Archiving remains the user's
-explicit host operation (`x` on the rail, `amux workgroup archive <id>`), which
-stops the coordinator and its members and retains transcripts and worktrees.
+to archive the workgroup or hand it another task. After explicit user confirmation,
+the coordinator can use `amux agent done` to archive its own workgroup. The host
+can also archive it (`x` on the rail, `amux workgroup archive <id>`). Both archive
+the coordinator and its members, stop runtimes, and revoke credentials while
+retaining transcripts and worktrees. Restore remains host-only and per session:
+restore the root first, then the members to resume; completed members stay archived.
 
 The next task on a workgroup with a completed goal clears the finished goal and
 establishes a fresh one with its own accounting. Restart evidence covers only

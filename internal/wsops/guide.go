@@ -287,8 +287,9 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 - `+"`amux do start <member>`"+` — bring a stopped member up without prompting it;
   `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
 - `+"`amux do set-archived <member> -f archived=true`"+` — mark a member done. Restoring
-  an archived member, and archiving or restoring this workgroup itself, are the
-  user's operations from the host, not yours.
+  an archived member or this workgroup requires the host.
+- After explicit user confirmation, `+"`amux agent done`"+` archives your own
+  workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
   pull request; review its authenticated session view and PR evidence, not only
   the member's summary.
@@ -457,21 +458,22 @@ func firstOf(list string) string {
 
 func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
 
-// completionSection is the task-completion contract every coordinator gets,
-// whatever its harness: finishing a task archives nothing. The workgroup stays on
-// the active rail with its coordinator and members, and what happens next —
-// archive it, or hand it another task — is the user's decision, asked for
-// explicitly. Archiving the workgroup is a host operation the coordinator's grant
-// refuses, so the guide never teaches it as something the model does itself.
+// Task completion never implies archive permission. A coordinator must ask for
+// explicit user confirmation before using its authenticated self-archive path.
 func completionSection(root store.Session) string {
 	return fmt.Sprintf(`## Finishing a task
 Finishing a task archives nothing: this workgroup, you and your members stay on
 the active rail. End each finished task with your final summary and ask the
-user whether to archive the workgroup (their host operation: `+"`x`"+` on the rail or
-`+"`amux workgroup archive %s`"+`) or give it another task. Never archive this
-workgroup yourself — not with `+"`amux agent done`"+`, not through a member. Members
-keep their own lifecycle: `+"`amux do set-archived <member> -f archived=true`"+` marks
-one done once its work is verified.
+user whether to archive the workgroup or give it another task. Wait for explicit
+user confirmation before archiving; goal completion is not confirmation.
+After confirmation, run `+"`amux agent done`"+`: your authenticated identity selects
+this workgroup (%s), and the daemon durably archives you and its direct members
+before stopping runtimes. Report success only when the command confirms it.
+Do not delegate self-archive to a member: a member's `+"`amux agent done`"+` archives
+only that member. You may still mark verified members done with
+`+"`amux do set-archived <member> -f archived=true`"+`.
+Restoration is host-only: restore the workgroup first, then explicitly restore
+any members the user wants resumed. Previously completed members stay archived.
 `, root.ID)
 }
 

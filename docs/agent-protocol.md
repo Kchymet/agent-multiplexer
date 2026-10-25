@@ -206,12 +206,18 @@ Refresh `updated` without changing any channel.
 Declare the agent's task **complete**. This is a *terminal* lifecycle report, not
 an activity state (§8): a task-mode workgroup member that has finished its task
 and integrated its artifact calls this to retire its own session from the active
-rail. The workgroup and its coordinator remain available.
+rail. The workgroup and its coordinator remain available. A coordinator may also
+call it after explicit user confirmation to archive its own whole workgroup.
+Goal completion alone never authorizes archive.
 
 - **CLI:** `amux agent done`
-- **Effect:** archives the agent's own session — it drops off the active rail into
-  the ARCHIVED section (§SectionArchived). Reversible: it hides the row, it does
-  **not** delete the worktree or branch (`amux workgroup unarchive <id>` restores it).
+- **Effect:** archives an ordinary member's own session. For a coordinator, it
+  atomically archives the coordinator and its direct members, preserving archive
+  timestamps on already-completed members. Runtimes stop and credentials are
+  revoked; durable flags drive cleanup even after a daemon restart. Worktrees,
+  branches and conversations remain. Restoration is host-only: restore the root
+  first with `amux workgroup unarchive <id>`, then explicitly restore any members
+  to resume. Restoring the root does not unarchive its members.
 - **Identity:** unlike the activity verbs, `done` acts on the authenticated
   principal's *store* subject (the id archive/rename actions take). It accepts no
   `--id` or environment identity. Missing fixed context fails nonzero.
@@ -220,14 +226,18 @@ rail. The workgroup and its coordinator remain available.
   store state the harness owns, not a volatile activity channel. It exits `0`
   only after the daemon confirms the archive action; missing identity, transport
   denial, an unreachable daemon, and rejected actions are nonzero failures.
-- **Idempotent:** marking an already-done session done again is a no-op.
+- **Durable response:** self-completion commits before responding, with a narrow
+  receipt window and bounded cleanup grace for the caller. An archived caller
+  has no general control access. Post-commit delivery failures still clean up;
+  the caller must not claim success without confirmation from the daemon.
 
 > Distinct from `status idle` (§5.1/§8): `idle` means "no live turn right now" and
 > flips back to `running` on the next message; `done` means "this session's job is
 > finished" and takes it off the active rail until a human restores it. Use `done`
 > only when a task-mode workgroup member has completed its entire assignment —
-> never for an interactive member (the human ends it), a coordinator, or a
-> long-lived task loop that still has work to do.
+> never automatically for an interactive member (the human ends it) or a
+> long-lived task loop that still has work to do. A coordinator must separately
+> ask for and receive explicit user confirmation before archiving its workgroup.
 
 ---
 

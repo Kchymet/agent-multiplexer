@@ -357,6 +357,16 @@ func (d *DB) SetArchivedFlag(id string, archived bool, archivedAt int64) error {
 	return err
 }
 
+// ArchiveWorkgroup atomically archives the coordinator and its current direct
+// members. Preserve independently archived members' timestamps. Restoration is
+// deliberately per session, so restoring a root cannot revive completed work.
+func (d *DB) ArchiveWorkgroup(id string, archivedAt int64) error {
+	_, err := d.sql.Exec(`UPDATE sessions SET
+		archived_at=CASE WHEN archived=1 THEN archived_at ELSE ? END, archived=1
+		WHERE id=? OR root_id=?`, archivedAt, id, id)
+	return err
+}
+
 // SetDir updates a session's sandbox dir (filled in for a workgroup root that
 // predates default sessions, the first time it is resolved as a coordinator).
 func (d *DB) SetDir(id, dir string) error {
