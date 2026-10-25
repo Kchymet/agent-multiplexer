@@ -49,6 +49,9 @@ func TestAccountSafeRequestsRejectCeremonyMaterial(t *testing.T) {
 			r.ProfileID = "codex:central"
 			r.Revision = 1
 		}
+		if op == AccountDefault {
+			r.DefaultRevision = 1
+		}
 		if op == AccountRebind {
 			r.WorkloadID = "w"
 		}
