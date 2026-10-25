@@ -886,6 +886,9 @@ func (m *model) renderForm() string {
 	if lipgloss.Width(footer[0]) > inner {
 		footer = []string{submit, m.formHint()}
 	}
+	if fs.action == core.ActionNewWorkgroup || fs.action == core.ActionNewRepoAgent || fs.action == core.ActionAddAgent {
+		footer = append(footer, dimStyle.Render("Account: machine default at creation (rail: s)"))
+	}
 	// In a pane too short for the modal's chrome, give up the blank spacer rows
 	// and the vertical padding before anything the user needs to see.
 	chrome, pad := formChrome, 1
