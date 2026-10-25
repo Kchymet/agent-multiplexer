@@ -63,7 +63,7 @@ func cmdDoctor() error {
 		missingRequired = true
 		fmt.Printf("  ✗ %v\n", err)
 	} else if runtime.GOOS == "darwin" {
-		fmt.Println("  ✓ macOS Seatbelt (sandbox-exec; native host application launching allowed)")
+		fmt.Println("  ✓ macOS Seatbelt (sandbox-exec; LaunchServices and host application launching denied)")
 	} else {
 		fmt.Println("  ✓ Linux bubblewrap >= 0.12.0 (user/PID namespaces required)")
 	}

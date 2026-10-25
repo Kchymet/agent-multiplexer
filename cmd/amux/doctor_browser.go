@@ -33,8 +33,10 @@ type browserProbe struct {
 	lookup   func(string) string
 	realPath func(string) string
 	// wsl says the host is WSL; jailed that panes run inside the bwrap scope;
-	// reaches whether a host path is visible from inside that scope.
+	// darwin says the host uses Seatbelt; reaches whether a host path is visible
+	// from inside that scope.
 	wsl     bool
+	darwin  bool
 	jailed  bool
 	reaches func(string) bool
 }
@@ -44,11 +46,10 @@ type browserProbe struct {
 // view --web`, Claude's OAuth login — and the failure is quiet: the tool prints
 // a URL and nobody notices the browser never came up. The value is checked the
 // way a pane would see it: resolved on this PATH, then tested against the
-// sandbox, which hides everything under $HOME (only system roots, the WSL
-// interop mounts, and the amux data tree are bound). On WSL a $BROWSER that
-// points at a Windows .exe under /mnt/c is steered to wslview instead: the
-// Windows path is per-machine, and wslview lives under /usr, is on every pane's
-// PATH, and does the URL/path translation itself. Returns the lines to print.
+// sandbox, which hides everything under $HOME. Protected macOS sessions deny
+// LaunchServices, and protected WSL sessions omit Windows-drive and interop
+// paths, so both use attended host-side login instead of an in-session opener.
+// Unprotected host WSL keeps the wslview guidance. Returns the lines to print.
 func checkBrowser(p browserProbe) []string {
 	var lines []string
 	say := func(mark, format string, a ...any) {
@@ -57,9 +58,25 @@ func checkBrowser(p browserProbe) []string {
 	note := func(format string, a ...any) {
 		lines = append(lines, "              "+fmt.Sprintf(format, a...))
 	}
+	value := strings.TrimSpace(p.shell)
+	if p.jailed && (p.darwin || p.wsl) {
+		platform := "macOS"
+		reason := "LaunchServices is denied"
+		if p.wsl {
+			platform = "WSL"
+			reason = "Windows-drive and interop paths are absent"
+		}
+		if value == "" {
+			say("✓", "protected %s sessions do not launch host browsers (%s)", platform, reason)
+		} else {
+			say("⚠", "$BROWSER=%s cannot launch a host browser from protected %s sessions (%s)", value, platform, reason)
+		}
+		note("run `amux auth login` (Claude) or `amux auth login codex` from a host terminal; copy any printed URL into the host browser")
+		return lines
+	}
 	wslview := p.lookup("wslview") != ""
-	// The one-line fix for WSL: point $BROWSER at wslview, installing wslu first
-	// if the host lacks it.
+	// The one-line fix applies only where WSL interop is available outside the
+	// protected namespace.
 	wslFix := func() {
 		if wslview {
 			note("use wslview instead: export BROWSER=wslview")
@@ -68,7 +85,6 @@ func checkBrowser(p browserProbe) []string {
 		}
 	}
 
-	value := strings.TrimSpace(p.shell)
 	switch {
 	case value == "" && p.wsl:
 		say("·", "$BROWSER is unset — links agents open (gh --web, Claude's login) fall back to xdg-open, which has no Windows browser to reach")
@@ -94,7 +110,7 @@ func checkBrowser(p browserProbe) []string {
 			}
 		case p.wsl && (isWindowsBinary(cmd) || isWindowsBinary(path) || isWindowsBinary(real)):
 			say("⚠", "$BROWSER=%s points at a Windows binary (%s)", value, path)
-			note("Windows paths differ per machine and interop is fragile inside the sandbox; wslview is on every pane's PATH and translates URLs itself")
+			note("Windows paths differ per machine; in this unprotected host context wslview provides the URL/path translation")
 			wslFix()
 		case p.jailed && p.reaches != nil && !p.reaches(path):
 			say("⚠", "$BROWSER=%s → %s is hidden inside the agent sandbox", value, path)
@@ -176,6 +192,7 @@ func probeBrowser(ctx context.Context, daemonUp bool) browserProbe {
 	p := browserProbe{
 		shell:  os.Getenv("BROWSER"),
 		wsl:    providercfg.IsWSL(),
+		darwin: runtime.GOOS == "darwin",
 		jailed: panespec.Jailed(),
 		reaches: func(path string) bool {
 			return panespec.ScopeReaches(core.DataDir(), path)

@@ -12,10 +12,9 @@ orchestrator; the native TUI currently connects to the local daemon.
 [Security and trust boundaries](SECURITY.md) · [Documentation](docs/README.md) ·
 [Contributing](CONTRIBUTING.md).
 
-The sandbox deliberately grants network and selected account access. On macOS,
-browser authentication also permits launching host applications outside the
-sandbox. Read [Security](SECURITY.md) before running unfamiliar agents or
-connecting a remote orchestrator; this is not a hostile multi-tenant boundary.
+The sandbox deliberately grants network and selected account access. Read
+[Security](SECURITY.md) before running unfamiliar agents or connecting a remote
+orchestrator; this is not a hostile multi-tenant boundary.
 
 ```
 ┌ amux ──────────────── ⌥ l ▸┬ 1 agent  2 editor  3 term ──────────────────────┐
@@ -129,7 +128,7 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   Git object generations are read-only. Other sessions, host state, transcripts,
   shell histories, and daemon control credentials are excluded from direct access
   by the session process. These restrictions have deliberate exceptions described
-  in [Security](SECURITY.md), including macOS host application launching. Each checkout
+  in [Security](SECURITY.md), including shared network and selected accounts. Each checkout
   keeps its writable Git metadata inside its session.
   Explicit grants supply the selected harness account, Git/GitHub authentication,
   editor configuration, and shell rc/theme files. Only the selected model's
@@ -464,15 +463,16 @@ not supported; use WSL2. The native TUI hosts panes over PTYs and needs no tmux.
 Missing or disabled isolation is an error; protected panes never fall back to
 unrestricted host execution. Docker sockets, WSL host drives, and sibling
 sessions are not available in protected panes. IP networking remains shared.
-On WSL, install `wslu` and set `BROWSER=wslview` rather than pointing at a
-Windows `.exe`. macOS permits native browser opening for authentication through LaunchServices.
-**This also permits launching other host applications outside the session sandbox:**
-Seatbelt's `lsopen` permission cannot be restricted to browser URLs. The direct
-file/socket restrictions still apply to the session process, but applications
-launched through LaunchServices do not inherit them. Claude inherits the host login through a scoped daemon credential broker; general
-Keychain access remains blocked. GitHub CLI and Git HTTPS authentication also use
-the broker for the host's active GitHub account in every harness. Codex continues to share the host credential
-files. Session settings and conversation histories remain private.
+Protected WSL sessions omit Windows drives and interop paths, so `wslview` and a
+Windows `.exe` are not agent-side browser solutions. Protected macOS sessions
+deny LaunchServices and `lsopen` rather than granting a URL-unsafe host opener.
+Run `amux auth login` / `amux auth login codex` in a host terminal and copy any
+printed authorization URL into the host browser. Already enrolled sessions keep
+their selected model identity. Claude receives its scoped central credential;
+general Keychain access remains blocked. GitHub CLI and Git HTTPS authentication
+continue through the broker for the host's active GitHub account in every
+harness. Codex continues to receive its scoped central account credential.
+Session settings and conversation histories remain private.
 
 ### Validation
 

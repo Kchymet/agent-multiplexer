@@ -40,9 +40,9 @@ wrapper around a one-off agent) hosts no session.
 A default session uses the same protected launcher as an ordinary agent:
 Seatbelt on macOS, bubblewrap with private PID/proc state on Linux/WSL2. It has
 its dedicated own directory, explicit daemon-issued access grants, and a private
-harness-config copy under `<sandbox>/.amux/`. macOS has no private PID namespace
-and allows host application launching for browser authentication; selected
-accounts and network access are shared. See [Security](../SECURITY.md) and
+harness-config copy under `<sandbox>/.amux/`. macOS has no private PID namespace;
+protected sessions deny host-application launching and use attended host-side
+authentication instead. Selected accounts and network access are shared. See [Security](../SECURITY.md) and
 [sandbox configuration](sandbox-config.md). A coordinator does not mount
 the workgroup parent containing members; repo homes and the console do not mount
 the amux data/state tree. Their wider views are explicit authenticated daemon
