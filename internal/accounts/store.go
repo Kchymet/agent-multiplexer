@@ -29,6 +29,7 @@ type Binding struct {
 	ProfileID         string `json:"profileId"`
 	Harness           string `json:"harness"`
 	Source            string `json:"source"`
+	CredentialMode    string `json:"credentialMode,omitempty"` // subscription | api; pinned independently of identity
 	ExpectedAccount   string `json:"expectedAccount,omitempty"`
 	CredentialVersion uint64 `json:"credentialVersion,omitempty"`
 	Revision          uint64 `json:"revision"`
@@ -62,6 +63,7 @@ func initial() (State, error) {
 		for _, m := range amuxcfg.AuthModes(h) {
 			p := hp.AccountProfile{ID: ID(h, m), Harness: h, Source: m, Revision: 1, DeliveryEpoch: 1, State: "unconfigured", Identity: hp.AccountIdentity{State: "unknown", Evidence: "external"}, Limits: hp.AccountLimits{State: "unavailable", Source: "unsupported"}, LoginMethod: "external"}
 			if m == amuxcfg.AuthCentral {
+				p.Mode = "subscription"
 				if h == "claude" {
 					p.LoginMethod = "setup-token"
 					p.Identity.Evidence = "opaque-token"
@@ -206,10 +208,24 @@ func Bind(session, h string) error {
 			if b.Harness != h {
 				return ErrBlocked
 			}
+			profile := s.Profiles[b.ProfileID]
+			if b.Source == "central" && b.CredentialMode == "" && (profile.State == "ready" || b.CredentialVersion != 0 || b.ExpectedAccount != "") {
+				b.CredentialMode = profile.Mode
+				if b.CredentialMode == "" {
+					b.CredentialMode = "subscription"
+				}
+				s.Bindings[session] = b
+			}
 			if b.Harness == "claude" && b.Source == "central" && b.CredentialVersion == 0 {
 				b.CredentialUnknown = b.CredentialUnknown || credentialUnknown
 				if !b.CredentialUnknown {
 					b.CredentialVersion = s.CredentialVersion[b.ProfileID]
+					if b.CredentialVersion != 0 && b.CredentialMode == "" {
+						b.CredentialMode = profile.Mode
+						if b.CredentialMode == "" {
+							b.CredentialMode = "subscription"
+						}
+					}
 				}
 				s.Bindings[session] = b
 			}
@@ -219,7 +235,14 @@ func Bind(session, h string) error {
 		if !ok {
 			return ErrBlocked
 		}
-		s.Bindings[session] = Binding{CredentialUnknown: credentialUnknown && p.Source == "central", ProfileID: p.ID, Harness: h, Source: p.Source, ExpectedAccount: p.Identity.AccountID, CredentialVersion: s.CredentialVersion[p.ID], Revision: 1, Origin: "machine-default"}
+		credentialMode := ""
+		if p.State == "ready" || s.CredentialVersion[p.ID] != 0 {
+			credentialMode = p.Mode
+			if credentialMode == "" {
+				credentialMode = "subscription"
+			}
+		}
+		s.Bindings[session] = Binding{CredentialMode: credentialMode, CredentialUnknown: credentialUnknown && p.Source == "central", ProfileID: p.ID, Harness: h, Source: p.Source, ExpectedAccount: p.Identity.AccountID, CredentialVersion: s.CredentialVersion[p.ID], Revision: 1, Origin: "machine-default"}
 		return nil
 	})
 }
@@ -273,12 +296,25 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 			if p.DeliveryEpoch != epoch || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
 				return ErrStale
 			}
+			mode := p.Mode
+			if mode == "" {
+				mode = "subscription"
+			}
+			pinned := b.CredentialMode
+			// Old central bindings predate API mode and can only be subscription.
+			if pinned == "" && (b.ExpectedAccount != "" || b.CredentialVersion != 0) {
+				pinned = "subscription"
+			}
+			if pinned != "" && pinned != mode {
+				return ErrBlocked
+			}
 			if b.ExpectedAccount != "" && b.ExpectedAccount != account {
 				return ErrBlocked
 			}
-			if b.Harness == "claude" && b.CredentialVersion != 0 && b.CredentialVersion != version {
+			if (b.Harness == "claude" || mode == "api") && b.CredentialVersion != 0 && b.CredentialVersion != version {
 				return ErrBlocked
 			}
+			b.CredentialMode = mode
 			b.DeliveredEpoch = epoch
 			if b.Harness == "claude" && s.CredentialVersion[p.ID] == 0 {
 				s.CredentialVersion[p.ID] = version

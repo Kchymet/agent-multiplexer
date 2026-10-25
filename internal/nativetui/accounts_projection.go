@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,13 +25,20 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		}
 		seen[p.Harness] = true
 		row := accountProfile{
-			id: p.ID, harness: p.Harness, label: accountHarnessName(p.Harness), mode: p.Source, state: p.State,
+			canAPI: slices.Contains(p.SupportedModes, "api"), authMode: p.Mode, id: p.ID, harness: p.Harness, label: accountHarnessName(p.Harness), mode: p.Source, state: p.State,
 			revision: p.Revision, defaultProfile: in.Defaults[p.Harness] == p.ID,
 			identitySource: p.Identity.Evidence, plan: p.Identity.Plan,
 			statusDetail: accountProfileProblem(p.Error),
-			canLogin:     p.Source == "central" && (p.LoginMethod == "browser" || p.LoginMethod == "setup-token") && p.State != "login-pending",
+			canLogin:     p.Source == "central" && (p.LoginMethod == "browser" || p.LoginMethod == "setup-token" || p.LoginMethod == "api-key") && p.State != "login-pending",
 			canLogout:    p.Source == "central" && p.State != "logged-out" && p.State != "unconfigured",
 			canDefault:   in.DefaultRevisions[p.Harness] > 0,
+		}
+		switch row.authMode {
+		case "":
+			row.authMode = "subscription"
+		case "api", "subscription":
+		default:
+			row.authMode = "unknown"
 		}
 		if p.Identity.State == "known" {
 			row.account = p.Identity.Email
@@ -39,12 +47,20 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			}
 		}
 		switch p.LoginMethod {
+		case "api-key":
+			row.loginHelp = "a: replace API key using protected input; e: subscription login."
 		case "setup-token":
 			row.loginHelp = "Enter: configure a Claude token using protected input."
 		case "browser":
 			row.loginHelp = "Enter: start browser login."
 		default:
 			row.loginHelp = "Login unavailable. Check the installed harness and refresh."
+		}
+		if row.authMode == "api" {
+			row.account, row.plan = "", "not applicable"
+			row.limits = []accountLimit{{name: "Subscription usage", state: "not applicable", source: "API mode", reason: "API billing and limits are separate from subscription quotas."}}
+			out.profiles = append(out.profiles, row)
+			continue
 		}
 		limits := p.Limits
 		confidence := "unknown"
@@ -119,7 +135,7 @@ func accountProfileProblem(code string) string {
 }
 
 func projectAccountCeremony(in harnessproto.AccountCeremony) accountAttempt {
-	a := accountAttempt{id: in.AttemptID, state: in.State, method: in.Method}
+	a := accountAttempt{mode: in.Mode, id: in.AttemptID, state: in.State, method: in.Method}
 	if in.ExpiresAt > 0 {
 		a.expiresAt = time.UnixMilli(in.ExpiresAt)
 	}

@@ -51,7 +51,7 @@ func ObserveClaude(session, generation string, raw []byte) error {
 			return ErrBlocked
 		}
 		p := s.Profiles[b.ProfileID]
-		if p.State != "ready" || b.DeliveredEpoch != p.DeliveryEpoch || b.CredentialVersion != s.CredentialVersion[p.ID] {
+		if p.Mode == "api" || p.State != "ready" || b.DeliveredEpoch != p.DeliveryEpoch || b.CredentialVersion != s.CredentialVersion[p.ID] {
 			return ErrStale
 		}
 		state := "unknown"

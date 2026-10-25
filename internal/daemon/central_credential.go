@@ -86,13 +86,16 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 		}
 		return rpcFailed("central_credential_unavailable"), nil
 	}
+	if (cred.Kind == centralauth.KindClaudeAPIKey) != (profile.Mode == "api") {
+		return rpcDenied("account_binding_blocked"), nil
+	}
 	if err := r.authorizeCentralCredential(ctx, request.Principal, req); err != nil {
 		return rpcDenied("credential_access_denied"), nil
 	}
 	if err := accounts.Accept(s.ID, binding.Revision, profile.DeliveryEpoch, "", cred.Generation); err != nil {
 		return rpcDenied("account_binding_blocked"), nil
 	}
-	body, err := json.Marshal(centralauth.Delivery{Token: cred.Token.Reveal(), Generation: cred.Generation})
+	body, err := json.Marshal(centralauth.Delivery{Token: cred.Token.Reveal(), Kind: cred.Kind, Generation: cred.Generation})
 	if err != nil || len(body) > sessionrpc.MaxResponseBody {
 		return rpcFailed("central_credential_unavailable"), nil
 	}

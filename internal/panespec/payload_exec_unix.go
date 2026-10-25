@@ -28,7 +28,7 @@ func init() {
 	}
 	if os.Args[2] == centralauth.LauncherArg {
 		// Central Claude: fetch only now, after descriptors are close-on-exec.
-		os.Exit(centralauth.Launch(os.Args[3:], os.Stderr, centralauth.FetchFromSession))
+		os.Exit(centralauth.LaunchCredential(os.Args[3:], os.Stderr, centralauth.FetchCredentialFromSession))
 	}
 	payload := os.Args[2]
 	if !strings.ContainsRune(payload, os.PathSeparator) {

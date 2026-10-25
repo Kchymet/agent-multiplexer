@@ -38,7 +38,7 @@ func TestCentralCodexAppServerPinsOfficialChatGPTEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	pins := []string{`chatgpt_base_url="` + codexcfg.OfficialChatGPTBaseURL + `"`, `model_provider="openai"`, `openai_base_url=""`}
+	pins := []string{`chatgpt_base_url="` + codexcfg.OfficialChatGPTBaseURL + `"`, `model_provider="openai"`, `openai_base_url=""`, `cli_auth_credentials_store="ephemeral"`}
 	for mode, want := range map[string]bool{amuxcfg.AuthCentral: true, amuxcfg.AuthHost: false, amuxcfg.AuthEnvironment: false} {
 		useCodexAuth(t, mode)
 		if err := accounts.Update(func(st *accounts.State) error {

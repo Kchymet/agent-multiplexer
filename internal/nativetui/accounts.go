@@ -17,10 +17,12 @@ import (
 // separate lifetime and is never copied to the dashboard status or agent panes.
 type accountProfile struct {
 	id, harness, label, mode, state string
+	authMode                        string
 	account, plan, identitySource   string
 	revision                        uint64
 	defaultProfile                  bool
 	canLogin, canLogout, canDefault bool
+	canAPI                          bool
 	loginHelp                       string
 	statusDetail                    string
 	workloads                       *int
@@ -42,6 +44,7 @@ type accountSnapshot struct {
 
 type accountAttempt struct {
 	id, state, method, url, code string
+	mode                         string
 	expiresAt                    time.Time
 }
 
@@ -51,6 +54,7 @@ func (a accountAttempt) active() bool {
 
 type accountRequest struct {
 	op, harness, profile, attempt string
+	loginMode                     string
 	secret                        string // write-only; cleared before returning a reply
 	revision                      uint64
 	defaultRevision               uint64
@@ -64,18 +68,19 @@ type accountResponse struct {
 type accountCaller func(context.Context, accountRequest) (accountResponse, error)
 
 type accountsState struct {
-	snapshot accountSnapshot
-	harness  string
-	selected string // stable profile identity, never a list offset
-	attempt  accountAttempt
-	pending  string
-	notice   string
-	stale    bool
-	confirm  *accountRequest
-	scroll   int
-	serial   uint64
-	secret   []rune // masked Claude setup-token input, never a generic form field
-	broker   *machineAccountTransport
+	snapshot  accountSnapshot
+	harness   string
+	selected  string // stable profile identity, never a list offset
+	attempt   accountAttempt
+	pending   string
+	notice    string
+	stale     bool
+	confirm   *accountRequest
+	scroll    int
+	serial    uint64
+	submitted bool
+	secret    []rune // masked Claude setup-token input, never a generic form field
+	broker    *machineAccountTransport
 }
 
 type accountsReplyMsg struct {
@@ -94,6 +99,10 @@ type accountsPollMsg struct {
 type accountsExpiredMsg struct {
 	owner   *accountsState
 	attempt string
+}
+
+func (s *accountsState) secretInput() bool {
+	return s.attempt.active() && !s.submitted && (s.attempt.method == "setup-token" || s.attempt.method == "api-key")
 }
 
 func (s *accountsState) profiles() []accountProfile {
@@ -149,6 +158,10 @@ func (m *model) requestAccounts(req accountRequest) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		res, err := call(ctx, req)
+		if err == nil && req.op == "login" && req.loginMode == "api" && (res.attempt == nil || res.attempt.mode != "api" || res.attempt.method != "api-key" || res.attempt.state != "pending") {
+			res = accountResponse{}
+			err = errAccountsUnsupported
+		}
 		req.secret = ""
 		if err != nil {
 			// Bubble Tea messages themselves must not retain raw provider errors.
@@ -164,6 +177,12 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 		return nil
 	}
 	s.pending = ""
+	if msg.request.op == "login" {
+		s.submitted = false
+	}
+	if msg.request.op == "complete" {
+		s.submitted = true
+	}
 	if msg.err != nil {
 		// Upstream failures can contain tokens or authorization URLs. Only the
 		// adapter's bounded error classification may be rendered here.
@@ -215,7 +234,7 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 	case "logout":
 		s.notice = "Logout requested. Refresh status to check local cleanup."
 	}
-	if s.attempt.active() && s.attempt.method != "setup-token" {
+	if s.attempt.active() && !s.secretInput() {
 		serial := s.serial
 		return tea.Tick(time.Second, func(time.Time) tea.Msg { return accountsPollMsg{s, serial} })
 	}
@@ -234,10 +253,10 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 
 func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.accounts
-	if k.Paste && !(s.attempt.active() && s.attempt.method == "setup-token" && s.pending == "") {
+	if k.Paste && !(s.secretInput() && s.pending == "") {
 		return m, nil
 	}
-	secretInput := s.attempt.active() && s.attempt.method == "setup-token"
+	secretInput := s.secretInput()
 	if k.String() == "esc" || k.String() == "ctrl+c" || (k.String() == "q" && !secretInput) {
 		if s.confirm != nil {
 			s.confirm = nil
@@ -273,7 +292,7 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s.attempt.active() {
-		if s.attempt.method == "setup-token" {
+		if s.secretInput() {
 			if !s.attempt.expiresAt.IsZero() && !time.Now().Before(s.attempt.expiresAt) {
 				s.clearSecret()
 				s.notice = "Login expired. Press Esc to close and start again."
@@ -335,16 +354,24 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.selectProfile()
 	case "r":
 		return m, m.requestAccounts(accountRequest{op: "status"})
-	case "e", "enter", "d", "x":
+	case "e", "enter", "a", "d", "x":
 		if s.stale || !s.snapshot.canManage {
 			s.notice = "Account management unavailable. Refresh status before making changes."
 			return m, nil
 		}
 		p := s.profile()
 		switch k.String() {
-		case "e", "enter":
+		case "e", "enter", "a":
+			if k.String() == "a" && (p == nil || !p.canAPI) {
+				s.notice = "API login unsupported. Upgrade the amux daemon and reconnect."
+				return m, nil
+			}
 			if p != nil && p.canLogin {
 				req := s.request("login")
+				req.loginMode = "subscription"
+				if k.String() == "a" {
+					req.loginMode = "api"
+				}
 				s.confirm = &req
 			} else {
 				s.notice = "Login unavailable here; inspect the profile's login instructions."
@@ -425,59 +452,70 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 func (m *model) renderAccounts() string {
 	s := m.accounts
 	w, h := m.mainWidth(), m.paneRows()
-	lines := []string{titleStyle.Render("Machine accounts · " + s.harness), "Tab: Claude / Codex · PgUp/PgDn: scroll", ""}
+	lines := []string{titleStyle.Render("Machine accounts · Claude + Codex"), "Tab: select · e: subscription · a: API key", ""}
 	if s.stale {
 		lines = append(lines, "STALE — refresh required before changes")
 	}
-	for _, p := range s.profiles() {
+	for _, harness := range []string{"claude", "codex"} {
+		var profile *accountProfile
+		for _, p := range s.snapshot.profiles {
+			if p.id == harness+":central" && p.mode == "central" {
+				profile = &p
+				break
+			}
+		}
 		mark := "  "
-		if p.id == s.selected {
+		if s.harness == harness {
 			mark = "› "
 		}
-		label := accountText(p.label)
-		if label == "" {
-			label = accountText(p.id)
+		if profile == nil {
+			lines = append(lines, mark+accountHarnessName(harness)+": unavailable", "  Usage: unavailable", "")
+			continue
 		}
-		if p.defaultProfile {
-			label += " [machine default]"
+		p := *profile
+		mode := p.authMode
+		if mode == "" {
+			mode = "subscription"
+		}
+		lines = append(lines, mark+accountHarnessName(harness)+" · "+mode+" · "+accountText(p.state))
+		if mode == "api" {
+			lines = append(lines, "  Subscription usage: not applicable")
 		} else {
-			label += " [not default]"
+			if len(p.limits) == 0 {
+				lines = append(lines, "  Usage: unavailable (unknown)")
+			}
+			for _, l := range p.limits {
+				lines = append(lines, accountUsageSummary(l, time.Now(), s.stale))
+			}
+			source := "provider report"
+			if harness == "claude" {
+				source = "statusline advisory; identity unverified"
+			}
+			lines = append(lines, "  Source: "+source)
 		}
-		lines = append(lines, mark+label+" · "+accountText(p.state))
+		if s.snapshot.legacyDefaults[harness] {
+			lines = append(lines, "  New workloads: preserved legacy default")
+		}
+		lines = append(lines, "")
 	}
-	if s.snapshot.legacyDefaults[s.harness] {
-		lines = append(lines, "Existing default retained. Press d to use this machine account for new workloads; confirmation required.")
-	}
+	lines = append(lines, "d: default · x: logout · r: refresh · Esc: close", "PgUp/PgDn: details; existing bindings stay fixed.")
 	if p := s.profile(); p != nil {
-		if p.statusDetail != "" {
-			lines = append(lines, "", p.statusDetail)
-		}
-		identity := accountText(p.account)
+		identity, plan := accountText(p.account), accountText(p.plan)
 		if identity == "" {
 			identity = "unknown (not verified)"
 		}
-		plan := accountText(p.plan)
 		if plan == "" {
 			plan = "unknown"
 		}
-		lines = append(lines, "", "Account: "+identity, "Plan: "+plan+" · Identity source: "+accountText(p.identitySource))
-		if p.workloads != nil {
-			lines = append(lines, fmt.Sprintf("Bound workloads: %d", *p.workloads))
-		}
-		if p.loginHelp != "" {
-			lines = append(lines, accountText(p.loginHelp))
-		}
-		lines = append(lines, "", "Subscription limits")
-		if len(p.limits) == 0 {
-			lines = append(lines, "Unavailable — no account-attributed observation.", "Unknown limits do not mean unlimited usage.")
+		lines = append(lines, "", "Selected: "+accountHarnessName(p.harness), "Account: "+identity, "Plan: "+plan, accountText(p.loginHelp))
+		if p.statusDetail != "" {
+			lines = append(lines, p.statusDetail)
 		}
 		for _, l := range p.limits {
 			lines = append(lines, accountLimitLines(l, time.Now(), s.stale)...)
 		}
-	} else {
-		lines = append(lines, "Machine account unavailable. Press r to refresh.")
 	}
-	lines = append(lines, "", "New workloads use the machine default; existing bindings stay fixed.")
+
 	if !s.snapshot.canManage {
 		lines = append(lines, "Account management is unavailable on this connection.")
 	}
@@ -497,12 +535,16 @@ func (m *model) renderAccounts() string {
 			lines = append(lines, "Login expired; cancel and start again.")
 		}
 		lines = append(lines, "", "c: cancel login · Esc: cancel and close")
-		if s.attempt.method == "setup-token" {
+		if s.secretInput() {
 			input := "(empty)"
 			if len(s.secret) > 0 {
 				input = "•••••••• (hidden)"
 			}
 			lines = []string{"Claude machine login", "", "In a trusted host terminal run: claude setup-token", "Paste its token below. Do not paste it into an agent conversation.", "", "Token: " + input, "", "Enter: submit · Ctrl+U: clear · Esc: cancel and close", "Expires: " + accountTime(s.attempt.expiresAt)}
+			if s.attempt.method == "api-key" {
+				lines = []string{accountHarnessName(s.harness) + " API key login", "", "Paste the API key below. Input stays hidden.", "Key: " + input, "", "Enter: submit · Ctrl+U: clear · Esc: cancel", "Expires: " + accountTime(s.attempt.expiresAt)}
+			}
+
 			if !s.attempt.expiresAt.IsZero() && !time.Now().Before(s.attempt.expiresAt) {
 				lines = []string{"Claude machine login expired", "Esc: close and start again"}
 			}
@@ -550,7 +592,7 @@ func accountConfirmation(r accountRequest, p *accountProfile) string {
 	case "default":
 		return "Use " + label + " as the machine default?\n\nOnly new workloads use this default. Existing workload account bindings stay fixed."
 	default:
-		return "Start login for " + label + "?\n\nLogin temporarily pauses new credential delivery to workloads bound to this profile. Complete the provider's browser/device flow. Esc cancels the attempt."
+		return "Start " + r.loginMode + " login for " + label + "?\n\nLogin temporarily pauses new credential delivery to workloads bound to this profile. Replacement or a mode change may require explicit rebind for existing workloads. Follow the login instructions; Esc cancels the attempt."
 	}
 }
 
@@ -607,4 +649,30 @@ func (s *accountsState) dispose() {
 		s.broker.close()
 		s.broker = nil
 	}
+}
+
+// Compact enough for both providers to remain visible on an 80x24 terminal.
+func accountUsageSummary(l accountLimit, now time.Time, stale bool) string {
+	state := l.state
+	if state == "" {
+		state = "unavailable"
+	}
+	if state != "available" && state != "stale" {
+		return "  Usage: " + accountText(state) + " (unknown)"
+	}
+	freshness := "fresh"
+	if stale || l.observedAt.IsZero() || l.observedAt.After(now) || l.freshUntil.IsZero() || !now.Before(l.freshUntil) || state == "stale" {
+		freshness = "stale"
+	}
+	name := strings.Split(l.name, " (")[0]
+	name = strings.ReplaceAll(strings.ReplaceAll(name, "five_hour", "5h"), "seven_day", "7d")
+	reset := "unknown"
+	if !l.resetsAt.IsZero() {
+		reset = l.resetsAt.UTC().Format("01-02 15:04Z")
+	}
+	used := "unknown"
+	if l.usedPercent != nil {
+		used = accountValue(l.usedPercent) + "%"
+	}
+	return "  " + accountText(name) + " " + used + " · reset " + reset + " · " + freshness
 }

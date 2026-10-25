@@ -9,6 +9,7 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"time"
 )
@@ -97,6 +98,10 @@ func authAccountMutation(op string, args []string) error {
 	return fmt.Errorf("unknown account profile")
 }
 func authMachineLogin(harness string, fromStdin bool) error {
+	return authMachineLoginMode(harness, "subscription", fromStdin)
+}
+
+func authMachineLoginMode(harness, mode string, fromStdin bool) error {
 	c, err := accountClient()
 	if err != nil {
 		return err
@@ -113,7 +118,7 @@ func authMachineLogin(harness string, fromStdin bool) error {
 		}
 	}
 	initiator := "host-cli"
-	out, err := checkedAccount(c, hp.AccountRequest{Operation: hp.AccountLogin, ProfileID: profile.ID, Revision: profile.Revision, Initiator: initiator}, true)
+	out, err := startAccountLogin(c, profile, mode, initiator)
 	if err != nil {
 		return err
 	}
@@ -122,7 +127,7 @@ func authMachineLogin(harness string, fromStdin bool) error {
 	}
 	attempt := out.Ceremony.AttemptID
 	req := hp.AccountRequest{ProfileID: profile.ID, AttemptID: attempt, Initiator: initiator}
-	if harness == "claude" {
+	if harness == "claude" || mode == "api" {
 		var raw string
 		if fromStdin {
 			raw, err = readTokenLine(os.Stdin)
@@ -133,12 +138,18 @@ func authMachineLogin(harness string, fromStdin bool) error {
 			// Native setup-token prints the credential. In the console its
 			// stdout may be captured as a session event, so only the host CLI
 			// may run issuance. Console completion uses hidden input instead.
-			if sessionContextRestricted() {
+			if mode == "api" {
+				fmt.Println("Use an API key from the provider account you intend to configure.")
+			} else if sessionContextRestricted() {
 				fmt.Println("Obtain a setup-token in a trusted host terminal using claude setup-token.")
 			} else if err = runClaudeSetupToken(); err != nil {
 				return err
 			}
-			fmt.Print("\nPaste setup-token (input hidden): ")
+			if mode == "api" {
+				fmt.Print("\nPaste API key (input hidden): ")
+			} else {
+				fmt.Print("\nPaste setup-token (input hidden): ")
+			}
 			raw, err = readHiddenLine(os.Stdin)
 			fmt.Println()
 		}
@@ -146,10 +157,12 @@ func authMachineLogin(harness string, fromStdin bool) error {
 			return err
 		}
 		err = completeClaudeToken(c, req, raw)
-		if err == nil {
+		if err == nil && harness == "claude" {
 			fmt.Println("Central Claude login saved. Existing bound workloads keep their account; use explicit rebind after replacing an opaque token.")
 		}
-		return err
+		if err != nil || harness == "claude" {
+			return err
+		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -199,7 +212,7 @@ func authMachineStatus(harness string) error {
 		if p.ID != harness+":central" {
 			continue
 		}
-		fmt.Printf("%s configuration: %s (%s)\nidentity: %s; plan: %s\nlimits: %s (%s)\n", harness, p.ID, p.State, p.Identity.State, p.Identity.Plan, p.Limits.State, p.Limits.Source)
+		fmt.Printf("%s configuration: %s (%s; mode %s)\nidentity: %s; plan: %s\nlimits: %s (%s)\n", harness, p.ID, p.State, p.Mode, p.Identity.State, p.Identity.Plan, p.Limits.State, p.Limits.Source)
 		if s.Defaults[harness] != p.ID {
 			fmt.Printf("New workloads still use a preserved legacy source; run amux auth default %s to select this configuration.\n", harness)
 		}
@@ -226,4 +239,20 @@ func completeClaudeToken(c accountService, r hp.AccountRequest, raw string) erro
 	r.Secret = secret.Reveal()
 	_, err = checkedAccount(c, r, true)
 	return err
+}
+
+// A pre-mode daemon silently ignores unknown JSON fields. Never give it an API
+// key: require both advertised support and an unambiguous ceremony echo.
+func startAccountLogin(c accountService, profile hp.AccountProfile, mode, initiator string) (hp.AccountResult, error) {
+	if mode == "api" && !slices.Contains(profile.SupportedModes, "api") {
+		return hp.AccountResult{}, fmt.Errorf("API login unsupported: upgrade the amux daemon and reconnect")
+	}
+	out, err := checkedAccount(c, hp.AccountRequest{Operation: hp.AccountLogin, Mode: mode, ProfileID: profile.ID, Revision: profile.Revision, Initiator: initiator}, true)
+	if err != nil {
+		return out, err
+	}
+	if mode == "api" && (out.Ceremony == nil || out.Ceremony.Mode != "api" || out.Ceremony.Method != "api-key" || out.Ceremony.State != "pending") {
+		return hp.AccountResult{}, fmt.Errorf("API login was not confirmed: upgrade the amux daemon and reconnect")
+	}
+	return out, nil
 }

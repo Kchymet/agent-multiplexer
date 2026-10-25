@@ -34,6 +34,7 @@ type Kind string
 // KindClaudeOAuthToken is a `claude setup-token` value, delivered to Claude
 // Code as CLAUDE_CODE_OAUTH_TOKEN.
 const KindClaudeOAuthToken Kind = "claude-oauth-token"
+const KindClaudeAPIKey Kind = "claude-api-key"
 
 // ClaudeTokenEnv is Claude Code's documented long-lived OAuth token input.
 const ClaudeTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -133,6 +134,7 @@ const (
 // only between the daemon's response and the launcher's exec.
 type Delivery struct {
 	Token      string `json:"token"`
+	Kind       Kind   `json:"kind,omitempty"`
 	Generation uint64 `json:"generation"`
 }
 

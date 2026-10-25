@@ -204,7 +204,11 @@ func (fs *fakeServer) handleCall(m incoming) {
 		go func() {
 			fs.gate(m.Method)
 			// Real Codex acknowledges first and completes the login afterwards.
-			fs.write(map[string]any{"id": m.ID, "result": map[string]any{"type": "chatgptAuthTokens"}})
+			var login struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(m.Params, &login)
+			fs.write(map[string]any{"id": m.ID, "result": map[string]any{"type": login.Type}})
 			switch {
 			case skip:
 			case failure != "":

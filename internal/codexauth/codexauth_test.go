@@ -143,7 +143,7 @@ func TestNativeInvocationIsPinnedAndScrubbed(t *testing.T) {
 	if err != nil || json.Unmarshal(b, &inv) != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-c", `cli_auth_credentials_store="file"`, "-c", `forced_login_method="chatgpt"`, "app-server"}
+	want := []string{"-c", `cli_auth_credentials_store="file"`, "app-server"}
 	if !slices.Equal(inv.Args, want) {
 		t.Fatalf("args %q, want %q", inv.Args, want)
 	}
@@ -436,8 +436,8 @@ func TestParseAuthIsNarrow(t *testing.T) {
 		doc  string
 		want error
 	}{
-		{"api key only", `{"OPENAI_API_KEY":"sk-abc"}`, ErrUnsupportedAuth},
-		{"api key mode", `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-abc","tokens":{"access_token":"a.b.c","account_id":"x"}}`, ErrUnsupportedAuth},
+		{"api key only", `{"OPENAI_API_KEY":"sk-abc"}`, nil},
+		{"api key mode", `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-abc","tokens":{"access_token":"a.b.c","account_id":"x"}}`, nil},
 		{"empty", `{}`, ErrNotLoggedIn},
 		{"no access token", `{"tokens":{"refresh_token":"` + refreshSecret + `","account_id":"x"}}`, errMalformed},
 		{"no account", `{"tokens":{"access_token":"abc"}}`, errMalformed},

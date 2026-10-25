@@ -58,6 +58,7 @@ var (
 // refresh token field by construction.
 type Tokens struct {
 	AccessToken string
+	APIKey      bool   // AccessToken is an API key; no verified account identity
 	AccountID   string // chatgptAccountId
 	PlanType    string // chatgptPlanType; may be empty
 	// ExpiresAt is the access token's JWT exp, or zero when it has none.
@@ -342,7 +343,7 @@ func (p *Provider) refreshLocked(ctx context.Context) (Tokens, error) {
 	case "":
 		p.forget()
 		return Tokens{}, ErrNotLoggedIn
-	case "chatgpt":
+	case "chatgpt", "apiKey":
 	default:
 		p.forget()
 		return Tokens{}, ErrUnsupportedAuth
@@ -412,7 +413,20 @@ func (p *Provider) readAccountLocked(ctx context.Context, refresh bool) (Account
 // cancelled natively).
 var ErrLoginCleanup = errors.New("codexauth: cancelled login cleanup failed")
 
-func (p *Provider) Login(ctx context.Context, show func(authURL string), commit ...func() error) (resultErr error) {
+func (p *Provider) Login(ctx context.Context, show func(authURL string), commit ...func() error) error {
+	return p.login(ctx, "", show, commit...)
+}
+
+// LoginAPIKey uses the same native owner and rollback transaction as browser
+// login. The key travels only over private stdio, never argv or the environment.
+func (p *Provider) LoginAPIKey(ctx context.Context, key string, commit ...func() error) error {
+	if !validToken(key) || len(key) > 4096 {
+		return errors.New("codexauth: invalid API key")
+	}
+	return p.login(ctx, key, nil, commit...)
+}
+
+func (p *Provider) login(ctx context.Context, key string, show func(string), commit ...func() error) (resultErr error) {
 	if err := p.acquire(ctx); err != nil {
 		return err
 	}
@@ -443,9 +457,39 @@ func (p *Provider) Login(ctx context.Context, show func(authURL string), commit 
 	}()
 	completed := srv.subscribe("account/login/completed")
 	defer srv.unsubscribe("account/login/completed")
-	raw, err := srv.call(ctx, "account/login/start", map[string]any{"type": "chatgpt"})
+	params := map[string]any{"type": "chatgpt"}
+	if key != "" {
+		params = map[string]any{"type": "apiKey", "apiKey": key}
+	}
+	raw, err := srv.call(ctx, "account/login/start", params)
 	if err != nil {
-		return err
+		return errors.New("codexauth: native login request failed")
+	}
+	if key != "" {
+		var response struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &response) != nil || response.Type != "apiKey" {
+			return errors.New("codexauth: unexpected API login response")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Verify the protected native record before making it deliverable.
+		token, err := readTokens(p.cfg.Home)
+		if err != nil || !token.APIKey || token.AccessToken != key {
+			return errors.New("codexauth: API key was not stored")
+		}
+		// Invalidate the old cache before metadata admission can expose a new
+		// epoch. Concurrent token readers must wait for this operation's release.
+		p.forget()
+		for _, admit := range commit {
+			if err := admit(); err != nil {
+				return err
+			}
+		}
+		committed = true
+		return nil
 	}
 	var start struct {
 		LoginID string `json:"loginId"`

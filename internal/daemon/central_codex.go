@@ -149,9 +149,25 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	if previous == "" {
 		previous = req.PreviousAccountID
 	}
+	if profile.Mode == "api" && req.Refresh {
+		return codexapp.ChatGPTToken{}, errors.New("API keys do not support subscription refresh")
+	}
 	t, err := c.provider.SessionToken(ctx, req.SessionID, req.Refresh, previous)
 	if err != nil {
 		return codexapp.ChatGPTToken{}, err
+	}
+	if t.APIKey != (profile.Mode == "api") {
+		return codexapp.ChatGPTToken{}, accounts.ErrBlocked
+	}
+	if t.APIKey {
+		state, err := accounts.Read()
+		if err != nil {
+			return codexapp.ChatGPTToken{}, err
+		}
+		t.Generation = state.CredentialVersion[profile.ID]
+		if t.Generation == 0 {
+			return codexapp.ChatGPTToken{}, accounts.ErrBlocked
+		}
 	}
 	// Startup and Close hold the manager's per-session gate, sometimes below
 	// effectMu. Delivery must never acquire effectMu: that creates a cycle.
@@ -167,7 +183,7 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	if err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}
-	return codexapp.ChatGPTToken{AccessToken: t.AccessToken, AccountID: t.AccountID, PlanType: t.PlanType}, nil
+	return codexapp.ChatGPTToken{AccessToken: t.AccessToken, APIKey: t.APIKey, AccountID: t.AccountID, PlanType: t.PlanType}, nil
 }
 
 // authorized reads the session without wsops.ResolveSession's create/migrate

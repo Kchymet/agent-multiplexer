@@ -104,6 +104,13 @@ jobs:
           tar -xzf codex.tar.gz -C codex
           tar -xzf claude.tgz -C claude
           tar -xzf codex-0.157.1.tar.gz -C "$RUNNER_TEMP/codex-0.157.1"
+      - name: test native central API-key login and delivery (synthetic key only)
+        env:
+          AMUX_TEST_CODEX_BIN: ${{ runner.temp }}/codex-0.157.1/codex-x86_64-unknown-linux-musl
+        run: |
+          go test ./internal/codexapp ./internal/daemon \
+            -run '^TestSmoke(APIKeyNativeOwnerAndMemoryDelivery|CentralAPIKeyBindingNative)$' \
+            -count=1 -timeout=90s -v
       - name: test real nested harness command surfaces
         shell: bash
         env:

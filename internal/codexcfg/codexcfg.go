@@ -144,6 +144,7 @@ var CentralEndpointPins = []string{
 	`chatgpt_base_url="` + OfficialChatGPTBaseURL + `"`,
 	`model_provider="openai"`,
 	`openai_base_url=""`,
+	`cli_auth_credentials_store="ephemeral"`,
 }
 
 // ConfigPath is the user home's config.toml.

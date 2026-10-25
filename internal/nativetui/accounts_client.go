@@ -74,7 +74,7 @@ func accountWireRequest(req accountRequest) (harnessproto.AccountRequest, bool, 
 	default:
 		return harnessproto.AccountRequest{}, false, errAccountsUnsupported
 	}
-	wire := harnessproto.AccountRequest{Operation: op, ProfileID: req.profile, Revision: req.revision, AttemptID: req.attempt}
+	wire := harnessproto.AccountRequest{Operation: op, Mode: req.loginMode, ProfileID: req.profile, Revision: req.revision, AttemptID: req.attempt}
 	if op == harnessproto.AccountDefault {
 		wire.DefaultRevision = req.defaultRevision
 	}

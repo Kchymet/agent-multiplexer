@@ -84,3 +84,21 @@ func TestManagedOnlyPreservesRoutingWithoutExposingSourceChoices(t *testing.T) {
 		t.Fatal("projection changed routing or source state")
 	}
 }
+
+func TestAccountModeOnlyAllowedOnLogin(t *testing.T) {
+	for _, mode := range []string{"subscription", "api"} {
+		r := AccountRequest{Operation: AccountLogin, ProfileID: "claude:central", Revision: 1, Mode: mode}
+		if !ValidateAccountRequest(r, true) {
+			t.Fatal("explicit login mode rejected")
+		}
+		for _, op := range []string{AccountStatus, AccountComplete, AccountPoll, AccountCancel, AccountLogout, AccountDefault, AccountRebind, AccountDisconnect} {
+			r.Operation = op
+			if ValidateAccountRequest(r, true) || ValidateAccountRequest(r, false) {
+				t.Fatalf("mode accepted outside login: %s", op)
+			}
+		}
+	}
+	if ValidateAccountRequest(AccountRequest{Operation: AccountLogin, ProfileID: "codex:central", Revision: 1, Mode: "unknown"}, true) {
+		t.Fatal("unknown auth mode accepted")
+	}
+}

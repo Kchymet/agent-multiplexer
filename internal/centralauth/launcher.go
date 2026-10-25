@@ -25,6 +25,14 @@ var LaunchRetry = 5 * time.Second
 // once and keeps asking, so the pane starts Claude as soon as a host login
 // exists instead of exiting into a restart loop. It returns only on failure.
 func Launch(argv []string, stderr io.Writer, fetch func() (Secret, error)) int {
+	return LaunchCredential(argv, stderr, func() (Credential, error) {
+		t, e := fetch()
+		return Credential{Kind: KindClaudeOAuthToken, Token: t}, e
+	})
+}
+
+// LaunchCredential retains classified delivery guidance for either auth mode.
+func LaunchCredential(argv []string, stderr io.Writer, fetch func() (Credential, error)) int {
 	if len(argv) == 0 {
 		fmt.Fprintln(stderr, "amux: central Claude launcher needs a command")
 		return 126
@@ -46,7 +54,7 @@ func Launch(argv []string, stderr io.Writer, fetch func() (Secret, error)) int {
 		}
 		time.Sleep(LaunchRetry)
 	}
-	if err := syscall.Exec(bin, argv, LaunchEnv(os.Environ(), token)); err != nil {
+	if err := syscall.Exec(bin, argv, LaunchCredentialEnv(os.Environ(), token)); err != nil {
 		fmt.Fprintf(stderr, "amux: exec Claude: %v\n", err)
 	}
 	return 126
@@ -101,6 +109,10 @@ func launchGuidance(err error) string {
 // LaunchEnv replaces inherited Claude credential inputs with the central
 // token, so a stale or alternate value can never shadow it.
 func LaunchEnv(environ []string, token Secret) []string {
+	return LaunchCredentialEnv(environ, Credential{Kind: KindClaudeOAuthToken, Token: token})
+}
+
+func LaunchCredentialEnv(environ []string, credential Credential) []string {
 	out := make([]string, 0, len(environ)+1)
 	for _, kv := range environ {
 		key, _, _ := strings.Cut(kv, "=")
@@ -111,7 +123,11 @@ func LaunchEnv(environ []string, token Secret) []string {
 		}
 		out = append(out, kv)
 	}
-	return append(out, ClaudeTokenEnv+"="+token.Reveal())
+	key := ClaudeTokenEnv
+	if credential.Kind == KindClaudeAPIKey {
+		key = "ANTHROPIC_API_KEY"
+	}
+	return append(out, key+"="+credential.Token.Reveal())
 }
 
 // sessionQuerier is the slice of the session RPC client Fetch uses.
@@ -126,9 +142,14 @@ var openSession = func() (sessionQuerier, error) { return sessionrpc.OpenClient(
 // FetchFromSession asks the daemon for this session's Claude credential over
 // the signed mailbox. Errors are fixed RPC codes, never values or paths.
 func FetchFromSession() (Secret, error) {
+	c, e := FetchCredentialFromSession()
+	return c.Token, e
+}
+
+func FetchCredentialFromSession() (Credential, error) {
 	client, err := openSession()
 	if err != nil {
-		return Secret{}, fetchMailbox
+		return Credential{}, fetchMailbox
 	}
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -141,23 +162,29 @@ func FetchFromSession() (Secret, error) {
 		if errors.As(err, &remote) {
 			switch remote.Code {
 			case string(fetchMissing), string(fetchUnavailable), string(fetchBlocked), string(fetchConflict):
-				return Secret{}, fetchFailure(remote.Code)
+				return Credential{}, fetchFailure(remote.Code)
 			case "credential_access_denied", "credential_revoked", "credential_invalid", "access_denied", "authentication_failed", "expired":
-				return Secret{}, fetchDenied
+				return Credential{}, fetchDenied
 			}
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return Secret{}, fetchTimeout
+			return Credential{}, fetchTimeout
 		}
-		return Secret{}, fetchTransport
+		return Credential{}, fetchTransport
 	}
 	var d Delivery
 	if json.Unmarshal(result.Body, &d) != nil {
-		return Secret{}, fetchMalformed
+		return Credential{}, fetchMalformed
 	}
 	token, err := NewSecret(d.Token)
 	if err != nil {
-		return Secret{}, fetchMalformed
+		return Credential{}, fetchMalformed
 	}
-	return token, nil
+	if d.Kind == "" {
+		d.Kind = KindClaudeOAuthToken
+	}
+	if d.Kind != KindClaudeOAuthToken && d.Kind != KindClaudeAPIKey {
+		return Credential{}, fetchMalformed
+	}
+	return Credential{Kind: d.Kind, Token: token, Generation: d.Generation}, nil
 }
