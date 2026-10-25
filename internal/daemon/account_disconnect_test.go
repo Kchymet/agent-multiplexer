@@ -13,15 +13,15 @@ import (
 	"time"
 )
 
-type accountRetirementObservedConn struct {
+type observedServerClose struct {
 	net.Conn
-	retired chan struct{}
-	once    sync.Once
+	closed chan struct{}
+	once   sync.Once
 }
 
-func (c *accountRetirementObservedConn) Close() error {
+func (c *observedServerClose) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(func() { close(c.retired) })
+	c.once.Do(func() { close(c.closed) })
 	return err
 }
 
@@ -45,12 +45,12 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, raw := net.Pipe()
-	observed := &accountRetirementObservedConn{Conn: srv, retired: make(chan struct{})}
+	pipeServer, raw := net.Pipe()
+	srv := &observedServerClose{Conn: pipeServer, closed: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); d.serve(ctx, observed) }()
+	go func() { defer close(done); d.serve(ctx, srv) }()
 	c, err := authenticateClientContext(ctx, raw, credential)
 	if err != nil {
 		t.Fatal(err)
@@ -65,27 +65,23 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 	d.effectMu.Lock()
 	err = json.NewEncoder(c.conn).Encode(core.Action{Action: core.ActionQuery, Query: core.QueryAccountCeremony, Fields: map[string]string{"request": string(b)}})
 	// The full authenticated completion frame has been read, but its mutation
-	// cannot enter until we release effectMu. Peer Close alone does not prove
-	// server observation. The server's connection watcher closes its transport
-	// after connection-context cancellation; wait for that retirement barrier.
+	// cannot enter until we release effectMu. Disconnect before that admission.
 	raw.Close()
-	if err != nil {
-		d.effectMu.Unlock()
-		t.Fatal(err)
-	}
+	// Client close does not order the server reader goroutine. Observe the
+	// server watcher closing its transport after EOF cancels connectionCtx,
+	// while effect admission is still held. The old synchronous reader cannot
+	// reach this observation and fails the bounded wait.
 	select {
-	case <-observed.retired:
-		if ctx.Err() != nil {
-			d.effectMu.Unlock()
-			t.Fatal("server retired only after fixture lifetime cancellation")
-		}
-	case <-time.After(time.Second):
+	case <-srv.closed:
+	case <-ctx.Done():
 		d.effectMu.Unlock()
-		cancel()
 		<-done
-		t.Fatal("server did not observe disconnect while account admission was blocked")
+		t.Fatal("server did not observe disconnect while effect admission was held")
 	}
 	d.effectMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-done:
 	case <-ctx.Done():
