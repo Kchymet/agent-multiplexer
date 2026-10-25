@@ -41,8 +41,10 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			row.loginHelp = "External source — manage login in the host tool. " + accountModeHelp(p.Source)
 		}
 		limits := p.Limits
-		confidence := "provider report"
-		if limits.Source == "claude-statusline" {
+		confidence := "unknown"
+		if limits.Source == "codex-native" {
+			confidence = "provider report"
+		} else if limits.Source == "claude-statusline" {
 			confidence = "session advisory"
 		}
 		base := accountLimit{name: "Account limits", state: "unavailable", source: limits.Source, confidence: confidence,

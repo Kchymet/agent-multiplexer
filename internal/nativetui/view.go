@@ -367,6 +367,15 @@ func (m *model) renderDialog() string {
 func (m *model) renderHelp() string {
 	switch {
 	case m.accounts != nil:
+		if s := m.accounts; s.pending != "" {
+			return hints("accounts", []hint{{"Esc", "close and disconnect"}})
+		} else if s.confirm != nil {
+			return hints("accounts", []hint{{"Enter", "confirm"}, {"Esc", "back"}})
+		} else if s.attempt.active() && s.attempt.method == "setup-token" {
+			return ansi.Truncate(hints("token hidden", []hint{{"Enter", "submit"}, {"Ctrl+U", "clear"}, {"Esc", "cancel"}}), m.w, "")
+		} else if s.attempt.active() {
+			return ansi.Truncate(hints("login", []hint{{"c", "cancel"}, {"PgUp/PgDn", "scroll"}, {"Esc", "cancel and close"}}), m.w, "")
+		}
 		return ansi.Truncate(hints("accounts", []hint{{"Enter", "login"}, {"e", "configure"}, {"d", "default"}, {"x", "logout"}, {"r", "refresh"}, {"Esc", "close"}}), m.w, "")
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
