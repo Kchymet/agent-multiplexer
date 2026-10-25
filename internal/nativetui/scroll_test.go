@@ -179,6 +179,10 @@ func TestHistoryKeysAndInput(t *testing.T) {
 	if term.Viewport().Offset != 5 || input() != "draft" {
 		t.Fatal("rebound scroll key not handled locally")
 	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyPgUp, Alt: true})
+	if term.Viewport().Offset != 0 || input() != "draft\x1b[5;3~" {
+		t.Fatalf("vacated chord lost its modifier: offset=%d input=%q", term.Viewport().Offset, input())
+	}
 }
 
 func TestHistoryIndicatorHeaderWidths(t *testing.T) {
@@ -198,6 +202,42 @@ func TestHistoryIndicatorHeaderWidths(t *testing.T) {
 			term.ReturnLive()
 			if strings.Contains(ansi.Strip(m.renderTopBorder()), "↑") {
 				t.Fatal("indicator remains live")
+			}
+		})
+	}
+}
+
+func TestPaneClickModifierContract(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		tracked, shift, alt bool
+		want                string
+	}{
+		{name: "untracked local"}, {name: "untracked alt offers passthrough", alt: true},
+		{name: "reporting", tracked: true, want: "\x1b[<0;3;3M"},
+		{name: "reporting alt", tracked: true, alt: true, want: "\x1b[<8;3;3M"},
+		{name: "shift local", tracked: true, shift: true},
+		{name: "shift wins over alt", tracked: true, shift: true, alt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, term, input := scrollModel(t, 60, 6)
+			data := historyRows(20)
+			if tc.tracked {
+				data += "\x1b[?1000h\x1b[?1006h"
+			}
+			feedPane(t, term, data)
+			term.ScrollLines(3)
+			ev := paneWheel(tea.MouseButtonLeft)
+			ev.Shift = tc.shift
+			ev.Alt = tc.alt
+			m.handleMouse(ev)
+			if tc.want != "" {
+				waitPane(t, "click forwarded", func() bool { return input() == tc.want })
+				if term.Viewport().Offset != 0 {
+					t.Fatal("child click did not return live")
+				}
+			} else if input() != "" || term.Viewport().Offset != 3 {
+				t.Fatalf("local click changed viewport/input: %d %q", term.Viewport().Offset, input())
 			}
 		})
 	}

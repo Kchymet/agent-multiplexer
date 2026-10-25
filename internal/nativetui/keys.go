@@ -39,12 +39,18 @@ func keyToBytes(k tea.KeyMsg) []byte {
 	case tea.KeyLeft:
 		return arrowBytes('D', k.Alt)
 	case tea.KeyHome:
-		return []byte("\x1b[H")
+		return arrowBytes('H', k.Alt)
 	case tea.KeyEnd:
-		return []byte("\x1b[F")
+		return arrowBytes('F', k.Alt)
 	case tea.KeyPgUp:
+		if k.Alt {
+			return []byte("\x1b[5;3~")
+		}
 		return []byte("\x1b[5~")
 	case tea.KeyPgDown:
+		if k.Alt {
+			return []byte("\x1b[6;3~")
+		}
 		return []byte("\x1b[6~")
 	}
 	// Any remaining C0 control chord (ctrl+a … ctrl+z, ctrl+o, ctrl+t, ctrl+space,
