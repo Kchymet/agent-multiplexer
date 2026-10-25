@@ -178,7 +178,7 @@ func (s codexTokenSource) authorized(id string) bool {
 		return false
 	}
 	defer db.Close()
-	session, ok, err := db.GetSession(id)
+	session, ok, err := lookupPolicySession(db, id)
 	return err == nil && ok && !session.Archived && agent.Canonical(session.Agent) == "codex"
 }
 

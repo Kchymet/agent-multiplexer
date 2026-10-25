@@ -255,3 +255,16 @@ func TestClaudeLogoutReplacementCannotReuseOldBinding(t *testing.T) {
 		t.Fatal("opaque replacement moved old workload")
 	}
 }
+
+func TestDefaultMigrationPinsSyntheticConsoleBeforeChangingSource(t *testing.T) {
+	d := isolatedAccounts(t)
+	before, _ := accounts.Read()
+	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: "claude:host", Revision: before.Profiles["claude:host"].Revision, DefaultRevision: before.DefaultRevisions["claude"]}, false)
+	if !out.OK {
+		t.Fatal(out)
+	}
+	after, _ := accounts.Read()
+	if after.Bindings["console"].ProfileID != before.Defaults["claude"] || after.Defaults["claude"] != "claude:host" {
+		t.Fatal("synthetic console changed with default", after.Bindings["console"])
+	}
+}
