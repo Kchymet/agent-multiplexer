@@ -566,7 +566,7 @@ func accountConfirmation(r accountRequest, p *accountProfile) string {
 	case "default":
 		return "Use " + label + " as the machine default?\n\nOnly new workloads use this default. Existing workload account bindings stay fixed."
 	default:
-		return "Start login for " + label + "?\n\nComplete the provider's browser/device flow. Esc cancels the attempt."
+		return "Start login for " + label + "?\n\nLogin temporarily pauses new credential delivery to workloads bound to this profile. Complete the provider's browser/device flow. Esc cancels the attempt."
 	}
 }
 
