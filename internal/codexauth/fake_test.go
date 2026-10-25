@@ -171,6 +171,10 @@ func runFake() {
 			}
 		case "account/login/cancel":
 			bump(home, "fake-cancels")
+			if os.Getenv("AMUX_FAKE_LATE_LOGIN") == "1" {
+				writeAuth(home, 9, "late-account", ttl)
+				_ = out.Encode(map[string]any{"method": "account/login/completed", "params": map[string]any{"loginId": loginID, "success": true}})
+			}
 			reply(map[string]any{})
 		case "account/logout":
 			_ = os.Remove(filepath.Join(home, authFile))

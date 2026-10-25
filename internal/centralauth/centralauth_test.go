@@ -234,3 +234,20 @@ func TestLoginLockIsExclusiveAndReleased(t *testing.T) {
 	}
 	again()
 }
+
+func TestDeletePreservesNonRepeatingCredentialGeneration(t *testing.T) {
+	s := testStore(t)
+	a, _ := NewSecret(mockToken)
+	b, _ := NewSecret(mockToken + "-another-account")
+	first, err := s.Save(a, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Save(b, time.Now())
+	if err != nil || second.Generation <= first.Generation {
+		t.Fatalf("generation repeated: %d -> %d, %v", first.Generation, second.Generation, err)
+	}
+}

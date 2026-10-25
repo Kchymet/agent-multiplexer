@@ -188,6 +188,9 @@ func newStructuredRPCServer(t *testing.T) (string, <-chan struct{}) {
 			switch call.Method {
 			case "initialize":
 				result = map[string]any{"capabilities": map[string]any{}}
+			case "account/login/start":
+				result = map[string]any{"type": "chatgptAuthTokens"}
+				_ = conn.WriteJSON(map[string]any{"method": "account/login/completed", "params": map[string]any{"success": true}})
 			case "thread/start":
 				result = map[string]any{"thread": map[string]any{"id": threadID}}
 			case "thread/resume":

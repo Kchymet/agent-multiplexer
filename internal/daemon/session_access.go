@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
+	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/panespec"
@@ -87,6 +89,9 @@ func (d *Daemon) sessionAccessForLaunch(ctx context.Context, id string) (store.S
 func (d *Daemon) launchSpecFor(ctx context.Context, id string) (panespec.LaunchSpec, error) {
 	session, grant, err := d.sessionAccessForLaunch(ctx, id)
 	if err != nil {
+		return panespec.LaunchSpec{}, err
+	}
+	if err := accounts.Bind(session.ID, agent.Canonical(session.Agent)); err != nil {
 		return panespec.LaunchSpec{}, err
 	}
 	objects, err := wsops.AgentGitObjectMounts(session)

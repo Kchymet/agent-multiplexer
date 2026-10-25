@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 )
@@ -36,6 +37,9 @@ func CredentialSelector() string {
 	if AuthMode() == amuxcfg.AuthShared && SharedAuthEnabled() {
 		return SharedAuthDir()
 	}
+	return hostCredentialSelector()
+}
+func hostCredentialSelector() string {
 	if value, ok := os.LookupEnv(SecureStorageEnv); ok {
 		return value
 	}
@@ -111,4 +115,12 @@ func AuthCommandEnv(base []string) []string {
 		env = append(env, kv)
 	}
 	return append(env, Env+"="+SharedAuthDir(), SecureStorageEnv+"="+SharedAuthDir())
+}
+
+// CredentialSelectorFor pins the Keychain selector to the workload source.
+func CredentialSelectorFor(id string) string {
+	if accounts.Mode(id, "claude") == amuxcfg.AuthShared && SharedAuthEnabled() {
+		return SharedAuthDir()
+	}
+	return hostCredentialSelector()
 }

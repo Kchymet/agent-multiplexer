@@ -1011,6 +1011,24 @@ func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
 	return a.validLocked(p)
 }
 
+// WithValid admits a short local effect under a current-principal read lease.
+// fn must not call the authority, perform network IO, or wait for a runtime.
+// Revocation/rotation cannot commit between validation and this effect.
+func (a *FileAuthority) WithValid(ctx context.Context, p Principal, fn func() error) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if a.rootDir == nil {
+		return ErrAuthorityClosed
+	}
+	if err := a.validLocked(p); err != nil {
+		return err
+	}
+	return fn()
+}
+
 func (a *FileAuthority) validLocked(p Principal) error {
 	rec, ok := a.registry.Records[p.KeyID]
 	if !ok || rec.SubjectID != p.SubjectID || rec.Kind != p.Kind || rec.Generation != p.Generation ||

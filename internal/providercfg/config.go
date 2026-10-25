@@ -27,6 +27,7 @@ import (
 // the flag names verbatim, so the file reads like the command line it replaces.
 type Config struct {
 	AccountStatus, AccountManage, AccountUse bool
+	AccountUseSet                            bool
 	Harnesses                                []string          // nil/empty: automatic discovery; otherwise verified allowlist
 	IdentityMode                             string            // currently only machine is supported
 	Orchestrator                             string            // orchestrator address host:port
@@ -138,7 +139,11 @@ func (c Config) Marshal() []byte {
 	}
 	boolean("account-status", c.AccountStatus)
 	boolean("account-manage", c.AccountManage)
-	boolean("account-use", c.AccountUse)
+	if c.AccountUseSet {
+		fmt.Fprintf(&b, "account-use = %t\n", c.AccountUse)
+	} else {
+		boolean("account-use", c.AccountUse)
+	}
 	boolean("publish-sessions", c.PublishSessions)
 	boolean("allow-compute", c.AllowCompute)
 	boolean("read-only-sessions", c.ReadOnlySessions)
@@ -258,6 +263,7 @@ func (c *Config) assign(key string, val any) error {
 	case "account-manage":
 		return boolean(&c.AccountManage)
 	case "account-use":
+		c.AccountUseSet = true
 		return boolean(&c.AccountUse)
 	case "publish-sessions":
 		return boolean(&c.PublishSessions)

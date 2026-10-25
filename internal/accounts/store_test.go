@@ -1,0 +1,120 @@
+package accounts
+
+import (
+	"amux/internal/amuxcfg"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func isolated(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+}
+func TestDefaultsAndBindingsPersistIndependently(t *testing.T) {
+	isolated(t)
+	if e := Bind("worker", "claude"); e != nil {
+		t.Fatal(e)
+	}
+	s, _ := Read()
+	machine := s.MachineID
+	if e := Update(func(s *State) error { s.Defaults["claude"] = ID("claude", "host"); return nil }); e != nil {
+		t.Fatal(e)
+	}
+	if e := Bind("next", "claude"); e != nil {
+		t.Fatal(e)
+	}
+	s, _ = Read()
+	if s.MachineID != machine || Mode("worker", "claude") != "central" || Mode("next", "claude") != "host" {
+		t.Fatalf("bindings changed: %+v", s.Bindings)
+	}
+	if e := amuxcfg.SetAuthMode("claude", "environment"); e != nil {
+		t.Fatal(e)
+	}
+	if Mode("worker", "claude") != "central" {
+		t.Fatal("global config changed workload")
+	}
+	fi, e := os.Stat(Path())
+	if e != nil || fi.Mode().Perm() != 0600 {
+		t.Fatal("metadata must be private")
+	}
+}
+func TestDeliveryFencesAccountLogoutAndBindingRevision(t *testing.T) {
+	isolated(t)
+	Bind("w", "codex")
+	b, p, e := Delivery("w", "codex")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = Accept("w", b.Revision, p.DeliveryEpoch, "account-a", 1); e != nil {
+		t.Fatal(e)
+	}
+	if e = Accept("w", b.Revision, p.DeliveryEpoch, "account-b", 2); !errors.Is(e, ErrBlocked) {
+		t.Fatal("account switched", e)
+	}
+	if e = Accept("w", b.Revision, p.DeliveryEpoch, "account-a", 2); e != nil {
+		t.Fatal("same-account refresh rejected", e)
+	}
+	Update(func(s *State) error {
+		p := s.Profiles[b.ProfileID]
+		p.DeliveryEpoch++
+		p.State = "logged-out"
+		s.Profiles[p.ID] = p
+		return nil
+	})
+	if e = Accept("w", b.Revision, p.DeliveryEpoch, "account-a", 3); !errors.Is(e, ErrStale) {
+		t.Fatal("late refresh survived logout", e)
+	}
+	if _, _, e = Delivery("w", "codex"); !errors.Is(e, ErrBlocked) {
+		t.Fatal(e)
+	}
+}
+func TestOpaqueClaudeReplacementRequiresExplicitRebind(t *testing.T) {
+	isolated(t)
+	Bind("w", "claude")
+	b, p, _ := Delivery("w", "claude")
+	if e := Accept("w", b.Revision, p.DeliveryEpoch, "", 1); e != nil {
+		t.Fatal(e)
+	}
+	if e := Accept("w", b.Revision, p.DeliveryEpoch, "", 2); !errors.Is(e, ErrBlocked) {
+		t.Fatal("opaque token switched", e)
+	}
+	if e := Accept("w", b.Revision+1, p.DeliveryEpoch, "", 1); !errors.Is(e, ErrBlocked) {
+		t.Fatal("binding revision ignored")
+	}
+}
+func TestCorruptMetadataFailsClosed(t *testing.T) {
+	isolated(t)
+	os.MkdirAll(filepath.Dir(Path()), 0700)
+	os.WriteFile(Path(), []byte(`{"version":99}`), 0600)
+	if e := Bind("w", "codex"); e == nil {
+		t.Fatal("corrupt store accepted")
+	}
+}
+func TestClaudeObservationProvenanceAndEpoch(t *testing.T) {
+	isolated(t)
+	Bind("w", "claude")
+	b, p, _ := Delivery("w", "claude")
+	Accept("w", b.Revision, p.DeliveryEpoch, "", 1)
+	raw := []byte(`{"five_hour":{"used_percentage":42,"resets_at":1892900800}}`)
+	if e := ObserveClaude("w", "runtime-1", raw); e != nil {
+		t.Fatal(e)
+	}
+	s, _ := Read()
+	q := s.Profiles[p.ID].Limits
+	if q.State != "known" || q.SessionID != "w" || q.RuntimeGeneration != "runtime-1" || q.DeliveryEpoch != p.DeliveryEpoch {
+		t.Fatalf("provenance missing: %+v", q)
+	}
+	Update(func(s *State) error {
+		p := s.Profiles[b.ProfileID]
+		p.DeliveryEpoch++
+		s.Profiles[p.ID] = p
+		return nil
+	})
+	if e := ObserveClaude("w", "runtime-1", raw); !errors.Is(e, ErrStale) {
+		t.Fatal("stale runtime quota accepted", e)
+	}
+}

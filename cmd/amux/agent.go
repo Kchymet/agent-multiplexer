@@ -160,6 +160,9 @@ func cmdAgentModel(args []string) error {
 	var payload claudecfg.StatusLinePayload
 	if readErr == nil && !overflow && decodeHookJSON(input, &payload) == nil {
 		_ = restrictedReport(sessionreport.Model, map[string]string{sessionreport.FieldModel: payload.Model.ID})
+		if len(payload.RateLimits) > 0 {
+			_ = restrictedReport(sessionreport.Limits, map[string]string{sessionreport.FieldLimits: string(payload.RateLimits)})
+		}
 	}
 
 	if forward64 == "" {

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
@@ -65,6 +66,9 @@ func validateSessionReport(req access.Request) error {
 	case sessionreport.Activity:
 		allowed = append(allowed, sessionreport.FieldState)
 		required = append(required, sessionreport.FieldState)
+	case sessionreport.Limits:
+		allowed = append(allowed, sessionreport.FieldLimits)
+		required = append(required, sessionreport.FieldLimits)
 	case sessionreport.Model:
 		allowed = append(allowed, sessionreport.FieldModel)
 		required = append(required, sessionreport.FieldModel)
@@ -100,6 +104,9 @@ func validateSessionReport(req access.Request) error {
 		default:
 			return errors.New("invalid activity state")
 		}
+	case sessionreport.Limits:
+		_, err := accounts.ClaudeWindows([]byte(req.Fields[sessionreport.FieldLimits]))
+		return err
 	case sessionreport.Model:
 		return boundedReportField(req.Fields, sessionreport.FieldModel, sessionreport.MaxModelBytes, true)
 	case sessionreport.PermissionRequest:
@@ -269,6 +276,8 @@ func (r *sessionRuntime) applySessionReport(session store.Session, generation st
 	case sessionreport.Activity:
 		return core.WriteSessionHookState(session.ID, session.ClaudeID,
 			req.Fields[sessionreport.FieldState], session.Dir)
+	case sessionreport.Limits:
+		return accounts.ObserveClaude(session.ID, generation, []byte(req.Fields[sessionreport.FieldLimits]))
 	case sessionreport.Model:
 		return core.WriteSessionRuntimeModel(session.ID, session.ClaudeID,
 			req.Fields[sessionreport.FieldModel])

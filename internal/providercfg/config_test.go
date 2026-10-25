@@ -214,3 +214,13 @@ func TestSaveLoad(t *testing.T) {
 		t.Errorf("Load = %+v, want %+v", got, full())
 	}
 }
+
+func TestAccountUseExplicitFalseSurvivesConfigRoundTrip(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		in := Config{AccountStatus: true, AccountManage: true, AccountUse: enabled, AccountUseSet: true, PublishSessions: true}
+		out, err := Parse(in.Marshal())
+		if err != nil || !reflect.DeepEqual(in, out) {
+			t.Fatalf("account grants lost: %+v %v", out, err)
+		}
+	}
+}

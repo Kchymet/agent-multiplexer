@@ -25,6 +25,11 @@ func (p *Provider) handleAccount(s *session, m hp.MuxMsg) {
 		if r.Operation == hp.AccountStatus {
 			allowed = p.cfg.AccountStatus
 		}
+		// AccountManage does not grant authority over arbitrary workloads.
+		// V1 rebind is host-only until session-scoped authorization is available.
+		if r.Operation == hp.AccountRebind {
+			allowed = false
+		}
 		if ephemeral && r.Initiator == "" {
 			allowed = false
 		}

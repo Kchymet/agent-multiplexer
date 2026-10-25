@@ -410,7 +410,9 @@ func (p *Provider) readAccountLocked(ctx context.Context, refresh bool) (Account
 // called once with the authorization URL; Login returns when the native
 // account/login/completed notification arrives or ctx ends (the login is then
 // cancelled natively).
-func (p *Provider) Login(ctx context.Context, show func(authURL string)) error {
+var ErrLoginCleanup = errors.New("codexauth: cancelled login cleanup failed")
+
+func (p *Provider) Login(ctx context.Context, show func(authURL string), commit ...func() error) (resultErr error) {
 	if err := p.acquire(ctx); err != nil {
 		return err
 	}
@@ -419,6 +421,26 @@ func (p *Provider) Login(ctx context.Context, show func(authURL string)) error {
 	if err != nil {
 		return err
 	}
+	prior, existed, err := p.snapshotAuth()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		// Reap the native writer before restoring a cancelled attempt. Neither a
+		// late callback nor an outstanding native task can rewrite the restored file.
+		if resultErr == nil && !committed {
+			resultErr = ctx.Err()
+		}
+		if resultErr != nil {
+			_ = srv.stop()
+			p.srv = nil
+			p.forget()
+			if restoreErr := p.restoreAuth(prior, existed); restoreErr != nil {
+				resultErr = ErrLoginCleanup
+			}
+		}
+	}()
 	completed := srv.subscribe("account/login/completed")
 	defer srv.unsubscribe("account/login/completed")
 	raw, err := srv.call(ctx, "account/login/start", map[string]any{"type": "chatgpt"})
@@ -452,8 +474,11 @@ func (p *Provider) Login(ctx context.Context, show func(authURL string)) error {
 				Success bool    `json:"success"`
 				Error   *string `json:"error"`
 			}
-			if json.Unmarshal(params, &done) != nil || (done.LoginID != "" && done.LoginID != start.LoginID) {
+			if json.Unmarshal(params, &done) != nil || done.LoginID != start.LoginID {
 				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			p.forget()
 			if !done.Success {
@@ -463,6 +488,12 @@ func (p *Provider) Login(ctx context.Context, show func(authURL string)) error {
 				}
 				return fmt.Errorf("codexauth: native login: %s", msg)
 			}
+			for _, admit := range commit {
+				if err := admit(); err != nil {
+					return err
+				}
+			}
+			committed = true
 			return nil
 		}
 	}
@@ -480,6 +511,12 @@ func (p *Provider) Logout(ctx context.Context) error {
 	}
 	p.forget()
 	_, err = srv.call(ctx, "account/logout", map[string]any{})
+	_ = srv.stop()
+	p.srv = nil
+	p.forget()
+	if cleanupErr := p.restoreAuth(nil, false); cleanupErr != nil {
+		return errors.New("codexauth: logout cleanup failed")
+	}
 	return err
 }
 

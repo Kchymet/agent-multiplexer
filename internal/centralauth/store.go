@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -140,6 +141,26 @@ func (s Store) Save(token Secret, now time.Time) (Credential, error) {
 		// never repeat: fall back to the wall clock, which exceeds any counter.
 		generation = uint64(now.UnixNano())
 	}
+	marker := filepath.Join(s.Dir, "generation")
+	if e := checkPrivate(marker, false); e == nil {
+		b, e := os.ReadFile(marker)
+		if e != nil {
+			return Credential{}, e
+		}
+		n, e := strconv.ParseUint(string(b), 10, 64)
+		if e != nil || n == ^uint64(0) {
+			return Credential{}, errors.New("invalid credential generation")
+		}
+		if n >= generation {
+			generation = n + 1
+		}
+	} else if !errors.Is(e, fs.ErrNotExist) {
+		return Credential{}, e
+	}
+	// Commit the counter first: crashes may skip a generation, never reuse one.
+	if err := writePrivateAtomic(s.Dir, "generation", []byte(strconv.FormatUint(generation, 10))); err != nil {
+		return Credential{}, err
+	}
 	rec := record{
 		Version: recordVersion, Harness: s.Harness, Kind: s.Kind,
 		Token: token.Reveal(), Fingerprint: token.Fingerprint(),
@@ -264,6 +285,11 @@ func (s Store) Delete() error {
 		return err
 	}
 	defer release()
+	if cred, e := s.Load(); e == nil {
+		if e = writePrivateAtomic(s.Dir, "generation", []byte(strconv.FormatUint(cred.Generation, 10))); e != nil {
+			return e
+		}
+	}
 	err = os.Remove(s.path())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
