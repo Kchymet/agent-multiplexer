@@ -31,6 +31,8 @@ jobs:
         run: |
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+      - name: bundled notices are current
+        run: make notices-check
       - name: vet
         run: make vet
       - name: test
