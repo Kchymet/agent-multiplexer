@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,6 +85,59 @@ func TestDoHelpTeachesGoalVocabulary(t *testing.T) {
 			if !strings.Contains(help, w) {
 				t.Errorf("`amux do %s` help does not mention %q: %s", verb, w, help)
 			}
+		}
+	}
+}
+
+func TestInteractiveWorkgroupForm(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	f := workgroupForm{name: "planning", task: "Plan the rollout", coordinator: wsops.Coordinator{
+		Kind: agent.GoalRuntime, Model: defaultModelFor(agent.GoalRuntime),
+	}}
+	menu := strings.Join(f.menu(), "\n")
+	for _, removed := range []string{"Linear", "Mode", "Runtime", "+ add agent"} {
+		if strings.Contains(menu, removed) {
+			t.Errorf("creation still offers %q", removed)
+		}
+	}
+	if strings.Count(menu, "Coordinator ") != 2 || !strings.Contains(menu, "Repos (optional") {
+		t.Fatalf("creation menu must expose two coordinator controls and optional repos: %s", menu)
+	}
+	for range agent.Kinds() {
+		f.cycleCoordinator()
+		h := agent.HarnessFor(f.coordinator.Kind)
+		if f.coordinator.Model != defaultModelFor(f.coordinator.Kind) || (len(h.Models()) > 0 && !slices.Contains(h.Models(), f.coordinator.Model)) {
+			t.Fatalf("coordinator model did not follow harness: %+v", f.coordinator)
+		}
+		if models := h.Models(); len(models) > 0 {
+			f.coordinator.Model = models[len(models)-1]
+		}
+		action := f.action()
+		if action.Action != core.ActionNewWorkgroup || action.Fields["name"] != f.name || action.Fields["prompt"] != f.task ||
+			action.Fields[wsops.FieldCoordinator] != f.coordinator.Kind || action.Fields[wsops.FieldCoordinatorModel] != f.coordinator.Model {
+			t.Fatalf("creation lost form choices: %+v", action)
+		}
+		for _, key := range []string{"linear", "mode", "agent", "model", "defaultAgent", "repos"} {
+			if _, ok := action.Fields[key]; ok {
+				t.Errorf("repo-less creation sends unexpected field %q", key)
+			}
+		}
+	}
+	f.repos = []string{"api", "web"}
+	if got := f.action().Fields["repos"]; got != "api,web" {
+		t.Fatalf("selected repos = %q", got)
+	}
+	f.repos = nil
+	if _, ok := f.action().Fields["repos"]; ok {
+		t.Fatal("cleared selection must omit repositories")
+	}
+}
+
+func TestCoordinatorModelAcceptsTextWithoutCatalog(t *testing.T) {
+	for _, value := range []string{"provider/custom-model", ""} {
+		in := bufio.NewReader(strings.NewReader(value + "\n"))
+		if got := pickCoordinatorModel(in, "hermes", "previous-model"); got != value {
+			t.Fatalf("typed model = %q, want %q", got, value)
 		}
 	}
 }
