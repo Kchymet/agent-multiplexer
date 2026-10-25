@@ -112,10 +112,10 @@ func generate(root string) ([]byte, error) {
 		parts := strings.Split(target, "/")
 		cmd := exec.Command("go", "list", "-deps", "-json", "./cmd/amux")
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS="+parts[0], "GOARCH="+parts[1])
-		out, err := cmd.CombinedOutput()
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=", "GOOS="+parts[0], "GOARCH="+parts[1])
+		out, stderr, err := commandOutput(cmd)
 		if err != nil {
-			return nil, fmt.Errorf("list dependencies for %s: %w: %s", target, err, strings.TrimSpace(string(out)))
+			return nil, fmt.Errorf("list dependencies for %s: %w: %s", target, err, strings.TrimSpace(stderr))
 		}
 		dec := json.NewDecoder(bytes.NewReader(out))
 		for {
@@ -253,6 +253,16 @@ func generate(root string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// commandOutput keeps diagnostic/status stderr separate from machine-readable
+// stdout. In particular, a cold Go module cache prints successful
+// "go: downloading ..." lines to stderr while go list emits JSON to stdout.
+func commandOutput(cmd *exec.Cmd) ([]byte, string, error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	return out, stderr.String(), err
 }
 
 func collectLegalFiles(rec *moduleRecord) ([]legalFile, error) {

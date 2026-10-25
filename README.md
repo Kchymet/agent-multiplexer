@@ -510,6 +510,14 @@ amux                         # select a repo and press a to create an agent
 Builds `~/.local/bin/amux`. Run `amux` from a normal terminal to launch the TUI —
 that is the standard way to invoke it.
 
+The supported `make build` / `make install` artifact path uses the exact Go
+version declared by `go.mod`, `CGO_ENABLED=0`, and no custom build tags. Those
+inputs are also used to generate the embedded dependency notices, and the build
+verifies its recorded toolchain and linked modules against that bundle. A
+custom toolchain, `GOFLAGS`, tags, or CGO configuration is a separate artifact
+configuration: build it directly and regenerate/review its notice inventory
+rather than treating the checked-in bundle as exact provenance for it.
+
 Use the latest patch of a supported Go release. The module's minimum version
 excludes known vulnerable older toolchains; with `GOTOOLCHAIN=auto`, Go can
 download the required toolchain. `GOTOOLCHAIN=local` requires installing it

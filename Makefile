@@ -18,7 +18,9 @@ GO_MODULES := . ./harnessproto
 all: build
 
 build: notices-check
-	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/amux ./cmd/amux
+	@if [ -n "$(strip $(GOFLAGS))" ]; then echo "custom GOFLAGS are outside the supported notice-provenance build; run go build directly and regenerate/review notices for that artifact"; exit 1; fi
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= go build -ldflags '$(LDFLAGS)' -o bin/amux ./cmd/amux
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go run ./internal/licenses/cmd/verify -binary bin/amux
 
 notices:
 	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go generate ./internal/licenses
@@ -69,11 +71,12 @@ clean:
 	rm -rf bin
 
 # Cross-compile sanity check for the two supported platforms.
-cross:
-	GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/amux
-	GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/amux
-	GOOS=darwin GOARCH=amd64 go build -o /dev/null ./cmd/amux
-	GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/amux
+cross: notices-check
+	@if [ -n "$(strip $(GOFLAGS))" ]; then echo "custom GOFLAGS are outside the supported notice-provenance build"; exit 1; fi
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/amux
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/amux
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= GOOS=darwin GOARCH=amd64 go build -o /dev/null ./cmd/amux
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/amux
 	@echo "cross build OK"
 
 run: build
