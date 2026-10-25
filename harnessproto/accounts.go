@@ -6,28 +6,33 @@ package harnessproto
 // authenticated initiating user and connection; possession of a machine ID is
 // never authorization. Disconnect cancels that connection's pending ceremonies.
 const (
-	AccountsV1       = "accounts-v1"
-	MAccountRequest  = "account-request"
-	HAccountResult   = "account-result"
-	MAccountCeremony = "account-ceremony"
-	HAccountCeremony = "account-ceremony"
-	AccountStatus    = "status"
-	AccountDefault   = "default"
-	AccountLogin     = "login"
-	AccountCancel    = "cancel"
-	AccountLogout    = "logout"
-	AccountComplete  = "complete"
+	AccountsV1                   = "accounts-v1"
+	MAccountRequest              = "account-request"
+	HAccountResult               = "account-result"
+	MAccountCeremony             = "account-ceremony"
+	HAccountCeremony             = "account-ceremony"
+	AccountStatus                = "status"
+	AccountDefault               = "default"
+	AccountLogin                 = "login"
+	AccountCancel                = "cancel"
+	AccountLogout                = "logout"
+	AccountComplete              = "complete"
+	AccountPoll                  = "poll"
+	AccountDisconnect            = "disconnect"
+	AccountRebind                = "rebind"
+	AccountLimitsTTLMillis int64 = 5 * 60 * 1000
 )
 
 // AccountRequest uses profile revisions for mutation CAS. Status takes no
 // profile/revision. Login/cancel/complete travel ONLY in MAccountCeremony.
 // Initiator is supplied by the authenticated relay, never browser form input.
 type AccountRequest struct {
-	Operation string `json:"operation"`
-	ProfileID string `json:"profileId,omitempty"`
-	Revision  uint64 `json:"revision,omitempty"`
-	AttemptID string `json:"attemptId,omitempty"`
-	Initiator string `json:"initiator,omitempty"`
+	WorkloadID string `json:"workloadId,omitempty"`
+	Operation  string `json:"operation"`
+	ProfileID  string `json:"profileId,omitempty"`
+	Revision   uint64 `json:"revision,omitempty"`
+	AttemptID  string `json:"attemptId,omitempty"`
+	Initiator  string `json:"initiator,omitempty"`
 	// Secret is accepted only by complete, for Claude's setup-token ceremony.
 	Secret string `json:"secret,omitempty"`
 }
@@ -92,4 +97,25 @@ type AccountResult struct {
 	Error    string           `json:"error,omitempty"`
 	Snapshot *AccountSnapshot `json:"snapshot,omitempty"`
 	Ceremony *AccountCeremony `json:"ceremony,omitempty"`
+}
+
+// ValidateAccountRequest enforces the safe/ephemeral split before any effect.
+// A safe status request cannot be used to poll or complete a ceremony.
+func ValidateAccountRequest(r AccountRequest, ceremony bool) bool {
+	if len(r.ProfileID) > 128 || len(r.AttemptID) > 128 || len(r.Initiator) > 512 || len(r.Secret) > 4096 || len(r.WorkloadID) > 128 {
+		return false
+	}
+	switch r.Operation {
+	case AccountStatus:
+		return !ceremony && r.ProfileID == "" && r.Revision == 0 && r.AttemptID == "" && r.Initiator == "" && r.Secret == "" && r.WorkloadID == ""
+	case AccountDefault, AccountLogout, AccountRebind:
+		return !ceremony && r.ProfileID != "" && r.Revision > 0 && r.AttemptID == "" && r.Initiator == "" && r.Secret == "" && ((r.Operation == AccountRebind) == (r.WorkloadID != ""))
+	case AccountLogin:
+		return ceremony && r.ProfileID != "" && r.Revision > 0 && r.AttemptID == "" && r.Secret == "" && r.WorkloadID == ""
+	case AccountPoll, AccountCancel, AccountComplete:
+		return ceremony && r.ProfileID != "" && r.AttemptID != "" && r.Revision == 0 && r.WorkloadID == "" && ((r.Operation == AccountComplete) == (r.Secret != ""))
+	case AccountDisconnect:
+		return ceremony && r.ProfileID == "" && r.AttemptID == "" && r.Revision == 0 && r.Secret == "" && r.WorkloadID == ""
+	}
+	return false
 }
