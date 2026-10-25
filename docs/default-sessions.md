@@ -154,8 +154,8 @@ Claude coordinator; there is no opt-in.
 
 - **State.** The goal lives in the coordinator's own session directory,
   `.amux/goal.json` (`$AMUX_GOAL_FILE` in its environment): objective, status
-  (`active | paused | input | blocked | budgetLimited | complete`, the Codex
-  spellings plus `input`), and a continuation count.
+  (`active | paused | input | waiting | blocked | budgetLimited | complete`,
+  the Codex spellings plus `input` and `waiting`), and a continuation count.
 - **A task becomes the goal.** A `UserPromptSubmit` hook (`amux agent goal
   prompt --hook`) establishes every user prompt — rail, web, steer, typed — as
   the active goal. A reply while the coordinator waits for input (`input`) is
@@ -167,8 +167,13 @@ Claude coordinator; there is no opt-in.
   status hook. A failure lets the turn end rather than trapping it.
 - **The model moves its own goal** with `amux agent goal complete "<summary>"`,
   `amux agent goal ask "<question>"` (stop and wait for the user — also
-  `AskUserQuestion` for concrete choices) and `amux agent goal blocked
-  "<reason>"`. Its guide tells it to ask for genuinely user-owned information
+  `AskUserQuestion` for concrete choices), `amux agent goal wait "<on what>"`
+  and `amux agent goal blocked "<reason>"`. `wait` is how a coordinator idles
+  on a member or CI without busy-polling: it arms a background wake-up
+  (`Monitor` or a `run_in_background` until-loop) and runs `goal wait`, which
+  lets exactly the next Stop through; the goal is active again after it, so the
+  turn the wake-up starts continues under goal pressure. The wait spends no
+  continuation budget and refunds none. Its guide tells it to ask for genuinely user-owned information
   rather than guess, and to pick a sensible default for anything optional.
 - **Only the user pauses it.** The same `goal` steer verb (`status`,
   `objective`) moves the file through the pinned session root; resuming an idle

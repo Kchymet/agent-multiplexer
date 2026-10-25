@@ -129,3 +129,35 @@ func TestStateRoundTripAndTruncation(t *testing.T) {
 		t.Fatal("corrupt state decoded")
 	}
 }
+
+// A waiting goal lets exactly one Stop through, then is active again: the turn
+// the coordinator's armed wake-up starts ends under goal pressure. The wait
+// neither spends nor refunds continuation budget.
+func TestWaitLetsOneStopThrough(t *testing.T) {
+	active := State{Objective: "land the PR", Status: StatusActive, Continuations: 5}
+	waiting, err := Mark(active, StatusWaiting, "member m1's CI", t0)
+	if err != nil || waiting.Status != StatusWaiting {
+		t.Fatalf("mark wait: %+v %v", waiting, err)
+	}
+	if !strings.Contains(Summary(waiting), "waiting") || !strings.Contains(Summary(waiting), "member m1's CI") {
+		t.Errorf("summary = %q", Summary(waiting))
+	}
+	woken, _, cont := OnStop(waiting, t0)
+	if cont || woken.Status != StatusActive || woken.Continuations != 5 {
+		t.Fatalf("stop while waiting: cont=%v %+v", cont, woken)
+	}
+	next, reason, cont := OnStop(woken, t0)
+	if !cont || next.Continuations != 6 || reason == "" {
+		t.Fatalf("stop after wake-up turn: cont=%v %+v", cont, next)
+	}
+	// Waiting is on members, not the user: a user prompt is a new task.
+	if got := OnPrompt(waiting, "new task", t0); got.Objective != "new task" || got.Status != StatusActive {
+		t.Fatalf("prompt while waiting: %+v", got)
+	}
+	// The continuation prompt teaches the idiomatic wait, not busy-polling.
+	for _, want := range []string{"amux agent goal wait", "run_in_background", "Monitor", "never busy-poll"} {
+		if !strings.Contains(ContinuationPrompt(active), want) {
+			t.Errorf("continuation prompt missing %q", want)
+		}
+	}
+}

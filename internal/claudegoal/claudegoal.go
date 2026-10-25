@@ -12,7 +12,9 @@
 //     blocks the stop and hands Claude a continuation prompt, so the coordinator
 //     keeps working across turns until it marks the goal complete, asks the user
 //     for input, reports itself blocked, or the user pauses it. A continuation
-//     budget (MaxContinuations) bounds a goal that never converges.
+//     budget (MaxContinuations) bounds a goal that never converges. A goal
+//     marked waiting lets exactly the next Stop through and is active again
+//     after it, so the turn a background wake-up starts continues the goal.
 //
 // The model moves its own goal with `amux agent goal complete|ask|blocked`; the
 // user pauses, resumes, replaces or clears it with the host's `goal` steer verb.
@@ -34,12 +36,16 @@ import (
 
 // Goal statuses. active, paused, blocked, budgetLimited and complete share the
 // Codex App Server's spellings so status surfaces read the same on both
-// runtimes; input is Claude-only: the coordinator asked the user something and
-// waits for the reply.
+// runtimes. input and waiting are Claude-only: input means the coordinator
+// asked the user something and waits for the reply; waiting means it armed a
+// background wake-up (a Monitor or run_in_background command on a member's
+// events, a PR, CI) and lets exactly one Stop through so it can idle until that
+// wake-up arrives instead of busy-polling under goal pressure.
 const (
 	StatusActive        = "active"
 	StatusPaused        = "paused"
 	StatusInput         = "input"
+	StatusWaiting       = "waiting"
 	StatusBlocked       = "blocked"
 	StatusBudgetLimited = "budgetLimited"
 	StatusComplete      = "complete"
@@ -119,7 +125,8 @@ func Encode(s State) []byte {
 
 // OnPrompt applies one user prompt. A continuation nudge keeps the objective,
 // and a reply to a pending question (status input) is appended to it; anything
-// else is a new task and becomes the goal, replacing whatever was there (a
+// else — including a prompt while the goal is waiting on members, which was not
+// waiting on the user — is a new task and becomes the goal, replacing whatever was there (a
 // completed, blocked or paused goal included — the user sending a task is the
 // user's instruction to work on it).
 func OnPrompt(s State, prompt string, now time.Time) State {
@@ -150,7 +157,18 @@ func OnPrompt(s State, prompt string, now time.Time) State {
 // returns cont=true with the continuation prompt the Stop hook hands back to
 // Claude, and the state with the continuation counted; past MaxContinuations
 // the goal becomes budgetLimited and the turn ends.
+//
+// A waiting goal lets this one Stop through and becomes active again, so the
+// next turn — the one the coordinator's armed wake-up starts — ends under goal
+// pressure. The continuation count is kept, not reset: the budget bounds turns
+// the hook forced, and a wake-up turn is not one of them, but a coordinator
+// that only ever waits and wakes must not earn a fresh budget each cycle.
 func OnStop(s State, now time.Time) (next State, reason string, cont bool) {
+	if s.Status == StatusWaiting {
+		s.Status = StatusActive
+		s.Updated = now.Unix()
+		return s, "", false
+	}
 	if s.Status != StatusActive {
 		return s, "", false
 	}
@@ -175,19 +193,19 @@ Objective: %s
 Keep making real progress toward the verified end state: check members' evidence, dispatch or steer work, fix what falls short. Do not restate a plan without acting on it.
 - Done and verified: run `+"`amux agent goal complete \"<summary>\"`"+`, then give your final summary.
 - Need a decision only the user can make, or information you cannot find: run `+"`amux agent goal ask \"<question>\"`"+`, then ask it plainly and end your turn. Choose a sensible default for anything optional instead.
-- Waiting on members: check their state now rather than ending the turn; if nothing can move until they report, say what you are waiting on and keep checking.
+- Waiting on members or CI: never busy-poll across continuations. If nothing can move until they report, first arm a background wake-up (a Monitor, or a run_in_background until-loop on the member's events or the PR/CI state), then run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn; the wake-up's notification resumes the goal. Never run goal wait without an armed wake-up.
 - Hard blocker that repeats and needs the user: run `+"`amux agent goal blocked \"<reason>\"`"+` and explain it.`,
 		s.Continuations, MaxContinuations, s.Objective)
 }
 
-// Mark applies one of the model's own transitions: complete, ask (input) or
-// blocked. They need a goal to act on.
+// Mark applies one of the model's own transitions: complete, ask (input),
+// wait (waiting) or blocked. They need a goal to act on.
 func Mark(s State, status, note string, now time.Time) (State, error) {
 	if s.None() {
 		return s, fmt.Errorf("no goal is set: a goal is established by the user's next task")
 	}
 	switch status {
-	case StatusComplete, StatusInput, StatusBlocked:
+	case StatusComplete, StatusInput, StatusWaiting, StatusBlocked:
 	default:
 		return s, fmt.Errorf("unknown goal transition %q", status)
 	}

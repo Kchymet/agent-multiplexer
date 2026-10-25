@@ -632,6 +632,16 @@ sessions) or about optional details: choose the sensible default, record it in
 `+"`COORDINATION.md`"+`, and keep going. An open question is never a reason to
 shrink the objective.
 
+### Waiting on members or CI
+Never busy-poll: every continuation is a full model call against the goal's
+continuation budget. When nothing can move until a member, a PR or CI reports:
+1. Arm a background wake-up first — a `+"`Monitor`"+`, or a `+"`run_in_background`"+`
+   until-loop on the member's events (`+"`amux agent events`"+`) or the PR/CI state.
+2. Run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn.
+   That lets this one turn end; the turn the wake-up's notification starts
+   continues the goal as active.
+Never run `+"`goal wait`"+` without an armed wake-up: nothing would resume the goal.
+
 ### Blockers, pausing and limits
 - Run `+"`amux agent goal blocked \"<reason>\"`"+` only after the same blocker
   repeats across consecutive continuations and only the user can clear it.

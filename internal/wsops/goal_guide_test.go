@@ -54,6 +54,9 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 		"amux agent goal complete",
 		"amux agent goal ask",
 		"amux agent goal blocked",
+		"amux agent goal wait", // idle until a wake-up
+		"Never busy-poll",      // no polling across continuations
+		"Never run `goal wait` without an armed wake-up",
 		"AskUserQuestion",                                 // concrete choices
 		"ask instead of guessing",                         // user-owned decisions
 		"choose the sensible default",                     // optional details

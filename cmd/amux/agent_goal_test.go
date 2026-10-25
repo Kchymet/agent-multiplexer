@@ -83,6 +83,35 @@ func TestAgentGoalAskWaitsForReply(t *testing.T) {
 	}
 }
 
+// `goal wait` ends exactly the current turn (reported ready); the turn the
+// armed wake-up starts is continued again.
+func TestAgentGoalWaitEndsOneTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "goal.json")
+	t.Setenv(claudegoal.EnvFile, path)
+	rpc := successfulReportRPC(t)
+	if err := writeGoal(path, claudegoal.State{Objective: "merge PR 12", Status: claudegoal.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureOutput(t, func() error { return cmdAgentGoal([]string{"wait"}) }); err == nil {
+		t.Fatal("wait without saying what on accepted")
+	}
+	if _, err := captureOutput(t, func() error { return cmdAgentGoal([]string{"wait", "CI on PR 12"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if out := runStopHook(t); strings.TrimSpace(out) != "" {
+		t.Fatalf("stop hook continued the waiting turn: %q", out)
+	}
+	if got := lastActivity(t, rpc); got != core.StateReady {
+		t.Fatalf("waiting turn reported %q, want ready", got)
+	}
+	if s := readGoalFile(t, path); s.Status != claudegoal.StatusActive {
+		t.Fatalf("goal after the waiting stop: %+v", s)
+	}
+	if out := runStopHook(t); !strings.Contains(out, `"decision":"block"`) {
+		t.Fatalf("wake-up turn was not continued: %q", out)
+	}
+}
+
 // Outside a Claude goal session the commands say so, and the hooks never
 // disrupt the agent: a non-goal Stop still reports ready and continues nothing.
 func TestAgentGoalOutsideGoalSession(t *testing.T) {

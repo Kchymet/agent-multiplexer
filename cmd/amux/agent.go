@@ -102,7 +102,8 @@ usage: amux agent <command>
                      rail (reversible — amux workgroup unarchive <id>).
                      identity comes only from the fixed session context
   goal [show]        Claude coordinator goal mode: show the goal, or mark it
-                     complete "<summary>" | ask "<question>" | blocked "<reason>"
+                     complete "<summary>" | ask "<question>" |
+                     wait "<waiting on>" | blocked "<reason>"
                      (amux agent goal --help)
   sessions [--json]  discover all host agent conversations (read-only)
   events [<id>]      read one bounded normalized event page through authenticated

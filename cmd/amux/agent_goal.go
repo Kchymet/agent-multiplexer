@@ -48,6 +48,8 @@ func cmdAgentGoal(args []string) error {
 		return goalMark(claudegoal.StatusComplete, args)
 	case "ask", "input":
 		return goalMark(claudegoal.StatusInput, args)
+	case "wait", "waiting":
+		return goalMark(claudegoal.StatusWaiting, args)
 	case "blocked":
 		return goalMark(claudegoal.StatusBlocked, args)
 	case "help", "-h", "--help":
@@ -55,7 +57,7 @@ func cmdAgentGoal(args []string) error {
 		return nil
 	default:
 		goalUsage()
-		return fmt.Errorf("amux agent goal: no goal action %q (show | complete | ask | blocked)", sub)
+		return fmt.Errorf("amux agent goal: no goal action %q (show | complete | ask | wait | blocked)", sub)
 	}
 }
 
@@ -69,6 +71,9 @@ reports itself blocked, or the user pauses it.
 usage: amux agent goal [show [--json]]
        amux agent goal complete "<summary>"    the objective is done and verified
        amux agent goal ask "<question>"        stop and wait for the user's answer
+       amux agent goal wait "<waiting on>"     end this turn only; an armed background
+                                               wake-up (Monitor / run_in_background)
+                                               resumes the goal. Never wait without one.
        amux agent goal blocked "<reason>"      a repeating blocker only the user can clear
 
 The user pauses, resumes or clears the goal from the host:
@@ -137,7 +142,7 @@ func goalShow(args []string) error {
 func goalMark(status string, args []string) error {
 	note := strings.TrimSpace(strings.Join(args, " "))
 	if note == "" && status != claudegoal.StatusComplete {
-		return fmt.Errorf("amux agent goal: say what you need (the question or the blocker)")
+		return fmt.Errorf("amux agent goal: say what you need (the question, what you are waiting on, or the blocker)")
 	}
 	path, err := goalFile()
 	if err != nil {
@@ -158,6 +163,8 @@ func goalMark(status string, args []string) error {
 		fmt.Println("goal complete: give your final summary, then end the turn. The workgroup stays open.")
 	case claudegoal.StatusInput:
 		fmt.Println("goal waiting for input: ask the user your question and end the turn; their reply resumes the goal.")
+	case claudegoal.StatusWaiting:
+		fmt.Println("goal waiting: end the turn now; the goal resumes in the turn your armed wake-up starts. If no wake-up is armed, arm one before ending the turn.")
 	case claudegoal.StatusBlocked:
 		fmt.Println("goal blocked: explain the blocker and end the turn; the user's next task or a resume continues.")
 	}
