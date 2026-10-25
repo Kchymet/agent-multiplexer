@@ -145,6 +145,10 @@ func (m *model) requestAccounts(req accountRequest) tea.Cmd {
 		defer cancel()
 		res, err := call(ctx, req)
 		req.secret = ""
+		if err != nil {
+			// Bubble Tea messages themselves must not retain raw provider errors.
+			err = safeAccountError(err)
+		}
 		return accountsReplyMsg{s, serial, req, res, err}
 	}
 }
@@ -184,6 +188,16 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 
 	if msg.request.op != "status" {
 		s.notice = ""
+	}
+	if msg.response.attempt != nil {
+		switch s.attempt.state {
+		case "succeeded":
+			s.notice = "Login complete. Use d to select this profile for new workloads."
+		case "failed":
+			s.notice = "Login failed. Review the refreshed profile status before retrying."
+		case "cancelled":
+			s.notice = "Login cancelled."
+		}
 	}
 	switch msg.request.op {
 	case "cancel":
@@ -550,7 +564,19 @@ var (
 	errAccountsUnsupported = errors.New("accounts unsupported")
 	errAccountsDenied      = errors.New("accounts denied")
 	errAccountsConflict    = errors.New("accounts revision conflict")
+	errAccountsNative      = errors.New("account native adapter unavailable")
+	errAccountsSecret      = errors.New("account token rejected")
+	errAccountsAttempt     = errors.New("account attempt unavailable")
 )
+
+func safeAccountError(err error) error {
+	for _, safe := range []error{errAccountsUnsupported, errAccountsDenied, errAccountsConflict, errAccountsNative, errAccountsSecret, errAccountsAttempt} {
+		if errors.Is(err, safe) {
+			return safe
+		}
+	}
+	return errors.New("account service unavailable")
+}
 
 func accountErrorMessage(err error, op string) string {
 	switch {
@@ -560,6 +586,12 @@ func accountErrorMessage(err error, op string) string {
 		return "Account access denied. Reconnect with an authorized operator account."
 	case errors.Is(err, errAccountsConflict):
 		return "Account changed elsewhere. Refresh and review before trying again."
+	case errors.Is(err, errAccountsNative):
+		return "Native login adapter unavailable. Check the installed harness and refresh."
+	case errors.Is(err, errAccountsSecret):
+		return "Token rejected. Start login again and paste only the setup token."
+	case errors.Is(err, errAccountsAttempt):
+		return "Login attempt expired or unavailable. Refresh before starting again."
 	case op == "status" || op == "progress":
 		return "Account service unavailable. Displayed data is stale; refresh to reconnect."
 	default:
