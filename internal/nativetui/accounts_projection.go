@@ -53,7 +53,11 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			base.observedAt = time.UnixMilli(limits.ObservedAt)
 			base.freshUntil = base.observedAt.Add(accountObservationMaxAge)
 		}
-		attributed := limits.ProfileID == p.ID && limits.DeliveryEpoch == p.DeliveryEpoch && p.Identity.State == "known"
+		// An opaque Claude token cannot verify account identity. Its statusline
+		// observations are still useful when the daemon attributes them to the
+		// bound profile, delivery epoch, session, and runtime; label them advisory.
+		advisory := p.Harness == "claude" && p.Source == "central" && limits.Source == "claude-statusline" && limits.SessionID != "" && limits.RuntimeGeneration != ""
+		attributed := limits.ProfileID == p.ID && limits.DeliveryEpoch == p.DeliveryEpoch && (p.Identity.State == "known" || advisory)
 		if limits.State != "known" || len(limits.Windows) == 0 || !attributed {
 			if !attributed && len(limits.Windows) > 0 {
 				base.reason = "Observation is not attributable to this verified account and delivery epoch."
@@ -64,6 +68,9 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 				l := base
 				l.name, l.state = window.Name, "available"
 				l.reason = "Stale after 5 minutes; usage is an observation, not a billing guarantee."
+				if advisory {
+					l.reason += " Reported by session " + limits.SessionID + ", runtime " + limits.RuntimeGeneration + "; account identity remains unverified."
+				}
 				used := window.UsedPercent
 				if !math.IsNaN(used) && !math.IsInf(used, 0) && used >= 0 && used <= 100 {
 					l.usedPercent = &used
