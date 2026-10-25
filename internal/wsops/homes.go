@@ -26,8 +26,7 @@ import (
 //     (store.RepoHomeID). It is created when a repo is tracked, and on first
 //     host-authorized creation for repos tracked before default sessions.
 //
-// A hidden single-member repo root (the wrapper around a one-off agent) hosts
-// nothing and resolves as a bare store row, as before.
+// Writable store opening promotes legacy hidden repo wrappers before resolution.
 
 // ResolveSession resolves an id the way every daemon-side lookup must: the
 // console or an existing store row (agent, coordinator root, or repo home).

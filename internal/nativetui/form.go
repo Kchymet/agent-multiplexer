@@ -18,18 +18,22 @@ import (
 
 var cursorStyle = lipgloss.NewStyle().Reverse(true)
 
-// openNewRepoAgentForm opens the settings form for a new repo-scoped agent.
+// openNewRepoAgentForm opens a normal workgroup form seeded with one repo.
 func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
 	m.form = &formState{
-		title:  "New agent · " + repoTitle,
-		action: core.ActionNewRepoAgent,
-		id:     repoID,
-		submit: "Create agent",
+		explicitRepos: true,
+		title:         "New workgroup · " + repoTitle,
+		action:        core.ActionNewWorkgroup,
+		submit:        "Create workgroup",
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
+			{key: wsops.FieldCoordinator, label: "Coordinator harness", value: agent.GoalRuntime, options: agent.Kinds()},
+			coordinatorModelField(agent.GoalRuntime),
+			{key: "repos", label: "Repos", value: repoID, picker: true},
+			{key: "name", label: "Name"},
 		},
 	}
 }
@@ -483,14 +487,15 @@ func isWordRune(r rune) bool  { return !isWordSpace(r) && r != '\n' }
 // (cursor == len(fields)). Text fields are vim-edited; `insert` is the vim mode
 // and `pending` holds a half-typed operator (d/c/r).
 type formState struct {
-	title   string
-	action  string
-	id      string
-	submit  string
-	fields  []*formField
-	cursor  int
-	insert  bool
-	pending string
+	explicitRepos bool // a seeded repo picker stays explicit even when cleared
+	title         string
+	action        string
+	id            string
+	submit        string
+	fields        []*formField
+	cursor        int
+	insert        bool
+	pending       string
 }
 
 func (fs *formState) values() map[string]string {
@@ -842,7 +847,7 @@ func (m *model) submitForm() tea.Cmd {
 
 func formFieldsForSubmit(fs *formState) map[string]string {
 	fields := fs.values()
-	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" {
+	if fs.action == core.ActionNewWorkgroup && fields["repos"] == "" && !fs.explicitRepos {
 		// An untouched first-agent picker means "create an empty but immediately
 		// usable coordinator", not an explicitly empty authorization ceiling.
 		// Omission lets wsops initialize all currently tracked repositories; the

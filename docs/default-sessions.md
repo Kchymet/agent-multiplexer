@@ -12,8 +12,8 @@ orchestrator over the provider protocol.
 | a work-scoped workgroup | `coordinator` | the workgroup id | `sessions/<workgroup>/coordinator/` — a dedicated own directory | `work` |
 | a tracked repo | `repo` | the repo name | `sessions/<repo>/` | `repo` |
 
-An ordinary agent has an empty role. A hidden single-member repo root (the
-wrapper around a one-off agent) hosts no session.
+An ordinary member agent has an empty role. Every workgroup has a visible
+coordinator, including workgroups limited to a single repo.
 
 ## What each one is for
 
@@ -30,10 +30,28 @@ wrapper around a one-off agent) hosts no session.
   workgroup — `Enter` on its rail row, `amux do steer <workgroup id> -f
   verb=prompt …`, or the web — reaches the coordinator. `amux do start
   <workgroup>` still starts the *members*.
-- **A repo home** is the long-lived context for a repo's one-off agents: it
-  knows what has been tried through its authenticated repo-scoped view and
-  dispatches new one-offs (`amux do new-repo-agent <repo> …`). It does not mount
-  another session's worktree or shared Git administration directly.
+- **A repo home** keeps repository management context and dispatches normal
+  workgroups with `amux do new-workgroup -f repos=<repo> -f prompt="…"`.
+  It can only create workgroups explicitly limited to its own repo. Sharing a
+  repo does not grant access to another workgroup's members or histories; the
+  workgroup coordinator and host console manage them.
+
+## Legacy one-off migration
+
+`new-repo-agent` is retired and returns guidance without creating a session.
+`amux workgroup repo <repo>` and the TUI repo shortcut use the normal constructor.
+Writable store opening promotes legacy hidden wrappers to visible workgroups,
+retaining root/member IDs, member directories, branches, conversations and archive
+state. The old container and all its files stay in place; a dedicated
+`coordinator/` directory is added for the root's own session. Existing runtime
+and account bindings are preserved (historical empty wrappers use Claude).
+The root receives explicit grants from its stored repo scope, never from member
+history. Deleted repos grant nothing. Promotion is transactional and repeatable;
+read-only authorization queries never perform it. Migration does not start agents.
+
+Adding, re-scoping or moving a member checks the destination coordinator's grant
+ceiling. Moving to a new workgroup grants exactly the member's assigned repos.
+Only an explicit host grant update can expand a workgroup's ceiling.
 
 ## Scope
 

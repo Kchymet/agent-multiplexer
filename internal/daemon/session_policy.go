@@ -251,17 +251,7 @@ func policyVisible(db policyStore, subject, target store.Session) (bool, error) 
 	case store.RoleCoordinator:
 		return target.ID == subject.ID || target.RootID == subject.ID, nil
 	case store.RoleRepo:
-		if target.ID == subject.ID {
-			return true, nil
-		}
-		if target.RootID == "" {
-			return target.Role() == store.RoleAgent && target.Scope == store.ScopeRepo && target.Repo == subject.Repo, nil
-		}
-		root, ok, err := db.GetSession(target.RootID)
-		if err != nil || !ok {
-			return false, err
-		}
-		return root.Role() == store.RoleAgent && root.Scope == store.ScopeRepo && root.Repo == subject.Repo, nil
+		return target.ID == subject.ID, nil
 	case store.RoleAgent:
 		return target.ID == subject.ID, nil
 	default:

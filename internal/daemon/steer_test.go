@@ -190,6 +190,15 @@ func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T
 	other := store.Session{ID: "prompt-other", Scope: store.ScopeWork, Agent: "claude", Dir: t.TempDir()}
 	member := store.Session{ID: "prompt-member", RootID: root.ID, Agent: "claude", Dir: t.TempDir()}
 	d, runtime, principals := sessionRuntimeFixture(t, root, other, member)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCoordinatorRepoGrants(other.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
 	d.sessionRPC = runtime
 	d.steerStarted = make(chan string, 1)
 	defer runtime.close()

@@ -52,7 +52,11 @@ func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) 
 	if defaultAgent != nil {
 		task = defaultAgent.Prompt
 	}
-	return createWorkspace(ctx, name, Coordinator{}, task, defaultAgent, nil)
+	var grants *[]string
+	if defaultAgent != nil {
+		grants = &defaultAgent.Repos
+	}
+	return createWorkspace(ctx, name, Coordinator{}, task, defaultAgent, grants)
 }
 
 // Coordinator selects a workgroup coordinator's runtime. Zero means the
@@ -106,6 +110,19 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	}
 	defer db.Close()
 
+	if defaultAgent != nil && !agent.Known(defaultAgent.Agent) {
+		return "", fmt.Errorf("unknown agent kind %q", defaultAgent.Agent)
+	}
+	if selectedGrants != nil {
+		for _, repo := range *selectedGrants {
+			if _, ok, err := db.Repo(repo); err != nil {
+				return "", err
+			} else if !ok {
+				return "", fmt.Errorf("unknown repo %q", repo)
+			}
+		}
+	}
+
 	rootID := db.NewID()
 	kind = agent.Canonical(kind)
 	root := store.Session{
@@ -151,27 +168,10 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	return rootID, nil
 }
 
-// CreateRepoWorkgroup creates a single-member, repo-scoped workgroup for one repo
-// plus its one agent. The wrapping root is hidden in the rail — the agent renders
-// directly under the repo header. Returns the agent session.
+// CreateRepoWorkgroup is retired. Callers must create a normal workgroup with
+// an explicit repository grant instead of a hidden single-member wrapper.
 func CreateRepoWorkgroup(ctx context.Context, repo string, spec AgentSpec) (store.Session, error) {
-	db, err := store.Open()
-	if err != nil {
-		return store.Session{}, err
-	}
-	defer db.Close()
-	if _, ok, _ := db.Repo(repo); !ok {
-		return store.Session{}, fmt.Errorf("unknown repo %q\n  %s", repo, trackedRepos(db))
-	}
-	rootID := db.NewID()
-	if err := db.PutSession(store.Session{
-		ID: rootID, RootID: "", Scope: store.ScopeRepo,
-		Mode: store.NormalizeMode(spec.Mode), Repo: repo, Created: store.Now(),
-	}); err != nil {
-		return store.Session{}, err
-	}
-	spec.Repos = []string{repo}
-	return addAgent(ctx, db, rootID, spec)
+	return store.Session{}, fmt.Errorf("new-repo-agent is retired; use amux do new-workgroup -f repos=%s -f prompt=…", repo)
 }
 
 // AddAgent adds an agent (sub-session) to a workgroup.
@@ -202,33 +202,8 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	if !ok || !root.IsRoot() {
 		return store.Session{}, fmt.Errorf("no such workgroup %q", rootID)
 	}
-	// The persisted coordinator ceiling is an execution-time invariant, not
-	// merely an RPC-policy hint. Host/UI creation and restricted mailbox calls
-	// converge here, before a directory or checkout is created. Repo-scoped
-	// hidden roots have their separate single-repo construction contract.
-	if root.Role() == store.RoleCoordinator {
-		grants, initialized, err := db.CoordinatorRepoGrants(rootID)
-		if err != nil {
-			return store.Session{}, err
-		}
-		if !initialized {
-			return store.Session{}, fmt.Errorf("coordinator %q has no initialized repository grants", rootID)
-		}
-		allowed := make(map[string]bool, len(grants))
-		for _, repo := range grants {
-			allowed[repo] = true
-		}
-		for _, repoName := range spec.Repos {
-			repoName = strings.TrimSpace(repoName)
-			if repoName == "" {
-				continue
-			}
-			if _, tracked, lookupErr := db.Repo(repoName); lookupErr != nil {
-				return store.Session{}, lookupErr
-			} else if tracked && !allowed[repoName] {
-				return store.Session{}, fmt.Errorf("repository %q is outside coordinator %q grants", repoName, rootID)
-			}
-		}
+	if err := db.CheckCoordinatorRepos(rootID, spec.Repos); err != nil {
+		return store.Session{}, err
 	}
 	agentID := db.NewID()
 	dir := store.AgentDir(rootID, agentID)
@@ -388,6 +363,9 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 	if a.IsRoot() {
 		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
+	if err := db.CheckCoordinatorRepos(a.RootID, want); err != nil {
+		return err
+	}
 	var managedRoot string
 	storageRoot := func() (string, error) {
 		if managedRoot != "" {
@@ -461,10 +439,8 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 // it creates a new work-scoped workgroup seeded with the agent's repos. Only the
 // agent's root_id changes — its worktree dir and branch are left where they are
 // (they embed the old root id but are read from the stored values, so they keep
-// working; physically moving git worktrees is avoided). An old single-member
-// repo-scoped workgroup left empty is dropped (its container dir is left on disk
-// because the moved agent's worktree still lives under it and is in use); a
-// work-scoped one left empty stays, since it is its coordinator's session.
+// working; physically moving git worktrees is avoided). The old workgroup
+// remains even when empty, preserving its coordinator and history.
 func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	db, err := store.Open()
 	if err != nil {
@@ -481,7 +457,8 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 	oldRoot := a.RootID
 
 	if strings.TrimSpace(targetRootID) == "" {
-		newRoot, err := CreateWorkspace(ctx, defaultStr(a.Name, a.Repo), nil)
+		repos := store.SplitRepos(a.Repo)
+		newRoot, err := createWorkspace(ctx, defaultStr(a.Name, a.Repo), Coordinator{}, "", nil, &repos)
 		if err != nil {
 			return err
 		}
@@ -499,18 +476,12 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
 		return nil
 	}
 
+	if err := db.CheckCoordinatorRepos(targetRootID, store.SplitRepos(a.Repo)); err != nil {
+		return err
+	}
 	// Field-scoped write: only the parent (root_id) changes when re-parenting.
 	if err := db.SetRootID(a.ID, targetRootID); err != nil {
 		return err
-	}
-	// Drop the old workgroup if it was the hidden single-member repo-scoped
-	// wrapper around this agent, now empty. A work-scoped workgroup stays: it is
-	// its coordinator's session, possibly running, and the user deletes it
-	// deliberately.
-	if old, ok, _ := db.GetSession(oldRoot); ok && old.Scope == store.ScopeRepo && old.Role() != store.RoleRepo {
-		if kids, _ := db.Children(oldRoot); len(kids) == 0 {
-			_ = db.DeleteSession(oldRoot)
-		}
 	}
 	return nil
 }

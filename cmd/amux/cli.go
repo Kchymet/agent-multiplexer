@@ -317,19 +317,16 @@ func cmdSession(args []string) error {
 		startCreated(rootID)
 		return nil
 	case "repo":
-		// amux workgroup repo <repo> [--name n] [--prompt t] [--mode m] [--model M]
-		// Creates a single-repo (repo-scoped) workgroup + its one agent.
-		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--mode m] [--model M]")
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: amux workgroup repo <repo> [--prompt t] [--coordinator kind]")
 		}
-		_, cfg := parseCreateFlags(args[2:])
-		id, err := sendActionID(core.Action{Action: core.ActionNewRepoAgent, ID: args[1], Fields: map[string]string{
-			"agent": cfg.agent, "mode": cfg.mode, "model": cfg.model, "prompt": cfg.prompt,
-		}})
+		_, cfg := parseCreateFlags(rest[1:])
+		fields := createWorkspaceFields([]string{rest[0]}, cfg)
+		id, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: fields})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created repo-scoped agent %s on %s\n", id, args[1])
+		fmt.Printf("created workgroup %s (repo: %s)\n", id, rest[0])
 		startCreated(id)
 		return nil
 	case "move":
@@ -430,7 +427,7 @@ func cmdSession(args []string) error {
 		return fmt.Errorf("unknown workgroup subcommand %q\nvalid subcommands:\n"+
 			"  new                          create a workgroup on a config page (default)\n"+
 			"  create <repo>...             create one non-interactively, with a first agent\n"+
-			"  repo <repo>                  start a repo-scoped agent on a tracked repo\n"+
+			"  repo <repo>                  create a workgroup limited to one tracked repo\n"+
 			"  add <id> [repo...]           add another agent to a workgroup\n"+
 			"  move <agent> [<id>|--new]    re-parent an agent into another workgroup\n"+
 			"  repos <agent> <repo>...      re-scope an agent to exactly these repos\n"+
@@ -456,7 +453,7 @@ usage: amux workgroup [command]
                      [--coordinator claude|codex] [--coordinator-model M]
                      the prompt is the coordinator's task (its goal on the
                      default codex coordinator); the agent starts idle for it
-  repo <repo>        create a single-repo (repo-scoped) agent on a tracked repo
+  repo <repo>        create a workgroup limited to one tracked repo
   add <root> [repo...]  add another agent to an existing workgroup
   open <id>          open the dashboard on a workgroup or agent  (alias: switch)
   ls                 list workgroups and their agents  (alias: list)

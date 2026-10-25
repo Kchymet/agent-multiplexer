@@ -27,8 +27,7 @@ const untrackedTTL = 12 * time.Hour
 const maxArchivedRows = 8
 
 // Workspace is the rail's source: the control console, then each root session
-// with its sub-sessions nested underneath, then each tracked repo with its
-// one-off agents. The console, every work-scoped root, and every repo row is
+// with its members nested underneath, then tracked repository homes. The console, every work-scoped root, and every repo row is
 // itself a session — the built-in default sessions (store.Role*): the console,
 // the workgroup's coordinator, the repo's home — so those rows carry a runtime,
 // caps, a role, and their own activity state, and can be opened and steered
@@ -94,11 +93,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Repo-scoped (single-member) workgroups don't get their own row — their agent
-	// renders nested under the repo header in the REPOS section. Collect them by
-	// repo while passing over the roots; work-scoped roots render inline here.
-	// Archived agents/workgroups are pulled aside into a collapsed ARCHIVED section.
-	repoAgents := map[string][]store.Session{}
+	// Every workgroup renders its coordinator and members under WORKGROUPS.
 	repoHomes := map[string]store.Session{} // a repo's home session, by repo name
 	var archived []store.Session
 	track := func(s store.Session) {
@@ -125,17 +120,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			repoHomes[r.Repo] = r
 			continue
 		}
-		if r.Scope == store.ScopeRepo {
-			for _, s := range subs {
-				track(s)
-				if s.Archived || r.Archived {
-					archived = append(archived, s)
-					continue
-				}
-				repoAgents[firstRepo(r.Repo)] = append(repoAgents[firstRepo(r.Repo)], s)
-			}
-			continue
-		}
+		track(r)
 		// Work-scoped: an archived workgroup (or sub) is set aside; the rest render
 		// inline, the root inheriting its most demanding child's state.
 		var active []store.Session
@@ -148,12 +133,17 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			active = append(active, s)
 		}
 		if r.Archived {
+			out = append(out, w.withCaps(core.Session{
+				ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionArchived,
+				IsRoot: true, Role: store.RoleCoordinator, Kind: agent.Canonical(r.Agent), Mode: r.Mode,
+				Model: r.Model, State: core.StateIdle, Status: "archived workgroup", Archived: true,
+				Cwd: r.Dir, CanAttach: true, CanKill: true,
+			}, false))
 			continue
 		}
 		// The root row is the workgroup's coordinator session. Its own activity
 		// leads its status; the row's state is the most demanding of its own and
 		// its agents', so a workgroup with a blocked member still floats up.
-		track(r)
 		ownState := agentState(liveOf(r.ID), r)
 		subStates := make([]string, len(active))
 		rootState := ownState
@@ -187,8 +177,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 	}
 
-	// Tracked repositories, each a container for its repo-scoped agents (nested
-	// directly beneath, so a single-repo agent shows here, never under WORKGROUPS).
+	// Tracked repositories retain their management home sessions.
 	// The repo row is the repo's home session (id = repo name). A repo tracked
 	// before default sessions may lack a provisioned home row. Reads never create
 	// one: that row remains visible but non-attachable until host-authorized repair.
@@ -210,19 +199,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				State: st, Status: status,
 				Cwd: containerDir(home), CanAttach: ok,
 			}, ok))
-			for _, s := range repoAgents[r.Name] {
-				st := agentState(liveOf(s.ID), s)
-				out = append(out, w.withCaps(core.Session{
-					ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionRepos,
-					RootID: r.Name, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
-					Model:     s.Model,
-					State:     st,
-					Status:    stateLabel(st) + subSuffix(s) + noticeSuffix(s) + configSuffix(s),
-					Cwd:       s.Dir,
-					CanAttach: true,
-					CanKill:   true,
-				}, true)) // tracked, active repo agent — steerable
-			}
+
 		}
 	}
 
@@ -233,7 +210,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 	for _, s := range recentArchived(archived) {
 		out = append(out, w.withCaps(core.Session{
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
-			Kind: agent.Canonical(s.Agent), Mode: s.Mode,
+			RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode,
 			Model: s.Model,
 			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
