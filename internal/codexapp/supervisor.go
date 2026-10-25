@@ -672,6 +672,8 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 		return nil
 	}
 	threadID := s.threadID
+	previousRPC := s.rpc
+	previousDone := s.rpcDone
 	previousCancel := s.runCancel
 	s.reconnecting = true
 	s.mu.Unlock()
@@ -688,6 +690,24 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 	}
 	if previousCancel != nil {
 		previousCancel()
+	}
+	if previousRPC != nil {
+		_ = previousRPC.close()
+	}
+	// Do not publish a replacement while any callback from the old connection is
+	// still running. Besides streamState being single-reader state, request handlers
+	// may reply after their work completes; keeping s.rpc pinned to previousRPC until
+	// its reader retires prevents an old request id from escaping on the new socket.
+	// The caller's admission context bounds this join just like dial and handshake.
+	if previousDone != nil {
+		select {
+		case <-previousDone:
+		case <-ctx.Done():
+			return fmt.Errorf("codexapp reconnect: wait for previous reader: %w", ctx.Err())
+		}
+	}
+	if !s.processRunning() {
+		return errors.New("codexapp: App Server process exited")
 	}
 
 	conn, err := s.dialWithRetry(ctx)

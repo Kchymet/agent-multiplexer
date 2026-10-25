@@ -7,11 +7,34 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+type heldLogWriter struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newHeldLogWriter() *heldLogWriter {
+	return &heldLogWriter{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (w *heldLogWriter) Write(p []byte) (int, error) {
+	w.enteredOnce.Do(func() { close(w.entered) })
+	<-w.release
+	return len(p), nil
+}
+
+func (w *heldLogWriter) Close() error {
+	w.releaseOnce.Do(func() { close(w.release) })
+	return nil
+}
 
 func TestManagerEnsureQueuedCreationHonorsAdmissionContext(t *testing.T) {
 	m := NewManager(context.Background(), "")
@@ -345,6 +368,135 @@ func TestManagerProcessExitAfterRetiredTransportClosesServingLifetime(t *testing
 			t.Fatal("process exit after retired transport left event log open")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestManagerReconnectJoinsOldReaderBeforePublishingReplacement(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	connected := make(chan *fakeServer, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		connected <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+
+	m := NewManager(context.Background(), "")
+	defer m.Shutdown()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	ensure := func(ctx context.Context) (*Supervisor, error) {
+		return m.Ensure(ctx, "reader-join", "", nil, []string{"sleep", "60"}, endpoint, "gpt-main", "", "")
+	}
+	sup, err := ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldServer := <-connected
+
+	// Hold an old connection callback inside emit. Its default request response is
+	// written only after the hold is released, so publishing a replacement early
+	// would both overlap read-loop-owned state and route this old id through s.rpc
+	// onto the replacement socket.
+	held := newHeldLogWriter()
+	sup.logMu.Lock()
+	sup.logW = held
+	sup.logMu.Unlock()
+	oldServer.write(map[string]any{
+		"method": "test/unsupported",
+		"id":     "old-request",
+		"params": map[string]any{},
+	})
+	select {
+	case <-held.entered:
+	case <-time.After(time.Second):
+		t.Fatal("old request handler did not reach the hold")
+	}
+	sup.mu.Lock()
+	oldRPC := sup.rpc
+	oldReaderDone := sup.rpcDone
+	sup.mu.Unlock()
+	if err := oldRPC.close(); err != nil {
+		t.Fatal(err)
+	}
+	shortCtx, cancelShort := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	_, err = ensure(shortCtx)
+	cancelShort()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reconnect reader join ignored admission deadline: %v", err)
+	}
+	select {
+	case <-connected:
+		t.Fatal("timed-out reconnect published a replacement before old reader retired")
+	default:
+	}
+
+	reconnectCtx, cancelReconnect := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelReconnect()
+	reconnected := make(chan error, 1)
+	go func() {
+		_, err := ensure(reconnectCtx)
+		reconnected <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		sup.mu.Lock()
+		joining := sup.reconnecting
+		sup.mu.Unlock()
+		if joining {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reconnect did not begin")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-oldReaderDone:
+		t.Fatal("old reader retired while its handler was held")
+	default:
+	}
+	select {
+	case <-connected:
+		t.Fatal("replacement connected before old reader handler retired")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-oldReaderDone:
+	case <-time.After(time.Second):
+		t.Fatal("old reader did not retire after handler release")
+	}
+	var replacement *fakeServer
+	select {
+	case replacement = <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not connect after old reader retired")
+	}
+	select {
+	case err := <-reconnected:
+		if err != nil {
+			t.Fatalf("reconnect: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconnect did not complete")
+	}
+
+	wantID, _ := json.Marshal("old-request")
+	replacement.mu.Lock()
+	defer replacement.mu.Unlock()
+	for _, call := range replacement.calls {
+		if call.Method == "" && string(call.ID) == string(wantID) {
+			t.Fatal("old request response was written on replacement connection")
+		}
 	}
 }
 
