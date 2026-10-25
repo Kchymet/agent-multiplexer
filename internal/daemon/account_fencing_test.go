@@ -323,3 +323,44 @@ func TestLogoutCleanupErrorPersistsAndLoginRecovers(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestLogoutWithoutNativeProviderPersistsCleanupUnavailable(t *testing.T) {
+	d := isolatedAccounts(t)
+	r := hp.AccountRequest{Operation: hp.AccountLogout, ProfileID: "codex:central", Revision: profileRevision(t, "codex:central")}
+	out := d.accountCall(t.Context(), r, false)
+	if out.OK || out.Error != "account_logout_cleanup_unavailable" {
+		t.Fatal(out)
+	}
+	state, _ := accounts.Read()
+	p := state.Profiles[r.ProfileID]
+	if p.State != "logged-out" || p.Error != out.Error {
+		t.Fatal(p)
+	}
+	accounts.Bind("w", "codex")
+	if _, _, err := accounts.Delivery("w", "codex"); err == nil {
+		t.Fatal("unavailable cleanup enabled delivery")
+	}
+	// An unavailable login is not recovery and must retain the cleanup error.
+	r.Operation = hp.AccountLogin
+	r.Revision = p.Revision
+	r.Initiator = "host"
+	if d.accountCall(t.Context(), r, true).OK {
+		t.Fatal("missing provider accepted login")
+	}
+	state, _ = accounts.Read()
+	if state.Profiles[r.ProfileID].Error != "account_logout_cleanup_unavailable" {
+		t.Fatal("failed login erased cleanup status")
+	}
+	// Recovery with a working adapter clears the persisted error.
+	d.centralCodex = &centralCodex{provider: &completionAccountProvider{}}
+	r.Operation = hp.AccountLogout
+	r.Revision = profileRevision(t, r.ProfileID)
+	r.Initiator = ""
+	if out = d.accountCall(t.Context(), r, false); !out.OK {
+		t.Fatal(out)
+	}
+	state, _ = accounts.Read()
+	if state.Profiles[r.ProfileID].Error != "" {
+		t.Fatal("successful cleanup retained error")
+	}
+}

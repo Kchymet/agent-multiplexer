@@ -3,8 +3,10 @@ package codexauth
 import (
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -56,4 +58,23 @@ func (p *Provider) restoreAuth(b []byte, existed bool) error {
 		return ce
 	}
 	return os.Rename(tmp, path)
+}
+
+// validLoginURL admits only the native issuer's browser authorization hosts.
+// Ceremony URLs remain ephemeral, but must not become script/credential-bearing
+// navigation targets supplied by a malformed native response.
+func validLoginURL(raw string) bool {
+	if len(raw) == 0 || len(raw) > 8192 || strings.ContainsAny(raw, " \t\r\n") {
+		return false
+	}
+	for _, r := range raw {
+		if r < 32 || r == 127 {
+			return false
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Fragment != "" {
+		return false
+	}
+	return u.Host == "auth.openai.com" || u.Host == "login.openai.com"
 }

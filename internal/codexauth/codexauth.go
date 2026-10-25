@@ -451,7 +451,7 @@ func (p *Provider) Login(ctx context.Context, show func(authURL string), commit 
 		LoginID string `json:"loginId"`
 		AuthURL string `json:"authUrl"`
 	}
-	if err := json.Unmarshal(raw, &start); err != nil || start.LoginID == "" || start.AuthURL == "" {
+	if err := json.Unmarshal(raw, &start); err != nil || start.LoginID == "" || !validLoginURL(start.AuthURL) {
 		return errors.New("codexauth: account/login/start: unexpected response")
 	}
 	if show != nil {

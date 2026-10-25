@@ -95,6 +95,9 @@ rotating it is one write and no reinstall.
   --publish-sessions  publish this daemon's session inventory and accept lifecycle verbs
   --read-only-sessions  publish inventory but reject every lifecycle verb
   --runtime-events   stream read-only transcript events (needs --publish-sessions)
+  --account-status   allow safe machine login and subscription-limit status (off by default)
+  --account-manage   allow transient login/default/logout management (off by default)
+  --account-use      allow machine-account use (defaults to writable session publishing)
 
 Install-only flags:
 

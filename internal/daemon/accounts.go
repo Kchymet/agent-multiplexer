@@ -124,6 +124,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				}
 				s.CredentialVersion[p.ID] = cred.Generation
 				p.State = "ready"
+				p.Error = ""
 				p.Revision++
 				s.Profiles[p.ID] = p
 				return nil
@@ -235,7 +236,6 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			}
 			p.DeliveryEpoch++
 			p.Revision++
-			p.Error = ""
 			p.Limits.State = "unavailable"
 			p.Limits.Windows = nil
 			p.Identity = hp.AccountIdentity{State: "unknown", Evidence: p.Identity.Evidence}
@@ -268,24 +268,39 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	}
 	if r.Operation == hp.AccountLogout {
 		// The durable fence precedes native IO. Failure cannot reopen delivery.
+		cleanupCode := "account_logout_cleanup_failed"
 		if p.Harness == "claude" {
 			e = centralauth.ClaudeStore().Delete()
 		} else if d.centralCodex != nil && d.centralCodex.provider != nil {
 			d.accountMu.Unlock()
 			e = d.centralCodex.provider.Logout(ctx)
 			d.accountMu.Lock()
+		} else {
+			e = errCentralCodexUnavailable
+			cleanupCode = "account_logout_cleanup_unavailable"
 		}
 		if e != nil {
 			_ = accounts.Update(func(s *accounts.State) error {
 				q := s.Profiles[p.ID]
 				if q.DeliveryEpoch == p.DeliveryEpoch {
-					q.Error = "account_logout_cleanup_failed"
+					q.Error = cleanupCode
 					q.Revision++
 					s.Profiles[q.ID] = q
 				}
 				return nil
 			})
-			return fail("account_logout_cleanup_failed")
+			return fail(cleanupCode)
+		}
+		if e = accounts.Update(func(s *accounts.State) error {
+			q := s.Profiles[p.ID]
+			if q.DeliveryEpoch == p.DeliveryEpoch && q.Error != "" {
+				q.Error = ""
+				q.Revision++
+				s.Profiles[q.ID] = q
+			}
+			return nil
+		}); e != nil {
+			return fail("account_status_unavailable")
 		}
 		return hp.AccountResult{OK: true}
 	}
@@ -318,6 +333,9 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			_ = accounts.Update(func(s *accounts.State) error {
 				q := s.Profiles[p.ID]
 				q.State = "blocked"
+				if q.Error == "" {
+					q.Error = "account_native_unavailable"
+				}
 				q.Revision++
 				s.Profiles[q.ID] = q
 				return nil

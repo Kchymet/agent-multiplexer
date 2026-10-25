@@ -97,3 +97,15 @@ func TestCentralClaudeLoginRequiresAuthorizedDaemonBeforeTokenAcquisition(t *tes
 		t.Fatal("offline login persisted secret")
 	}
 }
+
+func TestMachineAccountCommandsDenyProtectedSessionBeforeHostAccess(t *testing.T) {
+	isolateCentralCLI(t)
+	old := sessionContextRestricted
+	sessionContextRestricted = func() bool { return true }
+	t.Cleanup(func() { sessionContextRestricted = old })
+	for _, args := range [][]string{{"status"}, {"accounts"}, {"default", "claude:central"}, {"logout", "claude"}, {"rebind", "claude:central", "w"}} {
+		if err := cmdAuth(args); err == nil || !strings.Contains(err.Error(), "host terminal") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+}
