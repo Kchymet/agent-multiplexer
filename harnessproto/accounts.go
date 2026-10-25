@@ -31,11 +31,12 @@ type AccountRequest struct {
 	DefaultRevision uint64 `json:"defaultRevision,omitempty"` // required only for default; snapshot.defaultRevisions[harness]
 	WorkloadID      string `json:"workloadId,omitempty"`
 	Operation       string `json:"operation"`
+	Mode            string `json:"mode,omitempty"` // login only: subscription | api; empty preserves subscription compatibility
 	ProfileID       string `json:"profileId,omitempty"`
 	Revision        uint64 `json:"revision,omitempty"`
 	AttemptID       string `json:"attemptId,omitempty"`
 	Initiator       string `json:"initiator,omitempty"`
-	// Secret is accepted only by complete, for Claude's setup-token ceremony.
+	// Secret is accepted only by complete, for protected token/API-key input.
 	Secret string `json:"secret,omitempty"`
 }
 
@@ -50,16 +51,18 @@ type AccountSnapshot struct {
 }
 
 type AccountProfile struct {
-	ID            string          `json:"id"`
-	Harness       string          `json:"harness"`
-	Source        string          `json:"source"`
-	Revision      uint64          `json:"revision"`
-	DeliveryEpoch uint64          `json:"deliveryEpoch"`
-	State         string          `json:"state"` // unconfigured | login-pending | ready | blocked | logged-out
-	Identity      AccountIdentity `json:"identity"`
-	Limits        AccountLimits   `json:"limits"`
-	LoginMethod   string          `json:"loginMethod"`     // browser | setup-token | external
-	Error         string          `json:"error,omitempty"` // fixed code; never native error text
+	SupportedModes []string        `json:"supportedModes,omitempty"` // explicit local API-login capability; absence means unsupported
+	ID             string          `json:"id"`
+	Mode           string          `json:"mode,omitempty"` // subscription | api; empty legacy value means subscription
+	Harness        string          `json:"harness"`
+	Source         string          `json:"source"`
+	Revision       uint64          `json:"revision"`
+	DeliveryEpoch  uint64          `json:"deliveryEpoch"`
+	State          string          `json:"state"` // unconfigured | login-pending | ready | blocked | logged-out
+	Identity       AccountIdentity `json:"identity"`
+	Limits         AccountLimits   `json:"limits"`
+	LoginMethod    string          `json:"loginMethod"`     // browser | setup-token | external
+	Error          string          `json:"error,omitempty"` // fixed code; never native error text
 }
 
 type AccountIdentity struct {
@@ -92,6 +95,7 @@ type AccountLimitWindow struct {
 // AccountCeremony is ephemeral and initiator-only. Poll using the returned
 // attemptId and the same initiator; status snapshots never include these fields.
 type AccountCeremony struct {
+	Mode      string `json:"mode,omitempty"` // requested mode, confirmed by the daemon
 	AttemptID string `json:"attemptId"`
 	State     string `json:"state"`
 	Method    string `json:"method"`
@@ -110,6 +114,9 @@ type AccountResult struct {
 // no authority. Providers additionally permit only remote status requests.
 // A safe status request cannot be used to poll or complete a ceremony.
 func ValidateAccountRequest(r AccountRequest, ceremony bool) bool {
+	if r.Mode != "" && (r.Operation != AccountLogin || (r.Mode != "subscription" && r.Mode != "api")) {
+		return false
+	}
 	if (r.Operation == AccountDefault) != (r.DefaultRevision > 0) {
 		return false
 	}

@@ -150,6 +150,10 @@ func runFake() {
 				reply(map[string]any{"account": nil, "requiresOpenaiAuth": true})
 				continue
 			}
+			if tok, err := readTokens(home); err == nil && tok.APIKey {
+				reply(map[string]any{"account": map[string]any{"type": "apiKey"}, "requiresOpenaiAuth": true})
+				continue
+			}
 			if p.RefreshToken {
 				if d, _ := time.ParseDuration(os.Getenv(fakeRefreshSleep)); d > 0 {
 					time.Sleep(d)
@@ -162,6 +166,18 @@ func runFake() {
 			}
 			reply(map[string]any{"account": map[string]any{"type": "chatgpt", "email": "user@example.com", "planType": "plus"}, "requiresOpenaiAuth": true})
 		case "account/login/start":
+			var input struct {
+				Type   string `json:"type"`
+				APIKey string `json:"apiKey"`
+			}
+			_ = json.Unmarshal(m.Params, &input)
+			if input.Type == "apiKey" {
+				b, _ := json.Marshal(map[string]any{"auth_mode": "apikey", "OPENAI_API_KEY": input.APIKey})
+				_ = os.WriteFile(filepath.Join(home, authFile), b, 0600)
+				reply(map[string]any{"type": "apiKey"})
+				_ = out.Encode(map[string]any{"method": "account/login/completed", "params": map[string]any{"loginId": nil, "success": true}})
+				continue
+			}
 			loginID = "login-1"
 			reply(map[string]any{"type": "chatgpt", "loginId": loginID, "authUrl": "https://auth.openai.com/authorize?state=s"})
 			if os.Getenv(fakeHangLogin) != "1" {

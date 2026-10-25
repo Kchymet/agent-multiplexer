@@ -112,7 +112,7 @@ func TestAccountsBarKeyboardMouseAndLegacyProjection(t *testing.T) {
 		}
 		m.Update(cmd())
 		view := plain(m.renderAccounts())
-		if m.accounts.selected != "claude:central" || !strings.Contains(view, "[not default]") || !strings.Contains(view, "Existing default retained") {
+		if m.accounts.selected != "claude:central" || !strings.Contains(view, "New workloads: preserved legacy default") {
 			t.Fatalf("legacy default represented as central:\n%s", view)
 		}
 		for _, forbidden := range []string{"claude:host", "claude:shared", "codex:environment", "↑/↓: profile"} {

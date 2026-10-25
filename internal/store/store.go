@@ -288,10 +288,18 @@ func (d *DB) DeleteRepo(name string) error {
 // ---- sessions ------------------------------------------------------------
 
 func (d *DB) PutSession(s Session) error {
-	if err := accounts.Bind(s.ID, s.Agent); err != nil {
+	_, exists, err := d.GetSession(s.ID)
+	if err != nil {
 		return err
 	}
-	_, err := d.sql.Exec(
+	bind := accounts.Bind
+	if exists {
+		bind = accounts.BindExisting
+	}
+	if err := bind(s.ID, s.Agent); err != nil {
+		return err
+	}
+	_, err = d.sql.Exec(
 		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET

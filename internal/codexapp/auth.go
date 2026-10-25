@@ -71,6 +71,7 @@ const (
 // event of the value never carries it.
 type ChatGPTToken struct {
 	AccessToken string
+	APIKey      bool   // key is delivered through private account/login/start
 	AccountID   string // ChatGPT workspace/account id (chatgptAccountId)
 	PlanType    string // optional; "" lets Codex derive it from the token
 }
@@ -125,6 +126,7 @@ type tokenAuth struct {
 	mu       sync.Mutex
 	account  string
 	injected bool // the App Server holds a token amux installed
+	apiKey   bool // API login never establishes ChatGPT refresh identity
 	inflight *tokenRefresh
 	// refreshed is when the last forced refresh succeeded (see refresh).
 	refreshed time.Time
@@ -175,7 +177,10 @@ func (a *tokenAuth) fetch(ctx context.Context, refresh bool, previous string) (C
 		}
 		return ChatGPTToken{}, fmt.Errorf("codexapp: central ChatGPT auth: %w", err)
 	}
-	if strings.TrimSpace(tok.AccessToken) == "" || strings.TrimSpace(tok.AccountID) == "" {
+	if tok.APIKey && (tok.AccountID != "" || tok.PlanType != "") {
+		return ChatGPTToken{}, errors.New("codexapp: API credential cannot claim subscription identity")
+	}
+	if strings.TrimSpace(tok.AccessToken) == "" || (!tok.APIKey && strings.TrimSpace(tok.AccountID) == "") {
 		return ChatGPTToken{}, errors.New("codexapp: central ChatGPT auth returned an incomplete credential")
 	}
 	return tok, nil
@@ -203,12 +208,16 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 		"accessToken":      tok.AccessToken,
 		"chatgptAccountId": tok.AccountID,
 	}
-	if tok.PlanType != "" {
+	if tok.APIKey {
+		params = map[string]any{"type": "apiKey", "apiKey": tok.AccessToken}
+	}
+	if tok.PlanType != "" && !tok.APIKey {
 		params["chatgptPlanType"] = tok.PlanType
 	}
 	completed := make(chan loginOutcome, 1)
 	a.mu.Lock()
 	a.completed = completed
+	a.apiKey = tok.APIKey
 	a.pending = tok.AccessToken
 	a.mu.Unlock()
 	defer func() {
@@ -221,12 +230,22 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	}()
 	res, err := rpc.call(ctx, methodLoginStart, params)
 	if err != nil {
+		if tok.APIKey {
+			return errors.New("codexapp: API-key login request failed")
+		}
 		return loginError(err)
 	}
 	var r struct {
 		Type string `json:"type"`
 	}
-	if json.Unmarshal(res, &r) != nil || r.Type != loginTypeTokens {
+	expectedType := loginTypeTokens
+	if tok.APIKey {
+		expectedType = "apiKey"
+	}
+	if json.Unmarshal(res, &r) != nil || r.Type != expectedType {
+		if tok.APIKey {
+			return errors.New("codexapp: App Server did not accept API-key login")
+		}
 		return errExternalAuthUnsupported
 	}
 	// The server holds the token from here on, so a 401 during its own login
@@ -250,6 +269,9 @@ func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 		a.mu.Lock()
 		a.injected = false
 		a.mu.Unlock()
+		if tok.APIKey {
+			return errors.New("codexapp: App Server did not complete API-key login")
+		}
 		return fmt.Errorf("codexapp: App Server did not complete the central ChatGPT login: %s", safeServerText(out.err, tok.AccessToken))
 	}
 	return nil
@@ -274,13 +296,19 @@ func (a *tokenAuth) loginCompleted(params json.RawMessage) (ev harnessproto.Runt
 		out.err = *p.Error
 	}
 	a.mu.Lock()
-	ch, pending := a.completed, a.pending
+	ch, pending, apiKey := a.completed, a.pending, a.apiKey
 	a.mu.Unlock()
 	if ch != nil {
 		select {
 		case ch <- out:
 		default:
 		}
+	}
+	if apiKey {
+		if out.success {
+			return notice("info", "codex: central API-key login completed"), true
+		}
+		return notice("error", "codex: central API-key login failed"), true
 	}
 	if out.success {
 		return notice("info", "codex: central ChatGPT login completed"), true
@@ -330,7 +358,7 @@ func loginError(err error) error {
 func (a *tokenAuth) refresh(ctx context.Context) (ChatGPTToken, error) {
 	a.mu.Lock()
 	bound := a.account
-	if !a.injected || bound == "" {
+	if !a.injected || a.apiKey || bound == "" {
 		a.mu.Unlock()
 		return ChatGPTToken{}, errNotInjected
 	}

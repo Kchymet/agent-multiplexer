@@ -111,6 +111,12 @@ func parseAuth(b []byte) (Tokens, error) {
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return Tokens{}, errMalformed
 	}
+	if (doc.AuthMode == nil || strings.EqualFold(*doc.AuthMode, "apikey")) && doc.APIKey != nil && *doc.APIKey != "" {
+		if !validToken(*doc.APIKey) || len(*doc.APIKey) > 4096 {
+			return Tokens{}, errMalformed
+		}
+		return Tokens{AccessToken: *doc.APIKey, APIKey: true}, nil
+	}
 	if doc.AuthMode != nil && !strings.EqualFold(*doc.AuthMode, "chatgpt") {
 		return Tokens{}, ErrUnsupportedAuth
 	}

@@ -47,6 +47,7 @@ func authUsage() {
 usage: amux auth <command>
 
   login [claude] [--token-stdin]  create or replace the central Claude token
+  login <claude|codex> --api-key [--token-stdin]  replace with an API key
   login codex                     sign the central Codex home in to ChatGPT
   status [claude|codex]           show the amux-owned configuration and limits
   accounts [--json]             view Claude/Codex configuration and limits
@@ -119,20 +120,26 @@ func authStatus(args []string) error {
 
 func authLogin(args []string) error {
 	harness, rest := authHarness(args)
-	if harness == "codex" {
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: amux auth login codex")
+	mode, stdin := "subscription", false
+	seen := map[string]bool{}
+	for _, arg := range rest {
+		if seen[arg] {
+			return fmt.Errorf("duplicate login option")
 		}
-		return authMachineLogin("codex", false)
+		seen[arg] = true
+		switch arg {
+		case "--api-key":
+			mode = "api"
+		case "--token-stdin":
+			stdin = true
+		default:
+			return fmt.Errorf("usage: amux auth login <claude|codex> [--api-key] [--token-stdin]")
+		}
 	}
-	stdin := false
-	switch {
-	case len(rest) == 1 && rest[0] == "--token-stdin":
-		stdin = true
-	case len(rest) != 0:
-		return fmt.Errorf("usage: amux auth login [claude] [--token-stdin]")
+	if harness == "codex" && mode == "subscription" && stdin {
+		return fmt.Errorf("Codex --token-stdin requires --api-key")
 	}
-	return authMachineLogin("claude", stdin)
+	return authMachineLoginMode(harness, mode, stdin)
 }
 
 // claudeAuthStatus reports the selected Claude mode. Central mode is described

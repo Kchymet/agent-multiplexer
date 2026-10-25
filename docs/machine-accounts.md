@@ -4,11 +4,13 @@ The daemon owns one central Claude profile and one central Codex profile per amu
 
 ## Operator setup
 
-Open **Accounts** from the TUI rail (`s`). In a host terminal, the equivalent commands are:
+Open **Accounts** from the TUI rail (`s`). The initial screen shows Claude and Codex together, including reported usage, resets and freshness; Tab selects the harness for actions. `e` starts subscription login and `a` starts API-key login. Each existing central profile has one explicit `subscription` or `api` mode. In a host terminal, the equivalent commands are:
 
 ```sh
 amux auth login claude
 amux auth login codex
+amux auth login claude --api-key
+amux auth login codex --api-key
 amux auth accounts --json
 amux auth status codex
 amux auth default claude:central
@@ -19,6 +21,46 @@ amux auth logout claude
 Claude uses `claude setup-token`. The CLI runs that command and reads the resulting token with terminal echo disabled; `--token-stdin` also works. TUI completion is a protected, write-only token field: run `claude setup-token` in a trusted host terminal and paste its output there. Do not paste credentials into an agent conversation. There is no automated Claude browser issuance API in this adapter. Its token is opaque: account email, plan, expiry, and same-account identity cannot be inferred from it. It has no refresh token; renewal requires another setup-token ceremony.
 
 Codex uses the installed native App Server's browser login. The browser must reach that machine's native callback, including when the UI is remote. Device-code login and a browser callback proxy are not implemented. Missing binaries or unsupported native operations produce explicit unavailable states. The native server must support externally supplied ChatGPT tokens for workload login; unsupported versions fail closed. The automated tests use fake native servers and private temporary credentials; they do not sign the operator out or perform a real provider login.
+
+API-key login for both harnesses reads hidden terminal/TUI input, or a bounded
+stdin line with `--api-key --token-stdin`. No option accepts a key value in argv.
+The client requires advertised `supportedModes` containing `api` and a pending
+ceremony echoing `mode: api`, `method: api-key` before accepting key input. An
+older or ambiguous daemon fails closed with upgrade guidance. Keys travel only
+on the existing authenticated, initiator-owned ceremony connection. The trusted
+console exception is unchanged; web clients and ordinary agents cannot configure
+accounts or submit secrets.
+
+Claude subscription tokens and API keys replace the same private atomic record
+(0700 directory, 0600 file, no-follow checks, monotonic generation). Its protected
+launcher negotiates typed delivery (old launchers cannot receive API keys) and selects `CLAUDE_CODE_OAUTH_TOKEN` or
+`ANTHROPIC_API_KEY` only at final exec, clearing competing inherited inputs. Codex
+uses native `account/login/start` with `type: apiKey` over private stdio to its
+single daemon-owned home. That transaction retains native writer shutdown and
+rollback before reopening delivery. Workload App Servers receive the key through
+private RPC with `cli_auth_credentials_store="ephemeral"`; they do not persist
+an API key in session auth.json or a keyring. Default official provider endpoints
+remain pinned; third-party endpoint configuration is outside this feature.
+
+API identity and plan remain unknown/not applicable. API credentials never claim
+a native account ID or ChatGPT refresh identity. The binding records an explicit
+credential mode, and the daemon persists an opaque API generation independently
+of native account IDs and process-local token generations. API-key replacement
+and subscription/API transitions block existing bound workloads until authorized
+explicit rebind. Default changes do not rebind workloads. A genuinely new binding
+created before any credential exists records durable first-login eligibility,
+consumed and pinned when that first login commits (even before delivery).
+Discovery and session updates never grant this eligibility to missing or old-schema
+bindings; unknown legacy evidence remains blocked until explicit rebind.
+API mode reports subscription usage as
+`not-applicable`, clears subscription windows, and rejects Claude statusline quota
+reports. API billing limits are not estimated from subscription quotas.
+
+Protocol and native references: [App Server authentication](https://learn.chatgpt.com/docs/app-server)
+and [ephemeral credential storage](https://learn.chatgpt.com/docs/config-file/config-reference).
+The pinned Codex 0.157.1 synthetic-key checks exercise native login/account-read,
+private central-to-workload delivery, first-login and replacement/rebind fencing,
+and absence of a workload auth.json, without thread/turn/model requests.
 
 Starting replacement login pauses **new credential delivery** for that central profile. Already running processes may retain delivered tokens. Cancel, timeout, disconnect, or failed acquisition restores a prior ready profile only after the native writer has stopped and its prior credential file has been restored. If a newer logout/login has advanced the epoch, the old attempt cannot restore anything. Cleanup failure leaves delivery blocked and exposes a fixed error. Logout fences delivery before native cleanup; `account_logout_cleanup_failed` (or `account_logout_cleanup_unavailable` when the native adapter is absent) remains visible after reconnect until successful recovery. Tokens already delivered cannot be recalled or revoked upstream by amux.
 

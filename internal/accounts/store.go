@@ -23,12 +23,16 @@ var ErrStale = errors.New("account_revision_changed")
 var ErrBlocked = errors.New("account_binding_blocked")
 
 type Binding struct {
-	// CredentialUnknown requires explicit rebind after an unreadable legacy token.
+	// AwaitingFirstCredential is set only when creating a genuinely new workload
+	// before any central login. Absence in legacy metadata grants no first-login permission.
+	AwaitingFirstCredential bool `json:"awaitingFirstCredential,omitempty"`
+	// CredentialUnknown requires explicit rebind when legacy credential history is unknown.
 	CredentialUnknown bool   `json:"credentialUnknown,omitempty"`
 	DeliveredEpoch    uint64 `json:"deliveredEpoch,omitempty"`
 	ProfileID         string `json:"profileId"`
 	Harness           string `json:"harness"`
 	Source            string `json:"source"`
+	CredentialMode    string `json:"credentialMode,omitempty"` // subscription | api; pinned independently of identity
 	ExpectedAccount   string `json:"expectedAccount,omitempty"`
 	CredentialVersion uint64 `json:"credentialVersion,omitempty"`
 	Revision          uint64 `json:"revision"`
@@ -62,6 +66,7 @@ func initial() (State, error) {
 		for _, m := range amuxcfg.AuthModes(h) {
 			p := hp.AccountProfile{ID: ID(h, m), Harness: h, Source: m, Revision: 1, DeliveryEpoch: 1, State: "unconfigured", Identity: hp.AccountIdentity{State: "unknown", Evidence: "external"}, Limits: hp.AccountLimits{State: "unavailable", Source: "unsupported"}, LoginMethod: "external"}
 			if m == amuxcfg.AuthCentral {
+				p.Mode = "subscription"
 				if h == "claude" {
 					p.LoginMethod = "setup-token"
 					p.Identity.Evidence = "opaque-token"
@@ -184,7 +189,15 @@ func (s *State) Profile(id string, rev uint64) (hp.AccountProfile, error) {
 	}
 	return p, nil
 }
-func Bind(session, h string) error {
+
+// Bind records a new workload, or preserves its already recorded binding.
+func Bind(session, h string) error { return bind(session, h, true) }
+
+// BindExisting discovers an existing workload; missing metadata is not proof
+// that it has never used a credential. Discovery cannot grant first-login eligibility.
+func BindExisting(session, h string) error { return bind(session, h, false) }
+
+func bind(session, h string, newWorkload bool) error {
 	if h == "" {
 		h = "claude"
 	}
@@ -206,10 +219,33 @@ func Bind(session, h string) error {
 			if b.Harness != h {
 				return ErrBlocked
 			}
+
+			profile := s.Profiles[b.ProfileID]
+			if b.Source == "central" && b.CredentialMode == "" && !b.AwaitingFirstCredential {
+				// Legacy mode/identity/version zero is unknown history, not an empty
+				// account. Never infer its old mode from a newly configured API profile.
+				if b.CredentialVersion != 0 || b.ExpectedAccount != "" || (profile.State == "ready" && profile.Mode != "api") {
+					b.CredentialMode = "subscription"
+				} else {
+					b.CredentialUnknown = true
+				}
+				s.Bindings[session] = b
+			}
+			if b.AwaitingFirstCredential && !b.CredentialUnknown && profile.State == "ready" {
+				b = s.pinFirstCredential(b, profile)
+				s.Bindings[session] = b
+			}
+
 			if b.Harness == "claude" && b.Source == "central" && b.CredentialVersion == 0 {
 				b.CredentialUnknown = b.CredentialUnknown || credentialUnknown
 				if !b.CredentialUnknown {
 					b.CredentialVersion = s.CredentialVersion[b.ProfileID]
+					if b.CredentialVersion != 0 && b.CredentialMode == "" {
+						b.CredentialMode = profile.Mode
+						if b.CredentialMode == "" {
+							b.CredentialMode = "subscription"
+						}
+					}
 				}
 				s.Bindings[session] = b
 			}
@@ -219,7 +255,18 @@ func Bind(session, h string) error {
 		if !ok {
 			return ErrBlocked
 		}
-		s.Bindings[session] = Binding{CredentialUnknown: credentialUnknown && p.Source == "central", ProfileID: p.ID, Harness: h, Source: p.Source, ExpectedAccount: p.Identity.AccountID, CredentialVersion: s.CredentialVersion[p.ID], Revision: 1, Origin: "machine-default"}
+		credentialMode := ""
+		if p.State == "ready" || s.CredentialVersion[p.ID] != 0 {
+			credentialMode = p.Mode
+			if credentialMode == "" {
+				credentialMode = "subscription"
+			}
+		}
+		awaiting := newWorkload && p.Source == "central" && p.State == "unconfigured" && p.DeliveryEpoch == 1 && s.CredentialVersion[p.ID] == 0 && !credentialUnknown
+		if p.Source == "central" && (!newWorkload || (!awaiting && credentialMode == "")) {
+			credentialUnknown = true
+		}
+		s.Bindings[session] = Binding{AwaitingFirstCredential: awaiting, CredentialMode: credentialMode, CredentialUnknown: credentialUnknown && p.Source == "central", ProfileID: p.ID, Harness: h, Source: p.Source, ExpectedAccount: p.Identity.AccountID, CredentialVersion: s.CredentialVersion[p.ID], Revision: 1, Origin: "machine-default"}
 		return nil
 	})
 }
@@ -240,7 +287,7 @@ func Mode(session, h string) string {
 	return m
 }
 func Delivery(session, h string) (Binding, hp.AccountProfile, error) {
-	if e := Bind(session, h); e != nil {
+	if e := BindExisting(session, h); e != nil {
 		return Binding{}, hp.AccountProfile{}, e
 	}
 	s, e := Read()
@@ -273,12 +320,26 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 			if p.DeliveryEpoch != epoch || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
 				return ErrStale
 			}
+			mode := p.Mode
+			if mode == "" {
+				mode = "subscription"
+			}
+			pinned := b.CredentialMode
+			// Old central bindings predate API mode and can only be subscription.
+			if pinned == "" && (b.ExpectedAccount != "" || b.CredentialVersion != 0) {
+				pinned = "subscription"
+			}
+			if pinned != "" && pinned != mode {
+				return ErrBlocked
+			}
 			if b.ExpectedAccount != "" && b.ExpectedAccount != account {
 				return ErrBlocked
 			}
-			if b.Harness == "claude" && b.CredentialVersion != 0 && b.CredentialVersion != version {
+			if (b.Harness == "claude" || mode == "api") && b.CredentialVersion != 0 && b.CredentialVersion != version {
 				return ErrBlocked
 			}
+			b.AwaitingFirstCredential = false
+			b.CredentialMode = mode
 			b.DeliveredEpoch = epoch
 			if b.Harness == "claude" && s.CredentialVersion[p.ID] == 0 {
 				s.CredentialVersion[p.ID] = version
@@ -291,4 +352,28 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 			return nil
 		})
 	})
+}
+
+// PinInitialCredential consumes first-login eligibility atomically with the
+// credential commit, even for a workload that has not requested delivery yet.
+func (s *State) PinInitialCredential(profileID string) {
+	p := s.Profiles[profileID]
+	for id, b := range s.Bindings {
+		if b.ProfileID == profileID && b.AwaitingFirstCredential && !b.CredentialUnknown && p.State == "ready" {
+			s.Bindings[id] = s.pinFirstCredential(b, p)
+		}
+	}
+}
+
+func (s *State) pinFirstCredential(b Binding, p hp.AccountProfile) Binding {
+	b.ExpectedAccount = p.Identity.AccountID
+	b.CredentialMode = p.Mode
+	if b.CredentialMode == "" {
+		b.CredentialMode = "subscription"
+	}
+	if p.Harness == "claude" || p.Mode == "api" {
+		b.CredentialVersion = s.CredentialVersion[p.ID]
+	}
+	b.AwaitingFirstCredential = false
+	return b
 }

@@ -19,10 +19,9 @@ import (
 
 // configOverrides pin the central home's native behavior regardless of any
 // config.toml: credentials only in the private auth.json the parser reads (never
-// a keyring the parser cannot see), and ChatGPT login only (never an API key).
+// a keyring the parser cannot see). Login explicitly chooses subscription or API.
 var configOverrides = []string{
 	"-c", `cli_auth_credentials_store="file"`,
-	"-c", `forced_login_method="chatgpt"`,
 }
 
 // scrubbedEnv are removed from the native server's environment: another home,

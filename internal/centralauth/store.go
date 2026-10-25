@@ -125,6 +125,14 @@ func (s Store) LockLogin() (release func(), err error) {
 // Save atomically replaces the stored credential and advances its generation.
 // The previous value is overwritten only by the rename of a complete record.
 func (s Store) Save(token Secret, now time.Time) (Credential, error) {
+	return s.SaveKind(token, s.Kind, now)
+}
+
+// SaveKind replaces the single credential record, including its explicit mode.
+func (s Store) SaveKind(token Secret, kind Kind, now time.Time) (Credential, error) {
+	if kind != s.Kind && !(s.Harness == Claude && kind == KindClaudeAPIKey) {
+		return Credential{}, ErrInvalidSecret
+	}
 	if token.Empty() {
 		return Credential{}, ErrInvalidSecret
 	}
@@ -162,7 +170,7 @@ func (s Store) Save(token Secret, now time.Time) (Credential, error) {
 		return Credential{}, err
 	}
 	rec := record{
-		Version: recordVersion, Harness: s.Harness, Kind: s.Kind,
+		Version: recordVersion, Harness: s.Harness, Kind: kind,
 		Token: token.Reveal(), Fingerprint: token.Fingerprint(),
 		StoredAt: now.UTC().Truncate(time.Second), Generation: generation,
 	}
@@ -252,7 +260,7 @@ func (s Store) read() (record, error) {
 		// Never echo the record: a decode error can quote its contents.
 		return record{}, fmt.Errorf("%s: unreadable credential record", s.path())
 	}
-	if rec.Version != recordVersion || rec.Harness != s.Harness || rec.Kind != s.Kind {
+	if rec.Version != recordVersion || rec.Harness != s.Harness || !(rec.Kind == s.Kind || (s.Harness == Claude && (rec.Kind == KindClaudeOAuthToken || rec.Kind == KindClaudeAPIKey))) {
 		return record{}, fmt.Errorf("%s: unsupported credential record (version %d, %s/%s)", s.path(), rec.Version, rec.Harness, rec.Kind)
 	}
 	return rec, nil

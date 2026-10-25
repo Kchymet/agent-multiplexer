@@ -26,6 +26,8 @@ type accountAttempt struct {
 	retiredEpoch       uint64
 	prior              hp.AccountProfile
 	guard              context.Context
+	lifetime           context.Context
+	started            bool
 	ceremony           hp.AccountCeremony
 	cancel             context.CancelFunc
 }
@@ -104,12 +106,18 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			return fail("account_attempt_finished")
 		}
 		if r.Operation == hp.AccountComplete {
-			if a.ceremony.Method != "setup-token" {
+			if a.started || (a.ceremony.Method != "setup-token" && a.ceremony.Method != "api-key") {
 				return fail("account_operation_unsupported")
 			}
 			secret, e := centralauth.NewSecret(r.Secret)
 			if e != nil {
 				return fail("account_secret_invalid")
+			}
+			if a.prior.Harness == "codex" {
+				a.started = true
+				go d.runAccountLogin(a.lifetime, a, secret.Reveal())
+				c := a.ceremony
+				return hp.AccountResult{OK: true, Ceremony: &c}
 			}
 			e = accounts.Update(func(s *accounts.State) error {
 				if revalidateDeferred(ctx) != nil || revalidateDeferred(a.guard) != nil {
@@ -119,7 +127,11 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				if p.DeliveryEpoch != a.epoch {
 					return accounts.ErrStale
 				}
-				cred, e := centralauth.ClaudeStore().Save(secret, time.Now())
+				kind := centralauth.KindClaudeOAuthToken
+				if p.Mode == "api" {
+					kind = centralauth.KindClaudeAPIKey
+				}
+				cred, e := centralauth.ClaudeStore().SaveKind(secret, kind, time.Now())
 				if e != nil {
 					return e
 				}
@@ -128,6 +140,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				p.Error = ""
 				p.Revision++
 				s.Profiles[p.ID] = p
+				s.PinInitialCredential(p.ID)
 				return nil
 			})
 			if e != nil {
@@ -158,7 +171,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		// The built-in console is synthetic and absent from SQL inventory.
 		rows = append(rows, console.Session())
 		for _, row := range rows {
-			if err := accounts.Bind(row.ID, agent.Canonical(row.Agent)); err != nil {
+			if err := accounts.BindExisting(row.ID, agent.Canonical(row.Agent)); err != nil {
 				return fail("account_binding_invalid")
 			}
 		}
@@ -214,11 +227,16 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			if p.State != "ready" {
 				return accounts.ErrBlocked
 			}
+			b.CredentialMode = p.Mode
+			if b.CredentialMode == "" {
+				b.CredentialMode = "subscription"
+			}
 			b.ProfileID = p.ID
 			b.Source = p.Source
 			b.ExpectedAccount = p.Identity.AccountID
 			b.CredentialVersion = s.CredentialVersion[p.ID]
 			b.CredentialUnknown = false
+			b.AwaitingFirstCredential = false
 			b.Revision++
 			b.Origin = "explicit-rebind"
 			s.Bindings[r.WorkloadID] = b
@@ -242,6 +260,17 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			p.Limits.Windows = nil
 			p.Identity = hp.AccountIdentity{State: "unknown", Evidence: p.Identity.Evidence}
 			if r.Operation == hp.AccountLogin {
+				p.Mode = r.Mode
+				if p.Mode == "" {
+					p.Mode = "subscription"
+				}
+				p.LoginMethod = "browser"
+				if p.Harness == "claude" {
+					p.LoginMethod = "setup-token"
+				}
+				if p.Mode == "api" {
+					p.LoginMethod = "api-key"
+				}
 				p.State = "login-pending"
 			} else {
 				p.State = "logged-out"
@@ -317,7 +346,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	}
 	loginCtx, cancel := context.WithTimeout(lifetime, codexLoginTimeout)
 	stopOwner := context.AfterFunc(ctx, cancel)
-	a := &accountAttempt{prior: prior, guard: ctx, profile: p.ID, initiator: r.Initiator, epoch: p.DeliveryEpoch, cancel: cancel, ceremony: hp.AccountCeremony{AttemptID: id, State: "pending", Method: p.LoginMethod, ExpiresAt: d.accountTime().Add(codexLoginTimeout).UnixMilli()}}
+	a := &accountAttempt{prior: prior, guard: ctx, lifetime: loginCtx, profile: p.ID, initiator: r.Initiator, epoch: p.DeliveryEpoch, cancel: cancel, ceremony: hp.AccountCeremony{AttemptID: id, State: "pending", Method: p.LoginMethod, Mode: p.Mode, ExpiresAt: d.accountTime().Add(codexLoginTimeout).UnixMilli()}}
 	d.accountAttempts[id] = a
 	go func() {
 		<-loginCtx.Done()
@@ -344,19 +373,23 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			})
 			return fail("account_native_unavailable")
 		}
-		go d.runAccountLogin(loginCtx, a)
+		if p.Mode != "api" {
+			a.started = true
+			go d.runAccountLogin(loginCtx, a, "")
+		}
 	}
 	c := a.ceremony
 	return hp.AccountResult{OK: true, Ceremony: &c}
 }
-func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt) {
-	err := d.centralCodex.provider.Login(ctx, func(url string) {
+func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt, key string) {
+	show := func(url string) {
 		d.accountMu.Lock()
 		defer d.accountMu.Unlock()
 		if ctx.Err() == nil && revalidateDeferred(a.guard) == nil && a.ceremony.State == "pending" {
 			a.ceremony.AuthURL = url
 		}
-	}, func() error {
+	}
+	commit := func() error {
 		// This callback runs before the native owner releases its operation gate.
 		// Failure causes it to reap the writer and restore the prior auth file.
 		d.accountMu.Lock()
@@ -373,9 +406,16 @@ func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt) {
 				return accounts.ErrStale
 			}
 			p.State = "ready"
+			// A durable generation pins opaque API credentials across daemon restarts.
+			// Increment for every completed login, including API <-> subscription.
+			if s.CredentialVersion[p.ID] == ^uint64(0) {
+				return accounts.ErrBlocked
+			}
+			s.CredentialVersion[p.ID]++
 			p.Error = ""
 			p.Revision++
 			s.Profiles[p.ID] = p
+			s.PinInitialCredential(p.ID)
 			return nil
 		}); err != nil {
 			return err
@@ -383,7 +423,20 @@ func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt) {
 		a.ceremony.State = "succeeded"
 		a.ceremony.AuthURL = ""
 		return nil
-	})
+	}
+	var err error
+	if key != "" {
+		provider, ok := d.centralCodex.provider.(interface {
+			LoginAPIKey(context.Context, string, ...func() error) error
+		})
+		if !ok {
+			err = errors.New("account_operation_unsupported")
+		} else {
+			err = provider.LoginAPIKey(ctx, key, commit)
+		}
+	} else {
+		err = d.centralCodex.provider.Login(ctx, show, commit)
+	}
 	d.accountMu.Lock()
 	defer d.accountMu.Unlock()
 	defer a.cancel()
@@ -419,12 +472,19 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 			continue
 		}
 		p.Error = ""
+		if p.Mode == "" {
+			p.Mode = "subscription"
+		}
 		if p.Harness == "claude" {
-			st, err := centralauth.ClaudeStore().Status()
-			if err != nil {
+			cred, err := centralauth.ClaudeStore().Load()
+			if errors.Is(err, centralauth.ErrNotConfigured) {
+				p.State = "unconfigured"
+			} else if err != nil {
 				p.State = "blocked"
 				p.Error = "credential_unavailable"
-			} else if st.Configured {
+			} else if (cred.Kind == centralauth.KindClaudeAPIKey) != (p.Mode == "api") {
+				p.State, p.Error = "blocked", "credential_mode_mismatch"
+			} else if !cred.Token.Empty() {
 				p.State = "ready"
 			} else {
 				p.State = "unconfigured"
@@ -436,7 +496,10 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 			if err != nil {
 				p.Error = "native_status_unavailable"
 				p.Identity.State = "unavailable"
-			} else if acct.Type == "chatgpt" {
+			} else if acct.Type == "apiKey" && p.Mode == "api" {
+				p.State = "ready"
+				p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "api-key"}
+			} else if acct.Type == "chatgpt" && p.Mode == "subscription" {
 				p.State = "ready"
 				p.Identity = hp.AccountIdentity{State: "unknown", Email: acct.Email, Plan: acct.PlanType, Evidence: "native"}
 				if t, err := c.provider.SessionToken(qctx, "account-status", false, ""); err == nil {
@@ -444,11 +507,17 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 					p.Identity.State = "known"
 				}
 			}
+			if err == nil && acct.Type != "" && ((acct.Type == "apiKey") != (p.Mode == "api")) {
+				p.State, p.Error = "blocked", "credential_mode_mismatch"
+			}
 			if err == nil && acct.Type == "" {
 				p.State = "unconfigured"
 				p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "native"}
 			}
-			limits, err := c.provider.RateLimits(qctx)
+			limits := hp.AccountLimits{State: "unavailable", Source: "unsupported"}
+			if p.Mode != "api" {
+				limits, err = c.provider.RateLimits(qctx)
+			}
 			if err == nil {
 				p.Limits = limits
 			} else {
@@ -458,6 +527,10 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 		} else {
 			p.Error = "native_unavailable"
 			p.Limits.State = "unavailable"
+		}
+		if p.Mode == "api" {
+			p.Identity = hp.AccountIdentity{State: "unknown", Evidence: "api-key"}
+			p.Limits = hp.AccountLimits{State: "not-applicable", Source: "api"}
 		}
 		p.Limits.ProfileID = p.ID
 		p.Limits.DeliveryEpoch = p.DeliveryEpoch
@@ -479,7 +552,20 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 		s = *current
 		return nil
 	})
-	return s.Snapshot(), e
+	snapshot := s.Snapshot()
+	for i := range snapshot.Profiles {
+		if snapshot.Profiles[i].Source == "central" {
+			snapshot.Profiles[i].SupportedModes = []string{"subscription", "api"}
+			if snapshot.Profiles[i].Mode == "" {
+				snapshot.Profiles[i].Mode = "subscription"
+			}
+			if snapshot.Profiles[i].Mode == "api" {
+				snapshot.Profiles[i].Identity = hp.AccountIdentity{State: "unknown", Evidence: "api-key"}
+				snapshot.Profiles[i].Limits = hp.AccountLimits{State: "not-applicable", Source: "api"}
+			}
+		}
+	}
+	return snapshot, e
 }
 
 // Accounts is the shared TUI/CLI/provider client API. Manage and ceremony use a
@@ -575,7 +661,7 @@ func (d *Daemon) retireAccountAttemptLocked(a *accountAttempt, state string) {
 		}
 		return nil
 	})
-	if a.prior.Harness == "claude" {
+	if a.prior.Harness == "claude" || !a.started {
 		d.restoreAccountAttemptLocked(a)
 	}
 }

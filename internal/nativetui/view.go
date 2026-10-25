@@ -384,7 +384,7 @@ func (m *model) renderHelp() string {
 		} else if s.attempt.active() {
 			return ansi.Truncate(hints("login", []hint{{"c", "cancel"}, {"PgUp/PgDn", "scroll"}, {"Esc", "cancel and close"}}), m.w, "")
 		}
-		return ansi.Truncate(hints("accounts", []hint{{"Enter", "login"}, {"e", "configure"}, {"d", "default"}, {"x", "logout"}, {"r", "refresh"}, {"Esc", "close"}}), m.w, "")
+		return ansi.Truncate(hints("accounts", []hint{{"e", "subscription"}, {"a", "API key"}, {"d", "default"}, {"x", "logout"}, {"r", "refresh"}, {"Esc", "close"}}), m.w, "")
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:
