@@ -26,6 +26,10 @@ broad isolation-dependency work.
 - The branch was clean and refreshed from `origin` before edits. `FETCH_HEAD`
   and `HEAD` were both `b784ab5045b0aeff8fadc3fd1a9d14b8b0f57254`, which
   includes runtime PR #168 and UI PR #169.
+- Before publication, the focused change was merged forward to
+  `59f44549889ca5fb5df5ac3ded73dc03f5288953`, preserving the accepted notices,
+  macOS policy, and machine-login/broker-identity changes from PRs #170–#172.
+  This work does not modify the macOS Seatbelt/LaunchServices policy.
 
 ## Upstream source and artifact provenance
 
