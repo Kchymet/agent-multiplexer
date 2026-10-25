@@ -249,10 +249,17 @@ This applies to native terminal launches and new/resumed app-server threads.
 The model picker is live, not a baked-in list: Codex agents offer whatever your
 Codex has cached as available to your account (`~/.codex/models_cache.json`, the
 same list its own `/model` picker shows, in the same order), and Claude agents
-offer the built-in aliases plus any extra models Claude Code has cached for your
-account (`additionalModelOptionsCache` in `~/.claude.json`). The model set in each
-CLI's own config (`model` in `config.toml` / `.claude.json`) is always offered and
-pre-filled. Run the CLI once outside amux to refresh what it caches.
+offer the built-in aliases and `claude-opus-5-5` (Claude Opus 5.5), plus any extra
+models Claude Code has cached for your account (`additionalModelOptionsCache` in
+`~/.claude.json`). The model set in each CLI's own config (`model` in `config.toml`
+/ `.claude.json`) is always offered and pre-filled. Run the CLI once outside amux
+to refresh what it caches.
+
+To select Opus 5.5 explicitly, choose `claude-opus-5-5` in a Claude model picker
+or pass `--agent claude --model claude-opus-5-5` when creating an agent. For a
+workgroup coordinator, use `--coordinator claude --coordinator-model claude-opus-5-5`.
+The built-in Claude default remains `opus`. Opus 5.5 requires Claude Code
+v2.1.280 or newer; see the [official model configuration guide](https://code.claude.com/docs/en/model-config).
 
 An in-session `/model` switch is reconciled back into amux automatically. Claude
 reports its live `model.id` through an amux-installed status-line wrapper (which
