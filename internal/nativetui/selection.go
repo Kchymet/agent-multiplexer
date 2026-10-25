@@ -23,6 +23,7 @@ type paneGesture struct {
 	local      bool
 	cancelled  bool
 	button     tea.MouseButton
+	buttons    map[tea.MouseButton]bool // app gestures may hold multiple buttons
 	cols, rows int
 }
 
@@ -64,23 +65,52 @@ func panePoint(ev tea.MouseMsg, cols, rows int) termselect.Point {
 func (m *model) selectionMouse(ev tea.MouseMsg) (bool, tea.Cmd) {
 	m.validateSelection()
 	if g := m.gesture; g != nil {
+		v := g.term.Viewport()
+		p := panePoint(ev, min(g.cols, v.Cols), min(g.rows, v.Rows))
 		if tea.MouseEvent(ev).IsWheel() {
+			// Wheel notches are independent scroll actions, not button
+			// releases. Shift still forces local scrolling during an app
+			// drag. A local drag keeps the wheel local and cancels selection.
+			if g.local {
+				m.clearSelection()
+				ev.Shift = true
+			}
+			g.term.MouseEvent(mouseToVT(ev, p.X, p.Y))
 			return true, nil
-		}
-		if ev.Action != tea.MouseActionMotion && ev.Action != tea.MouseActionRelease {
-			return true, nil
-		}
-		p := panePoint(ev, g.cols, g.rows)
-		if ev.Action == tea.MouseActionRelease {
-			m.gesture = nil
 		}
 		if !g.local {
 			// A pane switch cannot redirect the release to another terminal.
 			// Keep the original app's capture until it gets its release, even
 			// when a modal, switch, or resize occurred during the gesture.
-			ev.Button = g.button
+			if ev.Button == tea.MouseButtonNone {
+				ev.Button = g.button // legacy releases omit the button
+			}
+			switch ev.Action {
+			case tea.MouseActionPress:
+				g.buttons[ev.Button] = true
+				g.button = ev.Button
+			case tea.MouseActionRelease:
+				delete(g.buttons, ev.Button)
+				if len(g.buttons) == 0 {
+					m.gesture = nil
+				} else if !g.buttons[g.button] {
+					for button := range g.buttons {
+						g.button = button
+						break
+					}
+				}
+			}
 			g.term.ForwardMouse(mouseToVT(ev, p.X, p.Y))
 			return true, nil
+		}
+		if ev.Action != tea.MouseActionMotion && ev.Action != tea.MouseActionRelease {
+			return true, nil
+		}
+		if ev.Action == tea.MouseActionRelease {
+			if ev.Button != g.button && ev.Button != tea.MouseButtonNone {
+				return true, nil
+			}
+			m.gesture = nil
 		}
 		if g.cancelled || m.selection == nil {
 			return true, nil
@@ -130,6 +160,7 @@ func (m *model) selectionMouse(ev tea.MouseMsg) (bool, tea.Cmd) {
 	local := ev.Shift || !ev.Alt && !t.MouseTracked()
 	m.gesture = &paneGesture{term: t, local: local, button: ev.Button, cols: cols, rows: rows}
 	if !local {
+		m.gesture.buttons = map[tea.MouseButton]bool{ev.Button: true}
 		t.ForwardMouse(mouseToVT(ev, x, y))
 		return true, nil
 	}

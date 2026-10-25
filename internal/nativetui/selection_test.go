@@ -292,3 +292,45 @@ func TestAppGestureReleaseRemainsOwnedAfterPaneSwitch(t *testing.T) {
 		t.Fatalf("original gesture leaked to new pane: %q", otherInput())
 	}
 }
+
+func TestAppGesturePreservesWheelAndMultipleButtons(t *testing.T) {
+	m, term, input := scrollModel(t, 12, 4)
+	feedPane(t, term, "\x1b[?1002h\x1b[?1006h")
+	m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
+	wheel := selectionEvent(tea.MouseActionPress, 0, 0)
+	wheel.Button = tea.MouseButtonWheelUp
+	m.handleMouse(wheel)
+	right := selectionEvent(tea.MouseActionPress, 0, 0)
+	right.Button = tea.MouseButtonRight
+	m.handleMouse(right)
+	m.handleMouse(selectionEvent(tea.MouseActionRelease, 0, 0))
+	if m.gesture == nil {
+		t.Fatal("capture ended while right button remained down")
+	}
+	right.Action = tea.MouseActionRelease
+	m.handleMouse(right)
+	want := "\x1b[<0;1;1M\x1b[<64;1;1M\x1b[<2;1;1M\x1b[<0;1;1m\x1b[<2;1;1m"
+	waitPane(t, "app wheel and both releases", func() bool { return input() == want })
+	if m.gesture != nil {
+		t.Fatal("capture survived all releases")
+	}
+}
+
+func TestShiftWheelRemainsLocalDuringAppGesture(t *testing.T) {
+	m, term, input := scrollModel(t, 12, 4)
+	feedPane(t, term, historyRows(12)+"\x1b[?1002h\x1b[?1006h")
+	m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
+	wheel := paneWheel(tea.MouseButtonWheelUp)
+	wheel.Shift = true
+	m.handleMouse(wheel)
+	if term.Viewport().Offset != 3 {
+		t.Fatal("Shift wheel lost local scrolling during app gesture")
+	}
+	// Resize before the outside release; it must use the new child's bounds.
+	m.Update(tea.WindowSizeMsg{Width: sidebarWidth + 1 + 5, Height: 3 + 2})
+	release := selectionEvent(tea.MouseActionRelease, 99, 99)
+	release.Shift = true
+	m.handleMouse(release)
+	want := "\x1b[<0;1;1M\x1b[<4;5;2m"
+	waitPane(t, "resized app release without local wheel bytes", func() bool { return input() == want })
+}

@@ -9,7 +9,7 @@ import "github.com/charmbracelet/x/vt"
 func (t *Terminal) ForwardMouse(ev vt.Mouse) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed {
+	if t.closed || !t.mouseTracked() {
 		return
 	}
 	t.scrollTo(0)
