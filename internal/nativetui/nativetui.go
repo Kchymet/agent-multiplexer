@@ -46,7 +46,7 @@ func Run(focusID string) error {
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
-	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	_, err := newProgram(m).Run()
 	if m.accounts != nil {
 		m.accounts.dispose()
 	}
@@ -54,6 +54,13 @@ func Run(focusID string) error {
 		_ = t.Close()
 	}
 	return err
+}
+
+// newProgram keeps terminal input modes shared by the interactive entry point
+// and PTY integration tests. Input/output overrides do not replace key decoding.
+func newProgram(m tea.Model, options ...tea.ProgramOption) *tea.Program {
+	options = append([]tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}, options...)
+	return tea.NewProgram(m, options...)
 }
 
 // Each agent owns a row of tabs, switched with Alt+1/2/3: the agent itself, an

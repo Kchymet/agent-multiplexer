@@ -1,0 +1,12 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor
+ ○ console                │work 00 · 界 ···········
+ A╭──────────────────────────────────────────────╮·
+ C│ Accounts · remaining budget                  │·
+  │                                              │·
+ C│ Selected: Codex                              │·
+  │ Account: fixture@example.test                │·
+ ↵│ Plan: fixture-plan                           │·
+ S│ ↑↓/jk select · PgUp/Dn · Esc  9–12/23        │·
+ /╰──────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────
+ accounts · e subscription · a API key · d default ·
