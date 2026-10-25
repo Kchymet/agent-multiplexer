@@ -1,0 +1,2 @@
+# Raw terminal frames retain intentional padding and ANSI control bytes.
+*.ansi binary

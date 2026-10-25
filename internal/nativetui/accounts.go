@@ -206,6 +206,9 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 		s.selectProfile()
 	}
 	if a := msg.response.attempt; a != nil {
+		if s.attempt.id != a.id {
+			s.scroll = 0
+		}
 		s.attempt = *a
 		if !s.attempt.active() {
 			s.attempt.url, s.attempt.code = "", ""
@@ -260,6 +263,7 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k.String() == "esc" || k.String() == "ctrl+c" || (k.String() == "q" && !secretInput) {
 		if s.confirm != nil {
 			s.confirm = nil
+			s.scroll = 0
 			return m, nil
 		}
 		if s.pending != "" && s.pending != "status" && s.pending != "progress" {
@@ -272,6 +276,16 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s.pending != "" {
 		return m, nil
 	}
+	if k.String() == "pgdown" || k.String() == "pgup" {
+		if k.String() == "pgdown" {
+			_, h := m.accountsSize()
+			s.scroll += max(1, h-6)
+		} else {
+			_, h := m.accountsSize()
+			s.scroll = max(0, s.scroll-max(1, h-6))
+		}
+		return m, nil
+	}
 	if s.confirm != nil {
 		if k.String() == "enter" || k.String() == "y" {
 			req := *s.confirm
@@ -280,14 +294,6 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if k.String() == "n" {
 			s.confirm = nil
-		}
-		return m, nil
-	}
-	if k.String() == "pgdown" || k.String() == "pgup" {
-		if k.String() == "pgdown" {
-			s.scroll += max(1, m.paneRows()-5)
-		} else {
-			s.scroll = max(0, s.scroll-max(1, m.paneRows()-5))
 		}
 		return m, nil
 	}
@@ -372,6 +378,7 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if k.String() == "a" {
 					req.loginMode = "api"
 				}
+				s.scroll = 0
 				s.confirm = &req
 			} else {
 				s.notice = "Login unavailable here; inspect the profile's login instructions."
@@ -379,11 +386,13 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "d":
 			if p != nil && p.canDefault && !p.defaultProfile {
 				req := s.request("default")
+				s.scroll = 0
 				s.confirm = &req
 			}
 		case "x":
 			if p != nil && p.canLogout {
 				req := s.request("logout")
+				s.scroll = 0
 				s.confirm = &req
 			}
 		}
@@ -451,8 +460,10 @@ func accountLimitLines(l accountLimit, now time.Time, stale bool) []string {
 
 func (m *model) renderAccounts() string {
 	s := m.accounts
-	w, h := m.mainWidth(), m.paneRows()
-	lines := []string{titleStyle.Render("Machine accounts · Claude + Codex"), "Tab: select · e: subscription · a: API key", ""}
+	w, h := m.accountsSize()
+	w, h = max(1, w-4), max(1, h-4) // border, horizontal padding, title and footer
+	compact := h < 12 || w < 60
+	lines := []string{}
 	if s.stale {
 		lines = append(lines, "STALE — refresh required before changes")
 	}
@@ -469,7 +480,10 @@ func (m *model) renderAccounts() string {
 			mark = "› "
 		}
 		if profile == nil {
-			lines = append(lines, mark+accountHarnessName(harness)+": unavailable", "  Usage: unavailable", "")
+			lines = append(lines, mark+accountHarnessName(harness)+": unavailable", "  Budget: unknown")
+			if !compact {
+				lines = append(lines, "")
+			}
 			continue
 		}
 		p := *profile
@@ -477,28 +491,41 @@ func (m *model) renderAccounts() string {
 		if mode == "" {
 			mode = "subscription"
 		}
-		lines = append(lines, mark+accountHarnessName(harness)+" · "+mode+" · "+accountText(p.state))
+		heading := mark + accountHarnessName(harness) + " · " + mode + " · " + accountText(p.state)
+		if s.harness == harness {
+			heading = selStyle.Render(heading)
+		} else {
+			heading = titleStyle.Render(heading)
+		}
+		lines = append(lines, heading)
+		if compact {
+			lines = append(lines, "  "+accountRailBudget(p, time.Now(), s.stale))
+			continue
+		}
 		if mode == "api" {
 			lines = append(lines, "  Subscription usage: not applicable")
 		} else {
 			if len(p.limits) == 0 {
 				lines = append(lines, "  Usage: unavailable (unknown)")
 			}
-			for _, l := range p.limits {
+			for i, l := range p.limits {
+				if i == 2 {
+					break // additional windows remain in the selected provider details
+				}
 				lines = append(lines, accountUsageSummary(l, time.Now(), s.stale))
 			}
 			source := "provider report"
 			if harness == "claude" {
 				source = "statusline advisory; identity unverified"
 			}
-			lines = append(lines, "  Source: "+source)
+			lines = append(lines, dimStyle.Render("  "+source))
 		}
 		if s.snapshot.legacyDefaults[harness] {
 			lines = append(lines, "  New workloads: preserved legacy default")
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, "d: default · x: logout · r: refresh · Esc: close", "PgUp/PgDn: details; existing bindings stay fixed.")
+	lines = append(lines, dimStyle.Render("Tab: select · e: subscription · a: API key"), dimStyle.Render("d: default · x: logout · r: refresh"), "Existing workload bindings stay fixed.")
 	if p := s.profile(); p != nil {
 		identity, plan := accountText(p.account), accountText(p.plan)
 		if identity == "" {
@@ -508,6 +535,9 @@ func (m *model) renderAccounts() string {
 			plan = "unknown"
 		}
 		lines = append(lines, "", "Selected: "+accountHarnessName(p.harness), "Account: "+identity, "Plan: "+plan, accountText(p.loginHelp))
+		if compact && s.snapshot.legacyDefaults[p.harness] {
+			lines = append(lines, "New workloads: preserved legacy default")
+		}
 		if p.statusDetail != "" {
 			lines = append(lines, p.statusDetail)
 		}
@@ -564,21 +594,24 @@ func (m *model) renderAccounts() string {
 	// long URL reachable on narrow terminals without emitting terminal escapes.
 	var wrapped []string
 	for _, line := range lines {
-		wrapped = append(wrapped, strings.Split(ansi.Hardwrap(line, max(1, w-2), true), "\n")...)
+		wrapped = append(wrapped, strings.Split(ansi.Hardwrap(line, w, true), "\n")...)
 	}
 	// Keep failures and progress visible even when the account details scroll.
 	var noticeLines []string
 	for _, line := range notices {
-		noticeLines = append(noticeLines, strings.Split(ansi.Hardwrap(line, max(1, w-2), true), "\n")...)
+		noticeLines = append(noticeLines, strings.Split(ansi.Hardwrap(line, w, true), "\n")...)
 	}
 	if len(noticeLines) > max(1, h/2) {
 		noticeLines = noticeLines[:max(1, h/2)]
 	}
-	rows := max(1, h-1-len(noticeLines))
+	rows := max(1, h-len(noticeLines))
 	s.scroll = min(s.scroll, max(0, len(wrapped)-rows))
 	end := min(len(wrapped), s.scroll+rows)
 	body := strings.Join(append(noticeLines, wrapped[s.scroll:end]...), "\n")
-	return lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(body)
+	body = lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(body)
+	footer := fmt.Sprintf("PgUp/PgDn scroll · Esc close  %d–%d/%d", s.scroll+1, end, len(wrapped))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accent).
+		Padding(0, 1).Render(cellPad(titleStyle.Render("Accounts · remaining budget"), w) + "\n" + body + "\n" + cellPad(dimStyle.Render(footer), w))
 }
 
 func accountConfirmation(r accountRequest, p *accountProfile) string {
@@ -651,28 +684,27 @@ func (s *accountsState) dispose() {
 	}
 }
 
+// accountsSize leaves the surrounding pane visible at ordinary terminal sizes.
+func (m *model) accountsSize() (int, int) {
+	return max(6, min(76, m.w-4)), max(6, min(26, m.h-4))
+}
+
 // Compact enough for both providers to remain visible on an 80x24 terminal.
 func accountUsageSummary(l accountLimit, now time.Time, stale bool) string {
-	state := l.state
-	if state == "" {
-		state = "unavailable"
-	}
-	if state != "available" && state != "stale" {
-		return "  Usage: " + accountText(state) + " (unknown)"
-	}
-	freshness := "fresh"
-	if stale || l.observedAt.IsZero() || l.observedAt.After(now) || l.freshUntil.IsZero() || !now.Before(l.freshUntil) || state == "stale" {
-		freshness = "stale"
-	}
-	name := strings.Split(l.name, " (")[0]
-	name = strings.ReplaceAll(strings.ReplaceAll(name, "five_hour", "5h"), "seven_day", "7d")
+	remaining, state := accountRemaining(l, now, stale)
+	name := accountWindowName(l)
 	reset := "unknown"
 	if !l.resetsAt.IsZero() {
 		reset = l.resetsAt.UTC().Format("01-02 15:04Z")
 	}
-	used := "unknown"
-	if l.usedPercent != nil {
-		used = accountValue(l.usedPercent) + "%"
+	if state != "fresh" {
+		return "  " + name + ": " + state + " · reset " + reset
 	}
-	return "  " + accountText(name) + " " + used + " used · reset " + reset + " · " + freshness
+	filled := int(remaining / 10)
+	bar := strings.Repeat("━", filled) + strings.Repeat("─", 10-filled)
+	style := keyStyle
+	if remaining <= 20 {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	}
+	return fmt.Sprintf("  %s %s %s · reset %s · fresh", name, style.Render(accountPercent(remaining)+" left"), style.Render(bar), reset)
 }

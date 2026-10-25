@@ -1,0 +1,12 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor
+ ○ console                │work 00 · 界 ···········
+ Accounts · left       s  │work 01 · 界 ···········
+ Claude                   │work 02 · 界 ···········
+ 5h 77% · 7d 77%          │work 03 · 界 ···········
+ Codex                    │work 04 · 界 ···········
+ 5h 33% · 7d 33%          │work 05 · 界 ···········
+ ↵ open  ↑↓ move ─────────│work 06 · 界 ···········
+ Space fold/unfold ───────│work 07 · 界 ···········
+ / search archived ───────│work 08 · 界 ···········
+──────────────────────────┴─────────────────────────
+ agent · ⌥ 1/2/3 tabs · ⌥ h rail · ⌥ a toggle · ⌥ r

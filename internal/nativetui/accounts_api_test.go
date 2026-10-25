@@ -64,7 +64,7 @@ func TestAccountsBothProvidersVisibleInitially(t *testing.T) {
 			}
 			m.accountOverview = &m.accounts.snapshot
 			view := ansi.Strip(m.View())
-			for _, want := range []string{"Claude · subscription · ready", "Codex · subscription · ready", "5h 23% used", "7d 23% used", "5h 67% used", "7d 67% used", "reset 01-02 03:04Z", "fresh", "statusline advisory; identity unverified"} {
+			for _, want := range []string{"Claude · subscription · ready", "Codex · subscription · ready", "5h 77% left", "7d 77% left", "5h 33% left", "7d 33% left", "reset 01-02 03:04Z", "fresh", "statusline advisory; identity unverified"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("missing %q initially:\n%s", want, view)
 				}
