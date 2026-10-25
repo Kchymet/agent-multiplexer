@@ -27,20 +27,22 @@ const (
 // profile/revision. Login/cancel/complete travel ONLY in MAccountCeremony.
 // Initiator is supplied by the authenticated relay, never browser form input.
 type AccountRequest struct {
-	WorkloadID string `json:"workloadId,omitempty"`
-	Operation  string `json:"operation"`
-	ProfileID  string `json:"profileId,omitempty"`
-	Revision   uint64 `json:"revision,omitempty"`
-	AttemptID  string `json:"attemptId,omitempty"`
-	Initiator  string `json:"initiator,omitempty"`
+	DefaultRevision uint64 `json:"defaultRevision,omitempty"` // required only for default; snapshot.defaultRevisions[harness]
+	WorkloadID      string `json:"workloadId,omitempty"`
+	Operation       string `json:"operation"`
+	ProfileID       string `json:"profileId,omitempty"`
+	Revision        uint64 `json:"revision,omitempty"`
+	AttemptID       string `json:"attemptId,omitempty"`
+	Initiator       string `json:"initiator,omitempty"`
 	// Secret is accepted only by complete, for Claude's setup-token ceremony.
 	Secret string `json:"secret,omitempty"`
 }
 
 type AccountSnapshot struct {
-	Version  int               `json:"version"`
-	Profiles []AccountProfile  `json:"profiles"`
-	Defaults map[string]string `json:"defaults"`
+	DefaultRevisions map[string]uint64 `json:"defaultRevisions"`
+	Version          int               `json:"version"`
+	Profiles         []AccountProfile  `json:"profiles"`
+	Defaults         map[string]string `json:"defaults"`
 }
 
 type AccountProfile struct {
@@ -103,6 +105,9 @@ type AccountResult struct {
 // ValidateAccountRequest enforces the safe/ephemeral split before any effect.
 // A safe status request cannot be used to poll or complete a ceremony.
 func ValidateAccountRequest(r AccountRequest, ceremony bool) bool {
+	if (r.Operation == AccountDefault) != (r.DefaultRevision > 0) {
+		return false
+	}
 	if len(r.ProfileID) > 128 || len(r.AttemptID) > 128 || len(r.Initiator) > 512 || len(r.Secret) > 4096 || len(r.WorkloadID) > 128 {
 		return false
 	}
