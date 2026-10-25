@@ -64,7 +64,7 @@ func TestAccountsBothProvidersVisibleInitially(t *testing.T) {
 			}
 			m.accountOverview = &m.accounts.snapshot
 			view := ansi.Strip(m.View())
-			for _, want := range []string{"Claude · subscription · ready", "Codex · subscription · ready", "5h 23%", "7d 23%", "5h 67%", "7d 67%", "reset 01-02 03:04Z", "fresh", "statusline advisory; identity unverified"} {
+			for _, want := range []string{"Claude · subscription · ready", "Codex · subscription · ready", "5h 23% used", "7d 23% used", "5h 67% used", "7d 67% used", "reset 01-02 03:04Z", "fresh", "statusline advisory; identity unverified"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("missing %q initially:\n%s", want, view)
 				}
@@ -78,6 +78,11 @@ func TestAccountsBothProvidersVisibleInitially(t *testing.T) {
 				}
 			}
 			if dir := os.Getenv("AMUX_ACCOUNTS_RENDER_DIR"); dir != "" {
+				lines := strings.Split(view, "\n")
+				for i := range lines {
+					lines[i] = strings.TrimRight(lines[i], " ")
+				}
+				view = strings.Join(lines, "\n")
 				if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("accounts-%dx%d.txt", m.w, m.h)), []byte(view+"\n"), 0600); err != nil {
 					t.Fatal(err)
 				}

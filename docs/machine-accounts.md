@@ -33,7 +33,7 @@ accounts or submit secrets.
 
 Claude subscription tokens and API keys replace the same private atomic record
 (0700 directory, 0600 file, no-follow checks, monotonic generation). Its protected
-launcher receives a typed credential and selects `CLAUDE_CODE_OAUTH_TOKEN` or
+launcher negotiates typed delivery (old launchers cannot receive API keys) and selects `CLAUDE_CODE_OAUTH_TOKEN` or
 `ANTHROPIC_API_KEY` only at final exec, clearing competing inherited inputs. Codex
 uses native `account/login/start` with `type: apiKey` over private stdio to its
 single daemon-owned home. That transaction retains native writer shutdown and

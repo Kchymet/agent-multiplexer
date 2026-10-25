@@ -674,5 +674,5 @@ func accountUsageSummary(l accountLimit, now time.Time, stale bool) string {
 	if l.usedPercent != nil {
 		used = accountValue(l.usedPercent) + "%"
 	}
-	return "  " + accountText(name) + " " + used + " · reset " + reset + " · " + freshness
+	return "  " + accountText(name) + " " + used + " used · reset " + reset + " · " + freshness
 }

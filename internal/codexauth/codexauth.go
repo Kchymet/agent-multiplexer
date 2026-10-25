@@ -32,9 +32,9 @@ import (
 var (
 	// ErrNotLoggedIn: the central home has no ChatGPT login. Run Login.
 	ErrNotLoggedIn = errors.New("codexauth: no central Codex ChatGPT login; run `amux auth login codex`")
-	// ErrUnsupportedAuth: the central home holds a non-ChatGPT credential (an API
-	// key) or malformed tokens. Never handed to sessions.
-	ErrUnsupportedAuth = errors.New("codexauth: central Codex login is not a ChatGPT login")
+	// ErrUnsupportedAuth: the central home holds unsupported or malformed
+	// credentials. Never handed to sessions.
+	ErrUnsupportedAuth = errors.New("codexauth: unsupported central Codex credential")
 	// ErrInsecureHome: the private home or auth.json is a symlink, not owned by
 	// this user, or group/other accessible.
 	ErrInsecureHome = errors.New("codexauth: central Codex home is not private")

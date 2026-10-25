@@ -123,11 +123,14 @@ type Issuer interface {
 }
 
 // QueryVerb is the restricted session RPC query that delivers the central
-// credential for the requesting session's own harness. Its only field is
-// HarnessField; the session identity comes from the signed request.
+// credential for the requesting session's own harness. HarnessField selects
+// the harness; optional FormatField negotiates typed API-key delivery. The
+// session identity comes from the signed request.
 const (
 	QueryVerb    = "central-credential"
 	HarnessField = "harness"
+	FormatField  = "credential-format"
+	TypedFormat  = "typed-v1"
 )
 
 // Delivery is the mailbox response body. Token is the raw value: it exists

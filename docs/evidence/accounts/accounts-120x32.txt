@@ -1,32 +1,32 @@
  amux ────────────── ⌥ l ▸┬─────────────────────────────────────────────────────────────────────────────────────────────
-                          │Machine accounts · Claude + Codex                                                            
- ▾ WORKGROUPS         w + │Tab: select · e: subscription · a: API key                                                   
- no workgroups — w to cre…│                                                                                             
-                          │› Claude · subscription · ready                                                              
- ▾ REPOS              R + │  5h 23% · reset 01-02 03:04Z · fresh                                                        
- no repos — R to add      │  7d 23% · reset 01-02 03:04Z · fresh                                                        
-                          │  Source: statusline advisory; identity unverified                                           
-                          │                                                                                             
-                          │  Codex · subscription · ready                                                               
-                          │  5h 67% · reset 01-02 03:04Z · fresh                                                        
-                          │  7d 67% · reset 01-02 03:04Z · fresh                                                        
-                          │  Source: provider report                                                                    
-                          │                                                                                             
-                          │d: default · x: logout · r: refresh · Esc: close                                             
-                          │PgUp/PgDn: details; existing bindings stay fixed.                                            
-                          │                                                                                             
-                          │Selected: Claude                                                                             
-                          │Account: unknown (not verified)                                                              
-                          │Plan: unknown                                                                                
-                          │Enter: configure a Claude token using protected input.                                       
-                          │five_hour: available                                                                         
-                          │  Used: 23% of the reported window                                                           
-                          │  Source:   Confidence:                                                                      
- Accounts              s  │  Observed: 2026-10-25 16:30 UTC  Resets: 2030-01-02 03:04 UTC                               
- Claude: ready            │seven_day: available                                                                         
- Codex: ready             │  Used: 23% of the reported window                                                           
- ↵ open  ↑↓ move ─────────│  Source:   Confidence:                                                                      
- Space fold/unfold ───────│  Observed: 2026-10-25 16:30 UTC  Resets: 2030-01-02 03:04 UTC                               
- / search archived ───────│                                                                                             
+                          │Machine accounts · Claude + Codex
+ ▾ WORKGROUPS         w + │Tab: select · e: subscription · a: API key
+ no workgroups — w to cre…│
+                          │› Claude · subscription · ready
+ ▾ REPOS              R + │  5h 23% used · reset 01-02 03:04Z · fresh
+ no repos — R to add      │  7d 23% used · reset 01-02 03:04Z · fresh
+                          │  Source: statusline advisory; identity unverified
+                          │
+                          │  Codex · subscription · ready
+                          │  5h 67% used · reset 01-02 03:04Z · fresh
+                          │  7d 67% used · reset 01-02 03:04Z · fresh
+                          │  Source: provider report
+                          │
+                          │d: default · x: logout · r: refresh · Esc: close
+                          │PgUp/PgDn: details; existing bindings stay fixed.
+                          │
+                          │Selected: Claude
+                          │Account: unknown (not verified)
+                          │Plan: unknown
+                          │Enter: configure a Claude token using protected input.
+                          │five_hour: available
+                          │  Used: 23% of the reported window
+                          │  Source:   Confidence:
+ Accounts              s  │  Observed: 2026-10-25 16:43 UTC  Resets: 2030-01-02 03:04 UTC
+ Claude: ready            │seven_day: available
+ Codex: ready             │  Used: 23% of the reported window
+ ↵ open  ↑↓ move ─────────│  Source:   Confidence:
+ Space fold/unfold ───────│  Observed: 2026-10-25 16:43 UTC  Resets: 2030-01-02 03:04 UTC
+ / search archived ───────│
 ──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────
  accounts · Enter login · e configure · d default · x logout · r refresh · Esc close

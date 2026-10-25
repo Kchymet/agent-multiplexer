@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/centralauth"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -34,6 +35,11 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 	}
 	t.Run("daemon-lifecycle", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, false) })
 	t.Run("service-published-after-launch", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, true) })
+	t.Run("subscription-delivery", func(t *testing.T) { testCentralClaudeTypedLaunch(t, "subscription") })
+	t.Run("api-delivery", func(t *testing.T) { testCentralClaudeTypedLaunch(t, "api") })
+}
+
+func testCentralClaudeTypedLaunch(t *testing.T, mode string) {
 	isolateHome(t)
 	s := store.Session{ID: "central-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "central-owner")}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
@@ -56,7 +62,19 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 	t.Setenv("AMUX_CLAUDE_BIN", fake)
 
 	tok, _ := centralauth.NewSecret(mockCentralToken)
-	if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+	kind := centralauth.KindClaudeOAuthToken
+	if mode == "api" {
+		kind = centralauth.KindClaudeAPIKey
+	}
+	if _, err := centralauth.ClaudeStore().SaveKind(tok, kind, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.Update(func(st *accounts.State) error {
+		p := st.Profiles["claude:central"]
+		p.Mode = mode
+		st.Profiles[p.ID] = p
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	grant, err := d.authority.EnsureSession(ctx, s.ID, s.Dir)
@@ -116,7 +134,11 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 		t.Fatal(err)
 	}
 	got := string(b)
-	if !strings.Contains(got, "token="+mockCentralToken+"\n") || !strings.Contains(got, "api=unset\n") {
+	tokenValue, apiValue := mockCentralToken, "unset"
+	if mode == "api" {
+		tokenValue, apiValue = "", mockCentralToken
+	}
+	if !strings.Contains(got, "token="+tokenValue+"\n") || !strings.Contains(got, "api="+apiValue+"\n") {
 		t.Fatalf("fake Claude observed:\n%s", got)
 	}
 	if !strings.Contains(got, "--permission-mode") {

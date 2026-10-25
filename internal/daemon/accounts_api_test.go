@@ -5,8 +5,10 @@ import (
 	"amux/internal/centralauth"
 	"amux/internal/codexapp"
 	"amux/internal/codexauth"
+	"amux/internal/sessionrpc"
 	"amux/internal/store"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,4 +124,22 @@ func TestSmokeCentralAPIKeyBindingNative(t *testing.T) {
 		t.Fatal("explicit rebind failed", err)
 	}
 	t.Log("Native API ceremony, first credential delivery, replacement refusal and explicit rebind passed without model calls")
+}
+
+func TestClaudeAPIDeliveryRequiresTypedLauncher(t *testing.T) {
+	row := store.Session{ID: "typed", Agent: "claude", Dir: t.TempDir()}
+	d, r, principals := sessionRuntimeFixture(t, row)
+	defer d.disconnectAccounts("", true)
+	loginAPIForTest(t, d, "claude", "synthetic-typed-key")
+	call := centralCall()
+	out, err := r.dispatch(t.Context(), sessionrpc.DispatchRequest{Principal: principals[row.ID], Call: call})
+	if err != nil || out.Code != "credential_type_unsupported" || len(out.Body) != 0 {
+		t.Fatal("old launcher received API material", err)
+	}
+	call.Fields[centralauth.FormatField] = centralauth.TypedFormat
+	out, err = r.dispatch(t.Context(), sessionrpc.DispatchRequest{Principal: principals[row.ID], Call: call})
+	var delivery centralauth.Delivery
+	if err != nil || out.Status != sessionrpc.StatusOK || json.Unmarshal(out.Body, &delivery) != nil || delivery.Kind != centralauth.KindClaudeAPIKey || delivery.Token != "synthetic-typed-key" {
+		t.Fatal("typed delivery failed", err)
+	}
 }

@@ -31,7 +31,7 @@ func (r *sessionRuntime) authorizeCentralCredential(ctx context.Context, princip
 func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal access.Principal, req access.Request) (store.Session, error) {
 	if principal.Kind != access.SubjectSession || req.Route != access.RouteQuery ||
 		req.ID != "" || req.Target != "" || req.Tab != 0 ||
-		len(req.Fields) != 1 || req.Fields[centralauth.HarnessField] != string(centralauth.Claude) {
+		!(len(req.Fields) == 1 || (len(req.Fields) == 2 && req.Fields[centralauth.FormatField] == centralauth.TypedFormat)) || req.Fields[centralauth.HarnessField] != string(centralauth.Claude) {
 		return store.Session{}, access.ErrDenied
 	}
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
@@ -78,6 +78,11 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 	binding, profile, err := accounts.Delivery(s.ID, "claude")
 	if err != nil {
 		return rpcDenied("account_binding_blocked"), nil
+	}
+	// An old launcher ignores response kind and always sets the OAuth input.
+	// Refuse API material unless the caller explicitly supports typed delivery.
+	if profile.Mode == "api" && req.Fields[centralauth.FormatField] != centralauth.TypedFormat {
+		return rpcDenied("credential_type_unsupported"), nil
 	}
 	cred, err := centralauth.ClaudeStore().Load()
 	if err != nil {

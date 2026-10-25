@@ -3,6 +3,8 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +30,10 @@ func TestAPIKeyInjectedWithoutSubscriptionIdentityOrEvents(t *testing.T) {
 		t.Fatal("API mode accepted ChatGPT refresh")
 	}
 	assertNoSecrets(t, sup)
+	log, _ := os.ReadFile(sup.cfg.EventLogPath)
+	if strings.Contains(string(log), "ChatGPT login completed") {
+		t.Fatal("API login event claimed subscription login")
+	}
 }
 
 func TestAPIKeyCannotClaimSubscriptionIdentity(t *testing.T) {

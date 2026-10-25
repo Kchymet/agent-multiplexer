@@ -142,11 +142,13 @@ var openSession = func() (sessionQuerier, error) { return sessionrpc.OpenClient(
 // FetchFromSession asks the daemon for this session's Claude credential over
 // the signed mailbox. Errors are fixed RPC codes, never values or paths.
 func FetchFromSession() (Secret, error) {
-	c, e := FetchCredentialFromSession()
+	c, e := fetchCredentialFromSession(false)
 	return c.Token, e
 }
 
-func FetchCredentialFromSession() (Credential, error) {
+func FetchCredentialFromSession() (Credential, error) { return fetchCredentialFromSession(true) }
+
+func fetchCredentialFromSession(typed bool) (Credential, error) {
 	client, err := openSession()
 	if err != nil {
 		return Credential{}, fetchMailbox
@@ -154,9 +156,18 @@ func FetchCredentialFromSession() (Credential, error) {
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := client.Query(ctx, sessionrpc.Query{
-		Verb: QueryVerb, Fields: map[string]string{HarnessField: string(Claude)},
-	})
+	fields := map[string]string{HarnessField: string(Claude)}
+	if typed {
+		fields[FormatField] = TypedFormat
+	}
+	result, err := client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: fields})
+	// Pre-API daemons reject the extra field. Subscription-only fallback is safe:
+	// new daemons independently refuse API keys to an untyped request.
+	var rejected *sessionrpc.RemoteError
+	if typed && errors.As(err, &rejected) && (rejected.Code == "access_denied" || rejected.Code == "credential_access_denied" || rejected.Code == "invalid_operation") {
+		typed = false
+		result, err = client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: map[string]string{HarnessField: string(Claude)}})
+	}
 	if err != nil {
 		var remote *sessionrpc.RemoteError
 		if errors.As(err, &remote) {
@@ -183,7 +194,7 @@ func FetchCredentialFromSession() (Credential, error) {
 	if d.Kind == "" {
 		d.Kind = KindClaudeOAuthToken
 	}
-	if d.Kind != KindClaudeOAuthToken && d.Kind != KindClaudeAPIKey {
+	if (d.Kind != KindClaudeOAuthToken && d.Kind != KindClaudeAPIKey) || (d.Kind == KindClaudeAPIKey && !typed) {
 		return Credential{}, fetchMalformed
 	}
 	return Credential{Kind: d.Kind, Token: token, Generation: d.Generation}, nil
