@@ -100,11 +100,13 @@ func accountProfileProblem(code string) string {
 		return ""
 	case "account_logout_cleanup_failed":
 		return "Local logout cleanup failed. New credential delivery remains disabled.\nStart login to recover."
+	case "account_logout_cleanup_unavailable":
+		return "Local logout cleanup unavailable. New credential delivery remains disabled.\nCheck the installed harness, then start login to recover."
 	case "account_login_cleanup_failed":
 		return "Login rollback failed. New credential delivery remains blocked.\nStart login to recover."
 	case "credential_unavailable":
 		return "Stored credential unavailable. Start login to recover."
-	case "native_status_unavailable", "native_unavailable":
+	case "native_status_unavailable", "native_unavailable", "account_native_unavailable":
 		return "Native account service unavailable. Check the installed harness and refresh."
 	default:
 		return "Account service reported a problem. Refresh status before trying again."
