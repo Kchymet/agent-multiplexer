@@ -148,13 +148,17 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   harness at it. The agent may edit its copy. Authentication is central by
   default: `amux auth login` (Claude `setup-token`) and `amux auth login codex`
   (ChatGPT) sign in once on the host, and the daemon delivers only a session
-  credential, never a refresh token, to each authorized session. `claude.auth`
-  and `codex.auth` can instead select the previous shared host login (`host`),
+  credential, never a refresh token, to each authorized session. TUI/web Accounts
+  and `amux auth accounts` show profiles and subscription limits;
+  `amux auth default <harness:source>` selects defaults for new workloads while
+  existing bindings stay fixed. Legacy `claude.auth` / `codex.auth` settings seed
+  the first defaults. Profiles can also select the previous shared host login (`host`),
   the older amux Claude login (`shared`) or `environment` (API keys, providers,
   gateways). Codex MCP credential files stay shared. macOS GitHub
   authentication uses the daemon broker. Copied config
   can itself contain secrets such as inline MCP tokens; it is readable by the
-  receiving session. See [central authentication](docs/sandbox-config.md#central-authentication).
+  receiving session. See [machine accounts](docs/machine-accounts.md) and
+  [central authentication](docs/sandbox-config.md#central-authentication).
   amux compares each copy with the template and flags an agent's edits on the rail
   (`⚙ N config edits`); `amux sandbox drift` lists them and `amux sandbox promote |
   reset <id> <path>` propagates or discards each one — nothing propagates on its
