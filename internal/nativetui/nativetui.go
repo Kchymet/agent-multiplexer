@@ -8,6 +8,7 @@ package nativetui
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/keymap"
+	"amux/internal/termoutput"
 	"amux/internal/vterm"
 )
 
@@ -46,7 +48,9 @@ func Run(focusID string) error {
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
-	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	output := termoutput.New(os.Stdout)
+	m.copyText = output.Copy
+	_, err := tea.NewProgram(m, tea.WithOutput(output), tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	if m.accounts != nil {
 		m.accounts.dispose()
 	}
@@ -84,6 +88,9 @@ type daemonClient interface {
 }
 
 type model struct {
+	selection      *paneSelection
+	gesture        *paneGesture
+	copyText       func(string) error
 	client         daemonClient
 	reconnectPanes bool // rebuild connection-bound mirrors after the next inventory
 	sessions       []core.Session
@@ -167,7 +174,15 @@ func waitData(ch chan struct{}) tea.Cmd {
 func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab}] }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer m.validateSelection()
 	switch msg := msg.(type) {
+	case clipboardResultMsg:
+		if msg.err != nil {
+			m.status = "clipboard write failed"
+		} else {
+			m.status = "copy sent to terminal"
+		}
+		return m, nil
 	case accountOverviewReplyMsg:
 		return m, m.updateAccountOverview(msg)
 	case accountOverviewTickMsg:
@@ -190,6 +205,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
+		m.clearSelection()
 		m.w, m.h = msg.Width, msg.Height
 		for _, t := range m.terms {
 			t.Resize(m.mainWidth(), m.paneRows())
@@ -203,6 +219,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview())
 
 	case disconnectedMsg:
+		m.clearSelection()
 		m.accountOverviewSerial++
 		m.accountOverviewStale = true
 		if s := m.accounts; s != nil {
@@ -281,6 +298,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // reporting. Shift always forces local handling, including for reporting apps.
 // Borders/help and modal events never reach the child.
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if handled, cmd := m.selectionMouse(ev); handled {
+		return m, cmd
+	}
+	defer m.validateSelection()
 	if m.accounts != nil {
 		if ev.Button == tea.MouseButtonWheelUp {
 			m.accounts.scroll = max(0, m.accounts.scroll-3)
@@ -290,6 +311,12 @@ func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.archiveSearch != nil || m.form != nil || m.confirm != nil || m.picker != nil {
+		return m, nil
+	}
+	// Layout helpers have startup/tiny-window fallback sizes. Only actual
+	// visible body coordinates can start a gesture or route a wheel. Captured
+	// outside motion/release was already handled by selectionMouse above.
+	if ev.X < 0 || ev.X >= m.w || ev.Y < 1 || ev.Y > min(m.paneRows(), max(0, m.h-3)) {
 		return m, nil
 	}
 	if ev.Action == tea.MouseActionPress && ev.Button == tea.MouseButtonLeft && ev.X >= 0 && ev.X < sidebarWidth {
@@ -352,6 +379,9 @@ func (m *model) reapClosed() {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Keyboard input/navigation cancels local selection but leaves a capture
+	// fence until release, so a drag cannot spill into a newly selected pane.
+	m.clearSelection()
 	if m.archiveSearch != nil {
 		return m.handleArchiveSearch(k)
 	}
@@ -682,6 +712,7 @@ func (m *model) firstChild(rootID string) *core.Session {
 // running in the background it just refocuses it; otherwise it resolves the
 // launch spec off-thread and embeds a fresh terminal when ready.
 func (m *model) attachSelected() tea.Cmd {
+	defer m.validateSelection()
 	s := m.selected()
 	if s == nil {
 		return nil
@@ -726,6 +757,7 @@ func (m *model) attachSelected() tea.Cmd {
 // to its first agent; anything with nothing runnable (e.g. an empty new
 // workgroup) just clears the pending attach. It's a no-op until the id lands.
 func (m *model) tryPendingAttach() tea.Cmd {
+	defer m.validateSelection()
 	if m.pending == "" {
 		return nil
 	}
@@ -779,6 +811,7 @@ func (m *model) selectByID(id string) {
 // switchTab shows tab t of the attached agent, launching its pane (editor/term)
 // on first use. Works even while the agent is focused (Alt+1/2/3).
 func (m *model) switchTab(t int) tea.Cmd {
+	defer m.validateSelection()
 	if m.attached == "" {
 		m.status = "open an agent first"
 		return nil
@@ -798,6 +831,7 @@ func (m *model) switchTab(t int) tea.Cmd {
 // for its inventory so deleted sessions are not relaunched from stale rows.
 // Closing a remote mirror does not stop its daemon-owned process.
 func (m *model) restorePanes() []tea.Cmd {
+	m.clearSelection()
 	attached, tab, focused := m.attached, m.tab, m.focus
 	previous := m.terms
 	m.terms = map[paneKey]*vterm.Terminal{}
@@ -823,6 +857,7 @@ func (m *model) restorePanes() []tea.Cmd {
 // id. The pane.open is sent off the UI goroutine so a socket write can't block
 // rendering.
 func (m *model) launchPane(id string, tab int) tea.Cmd {
+	m.clearSelection()
 	if m.terms == nil {
 		m.terms = map[paneKey]*vterm.Terminal{}
 	}
@@ -877,9 +912,15 @@ func (m *model) handlePaneFrame(p *core.PaneFrame) {
 	switch p.Type {
 	case core.FramePaneOutput:
 		if t != nil {
+			if m.selection != nil && m.selection.term == t && len(p.Data) > 0 {
+				m.clearSelection()
+			}
 			t.Feed(p.Data)
 		}
 	case core.FramePaneReset:
+		if m.selection != nil && m.selection.term == t {
+			m.clearSelection()
+		}
 		// The daemon fell too far behind to stream losslessly and is about to
 		// replay a fresh repaint; clear the emulator first so stale cells the
 		// repaint doesn't overwrite don't ghost through.
