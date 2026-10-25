@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 
 	"amux/internal/access"
@@ -80,6 +81,9 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 	}
 	cred, err := centralauth.ClaudeStore().Load()
 	if err != nil {
+		if errors.Is(err, centralauth.ErrNotConfigured) {
+			return rpcFailed("central_login_required"), nil
+		}
 		return rpcFailed("central_credential_unavailable"), nil
 	}
 	if err := r.authorizeCentralCredential(ctx, request.Principal, req); err != nil {

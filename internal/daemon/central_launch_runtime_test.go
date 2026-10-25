@@ -12,6 +12,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/centralauth"
 	"amux/internal/core"
+	"amux/internal/engine/local"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/sessionrpc"
@@ -30,6 +31,7 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 		}
 		t.Skipf("protected namespace unavailable: %v", err)
 	}
+	t.Run("daemon-lifecycle", testCentralClaudeDaemonLifecycle)
 	isolateHome(t)
 	s := store.Session{ID: "central-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "central-owner")}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
@@ -128,10 +130,84 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 		t.Fatal(err)
 	}
 	out, err := run(3 * time.Second)
-	if err == nil || !strings.Contains(out, "amux auth login") {
+	if err == nil || strings.Contains(out, "amux auth login") || !strings.Contains(out, "access was denied") {
 		t.Fatalf("revoked launch = %v: %s", err, out)
 	}
 	if _, err := os.Stat(observed); !os.IsNotExist(err) {
 		t.Fatalf("Claude started for a revoked session: %v", err)
 	}
+}
+
+// Exercise production lifecycle gates and the reconciliation loop, unlike the
+// direct mailbox server fixture above. PTY startup must return without waiting
+// for the child's credential query: that query needs those same admission locks.
+func testCentralClaudeDaemonLifecycle(t *testing.T) {
+	d, runtime, _ := sessionRuntimeFixture(t)
+	t.Setenv("AMUX_JAIL", "on")
+	t.Setenv("AMUX_SHUTDOWN_GRACE", "0s")
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	s := store.Session{ID: "central-lifecycle", RootID: "root", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "central-lifecycle")}
+	if err := os.MkdirAll(s.Dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(os.Getenv("HOME"), "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(fake), 0700); err != nil {
+		t.Fatal(err)
+	}
+	observed := filepath.Join(s.Dir, "launched")
+	// Only a success marker is persisted; the synthetic credential stays in env.
+	script := "#!/bin/sh\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = " + mockCentralToken + " ] || exit 17\nprintf ready > " + observed + "\nsleep 30\n"
+	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUX_CLAUDE_BIN", fake)
+	tok, _ := centralauth.NewSecret(mockCentralToken)
+	if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	d.engine = local.New()
+	d.sessionRPC = runtime
+	defer d.engine.Shutdown()
+	if err := runtime.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	serving, stop := context.WithCancel(ctx)
+	joined := make(chan struct{})
+	go func() { defer close(joined); runtime.run(serving) }()
+	defer func() { stop(); <-joined; runtime.close() }()
+	// A real action holds dispatchMu/effectMu while starting the sandboxed PTY.
+	finished := make(chan core.Result, 1)
+	go func() { finished <- d.handle(ctx, core.Action{Action: core.ActionStart, ID: s.ID}) }()
+	select {
+	case result := <-finished:
+		if !result.OK {
+			t.Fatal(result.Error)
+		}
+	case <-ctx.Done():
+		t.Fatal("start action blocked on its own credential query")
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if b, err := os.ReadFile(observed); err == nil && string(b) == "ready" {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("daemon reconciliation did not deliver the launch credential")
+		}
+	}
+	t.Log("real daemon start action returned; reconciliation served the protected Claude credential request")
 }

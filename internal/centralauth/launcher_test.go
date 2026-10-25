@@ -28,7 +28,25 @@ func TestMain(m *testing.M) {
 		fetch := func() (Secret, error) {
 			if failures > 0 {
 				failures--
-				return Secret{}, errors.New("central_credential_unavailable")
+				switch os.Getenv("AMUX_LAUNCH_FAILURE") {
+				case "timeout":
+					return Secret{}, fetchTimeout
+				case "denied":
+					return Secret{}, fetchDenied
+				case "blocked":
+					return Secret{}, fetchBlocked
+				case "unavailable":
+					return Secret{}, fetchUnavailable
+				case "unknown":
+					return Secret{}, errors.New("secret-token https://untrusted.invalid/path")
+				case "transition":
+					if failures == 1 {
+						return Secret{}, fetchTimeout
+					}
+					return Secret{}, fetchMissing
+				default:
+					return Secret{}, fetchMissing
+				}
 			}
 			return NewSecret(mockToken)
 		}
@@ -120,10 +138,10 @@ func TestFetchFromSessionRequestsOnlyItsHarnessAndHidesDetail(t *testing.T) {
 		"denied": {func() (sessionQuerier, error) {
 			return &fakeQuerier{err: &sessionrpc.RemoteError{Status: sessionrpc.StatusDenied, Code: "credential_access_denied"}}, nil
 		}, "credential_access_denied"},
-		"timeout": {func() (sessionQuerier, error) { return &fakeQuerier{err: context.DeadlineExceeded}, nil }, "daemon did not answer"},
+		"timeout": {func() (sessionQuerier, error) { return &fakeQuerier{err: context.DeadlineExceeded}, nil }, string(fetchTimeout)},
 		"malformed": {func() (sessionQuerier, error) {
 			return &fakeQuerier{result: sessionrpc.Result{Body: []byte(`{"token":"has space ` + mockToken + `"}`)}}, nil
-		}, "malformed response"},
+		}, string(fetchMalformed)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			openSession = tc.open
@@ -132,5 +150,77 @@ func TestFetchFromSessionRequestsOnlyItsHarnessAndHidesDetail(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// Exercise the actual retry/exec loop, including a change in failure category.
+// A successful retry must reach the child without printing secrets or mistaking
+// a broker timeout, denial or unreadable store for an absent login.
+func TestLaunchClassifiesFailuresAndRecovers(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		kind, want string
+		login      bool
+	}{
+		{"timeout", "within 10 seconds", false},
+		{"denied", "access was denied", false},
+		{"blocked", "binding is blocked", false},
+		{"unavailable", "could not read", false},
+		{"unknown", "mailbox request failed", false},
+		{"missing", "No central Claude login", true},
+		{"transition", "within 10 seconds", true},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, self, "/bin/sh", "-c", "exit 0")
+			cmd.Env = append(os.Environ(), launchChildEnv+"=1", "AMUX_LAUNCH_FAILURE="+tc.kind)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("retry failed: %v: %s", err, out)
+			}
+			msg := string(out)
+			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "amux auth login") != tc.login {
+				t.Fatalf("guidance: %s", msg)
+			}
+			if strings.Contains(msg, "secret-token") || strings.Contains(msg, "https://") || strings.Contains(msg, mockToken) {
+				t.Fatalf("unsafe output: %s", msg)
+			}
+			wantMessages := 1
+			if tc.kind == "transition" {
+				wantMessages = 2
+			}
+			if strings.Count(msg, "retrying automatically") != wantMessages {
+				t.Fatalf("repeated or stale guidance: %s", msg)
+			}
+		})
+	}
+}
+
+func TestFetchClassifiesOnlyAllowlistedRemoteCodes(t *testing.T) {
+	previous := openSession
+	t.Cleanup(func() { openSession = previous })
+	for _, tc := range []struct {
+		code string
+		want fetchFailure
+	}{
+		{"central_login_required", fetchMissing},
+		{"central_credential_unavailable", fetchUnavailable},
+		{"central_credential_conflict", fetchConflict},
+		{"account_binding_blocked", fetchBlocked},
+		{"credential_revoked", fetchDenied},
+		{"expired", fetchDenied},
+		{"secret-token https://untrusted.invalid", fetchTransport},
+	} {
+		openSession = func() (sessionQuerier, error) {
+			return &fakeQuerier{err: &sessionrpc.RemoteError{Status: sessionrpc.StatusFailed, Code: tc.code}}, nil
+		}
+		_, err := FetchFromSession()
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("classification = %v, want %v", err, tc.want)
+		}
 	}
 }

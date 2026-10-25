@@ -46,7 +46,7 @@ func TestCentralCredentialDeliveredOnlyToAuthorizedClaudeSessions(t *testing.T) 
 	}
 
 	// Central is the default; before a host login there is nothing to deliver.
-	if res := dispatch(principals[claude.ID], centralCall()); res.Status != sessionrpc.StatusFailed || res.Code != "central_credential_unavailable" {
+	if res := dispatch(principals[claude.ID], centralCall()); res.Status != sessionrpc.StatusFailed || res.Code != "central_login_required" {
 		t.Fatalf("unconfigured = %+v", res)
 	}
 	tok, _ := centralauth.NewSecret(mockCentralToken)
@@ -57,6 +57,18 @@ func TestCentralCredentialDeliveredOnlyToAuthorizedClaudeSessions(t *testing.T) 
 	var got centralauth.Delivery
 	if res.Status != sessionrpc.StatusOK || json.Unmarshal(res.Body, &got) != nil || got.Token != mockCentralToken || got.Generation != 1 {
 		t.Fatalf("authorized delivery = %+v", res)
+	}
+
+	// A present but insecure credential is not evidence that login is missing.
+	path := filepath.Join(centralauth.ClaudeStore().Dir, "credential.json")
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if res := dispatch(principals[claude.ID], centralCall()); res.Code != "central_credential_unavailable" || len(res.Body) != 0 {
+		t.Fatalf("unreadable store = %+v", res)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
 	}
 
 	for _, tc := range []struct {
