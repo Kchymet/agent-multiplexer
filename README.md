@@ -114,8 +114,9 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
     hidden — you just see repo → agents). Auto-created when you start an agent on
     a repo.
   - **work-scoped** — spans any number of repos and holds N agents. Rendered under
-    **WORKGROUPS**. Create with the `w` form (name, repos, a baseline description,
-    and an optional **Linear** issue woven into the first agent's prompt).
+    **WORKGROUPS**. Create with the `w` form or `amux workgroup new`: name, task,
+    coordinator harness and model, and optional repositories for a first agent.
+    Leave repositories empty to start with just the coordinator.
 - **Agent** — one agent (Claude Code or Codex, picked per agent by its **harness**)
   with its own subdirectory and a git **worktree per repo** it works on. An agent
   appears under WORKGROUPS *or* REPOS, never both; `m` moves one into a new
@@ -282,7 +283,7 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |
 | `Alt+r` | restart the focused agent or rail selection and resume its saved conversation (confirm) |
 | `a` | add an agent — on a repo, a repo-scoped agent; on a workgroup, another agent (settings form) |
-| `w` | new work-scoped workgroup (settings form, optional Linear) |
+| `w` | new work-scoped workgroup (coordinator settings, optional repos) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
 | `m` | move the selected agent to a new workgroup (confirm) |
 | `r` | rename the selected agent/workgroup (display name) |

@@ -449,8 +449,8 @@ func workgroupUsage() {
 usage: amux workgroup [command]
 
   (bare)             the interactive create page (same as "new")
-  new [repo...]      create a workgroup through the config page, optionally
-                     pre-attaching an agent scoped to the given repos
+  new [repo...]      choose coordinator harness/model and optional repos;
+                     selected repos seed a first agent
   create <repo>...   non-interactive: workgroup + one agent on those repos
                      [--name n] [--prompt t] [--agent a] [--mode m] [--model M]
                      [--coordinator claude|codex] [--coordinator-model M]
@@ -525,94 +525,90 @@ func sessionList() error {
 	return nil
 }
 
-// sessionNew is the interactive create page: name the workgroup, optionally
-// configure agents (each scoped to fuzzy-picked tracked repos, otherwise a
-// repo-less default agent), then Create. Repos are an attribute of an agent, not
-// the workgroup, so there's no workgroup-level repo list here.
+// workgroupForm is the interactive creation page. Coordinator settings are
+// separate from member defaults; repositories optionally seed a first member.
+type workgroupForm struct {
+	name, task  string
+	coordinator wsops.Coordinator
+	repos       []string
+}
+
+func (f workgroupForm) menu() []string {
+	return []string{
+		fmt.Sprintf("Name › %s", orOptional(f.name)),
+		fmt.Sprintf("Task › %s", orOptional(f.task)),
+		fmt.Sprintf("Coordinator harness › %s", f.coordinator.Kind),
+		fmt.Sprintf("Coordinator model › %s", orDefault(f.coordinator.Model)),
+		fmt.Sprintf("Repos (optional) › %s", orNone(strings.Join(f.repos, ", "))),
+		"────────────────", "✓ Create workgroup", "✗ Cancel",
+	}
+}
+
+func (f workgroupForm) action() core.Action {
+	fields := map[string]string{
+		"name": f.name, "prompt": f.task,
+		wsops.FieldCoordinator:      f.coordinator.Kind,
+		wsops.FieldCoordinatorModel: f.coordinator.Model,
+	}
+	// Omission preserves the host's default grants and creates only the
+	// coordinator. Selected repos request a first member on its default harness.
+	if len(f.repos) > 0 {
+		fields["repos"] = strings.Join(f.repos, ",")
+	}
+	return core.Action{Action: core.ActionNewWorkgroup, Fields: fields}
+}
+
+func (f *workgroupForm) cycleCoordinator() {
+	f.coordinator.Kind = pickCoordinatorKind(f.coordinator.Kind)
+	f.coordinator.Model = defaultModelFor(f.coordinator.Kind)
+}
+
+// sessionNew names the workgroup, configures its coordinator, and optionally
+// selects repositories. Further members can be configured after creation.
 func sessionNew(ctx context.Context, seedRepos []string) error {
 	if err := requireTerminal("amux workgroup new"); err != nil {
 		return err
 	}
 	in := bufio.NewReader(os.Stdin)
-	name, task := "", ""
-	coordinator := ""
-	var agents []agentCfg
-	// A seed repo (e.g. from the rail) pre-configures a first agent scoped to it.
-	if len(seedRepos) > 0 {
-		agents = append(agents, agentCfg{Repos: seedRepos, Agent: agent.DefaultKind(), Mode: "task", Model: defaultModelFor(agent.DefaultKind())})
+	f := workgroupForm{
+		coordinator: wsops.Coordinator{Kind: agent.GoalRuntime, Model: defaultModelFor(agent.GoalRuntime)},
+		repos:       seedRepos,
 	}
-
 	for {
-		menu := []string{
-			fmt.Sprintf("Name   › %s", orOptional(name)),
-			fmt.Sprintf("Task   › %s", orOptional(task)),
-			fmt.Sprintf("Runtime › %s", wsops.CoordinatorKind(coordinator)),
-			"+ add agent",
-		}
-		for i, a := range agents {
-			menu = append(menu, fmt.Sprintf("  agent %d: %s", i+1, describeAgent(a)))
-		}
-		menu = append(menu, "────────────────", "✓ Create workgroup", "✗ Cancel")
-
-		choice, err := fzfMenu("new workgroup", menu)
+		choice, err := fzfMenu("new workgroup", f.menu())
 		if err != nil {
 			return nil // Esc
 		}
 		switch {
 		case strings.HasPrefix(choice, "Name"):
-			name = promptLine(in, "Workgroup name (optional)")
+			f.name = promptLine(in, "Workgroup name (optional)")
 		case strings.HasPrefix(choice, "Task"):
-			// The coordinator's own task. On the default runtime this becomes its
-			// native goal: it is pursued until verified complete, not replayed to
-			// the agents below (each of those keeps its own prompt).
-			task = promptLine(in, "Task for the coordinator (optional)")
-		case strings.HasPrefix(choice, "Runtime"):
-			coordinator = pickCoordinatorKind(coordinator)
-		case strings.HasPrefix(choice, "+ add agent"):
-			if a, ok := configureAgent(ctx, in); ok {
-				agents = append(agents, a)
-			}
-		case strings.HasPrefix(strings.TrimSpace(choice), "agent "):
-			if i := agentIndex(choice); i >= 0 && i < len(agents) {
-				agents = append(agents[:i], agents[i+1:]...)
-			}
+			f.task = promptLine(in, "Task for the coordinator (optional)")
+		case strings.HasPrefix(choice, "Coordinator harness"):
+			f.cycleCoordinator()
+		case strings.HasPrefix(choice, "Coordinator model"):
+			f.coordinator.Model = pickCoordinatorModel(in, f.coordinator.Kind, f.coordinator.Model)
+		case strings.HasPrefix(choice, "Repos"):
+			f.repos = pickRepos(ctx, in, "repos for the first agent (optional, TAB)")
 		case strings.HasPrefix(choice, "✓"):
-			return createWorkspace(name, task, coordinator, agents)
+			rootID, err := sendActionID(f.action())
+			if err != nil {
+				return err
+			}
+			startCreated(rootID)
+			fmt.Printf("created workgroup %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
+			return nil
 		case strings.HasPrefix(choice, "✗"):
 			return nil
 		}
 	}
 }
 
-// createWorkspace creates the workgroup over the daemon: the coordinator gets
-// the workgroup's task (its goal on the default runtime) and, when the user
-// configured no explicit agents, one default (repo-less) agent is seeded;
-// otherwise each configured agent is added with its own prompt and repos.
-func createWorkspace(name, task, coordinator string, agents []agentCfg) error {
-	fields := map[string]string{"name": name, "prompt": task}
-	if coordinator != "" {
-		fields[wsops.FieldCoordinator] = coordinator
+func pickCoordinatorModel(in *bufio.Reader, kind, current string) string {
+	if len(agent.HarnessFor(kind).Models()) == 0 {
+		return promptLine(in, "Coordinator model (optional)")
 	}
-	if len(agents) == 0 {
-		fields["defaultAgent"] = "1"
-		fields["agent"] = agent.DefaultKind()
-		fields["mode"] = "task"
-		fields["model"] = defaultModelFor(agent.DefaultKind())
-	}
-	rootID, err := sendActionID(core.Action{Action: core.ActionCreateWorkspace, Fields: fields})
-	if err != nil {
-		return err
-	}
-	for _, a := range agents {
-		if _, err := sendActionID(core.Action{Action: core.ActionAddAgent, ID: rootID, Fields: map[string]string{
-			"repos": strings.Join(a.Repos, ","), "agent": a.Agent, "mode": a.Mode, "model": a.Model, "prompt": a.Prompt,
-		}}); err != nil {
-			return err
-		}
-	}
-	startCreated(rootID)
-	fmt.Printf("created workgroup %s — it's starting; open it in the dashboard (`amux`)\n", rootID)
-	return nil
+	return pickModel(kind, current)
 }
 
 func sessionAdd(ctx context.Context, rootID string) error {
@@ -750,18 +746,6 @@ func pickMode() string {
 	return store.ModeInteractive
 }
 
-func describeAgent(a agentCfg) string {
-	repos := "(plain agent)"
-	if len(a.Repos) > 0 {
-		repos = strings.Join(a.Repos, "+")
-	}
-	parts := []string{repos, agent.Canonical(a.Agent), a.Mode}
-	if a.Model != "" {
-		parts = append(parts, a.Model)
-	}
-	return strings.Join(parts, " · ")
-}
-
 func orNone(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "(none)"
@@ -774,15 +758,6 @@ func orID(display, id string) string {
 		return id
 	}
 	return display
-}
-
-func agentIndex(line string) int {
-	line = strings.TrimSpace(line)
-	var n int
-	if _, err := fmt.Sscanf(line, "agent %d:", &n); err != nil {
-		return -1
-	}
-	return n - 1
 }
 
 // ---- query helpers -------------------------------------------------------
