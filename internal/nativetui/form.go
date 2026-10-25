@@ -18,8 +18,10 @@ import (
 
 var cursorStyle = lipgloss.NewStyle().Reverse(true)
 
-// openNewRepoAgentForm opens a normal workgroup form seeded with one repo.
-func (m *model) openNewRepoAgentForm(repoID, repoTitle string) {
+// openNewRepoWorkgroupForm opens the new-workgroup form for a repo header: a
+// normal workgroup whose repos are seeded with (and so limited to) that one
+// repo, with its first agent on it. There is no one-off agent on a repo.
+func (m *model) openNewRepoWorkgroupForm(repoID, repoTitle string) {
 	m.form = &formState{
 		explicitRepos: true,
 		title:         "New workgroup · " + repoTitle,
@@ -71,7 +73,8 @@ func (m *model) openAddRepoForm() {
 	}
 }
 
-// openNewWorkgroupForm opens the settings form for a new work-scoped workgroup.
+// openNewWorkgroupForm opens the settings form for a new workgroup (the repos
+// picked limit it and seed a first agent; none = coordinator only).
 func (m *model) openNewWorkgroupForm() {
 	m.form = &formState{
 		title:  "New workgroup",
@@ -891,7 +894,7 @@ func (m *model) renderForm() string {
 	if lipgloss.Width(footer[0]) > inner {
 		footer = []string{submit, m.formHint()}
 	}
-	if fs.action == core.ActionNewWorkgroup || fs.action == core.ActionNewRepoAgent || fs.action == core.ActionAddAgent {
+	if fs.action == core.ActionNewWorkgroup || fs.action == core.ActionAddAgent {
 		footer = append(footer, dimStyle.Render("Account: machine default at creation (rail: s)"))
 	}
 	// In a pane too short for the modal's chrome, give up the blank spacer rows

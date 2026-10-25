@@ -149,6 +149,14 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 					wg.Dir = store.RootDir(r.ID) // a root predating default sessions
 				}
 			}
+			if wg.Role == store.RoleCoordinator {
+				// The ceiling is what "limited to one repo" means on a listing.
+				grants, initialized, err := db.CoordinatorRepoGrants(r.ID)
+				if err != nil {
+					return nil, err
+				}
+				wg.Grants, wg.Granted = grants, initialized
+			}
 			subs, _ := db.Children(r.ID)
 			for _, s := range subs {
 				wg.Agents = append(wg.Agents, core.AgentRow{

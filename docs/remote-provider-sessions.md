@@ -163,7 +163,7 @@ and the row carries a `role` naming which:
   additionally offer them the session affordances it offers an agent. A consumer
   that sorts sectionless or `repo`-kind rows into a session list must not: the
   console is sectionless by design and a repo row is a header that hosts a
-  session — neither is a one-off agent.
+  session — neither is an agent.
 
 **Backward compatibility.** These fields are additive (`omitempty` on `runtime`
 and `role`, a nullable object for `caps`). A provider that predates them omits both. A consumer

@@ -485,7 +485,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case s == nil:
 			m.status = "select a repo or workgroup to add an agent"
 		case s.Kind == "repo":
-			m.openNewRepoAgentForm(s.ID, s.Title)
+			m.openNewRepoWorkgroupForm(s.ID, s.Title)
 		case s.Section == core.SectionWorkgroups:
 			if root := m.rootOf(s); root != nil {
 				m.openAddAgentForm(root.ID, root.Title)
@@ -494,7 +494,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "select a repo or workgroup to add an agent"
 		}
 		return m, nil
-	case "w": // new work-scoped workgroup (opens a settings form)
+	case "w": // new workgroup (opens a settings form)
 		m.openNewWorkgroupForm()
 		return m, nil
 	case "R": // track a new repository (opens a one-field form)
@@ -502,10 +502,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+r": // force a state refresh (the daemon also auto-polls)
 		return m, tea.Batch(m.sendCmd(core.Action{Action: core.ActionRefresh}), m.refreshAccountOverview())
-	case "m": // move the selected agent into a new work-scoped workgroup (confirm first)
+	case "m": // move the selected agent into a new workgroup of its own (confirm first)
 		if s := m.selected(); s != nil && isAgent(s) && s.Section != core.SectionArchived {
 			m.confirm = &confirmState{
-				message: "Move " + s.Title + " into a new work-scoped workgroup?",
+				message: "Move " + s.Title + " into a new workgroup of its own?\n(limited to its repos; `amux workgroup move` targets an existing one)",
 				action:  core.Action{Action: core.ActionMove, ID: s.ID},
 			}
 			return m, nil
@@ -685,14 +685,15 @@ func (m *model) attachSelected() tea.Cmd {
 	// A container row that hosts a default session (the console, a workgroup's
 	// coordinator, a repo's home — Role set) opens that session itself. A bare
 	// container from a daemon that predates default sessions falls back to its
-	// first agent: a repo header opens the first repo-scoped agent, or the
-	// new-agent form if it has none; a workgroup root opens its first agent.
+	// first agent: a repo header opens the first agent nested under it, or the
+	// new-workgroup form for the repo if it has none; a workgroup root opens its
+	// first agent.
 	if s.Role == "" {
 		if s.Kind == "repo" {
 			if sub := m.firstChild(s.ID); sub != nil {
 				s = sub
 			} else {
-				m.openNewRepoAgentForm(s.ID, s.Title)
+				m.openNewRepoWorkgroupForm(s.ID, s.Title)
 				return nil
 			}
 		} else if s.IsRoot {
@@ -908,10 +909,10 @@ func isAgent(s *core.Session) bool {
 func paneIDOf(id string, tab int) string { return id + "\x1f" + strconv.Itoa(tab) }
 
 // attachable reports whether a row hosts an agent we can embed: the console, a
-// work-scoped workgroup's sub-agent, a repo-scoped agent nested under a repo
-// header, or a container row that is itself a default session (a workgroup's
-// coordinator, a repo's home — Role set) — but not a bare container or a
-// detached row.
+// workgroup's agent, or a container row that is itself a default session (a
+// workgroup's coordinator, a repo's home — Role set) — but not a bare container
+// or a detached row. (An agent nested under a repo header, as a daemon from
+// before workgroups-only publishes, still opens.)
 func attachable(s *core.Session) bool {
 	if s.ID == console.ID || s.Role != "" {
 		return true

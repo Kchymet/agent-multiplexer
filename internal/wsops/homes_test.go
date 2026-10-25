@@ -318,10 +318,10 @@ func TestDeleteWorkgroupKeepsMovedAgentDir(t *testing.T) {
 	if _, err := os.Stat(guide); err != nil {
 		t.Fatal(err)
 	}
-	if err := MoveAgent(ctx, kids[0].ID, ""); err != nil {
+	if _, err := MoveAgent(ctx, kids[0].ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	// MoveAgent drops an emptied *repo-scoped* root only; a work-scoped one stays.
+	// MoveAgent never drops the emptied workgroup; the user deletes it.
 	if err := DeleteByID(ctx, rootID); err != nil {
 		t.Fatal(err)
 	}
