@@ -48,11 +48,11 @@ usage: amux auth <command>
 
   login [claude] [--token-stdin]  create or replace the central Claude token
   login codex                     sign the central Codex home in to ChatGPT
-  status [claude|codex]           show the selected mode and central login
-  accounts [--json]             view machine profiles, defaults and limits
+  status [claude|codex]           show the amux-owned configuration and limits
+  accounts [--json]             view Claude/Codex configuration and limits
   logout <claude|codex>          fence delivery and clear the central login
-  default <harness:source>       select the default for new workloads
-  rebind <harness:source> <id>    explicitly bind and stop one workload
+  default <claude|codex>         use the amux configuration for new workloads
+  rebind <claude|codex> <id>      explicitly bind and stop one workload
   restart [--force]               restart idle Claude agents with current credentials
 
 login runs `+"`claude setup-token`"+` (browser sign-in) and then asks you to paste
@@ -67,9 +67,9 @@ short-lived ChatGPT tokens from the daemon. A setup-token is valid for one
 year and is not refreshed; run login again to reissue it before then.
 Reissuing does not revoke the previous token. Status never prints a secret.
 
-Other methods remain available as explicit selections:
-  amux auth default claude:host          # or claude:shared / claude:environment
-  amux auth default codex:host           # or codex:environment
+One amux-owned configuration is available for each harness. Legacy source
+bindings remain internal for compatibility. Configuration uses amux CLI/TUI;
+Harness web account views are read-only.
 
 Defaults affect newly created workloads. Existing workloads keep their binding;
 use explicit rebind after replacing an opaque Claude credential. Login pauses

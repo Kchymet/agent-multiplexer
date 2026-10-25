@@ -2,9 +2,10 @@ package harnessproto
 
 // AccountsV1 is independent of session/compute grants. Account status is safe
 // to cache; ceremony messages MUST NOT enter durable queues, logs, broadcasts,
-// replay buffers, or session events. The orchestrator binds a ceremony to its
-// authenticated initiating user and connection; possession of a machine ID is
-// never authorization. Disconnect cancels that connection's pending ceremonies.
+// replay buffers, or session events. Ceremony types remain for compatibility
+// and local amux CLI/TUI use; providers reject remote ceremonies and mutations.
+// Local ceremonies belong to their authenticated initiating connection.
+// Disconnect cancels that connection's pending ceremonies.
 const (
 	AccountsV1                   = "accounts-v1"
 	MAccountRequest              = "account-request"
@@ -38,6 +39,9 @@ type AccountRequest struct {
 	Secret string `json:"secret,omitempty"`
 }
 
+// AccountSnapshot exposes only the amux-owned central configuration per harness.
+// Defaults may reference a preserved legacy source until an explicit local change;
+// such references are compatibility metadata, not selectable configurations.
 type AccountSnapshot struct {
 	DefaultRevisions map[string]uint64 `json:"defaultRevisions"`
 	Version          int               `json:"version"`
@@ -102,7 +106,8 @@ type AccountResult struct {
 	Ceremony *AccountCeremony `json:"ceremony,omitempty"`
 }
 
-// ValidateAccountRequest enforces the safe/ephemeral split before any effect.
+// ValidateAccountRequest checks syntax and the safe/ephemeral split; it grants
+// no authority. Providers additionally permit only remote status requests.
 // A safe status request cannot be used to poll or complete a ceremony.
 func ValidateAccountRequest(r AccountRequest, ceremony bool) bool {
 	if (r.Operation == AccountDefault) != (r.DefaultRevision > 0) {
@@ -126,7 +131,9 @@ func ValidateAccountRequest(r AccountRequest, ceremony bool) bool {
 	return false
 }
 
-// AccountCapabilities are explicit independent host grants. Advertising a
+// AccountCapabilities are explicit independent host grants. Manage is retained
+// for wire compatibility; amux providers always advertise false. Configuration
+// belongs to the local amux CLI/TUI. Advertising a
 // feature name alone grants nothing. Use controls workload creation/start.
 type AccountCapabilities struct {
 	Status bool `json:"status"`
@@ -139,4 +146,22 @@ type AccountCapabilities struct {
 type AccountBinding struct {
 	ProfileID string `json:"profileId"`
 	Source    string `json:"source"`
+}
+
+// ManagedOnly removes legacy source choices from product account projections.
+// Keep actual defaults and their CAS revisions: projecting a central default
+// that has not been selected would misrepresent routing for new workloads.
+// Callers retain their full internal snapshot for readiness and migration.
+func (s AccountSnapshot) ManagedOnly() AccountSnapshot {
+	out := s
+	out.Profiles = []AccountProfile{}
+	for _, harness := range []string{"claude", "codex"} {
+		for _, p := range s.Profiles {
+			if p.Harness == harness && p.ID == harness+":central" && p.Source == "central" {
+				out.Profiles = append(out.Profiles, p)
+				break
+			}
+		}
+	}
+	return out
 }

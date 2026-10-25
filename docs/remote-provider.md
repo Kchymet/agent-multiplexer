@@ -109,7 +109,7 @@ Session publication is a separate grant from compute:
 | Add `--runtime-events` | Conversation text, tool arguments/results and other normalized transcript events for published sessions |
 | `--allow-compute` | Independent arbitrary process/PTY execution as the provider's host user |
 | `--account-status` | Safe machine profile, identity and subscription-limit projections (off by default) |
-| `--account-manage` | Default/logout plus protected transient login ceremonies (off by default; does not imply status) |
+| `--account-manage` | Retired: rejected when enabled; use amux CLI/TUI for configuration |
 | `--account-use` | Machine-account use for remote creation/start/prompt; inherited from writable session publication unless explicitly disabled |
 
 `--read-only-sessions` and `--runtime-events` require `--publish-sessions`.
@@ -118,11 +118,12 @@ still disclose sensitive inventory and, with runtime events, transcript content.
 There is no general secret-redaction guarantee for transcripts or terminal I/O.
 The operator must trust the remote service with the enabled data and actions.
 
-Machine account configuration and the transient ceremony protocol are documented in
-[machine accounts v1](machine-accounts.md). The web account route must keep ceremony
-URLs and write-only tokens out of the durable database relay; `account-ceremony`
-frames are connection-scoped and never replayed. Account-manage does not authorize
-remote rebind of arbitrary workloads.
+Machine account configuration and compatibility are documented in
+[machine accounts v1](machine-accounts.md). Web account access is read-only.
+The provider advertises manage=false and rejects every account mutation even
+with an old saved manage grant. Status/use grants do not grant configuration
+access. Local CLI/TUI ceremonies remain protected; no new permission is granted
+for the existing amux console.
 
 The provider's control connection is outbound and needs no inbound listening
 port. That topology does not reduce the authority granted above. See

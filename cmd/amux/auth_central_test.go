@@ -109,3 +109,15 @@ func TestMachineAccountCommandsDenyProtectedSessionBeforeHostAccess(t *testing.T
 		}
 	}
 }
+
+func TestAccountCLIRejectsLegacySourceSelectionBeforeConnecting(t *testing.T) {
+	for _, op := range []string{"default", "rebind", "logout"} {
+		args := []string{"claude:host"}
+		if op == "rebind" {
+			args = append(args, "worker")
+		}
+		if err := authAccountMutation(op, args); err == nil || !strings.Contains(err.Error(), "not selectable account configurations") {
+			t.Fatalf("%s: %v", op, err)
+		}
+	}
+}

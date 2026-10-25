@@ -60,11 +60,14 @@ func authAccounts(args []string) error {
 }
 func authAccountMutation(op string, args []string) error {
 	if len(args) < 1 || len(args) > 2 || (op == hp.AccountRebind && len(args) != 2) || (op != hp.AccountRebind && len(args) != 1) {
-		return fmt.Errorf("usage: amux auth %s <harness:source> [workload-id]", op)
+		return fmt.Errorf("usage: amux auth %s <claude|codex> [workload-id]", op)
 	}
 	id := args[0]
 	if id == "claude" || id == "codex" {
 		id += ":central"
+	}
+	if id != "claude:central" && id != "codex:central" {
+		return fmt.Errorf("choose claude or codex; legacy source bindings are preserved but are not selectable account configurations")
 	}
 	c, err := accountClient()
 	if err != nil {
@@ -188,10 +191,13 @@ func authMachineStatus(harness string) error {
 		return err
 	}
 	for _, p := range s.Profiles {
-		if p.ID != s.Defaults[harness] {
+		if p.ID != harness+":central" {
 			continue
 		}
-		fmt.Printf("%s default: %s (%s)\nidentity: %s; plan: %s\nlimits: %s (%s)\n", harness, p.ID, p.State, p.Identity.State, p.Identity.Plan, p.Limits.State, p.Limits.Source)
+		fmt.Printf("%s configuration: %s (%s)\nidentity: %s; plan: %s\nlimits: %s (%s)\n", harness, p.ID, p.State, p.Identity.State, p.Identity.Plan, p.Limits.State, p.Limits.Source)
+		if s.Defaults[harness] != p.ID {
+			fmt.Printf("New workloads still use a preserved legacy source; run amux auth default %s to select this configuration.\n", harness)
+		}
 		for _, w := range p.Limits.Windows {
 			fresh := "current"
 			if time.Now().UnixMilli()-p.Limits.ObservedAt > hp.AccountLimitsTTLMillis {

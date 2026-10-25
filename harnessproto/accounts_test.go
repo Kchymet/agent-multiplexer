@@ -67,3 +67,20 @@ func TestAccountSafeRequestsRejectCeremonyMaterial(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedOnlyPreservesRoutingWithoutExposingSourceChoices(t *testing.T) {
+	s := AccountSnapshot{Version: 1, Defaults: map[string]string{"claude": "claude:host", "codex": "codex:central"}, DefaultRevisions: map[string]uint64{"claude": 9}, Profiles: []AccountProfile{
+		{ID: "claude:host", Harness: "claude", Source: "host"},
+		{ID: "codex:central", Harness: "codex", Source: "central"},
+		{ID: "claude:central", Harness: "claude", Source: "central"},
+		{ID: "claude:central", Harness: "claude", Source: "central"},
+		{ID: "codex:environment", Harness: "codex", Source: "environment"},
+	}}
+	got := s.ManagedOnly()
+	if len(got.Profiles) != 2 || got.Profiles[0].ID != "claude:central" || got.Profiles[1].ID != "codex:central" {
+		t.Fatalf("projection: %+v", got)
+	}
+	if got.Defaults["claude"] != "claude:host" || got.DefaultRevisions["claude"] != 9 || len(s.Profiles) != 5 {
+		t.Fatal("projection changed routing or source state")
+	}
+}

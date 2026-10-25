@@ -149,12 +149,12 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   default: `amux auth login` (Claude `setup-token`) and `amux auth login codex`
   (ChatGPT) sign in once on the host, and the daemon delivers only a session
   credential, never a refresh token, to each authorized session. TUI/web Accounts
-  and `amux auth accounts` show profiles and subscription limits;
-  `amux auth default <harness:source>` selects defaults for new workloads while
+  and `amux auth accounts` show one Claude and one Codex configuration and limits;
+  configuration is through amux CLI/TUI only. `amux auth default <claude|codex>`
+  selects the amux configuration for new workloads while
   existing bindings stay fixed. Legacy `claude.auth` / `codex.auth` settings seed
-  the first defaults. Profiles can also select the previous shared host login (`host`),
-  the older amux Claude login (`shared`) or `environment` (API keys, providers,
-  gateways). Codex MCP credential files stay shared. macOS GitHub
+  the first defaults. Existing host/shared/environment defaults and bindings
+  remain internal compatibility state; web Accounts is read-only. Codex MCP credential files stay shared. macOS GitHub
   authentication uses the daemon broker. Copied config
   can itself contain secrets such as inline MCP tokens; it is readable by the
   receiving session. See [machine accounts](docs/machine-accounts.md) and

@@ -278,3 +278,16 @@ func TestProvideUninstallTakesNoArguments(t *testing.T) {
 		t.Error("uninstall accepted an unknown argument")
 	}
 }
+
+func TestRemoteAccountManagementFlagIsRetired(t *testing.T) {
+	for _, run := range []func([]string) error{provideRun, cmdProvideInstall} {
+		err := run([]string{"--account-manage"})
+		if err == nil || !strings.Contains(err.Error(), "configure accounts through amux CLI/TUI") {
+			t.Fatalf("retired flag: %v", err)
+		}
+	}
+	cfg := parseInstall(t, providercfg.Config{AccountManage: true, AccountStatus: true}, "--name", "updated")
+	if cfg.AccountManage || !cfg.AccountStatus {
+		t.Fatal("legacy management grant preserved or status removed")
+	}
+}

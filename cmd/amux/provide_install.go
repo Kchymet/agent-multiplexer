@@ -39,6 +39,10 @@ func cmdProvideInstall(args []string) error {
 		return err
 	}
 
+	if err := rejectRemoteAccountManagement(f.accountManage); err != nil {
+		return err
+	}
+
 	svc, err := providercfg.Service()
 	if err != nil {
 		return fmt.Errorf("provide install: %w — run `amux provide <addr>` in the foreground instead", err)
@@ -175,7 +179,7 @@ func applyProvideFlags(cfg *providercfg.Config, f *provideFlags, fset *flag.Flag
 	assign("max-panes", func() { cfg.MaxPanes = f.maxPanes })
 	assign("allow-compute", func() { cfg.AllowCompute = f.allowCompute })
 	assign("account-status", func() { cfg.AccountStatus = f.accountStatus })
-	assign("account-manage", func() { cfg.AccountManage = f.accountManage })
+	cfg.AccountManage = false // retire persisted remote management grants on install
 	assign("account-use", func() { cfg.AccountUse = f.accountUse; cfg.AccountUseSet = true })
 	assign("publish-sessions", func() { cfg.PublishSessions = f.publishSes })
 	assign("read-only-sessions", func() { cfg.ReadOnlySessions = f.readOnly })
