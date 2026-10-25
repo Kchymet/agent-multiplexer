@@ -214,7 +214,10 @@ func cmdDoctor() error {
 	// rather than failing the check. What it reports is the whole chain — config,
 	// credential, service, and whether the loop actually reached an orchestrator —
 	// because a provider that is installed but silently rejected looks, from the
-	// outside, exactly like one that works.
+	// outside, exactly like one that works. The providerId it prints is the
+	// physical node's diagnostic id; whether that registration is also a personal
+	// compute pool is the orchestrator's decision (docs/remote-provider.md,
+	// "Compute pools and machines"), so doctor does not claim it.
 	fmt.Println("\nProvider")
 	reportProvider()
 

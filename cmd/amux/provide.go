@@ -59,11 +59,14 @@ var provideSubcommands = map[string]func([]string) error{
 }
 
 func provideUsage() {
-	fmt.Fprint(os.Stderr, `amux provide — run this machine as a remote compute provider
+	fmt.Fprint(os.Stderr, `amux provide — provide this machine as remote compute (with Harness, your personal compute pool)
 
 Provider mode dials out to a remote orchestrator over TLS, registers this
-machine as a compute node, and serves agent panes over that one connection.
-See docs/remote-provider.md.
+machine, and serves agent panes over that one connection. With Harness as the
+orchestrator, a registration owned by your account is your personal compute
+pool of kind "machine", and its pool id is the providerId the orchestrator
+assigns (amux doctor prints it). Grouped and organization pools are made on
+the orchestrator, never here. See docs/remote-provider.md.
 
 usage: amux provide [<orchestrator-addr>] [flags]
        amux provide <command>
@@ -86,7 +89,7 @@ rotating it is one write and no reinstall.
   --max-panes <n>    capability: max concurrent panes
   --allow-compute    allow remote spawn/input/resize/kill (off by default)
   --harness <name>   verify and advertise only this harness (repeat; auto restores discovery)
-  --identity-mode <m> credential source (currently machine only)
+  --identity-mode <m> credential source (machine only: this host's own harness config)
   --label k=v        scheduling label (repeatable)
   --feature <s>      opaque capability feature string (repeatable)
   --publish-sessions  publish this daemon's session inventory and accept lifecycle verbs
@@ -151,7 +154,8 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 }
 
 // provideRun runs provider mode in the foreground: dial out to a remote
-// orchestrator over TLS, register this machine as a compute node, and serve
+// orchestrator over TLS, register this machine (with Harness, an owned
+// registration is the user's personal compute pool of kind machine), and serve
 // harnessproto v2 (spawn/input/resize/kill ⇄ output/exit) over the connection.
 // Panes survive reconnects within the orchestrator's grace window. See
 // docs/remote-provider.md.

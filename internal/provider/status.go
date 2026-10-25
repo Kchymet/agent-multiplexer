@@ -10,7 +10,7 @@ import (
 )
 
 // The provider's connection states, as written to the status file. A machine
-// registered as a compute node has no UI of its own — the status file is how
+// registered with an orchestrator has no UI of its own — the status file is how
 // `amux doctor` (and the user) sees whether the thing is actually connected,
 // rather than guessing from a log tail.
 const (
