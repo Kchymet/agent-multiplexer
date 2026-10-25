@@ -58,6 +58,21 @@ Configurable endpoints (`Config.Endpoint` / `--listen`):
 | `ws://127.0.0.1:<port>` | loopback, colocated clients — now works (Origin omitted); `codexapp.LoopbackEndpoint()` allocates a free port. |
 | `wss://host:port` | cross-machine, **authenticated TLS** — verification never downgraded; a non-loopback `ws://` (no TLS) is refused before dialing. |
 
+On Linux, Codex 0.157.1 also publishes the requested path as a symlink to
+`/tmp/codex-daemon-<uid>/<sha256>`. Because every pane has a private `/tmp`, amux
+binds one short, mode-0700 session directory from its own host
+`/tmp/amux-cx-<uid>/` root at that Codex path. The source key includes both the
+amux data instance and session key. The shared host root and sibling children are
+never mounted. Host-side dialing translates a symlink only when its amux layout,
+deterministic Codex target, real-socket type, owner, and mode 0600 all match; a
+direct socket remains supported for Codex 0.153.4 and 0.154.0. For either form,
+amux atomically hard-links the selected socket inode into a host-only,
+same-filesystem mode-0700 dial directory, validates the pinned entry, connects,
+and removes the temporary link. A writable session cannot redirect the host dial
+by replacing the source leaf or directory after validation. Custom Unix
+endpoints outside amux's generated rendezvous tree retain normal symlink
+behavior.
+
 On macOS, Codex 0.157.1 publishes the requested Unix path as a symlink to a
 physical socket in `/private/tmp/codex-daemon-<uid>/`. Seatbelt permits only the
 session's exact socket and startup lock (including its standalone control
@@ -394,6 +409,31 @@ tests pass unchanged.
   scope and its separately mounted Unix endpoint is reachable across the
   sandbox boundary (handshake succeeds). Socket isolation is tested separately.
 
+**Validated against the digest-pinned official Linux x86_64 Codex 0.157.1
+release, opt-in via `AMUX_TEST_CODEX_01571_BIN` and
+`AMUX_TEST_CODEX_01571_ARCHIVE`:**
+
+- `TestCompatCodex01571ProtectedAttachReconnect` verifies the published archive
+  digest, extracted binary digest, and `codex-cli 0.157.1` version before launch.
+  With an empty home and an unshared network, it initializes the real App Server,
+  resumes the same empty thread from a second protected namespace using the
+  native pagination bootstrap, deliberately drops amux's WebSocket, and races two
+  reconnecting `Ensure` calls. Both return the same supervisor, serving PID, and
+  pinned thread; no model turn or account request is made.
+- `TestScopeMapsOnlyOwnCodexPhysicalSocket` executes real bubblewrap probes: the
+  own physical endpoint connects while the sibling hash, host sibling source,
+  and a symlink alias to that source remain unreachable.
+- `TestDialContextPinsSocketAcrossResolveConnectReplacement` uses two synthetic
+  listeners and a deterministic post-selection barrier for both old direct and
+  relocated sockets. Replacing the source leaf with a peer symlink cannot change
+  the listener reached through the pinned inode.
+- Linux CI retains an official pinned 0.153.4 sandbox launch for the older
+  direct-requested-path transport alongside the 0.157.1 relocation regression.
+
+These fixtures establish local transport compatibility, namespace isolation,
+and reconnect/process identity. They do not establish account authentication,
+model execution, or complete interactive TUI/browser/provider acceptance.
+
 Also confirmed against the schema/CLI: `--listen` accepts `stdio://`/`unix://`/
 `ws://IP:PORT`/`off`; `--remote <ADDR>` is a real global TUI option (with
 `--remote-auth-token-env`); the approval response is `{"decision":"accept"|
@@ -428,6 +468,13 @@ The own directory exists before a pane launches, so a terminal opened before its
 App Server can connect when that server starts. The parent mask also hides peers
 created after the pane starts. Coordinator access to workgroup files does not
 implicitly grant access to members' raw App Server sockets.
+
+For Codex 0.157.1, the same rule applies to its physical listener: every Linux
+Codex pane receives one session child at the fixed daemon-directory spelling in
+its private `/tmp`. The amux host root remains outside the pane, so neither a
+sibling basename nor an absolute/symlink alias to the host source resolves. The
+server and a native attach independently receive the same exact child, while the
+host supervisor maps only the validated rendezvous target.
 
 `TestScopeRejectsSiblingSessionSocket` runs real connections in bubblewrap. It
 checks own access, denied sibling/canonical/proc-alias access, coordinator own vs

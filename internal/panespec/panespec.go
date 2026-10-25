@@ -22,6 +22,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/claudecfg"
 	"amux/internal/codexcfg"
+	"amux/internal/codexsocket"
 	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/launchenv"
@@ -572,6 +573,16 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 			return nil, fmt.Errorf("validate own App Server socket directory: %w", err)
 		}
 		args = append(args, "--bind", ownSocketsSource, ownSockets)
+		if isolationPlatform == "linux" && agent.HarnessFor(s.Agent).Kind() == "codex" {
+			physicalSource, physicalTarget, err := codexsocket.PrepareNamespaceMount(appServerSocketPath(s.ID))
+			if err != nil {
+				return nil, fmt.Errorf("prepare own Codex physical socket mount: %w", err)
+			}
+			// Codex 0.157 binds its listener below this fixed /tmp directory.
+			// The source contains only this session's endpoint; /tmp itself stays
+			// private and no host or sibling Codex daemon directory is mounted.
+			args = append(args, "--bind", physicalSource, physicalTarget)
+		}
 	}
 	// The daemon-private parent is never mounted. Mailbox is read-only, requests
 	// is its only writable overlay, and the independent credential source is
