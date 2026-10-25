@@ -23,6 +23,8 @@ var ErrStale = errors.New("account_revision_changed")
 var ErrBlocked = errors.New("account_binding_blocked")
 
 type Binding struct {
+	// CredentialUnknown requires explicit rebind after an unreadable legacy token.
+	CredentialUnknown bool   `json:"credentialUnknown,omitempty"`
 	DeliveredEpoch    uint64 `json:"deliveredEpoch,omitempty"`
 	ProfileID         string `json:"profileId"`
 	Harness           string `json:"harness"`
@@ -190,11 +192,14 @@ func Bind(session, h string) error {
 		return nil
 	}
 	return Update(func(s *State) error {
+		credentialUnknown := false
 		// Bootstrap the opaque version before any login/logout can replace the
 		// pre-account-service credential. Existing workloads must retain it too.
 		if h == "claude" && s.CredentialVersion[ID(h, "central")] == 0 {
 			if c, err := centralauth.ClaudeStore().Load(); err == nil {
 				s.CredentialVersion[ID(h, "central")] = c.Generation
+			} else if !errors.Is(err, centralauth.ErrNotConfigured) {
+				credentialUnknown = true
 			}
 		}
 		if b, ok := s.Bindings[session]; ok {
@@ -202,7 +207,10 @@ func Bind(session, h string) error {
 				return ErrBlocked
 			}
 			if b.Harness == "claude" && b.Source == "central" && b.CredentialVersion == 0 {
-				b.CredentialVersion = s.CredentialVersion[b.ProfileID]
+				b.CredentialUnknown = b.CredentialUnknown || credentialUnknown
+				if !b.CredentialUnknown {
+					b.CredentialVersion = s.CredentialVersion[b.ProfileID]
+				}
 				s.Bindings[session] = b
 			}
 			return nil
@@ -211,7 +219,7 @@ func Bind(session, h string) error {
 		if !ok {
 			return ErrBlocked
 		}
-		s.Bindings[session] = Binding{ProfileID: p.ID, Harness: h, Source: p.Source, ExpectedAccount: p.Identity.AccountID, CredentialVersion: s.CredentialVersion[p.ID], Revision: 1, Origin: "machine-default"}
+		s.Bindings[session] = Binding{CredentialUnknown: credentialUnknown && p.Source == "central", ProfileID: p.ID, Harness: h, Source: p.Source, ExpectedAccount: p.Identity.AccountID, CredentialVersion: s.CredentialVersion[p.ID], Revision: 1, Origin: "machine-default"}
 		return nil
 	})
 }
@@ -241,7 +249,7 @@ func Delivery(session, h string) (Binding, hp.AccountProfile, error) {
 	}
 	b := s.Bindings[session]
 	p := s.Profiles[b.ProfileID]
-	if b.Source != amuxcfg.AuthCentral || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
+	if b.CredentialUnknown || b.Source != amuxcfg.AuthCentral || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
 		return b, p, ErrBlocked
 	}
 	return b, p, nil
@@ -258,7 +266,7 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 	return Update(func(s *State) error {
 		return admit(func() error {
 			b, ok := s.Bindings[session]
-			if !ok || b.Revision != revision {
+			if !ok || b.CredentialUnknown || b.Revision != revision {
 				return ErrBlocked
 			}
 			p := s.Profiles[b.ProfileID]
