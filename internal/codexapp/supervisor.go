@@ -116,7 +116,11 @@ type Supervisor struct {
 	mu       sync.Mutex
 	proc     *exec.Cmd
 	procDone chan struct{} // closed by the sole cmd.Wait goroutine
-	closed   bool
+	// rpcDone belongs to rpc and closes only after that transport's read loop has
+	// retired its connection-scoped state. Publishing the pair under mu lets real
+	// process exit drain the current reader before closing the serving lifetime.
+	rpcDone chan struct{}
+	closed  bool
 	// reconnecting keeps a newly attached socket unpublished until initialize and
 	// exact-thread resume both succeed.
 	reconnecting bool
@@ -382,16 +386,23 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	go func() {
 		_ = cmd.Wait()
 		close(procDone)
-		// Process exit is the real supervisor lifetime boundary. Force the current
-		// client read loop to observe it; that loop drains any preceding frames,
-		// then closes subscribers and the durable writer. A mere transport loss
-		// while the process remains live takes the reconnect path instead.
+		// Process exit is the real supervisor lifetime boundary. Force any current
+		// client reader to observe it and wait for its preceding frames and cleanup
+		// to drain before closing subscribers and the durable writer. rpcDone may
+		// already be closed when transport loss retired the reader before process
+		// exit; serving teardown must not depend on another Ensure/reconnect.
 		s.mu.Lock()
 		rpc := s.rpc
+		rpcDone := s.rpcDone
 		s.mu.Unlock()
 		if rpc != nil {
 			_ = rpc.close()
 		}
+		if rpcDone != nil {
+			<-rpcDone
+		}
+		s.hub.close()
+		s.closeLog()
 	}()
 
 	conn, err := s.dialWithRetry(startCtx)
@@ -469,36 +480,38 @@ func (s *Supervisor) attachTransport(ctx context.Context, transport msgConn) err
 	rpc := newRPCConn(transport)
 	rpc.onNotify = s.onNotify
 	rpc.onRequest = s.onRequest
+	runCtx, cancel := context.WithCancel(ctx)
+	rpcDone := make(chan struct{})
 	s.mu.Lock()
 	if s.closed || s.interrupted {
 		s.mu.Unlock()
+		cancel()
 		_ = transport.Close()
 		return errClosed
 	}
+	// Process-less attaches are used by protocol tests. A process-backed
+	// supervisor, however, must never publish a socket after its real lifetime
+	// boundary: this also fences the exit watcher snapshot against reconnect.
+	if s.proc != nil && !s.processRunningLocked() {
+		s.mu.Unlock()
+		cancel()
+		_ = transport.Close()
+		return errors.New("codexapp: App Server process exited")
+	}
 	s.rpc = rpc
-	s.mu.Unlock()
-
-	runCtx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
+	s.rpcDone = rpcDone
 	s.runCancel = cancel
 	s.runCtx = runCtx
 	s.mu.Unlock()
 	go func() {
+		defer close(rpcDone)
 		_ = rpc.run(runCtx)
 		// A transport can disappear while the App Server and a native client keep
 		// running. Fail only work owned by this exact connection; retain the event
 		// hub and process so Manager.Ensure can rejoin them. A stale read loop that
-		// finishes after a reconnect must not disturb the replacement transport.
-		s.mu.Lock()
-		current := s.rpc == rpc
-		s.mu.Unlock()
-		if current {
-			s.failTurn()
-			if !s.processRunning() {
-				s.hub.close()
-				s.closeLog()
-			}
-		}
+		// finishes after a reconnect must not disturb the replacement transport;
+		// retireTransport fences that identity check and turn cleanup under one lock.
+		s.retireTransport(rpc)
 	}()
 
 	return nil
@@ -716,8 +729,13 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 // process. cmd.Wait has exactly one owner and closes procDone on real exit.
 func (s *Supervisor) processRunning() bool {
 	s.mu.Lock()
-	proc, done := s.proc, s.procDone
+	running := s.processRunningLocked()
 	s.mu.Unlock()
+	return running
+}
+
+func (s *Supervisor) processRunningLocked() bool {
+	proc, done := s.proc, s.procDone
 	if proc == nil || proc.Process == nil || done == nil {
 		return false
 	}
@@ -777,6 +795,7 @@ func (s *Supervisor) Close() error {
 	startCancel := s.startCancel
 	cancel := s.runCancel
 	rpc := s.rpc
+	rpcDone := s.rpcDone
 	s.mu.Unlock()
 
 	if startCancel != nil {
@@ -787,6 +806,9 @@ func (s *Supervisor) Close() error {
 	}
 	if rpc != nil {
 		_ = rpc.close()
+	}
+	if rpcDone != nil {
+		<-rpcDone
 	}
 	s.hub.close()
 	s.closeLog()
@@ -1378,21 +1400,55 @@ func (s *Supervisor) abandonLocalTurn(gen uint64) {
 	s.mu.Unlock()
 }
 
-// failTurn unblocks a pending Prompt if the transport closes mid-turn, and drops the
-// local ownership state so a late completion can't deliver again.
-func (s *Supervisor) failTurn() {
-	s.mu.Lock()
+// failTurnLocked drops a pending Prompt's local ownership state. Caller holds mu;
+// the returned waiter is notified after releasing it.
+func (s *Supervisor) failTurnLocked() chan *turnResult {
 	ch := s.turnDone
 	s.turnDone = nil
 	s.ownTurn = ""
 	s.earlyTerm = nil
 	s.curTurn = ""
+	return ch
+}
+
+func notifyDisconnected(ch chan *turnResult) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- &turnResult{StopReason: "disconnected", IsError: true}:
+	default:
+	}
+}
+
+// failTurn unblocks a pending Prompt if the transport closes mid-turn, and drops the
+// local ownership state so a late completion can't deliver again.
+func (s *Supervisor) failTurn() {
+	s.mu.Lock()
+	ch := s.failTurnLocked()
 	s.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- &turnResult{StopReason: "disconnected", IsError: true}:
-		default:
-		}
+	notifyDisconnected(ch)
+}
+
+// retireTransport applies read-loop cleanup only while rpc is still the published
+// connection. The identity check and turn mutation are one critical section, so a
+// replacement cannot be published between them and then lose its active turn to a
+// stale reader. Hub/log closure is reserved for a real process boundary (or the
+// process-less attach used by tests); a live process retains both for reconnect.
+func (s *Supervisor) retireTransport(rpc *rpcConn) {
+	s.mu.Lock()
+	if s.rpc != rpc {
+		s.mu.Unlock()
+		return
+	}
+	ch := s.failTurnLocked()
+	processRunning := s.processRunningLocked()
+	s.mu.Unlock()
+
+	notifyDisconnected(ch)
+	if !processRunning {
+		s.hub.close()
+		s.closeLog()
 	}
 }
 

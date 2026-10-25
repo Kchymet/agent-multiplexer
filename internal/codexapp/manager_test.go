@@ -263,6 +263,91 @@ func TestManagerReconnectsTransportWithoutReplacingLiveProcess(t *testing.T) {
 	}
 }
 
+func TestManagerProcessExitAfterRetiredTransportClosesServingLifetime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	connected := make(chan *fakeServer, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		connected <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+
+	m := NewManager(context.Background(), "")
+	defer m.Shutdown()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	sup, err := m.Ensure(context.Background(), "exit-after-loss", "", nil, []string{"sleep", "60"}, endpoint, "gpt-main", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := <-connected
+
+	// Open both serving resources before loss. The control reader must retire
+	// while the child is still alive, leaving them available for a reconnect.
+	sup.emit(notice("info", "open durable log"))
+	sup.logMu.Lock()
+	logOpen := sup.logW != nil
+	sup.logMu.Unlock()
+	if !logOpen {
+		t.Fatal("event log did not open")
+	}
+	sup.mu.Lock()
+	readerDone := sup.rpcDone
+	proc := sup.proc.Process
+	sup.mu.Unlock()
+	fs.close()
+	select {
+	case <-readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("transport reader did not retire before process exit")
+	}
+	if !sup.processRunning() {
+		t.Fatal("synthetic App Server exited with its control transport")
+	}
+	stream := sup.Subscribe(context.Background(), sup.hub.lastSeq())
+	select {
+	case _, ok := <-stream:
+		if !ok {
+			t.Fatal("transport loss closed serving lifetime before process exit")
+		}
+	default:
+	}
+
+	// No Ensure/reconnect follows. Real process exit must independently retire
+	// the hub and log even though closing rpc is now an idempotent no-op and no
+	// read loop remains to perform teardown.
+	if err := proc.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case _, ok := <-stream:
+		if ok {
+			t.Fatal("received an event after App Server process exit")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process exit after retired transport left subscriber open")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		sup.logMu.Lock()
+		logClosed := sup.logW == nil
+		sup.logMu.Unlock()
+		if logClosed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("process exit after retired transport left event log open")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestManagerEmptyLookups checks the no-supervisor paths: Get misses, Live is
 // empty, and Close is a harmless no-op. These are the states the daemon hits on
 // every steer/poll for a session that is not (or not yet) structured.
