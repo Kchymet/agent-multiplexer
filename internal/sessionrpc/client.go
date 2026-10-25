@@ -247,7 +247,7 @@ func (c *Client) awaitResponse(ctx context.Context, credential access.Credential
 		}
 		select {
 		case <-ctx.Done():
-			return Response{}, fmt.Errorf("%w: %v", ErrIndeterminate, ctx.Err())
+			return Response{}, fmt.Errorf("%w: %w", ErrIndeterminate, ctx.Err())
 		case <-ticker.C:
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -274,6 +275,9 @@ func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd,
 			case <-ctx.Done():
 			}
 			err := r.requireVerified(ctx)
+			if err == nil && !strings.Contains(r.result(), "Process running with session ID") {
+				err = fmt.Errorf("native fixture did not exercise yielded-process collection")
+			}
 			_ = cmd.Process.Kill()
 			_ = terminal.Close()
 			_ = cmd.Wait()
@@ -406,17 +410,41 @@ func (r *surfaceRuntime) serve(w http.ResponseWriter, req *http.Request) {
 	}
 	var input []map[string]any
 	_ = json.Unmarshal(body["input"], &input)
+	var combined strings.Builder
+	lastOutput := ""
+	outputs := 0
 	for _, item := range input {
 		if item["type"] == "function_call_output" {
 			out, _ := item["output"].(string)
-			if !strings.Contains(out, "Process exited with code 0") || !strings.Contains(out, "marked done: archived own") {
-				http.Error(w, "fixture tool did not return confirmed success: "+out, 400)
+			combined.WriteString(out)
+			combined.WriteByte('\n')
+			lastOutput = out
+			outputs++
+		}
+	}
+	if outputs > 0 {
+		// exec_command legitimately yields before the full CLI acceptance
+		// script finishes. Poll the same process; never rerun its mutations.
+		for _, line := range strings.Split(lastOutput, "\n") {
+			if raw, ok := strings.CutPrefix(line, "Process running with session ID "); ok {
+				id, err := strconv.Atoi(strings.TrimSpace(raw))
+				if err != nil || id <= 0 {
+					http.Error(w, "invalid fixture tool session", 400)
+					return
+				}
+				r.codexToolCall(w, "write_stdin", fmt.Sprintf("call_fixture_poll_%d", outputs), map[string]any{
+					"session_id": id, "chars": "", "yield_time_ms": 1000,
+				})
 				return
 			}
-			r.accept(out)
-			r.codexFinal(w)
+		}
+		if !strings.Contains(lastOutput, "Process exited with code 0") || !strings.Contains(combined.String(), "marked done: archived own") {
+			http.Error(w, "fixture tool did not return confirmed success: "+lastOutput, 400)
 			return
 		}
+		r.accept(combined.String())
+		r.codexFinal(w)
+		return
 	}
 	var tools []struct {
 		Name string `json:"name"`
@@ -432,15 +460,21 @@ func (r *surfaceRuntime) serve(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "exec_command not advertised", 400)
 		return
 	}
-	args, _ := json.Marshal(map[string]any{"cmd": r.command, "workdir": r.dir, "shell": "/bin/sh", "login": false, "sandbox_permissions": "use_default", "yield_time_ms": 10000})
-	item := map[string]any{"id": "fc_fixture", "type": "function_call", "status": "completed", "call_id": "call_fixture", "name": "exec_command", "arguments": string(args)}
+	// Exercise the asynchronous result contract on fast hosts as well as CI.
+	r.codexToolCall(w, "exec_command", "call_fixture", map[string]any{"cmd": r.command, "workdir": r.dir, "shell": "/bin/sh", "login": false, "sandbox_permissions": "use_default", "yield_time_ms": 1})
+}
+
+func (r *surfaceRuntime) codexToolCall(w http.ResponseWriter, name, callID string, arguments map[string]any) {
+	args, _ := json.Marshal(arguments)
+	itemID := "fc_" + callID
+	item := map[string]any{"id": itemID, "type": "function_call", "status": "completed", "call_id": callID, "name": name, "arguments": string(args)}
 	writeSSE(w, false, []map[string]any{
-		{"type": "response.created", "response": map[string]any{"id": "resp_fixture", "status": "in_progress"}},
+		{"type": "response.created", "response": map[string]any{"id": "resp_" + callID, "status": "in_progress"}},
 		{"type": "response.output_item.added", "output_index": 0, "item": item},
-		{"type": "response.function_call_arguments.delta", "item_id": "fc_fixture", "output_index": 0, "delta": string(args)},
-		{"type": "response.function_call_arguments.done", "item_id": "fc_fixture", "output_index": 0, "arguments": string(args)},
+		{"type": "response.function_call_arguments.delta", "item_id": itemID, "output_index": 0, "delta": string(args)},
+		{"type": "response.function_call_arguments.done", "item_id": itemID, "output_index": 0, "arguments": string(args)},
 		{"type": "response.output_item.done", "output_index": 0, "item": item},
-		{"type": "response.completed", "response": map[string]any{"id": "resp_fixture", "status": "completed", "output": []any{item}}},
+		{"type": "response.completed", "response": map[string]any{"id": "resp_" + callID, "status": "completed", "output": []any{item}}},
 	})
 }
 func (r *surfaceRuntime) accept(output string) {
@@ -530,5 +564,90 @@ func replaceNativeTestTool(t *testing.T, candidate, sessionID string) {
 	}
 	if err := os.Rename(staged, dest); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Reproduce the native CI result: the long shell script yielded after ten
+// seconds. A running result is neither a failed command nor confirmed success.
+func TestSurfaceRuntimePollsYieldedCodexCommand(t *testing.T) {
+	r := &surfaceRuntime{mode: "codex", verified: make(chan struct{})}
+	input := []map[string]any{}
+	call := func(out string) *httptest.ResponseRecorder {
+		t.Helper()
+		input = append(input, map[string]any{"type": "function_call_output", "output": out})
+		body, _ := json.Marshal(map[string]any{"input": input})
+		w := httptest.NewRecorder()
+		r.serve(w, httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body)))
+		return w
+	}
+	for i, out := range []string{
+		"Wall time: 10.0008 seconds\nProcess running with session ID 64966\nOutput:\namux agent events own --after 0",
+		"Process running with session ID 64966\nOutput:\nmarked done: archived own",
+	} {
+		w := call(out)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"write_stdin"`) || strings.Contains(w.Body.String(), `"name":"exec_command"`) {
+			t.Fatalf("yield was failed or command restarted: %d %s", w.Code, w.Body)
+		}
+		var args map[string]any
+		for _, line := range strings.Split(w.Body.String(), "\n") {
+			data, ok := strings.CutPrefix(line, "data: ")
+			if !ok {
+				continue
+			}
+			var event struct {
+				Type      string `json:"type"`
+				Arguments string `json:"arguments"`
+				ItemID    string `json:"item_id"`
+			}
+			if json.Unmarshal([]byte(data), &event) == nil && event.Type == "response.function_call_arguments.done" {
+				if event.ItemID != fmt.Sprintf("fc_call_fixture_poll_%d", i+1) {
+					t.Fatal("poll reused its call id")
+				}
+				if err := json.Unmarshal([]byte(event.Arguments), &args); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if args["session_id"] != float64(64966) || args["chars"] != "" {
+			t.Fatalf("poll changed the running process: %v", args)
+		}
+		select {
+		case <-r.verified:
+			t.Fatal("running tool accepted prematurely")
+		default:
+		}
+	}
+	w := call("Process exited with code 0\nOutput:")
+	if w.Code != http.StatusOK {
+		t.Fatalf("final result: %d %s", w.Code, w.Body)
+	}
+	select {
+	case <-r.verified:
+	default:
+		t.Fatal("completed tool was not accepted")
+	}
+	if !strings.Contains(r.result(), "marked done: archived own") {
+		t.Fatal("lost prior output")
+	}
+}
+
+func TestSurfaceRuntimeRejectsUnconfirmedCodexCompletion(t *testing.T) {
+	for _, out := range []string{
+		"Process exited with code 0\nOutput: no acknowledgement",
+		"Process exited with code 1\nmarked done: archived own",
+		"Process running with session ID invalid",
+	} {
+		r := &surfaceRuntime{mode: "codex", verified: make(chan struct{})}
+		body, _ := json.Marshal(map[string]any{"input": []any{map[string]any{"type": "function_call_output", "output": out}}})
+		w := httptest.NewRecorder()
+		r.serve(w, httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("unconfirmed tool accepted: %d %s", w.Code, w.Body)
+		}
+		select {
+		case <-r.verified:
+			t.Fatal("unconfirmed result accepted")
+		default:
+		}
 	}
 }
