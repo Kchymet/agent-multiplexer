@@ -518,6 +518,9 @@ func (m *model) renderAccounts() string {
 			if harness == "claude" {
 				source = "statusline advisory; identity unverified"
 			}
+			if len(p.limits) > 2 {
+				source += fmt.Sprintf(" · %d more windows in details", len(p.limits)-2)
+			}
 			lines = append(lines, dimStyle.Render("  "+source))
 		}
 		if s.snapshot.legacyDefaults[harness] {

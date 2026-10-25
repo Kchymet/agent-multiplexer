@@ -20,11 +20,11 @@
                       │ five_hour: available                                                     │·····················
                       │   Used: 67% of the reported window                                       │·····················
                       │   Source:   Confidence:                                                  │·····················
- Accounts · left      │   Observed: 2026-10-25 18:26 UTC  Resets: 2030-01-02 03:04 UTC           │·····················
+ Accounts · left      │   Observed: 2026-10-25 18:36 UTC  Resets: 2030-01-02 03:04 UTC           │·····················
  Claude               │ seven_day: available                                                     │·····················
  5h 77% · 7d 77%      │   Used: 67% of the reported window                                       │·····················
  Codex                │   Source:   Confidence:                                                  │·····················
- 5h 33% · 7d 33%      │   Observed: 2026-10-25 18:26 UTC  Resets: 2030-01-05 03:04 UTC           │·····················
+ 5h 33% · 7d 33%      │   Observed: 2026-10-25 18:36 UTC  Resets: 2030-01-05 03:04 UTC           │·····················
  ↵ open  ↑↓ move ─────│ PgUp/PgDn scroll · Esc close  5–26/26                                    │·····················
  Space fold/unfold ───╰──────────────────────────────────────────────────────────────────────────╯·····················
  / search archived ───────│work 28 · 界 ···············································································

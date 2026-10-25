@@ -23,7 +23,7 @@
  Accounts · left      │ five_hour: stale                                                         │·····················
  Claude: legacy defaul│   Used: 23% of the reported window                                       │·····················
  5h stale · 7d 77%    │   Source:   Confidence:                                                  │·····················
- Codex                │   Observed: 2026-10-25 18:26 UTC  Resets: 2030-01-02 03:04 UTC           │·····················
+ Codex                │   Observed: 2026-10-25 18:36 UTC  Resets: 2030-01-02 03:04 UTC           │·····················
  API · not applicable │ seven_day: available                                                     │·····················
  ↵ open  ↑↓ move ─────│ PgUp/PgDn scroll · Esc close  1–22/25                                    │·····················
  Space fold/unfold ───╰──────────────────────────────────────────────────────────────────────────╯·····················
