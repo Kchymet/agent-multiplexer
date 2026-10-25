@@ -3,12 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"amux/internal/access"
 	"amux/internal/core"
 	"amux/internal/sessionrpc"
+	"amux/internal/source"
 	"amux/internal/store"
 	"amux/internal/wsops"
 )
@@ -266,98 +270,174 @@ func TestHostArchiveUsesStoredMembershipAndMemberDoneStaysLocal(t *testing.T) {
 }
 
 func TestWorkgroupRestorePartialMemberRegrantRemainsFencedAndRetryable(t *testing.T) {
-	d, runtime, principals, _ := archiveGroupFixture(t)
-	ctx := context.Background()
-	if err := wsops.SetArchived(ctx, "root", true); err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// Model a root runtime that survived shutdown. Member regrant succeeds,
-	// but failure to prove the root quiescent must keep the whole group fenced.
-	eng := d.engine.(*fakeEngine)
-	eng.running("root")
-	eng.killRefuses = true
-	action := core.Action{Action: core.ActionSetArchived, ID: "root", Fields: map[string]string{"archived": "false"}}
-	if got := d.handle(ctx, action); got.OK {
-		t.Fatal("restore succeeded without root quiescence")
-	}
-	current, err := d.authority.Current(ctx, access.SubjectSession, "member")
-	if err != nil || current.Generation <= principals["member"].Generation {
-		t.Fatalf("partial member publication not reached: %+v %v", current, err)
-	}
-	cred, err := access.LoadCredential(d.authority.CredentialDir(access.SubjectSession, "member"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QuerySnapshot}
-	if err := runtime.authorize(ctx, credentialPrincipal(cred), call); err == nil {
-		t.Fatal("partial restore granted member authority before root restored")
-	}
-	if _, _, err := d.sessionAccessForLaunch(ctx, "member"); err == nil {
-		t.Fatal("partial restore allowed member launch")
-	}
-	db, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	root, _, err := db.GetSession("root")
-	if err != nil || !root.Archived {
-		t.Fatalf("failed restore lost durable parent archive: %+v %v", root, err)
-	}
-	member, _, err := db.GetSession("member")
-	if err != nil || member.Archived {
-		t.Fatalf("restore overwrote independent member state: %+v %v", member, err)
-	}
-	eng.killRefuses = false
-	if err := runtime.reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.authority.Valid(ctx, credentialPrincipal(cred)); err == nil {
-		t.Fatal("reconcile retained partial successor")
-	}
-	if got := d.handle(ctx, action); !got.OK {
-		t.Fatalf("explicit group restore retry failed: %+v", got)
-	}
-	for _, id := range []string{"root", "member"} {
-		if _, _, err := d.sessionAccessForLaunch(ctx, id); err != nil {
-			t.Fatalf("restored %s launch: %v", id, err)
-		}
-	}
-	done, _, err := db.GetSession("done")
-	if err != nil || !done.Archived || done.ArchivedAt != 123 {
-		t.Fatalf("retry revived independently completed member: %+v %v", done, err)
+	for _, failure := range []string{"root quiesce", "second member regrant"} {
+		t.Run(failure, func(t *testing.T) {
+			d, runtime, principals, _ := archiveGroupFixture(t)
+			ctx := context.Background()
+			eligible := []string{"root", "member"}
+			if failure == "second member regrant" {
+				session := store.Session{ID: "member2", RootID: "root", Agent: "claude", Created: 1, Dir: filepath.Join(core.SessionsDir(), "root", "member2")}
+				if err := os.MkdirAll(session.Dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				db, err := store.Open()
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = db.PutSession(session)
+				db.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := d.authority.EnsureSession(ctx, session.ID, session.Dir); err != nil {
+					t.Fatal(err)
+				}
+				eligible = append(eligible, "member2")
+			}
+			if err := wsops.SetArchived(ctx, "root", true); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			eng := d.engine.(*fakeEngine)
+			repair := func() { eng.killRefuses = false }
+			if failure == "root quiesce" {
+				eng.running("root")
+				eng.killRefuses = true
+			} else {
+				// Force member B's actual regrant to fail after member A succeeds.
+				// Created order makes B follow A in the store's member iteration.
+				dir := d.authority.CredentialDir(access.SubjectSession, "member2")
+				saved := dir + ".saved"
+				if err := os.Rename(dir, saved); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, []byte("blocked credential directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				repair = func() {
+					if err := os.Remove(dir); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(saved, dir); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			action := core.Action{Action: core.ActionSetArchived, ID: "root", Fields: map[string]string{"archived": "false"}}
+			got := d.handle(ctx, action)
+			if got.OK {
+				t.Fatalf("restore succeeded despite %s failure", failure)
+			}
+			if failure == "second member regrant" {
+				if !strings.Contains(got.Error, "restore workgroup member member2: restore session credential regrant") {
+					t.Fatalf("wrong member failure path: %+v", got)
+				}
+				if _, err := d.authority.Current(ctx, access.SubjectSession, "member2"); !errors.Is(err, access.ErrRevoked) {
+					t.Fatalf("failed member regrant published a credential: %v", err)
+				}
+			}
+			current, err := d.authority.Current(ctx, access.SubjectSession, "member")
+			if err != nil || current.Generation <= principals["member"].Generation {
+				t.Fatalf("partial member publication not reached: %+v %v", current, err)
+			}
+			cred, err := access.LoadCredential(d.authority.CredentialDir(access.SubjectSession, "member"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QuerySnapshot}
+			if err := runtime.authorize(ctx, credentialPrincipal(cred), call); err == nil {
+				t.Fatal("partial restore granted member authority before root restored")
+			}
+			if _, _, err := d.sessionAccessForLaunch(ctx, "member"); err == nil {
+				t.Fatal("partial restore allowed member launch")
+			}
+			db, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			root, _, err := db.GetSession("root")
+			if err != nil || !root.Archived {
+				t.Fatalf("failed restore lost durable parent archive: %+v %v", root, err)
+			}
+			member, _, err := db.GetSession("member")
+			if err != nil || member.Archived {
+				t.Fatalf("restore overwrote independent member state: %+v %v", member, err)
+			}
+			repair()
+			if err := runtime.reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.authority.Valid(ctx, credentialPrincipal(cred)); err == nil {
+				t.Fatal("reconcile retained partial successor")
+			}
+			if got := d.handle(ctx, action); !got.OK {
+				t.Fatalf("explicit group restore retry failed: %+v", got)
+			}
+			for _, id := range eligible {
+				if _, _, err := d.sessionAccessForLaunch(ctx, id); err != nil {
+					t.Fatalf("restored %s launch: %v", id, err)
+				}
+			}
+			done, _, err := db.GetSession("done")
+			if err != nil || !done.Archived || done.ArchivedAt != 123 {
+				t.Fatalf("retry revived independently completed member: %+v %v", done, err)
+			}
+		})
 	}
 }
 
-func TestHostMemberToggleUsesIndependentArchiveFlag(t *testing.T) {
+func TestHostArchiveToggleRefusesFencedMemberWithoutChangingCompletion(t *testing.T) {
 	d, _, _, _ := archiveGroupFixture(t)
 	ctx := context.Background()
 	if err := wsops.SetArchived(ctx, "root", true); err != nil {
 		t.Fatal(err)
 	}
-	// Parent archive affects runtime eligibility, not the member's own toggle.
-	got := d.handle(ctx, core.Action{Action: core.ActionArchive, ID: "member"})
-	if !got.OK {
-		t.Fatalf("member archive under archived group: %+v", got)
+	rows, err := source.NewWorkspace().Poll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenced := false
+	for _, row := range rows {
+		if row.ID == "member" {
+			fenced = row.Archived && row.Section == core.SectionArchived
+		}
+	}
+	if !fenced {
+		t.Fatal("fixture does not reproduce inherited archive rail row")
 	}
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	member, _, err := db.GetSession("member")
-	if err != nil || !member.Archived {
-		t.Fatalf("member toggle changed wrong state: %+v %v", member, err)
+	// Both the rail x binding and archive-search restore emit this action.
+	for _, id := range []string{"member", "done"} {
+		before, _, err := db.GetSession(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := d.handle(ctx, core.Action{Action: core.ActionArchive, ID: id})
+		if got.OK || !strings.Contains(got.Error, `restore workgroup "root" before restoring member`) {
+			t.Fatalf("fenced %s toggle: %+v", id, got)
+		}
+		after, _, err := db.GetSession(id)
+		if err != nil || before != after {
+			t.Fatalf("refused toggle changed %s: before=%+v after=%+v err=%v", id, before, after, err)
+		}
 	}
-	got = d.handle(ctx, core.Action{Action: core.ActionSetArchived, ID: "root", Fields: map[string]string{"archived": "false"}})
+	got := d.handle(ctx, core.Action{Action: core.ActionArchive, ID: "root"})
 	if !got.OK {
 		t.Fatalf("restore group: %+v", got)
 	}
-	member, _, err = db.GetSession("member")
-	if err != nil || !member.Archived {
-		t.Fatalf("group restore revived separately archived member: %+v %v", member, err)
+	member, _, err := db.GetSession("member")
+	if err != nil || member.Archived {
+		t.Fatalf("refused member toggle prevented later group restore: %+v %v", member, err)
+	}
+	done, _, err := db.GetSession("done")
+	if err != nil || !done.Archived || done.ArchivedAt != 123 {
+		t.Fatalf("group restore changed completed member: %+v %v", done, err)
 	}
 }

@@ -231,6 +231,11 @@ Goal completion alone never authorizes archive.
   has no general control access. Post-commit delivery failures still clean up;
   the caller must not claim success without confirmation from the daemon.
 
+The member `archived` field in `amux workgroup ls --json` (`QuerySessions`) is
+its independent completion flag. The rail and archive search also reflect parent
+archival; authorization and launch checks use that effective state. Restore the
+workgroup first when a member is shown archived because of its parent.
+
 > Distinct from `status idle` (§5.1/§8): `idle` means "no live turn right now" and
 > flips back to `running` on the next message; `done` means "this session's job is
 > finished" and takes it off the active rail until a human restores it. Use `done`

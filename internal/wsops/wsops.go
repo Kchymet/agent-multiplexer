@@ -460,6 +460,13 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error
 		return "", fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
 	oldRoot := a.RootID
+	source, found, err := db.GetSession(oldRoot)
+	if err != nil {
+		return "", err
+	}
+	if found && source.Archived {
+		return "", fmt.Errorf("restore workgroup %q before moving member %q", oldRoot, agentID)
+	}
 
 	created := ""
 	if strings.TrimSpace(targetRootID) == "" {
@@ -942,12 +949,26 @@ func ToggleArchived(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	cur := false
-	if s, ok, _ := db.GetSession(id); ok {
-		cur = s.Archived
+	defer db.Close()
+	s, ok, err := db.GetSession(id)
+	if err != nil {
+		return err
 	}
-	db.Close()
-	return SetArchived(ctx, id, !cur)
+	if !ok {
+		return fmt.Errorf("no such workgroup or agent %q", id)
+	}
+	if !s.IsRoot() {
+		parent, found, err := db.GetSession(s.RootID)
+		if err != nil {
+			return err
+		}
+		// The rail and archive search show inherited archive state. Toggling
+		// a fenced member must not turn a restore attempt into completion.
+		if found && parent.Archived {
+			return fmt.Errorf("restore workgroup %q before restoring member %q", parent.ID, id)
+		}
+	}
+	return SetArchived(ctx, id, !s.Archived)
 }
 
 // Rename sets a session's display name.
