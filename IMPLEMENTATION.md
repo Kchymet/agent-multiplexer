@@ -59,10 +59,14 @@ broad isolation-dependency work.
 3. When the host WebSocket client sees a symlink at an amux rendezvous path,
    accept it only if the path has the exact amux session layout and the target
    equals Codex's deterministic physical path for that rendezvous. Map that one
-   basename into the session's host physical directory. Reject sibling hashes,
-   relative links, extra aliases, redirected physical directories, and malformed
-   session-key paths. A direct Unix socket remains unchanged for Codex 0.153.4
-   and 0.154.0.
+   basename into the session's host physical directory. Before connecting, use
+   `linkat` without symlink following to pin the selected socket inode into a
+   same-filesystem, host-only mode-0700 dial directory; validate and connect to
+   that pinned entry, then remove it. This closes the mutable-leaf race for both
+   relocated and older direct sockets. Reject sibling hashes, relative links,
+   extra aliases, redirected physical directories, and malformed session-key
+   paths. Custom Unix endpoints outside the generated amux tree retain ordinary
+   Unix symlink behavior.
 4. Leave Supervisor and Manager lifecycle code unchanged. Start still removes
    only the stale rendezvous entry under the per-session start gate; Codex owns
    physical-socket cleanup and its startup lock. Reconnect continues to attach a
@@ -73,6 +77,9 @@ broad isolation-dependency work.
 - Unit-test direct-socket compatibility and exact 0.157.1 symlink resolution.
 - Deny sibling-hash, relative-link, noncanonical alias, redirected-source, and
   malformed-layout cases.
+- At a deterministic barrier between socket selection and connect, replace both
+  a direct and relocated source leaf with a symlink to a second listener and
+  prove the connection remains pinned to the originally selected listener.
 - Exercise real bubblewrap namespaces to prove an own physical socket is
   connectable while a sibling physical socket and host aliases are absent.
 - With the digest-verified official 0.157.1 binary and an empty home, execute the
@@ -118,7 +125,9 @@ remain separate.
 - `TestScopeMapsOnlyOwnCodexPhysicalSocket` passed real bubblewrap probes for own
   access and sibling/hash/host-source/symlink-alias denial.
 - Focused unit packages passed for exact symlink resolution, old direct sockets,
-  and redirected/malformed alias denial.
+  redirected/malformed alias denial, and deterministic two-listener replacement
+  races for both direct and relocated endpoints. The host reached the original
+  pinned socket after the source leaf was replaced; it never reached the peer.
 - Ubuntu namespace CI now runs the exact physical-boundary probe, the existing
   sandbox launch against pinned 0.153.4, and the digest-pinned 0.157.1 protected
   initialize/native-bootstrap/reconnect fixture.

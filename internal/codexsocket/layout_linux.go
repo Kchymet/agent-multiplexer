@@ -5,15 +5,18 @@
 package codexsocket
 
 import (
+	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	"amux/internal/core"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -44,62 +47,125 @@ func PrepareNamespaceMount(rendezvous string) (source, target string, err error)
 	return source, sharedDaemonDir(), nil
 }
 
-// ResolveDialPath preserves direct sockets used by Codex <=0.154. When a
-// generated amux rendezvous is a symlink (Codex >=0.157), it accepts only the
-// exact deterministic alias Codex derives for that rendezvous and maps it into
-// the corresponding session's private host directory.
-func ResolveDialPath(rendezvous string) (string, error) {
-	info, err := os.Lstat(rendezvous)
-	if errors.Is(err, os.ErrNotExist) {
-		return rendezvous, nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return rendezvous, nil
-	}
-
+// DialContext pins the socket inode for generated amux rendezvous paths before
+// connecting. A session may replace entries in its writable socket directory;
+// dialing a validated pathname would therefore leave a resolve/connect race.
+// Custom endpoints outside the generated tree retain normal Unix-dial behavior.
+func DialContext(ctx context.Context, rendezvous string) (net.Conn, error) {
 	key, owned, err := layoutKey(rendezvous)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if !owned {
-		// Custom unix:// endpoints historically followed ordinary filesystem
-		// symlinks. Only generated amux rendezvous paths use this translation.
-		return rendezvous, nil
+		return (&net.Dialer{}).DialContext(ctx, "unix", rendezvous)
 	}
+	return dialManagedContext(ctx, rendezvous, key, nil)
+}
+
+// dialManagedContext exposes a deterministic post-pin barrier to package tests.
+// The production path always supplies nil.
+func dialManagedContext(ctx context.Context, rendezvous, key string, afterPin func()) (net.Conn, error) {
+	info, err := os.Lstat(rendezvous)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		parent, err := existingPrivateDir(filepath.Dir(rendezvous))
+		if err != nil {
+			return nil, fmt.Errorf("validate Codex rendezvous directory: %w", err)
+		}
+		return dialPinnedContext(ctx, filepath.Join(parent, filepath.Base(rendezvous)), filepath.Join(filepath.Dir(parent), ".dial"), false, afterPin)
+	}
+
 	expected, err := ExpectedNamespacePath(rendezvous)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	target, err := os.Readlink(rendezvous)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if target != expected {
-		return "", fmt.Errorf("Codex socket rendezvous %q targets %q, want exact session endpoint %q", rendezvous, target, expected)
+		return nil, fmt.Errorf("Codex socket rendezvous %q targets %q, want exact session endpoint %q", rendezvous, target, expected)
 	}
 
 	root, err := existingPrivateDir(hostPhysicalRoot())
 	if err != nil {
-		return "", fmt.Errorf("validate Codex physical socket root: %w", err)
+		return nil, fmt.Errorf("validate Codex physical socket root: %w", err)
 	}
 	source, err := existingPrivateDir(filepath.Join(root, physicalSessionKey(key)))
 	if err != nil {
-		return "", fmt.Errorf("validate Codex session physical socket directory: %w", err)
+		return nil, fmt.Errorf("validate Codex session physical socket directory: %w", err)
 	}
 	physical := filepath.Join(source, filepath.Base(expected))
-	physicalInfo, err := os.Lstat(physical)
+	return dialPinnedContext(ctx, physical, filepath.Join(root, ".dial"), true, afterPin)
+}
+
+// dialPinnedContext uses linkat without AT_SYMLINK_FOLLOW to select the current
+// socket inode atomically. The hard link lives in a host-only directory on the
+// same filesystem; after it is created, replacing either the source leaf or its
+// directory cannot redirect connect(2). The established connection survives
+// removal of the temporary link.
+func dialPinnedContext(ctx context.Context, source, pinRoot string, require0600 bool, afterPin func()) (net.Conn, error) {
+	pinRoot, err := ensurePrivateDir(pinRoot)
 	if err != nil {
-		return "", fmt.Errorf("validate Codex physical socket: %w", err)
+		return nil, fmt.Errorf("prepare Codex host dial directory: %w", err)
 	}
-	physicalStat, ok := physicalInfo.Sys().(*syscall.Stat_t)
-	if physicalInfo.Mode()&os.ModeSocket == 0 || physicalInfo.Mode()&os.ModeSymlink != 0 ||
-		physicalInfo.Mode().Perm() != 0o600 || !ok || physicalStat.Uid != uint32(os.Geteuid()) {
-		return "", fmt.Errorf("Codex physical endpoint %q must be a real, user-owned mode-0600 Unix socket", physical)
+	sourceFD, err := openPrivateDir(filepath.Dir(source))
+	if err != nil {
+		return nil, fmt.Errorf("open Codex socket directory: %w", err)
 	}
-	return physical, nil
+	defer unix.Close(sourceFD)
+	pinDir, err := os.MkdirTemp(pinRoot, "dial-")
+	if err != nil {
+		return nil, err
+	}
+	pinFD, err := openPrivateDir(pinDir)
+	if err != nil {
+		_ = os.Remove(pinDir)
+		return nil, fmt.Errorf("open Codex host dial directory: %w", err)
+	}
+	defer func() {
+		_ = unix.Unlinkat(pinFD, "socket", 0)
+		_ = unix.Close(pinFD)
+		_ = os.Remove(pinDir)
+	}()
+	if err := unix.Linkat(sourceFD, filepath.Base(source), pinFD, "socket", 0); err != nil {
+		return nil, fmt.Errorf("pin Codex socket %q: %w", source, err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(pinFD, "socket", &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, fmt.Errorf("validate pinned Codex socket: %w", err)
+	}
+	modeOK := !require0600 || stat.Mode&0o777 == 0o600
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK || !modeOK || stat.Uid != uint32(os.Geteuid()) {
+		wantMode := ""
+		if require0600 {
+			wantMode = " mode-0600"
+		}
+		return nil, fmt.Errorf("Codex endpoint %q must pin a real, user-owned%s Unix socket", source, wantMode)
+	}
+	if afterPin != nil {
+		afterPin()
+	}
+	return (&net.Dialer{}).DialContext(ctx, "unix", fmt.Sprintf("/proc/self/fd/%d/socket", pinFD))
+}
+
+func openPrivateDir(path string) (int, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o777 != 0o700 || stat.Uid != uint32(os.Geteuid()) {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("path %q must open as a user-owned mode-0700 directory", path)
+	}
+	return fd, nil
 }
 
 // ExpectedNamespacePath implements Codex 0.157's Linux protected_socket_path:

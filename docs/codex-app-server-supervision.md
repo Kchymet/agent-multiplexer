@@ -65,7 +65,13 @@ binds one short, mode-0700 session directory from its own host
 amux data instance and session key. The shared host root and sibling children are
 never mounted. Host-side dialing translates a symlink only when its amux layout,
 deterministic Codex target, real-socket type, owner, and mode 0600 all match; a
-direct socket remains unchanged for Codex 0.153.4 and 0.154.0.
+direct socket remains supported for Codex 0.153.4 and 0.154.0. For either form,
+amux atomically hard-links the selected socket inode into a host-only,
+same-filesystem mode-0700 dial directory, validates the pinned entry, connects,
+and removes the temporary link. A writable session cannot redirect the host dial
+by replacing the source leaf or directory after validation. Custom Unix
+endpoints outside amux's generated rendezvous tree retain normal symlink
+behavior.
 
 On macOS, Codex 0.157.1 publishes the requested Unix path as a symlink to a
 physical socket in `/private/tmp/codex-daemon-<uid>/`. Seatbelt permits only the
@@ -417,6 +423,10 @@ release, opt-in via `AMUX_TEST_CODEX_01571_BIN` and
 - `TestScopeMapsOnlyOwnCodexPhysicalSocket` executes real bubblewrap probes: the
   own physical endpoint connects while the sibling hash, host sibling source,
   and a symlink alias to that source remain unreachable.
+- `TestDialContextPinsSocketAcrossResolveConnectReplacement` uses two synthetic
+  listeners and a deterministic post-selection barrier for both old direct and
+  relocated sockets. Replacing the source leaf with a peer symlink cannot change
+  the listener reached through the pinned inode.
 - Linux CI retains an official pinned 0.153.4 sandbox launch for the older
   direct-requested-path transport alongside the 0.157.1 relocation regression.
 
