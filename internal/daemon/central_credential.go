@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
 	"amux/internal/centralauth"
@@ -35,7 +36,7 @@ func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
 		return store.Session{}, err
 	}
-	if mode, err := amuxcfg.AuthMode("claude"); err != nil || mode != amuxcfg.AuthCentral {
+	if mode := accounts.Mode(principal.SubjectID, "claude"); mode != amuxcfg.AuthCentral {
 		return store.Session{}, access.ErrDenied
 	}
 	var session store.Session
@@ -73,12 +74,19 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 	if sp, ok := agent.HarnessFor(s.Agent).Config(s); ok && len(claudecfg.CentralConflicts(sp, s.Dir, os.Environ())) > 0 {
 		return rpcDenied("central_credential_conflict"), nil
 	}
+	binding, profile, err := accounts.Delivery(s.ID, "claude")
+	if err != nil {
+		return rpcDenied("account_binding_blocked"), nil
+	}
 	cred, err := centralauth.ClaudeStore().Load()
 	if err != nil {
 		return rpcFailed("central_credential_unavailable"), nil
 	}
 	if err := r.authorizeCentralCredential(ctx, request.Principal, req); err != nil {
 		return rpcDenied("credential_access_denied"), nil
+	}
+	if err := accounts.Accept(s.ID, binding.Revision, profile.DeliveryEpoch, "", cred.Generation); err != nil {
+		return rpcDenied("account_binding_blocked"), nil
 	}
 	body, err := json.Marshal(centralauth.Delivery{Token: cred.Token.Reveal(), Generation: cred.Generation})
 	if err != nil || len(body) > sessionrpc.MaxResponseBody {

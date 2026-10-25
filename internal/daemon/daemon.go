@@ -70,7 +70,9 @@ type Daemon struct {
 	// unaffected. nil in tests that don't exercise structured control.
 	codex *codexapp.Manager
 	// centralCodex owns the central Codex home when codex.auth is central.
-	centralCodex *centralCodex
+	centralCodex    *centralCodex
+	accountMu       sync.Mutex
+	accountAttempts map[string]*accountAttempt
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control
@@ -640,6 +642,7 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		}
 	}()
 	defer func() {
+		d.disconnectAccounts(cl.accountID, true)
 		cl.shutdown()
 		if snapshotDone != nil {
 			<-snapshotDone

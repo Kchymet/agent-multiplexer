@@ -93,6 +93,16 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.triggerPoll()
 		return ok()
+	case core.ActionAccountManage:
+		r, err := accountManageFields(a)
+		if err != nil {
+			return fail("account_request_invalid")
+		}
+		result := d.accountCall(ctx, r, false)
+		if !result.OK {
+			return fail("%s", result.Error)
+		}
+		return ok()
 	case core.ActionAuthReload:
 		if err := d.queueAuthReload(a); err != nil {
 			return fail("%v", err)

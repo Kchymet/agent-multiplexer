@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
@@ -64,7 +65,7 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		Entries: entries,
 		Shared:  []string{CredentialsFile},
 	}
-	switch mode := AuthMode(); {
+	switch mode := accounts.Mode(agentID, "claude"); {
 	case mode == amuxcfg.AuthShared && SharedAuthEnabled():
 		sp.Shared = nil
 		sp.AuthDir = SharedAuthDir()

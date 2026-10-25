@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
@@ -53,7 +55,7 @@ func codexExecutable() (string, error) {
 // the routing in place with a provider that refuses, so a central session
 // fails with guidance instead of falling back to a per-session login.
 func (d *Daemon) startCentralCodex(ctx context.Context) {
-	if d.codex == nil || codexcfg.AuthMode() != amuxcfg.AuthCentral {
+	if d.codex == nil {
 		return
 	}
 	c := &centralCodex{lifetime: ctx, login: core.CodexLoginStatus{State: "idle"}}
@@ -110,8 +112,35 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	if c == nil || c.provider == nil {
 		return codexapp.ChatGPTToken{}, errCentralCodexUnavailable
 	}
-	t, err := c.provider.SessionToken(ctx, req.SessionID, req.Refresh, req.PreviousAccountID)
+	binding, profile, err := accounts.Delivery(req.SessionID, "codex")
 	if err != nil {
+		return codexapp.ChatGPTToken{}, err
+	}
+	if s.d.authority == nil {
+		return codexapp.ChatGPTToken{}, errors.New("central Codex auth: authority unavailable")
+	}
+	credential, err := access.LoadCredential(s.d.authority.CredentialDir(access.SubjectSession, req.SessionID))
+	if err != nil {
+		return codexapp.ChatGPTToken{}, errors.New("central Codex auth: session not authorized")
+	}
+	principal := access.Principal{Kind: credential.Kind, SubjectID: credential.SubjectID, KeyID: credential.KeyID, Generation: credential.Generation}
+	if err = s.d.authority.Valid(ctx, principal); err != nil {
+		return codexapp.ChatGPTToken{}, err
+	}
+	previous := binding.ExpectedAccount
+	if previous == "" {
+		previous = req.PreviousAccountID
+	}
+	t, err := c.provider.SessionToken(ctx, req.SessionID, req.Refresh, previous)
+	if err != nil {
+		return codexapp.ChatGPTToken{}, err
+	}
+	s.d.effectMu.Lock()
+	defer s.d.effectMu.Unlock()
+	if !s.authorized(req.SessionID) || s.d.authority.Valid(ctx, principal) != nil {
+		return codexapp.ChatGPTToken{}, errors.New("central Codex auth: session not authorized")
+	}
+	if err = accounts.Accept(req.SessionID, binding.Revision, profile.DeliveryEpoch, t.AccountID, t.Generation); err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}
 	return codexapp.ChatGPTToken{AccessToken: t.AccessToken, AccountID: t.AccountID, PlanType: t.PlanType}, nil

@@ -119,3 +119,11 @@ func ValidateAccountRequest(r AccountRequest, ceremony bool) bool {
 	}
 	return false
 }
+
+// AccountCapabilities are explicit independent host grants. Advertising a
+// feature name alone grants nothing. Use controls workload creation/start.
+type AccountCapabilities struct {
+	Status bool `json:"status"`
+	Manage bool `json:"manage"`
+	Use    bool `json:"use"`
+}
