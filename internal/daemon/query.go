@@ -20,8 +20,18 @@ import (
 // the store and sending it back as a Data frame. The daemon owns store access;
 // this is what lets the CLI list repos and workgroups without opening the DB
 // itself. Unknown queries and store errors come back as a failed Data frame.
-func (d *Daemon) query(cl *connState, a core.Action) {
-	rows, err := d.readModel(a)
+func (d *Daemon) query(ctx context.Context, cl *connState, a core.Action) {
+	if a.Query == core.QueryAccountCeremony {
+		r, err := accountRequest(a)
+		if err != nil || !harnessproto.ValidateAccountRequest(r, true) {
+			cl.send(core.Data{Type: core.FrameData, Query: a.Query, Error: "account_request_invalid"})
+			return
+		}
+		r.Initiator = cl.accountID + r.Initiator
+		b, _ := json.Marshal(r)
+		a.Fields = map[string]string{"request": string(b)}
+	}
+	rows, err := d.readModelContext(ctx, a)
 	if err != nil {
 		cl.send(core.Data{Type: core.FrameData, Query: a.Query, OK: false, Error: err.Error()})
 		return
@@ -38,6 +48,21 @@ func (d *Daemon) query(cl *connState, a core.Action) {
 // marshalling and framing in query stay uniform across query names. The daemon is
 // the sole store owner, so this — and the poll loop — are the only readers.
 func (d *Daemon) readModel(a core.Action) (any, error) {
+	return d.readModelContext(context.Background(), a)
+}
+
+func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, error) {
+	if a.Query == core.QueryAccounts || a.Query == core.QueryAccountManage || a.Query == core.QueryAccountCeremony {
+		r, err := accountRequest(a)
+		if a.Query == core.QueryAccounts && len(a.Fields) == 0 {
+			r = harnessproto.AccountRequest{Operation: harnessproto.AccountStatus}
+			err = nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return d.accountCall(ctx, r, a.Query == core.QueryAccountCeremony), nil
+	}
 	if a.Query == core.QueryCodexControl {
 		return d.codexControl, d.configErr
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
@@ -23,22 +24,21 @@ func centralCodexDaemon(t *testing.T, sessions ...store.Session) *Daemon {
 	return d
 }
 
-func TestCentralCodexOnlyStartsInCentralMode(t *testing.T) {
+func TestCentralCodexOwnerAvailableRegardlessOfCreationDefault(t *testing.T) {
 	d := centralCodexDaemon(t)
+	t.Setenv("AMUX_CODEX_BIN", filepath.Join(t.TempDir(), "missing"))
 	for _, mode := range []string{amuxcfg.AuthHost, amuxcfg.AuthEnvironment} {
 		if err := amuxcfg.SetAuthMode("codex", mode); err != nil {
 			t.Fatal(err)
 		}
 		d.startCentralCodex(t.Context())
-		if d.centralCodex != nil {
-			t.Fatalf("%s mode started central Codex auth", mode)
+		if d.centralCodex == nil {
+			t.Fatalf("%s default disabled central profile management", mode)
 		}
-		if err := d.codexLogin(core.Action{Action: core.ActionCodexLogin}); err == nil || !strings.Contains(err.Error(), "codex.auth central") {
-			t.Fatalf("%s mode login = %v", mode, err)
+		if accounts.Mode("unbound", "codex") != mode {
+			t.Fatal("legacy source changed")
 		}
-		if st := d.codexAuthStatus(t.Context()); st.Mode != mode || st.Error != "" {
-			t.Fatalf("%s status = %+v", mode, st)
-		}
+		d.closeCentralCodex()
 	}
 }
 

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"sync"
@@ -22,8 +24,9 @@ import (
 // and leaves ghost text. obuf coalesces bytes instead of dropping them; only a
 // client that falls catastrophically far behind triggers a resync (see obuf).
 type connState struct {
-	out  chan any
-	conn net.Conn
+	accountID string
+	out       chan any
+	conn      net.Conn
 	// valid is checked immediately before every socket write. nil is reserved
 	// for transport-only unit tests; authenticated daemon connections always
 	// provide a generation/revocation check.
@@ -74,7 +77,12 @@ func newConnState(conn net.Conn) *connState {
 }
 
 func newAuthenticatedConnState(conn net.Conn, valid func() bool) *connState {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		panic(err)
+	}
 	cl := &connState{
+		accountID:  hex.EncodeToString(nonce[:]) + ":",
 		valid:      valid,
 		out:        make(chan any, 512),
 		conn:       conn,

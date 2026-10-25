@@ -297,7 +297,7 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 			}
 		}
 	}
-	if agent.Canonical(s.Agent) == "claude" && claudecfg.HostStoreShared() {
+	if agent.Canonical(s.Agent) == "claude" && claudecfg.HostStoreSharedFor(s.ID) {
 		// Claude's host and sandbox instances must coordinate token refreshes.
 		// Permit only the native lock paths, including creation when absent;
 		// neither the host configuration tree nor the Keychain is exposed.

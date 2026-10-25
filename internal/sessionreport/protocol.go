@@ -6,6 +6,7 @@ const (
 	Context            = "report-context"
 	Activity           = "report-activity"
 	Model              = "report-model"
+	Limits             = "report-limits"
 	PermissionRequest  = "report-permission-request"
 	PermissionResolved = "report-permission-resolved"
 	PermissionClear    = "report-permission-clear"
@@ -15,6 +16,7 @@ const (
 const (
 	FieldState             = "state"
 	FieldModel             = "model"
+	FieldLimits            = "limits"
 	FieldRequestID         = "request_id"
 	FieldTool              = "tool"
 	FieldAction            = "action"
@@ -41,7 +43,7 @@ const (
 // operations and must never reach the general wsops action dispatcher.
 func IsVerb(verb string) bool {
 	switch verb {
-	case Activity, Model, PermissionRequest, PermissionResolved, PermissionClear, Capture:
+	case Activity, Model, Limits, PermissionRequest, PermissionResolved, PermissionClear, Capture:
 		return true
 	default:
 		return false

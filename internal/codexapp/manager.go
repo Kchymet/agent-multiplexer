@@ -1,6 +1,8 @@
 package codexapp
 
 import (
+	"amux/internal/accounts"
+
 	"context"
 	"errors"
 	"sync"
@@ -222,7 +224,9 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 		EventLogPath:  EventLogPathFor(sessionID),
 	}
 	m.mu.Lock()
-	cfg.ChatGPTAuth = m.chatgptAuth
+	if accounts.Mode(sessionID, "codex") == "central" {
+		cfg.ChatGPTAuth = m.chatgptAuth
+	}
 	m.mu.Unlock()
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
 	cfg.ChatGPTAccount = boundAccountFor(sessionID, cfg.ResumeThreadID)

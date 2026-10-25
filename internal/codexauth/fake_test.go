@@ -163,7 +163,7 @@ func runFake() {
 			reply(map[string]any{"account": map[string]any{"type": "chatgpt", "email": "user@example.com", "planType": "plus"}, "requiresOpenaiAuth": true})
 		case "account/login/start":
 			loginID = "login-1"
-			reply(map[string]any{"type": "chatgpt", "loginId": loginID, "authUrl": "https://auth.example/authorize?state=s"})
+			reply(map[string]any{"type": "chatgpt", "loginId": loginID, "authUrl": "https://auth.openai.com/authorize?state=s"})
 			if os.Getenv(fakeHangLogin) != "1" {
 				writeAuth(home, 0, account, ttl)
 				_ = out.Encode(map[string]any{"method": "account/login/completed", "params": map[string]any{"loginId": "other", "success": false}})
@@ -171,6 +171,10 @@ func runFake() {
 			}
 		case "account/login/cancel":
 			bump(home, "fake-cancels")
+			if os.Getenv("AMUX_FAKE_LATE_LOGIN") == "1" {
+				writeAuth(home, 9, "late-account", ttl)
+				_ = out.Encode(map[string]any{"method": "account/login/completed", "params": map[string]any{"loginId": loginID, "success": true}})
+			}
 			reply(map[string]any{})
 		case "account/logout":
 			_ = os.Remove(filepath.Join(home, authFile))

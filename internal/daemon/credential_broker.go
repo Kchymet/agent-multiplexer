@@ -31,7 +31,7 @@ func (r *sessionRuntime) authorizeCredential(ctx context.Context, principal acce
 		return access.ErrDenied
 	}
 	github := credentialbroker.GitHubAllowed(o)
-	if !github && (!claudeKeychainAllowed() || o.Account != credentialbroker.HostAccount() || !slices.Contains(credentialbroker.ClaudeServices(claudecfg.CredentialSelector()), o.Service)) {
+	if !github && (!claudecfg.HostStoreSharedFor(principal.SubjectID) || o.Account != credentialbroker.HostAccount() || !slices.Contains(credentialbroker.ClaudeServices(claudecfg.CredentialSelectorFor(principal.SubjectID)), o.Service)) {
 		return access.ErrDenied
 	}
 	return r.resolver.withStore(func(db policyStore) error {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 	"amux/internal/codexapp"
@@ -57,6 +58,16 @@ func prepareSurfaceRuntime(t *testing.T, mode string, own *store.Session, script
 		harness = "claude"
 	}
 	if err := amuxcfg.SetAuthMode(harness, amuxcfg.AuthEnvironment); err != nil {
+		t.Fatal(err)
+	}
+	// The shared namespace fixture creates a Claude row before choosing the
+	// synthetic native runtime. Explicitly bind that test-only workload to its
+	// chosen harness/provider; changing a global default must not reroute it.
+	if err := accounts.Update(func(s *accounts.State) error {
+		prior := s.Bindings[own.ID]
+		s.Bindings[own.ID] = accounts.Binding{ProfileID: accounts.ID(harness, amuxcfg.AuthEnvironment), Harness: harness, Source: amuxcfg.AuthEnvironment, Revision: prior.Revision + 1, Origin: "synthetic-runtime-fixture"}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	r.server = httptest.NewServer(http.HandlerFunc(r.serve))

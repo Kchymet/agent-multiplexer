@@ -1,0 +1,143 @@
+package nativetui
+
+import (
+	"fmt"
+	"math"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
+)
+
+const accountObservationMaxAge = time.Duration(harnessproto.AccountLimitsTTLMillis) * time.Millisecond
+
+func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
+	out := accountSnapshot{canManage: true, defaultRevisions: in.DefaultRevisions}
+	for _, p := range in.Profiles {
+		if p.Harness != "claude" && p.Harness != "codex" {
+			continue
+		}
+		row := accountProfile{
+			id: p.ID, harness: p.Harness, label: p.ID, mode: p.Source, state: p.State,
+			revision: p.Revision, defaultProfile: in.Defaults[p.Harness] == p.ID,
+			identitySource: p.Identity.Evidence, plan: p.Identity.Plan,
+			statusDetail: accountProfileProblem(p.Error),
+			canLogin:     p.Source == "central" && (p.LoginMethod == "browser" || p.LoginMethod == "setup-token") && p.State != "login-pending",
+			canLogout:    p.Source == "central" && p.State != "logged-out" && p.State != "unconfigured",
+			canDefault:   in.DefaultRevisions[p.Harness] > 0,
+		}
+		if p.Identity.State == "known" {
+			row.account = p.Identity.Email
+			if row.account == "" {
+				row.account = p.Identity.AccountID
+			}
+		}
+		switch p.LoginMethod {
+		case "setup-token":
+			row.loginHelp = "Enter: configure a Claude token using protected input."
+		case "browser":
+			row.loginHelp = "Enter: start browser login."
+		default:
+			row.loginHelp = "External source — manage login in the host tool. " + accountModeHelp(p.Source)
+		}
+		limits := p.Limits
+		confidence := "unknown"
+		if limits.Source == "codex-native" {
+			confidence = "provider report"
+		} else if limits.Source == "claude-statusline" {
+			confidence = "session advisory"
+		}
+		base := accountLimit{name: "Account limits", state: "unavailable", source: limits.Source, confidence: confidence,
+			reason: "Unknown limits do not mean unlimited usage."}
+		if limits.ObservedAt > 0 {
+			base.observedAt = time.UnixMilli(limits.ObservedAt)
+			base.freshUntil = base.observedAt.Add(accountObservationMaxAge)
+		}
+		// An opaque Claude token cannot verify account identity. Its statusline
+		// observations are still useful when the daemon attributes them to the
+		// bound profile, delivery epoch, session, and runtime; label them advisory.
+		advisory := p.Harness == "claude" && p.Source == "central" && limits.Source == "claude-statusline" && limits.SessionID != "" && limits.RuntimeGeneration != ""
+		attributed := limits.ProfileID == p.ID && limits.DeliveryEpoch == p.DeliveryEpoch && (p.Identity.State == "known" || advisory)
+		if limits.State != "known" || len(limits.Windows) == 0 || !attributed {
+			if !attributed && len(limits.Windows) > 0 {
+				base.reason = "Observation is not attributable to this verified account and delivery epoch."
+			}
+			row.limits = []accountLimit{base}
+		} else {
+			for _, window := range limits.Windows {
+				l := base
+				l.name, l.state = window.Name, "available"
+				l.reason = "Stale after 5 minutes; usage is an observation, not a billing guarantee."
+				if advisory {
+					l.reason += " Reported by session " + limits.SessionID + ", runtime " + limits.RuntimeGeneration + "; account identity remains unverified."
+				}
+				used := window.UsedPercent
+				if !math.IsNaN(used) && !math.IsInf(used, 0) && used >= 0 && used <= 100 {
+					l.usedPercent = &used
+				} else {
+					l.state, l.reason = "unavailable", "Invalid provider observation."
+				}
+				if window.WindowMinutes > 0 {
+					l.name += fmt.Sprintf(" (%d minutes)", window.WindowMinutes)
+				}
+				if window.ResetsAt > 0 {
+					l.resetsAt = time.Unix(window.ResetsAt, 0)
+				}
+				row.limits = append(row.limits, l)
+			}
+		}
+		out.profiles = append(out.profiles, row)
+	}
+	return out
+}
+
+// Persisted status survives reconnect. Only fixed local copy crosses into the
+// view model; an unknown error must never retain native text or credentials.
+func accountProfileProblem(code string) string {
+	switch code {
+	case "":
+		return ""
+	case "account_logout_cleanup_failed":
+		return "Local logout cleanup failed. New credential delivery remains disabled.\nStart login to recover."
+	case "account_logout_cleanup_unavailable":
+		return "Local logout cleanup unavailable. New credential delivery remains disabled.\nCheck the installed harness, then start login to recover."
+	case "account_login_cleanup_failed":
+		return "Login rollback failed. New credential delivery remains blocked.\nStart login to recover."
+	case "credential_unavailable":
+		return "Stored credential unavailable. Start login to recover."
+	case "native_status_unavailable", "native_unavailable", "account_native_unavailable":
+		return "Native account service unavailable. Check the installed harness and refresh."
+	default:
+		return "Account service reported a problem. Refresh status before trying again."
+	}
+}
+
+func projectAccountCeremony(in harnessproto.AccountCeremony) accountAttempt {
+	a := accountAttempt{id: in.AttemptID, state: in.State, method: in.Method}
+	if in.ExpiresAt > 0 {
+		a.expiresAt = time.UnixMilli(in.ExpiresAt)
+	}
+	if a.active() && approvedAccountURL(in.AuthURL) {
+		a.url = in.AuthURL
+	}
+	return a
+}
+
+// Defense in depth: native/browser output must not become arbitrary clickable
+// URLs or terminal control sequences. The backend independently validates its
+// ceremony URL before exposing it to any client.
+func approvedAccountURL(raw string) bool {
+	if len(raw) > 8192 || accountText(raw) != raw || strings.ContainsAny(raw, " \t\r\n") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Fragment != "" {
+		return false
+	}
+	switch u.Hostname() {
+	case "auth.openai.com", "login.openai.com", "claude.ai", "console.anthropic.com":
+		return true
+	}
+	return false
+}

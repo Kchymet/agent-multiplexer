@@ -93,6 +93,16 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.triggerPoll()
 		return ok()
+	case core.ActionAccountManage:
+		r, err := accountManageFields(a)
+		if err != nil {
+			return fail("account_request_invalid")
+		}
+		result := d.accountCall(ctx, r, false)
+		if !result.OK {
+			return fail("%s", result.Error)
+		}
+		return ok()
 	case core.ActionAuthReload:
 		if err := d.queueAuthReload(a); err != nil {
 			return fail("%v", err)
@@ -117,6 +127,9 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// old inline switch missed, so the CLI's archive left the process running
 		// while the TUI's stopped it. killEngineFor runs before the store mutation so
 		// a root delete still reads its children from the pre-deletion snapshot.
+		if err := d.accountCreationReady(ctx, a); err != nil {
+			return fail("%v", err)
+		}
 		var newID string
 		var err error
 		if restore, restoreErr := hostRestoreRequested(a); restoreErr != nil {

@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"amux/internal/access"
+	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
 	"amux/internal/centralauth"
@@ -131,7 +132,7 @@ func AppServerCommand(spec LaunchSpec) (dir string, env, argv []string, endpoint
 	// Resolving argv here may race with an existing launch; never unlink its socket.
 	endpoint = "unix://" + sock
 	inner := []string{codexBin(agentArgv), "app-server", "--listen", endpoint}
-	if codexcfg.AuthMode() == amuxcfg.AuthCentral {
+	if accounts.Mode(s.ID, "codex") == amuxcfg.AuthCentral {
 		inner = codexcfg.CentralChatGPTEndpoint(inner)
 	}
 	if agent.NativeGoals(s) {
@@ -619,7 +620,7 @@ func agentAuthError(s store.Session, launchDir string) error {
 // closed. The token is fetched there, so it never appears in this argv, the
 // sandbox launcher's environment, or the engine spec.
 func centralLauncher(tab int, s store.Session, argv []string) []string {
-	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || claudecfg.AuthMode() != amuxcfg.AuthCentral {
+	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || accounts.Mode(s.ID, "claude") != amuxcfg.AuthCentral {
 		return argv
 	}
 	return append([]string{centralauth.LauncherArg}, argv...)

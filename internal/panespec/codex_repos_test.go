@@ -111,7 +111,7 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	}
 	check(argv, nil)
 	// Claude and shell argv must not receive Codex-specific configuration flags.
-	s.RootID, s.Agent = "group", "claude"
+	s.ID, s.RootID, s.Agent = "claude-other", "group", "claude"
 	if err := db.PutSession(s); err != nil {
 		t.Fatal(err)
 	}

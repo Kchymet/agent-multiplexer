@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/centralauth"
 	"amux/internal/cfghome"
@@ -155,10 +156,7 @@ var ErrCentralLoginRequired = errors.New("amux Claude central login required")
 // LaunchAuthError reports, before a Claude agent pane starts, why its selected
 // authentication cannot work. Messages name settings, never credential values.
 func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error {
-	mode, err := amuxcfg.AuthMode("claude")
-	if err != nil {
-		return err
-	}
+	mode := accounts.Mode(sp.AgentID, "claude")
 	switch mode {
 	case amuxcfg.AuthCentral:
 		st, err := centralauth.ClaudeStore().Status()
@@ -181,4 +179,10 @@ func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error
 		}
 	}
 	return nil
+}
+
+// HostStoreSharedFor respects an existing workload's pinned source.
+func HostStoreSharedFor(id string) bool {
+	mode := accounts.Mode(id, "claude")
+	return mode == amuxcfg.AuthHost || mode == amuxcfg.AuthShared && SharedAuthEnabled()
 }

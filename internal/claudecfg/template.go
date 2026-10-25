@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
@@ -64,7 +65,7 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		Entries: entries,
 		Shared:  []string{CredentialsFile},
 	}
-	switch mode := AuthMode(); {
+	switch mode := accounts.Mode(agentID, "claude"); {
 	case mode == amuxcfg.AuthShared && SharedAuthEnabled():
 		sp.Shared = nil
 		sp.AuthDir = SharedAuthDir()
@@ -77,7 +78,7 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 			// an explicit empty value selects the default host login instead of
 			// the private config directory's otherwise empty Keychain entry.
 			sp.AuthEnv = SecureStorageEnv
-			sp.AuthValue = CredentialSelector()
+			sp.AuthValue = CredentialSelectorFor(agentID)
 		}
 	default:
 		// Central and environment modes (and an unusable shared selection,

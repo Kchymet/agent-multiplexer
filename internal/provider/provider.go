@@ -32,7 +32,9 @@ import (
 // Config is the provider's runtime configuration, assembled by the CLI from
 // flags, the AMUX_PROVIDER_* / AMUX_TLS_* env vars, or the config file.
 type Config struct {
-	Execution *harnessproto.ExecutionCapabilities
+	AccountStatus, AccountManage, AccountUse bool
+	OpenAccounts                             func(context.Context) (AccountChannel, error)
+	Execution                                *harnessproto.ExecutionCapabilities
 	// DiscoverExecution runs on the host before dialing, on every reconnect.
 	DiscoverExecution func(context.Context) *harnessproto.ExecutionCapabilities
 	Orchestrator      string            // address host:port (optionally tls:-prefixed)
@@ -220,11 +222,12 @@ func (p *Provider) dial(ctx context.Context) (net.Conn, error) {
 // that fans out teardown to the reader/sender/heartbeat goroutines, its own
 // send-loop wake, and the last-pong clock for liveness.
 type session struct {
-	hc       *harnessproto.Conn
-	done     chan struct{}
-	once     sync.Once
-	wake     chan struct{}
-	lastPong int64 // atomic UnixNano
+	accountChannel AccountChannel
+	hc             *harnessproto.Conn
+	done           chan struct{}
+	once           sync.Once
+	wake           chan struct{}
+	lastPong       int64 // atomic UnixNano
 
 	// "sessions" feature: subscribe is closed (once) when the orchestrator sends
 	// sessions-subscribe, releasing the publish loop to send an initial snapshot
@@ -381,6 +384,9 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	rtCancel()       // cancel daemon-backed hooks before revoke waits for their barrier
 	s.revokeAllPublished()
 	wg.Wait()
+	if s.accountChannel != nil {
+		_ = s.accountChannel.Close()
+	}
 	s.rtWG.Wait()
 
 	p.mu.Lock()
@@ -419,6 +425,7 @@ func (p *Provider) registerMsg() harnessproto.HarnessMsg {
 func (p *Provider) capabilities() *harnessproto.Capabilities {
 	_, err := exec.LookPath("bwrap")
 	return &harnessproto.Capabilities{
+		Accounts:  &harnessproto.AccountCapabilities{Status: p.cfg.AccountStatus, Manage: p.cfg.AccountManage, Use: p.cfg.AccountUse},
 		Execution: p.cfg.Execution,
 		Compute:   p.cfg.AllowCompute,
 		MaxPanes:  p.cfg.MaxPanes,
@@ -433,7 +440,15 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 // enabled, the "sessions" and "runtime-events" features. A duplicate is never
 // appended, so an operator listing either in --feature is harmless.
 func (p *Provider) features() []string {
-	out := append([]string(nil), p.cfg.Features...)
+	out := []string{}
+	for _, f := range p.cfg.Features {
+		if f != harnessproto.AccountsV1 {
+			out = append(out, f)
+		}
+	}
+	if p.cfg.OpenAccounts != nil && (p.cfg.AccountStatus || p.cfg.AccountManage || p.cfg.AccountUse) {
+		out = appendUnique(out, harnessproto.AccountsV1)
+	}
 	if p.publishing() {
 		out = appendUnique(out, harnessproto.SessionsFeature)
 	}
@@ -556,6 +571,8 @@ func (p *Provider) readLoop(s *session) {
 			p.setStatus(func(st *Status) { st.HeartbeatAt, st.Panes = pong, panes })
 		case harnessproto.MSessionsSubscribe:
 			p.onSessionsSubscribe(s)
+		case harnessproto.MAccountRequest, harnessproto.MAccountCeremony:
+			p.handleAccount(s, m)
 		case harnessproto.MSessionAction:
 			p.handleSessionAction(s, m)
 		case harnessproto.MRuntimeEventsSubscribe:

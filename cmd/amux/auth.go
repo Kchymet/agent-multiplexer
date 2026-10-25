@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"slices"
 	"strings"
 	"time"
@@ -27,15 +26,19 @@ func cmdAuth(args []string) error {
 	}
 	run, ok := authSubcommands[args[0]]
 	if !ok {
-		return fmt.Errorf("unknown auth subcommand %q; want login, status, or restart", args[0])
+		return fmt.Errorf("unknown auth subcommand %q; want login, status, accounts, default, logout, rebind, or restart", args[0])
 	}
 	return run(args[1:])
 }
 
 var authSubcommands = map[string]func([]string) error{
-	"login":   authLogin,
-	"status":  authStatus,
-	"restart": authRestart,
+	"login":    authLogin,
+	"accounts": authAccounts,
+	"logout":   func(a []string) error { return authAccountMutation("logout", a) },
+	"default":  func(a []string) error { return authAccountMutation("default", a) },
+	"rebind":   func(a []string) error { return authAccountMutation("rebind", a) },
+	"status":   authStatus,
+	"restart":  authRestart,
 }
 
 func authUsage() {
@@ -46,6 +49,10 @@ usage: amux auth <command>
   login [claude] [--token-stdin]  create or replace the central Claude token
   login codex                     sign the central Codex home in to ChatGPT
   status [claude|codex]           show the selected mode and central login
+  accounts [--json]             view machine profiles, defaults and limits
+  logout <claude|codex>          fence delivery and clear the central login
+  default <harness:source>       select the default for new workloads
+  rebind <harness:source> <id>    explicitly bind and stop one workload
   restart [--force]               restart idle Claude agents with current credentials
 
 login runs `+"`claude setup-token`"+` (browser sign-in) and then asks you to paste
@@ -61,8 +68,12 @@ year and is not refreshed; run login again to reissue it before then.
 Reissuing does not revoke the previous token. Status never prints a secret.
 
 Other methods remain available as explicit selections:
-  amux config set claude.auth host|shared|environment
-  amux config set codex.auth host|environment
+  amux auth default claude:host          # or claude:shared / claude:environment
+  amux auth default codex:host           # or codex:environment
+
+Defaults affect newly created workloads. Existing workloads keep their binding;
+use explicit rebind after replacing an opaque Claude credential. Login pauses
+new credential delivery until completion or cancellation.
 `)
 }
 
@@ -82,9 +93,16 @@ func authHarness(args []string) (string, []string) {
 }
 
 func authStatus(args []string) error {
+	if sessionContextRestricted() {
+		return fmt.Errorf("machine account status requires a host terminal")
+	}
 	harness, rest := authHarness(args)
 	if len(rest) != 0 {
 		return fmt.Errorf("usage: amux auth status [claude|codex]")
+	}
+	if c, err := startupDial(); err == nil {
+		c.Close()
+		return authMachineStatus(harness)
 	}
 	if harness == "codex" {
 		return codexAuthStatus()
@@ -101,7 +119,7 @@ func authLogin(args []string) error {
 		if len(rest) != 0 {
 			return fmt.Errorf("usage: amux auth login codex")
 		}
-		return codexLogin()
+		return authMachineLogin("codex", false)
 	}
 	stdin := false
 	switch {
@@ -110,7 +128,7 @@ func authLogin(args []string) error {
 	case len(rest) != 0:
 		return fmt.Errorf("usage: amux auth login [claude] [--token-stdin]")
 	}
-	return claudeLogin(stdin, os.Stdin, os.Stdout)
+	return authMachineLogin("claude", stdin)
 }
 
 // claudeAuthStatus reports the selected Claude mode. Central mode is described
@@ -153,64 +171,6 @@ func claudeAuthStatus() error {
 		return nil
 	}
 	return runClaudeAuth("status")
-}
-
-// claudeLogin acquires a setup-token on the host and stores it centrally.
-func claudeLogin(fromStdin bool, in io.Reader, out io.Writer) error {
-	store := centralauth.ClaudeStore()
-	release, err := store.LockLogin()
-	if err != nil {
-		return err
-	}
-	defer release()
-	var raw string
-	if fromStdin {
-		raw, err = readTokenLine(in)
-	} else {
-		if !isTerminal(os.Stdin) {
-			return fmt.Errorf("amux auth login needs a terminal; use --token-stdin to provide a token from `claude setup-token`")
-		}
-		if err := runClaudeSetupToken(); err != nil {
-			return err
-		}
-		fmt.Fprint(out, "\nPaste the token printed above (input is hidden): ")
-		raw, err = readHiddenLine(os.Stdin)
-		fmt.Fprintln(out)
-	}
-	if err != nil {
-		return err
-	}
-	token, err := centralauth.NewSecret(strings.TrimSpace(raw))
-	if err != nil {
-		return fmt.Errorf("that is not a Claude OAuth token (empty, too long, or contains spaces); nothing was saved")
-	}
-	cred, err := store.Save(token, time.Now())
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "Central Claude login saved (%s, generation %d).\n", token.Fingerprint(), cred.Generation)
-	if cred.Generation > 1 {
-		fmt.Fprintln(out, "The previous token was replaced but not revoked; it stays valid until it expires or is revoked in your Claude account.")
-	}
-	if mode, err := amuxcfg.AuthMode("claude"); err == nil && mode != amuxcfg.AuthCentral {
-		fmt.Fprintf(out, "claude.auth is %s, so sessions keep using it; run `amux config unset claude.auth` to use the central login.\n", mode)
-		return nil
-	}
-	// Probe without starting a daemon: with none running there is no agent to
-	// restart, and new sessions read the central login when they launch.
-	c, err := startupDial()
-	if err != nil {
-		if daemonMayStart(err) {
-			fmt.Fprintln(out, "No amux daemon is running, so no agents need restarting; new Claude sessions use the central login.")
-			return nil
-		}
-		return fmt.Errorf("login saved, but the amux daemon could not be reached to restart running agents: %w; run `amux auth restart` once it is reachable", err)
-	}
-	_ = c.Close()
-	if err := reloadClaudeAuth(false); err != nil {
-		return fmt.Errorf("login saved, but running sessions could not be queued: %w; run amux auth restart after updating the daemon", err)
-	}
-	return nil
 }
 
 func readTokenLine(in io.Reader) (string, error) {
@@ -286,47 +246,6 @@ func reloadClaudeAuth(force bool) error {
 	}
 	fmt.Println("Claude agents queued to restart with the active login (conversations resume); busy and unknown-state agents wait unless --force is set.")
 	return nil
-}
-
-// codexLogin drives the daemon-owned central Codex login: the daemon holds the
-// central home exclusively, so the CLI only starts the flow and shows its URL.
-func codexLogin() error {
-	if err := sendAction(core.Action{Action: core.ActionCodexLogin}); err != nil {
-		return err
-	}
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
-	defer signal.Stop(interrupt)
-	shown := ""
-	for {
-		var st core.CodexAuthStatus
-		if err := queryRows(core.QueryCodexAuth, &st); err != nil {
-			return err
-		}
-		if st.Login.URL != "" && st.Login.URL != shown {
-			fmt.Printf("Open this URL in a browser to sign the central Codex home in to ChatGPT:\n\n  %s\n\nWaiting for the sign-in to finish (Ctrl-C cancels)...\n", st.Login.URL)
-			shown = st.Login.URL
-		}
-		switch st.Login.State {
-		case "succeeded":
-			fmt.Println("Central Codex login saved. New Codex sessions use it; restart running Codex sessions (amux do restart <id>) to switch them.")
-			return nil
-		case "failed":
-			return fmt.Errorf("central Codex login failed: %s", st.Login.Error)
-		case "cancelled":
-			return fmt.Errorf("central Codex login cancelled")
-		case "idle":
-			if st.Error != "" {
-				return fmt.Errorf("central Codex login unavailable: %s", st.Error)
-			}
-		}
-		select {
-		case <-interrupt:
-			_ = sendAction(core.Action{Action: core.ActionCodexLogin, Fields: map[string]string{"cancel": "true"}})
-			return fmt.Errorf("central Codex login cancelled")
-		case <-time.After(time.Second):
-		}
-	}
 }
 
 func codexAuthStatus() error {

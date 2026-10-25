@@ -67,7 +67,7 @@ func login(t *testing.T, p *Provider) {
 	if err := p.Login(ctxT(t), func(u string) { shown = append(shown, u) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(shown) != 1 || shown[0] != "https://auth.example/authorize?state=s" {
+	if len(shown) != 1 || shown[0] != "https://auth.openai.com/authorize?state=s" {
 		t.Fatalf("auth URL shown %q", shown)
 	}
 }
@@ -570,4 +570,51 @@ func TestOwnerDeathKillsNativeServer(t *testing.T) {
 		t.Fatalf("owner lock not released after owner death: %v", err)
 	}
 	_ = l.Close()
+}
+
+func TestCancelledNativeLoginCannotPersistLateAccount(t *testing.T) {
+	p, home, _ := newFake(t, fakeHangLogin+"=1", "AMUX_FAKE_LATE_LOGIN=1")
+	writeAuth(home, 0, "original-account", time.Hour)
+	before, err := os.ReadFile(filepath.Join(home, authFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	err = p.Login(ctx, func(string) { cancel() })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(home, authFile))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("late native callback replaced persisted account")
+	}
+	if p.srv != nil {
+		t.Fatal("cancelled login writer still running")
+	}
+}
+
+func TestRejectedNativeCompletionRollsBackAuthPersistence(t *testing.T) {
+	p, home, _ := newFake(t)
+	writeAuth(home, 0, "original-account", time.Hour)
+	before, err := os.ReadFile(filepath.Join(home, authFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := errors.New("initiator revoked")
+	err = p.Login(ctxT(t), nil, func() error { return denied })
+	after, readErr := os.ReadFile(filepath.Join(home, authFile))
+	if !errors.Is(err, denied) || readErr != nil || !bytes.Equal(before, after) || p.srv != nil {
+		t.Fatal("rejected completion retained native write", err, readErr)
+	}
+}
+
+func TestNativeLoginURLRejectsUnexpectedNavigation(t *testing.T) {
+	for _, raw := range []string{"javascript:alert(1)", "http://auth.openai.com/authorize", "https://auth.openai.com.evil.test/authorize", "https://user:secret@auth.openai.com/authorize", "https://auth.openai.com:444/authorize", "https://auth.openai.com/authorize#secret", "https://auth.openai.com/\x1b[31m"} {
+		if validLoginURL(raw) {
+			t.Fatalf("accepted unsafe URL: %q", raw)
+		}
+	}
+	if !validLoginURL("https://auth.openai.com/oauth/authorize?state=SYNTHETIC") {
+		t.Fatal("native authorization URL rejected")
+	}
 }

@@ -95,6 +95,9 @@ rotating it is one write and no reinstall.
   --publish-sessions  publish this daemon's session inventory and accept lifecycle verbs
   --read-only-sessions  publish inventory but reject every lifecycle verb
   --runtime-events   stream read-only transcript events (needs --publish-sessions)
+  --account-status   allow safe machine login and subscription-limit status (off by default)
+  --account-manage   allow transient login/default/logout management (off by default)
+  --account-use      allow machine-account use (defaults to writable session publishing)
 
 Install-only flags:
 
@@ -120,23 +123,27 @@ the provider's last registration and heartbeat.
 // parse can be exercised on its own — which is what tells the flags-in-any-order
 // fix from a regression back to silently dropping them.
 type provideFlags struct {
-	orch         string
-	tokenFile    string
-	name         string
-	caFile       string
-	serverName   string
-	maxPanes     int
-	allowCompute bool
-	publishSes   bool
-	readOnly     bool
-	rtEvents     bool
-	labels       multiFlag
-	features     multiFlag
-	harnesses    multiFlag
-	identityMode string
+	accountStatus, accountManage, accountUse bool
+	orch                                     string
+	tokenFile                                string
+	name                                     string
+	caFile                                   string
+	serverName                               string
+	maxPanes                                 int
+	allowCompute                             bool
+	publishSes                               bool
+	readOnly                                 bool
+	rtEvents                                 bool
+	labels                                   multiFlag
+	features                                 multiFlag
+	harnesses                                multiFlag
+	identityMode                             string
 }
 
 func (f *provideFlags) register(fs *flag.FlagSet) {
+	fs.BoolVar(&f.accountStatus, "account-status", false, "allow remote machine account status")
+	fs.BoolVar(&f.accountManage, "account-manage", false, "allow remote account management and ephemeral login")
+	fs.BoolVar(&f.accountUse, "account-use", false, "allow remote workloads to use machine accounts (defaults to writable session publishing)")
 	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
 	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
 	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
@@ -230,6 +237,10 @@ func provideRun(args []string) error {
 		return err
 	}
 	cfg := provider.Config{
+		AccountStatus:     resolvedBool(fs, "account-status", f.accountStatus, "AMUX_PROVIDER_ACCOUNT_STATUS", file.AccountStatus),
+		AccountManage:     resolvedBool(fs, "account-manage", f.accountManage, "AMUX_PROVIDER_ACCOUNT_MANAGE", file.AccountManage),
+		AccountUse:        resolvedBool(fs, "account-use", f.accountUse, "AMUX_PROVIDER_ACCOUNT_USE", providerAccountUseDefault(file, publish, readonly)),
+		OpenAccounts:      openProviderAccounts,
 		DiscoverExecution: executionDiscovery(execution),
 		Orchestrator:      addr,
 		Token:             token,
