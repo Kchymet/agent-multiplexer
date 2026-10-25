@@ -1366,7 +1366,7 @@ func (d *Daemon) killEngineFor(id string) {
 			}
 		}
 	} else {
-		// An archive's durable member flags also drive reconciliation, including
+		// The durable parent archive flag also drives member reconciliation, including
 		// recovery after this lookup fails. Never fall back to stale ownership.
 		log.Printf("session %s shutdown store: %v", id, err)
 	}

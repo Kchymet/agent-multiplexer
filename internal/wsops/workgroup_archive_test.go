@@ -9,7 +9,7 @@ import (
 	"amux/internal/store"
 )
 
-func TestWorkgroupArchiveAndSelectiveRestore(t *testing.T) {
+func TestWorkgroupArchivePreservesMemberCompletionState(t *testing.T) {
 	for _, verb := range []string{core.ActionArchive, core.ActionSetArchived} {
 		t.Run(verb, func(t *testing.T) {
 			isolateStore(t)
@@ -37,7 +37,7 @@ func TestWorkgroupArchiveAndSelectiveRestore(t *testing.T) {
 			for _, original := range sessions {
 				got := getSession(t, original.ID)
 				want := original
-				if original.ID == "root" || original.ID == "active" {
+				if original.ID == "root" {
 					want.Archived = true
 					want.ArchivedAt = got.ArchivedAt
 					if got.ArchivedAt == 0 {
@@ -57,17 +57,11 @@ func TestWorkgroupArchiveAndSelectiveRestore(t *testing.T) {
 			if getSession(t, "root").Archived {
 				t.Fatal("root not restored")
 			}
-			for _, id := range []string{"active", "done"} {
-				if !getSession(t, id).Archived {
-					t.Fatalf("root restore revived member %s", id)
-				}
+
+			if got := getSession(t, "active"); got.Archived || got.ArchivedAt != 0 {
+				t.Fatalf("group restore lost active member state: %+v", got)
 			}
-			if err := SetArchived(context.Background(), "active", false); err != nil {
-				t.Fatal(err)
-			}
-			if getSession(t, "active").Archived || getSession(t, "active").ArchivedAt != 0 {
-				t.Fatal("explicit member restore failed")
-			}
+
 			if got := getSession(t, "done"); !got.Archived || got.ArchivedAt != 123 {
 				t.Fatalf("previously completed member changed: %+v", got)
 			}

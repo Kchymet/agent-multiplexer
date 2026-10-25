@@ -899,8 +899,8 @@ func baselinePrompt(description, linear string) string {
 
 // SetArchived marks an agent (or workgroup) done/archived, or restores it. An
 // archived session drops off the active rail but stays in the store; the daemon
-// stops its runtime. Archiving a coordinator also archives its direct members
-// atomically; restoration is per session, root first.
+// stops its runtime. Members inherit their coordinator's archived state at runtime,
+// preserving their own flags so group restoration revives only eligible members.
 func SetArchived(ctx context.Context, id string, archived bool) error {
 	db, err := store.Open()
 	if err != nil {
@@ -910,9 +910,6 @@ func SetArchived(ctx context.Context, id string, archived bool) error {
 	s, ok, err := db.GetSession(id)
 	if err != nil || !ok {
 		return fmt.Errorf("no such workgroup or agent %q\n  `amux workgroup ls` lists them", id)
-	}
-	if archived && s.Role() == store.RoleCoordinator {
-		return db.ArchiveWorkgroup(id, store.Now())
 	}
 	if !archived && !s.IsRoot() {
 		parent, found, err := db.GetSession(s.RootID)

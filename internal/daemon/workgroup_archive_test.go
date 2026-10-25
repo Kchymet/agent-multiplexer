@@ -80,8 +80,18 @@ func TestCoordinatorArchiveKeepsReceiptUntilGroupCommitAndCleanup(t *testing.T) 
 	defer db.Close()
 	for _, id := range []string{"root", "member", "done"} {
 		s, ok, err := db.GetSession(id)
-		if err != nil || !ok || !s.Archived {
-			t.Fatalf("response preceded durable %s archive: %+v %v", id, s, err)
+		if err != nil || !ok || s.Archived != (id != "member") {
+			t.Fatalf("response changed member completion state: %s %+v %v", id, s, err)
+		}
+		effective, found, err := runtime.resolver.Lookup(ctx, id)
+		if err != nil || !found || !effective.Archived {
+			t.Fatalf("%s not effectively archived before response: %+v %v", id, effective, err)
+		}
+		if _, _, err := d.sessionAccessForLaunch(ctx, id); err == nil {
+			t.Fatalf("archived %s eligible for launch", id)
+		}
+		if err := runtime.authorize(ctx, principals[id], sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QuerySnapshot}); err == nil {
+			t.Fatalf("archived %s retained general authority", id)
 		}
 		if id == "done" && s.ArchivedAt != 123 {
 			t.Fatal("changed completed member timestamp")
@@ -117,35 +127,33 @@ func TestCoordinatorArchiveKeepsReceiptUntilGroupCommitAndCleanup(t *testing.T) 
 		time.Sleep(time.Millisecond)
 	}
 	assertGroupStopped(t, d, principals, instances)
-	// Host-only restoration regrants the selected session, never its children.
-	restore := func(id string) core.Result {
-		return d.handle(ctx, core.Action{Action: core.ActionSetArchived, ID: id, Fields: map[string]string{"archived": "false"}})
+
+	// One host group restore brings back previously active members, while
+	// independently completed members retain their archive state and timestamps.
+	resultHost := d.handle(ctx, core.Action{Action: core.ActionSetArchived, ID: "root", Fields: map[string]string{"archived": "false"}})
+	if !resultHost.OK {
+		t.Fatalf("host group restore: %+v", resultHost)
 	}
-	if got := restore("member"); got.OK {
-		t.Fatal("host restored member before its group")
-	}
-	if got := restore("root"); !got.OK {
-		t.Fatalf("host root restore: %+v", got)
-	}
-	current, err := d.authority.Current(ctx, access.SubjectSession, "root")
-	if err != nil || current.Generation <= principals["root"].Generation {
-		t.Fatalf("root regrant: %+v %v", current, err)
-	}
-	for _, id := range []string{"member", "done"} {
-		s, _, err := db.GetSession(id)
-		if err != nil || !s.Archived {
-			t.Fatalf("root restore revived %s: %+v %v", id, s, err)
+	for _, id := range []string{"root", "member"} {
+		current, err := d.authority.Current(ctx, access.SubjectSession, id)
+		if err != nil || current.Generation <= principals[id].Generation {
+			t.Fatalf("%s regrant: %+v %v", id, current, err)
 		}
-		if _, err := d.authority.Current(ctx, access.SubjectSession, id); err == nil {
-			t.Fatalf("root restore regranted %s", id)
+		if err := d.authority.Valid(ctx, principals[id]); err == nil {
+			t.Fatalf("old %s principal revived", id)
+		}
+		effective, found, err := runtime.resolver.Lookup(ctx, id)
+		if err != nil || !found || effective.Archived {
+			t.Fatalf("%s remained archived after group restore: %+v %v", id, effective, err)
+		}
+		if _, _, err := d.sessionAccessForLaunch(ctx, id); err != nil {
+			t.Fatalf("restored %s ineligible for launch: %v", id, err)
 		}
 	}
-	if got := restore("member"); !got.OK {
-		t.Fatalf("explicit member restore: %+v", got)
+	if _, err := d.authority.Current(ctx, access.SubjectSession, "done"); err == nil {
+		t.Fatal("group restore regranted completed member")
 	}
-	if _, err := d.authority.Current(ctx, access.SubjectSession, "member"); err != nil {
-		t.Fatalf("member regrant: %v", err)
-	}
+
 	done, _, err := db.GetSession("done")
 	if err != nil || !done.Archived || done.ArchivedAt != 123 {
 		t.Fatalf("completed member restored: %+v %v", done, err)
@@ -254,5 +262,102 @@ func TestHostArchiveUsesStoredMembershipAndMemberDoneStaysLocal(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWorkgroupRestorePartialMemberRegrantRemainsFencedAndRetryable(t *testing.T) {
+	d, runtime, principals, _ := archiveGroupFixture(t)
+	ctx := context.Background()
+	if err := wsops.SetArchived(ctx, "root", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Model a root runtime that survived shutdown. Member regrant succeeds,
+	// but failure to prove the root quiescent must keep the whole group fenced.
+	eng := d.engine.(*fakeEngine)
+	eng.running("root")
+	eng.killRefuses = true
+	action := core.Action{Action: core.ActionSetArchived, ID: "root", Fields: map[string]string{"archived": "false"}}
+	if got := d.handle(ctx, action); got.OK {
+		t.Fatal("restore succeeded without root quiescence")
+	}
+	current, err := d.authority.Current(ctx, access.SubjectSession, "member")
+	if err != nil || current.Generation <= principals["member"].Generation {
+		t.Fatalf("partial member publication not reached: %+v %v", current, err)
+	}
+	cred, err := access.LoadCredential(d.authority.CredentialDir(access.SubjectSession, "member"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: core.QuerySnapshot}
+	if err := runtime.authorize(ctx, credentialPrincipal(cred), call); err == nil {
+		t.Fatal("partial restore granted member authority before root restored")
+	}
+	if _, _, err := d.sessionAccessForLaunch(ctx, "member"); err == nil {
+		t.Fatal("partial restore allowed member launch")
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root, _, err := db.GetSession("root")
+	if err != nil || !root.Archived {
+		t.Fatalf("failed restore lost durable parent archive: %+v %v", root, err)
+	}
+	member, _, err := db.GetSession("member")
+	if err != nil || member.Archived {
+		t.Fatalf("restore overwrote independent member state: %+v %v", member, err)
+	}
+	eng.killRefuses = false
+	if err := runtime.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.authority.Valid(ctx, credentialPrincipal(cred)); err == nil {
+		t.Fatal("reconcile retained partial successor")
+	}
+	if got := d.handle(ctx, action); !got.OK {
+		t.Fatalf("explicit group restore retry failed: %+v", got)
+	}
+	for _, id := range []string{"root", "member"} {
+		if _, _, err := d.sessionAccessForLaunch(ctx, id); err != nil {
+			t.Fatalf("restored %s launch: %v", id, err)
+		}
+	}
+	done, _, err := db.GetSession("done")
+	if err != nil || !done.Archived || done.ArchivedAt != 123 {
+		t.Fatalf("retry revived independently completed member: %+v %v", done, err)
+	}
+}
+
+func TestHostMemberToggleUsesIndependentArchiveFlag(t *testing.T) {
+	d, _, _, _ := archiveGroupFixture(t)
+	ctx := context.Background()
+	if err := wsops.SetArchived(ctx, "root", true); err != nil {
+		t.Fatal(err)
+	}
+	// Parent archive affects runtime eligibility, not the member's own toggle.
+	got := d.handle(ctx, core.Action{Action: core.ActionArchive, ID: "member"})
+	if !got.OK {
+		t.Fatalf("member archive under archived group: %+v", got)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	member, _, err := db.GetSession("member")
+	if err != nil || !member.Archived {
+		t.Fatalf("member toggle changed wrong state: %+v %v", member, err)
+	}
+	got = d.handle(ctx, core.Action{Action: core.ActionSetArchived, ID: "root", Fields: map[string]string{"archived": "false"}})
+	if !got.OK {
+		t.Fatalf("restore group: %+v", got)
+	}
+	member, _, err = db.GetSession("member")
+	if err != nil || !member.Archived {
+		t.Fatalf("group restore revived separately archived member: %+v %v", member, err)
 	}
 }

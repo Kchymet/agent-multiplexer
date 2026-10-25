@@ -195,9 +195,9 @@ then stops their runtimes and revokes their credentials. It cannot archive a
 foreign workgroup. Do not delegate this to a member: member completion archives
 only that member. If confirmation has not arrived, leave the workgroup open.
 
-Restoration is host-only: `amux workgroup unarchive <workgroup-id>` first, then
-explicitly restore any members the user wants resumed. Restoring the workgroup
-does not automatically revive members, including those already completed.
+Restoration is host-only: `amux workgroup unarchive <workgroup-id>` restores the
+workgroup and its previously active members together. Members already completed
+before the group archive stay archived.
 
 Report the PR URL and the confirmed lifecycle outcome. If you did not archive
 (interactive session, a long-lived loop, more work remains, or no confirmation

@@ -472,8 +472,8 @@ before stopping runtimes. Report success only when the command confirms it.
 Do not delegate self-archive to a member: a member's `+"`amux agent done`"+` archives
 only that member. You may still mark verified members done with
 `+"`amux do set-archived <member> -f archived=true`"+`.
-Restoration is host-only: restore the workgroup first, then explicitly restore
-any members the user wants resumed. Previously completed members stay archived.
+Restoration is host-only: restoring the workgroup restores previously active
+members too. Previously completed members stay archived.
 `, root.ID)
 }
 

@@ -138,8 +138,8 @@ to archive the workgroup or hand it another task. After explicit user confirmati
 the coordinator can use `amux agent done` to archive its own workgroup. The host
 can also archive it (`x` on the rail, `amux workgroup archive <id>`). Both archive
 the coordinator and its members, stop runtimes, and revoke credentials while
-retaining transcripts and worktrees. Restore remains host-only and per session:
-restore the root first, then the members to resume; completed members stay archived.
+retaining transcripts and worktrees. Restore remains host-only: restoring the
+workgroup restores its previously active members; completed members stay archived.
 
 The next task on a workgroup with a completed goal clears the finished goal and
 establishes a fresh one with its own accounting. Restart evidence covers only

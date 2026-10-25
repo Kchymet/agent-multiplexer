@@ -212,12 +212,12 @@ Goal completion alone never authorizes archive.
 
 - **CLI:** `amux agent done`
 - **Effect:** archives an ordinary member's own session. For a coordinator, it
-  atomically archives the coordinator and its direct members, preserving archive
-  timestamps on already-completed members. Runtimes stop and credentials are
-  revoked; durable flags drive cleanup even after a daemon restart. Worktrees,
-  branches and conversations remain. Restoration is host-only: restore the root
-  first with `amux workgroup unarchive <id>`, then explicitly restore any members
-  to resume. Restoring the root does not unarchive its members.
+  archives the coordinator; direct members inherit the parent's archived state
+  for authorization, launch and runtime cleanup, preserving their own flags and
+  timestamps. Runtimes stop and credentials are revoked, including after a
+  daemon restart. Worktrees, branches and conversations remain. Restoration is
+  host-only: `amux workgroup unarchive <id>` regrants previously active members
+  before restoring the root. Independently completed members remain archived.
 - **Identity:** unlike the activity verbs, `done` acts on the authenticated
   principal's *store* subject (the id archive/rename actions take). It accepts no
   `--id` or environment identity. Missing fixed context fails nonzero.

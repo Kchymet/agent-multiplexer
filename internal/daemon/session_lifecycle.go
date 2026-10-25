@@ -158,6 +158,10 @@ func (r *sessionRuntime) reconcile(ctx context.Context) error {
 	current := make(map[string]store.Session, len(sessions))
 	for _, session := range sessions {
 		current[session.ID] = session
+	}
+	for _, session := range sessions {
+		// The durable parent flag also fences active members after a restart.
+		session.Archived = session.Archived || current[session.RootID].Archived
 		if session.Archived && !r.completions.has(session.ID) {
 			r.closeAndRevoke(ctx, session.ID)
 			continue

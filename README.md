@@ -172,8 +172,8 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   with its completed goal visible, and the coordinator asks whether to archive
   it or take another task. After explicit user confirmation, the coordinator can
   run `amux agent done` to archive its workgroup and all direct members, stopping
-  runtimes and revoking credentials. Host restoration restores the selected
-  session only: restore the workgroup first, then members to resume. Task-mode
+  runtimes and revoking credentials. Host workgroup restoration also restores
+  previously active members; already-completed members stay archived. Task-mode
   member agents still use `amux agent done` to archive only themselves.
 - **Mode** — an agent runs as a **task** (short) or **loop** (long/autonomous),
   shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.

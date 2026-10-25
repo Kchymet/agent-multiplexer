@@ -135,8 +135,8 @@ that supervises exactly that natively: Codex's App Server thread goal
   the coordinator can run `amux agent done` to archive its workgroup and members.
   The host can also archive it (`x` on the rail, `amux workgroup archive <id>`).
   Both stop runtimes and revoke credentials; transcripts and worktrees remain.
-  Only the host can restore: restore the root first, then explicitly restore
-  members to resume. Already-completed members stay archived.
+  Only the host can restore: restoring the workgroup also restores its previously
+  active members. Already-completed members stay archived.
 - **Only the user pauses it.** `amux do steer <workgroup> -f verb=goal
   -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]`,
   and the same verb over the remote session wire, are the explicit controls. A
