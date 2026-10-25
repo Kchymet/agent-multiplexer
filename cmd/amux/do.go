@@ -81,7 +81,7 @@ var actionGlosses = map[string]string{
 	core.ActionAgentSetRepos:       "re-scope an agent's repos     -f repos=api,web",
 	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web (host only)",
 	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
-	core.ActionNewRepoAgent:        "start a repo-scoped agent     id is the repo name",
+	core.ActionNewRepoAgent:        "retired; use new-workgroup -f repos=<repo>",
 	core.ActionNewWorkgroup:        "create a work-scoped workgroup -f name=… [-f prompt=…] [-f repos=a,b -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
 	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",
 }

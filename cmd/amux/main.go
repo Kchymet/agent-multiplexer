@@ -130,7 +130,7 @@ usage: amux <command>
   repo add <src>     track a repo (clone a git URL, or register a local path)
   repo ls | rm       list / untrack repositories
   workgroup new      create a work-scoped workgroup via a config page, then open
-  workgroup repo <r>  start a single-repo (repo-scoped) agent on a tracked repo
+  workgroup repo <r>  create a workgroup limited to one tracked repo
   workgroup move <a> [<root>|--new]  re-parent an agent into a work-scoped workgroup
   workgroup open <id>  open the dashboard focused on a workgroup or agent
   workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)

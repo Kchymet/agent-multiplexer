@@ -41,7 +41,7 @@ type Session struct {
 	ClaudeID string // pinned claude conversation id (resume across restarts)
 	Prompt   string // initial prompt
 	Created  int64
-	Scope    string // roots only: work (cross-repo) | repo (single-repo, single-member)
+	Scope    string // roots only: work (coordinator workgroup) | repo (management home)
 	Archived bool   // marked done/archived: hidden from the active rail (reversible)
 	// ArchivedAt is the store.Now() timestamp at which Archived last became true,
 	// or 0 when not archived. Distinct from Created so the rail can order the
@@ -69,7 +69,7 @@ type DB struct{ sql *sql.DB }
 // version only after their changes have completed successfully.
 const (
 	MinSchemaVersion     = 0
-	CurrentSchemaVersion = 2
+	CurrentSchemaVersion = 3
 )
 
 // SchemaVersionError means the database is outside the range this daemon can
@@ -109,6 +109,10 @@ func Open() (*DB, error) {
 		_ = err
 	}
 	if err := d.migrateCoordinatorGrants(); err != nil {
+		_ = sqldb.Close()
+		return nil, err
+	}
+	if err := d.migrateRepoWorkgroups(); err != nil {
 		_ = sqldb.Close()
 		return nil, err
 	}
@@ -198,8 +202,13 @@ CREATE TABLE IF NOT EXISTS coordinator_grant_migrations (
 	if err := d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	_, err = d.sql.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaVersion))
-	return err
+	// Version 3 includes the wrapper promotion below. Do not advertise it
+	// until the data migration has committed successfully.
+	if version < 2 {
+		_, err = d.sql.Exec(`PRAGMA user_version = 2`)
+		return err
+	}
+	return nil
 }
 
 // SchemaVersion returns SQLite's persistent user_version marker. It is zero for

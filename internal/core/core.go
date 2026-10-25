@@ -39,7 +39,7 @@ const (
 // pinned above them all.
 const (
 	SectionWorkgroups = harnessproto.SectionWorkgroups // cross-repo workgroups + nested agents
-	SectionRepos      = harnessproto.SectionRepos      // tracked repos + their single-repo agents
+	SectionRepos      = harnessproto.SectionRepos      // tracked repository management homes
 	SectionDetached   = harnessproto.SectionDetached   // Claude sessions amux didn't launch
 	SectionArchived   = harnessproto.SectionArchived   // agents marked done/archived (reversible)
 )
@@ -131,7 +131,7 @@ const (
 	ActionRmRepo              = "rm-repo"               // stop tracking a repo
 	ActionAgentSetRepos       = "agent-set-repos"       // re-scope an agent to exactly Fields["repos"]
 	ActionCoordinatorSetRepos = "coordinator-set-repos" // host-only: replace a coordinator's repo grant ceiling
-	ActionNewRepoAgent        = "new-repo-agent"        // create a repo-scoped workgroup + its agent
+	ActionNewRepoAgent        = "new-repo-agent"        // retired; returns migration guidance
 	ActionAddAgent            = "add-agent"             // add an agent to an existing workgroup
 	ActionAddRepo             = "add-repo"              // track a new repo (Fields["source"])
 	ActionNewWorkgroup        = "new-workgroup"         // create a work-scoped workgroup (+ optional first agent)
@@ -213,7 +213,7 @@ var actionDescriptors = map[string]ActionDescriptor{
 	ActionKill:            {StopsEngine: true},
 	ActionArchive:         {StopsEngine: true},
 	ActionSetArchived:     {StopsEngine: true},
-	ActionNewRepoAgent:    {CreatesSession: true},
+	ActionNewRepoAgent:    {}, // retired: never creates or starts a session
 	ActionAddAgent:        {CreatesSession: true},
 	ActionNewWorkgroup:    {CreatesSession: true, TargetsRoot: true},
 	ActionCreateWorkspace: {CreatesSession: true, TargetsRoot: true},
@@ -404,9 +404,8 @@ type WorkgroupRow struct {
 	Display string     `json:"display"` // name if set, else id
 	Agents  []AgentRow `json:"agents"`
 	// Role is the root's own session role: coordinator for a work-scoped
-	// workgroup, repo for a repo's home session, "" for a hidden single-member
-	// repo root (which hosts no session). Dir is that session's sandbox (the
-	// container dir), "" when the root hosts none or predates default sessions.
+	// workgroup or repo for a repo's management home. Dir is the session's
+	// private sandbox, empty only when provisioning predates default sessions.
 	Role  string `json:"role,omitempty"`
 	Agent string `json:"agent,omitempty"` // the root session's runtime kind
 	Dir   string `json:"dir,omitempty"`

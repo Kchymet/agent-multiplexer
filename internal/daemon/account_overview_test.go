@@ -70,3 +70,17 @@ func TestAccountOverviewPreservesLegacyDefaultsBindingsAndReadiness(t *testing.T
 		t.Fatal("local adoption rerouted existing workload")
 	}
 }
+
+func TestRepoWorkgroupCreationChecksCoordinatorAndMemberAccounts(t *testing.T) {
+	for _, action := range []string{core.ActionCreateWorkspace, core.ActionNewWorkgroup} {
+		harnesses := creationHarnesses(core.Action{Action: action, Fields: map[string]string{
+			"repos": "api", "defaultAgent": "1", "coordinator": "codex", "agent": "claude",
+		}})
+		if len(harnesses) != 2 || harnesses[0] != "codex" || harnesses[1] != "claude" {
+			t.Fatalf("%s: %v", action, harnesses)
+		}
+	}
+	if got := creationHarnesses(core.Action{Action: core.ActionNewRepoAgent}); len(got) != 0 {
+		t.Fatalf("retired action still invokes account readiness: %v", got)
+	}
+}
