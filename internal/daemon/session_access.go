@@ -91,7 +91,7 @@ func (d *Daemon) launchSpecFor(ctx context.Context, id string) (panespec.LaunchS
 	if err != nil {
 		return panespec.LaunchSpec{}, err
 	}
-	if err := accounts.Bind(session.ID, agent.Canonical(session.Agent)); err != nil {
+	if err := accounts.BindExisting(session.ID, agent.Canonical(session.Agent)); err != nil {
 		return panespec.LaunchSpec{}, err
 	}
 	objects, err := wsops.AgentGitObjectMounts(session)

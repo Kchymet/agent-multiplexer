@@ -48,8 +48,11 @@ credential mode, and the daemon persists an opaque API generation independently
 of native account IDs and process-local token generations. API-key replacement
 and subscription/API transitions block existing bound workloads until authorized
 explicit rebind. Default changes do not rebind workloads. A genuinely new binding
-created before any credential exists can accept its first authorized login;
-unknown legacy evidence remains blocked. API mode reports subscription usage as
+created before any credential exists records durable first-login eligibility,
+consumed and pinned when that first login commits (even before delivery).
+Discovery and session updates never grant this eligibility to missing or old-schema
+bindings; unknown legacy evidence remains blocked until explicit rebind.
+API mode reports subscription usage as
 `not-applicable`, clears subscription windows, and rejects Claude statusline quota
 reports. API billing limits are not estimated from subscription quotas.
 

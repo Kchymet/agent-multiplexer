@@ -140,6 +140,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				p.Error = ""
 				p.Revision++
 				s.Profiles[p.ID] = p
+				s.PinInitialCredential(p.ID)
 				return nil
 			})
 			if e != nil {
@@ -170,7 +171,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		// The built-in console is synthetic and absent from SQL inventory.
 		rows = append(rows, console.Session())
 		for _, row := range rows {
-			if err := accounts.Bind(row.ID, agent.Canonical(row.Agent)); err != nil {
+			if err := accounts.BindExisting(row.ID, agent.Canonical(row.Agent)); err != nil {
 				return fail("account_binding_invalid")
 			}
 		}
@@ -235,6 +236,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			b.ExpectedAccount = p.Identity.AccountID
 			b.CredentialVersion = s.CredentialVersion[p.ID]
 			b.CredentialUnknown = false
+			b.AwaitingFirstCredential = false
 			b.Revision++
 			b.Origin = "explicit-rebind"
 			s.Bindings[r.WorkloadID] = b
@@ -413,6 +415,7 @@ func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt, key str
 			p.Error = ""
 			p.Revision++
 			s.Profiles[p.ID] = p
+			s.PinInitialCredential(p.ID)
 			return nil
 		}); err != nil {
 			return err
