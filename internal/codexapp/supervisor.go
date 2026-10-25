@@ -113,9 +113,17 @@ type Supervisor struct {
 	state     *streamState // owned by the read loop only
 	auth      *tokenAuth   // nil unless Config.ChatGPTAuth is set
 
-	mu     sync.Mutex
-	proc   *exec.Cmd
-	closed bool
+	mu       sync.Mutex
+	proc     *exec.Cmd
+	procDone chan struct{} // closed by the sole cmd.Wait goroutine
+	// rpcDone belongs to rpc and closes only after that transport's read loop has
+	// retired its connection-scoped state. Publishing the pair under mu lets real
+	// process exit drain the current reader before closing the serving lifetime.
+	rpcDone chan struct{}
+	closed  bool
+	// reconnecting keeps a newly attached socket unpublished until initialize and
+	// exact-thread resume both succeed.
+	reconnecting bool
 	// interrupted is set during daemon drain before deferred callers are joined.
 	// It retires the control transport without killing the owned process; Close
 	// performs that later teardown after all admitted callers have returned.
@@ -285,7 +293,7 @@ func (s *Supervisor) ThreadID() string {
 // transport is closed cannot accept a prompt even if its child has not exited.
 func (s *Supervisor) live() bool {
 	s.mu.Lock()
-	if s.closed || s.interrupted || s.rpc == nil {
+	if s.closed || s.interrupted || s.reconnecting || s.rpc == nil {
 		s.mu.Unlock()
 		return false
 	}
@@ -367,9 +375,35 @@ func (s *Supervisor) Start(ctx context.Context, wrappedArgv []string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexapp: start app-server: %w", err)
 	}
+	procDone := make(chan struct{})
 	s.mu.Lock()
 	s.proc = cmd
+	s.procDone = procDone
 	s.mu.Unlock()
+	// Exactly one goroutine reaps the child. Besides avoiding zombies, this gives
+	// reconnect admission an authoritative distinction between a dead App Server
+	// and a live server whose daemon-side WebSocket alone was lost.
+	go func() {
+		_ = cmd.Wait()
+		close(procDone)
+		// Process exit is the real supervisor lifetime boundary. Force any current
+		// client reader to observe it and wait for its preceding frames and cleanup
+		// to drain before closing subscribers and the durable writer. rpcDone may
+		// already be closed when transport loss retired the reader before process
+		// exit; serving teardown must not depend on another Ensure/reconnect.
+		s.mu.Lock()
+		rpc := s.rpc
+		rpcDone := s.rpcDone
+		s.mu.Unlock()
+		if rpc != nil {
+			_ = rpc.close()
+		}
+		if rpcDone != nil {
+			<-rpcDone
+		}
+		s.hub.close()
+		s.closeLog()
+	}()
 
 	conn, err := s.dialWithRetry(startCtx)
 	if err != nil {
@@ -436,54 +470,58 @@ func (s *Supervisor) dialWithRetry(ctx context.Context) (msgConn, error) {
 // the read loop, performs the handshake, and pins the thread id. Exposed to tests
 // via an in-memory msgConn; Start calls it with the dialed WebSocket.
 func (s *Supervisor) attach(ctx context.Context, transport msgConn) error {
+	if err := s.attachTransport(ctx, transport); err != nil {
+		return err
+	}
+	return s.handshake(ctx)
+}
+
+func (s *Supervisor) attachTransport(ctx context.Context, transport msgConn) error {
 	rpc := newRPCConn(transport)
 	rpc.onNotify = s.onNotify
 	rpc.onRequest = s.onRequest
+	runCtx, cancel := context.WithCancel(ctx)
+	rpcDone := make(chan struct{})
 	s.mu.Lock()
 	if s.closed || s.interrupted {
 		s.mu.Unlock()
+		cancel()
 		_ = transport.Close()
 		return errClosed
 	}
+	// Process-less attaches are used by protocol tests. A process-backed
+	// supervisor, however, must never publish a socket after its real lifetime
+	// boundary: this also fences the exit watcher snapshot against reconnect.
+	if s.proc != nil && !s.processRunningLocked() {
+		s.mu.Unlock()
+		cancel()
+		_ = transport.Close()
+		return errors.New("codexapp: App Server process exited")
+	}
 	s.rpc = rpc
-	s.mu.Unlock()
-
-	runCtx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
+	s.rpcDone = rpcDone
 	s.runCancel = cancel
 	s.runCtx = runCtx
 	s.mu.Unlock()
 	go func() {
+		defer close(rpcDone)
 		_ = rpc.run(runCtx)
-		// The transport is gone: unblock any pending turn and tear the hub down so
-		// subscribers stop cleanly (mirrors the pane sender teardown).
-		s.failTurn()
-		s.hub.close()
+		// A transport can disappear while the App Server and a native client keep
+		// running. Fail only work owned by this exact connection; retain the event
+		// hub and process so Manager.Ensure can rejoin them. A stale read loop that
+		// finishes after a reconnect must not disturb the replacement transport;
+		// retireTransport fences that identity check and turn cleanup under one lock.
+		s.retireTransport(rpc)
 	}()
 
-	return s.handshake(ctx)
+	return nil
 }
 
 // handshake runs initialize → initialized → thread/start|resume and pins the
 // resulting thread id.
 func (s *Supervisor) handshake(ctx context.Context) error {
-	if _, err := s.rpc.call(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]any{"name": "amux", "title": "amux supervisor", "version": "1"},
-		"capabilities": map[string]any{
-			"experimentalApi": true, // turn/steer, turn/interrupt gate on this (docs: -32601 otherwise)
-		},
-	}); err != nil {
-		return fmt.Errorf("codexapp initialize: %w", err)
-	}
-	if err := s.rpc.notify("initialized", map[string]any{}); err != nil {
-		return fmt.Errorf("codexapp initialized: %w", err)
-	}
-	// Injected tokens live only in the server's memory, so every handshake —
-	// including a reconnect — installs them before the first thread RPC.
-	if s.auth != nil {
-		if err := s.auth.login(ctx, s.rpc); err != nil {
-			return err
-		}
+	if err := s.initialize(ctx); err != nil {
+		return err
 	}
 
 	start := func() (json.RawMessage, error) {
@@ -591,6 +629,144 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	return nil
 }
 
+// initialize establishes one daemon-side client on an App Server. Token login
+// is connection-scoped, so reconnects repeat it before resuming the pinned
+// thread.
+func (s *Supervisor) initialize(ctx context.Context) error {
+	if _, err := s.rpc.call(ctx, "initialize", map[string]any{
+		"clientInfo": map[string]any{"name": "amux", "title": "amux supervisor", "version": "1"},
+		"capabilities": map[string]any{
+			"experimentalApi": true, // turn/steer, turn/interrupt gate on this (docs: -32601 otherwise)
+		},
+	}); err != nil {
+		return fmt.Errorf("codexapp initialize: %w", err)
+	}
+	if err := s.rpc.notify("initialized", map[string]any{}); err != nil {
+		return fmt.Errorf("codexapp initialized: %w", err)
+	}
+	// Injected tokens live only in the server's memory, so every handshake —
+	// including a reconnect — installs them before the first thread RPC.
+	if s.auth != nil {
+		if err := s.auth.login(ctx, s.rpc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconnect restores only amux's client transport to an App Server process that
+// remained alive. It resumes the exact pinned thread without sending cfg.Model:
+// a native client may have changed models while our transport was absent, and a
+// recovery handshake must not overwrite that live choice.
+func (s *Supervisor) reconnect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.closed || s.interrupted {
+		s.mu.Unlock()
+		return errClosed
+	}
+	if s.rpc != nil && s.rpc.live() {
+		s.mu.Unlock()
+		return nil
+	}
+	threadID := s.threadID
+	previousRPC := s.rpc
+	previousDone := s.rpcDone
+	previousCancel := s.runCancel
+	s.reconnecting = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.reconnecting = false
+		s.mu.Unlock()
+	}()
+	if threadID == "" {
+		return errors.New("codexapp: cannot reconnect before thread identity is pinned")
+	}
+	if !s.processRunning() {
+		return errors.New("codexapp: App Server process exited")
+	}
+	if previousCancel != nil {
+		previousCancel()
+	}
+	if previousRPC != nil {
+		_ = previousRPC.close()
+	}
+	// Do not publish a replacement while any callback from the old connection is
+	// still running. Besides streamState being single-reader state, request handlers
+	// may reply after their work completes; keeping s.rpc pinned to previousRPC until
+	// its reader retires prevents an old request id from escaping on the new socket.
+	// The caller's admission context bounds this join just like dial and handshake.
+	if previousDone != nil {
+		select {
+		case <-previousDone:
+		case <-ctx.Done():
+			return fmt.Errorf("codexapp reconnect: wait for previous reader: %w", ctx.Err())
+		}
+	}
+	if !s.processRunning() {
+		return errors.New("codexapp: App Server process exited")
+	}
+
+	conn, err := s.dialWithRetry(ctx)
+	if err != nil {
+		return fmt.Errorf("codexapp reconnect: %w", err)
+	}
+	if err := s.attachTransport(ctx, conn); err != nil {
+		return err
+	}
+	if err := s.initialize(ctx); err != nil {
+		_ = s.rpc.close()
+		return err
+	}
+	params := map[string]any{
+		"threadId":          threadID,
+		"approvalPolicy":    s.cfg.ApprovalPolicy,
+		"approvalsReviewer": s.cfg.ApprovalsReviewer,
+		"sandbox":           s.cfg.Sandbox,
+	}
+	res, err := s.rpc.call(ctx, "thread/resume", params)
+	if err != nil {
+		_ = s.rpc.close()
+		return fmt.Errorf("codexapp reconnect thread: %w", err)
+	}
+	if got := threadIDFromResult(res); got != "" && got != threadID {
+		_ = s.rpc.close()
+		return fmt.Errorf("codexapp reconnect changed thread: got %q, want %q", got, threadID)
+	}
+	// The live thread already owns its model selection. Until an exact pinned
+	// turn_context observation refreshes cfg.Model, omit model from future turns
+	// rather than replaying the pre-disconnect launch choice.
+	s.mu.Lock()
+	s.cfg.Model = ""
+	s.mu.Unlock()
+	return nil
+}
+
+// processRunning distinguishes a dead control transport from a dead owned
+// process. cmd.Wait has exactly one owner and closes procDone on real exit.
+func (s *Supervisor) processRunning() bool {
+	s.mu.Lock()
+	running := s.processRunningLocked()
+	s.mu.Unlock()
+	return running
+}
+
+func (s *Supervisor) processRunningLocked() bool {
+	proc, done := s.proc, s.procDone
+	if proc == nil || proc.Process == nil || done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return false
+	default:
+		return true
+	}
+}
+
 // isNoRollout reports whether a thread/resume error is the "no rollout found"
 // case — a pinned thread that never had a turn, so there is nothing to resume.
 func isNoRollout(err error) bool {
@@ -639,6 +815,7 @@ func (s *Supervisor) Close() error {
 	startCancel := s.startCancel
 	cancel := s.runCancel
 	rpc := s.rpc
+	rpcDone := s.rpcDone
 	s.mu.Unlock()
 
 	if startCancel != nil {
@@ -649,6 +826,9 @@ func (s *Supervisor) Close() error {
 	}
 	if rpc != nil {
 		_ = rpc.close()
+	}
+	if rpcDone != nil {
+		<-rpcDone
 	}
 	s.hub.close()
 	s.closeLog()
@@ -689,25 +869,27 @@ func (s *Supervisor) interruptTransport() {
 func (s *Supervisor) killProc() {
 	s.mu.Lock()
 	proc := s.proc
+	done := s.procDone
 	s.proc = nil
+	s.procDone = nil
 	s.mu.Unlock()
-	if proc == nil || proc.Process == nil {
+	if proc == nil || proc.Process == nil || done == nil {
 		return
 	}
-	// Signal the whole process group so any children the server spawned go too: SIGTERM
-	// for a clean exit, then SIGKILL as the forceful backstop for anything in the group
-	// that ignores it. The child is its own group leader (Setpgid), so -pid targets its
-	// group alone, never the daemon's. A descendant that started its own session escapes
-	// the group; the WaitDelay below (not the group signal) is what bounds that case.
-	_ = syscall.Kill(-proc.Process.Pid, syscall.SIGTERM)
-	_ = syscall.Kill(-proc.Process.Pid, syscall.SIGKILL)
-	_ = proc.Process.Kill()
-	// cmd.Wait (not Process.Wait) reaps the child AND waits for os/exec's stderr-copier
-	// goroutine to drain, then closes the pipe fds — so the captured stderr tail is
-	// complete and the diagnostic pipe never leaks. cmd.WaitDelay (set in Start) bounds
-	// that wait, so a descendant still holding the stderr pipe open cannot wedge this.
-	// Called exactly once per proc (this function nils s.proc under the lock).
-	_ = proc.Wait()
+	select {
+	case <-done:
+		// It exited naturally; the watcher already reaped it.
+	default:
+		// Signal the whole process group so any children the server spawned go too:
+		// SIGTERM for a clean exit, then SIGKILL as the forceful backstop. The child
+		// is its own group leader, so -pid targets its group alone, never the daemon.
+		_ = syscall.Kill(-proc.Process.Pid, syscall.SIGTERM)
+		_ = syscall.Kill(-proc.Process.Pid, syscall.SIGKILL)
+		_ = proc.Process.Kill()
+		// The sole Wait goroutine reaps the child and applies cmd.WaitDelay to any
+		// escaped descendant still holding the diagnostic pipe open.
+		<-done
+	}
 	if p := unixEndpointPath(s.cfg.Endpoint); p != "" {
 		_ = os.Remove(p)
 	}
@@ -1238,21 +1420,55 @@ func (s *Supervisor) abandonLocalTurn(gen uint64) {
 	s.mu.Unlock()
 }
 
-// failTurn unblocks a pending Prompt if the transport closes mid-turn, and drops the
-// local ownership state so a late completion can't deliver again.
-func (s *Supervisor) failTurn() {
-	s.mu.Lock()
+// failTurnLocked drops a pending Prompt's local ownership state. Caller holds mu;
+// the returned waiter is notified after releasing it.
+func (s *Supervisor) failTurnLocked() chan *turnResult {
 	ch := s.turnDone
 	s.turnDone = nil
 	s.ownTurn = ""
 	s.earlyTerm = nil
 	s.curTurn = ""
+	return ch
+}
+
+func notifyDisconnected(ch chan *turnResult) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- &turnResult{StopReason: "disconnected", IsError: true}:
+	default:
+	}
+}
+
+// failTurn unblocks a pending Prompt if the transport closes mid-turn, and drops the
+// local ownership state so a late completion can't deliver again.
+func (s *Supervisor) failTurn() {
+	s.mu.Lock()
+	ch := s.failTurnLocked()
 	s.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- &turnResult{StopReason: "disconnected", IsError: true}:
-		default:
-		}
+	notifyDisconnected(ch)
+}
+
+// retireTransport applies read-loop cleanup only while rpc is still the published
+// connection. The identity check and turn mutation are one critical section, so a
+// replacement cannot be published between them and then lose its active turn to a
+// stale reader. Hub/log closure is reserved for a real process boundary (or the
+// process-less attach used by tests); a live process retains both for reconnect.
+func (s *Supervisor) retireTransport(rpc *rpcConn) {
+	s.mu.Lock()
+	if s.rpc != rpc {
+		s.mu.Unlock()
+		return
+	}
+	ch := s.failTurnLocked()
+	processRunning := s.processRunningLocked()
+	s.mu.Unlock()
+
+	notifyDisconnected(ch)
+	if !processRunning {
+		s.hub.close()
+		s.closeLog()
 	}
 }
 

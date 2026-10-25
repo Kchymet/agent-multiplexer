@@ -55,14 +55,11 @@ func (h codexHarness) CurrentModel(s store.Session) (string, bool) {
 	if path, ok := h.RuntimeTranscriptPath(s); ok {
 		return latestModelLine(path, codexModelLine)
 	}
-	// During a first run Codex has minted a rollout but amux has not adopted its
-	// uuid yet. The private home belongs only to this agent, so its newest rollout
-	// is an unambiguous fallback.
-	if _, private := h.Config(s); private {
-		if path, ok := h.home(s).LatestRolloutPath(); ok {
-			return latestModelLine(path, codexModelLine)
-		}
-	}
+	// Never infer a model from the private home's newest unpinned rollout. Codex
+	// may create auxiliary reviewer threads in the same home; folding one of
+	// those observations into Workspace.SetModel would change the main thread's
+	// next managed turn. Until the runtime id is pinned, retain the requested
+	// store model (or use the exact subject/runtime report above).
 	return "", false
 }
 
