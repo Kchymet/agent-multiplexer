@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +139,9 @@ func TestFetchFromSessionRequestsOnlyItsHarnessAndHidesDetail(t *testing.T) {
 		"denied": {func() (sessionQuerier, error) {
 			return &fakeQuerier{err: &sessionrpc.RemoteError{Status: sessionrpc.StatusDenied, Code: "credential_access_denied"}}, nil
 		}, "credential_access_denied"},
-		"timeout": {func() (sessionQuerier, error) { return &fakeQuerier{err: context.DeadlineExceeded}, nil }, string(fetchTimeout)},
+		"timeout": {func() (sessionQuerier, error) {
+			return &fakeQuerier{err: errors.Join(sessionrpc.ErrIndeterminate, fmt.Errorf("%w: %w", sessionrpc.ErrIndeterminate, context.DeadlineExceeded))}, nil
+		}, string(fetchTimeout)},
 		"malformed": {func() (sessionQuerier, error) {
 			return &fakeQuerier{result: sessionrpc.Result{Body: []byte(`{"token":"has space ` + mockToken + `"}`)}}, nil
 		}, string(fetchMalformed)},
