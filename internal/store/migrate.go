@@ -196,8 +196,8 @@ func NormalizeMode(m string) string {
 
 // Workgroup scopes (root sessions only).
 const (
-	ScopeWork = "work" // cross-repo workgroup: root + N agents
-	ScopeRepo = "repo" // single-repo, single-member workgroup nested under its repo
+	ScopeWork = "work" // coordinator workgroup: root + N agents, optional repo ceiling
+	ScopeRepo = "repo" // repository management home; legacy wrappers migrate to work
 )
 
 // Session roles: the built-in "default sessions" every container hosts. They
@@ -210,7 +210,7 @@ const (
 //     coordinator of its agents. Its id is the workgroup id and its sandbox is
 //     the workgroup's container dir, which holds every member's sandbox.
 //   - RoleRepo: a tracked repo's home session — the long-lived context for the
-//     one-off agents run against that repo. Its id is the repo name (see
+//     repository management notes. Its id is the repo name (see
 //     RepoHomeID) and it is a repo-scoped root with no members of its own.
 //   - RoleAgent ("") : an ordinary agent, or a bare container (a hidden
 //     single-member repo root) that hosts no session.

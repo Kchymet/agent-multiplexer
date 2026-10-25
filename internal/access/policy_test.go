@@ -64,8 +64,11 @@ func TestPolicyRoleMatrix(t *testing.T) {
 		{"coordinator permission generation", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteAction, Verb: core.ActionSteer, ID: "a2", Fields: map[string]string{core.SteerVerb: core.SteerPermission, core.SteerRequestID: "r1", RuntimeGenerationField: "turn-2"}}, true},
 		{"coordinator foreign member", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteAction, Verb: core.ActionStart, ID: "b1"}, false},
 		{"coordinator archive root", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteAction, Verb: core.ActionSetArchived, ID: "wg1", Fields: map[string]string{"archived": "true"}}, false},
-		{"repo new own", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionNewRepoAgent, ID: "api"}, true},
-		{"repo steer own oneoff", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionSteer, ID: "one", Fields: map[string]string{core.SteerVerb: core.SteerStop}}, true},
+		{"repo create scoped workgroup", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionNewWorkgroup, Fields: map[string]string{"repos": "api"}}, true},
+		{"repo create broad workgroup", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionNewWorkgroup}, false},
+		{"repo create foreign workgroup", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionNewWorkgroup, Fields: map[string]string{"repos": "api,web"}}, false},
+		{"repo new own", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionNewRepoAgent, ID: "api"}, false},
+		{"repo steer own oneoff", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteAction, Verb: core.ActionSteer, ID: "one", Fields: map[string]string{core.SteerVerb: core.SteerStop}}, false},
 		{"console lifecycle", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteAction, Verb: core.ActionNewWorkgroup}, true},
 		{"console auth admin", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteAction, Verb: core.ActionAuthReload}, false},
 		{"unknown role denied", Principal{Kind: SubjectSession, SubjectID: "unknown"}, Request{Route: RouteAction, Verb: core.ActionRename, ID: "unknown"}, false},
@@ -78,7 +81,7 @@ func TestPolicyRoleMatrix(t *testing.T) {
 		{"coordinator member normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "a2"}, true},
 		{"coordinator foreign normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
 		{"coordinator archived normalized runtime", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "old"}, true},
-		{"repo owned normalized runtime", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "one"}, true},
+		{"repo owned normalized runtime", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "one"}, false},
 		{"repo same-name workgroup denied", Principal{Kind: SubjectSession, SubjectID: "api"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, false},
 		{"console normalized runtime", Principal{Kind: SubjectSession, SubjectID: "console"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents, ID: "b1"}, true},
 		{"normalized runtime needs id", Principal{Kind: SubjectSession, SubjectID: "wg1"}, Request{Route: RouteQuery, Verb: core.QueryRuntimeEvents}, false},
@@ -109,7 +112,7 @@ func TestRepoHomeDoesNotOwnWorkgroupAgentSharingRepo(t *testing.T) {
 	for _, tc := range []struct {
 		id   string
 		want bool
-	}{{"one", true}, {"a1", false}} {
+	}{{"one", false}, {"a1", false}} {
 		err := p.Authorize(context.Background(), who, Request{Route: RouteAction, Verb: core.ActionStart, ID: tc.id})
 		if (err == nil) != tc.want {
 			t.Errorf("start %s: error=%v want success=%v", tc.id, err, tc.want)
@@ -124,7 +127,7 @@ func TestRepoHomeDoesNotOwnWorkgroupAgentSharingRepo(t *testing.T) {
 	for _, s := range out.Sessions {
 		ids = append(ids, s.ID)
 	}
-	if got := strings.Join(ids, ","); got != "api,hidden,one" {
+	if got := strings.Join(ids, ","); got != "api" {
 		t.Fatalf("visible repo sessions = %s", got)
 	}
 }

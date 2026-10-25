@@ -151,6 +151,12 @@ and the row carries a `role` naming which:
   the repo name. All three accept every session verb (§3) like an agent — a
   `prompt` to a workgroup id reaches its coordinator (starting it if stopped),
   never its members — and stream `runtime-events` (§4) from their own transcript.
+- All workgroups, including those limited to one repository, publish a coordinator
+  root in `workgroups` and member rows with that actual root id. Repo home rows
+  remain management context; members no longer appear directly beneath repos.
+  `new-workgroup` with `fields.repos` set to one repo is the single-repo creation
+  contract. It returns the coordinator id and admission checks both coordinator
+  and requested member harnesses. No separate one-off creation verb is supported.
 - A root row's `state` is the most demanding of the coordinator's own state and
   its members'; its `status` leads with the coordinator's own.
 - A consumer that renders container rows as headers keeps doing so; it may

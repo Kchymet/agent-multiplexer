@@ -465,7 +465,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.attachSelected()
-	case "a": // add an agent — on a repo header, a repo-scoped agent; on a workgroup, another agent
+	case "a": // create a workgroup on a repo header, or add a member to a workgroup
 		s := m.selected()
 		switch {
 		case s == nil:

@@ -145,7 +145,7 @@ func validateSessionAction(req access.Request) error {
 	case core.ActionAddAgent:
 		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model", "repos"), validateCreationMode(req.Fields))
 	case core.ActionNewRepoAgent:
-		return joinValidation(requireID(), noTarget(), fields("agent", "prompt", "mode", "model"), validateCreationMode(req.Fields))
+		return fmt.Errorf("new-repo-agent is retired; use new-workgroup with an explicit repos field")
 	case core.ActionNewWorkgroup:
 		// coordinator/coordinator_model choose the workgroup's own session runtime
 		// (agent/model describe a member): the console's guide teaches them and the

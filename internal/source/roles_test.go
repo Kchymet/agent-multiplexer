@@ -14,7 +14,7 @@ import (
 // Every container row is a default session: the console, a workgroup root (its
 // coordinator), and a repo header (its home) carry a role, a runtime, steerable
 // caps, and a sandbox — so a consumer can open and steer them like an agent.
-// A bare single-member repo root still hosts nothing and stays hidden.
+// Legacy repo wrappers become visible coordinator workgroups.
 func TestPollDefaultSessions(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("HOME", t.TempDir())
@@ -96,11 +96,9 @@ func TestPollDefaultSessions(t *testing.T) {
 	if web.Role != store.RoleRepo || web.Cwd != "" || web.CanAttach || !strings.Contains(web.Status, "repair required") {
 		t.Errorf("unprovisioned repo home = %+v", web)
 	}
-	if _, ok := byID["hidden"]; ok {
-		t.Error("the hidden single-member repo root rendered as a row")
-	}
-	if one := byID["one"]; one.RootID != "api" || one.Section != core.SectionRepos || one.Role != "" {
-		t.Errorf("one-off row = %+v, want nested under the repo with no role", one)
+	check("hidden", store.RoleCoordinator, "claude", store.CoordinatorDir("hidden"))
+	if one := byID["one"]; one.RootID != "hidden" || one.Section != core.SectionWorkgroups || one.Role != "" {
+		t.Errorf("one-off row = %+v, want nested under its preserved workgroup with no role", one)
 	}
 	if a1 := byID["a1"]; a1.Role != "" || a1.RootID != "wg1" {
 		t.Errorf("member row = %+v", a1)
