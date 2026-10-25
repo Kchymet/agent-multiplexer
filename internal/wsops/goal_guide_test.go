@@ -30,13 +30,13 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 			t.Errorf("goal coordinator guide missing %q", want)
 		}
 	}
-	// Restoring an archived member and archiving the workgroup itself are the
-	// user's operations, not the coordinator's: its grant refuses them.
-	for _, forbidden := range []string{"amux do unarchive", "amux workgroup archive"} {
-		if strings.Contains(guide, forbidden) {
-			t.Errorf("coordinator guide advertises the host-only %q", forbidden)
-		}
+	// Restoring an archived member is the user's operation, not the
+	// coordinator's: its grant refuses it. The workgroup archive command is named
+	// only as the user's host operation, never as a step the coordinator takes.
+	if strings.Contains(guide, "amux do unarchive") {
+		t.Error("coordinator guide advertises the host-only amux do unarchive")
 	}
+	assertCompletionLeavesWorkgroupOpen(t, "goal coordinator", guide, "wg1")
 
 	// An explicitly non-goal coordinator is told the truth instead.
 	plain := store.Session{ID: "wg2", Name: "payments", Agent: "claude", Dir: "/sandbox/wg2"}
@@ -52,6 +52,36 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(other, agent.GoalRuntime) {
 		t.Error("non-goal coordinator guide does not say which runtime does run goals")
+	}
+	assertCompletionLeavesWorkgroupOpen(t, "non-goal coordinator", other, "wg2")
+}
+
+// Finishing a task must never read as "the workgroup gets archived": on every
+// harness the guide tells the coordinator the workgroup stays open, to ask the
+// user whether to archive it or continue, and that archiving is the user's host
+// operation — not something the coordinator (or a member on its behalf) does.
+func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
+	t.Helper()
+	// The guide is hard-wrapped prose; match phrases against its unwrapped form.
+	flat := strings.Join(strings.Fields(guide), " ")
+	for _, want := range []string{
+		"archives nothing",
+		"ask the user whether to archive the workgroup",
+		"amux workgroup archive " + id,
+		"Never archive this workgroup yourself — not with `amux agent done`",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("%s guide missing %q", kind, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"automatically marks the workgroup done",
+		"marks the workgroup done",
+		"stops its coordinator and members",
+	} {
+		if strings.Contains(flat, forbidden) {
+			t.Errorf("%s guide still promises auto-archive: %q", kind, forbidden)
+		}
 	}
 }
 

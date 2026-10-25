@@ -297,6 +297,8 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 `, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
 	b.WriteString(goalSection(root))
 	b.WriteString("\n")
+	b.WriteString(completionSection(root))
+	b.WriteString("\n")
 	b.WriteString(membersSection(root))
 	b.WriteString("\n")
 	b.WriteString(configHomeSection)
@@ -525,6 +527,24 @@ func firstOf(list string) string {
 
 func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
 
+// completionSection is the task-completion contract every coordinator gets,
+// whatever its harness: finishing a task archives nothing. The workgroup stays on
+// the active rail with its coordinator and members, and what happens next —
+// archive it, or hand it another task — is the user's decision, asked for
+// explicitly. Archiving the workgroup is a host operation the coordinator's grant
+// refuses, so the guide never teaches it as something the model does itself.
+func completionSection(root store.Session) string {
+	return fmt.Sprintf(`## Finishing a task
+Finishing a task archives nothing: this workgroup, you and your members stay on
+the active rail. End each finished task with your final summary and ask the
+user whether to archive the workgroup (their host operation: `+"`x`"+` on the rail or
+`+"`amux workgroup archive %s`"+`) or give it another task. Never archive this
+workgroup yourself — not with `+"`amux agent done`"+`, not through a member. Members
+keep their own lifecycle: `+"`amux do set-archived <member> -f archived=true`"+` marks
+one done once its work is verified.
+`, root.ID)
+}
+
 // goalSection tells a coordinator how its task lifecycle actually works. On the
 // default goal runtime the host and Codex do the establishing and continuing;
 // the guide's job is to keep the model honest about completion, input and
@@ -550,10 +570,10 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
   CI), and fix or re-dispatch what falls short. Progress must change real state.
 - Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
   verified — never because you are stopping, out of ideas, or near a budget.
-  When the final turn finishes, amux automatically marks the workgroup done
-  (archived) and stops its coordinator and members. Finish all member work and
-  give your final summary before ending that turn. The user can restore the
-  workgroup; their next task then becomes a fresh goal.
+  Completing the goal archives nothing: the completed goal stays visible on the
+  thread and this workgroup stays open (see "Finishing a task"). Finish all
+  member work and give your final summary before ending that turn; the user's
+  next task becomes a fresh goal with its own accounting.
 - Ask the user only for genuine input (`+"`request_user_input`"+`); an open question is
   not a reason to shrink the objective. Use status `+"`blocked`"+` only after the same
   blocker repeats across consecutive goal turns, as the tool describes.

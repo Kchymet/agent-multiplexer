@@ -115,17 +115,18 @@ second launch command leaves an existing listener connectable.
 
 ## Goal completion
 
-A live goal-mode coordinator transitioning to `complete` marks its workgroup
-done (archived) after its final turn and pending goal decisions finish. The
-daemon commits the archive against the current supervisor under the same
-admission locks used for start, steer, restart and restore, then stops the
-coordinator and its members. Transcripts and worktrees are retained. Paused,
-blocked and limited goals do not trigger completion.
+A goal transitioning to `complete` archives nothing. The completed goal stays
+observable on the thread (`get_goal`, the rail's goal state), the workgroup
+stays on the active rail, and its coordinator and members keep running; the
+coordinator's guide tells it to finish with a summary and ask the user whether
+to archive the workgroup or hand it another task. Archiving remains the user's
+explicit host operation (`x` on the rail, `amux workgroup archive <id>`), which
+stops the coordinator and its members and retains transcripts and worktrees.
 
-A host restore leaves the workgroup open: simply loading an old completed goal
-does not archive it again. Its next task establishes a fresh goal. Restart
-evidence of the same previously active goal can recover a completion observed
-during daemon downtime.
+The next task on a workgroup with a completed goal clears the finished goal and
+establishes a fresh one with its own accounting. Restart evidence covers only
+goals observed `active`; a completed goal needs none, and a `completedGoalKey`
+left in an older restart journal is ignored.
 
 ## Restart and goal continuation
 

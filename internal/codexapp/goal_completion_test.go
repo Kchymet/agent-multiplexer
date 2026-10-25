@@ -1,123 +1,99 @@
 package codexapp
 
 import (
-	"errors"
+	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
 )
 
-func TestWorkgroupCompletionSurvivesRestart(t *testing.T) {
-	s, _ := goalSessionWith(t, true, &threadGoal{ThreadID: "thr_1", Status: GoalActive, Objective: "task"})
-	notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: GoalComplete, Objective: "task"})
-	w := s.RestartWork()
-	if w.GoalKey != "" || w.CompletedGoalKey == "" {
-		t.Fatalf("pending completion lost: %+v", w)
+// Completing a goal ends the task, not the workgroup: the completed goal stays
+// observable on the thread after the final turn, nothing about the supervisor
+// asks the host to archive anything, and the user's next task on the same open
+// workgroup replaces the finished goal with a fresh one.
+func TestCompletedGoalStaysObservableAndNextTaskStartsFreshGoal(t *testing.T) {
+	s, fs := goalSession(t, true)
+	goal := &threadGoal{ThreadID: s.ThreadID(), Objective: "ship the fix", Status: GoalActive, CreatedAt: 7}
+	peerTurn(s, "final")
+	fs.setGoalState(goal)
+	notifyGoal(s, goal)
+	done := *goal
+	done.Status = GoalComplete
+	done.TokensUsed = 4242
+	fs.setGoalState(&done)
+	notifyGoal(s, &done)
+	endTurn(s, "final", "completed")
+
+	got, ok := s.Goal()
+	if !ok || got.Status != GoalComplete || got.Objective != "ship the fix" || got.TokensUsed != 4242 {
+		t.Fatalf("completed goal not observable after the final turn: %+v ok=%t", got, ok)
+	}
+	// A completed goal is not interrupted work: restart evidence names no goal
+	// and asks for no continuation, so nothing survives a restart to act on it.
+	if w := s.RestartWork(); w.GoalKey != "" || w.Continue {
+		t.Fatalf("restart work after completion = %+v, want none", w)
+	}
+	if g := fs.goalState(); g == nil || g.Status != GoalComplete {
+		t.Fatalf("completion changed the native goal: %+v", g)
+	}
+
+	// The workgroup stays open: the next user task replaces the finished goal.
+	peerTurn(s, "next")
+	userMessage(s, "next", "item_next", "now add the regression test")
+	if !fs.awaitCall("thread/goal/set", 2*time.Second) {
+		t.Fatal("next task did not establish a goal")
+	}
+	fresh := awaitGoal(t, fs, func(g *threadGoal) bool { return g != nil && g.Status == GoalActive }, 2*time.Second)
+	if fresh == nil || fresh.Objective != "now add the regression test" || fresh.Status != GoalActive {
+		t.Fatalf("next goal = %+v, want a fresh active goal for the new task", fresh)
+	}
+	if fresh.TokensUsed != 0 || fresh.CreatedAt == 7 {
+		t.Fatalf("fresh goal inherited the completed goal's accounting: %+v", fresh)
+	}
+	if got, ok := s.Goal(); !ok || got.Status != GoalActive || got.Objective != "now add the regression test" {
+		t.Fatalf("supervisor view after the next task = %+v ok=%t", got, ok)
+	}
+}
+
+// A thread whose goal is already complete at resume is settled, whatever the
+// restart journal says about it: evidence written before completion stopped
+// being restart work (a legacy completedGoalKey), evidence that the goal was
+// active at shutdown and finished before resume, or no evidence at all. None of
+// them reactivates the goal, hides it, or turns it back into restart work.
+func TestResumedCompletedGoalIsSettledWhateverTheRestartEvidence(t *testing.T) {
+	finished := &threadGoal{ThreadID: "thr_1", Status: GoalComplete, Objective: "task", CreatedAt: 3}
+	var legacy RestartWork
+	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"threadId":"thr_1","completedGoalKey":%q}`, finished.key())), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ThreadID != "thr_1" || legacy.GoalKey != "" || legacy.Continue {
+		t.Fatalf("legacy journal decoded as %+v", legacy)
 	}
 	for _, tc := range []struct {
 		name string
 		work *RestartWork
-		want bool
 	}{
-		{"pending archive", &w, true},
-		{"finished during shutdown", &RestartWork{ThreadID: w.ThreadID, GoalKey: w.CompletedGoalKey}, true},
-		{"host restore", nil, false},
-		{"different goal", &RestartWork{ThreadID: w.ThreadID, CompletedGoalKey: "other"}, false},
-		{"different thread", &RestartWork{ThreadID: "other", CompletedGoalKey: w.CompletedGoalKey}, false},
+		{"legacy completed-goal evidence", &legacy},
+		{"goal active at shutdown, finished before resume", &RestartWork{ThreadID: "thr_1", GoalKey: finished.key()}},
+		{"no restart evidence", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := newMemPair()
-			fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, goal: &threadGoal{ThreadID: w.ThreadID, Status: GoalComplete, Objective: "task"}}
+			fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, goal: finished}
 			go fs.loop()
 			defer fs.close()
-			restored := New(Config{Goals: true, ResumeThreadID: w.ThreadID, RestartWork: tc.work})
+			restored := New(Config{Goals: true, ResumeThreadID: "thr_1", RestartWork: tc.work})
 			defer restored.Close()
 			attach(t, restored, client)
-			done, err := restored.CompleteWorkgroup(func() error { return nil })
-			if err != nil || done != tc.want {
-				t.Fatalf("done=%t want=%t err=%v", done, tc.want, err)
+			if _, set := fs.sawCall("thread/goal/set"); set {
+				t.Fatal("resume reactivated a completed goal")
+			}
+			if got, ok := restored.Goal(); !ok || got.Status != GoalComplete || got.Objective != "task" {
+				t.Fatalf("completed goal not observable after resume: %+v ok=%t", got, ok)
+			}
+			if w := restored.RestartWork(); w.GoalKey != "" || w.Continue {
+				t.Fatalf("completed goal produced restart work: %+v", w)
 			}
 		})
-	}
-}
-
-func TestWorkgroupCompletionWaitsForFinalTurn(t *testing.T) {
-	s, _ := goalSession(t, true)
-	goal := &threadGoal{ThreadID: s.ThreadID(), Objective: "ship", Status: GoalActive, CreatedAt: 1}
-	notifyGoal(s, goal)
-	peerTurn(s, "final")
-	goal.Status = GoalComplete
-	notifyGoal(s, goal)
-	commits := 0
-	commit := func() error { commits++; return nil }
-	if done, err := s.CompleteWorkgroup(commit); done || err != nil || commits != 0 {
-		t.Fatalf("archived during final response: done=%t err=%v commits=%d", done, err, commits)
-	}
-	endTurn(s, "final", "completed")
-	if done, err := s.CompleteWorkgroup(commit); !done || err != nil || commits != 1 {
-		t.Fatalf("did not archive after final turn: done=%t err=%v commits=%d", done, err, commits)
-	}
-	if done, _ := s.CompleteWorkgroup(commit); done || commits != 1 {
-		t.Fatal("completion committed twice")
-	}
-}
-
-func TestWorkgroupCompletionRequiresNewCompletedGoal(t *testing.T) {
-	for _, status := range []string{GoalActive, GoalPaused, GoalBlocked, GoalBudgetLimited, GoalUsageLimited, GoalComplete} {
-		t.Run(status, func(t *testing.T) {
-			s, _ := goalSessionWith(t, true, &threadGoal{ThreadID: "thr_1", Status: GoalActive, Objective: "task"})
-			notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: status, Objective: "task"})
-			called := false
-			done, err := s.CompleteWorkgroup(func() error { called = true; return nil })
-			if err != nil || done != (status == GoalComplete) || called != done {
-				t.Fatalf("done=%t called=%t err=%v", done, called, err)
-			}
-		})
-	}
-	for _, goals := range []bool{false, true} {
-		s, _ := goalSessionWith(t, goals, &threadGoal{ThreadID: "thr_1", Status: GoalComplete, Objective: "previous task"})
-		if done, _ := s.CompleteWorkgroup(func() error { t.Fatal("restored completed goal re-archived"); return nil }); done {
-			t.Fatal("restored completed goal archived")
-		}
-	}
-	s, _ := goalSession(t, false)
-	notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: GoalActive})
-	notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: GoalComplete})
-	s.CompleteWorkgroup(func() error { t.Fatal("ordinary session archived"); return nil })
-}
-
-func TestWorkgroupCompletionRechecksStateAndRetriesStoreFailures(t *testing.T) {
-	for _, change := range []string{"new turn", "new goal", "cleared", "pending task", "pending prompt", "goal operation", "shutdown"} {
-		t.Run(change, func(t *testing.T) {
-			s, _ := goalSessionWith(t, true, &threadGoal{ThreadID: "thr_1", Status: GoalActive})
-			notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: GoalComplete})
-			switch change {
-			case "new turn":
-				peerTurn(s, "new")
-			case "new goal":
-				notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: GoalActive, Objective: "new"})
-			case "cleared":
-				notifyGoal(s, nil)
-			case "pending task":
-				s.goalOpen = map[string]int{"new": 1}
-			case "pending prompt":
-				s.turnDone = make(chan *turnResult, 1)
-			case "goal operation":
-				s.goalOp.Lock()
-				defer s.goalOp.Unlock()
-			case "shutdown":
-				s.interruptTransport()
-			}
-			if done, err := s.CompleteWorkgroup(func() error { t.Fatal("stale completion committed"); return nil }); done || err != nil {
-				t.Fatalf("done=%t err=%v", done, err)
-			}
-		})
-	}
-	s, _ := goalSessionWith(t, true, &threadGoal{ThreadID: "thr_1", Status: GoalActive})
-	notifyGoal(s, &threadGoal{ThreadID: s.ThreadID(), Status: GoalComplete})
-	want := errors.New("store unavailable")
-	if done, err := s.CompleteWorkgroup(func() error { return want }); done || !errors.Is(err, want) {
-		t.Fatalf("failed commit: done=%t err=%v", done, err)
-	}
-	if done, err := s.CompleteWorkgroup(func() error { return nil }); !done || err != nil {
-		t.Fatalf("retry: done=%t err=%v", done, err)
 	}
 }
