@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"strconv"
 	"strings"
@@ -10,9 +12,11 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/agent"
+	"amux/internal/claudegoal"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/hostprep"
 	"amux/internal/panespec"
 	"amux/internal/runtimeevents"
 	"amux/internal/store"
@@ -71,8 +75,24 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 	// workgroup coordinator on the goal runtime). An ordinary App Server worker
 	// keeps its upstream native goal tracking and restart behaviour untouched —
 	// amux simply does not establish or control goals on its behalf.
-	if verb == core.SteerGoal && !agent.NativeGoals(sess) {
-		return fmt.Errorf("goal: agent %s is not a goal session (native goals are the workgroup coordinator's, on the %s runtime)", a.ID, agent.GoalRuntime)
+	if verb == core.SteerGoal && !agent.GoalMode(sess) {
+		return fmt.Errorf("goal: agent %s is not a goal session (goal mode is the workgroup coordinator's, on the %s or %s runtime)", a.ID, agent.GoalRuntime, agent.HookGoalRuntime)
+	}
+	// A Claude coordinator's goal is amux's own (internal/claudegoal): the
+	// control is a state change in its session-local goal file. Resuming a goal
+	// on an idle coordinator also nudges it back to work, since no Stop hook
+	// will fire until a turn runs; the nudge is an ordinary prompt below.
+	if verb == core.SteerGoal && agent.HookGoals(sess) {
+		resume, err := steerHookGoal(sess, a.Fields)
+		if err != nil || !resume {
+			return err
+		}
+		in, ok := d.engine.Lookup(engine.Key{AgentID: a.ID, Tab: panespec.TabAgent})
+		if !ok || in == nil || h.Activity(sess) != engine.ActivitySafe {
+			return nil // stopped or mid-turn: the next turn's Stop hook continues it
+		}
+		verb = core.SteerPrompt
+		a.Fields = map[string]string{core.SteerVerb: verb, core.SteerText: claudegoal.ResumePrompt}
 	}
 
 	// Structured control (AGE-181): a Codex session under the App Server supervisor
@@ -620,4 +640,36 @@ func (d *Daemon) deferInput(in engine.Instance, payload []engine.InputStep) {
 	}
 	payload[0].DelayBefore += settle
 	in.InputSequence(payload)
+}
+
+// steerHookGoal applies the host `goal` control to a Claude coordinator's goal
+// file through the pinned session root, and reports whether the goal was
+// resumed. Claude goals have no token accounting, so a token budget is refused
+// rather than silently dropped.
+func steerHookGoal(sess store.Session, fields map[string]string) (resume bool, err error) {
+	if strings.TrimSpace(fields[core.SteerGoalBudget]) != "" {
+		return false, fmt.Errorf("goal: %q is not supported on a %s coordinator (its goal is bounded by %d continuations, not tokens)",
+			core.SteerGoalBudget, agent.HookGoalRuntime, claudegoal.MaxContinuations)
+	}
+	root, err := hostprep.OpenSession(sess.Dir)
+	if err != nil {
+		return false, fmt.Errorf("goal: open session %s: %w", sess.ID, err)
+	}
+	defer root.Close()
+	b, err := root.ReadFile(claudegoal.StateRel)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("goal: read goal state: %w", err)
+	}
+	cur, err := claudegoal.Decode(b)
+	if err != nil {
+		return false, err
+	}
+	next, resume, err := claudegoal.Control(cur, fields[core.SteerGoalStatus], fields[core.SteerGoalObjective], time.Now())
+	if err != nil {
+		return false, err
+	}
+	if err := root.AtomicWrite(claudegoal.StateRel, claudegoal.Encode(next), 0o600); err != nil {
+		return false, fmt.Errorf("goal: write goal state: %w", err)
+	}
+	return resume, nil
 }

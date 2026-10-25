@@ -94,7 +94,7 @@ var overlayNames = map[string]bool{
 	"AMUX_AGENT": true, "AMUX_MODE": true, "AMUX_ROLE": true,
 	"AMUX_ROOT": true, "AMUX_SCOPE": true, "AMUX_SESSION_ID": true,
 	"AMUX_WORKGROUP": true, "AMUX_WORKSPACE": true,
-	"AMUX_SESSION_ACCESS": true, "TMPDIR": true, "CLAUDE_CODE_TMPDIR": true,
+	"AMUX_SESSION_ACCESS": true, "AMUX_GOAL_FILE": true, "TMPDIR": true, "CLAUDE_CODE_TMPDIR": true,
 	"CLAUDE_CONFIG_DIR": true, "CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
 	"CODEX_HOME": true,
 	// Public CA bundles selected and granted by the native sandbox launcher.

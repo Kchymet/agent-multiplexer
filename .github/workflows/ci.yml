@@ -87,7 +87,7 @@ jobs:
       - name: download pinned native harness fixtures
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/agent-runtimes/codex" "$RUNNER_TEMP/agent-runtimes/claude" "$RUNNER_TEMP/codex-0.157.1"
+          mkdir -p "$RUNNER_TEMP/agent-runtimes/codex" "$RUNNER_TEMP/agent-runtimes/codex-current" "$RUNNER_TEMP/agent-runtimes/claude" "$RUNNER_TEMP/codex-0.157.1"
           cd "$RUNNER_TEMP/agent-runtimes"
           curl --fail --location --retry 3 \
             https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-package-x86_64-unknown-linux-musl.tar.gz \
@@ -98,12 +98,18 @@ jobs:
           curl --fail --location --retry 3 \
             https://github.com/openai/codex/releases/download/rust-v0.157.1/codex-x86_64-unknown-linux-musl.tar.gz \
             -o codex-0.157.1.tar.gz
+          curl --fail --location --retry 3 \
+            https://github.com/openai/codex/releases/download/rust-v0.157.1/codex-package-x86_64-unknown-linux-musl.tar.gz \
+            -o codex-current.tar.gz
           echo 'a822187e1a2420c61c5926721bfbd878701ed95547c9bb0d4de4498a16ba1821  codex.tar.gz' | sha256sum -c -
           echo '8b6207348ad56fdcde085a0ad1f7cff0dfe06ce2c6c1bf97f69f1a1a7b6d0945  claude.tgz' | sha256sum -c -
           echo 'e98c1e8e028e8137fa2d2415c82ec58e7b3701a627e3554aace5b3ca31454af2  codex-0.157.1.tar.gz' | sha256sum -c -
+          echo '0e211868c9fd73cb49ad35ac675b5eafdf6b9f453df8a493df980c59a590fe5f  codex-current.tar.gz' | sha256sum -c -
           tar -xzf codex.tar.gz -C codex
           tar -xzf claude.tgz -C claude
           tar -xzf codex-0.157.1.tar.gz -C "$RUNNER_TEMP/codex-0.157.1"
+          tar -xzf codex-current.tar.gz -C codex-current
+          test "$(codex-current/bin/codex --version)" = 'codex-cli 0.157.1'
       - name: test native central API-key login and delivery (synthetic key only)
         env:
           AMUX_TEST_CODEX_BIN: ${{ runner.temp }}/codex-0.157.1/codex-x86_64-unknown-linux-musl
@@ -122,6 +128,11 @@ jobs:
           for runtime in claude codex codex-app-server; do
             AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
               -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
+          done
+          export AMUX_TEST_CODEX_PACKAGE="$RUNNER_TEMP/agent-runtimes/codex-current"
+          for runtime in codex codex-app-server; do
+            AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
+              -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=180s -v
           done
       - name: test old and relocated Codex App Server sockets
         shell: bash

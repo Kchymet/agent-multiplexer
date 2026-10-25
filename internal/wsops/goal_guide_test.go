@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"amux/internal/agent"
+	"amux/internal/claudegoal"
 	"amux/internal/store"
 )
 
@@ -38,16 +39,50 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 	}
 	assertCompletionLeavesWorkgroupOpen(t, "goal coordinator", guide, "wg1")
 
-	// An explicitly non-goal coordinator is told the truth instead.
-	plain := store.Session{ID: "wg2", Name: "payments", Agent: "claude", Dir: "/sandbox/wg2"}
-	if agent.NativeGoals(plain) {
-		t.Fatal("fixture unexpectedly has native goals")
+	// A Claude coordinator runs in goal mode by default, through amux's hooks:
+	// its guide teaches the amux goal commands and how to get missing input
+	// from the user, never Codex's update_goal.
+	claude := store.Session{ID: "wg3", Name: "payments", Agent: agent.HookGoalRuntime, Dir: "/sandbox/wg3"}
+	if !agent.HookGoals(claude) || !agent.GoalMode(claude) {
+		t.Fatal("claude coordinator fixture is not in goal mode")
+	}
+	hooked := coordinatorGuide(claude)
+	flatHooked := strings.Join(strings.Fields(hooked), " ")
+	for _, want := range []string{
+		"Goal mode (amux goal hooks)",
+		"goal mode by default",
+		"amux agent goal complete",
+		"amux agent goal ask",
+		"amux agent goal blocked",
+		"amux agent goal wait", // idle until a wake-up
+		"Never busy-poll",      // no polling across continuations
+		"Never run `goal wait` without an armed wake-up",
+		"AskUserQuestion",                                 // concrete choices
+		"ask instead of guessing",                         // user-owned decisions
+		"choose the sensible default",                     // optional details
+		"amux do steer wg3 -f verb=goal -f status=paused", // the user's controls
+	} {
+		if !strings.Contains(flatHooked, want) {
+			t.Errorf("claude goal coordinator guide missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"update_goal", "no native goal engine", "request_user_input"} {
+		if strings.Contains(hooked, forbidden) {
+			t.Errorf("claude goal coordinator guide mentions %q", forbidden)
+		}
+	}
+	assertCompletionLeavesWorkgroupOpen(t, "claude goal coordinator", hooked, "wg3")
+
+	// A coordinator on a harness with neither goal mechanism is told the truth.
+	plain := store.Session{ID: "wg2", Name: "payments", Agent: "hermes", Dir: "/sandbox/wg2"}
+	if agent.GoalMode(plain) {
+		t.Fatal("fixture unexpectedly has goal mode")
 	}
 	other := coordinatorGuide(plain)
 	if !strings.Contains(other, "no native goal engine") {
 		t.Error("non-goal coordinator guide claims or omits its lifecycle")
 	}
-	if strings.Contains(other, "update_goal") {
+	if strings.Contains(other, "update_goal") || strings.Contains(other, "amux agent goal") {
 		t.Error("non-goal coordinator guide teaches a tool it does not have")
 	}
 	if !strings.Contains(other, agent.GoalRuntime) {
@@ -104,6 +139,29 @@ func TestConsoleGuideTeachesCoordinatorFields(t *testing.T) {
 	for _, want := range []string{FieldCoordinator, FieldCoordinatorModel, agent.GoalRuntime} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("console guide does not teach %q", want)
+		}
+	}
+}
+
+// Only a Claude coordinator's environment names its goal file: the hooks and
+// `amux agent goal` find their state through it, and its absence is how they
+// know a session is not in Claude goal mode.
+func TestGoalFileEnvOnlyForClaudeCoordinator(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		s    store.Session
+		want bool
+	}{
+		{"claude coordinator", store.Session{ID: "wg1", Agent: "claude", Dir: "/s/wg1"}, true},
+		{"codex coordinator", store.Session{ID: "wg2", Agent: agent.GoalRuntime, Dir: "/s/wg2"}, false},
+		{"claude member", store.Session{ID: "m1", RootID: "wg1", Agent: "claude", Dir: "/s/m1"}, false},
+	} {
+		got := envOf(AgentEnv(tc.s), claudegoal.EnvFile)
+		if (got != "") != tc.want {
+			t.Errorf("%s: %s=%q, want set=%v", tc.name, claudegoal.EnvFile, got, tc.want)
+		}
+		if tc.want && got != claudegoal.StatePath(tc.s.Dir) {
+			t.Errorf("%s: goal file %q, want %q", tc.name, got, claudegoal.StatePath(tc.s.Dir))
 		}
 	}
 }

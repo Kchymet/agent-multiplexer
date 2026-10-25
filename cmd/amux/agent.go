@@ -56,6 +56,10 @@ func cmdAgent(args []string) error {
 		return cmdAgentEvents(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
+	case "goal":
+		// Goal mode for a Claude workgroup coordinator: the hook bindings that
+		// establish and continue the goal, and the model's own transitions.
+		return cmdAgentGoal(args[1:])
 	case "done":
 		// Terminal self-report: the agent declares its task complete and archives
 		// itself off the active rail. The self-scoped analog of the management
@@ -97,6 +101,10 @@ usage: amux agent <command>
   done               report the task complete: archive this agent off the active
                      rail (reversible — amux workgroup unarchive <id>).
                      identity comes only from the fixed session context
+  goal [show]        Claude coordinator goal mode: show the goal, or mark it
+                     complete "<summary>" | ask "<question>" |
+                     wait "<waiting on>" | blocked "<reason>"
+                     (amux agent goal --help)
   sessions [--json]  discover all host agent conversations (read-only)
   events [<id>]      read one bounded normalized event page through authenticated
                      session RPC (--after/--cursor, --json)
