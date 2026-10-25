@@ -291,3 +291,34 @@ func TestRemoteAccountManagementFlagIsRetired(t *testing.T) {
 		t.Fatal("legacy management grant preserved or status removed")
 	}
 }
+
+func TestLegacyAccountManageServiceStartsWithReadOnlyAccountAccess(t *testing.T) {
+	sandboxCLI(t)
+	t.Setenv("AMUX_PROVIDER_ACCOUNT_MANAGE", "true")
+	legacy := providercfg.Config{Orchestrator: "orch:7443", TokenFile: filepath.Join(t.TempDir(), "absent"), AccountManage: true, AccountStatus: true, AccountUse: true, AccountUseSet: true}
+	if err := providercfg.Save(legacy); err != nil {
+		t.Fatal(err)
+	}
+	unit := providercfg.DefaultUnit("/test/amux", providercfg.Path())
+	if !reflect.DeepEqual(unit.Args, []string{"provide"}) {
+		t.Fatalf("installed service embeds flags: %v", unit.Args)
+	}
+	for _, rendered := range []string{providercfg.RenderSystemdUnit(unit), providercfg.RenderLaunchdPlist(unit)} {
+		if strings.Contains(rendered, "account-manage") {
+			t.Fatal("retired flag embedded in installed service")
+		}
+	}
+	// Reach normal startup configuration/token validation rather than rejecting
+	// the legacy saved/env grant. No connection or live service is started.
+	err := provideRun(nil)
+	if err == nil || !strings.Contains(err.Error(), "read token file") {
+		t.Fatalf("legacy service startup rejected: %v", err)
+	}
+	saved, err := providercfg.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.AccountStatus || !providerAccountUseDefault(saved, true, false) {
+		t.Fatal("legacy status/use grants changed")
+	}
+}
