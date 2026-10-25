@@ -51,7 +51,7 @@ func runFakeCodexAppServer() {
 			}
 			reply(map[string]any{"account": map[string]any{"type": "chatgpt", "email": "user@example.com", "planType": "plus"}, "requiresOpenaiAuth": true})
 		case "account/login/start":
-			reply(map[string]any{"type": "chatgpt", "loginId": "login-1", "authUrl": "https://auth.example/authorize?state=fake"})
+			reply(map[string]any{"type": "chatgpt", "loginId": "login-1", "authUrl": "https://auth.openai.com/authorize?state=fake"})
 			switch os.Getenv(fakeCodexLogin) {
 			case "success":
 				_ = os.WriteFile(loggedIn, nil, 0o600)

@@ -67,7 +67,7 @@ func login(t *testing.T, p *Provider) {
 	if err := p.Login(ctxT(t), func(u string) { shown = append(shown, u) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(shown) != 1 || shown[0] != "https://auth.example/authorize?state=s" {
+	if len(shown) != 1 || shown[0] != "https://auth.openai.com/authorize?state=s" {
 		t.Fatalf("auth URL shown %q", shown)
 	}
 }
@@ -605,5 +605,16 @@ func TestRejectedNativeCompletionRollsBackAuthPersistence(t *testing.T) {
 	after, readErr := os.ReadFile(filepath.Join(home, authFile))
 	if !errors.Is(err, denied) || readErr != nil || !bytes.Equal(before, after) || p.srv != nil {
 		t.Fatal("rejected completion retained native write", err, readErr)
+	}
+}
+
+func TestNativeLoginURLRejectsUnexpectedNavigation(t *testing.T) {
+	for _, raw := range []string{"javascript:alert(1)", "http://auth.openai.com/authorize", "https://auth.openai.com.evil.test/authorize", "https://user:secret@auth.openai.com/authorize", "https://auth.openai.com:444/authorize", "https://auth.openai.com/authorize#secret", "https://auth.openai.com/\x1b[31m"} {
+		if validLoginURL(raw) {
+			t.Fatalf("accepted unsafe URL: %q", raw)
+		}
+	}
+	if !validLoginURL("https://auth.openai.com/oauth/authorize?state=SYNTHETIC") {
+		t.Fatal("native authorization URL rejected")
 	}
 }

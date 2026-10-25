@@ -26,7 +26,7 @@ func cmdAuth(args []string) error {
 	}
 	run, ok := authSubcommands[args[0]]
 	if !ok {
-		return fmt.Errorf("unknown auth subcommand %q; want login, status, or restart", args[0])
+		return fmt.Errorf("unknown auth subcommand %q; want login, status, accounts, default, logout, rebind, or restart", args[0])
 	}
 	return run(args[1:])
 }
@@ -68,8 +68,12 @@ year and is not refreshed; run login again to reissue it before then.
 Reissuing does not revoke the previous token. Status never prints a secret.
 
 Other methods remain available as explicit selections:
-  amux config set claude.auth host|shared|environment
-  amux config set codex.auth host|environment
+  amux auth default claude:host          # or claude:shared / claude:environment
+  amux auth default codex:host           # or codex:environment
+
+Defaults affect newly created workloads. Existing workloads keep their binding;
+use explicit rebind after replacing an opaque Claude credential. Login pauses
+new credential delivery until completion or cancellation.
 `)
 }
 
@@ -89,6 +93,9 @@ func authHarness(args []string) (string, []string) {
 }
 
 func authStatus(args []string) error {
+	if sessionContextRestricted() {
+		return fmt.Errorf("machine account status requires a host terminal")
+	}
 	harness, rest := authHarness(args)
 	if len(rest) != 0 {
 		return fmt.Errorf("usage: amux auth status [claude|codex]")
