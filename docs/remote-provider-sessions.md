@@ -486,8 +486,17 @@ nothing for it (honest degradation) — the feature stays advertised.
   session is Claude.
 - Read tolerance: the record file may not exist yet (nothing is emitted until it
   appears), grows by append (only new complete lines are read; a partial trailing
-  line waits for its newline), or is rotated/truncated (detected by inode change
-  or a size shrink; the reader restarts from the top).
+  line waits for its newline), or is rotated/truncated (detected by inode change,
+  a size shrink, or changed bytes before the last indexed line; the reader
+  renumbers from the top).
+- A subscription that starts behind the head arrives as several frames, each at
+  most 512 events / about 1 MiB of payload, rather than one frame carrying the
+  whole transcript. Each frame's `seq` follows the rule above.
+- The daemon keeps a per-file index of every record it reads (sparse
+  checkpoints of byte offset, event ordinal and decoder state, updated by
+  scanning only appended bytes and discarded on rotation/truncation/rewrite).
+  Resuming at any `afterSeq` and answering a history page (§4.7) therefore decode
+  at most one checkpoint interval, not the transcript from the top.
 - Streaming is read-only by definition; there is no input counterpart. It never
   opens, reads, or writes a pane.
 
@@ -632,6 +641,60 @@ The journal is polled last of a session's sources, so the shared event ordinals
 of everything that predates it are unchanged and a resuming `afterSeq` cursor
 still points where it did.
 
+### 4.7 History pages (`runtime-events-history`)
+
+A provider that also advertises `"runtime-events-history"` (only ever alongside
+`"runtime-events"`) answers on-demand, newest-first pages of a published
+session's events, so a consumer can show the end of a long transcript at once
+and fetch older history only when the reader scrolls back — instead of
+subscribing at `afterSeq: 0` and ingesting the whole record before rendering.
+
+Request (orchestrator → daemon):
+
+```json
+{"type":"runtime-events-history","reqId":"h1","sessionId":"a2","beforeSeq":41,"limit":200}
+```
+
+- `beforeSeq` is the exclusive upper ordinal of the page; absent or `0` asks for
+  the newest page. A value past the head is clamped to the head.
+- `limit` caps the event count; absent means 200, and the daemon clamps it to
+  1000. The daemon may return fewer (oldest dropped first) to keep a page's
+  payload around 4 MiB; a page always carries at least one event when any exist.
+
+Reply (daemon → orchestrator), exactly one per request, echoing `reqId`:
+
+```json
+{"type":"runtime-events-page","reqId":"h1","ok":true,"sessionId":"a2","runtime":"codex",
+ "seq":40,"headSeq":57,"hasMore":true,"events":[…]}
+```
+
+- `events` are ascending and `seq` is the ordinal of the last one, exactly as in
+  a `runtime-events` frame (first = `seq − len(events) + 1`); an empty page has
+  `seq: 0`. Ordinals are the same ones a fresh `runtime-events-subscribe` assigns,
+  so pages and stream frames dedupe against each other by ordinal.
+- `headSeq` is the session's newest ordinal when the page was read. Subscribing
+  with `afterSeq: headSeq` follows the session live with no gap and no overlap.
+- `hasMore` says older events exist; ask for them with `beforeSeq` = the page's
+  first ordinal.
+- A failure has `ok: false` and an `error`: `"session is not currently
+  published"` (also when the session is unpublished while its page is read —
+  the read is cancelled and no events are sent), `"invalid request"`, `"no
+  runtime record"`, or `"busy"` (more than four pages in flight on the
+  connection; retry).
+- Permission events in a page carry `runtime_generation` under the same live
+  binding rules as the stream (§4.2), so the newest page of a session waiting on
+  an approval is answerable.
+
+The intended consumer flow for a transcript view: request the newest page, render
+it anchored at the bottom, subscribe with `afterSeq: headSeq`, and request
+`beforeSeq: <oldest ordinal held>` as the reader scrolls up. A durable mirror
+that must hold the whole history can still backfill page by page, newest first.
+
+As with the stream, ordinals of a session with several sources (§4.6) are
+deterministic for a fresh read but sources that grow concurrently are numbered
+in the order the daemon observes them; a page and a later subscription agree
+because both start from the same fresh numbering.
+
 ## 5. Compatibility
 
 - These are additive messages behind feature negotiation — protocol version 2
@@ -643,6 +706,9 @@ still points where it did.
   both reads a success exactly as it did before (§2).
 - A daemon may implement `sessions` without `runtime-events` (status-only
   inventory) — consumers should expect that and render inventory alone.
+- `runtime-events-history` is a separate feature string; a consumer must not send
+  the request to a provider that did not advertise it (an older provider ignores
+  it and never replies).
 
 ## 6. Configuration
 
@@ -653,7 +719,7 @@ The feature is off by default. Enable it on `amux provide`:
 | `--allow-compute` | `AMUX_PROVIDER_ALLOW_COMPUTE=1` | explicitly permit remote spawn/input/resize/kill and reconnect adoption; independent of the session features below |
 | `--publish-sessions` | `AMUX_PROVIDER_PUBLISH_SESSIONS=1` | advertise `sessions`, publish inventory, accept lifecycle verbs |
 | `--read-only-sessions` | `AMUX_PROVIDER_SESSIONS_READONLY=1` | publish inventory but reject every verb with an error — lifecycle (§3) and steering (§3.1) alike |
-| `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code and Codex CLI). Requires `--publish-sessions`. |
+| `--runtime-events` | `AMUX_PROVIDER_RUNTIME_EVENTS=1` | additionally advertise `runtime-events` and `runtime-events-history`: stream read-only structured transcripts for published sessions from the local runtime's session record (Claude Code and Codex CLI), and answer newest-first history pages of them (§4.7). Requires `--publish-sessions`. |
 
 With `--publish-sessions`, the published rail is the daemon's own session
 inventory, including engine liveness. The provider makes an authenticated

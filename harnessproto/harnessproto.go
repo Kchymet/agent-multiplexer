@@ -53,6 +53,12 @@ const (
 	// "runtime-events". The orchestrator subscribes per published session (and
 	// resumes from afterSeq); read-only — there is no input counterpart.
 	MRuntimeEventsSubscribe = "runtime-events-subscribe" // begin receiving a session's structured transcript events
+
+	// v2 "runtime-events-history" feature (opt-in, docs/remote-provider-
+	// sessions.md §4.7): orchestrator -> provider. Asks for one page of a
+	// published session's events ending just before beforeSeq (absent = the
+	// newest page). Answered by exactly one runtime-events-page with the same reqId.
+	MRuntimeEventsHistory = "runtime-events-history"
 )
 
 // Harness -> server message types. In v2 the "harness" role is the provider and
@@ -73,6 +79,9 @@ const (
 	// transcript events for one published session, seq-ordered (docs/
 	// remote-provider-sessions.md §4).
 	HRuntimeEvents = "runtime-events"
+	// v2 "runtime-events-history" feature: provider -> orchestrator. The answer to
+	// one runtime-events-history request (§4.7).
+	HRuntimeEventsPage = "runtime-events-page"
 )
 
 // SessionsFeature is the feature string a provider advertises in
@@ -85,6 +94,13 @@ const SessionsFeature = "sessions"
 // (docs/remote-provider-sessions.md §1/§4). It is independent of and additive to
 // "sessions": a provider may advertise "sessions" alone (status-only inventory).
 const RuntimeEventsFeature = "runtime-events"
+
+// RuntimeEventsHistoryFeature is the feature string a provider advertises when it
+// also answers runtime-events-history: newest-first, on-demand pages of a
+// published session's events in the same ordinal space as the runtime-events
+// stream (docs/remote-provider-sessions.md §4.7). It is only advertised alongside
+// RuntimeEventsFeature.
+const RuntimeEventsHistoryFeature = "runtime-events-history"
 
 // Session lifecycle verbs the "sessions" feature accepts (spec §3). Anything
 // else — including any pane/terminal verb — is rejected with
@@ -334,6 +350,13 @@ type MuxMsg struct {
 	// v2 "runtime-events" feature (runtime-events-subscribe).
 	SessionID string `json:"sessionId,omitempty"` // runtime-events-subscribe: the published session to stream
 	AfterSeq  int64  `json:"afterSeq,omitempty"`  // runtime-events-subscribe: resume cursor (emit events with seq > afterSeq)
+
+	// v2 "runtime-events-history" feature (runtime-events-history; also uses
+	// ReqID and SessionID). BeforeSeq is the exclusive upper ordinal of the page —
+	// absent or 0 asks for the newest page; Limit caps its event count (absent =
+	// the provider's default; the provider also clamps it).
+	BeforeSeq int64 `json:"beforeSeq,omitempty"`
+	Limit     int   `json:"limit,omitempty"`
 }
 
 // HarnessMsg is a harness -> server message (v2: provider -> orchestrator).
@@ -386,6 +409,15 @@ type HarnessMsg struct {
 	SessionID string         `json:"sessionId,omitempty"`
 	Runtime   string         `json:"runtime,omitempty"`
 	Events    []RuntimeEvent `json:"events,omitempty"`
+
+	// v2 "runtime-events-history" feature (runtime-events-page; also uses ReqID,
+	// OK, Error, SessionID, Runtime, Seq and Events). Events are ascending and Seq
+	// is the ordinal of the last one, exactly as in a runtime-events frame. HeadSeq
+	// is the session's newest ordinal when the page was read: subscribing with
+	// afterSeq = HeadSeq continues live with no gap and no overlap. HasMore says
+	// older events exist; request them with beforeSeq = Seq-len(Events)+1.
+	HeadSeq int64 `json:"headSeq,omitempty"`
+	HasMore bool  `json:"hasMore,omitempty"`
 }
 
 // Conn is a typed harnessproto connection: one JSON object per line over any byte

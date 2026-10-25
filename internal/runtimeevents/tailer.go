@@ -18,17 +18,60 @@ const DefaultPollInterval = time.Second
 // per-session decode state opaque to the tailer (e.g. *ClaudeState).
 type LineMapper func(line []byte) []harnessproto.RuntimeEvent
 
+// Replay frames are capped so a subscription that starts far behind the head
+// arrives as a sequence of bounded runtime-events frames rather than one frame
+// holding the whole transcript.
+const (
+	maxBatchEvents       = 512
+	maxBatchPayloadBytes = 1 << 20
+)
+
 // tailSource is one open file of a session's stream: the spec that named it plus
 // the read cursor and decode state the tail carries across polls.
 type tailSource struct {
 	sourceSpec
-	mapper LineMapper
+	dec    *sourceDecoder
 	offset int64
 	info   os.FileInfo
 }
 
 func (s *tailSource) reset() {
-	s.offset, s.mapper, s.info = 0, s.newMapper(), nil
+	s.offset, s.dec, s.info = 0, s.newDecoder(), nil
+}
+
+// positionSources places every source where a fresh replay would be once it had
+// numbered afterSeq events, using each file's index instead of decoding the
+// files from the top. Sources wholly before that point sit at their indexed end;
+// the source holding ordinal afterSeq+1 resumes from its nearest checkpoint (the
+// sweep's afterSeq filter drops the at most one interval of events before it);
+// later sources start from the top. It returns the shared ordinal at the resume
+// point and the source the first sweep must start from: re-reading an earlier
+// source first would number its fresh appends ahead of the resumed source's
+// history.
+func positionSources(sources []*tailSource, afterSeq int64) (ordinal int64, first int) {
+	var base int64
+	for i, s := range sources {
+		f, ix, snap, err := openIndexed(s.sourceSpec)
+		if err != nil || f == nil {
+			s.reset() // not there yet (or unreadable): the sweep picks it up from the top
+			continue
+		}
+		_ = f.Close()
+		if base+snap.events <= afterSeq {
+			s.offset, _, s.dec = ix.position(snap.events)
+			s.info = snap.identity
+			base += snap.events
+			continue
+		}
+		var before int64
+		s.offset, before, s.dec = ix.position(afterSeq - base)
+		s.info = snap.identity
+		for _, later := range sources[i+1:] {
+			later.reset()
+		}
+		return base + before, i
+	}
+	return base, len(sources)
 }
 
 // tail streams batches of structured events derived from a session's growing
@@ -51,10 +94,16 @@ func (s *tailSource) reset() {
 //     honest degradation, never an error.
 //   - Growth (append) is the common case: only bytes past the last complete line
 //     are read; a partial trailing line (no newline yet) is left for the next poll.
-//   - Truncation / rotation (size shrinks below our offset): the tail resets to
-//     the file start and re-reads. Because the ordinal space is shared, a resync
-//     of any source restarts them all and ordinals recount from 1; the
-//     orchestrator dedups by ordinal, so a stable prefix re-sends idempotently.
+//   - Truncation / rotation (size shrinks below our offset): the tail rebuilds
+//     the files' indexes and repositions every source as a fresh replay would.
+//     Because the ordinal space is shared, a resync of any source renumbers them
+//     all from 1; the orchestrator dedups by ordinal, so a stable prefix re-sends
+//     idempotently.
+//
+// The tail never decodes a record from the top to find afterSeq: each file's
+// index (index.go) positions it at the nearest checkpoint, so resuming a
+// subscription costs at most one checkpoint interval of decoding plus whatever
+// the index has not yet seen.
 func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID string, specs []sourceSpec, afterSeq int64, poll time.Duration, out chan<- harnessproto.RuntimeEventBatch) {
 	defer close(out)
 	if poll <= 0 {
@@ -69,16 +118,11 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 		s.reset()
 		sources = append(sources, s)
 	}
-	var ordinal int64
-	occurrences := newPermissionOccurrenceTracker()
 	binder := newPermissionEventBinder()
+	ordinal, first := positionSources(sources, afterSeq)
 	resyncAll := func() {
-		ordinal = 0
-		occurrences = newPermissionOccurrenceTracker()
 		binder = newPermissionEventBinder()
-		for _, s := range sources {
-			s.reset()
-		}
+		ordinal, first = positionSources(sources, afterSeq)
 	}
 
 	t := time.NewTicker(poll)
@@ -91,7 +135,8 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 		var batch harnessproto.RuntimeEventBatch
 		for attempt := 0; attempt < 2; attempt++ {
 			batch = harnessproto.RuntimeEventBatch{}
-			if sweep(sources, occurrences, &ordinal, afterSeq, &batch, resyncAll) {
+			if sweep(sources[first:], &ordinal, afterSeq, &batch, resyncAll) {
+				first = 0
 				break
 			}
 			batch = harnessproto.RuntimeEventBatch{}
@@ -108,11 +153,13 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 		binder.seed(bindings)
 		if len(batch.Events) > 0 {
 			batch.Events = binder.bind(batch.Events, bindings)
-			batch.Runtime = rec.Runtime
-			select {
-			case out <- batch:
-			case <-ctx.Done():
-				return
+			for _, frame := range splitBatch(batch) {
+				frame.Runtime = rec.Runtime
+				select {
+				case out <- frame:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 		select {
@@ -123,11 +170,29 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 	}
 }
 
+// splitBatch cuts one sweep's events into frames of at most maxBatchEvents
+// events and about maxBatchPayloadBytes of payload (always at least one event),
+// each carrying the ordinal of its own last event.
+func splitBatch(b harnessproto.RuntimeEventBatch) []harnessproto.RuntimeEventBatch {
+	firstSeq := b.Seq - int64(len(b.Events)) + 1
+	var out []harnessproto.RuntimeEventBatch
+	start, bytes := 0, 0
+	for i, ev := range b.Events {
+		size := eventSize(ev)
+		if i > start && (i-start >= maxBatchEvents || bytes+size > maxBatchPayloadBytes) {
+			out = append(out, harnessproto.RuntimeEventBatch{Seq: firstSeq + int64(i) - 1, Events: b.Events[start:i]})
+			start, bytes = i, 0
+		}
+		bytes += size
+	}
+	return append(out, harnessproto.RuntimeEventBatch{Seq: b.Seq, Events: b.Events[start:]})
+}
+
 // sweep reads each source once, in order, accumulating new events into batch
 // under the shared ordinal. It returns false when a source turned out to have
 // rotated or been truncated — it calls resyncAll and stops, leaving the caller to
-// sweep again from the first source rather than emit a half-renumbered batch.
-func sweep(sources []*tailSource, occurrences *permissionOccurrenceTracker, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch, resyncAll func()) bool {
+// sweep again rather than emit a half-renumbered batch.
+func sweep(sources []*tailSource, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch, resyncAll func()) bool {
 	for _, s := range sources {
 		fi, err := os.Stat(s.path)
 		if err != nil {
@@ -154,7 +219,7 @@ func sweep(sources []*tailSource, occurrences *permissionOccurrenceTracker, ordi
 			resyncAll()
 			return false
 		}
-		s.offset = readFrom(s.path, s.offset, s.mapper, occurrences, ordinal, afterSeq, batch)
+		s.offset = readFrom(s.path, s.offset, s.dec.mapLine, ordinal, afterSeq, batch)
 	}
 	return true
 }
@@ -164,7 +229,7 @@ func sweep(sources []*tailSource, occurrences *permissionOccurrenceTracker, ordi
 // afterSeq to batch, and returns the new offset (past the last complete line). A
 // partial trailing line is not consumed. batch is passed in rather than returned
 // so one poll's sources accumulate into a single batch under one ordinal space.
-func readFrom(path string, offset int64, mapper LineMapper, occurrences *permissionOccurrenceTracker, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch) int64 {
+func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch) int64 {
 	f, err := os.Open(path)
 	if err != nil {
 		return offset
@@ -184,11 +249,7 @@ func readFrom(path string, offset int64, mapper LineMapper, occurrences *permiss
 			break
 		}
 		consumed += int64(len(line))
-		events := mapper(line)
-		if occurrences != nil {
-			events = occurrences.decorate(events)
-		}
-		for _, ev := range events {
+		for _, ev := range mapper(line) {
 			*ordinal++
 			if *ordinal > afterSeq {
 				batch.Events = append(batch.Events, ev)
@@ -205,7 +266,7 @@ func readFrom(path string, offset int64, mapper LineMapper, occurrences *permiss
 func mapEachLine(path string, mapper LineMapper) []harnessproto.RuntimeEvent {
 	var ordinal int64
 	var batch harnessproto.RuntimeEventBatch
-	readFrom(path, 0, mapper, nil, &ordinal, 0, &batch)
+	readFrom(path, 0, mapper, &ordinal, 0, &batch)
 	return batch.Events
 }
 
@@ -286,9 +347,12 @@ type Resolver func(sessionID string) (Record, bool)
 // the files that could hold one).
 type sourceSpec struct {
 	path       string
-	newMapper  func() LineMapper
+	kind       PageSourceKind
+	runtime    string
 	permission bool
 }
+
+func (sp sourceSpec) newDecoder() *sourceDecoder { return newSourceDecoder(sp.kind, sp.runtime) }
 
 // sourcesFor returns the files a session's stream is read from, in the order
 // they are polled, and whether the runtime has a reader at all. A runtime with no
@@ -316,38 +380,30 @@ func sourcesFor(rec Record) ([]sourceSpec, bool) {
 	// caller that still supplies one, but the daemon no longer does for structured
 	// records (see runtimeRecord).
 	if rec.Structured {
-		out = append(out, sourceSpec{path: rec.Path, permission: true, newMapper: func() LineMapper {
-			return structuredLine
-		}})
+		out = append(out, sourceSpec{path: rec.Path, kind: PageSourceStructured, runtime: rec.Runtime, permission: true})
 		if rec.Journal != "" {
-			out = append(out, sourceSpec{path: rec.Journal, newMapper: journalMapper(rec.Runtime)})
+			out = append(out, sourceSpec{path: rec.Journal, kind: PageSourceJournal, runtime: rec.Runtime})
 		}
 		return out, true
 	}
 	switch rec.Runtime {
 	case harnessproto.RuntimeClaude:
-		out = append(out, sourceSpec{path: rec.Path, newMapper: func() LineMapper {
-			st := &ClaudeState{}
-			return func(line []byte) []harnessproto.RuntimeEvent { return MapClaudeLine(line, st) }
-		}})
+		out = append(out, sourceSpec{path: rec.Path, kind: PageSourceClaude, runtime: rec.Runtime})
 	case harnessproto.RuntimeCodex:
-		out = append(out, sourceSpec{path: rec.Path, permission: true, newMapper: func() LineMapper {
-			st := &CodexState{}
-			return func(line []byte) []harnessproto.RuntimeEvent { return MapCodexLine(line, st) }
-		}})
+		out = append(out, sourceSpec{path: rec.Path, kind: PageSourceCodex, runtime: rec.Runtime, permission: true})
 	default:
 		return nil, false
 	}
 	if rec.Permissions != "" {
 		out = append(out, sourceSpec{
-			path: rec.Permissions, permission: true, newMapper: permissionMapper(rec.Runtime),
+			path: rec.Permissions, kind: PageSourcePermission, runtime: rec.Runtime, permission: true,
 		})
 	}
 	// amux's own journal is polled last so adding it leaves the ordinals of the
 	// records that predate it untouched: a replay still numbers the transcript
 	// first, then the permission journal, and only then these.
 	if rec.Journal != "" {
-		out = append(out, sourceSpec{path: rec.Journal, newMapper: journalMapper(rec.Runtime)})
+		out = append(out, sourceSpec{path: rec.Journal, kind: PageSourceJournal, runtime: rec.Runtime})
 	}
 	return out, true
 }

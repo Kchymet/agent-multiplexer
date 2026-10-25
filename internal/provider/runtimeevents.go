@@ -115,3 +115,84 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 		}
 	}
 }
+
+// maxRuntimeHistoryInFlight bounds concurrent runtime-events-history reads per
+// connection; a request beyond it is answered "busy" rather than queued.
+const maxRuntimeHistoryInFlight = 4
+
+// runtimeHistoryActive reports whether "runtime-events-history" is active: it
+// rides on "runtime-events" and needs a history source.
+func (p *Provider) runtimeHistoryActive() bool {
+	return p.runtimeEventsActive() && p.cfg.RuntimeEventHistory != nil
+}
+
+// onRuntimeEventsHistory answers one runtime-events-history request with exactly
+// one runtime-events-page (§4.7). Like a subscription it is admitted only for a
+// published session and registered as revocable work: removing the session
+// cancels the read and waits for it, and the reply is revalidated under the
+// admission lock, so no page of an unpublished session is ever written. The read
+// runs off the read loop so a cold index build never stalls pane traffic.
+func (p *Provider) onRuntimeEventsHistory(s *session, m harnessproto.MuxMsg) {
+	if !p.runtimeHistoryActive() {
+		return
+	}
+	reply := harnessproto.HarnessMsg{Type: harnessproto.HRuntimeEventsPage, ReqID: m.ReqID, SessionID: m.SessionID}
+	fail := func(msg string) {
+		reply.Error = msg
+		s.opMu.Lock()
+		err := s.hc.WriteHarness(reply)
+		s.opMu.Unlock()
+		if err != nil {
+			s.cancel()
+		}
+	}
+	if !validRuntimeSessionID(m.SessionID) || m.BeforeSeq < 0 || m.Limit < 0 {
+		fail("invalid request")
+		return
+	}
+	s.opMu.Lock()
+	if _, ok := s.published[m.SessionID]; !ok {
+		s.opMu.Unlock()
+		fail(errSessionNotPublished.Error())
+		return
+	}
+	if s.rtHistory >= maxRuntimeHistoryInFlight {
+		s.opMu.Unlock()
+		fail("busy")
+		return
+	}
+	s.rtHistory++
+	ctx, cancel := context.WithCancel(s.rtCtx)
+	s.nextOpID++
+	opID := s.nextOpID
+	call := &sessionActionCall{target: m.SessionID, cancel: cancel, done: make(chan struct{})}
+	s.actions[opID] = call
+	s.rtWG.Add(1)
+	s.opMu.Unlock()
+
+	go func() {
+		defer s.rtWG.Done()
+		page, ok := p.cfg.RuntimeEventHistory(ctx, m.SessionID, m.BeforeSeq, m.Limit)
+		cancelled := ctx.Err() != nil
+		cancel()
+		close(call.done)
+		s.opMu.Lock()
+		delete(s.actions, opID)
+		s.rtHistory--
+		_, published := s.published[m.SessionID]
+		switch {
+		case !published || cancelled:
+			reply.Error = errSessionNotPublished.Error()
+		case !ok:
+			reply.Error = "no runtime record"
+		default:
+			reply.OK = true
+			reply.Runtime, reply.Seq, reply.HeadSeq, reply.HasMore, reply.Events = page.Runtime, page.Seq, page.Head, page.HasMore, page.Events
+		}
+		err := s.hc.WriteHarness(reply)
+		s.opMu.Unlock()
+		if err != nil {
+			s.cancel()
+		}
+	}()
+}
