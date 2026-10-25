@@ -77,7 +77,7 @@ jobs:
           AMUX_REQUIRE_NAMESPACE_TEST: "1"
         run: |
           go test ./internal/panespec \
-            -run 'Test(RuntimeNamespaceRejectsAliasesFDsAndFutureSiblings|RuntimeGeneratedClaudeHookUsesExactInstalledAlias|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket)$' \
+            -run 'Test(RuntimeNamespaceRejectsAliasesFDsAndFutureSiblings|RuntimeGeneratedClaudeHookUsesExactInstalledAlias|RuntimeGitObjectGrantIsExactReadOnly|ScopeRejectsSiblingSessionSocket|ScopeMapsOnlyOwnCodexPhysicalSocket)$' \
             -count=1 -timeout=60s -v
           go test ./internal/daemon \
             -run '^Test(AgentNamespaceCommandSurface|CentralClaudeLaunchDeliversTokenInsideProtectedNamespace)$' \
@@ -85,7 +85,7 @@ jobs:
       - name: download pinned native harness fixtures
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/agent-runtimes/codex" "$RUNNER_TEMP/agent-runtimes/claude"
+          mkdir -p "$RUNNER_TEMP/agent-runtimes/codex" "$RUNNER_TEMP/agent-runtimes/claude" "$RUNNER_TEMP/codex-0.157.1"
           cd "$RUNNER_TEMP/agent-runtimes"
           curl --fail --location --retry 3 \
             https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-package-x86_64-unknown-linux-musl.tar.gz \
@@ -93,10 +93,15 @@ jobs:
           curl --fail --location --retry 3 \
             https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.263.tgz \
             -o claude.tgz
+          curl --fail --location --retry 3 \
+            https://github.com/openai/codex/releases/download/rust-v0.157.1/codex-x86_64-unknown-linux-musl.tar.gz \
+            -o codex-0.157.1.tar.gz
           echo 'a822187e1a2420c61c5926721bfbd878701ed95547c9bb0d4de4498a16ba1821  codex.tar.gz' | sha256sum -c -
           echo '8b6207348ad56fdcde085a0ad1f7cff0dfe06ce2c6c1bf97f69f1a1a7b6d0945  claude.tgz' | sha256sum -c -
+          echo 'e98c1e8e028e8137fa2d2415c82ec58e7b3701a627e3554aace5b3ca31454af2  codex-0.157.1.tar.gz' | sha256sum -c -
           tar -xzf codex.tar.gz -C codex
           tar -xzf claude.tgz -C claude
+          tar -xzf codex-0.157.1.tar.gz -C "$RUNNER_TEMP/codex-0.157.1"
       - name: test real nested harness command surfaces
         shell: bash
         env:
@@ -109,6 +114,21 @@ jobs:
             AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
               -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
           done
+      - name: test old and relocated Codex App Server sockets
+        shell: bash
+        env:
+          AMUX_REQUIRE_NAMESPACE_TEST: "1"
+        run: |
+          old_home="$RUNNER_TEMP/codex-0.153.4-home"
+          mkdir -p "$old_home/bin"
+          cp "$RUNNER_TEMP/agent-runtimes/codex/bin/codex" "$old_home/bin/codex"
+          HOME="$old_home" PATH="$old_home/bin:$PATH" \
+            AMUX_CODEX_APP_SERVER_SMOKE=1 go test ./internal/daemon \
+              -run '^TestSandboxedAppServerLaunch$' -count=1 -timeout=120s -v
+          AMUX_TEST_CODEX_01571_BIN="$RUNNER_TEMP/codex-0.157.1/codex-x86_64-unknown-linux-musl" \
+            AMUX_TEST_CODEX_01571_ARCHIVE="$RUNNER_TEMP/agent-runtimes/codex-0.157.1.tar.gz" \
+            go test ./internal/codexapp \
+              -run '^TestCompatCodex01571ProtectedAttachReconnect$' -count=1 -timeout=180s -v
 
   seatbelt-runtime:
     runs-on: macos-14

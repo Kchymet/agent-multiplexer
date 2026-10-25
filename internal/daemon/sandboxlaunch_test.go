@@ -13,6 +13,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/codexapp"
+	"amux/internal/core"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/store"
@@ -51,20 +52,21 @@ func TestSandboxedAppServerLaunch(t *testing.T) {
 	}
 
 	// A codex session whose worktree is a real dir (rw-bound in the scope).
-	wt := filepath.Join(data, "worktree")
+	wt := filepath.Join(core.SessionsDir(), "root", "sbx")
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	session := store.Session{ID: "sbx", RootID: "root", Agent: "codex", Dir: wt}
 	db, err := store.Open()
 	if err != nil {
 		t.Fatalf("store open: %v", err)
 	}
-	if err := db.PutSession(store.Session{ID: "sbx", Agent: "codex", Dir: wt}); err != nil {
+	if err := db.PutSession(session); err != nil {
 		t.Fatalf("put session: %v", err)
 	}
 	_ = db.Close()
 
-	spec := sandboxLaunchSpec(t, store.Session{ID: "sbx", Agent: "codex", Dir: wt})
+	spec := sandboxLaunchSpec(t, session)
 	dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
 	if err != nil {
 		t.Fatalf("AppServerCommand: %v", err)

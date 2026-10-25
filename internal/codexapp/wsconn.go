@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"amux/internal/codexsocket"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -118,7 +120,11 @@ func dialWS(ctx context.Context, endpoint, origin string) (msgConn, error) {
 	case "unix":
 		sockPath := u.Path
 		dialer.NetDialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+			physical, err := codexsocket.ResolveDialPath(sockPath)
+			if err != nil {
+				return nil, err
+			}
+			return (&net.Dialer{}).DialContext(ctx, "unix", physical)
 		}
 		// The Host is irrelevant over a unix socket; a stable placeholder keeps the
 		// handshake well-formed, and the path is "/".
