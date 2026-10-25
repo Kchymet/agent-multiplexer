@@ -73,8 +73,8 @@ func TestHarnessDoctor(t *testing.T) {
 func TestHarnessModelCatalog(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
-	if got := HarnessFor("claude").Models(); len(got) == 0 || got[0] != "opus" {
-		t.Errorf("claude Models() = %v, want opus first", got)
+	if got, want := HarnessFor("claude").Models(), []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5-5"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("claude Models() = %v, want %v", got, want)
 	}
 	if got := HarnessFor("claude").DefaultModel(); got != "opus" {
 		t.Errorf("claude DefaultModel() = %q, want opus", got)
@@ -177,11 +177,12 @@ func TestHarnessModelsDiscovered(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
 	cfg := `{"model":"claude-opus-5","additionalModelOptionsCache":[
 		{"label":"Fable","value":"claude-fable-5-1[1m]"},
-		{"label":"Opus","value":"opus"}]}`
+		{"label":"Opus","value":"opus"},
+		{"label":"Opus 5.5","value":"claude-opus-5-5"}]}`
 	if err := os.WriteFile(filepath.Join(claudeHome, ".claude.json"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	want = []string{"opus", "sonnet", "haiku", "fable", "claude-fable-5-1[1m]", "claude-opus-5"}
+	want = []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-fable-5-1[1m]", "claude-opus-5"}
 	if got := HarnessFor("claude").Models(); !reflect.DeepEqual(got, want) {
 		t.Errorf("claude Models() = %v, want %v", got, want)
 	}

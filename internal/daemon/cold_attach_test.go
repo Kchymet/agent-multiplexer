@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/codexsocket"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -20,7 +22,7 @@ func assertFreshNativeResume(t *testing.T, endpoint, threadID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", strings.TrimPrefix(endpoint, "unix://"))
+		return codexsocket.DialContext(ctx, strings.TrimPrefix(endpoint, "unix://"))
 	}}
 	conn, _, err := dialer.DialContext(ctx, "ws://localhost", http.Header{})
 	if err != nil {

@@ -54,7 +54,7 @@ func TestCreationAdmissionChecksTheHarnessesItWillLaunch(t *testing.T) {
 		{
 			name: "explicit claude coordinator on a claude-only pool", caps: pool(claude),
 			action: harnessproto.VerbNewWorkgroup,
-			fields: map[string]string{wsops.FieldCoordinator: claude, "prompt": "supervise"},
+			fields: map[string]string{wsops.FieldCoordinator: claude, wsops.FieldCoordinatorModel: "claude-opus-5-5", "prompt": "supervise"},
 			wantOK: true,
 		},
 		{
@@ -78,7 +78,7 @@ func TestCreationAdmissionChecksTheHarnessesItWillLaunch(t *testing.T) {
 		{
 			name: "both harnesses available", caps: pool(codex, claude),
 			action: harnessproto.VerbNewWorkgroup,
-			fields: map[string]string{"repos": "api", "agent": claude},
+			fields: map[string]string{"repos": "api", "agent": claude, "model": "claude-opus-5-5"},
 			wantOK: true,
 		},
 		{
