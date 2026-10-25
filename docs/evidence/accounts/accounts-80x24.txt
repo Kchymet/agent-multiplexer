@@ -21,4 +21,4 @@
  Space fold/unfold ───────│Enter: configure a Claude token using protected inp
  / search archived ───────│
 ──────────────────────────┴─────────────────────────────────────────────────────
- accounts · Enter login · e configure · d default · x logout · r refresh · Esc c
+ accounts · e subscription · a API key · d default · x logout · r refresh · Esc

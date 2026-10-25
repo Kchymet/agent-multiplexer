@@ -79,7 +79,7 @@ type accountsState struct {
 	scroll    int
 	serial    uint64
 	submitted bool
-	secret    []rune // masked Claude setup-token input, never a generic form field
+	secret    []rune // masked token/API-key input, never a generic form field
 	broker    *machineAccountTransport
 }
 
@@ -301,7 +301,7 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch k.Type {
 			case tea.KeyEnter:
 				if len(s.secret) == 0 {
-					s.notice = "Paste the setup token first. Input stays hidden."
+					s.notice = "Paste the requested credential first. Input stays hidden."
 					return m, nil
 				}
 				req := s.request("complete")
@@ -319,13 +319,13 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				input := strings.TrimSpace(string(k.Runes))
 				if len(s.secret)+len(input) > 4096 {
 					s.clearSecret()
-					s.notice = "Token too long. Input cleared; paste only the setup token."
+					s.notice = "Credential too long. Input cleared; paste only the token or API key."
 					return m, nil
 				}
 				for _, r := range input {
 					if r <= ' ' || r >= 127 {
 						s.clearSecret()
-						s.notice = "Invalid token input. Paste only the setup token."
+						s.notice = "Invalid credential input. Paste only the requested token or API key."
 						return m, nil
 					}
 					s.secret = append(s.secret, r)
@@ -546,7 +546,7 @@ func (m *model) renderAccounts() string {
 			}
 
 			if !s.attempt.expiresAt.IsZero() && !time.Now().Before(s.attempt.expiresAt) {
-				lines = []string{"Claude machine login expired", "Esc: close and start again"}
+				lines = []string{accountHarnessName(s.harness) + " machine login expired", "Esc: close and start again"}
 			}
 		}
 	}
@@ -632,7 +632,7 @@ func accountErrorMessage(err error, op string) string {
 	case errors.Is(err, errAccountsNative):
 		return "Native login adapter unavailable. Check the installed harness and refresh."
 	case errors.Is(err, errAccountsSecret):
-		return "Token rejected. Start login again and paste only the setup token."
+		return "Credential rejected. Start login again and paste only the requested token or API key."
 	case errors.Is(err, errAccountsAttempt):
 		return "Login attempt expired or unavailable. Refresh before starting again."
 	case op == "status" || op == "progress":

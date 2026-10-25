@@ -22,11 +22,11 @@
                           │five_hour: available
                           │  Used: 23% of the reported window
                           │  Source:   Confidence:
- Accounts              s  │  Observed: 2026-10-25 16:43 UTC  Resets: 2030-01-02 03:04 UTC
+ Accounts              s  │  Observed: 2026-10-25 16:48 UTC  Resets: 2030-01-02 03:04 UTC
  Claude: ready            │seven_day: available
  Codex: ready             │  Used: 23% of the reported window
  ↵ open  ↑↓ move ─────────│  Source:   Confidence:
- Space fold/unfold ───────│  Observed: 2026-10-25 16:43 UTC  Resets: 2030-01-02 03:04 UTC
+ Space fold/unfold ───────│  Observed: 2026-10-25 16:48 UTC  Resets: 2030-01-02 03:04 UTC
  / search archived ───────│
 ──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────
- accounts · Enter login · e configure · d default · x logout · r refresh · Esc close
+ accounts · e subscription · a API key · d default · x logout · r refresh · Esc close
