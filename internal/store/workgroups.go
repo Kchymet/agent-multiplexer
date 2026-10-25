@@ -15,11 +15,27 @@ import (
 // homes remain management sessions. Explicit grants are initialized here even
 // on databases where the older coordinator-grant migration has already run.
 func (d *DB) migrateRepoWorkgroups() error {
+	// Normal opens must remain read-only here. Besides avoiding needless WAL
+	// writes, this prevents concurrent opens from upgrading stale read snapshots
+	// into writers (SQLITE_BUSY_SNAPSHOT).
+	var needed bool
+	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE root_id='' AND scope='repo' AND id!=repo)
+		OR (SELECT user_version FROM pragma_user_version)!=?`, CurrentSchemaVersion).Scan(&needed); err != nil {
+		return err
+	}
+	if !needed {
+		return nil
+	}
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// Acquire the writer reservation before reading. A second startup waits for
+	// this migration and then reads the committed state instead of a stale one.
+	if _, err := tx.Exec(`UPDATE sessions SET scope=scope WHERE 0`); err != nil {
+		return err
+	}
 	rows, err := tx.Query(`SELECT id,repo,agent,claude_id FROM sessions WHERE root_id='' AND scope='repo' AND id!=repo`)
 	if err != nil {
 		return err

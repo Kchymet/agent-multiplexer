@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -134,5 +135,51 @@ func TestRepoWorkgroupMigrationRejectsCoordinatorAliasWithoutChangingRows(t *tes
 	}
 	if _, initialized, _ := db.CoordinatorRepoGrants(root.ID); initialized {
 		t.Fatal("failed migration initialized grants")
+	}
+}
+
+func TestConcurrentOpenPromotesLegacyWorkgroupOnce(t *testing.T) {
+	db := openTemp(t)
+	if err := db.PutSession(Session{ID: "legacy", Scope: ScopeRepo, Repo: "api"}); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errors := make(chan error, 12)
+	conversations := make(chan string, 12)
+	var workers sync.WaitGroup
+	for range 12 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			opened, err := Open()
+			if err != nil {
+				errors <- err
+				return
+			}
+			defer opened.Close()
+			root, _, err := opened.GetSession("legacy")
+			if err != nil {
+				errors <- err
+				return
+			}
+			conversations <- root.ClaudeID
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errors)
+	close(conversations)
+	for err := range errors {
+		t.Error(err)
+	}
+	var first string
+	for id := range conversations {
+		if first == "" {
+			first = id
+		}
+		if id == "" || id != first {
+			t.Fatalf("concurrent migration changed conversation: %q != %q", id, first)
+		}
 	}
 }
