@@ -39,7 +39,10 @@ cancel it. A cancelled local gesture consumes its remaining motion and release
 without copying or forwarding them. A revision check also catches output parsed
 before the next UI notification, so stale coordinates cannot copy different text.
 
-Clipboard requests occur only after an explicit completed drag. Rendering,
-child OSC52 output, ordinary clicks, empty selections, and cancelled gestures
-never initiate a copy. The UI and clipboard share one serialized output writer
-that preserves the terminal descriptor used for TTY detection and resize.
+The local selection feature requests a copy only after an explicit completed
+drag. Its rendering, ordinary clicks, empty selections, and cancelled gestures
+never initiate a copy. This is separate from an application's own copy action:
+when enabled by the hosted-app clipboard feature, the active pane's OSC52 writes
+can also reach the clipboard under that feature's active-pane and replay guards.
+The UI and local selection copy share one serialized output writer that preserves
+the terminal descriptor used for TTY detection and resize.

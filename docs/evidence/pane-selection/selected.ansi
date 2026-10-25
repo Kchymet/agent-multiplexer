@@ -1,0 +1,10 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h   1 agent   2 editor  3 term ────────
+▌○ agent-00               │A[38;5;231;48;5;24m界é[mZ                                      
+ Accounts · left       s  │second                                     
+ Claude                   │                                           
+   loading…               │                                           
+ Codex                    │                                           
+   loading…               │                                           
+ ↵ open  ↑↓ move ─────────│                                           
+──────────────────────────┴───────────────────────────────────────────
+ agent · ⌥ 1/2/3 tabs · ⌥ h rail · ⌥ a toggle · ⌥ r restart · ⌥ q quit

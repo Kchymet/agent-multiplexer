@@ -94,6 +94,23 @@ func TestHistoricalSelectionUsesDisplayedRows(t *testing.T) {
 	}
 }
 
+func TestAlternateFrameHistorySelectionUsesDisplayedRows(t *testing.T) {
+	m, term, input := scrollModel(t, 20, 4)
+	frame := func(text string) string { return "\x1b[?2026h\x1b[H\x1b[2J" + text + "\x1b[?2026l" }
+	feedPane(t, term, "\x1b[?1049h"+frame("old 界 row\r\nsecond old")+frame("new frame"))
+	term.ScrollToTop()
+	if !strings.Contains(ansi.Strip(m.renderMain()), "old 界 row") {
+		t.Fatal("alternate history is not displayed")
+	}
+	var copied string
+	m.copyText = func(s string) error { copied = s; return nil }
+	m.handleMouse(selectionEvent(tea.MouseActionPress, 4, 0))
+	finishSelection(m, selectionEvent(tea.MouseActionRelease, 5, 1))
+	if copied != "界 row\nsecond" || input() != "" {
+		t.Fatalf("alternate history copy=%q input=%q", copied, input())
+	}
+}
+
 func TestSelectionReleaseInRailStaysInPane(t *testing.T) {
 	m, term, input := scrollModel(t, 12, 4)
 	feedPane(t, term, "first\r\nsecond")

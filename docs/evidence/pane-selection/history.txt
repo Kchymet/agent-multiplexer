@@ -1,0 +1,10 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h   1 agent   2 editor  3 term ──↑ 6/14
+▌○ agent-00               │history-009                                
+ Accounts · left       s  │history-010                                
+ Claude                   │history-011                                
+   loading…               │history-012                                
+ Codex                    │history-013                                
+   loading…               │history-014                                
+ ↵ open  ↑↓ move ─────────│A界éZ                                      
+──────────────────────────┴───────────────────────────────────────────
+copy sent to terminal                                                 
