@@ -3,6 +3,8 @@ CONFDIR ?= $(HOME)/.config/amux
 GOFLAGS ?=
 GOVULNCHECK_VERSION := v1.8.0
 VERSION ?= 0.1.0
+GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
+NOTICE_TOOLCHAIN := go$(GO_VERSION)
 LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
 
 # Go modules in this repo. harnessproto is a nested, independently-published
@@ -11,12 +13,18 @@ LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
 # there would merge green.
 GO_MODULES := . ./harnessproto
 
-.PHONY: all build install uninstall test test-live fmt vet vuln clean cross run
+.PHONY: all build install uninstall test test-live fmt vet vuln notices notices-check clean cross run
 
 all: build
 
-build:
+build: notices-check
 	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/amux ./cmd/amux
+
+notices:
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go generate ./internal/licenses
+
+notices-check:
+	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go run ./internal/licenses/cmd/generate -check
 
 # Install the binary and drop the shell shim into the config dir. Prints the one
 # line to add to your shell rc. Claude status hooks install on first run.

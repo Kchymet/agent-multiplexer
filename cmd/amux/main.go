@@ -99,6 +99,7 @@ var commands = []command{
 	{names: []string{"name"}, run: cmdName, hidden: true},
 	{names: []string{"do"}, run: cmdDo},
 	{names: []string{"version", "--version", "-v"}, run: func([]string) error { return cmdVersion() }},
+	{names: []string{"licenses", "notices"}, run: cmdLicenses},
 	// hidden: help is what prints usage(), so it doesn't list itself
 	{names: []string{"help", "-h", "--help"}, run: func([]string) error { usage(); return nil }, hidden: true},
 }
@@ -149,6 +150,7 @@ usage: amux <command>
   provide install | uninstall  run provider mode as a user service (survives reboot)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print CLI, daemon and database versions + compatibility
+  licenses           print bundled dependency licenses and notices
 
 amux do <action> drives the daemon's control API from scripts (no direct store
 access). Positional [id]/[kind] still work; flags reach the rest:
