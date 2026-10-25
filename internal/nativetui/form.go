@@ -76,15 +76,9 @@ func (m *model) openNewWorkgroupForm() {
 		fields: []*formField{
 			{key: "name", label: "Name"},
 			{key: "prompt", label: "Prompt"},
-			// The coordinator runs the prompt; the goal runtime is the default and
-			// the only kind with native goal mode. Its model is its harness default
-			// unless set here — the first agent's model below never applies to it.
-			{key: wsops.FieldCoordinator, label: "Coordinator", value: agent.GoalRuntime, options: agent.Kinds()},
-			{key: "repos", label: "Repos (first agent)", picker: true},
-			{key: "mode", label: "Mode (first agent)", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
-			harnessField(),
-			modelField(agent.DefaultKind()),
-			{key: "linear", label: "Linear issue/URL"},
+			{key: wsops.FieldCoordinator, label: "Coordinator harness", value: agent.GoalRuntime, options: agent.Kinds()},
+			coordinatorModelField(agent.GoalRuntime),
+			{key: "repos", label: "Repos (optional)", picker: true},
 		},
 	}
 }
@@ -527,14 +521,23 @@ func (fs *formState) field(key string) *formField {
 }
 
 // syncDependents refreshes fields whose choices depend on another select's
-// value, after that select changes. Today the only such pair is Harness → Model:
+// value, after that select changes. Both agent and coordinator Harness → Model
+// pairs use the same rule:
 // the chosen harness filters the model list to its own models, and a selection
 // that the new list no longer offers resets to the harness default.
 func (fs *formState) syncDependents(changed *formField) {
-	if changed == nil || changed.key != "agent" {
+	if changed == nil {
 		return
 	}
-	model := fs.field("model")
+	modelKey := "model"
+	switch changed.key {
+	case "agent":
+	case wsops.FieldCoordinator:
+		modelKey = wsops.FieldCoordinatorModel
+	default:
+		return
+	}
+	model := fs.field(modelKey)
 	if model == nil {
 		return
 	}
@@ -556,6 +559,13 @@ func harnessField() *formField {
 func modelField(kind string) *formField {
 	h := agent.HarnessFor(kind)
 	return &formField{key: "model", label: "Model", value: h.DefaultModel(), options: h.Models()}
+}
+
+func coordinatorModelField(kind string) *formField {
+	f := modelField(kind)
+	f.key = wsops.FieldCoordinatorModel
+	f.label = "Coordinator model"
+	return f
 }
 
 func (fs *formState) next() { fs.move(1) }

@@ -1,12 +1,18 @@
 package nativetui
 
 import (
+	"context"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"amux/internal/agent"
+	"amux/internal/core"
+	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 func key(s string) tea.KeyMsg {
@@ -108,9 +114,7 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	}
 }
 
-// Every agent-creating form offers a Harness selector defaulting to claude, so
-// the daemon receives an explicit harness pick (and the workgroup's first agent
-// honors it).
+// Member creation offers a Harness selector defaulting to claude.
 func TestFormsCarryHarnessField(t *testing.T) {
 	cases := []struct {
 		name string
@@ -118,7 +122,6 @@ func TestFormsCarryHarnessField(t *testing.T) {
 	}{
 		{"new-repo-agent", func(m *model) { m.openNewRepoAgentForm("repo", "Repo") }},
 		{"add-agent", func(m *model) { m.openAddAgentForm("root", "Root") }},
-		{"new-workgroup", func(m *model) { m.openNewWorkgroupForm() }},
 	}
 	for _, tc := range cases {
 		m := &model{}
@@ -146,8 +149,8 @@ func TestNewWorkgroupUntouchedReposAreOmitted(t *testing.T) {
 	if _, explicit := fields["repos"]; explicit {
 		t.Fatalf("untouched new-workgroup repos must be omitted, got %q", fields["repos"])
 	}
-	if fields["agent"] != agent.DefaultKind() {
-		t.Fatalf("other form defaults were lost: agent = %q", fields["agent"])
+	if fields[wsops.FieldCoordinator] != agent.GoalRuntime {
+		t.Fatalf("coordinator default was lost: %q", fields[wsops.FieldCoordinator])
 	}
 
 	// Blank repos on other actions retain their established exact-empty meaning;
@@ -240,5 +243,127 @@ func TestVimNormalModeNotTyped(t *testing.T) {
 	}
 	if m.form.insert {
 		t.Fatal("should be in normal mode after Esc")
+	}
+}
+
+// The creation form exposes exactly two coordinator controls and sends their
+// values under coordinator keys, never the member harness/model keys.
+func TestWorkgroupCoordinatorControls(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	m := &model{w: 120, h: 40}
+	m.openNewWorkgroupForm()
+	fs := m.form
+	for _, key := range []string{"linear", "mode", "agent", "model"} {
+		if fs.field(key) != nil {
+			t.Errorf("unexpected creation control %q", key)
+		}
+	}
+	if len(fs.fields) != 5 {
+		t.Fatalf("creation has %d controls, want five", len(fs.fields))
+	}
+	if !strings.Contains(m.renderForm(), "Repos (optional") {
+		t.Fatal("repositories must be visibly optional")
+	}
+	harness, model := fs.field(wsops.FieldCoordinator), fs.field(wsops.FieldCoordinatorModel)
+	if harness == nil || model == nil {
+		t.Fatal("missing coordinator controls")
+	}
+	if harness.value != agent.GoalRuntime || !slices.Equal(harness.options, agent.Kinds()) {
+		t.Fatalf("coordinator harness = %+v", harness)
+	}
+	// Drive real key handling through every harness, including back to default.
+	fs.cursor = slices.Index(fs.fields, harness)
+	for range agent.Kinds() {
+		m.handleForm(key("l"))
+		h := agent.HarnessFor(harness.value)
+		if !slices.Equal(model.options, h.Models()) || model.value != h.DefaultModel() {
+			t.Fatalf("%s model after switching: %+v", harness.value, model)
+		}
+		m.handleForm(key("j"))
+		m.handleForm(key("l"))
+		fields := formFieldsForSubmit(fs)
+		if fields[wsops.FieldCoordinator] != harness.value || fields[wsops.FieldCoordinatorModel] != model.value {
+			t.Fatalf("coordinator choices lost: %#v", fields)
+		}
+		m.handleForm(key("k"))
+	}
+	fs.field("repos").value = "api,web"
+	if got := formFieldsForSubmit(fs)["repos"]; got != "api,web" {
+		t.Fatalf("selected repos = %q", got)
+	}
+	fs.field("repos").value = "  "
+	if _, ok := formFieldsForSubmit(fs)["repos"]; ok {
+		t.Fatal("cleared picker must omit repositories")
+	}
+}
+
+// Exercise the actual form payload through lifecycle persistence, without any
+// tracked repository or member. A selected model must reach the coordinator.
+func TestWorkgroupFormCreatesWithoutRepos(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("AMUX_JAIL", "off")
+	for _, kind := range agent.Kinds() {
+		t.Run(kind, func(t *testing.T) {
+			m := &model{}
+			m.openNewWorkgroupForm()
+			fs := m.form
+			fs.field("name").value = "No repositories"
+			fs.field("prompt").value = "Plan the next task"
+			harness := fs.field(wsops.FieldCoordinator)
+			harness.value = kind
+			fs.syncDependents(harness)
+			model := fs.field(wsops.FieldCoordinatorModel)
+			if model.isSelect() {
+				model.cycle(true)
+			} else {
+				model.value = "provider/custom-model"
+			}
+			id, err := wsops.ApplyResult(context.Background(), core.Action{Action: fs.action, Fields: formFieldsForSubmit(fs)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			root, ok, err := db.GetSession(id)
+			if err != nil || !ok {
+				t.Fatalf("created coordinator missing: %v", err)
+			}
+			if root.Agent != kind || root.Model != model.value || root.Prompt != "Plan the next task" || root.Name != "No repositories" {
+				t.Fatalf("coordinator did not retain form values: %+v", root)
+			}
+			children, err := db.Children(id)
+			if err != nil || len(children) != 0 {
+				t.Fatalf("repo-less workgroup children = %v, err = %v", children, err)
+			}
+		})
+	}
+}
+
+func TestWorkgroupFormReadableAtOrdinaryWidths(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	for _, width := range []int{80, 100, 120} {
+		m := &model{w: width, h: 24}
+		m.openNewWorkgroupForm()
+		for _, kind := range []string{"codex", "claude"} {
+			harness := m.form.field(wsops.FieldCoordinator)
+			harness.value = kind
+			m.form.syncDependents(harness)
+			for _, field := range m.form.fields {
+				m.form.cursor = slices.Index(m.form.fields, field)
+				out := plain(m.renderForm())
+				for _, want := range []string{"Coordinator harness:", "Coordinator model:", "Repos (optional):", kind, agent.HarnessFor(kind).DefaultModel(), "Create workgroup"} {
+					if !strings.Contains(out, want) {
+						t.Fatalf("width %d, active %s: missing %q:\n%s", width, field.key, want, out)
+					}
+				}
+			}
+		}
 	}
 }

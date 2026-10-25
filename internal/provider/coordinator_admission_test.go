@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,6 +35,12 @@ func TestCreationAdmissionChecksTheHarnessesItWillLaunch(t *testing.T) {
 		wantOK bool
 		reject string // the harness the error must name when refused
 	}{
+		{
+			name: "creation form without repositories", caps: pool(codex),
+			action: harnessproto.VerbNewWorkgroup,
+			fields: map[string]string{"name": "planning", "prompt": "plan it", wsops.FieldCoordinator: codex, wsops.FieldCoordinatorModel: "gpt-5.4"},
+			wantOK: true,
+		},
 		{
 			name: "default coordinator on a codex-only pool", caps: pool(codex),
 			action: harnessproto.VerbNewWorkgroup, fields: map[string]string{"prompt": "ship it"},
@@ -103,6 +110,9 @@ func TestCreationAdmissionChecksTheHarnessesItWillLaunch(t *testing.T) {
 				}
 				if id != "new" || applied.Action == "" {
 					t.Fatalf("verb did not reach the daemon: id=%q action=%+v", id, applied)
+				}
+				if !reflect.DeepEqual(applied.Fields, tc.fields) {
+					t.Fatalf("provider changed creation fields: got %#v, want %#v", applied.Fields, tc.fields)
 				}
 				return
 			}
