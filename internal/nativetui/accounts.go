@@ -33,8 +33,9 @@ type accountLimit struct {
 }
 
 type accountSnapshot struct {
-	profiles  []accountProfile
-	canManage bool
+	profiles         []accountProfile
+	canManage        bool
+	defaultRevisions map[string]uint64
 }
 
 type accountAttempt struct {
@@ -50,6 +51,7 @@ type accountRequest struct {
 	op, harness, profile, attempt string
 	secret                        string // write-only; cleared before returning a reply
 	revision                      uint64
+	defaultRevision               uint64
 }
 
 type accountResponse struct {
@@ -377,6 +379,9 @@ func (s *accountsState) request(op string) accountRequest {
 	r := accountRequest{op: op, harness: s.harness, profile: s.selected}
 	if p := s.profile(); p != nil {
 		r.revision = p.revision
+		if op == "default" {
+			r.defaultRevision = s.snapshot.defaultRevisions[p.harness]
+		}
 	}
 	return r
 }
