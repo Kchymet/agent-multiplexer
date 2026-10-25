@@ -769,8 +769,10 @@ func InstallHooksIn(dir, homeDir, amuxPath string) error {
 
 // InstallHooksInRooted installs per-project hooks through a pinned session
 // root. Both the file being preserved and inherited private-home settings are
-// read without following destination aliases.
-func InstallHooksInRooted(session *hostprep.Root, dir, homeDir, amuxPath string) error {
+// read without following destination aliases. goal also installs the goal-mode
+// hooks (see goalHooks) for a Claude workgroup coordinator; without it
+// any goal hooks from an earlier install are removed with the other amux groups.
+func InstallHooksInRooted(session *hostprep.Root, dir, homeDir, amuxPath string, goal bool) error {
 	settingsRel, err := session.Rel(ProjectSettingsLocalPath(dir))
 	if err != nil {
 		return err
@@ -789,7 +791,7 @@ func InstallHooksInRooted(session *hostprep.Root, dir, homeDir, amuxPath string)
 	if err != nil {
 		return err
 	}
-	out, err := encodeHooks(root, amuxPath, inherited)
+	out, err := encodeHooks(root, amuxPath, inherited, goal)
 	if err != nil {
 		return err
 	}
@@ -809,7 +811,7 @@ func writeHooks(settingsPath, projectDir, homeDir, amuxPath string) error {
 		_ = dec.Decode(&root)
 	}
 
-	out, err := encodeHooks(root, amuxPath, inheritedStatusLine(projectDir, homeDir))
+	out, err := encodeHooks(root, amuxPath, inheritedStatusLine(projectDir, homeDir), false)
 	if err != nil {
 		return err
 	}
@@ -823,7 +825,30 @@ func writeHooks(settingsPath, projectDir, homeDir, amuxPath string) error {
 	return os.Rename(tmp, path)
 }
 
-func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any) ([]byte, error) {
+// goalHooks maps each Claude hook event goal mode listens on to the
+// `amux agent goal` subcommand it runs (internal/claudegoal): UserPromptSubmit
+// establishes the user's task as the goal, and Stop continues an active goal.
+// The goal Stop hook also reports the turn's activity itself — ready when the
+// turn really ends, running when it continues — so it replaces the plain Stop
+// status hook rather than racing it (Claude runs one event's hooks in parallel).
+var goalHooks = []struct{ event, sub string }{
+	{"UserPromptSubmit", "prompt"},
+	{"Stop", "stop"},
+}
+
+// GoalHookCommand returns the `amux agent goal` subcommand goal mode runs on a
+// Claude hook event, and whether goal mode listens on that event. Exposed so a
+// contract test pins the mapping.
+func GoalHookCommand(event string) (sub string, ok bool) {
+	for _, gh := range goalHooks {
+		if gh.event == event {
+			return gh.sub, true
+		}
+	}
+	return "", false
+}
+
+func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any, goal bool) ([]byte, error) {
 	hooks, ok := root["hooks"].(map[string]any)
 	if !ok || hooks == nil {
 		hooks = map[string]any{}
@@ -835,7 +860,15 @@ func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any)
 	// SessionEnd, UserPromptSubmit, PostToolUse) get more than one.
 	amuxCmds := map[string][]string{}
 	for _, he := range hookEvents {
+		if goal && he.event == "Stop" {
+			continue // the goal Stop hook reports this event's activity itself
+		}
 		amuxCmds[he.event] = append(amuxCmds[he.event], amuxPath+" agent hook "+he.state)
+	}
+	if goal {
+		for _, gh := range goalHooks {
+			amuxCmds[gh.event] = append(amuxCmds[gh.event], amuxPath+" agent goal "+gh.sub+" --hook")
+		}
 	}
 	for _, ev := range captureEvents {
 		amuxCmds[ev] = append(amuxCmds[ev], amuxPath+" agent capture --hook")

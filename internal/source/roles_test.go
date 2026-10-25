@@ -60,6 +60,9 @@ func TestPollDefaultSessions(t *testing.T) {
 	claudeCaps := core.SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: false}
 	check := func(id, role, runtime, cwd string) core.Session {
 		t.Helper()
+		want := claudeCaps
+		// A Claude workgroup coordinator runs in goal mode by default.
+		want.Goal = role == store.RoleCoordinator
 		r, ok := byID[id]
 		if !ok {
 			t.Fatalf("row %s missing", id)
@@ -67,7 +70,7 @@ func TestPollDefaultSessions(t *testing.T) {
 		if r.Role != role || r.Runtime != runtime || !r.CanAttach {
 			t.Errorf("%s: role=%q runtime=%q canAttach=%v, want %q %q true", id, r.Role, r.Runtime, r.CanAttach, role, runtime)
 		}
-		if r.Caps == nil || *r.Caps != claudeCaps {
+		if r.Caps == nil || *r.Caps != want {
 			t.Errorf("%s: caps = %+v, want Claude permission fail-closed", id, r.Caps)
 		}
 		if r.Cwd != cwd {

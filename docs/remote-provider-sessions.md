@@ -116,9 +116,9 @@ control support from the mere existence of a transcript:
   verb (§3.1): `prompt`, `interject`, `cancel`, `permission`, `goal`. Each says
   whether the daemon can serve that verb for *this* session, so a consumer
   disables an affordance it would only fail on.
-  - `goal` is true only for a session whose runtime actually supervises a native
-    goal — a workgroup coordinator on the goal runtime, not every session of that
-    runtime. An ordinary agent on the same runtime reports `goal:false`, and a
+  - `goal` is true only for a session that runs in goal mode — a workgroup
+    coordinator on the native goal runtime (Codex) or on Claude (amux's goal
+    hooks), not every session of that runtime. An ordinary agent on the same runtime reports `goal:false`, and a
     daemon MUST refuse the verb for it rather than steering something else.
   - `permission` is deliberately **not** "a transcript exists". It is true only
     when the runtime raises *correlated* `permission_request` events — a

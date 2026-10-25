@@ -494,3 +494,67 @@ func TestAdditionalModels(t *testing.T) {
 		})
 	}
 }
+
+// TestGoalHooks verifies a goal coordinator's settings: UserPromptSubmit
+// establishes the goal, the goal Stop hook replaces (never races) the plain
+// Stop status hook, and reinstalling without goal mode removes both.
+func TestGoalHooks(t *testing.T) {
+	commands := func(root map[string]any, event string) []string {
+		var out []string
+		groups, _ := root["hooks"].(map[string]any)[event].([]any)
+		for _, g := range groups {
+			out = append(out, groupCommand(g))
+		}
+		return out
+	}
+	has := func(cmds []string, want string) bool {
+		for _, c := range cmds {
+			if c == want {
+				return true
+			}
+		}
+		return false
+	}
+	encode := func(root map[string]any, goal bool) map[string]any {
+		t.Helper()
+		b, err := encodeHooks(root, "/opt/amux", nil, goal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]any{}
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	goal := encode(encode(map[string]any{}, true), true) // reinstall must not stack
+	stop := commands(goal, "Stop")
+	if !has(stop, "/opt/amux agent goal stop --hook") || has(stop, "/opt/amux agent hook ready") {
+		t.Errorf("goal Stop hooks = %v, want the goal stop hook in place of the status hook", stop)
+	}
+	if n := strings.Count(strings.Join(stop, "\n"), "agent goal stop"); n != 1 {
+		t.Errorf("goal Stop hook installed %d times", n)
+	}
+	prompt := commands(goal, "UserPromptSubmit")
+	if !has(prompt, "/opt/amux agent goal prompt --hook") || !has(prompt, "/opt/amux agent hook running") {
+		t.Errorf("goal UserPromptSubmit hooks = %v", prompt)
+	}
+	for _, event := range []string{"Stop", "UserPromptSubmit"} {
+		if sub, ok := GoalHookCommand(event); !ok || sub == "" {
+			t.Errorf("GoalHookCommand(%s) = %q, %v", event, sub, ok)
+		}
+	}
+
+	plain := encode(goal, false)
+	for _, event := range []string{"Stop", "UserPromptSubmit"} {
+		for _, c := range commands(plain, event) {
+			if strings.Contains(c, "agent goal") {
+				t.Errorf("non-goal reinstall kept %q on %s", c, event)
+			}
+		}
+	}
+	if !has(commands(plain, "Stop"), "/opt/amux agent hook ready") {
+		t.Error("non-goal reinstall did not restore the Stop status hook")
+	}
+}
