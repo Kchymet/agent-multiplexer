@@ -164,7 +164,7 @@ func (m *model) accountOverviewLines() []string {
 		if m.accountOverviewStale {
 			budget = "stale · open to refresh"
 		}
-		lines = append(lines, cellPad(" "+keyStyle.Render(label), sidebarWidth), cellPad(" "+budget, sidebarWidth))
+		lines = append(lines, cellPad(" "+keyStyle.Render(label), sidebarWidth), cellPad("   "+budget, sidebarWidth))
 	}
 	return lines
 }

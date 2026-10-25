@@ -1,0 +1,32 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor   3 term  ──────────────────────────────────────────────────────────
+ ○ console                │work 00 · 界 ···············································································
+                          │work 01 · 界 ···············································································
+ ▾ WORKGROUPS         ╭──────────────────────────────────────────────────────────────────────────╮·····················
+ ▾ payments           │ Accounts · remaining budget                                              │·····················
+  ○ workgroup-child   │   statusline advisory; identity unverified                               │·····················
+                      │                                                                          │·····················
+ ▾ REPOS              │   Codex · subscription · ready                                           │·····················
+ ▾ ⛁ acme/api         │   5h 33% left ━━━─────── · reset 01-02 03:04Z · fresh                    │·····················
+  ○ repo-child        │   7d 33% left ━━━─────── · reset 01-05 03:04Z · fresh                    │·····················
+                      │   provider report                                                        │·····················
+ ▾ DETACHED           │                                                                          │·····················
+ ○ external-session   │ Tab/↑↓/jk: select · e: subscription · a: API key                         │·····················
+                      │ d: default · x: logout · r: refresh                                      │·····················
+                      │ Existing workload bindings stay fixed.                                   │·····················
+                      │                                                                          │·····················
+                      │ Selected: Claude                                                         │·····················
+                      │ Account: unknown (not verified)                                          │·····················
+                      │ Plan: unknown                                                            │·····················
+                      │ Enter: configure a Claude token using protected input.                   │·····················
+                      │ five_hour: available                                                     │·····················
+                      │   Used: 23% of the reported window                                       │·····················
+ Accounts · left      │   Source:   Confidence:                                                  │·····················
+ Claude               │   Observed: 2026-10-25 19:14 UTC  Resets: 2030-01-02 03:04 UTC           │·····················
+   5h 77% · 7d 77%    │ seven_day: available                                                     │·····················
+ Codex                │   Used: 23% of the reported window                                       │·····················
+   5h 33% · 7d 33%    │   Source:   Confidence:                                                  │·····················
+ ↵ open  ↑↓ move ─────│ ↑↓/jk select · PgUp/PgDn scroll · Esc close  4–25/26                     │·····················
+ Space fold/unfold ───╰──────────────────────────────────────────────────────────────────────────╯·····················
+ / search archived ───────│work 28 · 界 ···············································································
+──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────
+ accounts · e subscription · a API key · d default · x logout · r refresh · Esc close
