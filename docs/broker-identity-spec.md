@@ -161,7 +161,8 @@ For envelope `e=(version,b,k,g,q,issued,expires,body,signature)`, define:
       and 0 < len(body) <= 64 KiB
       and expires >= now - 5 seconds and issued <= now + 5 seconds
       and issued <= expires and expires - issued <= 30 seconds
-      and Valid(principal derived from Reg[k], S)
+      and Reg[e.k] exists
+      and Valid((Reg[e.k].subject, e.k, e.g), S)
       and signature verifies over the domain-separated framing of
           boot, key, generation, q, issued, expires, SHA256(body)
 
