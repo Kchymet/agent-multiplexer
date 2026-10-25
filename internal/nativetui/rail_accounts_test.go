@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"amux/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -238,5 +240,54 @@ func TestRailAccountRenderingEvidence(t *testing.T) {
 				t.Logf("%s rendered at %dx%d:\n%s", screen, m.w, m.h, out)
 			}
 		})
+	}
+}
+
+// Previously an observation older than the TTL, or any failed status refresh,
+// hid the last-known budget behind "stale"/"budget unknown".
+func TestAccountRailKeepsLastKnownBudgetWithAge(t *testing.T) {
+	now := time.Now()
+	observed := now.Add(-12 * time.Minute)
+	in := hp.AccountSnapshot{Profiles: []hp.AccountProfile{
+		{ID: "claude:central", Harness: "claude", Source: "central", State: "ready", DeliveryEpoch: 2, Identity: hp.AccountIdentity{State: "unknown", Evidence: "opaque-token"},
+			Limits: hp.AccountLimits{State: "known", Source: "claude-usage", ProfileID: "claude:central", DeliveryEpoch: 2, ObservedAt: observed.UnixMilli(), RefreshError: "claude_usage_unavailable",
+				Windows: []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 58, WindowMinutes: 300}, {Name: "seven_day", UsedPercent: 20, WindowMinutes: 10080}}}},
+		{ID: "codex:central", Harness: "codex", Source: "central", State: "ready", DeliveryEpoch: 1, Identity: hp.AccountIdentity{State: "known", AccountID: "a"},
+			Limits: hp.AccountLimits{State: "known", Source: "codex-native", ProfileID: "codex:central", DeliveryEpoch: 1, ObservedAt: now.UnixMilli(),
+				Windows: []hp.AccountLimitWindow{{Name: "codex:primary", UsedPercent: 10, WindowMinutes: 300}}}},
+	}}
+	snap := projectAccounts(in)
+	claude := snap.profiles[0]
+	if claude.limits[0].confidence != "provider report" || claude.limits[0].usedPercent == nil {
+		t.Fatalf("claude usage report not attributed: %+v", claude.limits[0])
+	}
+	if got := accountRailBudget(claude, now, false); got != "5h 42% · 7d 80% · stale" {
+		t.Fatalf("aged claude budget: %q", got)
+	}
+	detail := strings.Join(accountLimitLines(claude.limits[0], now, false), "\n")
+	for _, want := range []string{"stale", "Used: 58%", "12m ago", "Last refresh failed: claude_usage_unavailable"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail missing %q: %s", want, detail)
+		}
+	}
+	if got := ansi.Strip(accountUsageSummary(claude.limits[0], now, false)); !strings.Contains(got, "42% left") || !strings.Contains(got, "stale 12m ago") {
+		t.Fatalf("summary: %q", got)
+	}
+	m := groupedRail()
+	m.accountOverview = &snap
+	rail := plain(m.renderSidebar())
+	for _, want := range []string{"Claude · 12m ago", "5h 42% · 7d 80% · stale", "5h 90%"} {
+		if !strings.Contains(rail, want) {
+			t.Fatalf("rail missing %q:\n%s", want, rail)
+		}
+	}
+	if strings.Contains(rail, "5h 90% · stale") {
+		t.Fatalf("fresh codex budget marked stale:\n%s", rail)
+	}
+	// A failed status refresh keeps the last snapshot, now marked stale.
+	m.accountOverviewStale = true
+	rail = plain(m.renderSidebar())
+	if !strings.Contains(rail, "5h 90% · stale") || !strings.Contains(rail, "5h 42% · 7d 80% · stale") {
+		t.Fatalf("failed refresh hid last-known budget:\n%s", rail)
 	}
 }

@@ -75,6 +75,8 @@ type Daemon struct {
 	accountMu       sync.Mutex
 	accountAttempts map[string]*accountAttempt
 	accountNow      func() time.Time
+	// claudeUsage reads Claude subscription windows; nil uses the vendor API.
+	claudeUsage func(context.Context, string) ([]harnessproto.AccountLimitWindow, error)
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control
@@ -391,6 +393,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
 	codexOwned = true
 	d.startCentralCodex(ctx)
+	// Budgets refresh independently of clients and sessions of either harness.
+	startRunWorker(func() { d.accountLimitsLoop(ctx) })
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
