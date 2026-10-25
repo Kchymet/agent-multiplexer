@@ -227,8 +227,7 @@ func consoleAction(verb string) bool {
 	case core.ActionRefresh, core.ActionStart, core.ActionSteer, core.ActionRename,
 		core.ActionMove, core.ActionArchive, core.ActionSetArchived, core.ActionDelete,
 		core.ActionKill, core.ActionAddRepo, core.ActionRmRepo, core.ActionAgentSetRepos,
-		core.ActionAddAgent, core.ActionNewRepoAgent, core.ActionNewWorkgroup,
-		core.ActionCreateWorkspace:
+		core.ActionAddAgent, core.ActionNewWorkgroup, core.ActionCreateWorkspace:
 		return true
 	}
 	return false

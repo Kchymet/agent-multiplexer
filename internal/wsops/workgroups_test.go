@@ -54,19 +54,24 @@ func TestSingleRepoWorkgroupCeilingAcrossAddRescopeAndMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := MoveAgent(ctx, member.ID, target); err == nil {
+	if _, err := MoveAgent(ctx, member.ID, target); err == nil {
 		t.Fatal("move exceeded destination grant")
 	}
 	unchanged, _, _ := db.GetSession(member.ID)
 	if !reflect.DeepEqual(unchanged, member) {
 		t.Fatalf("denied move mutated member: %+v", unchanged)
 	}
-	if err := MoveAgent(ctx, member.ID, ""); err != nil {
+	created, err := MoveAgent(ctx, member.ID, "")
+	if err != nil {
 		t.Fatal(err)
 	}
 	moved, _, _ := db.GetSession(member.ID)
-	if moved.RootID == member.RootID {
-		t.Fatal("move did not create a workgroup")
+	if moved.RootID == member.RootID || created != moved.RootID {
+		t.Fatalf("move did not report the workgroup it created: created %q, agent now under %q", created, moved.RootID)
+	}
+	// The workgroup left behind stays, members or none.
+	if old, ok, _ := db.GetSession(member.RootID); !ok || old.Role() != store.RoleCoordinator {
+		t.Fatalf("emptied workgroup dropped by move: %+v ok=%v", old, ok)
 	}
 	grants, initialized, err := db.CoordinatorRepoGrants(moved.RootID)
 	if err != nil || !initialized || !reflect.DeepEqual(grants, []string{"api"}) {
@@ -78,13 +83,18 @@ func TestSingleRepoWorkgroupCeilingAcrossAddRescopeAndMove(t *testing.T) {
 	}
 }
 
+// The one-off verb is gone from the vocabulary: it is not a control action, it
+// creates nothing, and the socket answers it with how the same work is started.
 func TestRetiredRepoAgentCannotCreateOrLaunch(t *testing.T) {
 	isolateStore(t)
-	if desc := core.DescriptorFor(core.ActionNewRepoAgent); desc.CreatesSession || desc.TargetsRoot {
+	if core.KnownAction("new-repo-agent") {
+		t.Fatal("new-repo-agent is still a control action")
+	}
+	if desc := core.DescriptorFor("new-repo-agent"); desc.CreatesSession || desc.TargetsRoot {
 		t.Fatalf("retired descriptor: %+v", desc)
 	}
-	id, err := ApplyResult(context.Background(), core.Action{Action: core.ActionNewRepoAgent, ID: "api"})
-	if id != "" || err == nil || !strings.Contains(err.Error(), "retired") {
+	id, err := ApplyResult(context.Background(), core.Action{Action: "new-repo-agent", ID: "api"})
+	if id != "" || err == nil || !strings.Contains(err.Error(), "removed") || !strings.Contains(err.Error(), "new-workgroup -f repos=api") || !strings.Contains(err.Error(), "amux workgroup repo api") {
 		t.Fatalf("retired creation: %q %v", id, err)
 	}
 	db, err := store.Open()

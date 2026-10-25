@@ -80,7 +80,7 @@ func TestRepoWorkgroupCreationChecksCoordinatorAndMemberAccounts(t *testing.T) {
 			t.Fatalf("%s: %v", action, harnesses)
 		}
 	}
-	if got := creationHarnesses(core.Action{Action: core.ActionNewRepoAgent}); len(got) != 0 {
+	if got := creationHarnesses(core.Action{Action: "new-repo-agent"}); len(got) != 0 {
 		t.Fatalf("retired action still invokes account readiness: %v", got)
 	}
 }

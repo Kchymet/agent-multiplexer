@@ -78,7 +78,7 @@ Client → Server (`ClientMsg.type`):
 - `hello` `{version,token}` — mandatory first frame; the token is never blank.
 - `subscribe` — start receiving `snapshot` frames (the rail state).
 - `action` `{action,id,target,fields}` — lifecycle (open/delete/move/archive/
-  new-repo-agent/new-workgroup/…); mirrors today's `core.Action`.
+  add-agent/new-workgroup/…); mirrors today's `core.Action`.
 - `pane.open` `{paneId,agent,tab}` — start streaming a pane (tab 0 agent / 1
   editor / 2 terminal). The client mints `paneId`.
 - `pane.input` `{paneId,data}` — keystrokes (base64).

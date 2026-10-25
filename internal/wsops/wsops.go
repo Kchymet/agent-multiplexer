@@ -168,11 +168,11 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	return rootID, nil
 }
 
-// CreateRepoWorkgroup is retired. Callers must create a normal workgroup with
-// an explicit repository grant instead of a hidden single-member wrapper.
-func CreateRepoWorkgroup(ctx context.Context, repo string, spec AgentSpec) (store.Session, error) {
-	return store.Session{}, fmt.Errorf("new-repo-agent is retired; use amux do new-workgroup -f repos=%s -f prompt=…", repo)
-}
+// actionNewRepoAgentLegacy is the retired verb that used to create a hidden
+// single-member wrapper around a one-off agent on a repo. It is no longer part
+// of core.ControlActions — amux is workgroups-only — and ApplyResult answers it
+// with the replacement so an old script fails loudly instead of quietly.
+const actionNewRepoAgentLegacy = "new-repo-agent"
 
 // AddAgent adds an agent (sub-session) to a workgroup.
 func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session, error) {
@@ -435,55 +435,61 @@ func SetAgentRepos(ctx context.Context, agentID string, want []string) error {
 	return db.SetRepoScope(a.ID, store.JoinRepos(final))
 }
 
-// MoveAgent re-parents an agent into another workgroup. With an empty targetRootID
-// it creates a new work-scoped workgroup seeded with the agent's repos. Only the
-// agent's root_id changes — its worktree dir and branch are left where they are
-// (they embed the old root id but are read from the stored values, so they keep
-// working; physically moving git worktrees is avoided). The old workgroup
-// remains even when empty, preserving its coordinator and history.
-func MoveAgent(ctx context.Context, agentID, targetRootID string) error {
+// MoveAgent re-parents an agent into another workgroup and returns the id of a
+// workgroup it created for the purpose ("" when it moved into an existing one).
+// With an empty targetRootID it creates a new workgroup of the agent's own,
+// granted exactly the agent's repos. An existing target must be a workgroup
+// (never a repo home) whose repository ceiling covers the agent's repos — a move
+// is never itself a grant. Only the agent's root_id changes — its worktree dir
+// and branch are left where they are (they embed the old root id but are read
+// from the stored values, so they keep working; physically moving git worktrees
+// is avoided). The workgroup left behind always stays, members or none: it is
+// its coordinator's session, possibly running, and the user deletes it
+// deliberately.
+func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error) {
 	db, err := store.Open()
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer db.Close()
 	a, ok, err := db.GetSession(agentID)
 	if err != nil || !ok {
-		return fmt.Errorf("no such agent %q", agentID)
+		return "", fmt.Errorf("no such agent %q", agentID)
 	}
 	if a.IsRoot() {
-		return fmt.Errorf("%q is a workgroup, not an agent", agentID)
+		return "", fmt.Errorf("%q is a workgroup, not an agent", agentID)
 	}
 	oldRoot := a.RootID
 
+	created := ""
 	if strings.TrimSpace(targetRootID) == "" {
 		repos := store.SplitRepos(a.Repo)
 		newRoot, err := createWorkspace(ctx, defaultStr(a.Name, a.Repo), Coordinator{}, "", nil, &repos)
 		if err != nil {
-			return err
+			return "", err
 		}
-		targetRootID = newRoot
+		targetRootID, created = newRoot, newRoot
 	} else {
 		target, ok, _ := db.GetSession(targetRootID)
 		if !ok || !target.IsRoot() {
-			return fmt.Errorf("no such workgroup %q", targetRootID)
+			return "", fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", targetRootID)
 		}
-		if target.Scope == store.ScopeRepo {
-			return fmt.Errorf("cannot move into a repo-scoped workgroup; choose a work-scoped one (or omit a target to make a new one)")
+		if target.Role() == store.RoleRepo {
+			return "", fmt.Errorf("%q is repo %s's home session, not a workgroup; move into a workgroup granted that repo, or omit the target to make a new one", targetRootID, target.Repo)
 		}
 	}
 	if targetRootID == oldRoot {
-		return nil
+		return "", nil
 	}
 
 	if err := db.CheckCoordinatorRepos(targetRootID, store.SplitRepos(a.Repo)); err != nil {
-		return err
+		return created, err
 	}
 	// Field-scoped write: only the parent (root_id) changes when re-parenting.
 	if err := db.SetRootID(a.ID, targetRootID); err != nil {
-		return err
+		return created, err
 	}
-	return nil
+	return created, nil
 }
 
 // AgentCommand resolves everything needed to run an agent: its working dir, the
@@ -780,7 +786,8 @@ func Dispatch(ctx context.Context, a core.Action, stopEngine func(id string)) (s
 }
 
 // ApplyResult is Apply plus the id of any session the action created: the new
-// agent for new-repo-agent/add-agent, or the workgroup root for new-workgroup.
+// agent for add-agent, or the workgroup root for new-workgroup (and for a move
+// that made a new workgroup).
 // It lets a caller switch to (and thereby actually start) the agent it just
 // created instead of leaving it initialized-but-not-running. The id is "" for
 // actions that create nothing.
@@ -791,7 +798,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	case core.ActionDelete, core.ActionKill:
 		return "", DeleteByID(ctx, a.ID)
 	case core.ActionMove:
-		return "", MoveAgent(ctx, a.ID, a.Target)
+		return MoveAgent(ctx, a.ID, a.Target)
 	case core.ActionArchive:
 		return "", ToggleArchived(ctx, a.ID)
 	case core.ActionSetArchived:
@@ -814,12 +821,12 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		}
 		defer db.Close()
 		return "", db.SetCoordinatorRepoGrants(a.ID, store.SplitRepos(a.Fields["repos"]))
-	case core.ActionNewRepoAgent:
-		s, err := CreateRepoWorkgroup(ctx, a.ID, AgentSpec{
-			Agent:  agentOf(a.Fields),
-			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
-		})
-		return s.ID, err
+	case actionNewRepoAgentLegacy:
+		// Nothing is created: a one-off agent on a repo no longer exists. The
+		// caller is told how the same work is started now.
+		repo := defaultStr(a.ID, "<repo>")
+		return "", fmt.Errorf("%q was removed: amux is workgroups-only — create a workgroup limited to the repo instead\n  amux do new-workgroup -f repos=%s -f prompt=\"…\"   (or: amux workgroup repo %s)",
+			actionNewRepoAgentLegacy, repo, repo)
 	case core.ActionAddAgent:
 		// Repos come straight from the fuzzy picker; zero is allowed (repo-less
 		// agent). A workgroup no longer carries repos of its own to fall back to.

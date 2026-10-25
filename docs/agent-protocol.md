@@ -356,8 +356,9 @@ Request envelope (`core.Action`) and response (`core.Result`):
 ```
 
 Actions relevant to an agent's lifecycle (existing): `open`/`attach`, `delete`/
-`kill`, `move`, `archive`, `rename`, `new-repo-agent`, `add-agent`, `add-repo`,
-`new-workgroup`, plus the `pane.*` streaming verbs (attach/detach a live terminal
+`kill`, `move`, `archive`, `rename`, `add-agent`, `add-repo`, `new-workgroup`
+(`repos` limits the workgroup; one repo makes it single-repo), plus the `pane.*`
+streaming verbs (attach/detach a live terminal
 without killing the agent). Self-report verbs are a separate closed session-RPC
 namespace and are not added to this host action vocabulary.
 

@@ -117,8 +117,12 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   repos. An explicitly empty `repos` action field grants none.
 - **Agent** — one agent (Claude Code or Codex, picked per agent by its **harness**)
   with its own subdirectory and a git **worktree per repo** it works on. An agent
-  appears under WORKGROUPS *or* REPOS, never both; `m` moves one into a new
-  work-scoped workgroup (with a confirmation dialog).
+  always belongs to exactly one workgroup and appears under it; there is no
+  agent outside a workgroup. `m` moves one into a new workgroup of its own
+  (limited to its repos, with a confirmation dialog) and `amux workgroup move`
+  into an existing workgroup whose repos cover the agent's. Older one-off agents
+  on a repo become workgroups limited to that repo when the upgraded daemon
+  first opens the database (see [Versioning](docs/versioning.md)).
 - **Tabs** — every agent has a row of tabs, switched with **Alt+1/2/3**:
   **1** the agent (Claude Code or Codex), **2** an editor (`$AMUX_EDITOR`, default `nvim`),
   **3** a terminal. **All three are scoped to the agent's own directory** by
@@ -294,9 +298,9 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Alt+1/2/3` | switch the agent's tab (agent / editor / terminal) |
 | `Alt+r` | restart the focused agent or rail selection and resume its saved conversation (confirm) |
 | `a` | add an agent — on a repo, a normal workgroup limited to that repo; on a workgroup, another member (settings form) |
-| `w` | new work-scoped workgroup (coordinator settings, optional repos) |
+| `w` | new workgroup (coordinator settings; optional repos limit it and seed a first agent) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
-| `m` | move the selected agent to a new workgroup (confirm) |
+| `m` | move the selected agent into a new workgroup of its own (confirm); `amux workgroup move` targets an existing one |
 | `r` | rename the selected agent/workgroup (display name) |
 | `x` | archive / restore the selected agent |
 | `D` | permanently delete the selected agent/workgroup — worktrees + branch (confirm) |
@@ -348,9 +352,10 @@ amux serve [listen...]     # legacy relay (TLS unix + optional tls: specs)
 amux harness               # standalone raw-stdio mode is disabled
 amux repo add <src>        # track a repo: git URL | local path | OWNER/REPO (gh)
 amux repo ls | rm <name>   # list / untrack repos (rm refuses if agents use it)
-amux workgroup repo <repo> # create a normal workgroup limited to this repo (short form: wg)
-amux workgroup new         # work-scoped workgroup config page
-amux workgroup move <agent> [<root>|--new]
+amux workgroup new         # workgroup config page (short form: wg)
+amux workgroup repo <repo> # workgroup limited to one repo, with a first agent
+amux workgroup create <repo>...  # workgroup limited to those repos, with a first agent
+amux workgroup move <agent> [<root>|--new]  # into another workgroup, or a new one of its own
 amux workgroup archive | unarchive <id>
 amux workgroup rm|rename|ls
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
