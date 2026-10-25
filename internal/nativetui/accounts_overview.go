@@ -78,13 +78,30 @@ func accountPercent(remaining float64) string {
 
 func accountWindowName(l accountLimit) string {
 	name := strings.Split(accountText(l.name), " (")[0]
-	switch {
-	case name == "five_hour" || strings.HasSuffix(l.name, " (300 minutes)"):
-		return "5h"
-	case name == "seven_day" || strings.HasSuffix(l.name, " (10080 minutes)"):
-		return "7d"
+	bucket, window, scoped := strings.Cut(name, ":")
+	if !scoped {
+		window = name
 	}
-	return name
+	label := window
+	switch {
+	case window == "five_hour":
+		label = "5h"
+	case window == "seven_day":
+		label = "7d"
+	case window == "primary" || window == "secondary":
+		if strings.HasSuffix(l.name, " (300 minutes)") {
+			label = "5h"
+		}
+		if strings.HasSuffix(l.name, " (10080 minutes)") {
+			label = "7d"
+		}
+	}
+	// Native rateLimitsByLimitId keys identify different budgets. Keep that
+	// category even when the underlying window has a familiar duration.
+	if scoped {
+		return bucket + ":" + label
+	}
+	return label
 }
 
 func accountRailBudget(p accountProfile, now time.Time, stale bool) string {
@@ -100,7 +117,8 @@ func accountRailBudget(p accountProfile, now time.Time, stale bool) string {
 	parts := make([]string, 0, 2)
 	for _, name := range []string{"5h", "7d"} {
 		for _, l := range p.limits {
-			if accountWindowName(l) == name {
+			label := accountWindowName(l)
+			if label == name || (p.harness == "codex" && label == "codex:"+name) {
 				remaining, state := accountRemaining(l, now, false)
 				value := state
 				if state == "fresh" {

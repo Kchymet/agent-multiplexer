@@ -49,3 +49,10 @@ An optional `go test -race ./internal/nativetui` run reports an existing
 archive of upstream `90ac3c7` with
 `go test -race ./internal/nativetui -run '^TestRestartResultReattachesAgentAndPreservesTerminal$' -count=5`.
 Terminal lifecycle code is outside this change. Required CI does not run `-race`.
+
+Review follow-up: [multiple Codex categories](popup-120x32-multi-bucket.txt)
+retain native bucket names (for example `code-review:5h`) in the popup and announce
+additional windows in the selected provider's scrollable details. The rail uses
+5h/7d only for unscoped windows or the general `codex` bucket; multiple or other
+categories get the explicit limiting-window summary. A projection regression
+covers code-review and codex buckets together, including access to later windows.
