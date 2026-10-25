@@ -81,6 +81,7 @@ func TestFormOpensInNormalMode(t *testing.T) {
 // The new-agent form offers a model selector defaulting to opus, with vim
 // motions (j to reach it, l to cycle) driving the selection.
 func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	m := &model{}
 	m.openNewRepoAgentForm("repo", "Repo")
 
@@ -111,6 +112,15 @@ func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	m.handleForm(key("l"))
 	if got := modelField.value; got != agent.HarnessFor("claude").Models()[1] {
 		t.Fatalf("after cycling: got %q, want %q", got, agent.HarnessFor("claude").Models()[1])
+	}
+	for range 3 {
+		m.handleForm(key("l"))
+	}
+	if got := modelField.value; got != "claude-opus-5-5" {
+		t.Fatalf("explicit Opus 5.5 selection = %q", got)
+	}
+	if got := m.form.values()["model"]; got != "claude-opus-5-5" {
+		t.Fatalf("submitted model = %q", got)
 	}
 }
 

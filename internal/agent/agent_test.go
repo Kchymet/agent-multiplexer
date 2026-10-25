@@ -85,6 +85,21 @@ func TestArgvCodex(t *testing.T) {
 	}
 }
 
+// An explicit model ID reaches Claude unchanged alongside resume arguments.
+func TestArgvClaudeOpus55(t *testing.T) {
+	t.Setenv("AMUX_CLAUDE_BIN", "/test/claude")
+	t.Setenv("AMUX_PERMISSION_MODE", "auto")
+
+	argv, err := Argv("claude", "claude-opus-5-5", "--resume", "session-id")
+	if err != nil {
+		t.Fatalf("Argv: %v", err)
+	}
+	want := []string{"/test/claude", "--permission-mode", "auto", "--model", "claude-opus-5-5", "--resume", "session-id"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("claude Argv = %v, want %v", argv, want)
+	}
+}
+
 // An explicit path is passed through untouched.
 func TestArgvAbsolutePassThrough(t *testing.T) {
 	t.Setenv("AMUX_CLAUDE_BIN", "/usr/bin/env")
