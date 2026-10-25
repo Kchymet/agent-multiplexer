@@ -8,25 +8,28 @@ package harnessproto
 // StateUnknown (the attention ladder); Section ∈ SectionWorkgroups|SectionRepos|
 // SectionDetached|SectionArchived. Archived is emitted only when true.
 type Session struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Source    string `json:"source"`             // claude | hermes | workspace
-	Kind      string `json:"kind"`               // agent kind, e.g. claude
-	Mode      string `json:"mode,omitempty"`     // task (short) | loop (long)
-	Model     string `json:"model,omitempty"`    // runtime's current model (updated after an in-session switch)
-	RootID    string `json:"rootId,omitempty"`   // parent root for sub-sessions
-	IsRoot    bool   `json:"isRoot,omitempty"`   // true => a root container row
-	Repos     string `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
-	Section   string `json:"section,omitempty"`  // rail grouping: workgroups | repos | detached | archived
-	State     string `json:"state,omitempty"`    // idle | ready | waiting | running | unknown
-	Status    string `json:"status"`             // human label, e.g. "ready · main"
-	Archived  bool   `json:"archived,omitempty"` // set on rows in the archived section
-	Cwd       string `json:"cwd"`
-	Pid       int    `json:"pid,omitempty"`
-	StartedAt int64  `json:"startedAt"`
-	CanAttach bool   `json:"canAttach"`
-	CanKill   bool   `json:"canKill"`
-	CanResume bool   `json:"canResume"`
+	// AccountBinding is safe workload routing metadata, never upstream identity.
+	// Omitted means binding unknown; never infer it from the current default.
+	AccountBinding *AccountBinding `json:"accountBinding,omitempty"`
+	ID             string          `json:"id"`
+	Title          string          `json:"title"`
+	Source         string          `json:"source"`             // claude | hermes | workspace
+	Kind           string          `json:"kind"`               // agent kind, e.g. claude
+	Mode           string          `json:"mode,omitempty"`     // task (short) | loop (long)
+	Model          string          `json:"model,omitempty"`    // runtime's current model (updated after an in-session switch)
+	RootID         string          `json:"rootId,omitempty"`   // parent root for sub-sessions
+	IsRoot         bool            `json:"isRoot,omitempty"`   // true => a root container row
+	Repos          string          `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
+	Section        string          `json:"section,omitempty"`  // rail grouping: workgroups | repos | detached | archived
+	State          string          `json:"state,omitempty"`    // idle | ready | waiting | running | unknown
+	Status         string          `json:"status"`             // human label, e.g. "ready · main"
+	Archived       bool            `json:"archived,omitempty"` // set on rows in the archived section
+	Cwd            string          `json:"cwd"`
+	Pid            int             `json:"pid,omitempty"`
+	StartedAt      int64           `json:"startedAt"`
+	CanAttach      bool            `json:"canAttach"`
+	CanKill        bool            `json:"canKill"`
+	CanResume      bool            `json:"canResume"`
 
 	// Runtime names the runtime backing this session — a value from the Runtime*
 	// set (harnessproto/events.go: "claude" | "codex") — so a consumer gates

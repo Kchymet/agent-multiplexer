@@ -133,3 +133,10 @@ type AccountCapabilities struct {
 	Manage bool `json:"manage"`
 	Use    bool `json:"use"`
 }
+
+// AccountBinding is the workload's persisted routing selection. It carries no
+// upstream account identifier, credential version, email, or ceremony material.
+type AccountBinding struct {
+	ProfileID string `json:"profileId"`
+	Source    string `json:"source"`
+}
