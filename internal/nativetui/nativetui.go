@@ -282,13 +282,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // or click an agent just by pointing at it — focus follows a button press. Events
 // over the borders/help line, or while a modal is up, are ignored.
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.archiveSearch != nil || m.accounts != nil || m.form != nil || m.confirm != nil || m.picker != nil {
+	if m.accounts != nil {
+		if ev.Button == tea.MouseButtonWheelUp {
+			m.accounts.scroll = max(0, m.accounts.scroll-3)
+		} else if ev.Button == tea.MouseButtonWheelDown {
+			m.accounts.scroll += 3
+		}
+		return m, nil
+	}
+	if m.archiveSearch != nil || m.form != nil || m.confirm != nil || m.picker != nil {
 		return m, nil
 	}
 	if ev.Action == tea.MouseActionPress && ev.Button == tea.MouseButtonLeft && ev.X >= 0 && ev.X < sidebarWidth {
 		barY := 1 + max(1, m.paneRows()-len(m.accountOverviewLines())-len(m.railHints()))
-		if ev.Y >= barY && ev.Y < barY+3 {
-			m.focus = focusSidebar
+		if ev.Y >= barY && ev.Y < barY+len(m.accountOverviewLines()) {
 			return m, m.openAccounts()
 		}
 		if ev.Y == m.paneRows() {

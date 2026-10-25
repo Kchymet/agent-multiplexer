@@ -1,0 +1,12 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor
+ ○ console                │work 00 · 界 ···········
+ A╭──────────────────────────────────────────────╮·
+ C│ Accounts · remaining budget                  │·
+ 5│ › Claude · subscription · ready              │·
+ C│   5h 77% · 7d 77%                            │·
+ 5│   Codex · subscription · ready               │·
+ ↵│   5h 33% · 7d 33%                            │·
+ S│ PgUp/PgDn scroll · Esc close  1–4/23         │·
+ /╰──────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────
+ accounts · e subscription · a API key · d default ·
