@@ -5,6 +5,7 @@ import (
 	"amux/internal/provider"
 	"amux/internal/providercfg"
 	"context"
+	"fmt"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -31,4 +32,11 @@ func providerAccountUseDefault(c providercfg.Config, publish, readOnly bool) boo
 		return c.AccountUse
 	}
 	return c.AccountUse || publish && !readOnly
+}
+
+func rejectRemoteAccountManagement(enabled bool) error {
+	if enabled {
+		return fmt.Errorf("--account-manage is no longer supported; configure accounts through amux CLI/TUI (Harness account access is read-only)")
+	}
+	return nil
 }

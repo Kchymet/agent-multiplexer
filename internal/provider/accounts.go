@@ -21,18 +21,9 @@ func (p *Provider) handleAccount(s *session, m hp.MuxMsg) {
 	result := hp.AccountResult{Error: "account_access_denied"}
 	if m.Account != nil && m.ReqID != "" && len(m.ReqID) <= 128 && hp.ValidateAccountRequest(*m.Account, ephemeral) {
 		r := *m.Account
-		allowed := p.cfg.AccountManage
-		if r.Operation == hp.AccountStatus {
-			allowed = p.cfg.AccountStatus
-		}
-		// AccountManage does not grant authority over arbitrary workloads.
-		// V1 rebind is host-only until session-scoped authorization is available.
-		if r.Operation == hp.AccountRebind {
-			allowed = false
-		}
-		if ephemeral && r.Initiator == "" {
-			allowed = false
-		}
+		// Machine configuration is local amux CLI/TUI only. Persisted legacy
+		// manage grants never authorize remote effects, including ceremonies.
+		allowed := !ephemeral && r.Operation == hp.AccountStatus && p.cfg.AccountStatus
 		if allowed && p.cfg.OpenAccounts != nil {
 			if s.accountChannel == nil {
 				s.accountChannel, _ = p.cfg.OpenAccounts(s.rtCtx)
@@ -46,6 +37,10 @@ func (p *Provider) handleAccount(s *session, m hp.MuxMsg) {
 				// Defense in depth: safe transport can never carry a ceremony.
 				if !ephemeral {
 					result.Ceremony = nil
+					if result.Snapshot != nil {
+						filtered := result.Snapshot.ManagedOnly()
+						result.Snapshot = &filtered
+					}
 				}
 			}
 		}

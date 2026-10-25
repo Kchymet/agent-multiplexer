@@ -381,6 +381,12 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 			return nil, err
 		}
 	}
+	if s.Role() == store.RoleConsole {
+		endpoint := filepath.Join(grant.MailboxHostDir, access.ConsoleAccountSocketName)
+		if resolved, err := filepath.EvalSymlinks(endpoint); err == nil {
+			fmt.Fprintf(&policy.Builder, "(allow network-outbound (remote unix-socket (literal %s)))\n", strconv.Quote(resolved))
+		}
+	}
 	policy.sockets(ownSockets)
 	policy.sockets(s.Dir)
 	policy.sockets(temp)

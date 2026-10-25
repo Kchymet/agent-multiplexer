@@ -34,6 +34,7 @@ const (
 )
 
 type sessionRuntime struct {
+	consoleAccountClose func()
 	d                   *Daemon
 	resolver            *daemonAccessResolver
 	policy              access.Policy
@@ -231,6 +232,14 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 		_ = server.Close()
 		return err
 	}
+	if session.ID == console.ID && session.Role() == store.RoleConsole {
+		closeAccounts, err := r.d.listenConsoleAccounts(ctx, spec.Access.MailboxHostDir)
+		if err != nil {
+			_ = server.Close()
+			return err
+		}
+		r.consoleAccountClose = closeAccounts
+	}
 	r.servers[session.ID] = server
 	r.initialized[session.ID] = false
 	return nil
@@ -341,6 +350,10 @@ func credentialPrincipal(credential access.Credential) access.Principal {
 }
 
 func (r *sessionRuntime) closeServer(id string) {
+	if id == console.ID && r.consoleAccountClose != nil {
+		r.consoleAccountClose()
+		r.consoleAccountClose = nil
+	}
 	if server := r.servers[id]; server != nil {
 		_ = server.Close()
 		delete(r.servers, id)

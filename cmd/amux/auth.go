@@ -48,11 +48,11 @@ usage: amux auth <command>
 
   login [claude] [--token-stdin]  create or replace the central Claude token
   login codex                     sign the central Codex home in to ChatGPT
-  status [claude|codex]           show the selected mode and central login
-  accounts [--json]             view machine profiles, defaults and limits
+  status [claude|codex]           show the amux-owned configuration and limits
+  accounts [--json]             view Claude/Codex configuration and limits
   logout <claude|codex>          fence delivery and clear the central login
-  default <harness:source>       select the default for new workloads
-  rebind <harness:source> <id>    explicitly bind and stop one workload
+  default <claude|codex>         use the amux configuration for new workloads
+  rebind <claude|codex> <id>      explicitly bind and stop one workload
   restart [--force]               restart idle Claude agents with current credentials
 
 login runs `+"`claude setup-token`"+` (browser sign-in) and then asks you to paste
@@ -61,15 +61,18 @@ instead. Codex sign-in prints a browser URL; the daemon owns that login.
 restart --force also interrupts busy or unknown-state agents. Conversations
 resume after a restart.
 
-Run logins in a host terminal. Sessions never hold a refresh token: Claude
+Run logins in a host terminal or the trusted amux console terminal. Console
+Claude login accepts a token through hidden input; obtain it with setup-token
+in a host terminal. Other agent sessions cannot configure accounts.
+Sessions never hold a refresh token: Claude
 receives the setup-token through CLAUDE_CODE_OAUTH_TOKEN, and Codex receives
 short-lived ChatGPT tokens from the daemon. A setup-token is valid for one
 year and is not refreshed; run login again to reissue it before then.
 Reissuing does not revoke the previous token. Status never prints a secret.
 
-Other methods remain available as explicit selections:
-  amux auth default claude:host          # or claude:shared / claude:environment
-  amux auth default codex:host           # or codex:environment
+One amux-owned configuration is available for each harness. Legacy source
+bindings remain internal for compatibility. Configuration uses amux CLI/TUI;
+Harness web account views are read-only.
 
 Defaults affect newly created workloads. Existing workloads keep their binding;
 use explicit rebind after replacing an opaque Claude credential. Login pauses
@@ -94,7 +97,11 @@ func authHarness(args []string) (string, []string) {
 
 func authStatus(args []string) error {
 	if sessionContextRestricted() {
-		return fmt.Errorf("machine account status requires a host terminal")
+		harness, rest := authHarness(args)
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: amux auth status [claude|codex]")
+		}
+		return authMachineStatus(harness)
 	}
 	harness, rest := authHarness(args)
 	if len(rest) != 0 {
@@ -112,9 +119,6 @@ func authStatus(args []string) error {
 
 func authLogin(args []string) error {
 	harness, rest := authHarness(args)
-	if sessionContextRestricted() {
-		return fmt.Errorf("amux auth login must run in a host terminal, not inside a session")
-	}
 	if harness == "codex" {
 		if len(rest) != 0 {
 			return fmt.Errorf("usage: amux auth login codex")

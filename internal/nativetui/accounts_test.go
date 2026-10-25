@@ -37,9 +37,10 @@ func TestAccountsNavigationAndConfirmationCaptureRevision(t *testing.T) {
 		calls = append(calls, r)
 		return accountResponse{}, nil
 	}
+	m.accounts.snapshot.profiles[0].defaultProfile = false
 	m.handleKey(key("j"))
-	if m.accounts.selected != "claude:host" {
-		t.Fatal("profile navigation did not select host source")
+	if m.accounts.selected != "claude:central" {
+		t.Fatal("navigation exposed a legacy source")
 	}
 	m.handleKey(key("d"))
 	if m.accounts.confirm == nil || !strings.Contains(accountConfirmation(*m.accounts.confirm, m.accounts.profile()), "Existing workload account bindings stay fixed") {
@@ -49,7 +50,7 @@ func TestAccountsNavigationAndConfirmationCaptureRevision(t *testing.T) {
 	m.handleKey(key("k"))
 	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	cmd()
-	if len(calls) != 1 || calls[0].op != "default" || calls[0].profile != "claude:host" || calls[0].revision != 8 || calls[0].defaultRevision != 12 {
+	if len(calls) != 1 || calls[0].op != "default" || calls[0].profile != "claude:central" || calls[0].revision != 7 || calls[0].defaultRevision != 12 {
 		t.Fatalf("wrong confirmed mutation: %+v", calls)
 	}
 	if _, cmd := m.handleKey(key("x")); cmd != nil {
@@ -61,9 +62,8 @@ func TestAccountsNavigationAndConfirmationCaptureRevision(t *testing.T) {
 // Backend tests own enforcement; this checks the UI preserves the reviewed CAS
 // and handles rejection without silently retrying or declaring success.
 func TestAccountsConcurrentDifferentDefaultsRequireFreshReview(t *testing.T) {
-	first, second := accountModel(), accountModel()
-	first.accounts.snapshot.profiles[0].defaultProfile = false
-	second.accounts.selected = "claude:host"
+	second := accountModel()
+	second.accounts.snapshot.profiles[0].defaultProfile = false
 	currentRevision := uint64(12)
 	var requests []harnessproto.AccountRequest
 	call := func(_ context.Context, req accountRequest) (accountResponse, error) {
@@ -78,19 +78,21 @@ func TestAccountsConcurrentDifferentDefaultsRequireFreshReview(t *testing.T) {
 		currentRevision++
 		return accountResponse{}, nil
 	}
-	first.accountCall, second.accountCall = call, call
-	first.handleKey(key("d"))
+	second.accountCall = call
 	second.handleKey(key("d"))
-	if first.accounts.confirm == nil || second.accounts.confirm == nil {
-		t.Fatal("both operators must review a confirmation")
+	if second.accounts.confirm == nil {
+		t.Fatal("operator must review a confirmation")
 	}
-	_, cmd := first.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	first.Update(cmd())
+	// A concurrent CLI operator selects a different legacy target. The TUI
+	// offers no legacy menu, but must still fence that external default change.
+	if _, err := call(context.Background(), accountRequest{op: "default", profile: "claude:host", revision: 8, defaultRevision: 12}); err != nil {
+		t.Fatal(err)
+	}
 	// A newer observation arriving after confirmation must not rewrite consent.
 	second.accounts.snapshot.defaultRevisions["claude"] = currentRevision
-	_, cmd = second.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := second.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	_, retry := second.Update(cmd())
-	if len(requests) != 2 || requests[0].ProfileID == requests[1].ProfileID || requests[1].Revision != 8 || requests[1].DefaultRevision != 12 {
+	if len(requests) != 2 || requests[0].ProfileID == requests[1].ProfileID || requests[1].Revision != 7 || requests[1].DefaultRevision != 12 {
 		t.Fatalf("confirmation did not retain target and default revisions: %+v", requests)
 	}
 	if retry != nil || !second.accounts.stale || !strings.Contains(second.accounts.notice, "Refresh and review") || strings.Contains(second.View(), "Default updated") {
@@ -104,12 +106,12 @@ func TestAccountsConcurrentDifferentDefaultsRequireFreshReview(t *testing.T) {
 
 func TestAccountsMissingDefaultRevisionDisablesSelection(t *testing.T) {
 	snapshot := projectAccounts(harnessproto.AccountSnapshot{Version: 1, Profiles: []harnessproto.AccountProfile{
-		{ID: "claude:host", Harness: "claude", Source: "host", Revision: 8},
+		{ID: "claude:central", Harness: "claude", Source: "central", Revision: 8},
 	}})
 	m := accountModel()
 	m.accounts.snapshot = snapshot
-	m.accounts.selected = "claude:host"
-	for _, action := range []string{"d", "e"} {
+	m.accounts.selected = "claude:central"
+	for _, action := range []string{"d"} {
 		m.handleKey(key(action))
 		if m.accounts.confirm != nil {
 			t.Fatalf("%s allowed a default without a default revision", action)

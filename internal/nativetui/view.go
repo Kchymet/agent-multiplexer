@@ -170,7 +170,7 @@ func (m *model) renderSidebar() string {
 	// space above them; when it overflows we scroll it (keeping the selected row
 	// visible) rather than dropping rows off the bottom. Rows can be two lines tall
 	// (title + status sub-line), so we work in rendered lines, not slots.
-	foot := m.railHints()
+	foot := append(m.accountOverviewLines(), m.railHints()...)
 	rows := m.paneRows()
 	footLines := lineCount(foot)
 	avail := rows - footLines // lines available to the scrollable session list
@@ -230,7 +230,7 @@ func (m *model) railHints() []string {
 	return []string{
 		borderSeg(sidebarWidth, fill, l1, ""),
 		borderSeg(sidebarWidth, fill, " "+keyStyle.Render("Space")+dimStyle.Render(" fold/unfold "), ""),
-		borderSeg(sidebarWidth, fill, " "+keyStyle.Render("s")+dimStyle.Render(" machine accounts "), ""),
+		borderSeg(sidebarWidth, fill, " "+keyStyle.Render("/")+dimStyle.Render(" search archived "), ""),
 	}
 }
 
@@ -323,6 +323,9 @@ func stateColor(state string) lipgloss.Style {
 }
 
 func (m *model) renderMain() string {
+	if m.archiveSearch != nil {
+		return m.renderArchiveSearch()
+	}
 	if m.accounts != nil {
 		return m.renderAccounts()
 	}
@@ -366,6 +369,11 @@ func (m *model) renderDialog() string {
 // keys while the agent is focused, otherwise the rail command hints.
 func (m *model) renderHelp() string {
 	switch {
+	case m.archiveSearch != nil:
+		if m.archiveSearch.details != "" {
+			return ansi.Truncate(hints("read only", []hint{{"Ctrl+R", "restore"}, {"Esc", "results"}}), m.w, "")
+		}
+		return ansi.Truncate(hints("archive", []hint{{"↑↓", "move"}, {"Enter", "details"}, {"Ctrl+R", "restore"}, {"Esc", "close"}}), m.w, "")
 	case m.accounts != nil:
 		if s := m.accounts; s.pending != "" {
 			return hints("accounts", []hint{{"Esc", "close and disconnect"}})

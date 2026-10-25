@@ -425,7 +425,7 @@ func (p *Provider) registerMsg() harnessproto.HarnessMsg {
 func (p *Provider) capabilities() *harnessproto.Capabilities {
 	_, err := exec.LookPath("bwrap")
 	return &harnessproto.Capabilities{
-		Accounts:  &harnessproto.AccountCapabilities{Status: p.cfg.AccountStatus, Manage: p.cfg.AccountManage, Use: p.cfg.AccountUse},
+		Accounts:  &harnessproto.AccountCapabilities{Status: p.cfg.AccountStatus, Manage: false, Use: p.cfg.AccountUse},
 		Execution: p.cfg.Execution,
 		Compute:   p.cfg.AllowCompute,
 		MaxPanes:  p.cfg.MaxPanes,
@@ -446,7 +446,7 @@ func (p *Provider) features() []string {
 			out = append(out, f)
 		}
 	}
-	if p.cfg.OpenAccounts != nil && (p.cfg.AccountStatus || p.cfg.AccountManage || p.cfg.AccountUse) {
+	if p.cfg.OpenAccounts != nil && (p.cfg.AccountStatus || p.cfg.AccountUse) {
 		out = appendUnique(out, harnessproto.AccountsV1)
 	}
 	if p.publishing() {

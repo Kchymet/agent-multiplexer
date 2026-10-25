@@ -28,7 +28,8 @@ import (
 // process is already inside the harness sandbox when invoked from an agent.
 // It does not substitute for real Claude/Codex tool-turn acceptance.
 func TestAgentNamespaceCommandSurface(t *testing.T) {
-	testAgentCommandSurface(t, "shell")
+	t.Run("agent", func(t *testing.T) { testAgentCommandSurface(t, "shell") })
+	t.Run("console-accounts", testConsoleAccountCommandSurface)
 }
 
 // Opt-in: pinned native runtimes are external test dependencies, never host
@@ -112,6 +113,7 @@ func testAgentCommandSurface(t *testing.T, mode string) {
 	cancel, stopped := start()
 	defer func() { cancel(); <-stopped; r.close() }()
 	script := `set -eux
+if AMUX_ROLE=console amux auth accounts; then exit 33; fi
 test -e /amux-session-access/context.json
 # The authenticated context must remain read-only in every launch mode.
 if touch /amux-session-access/tamper 2>/dev/null; then exit 30; fi

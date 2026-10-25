@@ -36,7 +36,7 @@ func TestFoldGroupsAndSections(t *testing.T) {
 			m.attached = tc.id + "-agent"
 			m.handleKey(tea.KeyMsg{Type: tea.KeySpace})
 			out := plain(m.renderSidebar())
-			if strings.Contains(out, tc.child) || !strings.Contains(out, tc.sibling) || !strings.Contains(out, "archived-child") {
+			if strings.Contains(out, tc.child) || !strings.Contains(out, tc.sibling) || strings.Contains(out, "archived-child") {
 				t.Fatalf("fold hid the wrong rows:\n%s", out)
 			}
 			if s := m.selected(); s == nil || s.ID != tc.id || m.attached != tc.id+"-agent" {
@@ -48,7 +48,7 @@ func TestFoldGroupsAndSections(t *testing.T) {
 			}
 		})
 	}
-	for _, section := range []string{core.SectionWorkgroups, core.SectionRepos, core.SectionArchived, core.SectionDetached} {
+	for _, section := range []string{core.SectionWorkgroups, core.SectionRepos, core.SectionDetached} {
 		t.Run(section, func(t *testing.T) {
 			m := groupedRail()
 			m.selectEntry(railEntry{section: section})

@@ -470,6 +470,10 @@ func (d *Daemon) stopDeferredAdmission() {
 // startServingConnection registers an accepted transport before its handler is
 // launched. Once draining starts, no new handler can race WaitGroup.Wait.
 func (d *Daemon) startServingConnection(ctx context.Context, conn net.Conn) {
+	d.startServingHandler(ctx, conn, d.serve)
+}
+
+func (d *Daemon) startServingHandler(ctx context.Context, conn net.Conn, serve func(context.Context, net.Conn)) {
 	d.servingMu.Lock()
 	if d.servingDraining {
 		d.servingMu.Unlock()
@@ -489,7 +493,7 @@ func (d *Daemon) startServingConnection(ctx context.Context, conn net.Conn) {
 			d.servingMu.Unlock()
 			d.servingWG.Done()
 		}()
-		d.serve(ctx, conn)
+		serve(ctx, conn)
 	}()
 }
 
@@ -612,6 +616,11 @@ func (d *Daemon) triggerPoll() {
 // ---- connection serving --------------------------------------------------
 
 func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
+	d.serveAuthenticated(ctx, conn, false)
+}
+
+// consoleOnly selects a distinct listener; it is never client-controlled.
+func (d *Daemon) serveAuthenticated(ctx context.Context, conn net.Conn, consoleOnly bool) {
 	defer conn.Close()
 	if d.authority == nil {
 		return
@@ -625,9 +634,20 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	if err := secure.HandshakeContext(ctx); err != nil {
 		return
 	}
-	principal, reader, err := d.authenticateHost(ctx, secure)
+	kind := access.SubjectHost
+	if consoleOnly {
+		kind = access.SubjectSession
+	}
+	principal, reader, err := d.authenticateSubject(ctx, secure, kind)
 	if err != nil {
 		return
+	}
+
+	valid := func(checkCtx context.Context) error {
+		if consoleOnly {
+			return d.authorizeConsoleAccounts(checkCtx, principal)
+		}
+		return d.authority.Valid(checkCtx, principal)
 	}
 
 	invalidated, cancelWatch, err := d.authority.WatchInvalidation(principal)
@@ -637,7 +657,7 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 	defer cancelWatch()
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
 	defer cancelConnection()
-	cl := newAuthenticatedConnState(secure, func() bool { return connectionCtx.Err() == nil && d.authority.Valid(ctx, principal) == nil })
+	cl := newAuthenticatedConnState(secure, func() bool { return connectionCtx.Err() == nil && valid(ctx) == nil })
 	watchDone := make(chan struct{})
 	var snapshotDone chan struct{}
 	go func() {
@@ -663,49 +683,51 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		<-watchDone
 	}()
 
-	ch := make(chan core.Snapshot, 4)
-	d.subsMu.Lock()
-	d.subs[ch] = struct{}{}
-	d.subsMu.Unlock()
-	defer func() {
+	if !consoleOnly {
+		ch := make(chan core.Snapshot, 4)
 		d.subsMu.Lock()
-		delete(d.subs, ch)
+		d.subs[ch] = struct{}{}
 		d.subsMu.Unlock()
-	}()
+		defer func() {
+			d.subsMu.Lock()
+			delete(d.subs, ch)
+			d.subsMu.Unlock()
+		}()
 
-	// Send the current state immediately on connect.
-	if d.authority.Valid(ctx, principal) != nil {
-		return
-	}
-	cl.send(d.snapshot())
-
-	// Push subsequent snapshots.
-	snapshotDone = make(chan struct{})
-	go func() {
-		defer close(snapshotDone)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-cl.done:
-				return
-			case snap, ok := <-ch:
-				if !ok {
-					return
-				}
-				if d.authority.Valid(ctx, principal) != nil {
-					cl.stop()
-					return
-				}
-				cl.send(snap)
-			}
+		// Send the current state immediately on connect.
+		if valid(ctx) != nil {
+			return
 		}
-	}()
+		cl.send(d.snapshot())
 
-	// Deferred work carries the same generation guard and rechecks it at the
-	// actual execution boundary, not merely when this loop accepts the frame.
+		// Push subsequent snapshots.
+		snapshotDone = make(chan struct{})
+		go func() {
+			defer close(snapshotDone)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-cl.done:
+					return
+				case snap, ok := <-ch:
+					if !ok {
+						return
+					}
+					if valid(ctx) != nil {
+						cl.stop()
+						return
+					}
+					cl.send(snap)
+				}
+			}
+		}()
+
+		// Deferred work carries the same generation guard and rechecks it at the
+		// actual execution boundary, not merely when this loop accepts the frame.
+	}
 	clientCtx := withAccessGuard(ctx, func(checkCtx context.Context) error {
-		return d.authority.Valid(checkCtx, principal)
+		return valid(checkCtx)
 	})
 
 	// Account attempts belong to the live socket as well as its principal.
@@ -715,7 +737,7 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 		if err := connectionCtx.Err(); err != nil {
 			return err
 		}
-		return d.authority.Valid(checkCtx, principal)
+		return valid(checkCtx)
 	})
 	actions, readDone := readHostActions(reader, cancelConnection)
 	defer func() { cancelConnection(); _ = conn.Close(); <-readDone }()
@@ -730,8 +752,15 @@ func (d *Daemon) serve(ctx context.Context, conn net.Conn) {
 			}
 			a = next
 		}
-		if connectionCtx.Err() != nil || d.authority.Valid(ctx, principal) != nil {
+		if connectionCtx.Err() != nil || valid(ctx) != nil {
 			return
+		}
+		if consoleOnly {
+			if a.Action != core.ActionQuery || (a.Query != core.QueryAccounts && a.Query != core.QueryAccountManage && a.Query != core.QueryAccountCeremony) {
+				return
+			}
+			d.query(accountCtx, cl, a)
+			continue
 		}
 		switch a.Action {
 		case core.ActionPaneOpen:
@@ -859,6 +888,10 @@ const authDeadline = 5 * time.Second
 // issued host keys; session and provider keys cannot unlock streaming by selecting
 // a different socket path.
 func (d *Daemon) authenticateHost(ctx context.Context, conn net.Conn) (access.Principal, *bufio.Reader, error) {
+	return d.authenticateSubject(ctx, conn, access.SubjectHost)
+}
+
+func (d *Daemon) authenticateSubject(ctx context.Context, conn net.Conn, kind access.SubjectKind) (access.Principal, *bufio.Reader, error) {
 	if d.authority == nil {
 		return access.Principal{}, nil, fmt.Errorf("daemon authority unavailable")
 	}
@@ -886,10 +919,15 @@ func (d *Daemon) authenticateHost(ctx context.Context, conn net.Conn) (access.Pr
 		_ = json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, Error: "authentication failed"})
 		return access.Principal{}, nil, access.ErrInvalidCredential
 	}
-	principal, err := d.authority.VerifyProof(ctx, challenge, proof, access.SubjectHost)
+	principal, err := d.authority.VerifyProof(ctx, challenge, proof, kind)
 	if err != nil {
 		_ = json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, Error: "authentication failed"})
 		return access.Principal{}, nil, err
+	}
+	if kind == access.SubjectSession {
+		if err := d.authorizeConsoleAccounts(ctx, principal); err != nil {
+			return access.Principal{}, nil, err
+		}
 	}
 	if err := json.NewEncoder(conn).Encode(access.SocketWelcome{Type: access.FrameWelcome, OK: true}); err != nil {
 		return access.Principal{}, nil, err

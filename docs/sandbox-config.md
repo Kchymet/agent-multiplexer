@@ -40,8 +40,8 @@ mount, and how an agent's edits to its configuration come back to amux.
 ### Central authentication
 
 Central mode is the default for both harnesses. Run the logins from a host
-terminal; they refuse to run inside a session. TUI/web Accounts also support
-protected login, limits and default selection. See [machine accounts v1](machine-accounts.md)
+terminal or the trusted amux console terminal; ordinary agent sessions are denied. The amux TUI supports
+protected login and explicit new-workload selection; web Accounts only shows status and limits. See [machine accounts v1](machine-accounts.md)
 for persisted workload bindings, replacement behavior and the remote grant setup.
 
 #### Claude: one `setup-token` for every session

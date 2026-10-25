@@ -68,6 +68,7 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		if e != nil {
 			return fail("account_status_unavailable")
 		}
+		s = s.ManagedOnly()
 		return hp.AccountResult{OK: true, Snapshot: &s}
 	}
 	if r.ProfileID == "" {

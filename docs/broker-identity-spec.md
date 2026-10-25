@@ -3,7 +3,8 @@
 Status: historical design baseline, merged in PR #172 (squash `59f4454`, final reviewed head
 `6ef3fddedd4960a0df84d72326e00147bf68b5af`). The machine-account v1 implementation now adds
 persisted profiles/defaults and workload bindings, protected login ceremonies, native/observational limits,
-and account status/manage/use transport. See [implemented behavior and limitations](machine-accounts.md)
+and account status/use transport. Configuration is now restricted to local amux CLI/TUI;
+web accounts are read-only and legacy remote manage grants cannot enable mutation. See [implemented behavior and limitations](machine-accounts.md)
 for operator setup, wire/API details, continuity and cancellation semantics. The evidence labels and pinned
 source descriptions below still describe the original reviewed baseline; they are not blanket claims that
 every proposed guarantee or optional feature is implemented. Source

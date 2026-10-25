@@ -14,7 +14,6 @@ type railGroup struct{ section, id string }
 var railSections = []struct{ key, hotkey, empty string }{
 	{core.SectionWorkgroups, "w", "no workgroups — w to create"},
 	{core.SectionRepos, "R", "no repos — R to add"},
-	{core.SectionArchived, "", ""},
 	{core.SectionDetached, "", ""},
 }
 
@@ -30,7 +29,7 @@ func (m *model) group(s *core.Session) railGroup {
 func (m *model) groupHasChildren(s *core.Session) bool {
 	for i := range m.sessions {
 		child := &m.sessions[i]
-		if child.Section == s.Section && child.RootID == s.ID {
+		if child.Section == s.Section && child.RootID == s.ID && !archivedSession(*child) {
 			return true
 		}
 	}
@@ -71,7 +70,7 @@ func (m *model) hidden(s *core.Session) bool {
 func (m *model) railEntries() []railEntry {
 	var entries []railEntry
 	for i, s := range m.sessions {
-		if s.Section == "" && !m.hidden(&s) {
+		if s.Section == "" && !archivedSession(s) && !m.hidden(&s) {
 			entries = append(entries, railEntry{index: i})
 		}
 	}
@@ -79,7 +78,7 @@ func (m *model) railEntries() []railEntry {
 		var children []railEntry
 		populated := false
 		for i, s := range m.sessions {
-			if s.Section == sec.key {
+			if s.Section == sec.key && !archivedSession(s) {
 				populated = true
 				if !m.hidden(&s) {
 					children = append(children, railEntry{index: i})
