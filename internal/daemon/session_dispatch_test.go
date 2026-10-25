@@ -12,6 +12,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
@@ -33,6 +34,13 @@ func (s *completionRaceStore) GetSession(id string) (store.Session, bool, error)
 
 func sessionRuntimeFixture(t *testing.T, sessions ...store.Session) (*Daemon, *sessionRuntime, map[string]access.Principal) {
 	t.Helper()
+	return sessionRuntimeFixtureWithClock(t, time.Now, sessions...)
+}
+
+// sessionRuntimeFixtureWithClock drives both the authority and the runtime from
+// now, so a test can age credentials past expiry.
+func sessionRuntimeFixtureWithClock(t *testing.T, now func() time.Time, sessions ...store.Session) (*Daemon, *sessionRuntime, map[string]access.Principal) {
+	t.Helper()
 	isolateHome(t)
 	db, err := store.Open()
 	if err != nil {
@@ -48,7 +56,7 @@ func sessionRuntimeFixture(t *testing.T, sessions ...store.Session) (*Daemon, *s
 		t.Fatal(err)
 	}
 	d := New("", nil, time.Hour)
-	d.authority, err = access.Open(t.TempDir())
+	d.authority, err = access.OpenWithClock(t.TempDir(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +76,7 @@ func sessionRuntimeFixture(t *testing.T, sessions ...store.Session) (*Daemon, *s
 		principals[session.ID] = credentialPrincipal(credential)
 	}
 	runtime := newSessionRuntime(d)
+	runtime.now = now
 	return d, runtime, principals
 }
 
@@ -966,5 +975,99 @@ func TestExpiredHostCredentialIsReissuedOnStartupButRevokedIsNot(t *testing.T) {
 	}
 	if final.KeyID != after.KeyID || final.Generation != after.Generation {
 		t.Fatal("revoked host credential changed")
+	}
+}
+
+func TestExpiredUnrevokedSessionCredentialIsReissuedButArchivedOrRevokedIsNot(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	clock := func() time.Time { return now }
+	active := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	toArchive := store.Session{ID: "a2", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixtureWithClock(t, clock, active, toArchive)
+	ctx := context.Background()
+	if err := console.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	consoleSession := console.Session()
+	if _, err := d.authority.EnsureSession(ctx, consoleSession.ID, consoleSession.Dir); err != nil {
+		t.Fatal(err)
+	}
+	consoleBefore, err := runtime.loadCredential(consoleSession.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedBefore, err := runtime.loadCredential(toArchive.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The daemon was down past every lifetime; nothing was revoked.
+	now = now.Add(31 * 24 * time.Hour)
+	for _, p := range principals {
+		if err := d.authority.Valid(ctx, p); err == nil {
+			t.Fatalf("credential %s still valid after expiry", p.KeyID)
+		}
+	}
+
+	if err := runtime.validateOrRenewCredential(ctx, active); err != nil {
+		t.Fatalf("expired active session was not renewed: %v", err)
+	}
+	after, err := runtime.loadCredential(active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.KeyID == principals[active.ID].KeyID || after.Generation != principals[active.ID].Generation+1 {
+		t.Fatalf("renewed credential = key %s gen %d, want new key at generation %d", after.KeyID, after.Generation, principals[active.ID].Generation+1)
+	}
+	if err := d.authority.Valid(ctx, credentialPrincipal(after)); err != nil {
+		t.Fatalf("renewed session credential invalid: %v", err)
+	}
+	if err := runtime.validateOrRenewCredential(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := runtime.loadCredential(active.ID); err != nil || again.KeyID != after.KeyID {
+		t.Fatalf("fresh credential changed on re-validation: key %q err %v", again.KeyID, err)
+	}
+
+	// The synthetic console has no store row to restore; it heals the same way.
+	if err := runtime.validateOrRenewCredential(ctx, consoleSession); err != nil {
+		t.Fatalf("expired console credential was not renewed: %v", err)
+	}
+	consoleAfter, err := runtime.loadCredential(consoleSession.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consoleAfter.KeyID == consoleBefore.KeyID || consoleAfter.Generation != consoleBefore.Generation+1 {
+		t.Fatalf("console credential = key %s gen %d, want new key at generation %d", consoleAfter.KeyID, consoleAfter.Generation, consoleBefore.Generation+1)
+	}
+
+	// Archived subjects stay on their lapsed generation until an explicit restore.
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetArchivedFlag(toArchive.ID, true, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	archived := toArchive
+	archived.Archived = true
+	if err := runtime.validateOrRenewCredential(ctx, archived); err == nil {
+		t.Fatal("expired archived subject was renewed")
+	}
+	if final, err := runtime.loadCredential(toArchive.ID); err != nil || final.KeyID != archivedBefore.KeyID {
+		t.Fatalf("archived subject credential changed: key %q err %v", final.KeyID, err)
+	}
+
+	// Explicit revocation is sticky even once the revoked key has also expired.
+	if err := d.authority.Revoke(ctx, access.SubjectSession, active.ID); err != nil {
+		t.Fatal(err)
+	}
+	now = time.UnixMilli(after.NotAfter).Add(24 * time.Hour)
+	if err := runtime.validateOrRenewCredential(ctx, active); err == nil {
+		t.Fatal("revoked expired subject was renewed")
+	}
+	if final, err := runtime.loadCredential(active.ID); err != nil || final.KeyID != after.KeyID {
+		t.Fatalf("revoked subject credential changed: key %q err %v", final.KeyID, err)
 	}
 }

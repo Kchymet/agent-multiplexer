@@ -14,6 +14,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/agent"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
 	localengine "amux/internal/engine/local"
@@ -630,5 +631,95 @@ func TestFailedWorkgroupCreationDoesNotLaunchCoordinator(t *testing.T) {
 	}
 	if keys := eng.ensuredKeys(); len(keys) != 0 {
 		t.Fatalf("failed creation launched sessions: %v", keys)
+	}
+}
+
+func TestConsoleRestoreRegrantsExpiredOrRevokedCredentialWithoutStoreRow(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	d, runtime, _ := sessionRuntimeFixtureWithClock(t, func() time.Time { return now })
+	d.sessionRPC = runtime
+	t.Cleanup(runtime.completions.close)
+	d.engine = newFakeEngine()
+	ctx := context.Background()
+	if err := console.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	session := console.Session()
+	if _, err := d.authority.EnsureSession(ctx, session.ID, session.Dir); err != nil {
+		t.Fatal(err)
+	}
+	first, err := d.authority.Current(ctx, access.SubjectSession, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := core.Action{Action: core.ActionSetArchived, ID: session.ID, Fields: map[string]string{"archived": "false"}}
+
+	// A current console credential is left alone.
+	if result := d.handle(ctx, restore); !result.OK {
+		t.Fatalf("restore of current console = %+v", result)
+	}
+	if current, err := d.authority.Current(ctx, access.SubjectSession, session.ID); err != nil || current.KeyID != first.KeyID {
+		t.Fatalf("current console credential changed: %+v err=%v", current, err)
+	}
+
+	// Expired: a single restore retires the lapsed key and publishes the successor.
+	now = now.Add(31 * 24 * time.Hour)
+	if _, err := d.authority.Current(ctx, access.SubjectSession, session.ID); !errors.Is(err, access.ErrExpired) {
+		t.Fatalf("console credential state = %v, want expired", err)
+	}
+	if result := d.handle(ctx, restore); !result.OK {
+		t.Fatalf("restore of expired console = %+v", result)
+	}
+	second, err := d.authority.Current(ctx, access.SubjectSession, session.ID)
+	if err != nil || second.Generation != first.Generation+1 {
+		t.Fatalf("console credential after expired restore = %+v, err=%v", second, err)
+	}
+
+	// Revoked (for example by an older partial restore): restore regrants it too.
+	if err := d.authority.Revoke(ctx, access.SubjectSession, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if result := d.handle(ctx, restore); !result.OK {
+		t.Fatalf("restore of revoked console = %+v", result)
+	}
+	third, err := d.authority.Current(ctx, access.SubjectSession, session.ID)
+	if err != nil || third.Generation != second.Generation+1 {
+		t.Fatalf("console credential after revoked restore = %+v, err=%v", third, err)
+	}
+	if _, found, err := lookupSession(session.ID); err != nil || !found {
+		t.Fatalf("console projection missing after restore: found=%v err=%v", found, err)
+	}
+}
+
+func TestRestoreOfExpiredSessionDoesNotRevokeWhenArchivingFails(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	session := store.Session{ID: "a1", RootID: "root1", Agent: "claude", Dir: t.TempDir()}
+	d, runtime, principals := sessionRuntimeFixtureWithClock(t, func() time.Time { return now }, session)
+	d.sessionRPC = runtime
+	t.Cleanup(runtime.completions.close)
+	d.engine = newFakeEngine()
+	ctx := context.Background()
+	now = now.Add(31 * 24 * time.Hour)
+
+	// Remove the store row underneath the restore: the archive step cannot be
+	// confirmed, so the flow must fail before touching the credential registry.
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteSession(session.ID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	expected, regrant, lapsed, err := d.restoreCredentialState(ctx, session.ID)
+	if err != nil || !regrant || lapsed == nil || expected != principals[session.ID].Generation {
+		t.Fatalf("restoreCredentialState = (%d, %v, %v, %v)", expected, regrant, lapsed, err)
+	}
+	if _, err := d.authority.Current(ctx, access.SubjectSession, session.ID); !errors.Is(err, access.ErrExpired) {
+		t.Fatalf("inspecting restore state mutated the credential: %v", err)
+	}
+	if _, err := d.authority.LastRevoked(ctx, access.SubjectSession, session.ID); !errors.Is(err, access.ErrGenerationChanged) {
+		t.Fatalf("expired key was revoked by inspection: %v", err)
 	}
 }

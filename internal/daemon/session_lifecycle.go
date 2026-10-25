@@ -290,20 +290,46 @@ func (r *sessionRuntime) validateOrRenewCredential(ctx context.Context, session 
 		return err
 	}
 	if err := r.d.authority.Valid(ctx, credentialPrincipal(credential)); err != nil {
-		return err // revoked/expired is never silently re-issued
+		// Revocation is never silently undone. Expiry of an unrevoked subject is
+		// different: every served credential is rotated a week before it lapses,
+		// so a lapsed one means no daemon served this mailbox through the
+		// deadline and nothing could have used the key since. Leaving it dead
+		// strands the session (the console has no store row to restore at all),
+		// so renew it under the same current/unarchived checks a proactive
+		// rotation requires, once the registry confirms the loaded key is current
+		// and merely expired rather than revoked or superseded.
+		if _, currentErr := r.d.authority.Current(ctx, access.SubjectSession, session.ID); !errors.Is(currentErr, access.ErrExpired) {
+			return err
+		}
+		if err := r.renewable(ctx, session.ID); err != nil {
+			return err
+		}
+		log.Printf("session %s credential %s expired at %s while unserved; reissuing",
+			session.ID, credential.KeyID, time.UnixMilli(credential.NotAfter).Format(time.RFC3339))
+		_, err = r.d.authority.RenewExpired(ctx, access.SubjectSession, session.ID, credential.KeyID)
+		return err
 	}
 	if r.now().Add(credentialRenewBefore).Before(time.UnixMilli(credential.NotAfter)) {
 		return nil
 	}
-	resource, ok, err := r.resolver.Lookup(ctx, session.ID)
-	if err != nil || !ok || resource.Archived {
-		if err != nil {
-			return err
-		}
-		return access.ErrDenied
+	if err := r.renewable(ctx, session.ID); err != nil {
+		return err
 	}
 	_, err = r.d.authority.Rotate(ctx, access.SubjectSession, session.ID)
 	return err
+}
+
+// renewable fails closed unless the subject is a current, unarchived session.
+// Archived subjects keep their last generation until an explicit restore.
+func (r *sessionRuntime) renewable(ctx context.Context, id string) error {
+	resource, ok, err := r.resolver.Lookup(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !ok || resource.Archived {
+		return access.ErrDenied
+	}
+	return nil
 }
 
 func (r *sessionRuntime) loadCredential(subjectID string) (access.Credential, error) {
