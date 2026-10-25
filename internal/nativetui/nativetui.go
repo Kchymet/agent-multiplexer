@@ -47,6 +47,9 @@ func Run(focusID string) error {
 		m.status = "keybindings: " + keysErr.Error()
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	if m.accounts != nil {
+		m.accounts.dispose()
+	}
 	for _, t := range m.terms {
 		_ = t.Close()
 	}
@@ -106,6 +109,8 @@ type model struct {
 	dataCh        chan struct{}
 	w, h          int
 	status        string
+	accounts      *accountsState
+	accountCall   accountCaller // nil uses the authenticated host account service
 }
 
 // confirmState is a pending yes/no confirmation modal: the question shown, and
@@ -158,6 +163,20 @@ func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case accountsReplyMsg:
+		return m, m.updateAccounts(msg)
+	case accountsExpiredMsg:
+		if s := m.accounts; s != nil && s == msg.owner && s.attempt.id == msg.attempt && s.pending == "" {
+			s.dispose()
+			s.stale = true
+			s.notice = "Login expired. Refresh before starting again."
+		}
+		return m, nil
+	case accountsPollMsg:
+		if s := m.accounts; s != nil && s == msg.owner && s.serial == msg.serial && s.pending == "" && s.attempt.active() {
+			return m, m.requestAccounts(accountRequest{op: "progress", harness: s.harness, profile: s.selected, attempt: s.attempt.id})
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		for _, t := range m.terms {
@@ -172,6 +191,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, readCmd(msg.c)
 
 	case disconnectedMsg:
+		if s := m.accounts; s != nil {
+			s.dispose()
+			s.serial++ // fence callbacks from the retired connection
+			s.pending, s.confirm = "", nil
+			s.stale = true
+			s.notice = "Machine disconnected. Login cancelled; refresh to reconnect."
+		}
 		if m.client != nil {
 			_ = m.client.Close()
 		}
@@ -242,7 +268,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // or click an agent just by pointing at it — focus follows a button press. Events
 // over the borders/help line, or while a modal is up, are ignored.
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.form != nil || m.confirm != nil || m.picker != nil {
+	if m.accounts != nil || m.form != nil || m.confirm != nil || m.picker != nil {
 		return m, nil
 	}
 	if tea.MouseEvent(ev).IsWheel() && ev.X < sidebarWidth {
@@ -294,6 +320,9 @@ func (m *model) reapClosed() {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.accounts != nil {
+		return m.handleAccounts(k)
+	}
 	// The fuzzy repo picker is the top modal: it captures every key while open.
 	if m.picker != nil {
 		return m.handlePicker(k)
@@ -364,6 +393,8 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Sidebar focus.
 	switch k.String() {
+	case "s":
+		return m, m.openAccounts()
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
