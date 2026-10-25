@@ -104,6 +104,8 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	legacyCodexAuth(t) // PTY rollout resolution is the subject here
 
 	const cid = "22222222-2222-4222-8222-222222222222"
 	rollDir := filepath.Join(home, "codex", "sessions", "2026", "07", "02")

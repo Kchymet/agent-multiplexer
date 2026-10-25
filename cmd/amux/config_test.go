@@ -82,3 +82,27 @@ func TestConfigControlDefaultsListAndValidation(t *testing.T) {
 		t.Fatalf("ls: %s, %v", out, err)
 	}
 }
+
+func TestConfigAuthSettings(t *testing.T) {
+	sandboxCLI(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	run := func(want string, args ...string) {
+		t.Helper()
+		out, err := captureOutput(t, func() error { return cmdConfig(args) })
+		if err != nil || !strings.Contains(out, want) {
+			t.Fatalf("config %v = %q, %v; want %q", args, out, err, want)
+		}
+	}
+	run("central\n", "get", "claude.auth")
+	run("central\n", "get", "codex.auth")
+	run("claude.auth = host  (saved;", "set", "claude.auth", "host")
+	run("host\n", "get", "claude.auth")
+	run("codex.auth = environment  (saved; run amux daemon restart", "set", "codex.auth", "environment")
+	run("claude.auth host  (saved)", "ls")
+	run("codex.auth = central  (default;", "unset", "codex.auth")
+	for _, args := range [][]string{{"set", "codex.auth", "shared"}, {"set", "claude.auth", ""}, {"set", "claude.auth", "oauth"}} {
+		if err := cmdConfig(args); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}

@@ -145,12 +145,16 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   `$CODEX_HOME` is a **template**: each agent gets a copy of its *configuration*
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
   or history) under its own dir, and `CLAUDE_CONFIG_DIR` / `CODEX_HOME` point the
-  harness at it. The agent may edit its copy. Authentication is intentionally
-  shared: macOS Claude uses the daemon's scoped credential broker, Linux Claude
-  shares credential files, and Codex shares account/MCP credential files and
-  refresh locks. macOS GitHub authentication also uses the broker. Copied config
+  harness at it. The agent may edit its copy. Authentication is central by
+  default: `amux auth login` (Claude `setup-token`) and `amux auth login codex`
+  (ChatGPT) sign in once on the host, and the daemon delivers only a session
+  credential, never a refresh token, to each authorized session. `claude.auth`
+  and `codex.auth` can instead select the previous shared host login (`host`),
+  the older amux Claude login (`shared`) or `environment` (API keys, providers,
+  gateways). Codex MCP credential files stay shared. macOS GitHub
+  authentication uses the daemon broker. Copied config
   can itself contain secrets such as inline MCP tokens; it is readable by the
-  receiving session. See [account sharing](docs/sandbox-config.md#the-model).
+  receiving session. See [central authentication](docs/sandbox-config.md#central-authentication).
   amux compares each copy with the template and flags an agent's edits on the rail
   (`⚙ N config edits`); `amux sandbox drift` lists them and `amux sandbox promote |
   reset <id> <path>` propagates or discards each one — nothing propagates on its

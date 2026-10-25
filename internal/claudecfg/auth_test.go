@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
 
@@ -17,11 +18,20 @@ func isolateAuth(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv(Env, filepath.Join(root, ".claude"))
+}
+
+func selectAuth(t *testing.T, mode string) {
+	t.Helper()
+	if err := amuxcfg.SetAuthMode("claude", mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSharedAuthSurvivesAtomicRotationAndIgnoresDetachedFiles(t *testing.T) {
 	isolateAuth(t)
+	selectAuth(t, amuxcfg.AuthShared)
 	if SharedAuthEnabled() {
 		t.Fatal("shared auth enabled before login")
 	}
@@ -139,6 +149,8 @@ func TestHostKeychainSelectorSurvivesPrivateConfig(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateAuth(t)
+			// Keychain selector preservation is the explicit legacy host mode.
+			selectAuth(t, amuxcfg.AuthHost)
 			t.Setenv(Env, tc.config)
 			t.Setenv(SecureStorageEnv, tc.secure)
 			if !tc.secureSet {

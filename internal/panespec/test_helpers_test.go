@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"amux/internal/access"
+	"amux/internal/amuxcfg"
 	"amux/internal/store"
 )
 
@@ -77,4 +78,36 @@ func useFakeSecureBwrap(t *testing.T) string {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AMUX_JAIL", "on")
 	return path
+}
+
+// useClaudeAuth isolates amux's config file and selects a Claude auth mode.
+// Tests written for the legacy host/shared stores select them explicitly now
+// that central delivery is the default.
+func useClaudeAuth(t *testing.T, mode string) {
+	t.Helper()
+	isolateAmuxConfig(t)
+	if err := amuxcfg.SetAuthMode("claude", mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// useCodexAuth selects a Codex auth mode, keeping any Claude selection.
+func useCodexAuth(t *testing.T, mode string) {
+	t.Helper()
+	isolateAmuxConfig(t)
+	if err := amuxcfg.SetAuthMode("codex", mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// isolateAmuxConfig points amux's config file at a per-test directory once per
+// test, so mode helpers never write a developer's real XDG_CONFIG_HOME.
+func isolateAmuxConfig(t *testing.T) {
+	t.Helper()
+	const marker = "AMUX_TEST_CONFIG_ISOLATED"
+	if os.Getenv(marker) == t.Name() {
+		return
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv(marker, t.Name())
 }

@@ -335,6 +335,10 @@ func TestAutoAndManualControl(t *testing.T) {
 				sandboxCLI(t)
 				t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
 				t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "claude"))
+				// codex.control precedence applies to the explicit host login.
+				if err := amuxcfg.SetAuthMode("codex", amuxcfg.AuthHost); err != nil {
+					t.Fatal(err)
+				}
 				// Keep the Unix socket path short, even under Go's long test temp path.
 				sockDir, err := os.MkdirTemp("", "age233-")
 				if err != nil {

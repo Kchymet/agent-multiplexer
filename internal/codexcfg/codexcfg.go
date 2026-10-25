@@ -115,6 +115,37 @@ func NativeGoals(argv []string) []string {
 	return append(out, argv[1:]...)
 }
 
+// OfficialChatGPTBaseURL is Codex's default ChatGPT backend.
+const OfficialChatGPTBaseURL = "https://chatgpt.com/backend-api/"
+
+// CentralChatGPTEndpoint pins, for one App Server process, the endpoints that
+// receive the centrally issued ChatGPT access token. A session's config.toml is
+// its own editable copy; without these highest-precedence overrides a
+// chatgpt_base_url, a custom model_provider, or an openai_base_url there would
+// send the central token to another server (each verified against Codex
+// 0.153.4 and 0.157.1). Codex treats an empty openai_base_url as unset, which
+// restores the built-in provider's default. Command-line overrides also win
+// over a config.toml rewritten mid-session. Explicit host and environment
+// modes do not use it.
+func CentralChatGPTEndpoint(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := make([]string, 0, len(argv)+len(CentralEndpointPins)*2)
+	out = append(out, argv[0])
+	for _, pin := range CentralEndpointPins {
+		out = append(out, "-c", pin)
+	}
+	return append(out, argv[1:]...)
+}
+
+// CentralEndpointPins are the -c overrides CentralChatGPTEndpoint applies.
+var CentralEndpointPins = []string{
+	`chatgpt_base_url="` + OfficialChatGPTBaseURL + `"`,
+	`model_provider="openai"`,
+	`openai_base_url=""`,
+}
+
 // ConfigPath is the user home's config.toml.
 func ConfigPath() string { return UserHome().ConfigPath() }
 

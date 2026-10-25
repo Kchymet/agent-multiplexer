@@ -81,6 +81,18 @@ type fakeServer struct {
 	// reply, which makes an in-flight RPC racing a notification deterministic.
 	hold  map[string]chan struct{}
 	clock int64
+	// rejectTokenLogin makes account/login/start chatgptAuthTokens fail the way a
+	// Codex without the experimental external-token mode does.
+	rejectTokenLogin bool
+	// loginFailure, when set, acknowledges the token login and then reports
+	// account/login/completed success=false with this error, as Codex does
+	// when workspace routing discovery fails. skipLoginCompleted sends no
+	// completion at all.
+	loginFailure       string
+	skipLoginCompleted bool
+	// writeMu serializes writes: a WebSocket allows one concurrent writer, and
+	// the login reply is written off the read loop.
+	writeMu sync.Mutex
 }
 
 func newFakePair(t *testing.T) (*Supervisor, *fakeServer, *memConn) {
@@ -177,6 +189,32 @@ func (fs *fakeServer) handleCall(m incoming) {
 	switch m.Method {
 	case "initialize":
 		result = map[string]any{"capabilities": map[string]any{}}
+	case "account/login/start":
+		fs.mu.Lock()
+		reject := fs.rejectTokenLogin
+		failure, skip := fs.loginFailure, fs.skipLoginCompleted
+		fs.mu.Unlock()
+		if reject {
+			// Real servers quote the rejected request; the client must not repeat it.
+			fs.write(map[string]any{"id": m.ID, "error": map[string]any{"code": -32600, "message": "account/login/start.chatgptAuthTokens requires experimentalApi capability: " + string(m.Params)}})
+			return
+		}
+		// Reply off the read loop so a held login still lets the fake read the
+		// client's answers to server requests sent meanwhile.
+		go func() {
+			fs.gate(m.Method)
+			// Real Codex acknowledges first and completes the login afterwards.
+			fs.write(map[string]any{"id": m.ID, "result": map[string]any{"type": "chatgptAuthTokens"}})
+			switch {
+			case skip:
+			case failure != "":
+				fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": false, "error": failure})
+			default:
+				fs.pushNotify("account/login/completed", map[string]any{"loginId": nil, "success": true, "error": nil})
+				fs.pushNotify("account/updated", map[string]any{"authMode": "chatgptAuthTokens", "planType": "pro"})
+			}
+		}()
+		return
 	case "thread/goal/get", "thread/goal/set", "thread/goal/clear":
 		fs.mu.Lock()
 		disabled := fs.goalsDisabled
@@ -223,6 +261,8 @@ func (fs *fakeServer) handleCall(m incoming) {
 
 func (fs *fakeServer) write(obj any) {
 	b, _ := json.Marshal(obj)
+	fs.writeMu.Lock()
+	defer fs.writeMu.Unlock()
 	_ = fs.conn.WriteMessage(context.Background(), b)
 }
 
