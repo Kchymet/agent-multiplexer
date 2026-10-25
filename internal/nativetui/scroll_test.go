@@ -179,6 +179,10 @@ func TestHistoryKeysAndInput(t *testing.T) {
 	if term.Viewport().Offset != 5 || input() != "draft" {
 		t.Fatal("rebound scroll key not handled locally")
 	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyPgUp, Alt: true})
+	if term.Viewport().Offset != 0 || input() != "draft\x1b[5;3~" {
+		t.Fatalf("vacated chord lost its modifier: offset=%d input=%q", term.Viewport().Offset, input())
+	}
 }
 
 func TestHistoryIndicatorHeaderWidths(t *testing.T) {

@@ -110,6 +110,19 @@ jobs:
           tar -xzf codex-0.157.1.tar.gz -C "$RUNNER_TEMP/codex-0.157.1"
           tar -xzf codex-current.tar.gz -C codex-current
           test "$(codex-current/bin/codex --version)" = 'codex-cli 0.157.1'
+      - name: test real embedded Codex history routing
+        env:
+          AMUX_TEST_CODEX_BIN: ${{ runner.temp }}/codex-0.157.1/codex-x86_64-unknown-linux-musl
+          AMUX_REQUIRE_CODEX_SCROLL: "1"
+          AMUX_CODEX_SCROLL_EVIDENCE: ${{ runner.temp }}/codex-scroll-evidence
+        run: go test ./internal/nativetui -run '^TestCodexEmbeddedScroll$' -count=1 -timeout=180s -v
+      - name: upload embedded Codex scroll evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-scroll-evidence
+          path: ${{ runner.temp }}/codex-scroll-evidence
+          if-no-files-found: error
       - name: test native central API-key login and delivery (synthetic key only)
         env:
           AMUX_TEST_CODEX_BIN: ${{ runner.temp }}/codex-0.157.1/codex-x86_64-unknown-linux-musl
