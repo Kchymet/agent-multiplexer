@@ -300,15 +300,16 @@ type AdoptPane struct {
 
 // MuxMsg is a server -> harness message (v2: orchestrator -> provider).
 type MuxMsg struct {
-	Type    string   `json:"type"`
-	Version int      `json:"version,omitempty"` // hello / registered: negotiated version
-	PaneID  string   `json:"paneId,omitempty"`
-	Dir     string   `json:"dir,omitempty"`  // spawn: working directory
-	Env     []string `json:"env,omitempty"`  // spawn: KEY=VALUE additions
-	Argv    []string `json:"argv,omitempty"` // spawn: command + args
-	Cols    int      `json:"cols,omitempty"` // spawn/resize
-	Rows    int      `json:"rows,omitempty"` // spawn/resize
-	Data    []byte   `json:"data,omitempty"` // input bytes
+	Account *AccountRequest `json:"account,omitempty"`
+	Type    string          `json:"type"`
+	Version int             `json:"version,omitempty"` // hello / registered: negotiated version
+	PaneID  string          `json:"paneId,omitempty"`
+	Dir     string          `json:"dir,omitempty"`  // spawn: working directory
+	Env     []string        `json:"env,omitempty"`  // spawn: KEY=VALUE additions
+	Argv    []string        `json:"argv,omitempty"` // spawn: command + args
+	Cols    int             `json:"cols,omitempty"` // spawn/resize
+	Rows    int             `json:"rows,omitempty"` // spawn/resize
+	Data    []byte          `json:"data,omitempty"` // input bytes
 
 	// v2 registered fields.
 	OK               bool        `json:"ok,omitempty"`
@@ -336,11 +337,12 @@ type MuxMsg struct {
 
 // HarnessMsg is a harness -> server message (v2: provider -> orchestrator).
 type HarnessMsg struct {
-	Type    string `json:"type"`
-	Version int    `json:"version,omitempty"` // ready
-	PaneID  string `json:"paneId,omitempty"`
-	Data    []byte `json:"data,omitempty"`  // output bytes
-	Error   string `json:"error,omitempty"` // exit
+	Account *AccountResult `json:"account,omitempty"`
+	Type    string         `json:"type"`
+	Version int            `json:"version,omitempty"` // ready
+	PaneID  string         `json:"paneId,omitempty"`
+	Data    []byte         `json:"data,omitempty"`  // output bytes
+	Error   string         `json:"error,omitempty"` // exit
 
 	// v2 fields.
 	Seq          int64             `json:"seq,omitempty"`      // output/exit/reset: per-pane, monotonic from 1
