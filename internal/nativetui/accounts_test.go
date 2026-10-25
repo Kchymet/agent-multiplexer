@@ -282,6 +282,38 @@ func TestAccountsLimitsProvenanceFreshnessAndAttribution(t *testing.T) {
 	}
 }
 
+func TestAccountsClaudeAdvisoryLimitsRequireRuntimeAttribution(t *testing.T) {
+	p := harnessproto.AccountProfile{ID: "claude:central", Harness: "claude", Source: "central", DeliveryEpoch: 9,
+		Identity: harnessproto.AccountIdentity{State: "unknown", Evidence: "opaque-token"}, Limits: harnessproto.AccountLimits{
+			State: "known", Source: "claude-statusline", ProfileID: "claude:central", DeliveryEpoch: 9,
+			SessionID: "fixture-session", RuntimeGeneration: "fixture-runtime", ObservedAt: time.Now().UnixMilli(),
+			Windows: []harnessproto.AccountLimitWindow{{Name: "five_hour", UsedPercent: 42}},
+		}}
+	project := func() accountProfile {
+		return projectAccounts(harnessproto.AccountSnapshot{Profiles: []harnessproto.AccountProfile{p}}).profiles[0]
+	}
+	row := project()
+	text := strings.Join(accountLimitLines(row.limits[0], time.Now(), false), "\n")
+	for _, want := range []string{"Used: 42%", "session advisory", "fixture-session", "fixture-runtime", "identity remains unverified"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing advisory evidence %q: %s", want, text)
+		}
+	}
+	if row.account != "" {
+		t.Fatal("session observation invented account identity")
+	}
+	for _, invalidate := range []func(){
+		func() { p.Limits.RuntimeGeneration = "" },
+		func() { p.Limits.RuntimeGeneration = "fixture-runtime"; p.Limits.SessionID = "" },
+		func() { p.Limits.SessionID = "fixture-session"; p.Limits.DeliveryEpoch++ },
+	} {
+		invalidate()
+		if got := project().limits[0]; got.state != "unavailable" || got.usedPercent != nil {
+			t.Fatal("incomplete or stale attribution displayed advisory usage")
+		}
+	}
+}
+
 func TestAccountsCeremonyURLValidationAndTerminalErasure(t *testing.T) {
 	for _, raw := range []string{"https://evil.test/", "https://auth.openai.com.evil.test/", "https://user:token@auth.openai.com/", "http://auth.openai.com/", "https://auth.openai.com:444/", "https://auth.openai.com/\x1b[2J", "https://auth.openai.com/#token"} {
 		if approvedAccountURL(raw) {
