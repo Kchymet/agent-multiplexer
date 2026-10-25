@@ -1,3 +1,75 @@
+# Codex 0.157.1 native readiness correction
+
+## Scope
+
+Correct only the real-runtime command-surface fixture's native Codex readiness
+gate. Codex 0.157.1 renders the configured model and approval mode as separate
+terminal writes joined by cursor positioning, so matching a contiguous raw PTY
+substring can wait forever even though the composer is ready. Preserve every
+command-surface assertion, production namespace, nested tool sandbox, synthetic
+provider, raw failure diagnostics, older Codex coverage, and Claude coverage.
+No production behavior changes.
+
+## Worker and base evidence
+
+- Authenticated `amux status --json` identifies this task session as Codex model
+  `gpt-5.6-sol`, task mode, with structured control.
+- The private Codex configuration sets `model_reasoning_effort = "high"`. Its
+  default model is `gpt-6-astra`; the authenticated session snapshot proves the
+  launch-specific `gpt-5.6-sol` override is effective.
+- The assigned branch `amux/c22e02-2ee546` was clean at
+  `04c3586bacd0aa8fbe9717b7e3aa9204c09da4b6`, then fetched and merged
+  `origin/master`; it was already current at the same commit.
+
+## Bounded design and regression
+
+1. Continue capturing every raw PTY byte for unchanged timeout/failure
+   diagnostics.
+2. Feed those same chunks to the repository's VT emulator, including emulator
+   replies to terminal queries, and declare readiness only when the configured
+   model and `default` appear as adjacent fields on one rendered row. This
+   interprets styling, cursor movement, erasure, and arbitrarily split control
+   sequences without encoding any observed cursor coordinates.
+3. Send the bracketed paste and submit key in one ordered PTY write after that
+   semantic readiness signal; add no timing delay.
+4. Unit-test text and a cursor-position sequence split across four writes, using
+   arbitrary coordinates and rejecting readiness until the footer is complete.
+5. Keep the pinned older Codex and Claude command-surface CI runs, then run both
+   native Codex and Codex App Server command surfaces against the official full
+   0.157.1 Linux package, SHA-256
+   `0e211868c9fd73cb49ad35ac675b5eafdf6b9f453df8a493df980c59a590fe5f`.
+
+## Claim boundary
+
+The fixture uses an empty isolated home and deterministic local provider. It
+tests readiness plus the existing production namespace/inner sandbox, CLI
+surface, peer discovery, self-only writes, concurrent reports, restart, and
+archive acknowledgement. It does not use real credentials, request a paid model,
+deploy or restart a live daemon, or broaden product behavior.
+
+## Verification
+
+- Downloaded the official full Linux x86_64 package, verified archive SHA-256
+  `0e211868c9fd73cb49ad35ac675b5eafdf6b9f453df8a493df980c59a590fe5f`,
+  and observed `codex-cli 0.157.1` from its extracted binary.
+- `TestCodexNativeReadinessUsesRenderedTerminal` passed 20 repetitions under
+  the race detector. It exercises model text and CSI cursor positioning split
+  across four writes and rejects every incomplete state.
+- `TestAgentRuntimeCommandSurface` passed with the full 0.157.1 package in
+  native `codex` mode (4.85s) and `codex-app-server` mode (4.86s), with
+  `AMUX_REQUIRE_NAMESPACE_TEST=1` and `TERM=xterm-256color`.
+- The same full native 0.157.1 command surface passed under the race detector
+  in 5.63s test time (6.65s package time).
+- The complete `internal/daemon` package passed in 20.77s.
+- Repository `make test` passed for the root module and `harnessproto`; `make
+  vet` passed for both modules. `git diff --check` passed.
+- The App Server fixture requires a test-runner exception for its loopback
+  `httptest` listener in this managed environment. The first restricted attempt
+  failed at listener creation before launching Codex; the approved rerun retained
+  the production outer namespace and nested tool sandbox.
+
+---
+
 # Codex 0.157.1 Linux socket compatibility
 
 ## Scope

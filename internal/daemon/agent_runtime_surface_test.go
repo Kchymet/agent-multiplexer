@@ -28,6 +28,8 @@ import (
 	"amux/internal/core"
 	"amux/internal/panespec"
 	"amux/internal/store"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
 
@@ -234,24 +236,31 @@ func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd,
 	if r.mode == "codex" {
 		cmd.Stdout = nil
 		cmd.Stderr = nil
-		terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 60, Cols: 160})
+		const rows, cols = 60, 160
+		terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
 		if err != nil {
 			t.Fatal(err)
 		}
 		drained := make(chan struct{})
 		ready := make(chan struct{})
+		var readyOnce sync.Once
+		screen := newCodexReadinessScreen(cols, rows, func(p []byte) {
+			_, _ = terminal.Write(p)
+		})
 		go func() {
 			defer close(drained)
-			var signaled bool
 			buf := make([]byte, 4096)
 			for {
 				n, err := terminal.Read(buf)
-				output.Write(buf[:n])
-				// Native startup probes can consume stdin before the composer
-				// exists. Observe the loaded model footer, not elapsed time.
-				if !signaled && bytes.Contains(output.Bytes(), []byte("stub-model default")) {
-					close(ready)
-					signaled = true
+				if n > 0 {
+					output.Write(buf[:n])
+					_, _ = screen.Write(buf[:n])
+					// Readiness is a property of the terminal picture, not
+					// adjacency in the PTY byte stream. Codex may position the
+					// footer fields with a control sequence split across reads.
+					if codexNativeReady(screen.Render(), r.own.Model) {
+						readyOnce.Do(func() { close(ready) })
+					}
 				}
 				if err != nil {
 					return
@@ -261,10 +270,7 @@ func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd,
 		go func() {
 			select {
 			case <-ready:
-				_, _ = terminal.Write([]byte("\x1b[200~Run the fixture command once with exec_command.\x1b[201~"))
-				// Submit after the paste event has been processed by the TUI.
-				time.Sleep(300 * time.Millisecond)
-				_, _ = terminal.Write([]byte("\r"))
+				_, _ = terminal.Write([]byte("\x1b[200~Run the fixture command once with exec_command.\x1b[201~\r"))
 			case <-ctx.Done():
 			}
 			err := r.requireVerified(ctx)
@@ -272,6 +278,7 @@ func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd,
 			_ = terminal.Close()
 			_ = cmd.Wait()
 			<-drained
+			screen.Close()
 			exited <- err
 		}()
 		return
@@ -286,6 +293,83 @@ func (r *surfaceRuntime) start(t *testing.T, ctx context.Context, cmd *exec.Cmd,
 		}
 		exited <- err
 	}()
+}
+
+// codexReadinessScreen is a test-only VT screen with an ordered response drain.
+// Closing the emulator's reply writer first lets the reader exit before the
+// emulator itself closes; this avoids relying on vterm's asynchronous lifecycle
+// in a fixture whose PTY reader already supplies the serialization we need.
+type codexReadinessScreen struct {
+	*vt.Emulator
+	responsesDone chan struct{}
+}
+
+func newCodexReadinessScreen(cols, rows int, respond func([]byte)) *codexReadinessScreen {
+	s := &codexReadinessScreen{Emulator: vt.NewEmulator(cols, rows), responsesDone: make(chan struct{})}
+	go func() {
+		defer close(s.responsesDone)
+		buf := make([]byte, 256)
+		for {
+			n, err := s.Read(buf)
+			if n > 0 && respond != nil {
+				respond(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return s
+}
+
+func (s *codexReadinessScreen) Close() {
+	if closer, ok := s.InputPipe().(io.Closer); ok {
+		_ = closer.Close()
+	}
+	<-s.responsesDone
+	_ = s.Emulator.Close()
+}
+
+// codexNativeReady recognizes the configured model and approval mode as
+// adjacent fields on one rendered footer row. The caller supplies an emulated
+// screen, so ANSI styling, cursor movement, erasure, and chunk boundaries have
+// already been interpreted exactly as a terminal would interpret them.
+func codexNativeReady(screen, model string) bool {
+	for _, line := range strings.Split(ansi.Strip(screen), "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == model && fields[i+1] == "default" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestCodexNativeReadinessUsesRenderedTerminal(t *testing.T) {
+	screen := newCodexReadinessScreen(80, 24, nil)
+	defer screen.Close()
+
+	// Deliberately split both text and the cursor-position sequence across
+	// writes. The fields are separated in the byte stream, but adjacent in the
+	// rendered footer; the coordinates are arbitrary and not part of readiness.
+	chunks := [][]byte{
+		[]byte("\x1b[7;5Hstub-mo"),
+		[]byte("del\x1b["),
+		[]byte("7;24Hdef"),
+		[]byte("ault"),
+	}
+	for i, chunk := range chunks {
+		if _, err := screen.Write(chunk); err != nil {
+			t.Fatalf("parse chunk %d: %v", i, err)
+		}
+		if i+1 < len(chunks) && codexNativeReady(screen.Render(), "stub-model") {
+			t.Fatalf("readiness reported before the complete footer after chunk %d", i)
+		}
+	}
+	if !codexNativeReady(screen.Render(), "stub-model") {
+		t.Fatalf("rendered footer not recognized:\n%s", ansi.Strip(screen.Render()))
+	}
 }
 func (r *surfaceRuntime) requireVerified(ctx context.Context) error {
 	select {
