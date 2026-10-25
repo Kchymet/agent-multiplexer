@@ -89,6 +89,12 @@ type Config struct {
 	// so removal and connection teardown can revoke an in-flight subscription.
 	// Required for "runtime-events".
 	RuntimeEventStream func(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool)
+	// RuntimeEventHistory answers runtime-events-history (§4.7): the page of at
+	// most limit events ending just before beforeSeq (<= 0: the newest page), in
+	// RuntimeEventStream's ordinal space. ok=false ⇒ the session has no record.
+	// It must honor ctx. Optional: when set alongside "runtime-events" the
+	// provider also advertises "runtime-events-history".
+	RuntimeEventHistory func(ctx context.Context, sessionID string, beforeSeq int64, limit int) (harnessproto.RuntimeEventHistory, bool)
 
 	// OnStatus, when set, receives a snapshot every time the connection state
 	// changes (dial, register, disconnect, heartbeat, stop). The CLI wires it to
@@ -254,6 +260,9 @@ type session struct {
 	rtOpening map[string]*runtimeOpening
 	rtSubs    map[string]*runtimeSubscription
 	rtWG      sync.WaitGroup
+	// rtHistory counts in-flight runtime-events-history reads (opMu); each is
+	// also registered in actions so revocation cancels and waits for it.
+	rtHistory int
 }
 
 type runtimeSubscription struct {
@@ -455,6 +464,9 @@ func (p *Provider) features() []string {
 	if p.runtimeEventsActive() {
 		out = appendUnique(out, harnessproto.RuntimeEventsFeature)
 	}
+	if p.runtimeHistoryActive() {
+		out = appendUnique(out, harnessproto.RuntimeEventsHistoryFeature)
+	}
 	return out
 }
 
@@ -577,6 +589,8 @@ func (p *Provider) readLoop(s *session) {
 			p.handleSessionAction(s, m)
 		case harnessproto.MRuntimeEventsSubscribe:
 			p.onRuntimeEventsSubscribe(s, m)
+		case harnessproto.MRuntimeEventsHistory:
+			p.onRuntimeEventsHistory(s, m)
 		}
 	}
 }

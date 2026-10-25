@@ -165,53 +165,28 @@ func PendingPermission(rec Record) (Pending, bool) {
 
 // OpenPermissions returns every permission request a session still has open, in
 // the order they were opened. Only the sources that can carry a permission event
-// are replayed — Claude's transcript records no prompt at all, so scanning it
-// would be pure cost, leaving only its short journal. Codex has no journal and is
-// replayed from the rollout; that is the expensive case, and it is paid at most
-// once per `permission` verb, which is human-paced.
+// are consulted — Claude's transcript records no prompt at all, leaving only its
+// short journal; Codex's comes from the rollout. Each answer comes from the
+// source's index (index.go), which tracks the open set as it scans, so a call
+// costs a stat plus decoding whatever was appended since the last one — not a
+// replay of the whole record. The daemon asks on every runtime-record lookup,
+// which a live subscription makes once per poll.
 func OpenPermissions(rec Record) []Pending {
 	specs, ok := sourcesFor(rec)
 	if !ok {
 		return nil
 	}
 	var open []Pending
-	occurrences := newPermissionOccurrenceTracker()
 	for _, sp := range specs {
 		if !sp.permission || sp.path == "" {
 			continue
 		}
-		mapper := sp.newMapper()
-		for _, ev := range occurrences.decorate(mapEachLine(sp.path, mapper)) {
-			switch ev.Type {
-			case TypePermissionRequest:
-				var body struct {
-					RequestID string   `json:"request_id"`
-					Tool      string   `json:"tool"`
-					Action    string   `json:"action"`
-					Options   []string `json:"options"`
-				}
-				if json.Unmarshal(ev.Payload, &body) != nil || body.RequestID == "" {
-					continue
-				}
-				open = append(open, Pending{
-					RequestID: body.RequestID, Occurrence: ev.ItemID, Tool: body.Tool,
-					Action: body.Action, Options: body.Options,
-				})
-			case TypePermissionResolved:
-				var body struct {
-					RequestID string `json:"request_id"`
-				}
-				if json.Unmarshal(ev.Payload, &body) != nil {
-					continue
-				}
-				for i, o := range open {
-					if o.Occurrence == ev.ItemID {
-						open = append(open[:i], open[i+1:]...)
-						break
-					}
-				}
-			}
+		f, ix, _, err := openIndexed(sp)
+		if err != nil || f == nil {
+			continue
 		}
+		_ = f.Close()
+		open = append(open, ix.openPending()...)
 	}
 	return open
 }

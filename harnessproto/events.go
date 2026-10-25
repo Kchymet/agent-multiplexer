@@ -28,6 +28,19 @@ type RuntimeEventBatch struct {
 	Events  []RuntimeEvent
 }
 
+// RuntimeEventHistory is one page of a session's past events, the internal
+// handoff a runtime-events-history source hands the provider to frame as a
+// runtime-events-page (docs/remote-provider-sessions.md §4.7). Events are
+// ascending; Seq is the ordinal of the last one (0 for an empty page); Head is the
+// session's newest ordinal when the page was read; HasMore says older events exist.
+type RuntimeEventHistory struct {
+	Seq     int64
+	Head    int64
+	Runtime string
+	HasMore bool
+	Events  []RuntimeEvent
+}
+
 // Runtime names for RuntimeEventBatch.Runtime / HarnessMsg.Runtime and the
 // `runtime` field of a `raw` event payload. The set is open — a consumer that
 // meets an unknown runtime renders the events generically rather than dropping
