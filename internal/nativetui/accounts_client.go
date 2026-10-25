@@ -75,6 +75,9 @@ func accountWireRequest(req accountRequest) (harnessproto.AccountRequest, bool, 
 		return harnessproto.AccountRequest{}, false, errAccountsUnsupported
 	}
 	wire := harnessproto.AccountRequest{Operation: op, ProfileID: req.profile, Revision: req.revision, AttemptID: req.attempt}
+	if op == harnessproto.AccountDefault {
+		wire.DefaultRevision = req.defaultRevision
+	}
 	if ceremony {
 		// The daemon namespaces this label by the authenticated connection.
 		wire.Initiator = "native-tui"

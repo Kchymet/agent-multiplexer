@@ -13,7 +13,7 @@ import (
 const accountObservationMaxAge = time.Duration(harnessproto.AccountLimitsTTLMillis) * time.Millisecond
 
 func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
-	out := accountSnapshot{canManage: true}
+	out := accountSnapshot{canManage: true, defaultRevisions: in.DefaultRevisions}
 	for _, p := range in.Profiles {
 		if p.Harness != "claude" && p.Harness != "codex" {
 			continue
@@ -24,7 +24,7 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			identitySource: p.Identity.Evidence, plan: p.Identity.Plan,
 			canLogin:   p.Source == "central" && (p.LoginMethod == "browser" || p.LoginMethod == "setup-token") && p.State != "login-pending",
 			canLogout:  p.Source == "central" && p.State != "logged-out" && p.State != "unconfigured",
-			canDefault: true,
+			canDefault: in.DefaultRevisions[p.Harness] > 0,
 		}
 		if p.Identity.State == "known" {
 			row.account = p.Identity.Email

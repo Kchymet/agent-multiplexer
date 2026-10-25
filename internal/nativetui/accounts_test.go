@@ -17,7 +17,7 @@ import (
 )
 
 func accountFixture() accountSnapshot {
-	return projectAccounts(harnessproto.AccountSnapshot{Version: 1, Defaults: map[string]string{"claude": "claude:central", "codex": "codex:central"}, Profiles: []harnessproto.AccountProfile{
+	return projectAccounts(harnessproto.AccountSnapshot{Version: 1, DefaultRevisions: map[string]uint64{"claude": 12, "codex": 34}, Defaults: map[string]string{"claude": "claude:central", "codex": "codex:central"}, Profiles: []harnessproto.AccountProfile{
 		{ID: "claude:central", Harness: "claude", Source: "central", Revision: 7, State: "ready", LoginMethod: "setup-token", Identity: harnessproto.AccountIdentity{State: "unknown", Evidence: "opaque-token"}},
 		{ID: "claude:host", Harness: "claude", Source: "host", Revision: 8, State: "ready", LoginMethod: "external", Identity: harnessproto.AccountIdentity{State: "unknown", Evidence: "external"}},
 		{ID: "codex:central", Harness: "codex", Source: "central", Revision: 4, State: "ready", LoginMethod: "browser", Identity: harnessproto.AccountIdentity{State: "known", AccountID: "fixture-account", Email: "fixture@example.test", Plan: "fixture-plan", Evidence: "native"}},
@@ -49,11 +49,71 @@ func TestAccountsNavigationAndConfirmationCaptureRevision(t *testing.T) {
 	m.handleKey(key("k"))
 	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	cmd()
-	if len(calls) != 1 || calls[0].op != "default" || calls[0].profile != "claude:host" || calls[0].revision != 8 {
+	if len(calls) != 1 || calls[0].op != "default" || calls[0].profile != "claude:host" || calls[0].revision != 8 || calls[0].defaultRevision != 12 {
 		t.Fatalf("wrong confirmed mutation: %+v", calls)
 	}
 	if _, cmd := m.handleKey(key("x")); cmd != nil {
 		t.Fatal("a second mutation started before the first finished")
+	}
+}
+
+// The fake service models a concurrent operator changing a different target.
+// Backend tests own enforcement; this checks the UI preserves the reviewed CAS
+// and handles rejection without silently retrying or declaring success.
+func TestAccountsConcurrentDifferentDefaultsRequireFreshReview(t *testing.T) {
+	first, second := accountModel(), accountModel()
+	first.accounts.snapshot.profiles[0].defaultProfile = false
+	second.accounts.selected = "claude:host"
+	currentRevision := uint64(12)
+	var requests []harnessproto.AccountRequest
+	call := func(_ context.Context, req accountRequest) (accountResponse, error) {
+		wire, ceremony, err := accountWireRequest(req)
+		if err != nil || ceremony {
+			t.Fatalf("invalid default wire: %+v, %v", wire, err)
+		}
+		requests = append(requests, wire)
+		if wire.DefaultRevision != currentRevision {
+			return accountResponse{}, errAccountsConflict
+		}
+		currentRevision++
+		return accountResponse{}, nil
+	}
+	first.accountCall, second.accountCall = call, call
+	first.handleKey(key("d"))
+	second.handleKey(key("d"))
+	if first.accounts.confirm == nil || second.accounts.confirm == nil {
+		t.Fatal("both operators must review a confirmation")
+	}
+	_, cmd := first.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	first.Update(cmd())
+	// A newer observation arriving after confirmation must not rewrite consent.
+	second.accounts.snapshot.defaultRevisions["claude"] = currentRevision
+	_, cmd = second.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	_, retry := second.Update(cmd())
+	if len(requests) != 2 || requests[0].ProfileID == requests[1].ProfileID || requests[1].Revision != 8 || requests[1].DefaultRevision != 12 {
+		t.Fatalf("confirmation did not retain target and default revisions: %+v", requests)
+	}
+	if retry != nil || !second.accounts.stale || !strings.Contains(second.accounts.notice, "Refresh and review") || strings.Contains(second.View(), "Default updated") {
+		t.Fatal("stale default was retried or represented as successful")
+	}
+	second.handleKey(key("d"))
+	if second.accounts.confirm != nil {
+		t.Fatal("stale default permitted a new confirmation without refresh")
+	}
+}
+
+func TestAccountsMissingDefaultRevisionDisablesSelection(t *testing.T) {
+	snapshot := projectAccounts(harnessproto.AccountSnapshot{Version: 1, Profiles: []harnessproto.AccountProfile{
+		{ID: "claude:host", Harness: "claude", Source: "host", Revision: 8},
+	}})
+	m := accountModel()
+	m.accounts.snapshot = snapshot
+	m.accounts.selected = "claude:host"
+	for _, action := range []string{"d", "e"} {
+		m.handleKey(key(action))
+		if m.accounts.confirm != nil {
+			t.Fatalf("%s allowed a default without a default revision", action)
+		}
 	}
 }
 
@@ -161,6 +221,9 @@ func TestAccountsWireRequestsKeepSecretsOnCeremonyOnly(t *testing.T) {
 	for _, op := range []string{"status", "login", "progress", "cancel", "complete", "default", "logout", "disconnect"} {
 		t.Run(op, func(t *testing.T) {
 			r := accountRequest{op: op, profile: "claude:central", revision: 7}
+			if op == "default" {
+				r.defaultRevision = 12
+			}
 			if op == "progress" || op == "cancel" || op == "complete" {
 				r.attempt = "fixture-attempt"
 			}
