@@ -118,9 +118,15 @@ func TestRepoWorkgroupMigrationRejectsCoordinatorAliasWithoutChangingRows(t *tes
 	if err := os.Symlink(outside, CoordinatorDir("legacy")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.sql.Exec(`PRAGMA user_version=2`); err != nil {
+		t.Fatal(err)
+	}
 	if upgraded, err := Open(); err == nil {
 		upgraded.Close()
 		t.Fatal("migration accepted coordinator symlink")
+	}
+	if version, err := db.SchemaVersion(); err != nil || version != 2 {
+		t.Fatalf("failed migration marked schema complete: %d %v", version, err)
 	}
 	root, _, _ := db.GetSession("legacy")
 	if root.Scope != ScopeRepo {

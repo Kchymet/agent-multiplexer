@@ -202,8 +202,13 @@ CREATE TABLE IF NOT EXISTS coordinator_grant_migrations (
 	if err := d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	_, err = d.sql.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaVersion))
-	return err
+	// Version 3 includes the wrapper promotion below. Do not advertise it
+	// until the data migration has committed successfully.
+	if version < 2 {
+		_, err = d.sql.Exec(`PRAGMA user_version = 2`)
+		return err
+	}
+	return nil
 }
 
 // SchemaVersion returns SQLite's persistent user_version marker. It is zero for

@@ -86,6 +86,9 @@ func (d *DB) migrateRepoWorkgroups() error {
 			}
 		}
 	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaVersion)); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

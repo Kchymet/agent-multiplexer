@@ -110,3 +110,50 @@ func TestPollDefaultSessions(t *testing.T) {
 		}
 	}
 }
+
+func TestArchivedLegacyWorkgroupRemainsVisibleAndRestorable(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("HOME", t.TempDir())
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, s := range []store.Session{
+		{ID: "old", Scope: store.ScopeRepo, Repo: "api", Archived: true, ArchivedAt: 20},
+		{ID: "member", RootID: "old", Repo: "api", Agent: "claude", Archived: true, ArchivedAt: 21},
+	} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := NewWorkspace().Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRoot, foundMember := false, false
+	for _, row := range rows {
+		if row.ID == "old" {
+			foundRoot = row.Archived && row.IsRoot && row.Role == store.RoleCoordinator && row.Section == core.SectionArchived
+		}
+		if row.ID == "member" {
+			foundMember = row.Archived && row.RootID == "old"
+		}
+	}
+	if !foundRoot || !foundMember {
+		t.Fatalf("archive lost group or membership: %+v", rows)
+	}
+	if err := db.SetArchivedFlag("old", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = NewWorkspace().Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == "old" && !row.Archived && row.Section == core.SectionWorkgroups {
+			return
+		}
+	}
+	t.Fatalf("restored group missing: %+v", rows)
+}
