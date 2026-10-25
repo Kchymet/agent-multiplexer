@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/claudegoal"
 	"amux/internal/hostprep"
 	"amux/internal/store"
 )
@@ -546,10 +547,14 @@ one done once its work is verified.
 }
 
 // goalSection tells a coordinator how its task lifecycle actually works. On the
-// default goal runtime the host and Codex do the establishing and continuing;
-// the guide's job is to keep the model honest about completion, input and
+// default goal runtime the host and Codex do the establishing and continuing; a
+// Claude coordinator runs the same lifecycle through amux's goal hooks. Either
+// way the guide's job is to keep the model honest about completion, input and
 // pausing. Any other harness gets the plain truth instead of a goal claim.
 func goalSection(root store.Session) string {
+	if agent.HookGoals(root) {
+		return hookGoalSection(root)
+	}
 	if !agent.NativeGoals(root) {
 		return fmt.Sprintf(`## Goal mode
 This coordinator runs on %s, which has no native goal engine: a task arrives as
@@ -585,4 +590,67 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
   resumes an active goal by itself; `+"`stop`"+` interrupts the current turn and the
   goal continues on the next prompt.
 `, root.ID, root.ID)
+}
+
+// hookGoalSection is goalSection for a Claude coordinator: goal mode is on by
+// default and driven by amux's Claude hooks (internal/claudegoal), so the guide
+// teaches the `amux agent goal` transitions in place of Codex's update_goal, and
+// how to get missing information from the user without idling on optional
+// questions.
+func hookGoalSection(root store.Session) string {
+	return fmt.Sprintf(`## Goal mode (amux goal hooks)
+This coordinator runs in goal mode by default. Claude Code has no native goal
+engine, so amux runs one with hooks: every task this workgroup receives — from
+the rail, the web dashboard, `+"`amux do steer %s -f verb=prompt`"+`, or typed
+into this terminal — becomes your active goal, and when you end a turn while the
+goal is still active, amux continues it with a goal-continuation message
+instead of letting the turn stop. `+"`amux agent goal`"+` shows the objective and
+status.
+- Pursue the goal to the requested end state: scope it, dispatch members
+  (`+"`add-agent`"+`, `+"`steer`"+`), verify their evidence (session views, branches, PRs,
+  CI), and fix or re-dispatch what falls short. Progress must change real state;
+  a continuation that only restates a plan is wasted.
+- Run `+"`amux agent goal complete \"<summary>\"`"+` only when the objective is true
+  and verified — never because you are stopping, out of ideas, or near the
+  continuation budget. Completing the goal archives nothing (see "Finishing a
+  task"); give your final summary in the same turn.
+
+### Getting what you need from the user
+Before dispatching work, check the task for gaps. When the task is missing
+something only the user can supply or decide — which repository or environment,
+an ambiguous requirement whose readings lead to materially different results,
+credentials or access you cannot obtain, a destructive or outward-facing step
+they have not authorized — ask instead of guessing:
+- For a choice between concrete options, use the `+"`AskUserQuestion`"+` tool.
+- For anything open-ended, run `+"`amux agent goal ask \"<question>\"`"+`, ask the
+  question plainly, and end your turn. The goal waits (status `+"`input`"+`); the
+  user's reply resumes it with the answer attached to the objective.
+- Batch your questions into one ask, and keep doing any work that does not
+  depend on the answer before you stop.
+Do not ask about what you can find out yourself (the code, the repos, the
+sessions) or about optional details: choose the sensible default, record it in
+`+"`COORDINATION.md`"+`, and keep going. An open question is never a reason to
+shrink the objective.
+
+### Waiting on members or CI
+Never busy-poll: every continuation is a full model call against the goal's
+continuation budget. When nothing can move until a member, a PR or CI reports:
+1. Arm a background wake-up first — a `+"`Monitor`"+`, or a `+"`run_in_background`"+`
+   until-loop on the member's events (`+"`amux agent events`"+`) or the PR/CI state.
+2. Run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn.
+   That lets this one turn end; the turn the wake-up's notification starts
+   continues the goal as active.
+Never run `+"`goal wait`"+` without an armed wake-up: nothing would resume the goal.
+
+### Blockers, pausing and limits
+- Run `+"`amux agent goal blocked \"<reason>\"`"+` only after the same blocker
+  repeats across consecutive continuations and only the user can clear it.
+- Only the user pauses, resumes or clears the goal
+  (`+"`amux do steer %s -f verb=goal -f status=paused|active|complete|clear`"+`,
+  optionally `+"`-f objective=...`"+`). Never pause on your own initiative.
+- amux stops continuing one goal after %d continuations without a user turn
+  (status `+"`budgetLimited`"+`); the user's next message resumes it.
+- `+"`stop`"+` interrupts the current turn without a continuation; the user's next
+  message sets the next goal.
+`, root.ID, root.ID, claudegoal.MaxContinuations)
 }

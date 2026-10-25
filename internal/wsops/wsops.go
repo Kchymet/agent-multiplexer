@@ -14,6 +14,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/cfghome"
+	"amux/internal/claudegoal"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
@@ -56,12 +57,12 @@ func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) 
 
 // Coordinator selects a workgroup coordinator's runtime. Zero means the
 // default: agent.GoalRuntime with that harness's own default model, which is
-// the only combination amux can run in native goal mode — every task the
-// workgroup receives becomes the coordinator's thread goal, continued by the
-// runtime itself until verified complete. An explicit Kind is honored as
-// given; when it is not the goal runtime the coordinator is an ordinary
-// interactive session and creation says so on its rail notice rather than
-// claiming goal mode. Model applies only to the coordinator (a worker's model
+// the native goal runtime — every task the workgroup receives becomes the
+// coordinator's thread goal, continued by the runtime itself until verified
+// complete. An explicit Kind is honored as given. A Claude coordinator runs in
+// goal mode too, by default, through amux's goal hooks (agent.HookGoals); any
+// other harness is an ordinary interactive session and creation says so on its
+// rail notice rather than claiming goal mode. Model applies only to the coordinator (a worker's model
 // is never forwarded to a different harness).
 type Coordinator struct {
 	Kind  string
@@ -113,7 +114,7 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
-	if agent.NativeGoals(root) {
+	if agent.GoalMode(root) {
 		// A goal session is autonomous: it runs its task to verified completion.
 		root.Mode = store.ModeTask
 	}
@@ -625,6 +626,11 @@ func AgentEnv(s store.Session) []string {
 		// `amux agent status`, which falls back to $AMUX_SESSION_ID. Empty until a
 		// self-minting harness (Codex) has adopted its id — matching what's pinned.
 		"AMUX_SESSION_ID=" + s.ClaudeID,
+	}
+	if agent.HookGoals(s) {
+		// A Claude coordinator's goal-mode state (internal/claudegoal), read and
+		// moved by its `amux agent goal` hooks and commands.
+		env = append(env, claudegoal.EnvFile+"="+claudegoal.StatePath(s.Dir))
 	}
 	if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
 		env = append(env, spec.EnvEntries()...)

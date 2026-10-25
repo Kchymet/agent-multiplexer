@@ -41,8 +41,8 @@ func CapsFor(kind string) harnessproto.SessionCaps {
 
 // CapsForRole is CapsFor plus the capabilities that depend on what the session
 // IS, not only on what runs it. Today that is the goal control: only a session
-// running under native goal supervision can be served VerbGoal, and that is a
-// role+kind property (see NativeGoals), so an ordinary agent on the goal runtime
+// running in goal mode can be served VerbGoal, and that is a role+kind property
+// (see GoalMode), so an ordinary agent on a goal-capable runtime
 // advertises Goal=false and a consumer hides the control rather than offering an
 // affordance the daemon would refuse.
 //
@@ -55,12 +55,12 @@ func CapsForRole(kind, role string) harnessproto.SessionCaps {
 	return caps
 }
 
-// goalCapability is the published reading of "this session has a native goal".
-// It answers the same question NativeGoals asks of a stored session, from the
+// goalCapability is the published reading of "this session runs in goal mode".
+// It answers the same question GoalMode asks of a stored session, from the
 // role and kind a published row carries; a test pins the two together, so the
 // advertisement cannot drift from what the daemon and the launcher do.
 func goalCapability(kind, role string) bool {
-	return role == harnessproto.RoleCoordinator && Canonical(kind) == GoalRuntime
+	return role == harnessproto.RoleCoordinator && goalKind(kind)
 }
 
 // correlatesPermissions reports whether a runtime raises permission_request

@@ -934,8 +934,8 @@ func defaultStr(v, def string) string {
 }
 
 // pickCoordinatorKind cycles the coordinator runtime on the interactive page.
-// The default (the goal runtime) is the only one with native goal mode; the
-// others are an explicit opt-out, so the page shows what is actually chosen.
+// The default (the goal runtime) has native goal mode and Claude runs in goal
+// mode through amux's hooks; the page shows what is actually chosen.
 func pickCoordinatorKind(current string) string {
 	kinds := agent.Kinds()
 	now := wsops.CoordinatorKind(current)

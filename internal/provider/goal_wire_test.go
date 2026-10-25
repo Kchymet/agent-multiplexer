@@ -209,7 +209,9 @@ func TestPublishedGoalCapabilityIsHonest(t *testing.T) {
 		want bool
 	}{
 		{"goal coordinator", agent.GoalRuntime, harnessproto.RoleCoordinator, true},
-		{"coordinator on another harness", "claude", harnessproto.RoleCoordinator, false},
+		{"claude coordinator (hook goal mode)", agent.HookGoalRuntime, harnessproto.RoleCoordinator, true},
+		{"coordinator on another harness", "hermes", harnessproto.RoleCoordinator, false},
+		{"ordinary claude agent", agent.HookGoalRuntime, "", false},
 		{"ordinary agent on the goal runtime", agent.GoalRuntime, "", false},
 		{"repo home on the goal runtime", agent.GoalRuntime, harnessproto.RoleRepo, false},
 		{"console", agent.GoalRuntime, harnessproto.RoleConsole, false},
@@ -222,17 +224,17 @@ func TestPublishedGoalCapabilityIsHonest(t *testing.T) {
 	}
 }
 
-// TestGoalCapabilityMatchesNativeGoals pins the published advertisement to the
+// TestGoalCapabilityMatchesGoalMode pins the published advertisement to the
 // daemon's own reading of the same session. These are two expressions of one
 // fact; if they drift, a consumer offers (or hides) the control wrongly.
-func TestGoalCapabilityMatchesNativeGoals(t *testing.T) {
+func TestGoalCapabilityMatchesGoalMode(t *testing.T) {
 	for _, kind := range append(agent.Kinds(), "") {
 		for _, scope := range []string{store.ScopeWork, store.ScopeRepo} {
 			for _, rootID := range []string{"", "wg1"} {
 				s := store.Session{ID: "s1", RootID: rootID, Scope: scope, Agent: kind}
-				want := agent.NativeGoals(s)
+				want := agent.GoalMode(s)
 				if got := agent.CapsForRole(kind, s.Role()).Goal; got != want {
-					t.Fatalf("kind=%q scope=%q root=%q: cap %v != NativeGoals %v", kind, scope, rootID, got, want)
+					t.Fatalf("kind=%q scope=%q root=%q: cap %v != GoalMode %v", kind, scope, rootID, got, want)
 				}
 			}
 		}

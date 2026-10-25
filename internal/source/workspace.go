@@ -561,7 +561,7 @@ func plural(n int) string {
 // so "this coordinator does not run tasks as goals" stays visible for the life
 // of a session created with an explicit non-goal harness.
 func goalModeSuffix(root store.Session) string {
-	if agent.NativeGoals(root) {
+	if agent.GoalMode(root) {
 		return " · goal mode"
 	}
 	return fmt.Sprintf(" · no goal mode (%s; tasks run as ordinary turns)", agent.Canonical(root.Agent))

@@ -140,7 +140,46 @@ that supervises exactly that natively: Codex's App Server thread goal
 
 The default is a *runtime selection*, not a new engine: choosing another
 coordinator harness at creation (`-f coordinator=claude`, or the Runtime field
-on the interactive page) is supported and says so plainly — its rail status
-reads `no goal mode (claude; tasks run as ordinary turns)` and its guide
-describes the lifecycle it actually has. A goal session whose Codex has the
+on the interactive page) is supported. A Claude coordinator still runs in goal
+mode, by default (see below); any other harness says so plainly — its rail
+status reads `no goal mode (<harness>; tasks run as ordinary turns)` and its
+guide describes the lifecycle it actually has. A goal session whose Codex has the
 feature disabled fails to start with a clear error rather than pretending.
+
+### Claude coordinators: goal mode through amux's hooks
+
+Claude Code has no native goal engine, so for a Claude coordinator amux runs
+one itself (`agent.HookGoals`, `internal/claudegoal`). It is on for every
+Claude coordinator; there is no opt-in.
+
+- **State.** The goal lives in the coordinator's own session directory,
+  `.amux/goal.json` (`$AMUX_GOAL_FILE` in its environment): objective, status
+  (`active | paused | input | waiting | blocked | budgetLimited | complete`,
+  the Codex spellings plus `input` and `waiting`), and a continuation count.
+- **A task becomes the goal.** A `UserPromptSubmit` hook (`amux agent goal
+  prompt --hook`) establishes every user prompt — rail, web, steer, typed — as
+  the active goal. A reply while the coordinator waits for input (`input`) is
+  appended to the objective instead of replacing it.
+- **amux continues it.** The `Stop` hook (`amux agent goal stop --hook`) blocks
+  the stop of an active goal and hands Claude a continuation prompt restating
+  the objective and the honest ways out. It also reports the turn's activity
+  (`running` when continuing, `ready` otherwise), replacing the plain Stop
+  status hook. A failure lets the turn end rather than trapping it.
+- **The model moves its own goal** with `amux agent goal complete "<summary>"`,
+  `amux agent goal ask "<question>"` (stop and wait for the user — also
+  `AskUserQuestion` for concrete choices), `amux agent goal wait "<on what>"`
+  and `amux agent goal blocked "<reason>"`. `wait` is how a coordinator idles
+  on a member or CI without busy-polling: it arms a background wake-up
+  (`Monitor` or a `run_in_background` until-loop) and runs `goal wait`, which
+  lets exactly the next Stop through; the goal is active again after it, so the
+  turn the wake-up starts continues under goal pressure. The wait spends no
+  continuation budget and refunds none. Its guide tells it to ask for genuinely user-owned information
+  rather than guess, and to pick a sensible default for anything optional.
+- **Only the user pauses it.** The same `goal` steer verb (`status`,
+  `objective`) moves the file through the pinned session root; resuming an idle
+  coordinator also types a continuation nudge. `token_budget` is refused: a
+  Claude goal is bounded by 100 continuations without a user turn
+  (`budgetLimited`), since hooks see no token usage.
+- **Limits.** The state file is the coordinator's own sandbox state, like the
+  model's `update_goal` on Codex — not an authority boundary. A restart does
+  not by itself start a turn; an active goal continues on the next one.
