@@ -12,6 +12,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/centralauth"
 	"amux/internal/core"
+	"amux/internal/engine"
 	"amux/internal/engine/local"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
@@ -31,7 +32,8 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 		}
 		t.Skipf("protected namespace unavailable: %v", err)
 	}
-	t.Run("daemon-lifecycle", testCentralClaudeDaemonLifecycle)
+	t.Run("daemon-lifecycle", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, false) })
+	t.Run("service-published-after-launch", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, true) })
 	isolateHome(t)
 	s := store.Session{ID: "central-owner", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "central-owner")}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
@@ -141,12 +143,12 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 // Exercise production lifecycle gates and the reconciliation loop, unlike the
 // direct mailbox server fixture above. PTY startup must return without waiting
 // for the child's credential query: that query needs those same admission locks.
-func testCentralClaudeDaemonLifecycle(t *testing.T) {
+func testCentralClaudeDaemonLifecycle(t *testing.T, delayedService bool) {
 	d, runtime, _ := sessionRuntimeFixture(t)
 	t.Setenv("AMUX_JAIL", "on")
 	t.Setenv("AMUX_SHUTDOWN_GRACE", "0s")
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	s := store.Session{ID: "central-lifecycle", RootID: "root", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "central-lifecycle")}
 	if err := os.MkdirAll(s.Dir, 0700); err != nil {
 		t.Fatal(err)
@@ -178,14 +180,20 @@ func testCentralClaudeDaemonLifecycle(t *testing.T) {
 	}
 	d.engine = local.New()
 	d.sessionRPC = runtime
-	defer d.engine.Shutdown()
-	if err := runtime.start(ctx); err != nil {
-		t.Fatal(err)
+	t.Cleanup(d.engine.Shutdown)
+	startService := func() {
+		t.Helper()
+		if err := runtime.start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		serving, stop := context.WithCancel(ctx)
+		joined := make(chan struct{})
+		go func() { defer close(joined); runtime.run(serving) }()
+		t.Cleanup(func() { stop(); <-joined; runtime.close() })
 	}
-	serving, stop := context.WithCancel(ctx)
-	joined := make(chan struct{})
-	go func() { defer close(joined); runtime.run(serving) }()
-	defer func() { stop(); <-joined; runtime.close() }()
+	if !delayedService {
+		startService()
+	}
 	// A real action holds dispatchMu/effectMu while starting the sandboxed PTY.
 	finished := make(chan core.Result, 1)
 	go func() { finished <- d.handle(ctx, core.Action{Action: core.ActionStart, ID: s.ID}) }()
@@ -196,6 +204,35 @@ func testCentralClaudeDaemonLifecycle(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("start action blocked on its own credential query")
+	}
+	if delayedService {
+		// Provisioning exists, but reconciliation has not published service.json.
+		// Observe the actual child's failed query before allowing publication.
+		instance, ok := d.engine.Lookup(engine.Key{AgentID: s.ID, Tab: panespec.TabAgent})
+		if !ok {
+			t.Fatal("missing launcher instance")
+		}
+		chunks := make(chan string, 32)
+		unsubscribe := instance.Subscribe(engine.Sink{Output: func(b []byte) {
+			select {
+			case chunks <- string(b):
+			default:
+			}
+		}})
+		defer unsubscribe()
+		output := ""
+		for !strings.Contains(output, "retrying automatically") && !strings.Contains(output, "amux auth login") {
+			select {
+			case chunk := <-chunks:
+				output += chunk
+			case <-ctx.Done():
+				t.Fatal("launcher did not report unpublished mailbox service")
+			}
+		}
+		if strings.Contains(output, "amux auth login") || strings.Contains(output, mockCentralToken) || !strings.Contains(output, "mailbox request failed") {
+			t.Fatalf("unpublished service misdiagnosed: %s", output)
+		}
+		startService()
 	}
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
