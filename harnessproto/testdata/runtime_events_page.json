@@ -1,0 +1,1 @@
+{"type":"runtime-events-page","seq":40,"reqId":"h1","ok":true,"sessionId":"s1","runtime":"codex","events":[{"type":"prompt","direction":"in","payload":{"text":"hi"}},{"type":"text","item_id":"m3","direction":"out","payload":{"text":"hello"}}],"headSeq":57,"hasMore":true}

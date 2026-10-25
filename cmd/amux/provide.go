@@ -281,6 +281,9 @@ func provideRun(args []string) error {
 			// nothing (honest degradation).
 			cfg.RuntimeEvents = true
 			cfg.RuntimeEventStream = runtimeevents.StreamContext(runtimeRecordViaDaemon(), 0)
+			// Newest-first pages of the same records, so an orchestrator can show
+			// the latest page at once and fetch older history only on demand.
+			cfg.RuntimeEventHistory = runtimeevents.HistoryContext(runtimeRecordViaDaemon())
 		}
 	}
 

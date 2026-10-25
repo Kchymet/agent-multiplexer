@@ -133,6 +133,17 @@ var goldenFrames = []struct {
 			{Type: TypeToolCall, ItemID: "t1", Direction: DirOut, Payload: json.RawMessage(`{"title":"Read"}`)},
 		},
 	}},
+	{"runtime_events_history", MuxMsg{
+		Type: MRuntimeEventsHistory, ReqID: "h1", SessionID: "s1", BeforeSeq: 41, Limit: 200,
+	}},
+	{"runtime_events_page", HarnessMsg{
+		Type: HRuntimeEventsPage, ReqID: "h1", OK: true, SessionID: "s1", Runtime: RuntimeCodex,
+		Seq: 40, HeadSeq: 57, HasMore: true,
+		Events: []RuntimeEvent{
+			{Type: TypePrompt, Direction: DirIn, Payload: json.RawMessage(`{"text":"hi"}`)},
+			{Type: TypeText, ItemID: "m3", Direction: DirOut, Payload: json.RawMessage(`{"text":"hello"}`)},
+		},
+	}},
 }
 
 func TestGoldenFrames(t *testing.T) {
