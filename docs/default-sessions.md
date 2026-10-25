@@ -9,7 +9,7 @@ orchestrator over the provider protocol.
 | container | role (`AMUX_ROLE`) | session id | sandbox (cwd) | scope (`AMUX_SCOPE`) |
 |-----------|--------------------|------------|---------------|----------------------|
 | the machine | `console` | `console` | `~/.local/share/amux/console/` | `global` |
-| a work-scoped workgroup | `coordinator` | the workgroup id | `sessions/<workgroup>/coordinator/` — a dedicated own directory | `work` |
+| a workgroup | `coordinator` | the workgroup id | `sessions/<workgroup>/coordinator/` — a dedicated own directory | `work` |
 | a tracked repo | `repo` | the repo name | `sessions/<repo>/` | `repo` |
 
 An ordinary member agent has an empty role. Every workgroup has a visible
@@ -96,7 +96,9 @@ memory (`.amux/claude/CLAUDE.md`), which survives regeneration.
   time it is resolved. Deleting the workgroup
   removes the coordinator's own files and leaves any agent sandbox that still
   lives under the container (a moved-out agent) untouched. Moving the last
-  agent out of a work-scoped workgroup no longer drops the workgroup.
+  agent out of a workgroup never drops the workgroup; moving an agent with no
+  target makes it a new workgroup of its own, granted exactly its repos, and
+  reports that workgroup's id.
 - A repo home is a repo-scoped root whose id is the repo name. Tracking a repo
   creates it; a repo tracked earlier gets one on first open. It goes with the
   repo (`amux repo rm`), and cannot be deleted as a workgroup.
@@ -108,7 +110,7 @@ Published rows carry `role` (`harnessproto.Role*`) alongside `runtime` and
 the field sees a root or repo row with a runtime and caps, which is enough to
 offer it the session affordances; one that sorts sectionless or `repo`-kind rows
 into a session list should stop — the console and a repo header are not
-one-off agents.
+agents.
 
 ## Goal mode
 

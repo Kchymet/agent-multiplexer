@@ -215,7 +215,7 @@ func TestRowStatusShowsID(t *testing.T) {
 
 func TestClearingRepoShortcutDoesNotBroadenGrants(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("api", "api")
+	m.openNewRepoWorkgroupForm("api", "api")
 	m.form.field("repos").value = ""
 	fields := formFieldsForSubmit(m.form)
 	if value, explicit := fields["repos"]; !explicit || value != "" {

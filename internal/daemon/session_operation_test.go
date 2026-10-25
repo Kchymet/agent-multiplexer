@@ -37,7 +37,7 @@ func TestCanonicalSessionOperationClosedVocabulary(t *testing.T) {
 		{"streaming tab", access.Request{Route: access.RouteAction, Verb: core.ActionStart, ID: "a1", Tab: 1}, false},
 		{"unknown field", access.Request{Route: access.RouteAction, Verb: core.ActionAddAgent, ID: "wg1", Fields: map[string]string{"role": "console"}}, false},
 		{"reserved console mode", access.Request{Route: access.RouteAction, Verb: core.ActionAddAgent, ID: "wg1", Fields: map[string]string{"mode": "console"}}, false},
-		{"unknown creation mode", access.Request{Route: access.RouteAction, Verb: core.ActionNewRepoAgent, ID: "repo", Fields: map[string]string{"mode": "future"}}, false},
+		{"unknown creation mode", access.Request{Route: access.RouteAction, Verb: "new-repo-agent", ID: "repo", Fields: map[string]string{"mode": "future"}}, false},
 		{"interactive creation mode", access.Request{Route: access.RouteAction, Verb: core.ActionAddAgent, ID: "wg1", Fields: map[string]string{"mode": "interactive"}}, true},
 		{"rename missing field", access.Request{Route: access.RouteAction, Verb: core.ActionRename, ID: "a1"}, false},
 		{"move exact target", access.Request{Route: access.RouteAction, Verb: core.ActionMove, ID: "a1", Target: "wg2"}, true},

@@ -1,0 +1,6 @@
+--- FAIL: TestAccountsPTYProviderSelection (0.02s)
+    --- FAIL: TestAccountsPTYProviderSelection/80x24 (0.02s)
+        accounts_terminal_test.go:334: "\x1b[B" did not select codex: harness=claude profile=claude:central scroll=0
+FAIL
+FAIL	amux/internal/nativetui	0.030s
+FAIL

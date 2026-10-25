@@ -5,6 +5,10 @@
 // feeds (Feed) and routes input back through callbacks. The native TUI uses the
 // remote mode so the agent process lives in the daemon's engine — surviving the
 // TUI closing — and only its screen is mirrored here.
+//
+// A Terminal also keeps a bounded pane-local history of the primary screen and
+// a viewport that can scroll back into it; see history.go for the policy and
+// the ScrollLines/Snapshot family of methods.
 package vterm
 
 import (
@@ -81,6 +85,17 @@ type Terminal struct {
 	// scrub sanitizes string-sequence data before emu.Write (see scrubber). Its
 	// state spans chunk boundaries; pump and feedLoop both mutate it under t.mu.
 	scrub scrubber
+
+	// Pane-local history and viewport (history.go). offset is how many lines
+	// the viewport is scrolled back into primary history (0 = live). hist is
+	// the shape of the primary scrollback after the previous write, so
+	// afterWrite can tell real growth (lines scrolled off the top) from a
+	// cursor-only repaint. wasAlt is the screen the previous write left active.
+	// rev counts every change to what Render/Snapshot would show.
+	offset int
+	hist   histMark
+	wasAlt bool
+	rev    uint64
 }
 
 // feedCap bounds the coalesced backlog before the client, hopelessly behind,
@@ -123,6 +138,7 @@ func New(cols, rows int) *Terminal {
 		EnableMode:  func(m ansi.Mode) { t.noteMode(m, true) },
 		DisableMode: func(m ansi.Mode) { t.noteMode(m, false) },
 	})
+	t.installHistoryHooks()
 	return t
 }
 
@@ -139,8 +155,16 @@ func (t *Terminal) noteMode(m ansi.Mode, on bool) {
 	}
 }
 
-// mouseTracked reports whether the child has any mouse-reporting mode enabled,
-// meaning it wants raw mouse events forwarded rather than alternate-scroll keys.
+// MouseTracked reports whether the child has any mouse-reporting mode enabled,
+// meaning it wants raw mouse events forwarded (MouseEvent does so) rather than
+// having the wheel scroll the pane-local history or turn into cursor keys.
+func (t *Terminal) MouseTracked() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.mouseTracked()
+}
+
+// mouseTracked is MouseTracked for callers already holding t.mu.
 func (t *Terminal) mouseTracked() bool {
 	for _, m := range mouseTrackModes {
 		if t.mouseModes[m] {
@@ -182,10 +206,7 @@ func (t *Terminal) feedLoop() {
 				if len(b) == 0 {
 					break
 				}
-				t.mu.Lock()
-				t.scrub.scrub(b)
-				_, _ = t.emu.Write(b)
-				t.mu.Unlock()
+				t.ingest(b)
 				t.notify()
 			}
 		}
@@ -229,10 +250,7 @@ func (t *Terminal) pump() {
 	for {
 		n, err := t.ptmx.Read(buf)
 		if n > 0 {
-			t.mu.Lock()
-			t.scrub.scrub(buf[:n])
-			_, _ = t.emu.Write(buf[:n])
-			t.mu.Unlock()
+			t.ingest(buf[:n])
 			t.notify()
 		}
 		if err != nil {
@@ -249,6 +267,18 @@ func (t *Terminal) notify() {
 	if t.onData != nil {
 		t.onData()
 	}
+}
+
+// ingest is the one path output takes into the emulator, for a local PTY (pump)
+// and a remote stream (feedLoop) alike: scrub, parse, then let the history and
+// viewport bookkeeping observe the result. It holds t.mu throughout so Render,
+// Snapshot and the scroll methods never see a half-applied chunk.
+func (t *Terminal) ingest(b []byte) {
+	t.mu.Lock()
+	t.scrub.scrub(b)
+	_, _ = t.emu.Write(b)
+	t.afterWrite()
+	t.mu.Unlock()
 }
 
 // Feed hands output bytes to the feed goroutine, which writes them into the
@@ -274,11 +304,13 @@ func (t *Terminal) Feed(p []byte) {
 }
 
 // Reset clears the emulator to a blank screen via RIS (ESC c), discarding all
-// current cell state, scrollback, and modes. The daemon sends a pane.reset before
-// replaying a fresh repaint when a client fell too far behind to stream output
-// losslessly; without the clear, cells the repaint doesn't overwrite would ghost
-// (stale text showing through). It routes through the feed queue so it stays
-// ordered with the output that follows.
+// current cell state, modes, and the pane-local history (see the RIS hook in
+// history.go: the replay that follows is a tail of output the history already
+// absorbed, so keeping it would duplicate every line it scrolls). The daemon
+// sends a pane.reset before replaying a fresh repaint when a client fell too far
+// behind to stream output losslessly; without the clear, cells the repaint
+// doesn't overwrite would ghost (stale text showing through). It routes through
+// the feed queue so it stays ordered with the output that follows.
 func (t *Terminal) Reset() { t.Feed([]byte("\x1bc")) }
 
 // MarkClosed records that the remote process has exited, so Closed reports true
@@ -319,10 +351,19 @@ func (t *Terminal) drainResponses() {
 // stale content — an earlier frame's text, or the terminal's pre-amux
 // scrollback. Emitting a solid rectangle makes every frame fully overwrite its
 // pane, which is what a real terminal does.
+//
+// While the viewport is scrolled back (ScrollLines), the block shows history
+// rows above the live screen's top rows and carries the scroll indicator in the
+// top-right corner; see history.go.
 func (t *Terminal) Render() string {
 	t.mu.Lock()
-	raw := t.emu.Render()
 	cols, rows := t.cols, t.rows
+	var raw string
+	if t.offset > 0 {
+		raw = t.renderScrolled()
+	} else {
+		raw = t.emu.Render()
+	}
 	t.mu.Unlock()
 	return pad(raw, cols, rows)
 }
@@ -358,8 +399,12 @@ func pad(s string, cols, rows int) string {
 }
 
 // Write sends input bytes to the agent (e.g. translated keystrokes): to onInput
-// in remote mode, or the local PTY otherwise.
+// in remote mode, or the local PTY otherwise. Input returns a scrolled-back
+// viewport to the live screen first (ReturnLive), the way typing into a
+// terminal jumps its scrollback to the bottom; the emulator's own query replies
+// bypass Write and never do.
 func (t *Terminal) Write(p []byte) (int, error) {
+	t.ReturnLive()
 	if t.onInput != nil {
 		t.onInput(p)
 		return len(p), nil
@@ -428,7 +473,9 @@ func altScrollKeys(btn vt.MouseButton, app bool) []byte {
 	return seq
 }
 
-// Resize resizes both the emulator and the underlying PTY (SIGWINCH).
+// Resize resizes both the emulator and the underlying PTY (SIGWINCH). The
+// viewport returns to live: the child is about to repaint for the new size, and
+// history rows keep the width they were captured at (see history.go).
 func (t *Terminal) Resize(cols, rows int) {
 	if cols <= 0 || rows <= 0 {
 		return
@@ -436,6 +483,8 @@ func (t *Terminal) Resize(cols, rows int) {
 	t.mu.Lock()
 	t.cols, t.rows = cols, rows
 	t.emu.Resize(cols, rows)
+	t.offset = 0
+	t.rev++
 	ptmx := t.ptmx
 	t.mu.Unlock()
 	if ptmx != nil {

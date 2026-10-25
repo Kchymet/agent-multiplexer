@@ -27,7 +27,8 @@ const untrackedTTL = 12 * time.Hour
 const maxArchivedRows = 8
 
 // Workspace is the rail's source: the control console, then each root session
-// with its members nested underneath, then tracked repository homes. The console, every work-scoped root, and every repo row is
+// with its members nested underneath, then tracked repository homes. The
+// console, every workgroup root, and every repo row is
 // itself a session — the built-in default sessions (store.Role*): the console,
 // the workgroup's coordinator, the repo's home — so those rows carry a runtime,
 // caps, a role, and their own activity state, and can be opened and steered
@@ -401,15 +402,6 @@ func untrackedTitle(cwd, id string) string {
 		return b
 	}
 	return shortID(id)
-}
-
-// firstRepo returns the first repo in a comma-separated list (a repo-scoped
-// workgroup carries exactly one).
-func firstRepo(list string) string {
-	if r := store.SplitRepos(list); len(r) > 0 {
-		return r[0]
-	}
-	return ""
 }
 
 // agentLabel is the rail title for a leaf agent row — the line you read when

@@ -33,7 +33,7 @@ func key(s string) tea.KeyMsg {
 // press "i" first to start typing.
 func drive(keys ...string) string {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	for _, k := range keys {
 		m.handleForm(key(k))
 	}
@@ -67,7 +67,7 @@ func TestVimFormEditing(t *testing.T) {
 // navigation, not entry. The user opts into typing with i/a/A/I.
 func TestFormOpensInNormalMode(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	if m.form.insert {
 		t.Fatal("form should open in normal mode, not insert")
 	}
@@ -83,7 +83,7 @@ func TestFormOpensInNormalMode(t *testing.T) {
 func TestModelSelectorDefaultsOpusAndCycles(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 
 	var modelField *formField
 	for _, f := range m.form.fields {
@@ -130,7 +130,7 @@ func TestFormsCarryHarnessField(t *testing.T) {
 		name string
 		open func(*model)
 	}{
-		{"new-repo-agent", func(m *model) { m.openNewRepoAgentForm("repo", "Repo") }},
+		{"new-repo-agent", func(m *model) { m.openNewRepoWorkgroupForm("repo", "Repo") }},
 		{"add-agent", func(m *model) { m.openAddAgentForm("root", "Root") }},
 	}
 	for _, tc := range cases {
@@ -177,7 +177,7 @@ func TestNewWorkgroupUntouchedReposAreOmitted(t *testing.T) {
 // default. Cycling back to claude restores the claude models (and default).
 func TestHarnessCyclesModelOptions(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 
 	// prompt -> mode -> agent (Harness), then cycle claude -> codex.
 	m.handleForm(key("j"))
@@ -209,7 +209,7 @@ func TestHarnessCyclesModelOptions(t *testing.T) {
 // action fields the daemon consumes.
 func TestAgentFormSubmitsHarnessAndModel(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	v := m.form.values()
 	if got := v["agent"]; got != agent.DefaultKind() {
 		t.Fatalf("agent field: got %q, want claude", got)
@@ -244,7 +244,7 @@ func TestRenameFormSubmit(t *testing.T) {
 // Esc leaves insert mode; subsequent letters are commands, not text.
 func TestVimNormalModeNotTyped(t *testing.T) {
 	m := &model{}
-	m.openNewRepoAgentForm("repo", "Repo")
+	m.openNewRepoWorkgroupForm("repo", "Repo")
 	for _, k := range []string{"i", "hi", "<esc>", "x", "x", "x"} { // x deletes, doesn't type
 		m.handleForm(key(k))
 	}
