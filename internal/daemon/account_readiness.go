@@ -19,7 +19,7 @@ func creationHarnesses(a core.Action) []string {
 			out = append(out, member)
 		}
 		return out
-	case core.ActionAddAgent, core.ActionNewRepoAgent:
+	case core.ActionAddAgent:
 		return []string{member}
 	}
 	return nil

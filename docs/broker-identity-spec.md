@@ -207,7 +207,7 @@ helper lists some unarchive cases, but restricted canonical operations reject re
 | Host | Broad host control after authentication; individual handlers still validate operations. `Policy.Authorize` returns true for host kind. |
 | Ordinary session | Self rename and explicit self archive; own normalized history; limited queries and separately validated self reports/credentials. |
 | Coordinator | Selected actions on self/direct members; child creation under its own root with explicit requested repositories within its persisted ceiling. Self-completion is separately constrained. |
-| Repo home | Selected control/history via the target's authoritative repo-scoped root, not merely a matching repo string; creation within its repo. |
+| Repo home | Its own management context only; may create workgroups explicitly limited to its repo, but sharing a repo grants no control over another workgroup's members. |
 | Console | Broad enumerated control actions, still subject to canonical restrictions and specialized handlers. |
 | Discovery | Any active authenticated session may enumerate conversation metadata through `agent-sessions`; returned paths grant no filesystem access. |
 | History | Ordinary self; coordinator current direct members (including archived members); repo home its owned descendants; console broader visibility. Caller archive and target archive have different meanings. |

@@ -91,8 +91,9 @@ const (
 	// RoleCoordinator is a workgroup root's own session — the coordinator or
 	// supervisor of that workgroup's agents. Its id is the workgroup id.
 	RoleCoordinator = "coordinator"
-	// RoleRepo is a tracked repo's home session — the long-lived context for the
-	// one-off agents run against that repo. Its id is the repo name.
+	// RoleRepo is a tracked repo's home session — persistent management context
+	// for that repo, which can start workgroups limited to it. Its id is the
+	// repo name.
 	RoleRepo = "repo"
 )
 

@@ -219,7 +219,7 @@ func TestScopedCoordinatorRowsAreCurrentAndPathFree(t *testing.T) {
 	}
 }
 
-func TestScopedRepoHomeUsesAuthoritativeRepoRoot(t *testing.T) {
+func TestScopedRepoHomeKeepsOnlyItsManagementContext(t *testing.T) {
 	r := fakeResolver(policyFixture())
 	rows, err := r.scopedSessionRows(context.Background(), access.Principal{Kind: access.SubjectSession, SubjectID: "api"})
 	if err != nil {
@@ -234,8 +234,8 @@ func TestScopedRepoHomeUsesAuthoritativeRepoRoot(t *testing.T) {
 			got[row.ID] = nil
 		}
 	}
-	if !reflect.DeepEqual(got["repo-root"], []string{"oneoff"}) {
-		t.Fatalf("repo-root children = %v, want oneoff", got["repo-root"])
+	if len(got) != 1 {
+		t.Fatalf("repo home leaked workgroups: %v", got)
 	}
 	if _, ok := got["api"]; !ok {
 		t.Fatalf("repo home missing from %v", got)

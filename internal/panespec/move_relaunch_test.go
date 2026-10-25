@@ -38,7 +38,7 @@ func TestMovedMemberRelaunchUsesStoredOwnDirAfterOldRootRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wsops.MoveAgent(ctx, member.ID, newRoot); err != nil {
+	if _, err := wsops.MoveAgent(ctx, member.ID, newRoot); err != nil {
 		t.Fatal(err)
 	}
 	if err := wsops.DeleteByID(ctx, oldRoot); err != nil {

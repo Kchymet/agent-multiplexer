@@ -220,10 +220,15 @@ func TestGuidesByRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oneOff, err := CreateRepoWorkgroup(ctx, "api", AgentSpec{Agent: "claude", Prompt: "review open PRs"})
+	repoGroup, err := CreateWorkspace(ctx, "repo work", &AgentSpec{Agent: "claude", Repos: []string{"api"}, Prompt: "review open PRs"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	db, _ = store.Open()
+	members, _ := db.Children(repoGroup)
+	db.Close()
+	oneOff := members[0]
 
 	// Console: the whole inventory, and the operating vocabulary.
 	c, _, _ := ResolveSession(console.ID)
@@ -245,7 +250,7 @@ func TestGuidesByRole(t *testing.T) {
 		}
 	}
 
-	// Repo home: this repo's one-off sessions and how to dispatch more.
+	// Repo home: management context and normal workgroup dispatch.
 	home, _, _ := ResolveSession("api")
 	hr, err := hostprep.OpenSession(home.Dir)
 	if err != nil {
@@ -256,7 +261,7 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = hr.Close()
 	b, _ = os.ReadFile(filepath.Join(home.Dir, "CLAUDE.md"))
-	for _, want := range []string{"home session", gitDir, oneOff.ID, "review open PRs", "amux do new-repo-agent api", "linked worktree"} {
+	for _, want := range []string{"home session", gitDir, "amux do new-workgroup -f repos=api", "linked worktree"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("repo guide missing %q", want)
 		}
@@ -281,7 +286,7 @@ func TestGuidesByRole(t *testing.T) {
 	if got := envOf(AgentEnv(oneOff), "AMUX_ROLE"); got != "" {
 		t.Errorf("agent AMUX_ROLE = %q, want empty", got)
 	}
-	if got := envOf(AgentEnv(oneOff), "AMUX_SCOPE"); got != store.ScopeRepo {
+	if got := envOf(AgentEnv(oneOff), "AMUX_SCOPE"); got != store.ScopeWork {
 		t.Errorf("repo agent AMUX_SCOPE = %q", got)
 	}
 }
@@ -313,10 +318,10 @@ func TestDeleteWorkgroupKeepsMovedAgentDir(t *testing.T) {
 	if _, err := os.Stat(guide); err != nil {
 		t.Fatal(err)
 	}
-	if err := MoveAgent(ctx, kids[0].ID, ""); err != nil {
+	if _, err := MoveAgent(ctx, kids[0].ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	// MoveAgent drops an emptied *repo-scoped* root only; a work-scoped one stays.
+	// MoveAgent never drops the emptied workgroup; the user deletes it.
 	if err := DeleteByID(ctx, rootID); err != nil {
 		t.Fatal(err)
 	}

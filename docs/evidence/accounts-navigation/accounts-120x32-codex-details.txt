@@ -1,0 +1,32 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor   3 term  ──────────────────────────────────────────────────────────
+ ○ console                │work 00 · 界 ···············································································
+                          │work 01 · 界 ···············································································
+ ▾ WORKGROUPS         ╭──────────────────────────────────────────────────────────────────────────╮·····················
+ ▾ payments           │ Accounts · remaining budget                                              │·····················
+  ○ workgroup-child   │                                                                          │·····················
+                      │ › Codex · subscription · ready                                           │·····················
+ ▾ REPOS              │   5h 33% left ━━━─────── · reset 01-02 03:04Z · fresh                    │·····················
+ ▾ ⛁ acme/api         │   7d 33% left ━━━─────── · reset 01-05 03:04Z · fresh                    │·····················
+  ○ repo-child        │   provider report                                                        │·····················
+                      │                                                                          │·····················
+ ▾ DETACHED           │ Tab/↑↓/jk: select · e: subscription · a: API key                         │·····················
+ ○ external-session   │ d: default · x: logout · r: refresh                                      │·····················
+                      │ Existing workload bindings stay fixed.                                   │·····················
+                      │                                                                          │·····················
+                      │ Selected: Codex                                                          │·····················
+                      │ Account: fixture@example.test                                            │·····················
+                      │ Plan: fixture-plan                                                       │·····················
+                      │ Enter: start browser login.                                              │·····················
+                      │ five_hour: available                                                     │·····················
+                      │   Used: 67% of the reported window                                       │·····················
+                      │   Source:   Confidence:                                                  │·····················
+ Accounts · left      │   Observed: 2026-10-25 19:14 UTC  Resets: 2030-01-02 03:04 UTC           │·····················
+ Claude               │ seven_day: available                                                     │·····················
+   5h 77% · 7d 77%    │   Used: 67% of the reported window                                       │·····················
+ Codex                │   Source:   Confidence:                                                  │·····················
+   5h 33% · 7d 33%    │   Observed: 2026-10-25 19:14 UTC  Resets: 2030-01-05 03:04 UTC           │·····················
+ ↵ open  ↑↓ move ─────│ ↑↓/jk select · PgUp/PgDn scroll · Esc close  5–26/26                     │·····················
+ Space fold/unfold ───╰──────────────────────────────────────────────────────────────────────────╯·····················
+ / search archived ───────│work 28 · 界 ···············································································
+──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────
+ accounts · e subscription · a API key · d default · x logout · r refresh · Esc close

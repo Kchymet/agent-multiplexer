@@ -22,8 +22,7 @@ import (
 //
 // The positional [id] and [kind] forms are kept for back-compat; flags below set
 // the same fields and additionally reach Target and the form Fields that the
-// richer actions (add-agent, new-workgroup, new-repo-agent, add-repo, rename)
-// need. Examples:
+// richer actions (add-agent, new-workgroup, add-repo, rename) need. Examples:
 //
 //	amux do refresh
 //	amux do start 3f7a
@@ -81,8 +80,7 @@ var actionGlosses = map[string]string{
 	core.ActionAgentSetRepos:       "re-scope an agent's repos     -f repos=api,web",
 	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web (host only)",
 	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
-	core.ActionNewRepoAgent:        "start a repo-scoped agent     id is the repo name",
-	core.ActionNewWorkgroup:        "create a work-scoped workgroup -f name=… [-f prompt=…] [-f repos=a,b -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
+	core.ActionNewWorkgroup:        "create a workgroup            -f name=… [-f prompt=…] [-f repos=a,b (its repos; one = single-repo) -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
 	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",
 }
 
@@ -137,7 +135,7 @@ func cmdRefresh() error {
 // positionals can't reach:
 //
 //	--id ID              target workgroup/agent id (alternative to the 2nd positional)
-//	--target, -t ROOT    destination workgroup id (for "move"; "" = new work-scoped)
+//	--target, -t ROOT    destination workgroup id (for "move"; "" = a new workgroup of the agent's own)
 //	--field, -f key=val  form field, repeatable (add-agent, new-workgroup, …)
 //
 // --kind and --cwd are still parsed but no current action reads them, so they

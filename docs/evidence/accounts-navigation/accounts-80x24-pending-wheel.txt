@@ -1,0 +1,24 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor   3 term  ──────────────────
+ ○ console                │work 00 · 界 ·······································
+  ╭──────────────────────────────────────────────────────────────────────────╮·
+ ▾│ Accounts · remaining budget                                              │·
+ ▾│ Waiting for machine: status…                                             │·
+  │   statusline advisory; identity unverified                               │·
+  │                                                                          │·
+ ▾│ › Codex · subscription · ready                                           │·
+ ▾│   5h 33% left ━━━─────── · reset 01-02 03:04Z · fresh                    │·
+  │   7d 33% left ━━━─────── · reset 01-05 03:04Z · fresh                    │·
+  │   provider report                                                        │·
+ ▾│                                                                          │·
+ ○│ Tab/↑↓/jk: select · e: subscription · a: API key                         │·
+  │ d: default · x: logout · r: refresh                                      │·
+ A│ Existing workload bindings stay fixed.                                   │·
+ C│                                                                          │·
+  │ Selected: Codex                                                          │·
+ C│ Account: fixture@example.test                                            │·
+  │ Plan: fixture-plan                                                       │·
+ ↵│ Enter: start browser login.                                              │·
+ S│ PgUp/PgDn scroll · Esc close  4–18/26                                    │·
+ /╰──────────────────────────────────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────────────────────────────────
+ accounts · Esc close and disconnect
