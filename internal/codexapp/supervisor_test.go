@@ -63,6 +63,56 @@ func attach(t *testing.T, sup *Supervisor, client msgConn) {
 	}
 }
 
+func TestStaleReaderCannotFailReplacementTurn(t *testing.T) {
+	oldClient, oldServer := newMemPair()
+	newClient, newServer := newMemPair()
+	sup := New(Config{SessionID: "reader-fence"})
+	defer sup.Close()
+	defer oldServer.Close()
+	defer newServer.Close()
+
+	if err := sup.attachTransport(context.Background(), oldClient); err != nil {
+		t.Fatal(err)
+	}
+	sup.mu.Lock()
+	oldReaderDone := sup.rpcDone
+	sup.mu.Unlock()
+
+	// Publish a replacement before the old read loop retires, then give the new
+	// connection an active turn. Closing the old peer deterministically exercises
+	// the stale-reader ordering that used to check rpc identity and later reacquire
+	// mu in failTurn, leaving a window to clear this replacement state.
+	if err := sup.attachTransport(context.Background(), newClient); err != nil {
+		t.Fatal(err)
+	}
+	turnDone := make(chan *turnResult, 1)
+	sup.mu.Lock()
+	sup.turnDone = turnDone
+	sup.ownTurn = "turn-new"
+	sup.curTurn = "turn-new"
+	sup.earlyTerm = map[string]*turnResult{"turn-new": {StopReason: "completed"}}
+	sup.mu.Unlock()
+
+	if err := oldServer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-oldReaderDone:
+	case <-time.After(time.Second):
+		t.Fatal("stale read loop did not retire")
+	}
+	select {
+	case result := <-turnDone:
+		t.Fatalf("stale reader failed replacement turn: %+v", result)
+	default:
+	}
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if sup.turnDone != turnDone || sup.ownTurn != "turn-new" || sup.curTurn != "turn-new" || sup.earlyTerm == nil {
+		t.Fatalf("stale reader changed replacement state: done=%p own=%q current=%q early=%v", sup.turnDone, sup.ownTurn, sup.curTurn, sup.earlyTerm)
+	}
+}
+
 func TestStartRejectsTransportInterruptBeforeProcessLaunch(t *testing.T) {
 	sup := New(Config{SessionID: "pre-interrupted", Endpoint: "unix:///unused"})
 	sup.interruptTransport()
