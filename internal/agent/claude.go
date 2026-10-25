@@ -23,9 +23,9 @@ type claudeHarness struct{}
 
 func (claudeHarness) Kind() string { return "claude" }
 
-// claudeModels is the built-in Claude model catalog — the aliases every Claude
-// Code install accepts — opus first (the default).
-var claudeModels = []string{"opus", "sonnet", "haiku", "fable"}
+// claudeModels is the built-in Claude model catalog — aliases followed by
+// explicit model IDs, with opus first (the default).
+var claudeModels = []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5-5"}
 
 // Models is the built-in catalog plus whatever Claude Code has cached as
 // additionally selectable for this account (claudecfg.Home.AdditionalModels —
