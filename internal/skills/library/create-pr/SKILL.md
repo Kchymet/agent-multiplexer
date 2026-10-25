@@ -156,14 +156,19 @@ merging:
 
 Either way, don't walk away from a red PR — at minimum leave CI green.
 
-## Phase 5 — Mark the amux session done (task sessions only)
+## Phase 5 — Mark the amux session done (task-mode member agents only)
 
-A **task-driven** amux session exists to produce one change. Once its PR is open
-(and green), the session's job is finished, so mark it done to clear it from the
-active rail. This is reversible — it archives, it does not delete.
+A **task-driven** amux agent session exists to produce one change. Once its PR is
+open (and green), the session's job is finished, so mark it done to clear it from
+the active rail. This is reversible — it archives, it does not delete.
 
-**Only do this when both hold:**
+**Only do this when all three hold:**
 
+- `$AMUX_ROLE` is not `coordinator` — a workgroup coordinator **never** archives
+  itself or its workgroup when a task finishes. The workgroup stays open; the
+  coordinator reports the outcome and asks the user whether they want it
+  archived (their host operation: `amux workgroup archive <id>`) or have another
+  task for it.
 - `$AMUX_MODE` is `task` — **never** archive an `interactive` session. The human
   drives an interactive session and owns when it ends; archiving it out from under
   them defeats its purpose.
@@ -176,7 +181,7 @@ active rail. This is reversible — it archives, it does not delete.
 your own session from the fixed launch context, so you don't pass an id:
 
 ```sh
-if [ "$AMUX_MODE" = "task" ]; then
+if [ "$AMUX_MODE" = "task" ] && [ "$AMUX_ROLE" != "coordinator" ]; then
   amux agent done   # archives your own session; reversible
 fi
 ```
@@ -188,8 +193,9 @@ workgroup archive <id>`, which you'd use to archive *another* agent by id. To un
 either: `amux workgroup unarchive <id>`.
 
 Then report the outcome to the user: the PR URL and that the session was marked
-done. If you did **not** archive (interactive session, a long-lived loop, or more
-work remains), say so and why.
+done. If you did **not** archive (coordinator, interactive session, a long-lived
+loop, or more work remains), say so and why — a coordinator ends by asking the
+user whether to archive the workgroup or continue.
 
 ## Guardrails
 
