@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"amux/internal/hostprep"
+	"amux/internal/prefixcache"
 )
 
 var mu sync.Mutex // serialize our own read-modify-write of config.toml
@@ -425,6 +426,8 @@ func (h Home) ListSessions() []SessionInfo {
 		return nil
 	}
 	defer root.Close()
+	scan := rolloutCwds.Begin(h.sessionsRoot())
+	defer scan.Commit()
 	var out []SessionInfo
 	var walk func(*hostprep.Root, string)
 	walk = func(dir *hostprep.Root, prefix string) {
@@ -456,7 +459,9 @@ func (h Home) ListSessions() []SessionInfo {
 				f.Close()
 				continue
 			}
-			cwd := rolloutCwdReader(io.LimitReader(f, 1<<20))
+			cwd := scan.Value(name, info, rolloutCwdLimit, func() string {
+				return rolloutCwdReader(io.LimitReader(f, rolloutCwdLimit))
+			})
 			f.Close()
 			out = append(out, SessionInfo{
 				ID: id, Cwd: cwd, Project: filepath.ToSlash(filepath.Dir(name)),
@@ -471,6 +476,12 @@ func (h Home) ListSessions() []SessionInfo {
 	})
 	return out
 }
+
+// rolloutCwds remembers each rollout's cwd across listings (see
+// claudecfg's transcriptCwds): the leading session_meta never changes.
+var rolloutCwds prefixcache.Cache
+
+const rolloutCwdLimit = 1 << 20
 
 // rolloutCwd reads the working directory a rollout was recorded under. Codex
 // writes a session_meta record early in the file whose payload carries the cwd;

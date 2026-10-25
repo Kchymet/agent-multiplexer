@@ -22,6 +22,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/hostprep"
+	"amux/internal/prefixcache"
 )
 
 var mu sync.Mutex // serialize our own read-modify-write
@@ -364,6 +365,8 @@ func (h Home) ListSessions() []SessionInfo {
 	if err != nil {
 		return nil
 	}
+	scan := transcriptCwds.Begin(h.ProjectsRoot())
+	defer scan.Commit()
 	var out []SessionInfo
 	for _, p := range projects {
 		if !p.IsDir() {
@@ -387,7 +390,9 @@ func (h Home) ListSessions() []SessionInfo {
 				f.Close()
 				continue
 			}
-			cwd := transcriptCwdReader(io.LimitReader(f, 1<<20))
+			cwd := scan.Value(rel, fi, transcriptCwdLimit, func() string {
+				return transcriptCwdReader(io.LimitReader(f, transcriptCwdLimit))
+			})
 			f.Close()
 			out = append(out, SessionInfo{
 				ID: strings.TrimSuffix(e.Name(), ".jsonl"), Cwd: cwd,
@@ -401,6 +406,13 @@ func (h Home) ListSessions() []SessionInfo {
 	})
 	return out
 }
+
+// transcriptCwds remembers each transcript's cwd across listings: discovery
+// runs on every `amux agent sessions` page, and re-parsing the prefix of every
+// conversation on the host made each call take tens of seconds.
+var transcriptCwds prefixcache.Cache
+
+const transcriptCwdLimit = 1 << 20
 
 // transcriptCwd reads the originating working directory from a transcript's
 // first record that carries one. Claude Code stamps its JSONL lines with the

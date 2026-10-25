@@ -29,6 +29,7 @@ import (
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/engine/local"
 	"amux/internal/nativetui"
 	"amux/internal/vtdemo"
 )
@@ -195,6 +196,28 @@ var startupDial = daemon.Dial
 // fail on any attempted exec after a denied probe.
 var daemonCommand = exec.Command
 
+// startupProbe reports whether a daemon accepts an authenticated connection
+// now. Lifecycle waits poll it; tests replace it to model a slow daemon.
+var startupProbe = func() error {
+	c, err := startupDial()
+	if err == nil {
+		_ = c.Close()
+	}
+	return err
+}
+
+// daemonStopBudget bounds how long stop/restart waits for the old daemon to
+// release its singleton. Teardown deliberately lets every busy agent finish
+// its turn (engine shutdown grace) before SIGTERM→SIGKILL (kill grace); the
+// client must outlast that, plus supervisor and authority teardown, or every
+// restart issued while an agent works is reported as a failed shutdown.
+var daemonStopBudget = func() time.Duration { return local.ShutdownBudget() + 20*time.Second }
+
+// daemonStartupBudget bounds how long a spawned daemon may take to accept its
+// first connection while it is still running. Startup reconciles every
+// session mailbox before listening, which grows with the number of agents.
+var daemonStartupBudget = 90 * time.Second
+
 // sessionContextRestricted is fixed-path namespace provenance, replaceable only
 // by tests. A valid context proves a restricted session; an unreadable or
 // invalid context fails closed. Only a proven ENOENT means the fixed mount is
@@ -337,14 +360,19 @@ func daemonStop(mustExist bool) error {
 		return fmt.Errorf("daemon rejected shutdown: %w", err)
 	}
 	_ = c.Close()
-	// Wait for both endpoint removal and singleton-lock release. Socket absence
-	// alone is not process identity and can precede final engine cleanup.
-	deadline := time.Now().Add(12 * time.Second)
+	return waitDaemonStopped()
+}
+
+// waitDaemonStopped waits for both endpoint removal and singleton-lock
+// release. Socket absence alone is not process identity and can precede final
+// engine cleanup.
+func waitDaemonStopped() error {
+	start := time.Now()
+	deadline := start.Add(daemonStopBudget())
 	var lastErr error
+	announced := false
 	for time.Now().Before(deadline) {
-		probe, probeErr := startupDial()
-		if probeErr == nil {
-			_ = probe.Close()
+		if probeErr := startupProbe(); probeErr == nil {
 			lastErr = fmt.Errorf("daemon still accepting authenticated connections")
 		} else if !daemonMayStart(probeErr) {
 			return fmt.Errorf("cannot verify daemon shutdown: %w", daemonConnectionError(probeErr))
@@ -354,9 +382,13 @@ func daemonStop(mustExist bool) error {
 		} else {
 			lastErr = fmt.Errorf("daemon listener closed but singleton lock is still held")
 		}
+		if !announced && time.Since(start) > 2*time.Second {
+			announced = true
+			fmt.Printf("daemon stopping: letting busy agents finish their turn (up to %s)…\n", daemonStopBudget().Round(time.Second))
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("daemon did not complete authenticated shutdown within timeout: %w", lastErr)
+	return fmt.Errorf("daemon did not complete authenticated shutdown within %s: %w", daemonStopBudget().Round(time.Second), lastErr)
 }
 
 func singletonReleased() bool {
@@ -549,20 +581,41 @@ func startDaemonAfterDial(self string, initialErr error, explicitBootstrap bool)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("initial daemon connection failed (%w); start daemon: %w", initialErr, err)
 	}
-	_ = cmd.Process.Release()
+	// Reap the child only to learn whether it is still starting: a daemon
+	// that is alive but slow is waited for, one that exited is reported now.
+	// The child is in its own session, so this process exiting never stops it.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	return awaitDaemonReady(initialErr, exited, daemonStartupBudget)
+}
 
+// awaitDaemonReady waits for the spawned daemon to accept a connection. A
+// fixed few-second window used to report failure for every startup that had
+// many mailboxes to reconcile, although the daemon came up moments later.
+func awaitDaemonReady(initialErr error, exited <-chan error, budget time.Duration) error {
 	lastErr := initialErr
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		if c, err := startupDial(); err == nil {
-			_ = c.Close()
+		err := startupProbe()
+		if err == nil {
 			return nil
-		} else {
-			lastErr = err
 		}
-		time.Sleep(75 * time.Millisecond)
+		lastErr = err
+		select {
+		case waitErr := <-exited:
+			// The child returns cleanly when another daemon already owns the
+			// socket; that daemon answering is success too.
+			if lastErr = startupProbe(); lastErr == nil {
+				return nil
+			}
+			if waitErr == nil {
+				waitErr = errors.New("exited")
+			}
+			return fmt.Errorf("daemon process stopped before accepting connections (%v; see %s); initial connection failed: %w; last connection failed: %w", waitErr, core.LogPath(), initialErr, lastErr)
+		case <-time.After(75 * time.Millisecond):
+		}
 	}
-	return fmt.Errorf("daemon did not come up within timeout (see %s); initial connection failed: %w; last connection failed: %w", core.LogPath(), initialErr, lastErr)
+	return fmt.Errorf("daemon did not come up within %s (see %s); initial connection failed: %w; last connection failed: %w", budget, core.LogPath(), initialErr, lastErr)
 }
 
 // cmdNative launches the native Bubble Tea TUI (bare `amux`). It ensures the

@@ -68,6 +68,20 @@ func awaitGoal(t *testing.T, fs *fakeServer, want func(*threadGoal) bool, d time
 	return fs.goalState()
 }
 
+// awaitSupervisorGoal waits for the supervisor's own view. The fake server
+// records a goal before it answers thread/goal/set, so awaitGoal can return
+// while the supervisor is still receiving the result it records.
+func awaitSupervisorGoal(s *Supervisor, want func(GoalState) bool, d time.Duration) (GoalState, bool) {
+	deadline := time.Now().Add(d)
+	for {
+		st, ok := s.Goal()
+		if (ok && want(st)) || !time.Now().Before(deadline) {
+			return st, ok
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // settle gives the asynchronous observer time to act, so "nothing happened" is
 // an observation rather than a race the assertion won.
 func settle() { time.Sleep(150 * time.Millisecond) }
@@ -89,7 +103,10 @@ func TestFirstTaskBecomesGoal(t *testing.T) {
 				t.Fatal("establishing the goal started a second turn")
 			}
 			// The supervisor's own view tracks it for restart accounting.
-			if st, ok := s.Goal(); !ok || st.Status != GoalActive || st.Objective != g.Objective {
+			st, ok := awaitSupervisorGoal(s, func(st GoalState) bool {
+				return st.Status == GoalActive && st.Objective == g.Objective
+			}, 2*time.Second)
+			if !ok || st.Status != GoalActive || st.Objective != g.Objective {
 				t.Fatalf("observed goal state = %+v, ok=%t", st, ok)
 			}
 		})

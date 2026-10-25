@@ -46,6 +46,14 @@ type sessionRuntime struct {
 	dispatchMu          sync.Mutex
 	servers             map[string]*sessionrpc.Server
 	initialized         map[string]bool
+	// serving holds each subject's in-flight ServeOnce pass (closed when it
+	// returns) and closing each retired server whose Close waits on that pass.
+	// Mailboxes are served concurrently: one subject's slow request (discovery
+	// scan, event paging, a long action) must never delay every other
+	// subject's queue. All four maps are owned by the run goroutine.
+	serving             map[string]chan struct{}
+	closing             map[string]chan struct{}
+	passes              sync.WaitGroup
 	completions         *completionRegistry
 	responseBudget      sessionrpc.ResponseBudget
 	events              *sessionEventPager
@@ -79,6 +87,9 @@ func (r *sessionRuntime) start(ctx context.Context) error {
 func (r *sessionRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(r.poll)
 	defer ticker.Stop()
+	// Join every admitted pass before the daemon tears down: close takes
+	// dispatch ownership, which an in-flight dispatch may still be waiting for.
+	defer r.passes.Wait()
 	for {
 		if err := r.serve(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("session RPC: %v", err)
@@ -127,11 +138,58 @@ func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 		return initializeErr
 	}
 	for _, id := range ids {
-		if _, err := r.servers[id].ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
-			log.Printf("session RPC %s: %v", id, err)
-		}
+		r.startPass(ctx, id)
 	}
 	return nil
+}
+
+// startPass runs one ServeOnce for id unless its previous pass is still
+// dispatching. A subject's own requests stay serialized by its server.
+func (r *sessionRuntime) startPass(ctx context.Context, id string) {
+	if r.serving == nil {
+		r.serving = make(map[string]chan struct{})
+	}
+	if done, ok := r.serving[id]; ok && !finished(done) {
+		return
+	}
+	server := r.servers[id]
+	done := make(chan struct{})
+	r.serving[id] = done
+	r.passes.Add(1)
+	go func() {
+		defer r.passes.Done()
+		defer close(done)
+		if _, err := server.ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
+			log.Printf("session RPC %s: %v", id, err)
+		}
+	}()
+}
+
+// waitPasses joins every in-flight pass and deferred server close.
+func (r *sessionRuntime) waitPasses() { r.passes.Wait() }
+
+// retiring reports whether a closed server for id has not finished closing.
+// A replacement must not open the mailbox meanwhile: two servers would both
+// resume the same claimed request.
+func (r *sessionRuntime) retiring(id string) bool {
+	done, ok := r.closing[id]
+	if !ok {
+		return false
+	}
+	if !finished(done) {
+		return true
+	}
+	delete(r.closing, id)
+	return false
+}
+
+func finished(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *sessionRuntime) reconcile(ctx context.Context) error {
@@ -171,6 +229,9 @@ func (r *sessionRuntime) reconcile(ctx context.Context) error {
 		}
 		if _, ok := r.servers[session.ID]; ok {
 			r.renewCurrent(ctx, session)
+			continue
+		}
+		if r.retiring(session.ID) {
 			continue
 		}
 		if err := r.open(ctx, session); err != nil {
@@ -359,8 +420,29 @@ func (r *sessionRuntime) closeServer(id string) {
 		r.consoleAccountClose = nil
 	}
 	if server := r.servers[id]; server != nil {
-		_ = server.Close()
 		delete(r.servers, id)
+		pass := r.serving[id]
+		delete(r.serving, id)
+		// Server.Close waits for an in-flight ServeOnce, whose dispatch may be
+		// waiting for the dispatch/effect locks this caller holds. Hand the close
+		// to the pass's owner instead of deadlocking; the dispatch itself
+		// rechecks credential validity under those locks before any effect.
+		if pass == nil || finished(pass) {
+			_ = server.Close()
+		} else {
+			if r.closing == nil {
+				r.closing = make(map[string]chan struct{})
+			}
+			closed := make(chan struct{})
+			r.closing[id] = closed
+			r.passes.Add(1)
+			go func() {
+				defer r.passes.Done()
+				defer close(closed)
+				<-pass
+				_ = server.Close()
+			}()
+		}
 	}
 	delete(r.initialized, id)
 }
@@ -377,6 +459,8 @@ func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
 }
 
 func (r *sessionRuntime) close() {
+	// Passes are joined before taking dispatch ownership (see closeServer).
+	r.waitPasses()
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
 	for id := range r.servers {

@@ -51,6 +51,11 @@ func killGrace() time.Duration {
 // agent. Overridable via $AMUX_SHUTDOWN_GRACE (a Go duration).
 const defaultShutdownGrace = 30 * time.Second
 
+// ShutdownBudget is the longest Shutdown waits on its instances: the
+// wait-for-idle budget then the SIGTERM→SIGKILL grace. Lifecycle clients that
+// wait for a daemon to stop must allow at least this much.
+func ShutdownBudget() time.Duration { return shutdownGrace() + killGrace() }
+
 // shutdownGrace returns the wait-for-idle budget, honoring $AMUX_SHUTDOWN_GRACE.
 func shutdownGrace() time.Duration {
 	if v := os.Getenv("AMUX_SHUTDOWN_GRACE"); v != "" {
