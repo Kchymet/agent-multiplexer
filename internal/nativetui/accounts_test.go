@@ -345,11 +345,12 @@ func TestAccountsNarrowViewportAndSecretPasteIsolation(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		view := m.renderAccounts()
-		if len(strings.Split(view, "\n")) > m.paneRows() {
+		w, h := m.accountsSize()
+		if len(strings.Split(view, "\n")) != h {
 			t.Fatal("account view overflowed height")
 		}
 		for _, line := range strings.Split(view, "\n") {
-			if ansi.StringWidth(line) > m.mainWidth() {
+			if ansi.StringWidth(line) != w {
 				t.Fatalf("account view overflowed width: %q", line)
 			}
 		}

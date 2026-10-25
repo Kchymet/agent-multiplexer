@@ -1,0 +1,12 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h  1 agent  2 editor
+ ○ console                │work 00 · 界 ···········
+ A╭──────────────────────────────────────────────╮·
+ C│ Accounts · remaining budget                  │·
+ 5│   Used: 67% of the reported window           │·
+ C│   Source:   Confidence:                      │·
+ 5│   Observed: 2026-10-25 18:26 UTC  Resets: 20 │·
+ ↵│ 30-01-05 03:04 UTC                           │·
+ S│ PgUp/PgDn scroll · Esc close  19–22/22       │·
+ /╰──────────────────────────────────────────────╯·
+──────────────────────────┴─────────────────────────
+ accounts · e subscription · a API key · d default ·

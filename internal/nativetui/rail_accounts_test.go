@@ -103,7 +103,7 @@ func TestAccountsBarKeyboardMouseAndLegacyProjection(t *testing.T) {
 		}
 		var cmd tea.Cmd
 		if mouse {
-			_, cmd = m.handleMouse(tea.MouseMsg{X: 2, Y: 1 + m.paneRows() - 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+			_, cmd = m.handleMouse(tea.MouseMsg{X: 2, Y: 1 + m.paneRows() - len(m.accountOverviewLines()) - len(m.railHints()), Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 		} else {
 			_, cmd = m.handleKey(key("s"))
 		}
@@ -232,7 +232,7 @@ func TestRailAccountRenderingEvidence(t *testing.T) {
 				if lipgloss.Width(out) != m.w || lipgloss.Height(out) != m.h {
 					t.Fatalf("%s exceeds terminal: %dx%d", screen, lipgloss.Width(out), lipgloss.Height(out))
 				}
-				if !strings.Contains(out, "Accounts") || !strings.Contains(out, "/ search archived") {
+				if screen != "accounts" && (!strings.Contains(out, "Accounts") || !strings.Contains(out, "/ search archived")) {
 					t.Fatal("pinned navigation not visible")
 				}
 				t.Logf("%s rendered at %dx%d:\n%s", screen, m.w, m.h, out)
