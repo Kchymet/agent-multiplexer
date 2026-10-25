@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"amux/internal/clipboard"
 	"amux/internal/vterm"
 )
 
@@ -18,8 +19,9 @@ func Run(args []string) error {
 	if len(args) == 0 {
 		args = []string{"bash"}
 	}
-	m := &model{args: args, dataCh: make(chan struct{}, 1)}
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	out := &clipboard.SerialFile{File: os.Stdout}
+	m := &model{args: args, dataCh: make(chan struct{}, 1), clip: clipboard.New(out)}
+	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithOutput(out)).Run()
 	if m.term != nil {
 		_ = m.term.Close()
 	}
@@ -32,6 +34,7 @@ type model struct {
 	args   []string
 	term   *vterm.Terminal
 	dataCh chan struct{}
+	clip   *clipboard.Copier
 	w, h   int
 	err    error
 }
@@ -61,6 +64,7 @@ func (m *model) ensureStarted() {
 		default:
 		}
 	})
+	m.term.OnClipboard(m.clip.Copy)
 	cmd := exec.Command(m.args[0], m.args[1:]...)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	if err := m.term.Start(cmd); err != nil {
