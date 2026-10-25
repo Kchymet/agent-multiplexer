@@ -73,8 +73,14 @@ func TestAccountCompletionQueuedBehindEffectLockRejectsDisconnectedInitiator(t *
 	// reach this observation and fails the bounded wait.
 	select {
 	case <-srv.closed:
-	case <-ctx.Done():
+		if ctx.Err() != nil {
+			d.effectMu.Unlock()
+			<-done
+			t.Fatal("server retired only after fixture lifetime cancellation")
+		}
+	case <-time.After(time.Second):
 		d.effectMu.Unlock()
+		cancel()
 		<-done
 		t.Fatal("server did not observe disconnect while effect admission was held")
 	}
