@@ -6,11 +6,13 @@ import (
 	"amux/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type archiveSearchState struct {
 	query    string
 	selected string // preserve identity when inventory updates reorder results
+	details  string // read-only details target, never a pending runtime attachment
 }
 
 func archivedSession(s core.Session) bool {
@@ -43,6 +45,19 @@ func (m *model) archiveSelection(rows []core.Session) int {
 
 func (m *model) handleArchiveSearch(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.archiveSearch
+	if s.details != "" {
+		switch k.Type {
+		case tea.KeyEsc:
+			s.details = ""
+		case tea.KeyCtrlC:
+			m.archiveSearch = nil
+		case tea.KeyCtrlR:
+			if row := m.sessionByID(s.details); row != nil && archivedSession(*row) {
+				m.confirmArchiveRestore(*row)
+			}
+		}
+		return m, nil
+	}
 	rows := m.archivedMatches()
 	i := m.archiveSelection(rows)
 	switch k.Type {
@@ -69,27 +84,55 @@ func (m *model) handleArchiveSearch(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		selected := rows[i]
-		m.archiveSearch = nil
 		if k.Type == tea.KeyCtrlR {
-			m.confirm = &confirmState{
-				archivedOnly: true,
-				message:      "Restore " + accountText(selected.Title) + " to the active list?",
-				action:       core.Action{Action: core.ActionArchive, ID: selected.ID},
-			}
-			return m, nil
+			m.confirmArchiveRestore(selected)
+		} else {
+			s.details = selected.ID
 		}
-		// Resolve the existing attachment path without selecting an invisible
-		// rail row or changing archive state or workload account bindings.
-		cursor, section := m.cursor, m.sectionCursor
-		m.selectByID(selected.ID)
-		cmd := m.attachSelected()
-		m.cursor, m.sectionCursor = cursor, section
-		return m, cmd
+
 	}
 	return m, nil
 }
 
+func (m *model) confirmArchiveRestore(s core.Session) {
+	m.archiveSearch = nil
+	m.confirm = &confirmState{
+		archivedOnly: true,
+		message:      "Restore " + accountText(s.Title) + " to the active list?\nOpen it from the rail afterward to resume.",
+		action:       core.Action{Action: core.ActionArchive, ID: s.ID},
+	}
+}
+
+func (m *model) renderArchivedDetails() string {
+	w, h := m.mainWidth(), m.paneRows()
+	lines := []string{titleStyle.Render("Archived session · read only"), ""}
+	s := m.sessionByID(m.archiveSearch.details)
+	if s == nil || !archivedSession(*s) {
+		lines = append(lines, "This session is no longer in the archive.", "Esc: return to search")
+	} else {
+		runtime := s.Runtime
+		if runtime == "" {
+			runtime = s.Kind
+		}
+		if runtime == "" {
+			runtime = "unknown"
+		}
+		lines = append(lines, "Title: "+accountText(s.Title), "ID: "+accountText(s.ID),
+			"Runtime: "+accountText(runtime), "State: archived", "",
+			"History is not available in this TUI.",
+			"Restore before reopening from the active rail.", "",
+			"Ctrl+R: restore · Esc: back to results")
+	}
+	for i := range lines {
+		lines[i] = ansi.Wrap(lines[i], max(1, w-2), "")
+	}
+	return lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(strings.Join(lines, "\n"))
+}
+
 func (m *model) renderArchiveSearch() string {
+	if m.archiveSearch.details != "" {
+		return m.renderArchivedDetails()
+	}
 	w, h := m.mainWidth(), m.paneRows()
 	rows := m.archivedMatches()
 	i := m.archiveSelection(rows)
@@ -106,7 +149,7 @@ func (m *model) renderArchiveSearch() string {
 	if len(rows) == 0 {
 		lines = append(lines, "No archived sessions match.")
 	}
-	lines = append(lines, "", "Enter: open · Ctrl+R: restore · Esc: close")
+	lines = append(lines, "", "Enter: details · Ctrl+R: restore · Esc: close")
 	for i := range lines {
 		lines[i] = padTo(lines[i], w)
 	}
