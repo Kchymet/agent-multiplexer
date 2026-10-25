@@ -7,12 +7,14 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/codexauth"
 	"amux/internal/codexcfg"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -45,12 +47,25 @@ const (
 	claudeUsageMaxPause     = time.Hour
 )
 
+// A `claude setup-token` token has only the user:inference scope, so the
+// usage report refuses it. Its windows come instead from the unified
+// rate-limit headers of a one-token Haiku request, the same quota probe
+// Claude Code sends. Each probe spends about 8 input and 1 output token of the
+// subscription, so it runs at most every claudeProbeInterval and not while a
+// session's statusline or an earlier probe is newer than that.
+const (
+	claudeMessagesURL   = "https://api.anthropic.com/v1/messages"
+	claudeProbeModel    = "claude-haiku-4-5"
+	claudeProbeInterval = 15 * time.Minute
+)
+
 // Fixed refresh codes; vendor and transport text is never surfaced.
 const (
 	errClaudeUsageUnavailable = "claude_usage_unavailable"
 	errClaudeUsageRateLimited = "claude_usage_rate_limited"
 	errClaudeUsageScope       = "claude_usage_scope"
 	errClaudeUsageRejected    = "claude_usage_unauthorized"
+	errClaudeProbe            = "claude_probe_unavailable"
 	errCredentialUnavailable  = "credential_unavailable"
 	errCredentialExpired      = "credential_expired"
 	errNativeLimits           = "native_limits_unavailable"
@@ -223,6 +238,10 @@ func (d *Daemon) fetchClaudeLimits(ctx context.Context, p hp.AccountProfile) (hp
 	}
 	now := d.accountTime()
 	key := sha256.Sum256([]byte(token))
+	central := p.Source == amuxcfg.AuthCentral
+	if central && d.claudeNoUsage[p.ID] == key {
+		return d.probeClaudeLimits(ctx, p, token, key)
+	}
 	if last := p.Limits; last.ProfileID == p.ID && last.DeliveryEpoch == p.DeliveryEpoch {
 		// The persisted pause outlives a daemon restart. A credential other
 		// than the paused one (a renewed host login) may read at once.
@@ -246,6 +265,14 @@ func (d *Daemon) fetchClaudeLimits(ctx context.Context, p hp.AccountProfile) (hp
 		if !errors.As(err, &ue) {
 			// Never surface transport or vendor text: it may echo request data.
 			return out, false, errors.New(errClaudeUsageUnavailable)
+		}
+		if ue.code == errClaudeUsageScope && central {
+			// Remembered for this credential; a new login reads the report again.
+			if d.claudeNoUsage == nil {
+				d.claudeNoUsage = map[string][32]byte{}
+			}
+			d.claudeNoUsage[p.ID] = key
+			return d.probeClaudeLimits(ctx, p, token, key)
 		}
 		if ue.pause > 0 {
 			if d.claudePaused == nil {
@@ -375,4 +402,113 @@ func decodeClaudeUsage(raw []byte) (claudeUsageReport, error) {
 		out.Resets = &total
 	}
 	return out, nil
+}
+
+// probeClaudeLimits reads the central setup-token's windows from a quota
+// probe. skip means a newer observation or a pause makes a probe unnecessary.
+func (d *Daemon) probeClaudeLimits(ctx context.Context, p hp.AccountProfile, token string, key [32]byte) (hp.AccountLimits, bool, error) {
+	out := hp.AccountLimits{Source: "claude-probe"}
+	now := d.accountTime()
+	last := p.Limits
+	attributed := last.ProfileID == p.ID && last.DeliveryEpoch == p.DeliveryEpoch
+	if attributed {
+		if paused, known := d.claudePaused[p.ID]; last.RetryAt > now.UnixMilli() && (!known || paused == key) {
+			return out, true, nil
+		}
+		recent := func(ms int64) bool {
+			return ms > 0 && now.Sub(time.UnixMilli(ms)) < claudeProbeInterval-claudeUsageSlack
+		}
+		if last.RetryAt <= now.UnixMilli() && (recent(last.ObservedAt) || last.Source == "claude-probe" && recent(last.AttemptedAt)) {
+			return out, true, nil
+		}
+	}
+	probe := d.claudeProbe
+	if probe == nil {
+		probe = fetchClaudeProbe
+	}
+	qctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	windows, err := probe(qctx, token)
+	delete(d.claudePaused, p.ID)
+	if err != nil {
+		var ue *claudeUsageError
+		if !errors.As(err, &ue) {
+			return out, false, errors.New(errClaudeProbe)
+		}
+		if ue.pause > 0 {
+			if d.claudePaused == nil {
+				d.claudePaused = map[string][32]byte{}
+			}
+			d.claudePaused[p.ID] = key
+		}
+		return out, false, &claudeUsageError{code: ue.code, pause: ue.pause}
+	}
+	out.State, out.ObservedAt, out.Windows = "unknown", now.UnixMilli(), windows
+	// Nothing else refreshes it sooner, so it stays current until the next probe.
+	out.FreshUntil = now.Add(claudeProbeInterval + accountLimitsRefreshInterval).UnixMilli()
+	if len(windows) > 0 {
+		out.State = "known"
+	}
+	if attributed {
+		out.ResetsAvailable = last.ResetsAvailable // the probe carries no reset count
+	}
+	return out, false, nil
+}
+
+// fetchClaudeProbe sends Claude Code's one-token quota probe and reads the
+// unified rate-limit headers. An at-limit 429 still carries them.
+func fetchClaudeProbe(ctx context.Context, token string) ([]hp.AccountLimitWindow, error) {
+	body, err := json.Marshal(map[string]any{"model": claudeProbeModel, "max_tokens": 1,
+		"messages": []map[string]string{{"role": "user", "content": "quota"}}})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeMessagesURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusTooManyRequests {
+		if windows, ok := decodeClaudeRateLimitHeaders(resp.Header); ok {
+			return windows, nil
+		}
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil, &claudeUsageError{code: errClaudeProbe}
+	case http.StatusTooManyRequests, http.StatusUnauthorized:
+		return nil, claudeUsageStatus(resp.StatusCode, resp.Header.Get("Retry-After"), nil)
+	}
+	return nil, &claudeUsageError{code: errClaudeProbe, pause: claudeUsageDefaultPause}
+}
+
+// decodeClaudeRateLimitHeaders reads the anthropic-ratelimit-unified-*
+// windows: utilization is a 0-1 fraction, resets are Unix seconds. ok is
+// false when no window header is present.
+func decodeClaudeRateLimitHeaders(h http.Header) ([]hp.AccountLimitWindow, bool) {
+	out := []hp.AccountLimitWindow{}
+	for _, v := range []struct {
+		name, key string
+		minutes   int64
+	}{{"five_hour", "5h", 300}, {"seven_day", "7d", 10080}} {
+		util, err := strconv.ParseFloat(h.Get("anthropic-ratelimit-unified-"+v.key+"-utilization"), 64)
+		if err != nil || util < 0 || util > 1 {
+			continue
+		}
+		w := hp.AccountLimitWindow{Name: v.name, UsedPercent: math.Round(util*1000) / 10, WindowMinutes: v.minutes}
+		if reset, err := strconv.ParseInt(h.Get("anthropic-ratelimit-unified-"+v.key+"-reset"), 10, 64); err == nil && reset > 0 {
+			w.ResetsAt = reset
+		}
+		out = append(out, w)
+	}
+	return out, len(out) > 0
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -375,5 +376,113 @@ func TestDecodeClaudeUsage(t *testing.T) {
 	got, err = decodeClaudeUsage([]byte(`{"cedar_ember":{"eligible":false,"ineligible_reason":"tier"}}`))
 	if err != nil || got.Resets != nil {
 		t.Fatalf("an ineligible account reported a count: %+v %v", got, err)
+	}
+}
+
+// A setup-token lacks user:profile, so the usage report refuses it and the
+// central Claude budget used to update only while a session ran. It is now
+// read from a one-token quota probe at a conservative cadence.
+func TestClaudeSetupTokenProbe(t *testing.T) {
+	d := isolatedAccounts(t)
+	now := accountClock(d)
+	readyClaude(t)
+	usage, probes := 0, 0
+	d.claudeUsage = func(context.Context, string) (claudeUsageReport, error) {
+		usage++
+		return claudeUsageReport{}, claudeUsageStatus(403, "", []byte(`{"type":"error","error":{"type":"permission_error","details":{"error_code":"oauth_scope_insufficient"}}}`))
+	}
+	var probeErr error
+	d.claudeProbe = func(_ context.Context, tok string) ([]hp.AccountLimitWindow, error) {
+		probes++
+		if tok != "sk-ant-oat01-fixture" {
+			t.Fatalf("probe token %q", tok)
+		}
+		return []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 1, WindowMinutes: 300}, {Name: "seven_day", UsedPercent: 14, WindowMinutes: 10080}}, probeErr
+	}
+	daemon := d
+	tick := func(d time.Duration) hp.AccountLimits {
+		*now = now.Add(d)
+		daemon.refreshAccountLimits(t.Context())
+		return claudeLimits(t)
+	}
+	got := tick(0)
+	if usage != 1 || probes != 1 || got.Source != "claude-probe" || got.State != "known" || len(got.Windows) != 2 || got.RefreshError != "" {
+		t.Fatalf("setup-token not probed: usage=%d probes=%d %+v", usage, probes, got)
+	}
+	if got.FreshUntil != now.Add(claudeProbeInterval+accountLimitsRefreshInterval).UnixMilli() {
+		t.Fatalf("probe lifetime: %+v", got)
+	}
+	// The refusal is remembered, and probes stay claudeProbeInterval apart.
+	for range 7 {
+		tick(accountLimitsRefreshInterval)
+	}
+	if usage != 1 || probes != 1 {
+		t.Fatalf("probed too often: usage=%d probes=%d", usage, probes)
+	}
+	tick(accountLimitsRefreshInterval)
+	if usage != 1 || probes != 2 {
+		t.Fatalf("no probe after the interval: usage=%d probes=%d", usage, probes)
+	}
+	// A session's statusline observation newer than the interval suffices.
+	*now = now.Add(10 * time.Minute)
+	if err := accounts.Update(func(s *accounts.State) error {
+		q := s.Profiles["claude:central"]
+		q.Limits = hp.AccountLimits{State: "known", Source: "claude-statusline", ProfileID: q.ID, DeliveryEpoch: q.DeliveryEpoch, ObservedAt: now.UnixMilli(),
+			Windows: []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 5}}}
+		s.Profiles[q.ID] = q
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tick(10 * time.Minute)
+	if probes != 2 {
+		t.Fatal("probed while a statusline observation was fresh")
+	}
+	// A rate-limited probe keeps the last budget and honors Retry-After.
+	probeErr = claudeUsageStatus(429, "1200", nil)
+	limited := tick(6 * time.Minute)
+	if probes != 3 || limited.RefreshError != "claude_usage_rate_limited" || limited.RetryAt != now.Add(20*time.Minute).UnixMilli() || len(limited.Windows) != 1 {
+		t.Fatalf("rate-limited probe: %+v", limited)
+	}
+	probeErr = nil
+	tick(16 * time.Minute)
+	if probes != 3 {
+		t.Fatal("probed during Retry-After")
+	}
+	tick(5 * time.Minute)
+	if probes != 4 {
+		t.Fatal("no probe after Retry-After")
+	}
+	// Host and shared logins never probe: they can read the usage report.
+	if err := accounts.Update(func(s *accounts.State) error {
+		s.Defaults["claude"] = "claude:host"
+		q := s.Profiles["claude:central"]
+		q.State = "logged-out"
+		s.Profiles[q.ID] = q
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.claudeLogin = func(string) (claudecfg.OAuthLogin, error) { return claudecfg.OAuthLogin{AccessToken: "x"}, nil }
+	tick(time.Hour)
+	if probes != 4 || usage != 2 {
+		t.Fatalf("host login probed: usage=%d probes=%d", usage, probes)
+	}
+}
+
+func TestDecodeClaudeRateLimitHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-5h-utilization", "0.01")
+	h.Set("anthropic-ratelimit-unified-5h-reset", "1792988400")
+	h.Set("anthropic-ratelimit-unified-7d-utilization", "0.14")
+	h.Set("anthropic-ratelimit-unified-7d-reset", "1793365200")
+	got, ok := decodeClaudeRateLimitHeaders(h)
+	if !ok || len(got) != 2 || got[0] != (hp.AccountLimitWindow{Name: "five_hour", UsedPercent: 1, WindowMinutes: 300, ResetsAt: 1792988400}) || got[1].UsedPercent != 14 || got[1].ResetsAt != 1793365200 {
+		t.Fatalf("%+v %v", got, ok)
+	}
+	h.Set("anthropic-ratelimit-unified-5h-utilization", "1.5")
+	h.Del("anthropic-ratelimit-unified-7d-utilization")
+	if got, ok := decodeClaudeRateLimitHeaders(h); ok {
+		t.Fatalf("accepted invalid or missing headers: %+v", got)
 	}
 }

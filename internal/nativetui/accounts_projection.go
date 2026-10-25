@@ -74,7 +74,7 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		}
 		limits := lp.Limits
 		confidence := "unknown"
-		if limits.Source == "codex-native" || limits.Source == "claude-usage" {
+		if limits.Source == "codex-native" || limits.Source == "claude-usage" || limits.Source == "claude-probe" {
 			confidence = "provider report"
 		} else if limits.Source == "claude-statusline" {
 			confidence = "session advisory"
@@ -87,6 +87,11 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		if limits.ObservedAt > 0 {
 			base.observedAt = time.UnixMilli(limits.ObservedAt)
 			base.freshUntil = base.observedAt.Add(accountObservationMaxAge)
+			// A provider-stated lifetime (a periodic quota probe) replaces the
+			// default, bounded so a bad value cannot hide a dead refresh.
+			if until := time.UnixMilli(limits.FreshUntil); limits.FreshUntil > 0 && until.After(base.observedAt) {
+				base.freshUntil = minTime(until, base.observedAt.Add(time.Hour))
+			}
 		}
 		// An opaque Claude token cannot verify account identity. Its statusline
 		// observations are still useful when the daemon attributes them to the
@@ -95,7 +100,7 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 		// The central Claude usage report is read with the profile's own stored
 		// credential; its epoch fence retires it on login, logout, or mode change.
 		// A host Codex login is read through the host's own Codex home.
-		report := p.Harness == "claude" && limits.Source == "claude-usage" || lp.Source == "host" && limits.Source == "codex-native"
+		report := p.Harness == "claude" && (limits.Source == "claude-usage" || limits.Source == "claude-probe") || lp.Source == "host" && limits.Source == "codex-native"
 		attributed := limits.ProfileID == lp.ID && limits.DeliveryEpoch == lp.DeliveryEpoch && (lp.Identity.State == "known" || advisory || report)
 		if attributed && limits.ResetsAvailable != nil && *limits.ResetsAvailable >= 0 {
 			resets := *limits.ResetsAvailable
@@ -111,6 +116,9 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 				l := base
 				l.name, l.state = window.Name, "available"
 				l.reason = "Stale after 5 minutes; usage is an observation, not a billing guarantee."
+				if limits.Source == "claude-probe" {
+					l.reason = "Read from a one-token quota probe every 15 minutes; usage is an observation, not a billing guarantee."
+				}
 				if lp.ID != p.ID {
 					l.reason += " Read from the legacy default " + lp.ID + " login."
 				}
@@ -158,6 +166,13 @@ func accountProfileProblem(code string) string {
 	}
 }
 
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
 // accountRefreshProblem explains a fixed refresh code; unknown codes pass
 // through sanitized, since they are fixed daemon codes rather than native text.
 func accountRefreshProblem(code string) string {
@@ -165,13 +180,15 @@ func accountRefreshProblem(code string) string {
 	case "claude_usage_rate_limited":
 		return "Claude usage report rate limited"
 	case "claude_usage_scope":
-		return "this Claude token cannot read the usage report (setup-token lacks user:profile); budget comes from running Claude sessions"
+		return "this Claude login lacks the user:profile scope the usage report needs"
 	case "claude_usage_unauthorized":
 		return "Claude rejected the stored credential; log in again"
 	case "credential_expired":
 		return "Claude login expired; it renews on Claude's next use"
 	case "credential_unavailable":
 		return "stored credential unavailable"
+	case "claude_probe_unavailable":
+		return "Claude quota probe failed"
 	case "native_limits_unavailable":
 		return "Codex rate limits unavailable"
 	}

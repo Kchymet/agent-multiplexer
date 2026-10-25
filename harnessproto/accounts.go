@@ -84,7 +84,11 @@ type AccountLimits struct {
 	RefreshError string `json:"refreshError,omitempty"`
 	// RetryAt is when the provider allows the next refresh after it asked
 	// amux to pause (for example a rate-limited read). Unix milliseconds.
-	RetryAt           int64                `json:"retryAt,omitempty"`
+	RetryAt int64 `json:"retryAt,omitempty"`
+	// FreshUntil, when set, is how long this observation stays current in
+	// place of AccountLimitsTTLMillis: a quota probe that runs every 15
+	// minutes is not stale after 5. Unix milliseconds.
+	FreshUntil        int64                `json:"freshUntil,omitempty"`
 	ProfileID         string               `json:"profileId,omitempty"`
 	DeliveryEpoch     uint64               `json:"deliveryEpoch,omitempty"`
 	SessionID         string               `json:"sessionId,omitempty"`

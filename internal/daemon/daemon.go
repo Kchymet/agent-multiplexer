@@ -78,6 +78,8 @@ type Daemon struct {
 	accountNow      func() time.Time
 	// claudeUsage reads a Claude usage report; nil uses the vendor API.
 	claudeUsage func(context.Context, string) (claudeUsageReport, error)
+	// claudeProbe reads a setup-token's windows; nil sends the quota probe.
+	claudeProbe func(context.Context, string) ([]harnessproto.AccountLimitWindow, error)
 	// claudeLogin reads a host or shared Claude login; nil reads its store.
 	claudeLogin func(mode string) (claudecfg.OAuthLogin, error)
 	// hostCodexLimits reads the host Codex login's windows; nil runs codex.
@@ -85,6 +87,9 @@ type Daemon struct {
 	// claudePaused fingerprints the credential each profile's persisted
 	// RetryAt pause applies to. Only the account limits loop touches it.
 	claudePaused map[string][32]byte
+	// claudeNoUsage fingerprints each central credential the usage report
+	// refused for scope; those profiles are probed instead.
+	claudeNoUsage map[string][32]byte
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control

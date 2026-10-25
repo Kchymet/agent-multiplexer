@@ -363,3 +363,31 @@ func TestAccountLegacyDefaultShowsHostBudget(t *testing.T) {
 		t.Fatalf("row identity or provenance: %+v", snap.profiles[0])
 	}
 }
+
+// A quota probe runs every 15 minutes, so it stays current until the next
+// one is due instead of turning stale after the default 5 minutes.
+func TestAccountProbeFreshUntil(t *testing.T) {
+	now := time.Now()
+	observed := now.Add(-12 * time.Minute)
+	limits := hp.AccountLimits{State: "known", Source: "claude-probe", ProfileID: "claude:central", DeliveryEpoch: 1, ObservedAt: observed.UnixMilli(),
+		FreshUntil: observed.Add(17 * time.Minute).UnixMilli(),
+		Windows:    []hp.AccountLimitWindow{{Name: "five_hour", UsedPercent: 1, WindowMinutes: 300}, {Name: "seven_day", UsedPercent: 14, WindowMinutes: 10080}}}
+	profile := func(l hp.AccountLimits) accountProfile {
+		return projectAccounts(hp.AccountSnapshot{Profiles: []hp.AccountProfile{{ID: "claude:central", Harness: "claude", Source: "central", State: "ready", DeliveryEpoch: 1,
+			Identity: hp.AccountIdentity{State: "unknown", Evidence: "opaque-token"}, Limits: l}}}).profiles[0]
+	}
+	p := profile(limits)
+	if got := accountRailBudget(p, now, false); got != "5h 99% · 7d 86%" {
+		t.Fatalf("probe within its lifetime: %q", got)
+	}
+	if p.limits[0].confidence != "provider report" {
+		t.Fatalf("probe not attributed: %+v", p.limits[0])
+	}
+	if got := accountRailBudget(p, now.Add(6*time.Minute), false); got != "5h 99% · 7d 86% · stale" {
+		t.Fatalf("overdue probe: %q", got)
+	}
+	limits.FreshUntil = observed.Add(48 * time.Hour).UnixMilli()
+	if got := accountRailBudget(profile(limits), now.Add(time.Hour), false); !strings.HasSuffix(got, " · stale") {
+		t.Fatalf("unbounded lifetime: %q", got)
+	}
+}

@@ -550,7 +550,7 @@ func (m *model) renderAccounts() string {
 			source := "provider report"
 			if harness == "claude" {
 				source = "statusline advisory; identity unverified"
-				if len(p.limits) > 0 && p.limits[0].source == "claude-usage" {
+				if len(p.limits) > 0 && (p.limits[0].source == "claude-usage" || p.limits[0].source == "claude-probe") {
 					source = "provider report; identity unverified"
 				}
 			}
