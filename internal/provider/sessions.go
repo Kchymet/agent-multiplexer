@@ -228,7 +228,13 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	}
 	started := time.Now()
 	res := harnessproto.HarnessMsg{Type: harnessproto.HSessionResult, ReqID: m.ReqID}
-	newID, err := p.applyAuthorizedSessionAction(s, m)
+	var newID string
+	var err error
+	if p.cfg.OpenAccounts != nil && !p.cfg.AccountUse && (m.Action == harnessproto.VerbNewWorkgroup || m.Action == harnessproto.VerbAddAgent || m.Action == harnessproto.VerbStart || m.Action == harnessproto.VerbPrompt) {
+		err = errors.New("account_use_denied")
+	} else {
+		newID, err = p.applyAuthorizedSessionAction(s, m)
+	}
 	if err != nil {
 		res.Error = err.Error()
 	} else {

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"amux/internal/accounts"
 	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
@@ -39,7 +40,7 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		// A hard link shares the credential without failing that regular-file check.
 		HardlinkShared: []string{MCPCredentialsFile},
 	}
-	if mode := AuthMode(); mode != amuxcfg.AuthHost {
+	if mode := accounts.Mode(agentID, "codex"); mode != amuxcfg.AuthHost {
 		// Central and environment modes never share the host account login
 		// (auth.json holds its refresh token): a legacy link is unlinked without
 		// being followed. MCP OAuth credentials are separate integration

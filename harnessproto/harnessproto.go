@@ -271,6 +271,7 @@ const (
 
 // Capabilities advertises what a provider can run, for orchestrator scheduling.
 type Capabilities struct {
+	Accounts  *AccountCapabilities   `json:"accounts,omitempty"`
 	Execution *ExecutionCapabilities `json:"execution,omitempty"`
 	// Compute is the explicit local grant for spawn/input/resize/kill. Absence is
 	// false: a registration bearer, labels, MaxPanes, or Execution metadata must

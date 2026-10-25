@@ -26,20 +26,21 @@ import (
 // exactly the `amux provide` flag set minus the token itself; the TOML keys are
 // the flag names verbatim, so the file reads like the command line it replaces.
 type Config struct {
-	Harnesses        []string          // nil/empty: automatic discovery; otherwise verified allowlist
-	IdentityMode     string            // currently only machine is supported
-	Orchestrator     string            // orchestrator address host:port
-	TokenFile        string            // path to the 0600 file holding the bearer token
-	Name             string            // provider display name (default: hostname)
-	CAFile           string            // private CA to trust on top of the system roots
-	ServerName       string            // TLS server name for SNI/verification
-	MaxPanes         int               // capability: max concurrent panes (0 = unset)
-	AllowCompute     bool              // explicitly allow remote spawn/input/resize/kill
-	PublishSessions  bool              // advertise the "sessions" feature
-	ReadOnlySessions bool              // publish inventory but reject lifecycle verbs
-	RuntimeEvents    bool              // advertise "runtime-events" (needs PublishSessions)
-	Labels           map[string]string // scheduling labels (advisory)
-	Features         []string          // opaque capability feature strings
+	AccountStatus, AccountManage, AccountUse bool
+	Harnesses                                []string          // nil/empty: automatic discovery; otherwise verified allowlist
+	IdentityMode                             string            // currently only machine is supported
+	Orchestrator                             string            // orchestrator address host:port
+	TokenFile                                string            // path to the 0600 file holding the bearer token
+	Name                                     string            // provider display name (default: hostname)
+	CAFile                                   string            // private CA to trust on top of the system roots
+	ServerName                               string            // TLS server name for SNI/verification
+	MaxPanes                                 int               // capability: max concurrent panes (0 = unset)
+	AllowCompute                             bool              // explicitly allow remote spawn/input/resize/kill
+	PublishSessions                          bool              // advertise the "sessions" feature
+	ReadOnlySessions                         bool              // publish inventory but reject lifecycle verbs
+	RuntimeEvents                            bool              // advertise "runtime-events" (needs PublishSessions)
+	Labels                                   map[string]string // scheduling labels (advisory)
+	Features                                 []string          // opaque capability feature strings
 }
 
 // Path is the provider config file. It sits beside amux's other user config so
@@ -135,6 +136,9 @@ func (c Config) Marshal() []byte {
 			fmt.Fprintf(&b, "%s = true\n", key)
 		}
 	}
+	boolean("account-status", c.AccountStatus)
+	boolean("account-manage", c.AccountManage)
+	boolean("account-use", c.AccountUse)
 	boolean("publish-sessions", c.PublishSessions)
 	boolean("allow-compute", c.AllowCompute)
 	boolean("read-only-sessions", c.ReadOnlySessions)
@@ -249,6 +253,12 @@ func (c *Config) assign(key string, val any) error {
 		}
 		c.MaxPanes = n
 		return nil
+	case "account-status":
+		return boolean(&c.AccountStatus)
+	case "account-manage":
+		return boolean(&c.AccountManage)
+	case "account-use":
+		return boolean(&c.AccountUse)
 	case "publish-sessions":
 		return boolean(&c.PublishSessions)
 	case "allow-compute":

@@ -255,3 +255,18 @@ func (s Store) Status() (Status, error) {
 	st.Configured, st.Fingerprint, st.StoredAt, st.Generation = true, c.Token.Fingerprint(), c.StoredAt, c.Generation
 	return st, nil
 }
+
+// Delete removes amux's setup-token only. Tokens already delivered to a running
+// process cannot be retracted; account delivery fencing precedes this cleanup.
+func (s Store) Delete() error {
+	release, err := s.flock(writeLockFile, false)
+	if err != nil {
+		return err
+	}
+	defer release()
+	err = os.Remove(s.path())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}

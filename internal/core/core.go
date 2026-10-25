@@ -67,9 +67,10 @@ const (
 // agent's process in the daemon's engine without attaching a UI, so a
 // CLI-created session comes up running the way the TUI starts one on open.
 const (
-	ActionStart      = "start"       // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
-	ActionRestart    = "restart"     // restart only the named agent, preserving its conversation (host only)
-	ActionAuthReload = "auth-reload" // restart live Claude agents with the current login (conversations resume)
+	ActionStart         = "start"   // ensure an agent's (or a root's agents') process is running (ID=agent or root id)
+	ActionRestart       = "restart" // restart only the named agent, preserving its conversation (host only)
+	ActionAccountManage = "account-manage"
+	ActionAuthReload    = "auth-reload" // restart live Claude agents with the current login (conversations resume)
 	// ActionCodexLogin starts (or, with Fields["cancel"]="true", cancels) the
 	// daemon-owned central Codex ChatGPT login. Host only; poll QueryCodexAuth
 	// for the authorization URL and the outcome.
@@ -255,7 +256,10 @@ const (
 	// can identify an older daemon by the latter's unknown-query response.
 	QueryVersion = "version"
 	// QueryCodexAuth reports central Codex auth (-> CodexAuthStatus). Host only.
-	QueryCodexAuth = "codex-auth"
+	QueryAccounts        = "accounts"
+	QueryAccountManage   = "account-manage"
+	QueryAccountCeremony = "account-ceremony"
+	QueryCodexAuth       = "codex-auth"
 )
 
 // CodexAuthStatus is the QueryCodexAuth read model. It never carries a token.
