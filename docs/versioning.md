@@ -13,7 +13,7 @@ There are three independent numbers:
   fields retain the protocol number; a breaking wire or behavior change bumps
   it. Doctor currently accepts an exact match.
 - SQLite `PRAGMA user_version` identifies the database schema. Schema zero is
-  the legacy unmarked database; the current schema is two. Each daemon reports
+  the legacy unmarked database; the current schema is three. Each daemon reports
   the schema range it can migrate/open and refuses a database outside that range
   before applying migrations.
 
@@ -30,6 +30,23 @@ executable. Rebuild, reinstall and restart the daemon; reopen dashboards and
 restart any provider service. `go version -m /path/to/amux` reports the build's
 Go version and, for a Git checkout, revision. `make vuln` checks reachable
 vulnerabilities in both modules using the root module's selected toolchain.
+
+Schema three promotes legacy hidden repository workgroups into normal visible
+coordinator workgroups. Writable store opening preserves root/member IDs, member
+sandboxes, branches, conversation IDs and archive state, adds a dedicated
+`coordinator/` directory, and initializes explicit repository grants from the
+legacy root's stored repo scope. Repository homes remain management context.
+The migration does not move member files or launch runtimes. It is repeatable,
+and `user_version` advances to three only when the promotion transaction commits;
+a failed promotion from schema two leaves its marker at two so it can be retried.
+Read-only store opening never migrates and requires the current schema.
+
+For this upgrade, install the schema-three binary and restart the daemon before
+resuming management operations; then reconnect dashboards and restart provider
+services. Replacing only the CLI leaves the already-running daemon on its old
+code. A schema-two daemon cannot open a database upgraded to schema three and
+must be upgraded, not restarted with the older executable. Do not lower
+`user_version` to make an older binary accept the promoted data.
 
 The version query is additive. A daemon from before version reporting responds
 with an unknown-query error; the CLI reports its version and database schema as
