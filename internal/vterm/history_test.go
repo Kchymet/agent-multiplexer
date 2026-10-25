@@ -111,11 +111,8 @@ func TestHistoryCapturesScrolledOffRows(t *testing.T) {
 		t.Fatalf("rendered %d rows, want 4", len(rows))
 	}
 	// Two newest history rows above the live screen's top two rows; the
-	// indicator rides on row 0's right edge.
-	if !strings.HasPrefix(rows[0], "line 6") || !strings.Contains(rows[0], "↑ 2/7") {
-		t.Fatalf("row 0 = %q, want line 6 + indicator", rows[0])
-	}
-	if rows[1] != "line 7" || rows[2] != "line 8" || rows[3] != "line 9" {
+	// indicator is text for the embedder, never drawn into the pane.
+	if rows[0] != "line 6" || rows[1] != "line 7" || rows[2] != "line 8" || rows[3] != "line 9" {
 		t.Fatalf("rows = %q", rows)
 	}
 	if term.Indicator() != " ↑ 2/7 " {
@@ -331,36 +328,71 @@ func TestEraseDisplayKeepsPenBackground(t *testing.T) {
 	}
 }
 
-// TestHistoryPrimaryVersusAlternate: the alternate screen keeps no amux history
-// and cannot be scrolled; entering it returns the viewport to live; leaving it
-// hands the untouched primary history back.
+// altFrames returns the alternate-screen frame history as text rows per
+// frame, oldest first.
+func altFrames(term *Terminal) [][]string {
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	out := make([][]string, 0, len(term.alt.frames))
+	for _, fr := range term.alt.frames {
+		rows := make([]string, len(fr))
+		for y, row := range fr {
+			rows[y] = row.String()
+		}
+		out = append(out, rows)
+	}
+	return out
+}
+
+// syncFrame paints lines on rows 1..n inside a synchronized update, the way
+// owned-mode Codex redraws its transcript: cursor positioning and erase-line
+// only, never a scroll operation.
+func syncFrame(lines ...string) string {
+	var b strings.Builder
+	b.WriteString("\x1b[?2026h")
+	for y, l := range lines {
+		fmt.Fprintf(&b, "\x1b[%d;1H\x1b[2K%s", y+1, l)
+	}
+	b.WriteString("\x1b[?2026l")
+	return b.String()
+}
+
+// TestHistoryPrimaryVersusAlternate: the two screens have separate histories.
+// Entering the alternate screen returns the viewport to live and starts an
+// empty frame history; nothing the program does there touches primary history;
+// leaving hands the untouched primary history back and drops the frames.
 func TestHistoryPrimaryVersusAlternate(t *testing.T) {
 	term := New(20, 4)
 	term.write(numbered(1, 8)) // 5 rows into history
 	term.ScrollLines(3)
 	term.write("\x1b[?1049h")
 	v := term.Viewport()
-	if !v.AltScreen || v.Offset != 0 || v.HistoryLen != 5 {
+	if !v.AltScreen || v.Offset != 0 || v.HistoryLen != 0 {
 		t.Fatalf("after entering alt: %+v", v)
 	}
-	term.write(strings.Repeat("alt row\r\n", 30)) // scrolls inside the alt screen
-	term.write("\x1b[2J" + ratatuiFrame(4, "alt"))
-	if v := term.Viewport(); v.HistoryLen != 5 {
-		t.Fatalf("alt-screen scrolling leaked into primary history: %+v", v)
-	}
 	if term.ScrollLines(2) || term.ScrollPages(1) || term.ScrollToTop() {
-		t.Fatal("scrolling moved on the alternate screen")
+		t.Fatal("scrolling moved with no completed frame")
 	}
-	if term.Viewport().Offset != 0 || term.Indicator() != "" {
-		t.Fatalf("alt viewport %+v", term.Viewport())
+	term.write(strings.Repeat("alt row\r\n", 30)) // scrolls inside the alt screen
+	term.write("\x1b[2J" + syncFrame("one", "two", "three", "four"))
+	term.write(syncFrame("five", "six", "seven", "eight"))
+	v = term.Viewport()
+	if !v.AltScreen || v.HistoryLen != 4 {
+		t.Fatalf("alt frame history: %+v (frames %q)", v, altFrames(term))
 	}
-	if rows := renderRows(term); rows[0] != "row 1 alt" {
-		t.Fatalf("alt frame row 0 = %q", rows[0])
+	if !term.ScrollLines(2) || term.Indicator() != " ↑ 2/4 " {
+		t.Fatalf("alt scroll: %+v %q", term.Viewport(), term.Indicator())
+	}
+	if rows := renderRows(term); rows[0] != "three" || rows[1] != "four" || rows[2] != "five" || rows[3] != "six" {
+		t.Fatalf("alt scrolled rows = %q", rows)
 	}
 	term.write("\x1b[?1049l")
 	v = term.Viewport()
-	if v.AltScreen || v.HistoryLen != 5 {
+	if v.AltScreen || v.Offset != 0 || v.HistoryLen != 5 {
 		t.Fatalf("after leaving alt: %+v", v)
+	}
+	if n := len(altFrames(term)); n != 0 {
+		t.Fatalf("%d alt frames kept after leaving the alternate screen", n)
 	}
 	if !term.ScrollLines(2) {
 		t.Fatal("primary history not scrollable after alt")
@@ -368,6 +400,140 @@ func TestHistoryPrimaryVersusAlternate(t *testing.T) {
 	rows := renderRows(term)
 	if !strings.HasPrefix(rows[0], "line 4") || rows[1] != "line 5" || rows[2] != "line 6" {
 		t.Fatalf("rows after alt = %q", rows)
+	}
+}
+
+// TestAltFramesCommitPreviouslyPainted: DECSET 2026 commits the frame on
+// display, so the live frame is never in history; identical and blank frames
+// are dropped; a nested begin does not commit a half-painted screen.
+func TestAltFramesCommitPreviouslyPainted(t *testing.T) {
+	term := New(12, 2)
+	term.write("\x1b[?1049h")
+	term.write(syncFrame("a1", "a2")) // the blank entry screen is not kept
+	if got := altFrames(term); len(got) != 0 {
+		t.Fatalf("blank frame kept: %q", got)
+	}
+	term.write(syncFrame("a1", "a2"))      // identical repaint: commits a, once
+	term.write(syncFrame("a1", "a2"))      // again: the committed a is unchanged
+	term.write("\x1b[2;3H")                // cursor-only movement between frames
+	term.write(syncFrame("b1", "b2"))      // commits nothing new (still a)
+	term.write("\x1b[?2026h\x1b[1;1Hhalf") // begins c, commits b
+	term.write("\x1b[?2026h")              // nested begin: no commit
+	term.write("\x1b[?2026l")
+	term.write(syncFrame("d1", "d2")) // commits the finished c
+	want := [][]string{{"a1", "a2"}, {"b1", "b2"}, {"half", "b2"}}
+	if got := altFrames(term); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("frames = %q, want %q", got, want)
+	}
+	v := term.Viewport()
+	if v.HistoryLen != 6 || v.Offset != 0 {
+		t.Fatalf("viewport %+v", v)
+	}
+	// The live frame d is on screen and not in history; scrolling shows the
+	// stream of committed rows above it.
+	term.ScrollLines(1)
+	if rows := renderRows(term); rows[0] != "b2" || rows[1] != "d1" {
+		t.Fatalf("rows at offset 1 = %q", rows)
+	}
+	term.ScrollToTop()
+	if rows := renderRows(term); rows[0] != "a1" || rows[1] != "a2" {
+		t.Fatalf("rows at top = %q", rows)
+	}
+	snap := term.Snapshot()
+	if !snap.AltScreen || snap.Offset != 6 || snap.Text(0) != "a1" || snap.Text(1) != "a2" {
+		t.Fatalf("snapshot %+v %q %q", snap, snap.Text(0), snap.Text(1))
+	}
+	// New output returns to live, and the frame it begins is committed.
+	term.write(syncFrame("e1", "e2"))
+	if v := term.Viewport(); v.Offset != 0 || v.HistoryLen != 8 {
+		t.Fatalf("after output %+v", v)
+	}
+}
+
+// TestAltFramesChunkBoundaries: frame capture happens at the sequence, so the
+// same bytes chunked differently yield the same frame history.
+func TestAltFramesChunkBoundaries(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("\x1b[?1049h\x1b[?1000h\x1b[?1006h")
+	for i := 0; i < 12; i++ {
+		b.WriteString(syncFrame(fmt.Sprintf("turn %d ⠋ 日本", i), "composer", fmt.Sprintf("status %d", i)))
+	}
+	all := b.String()
+	whole := New(16, 3)
+	whole.write(all)
+	wantFrames := altFrames(whole)
+	if len(wantFrames) != 11 {
+		t.Fatalf("whole: %d frames", len(wantFrames))
+	}
+	whole.ScrollLines(7)
+	wantRows := renderRows(whole)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for trial := 0; trial < 20; trial++ {
+		term := New(16, 3)
+		rest := all
+		for len(rest) > 0 {
+			n := 1 + rng.Intn(min(len(rest), 11))
+			term.write(rest[:n])
+			rest = rest[n:]
+		}
+		if got := altFrames(term); fmt.Sprint(got) != fmt.Sprint(wantFrames) {
+			t.Fatalf("trial %d frames differ:\n%q\n%q", trial, got, wantFrames)
+		}
+		term.ScrollLines(7)
+		if got := renderRows(term); fmt.Sprint(got) != fmt.Sprint(wantRows) {
+			t.Fatalf("trial %d rows differ:\n%q\n%q", trial, got, wantRows)
+		}
+	}
+}
+
+// TestAltFramesBounded: the frame history is bounded by rows, dropping whole
+// frames oldest first, with the newest frame always kept; it never mixes with
+// primary history and RIS clears it.
+func TestAltFramesBounded(t *testing.T) {
+	term := New(10, 3)
+	term.write(numbered(1, 5)) // 2 primary rows
+	term.SetHistoryLimit(7)    // two 3-row frames fit, three do not
+	term.write("\x1b[?1049h")
+	for i := 0; i < 6; i++ {
+		term.write(syncFrame(fmt.Sprintf("f%d", i), "x", "y"))
+	}
+	frames := altFrames(term)
+	if len(frames) != 2 || frames[0][0] != "f3" || frames[1][0] != "f4" {
+		t.Fatalf("frames = %q", frames)
+	}
+	if v := term.Viewport(); v.HistoryLen != 6 {
+		t.Fatalf("viewport %+v", v)
+	}
+	term.SetHistoryLimit(1) // smaller than a frame: the newest frame survives
+	if frames := altFrames(term); len(frames) != 1 || frames[0][0] != "f4" {
+		t.Fatalf("frames after shrink = %q", frames)
+	}
+	term.ScrollToTop()
+	if v := term.Viewport(); v.Offset != 3 {
+		t.Fatalf("offset after shrink %+v", v)
+	}
+	term.write("\x1bc") // RIS: both histories go
+	if v := term.Viewport(); v.AltScreen || v.HistoryLen != 0 || len(altFrames(term)) != 0 {
+		t.Fatalf("after RIS %+v", v)
+	}
+	// Primary history never saw the frames.
+	term.SetHistoryLimit(0)
+	term.write(numbered(1, 4))
+	if got := term.historyText(); len(got) != 2 || got[0] != "line 1" || got[1] != "line 2" {
+		t.Fatalf("primary history = %q", got)
+	}
+}
+
+// TestAltWithoutSyncNoHistory: an alternate-screen program that never uses
+// synchronized output completes no frame, so it keeps its own scrolling.
+func TestAltWithoutSyncNoHistory(t *testing.T) {
+	term := New(10, 3)
+	term.write("\x1b[?1049h")
+	for i := 0; i < 5; i++ {
+		term.write(fmt.Sprintf("\x1b[1;1H\x1b[2Kframe %d\x1b[2;1Hbody", i))
+	}
+	if v := term.Viewport(); !v.AltScreen || v.HistoryLen != 0 || term.ScrollLines(1) {
+		t.Fatalf("history without frame boundaries: %+v", v)
 	}
 }
 
@@ -453,22 +619,27 @@ func TestHistoryResetClears(t *testing.T) {
 	}
 }
 
-// TestViewportReturnsLive covers the auto-live rules: growth returns to live,
-// a cursor-only repaint keeps the offset, input returns to live.
+// TestViewportReturnsLive covers the auto-live rules: any output returns to
+// live — rows scrolling into history or a repaint that changes text alike — and
+// so does input.
 func TestViewportReturnsLive(t *testing.T) {
 	var sent []byte
 	term := NewRemote(20, 4, func(b []byte) { sent = append(sent, b...) }, nil)
 	defer term.Close()
 	term.write(numbered(1, 10))
 	term.ScrollLines(3)
-	term.write(ratatuiFrame(4, "spin")) // repaint only
-	if off := term.Viewport().Offset; off != 3 {
-		t.Fatalf("repaint moved the viewport to %d", off)
+	// While scrolled, the lower rows show the live screen.
+	if rows := renderRows(term); rows[3] != "line 8" {
+		t.Fatalf("live rows under scrolled viewport: %q", rows)
 	}
-	// While scrolled, the lower rows show the live screen as it repaints.
-	if rows := renderRows(term); rows[3] != "row 1 spin" {
-		t.Fatalf("live rows not updating under scrolled viewport: %q", rows)
+	term.write(ratatuiFrame(4, "spin")) // repaint without scrolling
+	if off := term.Viewport().Offset; off != 0 {
+		t.Fatalf("repaint left the viewport at %d", off)
 	}
+	if rows := renderRows(term); rows[0] != "row 1 spin" {
+		t.Fatalf("live frame after return: %q", rows)
+	}
+	term.ScrollLines(3)
 	term.write("\x1b[4;1Hnew output\r\n") // scrolls one row off
 	if off := term.Viewport().Offset; off != 0 {
 		t.Fatalf("growth left the viewport at %d", off)
@@ -483,8 +654,8 @@ func TestViewportReturnsLive(t *testing.T) {
 }
 
 // TestSnapshotAlignedWithRender: the snapshot is the frame's cells — same
-// shape, same text per physical row — minus the indicator, detached from later
-// output, with a revision that moves on every change.
+// shape, same text per physical row, no indicator in either — detached from
+// later output, with a revision that moves on every change.
 func TestSnapshotAlignedWithRender(t *testing.T) {
 	term := New(24, 4)
 	term.write(numbered(1, 10))
@@ -496,14 +667,7 @@ func TestSnapshotAlignedWithRender(t *testing.T) {
 		t.Fatalf("snapshot header %+v", snap)
 	}
 	for y := 0; y < 4; y++ {
-		got, want := snap.Text(y), rows[y]
-		if y == 0 {
-			if strings.Contains(got, "↑") {
-				t.Fatalf("indicator leaked into snapshot row 0: %q", got)
-			}
-			want = strings.TrimRight(strings.TrimSuffix(want, " ↑ 2/7"), " ")
-		}
-		if got != want {
+		if got, want := snap.Text(y), rows[y]; got != want || strings.Contains(want, "↑") {
 			t.Fatalf("row %d: snapshot %q, render %q", y, got, want)
 		}
 	}
@@ -538,15 +702,29 @@ func TestSnapshotAlignedWithRender(t *testing.T) {
 	}
 }
 
-func TestIndicatorNeedsRoom(t *testing.T) {
-	term := New(8, 3)
-	term.write(numbered(1, 6))
-	term.ScrollLines(1)
-	if strings.Contains(term.Render(), "↑") {
-		t.Fatal("indicator drawn into a pane too narrow for it")
-	}
-	if term.Indicator() == "" {
-		t.Fatal("Indicator text should still be available")
+// TestIndicatorStaysOutOfPane: the badge is text for the embedder's border;
+// Render never overlays it, so a selection over row 0 copies what is there,
+// in narrow and wide panes alike.
+func TestIndicatorStaysOutOfPane(t *testing.T) {
+	for _, cols := range []int{8, 40} {
+		term := New(cols, 3)
+		term.write(numbered(1, 6))
+		term.ScrollLines(1)
+		if strings.Contains(term.Render(), "↑") {
+			t.Fatalf("cols %d: indicator drawn into the pane", cols)
+		}
+		if term.Indicator() != " ↑ 1/4 " {
+			t.Fatalf("cols %d: indicator %q", cols, term.Indicator())
+		}
+		snap, rows := term.Snapshot(), renderRows(term)
+		for y := range rows {
+			if snap.Text(y) != rows[y] {
+				t.Fatalf("cols %d row %d: snapshot %q render %q", cols, y, snap.Text(y), rows[y])
+			}
+		}
+		if rows[0] != "line 4" {
+			t.Fatalf("cols %d row 0 = %q", cols, rows[0])
+		}
 	}
 }
 
