@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -165,6 +166,103 @@ func TestManagerInitialPromptOnce(t *testing.T) {
 	}
 }
 
+func TestManagerReconnectsTransportWithoutReplacingLiveProcess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	servers := make(chan *fakeServer, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		servers <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+
+	m := NewManager(context.Background(), "")
+	defer m.Shutdown()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	ensure := func() (*Supervisor, error) {
+		return m.Ensure(context.Background(), "reconnect", "", nil, []string{"sleep", "60"}, endpoint, "gpt-main", "", "")
+	}
+	sup, err := ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := <-servers
+	sup.mu.Lock()
+	pid := sup.proc.Process.Pid
+	sup.mu.Unlock()
+
+	first.close() // daemon transport only; the synthetic App Server process lives
+	deadline := time.Now().Add(time.Second)
+	for sup.live() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if sup.live() {
+		t.Fatal("first transport did not close")
+	}
+	streamAcrossReconnect := sup.Subscribe(context.Background(), sup.hub.lastSeq())
+	select {
+	case _, ok := <-streamAcrossReconnect:
+		if !ok {
+			t.Fatal("transport loss closed the event hub while App Server remained live")
+		}
+	default:
+	}
+
+	reconnected, err := ensure()
+	if err != nil {
+		t.Fatalf("Ensure after transport loss: %v", err)
+	}
+	if reconnected != sup {
+		t.Fatal("transport recovery replaced the supervisor")
+	}
+	sup.mu.Lock()
+	gotPID := sup.proc.Process.Pid
+	gotModel := sup.cfg.Model
+	sup.mu.Unlock()
+	if gotPID != pid {
+		t.Fatalf("transport recovery replaced App Server pid %d with %d", pid, gotPID)
+	}
+	if gotModel != "" {
+		t.Fatalf("transport recovery retained stale launch model %q", gotModel)
+	}
+	second := <-servers
+	resume, ok := second.sawCall("thread/resume")
+	if !ok {
+		t.Fatal("reconnect did not resume the pinned thread")
+	}
+	var params map[string]any
+	if err := json.Unmarshal(resume.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if got := params["threadId"]; got != "thr_1" {
+		t.Fatalf("reconnect thread = %v, want thr_1", got)
+	}
+	if _, ok := params["model"]; ok {
+		t.Fatal("reconnect reapplied the launch-time model over the native thread")
+	}
+
+	// The opposite boundary remains strict: actual process exit (not transport
+	// loss) closes the serving stream without waiting for another manager poll.
+	stream := sup.Subscribe(context.Background(), sup.hub.lastSeq())
+	if err := sup.proc.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case _, ok := <-stream:
+		if ok {
+			t.Fatal("received an event after App Server process exit")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("App Server process exit did not close the serving stream")
+	}
+}
+
 // TestManagerEmptyLookups checks the no-supervisor paths: Get misses, Live is
 // empty, and Close is a harmless no-op. These are the states the daemon hits on
 // every steer/poll for a session that is not (or not yet) structured.
@@ -181,7 +279,7 @@ func TestManagerEmptyLookups(t *testing.T) {
 	m.Close("nope") // idempotent after shutdown
 }
 
-func TestManagerDoesNotKeepDisconnectedSupervisorLiveWithPendingTool(t *testing.T) {
+func TestManagerTransportLossDoesNotCloseSupervisorWithPendingTool(t *testing.T) {
 	m := NewManager(context.Background(), "")
 	sup, fs, client := newFakePair(t)
 	attach(t, sup, client)
@@ -215,6 +313,35 @@ func TestManagerDoesNotKeepDisconnectedSupervisorLiveWithPendingTool(t *testing.
 	}
 	if m.Live()["disconnected"] {
 		t.Fatal("dead transport with a pending tool remained in liveness snapshot")
+	}
+	sup.mu.Lock()
+	closed := sup.closed
+	sup.mu.Unlock()
+	if closed {
+		t.Fatal("transport loss closed the supervisor and would kill native App Server work")
+	}
+}
+
+func TestManagerCloseSerializesWithReplacementStart(t *testing.T) {
+	m := NewManager(context.Background(), "")
+	gate := m.startGate("same-session")
+	<-gate // model an in-progress replacement start owning the endpoint
+
+	closed := make(chan struct{})
+	go func() {
+		m.Close("same-session")
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close bypassed the per-session start gate; socket cleanup can race replacement bind")
+	case <-time.After(20 * time.Millisecond):
+	}
+	gate <- struct{}{}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not proceed after replacement gate released")
 	}
 }
 

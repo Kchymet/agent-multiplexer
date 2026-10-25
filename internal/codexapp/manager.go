@@ -55,10 +55,10 @@ func NewManager(ctx context.Context, bin string) *Manager {
 	return m
 }
 
-// startGate returns the per-session creation semaphore, creating it once.
-// Serializing Ensure per session BEFORE spawning prevents two callers from each
-// launching an App Server on the same socket and the loser's cleanup unlinking
-// the winner's listener, while still allowing a queued caller to honor context.
+// startGate returns the per-session lifecycle semaphore, creating it once.
+// Serializing Ensure/Close per session prevents two starts from competing and
+// prevents an old supervisor's cleanup from unlinking a replacement listener,
+// while still allowing a queued Ensure caller to honor context.
 func (m *Manager) startGate(sessionID string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -76,37 +76,61 @@ func (m *Manager) startGate(sessionID string) chan struct{} {
 func (m *Manager) Get(sessionID string) (*Supervisor, bool) {
 	m.mu.Lock()
 	s, ok := m.sup[sessionID]
-	if ok && !s.live() {
-		delete(m.sup, sessionID)
-		ok = false
-	}
 	m.mu.Unlock()
-	if !ok && s != nil {
-		_ = s.Close()
+	if !ok || !s.live() {
+		return nil, false
 	}
-	return s, ok
+	return s, true
 }
 
 // existingForEnsure performs the live lookup together with the one-way shutdown
 // check. Ensure must not return even an already-live handle once transport drain
 // has started, because its caller could otherwise begin new RPC work after the
 // manager's interrupt snapshot.
-func (m *Manager) existingForEnsure(sessionID string) (*Supervisor, bool, error) {
+func (m *Manager) existingForEnsure(ctx context.Context, sessionID string) (*Supervisor, bool, error) {
 	m.mu.Lock()
 	if m.stopping {
 		m.mu.Unlock()
 		return nil, false, errManagerStopping
 	}
 	s, ok := m.sup[sessionID]
-	if ok && !s.live() {
+	m.mu.Unlock()
+	if !ok {
+		return nil, false, nil
+	}
+	if s.live() {
+		return s, true, nil
+	}
+	if s.processRunning() {
+		// A lost daemon-side WebSocket does not imply that the App Server, a
+		// native client, or its current turn died. Rejoin the existing process;
+		// never replace it merely because our control transport disappeared.
+		reconnectCtx, cancelReconnect := context.WithCancel(m.supervisorCtx)
+		stopAdmission := context.AfterFunc(ctx, cancelReconnect)
+		err := s.reconnect(reconnectCtx)
+		if !stopAdmission() || ctx.Err() != nil {
+			cancelReconnect()
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+		}
+		if err != nil {
+			cancelReconnect()
+			return nil, false, err
+		}
+		return s, true, nil
+	}
+
+	// The owned process really exited. We hold the per-session start gate, so
+	// teardown (including Unix-socket cleanup) completes before a successor can
+	// bind the same endpoint.
+	m.mu.Lock()
+	if m.sup[sessionID] == s {
 		delete(m.sup, sessionID)
-		ok = false
 	}
 	m.mu.Unlock()
-	if !ok && s != nil {
-		_ = s.Close()
-	}
-	return s, ok, nil
+	_ = s.Close()
+	return nil, false, nil
 }
 
 // SetChatGPTAuth selects the central ChatGPT token provider for supervisors
@@ -161,15 +185,10 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	if err := m.ctx.Err(); err != nil {
 		return nil, err
 	}
-	// Fast path: already live.
-	if s, ok, err := m.existingForEnsure(sessionID); err != nil {
-		return nil, err
-	} else if ok {
-		return s, nil
-	}
-	// Serialize creation for this session with context-aware admission, then
-	// re-check under the gate so only one caller ever spawns. A request waiting
-	// behind another cold start must not outlive its final-admission deadline.
+	// Serialize every start/reconnect/close transition for this session. Close
+	// must finish killing the prior process and cleaning its Unix endpoint before
+	// a replacement may bind that path. A request waiting behind another cold
+	// start must not outlive its final-admission deadline.
 	gate := m.startGate(sessionID)
 	select {
 	case <-ctx.Done():
@@ -185,7 +204,7 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	if err := m.ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s, ok, err := m.existingForEnsure(sessionID); err != nil {
+	if s, ok, err := m.existingForEnsure(ctx, sessionID); err != nil {
 		return nil, err
 	} else if ok {
 		return s, nil
@@ -327,6 +346,14 @@ func boundAccountFor(sessionID, resumeThreadID string) string {
 // thread — archiving a session should not lose its conversation. Use Forget to
 // drop the identity when a session is deleted for good. No-op for an unknown id.
 func (m *Manager) Close(sessionID string) {
+	m.close(sessionID, false)
+}
+
+func (m *Manager) close(sessionID string, forget bool) {
+	gate := m.startGate(sessionID)
+	<-gate
+	defer func() { gate <- struct{}{} }()
+
 	m.mu.Lock()
 	s := m.sup[sessionID]
 	delete(m.sup, sessionID)
@@ -334,13 +361,15 @@ func (m *Manager) Close(sessionID string) {
 	if s != nil {
 		_ = s.Close()
 	}
+	if forget {
+		_ = RemoveIdentity(sessionID)
+	}
 }
 
 // Forget stops the supervisor (if any) and removes the persisted identity — for a
 // session deleted for good, so no stale sidecar or event log lingers.
 func (m *Manager) Forget(sessionID string) {
-	m.Close(sessionID)
-	_ = RemoveIdentity(sessionID)
+	m.close(sessionID, true)
 }
 
 // Shutdown stops every supervisor (daemon shutdown). Identities are left on disk
@@ -406,18 +435,11 @@ func (m *Manager) InterruptTransports() {
 func (m *Manager) Live() map[string]bool {
 	m.mu.Lock()
 	out := make(map[string]bool, len(m.sup))
-	var dead []*Supervisor
 	for id, s := range m.sup {
-		if !s.live() {
-			delete(m.sup, id)
-			dead = append(dead, s)
-			continue
+		if s.live() {
+			out[id] = true
 		}
-		out[id] = true
 	}
 	m.mu.Unlock()
-	for _, s := range dead {
-		_ = s.Close()
-	}
 	return out
 }
