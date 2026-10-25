@@ -112,6 +112,10 @@ func TestNormalize(t *testing.T) {
 		"alt+Escape":    "alt+esc",
 		"f5":            "f5",
 		"shift+f5":      "shift+f5",
+		"Alt+PageUp":    "alt+pgup",
+		"Alt+PageDown":  "alt+pgdown",
+		"alt+pgdn":      "alt+pgdown",
+		"Alt+End":       "alt+end",
 	}
 	for in, want := range good {
 		got, err := Normalize(in)
@@ -128,6 +132,8 @@ func TestNormalize(t *testing.T) {
 		"alt",     // no base key
 		"q",       // no modifier: would be stolen from the agent
 		"shift+q", // shift alone doesn't disambiguate a rune either
+		"pgup", "pgdown", "end", "shift+up", "shift+enter",
+		"shift+pgup", "shift+pgdown",
 		"alt+h+l", // two base keys
 		"alt+bogus",
 		"f99",
@@ -136,6 +142,45 @@ func TestNormalize(t *testing.T) {
 		if got, err := Normalize(in); err == nil {
 			t.Errorf("Normalize(%q) = %q, want error", in, got)
 		}
+	}
+}
+
+func TestHistoryBindingsRoundTrip(t *testing.T) {
+	configDir(t)
+	for _, tc := range []struct{ action, chord string }{
+		{ScrollUp, "alt+pgup"},
+		{ScrollDown, "alt+pgdown"},
+		{ScrollLive, "alt+end"},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			km, err := Load()
+			if err != nil || km.Chord(tc.action) != tc.chord || km.Action(tc.chord) != tc.action {
+				t.Fatalf("default %s = %q, %v", tc.action, km.Chord(tc.action), err)
+			}
+			if _, err := Set(tc.action, "alt+h"); err == nil {
+				t.Fatal("accepted collision with focus-rail")
+			}
+			if _, err := Set(Quit, tc.chord); err == nil {
+				t.Fatal("accepted collision with history default")
+			}
+			if _, err := Set(tc.action, "ctrl+g"); err != nil {
+				t.Fatal(err)
+			}
+			km, err = Load()
+			if err != nil || km.Action("ctrl+g") != tc.action || km.Action(tc.chord) != "" {
+				t.Fatalf("rebound %s: %v, %v", tc.action, km.List(), err)
+			}
+			if err := Unset(tc.action); err != nil {
+				t.Fatal(err)
+			}
+			km, err = Load()
+			if err != nil || km.Action(tc.chord) != tc.action {
+				t.Fatalf("restored %s: %v, %v", tc.action, km.List(), err)
+			}
+			if _, err := Set(tc.action, tc.chord); err != nil {
+				t.Fatalf("cannot persist default chord: %v", err)
+			}
+		})
 	}
 }
 
