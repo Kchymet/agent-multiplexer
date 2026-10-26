@@ -48,6 +48,19 @@ Generate temporary keys/certificates where needed and use explicit fake tokens.
 Review `git diff --cached` before committing. Keep local scanner reports outside
 the checkout, and redact them before sharing.
 
+## Migrations and compatibility
+
+Prefer forward migration over supporting old forms indefinitely. When a
+durable format, setting or routing model changes, migrate existing state
+(including dormant, archived and console sessions) automatically and
+idempotently on upgrade, keep the original as evidence where it is cheap, and
+refuse unknown or newer formats explicitly rather than reinitializing them.
+Do not add opt-in compatibility modes or require repeated manual steps such as
+per-workload rebinds. Never copy a credential to migrate it (rotating refresh
+tokens must keep a single owner); report a pending one-time login instead.
+Keep conversation identities, transcripts and history intact across the
+migration.
+
 ## Pull requests
 
 Explain the observed problem, the change, and the checks actually run. For

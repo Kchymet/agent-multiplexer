@@ -62,6 +62,13 @@ type sessionRuntime struct {
 	events              *sessionEventPager
 	eventsErr           error
 	credentialOperation func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error)
+	// wakes carries the ids whose request directory changed, so run serves a
+	// request on arrival instead of on the next tick. passDone reports each
+	// pass's end to run, which reruns a subject woken mid-pass (again).
+	wakes    chan string
+	passDone chan passEnd
+	again    map[string]bool
+
 	// beforeReportEffect, when set, runs just before a report's write, under
 	// whatever locks the report path holds there. Tests use it to model a slow
 	// report; production leaves it nil.
@@ -78,6 +85,7 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		servers:        make(map[string]*sessionrpc.Server),
 		initialized:    make(map[string]bool),
 		responseBudget: newSessionResponseBudget(),
+		wakes:          make(chan string, sessionWakeQueue),
 		applyResult:    wsops.ApplyResult,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
@@ -94,27 +102,94 @@ func (r *sessionRuntime) start(ctx context.Context) error {
 	return r.reconcile(ctx)
 }
 
+// run reconciles mailboxes every poll interval and serves each one when a
+// request lands in it. The poll tick still serves mailboxes the platform cannot
+// watch; a watched one is otherwise served on its wake, after a pass that was
+// woken or left work queued, and on the slow fallback tick for missed events.
 func (r *sessionRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(r.poll)
 	defer ticker.Stop()
+	fallback := time.NewTicker(sessionrpc.WatchFallbackInterval)
+	defer fallback.Stop()
+	r.passDone = make(chan passEnd, sessionWakeQueue)
 	// Join every admitted pass before the daemon tears down: close takes
 	// dispatch ownership, which an in-flight dispatch may still be waiting for.
 	defer r.passes.Wait()
+	all := true
 	for {
-		if err := r.serve(ctx); err != nil && ctx.Err() == nil {
+		if err := r.serveReconciled(ctx, all); err != nil && ctx.Err() == nil {
 			log.Printf("session RPC: %v", err)
 		}
-		select {
-		case <-ctx.Done():
+		var ok bool
+		if all, ok = r.awaitTick(ctx, ticker.C, fallback.C); !ok {
 			return
-		case <-ticker.C:
-		case inspect := <-r.inspect:
-			inspect()
 		}
 	}
 }
 
-func (r *sessionRuntime) serve(ctx context.Context) error {
+// awaitTick serves wakes and pass ends as they arrive until the next tick. It
+// reports whether that tick is the fallback (serve everything) and false once
+// ctx ends.
+func (r *sessionRuntime) awaitTick(ctx context.Context, tick, fallback <-chan time.Time) (all, ok bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return false, false
+		case <-tick:
+			return false, true
+		case <-fallback:
+			return true, true
+		case inspect := <-r.inspect:
+			inspect()
+			return false, true
+		case id := <-r.wakes:
+			r.serveOne(ctx, id)
+		case end := <-r.passDone:
+			if end.more || r.again[end.id] {
+				delete(r.again, end.id)
+				r.serveOne(ctx, end.id)
+			}
+		}
+	}
+}
+
+// sessionWakeQueue bounds pending wakes. A dropped wake is served by the
+// fallback tick.
+const sessionWakeQueue = 1024
+
+type passEnd struct {
+	id   string
+	more bool // the pass left requests queued
+}
+
+// notifier is a mailbox's RequestNotify: it queues id for run without
+// blocking the watcher.
+func (r *sessionRuntime) notifier(id string) func() {
+	if r.wakes == nil {
+		return nil
+	}
+	wakes := r.wakes
+	return func() {
+		select {
+		case wakes <- id:
+		default:
+		}
+	}
+}
+
+// serveOne serves id at once if its mailbox is open and every mailbox is
+// initialized.
+func (r *sessionRuntime) serveOne(ctx context.Context, id string) {
+	if err := r.serveDue(ctx, func(candidate string) bool { return candidate == id }); err != nil && ctx.Err() == nil {
+		log.Printf("session RPC: %v", err)
+	}
+}
+
+func (r *sessionRuntime) serve(ctx context.Context) error { return r.serveReconciled(ctx, true) }
+
+// serveReconciled reconciles, then serves every mailbox when all is set and
+// otherwise only those that are not watched or were just initialized.
+func (r *sessionRuntime) serveReconciled(ctx context.Context, all bool) error {
 	start := time.Now()
 	if err := r.reconcileTick(ctx); err != nil {
 		return err
@@ -123,10 +198,19 @@ func (r *sessionRuntime) serve(ctx context.Context) error {
 		// reconcile runs on the serving goroutine: no new pass starts meanwhile.
 		log.Printf("session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
 	}
-	return r.serveCurrent(ctx)
+	if all {
+		return r.serveCurrent(ctx)
+	}
+	return r.serveDue(ctx, func(id string) bool { return !r.servers[id].Watched() })
 }
 
 func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
+	return r.serveDue(ctx, func(string) bool { return true })
+}
+
+// serveDue initializes every mailbox, then starts a pass for each due one and
+// each one initialized just now (its queue predates its watch).
+func (r *sessionRuntime) serveDue(ctx context.Context, due func(string) bool) error {
 	ids := make([]string, 0, len(r.servers))
 	for id := range r.servers {
 		ids = append(ids, id)
@@ -134,6 +218,7 @@ func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 	sort.Strings(ids)
 	ready := true
 	var initializeErr error
+	fresh := map[string]bool{}
 	for _, id := range ids {
 		if r.initialized[id] {
 			continue
@@ -141,6 +226,7 @@ func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 		err := r.servers[id].Initialize(ctx)
 		if err == nil {
 			r.initialized[id] = true
+			fresh[id] = true
 			continue
 		}
 		ready = false
@@ -155,7 +241,9 @@ func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 		return initializeErr
 	}
 	for _, id := range ids {
-		r.startPass(ctx, id)
+		if fresh[id] || due(id) {
+			r.startPass(ctx, id)
+		}
 	}
 	return nil
 }
@@ -167,17 +255,34 @@ func (r *sessionRuntime) startPass(ctx context.Context, id string) {
 		r.serving = make(map[string]chan struct{})
 	}
 	if done, ok := r.serving[id]; ok && !finished(done) {
+		// The running pass may have listed the queue before this request
+		// landed; serve again when it ends.
+		if r.again == nil {
+			r.again = make(map[string]bool)
+		}
+		r.again[id] = true
 		return
 	}
 	server := r.servers[id]
+	if server == nil {
+		return
+	}
 	done := make(chan struct{})
 	r.serving[id] = done
+	passDone := r.passDone
 	r.passes.Add(1)
 	go func() {
 		defer r.passes.Done()
-		defer close(done)
-		if _, err := server.ServeOnce(ctx); err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
+		_, err := server.ServeOnce(ctx)
+		if err != nil && !errors.Is(err, sessionrpc.ErrQueueFull) && !errors.Is(err, sessionrpc.ErrClosed) {
 			log.Printf("session RPC %s: %v", id, err)
+		}
+		close(done)
+		if passDone != nil {
+			select {
+			case passDone <- passEnd{id: id, more: errors.Is(err, sessionrpc.ErrQueueFull)}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 }
@@ -252,7 +357,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
-		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget})
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID)})
 	if err != nil {
 		return err
 	}

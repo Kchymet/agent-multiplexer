@@ -52,8 +52,8 @@ usage: amux auth <command>
   status [claude|codex]           show the amux-owned configuration and limits
   accounts [--json]             view Claude/Codex configuration and limits
   logout <claude|codex>          fence delivery and clear the central login
-  default <claude|codex>         use the amux configuration for new workloads
-  rebind <claude|codex> <id>      explicitly bind and stop one workload
+  default <claude|codex>         confirm the central configuration (always the default)
+  rebind <claude|codex> <id>      stop one workload so it relaunches on the current login now
   restart [--force]               restart idle Claude agents with current credentials
 
 login runs `+"`claude setup-token`"+` (browser sign-in) and then asks you to paste
@@ -71,13 +71,18 @@ short-lived ChatGPT tokens from the daemon. A setup-token is valid for one
 year and is not refreshed; run login again to reissue it before then.
 Reissuing does not revoke the previous token. Status never prints a secret.
 
-One amux-owned configuration is available for each harness. Legacy source
-bindings remain internal for compatibility. Configuration uses amux CLI/TUI;
-Harness web account views are read-only.
+One amux-owned configuration is available for each harness. Configuration
+uses amux CLI/TUI; Harness web account views are read-only.
 
-Defaults affect newly created workloads. Existing workloads keep their binding;
-use explicit rebind after replacing an opaque Claude credential. Login pauses
-new credential delivery until completion or cancellation.
+Every workload, including existing and archived ones, follows its harness's
+central configuration. Each new harness process uses the newest successfully
+configured login, including a different account, subscription or API key;
+running processes keep what they received and are never stopped by login.
+Older host, shared and environment selections were migrated to central once,
+automatically; no credential is copied, so a harness without a central login
+needs one "amux auth login" before its workloads launch again (status reports
+the migration as pending). Login pauses new credential delivery until
+completion or cancellation.
 `)
 }
 
@@ -142,46 +147,35 @@ func authLogin(args []string) error {
 	return authMachineLoginMode(harness, mode, stdin)
 }
 
-// claudeAuthStatus reports the selected Claude mode. Central mode is described
-// from the store's metadata; legacy modes ask Claude about the store they use.
+// claudeAuthStatus describes the central Claude login when no daemon is
+// running. Every workload follows central auth; a saved legacy claude.auth
+// value is reported as retired, never used to inspect another store.
 func claudeAuthStatus() error {
-	mode, err := amuxcfg.AuthMode("claude")
+	if saved, _ := amuxcfg.SavedAuthMode("claude"); saved != "" && saved != amuxcfg.AuthCentral {
+		fmt.Printf("claude.auth: central (saved %s is retired; workloads migrated to central)\n", saved)
+	} else {
+		fmt.Println("claude.auth: central")
+	}
+	st, err := centralauth.ClaudeStore().Status()
 	if err != nil {
-		return err
+		return fmt.Errorf("central Claude credential unusable: %w", err)
 	}
-	saved, _ := amuxcfg.SavedAuthMode("claude")
-	source := "default"
-	if saved != "" {
-		source = "saved"
-	}
-	fmt.Printf("claude.auth: %s (%s)\n", mode, source)
-	switch mode {
-	case amuxcfg.AuthCentral:
-		st, err := centralauth.ClaudeStore().Status()
-		if err != nil {
-			return fmt.Errorf("central Claude credential unusable: %w", err)
-		}
-		if !st.Configured {
-			fmt.Println("central login: none — run `amux auth login` to create one for all sessions")
-			return nil
-		}
-		fmt.Printf("central login: setup-token %s, stored %s, generation %d\n",
-			st.Fingerprint, st.StoredAt.Local().Format(time.DateTime), st.Generation)
-		fmt.Println("lifetime: Claude documents setup-token tokens as valid for one year; amux does not refresh them")
-		user := claudecfg.User()
-		// A spec that names only the template: status has no session, so the
-		// user's own settings are the layer every new session starts from.
-		sp := cfghome.Spec{Template: user.Dir, Dir: user.Dir}
-		if conflicts := claudecfg.CentralConflicts(sp, "", os.Environ()); len(conflicts) > 0 {
-			fmt.Printf("warning: %s would override the central token in sessions (this shell's environment is shown; the daemon's may differ)\n",
-				strings.Join(conflicts, ", "))
-		}
-		return nil
-	case amuxcfg.AuthEnvironment:
-		fmt.Println("credentials: from the inherited environment and Claude settings (API key, apiKeyHelper, cloud provider or gateway); amux provides none")
+	if !st.Configured {
+		fmt.Println("central login: none — run `amux auth login claude` to create one for all sessions")
 		return nil
 	}
-	return runClaudeAuth("status")
+	fmt.Printf("central login: setup-token %s, stored %s, generation %d\n",
+		st.Fingerprint, st.StoredAt.Local().Format(time.DateTime), st.Generation)
+	fmt.Println("lifetime: Claude documents setup-token tokens as valid for one year; amux does not refresh them")
+	user := claudecfg.User()
+	// A spec that names only the template: status has no session, so the
+	// user's own settings are the layer every new session starts from.
+	sp := cfghome.Spec{Template: user.Dir, Dir: user.Dir}
+	if conflicts := claudecfg.CentralConflicts(sp, "", os.Environ()); len(conflicts) > 0 {
+		fmt.Printf("warning: %s would override the central token in sessions (this shell's environment is shown; the daemon's may differ)\n",
+			strings.Join(conflicts, ", "))
+	}
+	return nil
 }
 
 func readTokenLine(in io.Reader) (string, error) {
@@ -220,31 +214,6 @@ func withoutCredentialOverrides(env []string) []string {
 		out = append(out, kv)
 	}
 	return out
-}
-
-// runClaudeAuth runs `claude auth <verb>` against the store a legacy mode
-// selects: the older amux shared directory, or the host account otherwise.
-func runClaudeAuth(verb string) error {
-	// Resolve the installed Claude/wrapper exactly as agent launches do, but do
-	// not pass model or permission flags to a CLI auth subcommand.
-	argv, err := agent.Argv("claude", "")
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(argv[0], "auth", verb)
-	if verb == "login" || claudecfg.AuthMode() == amuxcfg.AuthShared && claudecfg.SharedAuthEnabled() {
-		cmd.Dir = claudecfg.SharedAuthDir()
-		cmd.Env = claudecfg.AuthCommandEnv(os.Environ())
-	} else {
-		// Inspect the host account that host-mode sessions inherit, including
-		// its environment credential overrides.
-		cmd.Env = os.Environ()
-	}
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Claude auth %s failed: %w", verb, err)
-	}
-	return nil
 }
 
 func reloadClaudeAuth(force bool) error {

@@ -29,8 +29,9 @@ func newServingFixture(t *testing.T, dispatch map[string]func() sessionrpc.Dispa
 	t.Cleanup(func() { authority.Close() })
 	f := &servingFixture{
 		authority: authority,
-		runtime:   &sessionRuntime{servers: map[string]*sessionrpc.Server{}, initialized: map[string]bool{}},
-		grants:    map[string]access.SessionAccess{},
+		runtime: &sessionRuntime{servers: map[string]*sessionrpc.Server{}, initialized: map[string]bool{},
+			wakes: make(chan string, sessionWakeQueue)},
+		grants: map[string]access.SessionAccess{},
 	}
 	for _, id := range ids {
 		dir := filepath.Join(t.TempDir(), id)
@@ -48,7 +49,7 @@ func newServingFixture(t *testing.T, dispatch map[string]func() sessionrpc.Dispa
 				Dispatch: func(context.Context, sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
 					return handle(), nil
 				},
-			}, sessionrpc.ServerOptions{})
+			}, sessionrpc.ServerOptions{RequestNotify: f.runtime.notifier(id)})
 		if err != nil {
 			t.Fatal(err)
 		}

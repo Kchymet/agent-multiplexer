@@ -36,6 +36,8 @@ func TestMain(m *testing.M) {
 					return Secret{}, fetchDenied
 				case "blocked":
 					return Secret{}, fetchBlocked
+				case "superseded":
+					return Secret{}, fetchSuperseded
 				case "unavailable":
 					return Secret{}, fetchUnavailable
 				case "unknown":
@@ -156,6 +158,27 @@ func TestFetchFromSessionRequestsOnlyItsHarnessAndHidesDetail(t *testing.T) {
 	}
 }
 
+// A superseded launch is permanent: the launcher exits so the pane can be
+// relaunched on a fresh launch, instead of retrying forever.
+func TestLaunchExitsWhenSuperseded(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, self, "/bin/sh", "-c", "exit 0")
+	cmd.Env = append(os.Environ(), launchChildEnv+"=1", "AMUX_LAUNCH_FAILURE=superseded")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 75 {
+		t.Fatalf("superseded launch = %v: %s", err, out)
+	}
+	if msg := string(out); !strings.Contains(msg, "restart the workload") || strings.Contains(msg, "retrying automatically") {
+		t.Fatalf("guidance: %s", msg)
+	}
+}
+
 // Exercise the actual retry/exec loop, including a change in failure category.
 // A successful retry must reach the child without printing secrets or mistaking
 // a broker timeout, denial or unreadable store for an absent login.
@@ -170,7 +193,7 @@ func TestLaunchClassifiesFailuresAndRecovers(t *testing.T) {
 	}{
 		{"timeout", "within 10 seconds", false},
 		{"denied", "access was denied", false},
-		{"blocked", "binding is blocked", false},
+		{"blocked", "delivery is paused", false},
 		{"unavailable", "could not read", false},
 		{"unknown", "mailbox request failed", false},
 		{"missing", "No central Claude login", true},

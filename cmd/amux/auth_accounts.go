@@ -213,16 +213,10 @@ func authMachineStatus(harness string) error {
 			continue
 		}
 		fmt.Printf("%s configuration: %s (%s; mode %s)\nidentity: %s; plan: %s\nlimits: %s (%s)\n", harness, p.ID, p.State, p.Mode, p.Identity.State, p.Identity.Plan, p.Limits.State, p.Limits.Source)
-		if s.Defaults[harness] != p.ID {
-			fmt.Printf("New workloads still use a preserved legacy source; run amux auth default %s to select this configuration.\n", harness)
+		if from := s.MigrationPending[harness]; from != "" {
+			fmt.Printf("Workloads migrated from the %s login follow this configuration; run amux auth login %s once.\n", from, harness)
 		}
 		printAccountLimits(p.Limits)
-		for _, q := range s.Profiles {
-			if q.ID == s.Defaults[harness] && q.ID != p.ID {
-				fmt.Printf("%s legacy default %s limits: %s (%s)\n", harness, q.ID, q.Limits.State, q.Limits.Source)
-				printAccountLimits(q.Limits)
-			}
-		}
 		if p.Error != "" {
 			fmt.Println(p.Error)
 		}

@@ -79,7 +79,8 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 			delete(d.authPending, k)
 			continue
 		}
-		d.captureRestart(k).apply(&spec)
+		record := d.captureRestart(k)
+		d.restartIntent(startIntent{record: &record, resumeGoal: true}, &spec)
 		dir, env, argv, err := d.resolve(spec, k.Tab)
 		if err != nil {
 			log.Printf("amux: auth reload %s: %v", k.AgentID, err)
@@ -88,12 +89,13 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 		}
 		// Resolving a launch can take time; recheck before interrupting the pane.
 		if !pending.force && d.instanceActivity(k) != engine.ActivitySafe {
+			retireUnstarted(k.AgentID, argv)
 			continue
 		}
 		d.permissions.retireAnd(k.AgentID, func() { d.engine.Kill(k) })
 		delete(d.authPending, k)
 		if _, _, err := d.publishPermissionRuntime(k.AgentID, func() (any, error) {
-			return d.engine.Ensure(ctx, engine.Spec{
+			return d.ensurePane(ctx, engine.Spec{
 				Key: k, Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 			})
 		}); err != nil {

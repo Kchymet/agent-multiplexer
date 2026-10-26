@@ -4,7 +4,6 @@ import (
 	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/centralauth"
-	"amux/internal/codexapp"
 	"amux/internal/codexauth"
 	"amux/internal/console"
 	"amux/internal/core"
@@ -19,6 +18,10 @@ import (
 	"strings"
 	"time"
 )
+
+// errLegacyRetired refuses selecting a host, shared or environment default:
+// every workload follows its harness's central profile.
+var errLegacyRetired = errors.New("account_legacy_source_retired")
 
 type accountAttempt struct {
 	profile, initiator string
@@ -143,7 +146,6 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 				p.Error = ""
 				p.Revision++
 				s.Profiles[p.ID] = p
-				s.PinInitialCredential(p.ID)
 				return nil
 			})
 			if e != nil {
@@ -173,10 +175,12 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		}
 		// The built-in console is synthetic and absent from SQL inventory.
 		rows = append(rows, console.Session())
+		all := make(map[string]string, len(rows))
 		for _, row := range rows {
-			if err := accounts.BindExisting(row.ID, agent.Canonical(row.Agent)); err != nil {
-				return fail("account_binding_invalid")
-			}
+			all[row.ID] = agent.Canonical(row.Agent)
+		}
+		if err := accounts.BindAll(all); err != nil {
+			return fail("account_binding_invalid")
 		}
 	}
 	if r.Operation == hp.AccountRebind {
@@ -194,15 +198,11 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			return fail("account_status_unavailable")
 		}
 		p, err := s.Profile(r.ProfileID, r.Revision)
-		if err != nil || p.Harness != agent.Canonical(row.Agent) || p.State != "ready" {
+		if err != nil || p.Harness != agent.Canonical(row.Agent) || p.Source != "central" || p.State != "ready" {
 			return fail("account_binding_invalid")
 		}
-		if p.Harness == "codex" {
-			identity, exists := codexapp.LoadIdentity(r.WorkloadID)
-			if exists && identity.ThreadID != "" && identity.ChatGPTAccount != "" && identity.ChatGPTAccount != p.Identity.AccountID {
-				return fail("account_rebind_requires_new_workload")
-			}
-		}
+		// A different native account no longer requires a new workload: the
+		// restarted process resumes the same thread under the current login.
 		// Runtime teardown may wait for startup/native auth. Do not hold the
 		// attempt mutex needed by native completion while waiting for that gate.
 		d.accountMu.Unlock()
@@ -223,29 +223,21 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		prior = p
 		switch r.Operation {
 		case hp.AccountRebind:
+			// Every binding already follows central; rebind only applies the
+			// current login now instead of at the workload's next launch.
 			b, ok := s.Bindings[r.WorkloadID]
-			if !ok || b.Harness != p.Harness {
+			if !ok || b.Harness != p.Harness || p.State != "ready" {
 				return accounts.ErrBlocked
 			}
-			if p.State != "ready" {
-				return accounts.ErrBlocked
-			}
-			b.CredentialMode = p.Mode
-			if b.CredentialMode == "" {
-				b.CredentialMode = "subscription"
-			}
-			b.ProfileID = p.ID
-			b.Source = p.Source
-			b.ExpectedAccount = p.Identity.AccountID
-			b.CredentialVersion = s.CredentialVersion[p.ID]
-			b.CredentialUnknown = false
-			b.AwaitingFirstCredential = false
 			b.Revision++
 			b.Origin = "explicit-rebind"
 			s.Bindings[r.WorkloadID] = b
 		case hp.AccountDefault:
 			if s.DefaultRevisions[p.Harness] != r.DefaultRevision {
 				return accounts.ErrStale
+			}
+			if p.Source != "central" {
+				return errLegacyRetired
 			}
 			s.DefaultRevisions[p.Harness]++
 			s.Defaults[p.Harness] = p.ID
@@ -287,6 +279,9 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	if e != nil {
 		if errors.Is(e, accounts.ErrStale) {
 			return fail("account_revision_changed")
+		}
+		if errors.Is(e, errLegacyRetired) {
+			return fail("account_legacy_source_retired")
 		}
 		return fail("account_operation_failed")
 	}
@@ -418,13 +413,13 @@ func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt, key str
 			p.Error = ""
 			p.Revision++
 			s.Profiles[p.ID] = p
-			s.PinInitialCredential(p.ID)
 			return nil
 		}); err != nil {
 			return err
 		}
 		a.ceremony.State = "succeeded"
 		a.ceremony.AuthURL = ""
+		d.readiness.clear()
 		return nil
 	}
 	var err error
@@ -673,6 +668,8 @@ func (d *Daemon) retireAccountAttemptLocked(a *accountAttempt, state string) {
 	if a.ceremony.State != "pending" {
 		return
 	}
+	// Expiry and disconnect change profile state outside accountCall.
+	d.readiness.clear()
 	a.cancel()
 	a.ceremony.State = state
 	a.ceremony.AuthURL = ""
@@ -695,6 +692,7 @@ func (d *Daemon) restoreAccountAttemptLocked(a *accountAttempt) {
 	if a.prior.State != "ready" || a.retiredEpoch == 0 {
 		return
 	}
+	d.readiness.clear()
 	_ = accounts.Update(func(s *accounts.State) error {
 		p := s.Profiles[a.profile]
 		if p.DeliveryEpoch != a.retiredEpoch || p.State != "blocked" {

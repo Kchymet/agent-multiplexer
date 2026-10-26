@@ -439,7 +439,10 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	// its coordinator, not a "start every member" (which is what `start <root>`
 	// means — see startEngineFor).
 	err := d.admitDeferredEffect(ctx, id, func(admitCtx context.Context) error {
-		if err := d.startAgent(admitCtx, id); err != nil {
+		// The prompt being typed below is this start's turn, and the prompt hook
+		// makes it the coordinator's goal; a goal continuation on top of it
+		// would be a second, competing submission.
+		if err := d.startAgentWith(admitCtx, id, startIntent{}); err != nil {
 			return err
 		}
 		in, ok := d.engine.Lookup(key)
@@ -644,12 +647,18 @@ func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([]eng
 
 // typedSteerText types text into the composer as the user's own words (see
 // agent.Keys.TypedNewline): newlines become the harness's newline key, tabs
-// become spaces (a typed Tab is a composer key, not text), and any other
+// become spaces (a typed Tab is a composer key, not text), a leading composer
+// trigger is neutralized with a space, and any other
 // control character is refused, since typed it would be a keystroke rather than
 // text. The pieces are spaced so the runtime reads them as typing, not a paste.
 func typedSteerText(verb string, keys agent.Keys, text string) ([]engine.InputStep, error) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\t", "    ")
+	if text != "" && strings.ContainsRune(keys.TypedTriggers, rune(text[0])) {
+		// Typed first, "/" would run a slash command and "!" a shell command;
+		// a leading space keeps the steer a prompt (see claudeKeys).
+		text = " " + text
+	}
 	var typed []byte
 	for _, r := range text {
 		switch {

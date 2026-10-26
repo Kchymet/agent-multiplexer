@@ -142,15 +142,23 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	if err = s.d.authority.Valid(ctx, principal); err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}
-	if binding.ExpectedAccount != "" && req.PreviousAccountID != "" && binding.ExpectedAccount != req.PreviousAccountID {
-		return codexapp.ChatGPTToken{}, codexauth.ErrAccountChanged
+	// A superseded process never receives a credential, and a refresh is only
+	// for the process that the binding currently pins.
+	if req.Launch.Seq < binding.Launch || (req.Refresh && req.Launch.Seq != binding.Launch) {
+		return codexapp.ChatGPTToken{}, accounts.ErrSuperseded
 	}
-	previous := binding.ExpectedAccount
-	if previous == "" {
-		previous = req.PreviousAccountID
+	// The current process keeps its account; a newer launch takes the current
+	// central login (another account continues the same thread).
+	previous := req.PreviousAccountID
+	if req.Launch.Seq == binding.Launch && binding.DeliveredEpoch != 0 && binding.ExpectedAccount != "" {
+		if previous != "" && previous != binding.ExpectedAccount {
+			return codexapp.ChatGPTToken{}, codexauth.ErrAccountChanged
+		}
+		previous = binding.ExpectedAccount
 	}
 	if profile.Mode == "api" && req.Refresh {
-		return codexapp.ChatGPTToken{}, errors.New("API keys do not support subscription refresh")
+		// A running subscription process never adopts the replacement API key.
+		return codexapp.ChatGPTToken{}, fmt.Errorf("%w: API keys do not support subscription refresh", accounts.ErrSuperseded)
 	}
 	t, err := c.provider.SessionToken(ctx, req.SessionID, req.Refresh, previous)
 	if err != nil {
@@ -179,7 +187,7 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 			}
 			return commit()
 		})
-	})
+	}, req.Launch)
 	if err != nil {
 		return codexapp.ChatGPTToken{}, err
 	}

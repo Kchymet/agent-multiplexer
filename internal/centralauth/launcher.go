@@ -55,6 +55,12 @@ func LaunchCredential(argv []string, stderr io.Writer, fetch func() (Credential,
 	token, err := fetch()
 	for previous := ""; err != nil; token, err = fetch() {
 		message := launchGuidance(err)
+		if errors.Is(err, fetchSuperseded) {
+			// Permanent for this launch: exit so the pane can be relaunched,
+			// which allocates a fresh launch on the current login.
+			fmt.Fprintln(stderr, "amux: "+message)
+			return 75
+		}
 		if message != previous {
 			fmt.Fprintln(stderr, "amux: "+message+"\nWaiting for authorized credential delivery; retrying automatically.")
 			previous = message
@@ -80,6 +86,8 @@ const (
 	fetchDenied      fetchFailure = "credential_access_denied"
 	fetchBlocked     fetchFailure = "account_binding_blocked"
 	fetchConflict    fetchFailure = "central_credential_conflict"
+	fetchSuperseded  fetchFailure = "account_runtime_superseded"
+	fetchChanged     fetchFailure = "account_revision_changed"
 	fetchMailbox     fetchFailure = "session mailbox unavailable"
 	fetchUnpublished fetchFailure = "session mailbox not published"
 	fetchTimeout     fetchFailure = "session mailbox request timed out"
@@ -98,7 +106,11 @@ func launchGuidance(err error) string {
 	case fetchDenied:
 		return "Claude credential access was denied. Check this workload's authorization in amux; logging in does not restore revoked access."
 	case fetchBlocked:
-		return "This workload's account binding is blocked. Check Accounts in amux; an account replacement may require explicit `amux auth rebind claude <workload-id>`."
+		return "Central Claude delivery is paused (login pending, logged out, or blocked). Check Accounts in amux; this workload uses the central login once it is ready."
+	case fetchSuperseded:
+		return "The central Claude login changed after this process was launched. A running process never switches logins; restart the workload to use the current login."
+	case fetchChanged:
+		return "Account metadata changed during delivery. Retrying with the current central login."
 	case fetchConflict:
 		return "Claude settings conflict with central credential delivery. Check provider and credential overrides for this workload."
 	case fetchUnavailable:
@@ -152,13 +164,19 @@ var openSession = func() (sessionQuerier, error) { return sessionrpc.OpenClient(
 // FetchFromSession asks the daemon for this session's Claude credential over
 // the signed mailbox. Errors are fixed RPC codes, never values or paths.
 func FetchFromSession() (Secret, error) {
-	c, e := fetchCredentialFromSession(false)
+	c, e := fetchCredentialFromSession(false, "")
 	return c.Token, e
 }
 
-func FetchCredentialFromSession() (Credential, error) { return fetchCredentialFromSession(true) }
+func FetchCredentialFromSession() (Credential, error) { return fetchCredentialFromSession(true, "") }
 
-func fetchCredentialFromSession(typed bool) (Credential, error) {
+// FetchLaunchCredentialFromSession requests the credential for one process
+// launch. Repeated requests for it receive the same credential version.
+func FetchLaunchCredentialFromSession(launch string) func() (Credential, error) {
+	return func() (Credential, error) { return fetchCredentialFromSession(true, launch) }
+}
+
+func fetchCredentialFromSession(typed bool, launch string) (Credential, error) {
 	client, err := openSession()
 	if err != nil {
 		return Credential{}, fetchMailbox
@@ -169,6 +187,9 @@ func fetchCredentialFromSession(typed bool) (Credential, error) {
 	fields := map[string]string{HarnessField: string(Claude)}
 	if typed {
 		fields[FormatField] = TypedFormat
+	}
+	if launch != "" {
+		fields[LaunchField] = launch
 	}
 	result, err := client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: fields})
 	// The launcher starts while the action that provisioned this session still
@@ -188,13 +209,17 @@ func fetchCredentialFromSession(typed bool) (Credential, error) {
 	var rejected *sessionrpc.RemoteError
 	if typed && errors.As(err, &rejected) && (rejected.Code == "access_denied" || rejected.Code == "credential_access_denied" || rejected.Code == "invalid_operation") {
 		typed = false
-		result, err = client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: map[string]string{HarnessField: string(Claude)}})
+		untyped := map[string]string{HarnessField: string(Claude)}
+		if launch != "" {
+			untyped[LaunchField] = launch // the launch fence still applies
+		}
+		result, err = client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: untyped})
 	}
 	if err != nil {
 		var remote *sessionrpc.RemoteError
 		if errors.As(err, &remote) {
 			switch remote.Code {
-			case string(fetchMissing), string(fetchUnavailable), string(fetchBlocked), string(fetchConflict):
+			case string(fetchMissing), string(fetchUnavailable), string(fetchBlocked), string(fetchConflict), string(fetchSuperseded), string(fetchChanged):
 				return Credential{}, fetchFailure(remote.Code)
 			case "credential_access_denied", "credential_revoked", "credential_invalid", "access_denied", "authentication_failed", "expired":
 				return Credential{}, fetchDenied

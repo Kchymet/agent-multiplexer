@@ -37,7 +37,7 @@ func TestTemplateSeed(t *testing.T) {
 	must(os.WriteFile(filepath.Join(user, "history.jsonl"), []byte("{}\n"), 0o644))
 	must(os.WriteFile(filepath.Join(user, "projects", "-x", "t.jsonl"), []byte("{}\n"), 0o644))
 	must(os.WriteFile(filepath.Join(user, CredentialsFile), []byte(`{"token":"x"}`), 0o600))
-	// The legacy host mode is an explicit selection; central is the default.
+	// A retired legacy host setting no longer shares the host credentials.
 	must(amuxcfg.SetAuthMode("claude", amuxcfg.AuthHost))
 	must(os.WriteFile(User().ConfigPath(),
 		[]byte(`{"hasCompletedOnboarding":true,"numStartups":7,"mcpServers":{"a":{}},"projects":{"/home/u":{"hasTrustDialogAccepted":true}}}`), 0o600))
@@ -81,12 +81,12 @@ func TestTemplateSeed(t *testing.T) {
 	if _, has := cfg["projects"]; has {
 		t.Errorf(".claude.json should be seeded without the user's projects table")
 	}
-	// Credentials: a symlink to the user's file, never a copy.
-	if target, err := os.Readlink(home.CredentialsPath()); err != nil || target != User().CredentialsPath() {
-		t.Errorf("credentials should link to the user's file: %q %v", target, err)
+	// Credentials: never linked, copied or bound from the user's login.
+	if _, err := os.Lstat(home.CredentialsPath()); !os.IsNotExist(err) {
+		t.Errorf("credentials entry in the copy: %v", err)
 	}
-	if binds := cfghome.Binds(sp); len(binds) != 1 || binds[0][1] != User().CredentialsPath() {
-		t.Errorf("Binds = %v, want just the credentials file at its own path", binds)
+	if binds := cfghome.Binds(sp); len(binds) != 0 {
+		t.Errorf("Binds = %v, want none", binds)
 	}
 
 	// A fresh copy has no drift — including the rewritten settings paths.
