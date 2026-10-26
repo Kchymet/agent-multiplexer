@@ -35,6 +35,10 @@ type Keys struct {
 	TypedNewline []byte
 	TypeChunk    int
 	TypeDelay    time.Duration
+	// TypedTriggers are the characters that, typed first into an empty
+	// composer, switch it into a command or shell mode instead of entering
+	// text. Typed text that starts with one is sent with a leading space.
+	TypedTriggers string
 	// SubmitDelay lets the TUI finish handling a paste before Enter arrives.
 	SubmitDelay time.Duration
 	// Interrupt stops the current turn without killing the process (`stop`).
@@ -97,6 +101,12 @@ func (k Keys) Steerable() bool {
 // words; typed in 256-byte pieces with newlines as backslash+Enter, Claude's
 // newline escape, it arrives verbatim as the user's own prompt).
 //
+// Typing reaches the composer's own key handling, which a paste bypassed: a
+// message whose first character is "/" runs a slash command and one starting
+// with "!" enters bash mode and runs the rest as a shell command (both verified
+// against CLI 2.1.310; "/" or "!" on a later line, "#", and "@" mentions are
+// treated exactly as when pasted). A leading space keeps such text a prompt.
+//
 // Interrupt is Ctrl+C, not the Esc the docs headline, because Esc is not
 // reliable here: with "editorMode": "vim" in Claude Code's settings — a per-user
 // setting amux cannot assume away — Esc is swallowed by the composer to enter vim
@@ -110,7 +120,8 @@ func claudeKeys() Keys {
 		Submit: keyEnter, Interrupt: keyCtrlC, Allow: keyEnter, Deny: keyEsc,
 		InterruptOnlyWhileBusy: true,
 		TypedNewline:           []byte("\\\r"), TypeChunk: 256, TypeDelay: 5 * time.Millisecond,
-		SubmitDelay: 100 * time.Millisecond,
+		TypedTriggers: "/!",
+		SubmitDelay:   100 * time.Millisecond,
 	}
 }
 
