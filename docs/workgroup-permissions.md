@@ -11,44 +11,47 @@ is the canonical list and is not repeated here. The surrounding roles are in
 ## Hierarchy
 
 ```
-HOST OPERATOR  (TUI, host CLI, web)                     never restricted
+AUTHENTICATED HOST OPERATOR  (local TUI, host CLI)      never restricted
   creates workgroups · sets the coordinator's repo grants · restores
-  archived sessions · changes goal state · moves, deletes, kills
+  archived sessions · steers goal state · moves, deletes, kills
+  (remote/provider callers hold their own separate grant)
   │
   ▼  one workgroup; its root row is the coordinator
-┌─────────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────────┐
 │ WORKGROUP A — COORDINATOR  (role coordinator, id = workgroup id)     │
-│  scope: itself + every session whose current RootID is this id      │
+│  scope: itself + every session whose current RootID is this id       │
 │  may: add-agent (own workgroup, granted repos only)                  │
-│       read member events · start · rename · steer · archive members │
-│       answer a MEMBER's permission request (never its own)          │
-│       archive the whole workgroup — after explicit user confirmation│
-│  may not: restore · touch another workgroup · change repo grants    │
-│           · steer goal · move/delete/kill · open panes or raw paths │
+│       read member events · start · rename · steer · archive members  │
+│       answer a MEMBER's permission request (never its own)           │
+│       archive the whole workgroup — after explicit user confirmation │
+│  may not: restore · touch another workgroup · change repo grants     │
+│           · steer goal · move/delete/kill · open panes or raw paths  │
 │      │ control flows one way: coordinator → member                   │
 │      ▼                                                               │
-│  ┌───────────────────────────┐   ┌───────────────────────────┐      │
-│  │ MEMBER A  (role empty)    │   │ MEMBER B  (role empty)    │      │
-│  │ self only: own events,   │   │ self only                 │      │
-│  │ status, name, start/stop,│   │ no sibling read, no       │      │
-│  │ prompt, `amux agent done`│   │ sibling control, no       │      │
-│  │                          │   │ coordinator control       │      │
-│  └───────────────────────────┘   └───────────────────────────┘      │
-└─────────────────────────────────────────────────────────────────────┘
+│ ┌────────────────────────────┐   ┌────────────────────────────┐      │
+│ │ MEMBER A  (role empty)     │   │ MEMBER B  (role empty)     │      │
+│ │ self only: own events,     │   │ self only                  │      │
+│ │ status, name, start/stop,  │   │ no sibling read, no        │      │
+│ │ prompt, `amux agent done`  │   │ sibling control, no        │      │
+│ │                            │   │ coordinator control        │      │
+│ └────────────────────────────┘   └────────────────────────────┘      │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 Three things that look like access but are not session control:
 
-- **Discovery is metadata, not access.** `amux agent sessions` lists every
-  host conversation's harness, path and cwd for any active session. It is the
-  deliberate read-only cross-session exception; it relaxes no event read and
-  no action (`internal/daemon/session_discovery.go`). Reading a session's
-  history is `amux agent events <id>`, which is workgroup-scoped.
-- **A control grant is not filesystem access.** A coordinator can steer and
-  read a member through the authenticated daemon RPC, but its sandbox mounts
-  only its own `coordinator/` directory, never the members' worktrees
-  ([sandbox configuration](sandbox-config.md)). Members likewise see only
-  their own worktree and private harness config.
+- **Discovery is metadata, not access.** `amux agent sessions` can expose
+  cross-session metadata (harness, transcript path, cwd) to any active
+  session. It is the deliberate read-only cross-session exception; it relaxes
+  no event read and no action (`internal/daemon/session_discovery.go`).
+  Reading a session's history is `amux agent events <id>`, which is
+  workgroup-scoped.
+- **A control grant is not a filesystem grant.** What a session may do over
+  the authenticated daemon RPC and what its process can see on disk are
+  separate grants. A coordinator can steer and read a member through the RPC
+  while its sandbox does not mount the member-containing workgroup parent;
+  the mount set itself is described in
+  [sandbox configuration](sandbox-config.md) and [Security](../SECURITY.md).
 - **Nobody approves itself.** A permission answer is accepted only from a
   principal other than the prompting session; see below.
 
@@ -74,8 +77,10 @@ ids, fields and environment variables only ever name a target
 - **Permission answers need proof of the prompt.** `steer verb=permission`
   must name `request_id` and `runtime_generation`, both taken from the
   member's `permission_request` event, and is never accepted on the caller's
-  own id. The daemon then refuses an id that does not match an open request of
-  the current runtime generation, so a replayed or guessed answer cannot land.
+  own id. The daemon then accepts the answer only if the request id names a
+  prompt the runtime currently has open and the generation names the current
+  runtime; otherwise it is refused (`internal/daemon/steer.go`,
+  `checkPermissionRequest`).
 - **add-agent stays inside the ceiling.** A coordinator can add only to its
   own workgroup, with the fields `agent`, `prompt`, `mode`, `model`, `repos`,
   and every listed repo must be in the grant set the host stored for that
@@ -84,12 +89,30 @@ ids, fields and environment variables only ever name a target
   session context and sends `set-archived archived=true` on that id. For a
   member this archives only the member. For a coordinator it archives the
   root, and direct members inherit the archived state: runtimes stop and
-  credentials are revoked. Repo homes and the console never archive
-  themselves.
-- **Host-only, for every session principal.** Restore (`archived=false` and
-  the `archive` toggle), `steer verb=goal`, repo-grant changes, move, delete,
-  kill, `new-workgroup` (except a repo home creating one limited to its own
-  repo), pane access, and raw runtime paths or records.
+  credentials are revoked. A repo home cannot archive itself. The dispatch
+  path accepts a self-completion only from an agent or coordinator role
+  (`internal/daemon/session_dispatch.go`, `isSelfCompletion`).
+- **Unavailable to every session principal.** Restore (`archived=false` and
+  the `archive` toggle), `steer verb=goal`, the coordinator repo ceiling
+  (`coordinator-set-repos`), daemon restart, auth reload, account and login
+  management, `subscribe`, pane access, and raw runtime paths, records and
+  account queries. Other host-scope operations (move, delete, kill, repo
+  add/remove, `new-workgroup`, `create-workspace`, refresh) are delegated to
+  the console and otherwise denied; the
+  [canonical table](agent-cli-sandbox.md#control-api-scopes) marks each one.
+- **Goal steering is not goal reporting.** `steer verb=goal` is the host's
+  control over a goal session's native goal: `status` active, paused,
+  complete or clear, an optional replacement objective, and an optional token
+  budget. It is distinct from the runtime reporting its own goal progress
+  (Codex `update_goal`, or `amux agent goal …` on a Claude coordinator),
+  which a coordinator does for itself and which never pauses, resumes or
+  clears the goal from outside.
+- **Authorization ceiling versus runtime support.** The policy decides
+  whether a principal may send an operation; the runtime decides whether it
+  can be carried out. An in-scope `interject`, `stop` or permission answer
+  still fails when the member has no live turn, no open prompt, or a runtime
+  that cannot prove its open requests. A denial is a scope result; an
+  execution failure is not a grant.
 
 ## Group archive: an instruction, not a daemon check
 
