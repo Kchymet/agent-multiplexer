@@ -202,3 +202,35 @@ credential 53s; first fetch also misses service publication → 5s). For the fix
 - **No lifecycle regressions:** no duplicate mailbox owner across
   close/retire/reopen, no lock-order cycle among `dispatchMu`/`effectMu`/
   `serveMu`/budget mutex, reconcile/init/shutdown joins still terminate.
+
+---
+
+## Independent re-run of author evidence `d347440d` (1a4fce WIP, no fix)
+
+Author's opt-in harnesses mapped via `go test -overlay` onto upstream `4a485da`
+(author commit adds only those two test files + `docs/session-mailbox-pressure.md`).
+
+| Harness | Condition | Result (b292d2 run) |
+|---|---|---|
+| `TestMeasureFirstDelivery` (`AMUX_MEASURE_FIRST=1`) | no pressure, no hold | **REPRODUCED** delivered after **5.068s**; launcher printed `fetchTransport` ("request failed"), i.e. first fetch misses unpublished `service.json`, then 5s `LaunchRetry` |
+| `TestMeasureMailboxPressure` 250ms × 6 subjects | pressure | **REPRODUCED** budget `files=128 bytes=82688 receipts=0`; credential after **53.26s**; launcher printed transport failure **then** the 10s timeout message; background 148 ok / 6 timed out, max 18.8s |
+| same, 5s × 6 subjects | negative control | budget `files=12`; credential after **5.07s** (publication miss only); background 18 ok / 0 timed out |
+
+Conclusions: two independent causes, both reproduced — (a) publication miss
+gives a deterministic ~5s first-start delay on every fresh session; (b) the
+128/60s global pool produces the 10s timeouts and tens-of-seconds delivery under
+ordinary multi-agent traffic.
+
+Notes on the harness for the fix PR:
+- `measureSignedCall` is a stat-only helper that never consumes/releases; after
+  a release-based fix it will still behave like an old client. Keep it only as
+  the **old-client compat control** (must stay bounded by 60s retention); the
+  pass/fail regression must use the production `sessionrpc.Client` /
+  `centralauth.FetchCredentialFromSession` path.
+- Convert both to non-opt-in assertions: fresh-session credential delivered on
+  the **first** attempt (no launcher guidance printed), latency ≪ 5s, and under
+  the 250ms × 6 load latency ≪ 10s.
+- Launcher misclassification: the publication miss surfaces as
+  "request failed … check daemon status", which misdirects users; with
+  publish-before-launch this path should be unreachable, but a not-yet-published
+  service is better reported/retried as "starting" with a short backoff.
