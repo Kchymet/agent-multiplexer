@@ -232,6 +232,7 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	// This is an actual process launch: it takes the newest central login, so
 	// the resumed thread's previous account is history, not a constraint.
 	cfg.PriorChatGPTAccounts = priorAccountsFor(sessionID, cfg.ResumeThreadID)
+	cfg.ResumeRequired = resumeRequiredFor(sessionID, cfg.ResumeThreadID)
 	if cfg.ChatGPTAuth != nil {
 		launch, err := accounts.BeginLaunch(sessionID, "codex")
 		if err != nil {
@@ -338,6 +339,17 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 		// Current identity, known not-yet-run — start fresh to avoid a doomed resume.
 		return ""
 	}
+}
+
+// resumeRequiredFor reports a resume target known to hold history: a resumable
+// identity, or one that ran under central auth. Only a legacy or never-run
+// thread may fall back to a fresh thread when its rollout is missing.
+func resumeRequiredFor(sessionID, resumeThreadID string) bool {
+	if resumeThreadID == "" {
+		return false
+	}
+	id, ok := LoadIdentity(sessionID)
+	return ok && id.ThreadID == resumeThreadID && (id.Resumable || id.ChatGPTAccount != "" || len(id.PriorChatGPTAccounts) > 0)
 }
 
 // priorAccountsFor returns the ChatGPT accounts a resumed thread ran under,

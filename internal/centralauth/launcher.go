@@ -73,6 +73,8 @@ const (
 	fetchDenied      fetchFailure = "credential_access_denied"
 	fetchBlocked     fetchFailure = "account_binding_blocked"
 	fetchConflict    fetchFailure = "central_credential_conflict"
+	fetchSuperseded  fetchFailure = "account_runtime_superseded"
+	fetchChanged     fetchFailure = "account_revision_changed"
 	fetchMailbox     fetchFailure = "session mailbox unavailable"
 	fetchTimeout     fetchFailure = "session mailbox request timed out"
 	fetchTransport   fetchFailure = "session mailbox request failed"
@@ -90,7 +92,11 @@ func launchGuidance(err error) string {
 	case fetchDenied:
 		return "Claude credential access was denied. Check this workload's authorization in amux; logging in does not restore revoked access."
 	case fetchBlocked:
-		return "This workload's account binding is blocked. Check Accounts in amux; an account replacement may require explicit `amux auth rebind claude <workload-id>`."
+		return "Central Claude delivery is paused (login pending, logged out, or blocked). Check Accounts in amux; this workload uses the central login once it is ready."
+	case fetchSuperseded:
+		return "The central Claude login changed after this process was launched. A running process never switches logins; restart the workload to use the current login."
+	case fetchChanged:
+		return "Account metadata changed during delivery. Retrying with the current central login."
 	case fetchConflict:
 		return "Claude settings conflict with central credential delivery. Check provider and credential overrides for this workload."
 	case fetchUnavailable:
@@ -181,7 +187,7 @@ func fetchCredentialFromSession(typed bool, launch string) (Credential, error) {
 		var remote *sessionrpc.RemoteError
 		if errors.As(err, &remote) {
 			switch remote.Code {
-			case string(fetchMissing), string(fetchUnavailable), string(fetchBlocked), string(fetchConflict):
+			case string(fetchMissing), string(fetchUnavailable), string(fetchBlocked), string(fetchConflict), string(fetchSuperseded), string(fetchChanged):
 				return Credential{}, fetchFailure(remote.Code)
 			case "credential_access_denied", "credential_revoked", "credential_invalid", "access_denied", "authentication_failed", "expired":
 				return Credential{}, fetchDenied

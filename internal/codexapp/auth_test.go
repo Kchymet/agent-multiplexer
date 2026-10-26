@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"amux/internal/accounts"
 	"context"
 	"encoding/json"
 	"errors"
@@ -439,15 +440,15 @@ func TestRefreshAfterCloseIsDropped(t *testing.T) {
 	}
 }
 
-// A resumed thread stays on the account it ran under: a central login now
-// pointing at another workspace fails the resume instead of moving it.
-func TestResumeRefusesDifferentPersistedAccount(t *testing.T) {
+// Within one process (a reconnect) the bound account is a constraint: a
+// central login now pointing at another workspace fails instead of moving it.
+func TestReconnectRefusesDifferentBoundAccount(t *testing.T) {
 	p := newStubProvider()
 	sup, fs, client := newAuthPair(t, p)
 	defer fs.close()
 	defer sup.Close()
 	sup.cfg.ResumeThreadID = "thr_1"
-	sup.auth = newTokenAuth(p, "s-auth", "acct-old", 0)
+	sup.auth = newTokenAuth(p, "s-auth", "acct-old", accounts.Launch{})
 	if err := sup.attach(context.Background(), client); !errors.Is(err, errAccountChanged) {
 		t.Fatalf("attach = %v, want errAccountChanged", err)
 	}
@@ -475,10 +476,12 @@ func TestIdentityRecordsBoundAccount(t *testing.T) {
 	if err := SaveIdentity(id); err != nil {
 		t.Fatal(err)
 	}
-	if got := boundAccountFor("s-auth", id.ThreadID); got != "acct-1" {
-		t.Fatalf("boundAccountFor = %q", got)
+	// A later process of the same thread records the account as history and
+	// is not constrained by it; another thread inherits nothing.
+	if got := priorAccountsFor("s-auth", id.ThreadID); len(got) != 1 || got[0] != "acct-1" {
+		t.Fatalf("priorAccountsFor = %q", got)
 	}
-	if got := boundAccountFor("s-auth", "thr_other"); got != "" {
+	if got := priorAccountsFor("s-auth", "thr_other"); len(got) != 0 {
 		t.Fatalf("another thread inherited the account: %q", got)
 	}
 	data, _ := os.ReadFile(identityPath("s-auth"))
@@ -629,7 +632,7 @@ func TestLoginCompletionErrorRedacted(t *testing.T) {
 // A completion for another login (a browser login started by a native
 // client carries a loginId) is not the token login's outcome.
 func TestForeignLoginCompletionIgnored(t *testing.T) {
-	a := newTokenAuth(newStubProvider(), "s", "", 0)
+	a := newTokenAuth(newStubProvider(), "s", "", accounts.Launch{})
 	ch := make(chan loginOutcome, 1)
 	a.completed = ch
 	if _, ok := a.loginCompleted(json.RawMessage(`{"loginId":"browser-1","success":true}`)); ok {

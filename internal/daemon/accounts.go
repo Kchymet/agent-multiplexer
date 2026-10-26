@@ -172,10 +172,12 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		}
 		// The built-in console is synthetic and absent from SQL inventory.
 		rows = append(rows, console.Session())
+		all := make(map[string]string, len(rows))
 		for _, row := range rows {
-			if err := accounts.BindExisting(row.ID, agent.Canonical(row.Agent)); err != nil {
-				return fail("account_binding_invalid")
-			}
+			all[row.ID] = agent.Canonical(row.Agent)
+		}
+		if err := accounts.BindAll(all); err != nil {
+			return fail("account_binding_invalid")
 		}
 	}
 	if r.Operation == hp.AccountRebind {

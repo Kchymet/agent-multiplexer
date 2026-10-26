@@ -34,22 +34,20 @@ const StoreVersion = 2
 // historyLimit bounds the per-binding record of earlier runtimes' deliveries.
 const historyLimit = 8
 
-// pendingLimit bounds allocated launches awaiting their first delivery. A
-// launch resolved for a pane that was then reused is never delivered.
-const pendingLimit = 4
-
 // Launch identifies one harness process launch. The nonce is handed only to
-// that process (the Codex supervisor, or the Claude launcher's argv, which its
-// exec replaces); metadata keeps only its hash.
+// launched processes (the Codex supervisor, or the Claude launcher's argv,
+// which its exec replaces); it is not a vendor credential.
 type Launch struct {
 	Seq   uint64
 	Nonce string
 }
 
-// PendingLaunch is an allocated launch awaiting its first delivery.
+// PendingLaunch is the allocated launch awaiting its first delivery. Every
+// launch resolved before that delivery reuses it, so a resolve whose pane was
+// then reused (a reattach) neither accumulates nor displaces allocations.
 type PendingLaunch struct {
-	Seq       uint64 `json:"seq"`
-	NonceHash string `json:"nonceHash"`
+	Seq   uint64 `json:"seq"`
+	Nonce string `json:"nonce"`
 }
 
 func nonceHash(nonce string) string {
@@ -81,12 +79,12 @@ type Binding struct {
 	Revision          uint64 `json:"revision"`
 	Origin            string `json:"origin"`
 	// Launch is the current runtime's launch sequence and LaunchNonce the hash
-	// of its nonce. Pending are allocated launches whose process has not
-	// received a credential yet. Launches allocates sequences.
-	Launch      uint64          `json:"launch,omitempty"`
-	LaunchNonce string          `json:"launchNonce,omitempty"`
-	Pending     []PendingLaunch `json:"pendingLaunches,omitempty"`
-	Launches    uint64          `json:"launches,omitempty"`
+	// of its nonce. Pending is the single allocated launch whose process has
+	// not received a credential yet. Launches allocates sequences.
+	Launch      uint64         `json:"launch,omitempty"`
+	LaunchNonce string         `json:"launchNonce,omitempty"`
+	Pending     *PendingLaunch `json:"pendingLaunch,omitempty"`
+	Launches    uint64         `json:"launches,omitempty"`
 	// MigratedFrom records the pre-central source of a migrated binding. It is
 	// evidence only and never routes a launch.
 	MigratedFrom string      `json:"migratedFrom,omitempty"`
@@ -367,37 +365,50 @@ func (s *State) Profile(id string, rev uint64) (hp.AccountProfile, error) {
 }
 
 // Bind records a new workload, or preserves its already recorded binding.
-func Bind(session, h string) error { return bind(session, h) }
+func Bind(session, h string) error { return BindAll(map[string]string{session: h}) }
 
 // BindExisting records a binding for a workload discovered without one. Every
 // binding follows central; there is no first-login or unknown-history state.
-func BindExisting(session, h string) error { return bind(session, h) }
+func BindExisting(session, h string) error { return Bind(session, h) }
 
-func bind(session, h string) error {
+// BindAll binds many workloads (session -> harness) in one transaction.
+func BindAll(sessions map[string]string) error {
+	return Update(func(s *State) error {
+		for session, h := range sessions {
+			if e := s.bind(session, h); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+}
+
+func (s *State) bind(session, h string) error {
 	if h == "" {
 		h = "claude"
 	}
 	if h != "claude" && h != "codex" {
 		return nil
 	}
-	return Update(func(s *State) error {
-		// Bootstrap the opaque version of a credential stored before the
-		// account service so that it counts as configured central state. An
-		// unreadable credential stays unconfigured here; delivery reports it.
-		if h == "claude" && s.CredentialVersion[ID(h, "central")] == 0 {
-			if c, err := centralauth.ClaudeStore().Load(); err == nil {
-				s.CredentialVersion[ID(h, "central")] = c.Generation
-			}
+	// Bootstrap the opaque version of a credential stored before the account
+	// service so that it counts as configured central state. A corrupt record
+	// stays unconfigured (delivery refuses it; login replaces it). An insecure
+	// store fails closed until its permissions are fixed.
+	if h == "claude" && s.CredentialVersion[ID(h, "central")] == 0 {
+		if c, err := centralauth.ClaudeStore().Load(); err == nil {
+			s.CredentialVersion[ID(h, "central")] = c.Generation
+		} else if errors.Is(err, centralauth.ErrInsecureStore) {
+			return err
 		}
-		if b, ok := s.Bindings[session]; ok {
-			if b.Harness != h {
-				return ErrBlocked
-			}
-			return nil
+	}
+	if b, ok := s.Bindings[session]; ok {
+		if b.Harness != h {
+			return ErrBlocked
 		}
-		s.Bindings[session] = Binding{ProfileID: ID(h, amuxcfg.AuthCentral), Harness: h, Source: amuxcfg.AuthCentral, Revision: 1, Origin: "machine-default"}
 		return nil
-	})
+	}
+	s.Bindings[session] = Binding{ProfileID: ID(h, amuxcfg.AuthCentral), Harness: h, Source: amuxcfg.AuthCentral, Revision: 1, Origin: "machine-default"}
+	return nil
 }
 
 // Mode is the source a launch of this workload uses. Every binding follows
@@ -439,19 +450,18 @@ func BeginLaunch(session, h string) (Launch, error) {
 	if _, e := rand.Read(raw[:]); e != nil {
 		return Launch{}, e
 	}
-	l := Launch{Nonce: hex.EncodeToString(raw[:])}
+	var l Launch
 	e := Update(func(s *State) error {
 		b, ok := s.Bindings[session]
 		if !ok || b.Harness != h {
 			return ErrBlocked
 		}
-		b.Launches = max(b.Launches, b.Launch) + 1
-		l.Seq = b.Launches
-		b.Pending = append(b.Pending, PendingLaunch{Seq: l.Seq, NonceHash: nonceHash(l.Nonce)})
-		if len(b.Pending) > pendingLimit {
-			b.Pending = append([]PendingLaunch(nil), b.Pending[len(b.Pending)-pendingLimit:]...)
+		if b.Pending == nil {
+			b.Launches = max(b.Launches, b.Launch) + 1
+			b.Pending = &PendingLaunch{Seq: b.Launches, Nonce: hex.EncodeToString(raw[:])}
+			s.Bindings[session] = b
 		}
-		s.Bindings[session] = b
+		l = Launch{Seq: b.Pending.Seq, Nonce: b.Pending.Nonce}
 		return nil
 	})
 	return l, e
@@ -476,8 +486,11 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 	return Update(func(s *State) error {
 		return admit(func() error {
 			b, ok := s.Bindings[session]
-			if !ok || b.Revision != revision || b.Source != amuxcfg.AuthCentral {
+			if !ok || b.Source != amuxcfg.AuthCentral {
 				return ErrBlocked
+			}
+			if b.Revision != revision {
+				return ErrStale // retryable: the binding changed during delivery
 			}
 			p := s.Profiles[b.ProfileID]
 			if p.DeliveryEpoch != epoch || p.State == "logged-out" || p.State == "login-pending" || p.State == "blocked" {
@@ -487,40 +500,29 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 			if mode == "" {
 				mode = "subscription"
 			}
-			pending := -1
-			for i, q := range b.Pending {
-				if q.Seq == l.Seq && q.NonceHash == hash {
-					pending = i
-				}
-			}
+			pending := b.Pending != nil && b.Pending.Seq == l.Seq && b.Pending.Nonce != "" && b.Pending.Nonce == l.Nonce
 			switch {
 			case l.Seq < b.Launch:
 				return ErrSuperseded
 			case l.Seq == b.Launch && b.LaunchNonce == hash && b.DeliveredEpoch != 0:
+				// A replacement login never retargets this running process.
 				if b.CredentialMode != "" && b.CredentialMode != mode {
-					return ErrBlocked
+					return ErrSuperseded
 				}
 				if b.ExpectedAccount != "" && b.ExpectedAccount != account {
-					return ErrBlocked
+					return ErrSuperseded
 				}
 				if (b.Harness == "claude" || mode == "api") && b.CredentialVersion != 0 && b.CredentialVersion != version {
-					return ErrBlocked
+					return ErrSuperseded
 				}
-			case pending >= 0:
+			case pending:
 				if b.DeliveredEpoch != 0 {
 					b.History = append(b.History, Delivered{Launch: b.Launch, Epoch: b.DeliveredEpoch, Mode: b.CredentialMode, Account: b.ExpectedAccount, Version: b.CredentialVersion})
 					if len(b.History) > historyLimit {
 						b.History = append([]Delivered(nil), b.History[len(b.History)-historyLimit:]...)
 					}
 				}
-				b.Launch, b.LaunchNonce = l.Seq, hash
-				var keep []PendingLaunch
-				for _, q := range b.Pending {
-					if q.Seq > l.Seq {
-						keep = append(keep, q)
-					}
-				}
-				b.Pending = keep
+				b.Launch, b.LaunchNonce, b.Pending = l.Seq, hash, nil
 			default:
 				return ErrBlocked // not a launch the daemon allocated
 			}

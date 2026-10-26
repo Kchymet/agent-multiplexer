@@ -73,7 +73,11 @@ type Config struct {
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
 	// --listen <Endpoint> and dials the same value.
 	Endpoint       string
-	ResumeThreadID string       // non-empty ⇒ thread/resume instead of thread/start
+	ResumeThreadID string // non-empty ⇒ thread/resume instead of thread/start
+	// ResumeRequired marks a thread known to hold history (a resumable
+	// identity). Its resume never falls back to a fresh thread: a failure
+	// fails the launch and leaves the identity unchanged.
+	ResumeRequired bool
 	RestartWork    *RestartWork // host-captured work state before restarting this thread
 	// Goals marks a goal session: every user task observed on the thread is
 	// established as its native goal (see goals.go). The launcher must have
@@ -565,7 +569,7 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 			params["model"] = s.cfg.Model
 		}
 		res, err = s.rpc.call(ctx, "thread/resume", params)
-		if err != nil && isNoRollout(err) {
+		if err != nil && isNoRollout(err) && !s.cfg.ResumeRequired {
 			// A pinned thread that never ran a turn has no rollout to resume (ROOT
 			// probe: "no rollout found"). Start a fresh thread and adopt its id rather
 			// than failing the launch — the empty thread carried no history to lose.

@@ -83,6 +83,7 @@ func TestSmokeCrossAccountThreadResume(t *testing.T) {
 			EventLogPath:   filepath.Join(root, "events.jsonl"),
 			ChatGPTAuth:    shim,
 			ResumeThreadID: resume,
+			ResumeRequired: resume != "",
 			ChatGPTAccount: bound,
 			Env:            []string{"CODEX_CA_CERTIFICATE=" + caPath, "CODEX_HOME=" + codexHome},
 		})
@@ -105,8 +106,8 @@ func TestSmokeCrossAccountThreadResume(t *testing.T) {
 		t.Fatalf("phase 1 identity = %+v", first)
 	}
 
-	// Controlled restart: the central login now belongs to another account and
-	// the workload's bookkeeping has been re-pinned (bound account cleared).
+	// Controlled restart: the central login now belongs to another account, so
+	// the new process carries no bound-account constraint.
 	amu.Lock()
 	account = "acct-bravo"
 	amu.Unlock()
@@ -118,50 +119,100 @@ func TestSmokeCrossAccountThreadResume(t *testing.T) {
 		t.Fatalf("phase 2 bound account = %q, want acct-bravo", second.ChatGPTAccount)
 	}
 	turns := b.turns()
-	if len(turns) < 2 {
-		t.Fatalf("model requests = %d, want 2", len(turns))
+	if len(turns) != 2 || turns[0].account != "acct-alpha" || turns[1].account != "acct-bravo" {
+		t.Fatalf("model requests = %+v, want one per account", turns)
 	}
-	last := turns[len(turns)-1]
-	for i, tr := range turns {
-		var req struct {
-			PreviousResponseID string            `json:"previous_response_id"`
-			Input              []json.RawMessage `json:"input"`
-		}
-		_ = json.Unmarshal([]byte(tr.body), &req)
-		var kinds []string
-		for _, in := range req.Input {
-			s := string(in)
-			if len(s) > 160 {
-				s = s[:160]
-			}
-			kinds = append(kinds, s)
-		}
-		t.Logf("request %d acct=%s previous_response_id=%q inputs=%d %q", i, tr.account, req.PreviousResponseID, len(req.Input), kinds)
-	}
-	t.Logf("phase 2 request: account header=%q carriesPhase1Prompt=%v carriesPhase1EncryptedReasoning=%v",
-		last.account, strings.Contains(last.body, "PROMPT-ONE"), strings.Contains(last.body, "ENC-acct-alpha"))
-	if last.account != "acct-bravo" {
-		t.Fatalf("phase 2 model request account = %q, want acct-bravo", last.account)
-	}
-	if !strings.Contains(last.body, "PROMPT-ONE") || !strings.Contains(last.body, "PROMPT-TWO") {
-		t.Fatal("resumed request lost the phase 1 conversation")
+	history := crossAccountHistory(t, turns[1].body)
+	t.Logf("phase 2 request as %s carries: %q", turns[1].account, history)
+	// The resumed request replays the exact phase 1 conversation in order:
+	// prompt, the other account's opaque reasoning, the assistant reply, and
+	// then the new prompt, with no server-side previous_response_id.
+	want := []string{"user:PROMPT-ONE", "reasoning:ENC-acct-alpha-1", "assistant:answer 1", "user:PROMPT-TWO"}
+	if !crossAccountSubsequence(history, want) {
+		t.Fatalf("phase 2 history = %q, want ordered %q", history, want)
 	}
 
-	// The current amux policy (bound account kept) refuses the same restart.
+	// A provider failure on a turn (for example a backend refusing another
+	// account's encrypted reasoning) fails that turn only: the identity keeps
+	// the same thread and the next restart still resumes its full history.
 	amu.Lock()
 	account = "acct-charlie"
 	amu.Unlock()
+	b.setFail(true)
+	third := run("phase 3", first.ThreadID, "", "PROMPT-THREE after a provider refusal")
+	if third.ThreadID != first.ThreadID {
+		t.Fatalf("turn failure changed thread: %s -> %s", first.ThreadID, third.ThreadID)
+	}
+	b.setFail(false)
+	fourth := run("phase 4", first.ThreadID, "", "PROMPT-FOUR recovered")
+	turns = b.turns()
+	history = crossAccountHistory(t, turns[len(turns)-1].body)
+	if fourth.ThreadID != first.ThreadID || !crossAccountSubsequence(history, append(want, "user:PROMPT-FOUR")) {
+		t.Fatalf("recovery lost the thread or history: %s %q", fourth.ThreadID, history)
+	}
+
+	// Within one process the bound account is a constraint (reconnect): a
+	// different account's token is refused rather than adopted.
 	sup := New(Config{
 		SessionID: "cross", Bin: bin, Dir: sessHome,
 		Endpoint:     "unix://" + filepath.Join(root, "s.sock"),
 		EventLogPath: filepath.Join(root, "events.jsonl"), ChatGPTAuth: shim,
-		ResumeThreadID: first.ThreadID, ChatGPTAccount: "acct-bravo",
+		ResumeThreadID: first.ThreadID, ResumeRequired: true, ChatGPTAccount: "acct-bravo",
 		Env: []string{"CODEX_CA_CERTIFICATE=" + caPath, "CODEX_HOME=" + codexHome},
 	})
 	if err := sup.Start(ctx, nil); err == nil {
 		_ = sup.Close()
-		t.Fatal("a pinned bound account accepted another account's token")
+		t.Fatal("a bound account accepted another account's token")
 	}
+}
+
+// crossAccountHistory reduces a Responses request's input to role:text and
+// reasoning:encrypted_content entries.
+func crossAccountHistory(t *testing.T, body string) []string {
+	t.Helper()
+	var req struct {
+		PreviousResponseID string `json:"previous_response_id"`
+		Input              []struct {
+			Type             string `json:"type"`
+			Role             string `json:"role"`
+			EncryptedContent string `json:"encrypted_content"`
+			Content          []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("decode model request: %v", err)
+	}
+	if req.PreviousResponseID != "" {
+		t.Fatalf("request relies on server state: previous_response_id=%q", req.PreviousResponseID)
+	}
+	var out []string
+	for _, in := range req.Input {
+		switch {
+		case in.Type == "reasoning":
+			out = append(out, "reasoning:"+in.EncryptedContent)
+		case in.Type == "message" && (in.Role == "user" || in.Role == "assistant") && len(in.Content) > 0:
+			text := in.Content[0].Text
+			if strings.HasPrefix(text, "PROMPT-") {
+				text, _, _ = strings.Cut(text, " ")
+			}
+			if in.Role == "assistant" || strings.HasPrefix(text, "PROMPT-") {
+				out = append(out, in.Role+":"+text)
+			}
+		}
+	}
+	return out
+}
+
+func crossAccountSubsequence(got, want []string) bool {
+	i := 0
+	for _, g := range got {
+		if i < len(want) && g == want[i] {
+			i++
+		}
+	}
+	return i == len(want)
 }
 
 type crossAccountTurn struct{ account, body string }
@@ -170,6 +221,13 @@ type crossAccountBackend struct {
 	mu    sync.Mutex
 	paths []string
 	reqs  []crossAccountTurn
+	fail  bool
+}
+
+func (b *crossAccountBackend) setFail(v bool) {
+	b.mu.Lock()
+	b.fail = v
+	b.mu.Unlock()
 }
 
 func (b *crossAccountBackend) snapshot() []string {
@@ -211,7 +269,13 @@ func (b *crossAccountBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "websocket unsupported", http.StatusNotFound)
 		return
 	}
-	b.paths = append(b.paths, "enc="+r.Header.Get("Content-Encoding"))
+	if b.fail {
+		b.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"The encrypted content could not be verified."}}`))
+		return
+	}
 	b.reqs = append(b.reqs, crossAccountTurn{account: acct, body: string(body)})
 	n := len(b.reqs)
 	b.mu.Unlock()

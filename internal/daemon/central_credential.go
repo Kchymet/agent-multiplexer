@@ -130,6 +130,12 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 	}
 	launch, _ := parseAccountLaunch(req.Fields[centralauth.LaunchField])
 	if err := accounts.Accept(s.ID, binding.Revision, profile.DeliveryEpoch, "", cred.Generation, launch); err != nil {
+		switch {
+		case errors.Is(err, accounts.ErrSuperseded):
+			return rpcDenied("account_runtime_superseded"), nil
+		case errors.Is(err, accounts.ErrStale):
+			return rpcFailed("account_revision_changed"), nil
+		}
 		return rpcDenied("account_binding_blocked"), nil
 	}
 	body, err := json.Marshal(centralauth.Delivery{Token: cred.Token.Reveal(), Kind: cred.Kind, Generation: cred.Generation})
