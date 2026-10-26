@@ -151,6 +151,8 @@ func TestHistoryBindingsRoundTrip(t *testing.T) {
 		{ScrollUp, "alt+pgup"},
 		{ScrollDown, "alt+pgdown"},
 		{ScrollLive, "alt+end"},
+		{ScrollHalfUp, "ctrl+u"},
+		{ScrollHalfDown, "ctrl+d"},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			km, err := Load()
@@ -159,6 +161,9 @@ func TestHistoryBindingsRoundTrip(t *testing.T) {
 			}
 			if _, err := Set(tc.action, "alt+h"); err == nil {
 				t.Fatal("accepted collision with focus-rail")
+			}
+			if _, err := Set(tc.action, tc.chord); err != nil {
+				t.Fatal(err)
 			}
 			if _, err := Set(Quit, tc.chord); err == nil {
 				t.Fatal("accepted collision with history default")
@@ -238,5 +243,43 @@ func TestWritePreservesForeignFields(t *testing.T) {
 	}
 	if keys["quit"] != "ctrl+x" || keys["focus-rail"] != "ctrl+g" {
 		t.Fatalf("keys after Set = %v", keys)
+	}
+}
+
+func TestHalfPageDefaultsPreserveExistingBindings(t *testing.T) {
+	configDir(t)
+	if err := os.MkdirAll(core.ConfigDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a config saved before the half-page actions existed.
+	original := []byte(`{"keys":{"scroll-up":"Ctrl+U","scroll-down":"Ctrl+D"}}`)
+	if err := os.WriteFile(core.ConfigPath(), original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	km, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		if km.Action("ctrl+u") != ScrollUp || km.Action("ctrl+d") != ScrollDown || km.Action("") != "" {
+			t.Fatal("configured bindings lost priority")
+		}
+	}
+	if km.Chord(ScrollHalfUp) != "" || km.Chord(ScrollHalfDown) != "" {
+		t.Fatal("new defaults still collide")
+	}
+	saved, _ := os.ReadFile(core.ConfigPath())
+	if string(saved) != string(original) {
+		t.Fatal("loading rewrote existing preferences")
+	}
+	if _, err := Set(ScrollHalfUp, "ctrl+u"); err == nil {
+		t.Fatal("accepted two explicit bindings for Ctrl+U")
+	}
+	if _, err := Set(ScrollUp, "f5"); err != nil {
+		t.Fatal(err)
+	}
+	km, err = Load()
+	if err != nil || km.Action("ctrl+u") != ScrollHalfUp || km.Action("f5") != ScrollUp || km.Action("ctrl+d") != ScrollDown {
+		t.Fatalf("default not restored: %+v, %v", km.List(), err)
 	}
 }

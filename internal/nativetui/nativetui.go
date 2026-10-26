@@ -452,7 +452,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.switchTab(tabEditor)
 	case keymap.TabTerm:
 		return m, m.switchTab(tabTerminal)
-	case keymap.ScrollUp, keymap.ScrollDown, keymap.ScrollLive:
+	case keymap.ScrollUp, keymap.ScrollDown, keymap.ScrollLive, keymap.ScrollHalfUp, keymap.ScrollHalfDown:
 		if t := m.cur(); t != nil {
 			switch m.keys.Action(k.String()) {
 			case keymap.ScrollUp:
@@ -461,6 +461,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				t.ScrollPages(-1)
 			case keymap.ScrollLive:
 				t.ReturnLive()
+			case keymap.ScrollHalfUp:
+				t.ScrollHalfPages(1)
+			case keymap.ScrollHalfDown:
+				t.ScrollHalfPages(-1)
 			}
 		}
 		return m, nil

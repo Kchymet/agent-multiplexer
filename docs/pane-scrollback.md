@@ -15,7 +15,7 @@ viewport scrolls whichever screen the program has active.
 | Primary | Rows that physically scroll off the top: LF/IND/NEL at the bottom margin, SU, DL, inside a full-width scrolling region. | `DefaultHistoryLines` rows (`SetHistoryLimit`), kept by the emulator's scrollback. |
 | Alternate | Completed, distinct rendered frames: each time the program begins a synchronized-output frame (`DECSET 2026`), the frame currently on display is committed, unless it is identical to the last committed frame or entirely blank. | The same row limit, dropping whole frames oldest first; the newest frame always survives, so at most the limit plus one screen. |
 
-amux scrolls both with `ScrollLines`, `ScrollPages`, `ScrollToTop` and
+amux scrolls both with `ScrollLines`, `ScrollPages`, `ScrollHalfPages`, `ScrollToTop` and
 `ReturnLive`. Wheel events go to the program when it enables mouse reporting;
 Shift forces local history instead. Without reporting, wheel stays local even
 when history is empty or at its boundary: `ScrollLines` reports no movement,
@@ -23,6 +23,29 @@ and no cursor keys are synthesized. The configurable `keys.scroll-up`,
 `keys.scroll-down`, and `keys.scroll-live` actions default to Alt+PageUp,
 Alt+PageDown, and Alt+End. The history indicator lives in the TUI header and
 never covers pane cells.
+
+`keys.scroll-half-up` and `keys.scroll-half-down` default to Ctrl+U and Ctrl+D.
+They move toward older/newer history by `max(1, rows/2)` rows (integer division),
+clamping at the oldest row and live output. Full-page navigation remains
+`max(1, rows-1)` rows. These are global pane actions, just like the Alt history
+chords: pane or rail focus targets the attached pane; an open modal takes
+precedence. With no attached pane, they do nothing. They clear local selection,
+keep local scrolling out of the child input stream, and leave mouse routing
+unchanged. Bracketed pasted text never becomes a history command.
+
+The defaults reserve the child's Ctrl+U line-kill and Ctrl+D EOF. To restore
+those child keys, run the following and reopen the dashboard:
+
+```sh
+amux config set keys.scroll-half-up f5
+amux config set keys.scroll-half-down f6
+```
+
+Upgrade compatibility: if an existing explicit setting already uses Ctrl+U or
+Ctrl+D (for example `keys.scroll-up=ctrl+u`), it keeps the chord. The corresponding
+new half-page default is suppressed and appears as `unbound` in `amux config`.
+No config file is rewritten. Moving the older binding away restores the new
+default, and two explicit bindings cannot be set to the same chord.
 
 ### Primary screen
 

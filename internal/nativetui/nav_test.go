@@ -66,10 +66,10 @@ func TestPageStepSizes(t *testing.T) {
 	}
 }
 
-// The rail responds to the common pager navigation keys: ctrl-u/ctrl-d for half
-// pages, PgUp/PgDn for full pages, and Home/End (and g/G) to jump to the ends.
+// The rail retains PgUp/PgDn and Home/End (and g/G). Ctrl+U/D are now
+// global pane-history defaults, so an unattached rail consumes them without
+// moving its selection, matching the existing global Alt history chords.
 func TestPagingKeys(t *testing.T) {
-	half := railModel(1, 23).halfPage() // 10
 	full := railModel(1, 23).pageStep() // 19
 
 	cases := []struct {
@@ -79,8 +79,8 @@ func TestPagingKeys(t *testing.T) {
 		want    int
 		section string
 	}{
-		{"ctrl+d half down", 0, tea.KeyMsg{Type: tea.KeyCtrlD}, half, ""},
-		{"ctrl+u half up", 30, tea.KeyMsg{Type: tea.KeyCtrlU}, 30 - half, ""},
+		{"ctrl+d reserved for pane", 0, tea.KeyMsg{Type: tea.KeyCtrlD}, 0, ""},
+		{"ctrl+u reserved for pane", 30, tea.KeyMsg{Type: tea.KeyCtrlU}, 30, ""},
 		{"pgdown full down", 0, tea.KeyMsg{Type: tea.KeyPgDown}, full, ""},
 		{"pgup full up", 30, tea.KeyMsg{Type: tea.KeyPgUp}, 30 - full, ""},
 		{"home to top", 20, tea.KeyMsg{Type: tea.KeyHome}, 0, core.SectionWorkgroups},

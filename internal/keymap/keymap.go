@@ -17,17 +17,19 @@ import (
 
 // Actions — the config key under "keys" is "keys.<action>" on the CLI.
 const (
-	FocusRail    = "focus-rail"
-	FocusAgent   = "focus-agent"
-	ToggleFocus  = "toggle-focus"
-	Quit         = "quit"
-	TabAgent     = "tab-agent"
-	TabEditor    = "tab-editor"
-	TabTerm      = "tab-term"
-	RestartAgent = "restart-agent"
-	ScrollUp     = "scroll-up"
-	ScrollDown   = "scroll-down"
-	ScrollLive   = "scroll-live"
+	FocusRail      = "focus-rail"
+	FocusAgent     = "focus-agent"
+	ToggleFocus    = "toggle-focus"
+	Quit           = "quit"
+	TabAgent       = "tab-agent"
+	TabEditor      = "tab-editor"
+	TabTerm        = "tab-term"
+	RestartAgent   = "restart-agent"
+	ScrollUp       = "scroll-up"
+	ScrollDown     = "scroll-down"
+	ScrollLive     = "scroll-live"
+	ScrollHalfUp   = "scroll-half-up"
+	ScrollHalfDown = "scroll-half-down"
 )
 
 // actions lists every configurable action in display order, with the help
@@ -44,20 +46,24 @@ var actions = []struct{ name, desc string }{
 	{ScrollUp, "scroll pane history up one page"},
 	{ScrollDown, "scroll pane history down one page"},
 	{ScrollLive, "return the pane to live output"},
+	{ScrollHalfUp, "scroll pane history up half a viewport"},
+	{ScrollHalfDown, "scroll pane history down half a viewport"},
 }
 
 var defaults = map[string]string{
-	FocusRail:    "alt+h",
-	FocusAgent:   "alt+l",
-	ToggleFocus:  "alt+a",
-	Quit:         "alt+q",
-	TabAgent:     "alt+1",
-	TabEditor:    "alt+2",
-	TabTerm:      "alt+3",
-	RestartAgent: "alt+r",
-	ScrollUp:     "alt+pgup",
-	ScrollDown:   "alt+pgdown",
-	ScrollLive:   "alt+end",
+	FocusRail:      "alt+h",
+	FocusAgent:     "alt+l",
+	ToggleFocus:    "alt+a",
+	Quit:           "alt+q",
+	TabAgent:       "alt+1",
+	TabEditor:      "alt+2",
+	TabTerm:        "alt+3",
+	RestartAgent:   "alt+r",
+	ScrollUp:       "alt+pgup",
+	ScrollDown:     "alt+pgdown",
+	ScrollLive:     "alt+end",
+	ScrollHalfUp:   "ctrl+u",
+	ScrollHalfDown: "ctrl+d",
 }
 
 // Keymap is the effective action→chord map. The zero value behaves as the
@@ -79,6 +85,9 @@ func (k Keymap) Chord(action string) string { return k.resolved()[action] }
 // Action returns the action a chord (as Bubble Tea's KeyMsg.String() spells
 // it) is bound to, or "" if the chord is unbound.
 func (k Keymap) Action(chord string) string {
+	if chord == "" {
+		return ""
+	}
 	for a, c := range k.resolved() {
 		if c == chord {
 			return a
@@ -137,6 +146,7 @@ func Load() (Keymap, error) {
 		}
 		merged[action] = n
 	}
+	preferExistingHistoryBindings(merged, raw)
 	if dup := duplicate(merged); dup != "" {
 		errs = append(errs, dup)
 	}
@@ -178,6 +188,7 @@ func Set(action, chord string) (string, error) {
 			}
 		}
 	}
+	preferExistingHistoryBindings(effective, overrides)
 	if dup := duplicate(effective); dup != "" {
 		return "", errors.New(dup)
 	}
@@ -291,12 +302,33 @@ func known(action string) bool {
 	return ok
 }
 
+// New half-page defaults must not steal an explicitly configured chord on
+// upgrade. Suppress only these new, unconfigured defaults; explicit collisions
+// still report an error. No config is rewritten, so moving the old binding away
+// automatically restores the half-page default.
+func preferExistingHistoryBindings(effective, overrides map[string]string) {
+	for _, half := range []string{ScrollHalfUp, ScrollHalfDown} {
+		if _, configured := overrides[half]; configured {
+			continue
+		}
+		for action := range overrides {
+			if action != half && known(action) && effective[action] == defaults[half] {
+				effective[half] = ""
+				break
+			}
+		}
+	}
+}
+
 // duplicate reports two actions sharing a chord, or "".
 func duplicate(m map[string]string) string {
 	seen := map[string]string{}
 	// Iterate in display order so the error is deterministic.
 	for _, a := range actions {
 		c := m[a.name]
+		if c == "" {
+			continue
+		}
 		if prev, ok := seen[c]; ok {
 			return fmt.Sprintf("%q is bound to both %s and %s", c, prev, a.name)
 		}

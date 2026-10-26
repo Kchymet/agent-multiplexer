@@ -242,3 +242,26 @@ func TestPaneClickModifierContract(t *testing.T) {
 		})
 	}
 }
+
+func TestHalfPageKeyScopeAndSelection(t *testing.T) {
+	for _, focused := range []focus{focusAgent, focusSidebar} {
+		m, term, input := scrollModel(t, 40, 7)
+		feedPane(t, term, historyRows(20))
+		m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
+		m.handleMouse(selectionEvent(tea.MouseActionMotion, 2, 0))
+		m.focus = focused
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+		if term.Viewport().Offset != 3 || input() != "" || m.selection != nil || m.focus != focused {
+			t.Fatal("half up scope/invalidation")
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+		if term.Viewport().Offset != 0 || input() != "" {
+			t.Fatal("half down scope")
+		}
+		m.confirm = &confirmState{message: "confirm"}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+		if term.Viewport().Offset != 0 || input() != "" {
+			t.Fatal("modal leaked history shortcut")
+		}
+	}
+}
