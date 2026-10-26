@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"amux/internal/access"
@@ -30,6 +31,9 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	// releaseCreation is set while a creation holds creationMu under the shared
+	// gate; the new session starts under its own lock after it is released.
+	var releaseCreation func()
 	if id, ok := sessionScopedAction(a); ok && !effectAdmissionHeld(ctx) {
 		// The action touches only one session's runtime and credential, so it
 		// waits only for that session (and for holders of the unsplit gate).
@@ -42,6 +46,25 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
 				log.Printf("action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if creationAction(a) && !effectAdmissionHeld(ctx) {
+		// Creating a session changes no existing session's authorization:
+		// archive, grants and membership moves are exclusive, so they cannot
+		// cross it. Creations serialize among themselves on creationMu, which
+		// also keeps reconcile from opening a half-created session's mailbox.
+		waitStart := time.Now()
+		release := d.admitShared()
+		defer release()
+		d.creationMu.Lock()
+		var once sync.Once
+		releaseCreation = func() { once.Do(d.creationMu.Unlock) }
+		defer releaseCreation()
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held creation %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -204,7 +227,16 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			// prompt must begin running without waiting for the user to switch to it.
 			// For a root, the returned id is the coordinator itself; startAgent avoids
 			// startEngineFor's root fan-out to the members.
-			if err := d.startAgent(ctx, newID); err != nil {
+			start := func() error { return d.startAgent(ctx, newID) }
+			if releaseCreation != nil {
+				releaseCreation()
+				start = func() error {
+					unlock := d.sessionLocks.lock(newID)
+					defer unlock()
+					return d.startAgent(ctx, newID)
+				}
+			}
+			if err := start(); err != nil {
 				kind := "agent"
 				if desc.TargetsRoot {
 					kind = "workgroup"

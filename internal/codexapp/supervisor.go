@@ -1146,11 +1146,29 @@ func (s *Supervisor) onNotify(method string, params json.RawMessage) {
 	// client submitted it (the native TUI starts turns without the daemon).
 	s.observeUserTask(method, params)
 	events, res := mapNotification(method, params, s.state)
+	if res != nil {
+		// Retire the ended turn as the steer target before anyone can observe
+		// its turn_end: a consumer reacting to that event (an orchestrator, a
+		// test) must already see "no active turn", or an Interject it sends
+		// would be routed to the finished turn instead of refused.
+		s.retireObservedTurn(res)
+	}
 	for _, ev := range events {
 		s.emit(ev)
 	}
 	if res != nil {
 		s.handleTurnCompleted(res)
+	}
+}
+
+// retireObservedTurn clears the observed active turn when res ended it. It is
+// the first half of handleTurnCompleted's step (1), run before the turn's
+// events are emitted; handleTurnCompleted repeats the check idempotently.
+func (s *Supervisor) retireObservedTurn(res *turnResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.threadID != "" && res.ThreadID == s.threadID && res.TurnID != "" && res.TurnID == s.curTurn {
+		s.curTurn = ""
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"amux/internal/credentialbroker"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
+	"amux/internal/sessionrpc"
 	"amux/internal/store"
 
 	"github.com/cli/go-gh/v2/pkg/config"
@@ -124,6 +125,19 @@ func testGitHubSandbox(t *testing.T, live bool) {
 				grant, err := d.authority.EnsureSession(ctx, s.ID, s.Dir)
 				if err != nil {
 					t.Fatal(err)
+				}
+				// The CLI fails fast while the mailbox is unpublished; wait for
+				// the session runtime to adopt the new session instead of racing
+				// its reconcile pass.
+				published := time.Now().Add(30 * time.Second)
+				for {
+					if _, err := os.Stat(filepath.Join(grant.MailboxHostDir, sessionrpc.ServiceFileName)); err == nil {
+						break
+					}
+					if time.Now().After(published) {
+						t.Fatal("session mailbox was never published")
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
 				dir, overlay, argv, err := panespec.Resolve(panespec.LaunchSpec{Session: s, Access: grant}, tab)
 				if err != nil {

@@ -36,6 +36,7 @@ records which slow holders delay a report from session `a1`:
 | host `start` of the workgroup root (starts every member: exclusive fallback) | yes | a later PR 4 slice |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
+| host `new-workgroup`, stalled launching its coordinator | no | PR 4, creation slice |
 | reconcile pass, stalled while it opens a3's mailbox | no | PR 3 |
 
 ## What the global gate protects
@@ -99,6 +100,7 @@ are and sit below every resource lock in the order.
 | `Daemon.persistMu` | live-agents file and `lastLive` |
 | `Daemon.authMu` | engine/codex instance kill and restart, `authPending`; taken by `killRuntimeFor`, `killEngineFor`, `killRuntimeToken`, auth reload |
 | `Daemon.accountMu` | account attempts/ceremonies |
+| `Daemon.creationMu` | session creation (`wsops` worktree and row setup), under the gate shared; taken after any session lock, and released by a creation before it locks its new session |
 | `Daemon.credentialMu` | host credential helper processes (keychain, `gh`), below a session's admission |
 | `accountReadinessCache.mu` | cached account snapshot |
 | `Daemon.servingMu`, `Daemon.deferredMu` | host transports and deferred work admission |
@@ -210,9 +212,17 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      Every exclusive acquisition (`lockEffectExclusive`) retries `TryLock`
      instead of queueing, so a writer waiting behind a slow shared holder never
      stalls new readers. Flips the host action row.
-   - Next: archive and restore (workgroup locks), creation with its slow work
-     moved before the lock, workgroup start, rename, then account manage and
-     completion `finish`.
+   - Creation slice, done: `add-agent`, `new-workgroup` and `create-workspace`
+     (`creationAction`) run under the gate shared plus `creationMu`, which
+     serializes creations among themselves. Adding a session changes no
+     existing session's authorization, and archive, grants and moves stay
+     exclusive. The new session starts under its own lock after `creationMu` is
+     released. Reconcile opens a new mailbox only while it can hold
+     `creationMu` (try-acquired on ticks), so it never adopts a half-created
+     row. Session-originated creations (a coordinator's `add-agent`) still use
+     the exclusive path.
+   - Next: archive and restore (workgroup locks), workgroup start, rename,
+     then account manage and completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is
