@@ -28,12 +28,15 @@ func init() {
 	}
 	if os.Args[2] == centralauth.LauncherArg {
 		// Central Claude: fetch only now, after descriptors are close-on-exec.
-		argv, fetch := os.Args[3:], centralauth.FetchCredentialFromSession
-		if len(argv) > 0 && strings.HasPrefix(argv[0], centralauth.LaunchArgPrefix) {
-			fetch = centralauth.FetchLaunchCredentialFromSession(strings.TrimPrefix(argv[0], centralauth.LaunchArgPrefix))
-			argv = argv[1:]
+		argv := os.Args[3:]
+		if len(argv) == 0 || !strings.HasPrefix(argv[0], centralauth.LaunchArgPrefix) {
+			// Every daemon-started pane carries its own account launch; without
+			// one delivery is refused, so fail fast instead of retrying forever.
+			_, _ = fmt.Fprintln(os.Stderr, "amux: this Claude pane started without a credential launch; restart the workload with the current amux.")
+			os.Exit(75)
 		}
-		os.Exit(centralauth.LaunchCredential(argv, os.Stderr, fetch))
+		fetch := centralauth.FetchLaunchCredentialFromSession(strings.TrimPrefix(argv[0], centralauth.LaunchArgPrefix))
+		os.Exit(centralauth.LaunchCredential(argv[1:], os.Stderr, fetch))
 	}
 	payload := os.Args[2]
 	if !strings.ContainsRune(payload, os.PathSeparator) {

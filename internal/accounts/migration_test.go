@@ -256,10 +256,6 @@ func TestClaudeLaunchIsIdempotentAndNeverAdoptsReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Resolves before the first delivery (pane reattach) reuse the pending launch.
-	if again, _ := BeginLaunch("w", "claude"); again != launch {
-		t.Fatal("pending launch displaced by a reattach")
-	}
 	deliver := func(l Launch, version uint64) error {
 		b, p, err := Delivery("w", "claude")
 		if err != nil {
@@ -301,6 +297,78 @@ func TestClaudeLaunchIsIdempotentAndNeverAdoptsReplacement(t *testing.T) {
 	}
 	if err := deliver(launch, first.Generation); !errors.Is(err, ErrSuperseded) {
 		t.Fatal("old launch accepted after a new one pinned", err)
+	}
+}
+
+// Kill and respawn before the first delivery: the killed process's queued
+// request (an abandoned duplicate) may still be dispatched. It can pin only its
+// own older launch, which the respawned process's newer launch supersedes, so
+// the new process always receives the newest login and the old one never does.
+func TestClaudeKilledProcessCannotClaimRespawnedPermit(t *testing.T) {
+	for _, order := range []string{"old-first", "new-first"} {
+		t.Run(order, func(t *testing.T) {
+			isolated(t)
+			first := claudeReady(t, "FIRST-SYNTHETIC")
+			killed, _ := BeginLaunch("w", "claude")
+			respawned, _ := BeginLaunch("w", "claude")
+			if killed.Nonce == respawned.Nonce || respawned.Seq <= killed.Seq {
+				t.Fatalf("respawn shares the killed permit: %+v %+v", killed, respawned)
+			}
+			deliver := func(l Launch, version uint64) error {
+				b, p, err := Delivery("w", "claude")
+				if err != nil {
+					return err
+				}
+				return Accept("w", b.Revision, p.DeliveryEpoch, "", version, l)
+			}
+			if order == "old-first" {
+				if err := deliver(killed, first.Generation); err != nil {
+					t.Fatal(err)
+				}
+				// A replacement login lands before the respawned process asks.
+				second := claudeReady(t, "SECOND-SYNTHETIC")
+				if err := deliver(respawned, second.Generation); err != nil {
+					t.Fatal("respawned process refused the newest login", err)
+				}
+				if err := deliver(killed, second.Generation); !errors.Is(err, ErrSuperseded) {
+					t.Fatal("killed process adopted the replacement", err)
+				}
+				return
+			}
+			if err := deliver(respawned, first.Generation); err != nil {
+				t.Fatal(err)
+			}
+			if err := deliver(killed, first.Generation); err == nil {
+				t.Fatal("killed process's late request was admitted")
+			}
+			if err := deliver(respawned, first.Generation); err != nil {
+				t.Fatal("respawned process lost its permit", err)
+			}
+		})
+	}
+}
+
+func TestPendingLaunchesAreBounded(t *testing.T) {
+	isolated(t)
+	claudeReady(t, "FIRST-SYNTHETIC")
+	oldest, _ := BeginLaunch("w", "claude")
+	var newest Launch
+	for i := 0; i < pendingLimit; i++ {
+		newest, _ = BeginLaunch("w", "claude")
+	}
+	s, _ := Read()
+	if len(s.Bindings["w"].Pending) != pendingLimit {
+		t.Fatalf("pending = %d", len(s.Bindings["w"].Pending))
+	}
+	b, p, _ := Delivery("w", "claude")
+	if err := Accept("w", b.Revision, p.DeliveryEpoch, "", s.CredentialVersion["claude:central"], oldest); err == nil {
+		t.Fatal("evicted launch admitted")
+	}
+	if err := Accept("w", b.Revision, p.DeliveryEpoch, "", s.CredentialVersion["claude:central"], newest); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ = Read(); len(s.Bindings["w"].Pending) != 0 {
+		t.Fatal("pin left older pending launches")
 	}
 }
 

@@ -630,8 +630,8 @@ func TestResumeThreadForGating(t *testing.T) {
 	}
 
 	// LEGACY identity (persisted before the Resumable field, Version 0) with a
-	// thread id ⇒ still attempt resume — don't silently discard a real conversation
-	// on upgrade (the handshake fallback covers a genuine miss).
+	// thread id ⇒ still resume — never silently discard a real conversation on
+	// upgrade; a failed resume fails the launch instead of starting fresh.
 	if err := SaveIdentity(Identity{SessionID: "legacy", ThreadID: "old-thr", Resumable: false, Version: 0}); err != nil {
 		t.Fatal(err)
 	}

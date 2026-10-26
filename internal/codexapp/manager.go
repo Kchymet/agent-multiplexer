@@ -232,7 +232,6 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	// This is an actual process launch: it takes the newest central login, so
 	// the resumed thread's previous account is history, not a constraint.
 	cfg.PriorChatGPTAccounts = priorAccountsFor(sessionID, cfg.ResumeThreadID)
-	cfg.ResumeRequired = resumeRequiredFor(sessionID, cfg.ResumeThreadID)
 	if cfg.ChatGPTAuth != nil {
 		launch, err := accounts.BeginLaunch(sessionID, "codex")
 		if err != nil {
@@ -316,8 +315,8 @@ func (m *Manager) RestartSnapshot() map[string]RestartWork {
 // their first turn. A structured identity is authoritative when present. Without
 // one, legacyThreadID lets the first structured launch adopt a conversation that
 // the PTY path already pinned in the session store. Legacy sidecars without a
-// version still attempt resume to avoid discarding conversations; a missing
-// rollout falls back.
+// version still resume. Every resume target must resume exactly; a failure
+// fails the launch rather than substituting an empty thread.
 func resumeThreadFor(sessionID, legacyThreadID string) string {
 	id, ok := LoadIdentity(sessionID)
 	if !ok {
@@ -331,25 +330,13 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 		// Known to have a rollout (initialized, ran a turn, or resumed).
 		return id.ThreadID
 	case id.Version == 0:
-		// Legacy identity persisted before Resumable existed — it may hold a real
-		// conversation, so don't silently discard it; attempt the resume and let the
-		// handshake fall back to a fresh thread only on a genuine "no rollout" miss.
+		// Legacy identity persisted before Resumable existed — its history is
+		// unknown, so it is resumed exactly and never silently discarded.
 		return id.ThreadID
 	default:
 		// Current identity, known not-yet-run — start fresh to avoid a doomed resume.
 		return ""
 	}
-}
-
-// resumeRequiredFor reports a resume target known to hold history: a resumable
-// identity, or one that ran under central auth. Only a legacy or never-run
-// thread may fall back to a fresh thread when its rollout is missing.
-func resumeRequiredFor(sessionID, resumeThreadID string) bool {
-	if resumeThreadID == "" {
-		return false
-	}
-	id, ok := LoadIdentity(sessionID)
-	return ok && id.ThreadID == resumeThreadID && (id.Resumable || id.ChatGPTAccount != "" || len(id.PriorChatGPTAccounts) > 0)
 }
 
 // priorAccountsFor returns the ChatGPT accounts a resumed thread ran under,

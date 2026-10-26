@@ -1118,14 +1118,14 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	var inst engine.Instance
 	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
 		published, _, publishErr := d.publishPermissionRuntime(a.ID, func() (any, error) {
-			return d.engine.Ensure(ctx, engineSpec)
+			return d.ensurePane(ctx, engineSpec)
 		})
 		err = publishErr
 		if err == nil {
 			inst, _ = published.(engine.Instance)
 		}
 	} else {
-		inst, err = d.engine.Ensure(ctx, engineSpec)
+		inst, err = d.ensurePane(ctx, engineSpec)
 	}
 	if err != nil {
 		paneExit(err.Error())
@@ -1219,7 +1219,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string, restart ...restartR
 		return err
 	}
 	published, _, err := d.publishPermissionRuntime(aid, func() (any, error) {
-		return d.engine.Ensure(ctx, engine.Spec{
+		return d.ensurePane(ctx, engine.Spec{
 			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
 			Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})
@@ -1443,6 +1443,23 @@ func (d *Daemon) killEngineFor(id string) {
 	for aid := range ids {
 		d.killRuntimeLocked(aid)
 	}
+}
+
+// ensurePane is the engine's Ensure for every daemon pane start. A resolved
+// central Claude argv carries a freshly allocated account launch. When Ensure
+// reuses the instance that was already running, or fails to spawn, no process
+// received that launch, so it is retired; a pane that exited between the
+// caller's resolve and Ensure is respawned and keeps its own fresh launch.
+func (d *Daemon) ensurePane(ctx context.Context, spec engine.Spec) (engine.Instance, error) {
+	before, alive := d.engine.Lookup(spec.Key)
+	alive = alive && before.Alive()
+	in, err := d.engine.Ensure(ctx, spec)
+	if launch, ok := panespec.AccountLaunchOf(spec.Argv); ok && (err != nil || (alive && in == before)) {
+		if rerr := accounts.RetireLaunch(spec.Key.AgentID, launch); rerr != nil {
+			log.Printf("amux: retire unused account launch for %s: %v", spec.Key.AgentID, rerr)
+		}
+	}
+	return in, err
 }
 
 func (d *Daemon) killRuntimeFor(id string) {

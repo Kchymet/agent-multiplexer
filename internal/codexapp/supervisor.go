@@ -73,11 +73,7 @@ type Config struct {
 	// wss://host:port (cross-machine, authenticated). amux launches the server with
 	// --listen <Endpoint> and dials the same value.
 	Endpoint       string
-	ResumeThreadID string // non-empty ⇒ thread/resume instead of thread/start
-	// ResumeRequired marks a thread known to hold history (a resumable
-	// identity). Its resume never falls back to a fresh thread: a failure
-	// fails the launch and leaves the identity unchanged.
-	ResumeRequired bool
+	ResumeThreadID string       // non-empty ⇒ thread/resume instead of thread/start
 	RestartWork    *RestartWork // host-captured work state before restarting this thread
 	// Goals marks a goal session: every user task observed on the thread is
 	// established as its native goal (see goals.go). The launcher must have
@@ -568,13 +564,13 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		if s.cfg.Model != "" {
 			params["model"] = s.cfg.Model
 		}
+		// A resume target is never replaced by a fresh thread: its history is
+		// unknown or known non-empty, so any resume error (including "no rollout
+		// found") fails the launch visibly and leaves the persisted identity as
+		// it was. Never-run threads are not resume targets (resumeThreadFor).
 		res, err = s.rpc.call(ctx, "thread/resume", params)
-		if err != nil && isNoRollout(err) && !s.cfg.ResumeRequired {
-			// A pinned thread that never ran a turn has no rollout to resume (ROOT
-			// probe: "no rollout found"). Start a fresh thread and adopt its id rather
-			// than failing the launch — the empty thread carried no history to lose.
-			resumed = false
-			res, err = start()
+		if err != nil {
+			return fmt.Errorf("codexapp resume thread %s (kept; amux never substitutes an empty thread): %w", s.cfg.ResumeThreadID, err)
 		}
 	} else {
 		res, err = start()
@@ -784,12 +780,6 @@ func (s *Supervisor) processRunningLocked() bool {
 	default:
 		return true
 	}
-}
-
-// isNoRollout reports whether a thread/resume error is the "no rollout found"
-// case — a pinned thread that never had a turn, so there is nothing to resume.
-func isNoRollout(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no rollout")
 }
 
 // unixEndpointPath returns the filesystem path of a unix:// endpoint, or "" for a

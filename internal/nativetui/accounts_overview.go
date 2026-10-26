@@ -231,8 +231,10 @@ func (m *model) accountOverviewLines() []string {
 					break
 				}
 			}
-			if m.accountOverview.legacyDefaults[harness] {
+			if m.accountOverview.migrationPending[harness] {
 				label = accountHarnessName(harness) + ": login required"
+			} else if m.accountOverview.legacyDefaults[harness] {
+				label = accountHarnessName(harness) + ": legacy default"
 			}
 		}
 		lines = append(lines, cellPad(" "+keyStyle.Render(label), sidebarWidth), cellPad("   "+budget, sidebarWidth))

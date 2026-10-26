@@ -624,7 +624,8 @@ func agentAuthError(s store.Session, launchDir string) error {
 // sandbox launcher's environment, or the engine spec. Each resolved launch
 // gets its own account launch: the pane's process receives the newest central
 // credential once, and repeated requests from it receive that same version.
-// A launch resolved for a pane that is then reused is never delivered.
+// A resolve whose pane the engine then reuses retires its launch
+// (AccountLaunchOf), so every process actually started holds a fresh one.
 func centralLauncher(tab int, s store.Session, argv []string) ([]string, error) {
 	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || accounts.Mode(s.ID, "claude") != amuxcfg.AuthCentral {
 		return argv, nil
@@ -634,6 +635,22 @@ func centralLauncher(tab int, s store.Session, argv []string) ([]string, error) 
 		return nil, fmt.Errorf("allocate Claude account launch: %w", err)
 	}
 	return append([]string{centralauth.LauncherArg, centralauth.LaunchArgPrefix + strconv.FormatUint(launch.Seq, 10) + ":" + launch.Nonce}, argv...), nil
+}
+
+// AccountLaunchOf returns the account launch a resolved agent argv carries.
+func AccountLaunchOf(argv []string) (accounts.Launch, bool) {
+	for i, a := range argv {
+		if a != centralauth.LauncherArg || i+1 >= len(argv) {
+			continue
+		}
+		v, ok := strings.CutPrefix(argv[i+1], centralauth.LaunchArgPrefix)
+		seq, nonce, ok2 := strings.Cut(v, ":")
+		n, err := strconv.ParseUint(seq, 10, 64)
+		if ok && ok2 && err == nil {
+			return accounts.Launch{Seq: n, Nonce: nonce}, true
+		}
+	}
+	return accounts.Launch{}, false
 }
 
 const (

@@ -168,10 +168,6 @@ func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error
 			return fmt.Errorf("%s would override or redirect the central Claude login; remove it, "+
 				"or use `amux auth login claude --api-key` for an API key", strings.Join(conflicts, ", "))
 		}
-	case amuxcfg.AuthShared:
-		if !SharedAuthEnabled() {
-			return fmt.Errorf("the older amux shared Claude login is no longer available; run `amux auth login claude`")
-		}
 	}
 	return nil
 }

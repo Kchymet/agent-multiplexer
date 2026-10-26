@@ -157,7 +157,8 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 		previous = binding.ExpectedAccount
 	}
 	if profile.Mode == "api" && req.Refresh {
-		return codexapp.ChatGPTToken{}, errors.New("API keys do not support subscription refresh")
+		// A running subscription process never adopts the replacement API key.
+		return codexapp.ChatGPTToken{}, fmt.Errorf("%w: API keys do not support subscription refresh", accounts.ErrSuperseded)
 	}
 	t, err := c.provider.SessionToken(ctx, req.SessionID, req.Refresh, previous)
 	if err != nil {

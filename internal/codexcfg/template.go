@@ -40,19 +40,15 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		// A hard link shares the credential without failing that regular-file check.
 		HardlinkShared: []string{MCPCredentialsFile},
 	}
-	if mode := accounts.Mode(agentID, "codex"); mode != amuxcfg.AuthHost {
-		// Central and environment modes never share the host account login
-		// (auth.json holds its refresh token): a legacy link is unlinked without
-		// being followed. MCP OAuth credentials are separate integration
-		// credentials and keep their existing sharing.
-		sp.Shared = []string{MCPCredentialsFile, "mcp-oauth-locks"}
-		sp.Retire = []string{AuthFile}
-		if mode == amuxcfg.AuthCentral {
-			// The daemon's App Server adapter supplies the ChatGPT tokens; an
-			// inherited API key would select a different account.
-			sp.AuthUnsetEnv = APIKeyEnv
-		}
-	}
+	// Every workload follows central auth and never shares the host account
+	// login (auth.json holds its refresh token): a legacy link from the retired
+	// host mode is unlinked without being followed. MCP OAuth credentials are
+	// separate integration credentials and keep their existing sharing. The
+	// daemon's App Server adapter supplies the credential; an inherited API key
+	// would select a different account.
+	sp.Shared = []string{MCPCredentialsFile, "mcp-oauth-locks"}
+	sp.Retire = []string{AuthFile}
+	sp.AuthUnsetEnv = APIKeyEnv
 	return sp
 }
 

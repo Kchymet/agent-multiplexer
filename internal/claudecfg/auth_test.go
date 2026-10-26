@@ -29,55 +29,25 @@ func selectAuth(t *testing.T, mode string) {
 	}
 }
 
-func TestSharedAuthSurvivesAtomicRotationAndIgnoresDetachedFiles(t *testing.T) {
+// The retired shared mode is inert: even with its saved setting and an
+// enabled older shared login, no workload mounts or selects that store.
+func TestRetiredSharedAuthIsNeverMounted(t *testing.T) {
 	isolateAuth(t)
 	selectAuth(t, amuxcfg.AuthShared)
-	if SharedAuthEnabled() {
-		t.Fatal("shared auth enabled before login")
-	}
 	if err := Login(func() error {
-		return os.WriteFile(filepath.Join(SharedAuthDir(), CredentialsFile), []byte("first mock credential"), 0600)
+		return os.WriteFile(filepath.Join(SharedAuthDir(), CredentialsFile), []byte("mock shared credential"), 0600)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var specs []cfghome.Spec
-	for _, id := range []string{"one", "two"} {
-		sp := Template(id, t.TempDir())
-		if _, err := cfghome.Seed(sp); err != nil {
-			t.Fatal(err)
-		}
-		// An old detached file must not be used, removed, or mounted as shared.
-		if err := os.WriteFile(filepath.Join(sp.Dir, CredentialsFile), []byte("stale private credential"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if sp.AuthDir != SharedAuthDir() || len(sp.Shared) != 0 {
-			t.Fatalf("unexpected auth routing: %+v", sp)
-		}
-		if !slices.Contains(sp.EnvEntries(), SecureStorageEnv+"="+SharedAuthDir()) {
-			t.Fatalf("missing credential store override: %v", sp.EnvEntries())
-		}
-		binds := cfghome.Binds(sp)
-		if len(binds) != 1 || !slices.Equal(binds[0], []string{"--bind", SharedAuthDir(), SharedAuthDir()}) {
-			t.Fatalf("must bind the directory, not a credential inode: %v", binds)
-		}
-		specs = append(specs, sp)
-	}
-	tmp := filepath.Join(SharedAuthDir(), "rotating.tmp")
-	if err := os.WriteFile(tmp, []byte("rotated mock credential"), 0600); err != nil {
+	sp := Template("one", t.TempDir())
+	if _, err := cfghome.Seed(sp); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(tmp, filepath.Join(SharedAuthDir(), CredentialsFile)); err != nil {
-		t.Fatal(err)
+	if sp.AuthDir != "" || len(sp.Shared) != 0 || len(cfghome.Binds(sp)) != 0 {
+		t.Fatalf("retired shared store routed: %+v", sp)
 	}
-	for _, sp := range specs {
-		b, err := os.ReadFile(filepath.Join(sp.AuthDir, CredentialsFile))
-		if err != nil || string(b) != "rotated mock credential" {
-			t.Fatalf("agent %s missed rotation: %q, %v", sp.AgentID, b, err)
-		}
-		changes, err := cfghome.Scan(sp)
-		if err != nil || len(changes) != 0 {
-			t.Fatalf("unused legacy credentials must not cause drift: %v, %v", changes, err)
-		}
+	if slices.Contains(sp.EnvEntries(), SecureStorageEnv+"="+SharedAuthDir()) || HostStoreSharedFor("one") {
+		t.Fatal("retired shared store selected")
 	}
 }
 

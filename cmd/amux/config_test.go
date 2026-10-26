@@ -124,12 +124,10 @@ func TestConfigAuthSettings(t *testing.T) {
 	}
 	run("central\n", "get", "claude.auth")
 	run("central\n", "get", "codex.auth")
-	run("claude.auth = host  (saved;", "set", "claude.auth", "host")
-	run("host\n", "get", "claude.auth")
-	run("codex.auth = environment  (saved; run amux daemon restart", "set", "codex.auth", "environment")
-	run("claude.auth host  (saved)", "ls")
+	run("claude.auth = central  (saved;", "set", "claude.auth", "central")
 	run("codex.auth = central  (default;", "unset", "codex.auth")
-	for _, args := range [][]string{{"set", "codex.auth", "shared"}, {"set", "claude.auth", ""}, {"set", "claude.auth", "oauth"}} {
+	// The legacy sources are retired: setting one is refused with guidance.
+	for _, args := range [][]string{{"set", "claude.auth", "host"}, {"set", "claude.auth", "shared"}, {"set", "codex.auth", "environment"}, {"set", "codex.auth", "shared"}, {"set", "claude.auth", ""}, {"set", "claude.auth", "oauth"}} {
 		if err := cmdConfig(args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}

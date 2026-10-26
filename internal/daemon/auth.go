@@ -93,7 +93,7 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 		d.permissions.retireAnd(k.AgentID, func() { d.engine.Kill(k) })
 		delete(d.authPending, k)
 		if _, _, err := d.publishPermissionRuntime(k.AgentID, func() (any, error) {
-			return d.engine.Ensure(ctx, engine.Spec{
+			return d.ensurePane(ctx, engine.Spec{
 				Key: k, Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 			})
 		}); err != nil {

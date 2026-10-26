@@ -83,7 +83,6 @@ func TestSmokeCrossAccountThreadResume(t *testing.T) {
 			EventLogPath:   filepath.Join(root, "events.jsonl"),
 			ChatGPTAuth:    shim,
 			ResumeThreadID: resume,
-			ResumeRequired: resume != "",
 			ChatGPTAccount: bound,
 			Env:            []string{"CODEX_CA_CERTIFICATE=" + caPath, "CODEX_HOME=" + codexHome},
 		})
@@ -157,7 +156,7 @@ func TestSmokeCrossAccountThreadResume(t *testing.T) {
 		SessionID: "cross", Bin: bin, Dir: sessHome,
 		Endpoint:     "unix://" + filepath.Join(root, "s.sock"),
 		EventLogPath: filepath.Join(root, "events.jsonl"), ChatGPTAuth: shim,
-		ResumeThreadID: first.ThreadID, ResumeRequired: true, ChatGPTAccount: "acct-bravo",
+		ResumeThreadID: first.ThreadID, ChatGPTAccount: "acct-bravo",
 		Env: []string{"CODEX_CA_CERTIFICATE=" + caPath, "CODEX_HOME=" + codexHome},
 	})
 	if err := sup.Start(ctx, nil); err == nil {

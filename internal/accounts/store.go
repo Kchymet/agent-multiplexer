@@ -34,20 +34,23 @@ const StoreVersion = 2
 // historyLimit bounds the per-binding record of earlier runtimes' deliveries.
 const historyLimit = 8
 
+// pendingLimit bounds allocated launches awaiting their first delivery. The
+// daemon does not allocate for a reattach to a live pane, so only launches
+// that started (or failed to start) a process occupy it.
+const pendingLimit = 16
+
 // Launch identifies one harness process launch. The nonce is handed only to
-// launched processes (the Codex supervisor, or the Claude launcher's argv,
-// which its exec replaces); it is not a vendor credential.
+// that launched process (the Codex supervisor, or the Claude launcher's argv,
+// which its exec replaces); metadata keeps only its hash.
 type Launch struct {
 	Seq   uint64
 	Nonce string
 }
 
-// PendingLaunch is the allocated launch awaiting its first delivery. Every
-// launch resolved before that delivery reuses it, so a resolve whose pane was
-// then reused (a reattach) neither accumulates nor displaces allocations.
+// PendingLaunch is an allocated launch awaiting its first delivery.
 type PendingLaunch struct {
-	Seq   uint64 `json:"seq"`
-	Nonce string `json:"nonce"`
+	Seq       uint64 `json:"seq"`
+	NonceHash string `json:"nonceHash"`
 }
 
 func nonceHash(nonce string) string {
@@ -79,12 +82,12 @@ type Binding struct {
 	Revision          uint64 `json:"revision"`
 	Origin            string `json:"origin"`
 	// Launch is the current runtime's launch sequence and LaunchNonce the hash
-	// of its nonce. Pending is the single allocated launch whose process has
-	// not received a credential yet. Launches allocates sequences.
-	Launch      uint64         `json:"launch,omitempty"`
-	LaunchNonce string         `json:"launchNonce,omitempty"`
-	Pending     *PendingLaunch `json:"pendingLaunch,omitempty"`
-	Launches    uint64         `json:"launches,omitempty"`
+	// of its nonce. Pending are allocated launches whose process has not
+	// received a credential yet, oldest first. Launches allocates sequences.
+	Launch      uint64          `json:"launch,omitempty"`
+	LaunchNonce string          `json:"launchNonce,omitempty"`
+	Pending     []PendingLaunch `json:"pendingLaunches,omitempty"`
+	Launches    uint64          `json:"launches,omitempty"`
 	// MigratedFrom records the pre-central source of a migrated binding. It is
 	// evidence only and never routes a launch.
 	MigratedFrom string      `json:"migratedFrom,omitempty"`
@@ -440,8 +443,8 @@ func Delivery(session, h string) (Binding, hp.AccountProfile, error) {
 }
 
 // BeginLaunch allocates a launch for a new harness process. The process's
-// first delivery pins the newest central credential to this launch; after
-// that, deliveries to it must match, and any older launch is superseded.
+// first delivery pins the newest central credential to this launch and
+// retires every older launch; after that, deliveries to it must match.
 func BeginLaunch(session, h string) (Launch, error) {
 	if e := BindExisting(session, h); e != nil {
 		return Launch{}, e
@@ -450,21 +453,45 @@ func BeginLaunch(session, h string) (Launch, error) {
 	if _, e := rand.Read(raw[:]); e != nil {
 		return Launch{}, e
 	}
-	var l Launch
+	// Every launch gets its own nonce, so a killed process's late request can
+	// never claim the permit of the process that replaced it.
+	l := Launch{Nonce: hex.EncodeToString(raw[:])}
 	e := Update(func(s *State) error {
 		b, ok := s.Bindings[session]
 		if !ok || b.Harness != h {
 			return ErrBlocked
 		}
-		if b.Pending == nil {
-			b.Launches = max(b.Launches, b.Launch) + 1
-			b.Pending = &PendingLaunch{Seq: b.Launches, Nonce: hex.EncodeToString(raw[:])}
-			s.Bindings[session] = b
+		b.Launches = max(b.Launches, b.Launch) + 1
+		l.Seq = b.Launches
+		b.Pending = append(b.Pending, PendingLaunch{Seq: l.Seq, NonceHash: nonceHash(l.Nonce)})
+		if len(b.Pending) > pendingLimit {
+			b.Pending = append([]PendingLaunch(nil), b.Pending[len(b.Pending)-pendingLimit:]...)
 		}
-		l = Launch{Seq: b.Pending.Seq, Nonce: b.Pending.Nonce}
+		s.Bindings[session] = b
 		return nil
 	})
 	return l, e
+}
+
+// RetireLaunch withdraws an allocated launch whose argv started no process (the
+// engine reused a running pane, or the spawn failed). Unknown launches are a no-op.
+func RetireLaunch(session string, l Launch) error {
+	hash := nonceHash(l.Nonce)
+	return Update(func(s *State) error {
+		b, ok := s.Bindings[session]
+		if !ok {
+			return nil
+		}
+		var keep []PendingLaunch
+		for _, q := range b.Pending {
+			if q.Seq != l.Seq || q.NonceHash != hash {
+				keep = append(keep, q)
+			}
+		}
+		b.Pending = keep
+		s.Bindings[session] = b
+		return nil
+	})
 }
 
 // Accept records a delivery to the runtime of one process launch.
@@ -500,7 +527,10 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 			if mode == "" {
 				mode = "subscription"
 			}
-			pending := b.Pending != nil && b.Pending.Seq == l.Seq && b.Pending.Nonce != "" && b.Pending.Nonce == l.Nonce
+			pending := false
+			for _, q := range b.Pending {
+				pending = pending || (q.Seq == l.Seq && q.NonceHash == hash)
+			}
 			switch {
 			case l.Seq < b.Launch:
 				return ErrSuperseded
@@ -522,7 +552,16 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 						b.History = append([]Delivered(nil), b.History[len(b.History)-historyLimit:]...)
 					}
 				}
-				b.Launch, b.LaunchNonce, b.Pending = l.Seq, hash, nil
+				// Launches are monotonic: an older pending launch belongs to a
+				// process that was replaced (or never started) and is retired.
+				b.Launch, b.LaunchNonce = l.Seq, hash
+				var keep []PendingLaunch
+				for _, q := range b.Pending {
+					if q.Seq > l.Seq {
+						keep = append(keep, q)
+					}
+				}
+				b.Pending = keep
 			default:
 				return ErrBlocked // not a launch the daemon allocated
 			}

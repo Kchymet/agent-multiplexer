@@ -511,7 +511,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 	}
 	kill()
 	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-		return d.engine.Ensure(ctx, engine.Spec{
+		return d.ensurePane(ctx, engine.Spec{
 			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
 			ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})

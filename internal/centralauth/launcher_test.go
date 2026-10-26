@@ -36,6 +36,8 @@ func TestMain(m *testing.M) {
 					return Secret{}, fetchDenied
 				case "blocked":
 					return Secret{}, fetchBlocked
+				case "superseded":
+					return Secret{}, fetchSuperseded
 				case "unavailable":
 					return Secret{}, fetchUnavailable
 				case "unknown":
@@ -170,7 +172,8 @@ func TestLaunchClassifiesFailuresAndRecovers(t *testing.T) {
 	}{
 		{"timeout", "within 10 seconds", false},
 		{"denied", "access was denied", false},
-		{"blocked", "binding is blocked", false},
+		{"blocked", "delivery is paused", false},
+		{"superseded", "restart the workload", false},
 		{"unavailable", "could not read", false},
 		{"unknown", "mailbox request failed", false},
 		{"missing", "No central Claude login", true},

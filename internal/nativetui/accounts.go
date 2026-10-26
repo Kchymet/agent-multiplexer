@@ -43,7 +43,11 @@ type accountSnapshot struct {
 	profiles         []accountProfile
 	canManage        bool
 	defaultRevisions map[string]uint64
+	// legacyDefaults marks an older (pre-migration) daemon still routing new
+	// workloads to a host or shared login; migrationPending a migrated harness
+	// awaiting its first central login.
 	legacyDefaults   map[string]bool
+	migrationPending map[string]bool
 }
 
 type accountAttempt struct {
@@ -551,8 +555,10 @@ func (m *model) renderAccounts() string {
 			}
 			lines = append(lines, dimStyle.Render("  "+source))
 		}
-		if s.snapshot.legacyDefaults[harness] {
+		if s.snapshot.migrationPending[harness] {
 			lines = append(lines, "  Migrated from an older login: central login required")
+		} else if s.snapshot.legacyDefaults[harness] {
+			lines = append(lines, "  Older daemon still uses a legacy login; restart it to migrate")
 		}
 		lines = append(lines, "")
 	}
@@ -566,8 +572,10 @@ func (m *model) renderAccounts() string {
 			plan = "unknown"
 		}
 		lines = append(lines, "", "Selected: "+accountHarnessName(p.harness), "Account: "+identity, "Plan: "+plan, accountText(p.loginHelp))
-		if compact && s.snapshot.legacyDefaults[p.harness] {
+		if compact && s.snapshot.migrationPending[p.harness] {
 			lines = append(lines, "Migrated from an older login: central login required")
+		} else if compact && s.snapshot.legacyDefaults[p.harness] {
+			lines = append(lines, "Older daemon still uses a legacy login; restart it to migrate")
 		}
 		if p.statusDetail != "" {
 			lines = append(lines, p.statusDetail)

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"amux/internal/access"
-	"amux/internal/amuxcfg"
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/launchenv"
@@ -249,7 +248,7 @@ func TestRuntimeGeneratedClaudeHookUsesExactInstalledAlias(t *testing.T) {
 			t.Setenv("HOME", home)
 			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 			t.Setenv("AMUX_JAIL", "on")
-			useClaudeAuth(t, amuxcfg.AuthHost)
+			isolateAmuxConfig(t)
 
 			installed := core.InstalledBinPath()
 			if err := os.MkdirAll(filepath.Dir(installed), 0o700); err != nil {
@@ -318,7 +317,9 @@ test "$(stat -Lc '%d:%i' /amux-bin/amux)" = "$(stat -Lc '%d:%i' "$3")"
 test "$(stat -Lc '%d:%i' /amux-bin/amux)" = "$(stat -Lc '%d:%i' "$4")"
 printf '%s' "$generated"
 `
-			argv, err := scope(s.Dir, TabAgent, s, spec.Access, nil, []string{"/bin/sh", "-c", script, "probe", sibling, hook, installed, self})
+			// The terminal tab shares the agent's namespace; the agent tab's
+			// payload is the central credential launcher, not this probe.
+			argv, err := scope(s.Dir, TabTerminal, s, spec.Access, nil, []string{"/bin/sh", "-c", script, "probe", sibling, hook, installed, self})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -217,3 +217,62 @@ func claudeProjectSettings(t *testing.T, dir, body string) string {
 	}
 	return path
 }
+
+// Kill and respawn through the real admission path: the killed pane's queued
+// request may be dispatched before or after the respawned pane's. Fresh
+// per-launch nonces and monotonic launches mean it can pin only its own older
+// launch; the respawned pane always gets the newest login, the old never does.
+func TestCentralCredentialKilledPaneCannotClaimRespawnedLaunch(t *testing.T) {
+	for _, order := range []string{"old-first", "new-first"} {
+		t.Run(order, func(t *testing.T) {
+			claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
+			_, r, principals := sessionRuntimeFixture(t, claude)
+			dispatch := func(c sessionrpc.Call) (sessionrpc.DispatchResult, centralauth.Delivery) {
+				t.Helper()
+				res, err := r.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: principals[claude.ID], Call: c})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var d centralauth.Delivery
+				_ = json.Unmarshal(res.Body, &d)
+				return res, d
+			}
+			save := func(v string) centralauth.Credential {
+				tok, _ := centralauth.NewSecret(v)
+				c, err := centralauth.ClaudeStore().Save(tok, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := accounts.Update(func(s *accounts.State) error { s.CredentialVersion["claude:central"] = c.Generation; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				return c
+			}
+			first := save(mockCentralToken)
+			killed := launchCall(t, claude.ID)    // resolved for the pane that is then killed
+			respawned := launchCall(t, claude.ID) // resolved for its replacement
+			if order == "old-first" {
+				if res, d := dispatch(killed); res.Status != sessionrpc.StatusOK || d.Generation != first.Generation {
+					t.Fatalf("killed pane's queued request = %+v", res)
+				}
+				second := save(mockCentralToken + "-second")
+				if res, d := dispatch(respawned); res.Status != sessionrpc.StatusOK || d.Generation != second.Generation {
+					t.Fatalf("respawned pane = %+v gen %d, want the newest login", res, d.Generation)
+				}
+				if res, _ := dispatch(killed); res.Status == sessionrpc.StatusOK || res.Code != "account_runtime_superseded" {
+					t.Fatalf("killed pane after respawn = %+v", res)
+				}
+				return
+			}
+			if res, d := dispatch(respawned); res.Status != sessionrpc.StatusOK || d.Generation != first.Generation {
+				t.Fatalf("respawned pane = %+v", res)
+			}
+			if res, _ := dispatch(killed); res.Status == sessionrpc.StatusOK || len(res.Body) != 0 {
+				t.Fatalf("killed pane's late request admitted: %+v", res)
+			}
+			if res, _ := dispatch(respawned); res.Status != sessionrpc.StatusOK {
+				t.Fatalf("respawned pane lost its permit: %+v", res)
+			}
+		})
+	}
+}
