@@ -12,22 +12,24 @@ in. Each PR updates this file and the row it flips in
 ## Measured today
 
 `BenchmarkConcurrentReportsDuringSlowEffect` runs two sessions' report pairs
-(context query + activity) while a host `start` of a third session repeatedly
-takes 100ms inside the real host action admission path.
+(context query + activity) while a third session repeatedly stalls for 100ms
+on a real path: `host-action` is a host `start` through the host action
+admission, `peer-report` is that session's own report stalled in its write.
 `BenchmarkSessionReportDispatch` is one report with no contention.
 
-| Benchmark | Result (master 664f1e7) |
-| --- | --- |
-| ConcurrentReportsDuringSlowEffect | p50 1.3ms, max 102ms |
-| SessionReportDispatch activity/shared | 0.24ms/op |
-| SessionReportDispatch context/shared | 0.18ms/op |
+| Benchmark | Before split (664f1e7) | After PR 2 |
+| --- | --- | --- |
+| ConcurrentReportsDuringSlowEffect/host-action | p50 1.3ms, max 102ms | unchanged (PR 4) |
+| ConcurrentReportsDuringSlowEffect/peer-report | p50 0.9ms, max 104ms | p50 0.45ms, max 2.7ms |
+| SessionReportDispatch activity/shared | 0.25–0.3ms/op | 0.27ms/op |
+| SessionReportDispatch context/shared | 0.18–0.2ms/op | 0.19ms/op |
 
 `TestSessionReportIndependence` (internal/daemon/session_lock_independence_test.go)
 records which slow holders delay a report from session `a1`:
 
 | Slow holder | Blocks a1's report today | Unblocked by |
 | --- | --- | --- |
-| a2's report, stalled inside its write | yes | PR 2 |
+| a2's report, stalled inside its write | no | PR 2 |
 | host `start` of a3, stalled in its effect | yes | PR 4 |
 | reconcile pass, stalled partway | yes | PR 3 |
 
@@ -52,10 +54,10 @@ check reads and its effect writes.
 | # | Holder | Locks | Check reads | Effect writes | Target lock |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `sessionRuntime.reconcile` (session_lifecycle.go), every 50ms tick and at start | both | host credential; all store sessions; each session's credential | host credential rotation; per session: credential renew/rotate, mailbox server open/close (`servers`, `initialized`, `serving`, `closing` maps, owned by the run goroutine), console accounts listener, revoke + `killRuntimeFor` | no gate for the scan; session lock per session it changes; host credential under the authority's own lock |
-| 2 | `sessionRuntime.dispatch`, report actions (activity, model, limits, permission-*) | both | authority `Valid`; own session row and its root's archive flag (`resolver.Lookup`, `lookupSession`); own runtime generation (`permissions`) | own hook-state file, own runtime-model file, own permission-observation journal (read-check-append); `accounts.ObserveClaude` (accounts state, flock'd) | session lock (self) |
+| 2 | `sessionRuntime.dispatch`, report actions (activity, model, limits, permission-*) | gate shared + session(self) since PR 2 | authority `Valid`; own session row and its root's archive flag (`resolver.Lookup`, `lookupSession`); own runtime generation (`permissions`) | own hook-state file, own runtime-model file, own permission-observation journal (read-check-append); `accounts.ObserveClaude` (accounts state, flock'd) | session lock (self) |
 | 3 | `sessionRuntime.dispatch`, every other operation | both | `policy.Authorize`: membership, grants, archive state across the caller's workgroup | restricted queries (read only); self-completion (archive self, `completions.begin`); `d.handle` for the canonical action | topology read + the locks of the action's targets (as for host actions) |
 | 4 | `withFinalAdmission` (session_dispatch.go), twice per runtime-events page | both | authority `Valid`, `policy.Authorize` | none: it gates disclosure | topology read + session lock of the paged subject |
-| 5 | `dispatchSessionCapture` (session_reports.go), two short gates around the copy | both | as #2, plus the session's dir and Claude id | publishes the staged transcript of self | session lock (self) |
+| 5 | `dispatchSessionCapture` (session_reports.go), two short admissions around the copy | gate shared + session(self) since PR 2 | as #2, plus the session's dir and Claude id | publishes the staged transcript of self | session lock (self) |
 | 6 | `dispatchCentralCredential` (central_credential.go) | both | own session row, accounts binding/profile, central token store | `accounts.Accept` (binding delivery state) | session lock (self) |
 | 7 | `dispatchCredential` (credential_broker.go) | both | own session row | runs a keychain or GitHub credential helper process: slow and external | session lock (self) |
 | 8 | `Daemon.handle` (actions.go), all host actions and #3's actions | both, unless already admitted | `revalidateDeferred` (caller's guard) | anything: store mutations through wsops, engine start/kill/restart, authority restore/regrant, account manage, steer, shutdown | per action: the locks of the resources it names (see Target model) |
@@ -105,9 +107,9 @@ are and sit below every resource lock in the order.
 Per-session files (hook state, runtime model, permission observations,
 transcript stage) have no lock of their own. `WriteSessionHookState` writes a
 fixed `<path>.tmp`, and the permission journal is check-then-append, so two
-concurrent writers for the same session would race. Today the gate and the
-per-subject mailbox (one `ServeOnce` per subject at a time) prevent that; the
-session lock takes over.
+concurrent writers for the same session would race. The session lock
+(`Daemon.sessionLocks`) guards them, alongside the per-subject mailbox (one
+`ServeOnce` per subject at a time).
 
 ## Target model
 
@@ -181,8 +183,9 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
 
 1. This audit, the independence test, and a benchmark holder that uses the real
    host action path.
-2. Session reports (#2, #5): gate read + session(self). Flips the peer report
-   row.
+2. Session reports (#2, #5): gate read + session(self) through
+   `admitSession`, with `keyedLocks` for the per-session locks. Flips the peer
+   report row. Done.
 3. Reconcile (#1): per-session work under session locks, scan with no gate.
    Flips the reconcile row.
 4. Host actions (#8, #9, #11): the per-action lock classifier, with the

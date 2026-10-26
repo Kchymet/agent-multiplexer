@@ -435,9 +435,10 @@ func openSessionTranscriptSource(session store.Session) (*os.File, error) {
 	return f, nil
 }
 
-// dispatchSessionCapture keeps the daemon-wide dispatch/effect locks away from
-// the potentially 256 MiB copy. Both short gates authenticate and bind the exact
-// subject/runtime incarnation; only the final gate publishes the private stage.
+// dispatchSessionCapture keeps the session's admission away from the
+// potentially 256 MiB copy. Both short admissions authenticate and bind the
+// exact subject/runtime incarnation; only the final one publishes the private
+// stage.
 func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal access.Principal, req access.Request) sessionrpc.DispatchResult {
 	// The wait is bounded: this subject's mailbox is served serially, so a
 	// capture parked behind other agents' copies would hold up its own status
@@ -452,17 +453,13 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	case <-ctx.Done():
 		return rpcFailed("report_capture_unavailable")
 	}
-	r.dispatchMu.Lock()
-	r.d.effectMu.Lock()
-	ctx = withEffectAdmission(ctx)
+	release := r.d.admitSession(principal.SubjectID)
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		return rpcDenied("credential_invalid")
 	}
 	if err := r.authorizeSessionReport(ctx, principal, req); err != nil {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		if errors.Is(err, access.ErrDenied) {
 			return rpcDenied("report_access_denied")
 		}
@@ -472,18 +469,15 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	generation, live := r.d.permissions.generation(principal.SubjectID)
 	if err != nil || !ok || session.Archived || session.ID != principal.SubjectID ||
 		session.ClaudeID == "" || !live || generation == "" {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		return rpcFailed("report_runtime_unavailable")
 	}
 	if req.Fields[sessionreport.FieldRuntimeGeneration] != generation {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		return rpcDenied("report_runtime_replaced")
 	}
 	source, err := openSessionTranscriptSource(session)
-	r.d.effectMu.Unlock()
-	r.dispatchMu.Unlock()
+	release()
 	if err != nil {
 		return rpcFailed(reportErrorCode(err))
 	}
@@ -496,10 +490,8 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	}
 	defer stage.Abort()
 
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
+	release = r.d.admitSession(principal.SubjectID)
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return rpcFailed("report_capture_unavailable")
 	}
