@@ -313,10 +313,15 @@ func (m *model) renderRow(i int, s core.Session) string {
 	icon := glyph(s)
 	if container(&s) {
 		// Keep container titles aligned, but reserve disclosure arrows for rows
-		// that actually have children to fold and unfold.
+		// that actually have children to fold and unfold. A childless workgroup
+		// takes the leaf bullet in the arrow column so it still reads as a row;
+		// a childless repo already has its ⛁ glyph to mark the row.
 		icon = " "
-		if m.groupHasChildren(&s) {
+		switch {
+		case m.groupHasChildren(&s):
 			icon = disclosure(m.collapsed[m.group(&s)])
+		case s.Kind != "repo":
+			icon = leaf
 		}
 		if s.Kind == "repo" {
 			icon += " " + glyph(s)
@@ -517,6 +522,12 @@ func disclosure(collapsed bool) string {
 	}
 	return "▾"
 }
+
+// leaf marks a container with nothing to disclose. A hollow bullet sits in the
+// disclosure column: it is single-cell, from the same Geometric Shapes block
+// as the arrows and activity circles, and reads as "empty" without inviting a
+// fold like ▸ would or looking like an idle agent's ○.
+const leaf = "◦"
 
 // Section headers participate in cursor navigation and retain their create hint.
 func (m *model) sectionHeader(section string) string {
