@@ -67,6 +67,26 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
 - **Corrupt or insecure state.** A corrupt central Claude record never blocks binding or the
   repairing login, and delivery refuses it. An insecure store fails closed.
 
+## Serialization audit (after #207, #212 and #214)
+
+Every fence decision is made inside one flock'd `accounts.Update` transaction, so correctness does not
+depend on in-process daemon gates. These decisions are: allocating, retiring and pinning a launch; the
+superseded refusal; the epoch, pending-login, blocked and revision checks; and the committed-version
+check for a new Claude or API pin.
+
+- Claude delivery (`dispatchCentralCredential`) still holds `dispatchMu` and the exclusive `effectMu`.
+  Account mutations and ceremonies (`accountCall`) take the exclusive `effectMu`, so the two remain
+  mutually exclusive.
+- Codex delivery (`codexTokenSource`) deliberately takes no `effectMu`. It is admitted under the
+  authority read lease inside `AcceptAuthorized`, as before.
+- #212's shared `admitSession` covers only session reports. Claude statusline quota observations
+  are fenced by `ObserveClaude`'s own transaction (delivered epoch and version).
+- #207's creation-readiness snapshot only short-circuits an all-ready preflight. It is also cleared
+  on background account transitions and is never consulted by delivery.
+- Hardening: a new Claude or API launch pins only the committed `CredentialVersion` (`ErrStale`
+  otherwise, which is retryable). A future split of the delivery gate therefore cannot pin a version
+  read before a replacement committed.
+
 ## Regression tests
 
 - `internal/accounts`: migration, idempotency, pending reporting, mode/API/account replacement,

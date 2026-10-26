@@ -75,6 +75,10 @@ func TestMigrationCapturesPreexistingClaudeCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The login completion commits the replacement's version with it.
+	if err = Update(func(s *State) error { s.CredentialVersion["claude:central"] = next.Generation; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", next.Generation, running); !errors.Is(err, ErrSuperseded) {
 		t.Fatal("running Claude process received the replacement", err)
 	}
