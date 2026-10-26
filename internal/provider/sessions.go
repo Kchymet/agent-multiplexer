@@ -93,7 +93,15 @@ func (p *Provider) publishOnce(ctx context.Context, s *session, seq int64, last 
 	}
 	next := publishedSessions(sess)
 	b, err := json.Marshal(sess)
-	if err != nil || bytes.Equal(b, last) {
+	if err != nil {
+		return seq, last
+	}
+	if bytes.Equal(b, last) {
+		// A provisional ID must still meet the next successful inventory poll.
+		// Reconcile even when the serialized snapshot did not otherwise change;
+		// otherwise a buggy creation result for an unpublished ID would remain a
+		// connection-long authority grant.
+		waitForRevokedWork(s.revokeMissingPublished(next))
 		return seq, last
 	}
 	seq++
@@ -153,6 +161,15 @@ func (s *session) revokeMissingPublished(next map[string]core.Session) []<-chan 
 			delete(s.published, id)
 		}
 	}
+	// A successful snapshot is the authority boundary for IDs minted since the
+	// previous one. Present IDs are now ordinary published grants; absent IDs are
+	// revoked exactly like a removed published row.
+	for id := range s.provisional {
+		if _, ok := next[id]; !ok {
+			removed[id] = true
+		}
+		delete(s.provisional, id)
+	}
 	if len(removed) == 0 {
 		return nil
 	}
@@ -189,6 +206,7 @@ func (s *session) revokeAllPublished() {
 
 func (s *session) revokeAllPublishedLocked() []<-chan struct{} {
 	s.published = map[string]core.Session{}
+	s.provisional = map[string]struct{}{}
 	var waits []<-chan struct{}
 	for _, call := range s.actions {
 		call.cancel()
@@ -230,7 +248,7 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	res := harnessproto.HarnessMsg{Type: harnessproto.HSessionResult, ReqID: m.ReqID}
 	var newID string
 	var err error
-	if p.cfg.OpenAccounts != nil && !p.cfg.AccountUse && (m.Action == harnessproto.VerbNewWorkgroup || m.Action == harnessproto.VerbAddAgent || m.Action == harnessproto.VerbStart || m.Action == harnessproto.VerbPrompt) {
+	if p.cfg.OpenAccounts != nil && !p.cfg.AccountUse && (isCreationVerb(m.Action) || m.Action == harnessproto.VerbStart || m.Action == harnessproto.VerbPrompt) {
 		err = errors.New("account_use_denied")
 	} else {
 		newID, err = p.applyAuthorizedSessionAction(s, m)
@@ -274,13 +292,15 @@ func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMs
 	if _, ok := sessionActionFor(m); !ok {
 		return p.applySessionAction(s.rtCtx, m)
 	}
-	if m.Action != harnessproto.VerbNewWorkgroup && m.ID == "" {
+	if !isRootCreationVerb(m.Action) && m.ID == "" {
 		return "", errSessionNotPublished
 	}
 
 	s.opMu.Lock()
-	if m.Action != harnessproto.VerbNewWorkgroup {
-		if _, ok := s.published[m.ID]; !ok {
+	if !isRootCreationVerb(m.Action) {
+		_, published := s.published[m.ID]
+		_, provisional := s.provisional[m.ID]
+		if !published && !provisional {
 			s.opMu.Unlock()
 			return "", errSessionNotPublished
 		}
@@ -296,6 +316,14 @@ func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMs
 	cancel()
 	close(call.done)
 	s.opMu.Lock()
+	if err == nil && newID != "" {
+		if _, published := s.published[newID]; !published {
+			if s.provisional == nil {
+				s.provisional = map[string]struct{}{}
+			}
+			s.provisional[newID] = struct{}{}
+		}
+	}
 	delete(s.actions, opID)
 	s.opMu.Unlock()
 	return newID, err
@@ -362,7 +390,15 @@ func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg
 	if p.cfg.ReadOnlySessions || p.cfg.ApplyAction == nil {
 		return "", errors.New("read-only: session verbs are disabled")
 	}
-	if m.Action == harnessproto.VerbNewWorkgroup || m.Action == harnessproto.VerbAddAgent {
+	if isCreationVerb(m.Action) {
+		if m.Action == harnessproto.VerbNewWorkgroupEmpty {
+			if _, present := m.Fields["repos"]; !present {
+				return "", errors.New("new-workgroup-empty requires an explicit repos field")
+			}
+			if _, present := m.Fields["defaultAgent"]; present {
+				return "", errors.New("new-workgroup-empty creates zero members; defaultAgent is not allowed")
+			}
+		}
 		identity := m.Fields["identity_mode"]
 		if identity == "" {
 			identity = harnessproto.IdentityMachine
@@ -398,6 +434,9 @@ func (p *Provider) applySessionAction(ctx context.Context, m harnessproto.MuxMsg
 //   - add-agent creates exactly one member: the `agent` field, defaulted.
 func requestedHarnesses(m harnessproto.MuxMsg) []string {
 	worker := agent.Canonical(m.Fields["agent"])
+	if m.Action == harnessproto.VerbNewWorkgroupEmpty {
+		return []string{wsops.CoordinatorKind(m.Fields[wsops.FieldCoordinator])}
+	}
 	if m.Action != harnessproto.VerbNewWorkgroup {
 		return []string{worker}
 	}
@@ -452,6 +491,16 @@ func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 	switch m.Action {
 	case harnessproto.VerbNewWorkgroup:
 		return core.Action{Action: core.ActionNewWorkgroup, Fields: m.Fields}, true
+	case harnessproto.VerbNewWorkgroupEmpty:
+		// create-workspace with no defaultAgent is the store's native operation
+		// for a coordinator plus an explicit grant ceiling and zero members.
+		// Copy the map so this wire normalization cannot mutate the caller's frame.
+		fields := make(map[string]string, len(m.Fields))
+		for k, v := range m.Fields {
+			fields[k] = v
+		}
+		delete(fields, "defaultAgent")
+		return core.Action{Action: core.ActionCreateWorkspace, Fields: fields}, true
 	case harnessproto.VerbAddAgent:
 		return core.Action{Action: core.ActionAddAgent, ID: m.ID, Fields: m.Fields}, true
 	case harnessproto.VerbRename:
@@ -468,6 +517,14 @@ func sessionActionFor(m harnessproto.MuxMsg) (core.Action, bool) {
 	default:
 		return core.Action{}, false
 	}
+}
+
+func isRootCreationVerb(action string) bool {
+	return action == harnessproto.VerbNewWorkgroup || action == harnessproto.VerbNewWorkgroupEmpty
+}
+
+func isCreationVerb(action string) bool {
+	return isRootCreationVerb(action) || action == harnessproto.VerbAddAgent
 }
 
 // steerFields normalizes a steering session-action's wire fields into the
