@@ -158,6 +158,11 @@ type Daemon struct {
 	effectMu sync.RWMutex
 	// sessionLocks orders effects on one session's own state.
 	sessionLocks keyedLocks
+	// creationMu serializes session creations among themselves, under the
+	// shared gate. Reconcile opens a new mailbox only while it can hold it, so
+	// it never adopts a half-created session. Order: gate, session locks, then
+	// creationMu; a creation releases it before locking its new session.
+	creationMu sync.Mutex
 	// credentialMu serializes host credential helper processes (keychain, gh)
 	// among themselves. It is a leaf below a session's admission.
 	credentialMu sync.Mutex

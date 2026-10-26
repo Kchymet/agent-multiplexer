@@ -70,7 +70,7 @@ func (r *sessionRuntime) reconcilePass(ctx context.Context, wait bool) error {
 			continue
 		}
 		if release, ok := admit(session.ID); ok {
-			r.reconcileSession(ctx, session.ID)
+			r.reconcileSession(ctx, session.ID, wait)
 			release()
 		}
 	}
@@ -82,7 +82,7 @@ func (r *sessionRuntime) reconcilePass(ctx context.Context, wait bool) error {
 			continue
 		}
 		if release, ok := admit(id); ok {
-			r.reconcileSession(ctx, id)
+			r.reconcileSession(ctx, id, wait)
 			release()
 		}
 	}
@@ -103,8 +103,10 @@ func (r *sessionRuntime) reconcileNeeded(ctx context.Context, session store.Sess
 }
 
 // reconcileSession runs under id's admission. It rereads the session, so a
-// restore, archive or deletion that committed after the scan is honored.
-func (r *sessionRuntime) reconcileSession(ctx context.Context, id string) {
+// restore, archive or deletion that committed after the scan is honored. It
+// opens a mailbox only while no creation is in progress (creationMu), waiting
+// for one when wait is set and otherwise leaving it to the next tick.
+func (r *sessionRuntime) reconcileSession(ctx context.Context, id string, wait bool) {
 	// Reread from the store the scan used, not the policy resolver: cleanup of
 	// an archive whose commit outcome is uncertain must not depend on policy
 	// reads succeeding.
@@ -134,6 +136,12 @@ func (r *sessionRuntime) reconcileSession(ctx context.Context, id string) {
 		r.renewCurrent(ctx, session)
 	case r.retiring(id):
 	default:
+		if wait {
+			r.d.creationMu.Lock()
+		} else if !r.d.creationMu.TryLock() {
+			return
+		}
+		defer r.d.creationMu.Unlock()
 		if err := r.open(ctx, session); err != nil {
 			log.Printf("session RPC %s unavailable: %v", id, err)
 		}

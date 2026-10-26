@@ -37,6 +37,7 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "workgroup host action (exclusive fallback)", hold: holdWorkgroupAction, blocked: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
+		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
 	}
 	for _, tc := range tests {
@@ -213,6 +214,21 @@ func holdPeerCredential(t *testing.T, f *independenceFixture, held func(), relea
 	}
 }
 
+// holdCreation is a host `new-workgroup` whose coordinator launch stalls.
+func holdCreation(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.d.launchSpec = func(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+		held()
+		<-release
+		return testLaunchSpecResolver(ctx, id)
+	}
+	f.d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "created"}}); !r.OK {
+		t.Errorf("new workgroup = %+v", r)
+	}
+}
+
 // holdReconcile is a session RPC reconcile pass stalling while it opens a3's
 // mailbox, inside a3's critical section.
 func holdReconcile(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
@@ -257,5 +273,37 @@ func TestSessionHostActionExcludesThatSessionsReports(t *testing.T) {
 	<-actionDone
 	if result := <-reported; result.Status != sessionrpc.StatusOK {
 		t.Fatalf("report = %+v", result)
+	}
+}
+
+// TestReconcileTickDefersOpensDuringCreation: a session row a creation is
+// still building must not have its mailbox adopted mid-creation.
+func TestReconcileTickDefersOpensDuringCreation(t *testing.T) {
+	f := newIndependenceFixture(t)
+	t.Cleanup(f.runtime.close)
+	var mu sync.Mutex
+	opened := map[string]bool{}
+	f.d.launchSpec = func(_ context.Context, id string) (panespec.LaunchSpec, error) {
+		mu.Lock()
+		opened[id] = true
+		mu.Unlock()
+		return panespec.LaunchSpec{}, errors.New("test: no launch spec")
+	}
+	f.d.creationMu.Lock()
+	if err := f.runtime.reconcileTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	during := len(opened)
+	mu.Unlock()
+	f.d.creationMu.Unlock()
+	if during != 0 {
+		t.Fatalf("reconcile opened %v during a creation", opened)
+	}
+	if err := f.runtime.reconcileTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !opened["a1"] {
+		t.Fatal("reconcile did not open a1 after the creation")
 	}
 }
