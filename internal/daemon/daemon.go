@@ -148,7 +148,12 @@ type Daemon struct {
 	// authenticated host actions, session mailbox dispatch, credential rotation,
 	// and completion revocation. A policy mutation cannot commit between a
 	// session's last current-generation check and admission of its exact effect.
-	effectMu sync.Mutex
+	// Holders not yet split per resource take it exclusively; session-scoped
+	// work takes it shared plus sessionLocks (admitSession). See
+	// docs/daemon-locking.md.
+	effectMu sync.RWMutex
+	// sessionLocks orders effects on one session's own state.
+	sessionLocks keyedLocks
 
 	// shutdown is closed only by the authenticated host control path. Process
 	// IDs are diagnostics, never authority to signal a process.
