@@ -719,3 +719,22 @@ Posted as PR206 issuecomment-6407618479.
   low request is missing from the listing; (C) neither file is listed. macOS
   held-fd scan visibility is a hypothesis only. Discriminating diagnostics and
   a darwin `listNames` micro-test are proposed on the PR.
+
+---
+
+## PR206 combined-tree reassessment (with master #207/#209)
+
+Posted as PR206 issuecomment-6407678613.
+- **Root cause of the release-test failure is integration, not scan
+  visibility.** #207 time-prefixes request IDs: 48-bit ms prefix followed by
+  80 random bits. Branch-only tree: 0/700 failures. `3c67763` merged with
+  master: 42/300 failures on Linux, because the release sorts ahead of the
+  later "low" request unless both are signed in the same ms. My earlier
+  all-zero premise was wrong because I read only the branch tree.
+- **Pressure 39/40** happened before #207 (run created 03:16:14Z versus the
+  #207 merge at 03:23:15Z), has not recurred in later macOS/Ubuntu runs, and
+  remains unexplained. Classify the next occurrence with the diagnostics.
+- **#207 × PR206 risk:** async hooks with `hookReportTimeout=10s` abandon
+  requests. The abandoned request is still dispatched (the R2 shape), so its
+  response is never released and pins a pool slot for 60s under a slow gate.
+  Suggested a regression plus a signed client deadline.
