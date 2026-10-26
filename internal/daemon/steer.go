@@ -477,7 +477,7 @@ func (d *Daemon) admitDeferredEffect(ctx context.Context, id string, effect func
 			return err
 		}
 	}
-	release := d.admitSession(id)
+	release := d.admitSessions(id, guardSubject(ctx))
 	defer release()
 	if err := revalidateDeferred(admitCtx); err != nil {
 		return err

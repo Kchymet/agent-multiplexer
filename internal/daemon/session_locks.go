@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -82,6 +83,38 @@ func (d *Daemon) admitSession(id string) (release func()) {
 		unlock()
 		d.effectMu.RUnlock()
 	}
+}
+
+// admitSessions is admitSession for several sessions at once: the gate
+// shared, then every named session's lock in one sorted acquisition. Empty
+// ids are ignored.
+func (d *Daemon) admitSessions(ids ...string) (release func()) {
+	keys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			keys = append(keys, id)
+		}
+	}
+	d.effectMu.RLock()
+	unlock := d.sessionLocks.lock(keys...)
+	return func() {
+		unlock()
+		d.effectMu.RUnlock()
+	}
+}
+
+type guardSubjectContextKey struct{}
+
+// withGuardSubject records the session whose authority the access guard on ctx
+// checks. Work admitted with only some sessions' locks also locks this one, so
+// an archive or delete of the caller cannot cross its guard.
+func withGuardSubject(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, guardSubjectContextKey{}, id)
+}
+
+func guardSubject(ctx context.Context) string {
+	id, _ := ctx.Value(guardSubjectContextKey{}).(string)
+	return id
 }
 
 // admitShared is admission for work that only reads policy or state: it takes
@@ -179,6 +212,101 @@ func workgroupStart(a core.Action) bool {
 	defer db.Close()
 	session, found, err := db.GetSession(a.ID)
 	return err == nil && found && session.IsRoot()
+}
+
+// archiveScopedAction names the sessions an archive, rename or delete
+// touches when it runs under their locks instead of the exclusive gate: the
+// target, plus every member when the target is a workgroup root. Restores and
+// the one-key archive toggle (which may restore) stay exclusive: a restore
+// regrants credentials and drains completions under dispatchMu.
+func archiveScopedAction(a core.Action) (ids []string, creation bool, ok bool) {
+	switch a.Action {
+	case core.ActionSetArchived:
+		if a.Fields["archived"] != "true" {
+			return nil, false, false
+		}
+		creation = true
+	case core.ActionDelete, core.ActionKill:
+		creation = true
+	case core.ActionRename:
+	default:
+		return nil, false, false
+	}
+	if a.ID == "" || a.ID == console.ID {
+		return nil, false, false
+	}
+	ids, found := sessionAndMembers(a.ID)
+	if !found {
+		return nil, false, false
+	}
+	return ids, creation, true
+}
+
+// sessionAndMembers returns id and, for a workgroup root, its members.
+func sessionAndMembers(id string) ([]string, bool) {
+	db, err := store.OpenReadOnly()
+	if err != nil {
+		return nil, false
+	}
+	defer db.Close()
+	session, found, err := db.GetSession(id)
+	if err != nil || !found {
+		return nil, false
+	}
+	ids := []string{session.ID}
+	if session.IsRoot() {
+		children, err := db.Children(id)
+		if err != nil {
+			return nil, false
+		}
+		for _, child := range children {
+			ids = append(ids, child.ID)
+		}
+	}
+	return ids, true
+}
+
+// sameMembers reports whether two resolutions of a session's members match.
+func sameMembers(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, id := range a {
+		seen[id] = true
+	}
+	for _, id := range b {
+		if !seen[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// repoScopedAction reports a repo action that runs under the shared gate and
+// creationMu instead of the exclusive gate, with the sessions it changes:
+// tracking a new repo (none: its home session is a creation) or re-scoping
+// one agent's repos (that agent).
+func repoScopedAction(a core.Action) ([]string, bool) {
+	switch a.Action {
+	case core.ActionAddRepo:
+		return nil, true
+	case core.ActionAgentSetRepos:
+		if a.ID == "" || a.ID == console.ID {
+			return nil, false
+		}
+		db, err := store.OpenReadOnly()
+		if err != nil {
+			return nil, false
+		}
+		defer db.Close()
+		session, found, err := db.GetSession(a.ID)
+		if err != nil || !found || session.IsRoot() {
+			return nil, false
+		}
+		return []string{session.ID}, true
+	}
+	return nil, false
 }
 
 // sessionScopedAction names the one session an action touches when it runs

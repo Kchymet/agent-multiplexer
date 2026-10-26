@@ -34,10 +34,15 @@ records which slow holders delay a report from session `a1`:
 | a2's report, stalled inside its write | no | PR 2 |
 | host `start` of a3, stalled in its effect | no | PR 4 |
 | host `start` of the workgroup root, stalled resolving its members | no | PR 4, workgroup-start slice |
-| host archive of a3 (a policy mutation: still exclusive), stalled stopping its runtime | yes | archive slice |
+| host archive of a3, stalled stopping its runtime | no | PR 4, archive slice |
+| one-key archive toggle of a3 (may restore: still exclusive) | yes | restore slice |
+| host `agent-set-repos` of a3, stalled in its git work | no | PR 4, repo slice |
+| host `add-repo`, stalled cloning | no | PR 4, repo slice |
+| archive of a1's own workgroup | yes, and a1 is then refused | correct: a1 is archived |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
 | host `new-workgroup`, stalled launching its coordinator | no | PR 4, creation slice |
+| host `start` of a3, stalled inside its runtime launch (`engine.Ensure`) | no | PR 7 (permission gate per subject) |
 | reconcile pass, stalled while it opens a3's mailbox | no | PR 3 |
 
 ## What the global gate protects
@@ -105,7 +110,7 @@ are and sit below every resource lock in the order.
 | `Daemon.credentialMu` | host credential helper processes (keychain, `gh`), below a session's admission |
 | `accountReadinessCache.mu` | cached account snapshot |
 | `Daemon.servingMu`, `Daemon.deferredMu` | host transports and deferred work admission |
-| `runtimePermissionGate.mu` | runtime generations and permission claims; `retireTokenAnd` runs its callback under it (called with `authMu` held) |
+| `runtimePermissionGate.mu` + per-subject locks | runtime generations and permission claims. Since PR 7 the subject lock is held across the callbacks (runtime creation in `publish`, kill in `retireAnd`/`retireTokenAnd`, delivery in `consume`), and `mu` only for map access. Before, one global `mu` was held across `engine.Ensure` and kills, so every runtime start or stop stalled every session's reports in `generation()`. Callers' locks (session, `authMu`) come before the subject lock |
 | `completionRegistry.mu` | completion entries |
 | `sessionEventPager.mu`, response budget `mu` | event paging state, mailbox response budget |
 | `FileAuthority.mu` (RW) | credential registry and replay ledger; `WithValid` holds it shared during a short callback |
@@ -229,8 +234,26 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      those (`startAgents`). Membership is not frozen by the shared gate: a
      creation adds members under `creationMu` alone. A member added after the
      resolution is started by its own creation, under its own lock.
-   - Next: archive and restore (workgroup locks), rename, then account manage
-     and completion `finish`.
+   - Archive slice, done: explicit archive (`set-archived true`), `rename`,
+     `delete` and `kill` of an agent or workgroup (`archiveScopedAction`) take
+     the gate shared plus the target's session lock and, for a root, every
+     member's. Archive and delete then take `creationMu` and re-resolve the
+     members; if a creation added one in between, they start again. So that
+     an archive or delete of a session principal cannot cross that principal's
+     guard, every shared holder whose check depends on a session principal
+     also locks it: restricted queries lock the caller, runtime-event
+     admission locks the caller and the subject, and a session-originated
+     scoped action or deferred steer locks the caller (`withGuardSubject`)
+     along with the target. The one-key toggle (it may restore) and restore
+     stay exclusive: restore drains completions under `dispatchMu`.
+   - Repo slice, done: `add-repo` (a clone plus a repo home session, so a
+     creation) and `agent-set-repos` of one agent (that agent's lock) run
+     under the gate shared plus `creationMu`, which also serializes their git
+     work with creations and deletions. `refresh` only wakes the poller and
+     takes no gate at all. `rm-repo` and `coordinator-set-repos` (they change
+     many sessions' authorization) stay exclusive.
+   - Next: restore, move and the remaining policy changes, then account
+     manage and completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is
@@ -241,3 +264,7 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
    session-originated actions follow the host action classification (PR 4
    slices). `accountCall` (#10) moves with account manage.
 6. Delete the gate and `dispatchMu`.
+7. The runtime permission gate: per-subject locks across its callbacks,
+   `mu` for the map only. Found while slicing archive: the gate's global
+   mutex was a second daemon-wide lock behind every runtime start and stop.
+   Done.
