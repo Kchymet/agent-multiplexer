@@ -234,3 +234,108 @@ Notes on the harness for the fix PR:
   "request failed … check daemon status", which misdirects users; with
   publish-before-launch this path should be unreachable, but a not-yet-published
   service is better reported/retried as "starting" with a short backoff.
+
+---
+
+## c0523b WIP checkpoint `1628b9a` — review (2026-10-25)
+
+Read `docs/evidence/auth-follow-central/CHECKPOINT.md` and the full diff vs
+`3397deb`. Probe: `c0523b_auth_follow_probe_test.go.txt` (daemon package, via
+overlay). WIP daemon tests do not compile yet (`account_overview_test.go:53`
+compares a struct now containing `[]accounts.Delivered`); for the probe run that
+file (and any other stale test) was overlaid with an empty `package daemon`
+file. Negative control = same probe on upstream `3397deb`/`4a485da`.
+
+### BLOCKER A1 — REPRODUCED: live Claude principal obtains changed auth (next-process-only broken)
+`dispatchCentralCredential` (`internal/daemon/central_credential.go`, unchanged)
+calls `accounts.Accept(...)` **without a launch**, and `AcceptAuthorized` treats
+a launch-less call as `allocate` → a new launch on **every** query
+(`internal/accounts/store.go` `if allocate { b.Launches = ...+1; seq = b.Launches }`).
+The "current launch keeps mode/account/version" branch is therefore unreachable
+for Claude. Any process holding the session principal (the running agent, or
+the session's shell tab — both can sign mailbox requests) can re-issue
+`central-credential` after a replacement login and receive the new credential
+(including a different account, or an API key via `credential-format=typed-v1`).
+
+| Run | Result |
+|---|---|
+| WIP `1628b9a` | first gen=1; same principal after `completeClaude` replacement → `status=ok gen=2 changedToken=true` (**LEAK**) |
+| upstream control | same sequence → `status=denied code=account_binding_blocked` |
+
+Fix direction: allocate the Claude launch on the daemon side when the agent tab
+process is started (`replaceSession`/start → `engine.Ensure`), hand the launcher a
+single-use launch identifier only in the agent tab's launch, and make
+`dispatchCentralCredential` require it and **consume** it (Claude never
+refreshes, so one delivery per launch). A launch-less request, a reused launch,
+or another tab's request is refused. Regression: probe above must return
+non-OK for the second query, while a real restart (new launch) gets gen=2.
+
+### BLOCKER A2 — REPRODUCED: corrupt central record blocks the repairing login
+`bind()` now `return err` when `CredentialVersion[claude:central]==0` and
+`ClaudeStore().Load()` fails with anything but `ErrNotConfigured`. `accountCall`
+runs `BindExisting` for every row before `AccountLogin`/`Logout`/`Default`, so
+login fails with `account_binding_invalid`.
+
+| Run | Result |
+|---|---|
+| WIP, corrupt `credential.json` (pre-feature, never bootstrapped) | `login begin ok=false error="account_binding_invalid"` |
+| WIP, valid store (control) | `ok=true` |
+| upstream, corrupt | `ok=true` (CredentialUnknown path) |
+
+CODE-READ consequence: the same error also fails `Delivery` and new Claude
+`Bind`/`BeginLaunch` for every session until the file is hand-repaired. Fix:
+treat an unreadable record as "not configured yet" for bootstrap (deliver
+nothing, `central_credential_unavailable`), never fail binding; `SaveKind`
+already handles a corrupt prior record. Regression: corrupt → no delivery →
+login completes → same session's next launch delivers, no rebind; plus valid
+control with generation unchanged and no epoch bump.
+
+### HIGH A3 — CODE-READ: first central login interrupts running legacy-host Claude on macOS
+`daemon/credential_broker.go:34` gates Keychain broker ops per request with
+`claudecfg.HostStoreSharedFor(principal)` → `accounts.Mode(id)`, and
+`normalize()` clears every `LegacySource` the moment central becomes
+configured. A host-mode Claude process launched before the login keeps running
+but its Keychain reads/refresh writes are now refused mid-turn — contradicting
+"running processes keep what they received". Seatbelt profile
+(`panespec/seatbelt.go:300`) is launch-time so only the broker gate is live.
+Fix: gate the broker on the runtime's launch-time source snapshot (record it with
+the launch), not on the durable binding. Regression (darwin or broker-level
+unit): host-mode runtime launched, central login completes, broker read still
+allowed for that runtime; new launch is central and broker refused.
+
+### MEDIUM A4 — LegacySource is indefinite
+Legacy retires only on the first central login. `LegacyUsable` returns true
+unconditionally for `environment` (both harnesses) and for `host` on darwin, and
+`bind()` seeds **new** workloads from `LegacyFallback`, so an installation that
+never logs in keeps creating legacy workloads forever. That is the indefinite
+compatibility mode the user asked to avoid. Suggest: legacy only for bindings
+that existed at the v1→v2 migration (no `LegacyFallback` seeding of new
+workloads), a persistent "migration pending — run `amux auth login <h>`" status
+in accounts/TUI, and keep "retire at next launch after first central login".
+Also: `amux config set claude.auth host|shared|environment` now errors; confirm
+that `unset` cannot resurrect a legacy fallback.
+
+### MEDIUM A5 — exact-thread fallback remains substring-based and unconditional
+`supervisor.go` `if err != nil && isNoRollout(err) { resumed=false; start() }`
+fires for any `thread/resume` error containing "no rollout", including
+`Identity.Resumable == true` threads that are known to have history. With
+routine cross-account resumes this path matters more. Gate the fallback to
+threads not known resumable (legacy v0 / never-run), and for a resumable thread
+fail the launch visibly with the identity unchanged. Regression: fake App
+Server returns a "no rollout"-shaped error for a resumable thread → launch
+error, `ThreadID` unchanged, no `thread/start`. Checkpoint's residual risk
+(backend rejecting another account's `encrypted_content`) is a turn-time error,
+not a resume error — add an assertion that such a turn failure does not rewrite
+identity or start a fresh thread.
+
+### Verified OK by reading (keep as regressions)
+- Codex old runtime: `req.Launch < binding.Launch` → `ErrSuperseded`; refresh
+  only for `req.Launch == binding.Launch`; same-launch account change →
+  `ErrAccountChanged` (`central_codex.go`). `BeginLaunch` only on the
+  fresh-process path (`existingForEnsure` returns before it).
+- Logout/pending epoch fences unchanged in `AcceptAuthorized`.
+- v1→v2 migration idempotent by version; `accounts.v1.json` written once with
+  `O_EXCL`; unknown/newer version refused without rewrite.
+- Minor: `migrateV1` bumps every binding's `Revision`; an in-flight delivery
+  across the migration gets `account_binding_blocked` (should map to a
+  retryable code, launcher text still mentions rebind semantics).

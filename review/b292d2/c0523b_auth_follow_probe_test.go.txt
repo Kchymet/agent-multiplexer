@@ -1,0 +1,72 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"amux/internal/centralauth"
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"amux/internal/sessionrpc"
+	"amux/internal/store"
+)
+
+// B1: the SAME live principal (no restart, no new launch) re-queries after a
+// central replacement. Next-process-only requires refusal; a changed token is a leak.
+func TestProbeLivePrincipalObtainsReplacementCredential(t *testing.T) {
+	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
+	d, r, principals := sessionRuntimeFixture(t, claude)
+	ctx := context.Background()
+	deliver := func() (sessionrpc.DispatchResult, centralauth.Delivery) {
+		res, err := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[claude.ID], Call: centralCall()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got centralauth.Delivery
+		_ = json.Unmarshal(res.Body, &got)
+		return res, got
+	}
+	tok, _ := centralauth.NewSecret(mockCentralToken)
+	if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	res, first := deliver()
+	if res.Status != sessionrpc.StatusOK {
+		t.Fatalf("first delivery %+v", res)
+	}
+	completeClaude(t, d, beginClaude(t, d, "owner")) // replacement login (new generation)
+	res, second := deliver()
+	t.Logf("first gen=%d; same principal after replacement: status=%s code=%s gen=%d changedToken=%v",
+		first.Generation, res.Status, res.Code, second.Generation, second.Token != "" && second.Token != first.Token)
+	if res.Status == sessionrpc.StatusOK && second.Token != first.Token {
+		t.Fatal("LEAK: live principal obtained replacement credential without a new launch")
+	}
+}
+
+// B5: a corrupt pre-feature central record (never bootstrapped) must not block
+// the login that repairs it.
+func TestProbeCorruptStoreDoesNotBlockRepairLogin(t *testing.T) {
+	for _, corrupt := range []bool{true, false} {
+		t.Run(map[bool]string{true: "corrupt", false: "control-valid"}[corrupt], func(t *testing.T) {
+			claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
+			d, _, _ := sessionRuntimeFixture(t, claude)
+			tok, _ := centralauth.NewSecret(mockCentralToken)
+			if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if corrupt {
+				if err := os.WriteFile(filepath.Join(centralauth.ClaudeStore().Dir, "credential.json"), []byte("corrupt"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountLogin, ProfileID: "claude:central", Revision: profileRevision(t, "claude:central"), Initiator: "owner"}, true)
+			t.Logf("login begin ok=%v error=%q", out.OK, out.Error)
+			if !out.OK {
+				t.Fatal("repair login refused")
+			}
+		})
+	}
+}
