@@ -93,7 +93,9 @@ ids, fields and environment variables only ever name a target
   path accepts a self-completion only from an agent or coordinator role
   (`internal/daemon/session_dispatch.go`, `isSelfCompletion`).
 - **Unavailable to every session principal.** Restore (`archived=false` and
-  the `archive` toggle), `steer verb=goal`, the coordinator repo ceiling
+  the `archive` toggle, refused for every restricted caller including the
+  console in `internal/daemon/session_operation.go` before policy runs),
+  `steer verb=goal`, the coordinator repo ceiling
   (`coordinator-set-repos`), daemon restart, auth reload, account and login
   management, `subscribe`, pane access, and raw runtime paths, records and
   account queries. Other host-scope operations (move, delete, kill, repo
