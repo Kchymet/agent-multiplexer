@@ -69,23 +69,23 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
 
 ## Serialization audit (after #207, #212 and #214)
 
-Every fence decision is made inside one flock'd `accounts.Update` transaction, so correctness does not
-depend on in-process daemon gates. These decisions are: allocating, retiring and pinning a launch; the
-superseded refusal; the epoch, pending-login, blocked and revision checks; and the committed-version
-check for a new Claude or API pin.
+The launch fence decisions run inside one flock'd `accounts.Update` transaction: allocating,
+retiring and pinning a launch; the superseded refusal; and the epoch, pending-login, blocked and
+revision checks. Login start advances the delivery epoch and blocks delivery until the credential
+commits, so a credential read that races a replacement fails the epoch check. Other guarantees still
+rely on in-process ordering:
 
-- Claude delivery (`dispatchCentralCredential`) still holds `dispatchMu` and the exclusive `effectMu`.
-  Account mutations and ceremonies (`accountCall`) take the exclusive `effectMu`, so the two remain
-  mutually exclusive.
-- Codex delivery (`codexTokenSource`) deliberately takes no `effectMu`. It is admitted under the
-  authority read lease inside `AcceptAuthorized`, as before.
-- #212's shared `admitSession` covers only session reports. Claude statusline quota observations
-  are fenced by `ObserveClaude`'s own transaction (delivered epoch and version).
-- #207's creation-readiness snapshot only short-circuits an all-ready preflight. It is also cleared
-  on background account transitions and is never consulted by delivery.
-- Hardening: a new Claude or API launch pins only the committed `CredentialVersion` (`ErrStale`
-  otherwise, which is retryable). A future split of the delivery gate therefore cannot pin a version
-  read before a replacement committed.
+- Claude delivery (`dispatchCentralCredential`) holds `dispatchMu` and the exclusive `effectMu` around
+  its authorization re-check, credential read and `Accept`. Account mutations and ceremonies
+  (`accountCall`) also take the exclusive `effectMu`, so they remain mutually exclusive with it. Its
+  archive/revocation re-check runs outside the account transaction and relies on that gate; splitting
+  the gate would need the re-check moved into the admission callback, as Codex does.
+- Codex delivery (`codexTokenSource`) deliberately takes no `effectMu`. Its authorization runs under
+  the authority read lease inside `AcceptAuthorized`'s admission callback.
+- #212's shared `admitSession` covers only session reports. Claude statusline quota observations are
+  fenced by `ObserveClaude`'s own transaction (delivered epoch and version).
+- #207's creation-readiness snapshot only short-circuits an all-ready preflight. It is also cleared on
+  background account transitions and is never consulted by delivery.
 
 ## Regression tests
 

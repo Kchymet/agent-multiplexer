@@ -564,12 +564,6 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 					return ErrSuperseded
 				}
 			case pending:
-				// A new launch pins only the committed credential: a read that
-				// raced a replacement cannot pin the superseded version, whatever
-				// in-process gate (if any) the caller held.
-				if (b.Harness == "claude" || mode == "api") && s.CredentialVersion[p.ID] != 0 && version != s.CredentialVersion[p.ID] {
-					return ErrStale
-				}
 				if b.DeliveredEpoch != 0 {
 					b.History = append(b.History, Delivered{Launch: b.Launch, Epoch: b.DeliveredEpoch, Mode: b.CredentialMode, Account: b.ExpectedAccount, Version: b.CredentialVersion})
 					if len(b.History) > historyLimit {

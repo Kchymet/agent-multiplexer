@@ -400,21 +400,3 @@ func TestClaudeLogoutBeforeFirstDelivery(t *testing.T) {
 		t.Fatal("pending launch refused after relogin", err)
 	}
 }
-
-// A delivery that read the credential before a replacement committed cannot
-// pin the superseded version to a new launch (retryable, then the new one).
-func TestNewLaunchPinsOnlyTheCommittedCredential(t *testing.T) {
-	isolated(t)
-	first := claudeReady(t, "FIRST-SYNTHETIC")
-	launch, _ := BeginLaunch("w", "claude")
-	b, p, _ := Delivery("w", "claude")
-	if err := Update(func(s *State) error { s.CredentialVersion["claude:central"] = first.Generation + 1; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if err := Accept("w", b.Revision, p.DeliveryEpoch, "", first.Generation, launch); !errors.Is(err, ErrStale) {
-		t.Fatalf("stale read pinned a superseded credential: %v", err)
-	}
-	if err := Accept("w", b.Revision, p.DeliveryEpoch, "", first.Generation+1, launch); err != nil {
-		t.Fatal("retry with the committed credential refused", err)
-	}
-}
