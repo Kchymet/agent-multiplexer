@@ -77,6 +77,26 @@ type Engine struct {
 	// activity, if set, reports whether an instance is mid-turn so a graceful
 	// Shutdown can defer terminating it until it is safe. nil means "always safe".
 	activity engine.ActivityFunc
+	// shutdownObserver, if set, receives every instance's progress through a
+	// graceful Shutdown so lifecycle clients can see what it is waiting on.
+	shutdownObserver func([]ShutdownProgress)
+}
+
+// Instance states a graceful Shutdown reports, in the order an instance moves
+// through them. An instance that is not mid-turn skips ShutdownBusy.
+const (
+	ShutdownBusy        = "busy"        // waiting (up to the shutdown grace) for its turn to end
+	ShutdownTerminating = "terminating" // SIGTERM sent; waiting (up to the kill grace) for it to exit
+	ShutdownKilling     = "killing"     // SIGKILL sent after it outlived the kill grace
+	ShutdownStopped     = "stopped"     // reaped
+)
+
+// ShutdownProgress is one instance's state during a graceful Shutdown. Until
+// is when it escalates to the next state, zero once nothing is pending.
+type ShutdownProgress struct {
+	Key   engine.Key
+	State string
+	Until time.Time
 }
 
 // Option configures an Engine at construction.
@@ -104,6 +124,15 @@ func New(opts ...Option) *Engine {
 func (e *Engine) SetActivity(f engine.ActivityFunc) {
 	e.mu.Lock()
 	e.activity = f
+	e.mu.Unlock()
+}
+
+// SetShutdownObserver installs a callback that receives a snapshot of every
+// instance's ShutdownProgress whenever one changes during Shutdown. Calls are
+// serialized; the callback must not call back into the engine.
+func (e *Engine) SetShutdownObserver(f func([]ShutdownProgress)) {
+	e.mu.Lock()
+	e.shutdownObserver = f
 	e.mu.Unlock()
 }
 
@@ -160,7 +189,9 @@ func (e *Engine) Shutdown() {
 		insts = append(insts, in)
 	}
 	e.insts = map[engine.Key]*instance{}
+	observe := e.shutdownObserver
 	e.mu.Unlock()
+	tracker := newShutdownTracker(insts, observe)
 	// Terminate in parallel so a shutdown (or `amux reload`) costs ~one grace
 	// period total, not one per instance. Each instance also waits (concurrently)
 	// for its own turn to finish before terminating, so a busy agent isn't cut
@@ -170,10 +201,55 @@ func (e *Engine) Shutdown() {
 		wg.Add(1)
 		go func(in *instance) {
 			defer wg.Done()
-			in.shutdown()
+			in.shutdown(tracker.reporter(in.key))
 		}(in)
 	}
 	wg.Wait()
+}
+
+// shutdownTracker aggregates per-instance shutdown progress into snapshots for
+// the engine's observer. A nil observer makes every report a no-op.
+type shutdownTracker struct {
+	mu      sync.Mutex
+	observe func([]ShutdownProgress)
+	order   []engine.Key
+	states  map[engine.Key]ShutdownProgress
+}
+
+func newShutdownTracker(insts []*instance, observe func([]ShutdownProgress)) *shutdownTracker {
+	t := &shutdownTracker{observe: observe, states: map[engine.Key]ShutdownProgress{}}
+	if observe == nil {
+		return t
+	}
+	for _, in := range insts {
+		t.order = append(t.order, in.key)
+		// Until the instance's own goroutine has probed its activity, it is
+		// about to be terminated: that is what an idle instance does next.
+		t.states[in.key] = ShutdownProgress{Key: in.key, State: ShutdownTerminating}
+	}
+	t.emitLocked()
+	return t
+}
+
+// reporter returns the state callback for one instance.
+func (t *shutdownTracker) reporter(key engine.Key) func(string, time.Time) {
+	if t.observe == nil {
+		return nil
+	}
+	return func(state string, until time.Time) {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.states[key] = ShutdownProgress{Key: key, State: state, Until: until}
+		t.emitLocked()
+	}
+}
+
+func (t *shutdownTracker) emitLocked() {
+	snapshot := make([]ShutdownProgress, 0, len(t.order))
+	for _, k := range t.order {
+		snapshot = append(snapshot, t.states[k])
+	}
+	t.observe(snapshot)
 }
 
 // remove drops an exited instance from the table (called by the instance's pump
@@ -477,20 +553,23 @@ func (in *instance) appendRing(p []byte) {
 // hasn't. It returns once the process has been reaped by pump. Kill (delete or
 // archive) uses this directly — it is a deliberate destroy and must not stall on
 // a busy turn; only Shutdown adds the wait-for-idle below.
-func (in *instance) kill() { in.terminate(killGrace()) }
+func (in *instance) kill() { in.terminateReporting(killGrace(), nil) }
 
 // shutdown is the graceful-stop path Engine.Shutdown uses: it first waits (up to
 // shutdownGrace) for the instance to leave a busy turn — so an agent killed
 // mid-turn doesn't lose the conversation it hasn't yet persisted — then
 // terminates exactly as kill() does. The env-derived budgets are passed through
-// to shutdownWith so tests can inject small ones.
-func (in *instance) shutdown() { in.shutdownWith(shutdownGrace(), killGrace()) }
+// to shutdownWith so tests can inject small ones; report is as for shutdownWith.
+func (in *instance) shutdown(report func(string, time.Time)) {
+	in.shutdownWith(shutdownGrace(), killGrace(), report)
+}
 
 // shutdownWith is shutdown() with explicit budgets: idleBudget bounds the
-// wait-for-idle, grace the subsequent SIGTERM→SIGKILL escalation.
-func (in *instance) shutdownWith(idleBudget, grace time.Duration) {
-	in.waitIdle(idleBudget)
-	in.terminate(grace)
+// wait-for-idle, grace the subsequent SIGTERM→SIGKILL escalation. report, if
+// non-nil, receives each state change (see ShutdownProgress).
+func (in *instance) shutdownWith(idleBudget, grace time.Duration, report func(string, time.Time)) {
+	in.waitIdle(idleBudget, report)
+	in.terminateReporting(grace, report)
 }
 
 // waitIdle blocks until the instance is safe to stop: its activity probe reports
@@ -499,16 +578,22 @@ func (in *instance) shutdownWith(idleBudget, grace time.Duration) {
 // "always safe", so the wait is skipped and behavior is unchanged. Because each
 // instance waits on its own budget and Shutdown fans these out concurrently, the
 // whole shutdown costs ~one budget regardless of how many agents are busy.
-func (in *instance) waitIdle(budget time.Duration) {
+func (in *instance) waitIdle(budget time.Duration, report func(string, time.Time)) {
 	if in.activity == nil || budget <= 0 {
 		return
 	}
+	until := time.Now().Add(budget)
 	deadline := time.After(budget)
 	tick := time.NewTicker(idlePoll)
 	defer tick.Stop()
+	reported := false
 	for {
 		if in.activity(in.key) != engine.ActivityBusy {
 			return
+		}
+		if !reported && report != nil {
+			reported = true
+			report(ShutdownBusy, until)
 		}
 		select {
 		case <-in.done: // already exited on its own; nothing to wait for
@@ -521,13 +606,22 @@ func (in *instance) waitIdle(budget time.Duration) {
 }
 
 // terminate is kill() with an explicit grace period (so tests can pick one).
-func (in *instance) terminate(grace time.Duration) {
+func (in *instance) terminate(grace time.Duration) { in.terminateReporting(grace, nil) }
+
+// terminateReporting is terminate that also reports each escalation to report
+// (when non-nil), finishing with ShutdownStopped once the process is reaped.
+func (in *instance) terminateReporting(grace time.Duration, report func(string, time.Time)) {
+	if report == nil {
+		report = func(string, time.Time) {}
+	}
+	defer report(ShutdownStopped, time.Time{})
 	// Already exited? pump has closed the ptmx and reaped; nothing to do.
 	select {
 	case <-in.done:
 		return
 	default:
 	}
+	report(ShutdownTerminating, time.Now().Add(grace))
 
 	// Ask the agent to shut down cleanly so it flushes its session transcript.
 	// We leave the ptmx open so any final output still drains through pump and
@@ -541,6 +635,7 @@ func (in *instance) terminate(grace time.Duration) {
 
 	// It ignored SIGTERM (or is wedged). Force it, and close the ptmx to unblock
 	// pump's Read in case the process is stuck without producing an EOF.
+	report(ShutdownKilling, time.Time{})
 	in.signal(syscall.SIGKILL)
 	in.mu.Lock()
 	in.closePtmx()
