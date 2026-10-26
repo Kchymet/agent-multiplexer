@@ -33,7 +33,8 @@ records which slow holders delay a report from session `a1`:
 | --- | --- | --- |
 | a2's report, stalled inside its write | no | PR 2 |
 | host `start` of a3, stalled in its effect | no | PR 4 |
-| host `start` of the workgroup root (starts every member: exclusive fallback) | yes | a later PR 4 slice |
+| host `start` of the workgroup root, stalled resolving its members | no | PR 4, workgroup-start slice |
+| host archive of a3 (a policy mutation: still exclusive), stalled stopping its runtime | yes | archive slice |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
 | host `new-workgroup`, stalled launching its coordinator | no | PR 4, creation slice |
@@ -221,8 +222,11 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      `creationMu` (try-acquired on ticks), so it never adopts a half-created
      row. Session-originated creations (a coordinator's `add-agent`) still use
      the exclusive path.
-   - Next: archive and restore (workgroup locks), workgroup start, rename,
-     then account manage and completion `finish`.
+   - Workgroup-start slice, done: `start` of a root takes the gate shared,
+     resolves its members (stable: membership changes are exclusive) and locks
+     exactly those sessions.
+   - Next: archive and restore (workgroup locks), rename, then account manage
+     and completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is
