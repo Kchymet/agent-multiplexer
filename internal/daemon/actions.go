@@ -30,7 +30,22 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
-	if !effectAdmissionHeld(ctx) {
+	if id, ok := sessionScopedAction(a); ok && !effectAdmissionHeld(ctx) {
+		// The action touches only one session's runtime and credential, so it
+		// waits only for that session (and for holders of the unsplit gate).
+		// Every policy mutation still takes the gate exclusively, so the guard
+		// below cannot be crossed by one.
+		waitStart := time.Now()
+		release := d.admitSession(id)
+		defer release()
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if !effectAdmissionHeld(ctx) {
 		waitStart := time.Now()
 		var admitted time.Time
 		defer func() {
@@ -78,7 +93,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 				}
 			}
 		}
-		d.effectMu.Lock()
+		d.lockEffectExclusive()
 		defer d.effectMu.Unlock()
 		admitted = time.Now()
 		ctx = withEffectAdmission(ctx)

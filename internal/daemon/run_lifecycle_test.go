@@ -314,7 +314,7 @@ func TestRunInterruptsStalledStructuredWriteBeforeDeferredJoin(t *testing.T) {
 
 	admissionDone := make(chan error, 1)
 	if !d.startDeferredWork(func() {
-		admissionDone <- d.admitDeferredEffect(context.Background(), func(admitCtx context.Context) error {
+		admissionDone <- d.admitDeferredEffect(context.Background(), "stalled", func(admitCtx context.Context) error {
 			_, err := sup.BeginPrompt(admitCtx, strings.Repeat("x", 32<<20))
 			return err
 		})

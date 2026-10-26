@@ -101,7 +101,7 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 	}
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
+	r.d.lockEffectExclusive()
 	defer r.d.effectMu.Unlock()
 	ctx = withEffectAdmission(ctx)
 
@@ -196,7 +196,7 @@ func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal ac
 func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
+	r.d.lockEffectExclusive()
 	defer r.d.effectMu.Unlock()
 	return r.finalAuthorize(withEffectAdmission(ctx), principal, req)
 }
