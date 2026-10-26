@@ -28,6 +28,7 @@ type Client struct {
 	poll                 time.Duration
 	beforeRequestPublish func()
 	afterServiceStat     func()
+	beforeResponseRead   func()
 
 	mu     sync.RWMutex
 	closed bool
@@ -39,6 +40,7 @@ type clientOptions struct {
 	poll                 time.Duration
 	beforeRequestPublish func()
 	afterServiceStat     func()
+	beforeResponseRead   func()
 }
 
 // OpenClient discovers only the fixed read-only session context. There is no
@@ -130,6 +132,7 @@ func openClientAt(fixedContextDir string, options clientOptions) (*Client, error
 		context: sessionContext, clock: clock, random: random, poll: poll,
 		beforeRequestPublish: options.beforeRequestPublish,
 		afterServiceStat:     options.afterServiceStat,
+		beforeResponseRead:   options.beforeResponseRead,
 	}, nil
 }
 
@@ -161,6 +164,9 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 		return Result{}, ErrInvalidRecord
 	}
 	service, err := c.loadService(credential)
+	if errors.Is(err, os.ErrNotExist) {
+		return Result{}, errors.Join(ErrUnpublished, err)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -186,6 +192,9 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 	}
 	if response.ReceiptRequired {
 		result.ReceiptSent = c.sendReceipt(credential, service, response) == nil
+	} else {
+		// Best effort: an unsent release only leaves the response to age cleanup.
+		_ = c.sendAck(credential, service, CallRelease, response)
 	}
 	if response.Status != StatusOK {
 		if response.Status == StatusReplay || response.Status == StatusIndeterminate {
@@ -242,6 +251,9 @@ func (c *Client) awaitResponse(ctx context.Context, credential access.Credential
 		interval = max(interval, WatchFallbackInterval)
 	}
 	for {
+		if c.beforeResponseRead != nil {
+			c.beforeResponseRead()
+		}
 		response, found, err := c.readResponse(credential, service, request)
 		if err != nil {
 			return Response{}, err
@@ -304,7 +316,14 @@ func (c *Client) sendReceipt(originalCredential access.Credential, originalServi
 	if service.BootID != originalService.BootID || credential.KeyID != originalCredential.KeyID || credential.Generation != originalCredential.Generation {
 		return ErrRestarted
 	}
-	call := Call{Kind: CallReceipt, Receipt: &Receipt{RequestID: response.RequestID, ResponseDigest: responseDigest(response)}}
+	return c.sendAck(credential, service, CallReceipt, response)
+}
+
+// sendAck publishes a receipt or release naming response. Neither awaits a
+// result: a receipt settles through the server's grace window and a release
+// produces no response at all.
+func (c *Client) sendAck(credential access.Credential, service Service, kind CallKind, response Response) error {
+	call := Call{Kind: kind, Receipt: &Receipt{RequestID: response.RequestID, ResponseDigest: responseDigest(response)}}
 	body, err := marshalBounded(call, access.MaxBodyBytes)
 	if err != nil {
 		return err

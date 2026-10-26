@@ -65,10 +65,11 @@ func TestMeasureRoundTripLatency(t *testing.T) {
 	}
 }
 
-// releaseReadResponses stands in for the client release in #206: without it a
-// mailbox retains every response for MaxResponseAge and stops admitting at
-// MaxResponseFiles, which a tight measurement loop reaches in seconds. A
-// response is long read once it is 100ms old.
+// releaseReadResponses retires responses the way the client's release does,
+// so the harness measures the same thing against code that predates release:
+// without it a mailbox retains every response for MaxResponseAge and stops
+// admitting at MaxResponseFiles within seconds. A response is long read once
+// it is 100ms old.
 func releaseReadResponses(ctx context.Context, dir string) {
 	for ctx.Err() == nil {
 		entries, _ := os.ReadDir(dir)
