@@ -888,3 +888,12 @@ Fix direction, without rewriting a live runtime's log:
 - **Remaining:** integrate current master (#212/#214/#204/#215), remove the
   temporary job, classify or accept the 1/30 launcher 126 (capture launcher
   stderr), and green CI on the final head.
+
+---
+
+## PR206 FINAL: signoff at `4d198e0`, conditional on green CI for that head
+
+The production diff against master is five files, identical to the reviewed
+`e3cdeea`. `10ddbb8` CI was green on all four checks. The merged-tree local
+suites and pressure 5/5 passed. The docs record every accepted residual,
+including the 1/30 exit 126 as unexplained, without overclaiming.
