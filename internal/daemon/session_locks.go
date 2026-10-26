@@ -166,6 +166,21 @@ func creationAction(a core.Action) bool {
 	return false
 }
 
+// workgroupStart reports a host `start` of a workgroup root, which starts
+// every member under the members' own locks.
+func workgroupStart(a core.Action) bool {
+	if a.Action != core.ActionStart || a.ID == "" || a.ID == console.ID {
+		return false
+	}
+	db, err := store.OpenReadOnly()
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	session, found, err := db.GetSession(a.ID)
+	return err == nil && found && session.IsRoot()
+}
+
 // sessionScopedAction names the one session an action touches when it runs
 // with only that session's admission: starting, restarting, recreating or
 // steering one existing session. Anything else, a workgroup start included

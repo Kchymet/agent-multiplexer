@@ -12,6 +12,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/core"
 	"amux/internal/credentialbroker"
+	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
@@ -34,7 +35,8 @@ func TestSessionReportIndependence(t *testing.T) {
 	}{
 		{name: "peer session report", hold: holdPeerReport, blocked: false},
 		{name: "host action on another session", hold: holdHostAction, blocked: false},
-		{name: "workgroup host action (exclusive fallback)", hold: holdWorkgroupAction, blocked: true},
+		{name: "workgroup start, stalled resolving its members", hold: holdWorkgroupAction, blocked: false},
+		{name: "archive of a3 (exclusive), stalled stopping its runtime", hold: holdArchive, blocked: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
@@ -160,7 +162,7 @@ func holdHostAction(t *testing.T, f *independenceFixture, held func(), release <
 }
 
 // holdWorkgroupAction is a host `start` of the workgroup root, which starts
-// every member and so still takes the exclusive gate.
+// every member under the members' locks.
 func holdWorkgroupAction(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
 	f.d.agentsUnder = func(id string) ([]string, error) {
 		held()
@@ -226,6 +228,20 @@ func holdCreation(t *testing.T, f *independenceFixture, held func(), release <-c
 	}
 	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "created"}}); !r.OK {
 		t.Errorf("new workgroup = %+v", r)
+	}
+}
+
+// holdArchive is a host archive of a3, a policy mutation that still takes
+// the exclusive gate, stalling while it stops a3's runtime.
+func holdArchive(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	eng := f.d.engine.(*fakeEngine)
+	eng.running("a3")
+	eng.killObserved = func(engine.Instance) {
+		held()
+		<-release
+	}
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionSetArchived, ID: "a3", Fields: map[string]string{"archived": "true"}}); !r.OK {
+		t.Errorf("archive = %+v", r)
 	}
 }
 

@@ -49,6 +49,26 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
+	} else if workgroupStart(a) && !effectAdmissionHeld(ctx) {
+		// A workgroup start starts every member. Membership changes are
+		// exclusive, so under the shared gate the member set is stable: lock
+		// exactly the sessions it will start.
+		waitStart := time.Now()
+		release := d.admitShared()
+		defer release()
+		ids, err := d.agentsUnder(a.ID)
+		if err != nil {
+			return fail("%v", err)
+		}
+		unlock := d.sessionLocks.lock(ids...)
+		defer unlock()
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
 	} else if creationAction(a) && !effectAdmissionHeld(ctx) {
 		// Creating a session changes no existing session's authorization:
 		// archive, grants and membership moves are exclusive, so they cannot

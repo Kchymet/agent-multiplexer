@@ -121,6 +121,8 @@ func BenchmarkStoreOpen(b *testing.B) {
 //   - peer-report: a3's own report, stalled inside its write;
 //   - peer-credential: a3's GitHub credential read, stalled in its helper;
 //   - creation: a host `new-workgroup`, stalled launching its coordinator;
+//   - workgroup-start: a host `start` of the workgroup root, stalled
+//     resolving its members;
 //   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
 //
 // It reports per-report p50/max latency rather than throughput.
@@ -183,6 +185,15 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 			}
 		})
 	})
+	b.Run("workgroup-start", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.agentsUnder = func(string) ([]string, error) {
+				slow()
+				return []string{"root", "a3"}, nil
+			}
+			return func() { d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "root"}) }
+		})
+	})
 	b.Run("reconcile", func(b *testing.B) {
 		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
 			d.launchSpec = func(_ context.Context, id string) (panespec.LaunchSpec, error) {
@@ -211,13 +222,14 @@ func benchmarkReportsDuringSlowHolder(b *testing.B, setup func(d *Daemon, runtim
 		{ID: "a1", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 		{ID: "a2", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 		{ID: "a3", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+		{ID: "root", Agent: "claude"},
 	}
 	d, runtime, principals := sessionRuntimeFixture(b, sessions...)
 	d.sessionRPC = runtime
 	b.Cleanup(runtime.completions.close)
 	d.engine = newFakeEngine()
 	generations := map[string]string{}
-	for _, s := range sessions {
+	for _, s := range sessions[:3] {
 		generations[s.ID] = publishTestRuntime(b, d, s.ID)
 	}
 	report := func(id string) error {
