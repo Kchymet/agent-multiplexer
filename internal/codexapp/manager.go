@@ -30,6 +30,9 @@ type Manager struct {
 	stopContextWatch  func() bool
 	bin               string // codex binary override (AMUX_CODEX_BIN), "" ⇒ "codex"
 	chatgptAuth       TokenProvider
+	// preStart runs on every fresh spawn, under the session's start gate and
+	// event-log lock, before the supervisor's first log line (SetPreStart).
+	preStart func(sessionID string) error
 
 	mu       sync.Mutex
 	sup      map[string]*Supervisor
@@ -71,6 +74,34 @@ func (m *Manager) startGate(sessionID string) chan struct{} {
 		m.starts[sessionID] = gate
 	}
 	return gate
+}
+
+// ErrLogBusy refuses an event-log rewrite while the session's runtime runs.
+var ErrLogBusy = errors.New("codexapp: session runtime is running")
+
+// WithQuiescentLog runs fn while no supervisor for sessionID runs or starts and
+// AppendNotice is excluded, so fn may replace the session's event log (the
+// one-time history migration). It holds the per-session start gate, so no
+// launch can begin meanwhile, and refuses with ErrLogBusy rather than rewrite
+// an active runtime's log.
+func (m *Manager) WithQuiescentLog(ctx context.Context, sessionID string, fn func() error) error {
+	gate := m.startGate(sessionID)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-gate:
+	}
+	defer func() { gate <- struct{}{} }()
+	m.mu.Lock()
+	s, ok := m.sup[sessionID]
+	_, starting := m.starting[sessionID]
+	m.mu.Unlock()
+	if starting || (ok && s.processRunning()) {
+		return ErrLogBusy
+	}
+	unlock := LockEventLog(sessionID)
+	defer unlock()
+	return fn()
 }
 
 // Get returns the live supervisor for a session id, or false. It is the daemon's
@@ -138,6 +169,16 @@ func (m *Manager) existingForEnsure(ctx context.Context, sessionID string) (*Sup
 // SetChatGPTAuth selects the central ChatGPT token provider for supervisors
 // started from now on (nil restores the legacy per-home credentials). Running
 // supervisors keep the provider they started with.
+// SetPreStart installs fn to run before every fresh App Server spawn, with no
+// runtime for that session running or starting and AppendNotice excluded, so
+// fn may replace the session's event log (the one-time history migration). An
+// error refuses that launch. fn must not call back into the manager.
+func (m *Manager) SetPreStart(fn func(sessionID string) error) {
+	m.mu.Lock()
+	m.preStart = fn
+	m.mu.Unlock()
+}
+
 func (m *Manager) SetChatGPTAuth(p TokenProvider) {
 	m.mu.Lock()
 	m.chatgptAuth = p
@@ -211,6 +252,17 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	} else if ok {
 		return s, nil
 	}
+	m.mu.Lock()
+	preStart := m.preStart
+	m.mu.Unlock()
+	if preStart != nil {
+		unlock := LockEventLog(sessionID)
+		err := preStart(sessionID)
+		unlock()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	cfg := Config{
 		SessionID:     sessionID,
@@ -229,7 +281,16 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	}
 	m.mu.Unlock()
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
-	cfg.ChatGPTAccount = boundAccountFor(sessionID, cfg.ResumeThreadID)
+	// This is an actual process launch: it takes the newest central login, so
+	// the resumed thread's previous account is history, not a constraint.
+	cfg.PriorChatGPTAccounts = priorAccountsFor(sessionID, cfg.ResumeThreadID)
+	if cfg.ChatGPTAuth != nil {
+		launch, err := accounts.BeginLaunch(sessionID, "codex")
+		if err != nil {
+			return nil, err
+		}
+		cfg.AccountLaunch = launch
+	}
 	if len(launch) > 0 {
 		cfg.Sandbox = launch[0].Sandbox
 		cfg.RestartWork = launch[0].RestartWork
@@ -306,8 +367,8 @@ func (m *Manager) RestartSnapshot() map[string]RestartWork {
 // their first turn. A structured identity is authoritative when present. Without
 // one, legacyThreadID lets the first structured launch adopt a conversation that
 // the PTY path already pinned in the session store. Legacy sidecars without a
-// version still attempt resume to avoid discarding conversations; a missing
-// rollout falls back.
+// version still resume. Every resume target must resume exactly; a failure
+// fails the launch rather than substituting an empty thread.
 func resumeThreadFor(sessionID, legacyThreadID string) string {
 	id, ok := LoadIdentity(sessionID)
 	if !ok {
@@ -321,9 +382,8 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 		// Known to have a rollout (initialized, ran a turn, or resumed).
 		return id.ThreadID
 	case id.Version == 0:
-		// Legacy identity persisted before Resumable existed — it may hold a real
-		// conversation, so don't silently discard it; attempt the resume and let the
-		// handshake fall back to a fresh thread only on a genuine "no rollout" miss.
+		// Legacy identity persisted before Resumable existed — its history is
+		// unknown, so it is resumed exactly and never silently discarded.
 		return id.ThreadID
 	default:
 		// Current identity, known not-yet-run — start fresh to avoid a doomed resume.
@@ -331,18 +391,22 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 	}
 }
 
-// boundAccountFor returns the ChatGPT account a resumed thread ran under, so
-// central auth cannot silently move an existing conversation to another
-// account. A fresh thread is bound by its first injection instead.
-func boundAccountFor(sessionID, resumeThreadID string) string {
+// priorAccountsFor returns the ChatGPT accounts a resumed thread ran under,
+// oldest first. A new process may continue the thread under the current
+// central account; these remain in its identity as evidence.
+func priorAccountsFor(sessionID, resumeThreadID string) []string {
 	if resumeThreadID == "" {
-		return ""
+		return nil
 	}
 	id, ok := LoadIdentity(sessionID)
 	if !ok || id.ThreadID != resumeThreadID {
-		return ""
+		return nil
 	}
-	return id.ChatGPTAccount
+	prior := append([]string(nil), id.PriorChatGPTAccounts...)
+	if id.ChatGPTAccount != "" {
+		prior = append(prior, id.ChatGPTAccount)
+	}
+	return prior
 }
 
 // Close stops and forgets the supervisor for a session (its App Server exits). It

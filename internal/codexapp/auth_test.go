@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"amux/internal/accounts"
 	"context"
 	"encoding/json"
 	"errors"
@@ -439,15 +440,15 @@ func TestRefreshAfterCloseIsDropped(t *testing.T) {
 	}
 }
 
-// A resumed thread stays on the account it ran under: a central login now
-// pointing at another workspace fails the resume instead of moving it.
-func TestResumeRefusesDifferentPersistedAccount(t *testing.T) {
+// Within one process (a reconnect) the bound account is a constraint: a
+// central login now pointing at another workspace fails instead of moving it.
+func TestReconnectRefusesDifferentBoundAccount(t *testing.T) {
 	p := newStubProvider()
 	sup, fs, client := newAuthPair(t, p)
 	defer fs.close()
 	defer sup.Close()
 	sup.cfg.ResumeThreadID = "thr_1"
-	sup.auth = newTokenAuth(p, "s-auth", "acct-old")
+	sup.auth = newTokenAuth(p, "s-auth", "acct-old", accounts.Launch{})
 	if err := sup.attach(context.Background(), client); !errors.Is(err, errAccountChanged) {
 		t.Fatalf("attach = %v, want errAccountChanged", err)
 	}
@@ -475,10 +476,12 @@ func TestIdentityRecordsBoundAccount(t *testing.T) {
 	if err := SaveIdentity(id); err != nil {
 		t.Fatal(err)
 	}
-	if got := boundAccountFor("s-auth", id.ThreadID); got != "acct-1" {
-		t.Fatalf("boundAccountFor = %q", got)
+	// A later process of the same thread records the account as history and
+	// is not constrained by it; another thread inherits nothing.
+	if got := priorAccountsFor("s-auth", id.ThreadID); len(got) != 1 || got[0] != "acct-1" {
+		t.Fatalf("priorAccountsFor = %q", got)
 	}
-	if got := boundAccountFor("s-auth", "thr_other"); got != "" {
+	if got := priorAccountsFor("s-auth", "thr_other"); len(got) != 0 {
 		t.Fatalf("another thread inherited the account: %q", got)
 	}
 	data, _ := os.ReadFile(identityPath("s-auth"))
@@ -489,8 +492,8 @@ func TestIdentityRecordsBoundAccount(t *testing.T) {
 
 // TestManagerEnsureCentralAuthLifecycle drives the production wiring end to
 // end: Manager.SetChatGPTAuth → Ensure (real child process, WebSocket dial) →
-// injection before the thread → refresh over the wire → restart resumes the
-// thread only under the persisted account.
+// injection before the thread → refresh over the wire → a restart under a
+// replacement account resumes the same thread → a later restart resumes it too.
 func TestManagerEnsureCentralAuthLifecycle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -537,21 +540,29 @@ func TestManagerEnsureCentralAuthLifecycle(t *testing.T) {
 	assertNoSecrets(t, sup)
 	m.Shutdown()
 
-	// Central login now points at another workspace: the resume is refused.
+	// Central login now points at another workspace: the next process takes
+	// it and resumes the same thread, keeping the previous account as history.
 	other := newStubProvider()
 	other.account = "acct-other"
 	m2 := NewManager(ctx, "")
 	m2.SetChatGPTAuth(other)
-	if _, err := ensure(m2); !errors.Is(err, errAccountChanged) {
-		t.Fatalf("Ensure with another account = %v, want errAccountChanged", err)
+	sup2, err := ensure(m2)
+	if err != nil {
+		t.Fatalf("Ensure with another account = %v", err)
 	}
-	refused := <-servers
-	if _, ok := refused.sawCall("thread/resume"); ok {
-		t.Fatal("thread resumed under another account")
+	moved := <-servers
+	if li, ri := methodIndex(moved, "account/login/start"), methodIndex(moved, "thread/resume"); li < 0 || li > ri {
+		t.Fatalf("replacement login=%d resume=%d", li, ri)
+	}
+	if _, ok := moved.sawCall("thread/start"); ok || sup2.ThreadID() != threadID {
+		t.Fatal("replacement account started a new thread")
+	}
+	if id, ok := LoadIdentity("central"); !ok || id.ThreadID != threadID || id.ChatGPTAccount != "acct-other" || len(id.PriorChatGPTAccounts) != 1 || id.PriorChatGPTAccounts[0] != "acct-1" {
+		t.Fatalf("identity after replacement = %+v", id)
 	}
 	m2.Shutdown()
 
-	// Same account: the restart logs in again, then resumes the same thread.
+	// The original account again: the restart logs in, then resumes the thread.
 	m3 := NewManager(ctx, "")
 	defer m3.Shutdown()
 	m3.SetChatGPTAuth(p)
@@ -629,7 +640,7 @@ func TestLoginCompletionErrorRedacted(t *testing.T) {
 // A completion for another login (a browser login started by a native
 // client carries a loginId) is not the token login's outcome.
 func TestForeignLoginCompletionIgnored(t *testing.T) {
-	a := newTokenAuth(newStubProvider(), "s", "")
+	a := newTokenAuth(newStubProvider(), "s", "", accounts.Launch{})
 	ch := make(chan loginOutcome, 1)
 	a.completed = ch
 	if _, ok := a.loginCompleted(json.RawMessage(`{"loginId":"browser-1","success":true}`)); ok {

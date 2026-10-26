@@ -1,10 +1,12 @@
 package panespec
 
 import (
+	"amux/internal/centralauth"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
@@ -80,9 +82,8 @@ func useFakeSecureBwrap(t *testing.T) string {
 	return path
 }
 
-// useClaudeAuth isolates amux's config file and selects a Claude auth mode.
-// Tests written for the legacy host/shared stores select them explicitly now
-// that central delivery is the default.
+// useClaudeAuth isolates amux's config file and saves a (retired) legacy
+// Claude auth setting, so tests can show it no longer changes routing.
 func useClaudeAuth(t *testing.T, mode string) {
 	t.Helper()
 	isolateAmuxConfig(t)
@@ -91,7 +92,21 @@ func useClaudeAuth(t *testing.T, mode string) {
 	}
 }
 
-// useCodexAuth selects a Codex auth mode, keeping any Claude selection.
+// useCentralClaudeLogin stores a synthetic central Claude credential, so a
+// Claude agent launch passes its central-login preflight.
+func useCentralClaudeLogin(t *testing.T) {
+	t.Helper()
+	isolateAmuxConfig(t)
+	token, err := centralauth.NewSecret("synthetic-central-claude-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := centralauth.ClaudeStore().Save(token, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// useCodexAuth saves a (retired) legacy Codex auth setting.
 func useCodexAuth(t *testing.T, mode string) {
 	t.Helper()
 	isolateAmuxConfig(t)

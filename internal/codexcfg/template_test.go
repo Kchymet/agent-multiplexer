@@ -25,7 +25,7 @@ func TestTemplateSeed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Account sharing is the explicit legacy host selection.
+	// A retired legacy host setting no longer shares the account login.
 	must(amuxcfg.SetAuthMode("codex", amuxcfg.AuthHost))
 	must(os.MkdirAll(filepath.Join(user, "sessions", "2026"), 0o755))
 	config := "model = \"gpt-5.5\"\n\n[mcp_servers.linear]\nurl = \"https://mcp.linear.app/mcp\"\n"
@@ -58,8 +58,8 @@ func TestTemplateSeed(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sp.Dir, "sessions")); !os.IsNotExist(err) {
 		t.Error("sessions/ must not be copied")
 	}
-	if target, err := os.Readlink(home.AuthPath()); err != nil || target != UserHome().AuthPath() {
-		t.Errorf("auth.json should link to the user's: %q %v", target, err)
+	if _, err := os.Lstat(home.AuthPath()); !os.IsNotExist(err) {
+		t.Errorf("auth.json in the copy: %v", err)
 	}
 	credential := filepath.Join(sp.Dir, MCPCredentialsFile)
 	local, err := os.Lstat(credential)
@@ -99,9 +99,9 @@ func TestTemplateSeed(t *testing.T) {
 	}
 }
 
-// TestCentralTemplateSharesNoAccountLogin pins central and environment Codex
-// homes: no auth.json (a legacy link is unlinked without touching the host
-// login), MCP credentials still shared, and only central clears API keys.
+// TestCentralTemplateSharesNoAccountLogin pins Codex homes under any saved
+// setting: no auth.json (a legacy link is unlinked without touching the host
+// login), MCP credentials still shared, and inherited API keys cleared.
 func TestCentralTemplateSharesNoAccountLogin(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", filepath.Join(root, "home"))
@@ -139,9 +139,10 @@ func TestCentralTemplateSharesNoAccountLogin(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(sp.Dir, MCPCredentialsFile)); err != nil {
 			t.Fatalf("%s lost MCP credential sharing: %v", mode, err)
 		}
+		// Every workload follows central auth: an inherited key is cleared.
 		cleared := strings.Join(sp.EnvEntries(), " ")
-		if got := strings.Contains(cleared, "OPENAI_API_KEY="); got != (mode == amuxcfg.AuthCentral) {
-			t.Fatalf("%s API key cleared = %v: %s", mode, got, cleared)
+		if !strings.Contains(cleared, "OPENAI_API_KEY=") {
+			t.Fatalf("%s API key kept: %s", mode, cleared)
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(user, AuthFile)); err != nil || string(b) != `{"tokens":"host-login"}` {

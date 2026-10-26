@@ -601,7 +601,10 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 		"--chdir", dir,
 	)
 	args = append(args, "--")
-	launchArgv = centralLauncher(tab, s, launchArgv)
+	launchArgv, err = centralLauncher(tab, s, launchArgv)
+	if err != nil {
+		return nil, err
+	}
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
@@ -621,12 +624,36 @@ func agentAuthError(s store.Session, launchDir string) error {
 // centralLauncher routes a central-mode Claude agent pane through the payload
 // trampoline's credential launcher, which runs after inherited descriptors are
 // closed. The token is fetched there, so it never appears in this argv, the
-// sandbox launcher's environment, or the engine spec.
-func centralLauncher(tab int, s store.Session, argv []string) []string {
+// sandbox launcher's environment, or the engine spec. Each resolved launch
+// gets its own account launch: the pane's process receives the newest central
+// credential once, and repeated requests from it receive that same version.
+// A resolve whose pane the engine then reuses retires its launch
+// (AccountLaunchOf), so every process actually started holds a fresh one.
+func centralLauncher(tab int, s store.Session, argv []string) ([]string, error) {
 	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || accounts.Mode(s.ID, "claude") != amuxcfg.AuthCentral {
-		return argv
+		return argv, nil
 	}
-	return append([]string{centralauth.LauncherArg}, argv...)
+	launch, err := accounts.BeginLaunch(s.ID, "claude")
+	if err != nil {
+		return nil, fmt.Errorf("allocate Claude account launch: %w", err)
+	}
+	return append([]string{centralauth.LauncherArg, centralauth.LaunchArgPrefix + strconv.FormatUint(launch.Seq, 10) + ":" + launch.Nonce}, argv...), nil
+}
+
+// AccountLaunchOf returns the account launch a resolved agent argv carries.
+func AccountLaunchOf(argv []string) (accounts.Launch, bool) {
+	for i, a := range argv {
+		if a != centralauth.LauncherArg || i+1 >= len(argv) {
+			continue
+		}
+		v, ok := strings.CutPrefix(argv[i+1], centralauth.LaunchArgPrefix)
+		seq, nonce, ok2 := strings.Cut(v, ":")
+		n, err := strconv.ParseUint(seq, 10, 64)
+		if ok && ok2 && err == nil {
+			return accounts.Launch{Seq: n, Nonce: nonce}, true
+		}
+	}
+	return accounts.Launch{}, false
 }
 
 const (

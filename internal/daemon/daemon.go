@@ -442,8 +442,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// its App Servers live and die with the daemon, not with any pane or client.
 	// It stays inert unless the captured startup selection enables App Server control.
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
+	d.codex.SetPreStart(importBeforeLaunch)
 	codexOwned = true
 	d.startCentralCodex(ctx)
+	// Carry PTY-era Codex history into the structured logs that are now every
+	// Codex session's canonical source, without delaying startup: each launch
+	// also imports first (the manager's pre-start hook), and the per-session
+	// quiescent-log gate serializes the two.
+	startRunWorker(d.importCodexHistories)
 	// Budgets refresh independently of clients and sessions of either harness.
 	startRunWorker(func() { d.accountLimitsLoop(ctx) })
 	// The engine's agents live in this process; stop them cleanly on shutdown.
@@ -1124,6 +1130,7 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 		return
 	}
 	if err := revalidateDeferred(ctx); err != nil {
+		retireUnstarted(a.ID, argv)
 		paneExit(err.Error())
 		return
 	}
@@ -1135,14 +1142,14 @@ func (d *Daemon) paneOpen(ctx context.Context, cl *connState, a core.Action) {
 	var inst engine.Instance
 	if a.Tab == panespec.TabAgent && !d.structuredControl(spec.Session) {
 		published, _, publishErr := d.publishPermissionRuntime(a.ID, func() (any, error) {
-			return d.engine.Ensure(ctx, engineSpec)
+			return d.ensurePane(ctx, engineSpec)
 		})
 		err = publishErr
 		if err == nil {
 			inst, _ = published.(engine.Instance)
 		}
 	} else {
-		inst, err = d.engine.Ensure(ctx, engineSpec)
+		inst, err = d.ensurePane(ctx, engineSpec)
 	}
 	if err != nil {
 		paneExit(err.Error())
@@ -1243,15 +1250,17 @@ func (d *Daemon) startAgentWith(ctx context.Context, aid string, intent startInt
 		return err
 	}
 	if err := revalidateDeferred(ctx); err != nil {
+		retireUnstarted(aid, argv)
 		return err
 	}
 	published, _, err := d.publishPermissionRuntime(aid, func() (any, error) {
-		return d.engine.Ensure(ctx, engine.Spec{
+		return d.ensurePane(ctx, engine.Spec{
 			Key: engine.Key{AgentID: aid, Tab: panespec.TabAgent},
 			Dir: dir, Env: env, ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})
 	})
 	if err != nil {
+		retireUnstarted(aid, argv)
 		return err
 	}
 	if _, ok := published.(engine.Instance); !ok {
@@ -1281,6 +1290,7 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 	if sup, ok := d.codex.Get(agentID); ok {
 		return sup, nil
 	}
+
 	// AppServerCommand resolves the sandbox-wrapped launch AND the per-session unix
 	// endpoint (in its separately mounted socket directory) — one source for the endpoint
 	// baked into argv, dialed by amux, and persisted for a native attach.
@@ -1470,6 +1480,34 @@ func (d *Daemon) killEngineFor(id string) {
 	for aid := range ids {
 		d.killRuntimeLocked(aid)
 	}
+}
+
+// ensurePane is the engine's Ensure for every daemon pane start. A resolved
+// central Claude argv carries a freshly allocated account launch. When Ensure
+// reuses the instance that was already running, or fails to spawn, no process
+// received that launch, so it is retired; a pane that exited between the
+// caller's resolve and Ensure is respawned and keeps its own fresh launch.
+// retireUnstarted withdraws the account launch a resolved argv carries when
+// the caller abandons it before ensurePane (a revalidation or publication
+// failure, a skipped restart). It is a no-op once that launch was delivered.
+func retireUnstarted(id string, argv []string) {
+	if launch, ok := panespec.AccountLaunchOf(argv); ok {
+		if err := accounts.RetireLaunch(id, launch); err != nil {
+			log.Printf("amux: retire unused account launch for %s: %v", id, err)
+		}
+	}
+}
+
+func (d *Daemon) ensurePane(ctx context.Context, spec engine.Spec) (engine.Instance, error) {
+	before, alive := d.engine.Lookup(spec.Key)
+	alive = alive && before.Alive()
+	in, err := d.engine.Ensure(ctx, spec)
+	if launch, ok := panespec.AccountLaunchOf(spec.Argv); ok && (err != nil || (alive && in == before)) {
+		if rerr := accounts.RetireLaunch(spec.Key.AgentID, launch); rerr != nil {
+			log.Printf("amux: retire unused account launch for %s: %v", spec.Key.AgentID, rerr)
+		}
+	}
+	return in, err
 }
 
 func (d *Daemon) killRuntimeFor(id string) {

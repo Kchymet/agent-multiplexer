@@ -54,7 +54,6 @@ func testGitHubSandbox(t *testing.T, live bool) {
 		want = strings.TrimSpace(string(out))
 	}
 	isolateHome(t)
-	legacyClaudeAuth(t) // this exercises the legacy host Claude login path
 	t.Setenv("AMUX_JAIL", "on")
 	t.Setenv("SHELL", "/bin/sh")
 	t.Setenv("AMUX_EDITOR", "/bin/sh")
@@ -108,6 +107,11 @@ func testGitHubSandbox(t *testing.T, live bool) {
 	defer func() { cancel(); <-done; r.close() }()
 	for _, kind := range []string{"claude", "codex"} {
 		for _, tab := range []int{panespec.TabAgent, panespec.TabTerminal, panespec.TabEditor} {
+			if kind == "claude" && tab == panespec.TabAgent {
+				// Its payload is always the central credential launcher, whose
+				// delivery the central launch runtime tests cover.
+				continue
+			}
 			t.Run(fmt.Sprintf("%s/tab%d", kind, tab), func(t *testing.T) {
 				s := store.Session{ID: store.NewUUID(), RootID: "root", Agent: kind}
 				s.Dir = filepath.Join(core.SessionsDir(), s.RootID, s.ID)

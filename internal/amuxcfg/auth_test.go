@@ -88,15 +88,16 @@ func TestCentralCodexAuthRequiresAppServerControl(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, err = ResolveCodexControl()
-	if err != nil || c.Effective != AppServer || !strings.Contains(c.Warning, "codex.auth host") {
+	if err != nil || c.Effective != AppServer || !strings.Contains(c.Warning, "requires App Server control") {
 		t.Fatalf("central over saved pty = %+v, %v", c, err)
 	}
+	// Retired legacy codex.auth values no longer keep PTY control.
 	for _, mode := range []string{AuthHost, AuthEnvironment} {
 		if err := SetAuthMode("codex", mode); err != nil {
 			t.Fatal(err)
 		}
-		if c, err := ResolveCodexControl(); err != nil || c.Effective != PTY || c.Source != "config" {
-			t.Fatalf("%s keeps saved pty: %+v, %v", mode, c, err)
+		if c, err := ResolveCodexControl(); err != nil || c.Effective != AppServer || c.Source != "codex.auth" {
+			t.Fatalf("%s kept saved pty: %+v, %v", mode, c, err)
 		}
 	}
 	if err := os.WriteFile(core.ConfigPath(), []byte(`{"codex":{"auth":"chatgpt"}}`), 0o600); err != nil {

@@ -41,13 +41,16 @@ type AccountRequest struct {
 }
 
 // AccountSnapshot exposes only the amux-owned central configuration per harness.
-// Defaults may reference a preserved legacy source until an explicit local change;
-// such references are compatibility metadata, not selectable configurations.
+// Every workload follows its harness's central profile; Defaults name it.
+// MigrationPending names, per harness, the older host/shared/environment
+// selection that was migrated to central and still awaits its first central
+// login. It is evidence for operator guidance, never a selectable source.
 type AccountSnapshot struct {
 	DefaultRevisions map[string]uint64 `json:"defaultRevisions"`
 	Version          int               `json:"version"`
 	Profiles         []AccountProfile  `json:"profiles"`
 	Defaults         map[string]string `json:"defaults"`
+	MigrationPending map[string]string `json:"migrationPending,omitempty"`
 }
 
 type AccountProfile struct {

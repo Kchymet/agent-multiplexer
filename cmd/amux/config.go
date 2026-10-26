@@ -79,8 +79,8 @@ func cmdConfig(args []string) error {
 			return fmt.Errorf("usage: amux config set <setting> <value>")
 		}
 		if harness, ok := authSetting(args[1]); ok {
-			if args[2] == "" {
-				return fmt.Errorf("%s must be one of %q (use unset to reset)", args[1], amuxcfg.AuthModes(harness))
+			if args[2] != amuxcfg.AuthCentral {
+				return fmt.Errorf("%s is retired: every workload follows the central login; run `amux auth login %s`", args[1], harness)
 			}
 			if err := amuxcfg.SetAuthMode(harness, args[2]); err != nil {
 				return err
@@ -177,8 +177,8 @@ usage: amux config <subcommand>
   get goal.auto_resume  print whether a restarted goal coordinator resumes its goal (on when unconfigured)
   set goal.auto_resume <on|off>  save the goal auto-resume switch (daemon restart required)
   unset goal.auto_resume  restore the default (on)
-  get|set|unset claude.auth  central (default) | host | shared | environment
-  get|set|unset codex.auth   central (default) | host | environment
+  get|unset claude.auth      retired: every workload follows central auth
+  get|unset codex.auth       retired: every workload follows central auth
   path               print the config file path
 
 Keybindings live in the "keys" section of the config file (see path). A rebind
@@ -192,12 +192,11 @@ with a continuation so a goal that was active or waiting on a wake-up picks up
 where it left off; paused, complete, blocked, input-waiting and budget-limited
 goals are never resumed automatically. It too is read at daemon start.
 
-claude.auth and codex.auth choose how sessions authenticate. central delivers
-one host login (amux auth login) to every session; host shares the host
-harness login as before; shared (Claude) uses an older amux shared login;
-environment provides nothing, leaving API keys, apiKeyHelper, cloud providers
-and gateways to the environment and harness settings. Central Codex auth
-always uses App Server control.
+claude.auth and codex.auth are retired. Every workload follows the central
+login (amux auth login). A saved host, shared or environment value was
+migrated to central once; no credential is copied, so run amux auth login once
+if Accounts reports the migration as pending. Central Codex auth always uses
+App Server control.
 `)
 }
 

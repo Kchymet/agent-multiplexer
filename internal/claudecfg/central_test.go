@@ -70,6 +70,9 @@ func TestCentralIsTheDefaultAndSharesNoHostStore(t *testing.T) {
 	}
 }
 
+// A copy seeded by the retired host mode linked the host credentials. Seeding
+// it again (whatever legacy setting remains saved) unlinks that link without
+// following it; a private regular credential file is not amux's to delete.
 func TestCentralRetiresLegacyLinksWithoutTouchingTheirTargets(t *testing.T) {
 	isolateAuth(t)
 	user := User()
@@ -87,19 +90,13 @@ func TestCentralRetiresLegacyLinksWithoutTouchingTheirTargets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if target, err := os.Readlink(filepath.Join(linked.Dir, CredentialsFile)); err != nil || target != user.CredentialsPath() {
-		t.Fatalf("host mode link = %q, %v", target, err)
-	}
-	// A private credential that is a regular file is not amux's to delete.
-	private := filepath.Join(detached.Dir, CredentialsFile)
-	if err := os.Remove(private); err != nil {
+	if err := os.Symlink(user.CredentialsPath(), filepath.Join(linked.Dir, CredentialsFile)); err != nil {
 		t.Fatal(err)
 	}
+	private := filepath.Join(detached.Dir, CredentialsFile)
 	if err := os.WriteFile(private, []byte("mock private credential"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	selectAuth(t, amuxcfg.AuthCentral)
 	for _, sp := range []cfghome.Spec{Template("linked", linked.Root), Template("detached", detached.Root)} {
 		if _, err := cfghome.Seed(sp); err != nil {
 			t.Fatal(err)
@@ -116,20 +113,18 @@ func TestCentralRetiresLegacyLinksWithoutTouchingTheirTargets(t *testing.T) {
 	}
 }
 
-func TestEnvironmentModePreservesInheritedProviderSelection(t *testing.T) {
+// The retired environment mode no longer keeps inherited credentials: they
+// are cleared, and one that would outrank central is a named launch conflict.
+func TestRetiredEnvironmentModeClearsInheritedCredentials(t *testing.T) {
 	isolateAuth(t)
 	selectAuth(t, amuxcfg.AuthEnvironment)
 	sp := Template("env", t.TempDir())
-	if len(sp.Shared) != 0 || sp.AuthDir != "" || len(sp.AuthUnsetEnv) != 0 {
+	if len(sp.Shared) != 0 || sp.AuthDir != "" || !slices.Equal(sp.AuthUnsetEnv, credentialOverrides) {
 		t.Fatalf("environment routing = %+v", sp)
 	}
-	for _, kv := range sp.EnvEntries() {
-		if strings.HasPrefix(kv, "ANTHROPIC_") || strings.HasPrefix(kv, "CLAUDE_CODE_OAUTH") {
-			t.Fatalf("environment mode overrode %s", kv)
-		}
-	}
-	if err := LaunchAuthError(sp, "", []string{"ANTHROPIC_API_KEY=mock"}); err != nil {
-		t.Fatalf("environment mode launch error = %v", err)
+	saveCentral(t)
+	if err := LaunchAuthError(sp, "", []string{"ANTHROPIC_API_KEY=mock"}); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Fatalf("inherited API key launch error = %v", err)
 	}
 }
 
@@ -140,8 +135,8 @@ func TestLaunchAuthErrorGuidesMigrationAndNamesConflictsWithoutValues(t *testing
 		t.Fatal(err)
 	}
 	err := LaunchAuthError(sp, "", nil)
-	if !errors.Is(err, ErrCentralLoginRequired) || !strings.Contains(err.Error(), "amux auth login") ||
-		!strings.Contains(err.Error(), "claude.auth environment") {
+	if !errors.Is(err, ErrCentralLoginRequired) || !strings.Contains(err.Error(), "amux auth login claude") ||
+		strings.Contains(err.Error(), "claude.auth") {
 		t.Fatalf("missing login error = %v", err)
 	}
 	saveCentral(t)
@@ -166,13 +161,12 @@ func TestLaunchAuthErrorGuidesMigrationAndNamesConflictsWithoutValues(t *testing
 		t.Fatalf("settings conflict error = %v", err)
 	}
 
-	selectAuth(t, amuxcfg.AuthShared)
-	if err := LaunchAuthError(sp, "", nil); err == nil || !strings.Contains(err.Error(), "no older amux shared Claude login") {
-		t.Fatalf("shared without login = %v", err)
-	}
-	selectAuth(t, amuxcfg.AuthHost)
-	if err := LaunchAuthError(sp, "", []string{"ANTHROPIC_API_KEY=mock"}); err != nil {
-		t.Fatalf("host mode launch error = %v", err)
+	// A retired legacy setting changes nothing: central conflicts still apply.
+	for _, mode := range []string{amuxcfg.AuthShared, amuxcfg.AuthHost} {
+		selectAuth(t, mode)
+		if err := LaunchAuthError(sp, "", []string{"ANTHROPIC_API_KEY=mock"}); err == nil {
+			t.Fatalf("%s setting bypassed central conflicts", mode)
+		}
 	}
 }
 

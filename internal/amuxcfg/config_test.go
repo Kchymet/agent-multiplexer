@@ -17,15 +17,6 @@ func isolate(t *testing.T) {
 	}
 }
 
-// legacyCodexAuth selects the host Codex login, under which codex.control
-// keeps its own precedence (central auth always requires the App Server).
-func legacyCodexAuth(t *testing.T) {
-	t.Helper()
-	if err := SetAuthMode("codex", AuthHost); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestControlPrecedence(t *testing.T) {
 	for _, saved := range []string{"", PTY, AppServer} {
 		for _, override := range []struct {
@@ -45,7 +36,10 @@ func TestControlPrecedence(t *testing.T) {
 		} {
 			t.Run(saved+"/"+override.name, func(t *testing.T) {
 				isolate(t)
-				legacyCodexAuth(t)
+				// A retired codex.auth host value no longer keeps PTY control.
+				if err := SetAuthMode("codex", AuthHost); err != nil {
+					t.Fatal(err)
+				}
 				if saved != "" {
 					if err := SetCodexControl(saved); err != nil {
 						t.Fatal(err)
@@ -68,8 +62,15 @@ func TestControlPrecedence(t *testing.T) {
 				case "disable", "normalized-disable", "legacy-off", "legacy-false", "invalid":
 					want, source = PTY, "environment"
 				}
-				if c.Effective != want || c.Source != source || c.Persisted != saved || c.Override != override.value || c.OverrideSet != override.present || (c.Warning != "") != override.warning {
-					t.Fatalf("got %+v; want effective=%s source=%s warning=%t", c, want, source, override.warning)
+				// Central Codex auth requires the App Server: a PTY selection is
+				// reported (unless it is only the default) and overridden.
+				warning := override.warning
+				if want != AppServer {
+					warning = warning || source != "default"
+					want, source = AppServer, "codex.auth"
+				}
+				if c.Effective != want || c.Source != source || c.Persisted != saved || c.Override != override.value || c.OverrideSet != override.present || (c.Warning != "") != warning {
+					t.Fatalf("got %+v; want effective=%s source=%s warning=%t", c, want, source, warning)
 				}
 			})
 		}

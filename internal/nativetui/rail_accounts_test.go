@@ -114,7 +114,7 @@ func TestAccountsBarKeyboardMouseAndLegacyProjection(t *testing.T) {
 		}
 		m.Update(cmd())
 		view := plain(m.renderAccounts())
-		if m.accounts.selected != "claude:central" || !strings.Contains(view, "New workloads: preserved legacy default") {
+		if m.accounts.selected != "claude:central" || !strings.Contains(view, "Older daemon still uses a legacy login") {
 			t.Fatalf("legacy default represented as central:\n%s", view)
 		}
 		for _, forbidden := range []string{"claude:host", "claude:shared", "codex:environment", "↑/↓: profile"} {
@@ -338,8 +338,8 @@ func TestAccountResetsAndRetryRendering(t *testing.T) {
 	}
 }
 
-// Under a preserved host default the rail shows the host login's budget,
-// which the daemon now refreshes, instead of the unused central profile.
+// An older (pre-migration) daemon may still report a host default; the rail
+// then shows the host login's budget instead of the unused central profile.
 func TestAccountLegacyDefaultShowsHostBudget(t *testing.T) {
 	now := time.Now()
 	one := int64(1)
