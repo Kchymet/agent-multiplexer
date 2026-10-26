@@ -1,0 +1,100 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"sync"
+	"testing"
+	"time"
+
+	"amux/internal/accounts"
+	"amux/internal/centralauth"
+	"amux/internal/sessionrpc"
+	"amux/internal/store"
+)
+
+// Real dispatchCentralCredential (dispatchMu+effectMu, Delivery, Load, Accept)
+// racing real accountCall login replacements. Invariant: one launch never
+// receives two different generations, and every delivered generation was
+// committed (<= store generation at the end).
+func TestProbeReplacementRacesDelivery(t *testing.T) {
+	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
+	d, r, principals := sessionRuntimeFixture(t, claude)
+	tok, _ := centralauth.NewSecret(mockCentralToken)
+	if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	stop := make(chan struct{})
+	var replaced int
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // replacements
+		defer wg.Done()
+		for i := 0; i < 15; i++ {
+			completeClaude(t, d, beginClaude(t, d, "owner"))
+			replaced++
+		}
+		close(stop)
+	}()
+	type rec struct{ gens map[uint64]bool }
+	var mu sync.Mutex
+	launches := map[string]*rec{}
+	ok, refused := 0, map[string]int{}
+	var workers sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				call := launchCall(t, claude.ID)
+				key := call.Fields[centralauth.LaunchField]
+				for k := 0; k < 3; k++ { // first delivery + retries on the same launch
+					res, err := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[claude.ID], Call: call})
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					mu.Lock()
+					if res.Status == sessionrpc.StatusOK {
+						var got centralauth.Delivery
+						_ = json.Unmarshal(res.Body, &got)
+						if launches[key] == nil {
+							launches[key] = &rec{gens: map[uint64]bool{}}
+						}
+						launches[key].gens[got.Generation] = true
+						ok++
+					} else {
+						refused[res.Code]++
+					}
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	workers.Wait()
+	final, _ := centralauth.ClaudeStore().Load()
+	multi, future := 0, 0
+	for _, l := range launches {
+		if len(l.gens) > 1 {
+			multi++
+		}
+		for g := range l.gens {
+			if g > final.Generation {
+				future++
+			}
+		}
+	}
+	st, _ := accounts.Read()
+	t.Logf("replacements=%d launches=%d delivered=%d refused=%v launchesWithTwoGenerations=%d uncommittedGenerations=%d finalGen=%d accountsVersion=%d",
+		replaced, len(launches), ok, refused, multi, future, final.Generation, st.CredentialVersion["claude:central"])
+	if multi != 0 || future != 0 {
+		t.Fatal("fence violated")
+	}
+}

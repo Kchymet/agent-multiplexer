@@ -1,0 +1,45 @@
+package accounts
+
+import (
+	"errors"
+	"testing"
+)
+
+// Without the committed-version check, does the login-start epoch fence stop a
+// delivery that read (epoch, credential) before a replacement from pinning it?
+func TestProbeEpochFenceCoversReplacementRace(t *testing.T) {
+	isolated(t)
+	first := claudeReady(t, "FIRST-SYNTHETIC")
+	launch, _ := BeginLaunch("w", "claude")
+	b, p, _ := Delivery("w", "claude") // delivery reads epoch E and credential `first`
+	// Replacement: login start (epoch++ and pending), then completion commits a new version.
+	if err := Update(func(s *State) error {
+		q := s.Profiles["claude:central"]
+		q.DeliveryEpoch++
+		q.State = "login-pending"
+		s.Profiles[q.ID] = q
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(func(s *State) error {
+		q := s.Profiles["claude:central"]
+		q.State = "ready"
+		s.Profiles[q.ID] = q
+		s.CredentialVersion[q.ID] = first.Generation + 1
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := Accept("w", b.Revision, p.DeliveryEpoch, "", first.Generation, launch)
+	t.Logf("stale (pre-replacement) read Accept err=%v stale=%v", err, errors.Is(err, ErrStale))
+	b2, p2, _ := Delivery("w", "claude")
+	err2 := Accept("w", b2.Revision, p2.DeliveryEpoch, "", first.Generation+1, launch)
+	t.Logf("retry with current epoch and new version: err=%v", err2)
+	// Control: replacement WITHOUT an epoch bump (not a real path) would be accepted.
+	launch2, _ := BeginLaunch("w2", "claude")
+	b3, p3, _ := Delivery("w2", "claude")
+	_ = Update(func(s *State) error { s.CredentialVersion["claude:central"] = first.Generation + 2; return nil })
+	err3 := Accept("w2", b3.Revision, p3.DeliveryEpoch, "", first.Generation+1, launch2)
+	t.Logf("control, no epoch bump: Accept of superseded version err=%v (nil = pinned superseded)", err3)
+}

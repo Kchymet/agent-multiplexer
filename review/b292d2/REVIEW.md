@@ -939,3 +939,61 @@ Residuals (non-blocking):
    its duration, delaying credential delivery and reconcile. This is
    bounded (once per session, sized by the rollout), and the startup import
    runs before Accept. Document it, or measure it on a large rollout.
+
+---
+
+## PR213 pre-final review at `5845948` (PR206 merged as `7884a0e`; PR213 not yet integrated)
+
+### Current fence after `5845948` removes the a3f9 committed-version check — ACCEPTED
+- **Replacement paths audited.** The only writers of `CredentialVersion` are
+  the bind/Accept bootstraps (when it is 0) and Claude login completion
+  (`daemon/accounts.go:140-144`). Completion runs inside a login attempt whose
+  start bumped `DeliveryEpoch` and set `login-pending` (`:252`), and it
+  re-checks `p.DeliveryEpoch == a.epoch`. Logout bumps the epoch too. Nothing
+  in `cmd/` writes the store directly.
+- **Transactional fence (accounts-level probe,
+  `c0523b_epoch_fence_probe_test.go.txt`).** A delivery that read its epoch
+  and credential before the replacement gets `Accept` →
+  `account_revision_changed` (ErrStale, retryable), and the retry pins the
+  new version. The control shows the fence relies on every replacement
+  bumping the epoch, which the audit above confirms.
+- **At the real gate boundaries (`c0523b_replacement_race_stress_probe_test.go.txt`,
+  `-race`, 3 runs).** Real `dispatchCentralCredential` (dispatchMu+effectMu →
+  Delivery → Load → Accept) runs against 15 real `accountCall` login
+  replacements: 9–10 launches with retries, **0 launches given two
+  generations, 0 uncommitted generations**, retries after a replacement get
+  `account_runtime_superseded`, and the final store and accounts versions
+  agree. For Claude, delivery and replacement are also mutually exclusive
+  under `effectMu`.
+- **Reason for dropping the check holds.** With it, a partial login commit
+  (store written, accounts.json not) would strand every new launch in
+  ErrStale.
+
+### BLOCKER for integration: PR206's pressure fixture vs PR213's launch fence
+The trial merge with master `fa7bf75` has a textual conflict in
+`central_launch_runtime_test.go` (imports only). After resolving it, PR206's
+`fresh-launch-under-releasing-client-pressure` **fails on every background
+session's first fetch**: `launcher exit 75`, stderr "this Claude pane started
+without a credential launch". The fixture re-invokes the nested launcher
+without `--amux-launch=`, and PR213 correctly refuses a launch-less delivery.
+PR206's fail-fast and stderr capture named this immediately. The other five
+subtests pass.
+
+Resolution must keep PR206's assertions (240 releasing fetches, fresh first
+attempt < LaunchRetry, pool peak bound, fail-fast and diagnostics). For
+example, the test allocates one launch per background session with
+`accounts.BeginLaunch` and hands `--amux-launch=<seq>:<nonce>` to the fixture
+(via a file or env the test writes). Repeated fetches on one launch then get
+the same snapshot, which is valid under the fence. Do not weaken the
+launch-less refusal.
+
+### Other items before final exact-head signoff
+- **Document the one-time import gate hold** (root requires it). The import
+  runs under `effectMu` on the steer and host-action paths, and a large
+  rollout holds the global gate for its read and rewrite. Not yet in
+  CHECKPOINT or machine-accounts.
+- **Re-validate the CHECKPOINT gate statements against #216** (`fa7bf75`,
+  "reconcile sessions without holding the global gate") once integrated.
+- **Fixture seam:** still inert in release (tag-only setter, nothing outside
+  tests writes `FixtureOrigin`).
+- Exit-drain residual accepted by root as non-blocking.
