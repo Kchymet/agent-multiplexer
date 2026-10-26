@@ -46,7 +46,9 @@ flow back toward the clients.
   daemon's local socket and the authenticated mailbox RPC used by agent-scoped
   `amux agent …` commands are described in
   [Local daemon and optional legacy relay](client-server.md) and
-  [Agent CLI access and authorization](agent-cli-sandbox.md).
+  [Agent CLI access and authorization](agent-cli-sandbox.md). What a
+  workgroup's coordinator and members may do over that RPC is mapped in
+  [Workgroup permissions](workgroup-permissions.md).
 - **The provider link is optional and outbound.** `amux provide` dials the
   Harness broker over one long-lived TLS connection and serves the published
   `harnessproto` v2 protocol on it: spawn, input, resize and kill commands come
