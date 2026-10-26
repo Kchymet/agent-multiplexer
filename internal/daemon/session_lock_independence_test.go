@@ -3,12 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/credentialbroker"
+	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
@@ -31,8 +35,11 @@ func TestSessionReportIndependence(t *testing.T) {
 	}{
 		{name: "peer session report", hold: holdPeerReport, blocked: false},
 		{name: "host action on another session", hold: holdHostAction, blocked: false},
-		{name: "workgroup host action (exclusive fallback)", hold: holdWorkgroupAction, blocked: true},
+		{name: "workgroup start, stalled resolving its members", hold: holdWorkgroupAction, blocked: false},
+		{name: "archive of a3 (exclusive), stalled stopping its runtime", hold: holdArchive, blocked: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
+		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
+		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
 	}
 	for _, tc := range tests {
@@ -97,6 +104,11 @@ type independenceFixture struct {
 // reports too, and a3 is the target of unrelated host actions.
 func newIndependenceFixture(t *testing.T) *independenceFixture {
 	t.Helper()
+	ghConfig := t.TempDir()
+	t.Setenv("GH_CONFIG_DIR", ghConfig)
+	if err := os.WriteFile(filepath.Join(ghConfig, "hosts.yml"), []byte("github.com:\n  user: selected\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	const runtimeID = "33333333-3333-4333-8333-333333333333"
 	sessions := []store.Session{
 		{ID: "root", Agent: "claude"},
@@ -150,7 +162,7 @@ func holdHostAction(t *testing.T, f *independenceFixture, held func(), release <
 }
 
 // holdWorkgroupAction is a host `start` of the workgroup root, which starts
-// every member and so still takes the exclusive gate.
+// every member under the members' locks.
 func holdWorkgroupAction(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
 	f.d.agentsUnder = func(id string) ([]string, error) {
 		held()
@@ -187,6 +199,50 @@ func holdQueuedExclusive(t *testing.T, f *independenceFixture, held func(), rele
 	held()
 	<-actions
 	<-actions
+}
+
+// holdPeerCredential is a2's GitHub credential read stalling inside its
+// helper process.
+func holdPeerCredential(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.runtime.credentialOperation = func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error) {
+		held()
+		<-release
+		return credentialbroker.Result{Value: "synthetic"}, nil
+	}
+	o := credentialbroker.Operation{Verb: credentialbroker.Read, Service: "gh:github.com", Account: credentialbroker.GitHubAccount}
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: o.Verb, Fields: o.Fields()}
+	if result, _ := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals["a2"], Call: call}); result.Status != sessionrpc.StatusOK {
+		t.Errorf("peer credential = %+v", result)
+	}
+}
+
+// holdCreation is a host `new-workgroup` whose coordinator launch stalls.
+func holdCreation(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.d.launchSpec = func(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+		held()
+		<-release
+		return testLaunchSpecResolver(ctx, id)
+	}
+	f.d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "created"}}); !r.OK {
+		t.Errorf("new workgroup = %+v", r)
+	}
+}
+
+// holdArchive is a host archive of a3, a policy mutation that still takes
+// the exclusive gate, stalling while it stops a3's runtime.
+func holdArchive(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	eng := f.d.engine.(*fakeEngine)
+	eng.running("a3")
+	eng.killObserved = func(engine.Instance) {
+		held()
+		<-release
+	}
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionSetArchived, ID: "a3", Fields: map[string]string{"archived": "true"}}); !r.OK {
+		t.Errorf("archive = %+v", r)
+	}
 }
 
 // holdReconcile is a session RPC reconcile pass stalling while it opens a3's
@@ -233,5 +289,66 @@ func TestSessionHostActionExcludesThatSessionsReports(t *testing.T) {
 	<-actionDone
 	if result := <-reported; result.Status != sessionrpc.StatusOK {
 		t.Fatalf("report = %+v", result)
+	}
+}
+
+// TestReconcileTickDefersOpensDuringCreation: a session row a creation is
+// still building must not have its mailbox adopted mid-creation.
+func TestReconcileTickDefersOpensDuringCreation(t *testing.T) {
+	f := newIndependenceFixture(t)
+	t.Cleanup(f.runtime.close)
+	var mu sync.Mutex
+	opened := map[string]bool{}
+	f.d.launchSpec = func(_ context.Context, id string) (panespec.LaunchSpec, error) {
+		mu.Lock()
+		opened[id] = true
+		mu.Unlock()
+		return panespec.LaunchSpec{}, errors.New("test: no launch spec")
+	}
+	f.d.creationMu.Lock()
+	if err := f.runtime.reconcileTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	during := len(opened)
+	mu.Unlock()
+	f.d.creationMu.Unlock()
+	if during != 0 {
+		t.Fatalf("reconcile opened %v during a creation", opened)
+	}
+	if err := f.runtime.reconcileTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !opened["a1"] {
+		t.Fatal("reconcile did not open a1 after the creation")
+	}
+}
+
+// TestWorkgroupStartStartsOnlyItsLockedMembers: a member added by a
+// concurrent creation after the start resolved its members is not started
+// by it (outside that member's lock); its creation starts it.
+func TestWorkgroupStartStartsOnlyItsLockedMembers(t *testing.T) {
+	f := newIndependenceFixture(t)
+	eng := f.d.engine.(*fakeEngine)
+	f.d.launchSpec = testLaunchSpecResolver
+	f.d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
+	var mu sync.Mutex
+	calls := 0
+	f.d.agentsUnder = func(string) ([]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return []string{"a3"}, nil
+		}
+		return []string{"a3", "added-later"}, nil
+	}
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "root"}); !r.OK {
+		t.Fatalf("workgroup start = %+v", r)
+	}
+	if keys := eng.ensuredKeys(); len(keys) != 1 || keys[0].AgentID != "a3" {
+		t.Fatalf("workgroup start launched %v, want only its locked member a3", keys)
 	}
 }

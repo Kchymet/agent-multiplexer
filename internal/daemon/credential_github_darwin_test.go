@@ -17,6 +17,7 @@ import (
 	"amux/internal/credentialbroker"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
+	"amux/internal/sessionrpc"
 	"amux/internal/store"
 
 	"github.com/cli/go-gh/v2/pkg/config"
@@ -125,6 +126,19 @@ func testGitHubSandbox(t *testing.T, live bool) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The CLI fails fast while the mailbox is unpublished; wait for
+				// the session runtime to adopt the new session instead of racing
+				// its reconcile pass.
+				published := time.Now().Add(30 * time.Second)
+				for {
+					if _, err := os.Stat(filepath.Join(grant.MailboxHostDir, sessionrpc.ServiceFileName)); err == nil {
+						break
+					}
+					if time.Now().After(published) {
+						t.Fatal("session mailbox was never published")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
 				dir, overlay, argv, err := panespec.Resolve(panespec.LaunchSpec{Session: s, Access: grant}, tab)
 				if err != nil {
 					t.Fatal(err)
@@ -155,6 +169,9 @@ if printf bad > "$GIT_CONFIG_GLOBAL" 2>/dev/null; then exit 24; fi
 test -z "${GH_TOKEN+x}${GITHUB_TOKEN+x}"
 echo github-broker-ok
 `
+				if !live {
+					script = "set -x\n" + script // trace synthetic steps for the failure message
+				}
 				found := false
 				for i, arg := range argv {
 					if arg == "/bin/sh" {
@@ -174,11 +191,18 @@ echo github-broker-ok
 				if err != nil {
 					t.Fatal(err)
 				}
+				var stderr strings.Builder
+				cmd.Stderr = &stderr
 				out, err := cmd.Output()
 				if err != nil || strings.TrimSpace(string(out)) != "github-broker-ok" {
-					// Do not dump subprocess output on failure: Git's credential
-					// protocol and gh auth token intentionally carry secrets.
-					t.Fatalf("sandbox GitHub identity/credential check failed: %v", err)
+					if live {
+						// Do not dump subprocess output on a live failure: Git's
+						// credential protocol and gh auth token carry real secrets.
+						t.Fatalf("sandbox GitHub identity/credential check failed: %v", err)
+					}
+					// The synthetic fixture's only token is synthetic-token, so its
+					// output is safe to show and says which step failed.
+					t.Fatalf("sandbox GitHub identity/credential check failed: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
 				}
 			})
 		}

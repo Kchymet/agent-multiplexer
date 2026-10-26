@@ -64,10 +64,14 @@ type sessionRuntime struct {
 	credentialOperation func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error)
 	// wakes carries the ids whose request directory changed, so run serves a
 	// request on arrival instead of on the next tick. passDone reports each
-	// pass's end to run, which reruns a subject woken mid-pass (again).
+	// pass's end to run, which reruns a subject woken mid-pass (again). due
+	// holds ids woken or just initialized but not yet served: a wake that
+	// arrives while some mailbox is still initializing, or before its own
+	// server is registered, must not be lost until the fallback tick.
 	wakes    chan string
 	passDone chan passEnd
 	again    map[string]bool
+	due      map[string]bool
 
 	// beforeReportEffect, when set, runs just before a report's write, under
 	// whatever locks the report path holds there. Tests use it to model a slow
@@ -180,7 +184,8 @@ func (r *sessionRuntime) notifier(id string) func() {
 // serveOne serves id at once if its mailbox is open and every mailbox is
 // initialized.
 func (r *sessionRuntime) serveOne(ctx context.Context, id string) {
-	if err := r.serveDue(ctx, func(candidate string) bool { return candidate == id }); err != nil && ctx.Err() == nil {
+	r.markDue(id)
+	if err := r.serveDue(ctx, func(string) bool { return false }); err != nil && ctx.Err() == nil {
 		log.Printf("session RPC: %v", err)
 	}
 }
@@ -208,8 +213,16 @@ func (r *sessionRuntime) serveCurrent(ctx context.Context) error {
 	return r.serveDue(ctx, func(string) bool { return true })
 }
 
-// serveDue initializes every mailbox, then starts a pass for each due one and
-// each one initialized just now (its queue predates its watch).
+func (r *sessionRuntime) markDue(id string) {
+	if r.due == nil {
+		r.due = make(map[string]bool)
+	}
+	r.due[id] = true
+}
+
+// serveDue initializes every mailbox, then starts a pass for each one due
+// selects, each one initialized (its queue predates its watch) or woken since
+// it last served, once every mailbox is initialized.
 func (r *sessionRuntime) serveDue(ctx context.Context, due func(string) bool) error {
 	ids := make([]string, 0, len(r.servers))
 	for id := range r.servers {
@@ -218,7 +231,6 @@ func (r *sessionRuntime) serveDue(ctx context.Context, due func(string) bool) er
 	sort.Strings(ids)
 	ready := true
 	var initializeErr error
-	fresh := map[string]bool{}
 	for _, id := range ids {
 		if r.initialized[id] {
 			continue
@@ -226,7 +238,7 @@ func (r *sessionRuntime) serveDue(ctx context.Context, due func(string) bool) er
 		err := r.servers[id].Initialize(ctx)
 		if err == nil {
 			r.initialized[id] = true
-			fresh[id] = true
+			r.markDue(id)
 			continue
 		}
 		ready = false
@@ -241,7 +253,8 @@ func (r *sessionRuntime) serveDue(ctx context.Context, due func(string) bool) er
 		return initializeErr
 	}
 	for _, id := range ids {
-		if fresh[id] || due(id) {
+		if r.due[id] || due(id) {
+			delete(r.due, id)
 			r.startPass(ctx, id)
 		}
 	}
@@ -357,7 +370,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
-		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID)})
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow})
 	if err != nil {
 		return err
 	}
@@ -512,7 +525,8 @@ func (r *sessionRuntime) closeServer(id string) {
 		// waiting for the dispatch/effect locks this caller holds. Hand the close
 		// to the pass's owner instead of deadlocking; the dispatch itself
 		// rechecks credential validity under those locks before any effect.
-		if pass == nil || finished(pass) {
+		// Close also joins the mailbox's slow lane, which may be dispatching.
+		if (pass == nil || finished(pass)) && !server.Busy() {
 			_ = server.Close()
 		} else {
 			if r.closing == nil {
@@ -524,12 +538,15 @@ func (r *sessionRuntime) closeServer(id string) {
 			go func() {
 				defer r.passes.Done()
 				defer close(closed)
-				<-pass
+				if pass != nil {
+					<-pass
+				}
 				_ = server.Close()
 			}()
 		}
 	}
 	delete(r.initialized, id)
+	delete(r.due, id)
 }
 
 func (r *sessionRuntime) closeAndRevoke(ctx context.Context, id string) {
@@ -547,7 +564,6 @@ func (r *sessionRuntime) close() {
 	// Passes are joined before taking dispatch ownership (see closeServer).
 	r.waitPasses()
 	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
 	for id := range r.servers {
 		r.closeServer(id)
 	}
@@ -555,6 +571,9 @@ func (r *sessionRuntime) close() {
 	if r.events != nil {
 		r.events.close()
 	}
+	r.dispatchMu.Unlock()
+	// A mailbox whose slow lane was dispatching closes on its own goroutine.
+	r.waitPasses()
 }
 
 type completionRegistry struct {

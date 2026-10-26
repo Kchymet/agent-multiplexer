@@ -84,6 +84,13 @@ func (d *Daemon) admitSession(id string) (release func()) {
 	}
 }
 
+// admitShared is admission for work that only reads policy or state: it takes
+// the gate shared and no session lock.
+func (d *Daemon) admitShared() (release func()) {
+	d.effectMu.RLock()
+	return d.effectMu.RUnlock
+}
+
 // tryLock acquires key only if it is free right now.
 func (l *keyedLocks) tryLock(key string) (unlock func(), ok bool) {
 	l.mu.Lock()
@@ -147,6 +154,31 @@ func (d *Daemon) lockEffectExclusive() {
 			wait *= 2
 		}
 	}
+}
+
+// creationAction reports a verb that creates a session. It runs under the
+// shared gate and creationMu rather than the exclusive gate.
+func creationAction(a core.Action) bool {
+	switch a.Action {
+	case core.ActionAddAgent, core.ActionNewWorkgroup, core.ActionCreateWorkspace:
+		return true
+	}
+	return false
+}
+
+// workgroupStart reports a host `start` of a workgroup root, which starts
+// every member under the members' own locks.
+func workgroupStart(a core.Action) bool {
+	if a.Action != core.ActionStart || a.ID == "" || a.ID == console.ID {
+		return false
+	}
+	db, err := store.OpenReadOnly()
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	session, found, err := db.GetSession(a.ID)
+	return err == nil && found && session.IsRoot()
 }
 
 // sessionScopedAction names the one session an action touches when it runs
