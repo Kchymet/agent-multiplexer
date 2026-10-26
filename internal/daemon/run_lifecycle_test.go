@@ -297,6 +297,9 @@ func TestRunInterruptsStalledStructuredWriteBeforeDeferredJoin(t *testing.T) {
 	}
 
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	// This test covers transport interruption, not auth: the fake App Server
+	// has no session record for central token delivery.
+	d.codex.SetChatGPTAuth(nil)
 	sup, err := d.codex.Ensure(context.Background(), "stalled", "", nil, []string{"sleep", "60"}, endpoint, "", "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +314,7 @@ func TestRunInterruptsStalledStructuredWriteBeforeDeferredJoin(t *testing.T) {
 
 	admissionDone := make(chan error, 1)
 	if !d.startDeferredWork(func() {
-		admissionDone <- d.admitDeferredEffect(context.Background(), func(admitCtx context.Context) error {
+		admissionDone <- d.admitDeferredEffect(context.Background(), "stalled", func(admitCtx context.Context) error {
 			_, err := sup.BeginPrompt(admitCtx, strings.Repeat("x", 32<<20))
 			return err
 		})

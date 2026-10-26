@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
 	"amux/internal/core"
 	"amux/internal/sessionreport"
@@ -224,5 +225,63 @@ func TestAgentModelForwardsExistingStatusLine(t *testing.T) {
 	}
 	if string(got) != payload {
 		t.Fatalf("forwarded stdout = %q, want exact original payload", got)
+	}
+}
+
+// TestStatusLineReportsOnlyChanges pins the status-line rate limit: Claude
+// re-renders constantly while a turn streams, and each unchanged render must not
+// cost the daemon a report round-trip.
+func TestStatusLineReportsOnlyChanges(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rpc := successfulReportRPC(t)
+	now := time.Unix(1_800_000_000, 0)
+	oldNow := statusLineNow
+	statusLineNow = func() time.Time { return now }
+	t.Cleanup(func() { statusLineNow = oldNow })
+	render := func(model, limits string) {
+		t.Helper()
+		payload := `{"session_id":"conv-1","model":{"id":"` + model + `"},"rate_limits":` + limits + `}`
+		withHookStdin(t, payload, func() {
+			if err := cmdAgentModel([]string{"--statusline"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	count := func(verb string) int {
+		n := 0
+		for _, action := range rpc.actions {
+			if action.Verb == verb {
+				n++
+			}
+		}
+		return n
+	}
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":10}}`)
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":10}}`)
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":10}}`)
+	if count(sessionreport.Model) != 1 || count(sessionreport.Limits) != 1 {
+		t.Fatalf("unchanged renders reported again: %+v", rpc.actions)
+	}
+	render("claude-sonnet-4-6", `{"five_hour":{"used_percentage":11}}`)
+	if count(sessionreport.Model) != 2 || count(sessionreport.Limits) != 2 {
+		t.Fatalf("changed render was not reported: %+v", rpc.actions)
+	}
+	now = now.Add(statusLineRefresh)
+	render("claude-sonnet-4-6", `{"five_hour":{"used_percentage":11}}`)
+	if count(sessionreport.Model) != 3 || count(sessionreport.Limits) != 3 {
+		t.Fatalf("stale observation was not refreshed: %+v", rpc.actions)
+	}
+	rpc.actionErr = errors.New("daemon busy")
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":11}}`)
+	rpc.actionErr = nil
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":11}}`)
+	if count(sessionreport.Model) != 4 {
+		t.Fatalf("failed report was retried by the very next render: %+v", rpc.actions)
+	}
+	now = now.Add(statusLineRetry)
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":11}}`)
+	render("claude-opus-4-7", `{"five_hour":{"used_percentage":11}}`)
+	if count(sessionreport.Model) != 5 {
+		t.Fatalf("failed report was not retried once after backoff: %+v", rpc.actions)
 	}
 }

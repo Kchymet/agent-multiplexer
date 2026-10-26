@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"amux/internal/access"
@@ -29,7 +30,35 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
-	if !effectAdmissionHeld(ctx) {
+	if id, ok := sessionScopedAction(a); ok && !effectAdmissionHeld(ctx) {
+		// The action touches only one session's runtime and credential, so it
+		// waits only for that session (and for holders of the unsplit gate).
+		// Every policy mutation still takes the gate exclusively, so the guard
+		// below cannot be crossed by one.
+		waitStart := time.Now()
+		release := d.admitSession(id)
+		defer release()
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if !effectAdmissionHeld(ctx) {
+		waitStart := time.Now()
+		var admitted time.Time
+		defer func() {
+			// The gates taken below serialize every session's reports; an action
+			// holding them for long is the usual cause of a daemon-wide stall.
+			if admitted.IsZero() {
+				return
+			}
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held the effect gate %v (waited %v)", a.Action, a.ID,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
 		// Use the same lock order as mailbox serving: dispatch ownership, then
 		// effect admission. For an explicit restore, drain the old completion
 		// owner before taking effectMu; its cleanup may already be waiting there.
@@ -64,8 +93,9 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 				}
 			}
 		}
-		d.effectMu.Lock()
+		d.lockEffectExclusive()
 		defer d.effectMu.Unlock()
+		admitted = time.Now()
 		ctx = withEffectAdmission(ctx)
 	}
 	if err := revalidateDeferred(ctx); err != nil {
@@ -461,7 +491,8 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 	if spec.Session.Archived {
 		return fmt.Errorf("session %s is archived; restore it before restarting", id)
 	}
-	work := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent}).apply(&spec)
+	record := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent})
+	work := d.restartIntent(startIntent{record: &record, resumeGoal: true}, &spec)
 	kill := func() {
 		if allTabs {
 			d.killRuntimeFor(id)
@@ -507,16 +538,18 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		return err
 	}
 	if err := revalidateDeferred(ctx); err != nil {
+		retireUnstarted(id, argv)
 		return err
 	}
 	kill()
 	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-		return d.engine.Ensure(ctx, engine.Spec{
+		return d.ensurePane(ctx, engine.Spec{
 			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
 			ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})
 	})
 	if err != nil {
+		retireUnstarted(id, argv)
 		return err
 	}
 	if _, ok := published.(engine.Instance); !ok {

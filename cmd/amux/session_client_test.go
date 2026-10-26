@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 
 	"amux/internal/core"
@@ -41,11 +43,19 @@ func installRestrictedRPC(t *testing.T, client restrictedSessionRPC) {
 	t.Helper()
 	oldRestricted := sessionContextRestricted
 	oldOpen := openRestrictedSessionRPC
+	oldCursorDir := eventCursorDir
+	cursorDir := t.TempDir()
+	eventCursorDir = func() string { return cursorDir }
+	oldStatusLine := startStatusLineReport
 	sessionContextRestricted = func() bool { return true }
 	openRestrictedSessionRPC = func() (restrictedSessionRPC, error) { return client, nil }
+	// Run handed-off status-line reports inline so tests observe them.
+	startStatusLineReport = reportStatusLine
 	t.Cleanup(func() {
 		sessionContextRestricted = oldRestricted
 		openRestrictedSessionRPC = oldOpen
+		startStatusLineReport = oldStatusLine
+		eventCursorDir = oldCursorDir
 	})
 }
 
@@ -127,5 +137,39 @@ func TestRepoShortcutCreatesAndStartsCoordinatorWorkgroup(t *testing.T) {
 	}
 	if start.Verb != core.ActionStart || start.ID != "group" {
 		t.Fatalf("start targeted wrong session: %+v", start)
+	}
+}
+
+// unservedThenServedRPC fails the report-context query as an unpublished
+// mailbox (no service record) a few times, then answers normally.
+type unservedThenServedRPC struct {
+	fakeRestrictedRPC
+	unserved int
+}
+
+func (u *unservedThenServedRPC) Query(ctx context.Context, query sessionrpc.Query) (sessionrpc.Result, error) {
+	if u.unserved > 0 {
+		u.unserved--
+		u.queryCalls++
+		return sessionrpc.Result{}, fmt.Errorf("read service: %w", os.ErrNotExist)
+	}
+	return u.fakeRestrictedRPC.Query(ctx, query)
+}
+
+// TestReportWaitsForUnservedMailbox pins that a self report made before the
+// daemon serves a new session's mailbox is delivered once it is, instead of
+// being dropped (which left fresh members "unknown" for their first turn).
+func TestReportWaitsForUnservedMailbox(t *testing.T) {
+	result, _ := json.Marshal(core.Result{Type: "result", OK: true})
+	rpc := &unservedThenServedRPC{unserved: 2, fakeRestrictedRPC: fakeRestrictedRPC{
+		query:  sessionrpc.Result{Status: sessionrpc.StatusOK, Body: []byte(`{"runtime_generation":"gen-1"}`)},
+		action: sessionrpc.Result{Status: sessionrpc.StatusOK, Body: result},
+	}}
+	installRestrictedRPC(t, rpc)
+	if err := restrictedReport(sessionreport.Activity, map[string]string{sessionreport.FieldState: core.StateRunning}); err != nil {
+		t.Fatalf("report after mailbox publication = %v", err)
+	}
+	if rpc.queryCalls != 3 || len(rpc.actions) != 1 || rpc.actions[0].Fields[sessionreport.FieldState] != core.StateRunning {
+		t.Fatalf("queries %d, actions %+v", rpc.queryCalls, rpc.actions)
 	}
 }

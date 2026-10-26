@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -121,4 +122,47 @@ func captureAgentEventsStdout(t *testing.T, run func() error) string {
 		t.Fatal(readErr)
 	}
 	return string(b)
+}
+
+// scriptedEventsRPC answers successive runtime-event queries from a script.
+type scriptedEventsRPC struct {
+	fakeRestrictedRPC
+	replies []func() (sessionrpc.Result, error)
+}
+
+func (s *scriptedEventsRPC) Query(_ context.Context, query sessionrpc.Query) (sessionrpc.Result, error) {
+	s.queries = append(s.queries, query)
+	reply := s.replies[0]
+	s.replies = s.replies[1:]
+	return reply()
+}
+
+// TestAgentEventsResumesExpiredCursorAfterSequence pins that a cursor this
+// client was issued, once expired in the daemon, resumes the read with
+// after_sequence at the page's scanned sequence instead of failing.
+func TestAgentEventsResumesExpiredCursorAfterSequence(t *testing.T) {
+	cursor := strings.Repeat("c", 43)
+	page := func(scanned int64, next string) func() (sessionrpc.Result, error) {
+		return func() (sessionrpc.Result, error) {
+			body, _ := json.Marshal(core.RuntimeEventPage{Target: "member-1", ScannedSequence: scanned, NextCursor: next})
+			return sessionrpc.Result{Status: sessionrpc.StatusOK, Body: body}, nil
+		}
+	}
+	expired := func() (sessionrpc.Result, error) {
+		return sessionrpc.Result{}, &sessionrpc.RemoteError{Status: sessionrpc.StatusInvalid, Code: "runtime_events_cursor_invalid"}
+	}
+	rpc := &scriptedEventsRPC{replies: []func() (sessionrpc.Result, error){page(19, cursor), expired, page(25, strings.Repeat("d", 43))}}
+	installRestrictedRPC(t, rpc)
+	_ = captureAgentEventsStdout(t, func() error { return cmdAgentEvents([]string{"member-1", "--json"}) })
+	_ = captureAgentEventsStdout(t, func() error { return cmdAgentEvents([]string{"member-1", "--cursor", cursor, "--json"}) })
+	if len(rpc.queries) != 3 || rpc.queries[1].Fields[core.RuntimeEventsCursorField] != cursor ||
+		rpc.queries[2].Fields[core.RuntimeEventsAfterSequenceField] != "19" || len(rpc.queries[2].Fields) != 1 {
+		t.Fatalf("queries = %+v", rpc.queries)
+	}
+
+	// A cursor never issued to this client (or for another target) still fails.
+	rpc.replies = []func() (sessionrpc.Result, error){expired}
+	if err := cmdAgentEvents([]string{"member-2", "--cursor", cursor}); err == nil || !strings.Contains(err.Error(), "--after") {
+		t.Fatalf("unknown expired cursor = %v", err)
+	}
 }

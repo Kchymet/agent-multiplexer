@@ -3,6 +3,7 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -149,19 +150,16 @@ func TestHandshakeStart(t *testing.T) {
 }
 
 // Every handshake path must select the reviewer explicitly, including the
-// persistence resume for a fresh thread and the fallback for a missing rollout.
+// persistence resume for a fresh thread.
 func TestHandshakeApprovalsReviewer(t *testing.T) {
 	for _, reviewer := range []string{"", "user"} {
-		for _, mode := range []string{"fresh", "resume", "missing rollout"} {
+		for _, mode := range []string{"fresh", "resume"} {
 			t.Run(reviewer+"/"+mode, func(t *testing.T) {
 				client, server := newMemPair()
 				fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}}
 				cfg := Config{SessionID: "reviewer", ApprovalsReviewer: reviewer}
 				if mode != "fresh" {
 					cfg.ResumeThreadID = "thr_saved"
-				}
-				if mode == "missing rollout" {
-					fs.resumeErr = "no rollout found"
 				}
 				go fs.loop()
 				defer fs.close()
@@ -205,7 +203,6 @@ func TestHandshakeInitialPrompt(t *testing.T) {
 		{name: "empty"},
 		{name: "whitespace", prompt: " \n\t"},
 		{name: "resume", prompt: prompt, resume: "thr_saved"},
-		{name: "missing rollout", prompt: prompt, resume: "thr_gone", resumeErr: "no rollout found", wantTurn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sup, fs, client := newFakePair(t)
@@ -368,27 +365,54 @@ func TestHandshakeResume(t *testing.T) {
 	}
 }
 
-// TestHandshakeResumeMissFallsBack checks the belt-and-suspenders backstop: if a
-// resume is attempted and the server returns "no rollout found", the handshake
-// falls back to thread/start and pins the new thread rather than failing (or
-// leaving the thread in a state whose first turn hangs).
-func TestHandshakeResumeMissFallsBack(t *testing.T) {
-	client, server := newMemPair()
-	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, resumeErr: "no rollout found"}
-	go fs.loop()
-	defer fs.close()
-	sup := New(Config{SessionID: "s-test", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: "thr_gone"})
-	defer sup.Close()
-	attach(t, sup, client)
-
-	if _, ok := fs.sawCall("thread/resume"); !ok {
-		t.Fatal("expected a thread/resume attempt")
-	}
-	if _, ok := fs.sawCall("thread/start"); !ok {
-		t.Fatal("resume miss did not fall back to thread/start")
-	}
-	if got := sup.ThreadID(); got != "thr_1" {
-		t.Fatalf("threadID = %q, want thr_1 (the fresh thread from the fallback)", got)
+// A resume target is never replaced by a fresh thread, whatever is known about
+// its history: a resumable identity, a legacy v0 identity (unknown history), or
+// no identity with a thread pinned by the older PTY path. A resume error, even
+// one shaped like a missing rollout, fails the launch visibly, sends no
+// thread/start, and leaves the persisted identity exactly as it was.
+func TestHandshakeResumeNeverFallsBackToFreshThread(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity *Identity
+		legacy   string
+	}{
+		{name: "resumable", identity: &Identity{SessionID: "s-test", ThreadID: "thr_history", Resumable: true, Version: identityVersion, ChatGPTAccount: "acct-old"}},
+		{name: "legacy v0", identity: &Identity{SessionID: "s-test", ThreadID: "thr_history"}},
+		{name: "pty pinned", legacy: "thr_history"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("HOME", t.TempDir())
+			if tc.identity != nil {
+				if err := SaveIdentity(*tc.identity); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resume := resumeThreadFor("s-test", tc.legacy)
+			if resume != "thr_history" {
+				t.Fatalf("resume target = %q, want the existing thread", resume)
+			}
+			client, server := newMemPair()
+			fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, resumeErr: "no rollout found"}
+			go fs.loop()
+			defer fs.close()
+			sup := New(Config{SessionID: "s-test", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: resume})
+			defer sup.Close()
+			err := sup.attach(context.Background(), client)
+			if err == nil || !strings.Contains(err.Error(), "thr_history") {
+				t.Fatalf("resume failure did not fail visibly: %v", err)
+			}
+			if _, ok := fs.sawCall("thread/start"); ok {
+				t.Fatal("resume failure started an empty thread")
+			}
+			got, ok := LoadIdentity("s-test")
+			if tc.identity == nil && ok {
+				t.Fatalf("failed launch persisted an identity: %+v", got)
+			}
+			if tc.identity != nil && (!ok || !reflect.DeepEqual(got, *tc.identity)) {
+				t.Fatalf("identity changed: %+v", got)
+			}
+		})
 	}
 }
 

@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"amux/internal/accounts"
 	"context"
 	"encoding/json"
 	"errors"
@@ -98,10 +99,16 @@ type Config struct {
 	// owned ChatGPT tokens injected over the protocol (auth.go) instead of any
 	// credential in its own Codex home. Nil keeps the legacy behaviour.
 	ChatGPTAuth TokenProvider
-	// ChatGPTAccount is the account a resumed thread was bound to (from its
-	// persisted Identity); injection refuses a token for any other account.
-	// "" accepts the provider's account, as for a fresh or migrated session.
+	// ChatGPTAccount constrains injection to one account. The manager leaves it
+	// empty for a new process: a launch pins whatever the central login holds,
+	// and a reconnect keeps this process's account (tokenAuth).
 	ChatGPTAccount string
+	// AccountLaunch is the account service's launch of this process; every
+	// token request carries it so a superseded process cannot be re-pinned.
+	AccountLaunch accounts.Launch
+	// PriorChatGPTAccounts are earlier accounts of the resumed thread, kept
+	// as evidence when a replacement login continues it.
+	PriorChatGPTAccounts []string
 }
 
 // Supervisor is a running (or resumable) App Server plus the amux-side client.
@@ -198,7 +205,7 @@ func New(cfg Config) *Supervisor {
 		hub:       newEventHub(),
 		approvals: newApprovalTracker(),
 		state:     &streamState{},
-		auth:      newTokenAuth(cfg.ChatGPTAuth, cfg.SessionID, cfg.ChatGPTAccount),
+		auth:      newTokenAuth(cfg.ChatGPTAuth, cfg.SessionID, cfg.ChatGPTAccount, cfg.AccountLaunch),
 	}
 }
 
@@ -267,7 +274,13 @@ type Identity struct {
 	// ChatGPTAccount is the central ChatGPT account (not a credential) the
 	// thread ran under; empty for sessions that never used central auth.
 	ChatGPTAccount string `json:"chatgptAccount,omitempty"`
+	// PriorChatGPTAccounts are accounts the thread ran under before a
+	// replacement central login continued it, oldest first (bounded).
+	PriorChatGPTAccounts []string `json:"priorChatgptAccounts,omitempty"`
 }
+
+// priorAccountLimit bounds Identity.PriorChatGPTAccounts.
+const priorAccountLimit = 8
 
 // identityVersion is the current Identity schema version (see Identity.Version).
 const identityVersion = 1
@@ -551,13 +564,13 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 		if s.cfg.Model != "" {
 			params["model"] = s.cfg.Model
 		}
+		// A resume target is never replaced by a fresh thread: its history is
+		// unknown or known non-empty, so any resume error (including "no rollout
+		// found") fails the launch visibly and leaves the persisted identity as
+		// it was. Never-run threads are not resume targets (resumeThreadFor).
 		res, err = s.rpc.call(ctx, "thread/resume", params)
-		if err != nil && isNoRollout(err) {
-			// A pinned thread that never ran a turn has no rollout to resume (ROOT
-			// probe: "no rollout found"). Start a fresh thread and adopt its id rather
-			// than failing the launch — the empty thread carried no history to lose.
-			resumed = false
-			res, err = start()
+		if err != nil {
+			return fmt.Errorf("codexapp resume thread %s (kept; amux never substitutes an empty thread): %w", s.cfg.ResumeThreadID, err)
 		}
 	} else {
 		res, err = start()
@@ -648,6 +661,9 @@ func (s *Supervisor) initialize(ctx context.Context) error {
 	if s.auth != nil {
 		if err := s.auth.login(ctx, s.rpc); err != nil {
 			return err
+		}
+		if n := len(s.cfg.PriorChatGPTAccounts); n > 0 && s.cfg.ResumeThreadID != "" && s.cfg.PriorChatGPTAccounts[n-1] != s.auth.boundAccount() {
+			s.emit(notice("info", "codex: this thread continues under the current central account"))
 		}
 	}
 	return nil
@@ -764,12 +780,6 @@ func (s *Supervisor) processRunningLocked() bool {
 	default:
 		return true
 	}
-}
-
-// isNoRollout reports whether a thread/resume error is the "no rollout found"
-// case — a pinned thread that never had a turn, so there is nothing to resume.
-func isNoRollout(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no rollout")
 }
 
 // unixEndpointPath returns the filesystem path of a unix:// endpoint, or "" for a
@@ -1290,10 +1300,24 @@ func (s *Supervisor) identityLocked() Identity {
 		ControlMode: harnessproto.ControlModeStructured,
 		Resumable:   s.resumable,
 		Version:     identityVersion,
-		// Bound by the first successful token injection, so a restart resumes
-		// the thread only with the same ChatGPT account.
-		ChatGPTAccount: s.auth.boundAccount(),
+		// Bound by this process's first successful token injection. A later
+		// process may continue the thread under the current central account.
+		ChatGPTAccount:       s.auth.boundAccount(),
+		PriorChatGPTAccounts: s.priorAccountsLocked(),
 	}
+}
+
+// priorAccountsLocked is the resumed thread's account history plus, when this
+// process continues it under another account, the account it ran under before.
+func (s *Supervisor) priorAccountsLocked() []string {
+	prior := append([]string(nil), s.cfg.PriorChatGPTAccounts...)
+	if current := s.auth.boundAccount(); current != "" && len(prior) > 0 && prior[len(prior)-1] == current {
+		prior = prior[:len(prior)-1]
+	}
+	if len(prior) > priorAccountLimit {
+		prior = prior[len(prior)-priorAccountLimit:]
+	}
+	return prior
 }
 
 func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.RawMessage) {
@@ -1614,6 +1638,8 @@ func AppendNotice(sessionID, level, text string) error {
 	if sessionID == "" || text == "" {
 		return nil
 	}
+	unlock := LockEventLog(sessionID)
+	defer unlock()
 	path := EventLogPathFor(sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -1629,6 +1655,17 @@ func AppendNotice(sessionID, level, text string) error {
 	defer f.Close()
 	_, err = f.Write(append(b, '\n'))
 	return err
+}
+
+var eventLogLocks sync.Map // session id -> *sync.Mutex
+
+// LockEventLog excludes AppendNotice for one session while its event log is
+// replaced (WithQuiescentLog). The returned function releases it.
+func LockEventLog(sessionID string) func() {
+	v, _ := eventLogLocks.LoadOrStore(sessionID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (s *Supervisor) closeLog() {

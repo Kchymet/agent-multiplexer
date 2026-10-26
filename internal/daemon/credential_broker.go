@@ -51,7 +51,7 @@ func (r *sessionRuntime) dispatchCredential(ctx context.Context, request session
 	// admission gate so an archive, role change, or revoke cannot cross a write.
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
+	r.d.lockEffectExclusive()
 	defer r.d.effectMu.Unlock()
 	ctx = withEffectAdmission(ctx)
 	req := request.Call.AccessRequest()

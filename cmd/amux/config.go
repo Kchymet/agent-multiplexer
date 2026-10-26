@@ -52,6 +52,14 @@ func cmdConfig(args []string) error {
 			fmt.Println(value)
 			return nil
 		}
+		if args[1] == amuxcfg.GoalAutoResumeKey {
+			on, err := amuxcfg.ResolveGoalAutoResume()
+			if err != nil {
+				return err
+			}
+			fmt.Println(onOff(on))
+			return nil
+		}
 		action, err := keyPath(args[1])
 		if err != nil {
 			return err
@@ -61,18 +69,18 @@ func cmdConfig(args []string) error {
 			return err
 		}
 		chord := km.Chord(action)
-		if chord == "" {
+		if chord == "" && (keymap.Keymap{}).Chord(action) == "" {
 			return fmt.Errorf("unknown action %q (see `amux config ls`)", action)
 		}
-		fmt.Println(chord)
+		fmt.Println(bindingLabel(chord))
 		return nil
 	case "set":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: amux config set <setting> <value>")
 		}
 		if harness, ok := authSetting(args[1]); ok {
-			if args[2] == "" {
-				return fmt.Errorf("%s must be one of %q (use unset to reset)", args[1], amuxcfg.AuthModes(harness))
+			if args[2] != amuxcfg.AuthCentral {
+				return fmt.Errorf("%s is retired: every workload follows the central login; run `amux auth login %s`", args[1], harness)
 			}
 			if err := amuxcfg.SetAuthMode(harness, args[2]); err != nil {
 				return err
@@ -88,6 +96,17 @@ func cmdConfig(args []string) error {
 				return err
 			}
 			fmt.Printf("codex.control = %s  (saved; run amux daemon restart to apply; environment overrides still take precedence)\n", args[2])
+			return nil
+		}
+		if args[1] == amuxcfg.GoalAutoResumeKey {
+			on, err := amuxcfg.ParseGoalAutoResume(args[2])
+			if err != nil {
+				return err
+			}
+			if err := amuxcfg.SetGoalAutoResume(&on); err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s  (saved; run amux daemon restart to apply)\n", amuxcfg.GoalAutoResumeKey, onOff(on))
 			return nil
 		}
 		action, err := keyPath(args[1])
@@ -118,6 +137,13 @@ func cmdConfig(args []string) error {
 			fmt.Println("codex.control = pty  (default; run amux daemon restart to apply; environment overrides still take precedence)")
 			return nil
 		}
+		if args[1] == amuxcfg.GoalAutoResumeKey {
+			if err := amuxcfg.SetGoalAutoResume(nil); err != nil {
+				return err
+			}
+			fmt.Printf("%s = on  (default; run amux daemon restart to apply)\n", amuxcfg.GoalAutoResumeKey)
+			return nil
+		}
 		action, err := keyPath(args[1])
 		if err != nil {
 			return err
@@ -126,7 +152,7 @@ func cmdConfig(args []string) error {
 			return err
 		}
 		km, _ := keymap.Load()
-		fmt.Printf("keys.%s = %s  (default; reopen the dashboard to apply)\n", action, km.Chord(action))
+		fmt.Printf("keys.%s = %s  (default; reopen the dashboard to apply)\n", action, bindingLabel(km.Chord(action)))
 		return nil
 	case "path":
 		fmt.Println(core.ConfigPath())
@@ -148,8 +174,11 @@ usage: amux config <subcommand>
   get codex.control  print saved control mode (pty when unconfigured)
   set codex.control <app-server|pty>  save the daemon's Codex rollout selection
   unset codex.control  restore the default (pty)
-  get|set|unset claude.auth  central (default) | host | shared | environment
-  get|set|unset codex.auth   central (default) | host | environment
+  get goal.auto_resume  print whether a restarted goal coordinator resumes its goal (on when unconfigured)
+  set goal.auto_resume <on|off>  save the goal auto-resume switch (daemon restart required)
+  unset goal.auto_resume  restore the default (on)
+  get|unset claude.auth      retired: every workload follows central auth
+  get|unset codex.auth       retired: every workload follows central auth
   path               print the config file path
 
 Keybindings live in the "keys" section of the config file (see path). A rebind
@@ -157,13 +186,17 @@ applies the next time the dashboard opens. codex.control lives in "codex" and
 requires a daemon restart; changing it does not reroute running sessions.
 AMUX_CODEX_CONTROL overrides the saved value when nonempty. Run amux doctor to
 compare saved settings, this shell's override, and the running daemon selection.
+goal.auto_resume lives in "goal": when on (the default), a goal coordinator whose
+runtime is restarted (agent restart, daemon restart, amux do start) is relaunched
+with a continuation so a goal that was active or waiting on a wake-up picks up
+where it left off; paused, complete, blocked, input-waiting and budget-limited
+goals are never resumed automatically. It too is read at daemon start.
 
-claude.auth and codex.auth choose how sessions authenticate. central delivers
-one host login (amux auth login) to every session; host shares the host
-harness login as before; shared (Claude) uses an older amux shared login;
-environment provides nothing, leaving API keys, apiKeyHelper, cloud providers
-and gateways to the environment and harness settings. Central Codex auth
-always uses App Server control.
+claude.auth and codex.auth are retired. Every workload follows the central
+login (amux auth login). A saved host, shared or environment value was
+migrated to central once; no credential is copied, so run amux auth login once
+if Accounts reports the migration as pending. Central Codex auth always uses
+App Server control.
 `)
 }
 
@@ -176,7 +209,10 @@ func configList() error {
 		if !b.Default {
 			mark = "  (custom)"
 		}
-		fmt.Printf("keys.%-14s %-12s %s%s\n", b.Action, b.Chord, b.Desc, mark)
+		if b.Chord == "" {
+			mark = "  (default displaced by configured binding)"
+		}
+		fmt.Printf("keys.%-14s %-12s %s%s\n", b.Action, bindingLabel(b.Chord), b.Desc, mark)
 	}
 	var authErr error
 	for _, harness := range []string{"claude", "codex"} {
@@ -201,7 +237,23 @@ func configList() error {
 		}
 		fmt.Printf("codex.control %s  (%s; daemon restart required after changes)\n", value, mark)
 	}
-	return errors.Join(loadErr, authErr, controlErr)
+	on, set, resumeErr := amuxcfg.GoalAutoResume()
+	switch {
+	case resumeErr != nil:
+		fmt.Printf("%s INVALID\n", amuxcfg.GoalAutoResumeKey)
+	case !set:
+		fmt.Printf("%s on  (default; daemon restart required after changes)\n", amuxcfg.GoalAutoResumeKey)
+	default:
+		fmt.Printf("%s %s  (saved; daemon restart required after changes)\n", amuxcfg.GoalAutoResumeKey, onOff(on))
+	}
+	return errors.Join(loadErr, authErr, controlErr, resumeErr)
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 // authSetting maps claude.auth / codex.auth to their harness.
@@ -230,4 +282,11 @@ func keyPath(path string) (string, error) {
 		return "", fmt.Errorf("unknown setting %q — use keys.<action>, claude.auth, codex.auth or codex.control (see `amux config ls`)", path)
 	}
 	return action, nil
+}
+
+func bindingLabel(chord string) string {
+	if chord == "" {
+		return "unbound"
+	}
+	return chord
 }

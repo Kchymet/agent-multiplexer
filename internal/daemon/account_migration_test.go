@@ -4,16 +4,36 @@ import (
 	"amux/internal/accounts"
 	"amux/internal/centralauth"
 	"amux/internal/store"
-	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// Expected to fail on affcf94: migration seeds the source but leaves the
-// credential generation unknown even when the pre-feature token is available.
-func TestAccountMigrationPinsPreFeatureClaudeCredential(t *testing.T) {
+func putClaudeSession(t *testing.T, id string) {
+	t.Helper()
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.PutSession(store.Session{ID: id, Agent: "claude", Dir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func acceptClaude(id string, l accounts.Launch, generation uint64) error {
+	b, p, err := accounts.Delivery(id, "claude")
+	if err != nil {
+		return err
+	}
+	return accounts.Accept(id, b.Revision, p.DeliveryEpoch, "", generation, l)
+}
+
+// A pre-feature central credential stays usable for the running process, and
+// a replacement login serves the workload's next launch without any rebind.
+func TestPreFeatureClaudeCredentialFollowsReplacementAtNextLaunch(t *testing.T) {
 	d := isolatedAccounts(t)
 	secret, err := centralauth.NewSecret("PRE-FEATURE-SYNTHETIC-TOKEN")
 	if err != nil {
@@ -23,78 +43,65 @@ func TestAccountMigrationPinsPreFeatureClaudeCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.Open()
+	putClaudeSession(t, "old")
+	running, err := accounts.BeginLaunch("old", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = db.PutSession(store.Session{ID: "old", Agent: "claude", Dir: t.TempDir()})
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
+	if err := acceptClaude("old", running, original.Generation); err != nil {
+		t.Fatal("pre-feature credential not delivered", err)
 	}
-	before, err := accounts.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Force the current implementation's migration seam before replacement.
-	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: "claude:central", Revision: before.Profiles["claude:central"].Revision, DefaultRevision: before.DefaultRevisions["claude"]}, false)
-	if !out.OK {
-		t.Fatal(out)
-	}
-	r := beginClaude(t, d, "owner")
-	completeClaude(t, d, r)
+	completeClaude(t, d, beginClaude(t, d, "owner"))
 	fresh, err := centralauth.ClaudeStore().Load()
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || fresh.Generation == original.Generation {
+		t.Fatal("fixture did not replace credential", err)
 	}
-	if fresh.Generation == original.Generation {
-		t.Fatal("fixture did not replace credential")
+	if err := acceptClaude("old", running, fresh.Generation); !errors.Is(err, accounts.ErrSuperseded) {
+		t.Fatal("running process adopted the replacement", err)
 	}
-	b, pf, err := accounts.Delivery("old", "claude")
-	if err != nil {
-		return
-	} // Explicit blocked migration is safe.
-	if err = accounts.Accept("old", b.Revision, pf.DeliveryEpoch, "", fresh.Generation); err == nil {
-		t.Fatal("pre-feature workload silently accepted replacement opaque credential")
+	next, _ := accounts.BeginLaunch("old", "claude")
+	if err := acceptClaude("old", next, fresh.Generation); err != nil {
+		t.Fatal("next launch refused the replacement", err)
 	}
 }
 
-func TestUnreadableMigrationAllowsOnlyExplicitRebindAfterLogin(t *testing.T) {
+// A corrupt pre-feature record never blocks the repairing login; nothing is
+// delivered from it, and after login the same workload's next launch delivers.
+func TestCorruptClaudeRecordAllowsRepairLogin(t *testing.T) {
 	d := isolatedAccounts(t)
-	db, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = db.PutSession(store.Session{ID: "old", Agent: "claude", Dir: t.TempDir()})
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := centralauth.ClaudeStore().Dir
-	if err = os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(dir, "credential.json"), []byte("corrupt legacy credential"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "credential.json"), []byte("corrupt legacy credential"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r := beginClaude(t, d, "owner")
-	completeClaude(t, d, r)
-	if _, _, err = accounts.Delivery("old", "claude"); err == nil {
-		t.Fatal("old workload accepted replacement")
+	putClaudeSession(t, "old")
+	if _, err := centralauth.ClaudeStore().Load(); err == nil {
+		t.Fatal("fixture is readable")
 	}
-	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountRebind, ProfileID: "claude:central", Revision: profileRevision(t, "claude:central"), WorkloadID: "old"}, false)
-	if !out.OK {
-		t.Fatal(out)
-	}
-	b, p, err := accounts.Delivery("old", "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
+	completeClaude(t, d, beginClaude(t, d, "owner"))
 	credential, err := centralauth.ClaudeStore().Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = accounts.Accept("old", b.Revision, p.DeliveryEpoch, "", credential.Generation); err != nil {
+	launch, _ := accounts.BeginLaunch("old", "claude")
+	if err := acceptClaude("old", launch, credential.Generation); err != nil {
+		t.Fatal("repaired login not delivered to the next launch", err)
+	}
+}
+
+// A workload created before the first login receives it without rebind.
+func TestWorkloadBeforeFirstLoginReceivesIt(t *testing.T) {
+	d := isolatedAccounts(t)
+	putClaudeSession(t, "new")
+	launch, _ := accounts.BeginLaunch("new", "claude")
+	completeClaude(t, d, beginClaude(t, d, "owner"))
+	credential, err := centralauth.ClaudeStore().Load()
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := acceptClaude("new", launch, credential.Generation); err != nil {
+		t.Fatal("waiting launch could not receive the first login", err)
 	}
 }

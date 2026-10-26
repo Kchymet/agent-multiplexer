@@ -65,6 +65,8 @@ authentication instead. Selected accounts and network access are shared. See [Se
 the workgroup parent containing members; repo homes and the console do not mount
 the amux data/state tree. Their wider views are explicit authenticated daemon
 grants, so they change amux through the CLI and change code by steering an agent.
+The hierarchy of those grants inside one workgroup, host over coordinator over
+members, is drawn in [Workgroup permissions](workgroup-permissions.md).
 
 Existing processes keep the namespace they started with. A legacy coordinator
 that still sees its member-containing parent or broad state invalidates any
@@ -203,6 +205,20 @@ Claude coordinator; there is no opt-in.
   coordinator also types a continuation nudge. `token_budget` is refused: a
   Claude goal is bounded by 100 continuations without a user turn
   (`budgetLimited`), since hooks see no token usage.
+- **Restarts resume it.** The goal file is the goal's durable record, so when
+  the coordinator's runtime comes back — `amux do restart`, `amux do start` of
+  a stopped coordinator, or the daemon relaunching its live set after its own
+  restart or a crash — the daemon reads the file and relaunches a goal that was
+  `active`, or `waiting` on a background wake-up (which died with the runtime),
+  with a goal-aware continuation and no user turn. The restart spends one
+  continuation of the budget rather than resetting it, so a coordinator that
+  crashes and restarts in a loop is bounded like one that never converges.
+  `paused`, `complete`, `blocked`, `input` and `budgetLimited` goals are never
+  resumed by a restart; they are the user's to move. A restart mid-turn of such
+  a goal still gets the ordinary running-work continuation, and that
+  continuation is never recorded as a new task. The switch is
+  `amux config set goal.auto_resume off` (default on; read at daemon start). A
+  `prompt` that cold-starts a stopped coordinator submits only that prompt: it
+  is the new task.
 - **Limits.** The state file is the coordinator's own sandbox state, like the
-  model's `update_goal` on Codex — not an authority boundary. A restart does
-  not by itself start a turn; an active goal continues on the next one.
+  model's `update_goal` on Codex — not an authority boundary.

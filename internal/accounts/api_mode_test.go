@@ -5,7 +5,9 @@ import (
 	"testing"
 )
 
-func TestOpaqueCredentialsPinModeAndGeneration(t *testing.T) {
+// A mode change or API-key replacement never retargets the running process,
+// and the next launch takes it without any rebind.
+func TestReplacementServesNextLaunchOnly(t *testing.T) {
 	for _, harness := range []string{"claude", "codex"} {
 		for _, change := range []string{"subscription-to-api", "api-to-subscription", "api-replacement"} {
 			t.Run(harness+"/"+change, func(t *testing.T) {
@@ -27,15 +29,15 @@ func TestOpaqueCredentialsPinModeAndGeneration(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if err := Bind("existing", harness); err != nil {
+				first, err := BeginLaunch("existing", harness)
+				if err != nil {
 					t.Fatal(err)
 				}
 				b, p, err := Delivery("existing", harness)
 				if err != nil {
 					t.Fatal(err)
 				}
-				// No native account ID: mode and generation must provide the fence.
-				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 41); err != nil {
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 41, first); err != nil {
 					t.Fatal(err)
 				}
 				if err := Update(func(s *State) error {
@@ -53,64 +55,33 @@ func TestOpaqueCredentialsPinModeAndGeneration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42); !errors.Is(err, ErrBlocked) {
-					t.Fatalf("replacement accepted: %v", err)
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrSuperseded) {
+					t.Fatalf("running process retargeted: %v", err)
 				}
-				// Reading and rebinding discovery after restart cannot remove the fence.
-				if err := Bind("existing", harness); err != nil {
+				// Rediscovery cannot move the running process either.
+				if err := BindExisting("existing", harness); err != nil {
 					t.Fatal(err)
 				}
-				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42); !errors.Is(err, ErrBlocked) {
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrSuperseded) {
 					t.Fatalf("rediscovery removed fence: %v", err)
 				}
-				if err := Bind("new", harness); err != nil {
-					t.Fatal(err)
-				}
-				b, p, err = Delivery("new", harness)
+				next, err := BeginLaunch("existing", harness)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := Accept("new", b.Revision, p.DeliveryEpoch, "", 42); err != nil {
-					t.Fatal("new workload refused", err)
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, next); err != nil {
+					t.Fatal("next launch refused the replacement", err)
 				}
-			})
-		}
-	}
-}
-
-func TestInitialAPIKeyAllowedButUnknownLegacyRefused(t *testing.T) {
-	for _, harness := range []string{"claude", "codex"} {
-		for _, unknown := range []bool{false, true} {
-			t.Run(harness+map[bool]string{false: "/new", true: "/unknown-legacy"}[unknown], func(t *testing.T) {
-				isolated(t)
-				if err := Bind("waiting", harness); err != nil {
-					t.Fatal(err)
+				s, _ := Read()
+				got := s.Bindings["existing"]
+				if got.CredentialMode != after || got.CredentialVersion != 42 || got.Launch != next.Seq {
+					t.Fatalf("next launch not pinned: %+v", got)
 				}
-				if err := Update(func(s *State) error {
-					b := s.Bindings["waiting"]
-					b.CredentialUnknown = unknown
-					s.Bindings["waiting"] = b
-					p := s.Profiles[b.ProfileID]
-					p.Mode, p.State = "api", "ready"
-					p.DeliveryEpoch++
-					s.Profiles[p.ID] = p
-					s.CredentialVersion[p.ID] = 1
-					return nil
-				}); err != nil {
-					t.Fatal(err)
+				if len(got.History) != 1 || got.History[0].Launch != first.Seq || got.History[0].Mode != before || got.History[0].Version != 41 {
+					t.Fatalf("previous runtime evidence lost: %+v", got.History)
 				}
-				if err := Bind("waiting", harness); err != nil {
-					t.Fatal(err)
-				}
-				b, p, err := Delivery("waiting", harness)
-				if err == nil {
-					err = Accept("waiting", b.Revision, p.DeliveryEpoch, "", 1)
-				}
-				if unknown && err == nil {
-					t.Fatal("unknown legacy binding adopted API key")
-				}
-				if !unknown && err != nil {
-					t.Fatal("first authorized API login refused", err)
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrSuperseded) {
+					t.Fatalf("superseded process accepted: %v", err)
 				}
 			})
 		}

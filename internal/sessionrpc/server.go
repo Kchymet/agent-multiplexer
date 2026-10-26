@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -23,6 +25,12 @@ type ServerOptions struct {
 	PollInterval       time.Duration
 	SettlementInterval time.Duration
 	ResponseBudget     ResponseBudget
+	// RequestNotify, if set, is called after a request may have been published
+	// to this mailbox, so a caller that schedules ServeOnce itself can serve it
+	// at once instead of on its next tick. It runs on the process-wide watcher
+	// goroutine and must not block. It is never called for a mailbox whose
+	// directory cannot be watched (see Watched).
+	RequestNotify func()
 }
 
 type pendingReceipt struct {
@@ -37,6 +45,9 @@ type pendingReceipt struct {
 type responseReservation struct {
 	lease     ResponseLease
 	committed bool
+	// discard marks a one-way receipt: the client never reads a result for
+	// it, so none is published or accounted.
+	discard bool
 }
 
 func (r *responseReservation) release() {
@@ -64,6 +75,10 @@ type Server struct {
 	responses       *os.File
 	responseCleanup *os.File
 	responseUsage   *os.File
+	// watch reports request publication; nil when the requests directory
+	// cannot be watched and callers must keep polling.
+	watch *dirWatch
+	wake  wakeSignal
 
 	serveMu sync.Mutex
 	// rejectRequests drains an over-capacity client-writable queue without ever
@@ -163,7 +178,16 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 		pending:        make(map[string]pendingReceipt),
 		responseBudget: options.ResponseBudget, responseLeases: make(map[string]ResponseLease),
 		settlementPoll: settlementPoll, settlementStop: make(chan struct{}), settlementDone: make(chan struct{}),
-		responseWriter: atomicWriteAt,
+		responseWriter: atomicWriteAt, wake: newWakeSignal(),
+	}
+	notify := options.RequestNotify
+	if watch, err := watchDir(requests, filepath.Join(trustedMailboxHostDir, RequestsDirName), func() {
+		server.wake.notify()
+		if notify != nil {
+			notify()
+		}
+	}); err == nil {
+		server.watch = watch
 	}
 	go server.runSettlement()
 	return server, nil
@@ -227,6 +251,9 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 	s.settleExpired()
 	processed := 0
 	overflow := false
+	// blocked records exhausted response capacity. The pass continues so a
+	// release queued behind a blocked request can still free that capacity.
+	blocked := false
 
 	processingNames, more, err := listNames(s.processing, MaxQueuedRequests)
 	if err != nil {
@@ -244,7 +271,9 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 			processed++
 			continue
 		}
-		if err := s.processClaimed(ctx, name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := s.processClaimed(ctx, name, !blocked); errors.Is(err, ErrResponseCapacity) {
+			blocked = true
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return processed, err
 		}
 		processed++
@@ -289,7 +318,9 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 				return processed, err
 			}
 			if claimed {
-				if err := s.processClaimed(ctx, name); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := s.processClaimed(ctx, name, !blocked); errors.Is(err, ErrResponseCapacity) {
+					blocked = true
+				} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 					return processed, err
 				}
 			}
@@ -309,6 +340,9 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 cleanup:
 	if err := s.cleanupResponses(); err != nil {
 		return processed, err
+	}
+	if blocked {
+		return processed, fmt.Errorf("%w: daemon response budget admission", ErrResponseCapacity)
 	}
 	if overflow {
 		return processed, ErrQueueFull
@@ -339,21 +373,27 @@ func (s *Server) removeRequestEntry(name string) (bool, error) {
 	return true, unlinkAt(s.requests, name)
 }
 
+// Watched reports whether request publication wakes this server. When it
+// does, a scheduler only needs a slow fallback pass (WatchFallbackInterval);
+// otherwise it must keep polling.
+func (s *Server) Watched() bool { return s.watch != nil }
+
 func (s *Server) Run(ctx context.Context) error {
 	if err := s.PublishService(ctx); err != nil {
 		return err
 	}
-	ticker := time.NewTicker(s.poll)
-	defer ticker.Stop()
+	interval := s.poll
+	if s.Watched() {
+		interval = max(interval, WatchFallbackInterval)
+	}
 	for {
 		_, err := s.ServeOnce(ctx)
 		if err != nil && !errors.Is(err, ErrQueueFull) && !errors.Is(err, ErrResponseCapacity) {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+		waitWake(ctx.Done(), s.wake, interval)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 }
@@ -379,19 +419,14 @@ func (s *Server) claim(name string) (bool, error) {
 	return false, err
 }
 
-func (s *Server) processClaimed(ctx context.Context, name string) error {
+// processClaimed handles one claimed request. admit=false means response
+// capacity is already exhausted in this pass: only a release, which needs no
+// response, is processed and everything else stays claimed for a later pass.
+func (s *Server) processClaimed(ctx context.Context, name string, admit bool) error {
 	requestID, ok := requestIDFromFile(name)
 	if !ok {
 		return unlinkAt(s.processing, name)
 	}
-	// Reserve the worst-case per-subject response capacity before durable replay
-	// acceptance or dispatch. No operation is admitted if the daemon cannot keep
-	// its bounded result artifact.
-	reservation, err := s.reserveResponse(ctx, requestID)
-	if err != nil {
-		return err
-	}
-	defer reservation.release()
 	raw, err := readRegularAt(s.processing, name, maxEnvelopeFileBytes)
 	if err != nil {
 		_ = unlinkAt(s.processing, name)
@@ -405,6 +440,31 @@ func (s *Server) processClaimed(ctx context.Context, name string) error {
 		_ = unlinkAt(s.processing, name)
 		return nil
 	}
+	// The unverified kind only routes: a release must not wait for the response
+	// capacity it exists to free. processRelease verifies everything itself.
+	var routed Call
+	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &routed) == nil && routed.Kind == CallRelease {
+		return s.processRelease(ctx, name, envelope)
+	}
+	// Reserve the worst-case per-subject response capacity before durable replay
+	// acceptance or dispatch. No operation is admitted if the daemon cannot keep
+	// its bounded result artifact.
+	var reservation *responseReservation
+	switch {
+	case routed.Kind == CallReceipt:
+		// A receipt is one-way: the client never reads a result for it, and it
+		// settles a mandatory completion that frees capacity, so it must neither
+		// wait behind the pool it drains nor retain an unread response.
+		reservation = &responseReservation{discard: true}
+	case !admit:
+		return ErrResponseCapacity
+	default:
+		reservation, err = s.reserveResponse(ctx, requestID)
+		if err != nil {
+			return err
+		}
+	}
+	defer reservation.release()
 	requestDigestBytes := sha256.Sum256(envelope.Body)
 	requestDigest := hex.EncodeToString(requestDigestBytes[:])
 
@@ -460,6 +520,10 @@ func (s *Server) processClaimed(ctx context.Context, name string) error {
 
 	if call.Kind == CallReceipt {
 		status, code := s.acceptReceipt(principal, *call.Receipt)
+		if status == StatusOK {
+			// The receipt proved the client holds this exact response.
+			s.retireReceipted(call.Receipt.RequestID)
+		}
 		response := s.newResponse(envelope, requestDigest, status, code, nil, false)
 		if err := s.publishResponse(&response, reservation); err != nil && !errors.Is(err, unix.EEXIST) {
 			return err
@@ -515,6 +579,65 @@ func (s *Server) processClaimed(ctx context.Context, name string) error {
 	return unlinkAt(s.processing, name)
 }
 
+// processRelease retires one consumed response. It reserves nothing and
+// publishes nothing; any failure simply leaves the response to age cleanup.
+// The request is still verified (and durably consumed in the replay ledger)
+// like every other call before anything is deleted.
+func (s *Server) processRelease(ctx context.Context, name string, envelope access.SignedRequest) error {
+	defer func() { _ = unlinkAt(s.processing, name) }()
+	principal, err := s.authority.Verify(ctx, envelope)
+	if err != nil || principal.Kind != access.SubjectSession || principal.SubjectID != s.subjectID {
+		return nil
+	}
+	var call Call
+	if err := unmarshalBounded(envelope.Body, access.MaxBodyBytes, &call); err != nil || call.Kind != CallRelease || validateCall(call) != nil {
+		return nil
+	}
+	if s.authority.Valid(ctx, principal) != nil {
+		return nil
+	}
+	s.retireResponse(principal, *call.Receipt)
+	return nil
+}
+
+// retireResponse deletes a committed response only when the caller proves it
+// holds that exact signed response: same subject, credential generation and
+// boot, and the digest of the bytes the daemon signed. A response that still
+// awaits a mandatory receipt is never retired here.
+func (s *Server) retireResponse(principal access.Principal, release Receipt) {
+	s.mu.Lock()
+	_, pending := s.pending[release.RequestID]
+	s.mu.Unlock()
+	if pending {
+		return
+	}
+	name := responseFileName(release.RequestID)
+	data, err := readRegularAt(s.responses, name, maxEnvelopeFileBytes)
+	if err != nil {
+		return
+	}
+	var response Response
+	if unmarshalBounded(data, maxEnvelopeFileBytes, &response) != nil {
+		return
+	}
+	if response.RequestID != release.RequestID || response.SubjectID != s.subjectID ||
+		response.KeyID != principal.KeyID || response.Generation != principal.Generation ||
+		response.BootID != s.authority.BootID() || response.ReceiptRequired ||
+		subtle.ConstantTimeCompare([]byte(responseDigest(response)), []byte(release.ResponseDigest)) != 1 {
+		return
+	}
+	if unlinkAt(s.responses, name) == nil {
+		s.releaseResponseLease(release.RequestID)
+	}
+}
+
+// retireReceipted deletes a response whose mandatory receipt was accepted.
+func (s *Server) retireReceipted(requestID string) {
+	if unlinkAt(s.responses, responseFileName(requestID)) == nil {
+		s.releaseResponseLease(requestID)
+	}
+}
+
 func (s *Server) newResponse(request access.SignedRequest, requestDigest string, status Status, code string, body []byte, receiptRequired bool) Response {
 	return Response{
 		Protocol: ProtocolVersion, BootID: s.authority.BootID(), IssuerKeyID: s.signer.IssuerKeyID(),
@@ -527,6 +650,10 @@ func (s *Server) newResponse(request access.SignedRequest, requestDigest string,
 func (s *Server) publishResponse(response *Response, reservation *responseReservation) error {
 	if response == nil || reservation == nil || reservation.committed {
 		return ErrInvalidRecord
+	}
+	if reservation.discard {
+		reservation.committed = true
+		return nil
 	}
 	if err := signResponse(s.signer, response); err != nil {
 		return err
@@ -980,6 +1107,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.watch.Close()
 	s.settlementStopOnce.Do(func() { close(s.settlementStop) })
 	pending := s.pending
 	s.pending = make(map[string]pendingReceipt)

@@ -82,3 +82,30 @@ func TestTypedDeliveryFallbackNeverAcceptsAPIKey(t *testing.T) {
 		}
 	}
 }
+
+type launchRecordingQuerier struct{ fields []map[string]string }
+
+func (q *launchRecordingQuerier) Query(_ context.Context, r sessionrpc.Query) (sessionrpc.Result, error) {
+	q.fields = append(q.fields, r.Fields)
+	if r.Fields[FormatField] != "" {
+		return sessionrpc.Result{}, &sessionrpc.RemoteError{Code: "access_denied"}
+	}
+	b, _ := json.Marshal(Delivery{Token: "synthetic-secret", Kind: KindClaudeOAuthToken, Generation: 1})
+	return sessionrpc.Result{Status: sessionrpc.StatusOK, Body: b}, nil
+}
+func (q *launchRecordingQuerier) Close() error { return nil }
+
+// The untyped fallback still presents this process's launch, so the launch
+// fence applies to it too.
+func TestUntypedFallbackKeepsLaunch(t *testing.T) {
+	prior := openSession
+	defer func() { openSession = prior }()
+	q := &launchRecordingQuerier{}
+	openSession = func() (sessionQuerier, error) { return q, nil }
+	if _, err := FetchLaunchCredentialFromSession("3:abc")(); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.fields) != 2 || q.fields[1][LaunchField] != "3:abc" || q.fields[1][FormatField] != "" {
+		t.Fatalf("fallback fields = %+v", q.fields)
+	}
+}

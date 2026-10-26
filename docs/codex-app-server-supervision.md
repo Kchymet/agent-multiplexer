@@ -174,7 +174,12 @@ task starts a fresh goal with its own accounting.
 
 Claude Code uses its explicit running hook state and a continuation prompt in
 the existing conversation. Idle, waiting and unknown states reopen without
-automatic submission. Legacy Codex PTY has no built-in running hook. See
+automatic submission — except a Claude goal coordinator, whose goal file is read
+at every launch: an `active` or `waiting` goal is relaunched with its goal-aware
+continuation whatever the hook state was, and that continuation is never
+recorded as a new task (`goal.auto_resume`, default on; see
+[goal mode](default-sessions.md#claude-coordinators-goal-mode-through-amuxs-hooks)).
+Legacy Codex PTY has no built-in running hook. See
 [session restart behavior](sandbox-config.md#macos-certificate-trust-and-restarting-a-session).
 
 These opt-in tests use installed CLIs and isolated local model endpoints:
@@ -276,7 +281,19 @@ replay behavior.
 
 ## Opt-in and fallback
 
-The default remains PTY. Enable App Server control durably with amux's own
+> **Current behaviour.** Central Codex auth is the only Codex auth source (the
+> legacy `codex.auth` modes are retired), and it delivers credentials through
+> the supervised App Server. The effective selection is therefore always
+> `app-server`: a saved or environment `pty` is resolved as below, reported as a
+> warning (`amux doctor`, daemon log), and overridden (`source=codex.auth`). A
+> conversation last run under PTY resumes on the same thread; its rollout is
+> imported once into the structured event log
+> ([machine accounts](machine-accounts.md#defaults-and-existing-workloads)).
+> A resume target is never replaced by an empty thread: a resume error fails the
+> launch and keeps the identity. The rest of this section describes how the
+> saved and environment values are resolved and reported.
+
+Historically the default was PTY. Enable App Server control durably with amux's own
 configuration (AGE-233), stored at `amux config path`:
 
 ```json

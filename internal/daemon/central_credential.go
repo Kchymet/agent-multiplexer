@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
+	"strings"
 
 	"amux/internal/access"
 	"amux/internal/accounts"
@@ -30,8 +32,7 @@ func (r *sessionRuntime) authorizeCentralCredential(ctx context.Context, princip
 // was authorized for, read through the side-effect-free policy store.
 func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal access.Principal, req access.Request) (store.Session, error) {
 	if principal.Kind != access.SubjectSession || req.Route != access.RouteQuery ||
-		req.ID != "" || req.Target != "" || req.Tab != 0 ||
-		!(len(req.Fields) == 1 || (len(req.Fields) == 2 && req.Fields[centralauth.FormatField] == centralauth.TypedFormat)) || req.Fields[centralauth.HarnessField] != string(centralauth.Claude) {
+		req.ID != "" || req.Target != "" || req.Tab != 0 || !centralCredentialFields(req.Fields) {
 		return store.Session{}, access.ErrDenied
 	}
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
@@ -55,6 +56,37 @@ func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal
 	return session, err
 }
 
+// centralCredentialFields admits the harness, optional typed format, and the
+// optional process launch; nothing else.
+func centralCredentialFields(f map[string]string) bool {
+	n := 1
+	if _, ok := f[centralauth.FormatField]; ok {
+		if f[centralauth.FormatField] != centralauth.TypedFormat {
+			return false
+		}
+		n++
+	}
+	if _, ok := f[centralauth.LaunchField]; ok {
+		if _, ok := parseAccountLaunch(f[centralauth.LaunchField]); !ok {
+			return false
+		}
+		n++
+	}
+	return len(f) == n && f[centralauth.HarnessField] == string(centralauth.Claude)
+}
+
+// parseAccountLaunch reads "<seq>:<nonce>". A request without a valid launch
+// (an older launcher) yields the zero launch, which no allocation matches, so
+// it is refused rather than given any credential.
+func parseAccountLaunch(v string) (accounts.Launch, bool) {
+	seq, nonce, ok := strings.Cut(v, ":")
+	n, err := strconv.ParseUint(seq, 10, 64)
+	if !ok || err != nil || n == 0 || len(nonce) != 48 || strings.Trim(nonce, "0123456789abcdef") != "" {
+		return accounts.Launch{}, false
+	}
+	return accounts.Launch{Seq: n, Nonce: nonce}, true
+}
+
 // dispatchCentralCredential returns the central Claude token. It runs inside
 // the lifecycle admission gate and re-authorizes after reading, so an archive
 // or revocation that crosses the read never receives the value. Failures carry
@@ -62,7 +94,7 @@ func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal
 func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
+	r.d.lockEffectExclusive()
 	defer r.d.effectMu.Unlock()
 	ctx = withEffectAdmission(ctx)
 	req := request.Call.AccessRequest()
@@ -97,7 +129,14 @@ func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request 
 	if err := r.authorizeCentralCredential(ctx, request.Principal, req); err != nil {
 		return rpcDenied("credential_access_denied"), nil
 	}
-	if err := accounts.Accept(s.ID, binding.Revision, profile.DeliveryEpoch, "", cred.Generation); err != nil {
+	launch, _ := parseAccountLaunch(req.Fields[centralauth.LaunchField])
+	if err := accounts.Accept(s.ID, binding.Revision, profile.DeliveryEpoch, "", cred.Generation, launch); err != nil {
+		switch {
+		case errors.Is(err, accounts.ErrSuperseded):
+			return rpcDenied("account_runtime_superseded"), nil
+		case errors.Is(err, accounts.ErrStale):
+			return rpcFailed("account_revision_changed"), nil
+		}
 		return rpcDenied("account_binding_blocked"), nil
 	}
 	body, err := json.Marshal(centralauth.Delivery{Token: cred.Token.Reveal(), Kind: cred.Kind, Generation: cred.Generation})

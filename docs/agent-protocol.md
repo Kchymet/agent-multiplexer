@@ -418,9 +418,14 @@ The shipped mechanism is exactly the `state`-only profile of this protocol:
   `protocol` absent — readers MUST treat a missing `protocol` as v0 and a bare
   state-word file as `{state}` (the existing tolerant reader).
 - Claude Code keeps reporting via its installed `SessionStart/UserPromptSubmit/
-  Notification/Stop/SessionEnd → amux agent hook <state>` hooks
+  PostToolUse/Notification/Stop/SessionEnd → amux agent hook <state>` hooks
   (`claudecfg.InstallHooks`). Generated commands stay nondisruptive, while their
-  effect now requires the fixed authenticated session context.
+  effect now requires the fixed authenticated session context. Every report
+  hook (status, capture, permission) is installed `async` with a short
+  `timeout`, so a busy daemon never stalls a prompt, tool call or turn end; only
+  the goal hooks block, because Claude reads their decision. The status-line
+  wrapper reports model and limits only when they change (refreshing once a
+  minute) and never delays the user's own status line.
 
 Legacy UUID-only files remain preserved as host diagnostics, but managed readers
 use daemon-owned subject/runtime-scoped records. A new binary in an old namespace

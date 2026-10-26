@@ -4,18 +4,12 @@ import (
 	"amux/internal/accounts"
 	"amux/internal/core"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
+	"reflect"
 	"testing"
 )
 
-func TestAccountOverviewPreservesLegacyDefaultsBindingsAndReadiness(t *testing.T) {
+func TestAccountOverviewIsCentralOnlyAndRetiresLegacyDefaults(t *testing.T) {
 	d := isolatedAccounts(t)
-	if err := accounts.Update(func(s *accounts.State) error {
-		s.Defaults["claude"] = "claude:host"
-		s.Defaults["codex"] = "codex:environment"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if err := accounts.Bind("existing", "claude"); err != nil {
 		t.Fatal(err)
 	}
@@ -32,42 +26,28 @@ func TestAccountOverviewPreservesLegacyDefaultsBindingsAndReadiness(t *testing.T
 			t.Fatalf("legacy config exposed: %+v", p)
 		}
 	}
-	if out.Snapshot.Defaults["claude"] != "claude:host" || out.Snapshot.Defaults["codex"] != "codex:environment" {
-		t.Fatal("legacy routing hidden")
-	}
-	internal, err := d.accountSnapshot(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	harnesses := creationHarnesses(core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"coordinator": "codex", "agent": "claude", "repos": "repo"}})
-	if len(harnesses) != 2 {
-		t.Fatal("fixture must check coordinator and worker")
-	}
-	if err := checkAccountReadiness(internal, harnesses); err != nil {
-		t.Fatal("internal readiness lost legacy defaults", err)
+	if out.Snapshot.Defaults["claude"] != "claude:central" || out.Snapshot.Defaults["codex"] != "codex:central" {
+		t.Fatalf("defaults: %+v", out.Snapshot.Defaults)
 	}
 	after, err := accounts.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Bindings["existing"] != before.Bindings["existing"] || after.Defaults["claude"] != before.Defaults["claude"] || after.DefaultRevisions["claude"] != before.DefaultRevisions["claude"] {
+	if !reflect.DeepEqual(after.Bindings["existing"], before.Bindings["existing"]) || after.DefaultRevisions["claude"] != before.DefaultRevisions["claude"] {
 		t.Fatal("view changed binding/default")
 	}
-	// Central selection is an explicit local CAS mutation and affects only new bindings.
+	// A legacy source can no longer be selected; central remains selectable.
+	host := after.Profiles["claude:host"]
+	result := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: host.ID, Revision: host.Revision, DefaultRevision: after.DefaultRevisions["claude"]}, false)
+	if result.OK || result.Error != "account_legacy_source_retired" {
+		t.Fatalf("legacy default accepted: %+v", result)
+	}
 	central := after.Profiles["claude:central"]
-	result := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: central.ID, Revision: central.Revision, DefaultRevision: after.DefaultRevisions["claude"]}, false)
-	if !result.OK {
+	if result := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: central.ID, Revision: central.Revision, DefaultRevision: after.DefaultRevisions["claude"]}, false); !result.OK {
 		t.Fatal(result)
 	}
-	if err := accounts.Bind("new", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	after, err = accounts.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Bindings["existing"] != before.Bindings["existing"] || after.Bindings["new"].ProfileID != "claude:central" {
-		t.Fatal("local adoption rerouted existing workload")
+	if got, _ := accounts.Read(); got.Defaults["claude"] != "claude:central" {
+		t.Fatal("central default lost")
 	}
 }
 

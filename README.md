@@ -152,11 +152,11 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   (ChatGPT) sign in once on the host, and the daemon delivers only a session
   credential, never a refresh token, to each authorized session. TUI/web Accounts
   and `amux auth accounts` show one Claude and one Codex configuration and limits;
-  configuration is through amux CLI/TUI only. `amux auth default <claude|codex>`
-  selects the amux configuration for new workloads while
-  existing bindings stay fixed. Legacy `claude.auth` / `codex.auth` settings seed
-  the first defaults. Existing host/shared/environment defaults and bindings
-  remain internal compatibility state; web Accounts is read-only. Codex MCP credential files stay shared. macOS GitHub
+  configuration is through amux CLI/TUI only; web Accounts is read-only. Every
+  workload follows the central configuration: each new harness process uses the
+  newest successfully configured login (another account, subscription or API key
+  included) while running processes keep theirs. Older host/shared/environment
+  selections were migrated to central once, automatically. Codex MCP credential files stay shared. macOS GitHub
   authentication uses the daemon broker. Copied config
   can itself contain secrets such as inline MCP tokens; it is readable by the
   receiving session. See [machine accounts](docs/machine-accounts.md) and
@@ -288,7 +288,7 @@ amux harness               # disabled without an authenticated inherited channel
 
 ## Keys (native TUI)
 
-Navigation is **Alt/Option-only** (no prefix):
+Global navigation uses configurable chords (no prefix):
 
 | key | action |
 |-----|--------|
@@ -302,6 +302,7 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Alt+r` | restart the focused agent or rail selection and resume its saved conversation (confirm) |
 | `Alt+PgUp` / `Alt+PgDown` | scroll the active pane's history up / down one page |
 | `Alt+End` | return the active pane to live output |
+| `Ctrl+U` / `Ctrl+D` | scroll focused pane history toward older / newer text, or page the focused rail, by half its height |
 | `a` | add an agent — on a repo, a normal workgroup limited to that repo; on a workgroup, another member (settings form) |
 | `w` | new workgroup (coordinator settings; optional repos limit it and seed a first agent) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
@@ -327,13 +328,27 @@ the child, including at empty history or either boundary.
 While viewing history, an `↑ offset/history` badge appears in the pane header
 (just `↑` when narrow), leaving the pane's text uncovered. `Alt+End`, actual
 child input, or new child output returns to live. Rebind history navigation
-with `keys.scroll-up`, `keys.scroll-down`, and `keys.scroll-live`:
+with `keys.scroll-up`, `keys.scroll-down`, `keys.scroll-live`,
+`keys.scroll-half-up`, and `keys.scroll-half-down`:
 
 ```sh
 amux config set keys.scroll-up ctrl+g
 amux config set keys.scroll-down alt+PageDown
 amux config set keys.scroll-live alt+End
+amux config set keys.scroll-half-up f5
+amux config set keys.scroll-half-down f6
 ```
+
+Ctrl+U/Ctrl+D are reserved for pane history by default, including when an agent
+is focused. The last two commands move half-page scrolling to F5/F6 and restore
+child Ctrl+U line-kill and Ctrl+D EOF; reopen the dashboard to apply. Half-page
+actions respect focus: pane history with pane focus, existing rail paging with
+rail focus. The same rebindings apply in both places. Pane steps round down
+with a one-row minimum. Full-page Alt chords remain global pane actions, and
+modals handle their keys first. Pasted text does not invoke history shortcuts.
+An existing explicit binding using Ctrl+U or Ctrl+D wins on upgrade: the
+corresponding new half-page default is left unbound until that conflict is moved
+or the half-page action is explicitly rebound (`amux config ls` shows this).
 
 History is bounded and local to the attached pane; alternate-screen history
 records completed synchronized redraws rather than reconstructing an entire
@@ -584,14 +599,27 @@ Auto-launching amux on terminal open is optional and off by default. If you want
 it, opt in by sourcing the shim (`scripts/amux.sh`) from your shell rc; set
 `AMUX_SKIP=1` in any shell to bypass it.
 
-### Persistent Codex App Server opt-in
+### Codex App Server control
 
-Use `amux config set codex.control app-server` to save the daemon's Codex backend
-selection across restarts (`pty` is the default and rollback value). Changes
-require an operator-controlled `amux daemon restart`, which stops hosted agents;
-they do not change routing in a running daemon. `amux doctor` compares saved
+Central Codex auth delivers credentials through the supervised App Server, so
+every Codex session runs under it; a saved or environment `codex.control pty` is
+reported and overridden. Changes to `codex.control` require an
+operator-controlled `amux daemon restart`, which stops hosted agents; they do not
+change routing in a running daemon. `amux doctor` compares saved
 config, the shell override, and the running daemon's reported selection. See the
 [operator enable/restart/rollback sequence and override precedence](docs/codex-app-server-supervision.md#opt-in-and-fallback).
+
+### Goal auto-resume
+
+A workgroup coordinator's goal survives restarts: when its runtime comes back
+(`amux do restart`, `amux do start`, or the daemon relaunching its live set after
+its own restart) a goal that was still active, or waiting on a background
+wake-up, is continued without a user turn. Codex coordinators get this from the
+App Server's native goal; for Claude coordinators the daemon reads the goal file
+and relaunches with a continuation. Paused, complete, blocked, input-waiting and
+budget-limited goals are never resumed automatically. `amux config set
+goal.auto_resume off` turns the Claude-side continuation off (default on; applied
+at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
 
 ## Roadmap
 

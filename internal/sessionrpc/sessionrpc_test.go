@@ -677,10 +677,12 @@ func TestRestartCleanupAndAdoptionProgressBeyondOneChunk(t *testing.T) {
 	f.server = nil
 	responseDir := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName)
 	old := clock.Now().Add(-time.Duration(access.MaxResponseAge+1) * time.Second)
+	// Current-boot artifacts are adopted; prior-boot ones are retired instead.
+	current := []byte(`{"bootId":"` + f.auth.BootID() + `"}`)
 	for index := 0; index < MaxResponseFiles+1; index++ {
 		name := fmt.Sprintf("%032x.res", index+1)
 		path := filepath.Join(responseDir, name)
-		if err := os.WriteFile(path, []byte("{}"), regularFileMode); err != nil {
+		if err := os.WriteFile(path, current, regularFileMode); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chtimes(path, old, old); err != nil {
@@ -922,9 +924,9 @@ func TestReceiptDeadlineAtAcceptanceAndIndependentSettlement(t *testing.T) {
 		if value.Received || value.Reason != SettlementGraceExpired {
 			t.Fatalf("late receipt settlement = %+v", value)
 		}
-		receiptResponse := readTestResponse(t, f.grant.MailboxHostDir, receipt.RequestID)
-		if receiptResponse.Status != StatusInvalid || receiptResponse.Code != "receipt_expired" {
-			t.Fatalf("late receipt response = %+v", receiptResponse)
+		// Receipts are one-way: settlement is the outcome, never a response.
+		if _, err := os.Stat(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, responseFileName(receipt.RequestID))); !os.IsNotExist(err) {
+			t.Fatalf("receipt published a response: %v", err)
 		}
 	})
 
@@ -1047,15 +1049,30 @@ func TestServerRemovesAbandonedAtomicPublication(t *testing.T) {
 
 func TestClientRejectsForgedResponsePath(t *testing.T) {
 	f := newFixture(t, Callbacks{}, ServerOptions{})
-	responseName := responseFileName(string(bytes.Repeat([]byte{'0'}, 32)))
+	// Request ids lead with the 48-bit issue millisecond; with a fixed clock and
+	// zeroReader the client's id, and so its response path, is predictable.
+	issued := time.Now()
+	id := make([]byte, 16)
+	for i, ms := 5, uint64(issued.UnixMilli()); i >= 0; i-- {
+		id[i] = byte(ms)
+		ms >>= 8
+	}
+	responseName := responseFileName(hex.EncodeToString(id))
 	if err := os.Symlink("/etc/passwd", filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, responseName)); err != nil {
 		t.Fatal(err)
 	}
-	client := f.client(clientOptions{random: zeroReader{}})
+	var published atomic.Bool
+	client := f.client(clientOptions{random: zeroReader{}, clock: func() time.Time { return issued }, beforeRequestPublish: func() { published.Store(true) }})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := client.Query(ctx, Query{Verb: "snapshot"}); err == nil {
+	_, err := client.Query(ctx, Query{Verb: "snapshot"})
+	if err == nil {
 		t.Fatal("forged response symlink was accepted")
+	}
+	// Rejection must come from reading the forged path, not from waiting out
+	// the deadline on a path the client never looked at.
+	if !published.Load() || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("client did not read its forged response path: published=%v err=%v", published.Load(), err)
 	}
 }
 

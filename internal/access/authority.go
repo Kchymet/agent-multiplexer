@@ -1011,6 +1011,14 @@ func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
 	return a.validLocked(p)
 }
 
+// HasCurrent reports whether the subject has a current credential generation.
+// It is a cheap read for callers deciding whether a revocation has work to do.
+func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.registry.Current[currentKey(kind, subjectID)] != ""
+}
+
 // WithValid admits a short local effect under a current-principal read lease.
 // fn must not call the authority, perform network IO, or wait for a runtime.
 // Revocation/rotation cannot commit between validation and this effect.
@@ -1100,9 +1108,18 @@ func SignRequest(cred Credential, bootID string, body []byte, now time.Time, ran
 	if err != nil || len(priv) != ed25519.PrivateKeySize {
 		return SignedRequest{}, ErrInvalidCredential
 	}
+	// The id leads with the issue time so a mailbox, which serves request files
+	// in name order, serves them first-in first-out: a hook's reports keep their
+	// order and no request starves behind later arrivals. The remaining 80 bits
+	// stay random, so ids remain unique and unpredictable.
 	nonce := make([]byte, 16)
-	if _, err := io.ReadFull(random, nonce); err != nil {
+	if _, err := io.ReadFull(random, nonce[6:]); err != nil {
 		return SignedRequest{}, err
+	}
+	issued := uint64(now.UnixMilli())
+	for i := 5; i >= 0; i-- {
+		nonce[i] = byte(issued)
+		issued >>= 8
 	}
 	req := SignedRequest{
 		Protocol: ProtocolVersion, BootID: bootID, KeyID: cred.KeyID, Generation: cred.Generation,

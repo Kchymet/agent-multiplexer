@@ -1,14 +1,13 @@
 package claudecfg
 
 import (
+	"amux/internal/accounts"
+	"amux/internal/amuxcfg"
 	"bytes"
 	"encoding/json"
 	"path/filepath"
-	"runtime"
 	"sort"
 
-	"amux/internal/accounts"
-	"amux/internal/amuxcfg"
 	"amux/internal/cfghome"
 )
 
@@ -38,9 +37,7 @@ var configKeys = []string{"mcpServers", "model"}
 // an agent's private home beneath sessionRoot — the spec cfghome executes. Config entries are
 // copied; .claude.json is copied minus its per-project trust table (amux
 // re-trusts the agent's own dir at launch) and compared only on its config
-// keys. Credentials follow claude.auth: central (the default) and environment
-// share no host store; host keeps the legacy macOS Keychain broker or Linux
-// credential-file link; shared keeps the older amux shared directory.
+// keys. Credentials follow central auth: no host credential store is shared.
 func Template(agentID, sessionRoot string) cfghome.Spec {
 	user := User()
 	dir := AgentHome(sessionRoot)
@@ -65,34 +62,18 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		Entries: entries,
 		Shared:  []string{CredentialsFile},
 	}
-	switch mode := accounts.Mode(agentID, "claude"); {
-	case mode == amuxcfg.AuthShared && SharedAuthEnabled():
-		sp.Shared = nil
-		sp.AuthDir = SharedAuthDir()
-		sp.AuthEnv = SecureStorageEnv
-		sp.AuthValue = sp.AuthDir
+	// Every workload follows central auth: no host credential store is shared.
+	// The session's own config directory is its private secure storage, and a
+	// legacy credential link left in the copy (from the retired host or shared
+	// modes) is unlinked without being followed. Central delivers its token to
+	// the launcher separately and clears inherited credential inputs.
+	sp.Shared = nil
+	sp.Retire = []string{CredentialsFile}
+	sp.AuthEnv = SecureStorageEnv
+	sp.AuthValue = dir
+	// Only a test-fixture build can route a workload to the environment.
+	if accounts.Mode(agentID, "claude") != amuxcfg.AuthEnvironment {
 		sp.AuthUnsetEnv = credentialOverrides
-	case mode == amuxcfg.AuthHost:
-		if runtime.GOOS == "darwin" {
-			// Preserve the host's exact Keychain selector. Unset and empty differ:
-			// an explicit empty value selects the default host login instead of
-			// the private config directory's otherwise empty Keychain entry.
-			sp.AuthEnv = SecureStorageEnv
-			sp.AuthValue = CredentialSelectorFor(agentID)
-		}
-	default:
-		// Central and environment modes (and an unusable shared selection,
-		// which LaunchAuthError refuses) share no host credential store. The
-		// session's own config directory is its private secure storage, and a
-		// legacy credential link left in the copy is unlinked without being
-		// followed. Central delivers its token to the launcher separately.
-		sp.Shared = nil
-		sp.Retire = []string{CredentialsFile}
-		sp.AuthEnv = SecureStorageEnv
-		sp.AuthValue = dir
-		if mode != amuxcfg.AuthEnvironment {
-			sp.AuthUnsetEnv = credentialOverrides
-		}
 	}
 	return sp
 }
