@@ -345,7 +345,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" + trampoline +
 		"i=0\nwhile [ $i -lt " + fmt.Sprint(fetches) + " ]; do\n" +
 		"  printf %s $((i+1)) > \"$PWD/started\"\n" +
-		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true || { printf 'launcher exit %s on fetch %s' $? $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
+		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true 2> \"$PWD/launcher.err\" || { printf 'launcher exit %s on fetch %s' $? $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
 		"  i=$((i+1)); printf %s $i > \"$PWD/fetched\"\ndone\nsleep 60\n"
 	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -387,6 +387,17 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		n, _ := strconv.Atoi(string(b))
 		return n
 	}
+	// A background loop that records a launcher failure will never finish;
+	// report it at once, while the runtime is still serving.
+	failFast := func(all []store.Session) {
+		t.Helper()
+		for _, session := range sessions {
+			if b, err := os.ReadFile(filepath.Join(core.SessionsDir(), "root", session.ID, "failed")); err == nil {
+				pressureDiagnostics(t, d, runtime, all)
+				t.Fatalf("%s: %s", session.ID, b)
+			}
+		}
+	}
 	for _, session := range sessions {
 		if r := d.handle(ctx, core.Action{Action: core.ActionStart, ID: session.ID}); !r.OK {
 			t.Fatal(r.Error)
@@ -398,6 +409,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		for _, session := range sessions {
 			total += fetched(session.ID)
 		}
+		failFast(sessions)
 		select {
 		case <-ctx.Done():
 			pressureDiagnostics(t, d, runtime, sessions)
@@ -428,6 +440,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		if b, err := os.ReadFile(filepath.Join(fresh.Dir, "launched")); err == nil && string(b) == "ready" {
 			break
 		}
+		failFast(append(sessions, fresh))
 		select {
 		case <-ctx.Done():
 			pressureDiagnostics(t, d, runtime, append(sessions, fresh))
@@ -438,6 +451,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 	elapsed := time.Since(began)
 	for _, session := range sessions {
 		for fetched(session.ID) < fetches {
+			failFast(sessions)
 			select {
 			case <-ctx.Done():
 				pressureDiagnostics(t, d, runtime, sessions)
@@ -503,7 +517,7 @@ func pressureDiagnostics(t *testing.T, d *Daemon, runtime *sessionRuntime, sessi
 	}:
 		<-captured
 	case <-time.After(2 * time.Second):
-		t.Log("server state: run loop did not accept an inspection within 2s (blocked in reconcile or serve)")
+		t.Log("server state: run loop did not accept an inspection within 2s (blocked in reconcile or serve, or already stopped because the test context expired)")
 	}
 	for _, session := range sessions {
 		dir := filepath.Join(core.SessionsDir(), "root", session.ID)
@@ -534,8 +548,8 @@ func pressureDiagnostics(t *testing.T, d *Daemon, runtime *sessionRuntime, sessi
 			}
 			queues += fmt.Sprintf(" %s=%d%v%v", sub, len(names), names, err)
 		}
-		t.Logf("%s: started=%s fetched=%s failed=%s alive=%v server[%s] queues:%s output=%q",
-			session.ID, read("started"), read("fetched"), read("failed"), alive, server[session.ID], queues, output)
+		t.Logf("%s: started=%s fetched=%s failed=%s launcher-stderr=%q alive=%v server[%s] queues:%s output=%q",
+			session.ID, read("started"), read("fetched"), read("failed"), strings.ReplaceAll(read("launcher.err"), mockCentralToken, "<token>"), alive, server[session.ID], queues, output)
 	}
 	var stacks bytes.Buffer
 	_ = pprof.Lookup("goroutine").WriteTo(&stacks, 2)
