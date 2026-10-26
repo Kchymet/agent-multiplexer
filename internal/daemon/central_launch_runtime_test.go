@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -325,12 +326,23 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(fake), 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Background sessions loop the real launcher (the pane's own amux binary),
-	// exec'ing true once delivered; the fresh session only marks delivery.
+	// Background sessions loop the real launcher through their pane's own
+	// payload trampoline, exec'ing true once delivered; the fresh session only
+	// marks delivery. Linux mounts the trampoline at a fixed tool path; macOS
+	// publishes a per-session copy.
+	trampoline := "case \"$PWD\" in\n"
+	for _, session := range sessions {
+		tool := launchenv.ToolBinDir + "/amux"
+		if goruntime.GOOS == "darwin" {
+			tool = core.SessionBinPath(session.ID)
+		}
+		trampoline += "  */" + session.ID + ") tool='" + tool + "';;\n"
+	}
+	trampoline += "esac\n"
 	script := "#!/bin/sh\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = " + mockCentralToken + " ] || exit 17\n" +
-		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" +
+		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" + trampoline +
 		"i=0\nwhile [ $i -lt " + fmt.Sprint(fetches) + " ]; do\n" +
-		"  AMUX_PAYLOAD_CLEAN_EXEC=1 " + launchenv.ToolBinDir + "/amux --amux-payload-clean-exec " + centralauth.LauncherArg + " true || exit 1\n" +
+		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true || exit 1\n" +
 		"  i=$((i+1)); printf %s $i > \"$PWD/fetched\"\ndone\nsleep 60\n"
 	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
 		t.Fatal(err)
