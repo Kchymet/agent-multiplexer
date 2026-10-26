@@ -82,3 +82,62 @@ func releaseReadResponses(ctx context.Context, dir string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestMeasureFastBehindSlow reports a fast query's latency while another
+// client keeps a 200ms slow action running in the same mailbox, without lanes
+// (every call dispatched in arrival order, as before) and with them. Opt-in:
+// AMUX_MEASURE_RPC_LATENCY=1.
+func TestMeasureFastBehindSlow(t *testing.T) {
+	if os.Getenv("AMUX_MEASURE_RPC_LATENCY") == "" {
+		t.Skip("set AMUX_MEASURE_RPC_LATENCY=1 to measure")
+	}
+	for _, lanes := range []bool{false, true} {
+		options := ServerOptions{PollInterval: 50 * time.Millisecond}
+		if lanes {
+			options.Slow = func(call Call) bool { return call.Verb == "slow" }
+		}
+		f := newFixture(t, Callbacks{Dispatch: func(_ context.Context, request DispatchRequest) (DispatchResult, error) {
+			if request.Call.Verb == "slow" {
+				time.Sleep(200 * time.Millisecond)
+			}
+			return DispatchResult{Status: StatusOK, Body: []byte("ok")}, nil
+		}}, options)
+		ctx, cancel := context.WithCancel(context.Background())
+		served := make(chan error, 1)
+		go func() { served <- f.server.Run(ctx) }()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			releaseReadResponses(ctx, filepath.Join(f.grant.MailboxHostDir, ResponsesDirName))
+		}()
+		slowClient := f.client(clientOptions{})
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				_, _ = slowClient.Action(ctx, Action{Verb: "slow", ID: "subject-a"})
+			}
+		}()
+		time.Sleep(50 * time.Millisecond)
+		probe := f.client(clientOptions{})
+		var samples []time.Duration
+		for i := 0; i < 50; i++ {
+			start := time.Now()
+			callCtx, callCancel := context.WithTimeout(ctx, 10*time.Second)
+			result, err := probe.Query(callCtx, Query{Verb: "version"})
+			callCancel()
+			if err != nil || result.Status != StatusOK {
+				t.Fatalf("probe %d = %+v, %v", i, result, err)
+			}
+			samples = append(samples, time.Since(start))
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+		wg.Wait()
+		<-served
+		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+		pct := func(p int) time.Duration { return samples[len(samples)*p/100] }
+		t.Logf("lanes=%v: fast p50 %v  p90 %v  max %v", lanes,
+			pct(50).Round(10*time.Microsecond), pct(90).Round(10*time.Microsecond), samples[len(samples)-1].Round(10*time.Microsecond))
+	}
+}

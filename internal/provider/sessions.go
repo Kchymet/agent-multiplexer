@@ -286,8 +286,10 @@ var errSessionNotPublished = errors.New("session is not currently published")
 // call without disturbing retained targets; once revocation completes no queued
 // action can use the old ID.
 // New-workgroup is the one creation verb with no existing target; enabling the
-// session-control hook deliberately grants it. A newly created ID is not usable
-// until a later successful snapshot publishes it.
+// session-control hook deliberately grants it. A newly created ID is usable
+// provisionally only until the next authority boundary. A revocation that
+// cancels an in-flight create also prevents its later result from reopening the
+// grant.
 func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMsg) (string, error) {
 	if _, ok := sessionActionFor(m); !ok {
 		return p.applySessionAction(s.rtCtx, m)
@@ -313,10 +315,13 @@ func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMs
 	s.opMu.Unlock()
 
 	newID, err := p.applySessionAction(ctx, m)
-	cancel()
-	close(call.done)
+	// Finalize under the same gate as revocation. If revocation won first, its
+	// cancel is observable here and a late local success cannot restore access.
+	// If finalization wins first, a following revoke sees and removes the newly
+	// provisional ID before its own barrier completes.
 	s.opMu.Lock()
-	if err == nil && newID != "" {
+	revoked := ctx.Err() != nil
+	if err == nil && newID != "" && !revoked {
 		if _, published := s.published[newID]; !published {
 			if s.provisional == nil {
 				s.provisional = map[string]struct{}{}
@@ -326,6 +331,8 @@ func (p *Provider) applyAuthorizedSessionAction(s *session, m harnessproto.MuxMs
 	}
 	delete(s.actions, opID)
 	s.opMu.Unlock()
+	cancel()
+	close(call.done)
 	return newID, err
 }
 

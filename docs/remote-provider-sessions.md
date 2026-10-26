@@ -301,7 +301,10 @@ steering target on that same authenticated connection, even before the next
 `sessions` snapshot. This is a provisional grant only for an ID the daemon
 itself just minted; the next successful inventory snapshot promotes it when
 present or revokes it when absent, and a poll error/reconnect revokes it. A
-caller-selected ID never receives this treatment.
+caller-selected ID never receives this treatment. A fail-closed revocation that
+cancels an in-flight creation also prevents its later result from installing a
+provisional grant; a late local success must not reopen connection authority
+after that revocation completes.
 
 ### 3.1 Steering verbs
 

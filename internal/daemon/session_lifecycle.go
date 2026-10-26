@@ -370,7 +370,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
-		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID)})
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow})
 	if err != nil {
 		return err
 	}
@@ -525,7 +525,8 @@ func (r *sessionRuntime) closeServer(id string) {
 		// waiting for the dispatch/effect locks this caller holds. Hand the close
 		// to the pass's owner instead of deadlocking; the dispatch itself
 		// rechecks credential validity under those locks before any effect.
-		if pass == nil || finished(pass) {
+		// Close also joins the mailbox's slow lane, which may be dispatching.
+		if (pass == nil || finished(pass)) && !server.Busy() {
 			_ = server.Close()
 		} else {
 			if r.closing == nil {
@@ -537,7 +538,9 @@ func (r *sessionRuntime) closeServer(id string) {
 			go func() {
 				defer r.passes.Done()
 				defer close(closed)
-				<-pass
+				if pass != nil {
+					<-pass
+				}
 				_ = server.Close()
 			}()
 		}
@@ -561,7 +564,6 @@ func (r *sessionRuntime) close() {
 	// Passes are joined before taking dispatch ownership (see closeServer).
 	r.waitPasses()
 	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
 	for id := range r.servers {
 		r.closeServer(id)
 	}
@@ -569,6 +571,9 @@ func (r *sessionRuntime) close() {
 	if r.events != nil {
 		r.events.close()
 	}
+	r.dispatchMu.Unlock()
+	// A mailbox whose slow lane was dispatching closes on its own goroutine.
+	r.waitPasses()
 }
 
 type completionRegistry struct {

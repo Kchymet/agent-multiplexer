@@ -49,7 +49,7 @@ func newServingFixture(t *testing.T, dispatch map[string]func() sessionrpc.Dispa
 				Dispatch: func(context.Context, sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
 					return handle(), nil
 				},
-			}, sessionrpc.ServerOptions{RequestNotify: f.runtime.notifier(id)})
+			}, sessionrpc.ServerOptions{RequestNotify: f.runtime.notifier(id), Slow: sessionCallSlow})
 		if err != nil {
 			t.Fatal(err)
 		}

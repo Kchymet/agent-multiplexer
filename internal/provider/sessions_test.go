@@ -187,6 +187,90 @@ func TestUnchangedSnapshotRevokesMissingProvisionalID(t *testing.T) {
 	}
 }
 
+func TestCompletedRevocationDoesNotRegrantCreateResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wire := &session{
+		rtCtx:       ctx,
+		published:   map[string]core.Session{},
+		provisional: map[string]struct{}{},
+		actions:     map[uint64]*sessionActionCall{},
+		rtOpening:   map[string]*runtimeOpening{},
+		rtSubs:      map[string]*runtimeSubscription{},
+	}
+	var waits []<-chan struct{}
+	p := &Provider{cfg: Config{ApplyAction: func(actionCtx context.Context, _ core.Action) (string, error) {
+		wire.opMu.Lock()
+		waits = wire.revokeAllPublishedLocked()
+		wire.opMu.Unlock()
+		if actionCtx.Err() == nil {
+			t.Fatal("test setup did not revoke the in-flight create")
+		}
+		// The local mutation may finish successfully despite observing cancellation.
+		return "synthetic-created-id", nil
+	}}}
+	id, err := p.applyAuthorizedSessionAction(wire, harnessproto.MuxMsg{
+		Action: harnessproto.VerbNewWorkgroupEmpty,
+		Fields: map[string]string{
+			"repos": "", "coordinator": "codex",
+			"identity_mode": harnessproto.IdentityMachine,
+		},
+	})
+	waitForRevokedWork(waits)
+	if err != nil || id != "synthetic-created-id" {
+		t.Fatalf("create result = (%q, %v)", id, err)
+	}
+	wire.opMu.Lock()
+	defer wire.opMu.Unlock()
+	if _, retained := wire.provisional[id]; retained {
+		t.Fatalf("completed revocation retained provisional grant for %q", id)
+	}
+}
+
+func TestOrdinaryPollDoesNotSuppressInFlightCreateGrant(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p := &Provider{cfg: Config{
+		Sessions: func(context.Context) ([]core.Session, error) { return []core.Session{}, nil },
+		ApplyAction: func(_ context.Context, _ core.Action) (string, error) {
+			close(started)
+			<-release
+			return "slow-created-id", nil
+		},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wire := &session{
+		rtCtx:       ctx,
+		published:   map[string]core.Session{},
+		provisional: map[string]struct{}{},
+		actions:     map[uint64]*sessionActionCall{},
+		rtOpening:   map[string]*runtimeOpening{},
+		rtSubs:      map[string]*runtimeSubscription{},
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := p.applyAuthorizedSessionAction(wire, harnessproto.MuxMsg{
+			Action: harnessproto.VerbNewWorkgroupEmpty,
+			Fields: map[string]string{"repos": ""},
+		})
+		result <- err
+	}()
+	<-started
+	// A normal poll is not a revocation of the in-flight root, which does not
+	// have an ID yet. It must not break the create -> follow-up contract.
+	p.publishOnce(context.Background(), wire, 1, []byte("[]"))
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	wire.opMu.Lock()
+	defer wire.opMu.Unlock()
+	if _, granted := wire.provisional["slow-created-id"]; !granted {
+		t.Fatal("ordinary poll suppressed the in-flight create's provisional grant")
+	}
+}
+
 // TestPublishOnSubscribeAndChange proves an initial snapshot on subscribe and a
 // second snapshot (next seq) after the rail changes.
 func TestPublishOnSubscribeAndChange(t *testing.T) {

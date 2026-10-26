@@ -392,13 +392,19 @@ func TestSessionRuntimeRearmsGlobalInitializationBeforeFreshDispatch(t *testing.
 
 func publishDaemonBudgetCall(t *testing.T, authority *access.FileAuthority, grant access.SessionAccess) {
 	t.Helper()
+	publishDaemonCall(t, authority, grant, sessionrpc.Call{
+		Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: "snapshot",
+	})
+}
+
+// publishDaemonCall signs call with grant's credential and publishes it.
+func publishDaemonCall(t *testing.T, authority *access.FileAuthority, grant access.SessionAccess, call sessionrpc.Call) {
+	t.Helper()
 	credential, err := access.LoadCredential(grant.CredentialHostDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(sessionrpc.Call{
-		Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: "snapshot",
-	})
+	body, err := json.Marshal(call)
 	if err != nil {
 		t.Fatal(err)
 	}
