@@ -226,6 +226,11 @@ are recorded separately because only the second one has evidence.
   trampoline's descriptor setup. That job's green conclusion hid this failure
   (no `pipefail`); the job has since been removed.
 
+  This failure (1 in 30 macOS repeat runs) is accepted as an unexplained
+  residual, outside the mailbox-retention fix. It does not show that
+  production pane launches are unaffected. If a Seatbelt `execve` failure is
+  confirmed, that launch risk should be tracked separately.
+
 The other repeat run (head `fddfce0`) passed all 15: 3,600 fetches, fresh first
 attempt 152–586ms, pool peak 7. Blocked-release ordering passed ×1000 and the
 held-descriptor visibility probe
