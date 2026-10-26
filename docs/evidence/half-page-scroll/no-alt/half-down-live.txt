@@ -21,11 +21,11 @@
                           │  CODEX-HISTORY-099 deterministic conversation line for wheel probe.                                
  Accounts · left       s  │  CODEX-HISTORY-100 deterministic conversation line for wheel probe.                                
  Claude                   │                                                                                                    
-   loading…               │  22:41                                                                                             
+   loading…               │  22:45                                                                                             
  Codex                    │                                                                                                    
    loading…               │                                                                                                    
  ↵ open  ↑↓ move ─────────│› DRAFT-WHEEL-MUST-STAY                                                                             
  Space fold/unfold ───────│                                                                                                    
- / search archived ───────│  gpt-5.6 default · /tmp/TestCodexEmbeddedScrollno-alt2741515996/001       ⚠ 1 warning · f2 to view 
+ / search archived ───────│  gpt-5.6 default · /tmp/TestCodexEmbeddedScrollno-alt3024672873/001       ⚠ 1 warning · f2 to view 
 ──────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────
  agent · ⌥ 1/2/3 tabs · ⌥ h rail · ⌥ a toggle · ⌥ r restart · ⌥ q quit                                                         

@@ -1,6 +1,6 @@
 # Half-page pane history evidence
 
-Source tested: `cd09bd9e78f1c8f4f844694e5d69c753bc89b868`.
+Source tested: `3ef7827b50624fbdb4d1a81d272ba92800c14547`.
 The native fixture uses checksum-pinned Codex 0.157.1 with synthetic localhost
 model responses, no account or external model requests.
 
@@ -29,3 +29,7 @@ go test ./internal/nativetui -run '^TestHalfPageKeysPTY$' -count=1 -v
 
 The existing wheel assertions still run; wheel routing has no changes in this
 work. Clipboard paths and paste handling also have no production changes.
+
+Final `make test vet notices-check vuln` passed after the focus correction.
+Half-page actions preserve rail paging when the rail is focused; the original
+rail paging tests pass unchanged, with additional rebinding coverage.

@@ -3,8 +3,8 @@
     codex_scroll_integration_test.go:294: real Codex 0.157.1 always: recovered rendered marker 070; draft preserved; local wheel and Ctrl+U/D sent no input; half-page keys recovered earlier content and restored draft; indicator and input/output live returns verified
 === RUN   TestCodexEmbeddedScroll/no-alt
     codex_scroll_integration_test.go:294: real Codex 0.157.1 no-alt: recovered rendered marker 070; draft preserved; local wheel and Ctrl+U/D sent no input; half-page keys recovered earlier content and restored draft; indicator and input/output live returns verified
---- PASS: TestCodexEmbeddedScroll (22.25s)
-    --- PASS: TestCodexEmbeddedScroll/always (11.48s)
-    --- PASS: TestCodexEmbeddedScroll/no-alt (10.76s)
+--- PASS: TestCodexEmbeddedScroll (22.24s)
+    --- PASS: TestCodexEmbeddedScroll/always (11.50s)
+    --- PASS: TestCodexEmbeddedScroll/no-alt (10.73s)
 PASS
-ok  	amux/internal/nativetui	22.256s
+ok  	amux/internal/nativetui	22.248s

@@ -25,7 +25,7 @@
  Codex                    │                                                                                                    
    loading…               │› Ask Codex to do anything                                                                          
  ↵ open  ↑↓ move ─────────│                                                                                                    
- Space fold/unfold ───────│  gpt-5.6 default · /tmp/TestCodexEmbeddedScrollalways4009242611/001 · ⠋                            
+ Space fold/unfold ───────│  gpt-5.6 default · /tmp/TestCodexEmbeddedScrollalways820615692/001 · ⠋                             
  / search archived ───────│  ? for shortcuts                                                          ⚠ 1 warning · f2 to view 
 ──────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────
  agent · ⌥ 1/2/3 tabs · ⌥ h rail · ⌥ a toggle · ⌥ r restart · ⌥ q quit                                                         
