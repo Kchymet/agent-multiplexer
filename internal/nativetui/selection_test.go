@@ -254,7 +254,7 @@ func TestSelectionClipboardThroughRealOutputWrapper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	m.clip = isolatedClipboard(t, &clipboard.SerialFile{File: f})
+	m.clip = terminalClipboardSink(t, &clipboard.SerialFile{File: f})
 	feedPane(t, term, "abcdef\x1b]52;c;c2VjcmV0\a\x1b]52;c;?\a")
 	_ = m.View()
 	// Without an app-copy callback, output/rendering and ordinary clicks do
@@ -354,12 +354,14 @@ func TestShiftWheelRemainsLocalDuringAppGesture(t *testing.T) {
 	waitPane(t, "resized app release without local wheel bytes", func() bool { return input() == want })
 }
 
-// Exercise the real Copier without invoking the developer's host clipboard.
-func isolatedClipboard(t *testing.T, out io.Writer) func([]byte) {
+// terminalClipboardSink injects only terminal delivery: no Copier worker, host
+// environment lookup, subprocess, or desktop clipboard. Clipboard package tests
+// cover Copier route selection separately with fake dependencies.
+func terminalClipboardSink(t *testing.T, out io.Writer) func([]byte) {
 	t.Helper()
-	t.Setenv("PATH", t.TempDir())
-	for _, key := range []string{"TMUX", "DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME", "WSL_INTEROP"} {
-		t.Setenv(key, "")
+	return func(text []byte) {
+		if _, err := out.Write(clipboard.Sequence(text, false)); err != nil {
+			t.Errorf("terminal clipboard sink: %v", err)
+		}
 	}
-	return clipboard.New(out).Copy
 }

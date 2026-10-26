@@ -4,6 +4,9 @@ Toolchain: Go 1.26.10
 make test vet notices-check vuln: PASS (root and harnessproto; no vulnerabilities)
 go test -race ./internal/clipboard ./internal/termselect: PASS
 
+After test-isolation review: PTY fixtures inject a synchronous terminal-only sink;
+no Copier worker, host environment/tool lookup, or subprocess is used.
+
 AMUX_SELECTION_EVIDENCE=docs/evidence/pane-selection go test ./internal/nativetui -run Test(SelectionPTYRendererAndClipboard|AccountsPTY) -count=1 -v
 === RUN   TestAccountsPTYScrolling
 === RUN   TestAccountsPTYScrolling/80x24/sgr-wheel
@@ -16,7 +19,7 @@ AMUX_SELECTION_EVIDENCE=docs/evidence/pane-selection go test ./internal/nativetu
 === RUN   TestAccountsPTYScrolling/52x12/x10-wheel
 === RUN   TestAccountsPTYScrolling/52x12/trackpad-burst
 --- PASS: TestAccountsPTYScrolling (0.90s)
-    --- PASS: TestAccountsPTYScrolling/80x24/sgr-wheel (0.11s)
+    --- PASS: TestAccountsPTYScrolling/80x24/sgr-wheel (0.10s)
     --- PASS: TestAccountsPTYScrolling/80x24/x10-wheel (0.10s)
     --- PASS: TestAccountsPTYScrolling/80x24/trackpad-burst (0.10s)
     --- PASS: TestAccountsPTYScrolling/120x32/sgr-wheel (0.10s)
@@ -28,9 +31,9 @@ AMUX_SELECTION_EVIDENCE=docs/evidence/pane-selection go test ./internal/nativetu
 === RUN   TestAccountsPTYSecretSelectionIsolation
 === RUN   TestAccountsPTYSecretSelectionIsolation/e
 === RUN   TestAccountsPTYSecretSelectionIsolation/a
---- PASS: TestAccountsPTYSecretSelectionIsolation (0.05s)
-    --- PASS: TestAccountsPTYSecretSelectionIsolation/e (0.02s)
-    --- PASS: TestAccountsPTYSecretSelectionIsolation/a (0.03s)
+--- PASS: TestAccountsPTYSecretSelectionIsolation (0.04s)
+    --- PASS: TestAccountsPTYSecretSelectionIsolation/e (0.03s)
+    --- PASS: TestAccountsPTYSecretSelectionIsolation/a (0.02s)
 === RUN   TestAccountsPTYProviderSelection
 === RUN   TestAccountsPTYProviderSelection/80x24
 === RUN   TestAccountsPTYProviderSelection/120x32
@@ -44,7 +47,7 @@ AMUX_SELECTION_EVIDENCE=docs/evidence/pane-selection go test ./internal/nativetu
 === RUN   TestSelectionPTYRendererAndClipboard
 --- PASS: TestSelectionPTYRendererAndClipboard (0.07s)
 PASS
-ok  	amux/internal/nativetui	1.594s
+ok  	amux/internal/nativetui	1.599s
 
 AMUX_TEST_CODEX_BIN=<checksum-pinned Codex 0.157.1> AMUX_REQUIRE_CODEX_SCROLL=1 go test ./internal/nativetui -run ^TestCodexEmbeddedScroll$ -count=1 -timeout=180s -v
 === RUN   TestCodexEmbeddedScroll

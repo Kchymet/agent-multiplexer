@@ -2,9 +2,10 @@
 
 These 70×10 frames come from the output PTY of the production Bubble Tea
 constructor, decoded into an outer terminal emulator. They are not direct
-`model.View()` dumps. Only the model's daemon connection is replaced with a
-deterministic fixture. The same constructor and unchanged Accounts PTY tests
-remain in use after integrating master through PR191 and PR192.
+`model.View()` dumps. The daemon connection and clipboard delivery are replaced
+with deterministic fixtures; the latter writes OSC52 only to the test output
+PTY. The same constructor and unchanged Accounts PTY tests remain in use after
+integrating master through PR191 and PR192.
 
 Run from the repository root:
 
@@ -17,7 +18,7 @@ AMUX_SELECTION_EVIDENCE="$PWD/docs/evidence/pane-selection" \
   selection of `界é`. The wide glyph is selected whole; no local-selection
   clipboard write occurs before release and the child receives no mouse bytes.
 - Before selection, a visible-app OSC52 write is delivered through the same
-  Copier; hidden-pane writes and clipboard queries are ignored.
+  terminal-only test sink; hidden-pane writes and clipboard queries are ignored.
 - Release adds exactly one `OSC 52 ; c ; 55WMw6k= BEL` through the same output
   writer used by Bubble Tea. The test checks the actual PTY byte stream.
 - `history`: raw Alt+PageUp scrolls primary history; the outer renderer shows
@@ -40,11 +41,11 @@ multiline Unicode text through bracketed-paste decoding. Exact text bytes reach
 the child and focus remains on the pane. This preserves the existing text path
 (which does not re-emit bracket delimiters); it does not test image paste.
 
-App copy and local copy share the production Copier and SerialFile. Test-only
-environment isolation disables host clipboard tools and tmux, so testing never
-modifies a developer's desktop clipboard. Clipboard route unit tests separately
-exercise platform/tmux choices. Daemon replay stripping remains covered by the
-existing replay regressions.
+App copy and local copy share one injected terminal-only sink and the production
+SerialFile. This fixture creates no Copier worker and cannot resolve or invoke
+host clipboard tools, even on WSL. Clipboard unit tests separately exercise
+Copier platform/tmux routes with fake dependencies. Daemon replay stripping
+remains covered by the existing replay regressions.
 
 `validation.txt` records the integrated master preflight and actual PTY/native
 fixture results. Native Codex uses synthetic localhost responses without a

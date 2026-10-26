@@ -74,6 +74,8 @@ exact multiline/Unicode text and shortcut-looking strings such as `q`, `s`, and
 coverage, not a claim about every native app's interpretation of those bytes.
 
 The native Codex fixture verifies history and draft preservation, while the
-outer-PTY fixture verifies copy/paste transport with deterministic child output.
+outer-PTY fixture verifies copy/paste transport with deterministic child output
+and an injected terminal-only clipboard sink; Copier routes have separate unit
+tests using fake dependencies.
 Neither test establishes image-paste support or lack of support, nor exercises
 native Codex/Claude clipboard menus against a real desktop clipboard.

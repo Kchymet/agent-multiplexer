@@ -34,7 +34,7 @@ func TestSelectionPTYRendererAndClipboard(t *testing.T) {
 	m, term, input := scrollModel(t, width-sidebarWidth-1, height-3)
 	feedPane(t, term, historyRows(20)+"\x1b[H\x1b[2JA界éZ\r\nsecond\x1b[?1002h\x1b[?1006h")
 	output := &clipboard.SerialFile{File: slave}
-	m.clip = isolatedClipboard(t, output)
+	m.clip = terminalClipboardSink(t, output)
 	m.bindClipboard(term)
 	hidden := vterm.NewRemote(width-sidebarWidth-1, height-3, nil, nil)
 	m.bindClipboard(hidden)
@@ -120,8 +120,8 @@ func TestSelectionPTYRendererAndClipboard(t *testing.T) {
 	waitPane(t, "actual terminal mouse modes", func() bool {
 		return strings.Contains(readRaw(), "\x1b[?1002h") && strings.Contains(readRaw(), "\x1b[?1006h")
 	})
-	// The same production visible-pane callback and Copier deliver app-owned
-	// copy before local selection. Queries and hidden panes must not copy.
+	// The production visible-pane callback and local selection share one
+	// injected terminal-only sink. Queries and hidden panes must not copy.
 	appCopy := "app copy ✓"
 	feedPane(t, hidden, string(clipboard.Sequence([]byte("hidden copy"), false)))
 	feedPane(t, term, "\x1b]52;c;?\a"+string(clipboard.Sequence([]byte(appCopy), false)))
