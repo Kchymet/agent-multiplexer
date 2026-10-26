@@ -870,6 +870,14 @@ func (a *FileAuthority) Revoke(_ context.Context, kind SubjectKind, subjectID st
 	return a.revokeLocked(kind, subjectID, "")
 }
 
+// HasCurrent reports whether subject has an unrevoked current credential,
+// without publishing or touching disk.
+func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.rootDir != nil && a.registry.Current[currentKey(kind, subjectID)] != ""
+}
+
 // RevokeCurrent revokes only the exact principal generation supplied by its
 // caller. Delayed completion cleanup uses this after proving that it still owns
 // the corresponding runtime incarnation; it can never revoke a later regrant.

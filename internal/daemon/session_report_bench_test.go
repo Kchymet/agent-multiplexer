@@ -107,8 +107,7 @@ func BenchmarkStoreOpen(b *testing.B) {
 }
 
 // BenchmarkConcurrentReportsDuringSlowEffect measures what two sessions'
-// reports cost while a slow effect (a creation, a restart) repeatedly holds
-// the daemon-wide gate for 100ms — the shape of the user-visible stall. It
+// reports cost while a slow creation repeatedly holds admission for 100ms — the shape of the user-visible stall. It
 // reports per-report p50/max latency rather than throughput.
 func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 	store.ShareHandles(true)
@@ -133,11 +132,12 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 				return
 			default:
 			}
-			runtime.dispatchMu.Lock()
-			d.effectMu.Lock()
+			// A creation: serialized with other actions, shared admission.
+			d.actionMu.Lock()
+			release, _ := lockAdmission(context.Background(), &runtime.dispatchMu, &d.effectMu, admitShared)
 			time.Sleep(100 * time.Millisecond)
-			d.effectMu.Unlock()
-			runtime.dispatchMu.Unlock()
+			release()
+			d.actionMu.Unlock()
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()

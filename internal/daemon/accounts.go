@@ -52,8 +52,11 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		return fail("account_request_invalid")
 	}
 	if !effectAdmissionHeld(ctx) && r.Operation != hp.AccountStatus {
-		d.effectMu.Lock()
-		defer d.effectMu.Unlock()
+		release, ok := lockAdmission(ctx, nil, &d.effectMu, admitExclusive)
+		defer release()
+		if !ok {
+			return fail("account_access_denied")
+		}
 	}
 	if ctx.Err() != nil || revalidateDeferred(ctx) != nil {
 		return fail("account_access_denied")

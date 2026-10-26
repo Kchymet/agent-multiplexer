@@ -8,6 +8,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"amux/internal/access"
@@ -472,12 +473,12 @@ func (d *Daemon) admitDeferredEffect(ctx context.Context, effect func(context.Co
 			return err
 		}
 	}
+	var dispatch *sync.RWMutex
 	if d.sessionRPC != nil {
-		d.sessionRPC.dispatchMu.Lock()
-		defer d.sessionRPC.dispatchMu.Unlock()
+		dispatch = &d.sessionRPC.dispatchMu
 	}
-	d.effectMu.Lock()
-	defer d.effectMu.Unlock()
+	release, _ := lockAdmission(admitCtx, dispatch, &d.effectMu, admitShared)
+	defer release()
 	if err := revalidateDeferred(admitCtx); err != nil {
 		return err
 	}

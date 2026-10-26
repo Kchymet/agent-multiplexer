@@ -89,16 +89,30 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 			return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
 		}
 	}
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
-	ctx = withEffectAdmission(ctx)
+	// Reads and self reports share admission; actions are serialized with
+	// every other action and hold it exclusively unless they only create or
+	// start work (admission.go).
+	mode := admitShared
+	if req.Route == access.RouteAction && !isSessionReport(req) {
+		r.d.actionMu.Lock()
+		defer r.d.actionMu.Unlock()
+		if !sharedAdmissionAction(action) || selfCompletionShape(request.Principal, action) {
+			mode = admitExclusive
+		}
+	}
+	release, admitted := lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, mode)
+	if !admitted {
+		return rpcFailed("admission_unavailable"), nil
+	}
+	defer release()
+	ctx = withAdmission(ctx, mode)
 
 	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
 		return rpcDenied("credential_invalid"), nil
 	}
 	if isSessionReport(req) {
+		unlock := r.reportLocks.lock(request.Principal.SubjectID)
+		defer unlock()
 		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
 	// Authorize again under the dispatch lock, immediately before the exact
@@ -187,11 +201,9 @@ func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal ac
 }
 
 func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
-	return r.finalAuthorize(withEffectAdmission(ctx), principal, req)
+	release, _ := lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitShared)
+	defer release()
+	return r.finalAuthorize(withAdmission(ctx, admitShared), principal, req)
 }
 
 func (r *sessionRuntime) finalAuthorize(ctx context.Context, principal access.Principal, req access.Request) error {

@@ -299,9 +299,10 @@ var (
 	errReportLifecycle     = errors.New("permission report lifecycle invalid")
 	errReportCapture       = errors.New("capture source unavailable")
 	stageSessionTranscript = core.StageSessionTranscript
-	// One unpublished capture globally bounds staging disk to 256 MiB without
-	// blocking management dispatch/effect admission while the copy runs.
-	sessionCaptureSlot = make(chan struct{}, 1)
+	// At most four unpublished captures (one per subject, see reportLocks)
+	// bound staging disk to 1 GiB without blocking admission while copies run.
+	// Captures are deltas after a runtime's first, so slots turn over quickly.
+	sessionCaptureSlot = make(chan struct{}, 4)
 	// sessionCaptureSlotWait bounds how long one capture queues for the slot.
 	sessionCaptureSlotWait = 5 * time.Second
 )
@@ -449,17 +450,16 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	case <-ctx.Done():
 		return rpcFailed("report_capture_unavailable")
 	}
-	r.dispatchMu.Lock()
-	r.d.effectMu.Lock()
-	ctx = withEffectAdmission(ctx)
+	unlockSubject := r.reportLocks.lock(principal.SubjectID)
+	defer unlockSubject()
+	release, _ := lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitShared)
+	ctx = withAdmission(ctx, admitShared)
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		return rpcDenied("credential_invalid")
 	}
 	if err := r.authorizeSessionReport(ctx, principal, req); err != nil {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		if errors.Is(err, access.ErrDenied) {
 			return rpcDenied("report_access_denied")
 		}
@@ -469,18 +469,15 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	generation, live := r.d.permissions.generation(principal.SubjectID)
 	if err != nil || !ok || session.Archived || session.ID != principal.SubjectID ||
 		session.ClaudeID == "" || !live || generation == "" {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		return rpcFailed("report_runtime_unavailable")
 	}
 	if req.Fields[sessionreport.FieldRuntimeGeneration] != generation {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
+		release()
 		return rpcDenied("report_runtime_replaced")
 	}
 	source, err := openSessionTranscriptSource(session)
-	r.d.effectMu.Unlock()
-	r.dispatchMu.Unlock()
+	release()
 	if err != nil {
 		return rpcFailed(reportErrorCode(err))
 	}
@@ -493,10 +490,8 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	}
 	defer stage.Abort()
 
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
+	release, _ = lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitShared)
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return rpcFailed("report_capture_unavailable")
 	}

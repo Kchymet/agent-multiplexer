@@ -60,11 +60,11 @@ func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal
 // or revocation that crosses the read never receives the value. Failures carry
 // only a fixed code: no path, value or store detail reaches the session.
 func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
-	ctx = withEffectAdmission(ctx)
+	r.credentialMu.Lock()
+	defer r.credentialMu.Unlock()
+	release, _ := lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitShared)
+	defer release()
+	ctx = withAdmission(ctx, admitShared)
 	req := request.Call.AccessRequest()
 	s, err := r.centralCredentialSession(ctx, request.Principal, req)
 	if err != nil {
