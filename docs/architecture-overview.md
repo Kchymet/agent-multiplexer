@@ -19,10 +19,19 @@ which also explains the Harness-side roles, registration and pooling.
 ┌──────────────┴─────────────┐    ┌──────────────┴─────────────┐
 │ Harness control API        │    │ amux control API           │
 │ auth, fleet view, pools,   │    │ workgroups, worktrees,     │
-│ placement, provider tokens │    │ agent lifecycle            │
+│ placement, provider tokens │    │ agent lifecycle, provide   │
 └──────────────┬─────────────┘    └──────────────┬─────────────┘
-               ↕                                 ↕
-┌──────────────┴─────────────────────────────────┴─────────────┐
+               ↕ control · pool/provider verbs   ↕ control · amux provide
+               │ ┌─────────────────────────────┐ │
+               ├─┤ Compute-pool registration & ├─┤
+               │ │ discovery                   │ │
+               │ │ API: pool catalog, tokens,  │ │
+               │ │ owner/org access policy     │ │
+               │ │ wire: harnessproto v2 / TLS │ │
+               │ │ register, caps, compute flag│ │
+               │ └──────────────┬──────────────┘ │
+               ↕ Postgres       ↕ provider hub   ↕ same daemon (local)
+┌──────────────┴────────────────┴────────────────┴─────────────┐
 │ Compute broker                                               │
 │ manages sessions: durable event log, prompt and turn         │
 │ delivery, placement onto a backend, status back to clients   │
@@ -57,6 +66,14 @@ flow back toward the clients.
   accepting session controls. See
   [amux as a remote compute provider](remote-provider.md) and
   [Provider session, steering and runtime-event protocol](remote-provider-sessions.md).
+- **Registration and discovery are two surfaces, not one service.** On the
+  Harness control API, pools and enrollment tokens are created and listed
+  (`pool.*` and `provider.*` actions; the catalog lives in Harness's Postgres).
+  On the wire, `amux provide` presents that token to the broker over TLS and
+  advertises labels, features and the harnesses it can run; a machine
+  registered this way is itself a pool whose id is the `providerId` that
+  `amux doctor` prints. Grouped and organization pools are made on Harness,
+  not in amux. See [Compute pools and machines](remote-provider.md#compute-pools-and-machines).
 - **Session runtimes** such as Claude Code and Codex App Server run as
   processes on a backend. amux resolves them per agent kind and scopes each
   pane to its worktree with bubblewrap on Linux/WSL2 or Seatbelt on macOS; see
