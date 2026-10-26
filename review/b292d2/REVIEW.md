@@ -997,3 +997,14 @@ launch-less refusal.
 - **Fixture seam:** still inert in release (tag-only setter, nothing outside
   tests writes `FixtureOrigin`).
 - Exit-drain residual accepted by root as non-blocking.
+
+---
+
+## PR213 FINAL: signoff at `5e960e6`, conditional
+
+Conditions: the clean master merge only (#216/#218, which merged cleanly in
+the trial), and required CI green with the TUI flake rerun.
+
+Combined-tree evidence: vet and full suite pass; pressure 5/5; replacement
+race stress 0 violations; importer v3 probes pass; release seam inert; gate
+claims verified on #216; docs include the import gate hold.
