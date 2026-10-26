@@ -23,6 +23,8 @@ admission, `peer-report` is that session's own report stalled in its write,
 | ConcurrentReportsDuringSlowEffect/host-action | p50 1.3ms, max 102ms | p50 0.49ms, max 1.5–2.0ms (PR 4) |
 | ConcurrentReportsDuringSlowEffect/peer-report | p50 0.9ms, max 104ms | p50 0.45ms, max 2.7ms (PR 2) |
 | ConcurrentReportsDuringSlowEffect/reconcile | p50 1.3ms, max 102.5ms | p50 0.45–1.1ms, max 2.1–2.6ms (PR 3) |
+| ConcurrentReportsDuringSlowEffect/self-completion | p50 0.46ms, max 102.8ms | p50 0.43ms, max 2.0ms (frequent-paths slice) |
+| ConcurrentReportsDuringSlowEffect/account-sign-in | p50 1.1ms, max 102.5ms | p50 1.1ms, max 2.5ms (frequent-paths slice) |
 | SessionReportDispatch activity/shared | 0.25–0.3ms/op | 0.27ms/op |
 | SessionReportDispatch context/shared | 0.18–0.2ms/op | 0.19ms/op |
 
@@ -34,11 +36,20 @@ records which slow holders delay a report from session `a1`:
 | a2's report, stalled inside its write | no | PR 2 |
 | host `start` of a3, stalled in its effect | no | PR 4 |
 | host `start` of the workgroup root, stalled resolving its members | no | PR 4, workgroup-start slice |
-| host archive of a3 (a policy mutation: still exclusive), stalled stopping its runtime | yes | archive slice |
+| host archive of a3, stalled stopping its runtime | no | PR 4, archive slice |
+| one-key archive toggle of a3 (may restore: still exclusive) | yes | restore slice |
+| host `agent-set-repos` of a3, stalled in its git work | no | PR 4, repo slice |
+| host `add-repo`, stalled cloning | no | PR 4, repo slice |
+| the coordinator's own `add-agent` (through its mailbox), stalled creating | no | PR 4, session-originated slice |
+| a3's completion cleanup, stalled stopping its runtime | no | PR 4, completion slice |
+| archive of a1's own workgroup | yes, and a1 is then refused | correct: a1 is archived |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
 | host `new-workgroup`, stalled launching its coordinator | no | PR 4, creation slice |
+| host `start` of a3, stalled inside its runtime launch (`engine.Ensure`) | no | PR 7 (permission gate per subject) |
 | reconcile pass, stalled while it opens a3's mailbox | no | PR 3 |
+| a3 marking itself done (`amux agent done`), stalled archiving itself | no | PR 4, frequent-paths slice |
+| a console account sign-in step, stalled | no | PR 4, frequent-paths slice |
 
 ## What the global gate protects
 
@@ -62,15 +73,15 @@ check reads and its effect writes.
 | --- | --- | --- | --- | --- | --- |
 | 1 | `sessionRuntime.reconcile` (session_lifecycle.go), every 50ms tick and at start | both | host credential; all store sessions; each session's credential | host credential rotation; per session: credential renew/rotate, mailbox server open/close (`servers`, `initialized`, `serving`, `closing` maps, owned by the run goroutine), console accounts listener, revoke + `killRuntimeFor` since PR 3: no lock for the scan or the lock-free pre-check; gate shared + session(id) for each session it changes, rereading the row there; host credential under the gate shared. Tick passes try-acquire and leave a busy session to the next tick |
 | 2 | `sessionRuntime.dispatch`, report actions (activity, model, limits, permission-*) | gate shared + session(self) since PR 2 | authority `Valid`; own session row and its root's archive flag (`resolver.Lookup`, `lookupSession`); own runtime generation (`permissions`) | own hook-state file, own runtime-model file, own permission-observation journal (read-check-append); `accounts.ObserveClaude` (accounts state, flock'd) | session lock (self) |
-| 3 | `sessionRuntime.dispatch`, every other operation | since PR 5: restricted queries gate shared; `sessionScopedAction` actions (a coordinator steering a member) go to `handle`'s session admission after a shared pre-check; everything else both (exclusive by retry) | `policy.Authorize`: membership, grants, archive state across the caller's workgroup | restricted queries (read only); self-completion (archive self, `completions.begin`); `d.handle` for the canonical action | topology read + the locks of the action's targets (as for host actions) |
+| 3 | `sessionRuntime.dispatch`, every other operation | since PR 5: restricted queries gate shared; `sessionScopedAction` actions (a coordinator steering a member) go to `handle`'s session admission after a shared pre-check; self-completion `admitArchive` of the caller since the frequent-paths slice; everything else both (exclusive by retry) | `policy.Authorize`: membership, grants, archive state across the caller's workgroup | restricted queries (read only); self-completion (archive self, `completions.begin`); `d.handle` for the canonical action | topology read + the locks of the action's targets (as for host actions) |
 | 4 | `withFinalAdmission` (session_dispatch.go), twice per runtime-events page | gate shared since PR 5 | authority `Valid`, `policy.Authorize` | none: it gates disclosure | topology read + session lock of the paged subject |
 | 5 | `dispatchSessionCapture` (session_reports.go), two short admissions around the copy | gate shared + session(self) since PR 2 | as #2, plus the session's dir and Claude id | publishes the staged transcript of self | session lock (self) |
 | 6 | `dispatchCentralCredential` (central_credential.go) | gate shared + session(self) since PR 5 | own session row, accounts binding/profile, central token store | `accounts.Accept` (binding delivery state) | session lock (self) |
 | 7 | `dispatchCredential` (credential_broker.go) | gate shared + session(self) + `credentialMu` (leaf, serializes helper processes) since PR 5 | own session row | runs a keychain or GitHub credential helper process: slow and external | session lock (self) |
 | 8 | `Daemon.handle` (actions.go), all host actions and #3's actions | since PR 4: gate shared + session(id) for `sessionScopedAction`; otherwise both (exclusive by retry), unless already admitted | `revalidateDeferred` (caller's guard) | anything: store mutations through wsops, engine start/kill/restart, authority restore/regrant, account manage, steer, shutdown | per action: the locks of the resources it names (see Target model) |
 | 9 | `admitDeferredEffect` (steer.go), deferred start behind an accepted `prompt` | gate shared + session(id) since PR 4 | `revalidateDeferred` | `startAgent`, queue input on the instance | session lock of the target |
-| 10 | `accountCall` (accounts.go), non-status operations when not admitted | effectMu | caller guard | `readiness` cache clear, account attempts (`accountMu`), accounts state | account lock (today `accountMu`) |
-| 11 | `completionRegistry.finish` (session_lifecycle.go) | effectMu | completion ownership, archive flag | `RevokeCurrent`, `killRuntimeToken` | session lock (self) |
+| 10 | `accountCall` (accounts.go), non-status operations when not admitted | sign-in steps (login, poll, cancel, complete): gate shared + account(profile) since the frequent-paths slice; default, rebind, logout, disconnect: effectMu | caller guard | `readiness` cache clear, account attempts (`accountMu`), accounts state | account lock (today `accountMu`) |
+| 11 | `completionRegistry.finish` (session_lifecycle.go) | gate shared + session(self) since the completion slice | completion ownership, archive flag | `RevokeCurrent`, `killRuntimeToken` | session lock (self) |
 | 12 | `sessionRuntime.close` | dispatchMu | — | closes every server after all passes joined | none once the run goroutine owns shutdown |
 
 The central Codex token delivery (central_codex.go) already avoids the gate:
@@ -100,12 +111,13 @@ are and sit below every resource lock in the order.
 | `Daemon.subsMu` | snapshot subscribers |
 | `Daemon.persistMu` | live-agents file and `lastLive` |
 | `Daemon.authMu` | engine/codex instance kill and restart, `authPending`; taken by `killRuntimeFor`, `killEngineFor`, `killRuntimeToken`, auth reload |
-| `Daemon.accountMu` | account attempts/ceremonies |
+| `Daemon.accountMu` | account attempts/ceremonies; held for the in-memory steps, the accounts file update and Claude's credential save, so two profiles' steps still share it briefly |
+| `Daemon.accountLocks` (per profile) | one profile's sign-in steps (`admitAccount`), under the gate shared and above `accountMu`; never held with a session lock |
 | `Daemon.creationMu` | session creation (`wsops` worktree and row setup), under the gate shared; taken after any session lock, and released by a creation before it locks its new session |
 | `Daemon.credentialMu` | host credential helper processes (keychain, `gh`), below a session's admission |
 | `accountReadinessCache.mu` | cached account snapshot |
 | `Daemon.servingMu`, `Daemon.deferredMu` | host transports and deferred work admission |
-| `runtimePermissionGate.mu` | runtime generations and permission claims; `retireTokenAnd` runs its callback under it (called with `authMu` held) |
+| `runtimePermissionGate.mu` + per-subject locks | runtime generations and permission claims. Since PR 7 the subject lock is held across the callbacks (runtime creation in `publish`, kill in `retireAnd`/`retireTokenAnd`, delivery in `consume`), and `mu` only for map access. Before, one global `mu` was held across `engine.Ensure` and kills, so every runtime start or stop stalled every session's reports in `generation()`. Callers' locks (session, `authMu`) come before the subject lock |
 | `completionRegistry.mu` | completion entries |
 | `sessionEventPager.mu`, response budget `mu` | event paging state, mailbox response budget |
 | `FileAuthority.mu` (RW) | credential registry and replay ledger; `WithValid` holds it shared during a short callback |
@@ -185,8 +197,9 @@ transition `effectMu` becomes a read/write gate:
 - Converted holders take it in read mode, then their resource locks. They run
   in parallel with each other, and serialize only on shared resources.
 - `dispatchMu` stays exclusive for unconverted holders only. Converted holders
-  skip it: they never begin a completion, the one effect the restore drain
-  fences.
+  skip it. Self-completion, the one converted holder that begins a completion
+  (the effect the restore drain fences), is covered instead by the restore
+  cancelling the entry under the exclusive gate and by `finish`'s recheck.
 - A goroutine that serves other sessions (the reconcile tick) never queues for
   the gate or a session lock. It try-acquires and skips. A queued writer on a
   `sync.RWMutex` also stalls every new reader, so exclusive holders that may
@@ -229,8 +242,52 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      those (`startAgents`). Membership is not frozen by the shared gate: a
      creation adds members under `creationMu` alone. A member added after the
      resolution is started by its own creation, under its own lock.
-   - Next: archive and restore (workgroup locks), rename, then account manage
-     and completion `finish`.
+   - Archive slice, done: explicit archive (`set-archived true`), `rename`,
+     `delete` and `kill` of an agent or workgroup (`archiveScopedAction`) take
+     the gate shared plus the target's session lock and, for a root, every
+     member's. Archive and delete then take `creationMu` and re-resolve the
+     members; if a creation added one in between, they start again. So that
+     an archive or delete of a session principal cannot cross that principal's
+     guard, every shared holder whose check depends on a session principal
+     also locks it: restricted queries lock the caller, runtime-event
+     admission locks the caller and the subject, and a session-originated
+     scoped action or deferred steer locks the caller (`withGuardSubject`)
+     along with the target. The one-key toggle (it may restore) and restore
+     stay exclusive: restore drains completions under `dispatchMu`.
+   - Repo slice, done: `add-repo` (a clone plus a repo home session, so a
+     creation) and `agent-set-repos` of one agent (that agent's lock) run
+     under the gate shared plus `creationMu`, which also serializes their git
+     work with creations and deletions. `refresh` only wakes the poller and
+     takes no gate at all. `rm-repo` and `coordinator-set-repos` (they change
+     many sessions' authorization) stay exclusive.
+   - Session-originated slice, done: an action a session sends (a
+     coordinator creating, archiving, re-scoping, starting or steering a
+     member) takes the same per-resource admission as the host's
+     (`splitAction`), plus the caller's own session lock. The creation branch
+     locks the caller during the creation, then takes {caller, new session}
+     in one sorted acquisition to start it.
+   - Completion slice, done: completion cleanup (`finish`: revoke the
+     generation, then stop the runtime, whose kill can wait out the engine's
+     kill grace) takes only its subject's admission. A restore cancels the
+     entry before it takes the gate, and `finish` rechecks ownership under
+     its lock.
+   - Frequent-paths slice, done: an agent marking itself done
+     (`selfComplete`) takes `admitArchive`: the gate shared plus its own
+     lock, and for a coordinator its members' locks and `creationMu`, as a
+     host archive of it would. An agent's archive is one row write no
+     creation touches, so it skips `creationMu` and two agents completing
+     never wait on each other. It begins a completion without `dispatchMu`:
+     a restore cancels any entry registered since its drain once it holds
+     the exclusive gate, and `finish` rechecks ownership and the archive
+     flag under the session lock. Account sign-in steps (login, poll,
+     cancel, complete) take the gate shared plus their profile's lock
+     (`admitAccount`); deliveries already re-check account state against
+     the accounts CAS, and the codex login commit already ran outside the
+     gate. Default, rebind, logout and disconnect stay exclusive.
+   - Remaining, deliberately exclusive (rare admin paths, not worth the
+     risk): restore and the one-key toggle, move, `coordinator-set-repos`,
+     `rm-repo`, auth reload, codex login, the other account operations and
+     shutdown.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is
@@ -239,5 +296,10 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
    #210). A session-originated `sessionScopedAction` goes to `handle`'s session
    admission, which reruns the caller's guard there. Remaining: other
    session-originated actions follow the host action classification (PR 4
-   slices). `accountCall` (#10) moves with account manage.
+   slices). `accountCall` (#10): sign-in steps moved in the frequent-paths
+   slice; its admin operations stay exclusive.
 6. Delete the gate and `dispatchMu`.
+7. The runtime permission gate: per-subject locks across its callbacks,
+   `mu` for the map only. Found while slicing archive: the gate's global
+   mutex was a second daemon-wide lock behind every runtime start and stop.
+   Done.

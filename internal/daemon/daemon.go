@@ -65,6 +65,9 @@ type Daemon struct {
 	// agentsUnder resolves an id (agent or workgroup root) to the agent ids whose
 	// process should run. Defaults to wsops.AgentIDsUnder; overridable in tests.
 	agentsUnder func(id string) ([]string, error)
+	// dispatch applies a store-backed host action (wsops.Dispatch); tests
+	// override it to stall inside an action's own work.
+	dispatch func(ctx context.Context, a core.Action, stopEngine func(id string)) (string, error)
 
 	// codex supervises structured-control Codex sessions (AGE-181): a background
 	// App Server per session, owned by the daemon, independent of any pane. It is
@@ -75,6 +78,11 @@ type Daemon struct {
 	// centralCodex owns the central Codex home when codex.auth is central.
 	centralCodex *centralCodex
 	accountMu    sync.Mutex
+	// accountLocks orders one account profile's sign-in steps (admitAccount).
+	accountLocks keyedLocks
+	// beforeAccountStep, when set, runs inside an account operation's
+	// admission; tests stall it there.
+	beforeAccountStep func(profileID string)
 	// readiness is the last account snapshot, reused by creation preflight.
 	readiness       accountReadinessCache
 	accountAttempts map[string]*accountAttempt
@@ -222,6 +230,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		self:           self,
 		resolve:        panespec.Resolve,
 		agentsUnder:    wsops.AgentIDsUnder,
+		dispatch:       wsops.Dispatch,
 		subs:           map[chan core.Snapshot]struct{}{},
 		pollNow:        make(chan struct{}, 1),
 		liveAgentsPath: core.LiveAgentsPath(),

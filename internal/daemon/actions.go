@@ -31,6 +31,14 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	if (a.Action == "" || a.Action == core.ActionRefresh) && !effectAdmissionHeld(ctx) {
+		// A refresh only wakes the poller; it reads and changes nothing.
+		if err := revalidateDeferred(ctx); err != nil {
+			return fail("authorization changed before execution: %v", err)
+		}
+		d.triggerPoll()
+		return ok()
+	}
 	// releaseCreation is set while a creation holds creationMu under the shared
 	// gate; the new session starts under its own lock after it is released.
 	var releaseCreation func()
@@ -43,12 +51,58 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// Every policy mutation still takes the gate exclusively, so the guard
 		// below cannot be crossed by one.
 		waitStart := time.Now()
-		release := d.admitSession(id)
+		release := d.admitSessions(id, guardSubject(ctx))
 		defer release()
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
 				log.Printf("action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if ids, creation, ok := archiveScopedAction(a); ok && !effectAdmissionHeld(ctx) {
+		// Archiving, renaming or deleting a session changes only that session
+		// (and a root's members), so it locks exactly those, plus the caller's
+		// session for its guard. Every other check on them runs under their
+		// locks or the exclusive gate. Archive and delete also hold creationMu
+		// so no member is added meanwhile; if one was added before it was
+		// taken, the locked set is stale and the pass starts again.
+		waitStart := time.Now()
+		release := sync.OnceFunc(d.admitSessions(append(ids, guardSubject(ctx))...))
+		defer release()
+		if creation {
+			d.creationMu.Lock()
+			if current, found := sessionAndMembers(a.ID); !found || !sameMembers(ids, current) {
+				d.creationMu.Unlock()
+				release()
+				if !found {
+					return fail("session %s not found", a.ID)
+				}
+				return d.handle(ctx, a)
+			}
+			defer d.creationMu.Unlock()
+		}
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if ids, ok := repoScopedAction(a); ok && !effectAdmissionHeld(ctx) {
+		// Tracking a repo or re-scoping one agent's repos changes no other
+		// session's authorization: removing a repo and changing a coordinator's
+		// repo ceiling stay exclusive. The git work serializes with creations
+		// and deletions on creationMu.
+		waitStart := time.Now()
+		release := d.admitSessions(append(ids, guardSubject(ctx))...)
+		defer release()
+		d.creationMu.Lock()
+		defer d.creationMu.Unlock()
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held repo work %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -66,7 +120,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		if len(ids) == 0 {
 			return fail("no agent to start for %q", a.ID)
 		}
-		unlock := d.sessionLocks.lock(ids...)
+		unlock := d.sessionLocks.lock(append(ids, guardSubject(ctx))...)
 		defer unlock()
 		lockedMembers = ids
 		admitted := time.Now()
@@ -77,16 +131,23 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			}
 		}()
 	} else if creationAction(a) && !effectAdmissionHeld(ctx) {
-		// Creating a session changes no existing session's authorization:
-		// archive, grants and membership moves are exclusive, so they cannot
-		// cross it. Creations serialize among themselves on creationMu, which
-		// also keeps reconcile from opening a half-created session's mailbox.
+		// Creating a session changes no existing session's authorization.
+		// Grants and membership moves are exclusive, and archive and delete
+		// hold creationMu, so none crosses it. Creations serialize among
+		// themselves on creationMu, which also keeps reconcile from opening a
+		// half-created session's mailbox. A guarded caller's session is locked
+		// so an archive of the caller cannot cross its guard.
 		waitStart := time.Now()
-		release := d.admitShared()
+		release := sync.OnceFunc(d.admitSessions(guardSubject(ctx)))
 		defer release()
 		d.creationMu.Lock()
 		var once sync.Once
-		releaseCreation = func() { once.Do(d.creationMu.Unlock) }
+		releaseCreation = func() {
+			once.Do(func() {
+				d.creationMu.Unlock()
+				release()
+			})
+		}
 		defer releaseCreation()
 		admitted := time.Now()
 		defer func() {
@@ -146,6 +207,13 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.lockEffectExclusive()
 		defer d.effectMu.Unlock()
 		admitted = time.Now()
+		if d.sessionRPC != nil {
+			if restore, _ := hostRestoreRequested(a); restore {
+				// A self-completion takes no dispatchMu, so one may have registered
+				// since the drain; finish rechecks ownership and skips it.
+				d.sessionRPC.completions.cancel(a.ID)
+			}
+		}
 		ctx = withEffectAdmission(ctx)
 	}
 	if err := revalidateDeferred(ctx); err != nil {
@@ -248,7 +316,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		} else if restore {
 			newID, err = d.restoreSessionAccess(ctx, a)
 		} else {
-			newID, err = wsops.Dispatch(ctx, a, d.killEngineFor)
+			newID, err = d.dispatch(ctx, a, d.killEngineFor)
 		}
 		if err != nil {
 			return fail("%v", err)
@@ -265,10 +333,13 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			// startEngineFor's root fan-out to the members.
 			start := func() error { return d.startAgent(ctx, newID) }
 			if releaseCreation != nil {
+				// Start under the new session's admission, taken together with
+				// the caller's in one sorted acquisition: adding a key to a
+				// held set could deadlock against a workgroup archive.
 				releaseCreation()
 				start = func() error {
-					unlock := d.sessionLocks.lock(newID)
-					defer unlock()
+					release := d.admitSessions(newID, guardSubject(ctx))
+					defer release()
 					return d.startAgent(ctx, newID)
 				}
 			}

@@ -100,10 +100,11 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
 	if req.Route == access.RouteQuery {
-		// Restricted queries only read. The shared gate is enough: every policy
-		// mutation takes it exclusively, so none lands between this
-		// authorization and the disclosure.
-		release := r.d.admitShared()
+		// Restricted queries only read. The shared gate keeps exclusive policy
+		// mutations out, and the caller's session lock keeps out an archive or
+		// delete of the caller, so none lands between this authorization and
+		// the disclosure.
+		release := r.d.admitSessions(request.Principal.SubjectID)
 		defer release()
 		if denied, ok := r.admissionCheck(ctx, request.Principal, req); !ok {
 			return denied, nil
@@ -117,14 +118,18 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		}
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 	}
-	guarded := withAccessGuard(ctx, func(checkCtx context.Context) error {
+	guarded := withGuardSubject(withAccessGuard(ctx, func(checkCtx context.Context) error {
 		return r.finalAuthorize(checkCtx, request.Principal, req)
-	})
-	if _, scoped := sessionScopedAction(action); scoped && !selfCompletionShape(request.Principal, action) {
-		// A start, restart or steer of one session (a coordinator prompting its
-		// member, say) takes only the target's admission inside handle, which
-		// reruns the guard there, immediately before the effect. Check once
-		// first so a denied caller gets the same codes as on the exclusive path.
+	}), request.Principal.SubjectID)
+	if selfCompletionShape(request.Principal, action) {
+		return r.selfComplete(ctx, request, req, action)
+	}
+	if splitAction(action) {
+		// An action handle admits per resource (a coordinator prompting,
+		// creating or archiving a member, say) takes only those locks inside
+		// handle, plus the caller's, and reruns the guard there, immediately
+		// before the effect. Check once first so a denied caller gets the same
+		// codes as on the exclusive path.
 		release := r.d.admitShared()
 		denied, ok := r.admissionCheck(ctx, request.Principal, req)
 		release()
@@ -146,36 +151,47 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return denied, nil
 	}
 
-	if selfCompletionShape(request.Principal, action) {
-		if !r.isSelfCompletion(ctx, request.Principal, action) {
-			// Never fall through to the ordinary wsops dispatch for a claimed
-			// self-completion: that path stops the runtime before its response.
-			return rpcDenied("completion_not_current"), nil
-		}
-		// Completion is deliberately not d.handle/wsops.Dispatch: those stop the
-		// runtime before the durable response and its receipt can be observed.
-		if _, err := r.applyResult(ctx, action); err != nil {
-			archived, known := r.completionArchiveState(ctx, action.ID)
-			if archived || !known {
-				// The mutation may already be committed even though its caller saw an
-				// error. Keep the narrow archived receipt window and, independently
-				// of transport hooks, guarantee bounded runtime stop/revocation.
-				r.d.triggerPoll()
-				r.completions.begin(request.Principal, request.RequestID, action.ID)
-				return rpcIndeterminate("completion_commit_uncertain"), nil
-			}
-			return rpcFailed("completion_failed"), nil
-		}
-		r.d.triggerPoll()
-		hooks := r.completions.begin(request.Principal, request.RequestID, action.ID)
-		body, err := r.encodeResult(core.Result{Type: "result", OK: true})
-		if err != nil {
-			return rpcFailed("encode_failed"), nil
-		}
-		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body, Receipt: hooks}, nil
-	}
-
 	return r.actionResult(r.d.handle(guarded, action))
+}
+
+// selfComplete is an agent marking itself done (`amux agent done`). It archives
+// only the caller (with its members, for a coordinator), so it runs under
+// those sessions' locks and creationMu, as a host archive does, not the
+// exclusive gate. It begins a completion without dispatchMu: a restore that
+// drained before this registers cancels the entry once it holds the gate, and
+// finish rechecks ownership and the archive flag under the session lock.
+func (r *sessionRuntime) selfComplete(ctx context.Context, request sessionrpc.DispatchRequest, req access.Request, action core.Action) (sessionrpc.DispatchResult, error) {
+	release := r.d.admitArchive(action.ID)
+	defer release()
+	if denied, ok := r.admissionCheck(ctx, request.Principal, req); !ok {
+		return denied, nil
+	}
+	if !r.isSelfCompletion(ctx, request.Principal, action) {
+		// Never fall through to the ordinary wsops dispatch for a claimed
+		// self-completion: that path stops the runtime before its response.
+		return rpcDenied("completion_not_current"), nil
+	}
+	// Completion is deliberately not d.handle/wsops.Dispatch: those stop the
+	// runtime before the durable response and its receipt can be observed.
+	if _, err := r.applyResult(ctx, action); err != nil {
+		archived, known := r.completionArchiveState(ctx, action.ID)
+		if archived || !known {
+			// The mutation may already be committed even though its caller saw an
+			// error. Keep the narrow archived receipt window and, independently
+			// of transport hooks, guarantee bounded runtime stop/revocation.
+			r.d.triggerPoll()
+			r.completions.begin(request.Principal, request.RequestID, action.ID)
+			return rpcIndeterminate("completion_commit_uncertain"), nil
+		}
+		return rpcFailed("completion_failed"), nil
+	}
+	r.d.triggerPoll()
+	hooks := r.completions.begin(request.Principal, request.RequestID, action.ID)
+	body, err := r.encodeResult(core.Result{Type: "result", OK: true})
+	if err != nil {
+		return rpcFailed("encode_failed"), nil
+	}
+	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body, Receipt: hooks}, nil
 }
 
 // admissionCheck is the credential and policy check every dispatch repeats
@@ -224,10 +240,11 @@ func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal ac
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 }
 
-// withFinalAdmission only checks: it gates a disclosure, so the shared gate is
-// enough to keep every policy mutation (all exclusive) from crossing it.
+// withFinalAdmission only checks: it gates a disclosure. The shared gate keeps
+// exclusive policy mutations out, and the caller's and subject's session locks
+// keep out an archive or delete of either.
 func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
-	release := r.d.admitShared()
+	release := r.d.admitSessions(principal.SubjectID, req.ID)
 	defer release()
 	return r.finalAuthorize(ctx, principal, req)
 }
