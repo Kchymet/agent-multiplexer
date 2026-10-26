@@ -236,6 +236,32 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 	if term.Viewport().Offset != 0 || strings.Contains(ansi.Strip(m.renderTopBorder()), "↑") || !strings.Contains(frame(), draft) {
 		t.Fatal("live chord failed to restore exact draft / clear indicator")
 	}
+	// Recover the same previously rendered content with half-page keys, then
+	// walk back to the unchanged composer without emitting any child bytes.
+	before = input.bytes()
+	found = false
+	for i := 0; i < 1000; i++ {
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+		if strings.Contains(frame(), "CODEX-HISTORY-070") {
+			found = true
+			break
+		}
+		v := term.Viewport()
+		if v.Offset == 0 || v.Offset == v.HistoryLen {
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Ctrl+U did not recover rendered marker: %+v\n%s", term.Viewport(), frame())
+	}
+	save("half-up-history")
+	for i := 0; i < 1000 && term.Viewport().Offset > 0; i++ {
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+	}
+	if term.Viewport().Offset != 0 || !strings.Contains(frame(), draft) || !bytes.Equal(before, input.bytes()) {
+		t.Fatal("Ctrl+U/D changed draft/input or failed to return live")
+	}
+	save("half-down-live")
 	m.handleKey(tea.KeyMsg{Type: tea.KeyPgUp, Alt: true})
 	if term.Viewport().Offset == 0 {
 		t.Fatal("TUI page-up did not scroll")
@@ -265,5 +291,5 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 	}
 	await("new child output returns live", func() bool { return term.Viewport().Offset == 0 && strings.Contains(frame(), "NEXT-HISTORY-004") })
 	save("output-live")
-	t.Logf("real Codex 0.157.1 %s: recovered rendered marker 070; draft preserved; local wheel sent no input; indicator and input/output live returns verified", mode)
+	t.Logf("real Codex 0.157.1 %s: recovered rendered marker 070; draft preserved; local wheel and Ctrl+U/D sent no input; half-page keys recovered earlier content and restored draft; indicator and input/output live returns verified", mode)
 }

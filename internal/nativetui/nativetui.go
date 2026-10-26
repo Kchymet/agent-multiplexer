@@ -452,6 +452,22 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.switchTab(tabEditor)
 	case keymap.TabTerm:
 		return m, m.switchTab(tabTerminal)
+	case keymap.ScrollHalfUp, keymap.ScrollHalfDown:
+		older := m.keys.Action(k.String()) == keymap.ScrollHalfUp
+		if m.focus == focusSidebar {
+			step := m.halfPage()
+			if older {
+				step = -step
+			}
+			m.page(step)
+		} else if t := m.cur(); t != nil {
+			delta := -1
+			if older {
+				delta = 1
+			}
+			t.ScrollHalfPages(delta)
+		}
+		return m, nil
 	case keymap.ScrollUp, keymap.ScrollDown, keymap.ScrollLive:
 		if t := m.cur(); t != nil {
 			switch m.keys.Action(k.String()) {
@@ -501,10 +517,6 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(-1)
 	case "down", "j":
 		m.move(1)
-	case "ctrl+u": // half page up (vim/less style, clamps at the ends)
-		m.page(-m.halfPage())
-	case "ctrl+d": // half page down
-		m.page(m.halfPage())
 	case "pgup", "ctrl+b": // full page up
 		m.page(-m.pageStep())
 	case "pgdown", "ctrl+f": // full page down
