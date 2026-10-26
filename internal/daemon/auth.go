@@ -79,7 +79,8 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 			delete(d.authPending, k)
 			continue
 		}
-		d.captureRestart(k).apply(&spec)
+		record := d.captureRestart(k)
+		d.restartIntent(startIntent{record: &record, resumeGoal: true}, &spec)
 		dir, env, argv, err := d.resolve(spec, k.Tab)
 		if err != nil {
 			log.Printf("amux: auth reload %s: %v", k.AgentID, err)

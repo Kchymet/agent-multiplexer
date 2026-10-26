@@ -1070,3 +1070,30 @@ func TestSteerPromptStartsTheCoordinator(t *testing.T) {
 		t.Fatal("start <root> did not start its member")
 	}
 }
+
+// TestSteerNeutralizesComposerTriggers pins that typed steering text can never
+// run a Claude composer command: a leading "/" (slash command) or "!" (bash
+// mode) gets a space in front, while the same characters later in the text,
+// and other leading characters, are typed unchanged.
+func TestSteerNeutralizesComposerTriggers(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	in := eng.running("a1")
+	cases := map[string]string{
+		"/clear the cache":     " /clear the cache",
+		"!rm -rf build":        " !rm -rf build",
+		"run /clear\n!then":    "run /clear\\\r!then",
+		"#note and @README.md": "#note and @README.md",
+		" /already spaced":     " /already spaced",
+	}
+	for text, want := range cases {
+		before := len(in.sequences)
+		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerInterject, core.SteerText: text}}); err != nil {
+			t.Fatal(err)
+		}
+		steps := in.sequences[before]
+		if got := string(steps[0].Bytes); got != want {
+			t.Errorf("%q typed as %q, want %q", text, got, want)
+		}
+	}
+}

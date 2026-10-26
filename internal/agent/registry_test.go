@@ -190,3 +190,20 @@ func TestHarnessModelsDiscovered(t *testing.T) {
 		t.Errorf("claude DefaultModel() = %q, want opus regardless of extras", got)
 	}
 }
+
+// A resumed launch submits the host's continuation: the generic prompt by
+// default, or the one the host chose (a goal coordinator's goal-aware one).
+func TestResumedExtraUsesHostContinuation(t *testing.T) {
+	if got := resumedExtra(LaunchRequest{}, "--resume", "c1"); !reflect.DeepEqual(got, []string{"--resume", "c1"}) {
+		t.Fatalf("no resume: %v", got)
+	}
+	if got := resumedExtra(LaunchRequest{ResumeWork: true}, "--resume", "c1"); !reflect.DeepEqual(got, []string{"--resume", "c1", ResumeWorkPrompt}) {
+		t.Fatalf("default continuation: %v", got)
+	}
+	if got := resumedExtra(LaunchRequest{ResumeWork: true, ResumePrompt: " continue the goal "}, "--continue"); !reflect.DeepEqual(got, []string{"--continue", "continue the goal"}) {
+		t.Fatalf("host continuation: %v", got)
+	}
+	if got := resumedExtra(LaunchRequest{ResumePrompt: "continue the goal"}); got != nil {
+		t.Fatalf("a continuation without resume intent was submitted: %v", got)
+	}
+}

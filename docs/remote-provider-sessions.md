@@ -376,7 +376,9 @@ a 100ms wait, then Enter; this prevents adjacent commands from mixing during
 the wait. A bracketed paste would reach the model as `<pasted_content>`, which
 Claude tells it to treat as material the user did not write, so an
 orchestrator's directive would lose its authority. Tabs are sent as spaces and
-other control characters are refused. Startup settling also occupies this FIFO.
+other control characters are refused. Because typing goes through the composer,
+text whose first character is `/` (slash command) or `!` (bash mode) is sent
+with a leading space so it stays a prompt. Startup settling also occupies this FIFO.
 `stop` sends the runtime's own interrupt key. For a runtime whose capability is
 true, `permission` uses its authenticated native control mechanism (Codex's
 structured supervisor today). That is an implementation
