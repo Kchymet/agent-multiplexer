@@ -15,10 +15,12 @@ Sandbox rules still apply: stay on your `amux/…` branch, keep every edit insid
 your worktree, and never push to the default branch.
 
 The lifecycle this loop serves: open (draft optional while iterating) → CI green
-→ review addressed → **`gh pr ready <n>` as the final step** → report it ready for
-review → the user merges (unless your task explicitly authorizes you to merge).
-"Do not merge" means no `gh pr merge` and no auto-merge — it does **not** mean
-"keep the PR draft". A finished PR left in draft is an incomplete task.
+→ **`gh pr ready <n>`** and report it ready for review → keep babysitting (CI,
+review feedback, conflicts) → **merge, the final step** — done by the user unless
+they (or the task) explicitly authorize you to merge. Marking ready is the
+hand-off to review, not the end of babysitting. "Do not merge" means no
+`gh pr merge` and no auto-merge — it does **not** mean "keep the PR draft". A
+finished PR left in draft is an incomplete task.
 
 ## The loop
 
@@ -31,7 +33,9 @@ until the exit condition below:
    gh pr view <n> --json state,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,reviews
    ```
 
-2. **Get CI green** (step 1 below).
+2. **Get CI green** (step 1 below). Once the code is complete and CI is green,
+   mark the PR ready for review if it is still a draft (`gh pr ready <n>`) and
+   report it ready — then keep looping.
 3. **Read and triage review feedback** (step 2 — the important one).
 4. **Address what you accepted; reply to the rest** (step 3).
 5. **Resolve conflicts if the base moved** (step 4).
@@ -142,30 +146,32 @@ preserve the combined intent.
 
 ## Exit condition — when babysitting is done
 
-Stop the loop when **all** hold:
+Babysitting is done when **the PR is merged** — by the user, or by you if
+you're authorized. The merge is the final step of the lifecycle.
 
-- CI is green.
-- Every review thread is resolved — accepted-and-addressed or declined-with-a-reason.
-- The PR is mergeable (no conflicts) and, where the repo requires it, approved.
+When a task session has to stop before the merge, it may stop only when **all**
+hold, and then reports the PR as ready-for-review and green with nothing
+outstanding:
 
-Then:
-
-- **Mark it ready for review.** If the PR is a draft, take it out of draft now —
-  this is the final step of the work, whoever merges:
+- The PR is marked ready for review, not draft:
 
   ```sh
   gh pr ready <n>
   gh pr view <n> --json isDraft -q .isDraft   # must print false
   ```
 
-  Never leave a finished PR in draft, and never write "keep this PR draft" (or
-  similar) into the PR body or your report.
+- CI is green.
+- Every review thread is resolved — accepted-and-addressed or declined-with-a-reason.
+- The PR is mergeable (no conflicts) and, where the repo requires it, approved.
+
+Never leave a finished PR in draft, and never write "keep this PR draft" (or
+similar) into the PR body or your report.
+
 - **Merge only if you're authorized to.** Merging is an outward, hard-to-reverse
-  action. Merge autonomously **only** when the task explicitly told you to (e.g.
-  an autonomous PR loop whose policy is "merge approved PRs"). Otherwise, report
-  that the PR is green and ready for review and let the human merge. Not merging
-  means not running `gh pr merge` and not enabling auto-merge — it does not mean
-  leaving the PR draft.
+  action. Merge autonomously **only** when the user or the task explicitly told
+  you to (e.g. an autonomous PR loop whose policy is "merge approved PRs").
+  Otherwise the user merges. Not merging means not running `gh pr merge` and not
+  enabling auto-merge — it does not mean leaving the PR draft.
 - When you do merge, use the repo's convention (this project squash-merges):
 
   ```sh
@@ -176,6 +182,7 @@ Then:
   can't fix, a design disagreement — stop and report it clearly with the specific
   blocker and what you tried. Don't churn.
 
-Report the outcome plainly: merged (with URL), or ready-for-human (with URL,
-confirming it is marked ready for review — not draft), or blocked (with why; if
-it is still draft, say why). Don't claim done if it isn't.
+Report the outcome plainly: merged (with URL), or ready-for-review (with URL,
+confirming it is marked ready for review — not draft — green, with nothing
+outstanding, awaiting the user's merge), or blocked (with why; if it is still
+draft, say why). Don't claim done if it isn't.

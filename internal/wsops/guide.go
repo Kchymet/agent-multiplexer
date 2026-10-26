@@ -121,11 +121,13 @@ babysitting it: watching CI, weighing review feedback on its merits, and
 resolving conflicts) so you take a change all the way to merged, not just opened.
 
 The PR lifecycle is: open it (draft only while the work is genuinely still in
-progress) → get CI green → address review feedback → mark it ready with
-`+"`gh pr ready <n>`"+` as the final step → report it ready for review, with its URL.
-The user merges unless your task explicitly authorizes you to. "Do not merge"
-means do not run `+"`gh pr merge`"+` and do not enable auto-merge — it never means
-"keep the PR draft". A finished PR left in draft is an incomplete task.
+progress) → get CI green → mark it ready with `+"`gh pr ready <n>`"+` and report it
+ready for review, with its URL → keep babysitting (CI, review feedback,
+conflicts) → merge, the final step, which the user does unless they or your task
+explicitly authorize you to. Marking ready is the hand-off to review, not the
+end. "Do not merge" means do not run `+"`gh pr merge`"+` and do not enable
+auto-merge — it never means "keep the PR draft". A finished PR left in draft is
+an incomplete task.
 `, repos, s.Branch)
 }
 
@@ -299,9 +301,11 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
   pull request; review its authenticated session view and PR evidence, not only
-  the member's summary. A member's PR is finished only when it is open, green,
-  review addressed, and marked ready for review (`+"`gh pr ready <n>`"+`) — a
-  finished PR left in draft is incomplete work, so send it back. "Do not merge" /
+  the member's summary. A member marks its PR ready for review
+  (`+"`gh pr ready <n>`"+`) once the code is complete and CI is green, then keeps
+  babysitting (CI, review feedback, conflicts) until the merge, which the user
+  does unless told otherwise — a finished PR left in draft is incomplete work,
+  so send it back. "Do not merge" /
   "the user merges" means no `+"`gh pr merge`"+` and no auto-merge; it never means
   "keep the PR draft". Say so when you dispatch PR work.
 

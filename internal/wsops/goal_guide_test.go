@@ -135,12 +135,16 @@ func TestMemberGuideMentionsNoGoals(t *testing.T) {
 }
 
 // Agents read "the user merges" as "keep the PR draft" and left finished PRs
-// in draft; the member guide must say marking ready is the final step and that
-// not merging never implies draft.
+// in draft; the member guide must say to mark the PR ready once green, keep
+// babysitting, leave the final merge to the user, and that not merging never
+// implies draft.
 func TestMemberGuideEndsPRLifecycleReadyForReview(t *testing.T) {
 	guide := strings.Join(strings.Fields(memberGuide(store.Session{ID: "m1", RootID: "wg1", Agent: "claude", Branch: "amux/wg1-m1"})), " ")
 	for _, want := range []string{
-		"`gh pr ready <n>` as the final step",
+		"mark it ready with `gh pr ready <n>` and report it ready for review",
+		"keep babysitting (CI, review feedback, conflicts)",
+		"merge, the final step, which the user does",
+		"Marking ready is the hand-off to review, not the end.",
 		"do not enable auto-merge",
 		"it never means \"keep the PR draft\"",
 		"A finished PR left in draft is an incomplete task.",
@@ -158,7 +162,7 @@ func TestCoordinatorGuideRequiresReadyMemberPRs(t *testing.T) {
 		root := store.Session{ID: "wg1", Name: "payments", Agent: kind, Dir: "/sandbox/wg1"}
 		guide := strings.Join(strings.Fields(coordinatorGuide(root)), " ")
 		for _, want := range []string{
-			"marked ready for review (`gh pr ready <n>`)",
+			"marks its PR ready for review (`gh pr ready <n>`) once the code is complete and CI is green",
 			"a finished PR left in draft is incomplete work",
 			"it never means \"keep the PR draft\"",
 			"every member PR it produced is green and marked ready for review",

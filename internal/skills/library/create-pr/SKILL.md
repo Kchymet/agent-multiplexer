@@ -13,10 +13,11 @@ Keep two lifecycles distinct:
 
 - **The PR** is done when it's merged (or you've hit something only a human can
   decide, and said so). The **babysit-pr** skill drives that.
-- **The amux session** — if it's a single-task session — is done once its PR is
-  open, green, and marked ready for review (not draft), because producing that PR
-  was the whole point. Phase 5 marks it done; the user (or a separate PR-review
-  loop) carries the PR to merge.
+- **The amux session** — if it's a single-task session — may stop before the
+  merge once its PR is open, green, marked ready for review (not draft), and has
+  no outstanding review feedback, because producing that PR was the whole point.
+  Phase 5 marks it done; the user (or a separate PR-review loop) carries the PR
+  to merge.
 
 ## The PR lifecycle — read this first
 
@@ -24,12 +25,15 @@ Every PR you ship goes through the same five steps, in order:
 
 1. **Open it.** Opening as a draft is optional, and only while the work is
    genuinely still in progress.
-2. **Babysit CI until green** — fix failures, don't walk away from red.
-3. **Address review feedback** — accept-and-fix or decline-with-a-reason.
-4. **Mark it ready for review — the final step:** `gh pr ready <n>`. Then state
-   in your report that the PR is ready for review, with its URL.
-5. **Leave the merge to the user**, unless your task explicitly authorizes you to
-   merge.
+2. **Get CI green** — fix failures, don't walk away from red.
+3. **Mark it ready for review** — `gh pr ready <n>` — as soon as the code is
+   complete and CI is green, and say in your report that the PR is ready for
+   review, with its URL. This is the hand-off to review, not the end.
+4. **Keep babysitting after it's ready** — fix CI regressions, address review
+   feedback as it appears (accept-and-fix or decline-with-a-reason), resolve
+   merge conflicts.
+5. **The final step is the merge.** The user merges unless they (or the task)
+   say otherwise; merge yourself only when explicitly authorized.
 
 "Do not merge" / "the user merges" means: do not run `gh pr merge` and do not
 enable auto-merge. It **never** means "keep the PR draft". A finished PR left in
@@ -172,24 +176,29 @@ PR from being merged. Never put "keep this PR draft" or similar in the PR body.
 The PR is open, but the *change* isn't landed. Two paths, depending on who owns
 merging:
 
-- **If a separate PR-review loop owns merging** (this project may run one — it
-  reviews open PRs and merges the clean ones), the deliverable of a task session
-  is still an open, green, **ready-for-review (non-draft) PR**. Get CI green (see
-  babysit-pr step 1), address any review feedback that has arrived, run
-  `gh pr ready <n>`, then go to Phase 5. A review loop owning the merge is
-  **not** a reason to leave the PR draft — a draft PR is invisible to that loop.
-- **If this session is responsible for seeing the PR through** (you were told to,
-  there's no review loop, or it's a long-lived loop session), follow the
-  **babysit-pr** skill fully: watch CI, critically evaluate review feedback,
-  address what's worth addressing, resolve conflicts, and mark it ready. Merge
-  only if your task explicitly authorizes it; otherwise the user merges.
-
-Either way, don't walk away from a red PR, and finish by marking it ready:
+Either way, as soon as the code is complete and CI is green (babysit-pr step 1),
+mark the PR ready for review and report it ready, with its URL:
 
 ```sh
 gh pr ready <n>       # safe to re-run if it is already ready
 gh pr view <n> --json isDraft -q .isDraft   # must print false
 ```
+
+Then keep babysitting — CI regressions, review feedback, conflicts — until it
+merges or this session has to stop:
+
+- **If a separate PR-review loop owns merging** (this project may run one — it
+  reviews open PRs and merges the clean ones), the deliverable of a task session
+  is still an open, green, **ready-for-review (non-draft) PR**. Address any review
+  feedback that has arrived, then go to Phase 5. A review loop owning the merge
+  is **not** a reason to leave the PR draft — a draft PR is invisible to that
+  loop.
+- **If this session is responsible for seeing the PR through** (you were told to,
+  there's no review loop, or it's a long-lived loop session), follow the
+  **babysit-pr** skill fully: watch CI, critically evaluate review feedback,
+  address what's worth addressing, and resolve conflicts until the PR merges.
+  The merge is the final step; merge yourself only if your task explicitly
+  authorizes it, otherwise the user merges.
 
 Not merging is not the same as staying draft: "do not merge" means no
 `gh pr merge` and no auto-merge, nothing more.
@@ -197,7 +206,8 @@ Not merging is not the same as staying draft: "do not merge" means no
 ## Phase 5 — Finish the amux session
 
 A **task-driven member** amux agent session exists to produce one change. Once its PR is
-open, green, and marked ready for review, the session's job is finished, so mark
+open, green, marked ready for review, and has no outstanding feedback, the
+session's job is finished, so mark
 it done to clear it from the active rail. This is reversible — it archives, it does not delete.
 
 **Only do this when all three hold:**

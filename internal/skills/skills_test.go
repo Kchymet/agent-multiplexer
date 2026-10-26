@@ -111,12 +111,16 @@ func TestInstalledPRSkillsMarkPRReady(t *testing.T) {
 	}
 	for skill, wants := range map[string][]string{
 		"create-pr": {
-			"Mark it ready for review — the final step:** `gh pr ready <n>`",
+			"**Mark it ready for review** — `gh pr ready <n>` — as soon as the code is complete and CI is green",
+			"**Keep babysitting after it's ready**",
+			"**The final step is the merge.**",
 			"It **never** means \"keep the PR draft\"",
 			"open, green, **ready-for-review (non-draft) PR**",
 		},
 		"babysit-pr": {
-			"**`gh pr ready <n>` as the final step**",
+			"**`gh pr ready <n>`** and report it ready for review → keep babysitting",
+			"**merge, the final step**",
+			"Babysitting is done when **the PR is merged**",
 			"it does **not** mean \"keep the PR draft\"",
 			"confirming it is marked ready for review — not draft",
 		},
