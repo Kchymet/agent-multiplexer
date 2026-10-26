@@ -169,6 +169,9 @@ if printf bad > "$GIT_CONFIG_GLOBAL" 2>/dev/null; then exit 24; fi
 test -z "${GH_TOKEN+x}${GITHUB_TOKEN+x}"
 echo github-broker-ok
 `
+				if !live {
+					script = "set -x\n" + script // trace synthetic steps for the failure message
+				}
 				found := false
 				for i, arg := range argv {
 					if arg == "/bin/sh" {
@@ -188,11 +191,18 @@ echo github-broker-ok
 				if err != nil {
 					t.Fatal(err)
 				}
+				var stderr strings.Builder
+				cmd.Stderr = &stderr
 				out, err := cmd.Output()
 				if err != nil || strings.TrimSpace(string(out)) != "github-broker-ok" {
-					// Do not dump subprocess output on failure: Git's credential
-					// protocol and gh auth token intentionally carry secrets.
-					t.Fatalf("sandbox GitHub identity/credential check failed: %v", err)
+					if live {
+						// Do not dump subprocess output on a live failure: Git's
+						// credential protocol and gh auth token carry real secrets.
+						t.Fatalf("sandbox GitHub identity/credential check failed: %v", err)
+					}
+					// The synthetic fixture's only token is synthetic-token, so its
+					// output is safe to show and says which step failed.
+					t.Fatalf("sandbox GitHub identity/credential check failed: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
 				}
 			})
 		}
