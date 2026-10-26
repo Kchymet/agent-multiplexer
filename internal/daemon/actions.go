@@ -31,6 +31,14 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	if (a.Action == "" || a.Action == core.ActionRefresh) && !effectAdmissionHeld(ctx) {
+		// A refresh only wakes the poller; it reads and changes nothing.
+		if err := revalidateDeferred(ctx); err != nil {
+			return fail("authorization changed before execution: %v", err)
+		}
+		d.triggerPoll()
+		return ok()
+	}
 	// releaseCreation is set while a creation holds creationMu under the shared
 	// gate; the new session starts under its own lock after it is released.
 	var releaseCreation func()
@@ -78,6 +86,23 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
 				log.Printf("action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if ids, ok := repoScopedAction(a); ok && !effectAdmissionHeld(ctx) {
+		// Tracking a repo or re-scoping one agent's repos changes no other
+		// session's authorization: removing a repo and changing a coordinator's
+		// repo ceiling stay exclusive. The git work serializes with creations
+		// and deletions on creationMu.
+		waitStart := time.Now()
+		release := d.admitSessions(append(ids, guardSubject(ctx))...)
+		defer release()
+		d.creationMu.Lock()
+		defer d.creationMu.Unlock()
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held repo work %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -277,7 +302,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		} else if restore {
 			newID, err = d.restoreSessionAccess(ctx, a)
 		} else {
-			newID, err = wsops.Dispatch(ctx, a, d.killEngineFor)
+			newID, err = d.dispatch(ctx, a, d.killEngineFor)
 		}
 		if err != nil {
 			return fail("%v", err)
