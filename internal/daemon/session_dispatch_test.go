@@ -32,14 +32,14 @@ func (s *completionRaceStore) GetSession(id string) (store.Session, bool, error)
 	return session, ok, err
 }
 
-func sessionRuntimeFixture(t *testing.T, sessions ...store.Session) (*Daemon, *sessionRuntime, map[string]access.Principal) {
+func sessionRuntimeFixture(t testing.TB, sessions ...store.Session) (*Daemon, *sessionRuntime, map[string]access.Principal) {
 	t.Helper()
 	return sessionRuntimeFixtureWithClock(t, time.Now, sessions...)
 }
 
 // sessionRuntimeFixtureWithClock drives both the authority and the runtime from
 // now, so a test can age credentials past expiry.
-func sessionRuntimeFixtureWithClock(t *testing.T, now func() time.Time, sessions ...store.Session) (*Daemon, *sessionRuntime, map[string]access.Principal) {
+func sessionRuntimeFixtureWithClock(t testing.TB, now func() time.Time, sessions ...store.Session) (*Daemon, *sessionRuntime, map[string]access.Principal) {
 	t.Helper()
 	isolateHome(t)
 	db, err := store.Open()

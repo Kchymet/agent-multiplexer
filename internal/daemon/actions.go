@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"amux/internal/access"
@@ -30,6 +31,19 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	if !effectAdmissionHeld(ctx) {
+		waitStart := time.Now()
+		var admitted time.Time
+		defer func() {
+			// The gates taken below serialize every session's reports; an action
+			// holding them for long is the usual cause of a daemon-wide stall.
+			if admitted.IsZero() {
+				return
+			}
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held the effect gate %v (waited %v)", a.Action, a.ID,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
 		// Use the same lock order as mailbox serving: dispatch ownership, then
 		// effect admission. For an explicit restore, drain the old completion
 		// owner before taking effectMu; its cleanup may already be waiting there.
@@ -66,6 +80,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		}
 		d.effectMu.Lock()
 		defer d.effectMu.Unlock()
+		admitted = time.Now()
 		ctx = withEffectAdmission(ctx)
 	}
 	if err := revalidateDeferred(ctx); err != nil {

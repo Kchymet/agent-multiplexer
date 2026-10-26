@@ -860,6 +860,22 @@ func GoalHookCommand(event string) (sub string, ok bool) {
 	return "", false
 }
 
+// Observation hooks (status, capture, permission diagnostics) only report to
+// the daemon; nothing Claude does depends on their outcome. They run async so a
+// busy daemon can never stall a prompt, tool call or turn end, and are killed
+// after observationHookTimeout so a wedged report cannot accumulate processes.
+// Goal hooks stay blocking: their stdout is the continuation decision.
+const observationHookTimeout = 15 // seconds
+
+func hookCommand(cmd string) map[string]any {
+	h := map[string]any{"type": "command", "command": cmd}
+	if !strings.Contains(cmd, " agent goal ") {
+		h["async"] = true
+		h["timeout"] = observationHookTimeout
+	}
+	return h
+}
+
 func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any, goal bool) ([]byte, error) {
 	hooks, ok := root["hooks"].(map[string]any)
 	if !ok || hooks == nil {
@@ -904,9 +920,7 @@ func encodeHooks(root map[string]any, amuxPath string, inherited map[string]any,
 			}
 		}
 		for _, cmd := range amuxCmds[event] {
-			groups = append(groups, map[string]any{
-				"hooks": []any{map[string]any{"type": "command", "command": cmd}},
-			})
+			groups = append(groups, map[string]any{"hooks": []any{hookCommand(cmd)}})
 		}
 		hooks[event] = groups
 	}
