@@ -43,12 +43,41 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// Every policy mutation still takes the gate exclusively, so the guard
 		// below cannot be crossed by one.
 		waitStart := time.Now()
-		release := d.admitSession(id)
+		release := d.admitSessions(id, guardSubject(ctx))
 		defer release()
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
 				log.Printf("action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
+					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
+			}
+		}()
+	} else if ids, creation, ok := archiveScopedAction(a); ok && !effectAdmissionHeld(ctx) {
+		// Archiving, renaming or deleting a session changes only that session
+		// (and a root's members), so it locks exactly those, plus the caller's
+		// session for its guard. Every other check on them runs under their
+		// locks or the exclusive gate. Archive and delete also hold creationMu
+		// so no member is added meanwhile; if one was added before it was
+		// taken, the locked set is stale and the pass starts again.
+		waitStart := time.Now()
+		release := sync.OnceFunc(d.admitSessions(append(ids, guardSubject(ctx))...))
+		defer release()
+		if creation {
+			d.creationMu.Lock()
+			if current, found := sessionAndMembers(a.ID); !found || !sameMembers(ids, current) {
+				d.creationMu.Unlock()
+				release()
+				if !found {
+					return fail("session %s not found", a.ID)
+				}
+				return d.handle(ctx, a)
+			}
+			defer d.creationMu.Unlock()
+		}
+		admitted := time.Now()
+		defer func() {
+			if held := time.Since(admitted); held >= slowSessionDispatch {
+				log.Printf("action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
