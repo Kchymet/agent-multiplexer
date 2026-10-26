@@ -173,3 +173,81 @@ func ResolveCodexControl() (Control, error) {
 	}
 	return c, nil
 }
+
+// GoalAutoResumeKey is the config path of the goal auto-resume switch
+// (`goal.auto_resume`): whether a restarted goal coordinator continues its
+// still-eligible goal without a user turn. On by default. Captured once at
+// daemon construction, like codex.control.
+const GoalAutoResumeKey = "goal.auto_resume"
+
+func goalSection(top map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if b, ok := top["goal"]; ok {
+		return object(b, core.ConfigPath()+": goal")
+	}
+	return map[string]json.RawMessage{}, nil
+}
+
+// GoalAutoResume returns the saved switch, or set=false when unconfigured (the
+// default is on). It describes the saved setting only.
+func GoalAutoResume() (value, set bool, err error) {
+	top, err := Read()
+	if err != nil {
+		return false, false, err
+	}
+	goal, err := goalSection(top)
+	if err != nil {
+		return false, false, err
+	}
+	b, ok := goal["auto_resume"]
+	if !ok {
+		return false, false, nil
+	}
+	if err := json.Unmarshal(b, &value); err != nil {
+		return false, false, fmt.Errorf("%s: %s must be true or false", core.ConfigPath(), GoalAutoResumeKey)
+	}
+	return value, true, nil
+}
+
+// ResolveGoalAutoResume is the effective switch: the saved value, or on.
+func ResolveGoalAutoResume() (bool, error) {
+	value, set, err := GoalAutoResume()
+	if err != nil {
+		return false, err
+	}
+	return !set || value, nil
+}
+
+// ParseGoalAutoResume accepts the spellings `amux config set` takes for the
+// switch.
+func ParseGoalAutoResume(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on", "true", "1", "yes":
+		return true, nil
+	case "off", "false", "0", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("%s must be on or off", GoalAutoResumeKey)
+}
+
+// SetGoalAutoResume saves the switch; a nil value unsets it (back to on).
+func SetGoalAutoResume(value *bool) error {
+	top, err := Read()
+	if err != nil {
+		return err
+	}
+	goal, err := goalSection(top)
+	if err != nil {
+		return err
+	}
+	if value == nil {
+		delete(goal, "auto_resume")
+	} else {
+		goal["auto_resume"], _ = json.Marshal(*value)
+	}
+	if len(goal) == 0 {
+		delete(top, "goal")
+	} else {
+		top["goal"], _ = json.Marshal(goal)
+	}
+	return Write(top)
+}

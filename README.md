@@ -608,6 +608,18 @@ they do not change routing in a running daemon. `amux doctor` compares saved
 config, the shell override, and the running daemon's reported selection. See the
 [operator enable/restart/rollback sequence and override precedence](docs/codex-app-server-supervision.md#opt-in-and-fallback).
 
+### Goal auto-resume
+
+A workgroup coordinator's goal survives restarts: when its runtime comes back
+(`amux do restart`, `amux do start`, or the daemon relaunching its live set after
+its own restart) a goal that was still active, or waiting on a background
+wake-up, is continued without a user turn. Codex coordinators get this from the
+App Server's native goal; for Claude coordinators the daemon reads the goal file
+and relaunches with a continuation. Paused, complete, blocked, input-waiting and
+budget-limited goals are never resumed automatically. `amux config set
+goal.auto_resume off` turns the Claude-side continuation off (default on; applied
+at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
+
 ## Roadmap
 
 - **Thin-client TUI** — migrate the native TUI onto `muxclient` so the default app

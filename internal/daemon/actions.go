@@ -476,7 +476,8 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 	if spec.Session.Archived {
 		return fmt.Errorf("session %s is archived; restore it before restarting", id)
 	}
-	work := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent}).apply(&spec)
+	record := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent})
+	work := d.restartIntent(startIntent{record: &record, resumeGoal: true}, &spec)
 	kill := func() {
 		if allTabs {
 			d.killRuntimeFor(id)
