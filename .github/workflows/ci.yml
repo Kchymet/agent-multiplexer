@@ -226,3 +226,26 @@ jobs:
             -run '^TestSeatbeltCodex' -count=1 -timeout=60s -v
       - name: cross compile supported targets
         run: make cross
+
+  # TEMPORARY (PR 206 diagnostics, remove before merge): repeat the macOS-only
+  # failures on the merged tree to measure their rate with diagnostics on.
+  macos-pressure-repeat:
+    runs-on: macos-14
+    env:
+      TMPDIR: /private/tmp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: releasing-client pressure x15
+        run: |
+          go test ./internal/daemon \
+            -run '^TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace$/^fresh-launch-under-releasing-client-pressure$' \
+            -count=15 -timeout=40m -v 2>&1 | tee pressure.log | grep -E 'releasing fetches|--- (PASS|FAIL)|^(ok|FAIL)|_test.go'
+      - name: blocked-release ordering x1000
+        if: always()
+        run: go test ./internal/sessionrpc -run '^TestReleaseProcessedBehindCapacityBlockedRequest$' -count=1000 -timeout=20m
+      - name: held-descriptor visibility probe x20
+        if: always()
+        run: go test ./internal/sessionrpc -run '^TestHeldDirectoryListingSeesEveryPublishAndClaim$' -count=20 -timeout=20m -v 2>&1 | grep -E -- '--- (PASS|FAIL)|_test.go|^(ok|FAIL)'
