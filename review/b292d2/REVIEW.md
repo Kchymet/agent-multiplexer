@@ -339,3 +339,81 @@ identity or start a fresh thread.
 - Minor: `migrateV1` bumps every binding's `Revision`; an in-flight delivery
   across the migration gets `account_binding_blocked` (should map to a
   retryable code, launcher text still mentions rebind semantics).
+
+---
+
+## Refinement (after root feedback): A1 launch-fix design and A2 scope
+
+### A1 — do NOT use a consume-on-first-delivery nonce
+A one-shot consumed before the client observes the response breaks exactly the
+cases reproduced for 1a4fce: client timeout (R1), lost/expired response,
+daemon restart between response and read (`ErrRestarted`), and the abandoned
+duplicate dispatch (R2). The launcher would then retry into a permanent denial.
+
+Safe shape (reuses the WIP's existing same-launch branch; no one-shot packet):
+1. **Daemon-only allocation.** `BeginLaunch` runs on the host side when the
+   agent tab process is actually started (`replaceSession`/start →
+   `engine.Ensure`), never from a mailbox request. Start failure retires the
+   allocation (so an old process cannot claim an allocated-but-unused launch).
+2. **Pin on first delivery, idempotent re-delivery.** A Claude request carries
+   its launch; `AcceptAuthorized(..., launch)` with `seq == b.Launch` re-delivers
+   only if mode, account and **version/generation are unchanged** and the epoch
+   is still current (this branch already exists). Retries after a timeout or a
+   lost response get the same snapshot. After a replacement login the same launch
+   gets a stable refusal (`account_runtime_superseded` / "restart to use the new
+   login"), never the new token. Logout/pending epoch fences still apply.
+3. **Bound the claim.** Today the `default:` branch accepts any `seq > b.Launch`
+   and sets `Launches = max(Launches, seq)`. With a client-supplied launch that
+   is a bypass: an agent sends `b.Launch+1` and pins the replacement. Require
+   `b.Launch < seq <= b.Launches` **and** that `seq` is the single outstanding
+   daemon allocation. Launch-less Claude requests are refused (remove the
+   `allocate` path for Claude once the launcher sends the launch).
+4. **Identifier.** Bind the allocation to a random per-launch value (≥128 bits)
+   given only to the agent tab's launcher; the launcher strips it from the
+   environment before `exec`. A sequence number alone is guessable.
+
+**Actual protected scope (be explicit in the PR).** All tabs of a session share
+one session principal (`central_credential.go` comment), the same uid and the
+same sandbox. A same-session process can read the launcher's environment
+before it execs, and the agent may legitimately request its own restart. So the
+launch fence is a **runtime-consistency guarantee**: a running process, an old
+process, or a launch-less/other-tab request cannot adopt a replacement login.
+It is **not** isolation against a malicious agent inside its own session. That
+is enough for the user's next-process-only promise. Knowing the current launch
+id yields only the snapshot the process already holds in
+`CLAUDE_CODE_OAUTH_TOKEN`, so the id does not need to be a strong secret. It
+only needs to be unforgeable for *future* launches (item 3). Codex is stronger:
+its launch lives in the daemon-side supervisor and never enters the sandbox.
+
+Regressions:
+- Same launch: first delivery, then response lost (do not read the response),
+  then retry → same token and generation.
+- Replacement login, then the same launch → refused with no token. A new
+  daemon-started launch → new token.
+- Forged `b.Launch+1` and launch-less request → refused.
+- Abandoned duplicate (R2 shape) → same snapshot, no new pin.
+- Logout between allocate and first delivery → refused.
+- Old process after a new launch pinned → superseded.
+
+### A2 — distinguish three failure classes; only one may admit repair login
+Current `centralauth.Store.read()` returns `ErrNotConfigured`, a
+**`ErrInsecureStore`-wrapped** error (symlink, wrong type, mode, owner), or a
+**plain** `fmt.Errorf` for "unreadable credential record" / "unsupported
+credential record" (decode, version, harness, kind). An invalid stored value
+wraps `ErrInvalidSecret`. Recommend a sentinel `centralauth.ErrCorruptRecord`
+for the decode/version/invalid-value cases.
+
+| Class | Bind/bootstrap | Delivery | Host login |
+|---|---|---|---|
+| Corrupt **credential record** (private, regular file, bad content) | skip bootstrap, bind OK | refuse (`central_credential_unavailable`), never deliver | **allowed**: `SaveKind` already replaces it (generation falls back to wall clock, never reused) |
+| **Insecure store** (`ErrInsecureStore`) | fail closed | refuse | refuse; `SaveKind`→`ensureDir`/`checkPrivate` already refuses. User fixes permissions. Do not weaken. |
+| Corrupt **accounts metadata** (`account_store_invalid`, `_version_unsupported`, `_insecure`) | fail closed, never reinitialize/rewrite (WIP already does this) | refuse | refuse until repaired; `accounts.v1.json` backup aids manual repair |
+
+Regressions:
+- Corrupt record: bind OK, delivery refused, login completes, the same session's
+  next launch delivers with no rebind. Generation is greater than any prior.
+- Insecure dir or file (mode 0644, symlink): login and delivery both refused, and
+  the file is unchanged.
+- Corrupt `accounts.json`: every operation refused and the file byte-identical
+  afterwards.
+- Valid control: delivery works, generation unchanged, no epoch bump.
