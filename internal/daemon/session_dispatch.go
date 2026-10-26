@@ -89,6 +89,16 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 			return r.dispatchRuntimeEvents(ctx, request.Principal, req, action)
 		}
 	}
+	if isSessionReport(req) {
+		// A report reads and writes only its own session's state, so it waits
+		// only for that session (and for holders of the unsplit gate).
+		release := r.d.admitSession(request.Principal.SubjectID)
+		defer release()
+		if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
+			return rpcDenied("credential_invalid"), nil
+		}
+		return r.dispatchSessionReport(ctx, request.Principal, req), nil
+	}
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
 	r.d.effectMu.Lock()
@@ -97,9 +107,6 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 
 	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
 		return rpcDenied("credential_invalid"), nil
-	}
-	if isSessionReport(req) {
-		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
 	// Authorize again under the dispatch lock, immediately before the exact
 	// canonical action executes. Membership, grants and archive state are live.
