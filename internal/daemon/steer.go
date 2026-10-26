@@ -349,7 +349,7 @@ func (d *Daemon) runStructuredPrompt(ctx context.Context, id string, sup structu
 		return
 	}
 	var wait func(context.Context) error
-	err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
+	err := d.admitDeferredEffect(ctx, id, func(admitCtx context.Context) error {
 		if d.codex != nil {
 			current, currentOK := d.codex.Get(id)
 			if !currentOK || current != sup {
@@ -392,7 +392,7 @@ func (d *Daemon) startStructuredForPrompt(ctx context.Context, sess store.Sessio
 	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
 		structuredJournal(sess.ID, core.JournalInfo, "starting agent")
 		var sup *codexapp.Supervisor
-		err := d.admitDeferredEffect(workCtx, func(admitCtx context.Context) error {
+		err := d.admitDeferredEffect(workCtx, sess.ID, func(admitCtx context.Context) error {
 			var ensureErr error
 			sup, ensureErr = d.ensureSupervisor(admitCtx, sess.ID)
 			return ensureErr
@@ -438,7 +438,7 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	// Start exactly the steered session: a prompt to a workgroup id is a prompt to
 	// its coordinator, not a "start every member" (which is what `start <root>`
 	// means — see startEngineFor).
-	err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
+	err := d.admitDeferredEffect(ctx, id, func(admitCtx context.Context) error {
 		// The prompt being typed below is this start's turn, and the prompt hook
 		// makes it the coordinator's goal; a goal continuation on top of it
 		// would be a second, competing submission.
@@ -463,12 +463,13 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	d.triggerPoll()
 }
 
-// admitDeferredEffect reacquires the daemon's final execution gate even when
-// ctx was captured while the original request held it. A detached goroutine
-// must never trust that inherited marker: the original handler releases the
-// lock before this work runs. The callback is bounded to admission/queueing;
-// callers wait for a model turn only after this function returns.
-func (d *Daemon) admitDeferredEffect(ctx context.Context, effect func(context.Context) error) error {
+// admitDeferredEffect reacquires id's admission even when ctx was captured
+// while the original request held a gate. A detached goroutine must never
+// trust that inherited marker: the original handler releases the lock before
+// this work runs. The effect starts or prompts only session id, so it takes
+// that session's admission, not the exclusive gate. The callback is bounded to
+// admission/queueing; callers wait for a model turn only after this returns.
+func (d *Daemon) admitDeferredEffect(ctx context.Context, id string, effect func(context.Context) error) error {
 	admitCtx, cancel := context.WithTimeout(ctx, steerEffectAdmissionTimeout)
 	defer cancel()
 	if d.steerAdmission != nil {
@@ -476,12 +477,8 @@ func (d *Daemon) admitDeferredEffect(ctx context.Context, effect func(context.Co
 			return err
 		}
 	}
-	if d.sessionRPC != nil {
-		d.sessionRPC.dispatchMu.Lock()
-		defer d.sessionRPC.dispatchMu.Unlock()
-	}
-	d.effectMu.Lock()
-	defer d.effectMu.Unlock()
+	release := d.admitSession(id)
+	defer release()
 	if err := revalidateDeferred(admitCtx); err != nil {
 		return err
 	}

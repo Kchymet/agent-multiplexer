@@ -92,11 +92,8 @@ func parseAccountLaunch(v string) (accounts.Launch, bool) {
 // or revocation that crosses the read never receives the value. Failures carry
 // only a fixed code: no path, value or store detail reaches the session.
 func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
-	ctx = withEffectAdmission(ctx)
+	release := r.d.admitSession(request.Principal.SubjectID)
+	defer release()
 	req := request.Call.AccessRequest()
 	s, err := r.centralCredentialSession(ctx, request.Principal, req)
 	if err != nil {
