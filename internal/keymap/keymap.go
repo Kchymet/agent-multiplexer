@@ -46,8 +46,8 @@ var actions = []struct{ name, desc string }{
 	{ScrollUp, "scroll pane history up one page"},
 	{ScrollDown, "scroll pane history down one page"},
 	{ScrollLive, "return the pane to live output"},
-	{ScrollHalfUp, "scroll pane history up half a viewport"},
-	{ScrollHalfDown, "scroll pane history down half a viewport"},
+	{ScrollHalfUp, "scroll focused pane history or rail up half a viewport"},
+	{ScrollHalfDown, "scroll focused pane history or rail down half a viewport"},
 }
 
 var defaults = map[string]string{

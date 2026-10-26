@@ -27,9 +27,11 @@ never covers pane cells.
 `keys.scroll-half-up` and `keys.scroll-half-down` default to Ctrl+U and Ctrl+D.
 They move toward older/newer history by `max(1, rows/2)` rows (integer division),
 clamping at the oldest row and live output. Full-page navigation remains
-`max(1, rows-1)` rows. These are global pane actions, just like the Alt history
-chords: pane or rail focus targets the attached pane; an open modal takes
-precedence. With no attached pane, they do nothing. They clear local selection,
+`max(1, rows-1)` rows. Half-page actions respect focus: pane focus targets pane
+history, while rail focus preserves existing rail half-page navigation. Rebinding
+these actions changes both uses. Full-page Alt chords remain global pane actions;
+an open modal takes precedence. Pane focus without an attached pane does nothing.
+The actions clear local selection,
 keep local scrolling out of the child input stream, and leave mouse routing
 unchanged. Bracketed pasted text never becomes a history command.
 
