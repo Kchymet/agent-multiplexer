@@ -323,3 +323,32 @@ func TestReconcileTickDefersOpensDuringCreation(t *testing.T) {
 		t.Fatal("reconcile did not open a1 after the creation")
 	}
 }
+
+// TestWorkgroupStartStartsOnlyItsLockedMembers: a member added by a
+// concurrent creation after the start resolved its members is not started
+// by it (outside that member's lock); its creation starts it.
+func TestWorkgroupStartStartsOnlyItsLockedMembers(t *testing.T) {
+	f := newIndependenceFixture(t)
+	eng := f.d.engine.(*fakeEngine)
+	f.d.launchSpec = testLaunchSpecResolver
+	f.d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
+	var mu sync.Mutex
+	calls := 0
+	f.d.agentsUnder = func(string) ([]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return []string{"a3"}, nil
+		}
+		return []string{"a3", "added-later"}, nil
+	}
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "root"}); !r.OK {
+		t.Fatalf("workgroup start = %+v", r)
+	}
+	if keys := eng.ensuredKeys(); len(keys) != 1 || keys[0].AgentID != "a3" {
+		t.Fatalf("workgroup start launched %v, want only its locked member a3", keys)
+	}
+}

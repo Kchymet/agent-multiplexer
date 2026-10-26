@@ -34,6 +34,9 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	// releaseCreation is set while a creation holds creationMu under the shared
 	// gate; the new session starts under its own lock after it is released.
 	var releaseCreation func()
+	// lockedMembers is the member set a workgroup start resolved and locked; it
+	// starts exactly those, never a member a concurrent creation just added.
+	var lockedMembers []string
 	if id, ok := sessionScopedAction(a); ok && !effectAdmissionHeld(ctx) {
 		// The action touches only one session's runtime and credential, so it
 		// waits only for that session (and for holders of the unsplit gate).
@@ -50,9 +53,9 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			}
 		}()
 	} else if workgroupStart(a) && !effectAdmissionHeld(ctx) {
-		// A workgroup start starts every member. Membership changes are
-		// exclusive, so under the shared gate the member set is stable: lock
-		// exactly the sessions it will start.
+		// A workgroup start starts every member. It resolves them once, locks
+		// exactly those sessions and starts only those: a member a concurrent
+		// creation adds afterwards is started by that creation, under its lock.
 		waitStart := time.Now()
 		release := d.admitShared()
 		defer release()
@@ -60,8 +63,12 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		if err != nil {
 			return fail("%v", err)
 		}
+		if len(ids) == 0 {
+			return fail("no agent to start for %q", a.ID)
+		}
 		unlock := d.sessionLocks.lock(ids...)
 		defer unlock()
+		lockedMembers = ids
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
@@ -183,7 +190,16 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.triggerPoll()
 		return ok()
 	case core.ActionStart:
-		if err := d.startEngineFor(ctx, a.ID); err != nil {
+		start := func() error { return d.startEngineFor(ctx, a.ID) }
+		if lockedMembers != nil {
+			start = func() error {
+				if err := revalidateDeferred(ctx); err != nil {
+					return err
+				}
+				return d.startAgents(ctx, a.ID, lockedMembers)
+			}
+		}
+		if err := start(); err != nil {
 			return fail("%v", err)
 		}
 		d.triggerPoll()
