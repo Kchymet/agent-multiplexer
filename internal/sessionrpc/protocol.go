@@ -63,6 +63,9 @@ var (
 	ErrRestarted        = errors.New("session RPC daemon boot changed")
 	ErrIndeterminate    = errors.New("session RPC outcome is indeterminate")
 	ErrClosed           = errors.New("session RPC endpoint is closed")
+	// ErrUnpublished means the mailbox has no service record yet, so nothing was
+	// sent. A freshly provisioned session sees it until the daemon publishes.
+	ErrUnpublished = errors.New("session RPC service is not published")
 )
 
 type CallKind string
@@ -70,6 +73,10 @@ type CallKind string
 const (
 	CallOperation CallKind = "call"
 	CallReceipt   CallKind = "receipt"
+	// CallRelease tells the server its client has consumed a response, so the
+	// daemon can retire it instead of retaining it until age cleanup. It names
+	// the response in Receipt, needs no response capacity and gets no response.
+	CallRelease CallKind = "release"
 )
 
 type Status string
@@ -306,7 +313,7 @@ func validateCall(call Call) error {
 		if call.Receipt != nil || (call.Route != access.RouteQuery && call.Route != access.RouteAction) || call.Verb == "" {
 			return ErrInvalidRecord
 		}
-	case CallReceipt:
+	case CallReceipt, CallRelease:
 		if call.Receipt == nil || !validRequestID(call.Receipt.RequestID) || !validDigest(call.Receipt.ResponseDigest) ||
 			call.Route != "" || call.Verb != "" || call.ID != "" || call.Target != "" || call.Tab != 0 || len(call.Fields) != 0 {
 			return ErrInvalidRecord

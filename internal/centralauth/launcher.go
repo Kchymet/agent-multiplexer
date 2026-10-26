@@ -18,6 +18,13 @@ import (
 // LaunchRetry is how often a launcher without a usable credential asks again.
 var LaunchRetry = 5 * time.Second
 
+// fetchAttempt bounds one credential request, including waiting for the daemon
+// to publish a just-provisioned mailbox. publishPoll paces that wait.
+var (
+	fetchAttempt = 10 * time.Second
+	publishPoll  = 50 * time.Millisecond
+)
+
 // Launch is the in-session Claude launcher for central mode. The token is
 // fetched into this process only and handed to Claude through its documented
 // CLAUDE_CODE_OAUTH_TOKEN input; it is never placed in argv, the sandbox
@@ -76,6 +83,7 @@ const (
 	fetchSuperseded  fetchFailure = "account_runtime_superseded"
 	fetchChanged     fetchFailure = "account_revision_changed"
 	fetchMailbox     fetchFailure = "session mailbox unavailable"
+	fetchUnpublished fetchFailure = "session mailbox not published"
 	fetchTimeout     fetchFailure = "session mailbox request timed out"
 	fetchTransport   fetchFailure = "session mailbox request failed"
 	fetchMalformed   fetchFailure = "malformed credential response"
@@ -103,6 +111,8 @@ func launchGuidance(err error) string {
 		return "The daemon could not read the central Claude credential. Check Accounts in amux; this does not establish that login is missing."
 	case fetchMailbox:
 		return "The protected session mailbox is unavailable. Check the workload's session access and daemon status from a trusted host terminal."
+	case fetchUnpublished:
+		return "The daemon has not published this session's protected mailbox after 10 seconds. Credential status is unknown; check daemon status from a trusted host terminal."
 	case fetchTimeout:
 		return "The daemon did not answer the protected session mailbox request within 10 seconds. Credential status is unknown; check daemon status from a trusted host terminal."
 	case fetchMalformed:
@@ -166,7 +176,7 @@ func fetchCredentialFromSession(typed bool, launch string) (Credential, error) {
 		return Credential{}, fetchMailbox
 	}
 	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchAttempt)
 	defer cancel()
 	fields := map[string]string{HarnessField: string(Claude)}
 	if typed {
@@ -176,6 +186,18 @@ func fetchCredentialFromSession(typed bool, launch string) (Credential, error) {
 		fields[LaunchField] = launch
 	}
 	result, err := client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: fields})
+	// The launcher starts while the action that provisioned this session still
+	// holds the daemon's admission locks, so its mailbox can be published a few
+	// milliseconds later. Nothing was sent; wait for publication within this
+	// attempt instead of failing it and sleeping a full LaunchRetry.
+	for errors.Is(err, sessionrpc.ErrUnpublished) {
+		select {
+		case <-ctx.Done():
+			return Credential{}, fetchUnpublished
+		case <-time.After(publishPoll):
+		}
+		result, err = client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: fields})
+	}
 	// Pre-API daemons reject the extra field. Subscription-only fallback is safe:
 	// new daemons independently refuse API keys to an untyped request.
 	var rejected *sessionrpc.RemoteError

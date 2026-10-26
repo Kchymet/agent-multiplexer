@@ -66,6 +66,9 @@ type sessionRuntime struct {
 	// whatever locks the report path holds there. Tests use it to model a slow
 	// report; production leaves it nil.
 	beforeReportEffect func(subjectID string)
+	// inspect, when set by a test, runs a function on the run goroutine, which
+	// owns the serving maps. Nil in production: a nil channel never fires.
+	inspect chan func()
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -105,6 +108,8 @@ func (r *sessionRuntime) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case inspect := <-r.inspect:
+			inspect()
 		}
 	}
 }

@@ -128,7 +128,9 @@ any notices already there), so its earlier history stays readable. A log that
 already holds structured events is kept as is. The rewrite never runs while that
 session's runtime is running or starting. The outcome is recorded beside the log
 and inside it; until then a failed import refuses only that session's launch and
-is retried.
+is retried. The import runs once per session, inside that launch: a launch
+admitted under the daemon-wide gate holds it while a large rollout is mapped
+(each line is bounded at 16 MiB; the rollout is read once).
 
 `amux auth rebind <claude|codex> WORKLOAD_ID` is optional: it stops one workload
 so its next start uses the current login now rather than at its next launch.

@@ -64,6 +64,14 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
     importing again.
   - Until then, a failed import refuses only that launch and is retried. An oversized line becomes
     an omission notice. The rollout is only read; it is the same file the App Server resumes.
+- **Accepted residuals (root review).**
+  - The one-time import runs inside the session's launch. A launch admitted under the
+    daemon-wide `effectMu` (for example `start` through `handle`) holds that gate while a large
+    rollout is mapped. This is a one-time cost per session.
+  - Narrow exit-drain window: `WithQuiescentLog` treats a supervisor whose process has exited as
+    quiescent. A final notice write from a supervisor that is still draining could land on the
+    replaced inode. This applies only to a session with no marker whose log holds only notices,
+    so no turn events can be lost. No reaper redesign was made for it.
 - **Corrupt or insecure state.** A corrupt central Claude record never blocks binding or the
   repairing login, and delivery refuses it. An insecure store fails closed.
 
