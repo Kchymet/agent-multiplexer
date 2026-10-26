@@ -1,0 +1,90 @@
+package sessionrpc
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// Real-client probe: unrelated subjects' retained responses fill an aggregate
+// budget sized like production (MaxResponseFiles daemon-wide). A fresh
+// subject's FIRST launcher-shaped Query (10s deadline) times out; it succeeds
+// only after retention expiry frees a slot. The abandoned request is then still
+// dispatched. busy=MaxResponseFiles-1 is the negative control.
+func runSaturation(t *testing.T, busy int, wait time.Duration) (first error, firstElapsed time.Duration, launcherDispatch int32, second error) {
+	budget := &testResponseBudget{limit: MaxResponseFiles}
+	clock := newTestClock(time.Now())
+	opts := ServerOptions{Clock: clock.Now, ResponseBudget: budget}
+	var servers []*Server
+	for remaining := busy; remaining > 0; {
+		f := newFixture(t, Callbacks{}, opts)
+		servers = append(servers, f.server)
+		c := f.client(clientOptions{})
+		n := 32
+		if remaining < n {
+			n = remaining
+		}
+		for i := 0; i < n; i++ {
+			if _, err := pumpClient(t, f.server, func(ctx context.Context) (Result, error) {
+				return c.Query(ctx, Query{Verb: "snapshot"})
+			}); err != nil {
+				t.Fatalf("busy query %d: %v", i, err)
+			}
+		}
+		remaining -= n
+	}
+	var dispatched atomic.Int32
+	lf := newFixture(t, Callbacks{Dispatch: func(_ context.Context, r DispatchRequest) (DispatchResult, error) {
+		dispatched.Add(1)
+		return DispatchResult{Status: StatusOK, Body: []byte(`{"token":"x"}`)}, nil
+	}}, opts)
+	servers = append(servers, lf.server)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { // the daemon's normal serving loop
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			for _, s := range servers {
+				_, _ = s.ServeOnce(context.Background())
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	lc := lf.client(clientOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	start := time.Now()
+	_, first = lc.Query(ctx, Query{Verb: "central-credential", Fields: map[string]string{"harness": "claude"}})
+	firstElapsed = time.Since(start)
+	cancel()
+	launcherDispatch = dispatched.Load()
+	// Retention expiry frees busy slots; a retry (the launcher's 5s loop) now works.
+	clock.Advance(61 * time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), wait)
+	defer cancel2()
+	_, second = lc.Query(ctx2, Query{Verb: "central-credential", Fields: map[string]string{"harness": "claude"}})
+	time.Sleep(200 * time.Millisecond)
+	t.Logf("busy=%d first=%v after %v (dispatch before expiry=%d) second=%v total launcher dispatches=%d",
+		busy, first, firstElapsed.Round(time.Millisecond), launcherDispatch, second, dispatched.Load())
+	return
+}
+
+func TestProbeClientSaturationFirstAttemptTimesOut(t *testing.T) {
+	first, _, d, second := runSaturation(t, MaxResponseFiles, 3*time.Second)
+	if !errors.Is(first, context.DeadlineExceeded) || d != 0 || second != nil {
+		t.Fatalf("expected first-attempt timeout then retry success")
+	}
+}
+
+func TestProbeClientSaturationNegativeControl(t *testing.T) {
+	first, el, _, _ := runSaturation(t, MaxResponseFiles-1, 3*time.Second)
+	if first != nil || el > time.Second {
+		t.Fatalf("control: first=%v elapsed=%v", first, el)
+	}
+}

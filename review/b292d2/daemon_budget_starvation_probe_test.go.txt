@@ -1,0 +1,84 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"amux/internal/access"
+	"amux/internal/sessionrpc"
+)
+
+// Probe: with production limits, unrelated subjects' retained (60s) responses
+// exhaust the daemon-wide budget and a fresh subject's first request is not
+// dispatched. busyResponses=128 is the failure case; 127 is the negative control.
+func probeStarvation(t *testing.T, busyResponses int) (int, error) {
+	authority, err := access.Open(filepath.Join(t.TempDir(), "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authority.Close()
+	budget := newSessionResponseBudget()
+	open := func(id string) (access.SessionAccess, *sessionrpc.Server, *int) {
+		dir := filepath.Join(t.TempDir(), id)
+		_ = os.MkdirAll(dir, 0o700)
+		grant, err := authority.EnsureSession(context.Background(), id, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := new(int)
+		srv, err := sessionrpc.OpenServerMailbox(id, grant.MailboxHostDir, authority, authority, sessionrpc.Callbacks{
+			Authorize: func(context.Context, access.Principal, sessionrpc.Call) error { return nil },
+			Dispatch: func(context.Context, sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
+				*n++
+				return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: []byte(`{}`)}, nil
+			},
+		}, sessionrpc.ServerOptions{ResponseBudget: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.PublishService(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = srv.Close() })
+		return grant, srv, n
+	}
+	const per = 32
+	for i := 0; busyResponses > 0; i++ {
+		g, srv, _ := open(fmt.Sprintf("busy-%d", i))
+		k := per
+		if busyResponses < k {
+			k = busyResponses
+		}
+		for j := 0; j < k; j++ {
+			publishDaemonBudgetCall(t, authority, g)
+		}
+		if n, err := srv.ServeOnce(context.Background()); err != nil || n != k {
+			t.Fatalf("busy serve = %d, %v", n, err)
+		}
+		busyResponses -= k
+	}
+	g, srv, dispatched := open("launcher")
+	publishDaemonBudgetCall(t, authority, g)
+	_, err = srv.ServeOnce(context.Background())
+	return *dispatched, err
+}
+
+func TestProbeGlobalBudgetStarvesFirstCredentialRequest(t *testing.T) {
+	n, err := probeStarvation(t, sessionrpc.MaxResponseFiles)
+	t.Logf("128 retained unrelated responses: launcher dispatched=%d err=%v", n, err)
+	if n != 0 || !errors.Is(err, sessionrpc.ErrResponseCapacity) {
+		t.Fatalf("expected starvation")
+	}
+}
+
+func TestProbeGlobalBudgetNegativeControl(t *testing.T) {
+	n, err := probeStarvation(t, sessionrpc.MaxResponseFiles-1)
+	t.Logf("127 retained unrelated responses: launcher dispatched=%d err=%v", n, err)
+	if n != 1 || err != nil {
+		t.Fatalf("control failed")
+	}
+}
