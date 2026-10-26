@@ -1,0 +1,8 @@
+=== RUN   TestHalfPageKeysPTY
+=== RUN   TestHalfPageKeysPTY/defaults
+=== RUN   TestHalfPageKeysPTY/rebound
+--- PASS: TestHalfPageKeysPTY (0.14s)
+    --- PASS: TestHalfPageKeysPTY/defaults (0.07s)
+    --- PASS: TestHalfPageKeysPTY/rebound (0.07s)
+PASS
+ok  	amux/internal/nativetui	0.149s
