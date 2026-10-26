@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,6 +81,9 @@ type Engine struct {
 	// shutdownObserver, if set, receives every instance's progress through a
 	// graceful Shutdown so lifecycle clients can see what it is waiting on.
 	shutdownObserver func([]ShutdownProgress)
+	// idleWaited is set by WaitIdle: the wait-for-idle has been spent, so
+	// Shutdown terminates without waiting again.
+	idleWaited bool
 }
 
 // Instance states a graceful Shutdown reports, in the order an instance moves
@@ -190,18 +194,52 @@ func (e *Engine) Shutdown() {
 	}
 	e.insts = map[engine.Key]*instance{}
 	observe := e.shutdownObserver
+	idleBudget := shutdownGrace()
+	if e.idleWaited {
+		idleBudget = 0
+	}
 	e.mu.Unlock()
 	tracker := newShutdownTracker(insts, observe)
 	// Terminate in parallel so a shutdown (or `amux reload`) costs ~one grace
 	// period total, not one per instance. Each instance also waits (concurrently)
 	// for its own turn to finish before terminating, so a busy agent isn't cut
-	// off mid-turn — see shutdown().
+	// off mid-turn — see shutdownWith — unless WaitIdle already spent that wait.
 	var wg sync.WaitGroup
 	for _, in := range insts {
 		wg.Add(1)
 		go func(in *instance) {
 			defer wg.Done()
-			in.shutdown(tracker.reporter(in.key))
+			in.shutdownWith(idleBudget, killGrace(), tracker.reporter(in.key))
+		}(in)
+	}
+	wg.Wait()
+}
+
+// WaitIdle is Shutdown's wait-for-idle on its own: it waits, concurrently and
+// for at most the shutdown grace, for every mid-turn instance to leave its
+// turn, terminating nothing. A caller whose activity signal arrives through a
+// channel it must close before terminating (the daemon's session mailbox, which
+// carries Claude's hook reports) waits here while that channel still serves,
+// then calls Shutdown, which no longer waits.
+func (e *Engine) WaitIdle() {
+	e.mu.Lock()
+	insts := make([]*instance, 0, len(e.insts))
+	for _, in := range e.insts {
+		insts = append(insts, in)
+	}
+	e.idleWaited = true
+	observe := e.shutdownObserver
+	e.mu.Unlock()
+	// Nothing is terminating yet, so the observer sees only the instances
+	// this wait is for: each from its busy report until its wait ends.
+	tracker := newShutdownTracker(nil, observe)
+	var wg sync.WaitGroup
+	for _, in := range insts {
+		wg.Add(1)
+		go func(in *instance) {
+			defer wg.Done()
+			in.waitIdle(shutdownGrace(), tracker.reporter(in.key))
+			tracker.drop(in.key)
 		}(in)
 	}
 	wg.Wait()
@@ -239,9 +277,27 @@ func (t *shutdownTracker) reporter(key engine.Key) func(string, time.Time) {
 	return func(state string, until time.Time) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
+		if _, ok := t.states[key]; !ok {
+			t.order = append(t.order, key)
+		}
 		t.states[key] = ShutdownProgress{Key: key, State: state, Until: until}
 		t.emitLocked()
 	}
+}
+
+// drop removes key from the snapshots, emitting if it was listed.
+func (t *shutdownTracker) drop(key engine.Key) {
+	if t.observe == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.states[key]; !ok {
+		return
+	}
+	delete(t.states, key)
+	t.order = slices.DeleteFunc(t.order, func(k engine.Key) bool { return k == key })
+	t.emitLocked()
 }
 
 func (t *shutdownTracker) emitLocked() {
@@ -555,18 +611,12 @@ func (in *instance) appendRing(p []byte) {
 // a busy turn; only Shutdown adds the wait-for-idle below.
 func (in *instance) kill() { in.terminateReporting(killGrace(), nil) }
 
-// shutdown is the graceful-stop path Engine.Shutdown uses: it first waits (up to
-// shutdownGrace) for the instance to leave a busy turn — so an agent killed
+// shutdownWith is the graceful-stop path Engine.Shutdown uses: it first waits
+// (up to idleBudget) for the instance to leave a busy turn — so an agent killed
 // mid-turn doesn't lose the conversation it hasn't yet persisted — then
-// terminates exactly as kill() does. The env-derived budgets are passed through
-// to shutdownWith so tests can inject small ones; report is as for shutdownWith.
-func (in *instance) shutdown(report func(string, time.Time)) {
-	in.shutdownWith(shutdownGrace(), killGrace(), report)
-}
-
-// shutdownWith is shutdown() with explicit budgets: idleBudget bounds the
-// wait-for-idle, grace the subsequent SIGTERM→SIGKILL escalation. report, if
-// non-nil, receives each state change (see ShutdownProgress).
+// terminates exactly as kill() does, with grace bounding the SIGTERM→SIGKILL
+// escalation. The budgets are parameters so tests can inject small ones.
+// report, if non-nil, receives each state change (see ShutdownProgress).
 func (in *instance) shutdownWith(idleBudget, grace time.Duration, report func(string, time.Time)) {
 	in.waitIdle(idleBudget, report)
 	in.terminateReporting(grace, report)

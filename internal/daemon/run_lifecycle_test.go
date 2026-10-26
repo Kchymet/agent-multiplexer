@@ -18,7 +18,10 @@ import (
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/panespec"
+	"amux/internal/sessionreport"
+	"amux/internal/sessionrpc"
 	"amux/internal/source"
+	"amux/internal/store"
 
 	"github.com/gorilla/websocket"
 )
@@ -442,5 +445,127 @@ func TestDeferredDrainRejectsNewAdmissionAndJoinsAcceptedWork(t *testing.T) {
 	case <-drained:
 	case <-time.After(time.Second):
 		t.Fatal("deferred drain deadlocked")
+	}
+}
+
+// idleTestEngine is a lifecycle engine whose WaitIdle polls the daemon's real
+// activity probe for one instance, as the local engine's wait-for-idle does.
+type idleTestEngine struct {
+	*lifecycleTestEngine
+	key      engine.Key
+	activity func(engine.Key) engine.Activity
+	budget   time.Duration
+	// during runs as the wait begins, standing in for the agent's hooks.
+	during func()
+	waited chan time.Duration
+}
+
+func (e *idleTestEngine) WaitIdle() {
+	start := time.Now()
+	go e.during()
+	for e.activity(e.key) == engine.ActivityBusy && time.Since(start) < e.budget {
+		time.Sleep(10 * time.Millisecond)
+	}
+	e.waited <- time.Since(start)
+}
+
+// A Claude agent's turn end reaches the daemon only as a hook report through
+// its session mailbox. Shutdown must wait for mid-turn agents while reports
+// still land, so a turn that ends during the wait ends the wait, instead of
+// closing the mailboxes first and waiting out the whole grace.
+func TestShutdownIdleWaitSeesTurnEndReports(t *testing.T) {
+	isolateControl(t)
+	const runtimeID = "77777777-7777-4777-8777-777777777777"
+	session := store.Session{ID: "a1", RootID: "root", Agent: "claude", Dir: t.TempDir(), ClaudeID: runtimeID}
+	d, _, principals := sessionRuntimeFixture(t, session)
+	generation := publishTestRuntime(t, d, session.ID)
+	if err := core.WriteSessionHookState(session.ID, runtimeID, core.StateRunning, session.Dir); err != nil {
+		t.Fatal(err)
+	}
+	key := engine.Key{AgentID: session.ID, Tab: panespec.TabAgent}
+	if got := d.instanceActivity(key); got != engine.ActivityBusy {
+		t.Fatalf("activity before shutdown = %v, want busy", got)
+	}
+
+	const budget = 10 * time.Second
+	eng := &idleTestEngine{
+		lifecycleTestEngine: newLifecycleTestEngine(),
+		key:                 key, activity: d.instanceActivity, budget: budget,
+		waited: make(chan time.Duration, 1),
+	}
+	type outcome struct {
+		report, other sessionrpc.DispatchResult
+		closed        bool
+	}
+	during := make(chan outcome, 1)
+	eng.during = func() {
+		var o outcome
+		o.report, _ = d.sessionRPC.dispatch(context.Background(), reportRequest(principals[session.ID], sessionreport.Activity, map[string]string{
+			sessionreport.FieldRuntimeGeneration: generation,
+			sessionreport.FieldState:             core.StateReady,
+		}))
+		o.other, _ = d.sessionRPC.dispatch(context.Background(), sessionrpc.DispatchRequest{
+			Principal: principals[session.ID], RequestID: strings.Repeat("b", 32),
+			Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionRename, ID: session.ID, Fields: map[string]string{"name": "late"}},
+		})
+		d.sessionRPC.completions.mu.Lock()
+		o.closed = d.sessionRPC.completions.closed
+		d.sessionRPC.completions.mu.Unlock()
+		during <- o
+	}
+	var waited time.Duration
+	eng.check = func() error {
+		select {
+		case waited = <-eng.waited:
+			return nil
+		default:
+			return errors.New("engine shutdown began before the wait-for-idle")
+		}
+	}
+	pollSource := &lifecycleBlockingSource{entered: make(chan struct{}), exited: make(chan struct{})}
+	d.sources = []source.Source{pollSource}
+	d.engine = eng
+	listener := newLifecycleListener()
+	d.listen = func(string, string) (net.Listener, func(), error) {
+		return listener, func() {}, nil
+	}
+	d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{}, errors.New("disabled in lifecycle test")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- d.Run(ctx) }()
+	select {
+	case <-pollSource.entered:
+	case err := <-runDone:
+		t.Fatalf("Run exited before polling: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not begin polling")
+	}
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run shutdown: %v", err)
+		}
+	case <-time.After(budget + 5*time.Second):
+		t.Fatal("Run shutdown deadlocked")
+	}
+	if err := <-eng.shutdown; err != nil {
+		t.Fatal(err)
+	}
+	o := <-during
+	if o.report.Status != sessionrpc.StatusOK {
+		t.Fatalf("turn-end report during the wait = %+v", o.report)
+	}
+	if o.other.Status != sessionrpc.StatusFailed || o.other.Code != "daemon_stopping" {
+		t.Fatalf("non-report call during the wait = %+v, want daemon_stopping", o.other)
+	}
+	if o.closed {
+		t.Fatal("session runtime closed before the wait-for-idle")
+	}
+	if waited > budget/4 {
+		t.Fatalf("wait-for-idle took %v after the turn ended; budget %v", waited, budget)
 	}
 }

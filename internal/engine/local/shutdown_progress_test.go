@@ -82,3 +82,50 @@ func TestShutdownReportsInstanceProgress(t *testing.T) {
 		}
 	}
 }
+
+// WaitIdle reports only the instances it waits on: nothing is terminating yet,
+// so an idle instance never appears, and a busy one leaves once its turn ends.
+func TestWaitIdleReportsOnlyBusyInstances(t *testing.T) {
+	t.Setenv("AMUX_SHUTDOWN_GRACE", "5s")
+	busyKey := engine.Key{AgentID: "busy"}
+	idleKey := engine.Key{AgentID: "idle"}
+	busyUntil := time.Now().Add(300 * time.Millisecond)
+	eng := New(WithActivity(func(k engine.Key) engine.Activity {
+		if k == busyKey && time.Now().Before(busyUntil) {
+			return engine.ActivityBusy
+		}
+		return engine.ActivitySafe
+	}))
+	defer eng.Shutdown()
+	for _, key := range []engine.Key{busyKey, idleKey} {
+		inst, err := eng.Ensure(context.Background(), engine.Spec{Key: key, Argv: []string{"sh", "-c", "trap 'exit 0' TERM; printf READY; while :; do sleep 0.02; done"}, Cols: 80, Rows: 24})
+		if err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		c := &collector{}
+		inst.Subscribe(c.sink())
+		waitFor(t, c, "READY", 3*time.Second)
+	}
+
+	var snapshots [][]ShutdownProgress
+	eng.SetShutdownObserver(func(p []ShutdownProgress) {
+		snapshots = append(snapshots, append([]ShutdownProgress(nil), p...))
+	})
+	eng.WaitIdle()
+
+	sawBusy := false
+	for _, snap := range snapshots {
+		for _, p := range snap {
+			if p.Key != busyKey || p.State != ShutdownBusy {
+				t.Fatalf("WaitIdle reported %+v; want only the busy instance, as busy", p)
+			}
+			sawBusy = true
+		}
+	}
+	if !sawBusy {
+		t.Fatal("WaitIdle never reported the busy instance")
+	}
+	if last := snapshots[len(snapshots)-1]; len(last) != 0 {
+		t.Fatalf("final WaitIdle snapshot = %+v; want empty once the turn ended", last)
+	}
+}
