@@ -72,3 +72,30 @@ func TestRequestDuringPassServedWhenPassEnds(t *testing.T) {
 	close(release)
 	waitFor(t, "request published mid-pass served", func() bool { return started.Load() == 2 })
 }
+
+// A wake that cannot be served yet (its server is not registered, or another
+// mailbox is still initializing) must be served by the next serving call, not
+// wait for the fallback tick.
+func TestWakeHeldUntilMailboxCanServe(t *testing.T) {
+	var served atomic.Int32
+	f := newServingFixture(t, map[string]func() sessionrpc.DispatchResult{
+		"a": func() sessionrpc.DispatchResult {
+			served.Add(1)
+			return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK}
+		},
+	}, "a")
+	if err := f.runtime.serveCurrent(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime.waitPasses()
+	publishDaemonBudgetCall(t, f.authority, f.grants["a"])
+	server := f.runtime.servers["a"]
+	delete(f.runtime.servers, "a")
+	f.runtime.serveOne(context.Background(), "a") // woken before it is registered
+	f.runtime.servers["a"] = server
+	// Only a held wake can start this pass: nothing else is due.
+	if err := f.runtime.serveDue(context.Background(), func(string) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "held wake served", func() bool { return served.Load() == 1 })
+}
