@@ -45,6 +45,7 @@ func TestHookEventStateContract(t *testing.T) {
 	want := map[string]string{
 		"SessionStart":     core.StateReady,
 		"UserPromptSubmit": core.StateRunning,
+		"PostToolUse":      core.StateRunning,
 		"Notification":     core.StateWaiting,
 		"Stop":             core.StateReady,
 		"SessionEnd":       core.StateIdle,
