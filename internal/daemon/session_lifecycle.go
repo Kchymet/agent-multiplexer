@@ -717,7 +717,7 @@ func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
 		}
 	}
 stop:
-	c.d.effectMu.Lock()
+	c.d.lockEffectExclusive()
 	defer c.d.effectMu.Unlock()
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return

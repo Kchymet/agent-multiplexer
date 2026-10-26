@@ -3,6 +3,11 @@ package daemon
 import (
 	"sort"
 	"sync"
+	"time"
+
+	"amux/internal/console"
+	"amux/internal/core"
+	"amux/internal/store"
 )
 
 // keyedLocks is one exclusive lock per key (a session id), created on first
@@ -124,4 +129,47 @@ func (d *Daemon) tryAdmitSession(id string) (release func(), ok bool) {
 		unlock()
 		d.effectMu.RUnlock()
 	}, true
+}
+
+// effectRetryMax caps lockEffectExclusive's backoff between attempts.
+const effectRetryMax = 2 * time.Millisecond
+
+// lockEffectExclusive takes the gate exclusively without queueing on it. A
+// writer blocked in sync.RWMutex.Lock stalls every new reader, so one
+// exclusive holder waiting behind a slow shared holder (a session's restart,
+// say) would stall every other session's reports until both finish. Retrying
+// TryLock leaves readers flowing; the writer gets in at the first gap.
+func (d *Daemon) lockEffectExclusive() {
+	wait := 50 * time.Microsecond
+	for !d.effectMu.TryLock() {
+		time.Sleep(wait)
+		if wait < effectRetryMax {
+			wait *= 2
+		}
+	}
+}
+
+// sessionScopedAction names the one session an action touches when it runs
+// with only that session's admission: starting, restarting, recreating or
+// steering one existing session. Anything else, a workgroup start included
+// (it starts every member), keeps the exclusive gate.
+func sessionScopedAction(a core.Action) (string, bool) {
+	switch a.Action {
+	case core.ActionStart, core.ActionRestart, actionSessionRecreate, core.ActionSteer:
+	default:
+		return "", false
+	}
+	if a.ID == "" || a.ID == console.ID {
+		return "", false
+	}
+	db, err := store.OpenReadOnly()
+	if err != nil {
+		return "", false
+	}
+	defer db.Close()
+	session, found, err := db.GetSession(a.ID)
+	if err != nil || !found || (a.Action == core.ActionStart && session.IsRoot()) {
+		return "", false
+	}
+	return session.ID, true
 }
