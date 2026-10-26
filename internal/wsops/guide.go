@@ -119,6 +119,13 @@ When a change is ready for review, use the `+"`create-pr`"+` skill — it encode
 project's end-to-end PR flow (commit and push conventions, opening the PR, then
 babysitting it: watching CI, weighing review feedback on its merits, and
 resolving conflicts) so you take a change all the way to merged, not just opened.
+
+The PR lifecycle is: open it (draft only while the work is genuinely still in
+progress) → get CI green → address review feedback → mark it ready with
+`+"`gh pr ready <n>`"+` as the final step → report it ready for review, with its URL.
+The user merges unless your task explicitly authorizes you to. "Do not merge"
+means do not run `+"`gh pr merge`"+` and do not enable auto-merge — it never means
+"keep the PR draft". A finished PR left in draft is an incomplete task.
 `, repos, s.Branch)
 }
 

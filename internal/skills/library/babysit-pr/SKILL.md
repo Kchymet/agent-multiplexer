@@ -14,6 +14,12 @@ if asked, someone else's).
 Sandbox rules still apply: stay on your `amux/…` branch, keep every edit inside
 your worktree, and never push to the default branch.
 
+The lifecycle this loop serves: open (draft optional while iterating) → CI green
+→ review addressed → **`gh pr ready <n>` as the final step** → report it ready for
+review → the user merges (unless your task explicitly authorizes you to merge).
+"Do not merge" means no `gh pr merge` and no auto-merge — it does **not** mean
+"keep the PR draft". A finished PR left in draft is an incomplete task.
+
 ## The loop
 
 Identify the PR (`gh pr view --json number,url,headRefName,state`), then repeat
@@ -144,10 +150,22 @@ Stop the loop when **all** hold:
 
 Then:
 
+- **Mark it ready for review.** If the PR is a draft, take it out of draft now —
+  this is the final step of the work, whoever merges:
+
+  ```sh
+  gh pr ready <n>
+  gh pr view <n> --json isDraft -q .isDraft   # must print false
+  ```
+
+  Never leave a finished PR in draft, and never write "keep this PR draft" (or
+  similar) into the PR body or your report.
 - **Merge only if you're authorized to.** Merging is an outward, hard-to-reverse
   action. Merge autonomously **only** when the task explicitly told you to (e.g.
   an autonomous PR loop whose policy is "merge approved PRs"). Otherwise, report
-  that the PR is green and ready and let the human merge.
+  that the PR is green and ready for review and let the human merge. Not merging
+  means not running `gh pr merge` and not enabling auto-merge — it does not mean
+  leaving the PR draft.
 - When you do merge, use the repo's convention (this project squash-merges):
 
   ```sh
@@ -158,5 +176,6 @@ Then:
   can't fix, a design disagreement — stop and report it clearly with the specific
   blocker and what you tried. Don't churn.
 
-Report the outcome plainly: merged (with URL), or ready-for-human (with what's
-left), or blocked (with why). Don't claim done if it isn't.
+Report the outcome plainly: merged (with URL), or ready-for-human (with URL,
+confirming it is marked ready for review — not draft), or blocked (with why; if
+it is still draft, say why). Don't claim done if it isn't.

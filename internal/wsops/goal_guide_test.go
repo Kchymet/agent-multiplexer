@@ -134,6 +134,23 @@ func TestMemberGuideMentionsNoGoals(t *testing.T) {
 	}
 }
 
+// Agents read "the user merges" as "keep the PR draft" and left finished PRs
+// in draft; the member guide must say marking ready is the final step and that
+// not merging never implies draft.
+func TestMemberGuideEndsPRLifecycleReadyForReview(t *testing.T) {
+	guide := strings.Join(strings.Fields(memberGuide(store.Session{ID: "m1", RootID: "wg1", Agent: "claude", Branch: "amux/wg1-m1"})), " ")
+	for _, want := range []string{
+		"`gh pr ready <n>` as the final step",
+		"do not enable auto-merge",
+		"it never means \"keep the PR draft\"",
+		"A finished PR left in draft is an incomplete task.",
+	} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("member guide missing %q", want)
+		}
+	}
+}
+
 // The console dispatches creations for the user, so its guide must name the
 // creation fields the daemon actually accepts — a guide that teaches a field
 // the allowlist refuses sends the model into an error it cannot diagnose.
