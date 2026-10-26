@@ -53,8 +53,11 @@ func prepareSurfaceRuntime(t *testing.T, mode string, own *store.Session, script
 	t.Helper()
 	r := &surfaceRuntime{mode: mode, command: "/bin/sh " + script, dir: own.Dir, candidate: candidate, grant: grant, verified: make(chan struct{})}
 	// Each runtime below talks to a synthetic provider (a fixture endpoint and
-	// key), which is the explicit environment auth method, not the central
-	// default. Keep the selection in the isolated home's own config.
+	// key). Central auth pins official endpoints, so the fixture uses the
+	// test-only environment seam compiled in with -tags amuxfixture.
+	if !accounts.FixtureSourcesEnabled() {
+		t.Fatal("native runtime surface tests need -tags amuxfixture")
+	}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(os.Getenv("HOME"), "config"))
 	harness := "codex"
 	if mode == "claude" {
@@ -68,7 +71,7 @@ func prepareSurfaceRuntime(t *testing.T, mode string, own *store.Session, script
 	// chosen harness/provider; changing a global default must not reroute it.
 	if err := accounts.Update(func(s *accounts.State) error {
 		prior := s.Bindings[own.ID]
-		s.Bindings[own.ID] = accounts.Binding{ProfileID: accounts.ID(harness, amuxcfg.AuthEnvironment), Harness: harness, Source: amuxcfg.AuthEnvironment, Revision: prior.Revision + 1, Origin: "synthetic-runtime-fixture"}
+		s.Bindings[own.ID] = accounts.Binding{ProfileID: accounts.ID(harness, amuxcfg.AuthEnvironment), Harness: harness, Source: amuxcfg.AuthEnvironment, Revision: prior.Revision + 1, Origin: accounts.FixtureOrigin}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

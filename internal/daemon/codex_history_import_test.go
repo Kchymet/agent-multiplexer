@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"context"
+
+	"amux/internal/panespec"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -49,25 +52,42 @@ func structuredLog(t *testing.T, id string) []harnessproto.RuntimeEvent {
 	return out
 }
 
-// A session migrated from PTY Codex keeps its earlier history readable through
-// the structured record now canonical for every Codex session: the rollout is
-// imported once, in order, as the log's prefix; reruns and already structured
-// sessions are untouched; the rollout itself is never modified.
-func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
+func historyHome(t *testing.T) string {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
-	const pty, structured = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+	return home
+}
+
+func marker(t *testing.T, id string) historyMarker {
+	t.Helper()
+	var m historyMarker
+	b, err := os.ReadFile(historyMarkerPath(id))
+	if err != nil || json.Unmarshal(b, &m) != nil {
+		t.Fatalf("history marker for %s: %v", id, err)
+	}
+	return m
+}
+
+// A session migrated from PTY Codex keeps its earlier history readable through
+// the structured record now canonical for every Codex session: the rollout is
+// imported once, in order, as the log's prefix; a log holding only amux's
+// notices about this launch keeps them after the prefix; reruns change
+// nothing; the rollout itself is never modified.
+func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
+	home := historyHome(t)
+	const pty, noticed = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
 	rollout := legacyRollout(t, home, pty, "PTY-PROMPT", "PTY-ANSWER")
 	before, _ := os.ReadFile(rollout)
-	legacyRollout(t, home, structured, "OTHER-PROMPT", "OTHER-ANSWER")
+	legacyRollout(t, home, noticed, "NOTICED-PROMPT", "NOTICED-ANSWER")
 	sessions := []store.Session{
 		{ID: "migrated", Agent: "codex", ClaudeID: pty, Dir: t.TempDir()},
 		{ID: "archived", Agent: "codex", ClaudeID: pty, Dir: t.TempDir(), Archived: true},
-		{ID: "already", Agent: "codex", ClaudeID: structured, Dir: t.TempDir()},
+		{ID: "noticed", Agent: "codex", ClaudeID: noticed, Dir: t.TempDir()},
 		{ID: "never-run", Agent: "codex", Dir: t.TempDir()},
 	}
 	db, err := store.Open()
@@ -80,11 +100,11 @@ func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
 		}
 	}
 	db.Close()
-	// "already" is structured: its log exists and is canonical.
-	if err := codexapp.AppendNotice("already", "info", "structured since creation"); err != nil {
+	// A cold-start notice was appended before the migration ran: the log
+	// exists but holds no history.
+	if err := codexapp.AppendNotice("noticed", "info", "starting this launch"); err != nil {
 		t.Fatal(err)
 	}
-	existing, _ := os.ReadFile(codexapp.EventLogPathFor("already"))
 
 	d := New("", nil, 0)
 	d.importCodexHistories()
@@ -94,9 +114,12 @@ func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
 			!strings.Contains(string(got[1].Payload), "PTY-ANSWER") || got[2].Type != harnessproto.TypeNotice || !strings.Contains(string(got[2].Payload), "imported 2 lines") {
 			t.Fatalf("%s log = %+v", id, got)
 		}
+		if m := marker(t, id); m.Outcome != "imported" || m.Lines != 2 {
+			t.Fatalf("%s marker = %+v", id, m)
+		}
 	}
-	if b, _ := os.ReadFile(codexapp.EventLogPathFor("already")); !bytes.Equal(b, existing) {
-		t.Fatal("an existing structured log was rewritten")
+	if got := structuredLog(t, "noticed"); len(got) != 4 || !strings.Contains(string(got[0].Payload), "NOTICED-PROMPT") || !strings.Contains(string(got[3].Payload), "starting this launch") {
+		t.Fatalf("notice-only log not migrated in order: %+v", got)
 	}
 	if _, err := os.Stat(codexapp.EventLogPathFor("never-run")); !os.IsNotExist(err) {
 		t.Fatalf("never-run session got a log: %v", err)
@@ -121,23 +144,92 @@ func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
 	}
 }
 
-// The thread the launch resumes (a persisted identity) is the one imported.
-func TestCodexHistoryImportFollowsIdentityThread(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
-	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
-	const pinned, resumed = "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"
-	legacyRollout(t, home, pinned, "STALE-PROMPT", "STALE")
-	legacyRollout(t, home, resumed, "RESUMED-PROMPT", "RESUMED")
-	if err := codexapp.SaveIdentity(codexapp.Identity{SessionID: "s", ThreadID: resumed, Resumable: true}); err != nil {
+// A session that already ran structured keeps its canonical log untouched:
+// its rollout also holds the log's own turns, which would be duplicated.
+func TestCodexHistoryStructuredSessionKeepsLog(t *testing.T) {
+	home := historyHome(t)
+	const thread = "44444444-4444-4444-8444-444444444444"
+	legacyRollout(t, home, thread, "ROLLOUT-PROMPT", "ROLLOUT")
+	if err := codexapp.SaveIdentity(codexapp.Identity{SessionID: "s", ThreadID: thread, Resumable: true}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := importCodexHistory(store.Session{ID: "s", Agent: "codex", ClaudeID: pinned, Dir: t.TempDir()}); !ok || err != nil {
+	if err := codexapp.AppendNotice("s", "info", "structured since creation"); err != nil {
+		t.Fatal(err)
+	}
+	existing, _ := os.ReadFile(codexapp.EventLogPathFor("s"))
+	if ok, err := importCodexHistory(store.Session{ID: "s", Agent: "codex", ClaudeID: thread, Dir: t.TempDir()}); ok || err != nil {
 		t.Fatalf("import = %v, %v", ok, err)
 	}
-	if got := structuredLog(t, "s"); !strings.Contains(string(got[0].Payload), "RESUMED-PROMPT") {
-		t.Fatalf("imported the wrong thread: %+v", got)
+	if b, _ := os.ReadFile(codexapp.EventLogPathFor("s")); !bytes.Equal(b, existing) {
+		t.Fatal("structured log rewritten")
+	}
+	if m := marker(t, "s"); m.Outcome != "structured" {
+		t.Fatalf("marker = %+v", m)
+	}
+}
+
+// A failed import refuses that session's launch through the real supervisor
+// launch path, leaves the migration pending (no marker, no log), and the next
+// launch after repair imports the history before anything else is logged.
+func TestCodexHistoryImportFailureBlocksLaunchAndRetries(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores the unreadable-rollout fixture")
+	}
+	home := historyHome(t)
+	const thread = "66666666-6666-4666-8666-666666666666"
+	rollout := legacyRollout(t, home, thread, "RETRY-PROMPT", "RETRY")
+	s := store.Session{ID: "retry", Agent: "codex", ClaudeID: thread, Dir: t.TempDir()}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	d := New("", nil, 0)
+	d.codex = codexapp.NewManager(ctx, "")
+	defer d.codex.Shutdown()
+	if err := os.Chmod(rollout, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ensureSupervisorSpec(ctx, panespec.LaunchSpec{Session: s}); err == nil || !strings.Contains(err.Error(), "earlier history") {
+		t.Fatalf("launch with an unreadable rollout = %v", err)
+	}
+	if _, err := os.Stat(historyMarkerPath(s.ID)); !os.IsNotExist(err) {
+		t.Fatal("failed import recorded an outcome")
+	}
+	if _, err := os.Stat(codexapp.EventLogPathFor(s.ID)); !os.IsNotExist(err) {
+		t.Fatal("failed import left a log")
+	}
+	if err := os.Chmod(rollout, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The repaired launch imports first; whatever later launch step fails in
+	// this unsandboxed test cannot undo that.
+	_, _ = d.ensureSupervisorSpec(ctx, panespec.LaunchSpec{Session: s})
+	if got := structuredLog(t, s.ID); len(got) < 3 || !strings.Contains(string(got[0].Payload), "RETRY-PROMPT") {
+		t.Fatalf("retry did not import history first: %+v", got)
+	}
+	if m := marker(t, s.ID); m.Outcome != "imported" {
+		t.Fatalf("marker = %+v", m)
+	}
+}
+
+// An oversized rollout line is replaced by an omission notice instead of
+// failing the migration forever.
+func TestCodexHistoryImportBoundsLines(t *testing.T) {
+	home := historyHome(t)
+	const thread = "77777777-7777-4777-8777-777777777777"
+	rollout := legacyRollout(t, home, thread, "SMALL-PROMPT", "SMALL")
+	f, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"type":"response_item","payload":{"text":"` + strings.Repeat("x", 200<<10) + `"}}` + "\n")
+	_ = f.Close()
+	old := maxImportLine
+	maxImportLine = 100 << 10
+	defer func() { maxImportLine = old }()
+	if ok, err := importCodexHistory(store.Session{ID: "big", Agent: "codex", ClaudeID: thread, Dir: t.TempDir()}); !ok || err != nil {
+		t.Fatalf("import = %v, %v", ok, err)
+	}
+	got := structuredLog(t, "big")
+	if len(got) != 4 || !strings.Contains(string(got[2].Payload), "omitted rollout line 3") || !strings.Contains(string(got[3].Payload), "imported 3 lines") {
+		t.Fatalf("bounded import = %+v", got)
 	}
 }

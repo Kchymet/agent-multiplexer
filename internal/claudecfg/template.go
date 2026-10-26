@@ -1,6 +1,8 @@
 package claudecfg
 
 import (
+	"amux/internal/accounts"
+	"amux/internal/amuxcfg"
 	"bytes"
 	"encoding/json"
 	"path/filepath"
@@ -69,7 +71,10 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 	sp.Retire = []string{CredentialsFile}
 	sp.AuthEnv = SecureStorageEnv
 	sp.AuthValue = dir
-	sp.AuthUnsetEnv = credentialOverrides
+	// Only a test-fixture build can route a workload to the environment.
+	if accounts.Mode(agentID, "claude") != amuxcfg.AuthEnvironment {
+		sp.AuthUnsetEnv = credentialOverrides
+	}
 	return sp
 }
 

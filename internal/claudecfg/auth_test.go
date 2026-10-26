@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -104,22 +103,21 @@ func TestAuthCommandEnvUsesOneContext(t *testing.T) {
 	}
 }
 
-func TestHostKeychainSelectorSurvivesPrivateConfig(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS Keychain routing")
-	}
+// The retired host mode no longer preserves the host Keychain selector: a
+// saved host setting still selects the session's private config directory
+// and clears inherited credential overrides, whatever selector the host uses.
+func TestRetiredHostModeNeverSelectsHostKeychain(t *testing.T) {
 	for _, tc := range []struct {
-		name, config, secure, want string
-		secureSet                  bool
+		name, config, secure string
+		secureSet            bool
 	}{
 		{name: "default"},
-		{name: "custom config", config: "/host/claude-work/", want: "/host/claude-work/"},
+		{name: "custom config", config: "/host/claude-work/"},
 		{name: "explicit default", config: "/host/claude-work", secureSet: true},
-		{name: "separate credentials", config: "/host/settings", secure: "/host/account/", secureSet: true, want: "/host/account/"},
+		{name: "separate credentials", config: "/host/settings", secure: "/host/account/", secureSet: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateAuth(t)
-			// Keychain selector preservation is the explicit legacy host mode.
 			selectAuth(t, amuxcfg.AuthHost)
 			t.Setenv(Env, tc.config)
 			t.Setenv(SecureStorageEnv, tc.secure)
@@ -127,11 +125,11 @@ func TestHostKeychainSelectorSurvivesPrivateConfig(t *testing.T) {
 				os.Unsetenv(SecureStorageEnv)
 			}
 			sp := Template("host-auth", t.TempDir())
-			if !slices.Contains(sp.EnvEntries(), SecureStorageEnv+"="+tc.want) {
-				t.Fatal("private config changed the host credential selector")
+			if !slices.Contains(sp.EnvEntries(), SecureStorageEnv+"="+sp.Dir) || !slices.Equal(sp.AuthUnsetEnv, credentialOverrides) {
+				t.Fatalf("retired host mode selected a host store: %v", sp.EnvEntries())
 			}
-			if sp.AuthDir != "" || len(sp.AuthUnsetEnv) != 0 {
-				t.Fatal("default host authentication must preserve host credential overrides")
+			if HostStoreSharedFor("host-auth") {
+				t.Fatal("retired host mode shares a host store")
 			}
 		})
 	}

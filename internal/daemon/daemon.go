@@ -1263,6 +1263,12 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 	if sup, ok := d.codex.Get(agentID); ok {
 		return sup, nil
 	}
+	// The PTY-era history must be carried forward before the supervisor's
+	// first log line, or it would stay hidden; a failed import refuses this
+	// launch (history kept, retried next launch) rather than lose it.
+	if _, err := importCodexHistory(spec.Session); err != nil {
+		return nil, fmt.Errorf("import this Codex session's earlier history before launch: %w; the history is kept and the next start retries", err)
+	}
 	// AppServerCommand resolves the sandbox-wrapped launch AND the per-session unix
 	// endpoint (in its separately mounted socket directory) — one source for the endpoint
 	// baked into argv, dialed by amux, and persisted for a native attach.
@@ -1274,11 +1280,6 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 		return nil, err
 	}
 	sess := spec.Session
-	// A session first launched structured after startup (e.g. restored from
-	// archive) still carries its PTY-era history forward first.
-	if _, err := importCodexHistory(sess); err != nil {
-		log.Printf("amux: Codex history import for %s: %v", agentID, err)
-	}
 	var work *codexapp.RestartWork
 	if len(restart) > 0 {
 		work = restart[0]

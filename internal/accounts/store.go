@@ -414,11 +414,29 @@ func (s *State) bind(session, h string) error {
 	return nil
 }
 
+// FixtureOrigin marks a binding written by a native runtime test fixture.
+const FixtureOrigin = "synthetic-runtime-fixture"
+
+// fixtureSource is the test-only routing seam (fixture_amuxfixture.go). In a
+// release build it is never set and every binding follows central.
+var fixtureSource = func(Binding) string { return "" }
+
+// FixtureSourcesEnabled reports whether this build includes the seam.
+func FixtureSourcesEnabled() bool {
+	return fixtureSource(Binding{Origin: FixtureOrigin, Source: amuxcfg.AuthEnvironment}) != ""
+}
+
 // Mode is the source a launch of this workload uses. Every binding follows
 // central; "blocked" reports unreadable account metadata.
 func Mode(session, h string) string {
-	if _, e := Read(); e != nil {
+	s, e := Read()
+	if e != nil {
 		return "blocked"
+	}
+	if b, ok := s.Bindings[session]; ok && b.Harness == h {
+		if src := fixtureSource(b); src != "" {
+			return src
+		}
 	}
 	return amuxcfg.AuthCentral
 }

@@ -50,10 +50,14 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
   identity, a legacy v0 identity, or a PTY-pinned id with no identity) is never replaced by an
   empty thread: a resume error fails the launch and leaves the identity unchanged.
 - **PTY history.** Central Codex auth requires the App Server, so `codex.control pty` is reported
-  and overridden. A session whose canonical structured log is absent has the rollout of the
-  thread it will resume imported once (at daemon startup and before supervisor launch) as an
-  ordered prefix of that log, published with a no-clobber link. The rollout is only read; it is
-  the same file the App Server resumes and appends to.
+  and overridden. For a session that never ran structured (no persisted identity), the PTY
+  rollout is imported (at daemon startup and before every supervisor launch) as the ordered
+  prefix of its structured log. Notice lines already in the log, including appends that race
+  the replacement, are kept after the prefix. The outcome (`imported` or `structured`) is
+  recorded in `<log>.history.json`. Until then, a failed import refuses only that launch and is
+  retried. An oversized line becomes an omission notice. A session that already ran structured
+  keeps its log, because its rollout also holds the log's own turns and log events carry no time
+  to separate them. The rollout is only read; it is the same file the App Server resumes.
 - **Corrupt or insecure state.** A corrupt central Claude record never blocks binding or the
   repairing login, and delivery refuses it. An insecure store fails closed.
 

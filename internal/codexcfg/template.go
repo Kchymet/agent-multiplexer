@@ -48,7 +48,10 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 	// would select a different account.
 	sp.Shared = []string{MCPCredentialsFile, "mcp-oauth-locks"}
 	sp.Retire = []string{AuthFile}
-	sp.AuthUnsetEnv = APIKeyEnv
+	// Only a test-fixture build can route a workload to the environment.
+	if accounts.Mode(agentID, "codex") != amuxcfg.AuthEnvironment {
+		sp.AuthUnsetEnv = APIKeyEnv
+	}
 	return sp
 }
 
