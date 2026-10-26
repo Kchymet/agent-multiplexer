@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/credentialbroker"
 	"amux/internal/panespec"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
@@ -116,6 +119,7 @@ func BenchmarkStoreOpen(b *testing.B) {
 //
 //   - host-action: a host `start` of a3 (a creation, a restart);
 //   - peer-report: a3's own report, stalled inside its write;
+//   - peer-credential: a3's GitHub credential read, stalled in its helper;
 //   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
 //
 // It reports per-report p50/max latency rather than throughput.
@@ -137,6 +141,27 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 				}
 			}
 			return nil // the holder is a3's own report loop
+		})
+	})
+	b.Run("peer-credential", func(b *testing.B) {
+		ghConfig := b.TempDir()
+		b.Setenv("GH_CONFIG_DIR", ghConfig)
+		if err := os.WriteFile(filepath.Join(ghConfig, "hosts.yml"), []byte("github.com:\n  user: selected\n"), 0600); err != nil {
+			b.Fatal(err)
+		}
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			runtime.credentialOperation = func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error) {
+				slow()
+				return credentialbroker.Result{Value: "synthetic"}, nil
+			}
+			o := credentialbroker.Operation{Verb: credentialbroker.Read, Service: "gh:github.com", Account: credentialbroker.GitHubAccount}
+			call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: o.Verb, Fields: o.Fields()}
+			principal := principalFor(b, d, "a3")
+			return func() {
+				if result, _ := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: principal, Call: call}); result.Status != sessionrpc.StatusOK {
+					b.Errorf("credential = %+v", result)
+				}
+			}
 		})
 	})
 	b.Run("reconcile", func(b *testing.B) {
@@ -241,4 +266,13 @@ func benchmarkReportsDuringSlowHolder(b *testing.B, setup func(d *Daemon, runtim
 		b.ReportMetric(float64(latencies[len(latencies)/2].Microseconds()), "p50-us")
 		b.ReportMetric(float64(latencies[len(latencies)-1].Microseconds()), "max-us")
 	}
+}
+
+// principalFor loads the principal of a session the fixture provisioned.
+func principalFor(b *testing.B, d *Daemon, id string) access.Principal {
+	credential, err := access.LoadCredential(d.authority.CredentialDir(access.SubjectSession, id))
+	if err != nil {
+		b.Fatal(err)
+	}
+	return credentialPrincipal(credential)
 }

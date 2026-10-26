@@ -47,13 +47,13 @@ func (r *sessionRuntime) authorizeCredential(ctx context.Context, principal acce
 }
 
 func (r *sessionRuntime) dispatchCredential(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
-	// Keep the short, bounded native credential operation within the lifecycle
-	// admission gate so an archive, role change, or revoke cannot cross a write.
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.lockEffectExclusive()
-	defer r.d.effectMu.Unlock()
-	ctx = withEffectAdmission(ctx)
+	// Keep the short, bounded native credential operation within the caller's
+	// admission so an archive, role change, or revoke (all exclusive) cannot
+	// cross a write. The helper processes serialize only among themselves.
+	release := r.d.admitSession(request.Principal.SubjectID)
+	defer release()
+	r.d.credentialMu.Lock()
+	defer r.d.credentialMu.Unlock()
 	req := request.Call.AccessRequest()
 	if err := r.authorizeCredential(ctx, request.Principal, req); err != nil {
 		return rpcDenied("credential_access_denied"), nil
