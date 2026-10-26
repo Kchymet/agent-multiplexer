@@ -399,7 +399,7 @@ func (m *model) renderMain() string {
 		return m.renderDialog()
 	}
 	if t := m.cur(); t != nil {
-		return t.Render()
+		return m.renderSelectedPane(t)
 	}
 	return lipgloss.NewStyle().
 		Width(m.mainWidth()).Height(m.paneRows()).
