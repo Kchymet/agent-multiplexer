@@ -39,6 +39,7 @@ records which slow holders delay a report from session `a1`:
 | host `agent-set-repos` of a3, stalled in its git work | no | PR 4, repo slice |
 | host `add-repo`, stalled cloning | no | PR 4, repo slice |
 | the coordinator's own `add-agent` (through its mailbox), stalled creating | no | PR 4, session-originated slice |
+| a3's completion cleanup, stalled stopping its runtime | no | PR 4, completion slice |
 | archive of a1's own workgroup | yes, and a1 is then refused | correct: a1 is archived |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
@@ -76,7 +77,7 @@ check reads and its effect writes.
 | 8 | `Daemon.handle` (actions.go), all host actions and #3's actions | since PR 4: gate shared + session(id) for `sessionScopedAction`; otherwise both (exclusive by retry), unless already admitted | `revalidateDeferred` (caller's guard) | anything: store mutations through wsops, engine start/kill/restart, authority restore/regrant, account manage, steer, shutdown | per action: the locks of the resources it names (see Target model) |
 | 9 | `admitDeferredEffect` (steer.go), deferred start behind an accepted `prompt` | gate shared + session(id) since PR 4 | `revalidateDeferred` | `startAgent`, queue input on the instance | session lock of the target |
 | 10 | `accountCall` (accounts.go), non-status operations when not admitted | effectMu | caller guard | `readiness` cache clear, account attempts (`accountMu`), accounts state | account lock (today `accountMu`) |
-| 11 | `completionRegistry.finish` (session_lifecycle.go) | effectMu | completion ownership, archive flag | `RevokeCurrent`, `killRuntimeToken` | session lock (self) |
+| 11 | `completionRegistry.finish` (session_lifecycle.go) | gate shared + session(self) since the completion slice | completion ownership, archive flag | `RevokeCurrent`, `killRuntimeToken` | session lock (self) |
 | 12 | `sessionRuntime.close` | dispatchMu | — | closes every server after all passes joined | none once the run goroutine owns shutdown |
 
 The central Codex token delivery (central_codex.go) already avoids the gate:
@@ -259,8 +260,13 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      (`splitAction`), plus the caller's own session lock. The creation branch
      locks the caller during the creation, then takes {caller, new session}
      in one sorted acquisition to start it. Self-completion stays exclusive.
+   - Completion slice, done: completion cleanup (`finish`: revoke the
+     generation, then stop the runtime, whose kill can wait out the engine's
+     kill grace) takes only its subject's admission. A restore cancels the
+     entry before it takes the gate, and `finish` rechecks ownership under
+     its lock.
    - Next: restore, move and the remaining policy changes, then account
-     manage and completion `finish`.
+     manage.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is

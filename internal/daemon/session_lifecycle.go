@@ -736,8 +736,11 @@ func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
 		}
 	}
 stop:
-	c.d.lockEffectExclusive()
-	defer c.d.effectMu.Unlock()
+	// Revocation and the kill change only this subject, so its admission is
+	// enough; a restore cancels the entry before it takes the gate, and owns
+	// rechecks that here.
+	release := c.d.admitSession(subjectID)
+	defer release()
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return
 	}
