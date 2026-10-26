@@ -28,6 +28,13 @@ type Keys struct {
 	Submit []byte
 	// PasteStart and PasteEnd frame programmatic text as a paste, preserving newlines.
 	PasteStart, PasteEnd []byte
+	// TypedNewline, when set, delivers text as typed input instead of a paste:
+	// each newline is sent as this key sequence and the text is written in
+	// TypeChunk-byte pieces TypeDelay apart. It takes precedence over the paste
+	// framing (see claudeKeys for why).
+	TypedNewline []byte
+	TypeChunk    int
+	TypeDelay    time.Duration
 	// SubmitDelay lets the TUI finish handling a paste before Enter arrives.
 	SubmitDelay time.Duration
 	// Interrupt stops the current turn without killing the process (`stop`).
@@ -81,6 +88,15 @@ func (k Keys) Steerable() bool {
 //   - Esc on a permission prompt declines it — the prompt itself says "Esc to
 //     cancel", and the run leaves the tool uncalled and the session alive.
 //
+// Steering text is typed, not pasted. Claude Code collapses a bracketed paste
+// into a "[Pasted text #1 +N lines]" placeholder in the composer and hands it
+// to the model inside <pasted_content> tags, which the model is told to treat
+// as material the user did not write — so an orchestrator's directive arrived
+// as untrusted pasted content (verified against CLI 2.1.310: the same 1 KiB,
+// multi-paragraph text pasted becomes a pasted_content block with no typed
+// words; typed in 256-byte pieces with newlines as backslash+Enter, Claude's
+// newline escape, it arrives verbatim as the user's own prompt).
+//
 // Interrupt is Ctrl+C, not the Esc the docs headline, because Esc is not
 // reliable here: with "editorMode": "vim" in Claude Code's settings — a per-user
 // setting amux cannot assume away — Esc is swallowed by the composer to enter vim
@@ -93,7 +109,7 @@ func claudeKeys() Keys {
 	return Keys{
 		Submit: keyEnter, Interrupt: keyCtrlC, Allow: keyEnter, Deny: keyEsc,
 		InterruptOnlyWhileBusy: true,
-		PasteStart:             []byte("\x1b[200~"), PasteEnd: []byte("\x1b[201~"),
+		TypedNewline:           []byte("\\\r"), TypeChunk: 256, TypeDelay: 5 * time.Millisecond,
 		SubmitDelay: 100 * time.Millisecond,
 	}
 }

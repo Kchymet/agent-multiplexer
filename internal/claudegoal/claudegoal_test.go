@@ -155,7 +155,8 @@ func TestWaitLetsOneStopThrough(t *testing.T) {
 		t.Fatalf("prompt while waiting: %+v", got)
 	}
 	// The continuation prompt teaches the idiomatic wait, not busy-polling.
-	for _, want := range []string{"amux agent goal wait", "run_in_background", "Monitor", "never busy-poll"} {
+	// ...and that a done goal means member PRs marked ready, never left draft.
+	for _, want := range []string{"amux agent goal wait", "run_in_background", "Monitor", "never busy-poll", "gh pr ready", "\"do not merge\" never means draft"} {
 		if !strings.Contains(ContinuationPrompt(active), want) {
 			t.Errorf("continuation prompt missing %q", want)
 		}

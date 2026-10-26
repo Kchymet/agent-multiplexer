@@ -288,7 +288,7 @@ amux harness               # disabled without an authenticated inherited channel
 
 ## Keys (native TUI)
 
-Navigation is **Alt/Option-only** (no prefix):
+Global navigation uses configurable chords (no prefix):
 
 | key | action |
 |-----|--------|
@@ -302,6 +302,7 @@ Navigation is **Alt/Option-only** (no prefix):
 | `Alt+r` | restart the focused agent or rail selection and resume its saved conversation (confirm) |
 | `Alt+PgUp` / `Alt+PgDown` | scroll the active pane's history up / down one page |
 | `Alt+End` | return the active pane to live output |
+| `Ctrl+U` / `Ctrl+D` | scroll focused pane history toward older / newer text, or page the focused rail, by half its height |
 | `a` | add an agent — on a repo, a normal workgroup limited to that repo; on a workgroup, another member (settings form) |
 | `w` | new workgroup (coordinator settings; optional repos limit it and seed a first agent) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
@@ -327,13 +328,27 @@ the child, including at empty history or either boundary.
 While viewing history, an `↑ offset/history` badge appears in the pane header
 (just `↑` when narrow), leaving the pane's text uncovered. `Alt+End`, actual
 child input, or new child output returns to live. Rebind history navigation
-with `keys.scroll-up`, `keys.scroll-down`, and `keys.scroll-live`:
+with `keys.scroll-up`, `keys.scroll-down`, `keys.scroll-live`,
+`keys.scroll-half-up`, and `keys.scroll-half-down`:
 
 ```sh
 amux config set keys.scroll-up ctrl+g
 amux config set keys.scroll-down alt+PageDown
 amux config set keys.scroll-live alt+End
+amux config set keys.scroll-half-up f5
+amux config set keys.scroll-half-down f6
 ```
+
+Ctrl+U/Ctrl+D are reserved for pane history by default, including when an agent
+is focused. The last two commands move half-page scrolling to F5/F6 and restore
+child Ctrl+U line-kill and Ctrl+D EOF; reopen the dashboard to apply. Half-page
+actions respect focus: pane history with pane focus, existing rail paging with
+rail focus. The same rebindings apply in both places. Pane steps round down
+with a one-row minimum. Full-page Alt chords remain global pane actions, and
+modals handle their keys first. Pasted text does not invoke history shortcuts.
+An existing explicit binding using Ctrl+U or Ctrl+D wins on upgrade: the
+corresponding new half-page default is left unbound until that conflict is moved
+or the half-page action is explicitly rebound (`amux config ls` shows this).
 
 History is bounded and local to the attached pane; alternate-screen history
 records completed synchronized redraws rather than reconstructing an entire

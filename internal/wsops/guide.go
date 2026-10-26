@@ -119,6 +119,15 @@ When a change is ready for review, use the `+"`create-pr`"+` skill — it encode
 project's end-to-end PR flow (commit and push conventions, opening the PR, then
 babysitting it: watching CI, weighing review feedback on its merits, and
 resolving conflicts) so you take a change all the way to merged, not just opened.
+
+The PR lifecycle is: open it (draft only while the work is genuinely still in
+progress) → get CI green → mark it ready with `+"`gh pr ready <n>`"+` and report it
+ready for review, with its URL → keep babysitting (CI, review feedback,
+conflicts) → merge, the final step, which the user does unless they or your task
+explicitly authorize you to. Marking ready is the hand-off to review, not the
+end. "Do not merge" means do not run `+"`gh pr merge`"+` and do not enable
+auto-merge — it never means "keep the PR draft". A finished PR left in draft is
+an incomplete task.
 `, repos, s.Branch)
 }
 
@@ -292,7 +301,13 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
   pull request; review its authenticated session view and PR evidence, not only
-  the member's summary.
+  the member's summary. A member marks its PR ready for review
+  (`+"`gh pr ready <n>`"+`) once the code is complete and CI is green, then keeps
+  babysitting (CI, review feedback, conflicts) until the merge, which the user
+  does unless told otherwise — a finished PR left in draft is incomplete work,
+  so send it back. "Do not merge" /
+  "the user merges" means no `+"`gh pr merge`"+` and no auto-merge; it never means
+  "keep the PR draft". Say so when you dispatch PR work.
 
 `, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
 	b.WriteString(goalSection(root))
@@ -463,8 +478,11 @@ func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
 func completionSection(root store.Session) string {
 	return fmt.Sprintf(`## Finishing a task
 Finishing a task archives nothing: this workgroup, you and your members stay on
-the active rail. End each finished task with your final summary and ask the
-user whether to archive the workgroup or give it another task. Wait for explicit
+the active rail. Before you call a task finished, check that every member PR it
+produced is green and marked ready for review (`+"`gh pr view <n> --json isDraft`"+`
+prints false), not left in draft; the user merges unless the task authorizes
+merging. End each finished task with your final summary, listing those PR URLs
+as ready for review, and ask the user whether to archive the workgroup or give it another task. Wait for explicit
 user confirmation before archiving; goal completion is not confirmation.
 After confirmation, run `+"`amux agent done`"+`: your authenticated identity selects
 this workgroup (%s), and the daemon durably archives you and its direct members
@@ -504,6 +522,8 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
 - Pursue the goal to the requested end state: scope it, dispatch members
   (`+"`add-agent`"+`, `+"`steer`"+`), verify their evidence (session views, branches, PRs,
   CI), and fix or re-dispatch what falls short. Progress must change real state.
+  A member PR is done only when it is green and marked ready for review, not
+  draft; "do not merge" never means draft.
 - Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
   verified — never because you are stopping, out of ideas, or near a budget.
   Completing the goal archives nothing: the completed goal stays visible on the
@@ -540,7 +560,9 @@ status.
 - Pursue the goal to the requested end state: scope it, dispatch members
   (`+"`add-agent`"+`, `+"`steer`"+`), verify their evidence (session views, branches, PRs,
   CI), and fix or re-dispatch what falls short. Progress must change real state;
-  a continuation that only restates a plan is wasted.
+  a continuation that only restates a plan is wasted. A member PR is done only
+  when it is green and marked ready for review, not draft; "do not merge" never
+  means draft.
 - Run `+"`amux agent goal complete \"<summary>\"`"+` only when the objective is true
   and verified — never because you are stopping, out of ideas, or near the
   continuation budget. Completing the goal archives nothing (see "Finishing a

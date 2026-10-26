@@ -69,10 +69,10 @@ func cmdConfig(args []string) error {
 			return err
 		}
 		chord := km.Chord(action)
-		if chord == "" {
+		if chord == "" && (keymap.Keymap{}).Chord(action) == "" {
 			return fmt.Errorf("unknown action %q (see `amux config ls`)", action)
 		}
-		fmt.Println(chord)
+		fmt.Println(bindingLabel(chord))
 		return nil
 	case "set":
 		if len(args) < 3 {
@@ -152,7 +152,7 @@ func cmdConfig(args []string) error {
 			return err
 		}
 		km, _ := keymap.Load()
-		fmt.Printf("keys.%s = %s  (default; reopen the dashboard to apply)\n", action, km.Chord(action))
+		fmt.Printf("keys.%s = %s  (default; reopen the dashboard to apply)\n", action, bindingLabel(km.Chord(action)))
 		return nil
 	case "path":
 		fmt.Println(core.ConfigPath())
@@ -210,7 +210,10 @@ func configList() error {
 		if !b.Default {
 			mark = "  (custom)"
 		}
-		fmt.Printf("keys.%-14s %-12s %s%s\n", b.Action, b.Chord, b.Desc, mark)
+		if b.Chord == "" {
+			mark = "  (default displaced by configured binding)"
+		}
+		fmt.Printf("keys.%-14s %-12s %s%s\n", b.Action, bindingLabel(b.Chord), b.Desc, mark)
 	}
 	var authErr error
 	for _, harness := range []string{"claude", "codex"} {
@@ -280,4 +283,11 @@ func keyPath(path string) (string, error) {
 		return "", fmt.Errorf("unknown setting %q — use keys.<action>, claude.auth, codex.auth or codex.control (see `amux config ls`)", path)
 	}
 	return action, nil
+}
+
+func bindingLabel(chord string) string {
+	if chord == "" {
+		return "unbound"
+	}
+	return chord
 }

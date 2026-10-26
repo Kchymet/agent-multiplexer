@@ -15,6 +15,8 @@ func TestConfigHistoryBindings(t *testing.T) {
 		{"scroll-up", "alt+pgup"},
 		{"scroll-down", "alt+pgdown"},
 		{"scroll-live", "alt+end"},
+		{"scroll-half-up", "ctrl+u"},
+		{"scroll-half-down", "ctrl+d"},
 	} {
 		key := "keys." + tc.action
 		out, err := captureOutput(t, func() error { return cmdConfig([]string{"get", key}) })
@@ -133,5 +135,28 @@ func TestConfigAuthSettings(t *testing.T) {
 		if err := cmdConfig(args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
+	}
+}
+
+func TestConfigHalfPageUpgrade(t *testing.T) {
+	sandboxCLI(t)
+	if err := os.MkdirAll(core.ConfigDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(core.ConfigPath(), []byte(`{"keys":{"scroll-up":"ctrl+u","scroll-down":"ctrl+d"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"scroll-half-up", "scroll-half-down"} {
+		out, err := captureOutput(t, func() error { return cmdConfig([]string{"get", "keys." + action}) })
+		if err != nil || strings.TrimSpace(out) != "unbound" {
+			t.Fatalf("upgrade %s: %q, %v", action, out, err)
+		}
+	}
+	out, err := captureOutput(t, func() error { return cmdConfig([]string{"ls"}) })
+	if err != nil || !strings.Contains(out, "default displaced by configured binding") {
+		t.Fatalf("list: %q, %v", out, err)
+	}
+	if err := cmdConfig([]string{"set", "keys.scroll-half-up", "ctrl+u"}); err == nil {
+		t.Fatal("CLI accepted explicit collision")
 	}
 }
