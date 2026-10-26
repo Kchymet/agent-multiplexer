@@ -1011,6 +1011,14 @@ func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
 	return a.validLocked(p)
 }
 
+// HasCurrent reports whether the subject has a current credential generation.
+// It is a cheap read for callers deciding whether a revocation has work to do.
+func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.registry.Current[currentKey(kind, subjectID)] != ""
+}
+
 // WithValid admits a short local effect under a current-principal read lease.
 // fn must not call the authority, perform network IO, or wait for a runtime.
 // Revocation/rotation cannot commit between validation and this effect.
