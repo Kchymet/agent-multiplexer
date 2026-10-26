@@ -191,7 +191,7 @@ func ContinuationPrompt(s State) string {
 Objective: %s
 
 Keep making real progress toward the verified end state: check members' evidence, dispatch or steer work, fix what falls short. Do not restate a plan without acting on it.
-- Done and verified: run `+"`amux agent goal complete \"<summary>\"`"+`, then give your final summary.
+- Done and verified: member PRs are green and marked ready for review (`+"`gh pr ready <n>`"+`), not left draft — "do not merge" never means draft. Then run `+"`amux agent goal complete \"<summary>\"`"+` and give your final summary.
 - Need a decision only the user can make, or information you cannot find: run `+"`amux agent goal ask \"<question>\"`"+`, then ask it plainly and end your turn. Choose a sensible default for anything optional instead.
 - Waiting on members or CI: never busy-poll across continuations. If nothing can move until they report, first arm a background wake-up (a Monitor, or a run_in_background until-loop on the member's events or the PR/CI state), then run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn; the wake-up's notification resumes the goal. Never run goal wait without an armed wake-up.
 - Hard blocker that repeats and needs the user: run `+"`amux agent goal blocked \"<reason>\"`"+` and explain it.`,
