@@ -81,7 +81,7 @@ func TestSessionReportVocabularyRejectsAuthorityAndPathFields(t *testing.T) {
 	}
 }
 
-func publishTestRuntime(t *testing.T, d *Daemon, subject string) string {
+func publishTestRuntime(t testing.TB, d *Daemon, subject string) string {
 	t.Helper()
 	generation, err := d.permissions.observe(subject, &fakeInstance{})
 	if err != nil {
@@ -308,5 +308,35 @@ func TestCaptureStreamsOutsideEffectGateAndRejectsReplacement(t *testing.T) {
 	}
 	if _, _, ok := core.SessionCapturedTranscript(session.ID, runtimeID); ok {
 		t.Fatal("replacement published an old runtime's staged capture")
+	}
+}
+
+// TestReportContextServedOutsideEffectGate pins that the read-only report
+// context never queues behind the daemon-wide gates: every hook and status-line
+// report starts with it, and a long effect elsewhere must not stall them all.
+func TestReportContextServedOutsideEffectGate(t *testing.T) {
+	session := store.Session{ID: "a1", RootID: "root", Agent: "claude", Dir: t.TempDir(), ClaudeID: "44444444-4444-4444-8444-444444444444"}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	generation := publishTestRuntime(t, d, session.ID)
+	query := sessionrpc.DispatchRequest{Principal: principals[session.ID], RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}}
+	runtime.dispatchMu.Lock()
+	d.effectMu.Lock()
+	done := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), query)
+		done <- result
+	}()
+	var result sessionrpc.DispatchResult
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("report context waited for the effect gate")
+	}
+	d.effectMu.Unlock()
+	runtime.dispatchMu.Unlock()
+	var body selfReportContext
+	if result.Status != sessionrpc.StatusOK || json.Unmarshal(result.Body, &body) != nil || body.RuntimeGeneration != generation {
+		t.Fatalf("report context = %+v", result)
 	}
 }

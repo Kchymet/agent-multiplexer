@@ -62,6 +62,10 @@ type sessionRuntime struct {
 	events              *sessionEventPager
 	eventsErr           error
 	credentialOperation func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error)
+	// beforeReportEffect, when set, runs just before a report's write, under
+	// whatever locks the report path holds there. Tests use it to model a slow
+	// report; production leaves it nil.
+	beforeReportEffect func(subjectID string)
 	// inspect, when set by a test, runs a function on the run goroutine, which
 	// owns the serving maps. Nil in production: a nil channel never fires.
 	inspect chan func()
@@ -111,8 +115,13 @@ func (r *sessionRuntime) run(ctx context.Context) {
 }
 
 func (r *sessionRuntime) serve(ctx context.Context) error {
+	start := time.Now()
 	if err := r.reconcile(ctx); err != nil {
 		return err
+	}
+	if elapsed := time.Since(start); elapsed >= slowSessionReconcile {
+		// reconcile holds the daemon-wide gates every report needs.
+		log.Printf("session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
 	}
 	return r.serveCurrent(ctx)
 }
@@ -354,8 +363,25 @@ func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrp
 			err = nil
 		}
 	}()
+	start := time.Now()
+	defer func() {
+		// Every session's reports share the daemon-wide dispatch/effect gates, so
+		// one slow call delays all agents. Name it in the log so a stall can be
+		// attributed without a profiler.
+		if elapsed := time.Since(start); elapsed >= slowSessionDispatch {
+			log.Printf("session RPC %s: slow %s %s took %v (status %s %s)", request.Principal.SubjectID,
+				request.Call.Route, request.Call.Verb, elapsed.Round(time.Millisecond), result.Status, result.Code)
+		}
+	}()
 	return r.dispatch(ctx, request)
 }
+
+// slowSessionDispatch and slowSessionReconcile are the durations worth a
+// daemon log line.
+const (
+	slowSessionDispatch  = time.Second
+	slowSessionReconcile = 250 * time.Millisecond
+)
 
 func (r *sessionRuntime) renewCurrent(ctx context.Context, session store.Session) {
 	if err := r.validateOrRenewCredential(ctx, session); err != nil {

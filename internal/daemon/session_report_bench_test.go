@@ -1,0 +1,187 @@
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"testing"
+	"time"
+
+	"amux/internal/access"
+	"amux/internal/core"
+	"amux/internal/sessionreport"
+	"amux/internal/sessionrpc"
+	"amux/internal/store"
+)
+
+// reportPopulation is a long-lived install's shape: one live reporting agent
+// among 40 live and 300 archived sessions.
+func reportPopulation(b *testing.B) (*sessionRuntime, access.Principal, string) {
+	b.Helper()
+	const runtimeID = "33333333-3333-4333-8333-333333333333"
+	sessions := []store.Session{{ID: "a0000", RootID: "root", Agent: "claude", ClaudeID: runtimeID}}
+	for i := 1; i < 340; i++ {
+		sessions = append(sessions, store.Session{ID: fmt.Sprintf("a%04d", i), RootID: "root", Agent: "claude", ClaudeID: runtimeID, Archived: i >= 40})
+	}
+	d, runtime, principals := sessionRuntimeFixture(b, sessions...)
+	return runtime, principals["a0000"], publishTestRuntime(b, d, "a0000")
+}
+
+// BenchmarkSessionReportDispatch measures one hook's daemon-side cost: the
+// context query plus the activity report, each of which runs under the
+// daemon-wide dispatch/effect gates every other session also needs.
+func BenchmarkSessionReportDispatch(b *testing.B) {
+	runtime, principal, generation := reportPopulation(b)
+	contextQuery := sessionrpc.DispatchRequest{Principal: principal, RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}}
+	activity := reportRequest(principal, sessionreport.Activity, map[string]string{
+		sessionreport.FieldRuntimeGeneration: generation, sessionreport.FieldState: core.StateRunning,
+	})
+	for _, shared := range []bool{false, true} {
+		store.ShareHandles(shared)
+		handles := map[bool]string{false: "per-call", true: "shared"}[shared]
+		b.Run("context/"+handles, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				if result, err := runtime.dispatch(context.Background(), contextQuery); err != nil || result.Status != sessionrpc.StatusOK {
+					b.Fatalf("context = %+v, %v", result, err)
+				}
+			}
+		})
+		b.Run("activity/"+handles, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				if result, err := runtime.dispatch(context.Background(), activity); err != nil || result.Status != sessionrpc.StatusOK {
+					b.Fatalf("activity = %+v, %v", result, err)
+				}
+			}
+		})
+	}
+	store.ShareHandles(false)
+}
+
+// BenchmarkSessionReconcileSharedHandles is BenchmarkSessionReconcile with the
+// daemon's pooled store handles.
+func BenchmarkSessionReconcileSharedHandles(b *testing.B) {
+	store.ShareHandles(true)
+	defer store.ShareHandles(false)
+	r := reconcilePopulation(b, 40, 300)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := r.reconcile(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStoreOpen(b *testing.B) {
+	reportPopulation(b)
+	b.Run("shared", func(b *testing.B) {
+		store.ShareHandles(true)
+		defer store.ShareHandles(false)
+		for i := 0; i < b.N; i++ {
+			db, err := store.Open()
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = db.Close()
+		}
+	})
+	b.Run("writable", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			db, err := store.Open()
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = db.Close()
+		}
+	})
+	b.Run("readonly", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			db, err := store.OpenReadOnly()
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = db.Close()
+		}
+	})
+}
+
+// BenchmarkConcurrentReportsDuringSlowEffect measures what two sessions'
+// reports cost while a slow host action on a third session (a creation, a
+// restart) repeatedly runs for 100ms — the shape of the user-visible stall.
+// The holder goes through the real host action admission, so the numbers
+// track whatever locks that path takes (docs/daemon-locking.md). It reports
+// per-report p50/max latency rather than throughput.
+func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
+	store.ShareHandles(true)
+	defer store.ShareHandles(false)
+	const runtimeID = "33333333-3333-4333-8333-333333333333"
+	sessions := []store.Session{
+		{ID: "a1", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+		{ID: "a2", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+		{ID: "a3", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+	}
+	d, runtime, principals := sessionRuntimeFixture(b, sessions...)
+	d.sessionRPC = runtime
+	b.Cleanup(runtime.completions.close)
+	d.engine = newFakeEngine()
+	d.agentsUnder = func(string) ([]string, error) {
+		time.Sleep(100 * time.Millisecond)
+		return nil, nil
+	}
+	generations := map[string]string{}
+	for _, s := range sessions {
+		generations[s.ID] = publishTestRuntime(b, d, s.ID)
+	}
+	stop := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"})
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	var mu sync.Mutex
+	var latencies []time.Duration
+	b.ResetTimer()
+	var wg sync.WaitGroup
+	for _, s := range sessions[:2] {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			for i := 0; i < b.N; i++ {
+				start := time.Now()
+				for _, req := range []sessionrpc.DispatchRequest{
+					{Principal: principals[id], RequestID: "0123456789abcdef0123456789abcdef",
+						Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}},
+					reportRequest(principals[id], sessionreport.Activity, map[string]string{
+						sessionreport.FieldRuntimeGeneration: generations[id], sessionreport.FieldState: core.StateRunning,
+					}),
+				} {
+					if result, err := runtime.dispatch(context.Background(), req); err != nil || result.Status != sessionrpc.StatusOK {
+						b.Errorf("report = %+v, %v", result, err)
+						return
+					}
+				}
+				mu.Lock()
+				latencies = append(latencies, time.Since(start))
+				mu.Unlock()
+			}
+		}(s.ID)
+	}
+	wg.Wait()
+	b.StopTimer()
+	close(stop)
+	<-holderDone
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	if len(latencies) > 0 {
+		b.ReportMetric(float64(latencies[len(latencies)/2].Microseconds()), "p50-us")
+		b.ReportMetric(float64(latencies[len(latencies)-1].Microseconds()), "max-us")
+	}
+}

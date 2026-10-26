@@ -1094,3 +1094,36 @@ func TestRenewExpiredReissuesOnlyLapsedUnrevokedCurrent(t *testing.T) {
 		t.Fatalf("revoked renew attempt changed record count to %d", got)
 	}
 }
+
+// TestSignRequestIDsSortInIssueOrder pins the FIFO contract mailboxes rely on:
+// request files are served in name order, so ids must sort by issue time.
+func TestSignRequestIDsSortInIssueOrder(t *testing.T) {
+	a, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	dir, err := a.Ensure(context.Background(), SubjectSession, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := LoadCredential(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(1_800_000_000, 0)
+	var previous string
+	for i := 0; i < 50; i++ {
+		req, err := SignRequest(cred, a.BootID(), []byte("{}"), start.Add(time.Duration(i)*time.Millisecond), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !validHexID(req.RequestID, 16) {
+			t.Fatalf("request id %q is not 16 hex bytes", req.RequestID)
+		}
+		if req.RequestID <= previous {
+			t.Fatalf("request id %q does not sort after %q", req.RequestID, previous)
+		}
+		previous = req.RequestID
+	}
+}

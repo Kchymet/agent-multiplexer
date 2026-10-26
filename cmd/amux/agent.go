@@ -126,6 +126,10 @@ specified in docs/agent-protocol.md and planned.
 // hooks carry the model only at SessionStart. Failures are swallowed only in
 // --statusline mode; an explicit model report returns its exact failure.
 func cmdAgentModel(args []string) error {
+	if len(args) > 0 && args[0] == statusLineReportFlag {
+		runStatusLineReport(args[1:])
+		return nil
+	}
 	var forward64, explicitModel string
 	statusLine := false
 	for _, arg := range args {
@@ -170,10 +174,12 @@ func cmdAgentModel(args []string) error {
 	input, overflow, readErr := readBoundedHookInput()
 	var payload claudecfg.StatusLinePayload
 	if readErr == nil && !overflow && decodeHookJSON(input, &payload) == nil {
-		_ = restrictedReport(sessionreport.Model, map[string]string{sessionreport.FieldModel: payload.Model.ID})
-		if len(payload.RateLimits) > 0 {
-			_ = restrictedReport(sessionreport.Limits, map[string]string{sessionreport.FieldLimits: string(payload.RateLimits)})
-		}
+		// Claude re-renders the status line many times a second while a turn
+		// streams, and waits for this command each time. Report only what
+		// changed (refreshing periodically), and hand that report off rather
+		// than wait for it, so a busy daemon delays neither the rendered line
+		// nor — through a flood of redundant reports — every other agent.
+		scheduleStatusLineReport(payload)
 	}
 
 	if forward64 == "" {
@@ -208,7 +214,7 @@ func cmdAgentStatus(args []string, hook bool) error {
 			return nil
 		}
 	}
-	return hookResult(hook, restrictedReport(sessionreport.Activity,
+	return hookResult(hook, reportWithin(hook, sessionreport.Activity,
 		map[string]string{sessionreport.FieldState: args[0]}))
 }
 
@@ -286,7 +292,7 @@ func cmdAgentPermission(args []string) error {
 	default:
 		return hookResult(hook, fmt.Errorf("unknown permission observation verb %q", verb))
 	}
-	return hookResult(hook, restrictedReport(reportVerb, fields))
+	return hookResult(hook, reportWithin(hook, reportVerb, fields))
 }
 
 // cmdAgentDone is the terminal self-report: an agent declares its task finished
@@ -358,7 +364,7 @@ func cmdAgentCapture(args []string) error {
 	} else {
 		return fmt.Errorf("amux agent capture: event is required")
 	}
-	return hookResult(hook, restrictedReport(sessionreport.Capture,
+	return hookResult(hook, reportWithin(hook, sessionreport.Capture,
 		map[string]string{sessionreport.FieldEvent: event}))
 }
 
