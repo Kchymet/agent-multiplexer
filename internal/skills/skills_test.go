@@ -101,3 +101,39 @@ func TestInstalledCreatePRRequiresCoordinatorArchiveConfirmation(t *testing.T) {
 		t.Fatal("installed skill still prohibits confirmed coordinator archive")
 	}
 }
+
+// The shipped PR skills must end the lifecycle with the PR marked ready for
+// review: agents had read "the user merges" as "keep the PR draft".
+func TestInstalledPRSkillsMarkPRReady(t *testing.T) {
+	dest := t.TempDir()
+	if err := Install(dest); err != nil {
+		t.Fatal(err)
+	}
+	for skill, wants := range map[string][]string{
+		"create-pr": {
+			"**Mark it ready for review** — `gh pr ready <n>` — as soon as the code is complete and CI is green",
+			"**Keep babysitting after it's ready**",
+			"**The final step is the merge.**",
+			"It **never** means \"keep the PR draft\"",
+			"open, green, **ready-for-review (non-draft) PR**",
+		},
+		"babysit-pr": {
+			"**`gh pr ready <n>`** and report it ready for review → keep babysitting",
+			"**merge, the final step**",
+			"Babysitting is done when **the PR is merged**",
+			"it does **not** mean \"keep the PR draft\"",
+			"confirming it is marked ready for review — not draft",
+		},
+	} {
+		b, err := os.ReadFile(filepath.Join(dest, skill, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(b)), " ")
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing %q", skill, want)
+			}
+		}
+	}
+}
