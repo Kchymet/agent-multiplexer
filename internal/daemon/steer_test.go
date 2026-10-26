@@ -635,6 +635,38 @@ func TestAttachedPaneStillDeliversManualClaudePermissionKey(t *testing.T) {
 	}
 }
 
+// TestComposerTriggersEscapedOnlyForSteeredText pins the boundary of the
+// leading-space escape: a human typing into an attached Claude or Codex pane
+// (native TUI, web or Android terminal — all reach the instance through raw
+// pane input) can still run "/" slash commands and "!" shell commands, while
+// the same text delivered programmatically by the steer verb is escaped.
+func TestComposerTriggersEscapedOnlyForSteeredText(t *testing.T) {
+	for _, typed := range []string{"/help\r", "!echo probe\r"} {
+		// Pasted at once and keystroke by keystroke, as a terminal sends it.
+		in := &fakeInstance{}
+		client := &connState{panes: map[string]paneRoute{"pane": {inst: in}}}
+		client.paneInput("pane", []byte(typed))
+		for i := 0; i < len(typed); i++ {
+			client.paneInput("pane", []byte{typed[i]})
+		}
+		if got := in.written(); got != typed+typed {
+			t.Fatalf("interactive %q reached the pane as %q", typed, got)
+		}
+	}
+
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	in := eng.running("a1")
+	if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{
+		core.SteerVerb: core.SteerPrompt, core.SteerText: "/clear",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(in.sequences[len(in.sequences)-1][0].Bytes); got != " /clear" {
+		t.Fatalf("steered /clear typed as %q, want it escaped", got)
+	}
+}
+
 // TestSteerRefusals proves every refusal is explicit and typed rather than a
 // silent no-op — a steering verb that can't be delivered must say so, because
 // the caller is a remote orchestrator with no view of this machine.
