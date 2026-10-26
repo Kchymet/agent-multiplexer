@@ -809,3 +809,64 @@ Other points:
 - **Startup cost.** Startup imports synchronously for every row, reading
   whole rollouts before restore. That cost is one-time, but failed sessions
   retry on every startup. Bounded; note it in the docs.
+
+---
+
+## c0523b `1d88ab5` / `e502930` — importer v2 (marker, gated launch) and fixture seam
+
+Probe: `c0523b_history_import_v2_probe_test.go.txt` (daemon package, overlay).
+
+| Case | Result at `e502930` |
+|---|---|
+| (a) log rename succeeds, marker write fails (blocked `.history.json.tmp`), retry | **prefix imported twice** (`prefixCopies=2`) |
+| (b) v0 identity with thread = rollout, no log | `imported=false`, marker `structured`, **no history**. Regression: `a4c8e53` imported this case using `Identity.ThreadID`. |
+| (c) two concurrent first imports of one session | **34 of 50** trials have prefix count ≠ 1 (duplicated or lost) |
+| (d) writer holding the log open across the rename (supervisor `logW` shape) | notice and history kept, **held writer's later line lost** (it goes to the orphaned inode) |
+
+All four of root's concerns are confirmed. Actual daemon serialization:
+- **Startup is safe.** `importCodexHistories()` (`daemon.go:443`) runs
+  before the `ln.Accept()` loop and before restore, so no client or
+  supervisor can race it.
+- **After startup, (c) and (d) are reachable.** The import in
+  `ensureSupervisorSpec` runs *outside* the manager's per-session Ensure gate.
+  `paneOpen` (host connection, not under `effectMu`) and the steer prompt
+  path (`admitDeferredEffect`) can enter it concurrently for the same
+  never-structured session, e.g. two clients attach after a failed startup
+  import. If caller A finishes, starts its supervisor (persistent O_APPEND
+  `logW`) and caller B then renames over the log, A's whole runtime writes
+  to an orphaned inode. The single post-rename `ReadAll` also ignores
+  errors, and it cannot cover writers that keep the old fd.
+- **(b) is decided by identity presence**, not by log content. A v0 or
+  pre-event-log identity, or a log that holds only notices, gets
+  `structured` with nothing imported.
+
+Fix direction, without rewriting a live runtime's log:
+- Run the import under the **same per-session gate** as `codexapp.Manager.Ensure`
+  (or a per-session mutex shared by every `ensureSupervisorSpec` caller), and
+  only when `d.codex.Get` is empty under that gate. No live `logW` can then
+  exist.
+- Make `AppendNotice` take a per-log lock (an flock on the log or marker)
+  that the importer also holds across copy and rename. That removes the
+  late-append race without `ReadAll`.
+- Make retry idempotent: write an `importing` state (or embed a marker
+  record as the log's first line, carrying the thread id) **before** the
+  rename. A retry that finds the embedded prefix only finalizes the marker
+  instead of importing again.
+- Decide "structured" from log content: the log contains
+  supervisor-originated events. Identity existence is not enough. A v0
+  identity with no log, or a notices-only log, still imports from
+  `Identity.ThreadID` (else `ClaudeID`), as `a4c8e53` did.
+- Regressions: cases (a)–(d) above, each with a clean control.
+
+### Fixture seam (`fixture_amuxfixture.go`, `//go:build amuxfixture`) — OK
+- With no tags `FixtureSourcesEnabled()` is false; with `-tags amuxfixture`
+  it is true.
+- The release binary (`go build ./cmd/amux`) has **no**
+  `accounts.init.0`; the tagged build has it. The Makefile `build` and `cross`
+  targets pass no tags.
+- In a release build a `FixtureOrigin` binding in `accounts.json` is inert,
+  because `fixtureSource` returns "".
+- CI uses `-tags amuxfixture` only for `TestAgentRuntimeCommandSurface`. The
+  central-auth native tests (`TestSmokeCentralAPIKeyBindingNative`,
+  `TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace`, the broker
+  round-trips) run on the normal build.
