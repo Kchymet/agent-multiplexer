@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -82,10 +85,30 @@ func cmdAgentEvents(args []string) error {
 		fields[core.RuntimeEventsAfterSequenceField] = after
 	}
 	var page core.RuntimeEventPage
-	if err := restrictedQueryRequest(sessionrpc.Query{
+	err := restrictedQueryRequest(sessionrpc.Query{
 		Verb: core.QueryRuntimeEvents, ID: target, Fields: fields,
-	}, &page); err != nil {
+	}, &page)
+	if cursorSet && isEventCursorInvalid(err) {
+		// Cursors live in daemon memory: they expire after five idle minutes,
+		// are evicted under pressure, and die with a daemon restart or a source
+		// change. A cursor this client was handed records where its page ended,
+		// so resume the read from there instead of failing the caller.
+		resume, ok := rememberedEventCursor(target, cursor)
+		if !ok {
+			return fmt.Errorf("query runtime events for %s: %w (the cursor expired; resume with --after <last sequence you processed>)", target, err)
+		}
+		fmt.Fprintf(os.Stderr, "amux: events cursor expired; resumed after sequence %d\n", resume)
+		page = core.RuntimeEventPage{}
+		err = restrictedQueryRequest(sessionrpc.Query{
+			Verb: core.QueryRuntimeEvents, ID: target,
+			Fields: map[string]string{core.RuntimeEventsAfterSequenceField: strconv.FormatInt(resume, 10)},
+		}, &page)
+	}
+	if err != nil {
 		return fmt.Errorf("query runtime events for %s: %w", target, err)
+	}
+	if page.NextCursor != "" {
+		rememberEventCursor(target, page.NextCursor, page.ScannedSequence)
 	}
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -122,4 +145,84 @@ func canonicalRuntimeEventCursor(cursor string) bool {
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 	return err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == cursor
+}
+
+func isEventCursorInvalid(err error) bool {
+	var remote *sessionrpc.RemoteError
+	return errors.As(err, &remote) && remote.Code == "runtime_events_cursor_invalid"
+}
+
+// eventCursorMemory is how many issued cursors per target the client keeps.
+const eventCursorMemory = 64
+
+// rememberedCursor is one cursor this client printed and the last sequence its
+// page had assigned, i.e. where an after_sequence read resumes.
+type rememberedCursor struct {
+	Cursor string `json:"cursor"`
+	After  int64  `json:"after"`
+}
+
+var eventCursorDir = func() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "amux", "events")
+}
+
+func eventCursorPath(target string) string {
+	dir := eventCursorDir()
+	if dir == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(target))
+	return filepath.Join(dir, hex.EncodeToString(sum[:8])+".json")
+}
+
+func readEventCursors(path string) []rememberedCursor {
+	var cursors []rememberedCursor
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &cursors)
+	}
+	return cursors
+}
+
+// rememberEventCursor records a cursor this client was issued. Best-effort:
+// failing to record only means a later expiry is reported instead of resumed.
+func rememberEventCursor(target, cursor string, after int64) {
+	path := eventCursorPath(target)
+	if path == "" || after < 0 {
+		return
+	}
+	cursors := []rememberedCursor{{Cursor: cursor, After: after}}
+	for _, c := range readEventCursors(path) {
+		if c.Cursor != cursor && len(cursors) < eventCursorMemory {
+			cursors = append(cursors, c)
+		}
+	}
+	b, err := json.Marshal(cursors)
+	if err != nil || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".cursors-*")
+	if err != nil {
+		return
+	}
+	_, werr := tmp.Write(b)
+	if cerr := tmp.Close(); werr != nil || cerr != nil || os.Rename(tmp.Name(), path) != nil {
+		_ = os.Remove(tmp.Name())
+	}
+}
+
+func rememberedEventCursor(target, cursor string) (int64, bool) {
+	path := eventCursorPath(target)
+	if path == "" {
+		return 0, false
+	}
+	for _, c := range readEventCursors(path) {
+		if c.Cursor == cursor && c.After >= 0 {
+			return c.After, true
+		}
+	}
+	return 0, false
 }
