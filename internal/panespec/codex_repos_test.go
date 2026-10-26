@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -20,7 +19,7 @@ func TestCodexLaunchDoesNotGrantSharedGitStores(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	t.Setenv("AMUX_CODEX_BIN", "/bin/true")
 	t.Setenv("AMUX_CLAUDE_BIN", "/bin/true")
-	useClaudeAuth(t, amuxcfg.AuthHost)
+	useCentralClaudeLogin(t)
 	useFakeSecureBwrap(t)
 	dir := filepath.Join(core.SessionsDir(), "group", "agent")
 	if err := os.MkdirAll(dir, 0700); err != nil {

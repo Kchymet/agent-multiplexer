@@ -95,10 +95,14 @@ export AMUX_TEST_CLAUDE_BIN=/absolute/path/to/claude/package/claude
 go test -race ./internal/daemon \
   -run '^TestAgentNamespaceCommandSurface$' -count=1 -timeout=120s -v
 for runtime in claude codex codex-app-server; do
-  AMUX_TEST_AGENT_RUNTIME="$runtime" go test -race ./internal/daemon \
+  AMUX_TEST_AGENT_RUNTIME="$runtime" go test -race -tags amuxfixture ./internal/daemon \
     -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v || break
 done
 ```
+
+`TestAgentRuntimeCommandSurface` drives the native runtimes at a local fixture
+provider, which central auth cannot serve; `-tags amuxfixture` compiles in the
+test-only routing seam for its fixture binding (release builds never include it).
 
 When running from an existing managed agent, hide its live fixed session context
 and use a synthetic HOME before running the broader suite. If the parent command

@@ -26,7 +26,6 @@ func TestStructuredControlGate(t *testing.T) {
 	defer cancel()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	legacyCodexAuth(t)
 	newDaemon := func() *Daemon {
 		d := New("", nil, time.Hour)
 		d.codex = codexapp.NewManager(ctx, "")
@@ -37,11 +36,12 @@ func TestStructuredControlGate(t *testing.T) {
 	codex := store.Session{ID: "a", RootID: "root", Agent: "codex"}
 	claude := store.Session{ID: "b", RootID: "root", Agent: "claude"}
 
-	// Flag unset ⇒ everything is pty.
+	// Central Codex auth requires the App Server, so Codex is structured even
+	// with the flag unset or set to another value.
 	t.Setenv("AMUX_CODEX_CONTROL", "")
 	d := newDaemon()
-	if d.structuredControl(codex) {
-		t.Error("codex session structured with the flag unset")
+	if !d.structuredControl(codex) {
+		t.Error("codex session not structured with the flag unset")
 	}
 
 	// Flag on ⇒ codex is structured, claude is not (Codex-only).
@@ -54,11 +54,10 @@ func TestStructuredControlGate(t *testing.T) {
 		t.Error("claude session structured — only codex is eligible")
 	}
 
-	// An unrelated flag value stays pty.
 	t.Setenv("AMUX_CODEX_CONTROL", "exec-json")
 	d = newDaemon()
-	if d.structuredControl(codex) {
-		t.Error("codex session structured for a non-app-server flag value")
+	if !d.structuredControl(codex) || d.structuredControl(claude) {
+		t.Error("an unrelated flag value changed Codex/Claude routing")
 	}
 
 	// No manager ⇒ never structured, even with the flag on.
@@ -199,7 +198,6 @@ func TestGoalCoordinatorIsAlwaysStructured(t *testing.T) {
 	defer cancel()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	legacyCodexAuth(t)
 	coordinator := store.Session{ID: "wg", Agent: agent.GoalRuntime}
 	claudeCoordinator := store.Session{ID: "wg2", Agent: "claude"}
 	member := store.Session{ID: "m", RootID: "wg", Agent: agent.GoalRuntime}
@@ -213,8 +211,9 @@ func TestGoalCoordinatorIsAlwaysStructured(t *testing.T) {
 		if d.structuredControl(claudeCoordinator) {
 			t.Errorf("codex.control=%q made a claude coordinator structured", control)
 		}
-		if want := control == "app-server"; d.structuredControl(member) != want {
-			t.Errorf("codex.control=%q: ordinary member structured=%t, want %t", control, !want, want)
+		// Central Codex auth keeps every Codex member structured as well.
+		if !d.structuredControl(member) {
+			t.Errorf("codex.control=%q: ordinary member not structured", control)
 		}
 		// Cold event-source resolution follows the same rule, so a subscriber
 		// reads the coordinator's structured log from the first subscription.

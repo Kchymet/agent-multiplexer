@@ -1,6 +1,6 @@
 # Machine accounts v1
 
-The daemon owns one central Claude profile and one central Codex profile per amux installation. The amux CLI/TUI (including the trusted console terminal CLI) configure login and select the configuration for new workloads. Both the TUI and web Harness show account status and subscription windows; web account access is read-only. Each view exposes at most one Claude and one Codex configuration. The implementation follows the [broker identity design](broker-identity-spec.md); this document describes the implemented subset and its limits.
+The daemon owns one central Claude profile and one central Codex profile per amux installation. The amux CLI/TUI (including the trusted console terminal CLI) configure login. Every workload follows its harness's central configuration; each new harness process uses the newest successfully configured login. Both the TUI and web Harness show account status and subscription windows; web account access is read-only. Each view exposes at most one Claude and one Codex configuration. The implementation follows the [broker identity design](broker-identity-spec.md); this document describes the implemented subset and its limits.
 
 ## Operator setup
 
@@ -43,15 +43,12 @@ an API key in session auth.json or a keyring. Default official provider endpoint
 remain pinned; third-party endpoint configuration is outside this feature.
 
 API identity and plan remain unknown/not applicable. API credentials never claim
-a native account ID or ChatGPT refresh identity. The binding records an explicit
-credential mode, and the daemon persists an opaque API generation independently
-of native account IDs and process-local token generations. API-key replacement
-and subscription/API transitions block existing bound workloads until authorized
-explicit rebind. Default changes do not rebind workloads. A genuinely new binding
-created before any credential exists records durable first-login eligibility,
-consumed and pinned when that first login commits (even before delivery).
-Discovery and session updates never grant this eligibility to missing or old-schema
-bindings; unknown legacy evidence remains blocked until explicit rebind.
+a native account ID or ChatGPT refresh identity. The daemon persists an opaque
+API generation independently of native account IDs and process-local token
+generations. A replacement API key, a different subscription account, or a
+subscription/API transition never retargets a running process; the next process
+launch of every workload receives it (see
+[Existing workloads](#defaults-and-existing-workloads)).
 API mode reports subscription usage as
 `not-applicable`, clears subscription windows, and rejects Claude statusline quota
 reports. API billing limits are not estimated from subscription quotas.
@@ -59,8 +56,8 @@ reports. API billing limits are not estimated from subscription quotas.
 Protocol and native references: [App Server authentication](https://learn.chatgpt.com/docs/app-server)
 and [ephemeral credential storage](https://learn.chatgpt.com/docs/config-file/config-reference).
 The pinned Codex 0.157.1 synthetic-key checks exercise native login/account-read,
-private central-to-workload delivery, first-login and replacement/rebind fencing,
-and absence of a workload auth.json, without thread/turn/model requests.
+private central-to-workload delivery, running-process fencing and next-launch
+replacement, and absence of a workload auth.json, without thread/turn/model requests.
 
 Starting replacement login pauses **new credential delivery** for that central profile. Already running processes may retain delivered tokens. Cancel, timeout, disconnect, or failed acquisition restores a prior ready profile only after the native writer has stopped and its prior credential file has been restored. If a newer logout/login has advanced the epoch, the old attempt cannot restore anything. Cleanup failure leaves delivery blocked and exposes a fixed error. Logout fences delivery before native cleanup; `account_logout_cleanup_failed` (or `account_logout_cleanup_unavailable` when the native adapter is absent) remains visible after reconnect until successful recovery. Tokens already delivered cannot be recalled or revoked upstream by amux.
 
@@ -72,22 +69,79 @@ Console Claude login **does not run native `claude setup-token`**, whose output 
 
 ## Defaults and existing workloads
 
-A fresh installation defaults to `claude:central` and `codex:central`. At first initialization, explicit legacy `claude.auth` / `codex.auth` settings seed the defaults. Thereafter, change defaults through Accounts or `amux auth default`; the persisted account service is authoritative. Existing host, Claude shared, and environment defaults/bindings remain internal compatibility state. They are not additional selectable account configurations. If a legacy default is active, Accounts says so; the central configuration becomes the new-workload default only after explicit local **Use for new workloads** or `amux auth default claude` / `amux auth default codex`. Viewing accounts never changes routing.
+Every workload — new, existing, dormant, archived, and the console — follows its
+harness's central configuration (`claude:central`, `codex:central`). The default
+is always central; host, shared and environment sources are retired and cannot
+be selected (`account_legacy_source_retired`). Viewing accounts never changes routing.
 
-A workload persists its profile and source at creation. Changing a default never changes existing workload routing. Both the workgroup coordinator and initial worker must have a ready selected profile before creation. The service refuses corrupt account metadata instead of switching to a global source.
+**Next process launch.** The newest successfully configured central login —
+including a different account, a subscription↔API change, or a replacement API
+key — applies when a workload's harness process is next launched or restarted.
+Login never stops a workload. Each launch is fenced by a daemon-allocated launch
+(a sequence plus a random nonce; metadata keeps only its hash):
 
-Codex pins the native account ID after first delivery. Reauthentication into the same native account preserves its thread; a different account is rejected for that bound workload. Claude pins a monotonically increasing credential version because an opaque replacement cannot prove same-account identity. Logout and relogin never reuse a Claude version.
+- Codex: the supervisor allocates a launch when it starts an App Server process
+  (a reconnect to a live process keeps its launch). The launch never enters the
+  sandbox.
+- Claude: the daemon allocates a launch for each resolved agent pane and passes
+  it in the in-sandbox launcher's argv. The exec into Claude drops it from
+  Claude's argv, but on Linux the bubblewrap parent keeps showing it to same-uid
+  processes for the pane's lifetime; it yields only that launch's snapshot. A
+  resolve whose pane the engine reuses (a reattach), or that fails or is abandoned
+  before start, is retired, so every started process holds a fresh launch.
 
-An explicit local host operation stops a workload and rebinds it:
+The first delivery to a launch pins the current mode, account and credential
+version, and retires every older launch. Further deliveries to the same launch
+(a timeout or lost-response retry, an abandoned duplicate, a reconnect,
+same-account Codex refresh) receive the same snapshot. After a replacement they
+are refused with `account_runtime_superseded` — a running process never adopts
+another login; restart the workload to use it. An older, unallocated, or
+nonce-mismatched launch is refused. Logout, pending-login, cancellation and
+binding-revision fences apply as before. Each binding keeps the evidence of the
+current runtime and of up to eight earlier ones. This is a runtime-consistency
+guarantee, not isolation from a malicious process inside the same session (all
+tabs of a session share its principal); a Codex launch never enters the sandbox.
 
-```sh
-amux auth rebind claude:central WORKLOAD_ID
-amux do start WORKLOAD_ID
-```
+**Codex threads.** A new Codex process resumes the exact persisted thread under
+the current central account; the account the thread previously ran under is
+kept in its identity as history (`priorChatgptAccounts`) and a notice records
+the change. A resume target is never replaced by an empty thread: a missing
+rollout is not evidence of empty history, so a resume error fails the launch
+visibly with the thread id, leaves the identity unchanged, and requires an
+explicit recovery or a new session. Only a current identity that records its
+thread as never run starts fresh. The pinned
+Codex 0.157.1 accepts another account's injected tokens for a resumed thread and
+replays its full history, including opaque encrypted reasoning
+([evidence](evidence/auth-follow-central/CHECKPOINT.md)). The real backend may
+refuse another account's encrypted reasoning; such a turn fails visibly and the
+thread and its history are kept.
 
-Use `codex:central` similarly only when compatible with the persisted native thread account. A different or unknown target account for an existing account-bound Codex thread returns `account_rebind_requires_new_workload`; create a new workload instead. All remote account mutations, including rebind, are denied; use the amux CLI/TUI locally. Rebind is not automatic after login or default changes.
+**Migration.** The account store's version 2 migration runs once,
+automatically, under the store lock: every default and binding moves to
+central, the original metadata is kept once as `accounts.v1.json`, and newer,
+unknown or malformed metadata is refused without being rewritten. No credential
+is copied: host and shared logins hold rotating refresh tokens (a copy would
+fork the refresh chain) and environment credentials are not amux's to move. A
+harness that had no central login is reported as *migrated — central login
+required* in Accounts and `amux auth status` until its first central login;
+launches meanwhile use the normal central login flow. Saved `claude.auth` /
+`codex.auth` legacy values only record this evidence; `amux config set` accepts
+only `central`. Central Codex auth requires App Server control, so
+`codex.control pty` is reported and overridden. A Codex session last run under
+PTY control has its rollout imported once into its structured event log (before
+any notices already there), so its earlier history stays readable. A log that
+already holds structured events is kept as is. The rewrite never runs while that
+session's runtime is running or starting. The outcome is recorded beside the log
+and inside it; until then a failed import refuses only that session's launch and
+is retried. The import runs once per session, inside that launch: a launch
+admitted under the daemon-wide gate holds it while a large rollout is mapped
+(each line is bounded at 16 MiB; the rollout is read once).
 
-Metadata lives in the host-only `<amux data>/auth/accounts.json`; vendor secrets remain in their existing private stores. Atomic metadata transactions fence delivery and asynchronous callbacks by epoch and binding revision. Persisted `login-pending` profiles are retired on daemon startup; browser ceremonies are never reconstructed or replayed after a crash.
+`amux auth rebind <claude|codex> WORKLOAD_ID` is optional: it stops one workload
+so its next start uses the current login now rather than at its next launch.
+All remote account mutations, including rebind, are denied; use the amux CLI/TUI locally.
+
+Metadata lives in the host-only `<amux data>/auth/accounts.json`; vendor secrets remain in their existing private stores. Atomic metadata transactions fence delivery and asynchronous callbacks by epoch, binding revision and launch. Persisted `login-pending` profiles are retired on daemon startup; browser ceremonies are never reconstructed or replayed after a crash. A corrupt central Claude record never blocks the repairing login (delivery refuses it until then); an insecure credential store fails closed until its permissions are fixed.
 
 ## Subscription limits
 
@@ -111,7 +165,7 @@ amux provide install --account-use=false
 
 `--account-manage=true` is retired and returns a message directing users to amux CLI/TUI. Old persisted or environment manage grants are ignored; reinstalling the provider clears the saved grant. Providers always advertise `capabilities.accounts.manage=false` and reject login, completion, polling, cancellation, default, logout and rebind requests, even from old clients with stale grants. The Harness server also rejects web account writes. The trusted amux console terminal can run `amux auth` through a dedicated local account socket; account status grants do not confer console access. Ordinary agents and provider principals cannot authenticate to this socket.
 
-`accounts-v1` and its wire types remain compatible. Remote `account-request` / `account-result` frames support only `status`. Local daemon APIs retain safe default/logout/rebind and protected login/poll/cancel/complete/disconnect ceremonies. Local ceremonies never enter durable relay queues, replay, session actions, or event logs. Safe status rejects secret/attempt/initiator fields and never returns a ceremony URL.
+`accounts-v1` and its wire types remain compatible. Remote `account-request` / `account-result` frames support only `status`. Local daemon APIs retain safe default (central only)/logout/rebind and protected login/poll/cancel/complete/disconnect ceremonies. Local ceremonies never enter durable relay queues, replay, session actions, or event logs. Safe status rejects secret/attempt/initiator fields and never returns a ceremony URL.
 
 ## Canonical integration contract
 
@@ -121,10 +175,10 @@ Mutations use the target profile `revision`. Default selection additionally requ
 
 TUI/CLI use `(*daemon.Client).Accounts(request, ceremony)` on a dedicated connection. Its `core.Action.Fields` envelope is exactly `{"request": JSON(AccountRequest)}`. Queries are `accounts` for status, `account-manage` for safe mutation, and `account-ceremony` for transient requests. Closing the client cancels its attempts. Ceremony states are `pending`, `succeeded`, `failed`, and `cancelled`, with a fifteen-minute deadline and terminal URLs cleared. Safe profile states are `unconfigured`, `login-pending`, `ready`, `blocked`, and `logged-out`.
 
-V1 exposes one stable amux-owned central configuration per harness, preserving legacy sources internally; named multi-account profile management, remote rebind, device-code initiation, and a standalone Claude quota/identity API are not implemented. These limits do not defer login, protected Claude token completion, account/limits viewing, defaults, or stable workload bindings to design-only work.
+V1 exposes one stable amux-owned central configuration per harness that every workload follows; named multi-account profile management, remote rebind, device-code initiation, and a standalone Claude quota/identity API are not implemented. These limits do not defer login, protected Claude token completion, account/limits viewing, defaults, or stable workload bindings to design-only work.
 
 ### Claude launch diagnostics
 
 A central Claude pane obtains its token after entering the sandbox, through its signed session mailbox. It does not connect to the host management socket. The mailbox request waits up to ten seconds and the launcher retries after five seconds. A running daemon or a copied Claude configuration does not by itself prove that this separate credential request was answered. On a new session, the child can run before reconciliation publishes the mailbox service record; this immediate failure also retries. It is not a connection timeout or evidence of a missing login.
 
-Only a confirmed absent central credential recommends `amux auth login claude`. A mailbox timeout leaves credential status unknown; check daemon status from a trusted host terminal. Access denial, a blocked workload binding, conflicting settings, and an unreadable credential have separate guidance. Login does not restore revoked session authority or silently rebind an existing workload. Repeated failures in the same category print once; a changed category updates the guidance. Older daemons that return the ambiguous `central_credential_unavailable` code are treated as unknown, not as proof that login is missing.
+Only a confirmed absent central credential recommends `amux auth login claude`. A mailbox timeout leaves credential status unknown; check daemon status from a trusted host terminal. Access denial, paused delivery (login pending, logged out, blocked), a superseded process (the login changed after launch: restart the workload), conflicting settings, and an unreadable credential have separate guidance. Login does not restore revoked session authority and never switches a running process; a launcher started without a daemon-allocated launch exits immediately. Repeated failures in the same category print once; a changed category updates the guidance. Older daemons that return the ambiguous `central_credential_unavailable` code are treated as unknown, not as proof that login is missing.

@@ -42,65 +42,24 @@ func TestAccountsNavigationAndConfirmationCaptureRevision(t *testing.T) {
 	if m.accounts.selected != "claude:central" {
 		t.Fatal("navigation exposed a legacy source")
 	}
-	m.handleKey(key("d"))
-	if m.accounts.confirm == nil || !strings.Contains(accountConfirmation(*m.accounts.confirm, m.accounts.profile()), "Existing workload account bindings stay fixed") {
-		t.Fatal("default lacks an impact confirmation")
+	// Workloads always follow central: there is no default action to choose.
+	if _, cmd := m.handleKey(key("d")); cmd != nil || m.accounts.confirm != nil {
+		t.Fatal("retired default action offered")
 	}
-	// Attempted profile navigation cannot change the reviewed target.
+	// A logout confirmation captures the reviewed revision; attempted profile
+	// navigation cannot change the reviewed target.
+	m.handleKey(key("x"))
+	if m.accounts.confirm == nil || !strings.Contains(accountConfirmation(*m.accounts.confirm, m.accounts.profile()), "Running workloads are not stopped") {
+		t.Fatal("logout lacks an impact confirmation")
+	}
 	m.handleKey(key("k"))
 	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	cmd()
-	if len(calls) != 1 || calls[0].op != "default" || calls[0].profile != "claude:central" || calls[0].revision != 7 || calls[0].defaultRevision != 12 {
+	if len(calls) != 1 || calls[0].op != "logout" || calls[0].profile != "claude:central" || calls[0].revision != 7 {
 		t.Fatalf("wrong confirmed mutation: %+v", calls)
 	}
 	if _, cmd := m.handleKey(key("x")); cmd != nil {
 		t.Fatal("a second mutation started before the first finished")
-	}
-}
-
-// The fake service models a concurrent operator changing a different target.
-// Backend tests own enforcement; this checks the UI preserves the reviewed CAS
-// and handles rejection without silently retrying or declaring success.
-func TestAccountsConcurrentDifferentDefaultsRequireFreshReview(t *testing.T) {
-	second := accountModel()
-	second.accounts.snapshot.profiles[0].defaultProfile = false
-	currentRevision := uint64(12)
-	var requests []harnessproto.AccountRequest
-	call := func(_ context.Context, req accountRequest) (accountResponse, error) {
-		wire, ceremony, err := accountWireRequest(req)
-		if err != nil || ceremony {
-			t.Fatalf("invalid default wire: %+v, %v", wire, err)
-		}
-		requests = append(requests, wire)
-		if wire.DefaultRevision != currentRevision {
-			return accountResponse{}, errAccountsConflict
-		}
-		currentRevision++
-		return accountResponse{}, nil
-	}
-	second.accountCall = call
-	second.handleKey(key("d"))
-	if second.accounts.confirm == nil {
-		t.Fatal("operator must review a confirmation")
-	}
-	// A concurrent CLI operator selects a different legacy target. The TUI
-	// offers no legacy menu, but must still fence that external default change.
-	if _, err := call(context.Background(), accountRequest{op: "default", profile: "claude:host", revision: 8, defaultRevision: 12}); err != nil {
-		t.Fatal(err)
-	}
-	// A newer observation arriving after confirmation must not rewrite consent.
-	second.accounts.snapshot.defaultRevisions["claude"] = currentRevision
-	_, cmd := second.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	_, retry := second.Update(cmd())
-	if len(requests) != 2 || requests[0].ProfileID == requests[1].ProfileID || requests[1].Revision != 7 || requests[1].DefaultRevision != 12 {
-		t.Fatalf("confirmation did not retain target and default revisions: %+v", requests)
-	}
-	if retry != nil || !second.accounts.stale || !strings.Contains(second.accounts.notice, "Refresh and review") || strings.Contains(second.View(), "Default updated") {
-		t.Fatal("stale default was retried or represented as successful")
-	}
-	second.handleKey(key("d"))
-	if second.accounts.confirm != nil {
-		t.Fatal("stale default permitted a new confirmation without refresh")
 	}
 }
 

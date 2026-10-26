@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"amux/internal/access"
 	"amux/internal/agent"
@@ -438,7 +439,10 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	// its coordinator, not a "start every member" (which is what `start <root>`
 	// means — see startEngineFor).
 	err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
-		if err := d.startAgent(admitCtx, id); err != nil {
+		// The prompt being typed below is this start's turn, and the prompt hook
+		// makes it the coordinator's goal; a goal continuation on top of it
+		// would be a second, competing submission.
+		if err := d.startAgentWith(admitCtx, id, startIntent{}); err != nil {
 			return err
 		}
 		in, ok := d.engine.Lookup(key)
@@ -615,6 +619,9 @@ func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([]eng
 		if text == "" {
 			return nil, fmt.Errorf("%s: need %q", verb, core.SteerText)
 		}
+		if len(keys.TypedNewline) > 0 {
+			return typedSteerText(verb, keys, text)
+		}
 		// An embedded paste delimiter would escape the text frame and become
 		// keystrokes. Refuse it rather than silently changing the requested text.
 		if len(keys.PasteEnd) > 0 && (strings.Contains(text, string(keys.PasteStart)) || strings.Contains(text, string(keys.PasteEnd))) {
@@ -639,6 +646,55 @@ func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([]eng
 	default:
 		return nil, fmt.Errorf("unknown steer verb %q", verb)
 	}
+}
+
+// typedSteerText types text into the composer as the user's own words (see
+// agent.Keys.TypedNewline): newlines become the harness's newline key, tabs
+// become spaces (a typed Tab is a composer key, not text), a leading composer
+// trigger is neutralized with a space, and any other
+// control character is refused, since typed it would be a keystroke rather than
+// text. The pieces are spaced so the runtime reads them as typing, not a paste.
+func typedSteerText(verb string, keys agent.Keys, text string) ([]engine.InputStep, error) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\t", "    ")
+	if text != "" && strings.ContainsRune(keys.TypedTriggers, rune(text[0])) {
+		// Typed first, "/" would run a slash command and "!" a shell command;
+		// a leading space keeps the steer a prompt (see claudeKeys).
+		text = " " + text
+	}
+	var typed []byte
+	for _, r := range text {
+		switch {
+		case r == '\n':
+			typed = append(typed, keys.TypedNewline...)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+			return nil, fmt.Errorf("%s: text contains control character %U", verb, r)
+		default:
+			typed = utf8.AppendRune(typed, r)
+		}
+	}
+	chunk := keys.TypeChunk
+	if chunk <= 0 {
+		chunk = len(typed)
+	}
+	var steps []engine.InputStep
+	for start := 0; start < len(typed); {
+		end := start + chunk
+		if end > len(typed) {
+			end = len(typed)
+		}
+		// Never split a UTF-8 sequence across pieces.
+		for end < len(typed) && !utf8.RuneStart(typed[end]) {
+			end++
+		}
+		step := engine.InputStep{Bytes: typed[start:end]}
+		if start > 0 {
+			step.DelayBefore = keys.TypeDelay
+		}
+		steps = append(steps, step)
+		start = end
+	}
+	return append(steps, engine.InputStep{Bytes: keys.Submit, DelayBefore: keys.SubmitDelay}), nil
 }
 
 // deferInput reserves the startup wait in the same FIFO as subsequent input,

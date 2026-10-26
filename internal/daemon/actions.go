@@ -476,7 +476,8 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 	if spec.Session.Archived {
 		return fmt.Errorf("session %s is archived; restore it before restarting", id)
 	}
-	work := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent}).apply(&spec)
+	record := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent})
+	work := d.restartIntent(startIntent{record: &record, resumeGoal: true}, &spec)
 	kill := func() {
 		if allTabs {
 			d.killRuntimeFor(id)
@@ -522,16 +523,18 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		return err
 	}
 	if err := revalidateDeferred(ctx); err != nil {
+		retireUnstarted(id, argv)
 		return err
 	}
 	kill()
 	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-		return d.engine.Ensure(ctx, engine.Spec{
+		return d.ensurePane(ctx, engine.Spec{
 			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
 			ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
 		})
 	})
 	if err != nil {
+		retireUnstarted(id, argv)
 		return err
 	}
 	if _, ok := published.(engine.Instance); !ok {
