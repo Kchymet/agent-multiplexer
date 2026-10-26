@@ -120,6 +120,7 @@ func BenchmarkStoreOpen(b *testing.B) {
 //   - host-action: a host `start` of a3 (a creation, a restart);
 //   - peer-report: a3's own report, stalled inside its write;
 //   - peer-credential: a3's GitHub credential read, stalled in its helper;
+//   - creation: a host `new-workgroup`, stalled launching its coordinator;
 //   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
 //
 // It reports per-report p50/max latency rather than throughput.
@@ -160,6 +161,24 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 			return func() {
 				if result, _ := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: principal, Call: call}); result.Status != sessionrpc.StatusOK {
 					b.Errorf("credential = %+v", result)
+				}
+			}
+		})
+	})
+	b.Run("creation", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.launchSpec = func(ctx context.Context, id string) (panespec.LaunchSpec, error) {
+				slow()
+				return testLaunchSpecResolver(ctx, id)
+			}
+			d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+				return "", nil, []string{"sh"}, nil
+			}
+			n := 0
+			return func() {
+				n++
+				if r := d.handle(context.Background(), core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": fmt.Sprintf("bench-%d", n)}}); !r.OK {
+					b.Errorf("new workgroup = %+v", r)
 				}
 			}
 		})

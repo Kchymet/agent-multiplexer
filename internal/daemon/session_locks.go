@@ -156,6 +156,16 @@ func (d *Daemon) lockEffectExclusive() {
 	}
 }
 
+// creationAction reports a verb that creates a session. It runs under the
+// shared gate and creationMu rather than the exclusive gate.
+func creationAction(a core.Action) bool {
+	switch a.Action {
+	case core.ActionAddAgent, core.ActionNewWorkgroup, core.ActionCreateWorkspace:
+		return true
+	}
+	return false
+}
+
 // sessionScopedAction names the one session an action touches when it runs
 // with only that session's admission: starting, restarting, recreating or
 // steering one existing session. Anything else, a workgroup start included
