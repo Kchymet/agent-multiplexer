@@ -2,6 +2,7 @@ package sessionrpc
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,9 +56,9 @@ func responseCount(t *testing.T, mailboxDir string) int {
 	return len(entries)
 }
 
-// lowSignedCall signs call with an all-zero request ID, which sorts before
-// any client-generated request in the server's queue order.
-func lowSignedCall(t *testing.T, f *fixture, call Call) (access.SignedRequest, []byte) {
+// earlierSignedCall signs call as issued at issued. Request IDs begin with the
+// issue time, so an earlier issue time sorts ahead in the server's FIFO scan.
+func earlierSignedCall(t *testing.T, f *fixture, call Call, issued time.Time) (access.SignedRequest, []byte) {
 	t.Helper()
 	credential, err := access.LoadCredential(f.grant.CredentialHostDir)
 	if err != nil {
@@ -67,7 +68,7 @@ func lowSignedCall(t *testing.T, f *fixture, call Call) (access.SignedRequest, [
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := access.SignRequest(credential, f.auth.BootID(), body, time.Now(), zeroReader{})
+	envelope, err := access.SignRequest(credential, f.auth.BootID(), body, issued, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,8 +120,16 @@ func TestClientReleaseRetiresConsumedResponses(t *testing.T) {
 }
 
 // A release must be processed even when an ordinary request ahead of it in
-// queue order is blocked on the very capacity the release frees.
+// the pass is blocked on the very capacity the release frees. Both places a
+// request can be ahead are covered: already claimed into processing (drained
+// before the queue), and queued with an earlier issue time (the FIFO order).
 func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
+	for _, stage := range []string{processingDirName, RequestsDirName} {
+		t.Run(stage, func(t *testing.T) { testReleaseBehindBlocked(t, stage) })
+	}
+}
+
+func testReleaseBehindBlocked(t *testing.T, stage string) {
 	budget := &testResponseBudget{limit: 1}
 	f := newFixture(t, Callbacks{}, ServerOptions{ResponseBudget: budget})
 	client := f.client(clientOptions{})
@@ -148,8 +157,8 @@ func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
 	if responseCount(t, f.grant.MailboxHostDir) != 1 {
 		t.Fatal("expected the consumed response before its release is served")
 	}
-	blocked, encoded := lowSignedCall(t, f, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", Fields: map[string]string{"value": "blocked"}})
-	publishEnvelope(t, f.grant.RequestsHostDir, blocked, encoded)
+	blocked, encoded := earlierSignedCall(t, f, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", Fields: map[string]string{"value": "blocked"}}, time.Now().Add(-time.Second))
+	publishEnvelope(t, filepath.Join(f.grant.MailboxHostDir, stage), blocked, encoded)
 	state := func() string {
 		active, commits, releases := budget.counts()
 		out := fmt.Sprintf("budget active=%d commits=%d releases=%d", active, commits, releases)
@@ -175,19 +184,23 @@ func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
 		}
 		return out + " now:" + time.Now().Format(time.RFC3339Nano)
 	}
-	// Preconditions: the consumed response holds the only slot, and both the
-	// low request and the client's release are queued, the low one first.
+	// Preconditions: the consumed response holds the only slot, the client's
+	// release is queued, and the blocked request is ahead of it in pass order.
 	before := state()
 	if active, _, _ := budget.counts(); active != 1 {
 		t.Fatalf("precondition: consumed response must hold the only slot: %s", before)
 	}
 	queued, err := os.ReadDir(f.grant.RequestsHostDir)
-	if err != nil || len(queued) != 2 || queued[0].Name() != requestFileName(blocked.RequestID) {
-		t.Fatalf("precondition: want the low request ahead of one release: %s", before)
+	want := 1
+	if stage == RequestsDirName {
+		want = 2
+	}
+	if err != nil || len(queued) != want || (stage == RequestsDirName && queued[0].Name() != requestFileName(blocked.RequestID)) {
+		t.Fatalf("precondition: want the blocked request ahead of one release: %s", before)
 	}
 
 	if _, err := f.server.ServeOnce(context.Background()); !errors.Is(err, ErrResponseCapacity) {
-		t.Fatalf("first pass = %v, want the low request capacity-blocked\nbefore: %s\nafter:  %s", err, before, state())
+		t.Fatalf("first pass = %v, want the blocked request capacity-blocked\nbefore: %s\nafter:  %s", err, before, state())
 	}
 	if responseCount(t, f.grant.MailboxHostDir) != 0 {
 		t.Fatal("release queued behind a capacity-blocked request was not processed")

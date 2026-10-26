@@ -159,11 +159,48 @@ Releasing clients prevent this from recurring on later restarts. The pool can
 still be full at a later restart only if non-releasing (old) clients, or
 crashed clients that never released, filled it.
 
-### Not addressed here
+### Accepted residual limits
 
-Any admitted effect that holds `dispatchMu`/`effectMu` (creation, restart,
-archive) still delays every session's mailbox publication and gated
-dispatches, including credential delivery, for its duration. The 12s row
-above shows this. Measured creation holds are short (90–330ms); no ≥10s
-holder was identified in current source, and it overlaps the auth
-runtime-boundary work.
+This change bounds retention by consumption. It does not claim that every
+lock-related timeout is solved. The remaining cases all keep the existing
+bounds (128 files, 8 MiB, 60s TTL) and leave replay protection and committed
+outcomes unchanged:
+
+- **Abandoned requests.** A client that stops waiting before its response is
+  published never reads it, so it never releases it. That covers a timed-out
+  #207 async hook (10s report timeout), the 10s launcher attempt, a 35s CLI
+  call, or a crashed client. The request is still dispatched when it reaches
+  the head of its mailbox, and its response holds a pool slot until the 60s TTL
+  removes it. Under a long gate hold, many such responses can accumulate, and
+  admissions slow until they age out. A signed client deadline that would let
+  the server skip stale requests is a protocol redesign and is out of scope
+  here.
+- **Old or crashed clients** (see Compatibility) retire only by TTL.
+- **Long admitted effects.** Any admitted effect that holds
+  `dispatchMu`/`effectMu` (creation, restart, archive) still delays every
+  session's mailbox publication and every gated dispatch, including credential
+  delivery, for its duration. The 12s row above shows this. Measured creation
+  holds are short (90–330ms). #207/#209 moved report traffic out of the gate
+  and log slow dispatches.
+
+### Integration with #207/#209 (FIFO request ids)
+
+Since #207, a request id is a 48-bit issue millisecond followed by 80 random
+bits, so a mailbox serves requests first-in first-out. Releases and one-way
+receipts are compatible with this: a release always follows the response it
+names, and a blocked pass keeps scanning. Tests that need a particular pass
+order now control it explicitly: an earlier issue time, or staging the request
+in `processing/`. Tests no longer assume a fixed request id.
+
+### Historical, unexplained: one macOS pressure stall before #207
+
+One macOS run of the pressure test (CI run 40263237208, on a tree without
+#207) stalled at 39 of 40 fetches for one session for about 87s. Before the
+stall, more than 160 fetches had succeeded in about 3s, and no
+`session RPC` error was logged. The stall did not recur, and that run had no
+diagnostics, so its cause is not established. The test's failure paths now
+record the fixture markers, pane liveness and output, server state captured on
+the run goroutine, mailbox queues, the budget and every goroutine's stack. A
+held-descriptor scan probe (`TestHeldDirectoryListingSeesEveryPublishAndClaim`)
+checks the directory-visibility premise directly. Repeated macOS runs on the
+merged tree are recorded on the PR.
