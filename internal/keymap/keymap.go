@@ -79,7 +79,7 @@ func (k Keymap) resolved() map[string]string {
 	return k.chords
 }
 
-// Chord returns the chord bound to an action ("" for an unknown action).
+// Chord returns the effective chord ("" for unknown or displaced defaults).
 func (k Keymap) Chord(action string) string { return k.resolved()[action] }
 
 // Action returns the action a chord (as Bubble Tea's KeyMsg.String() spells
