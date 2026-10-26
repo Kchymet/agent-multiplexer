@@ -1,0 +1,31 @@
+package sessionrpc
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// #207 x PR206: hook-shaped production clients give up (hookReportTimeout)
+// while the gate is busy. Their queued requests are still dispatched later;
+// nobody releases those responses.
+func TestProbeAbandonedClientsPinPool(t *testing.T) {
+	budget := &testResponseBudget{limit: MaxResponseFiles}
+	f := newFixture(t, Callbacks{}, ServerOptions{ResponseBudget: budget})
+	const n = 10
+	for i := 0; i < n; i++ {
+		c := f.client(clientOptions{})
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		_, err := c.Query(ctx, Query{Verb: "snapshot"}) // gate busy: nothing served yet
+		cancel()
+		if err == nil {
+			t.Fatal("expected timeout")
+		}
+	}
+	for i := 0; i < 3; i++ { // gate frees; server drains the queue
+		_, _ = f.server.ServeOnce(context.Background())
+	}
+	active, _, releases := budget.counts()
+	t.Logf("abandoned hook clients=%d -> retained responses=%d active leases=%d releases=%d (held until 60s age cleanup)",
+		n, responseCount(t, f.grant.MailboxHostDir), active, releases)
+}
