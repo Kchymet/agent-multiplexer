@@ -273,6 +273,15 @@ running hook, so it reopens without automatic submission unless one is reported.
 Enable native Codex goal tracking with `amux config set codex.control app-server`,
 then restart the daemon to apply it.
 
+A Claude workgroup coordinator runs in goal mode through amux's hooks, and its
+goal file is the record a restart decides from: a goal that was `active`, or
+`waiting` on a background wake-up, is relaunched with a goal-aware continuation
+even when the coordinator was idle between turns, because the wake-up died with
+the runtime. Paused, complete, blocked, input-waiting and budget-limited goals
+are left to the user. `amux config set goal.auto_resume off` disables this
+(daemon restart required). See
+[goal mode](default-sessions.md#claude-coordinators-goal-mode-through-amuxs-hooks).
+
 For supervised Codex sessions, amux observes the native goal state before
 shutdown. A previously active goal resumes automatically, preserving its
 objective, token budget and usage. A goal paused before restart stays paused;

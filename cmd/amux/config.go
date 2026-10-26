@@ -52,6 +52,14 @@ func cmdConfig(args []string) error {
 			fmt.Println(value)
 			return nil
 		}
+		if args[1] == amuxcfg.GoalAutoResumeKey {
+			on, err := amuxcfg.ResolveGoalAutoResume()
+			if err != nil {
+				return err
+			}
+			fmt.Println(onOff(on))
+			return nil
+		}
 		action, err := keyPath(args[1])
 		if err != nil {
 			return err
@@ -90,6 +98,17 @@ func cmdConfig(args []string) error {
 			fmt.Printf("codex.control = %s  (saved; run amux daemon restart to apply; environment overrides still take precedence)\n", args[2])
 			return nil
 		}
+		if args[1] == amuxcfg.GoalAutoResumeKey {
+			on, err := amuxcfg.ParseGoalAutoResume(args[2])
+			if err != nil {
+				return err
+			}
+			if err := amuxcfg.SetGoalAutoResume(&on); err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s  (saved; run amux daemon restart to apply)\n", amuxcfg.GoalAutoResumeKey, onOff(on))
+			return nil
+		}
 		action, err := keyPath(args[1])
 		if err != nil {
 			return err
@@ -116,6 +135,13 @@ func cmdConfig(args []string) error {
 				return err
 			}
 			fmt.Println("codex.control = pty  (default; run amux daemon restart to apply; environment overrides still take precedence)")
+			return nil
+		}
+		if args[1] == amuxcfg.GoalAutoResumeKey {
+			if err := amuxcfg.SetGoalAutoResume(nil); err != nil {
+				return err
+			}
+			fmt.Printf("%s = on  (default; run amux daemon restart to apply)\n", amuxcfg.GoalAutoResumeKey)
 			return nil
 		}
 		action, err := keyPath(args[1])
@@ -148,6 +174,9 @@ usage: amux config <subcommand>
   get codex.control  print saved control mode (pty when unconfigured)
   set codex.control <app-server|pty>  save the daemon's Codex rollout selection
   unset codex.control  restore the default (pty)
+  get goal.auto_resume  print whether a restarted goal coordinator resumes its goal (on when unconfigured)
+  set goal.auto_resume <on|off>  save the goal auto-resume switch (daemon restart required)
+  unset goal.auto_resume  restore the default (on)
   get|unset claude.auth      retired: every workload follows central auth
   get|unset codex.auth       retired: every workload follows central auth
   path               print the config file path
@@ -157,6 +186,11 @@ applies the next time the dashboard opens. codex.control lives in "codex" and
 requires a daemon restart; changing it does not reroute running sessions.
 AMUX_CODEX_CONTROL overrides the saved value when nonempty. Run amux doctor to
 compare saved settings, this shell's override, and the running daemon selection.
+goal.auto_resume lives in "goal": when on (the default), a goal coordinator whose
+runtime is restarted (agent restart, daemon restart, amux do start) is relaunched
+with a continuation so a goal that was active or waiting on a wake-up picks up
+where it left off; paused, complete, blocked, input-waiting and budget-limited
+goals are never resumed automatically. It too is read at daemon start.
 
 claude.auth and codex.auth are retired. Every workload follows the central
 login (amux auth login). A saved host, shared or environment value was
@@ -203,7 +237,23 @@ func configList() error {
 		}
 		fmt.Printf("codex.control %s  (%s; daemon restart required after changes)\n", value, mark)
 	}
-	return errors.Join(loadErr, authErr, controlErr)
+	on, set, resumeErr := amuxcfg.GoalAutoResume()
+	switch {
+	case resumeErr != nil:
+		fmt.Printf("%s INVALID\n", amuxcfg.GoalAutoResumeKey)
+	case !set:
+		fmt.Printf("%s on  (default; daemon restart required after changes)\n", amuxcfg.GoalAutoResumeKey)
+	default:
+		fmt.Printf("%s %s  (saved; daemon restart required after changes)\n", amuxcfg.GoalAutoResumeKey, onOff(on))
+	}
+	return errors.Join(loadErr, authErr, controlErr, resumeErr)
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 // authSetting maps claude.auth / codex.auth to their harness.

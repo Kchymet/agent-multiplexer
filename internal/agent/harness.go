@@ -151,6 +151,11 @@ type LaunchRequest struct {
 	Dir        string         // the stat-verified launch dir (the workspace root)
 	Prompt     string         // the trimmed initial prompt
 	ResumeWork bool           // continue interrupted work only when an existing conversation is found
+	// ResumePrompt is the continuation submitted when ResumeWork applies; empty
+	// means ResumeWorkPrompt. A goal coordinator is given its goal-aware
+	// continuation (claudegoal.RestartPrompt) so its prompt hook continues the
+	// goal instead of recording the restart as a new task.
+	ResumePrompt string
 	// ResumeCwds are the candidate cwds a transcript for this session could live
 	// under (amux's workdir convention has shifted over time), preferred-first.
 	ResumeCwds []string
@@ -161,10 +166,14 @@ type LaunchRequest struct {
 const ResumeWorkPrompt = "This session was restarted while you were working. Continue the in-progress task from the existing conversation and current workspace state. Preserve the current goal, progress and budget. Do not resume any goal or task the user explicitly paused, and do not repeat work already completed."
 
 func resumedExtra(req LaunchRequest, args ...string) []string {
-	if req.ResumeWork {
-		return append(args, ResumeWorkPrompt)
+	if !req.ResumeWork {
+		return args
 	}
-	return args
+	prompt := strings.TrimSpace(req.ResumePrompt)
+	if prompt == "" {
+		prompt = ResumeWorkPrompt
+	}
+	return append(args, prompt)
 }
 
 // LaunchDecision is a PlanLaunch result: the (possibly relocated) launch dir and

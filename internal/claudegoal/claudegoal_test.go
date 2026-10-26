@@ -162,3 +162,78 @@ func TestWaitLetsOneStopThrough(t *testing.T) {
 		}
 	}
 }
+
+// A restart continues only a goal that was active or waiting on a wake-up, and
+// only with budget left; it spends one continuation rather than resetting them.
+func TestRestartContinuesOnlyEligibleGoals(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		conts  int
+		want   bool
+	}{
+		{StatusActive, 0, true},
+		{StatusActive, 41, true},
+		{StatusWaiting, 3, true},
+		{StatusActive, MaxContinuations, false},
+		{StatusWaiting, MaxContinuations, false},
+		{StatusPaused, 0, false},
+		{StatusInput, 0, false},
+		{StatusBlocked, 0, false},
+		{StatusBudgetLimited, 0, false},
+		{StatusComplete, 0, false},
+		{"", 0, false},
+	} {
+		s := State{Objective: "ship it", Status: tc.status, Continuations: tc.conts, Note: "n", Updated: 1}
+		if tc.status == "" {
+			s = State{}
+		}
+		if got := ContinueOnRestart(s); got != tc.want {
+			t.Errorf("ContinueOnRestart(%s/%d) = %v", tc.status, tc.conts, got)
+		}
+		next := OnRestart(s, t0)
+		if !tc.want {
+			if next != s {
+				t.Errorf("restart moved an ineligible %s goal: %+v", tc.status, next)
+			}
+			continue
+		}
+		if next.Status != StatusActive || next.Continuations != tc.conts+1 || next.Note != "" || next.Updated != t0.Unix() || next.Objective != "ship it" {
+			t.Errorf("restart of %s/%d: %+v", tc.status, tc.conts, next)
+		}
+	}
+	if ContinueOnRestart(State{Status: StatusActive}) {
+		t.Error("a goal without an objective is eligible")
+	}
+}
+
+// The restart continuation reaches the prompt hook like any prompt; it must
+// never be recorded as the new task, whatever state the goal is in.
+func TestRestartPromptIsNeverANewTask(t *testing.T) {
+	active := State{Objective: "migrate the db", Status: StatusActive, Continuations: 5}
+	got := OnPrompt(active, RestartPrompt, t0)
+	if got.Objective != "migrate the db" || got.Status != StatusActive || got.Continuations != 6 {
+		t.Fatalf("restart of an active goal: %+v", got)
+	}
+	waiting := State{Objective: "migrate the db", Status: StatusWaiting, Note: "CI", Continuations: 2}
+	got = OnPrompt(waiting, RestartPrompt, t0)
+	if got.Status != StatusActive || got.Continuations != 3 || got.Note != "" {
+		t.Fatalf("restart of a waiting goal: %+v", got)
+	}
+	for _, status := range []string{StatusPaused, StatusInput, StatusBlocked, StatusBudgetLimited, StatusComplete} {
+		s := State{Objective: "migrate the db", Status: status, Note: "why", Continuations: 7, Updated: 9}
+		if got := OnPrompt(s, RestartPrompt, t0); got != s {
+			t.Errorf("restart replaced or moved a %s goal: %+v", status, got)
+		}
+	}
+	if got := OnPrompt(State{}, RestartPrompt, t0); !got.None() {
+		t.Fatalf("restart with no goal established one: %+v", got)
+	}
+	// The budget still bounds a coordinator that only ever restarts.
+	spent := OnPrompt(State{Objective: "x", Status: StatusActive, Continuations: MaxContinuations - 1}, RestartPrompt, t0)
+	if _, _, cont := OnStop(spent, t0); cont {
+		t.Fatal("a restart past the budget continued")
+	}
+	if !strings.HasPrefix(RestartPrompt, resumeMarker) {
+		t.Fatal("the restart prompt lacks the continuation marker")
+	}
+}

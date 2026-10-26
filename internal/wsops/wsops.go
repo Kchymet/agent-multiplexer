@@ -511,7 +511,15 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error
 // root; only the editor and terminal panes drop into that subdir (see
 // AgentWorkdir). Resuming a legacy conversation is the one exception: the launch
 // dir moves to wherever its transcript already lives (see resumeCwds).
-func AgentCommand(s store.Session, resumeWork ...bool) (dir string, env, argv []string, err error) {
+// ResumeWork is the host's restart intent for one launch: whether to continue
+// interrupted work in an existing conversation, and with which continuation
+// (empty Prompt means the harness default, agent.ResumeWorkPrompt).
+type ResumeWork struct {
+	Work   bool
+	Prompt string
+}
+
+func AgentCommand(s store.Session, resume ...ResumeWork) (dir string, env, argv []string, err error) {
 	dir = s.Dir
 	if _, err := os.Stat(dir); err != nil {
 		return "", nil, nil, fmt.Errorf("agent dir missing: %s", dir)
@@ -557,7 +565,11 @@ func AgentCommand(s store.Session, resumeWork ...bool) (dir string, env, argv []
 	// launch dir to wherever a transcript already lives. resumeCwds lists the cwds a
 	// transcript for this agent could live under (amux's workdir convention has
 	// shifted over time), preferred-first.
-	plan, err := h.PlanLaunch(agent.LaunchRequest{Root: root, Session: s, Dir: dir, Prompt: prompt, ResumeCwds: resumeCwds(s), ResumeWork: len(resumeWork) > 0 && resumeWork[0]})
+	var rw ResumeWork
+	if len(resume) > 0 {
+		rw = resume[0]
+	}
+	plan, err := h.PlanLaunch(agent.LaunchRequest{Root: root, Session: s, Dir: dir, Prompt: prompt, ResumeCwds: resumeCwds(s), ResumeWork: rw.Work, ResumePrompt: rw.Prompt})
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("plan agent launch: %w", err)
 	}

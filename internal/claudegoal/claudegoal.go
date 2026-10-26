@@ -18,6 +18,10 @@
 //
 // The model moves its own goal with `amux agent goal complete|ask|blocked`; the
 // user pauses, resumes, replaces or clears it with the host's `goal` steer verb.
+// A restart of the runtime (agent restart, daemon restart, `amux do start`)
+// relaunches an eligible goal with RestartPrompt so it continues without a user
+// turn (ContinueOnRestart / OnRestart); the daemon decides that from this file,
+// which is the goal's durable record across restarts.
 // The file is session-local state, not an authority boundary: it lives in the
 // coordinator's writable sandbox, exactly like the model's own update_goal on
 // Codex, and nothing outside the coordinator's goal loop trusts it.
@@ -77,6 +81,15 @@ const ResumePrompt = resumeMarker + " The user resumed this goal. Continue worki
 
 const resumeMarker = "[amux goal]"
 
+// RestartPrompt is the continuation a restarted coordinator is launched with
+// (the daemon's host-side restart intent, see daemon.restartIntent). It carries
+// the marker so the prompt hook treats it as a continuation, never as a new
+// task: a restart must not turn the goal into "this session was restarted".
+// It is worded for both outcomes because the same launch argument is used
+// whether the goal is still eligible (OnRestart continues it) or the user had
+// paused or finished it (the state is left exactly as it was).
+const RestartPrompt = resumeMarker + " This session was restarted. If your goal is still active, continue working toward it from the existing conversation and current workspace state; any background wake-up you had armed died with the runtime, so re-check what you were waiting on and re-arm it if needed. Do not resume a goal the user paused or that is complete, blocked, or waiting for the user's input, and do not repeat work already completed."
+
 // EnvFile names the goal state file in a Claude goal coordinator's environment
 // (wsops.AgentEnv sets it). Its absence means the session is not in Claude goal
 // mode.
@@ -134,6 +147,9 @@ func OnPrompt(s State, prompt string, now time.Time) State {
 	if prompt == "" {
 		return s
 	}
+	if strings.HasPrefix(prompt, RestartPrompt) {
+		return OnRestart(s, now)
+	}
 	resume := strings.HasPrefix(prompt, resumeMarker)
 	if !s.None() && s.Objective != "" && (resume || s.Status == StatusInput) {
 		if !resume {
@@ -151,6 +167,41 @@ func OnPrompt(s State, prompt string, now time.Time) State {
 		return s // a stray nudge with no goal to continue establishes nothing
 	}
 	return State{Objective: truncate(prompt), Status: StatusActive, Created: now.Unix(), Updated: now.Unix()}
+}
+
+// ContinueOnRestart reports whether a restart of the coordinator's runtime
+// should continue this goal without a user turn. Only a goal that was being
+// worked (active) or idling on a background wake-up (waiting — the wake-up died
+// with the runtime, so nothing else would resume it) qualifies, and only while
+// it has continuation budget left. Paused, complete, blocked, budget-limited
+// goals and one waiting for the user's input are the user's to move.
+func ContinueOnRestart(s State) bool {
+	if s.None() || s.Objective == "" {
+		return false
+	}
+	switch s.Status {
+	case StatusActive, StatusWaiting:
+		return s.Continuations < MaxContinuations
+	}
+	return false
+}
+
+// OnRestart applies the restart continuation (RestartPrompt) the daemon
+// launches a restarted coordinator with. An eligible goal (ContinueOnRestart)
+// is active again and the restart is counted as a continuation: a restart is
+// amux's turn, not the user's, so it spends budget rather than earning a fresh
+// one — a coordinator that crashes and restarts in a loop is bounded by the
+// same MaxContinuations as one that never converges. Any other state is left
+// untouched: the prompt then merely reopens the conversation.
+func OnRestart(s State, now time.Time) State {
+	if !ContinueOnRestart(s) {
+		return s
+	}
+	s.Status = StatusActive
+	s.Continuations++
+	s.Note = ""
+	s.Updated = now.Unix()
+	return s
 }
 
 // OnStop decides whether Claude may end its turn. While the goal is active it

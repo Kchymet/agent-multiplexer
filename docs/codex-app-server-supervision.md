@@ -174,7 +174,12 @@ task starts a fresh goal with its own accounting.
 
 Claude Code uses its explicit running hook state and a continuation prompt in
 the existing conversation. Idle, waiting and unknown states reopen without
-automatic submission. Legacy Codex PTY has no built-in running hook. See
+automatic submission — except a Claude goal coordinator, whose goal file is read
+at every launch: an `active` or `waiting` goal is relaunched with its goal-aware
+continuation whatever the hook state was, and that continuation is never
+recorded as a new task (`goal.auto_resume`, default on; see
+[goal mode](default-sessions.md#claude-coordinators-goal-mode-through-amuxs-hooks)).
+Legacy Codex PTY has no built-in running hook. See
 [session restart behavior](sandbox-config.md#macos-certificate-trust-and-restarting-a-session).
 
 These opt-in tests use installed CLIs and isolated local model endpoints:

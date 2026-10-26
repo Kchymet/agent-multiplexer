@@ -47,6 +47,9 @@ type LaunchSpec struct {
 	Access     access.SessionAccess
 	GitObjects []git.GitObjectMount
 	ResumeWork bool // host restart intent; never inferred from session-controlled environment
+	// ResumePrompt is the continuation ResumeWork submits; empty means the
+	// harness default (agent.ResumeWorkPrompt). Host-decided like ResumeWork.
+	ResumePrompt string
 }
 
 // Tabs an agent exposes.
@@ -84,7 +87,7 @@ func Resolve(spec LaunchSpec, tab int) (dir string, env, argv []string, err erro
 		if err := agentAuthError(s, s.Dir); err != nil {
 			return "", nil, nil, err
 		}
-		dir, env, argv, err = wsops.AgentCommand(s, spec.ResumeWork)
+		dir, env, argv, err = wsops.AgentCommand(s, wsops.ResumeWork{Work: spec.ResumeWork, Prompt: spec.ResumePrompt})
 		if err != nil {
 			return "", nil, nil, err
 		}

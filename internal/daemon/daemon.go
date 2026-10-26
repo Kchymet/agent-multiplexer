@@ -97,6 +97,10 @@ type Daemon struct {
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control
 	configErr    error
+	// goalAutoResume is the goal.auto_resume switch (amuxcfg): whether a
+	// restarted Claude goal coordinator continues its eligible goal without a
+	// user turn (restartIntent). Captured once, like codexControl.
+	goalAutoResume bool
 
 	mu       sync.RWMutex
 	sessions []core.Session
@@ -200,9 +204,11 @@ type launchSpecResolver func(context.Context, string) (panespec.LaunchSpec, erro
 // any configuration error before opening a socket. self is this binary's path.
 func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	control, err := amuxcfg.ResolveCodexControl()
+	goalAutoResume, goalErr := amuxcfg.ResolveGoalAutoResume()
 	d := &Daemon{
 		codexControl:   control,
-		configErr:      err,
+		configErr:      errors.Join(err, goalErr),
+		goalAutoResume: goalAutoResume,
 		sources:        sources,
 		interval:       interval,
 		self:           self,
@@ -1213,7 +1219,20 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 // Ensure is idempotent, so a running session is a no-op. This is the single
 // session-start primitive: startEngineFor fans a root out to its members through
 // it, and a `prompt` to a stopped session starts exactly that session with it.
+//
+// A start resumes an eligible goal (restartIntent): `amux do start`, the daemon's
+// own restore and an agent restart all count as the runtime coming back. The
+// optional restart record carries the journal's evidence for that session.
 func (d *Daemon) startAgent(ctx context.Context, aid string, restart ...restartRecord) error {
+	intent := startIntent{resumeGoal: true}
+	if len(restart) > 0 {
+		intent.record = &restart[0]
+	}
+	return d.startAgentWith(ctx, aid, intent)
+}
+
+// startAgentWith is startAgent with the launch's restart intent spelled out.
+func (d *Daemon) startAgentWith(ctx context.Context, aid string, intent startIntent) error {
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
 	}
@@ -1221,10 +1240,7 @@ func (d *Daemon) startAgent(ctx context.Context, aid string, restart ...restartR
 	if err != nil {
 		return err
 	}
-	var work *codexapp.RestartWork
-	if len(restart) > 0 {
-		work = restart[0].apply(&spec)
-	}
+	work := d.restartIntent(intent, &spec)
 	if d.structuredControl(spec.Session) {
 		_, err := d.ensureSupervisorSpec(ctx, spec, work)
 		return err
