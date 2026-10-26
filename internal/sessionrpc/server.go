@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -23,6 +24,12 @@ type ServerOptions struct {
 	PollInterval       time.Duration
 	SettlementInterval time.Duration
 	ResponseBudget     ResponseBudget
+	// RequestNotify, if set, is called after a request may have been published
+	// to this mailbox, so a caller that schedules ServeOnce itself can serve it
+	// at once instead of on its next tick. It runs on the process-wide watcher
+	// goroutine and must not block. It is never called for a mailbox whose
+	// directory cannot be watched (see Watched).
+	RequestNotify func()
 }
 
 type pendingReceipt struct {
@@ -64,6 +71,10 @@ type Server struct {
 	responses       *os.File
 	responseCleanup *os.File
 	responseUsage   *os.File
+	// watch reports request publication; nil when the requests directory
+	// cannot be watched and callers must keep polling.
+	watch *dirWatch
+	wake  wakeSignal
 
 	serveMu sync.Mutex
 	// rejectRequests drains an over-capacity client-writable queue without ever
@@ -163,7 +174,16 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 		pending:        make(map[string]pendingReceipt),
 		responseBudget: options.ResponseBudget, responseLeases: make(map[string]ResponseLease),
 		settlementPoll: settlementPoll, settlementStop: make(chan struct{}), settlementDone: make(chan struct{}),
-		responseWriter: atomicWriteAt,
+		responseWriter: atomicWriteAt, wake: newWakeSignal(),
+	}
+	notify := options.RequestNotify
+	if watch, err := watchDir(requests, filepath.Join(trustedMailboxHostDir, RequestsDirName), func() {
+		server.wake.notify()
+		if notify != nil {
+			notify()
+		}
+	}); err == nil {
+		server.watch = watch
 	}
 	go server.runSettlement()
 	return server, nil
@@ -339,21 +359,27 @@ func (s *Server) removeRequestEntry(name string) (bool, error) {
 	return true, unlinkAt(s.requests, name)
 }
 
+// Watched reports whether request publication wakes this server. When it
+// does, a scheduler only needs a slow fallback pass (WatchFallbackInterval);
+// otherwise it must keep polling.
+func (s *Server) Watched() bool { return s.watch != nil }
+
 func (s *Server) Run(ctx context.Context) error {
 	if err := s.PublishService(ctx); err != nil {
 		return err
 	}
-	ticker := time.NewTicker(s.poll)
-	defer ticker.Stop()
+	interval := s.poll
+	if s.Watched() {
+		interval = max(interval, WatchFallbackInterval)
+	}
 	for {
 		_, err := s.ServeOnce(ctx)
 		if err != nil && !errors.Is(err, ErrQueueFull) && !errors.Is(err, ErrResponseCapacity) {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+		waitWake(ctx.Done(), s.wake, interval)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 }
@@ -980,6 +1006,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.watch.Close()
 	s.settlementStopOnce.Do(func() { close(s.settlementStop) })
 	pending := s.pending
 	s.pending = make(map[string]pendingReceipt)

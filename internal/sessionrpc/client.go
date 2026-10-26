@@ -228,8 +228,19 @@ func (c *Client) loadService(credential access.Credential) (Service, error) {
 }
 
 func (c *Client) awaitResponse(ctx context.Context, credential access.Credential, service Service, request access.SignedRequest) (Response, error) {
-	ticker := time.NewTicker(c.poll)
-	defer ticker.Stop()
+	// Wake when the response is published, or service.json is replaced by a
+	// restart, rather than on a tick. The watches are registered before the
+	// first read below, so a response that landed before them is still found.
+	// Without both (a sandbox that refuses them), poll as before.
+	wake := newWakeSignal()
+	interval := c.poll
+	responses, responsesErr := watchDir(c.responses, filepath.Join(c.context.MailboxDir, ResponsesDirName), wake.notify)
+	defer responses.Close()
+	mailbox, mailboxErr := watchDir(c.mailbox, c.context.MailboxDir, wake.notify)
+	defer mailbox.Close()
+	if responsesErr == nil && mailboxErr == nil {
+		interval = max(interval, WatchFallbackInterval)
+	}
 	for {
 		response, found, err := c.readResponse(credential, service, request)
 		if err != nil {
@@ -245,10 +256,9 @@ func (c *Client) awaitResponse(ctx context.Context, credential access.Credential
 		if currentService.BootID != service.BootID {
 			return Response{}, ErrRestarted
 		}
-		select {
-		case <-ctx.Done():
-			return Response{}, fmt.Errorf("%w: %w", ErrIndeterminate, ctx.Err())
-		case <-ticker.C:
+		waitWake(ctx.Done(), wake, interval)
+		if err := ctx.Err(); err != nil {
+			return Response{}, fmt.Errorf("%w: %w", ErrIndeterminate, err)
 		}
 	}
 }
