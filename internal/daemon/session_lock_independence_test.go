@@ -17,6 +17,7 @@ import (
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // TestSessionReportIndependence records which slow holders delay session A's
@@ -47,6 +48,7 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "host agent-set-repos of a3, stalled in its git work", hold: holdDispatch(core.Action{Action: core.ActionAgentSetRepos, ID: "a3", Fields: map[string]string{"repos": ""}}), blocked: false},
 		{name: "host add-repo, stalled cloning", hold: holdDispatch(core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": "https://example.invalid/r.git"}}), blocked: false},
 		{name: "coordinator's own add-agent, stalled creating", hold: holdCoordinatorAddAgent, blocked: false},
+		{name: "a3's completion cleanup, stalled stopping its runtime", hold: holdCompletion, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
@@ -260,6 +262,31 @@ func holdCoordinatorAddAgent(t *testing.T, f *independenceFixture, held func(), 
 		Fields: map[string]string{"agent": "claude"}}
 	if result, _ := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals["root"], Call: call}); result.Status != sessionrpc.StatusOK {
 		t.Errorf("coordinator add-agent = %+v", result)
+	}
+}
+
+// holdCompletion is a3's completion cleanup (revoke, then stop the runtime)
+// stalling in the kill.
+func holdCompletion(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	eng := f.d.engine.(*fakeEngine)
+	eng.running("a3")
+	var once sync.Once
+	eng.killObserved = func(engine.Instance) {
+		once.Do(func() {
+			held()
+			<-release
+		})
+	}
+	c := f.runtime.completions
+	c.minimum, c.runtime, c.poll, c.abandon = time.Millisecond, time.Millisecond, time.Millisecond, time.Millisecond
+	if err := wsops.SetArchived(context.Background(), "a3", true); err != nil {
+		t.Error(err)
+		return
+	}
+	c.begin(f.principals["a3"], "0123456789abcdef0123456789abcdef", "a3")
+	deadline := time.Now().Add(10 * time.Second)
+	for c.has("a3") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 }
 
