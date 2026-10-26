@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"amux/internal/access"
 	"amux/internal/agent"
@@ -612,6 +613,9 @@ func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([]eng
 		if text == "" {
 			return nil, fmt.Errorf("%s: need %q", verb, core.SteerText)
 		}
+		if len(keys.TypedNewline) > 0 {
+			return typedSteerText(verb, keys, text)
+		}
 		// An embedded paste delimiter would escape the text frame and become
 		// keystrokes. Refuse it rather than silently changing the requested text.
 		if len(keys.PasteEnd) > 0 && (strings.Contains(text, string(keys.PasteStart)) || strings.Contains(text, string(keys.PasteEnd))) {
@@ -636,6 +640,49 @@ func steerPayload(verb string, keys agent.Keys, fields map[string]string) ([]eng
 	default:
 		return nil, fmt.Errorf("unknown steer verb %q", verb)
 	}
+}
+
+// typedSteerText types text into the composer as the user's own words (see
+// agent.Keys.TypedNewline): newlines become the harness's newline key, tabs
+// become spaces (a typed Tab is a composer key, not text), and any other
+// control character is refused, since typed it would be a keystroke rather than
+// text. The pieces are spaced so the runtime reads them as typing, not a paste.
+func typedSteerText(verb string, keys agent.Keys, text string) ([]engine.InputStep, error) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\t", "    ")
+	var typed []byte
+	for _, r := range text {
+		switch {
+		case r == '\n':
+			typed = append(typed, keys.TypedNewline...)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+			return nil, fmt.Errorf("%s: text contains control character %U", verb, r)
+		default:
+			typed = utf8.AppendRune(typed, r)
+		}
+	}
+	chunk := keys.TypeChunk
+	if chunk <= 0 {
+		chunk = len(typed)
+	}
+	var steps []engine.InputStep
+	for start := 0; start < len(typed); {
+		end := start + chunk
+		if end > len(typed) {
+			end = len(typed)
+		}
+		// Never split a UTF-8 sequence across pieces.
+		for end < len(typed) && !utf8.RuneStart(typed[end]) {
+			end++
+		}
+		step := engine.InputStep{Bytes: typed[start:end]}
+		if start > 0 {
+			step.DelayBefore = keys.TypeDelay
+		}
+		steps = append(steps, step)
+		start = end
+	}
+	return append(steps, engine.InputStep{Bytes: keys.Submit, DelayBefore: keys.SubmitDelay}), nil
 }
 
 // deferInput reserves the startup wait in the same FIFO as subsequent input,
