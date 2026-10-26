@@ -248,8 +248,13 @@ type session struct {
 	// lock, so no queued batch crosses a completed revoke barrier.
 	opMu      sync.Mutex
 	published map[string]core.Session
-	actions   map[uint64]*sessionActionCall
-	nextOpID  uint64
+	// provisional contains IDs this daemon minted for this authenticated
+	// connection but the polling inventory has not published yet. It closes the
+	// create→follow-up race without granting an arbitrary caller-selected ID; the
+	// next authoritative snapshot either promotes or revokes each entry.
+	provisional map[string]struct{}
+	actions     map[uint64]*sessionActionCall
+	nextOpID    uint64
 
 	// "runtime-events" feature: rtCtx is cancelled on session teardown to stop all
 	// per-session tail pumps; rtSubs dedupes a re-subscribe for the same session
@@ -356,17 +361,18 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 
 	rtCtx, rtCancel := context.WithCancel(ctx)
 	s := &session{
-		hc:        hc,
-		done:      make(chan struct{}),
-		wake:      make(chan struct{}, 1),
-		lastPong:  time.Now().UnixNano(),
-		subscribe: make(chan struct{}),
-		published: map[string]core.Session{},
-		actions:   map[uint64]*sessionActionCall{},
-		rtCtx:     rtCtx,
-		rtCancel:  rtCancel,
-		rtOpening: map[string]*runtimeOpening{},
-		rtSubs:    map[string]*runtimeSubscription{},
+		hc:          hc,
+		done:        make(chan struct{}),
+		wake:        make(chan struct{}, 1),
+		lastPong:    time.Now().UnixNano(),
+		subscribe:   make(chan struct{}),
+		published:   map[string]core.Session{},
+		provisional: map[string]struct{}{},
+		actions:     map[uint64]*sessionActionCall{},
+		rtCtx:       rtCtx,
+		rtCancel:    rtCancel,
+		rtOpening:   map[string]*runtimeOpening{},
+		rtSubs:      map[string]*runtimeSubscription{},
 	}
 	p.mu.Lock()
 	p.wake = s.wake
@@ -460,6 +466,7 @@ func (p *Provider) features() []string {
 	}
 	if p.publishing() {
 		out = appendUnique(out, harnessproto.SessionsFeature)
+		out = appendUnique(out, harnessproto.EmptyWorkgroupFeature)
 	}
 	if p.runtimeEventsActive() {
 		out = appendUnique(out, harnessproto.RuntimeEventsFeature)
