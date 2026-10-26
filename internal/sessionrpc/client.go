@@ -163,7 +163,7 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 	if credential.SubjectID != c.context.SubjectID || credential.Kind != access.SubjectSession {
 		return Result{}, ErrInvalidRecord
 	}
-	service, err := c.loadService(credential)
+	service, err := c.awaitService(ctx, credential)
 	if errors.Is(err, os.ErrNotExist) {
 		return Result{}, errors.Join(ErrUnpublished, err)
 	}
@@ -203,6 +203,36 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 		return result, &RemoteError{Status: response.Status, Code: response.Code}
 	}
 	return result, nil
+}
+
+// awaitService loads service.json, waiting within ctx while it does not exist
+// yet. A session's processes start as soon as it is created, but its mailbox
+// is published by the daemon's next reconcile, so a credential helper or hook
+// that runs first would otherwise fail. Nothing has been sent at this point,
+// so waiting is always safe; when ctx ends the not-exist error is returned.
+func (c *Client) awaitService(ctx context.Context, credential access.Credential) (Service, error) {
+	service, err := c.loadService(credential)
+	if !errors.Is(err, os.ErrNotExist) {
+		return service, err
+	}
+	// service.json is renamed into the mailbox directory: wake on that, and
+	// poll where the directory cannot be watched.
+	wake := newWakeSignal()
+	interval := c.poll
+	if watch, watchErr := watchDir(c.mailbox, c.context.MailboxDir, wake.notify); watchErr == nil {
+		defer watch.Close()
+		interval = max(interval, WatchFallbackInterval)
+	}
+	// Publication may have landed before the watch existed.
+	service, err = c.loadService(credential)
+	for errors.Is(err, os.ErrNotExist) {
+		waitWake(ctx.Done(), wake, interval)
+		if ctx.Err() != nil {
+			return Service{}, err
+		}
+		service, err = c.loadService(credential)
+	}
+	return service, err
 }
 
 func (c *Client) loadService(credential access.Credential) (Service, error) {
