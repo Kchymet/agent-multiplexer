@@ -3,6 +3,7 @@ package access
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"hash/fnv"
@@ -54,6 +55,7 @@ type replayJournal struct {
 	sync    func(*os.File) error
 	shards  [replayShards]journalShard
 	gen     uint64 // current journal generation; guarded by every shard lock
+	closed  bool   // set by closeReplay; guarded by every shard lock
 	records atomic.Int64
 
 	compactMu sync.Mutex // one compaction at a time
@@ -250,16 +252,35 @@ func (a *FileAuthority) unexpiredReplay() replayFile {
 }
 
 // createShards opens generation j.gen's journals and makes their names
-// durable. The caller holds every shard lock, or no request can run yet.
+// durable. The caller holds every shard lock, or no request can run yet, so
+// no record can be appended, let alone acknowledged, before the directory
+// sync returns: a synced record in a file whose directory entry was never
+// synced can vanish in a crash. On any failure no shard is installed, and
+// appends refuse until a later rotation succeeds.
 func (j *replayJournal) createShards() error {
-	for i := range j.shards {
+	var created [replayShards]*os.File
+	fail := func(err error) error {
+		for _, f := range created {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		return err
+	}
+	for i := range created {
 		f, err := os.OpenFile(journalPath(j.root, j.gen, i), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 		if err != nil {
-			return err
+			return fail(err)
 		}
+		created[i] = f
+	}
+	if err := j.sync(j.dir); err != nil {
+		return fail(err)
+	}
+	for i, f := range created {
 		j.shards[i].f = f
 	}
-	return j.sync(j.dir)
+	return nil
 }
 
 func (j *replayJournal) closeShards() {
@@ -287,7 +308,15 @@ func (j *replayJournal) append(rec replayRecord) error {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	if shard.f == nil {
-		return ErrAuthorityClosed
+		if j.closed {
+			return ErrAuthorityClosed
+		}
+		// A rotation failed to create durable journals: retry it.
+		select {
+		case j.wake <- struct{}{}:
+		default:
+		}
+		return errReplayJournal
 	}
 	if _, err := shard.f.Write(buf); err != nil {
 		return err
@@ -372,13 +401,14 @@ func (a *FileAuthority) compactReplay() error {
 	rotated := j.records.Load()
 	old := j.gen
 	var rotateErr error
-	if j.shards[0].f == nil {
+	if j.closed {
 		rotateErr = ErrAuthorityClosed
 	} else {
 		j.closeShards()
 		j.gen++
-		// On failure the shards left unopened refuse appends (fail closed);
-		// the old generations stay on disk and in the next recovery.
+		// On failure no shard is installed: appends refuse (fail closed) and
+		// wake the next attempt. Every generation stays on disk, and in
+		// recovery, until a snapshot holding it is durable.
 		rotateErr = j.createShards()
 	}
 	for i := len(j.shards) - 1; i >= 0; i-- {
@@ -432,9 +462,12 @@ func (a *FileAuthority) closeReplay() error {
 	for i := range j.shards {
 		j.shards[i].mu.Lock()
 	}
+	j.closed = true
 	j.closeShards()
 	for i := len(j.shards) - 1; i >= 0; i-- {
 		j.shards[i].mu.Unlock()
 	}
 	return nil
 }
+
+var errReplayJournal = errors.New("replay journal unavailable")

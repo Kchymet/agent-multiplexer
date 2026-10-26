@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -329,4 +330,95 @@ func TestReplayJournalLimitFailsClosed(t *testing.T) {
 	if _, err := a.Verify(context.Background(), req); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("verify over the journal limit = %v, want capacity", err)
 	}
+}
+
+// syncLog records, in order, every sync the journal performs.
+type syncLog struct {
+	mu    sync.Mutex
+	names []string
+	fail  func(*os.File) error
+}
+
+func (l *syncLog) install(a *FileAuthority) {
+	real := a.journal.sync
+	a.journal.sync = func(f *os.File) error {
+		l.mu.Lock()
+		l.names = append(l.names, f.Name())
+		fail := l.fail
+		l.mu.Unlock()
+		if fail != nil {
+			if err := fail(f); err != nil {
+				return err
+			}
+		}
+		return real(f)
+	}
+}
+
+// A synced record in a file whose directory entry was never synced can be
+// lost in a crash, so a new generation's files must be durable in the
+// directory before the first record in them is acknowledged (a record is
+// acknowledged only after its own file sync returns).
+func TestJournalDirectorySyncPrecedesFirstAcknowledgement(t *testing.T) {
+	root := t.TempDir()
+	a := openReplayAuthority(t, root)
+	t.Cleanup(func() { _ = a.Close() })
+	cred := replayCredential(t, a, "a1")
+	acceptRequests(t, a, cred, 2)
+	var log syncLog
+	log.install(a)
+	if err := a.compactReplay(); err != nil {
+		t.Fatal(err)
+	}
+	acceptRequests(t, a, cred, 1)
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	dirSync, firstRecord := -1, -1
+	gen := fmt.Sprintf("%s.%d.", replayJournalName, a.journal.gen)
+	for i, name := range log.names {
+		switch {
+		case name == a.rootDir.Name() && dirSync < 0:
+			dirSync = i
+		case strings.Contains(filepath.Base(name), gen) && firstRecord < 0:
+			firstRecord = i
+		}
+	}
+	if dirSync < 0 || firstRecord < 0 || dirSync > firstRecord {
+		t.Fatalf("directory sync at %d, first new-generation record sync at %d: %q", dirSync, firstRecord, log.names)
+	}
+}
+
+// If the new generation's directory entries cannot be made durable, nothing
+// is acknowledged into it; acceptance resumes once a later rotation succeeds.
+func TestFailedJournalDirectorySyncAcknowledgesNothing(t *testing.T) {
+	root := t.TempDir()
+	a := openReplayAuthority(t, root)
+	t.Cleanup(func() { _ = a.Close() })
+	cred := replayCredential(t, a, "a1")
+	var log syncLog
+	log.install(a)
+	log.fail = func(f *os.File) error {
+		if f.Name() == a.rootDir.Name() {
+			return errors.New("injected directory sync failure")
+		}
+		return nil
+	}
+	if err := a.compactReplay(); err == nil {
+		t.Fatal("rotation succeeded without a durable directory")
+	}
+	req, _ := SignRequest(cred, a.BootID(), []byte(`{"q":1}`), replayNow, rand.Reader)
+	if _, err := a.Verify(context.Background(), req); err == nil {
+		t.Fatal("request acknowledged into a journal whose directory entry is not durable")
+	}
+	// Its durability was unknown, so it stays consumed.
+	if _, err := a.Verify(context.Background(), req); !errors.Is(err, ErrReplay) {
+		t.Fatalf("retry of an unacknowledged request = %v, want replay", err)
+	}
+	log.mu.Lock()
+	log.fail = nil
+	log.mu.Unlock()
+	if err := a.compactReplay(); err != nil {
+		t.Fatal(err)
+	}
+	acceptRequests(t, a, cred, 3)
 }
