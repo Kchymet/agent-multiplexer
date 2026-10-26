@@ -897,3 +897,45 @@ The production diff against master is five files, identical to the reviewed
 `e3cdeea`. `10ddbb8` CI was green on all four checks. The merged-tree local
 suites and pressure 5/5 passed. The docs record every accepted residual,
 including the 1/30 exit 126 as unexplained, without overclaiming.
+
+---
+
+## c0523b `6017037` / `36662b6` — importer v3: root's three gaps FIXED
+
+Probe: `c0523b_history_import_v3_probe_test.go.txt`, run through the real
+`d.importHistory` with a real `codexapp.Manager`, under `-race`. No races.
+
+| Case | v2 (`e502930`) | v3 (`36662b6`) |
+|---|---|---|
+| (a) marker sidecar write fails, then retry | prefix ×2 | **prefix ×1**, marker written (the in-log marker recovers) |
+| (b) v0 identity, no log | `structured`, no history | **imported** via `Identity.ThreadID` |
+| (b2) identity + notices-only log | — | imported, notice kept *after* the history |
+| (c) 3 concurrent `importHistory` calls ×50 | 34/50 bad | **0/50 bad** |
+| (d) 20 `AppendNotice` calls racing the import ×50 | held writer lost | **0 lost**, prefix ×1 |
+
+Serialization and lock order (CODE-READ):
+- `WithQuiescentLog` takes the per-session start gate, then `m.mu` (brief),
+  then `LockEventLog`. It refuses with `ErrLogBusy` while a start is in
+  progress or the process is running. The import is decided by log content
+  (any non-notice event means `structured`).
+- `AppendNotice` takes only `LockEventLog`, a leaf lock. Gate holders
+  (`Ensure`, `Close`, `WithQuiescentLog`) never wait for `AppendNotice`. So
+  the order is effectMu → gate → eventLog everywhere, with no cycle.
+- The startup import also goes through `d.importHistory`, i.e. the gate.
+
+Residuals (non-blocking):
+1. **Exit-drain window.** The reaper closes `procDone` first, then
+   `rpc.close()` and `<-rpcDone` (draining the final frames into `logW`),
+   and only then `closeLog()`. In that window `processRunning()` is false,
+   so a quiescent rewrite could orphan the last drained lines.
+   Practically limited: a runtime that wrote any structured event makes the
+   log `structured`, so it is never rewritten; only notices from a runtime
+   that died before its first structured event are at risk. Cheap fix: treat
+   the log as busy until the reaper has run `closeLog` (a `stopped`
+   channel).
+2. **Gate hold during import.** On the steer and host-action paths
+   `ensureSupervisorSpec` runs under `effectMu`, so a large rollout's
+   one-time import (a full read and rewrite) holds the daemon-wide gate for
+   its duration, delaying credential delivery and reconcile. This is
+   bounded (once per session, sized by the rollout), and the startup import
+   runs before Accept. Document it, or measure it on a large rollout.
