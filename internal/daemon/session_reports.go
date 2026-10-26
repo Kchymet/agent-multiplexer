@@ -262,6 +262,9 @@ func (r *sessionRuntime) dispatchSessionReport(ctx context.Context, principal ac
 	if req.Fields[sessionreport.FieldRuntimeGeneration] != generation {
 		return rpcDenied("report_runtime_replaced")
 	}
+	if r.beforeReportEffect != nil {
+		r.beforeReportEffect(session.ID)
+	}
 	if err := r.applySessionReport(session, generation, req); err != nil {
 		return rpcFailed(reportErrorCode(err))
 	}

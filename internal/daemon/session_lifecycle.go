@@ -62,6 +62,10 @@ type sessionRuntime struct {
 	events              *sessionEventPager
 	eventsErr           error
 	credentialOperation func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error)
+	// beforeReportEffect, when set, runs just before a report's write, under
+	// whatever locks the report path holds there. Tests use it to model a slow
+	// report; production leaves it nil.
+	beforeReportEffect func(subjectID string)
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
