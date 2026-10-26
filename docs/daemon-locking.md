@@ -38,6 +38,7 @@ records which slow holders delay a report from session `a1`:
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
 | host `new-workgroup`, stalled launching its coordinator | no | PR 4, creation slice |
+| host `start` of a3, stalled inside its runtime launch (`engine.Ensure`) | no | PR 7 (permission gate per subject) |
 | reconcile pass, stalled while it opens a3's mailbox | no | PR 3 |
 
 ## What the global gate protects
@@ -105,7 +106,7 @@ are and sit below every resource lock in the order.
 | `Daemon.credentialMu` | host credential helper processes (keychain, `gh`), below a session's admission |
 | `accountReadinessCache.mu` | cached account snapshot |
 | `Daemon.servingMu`, `Daemon.deferredMu` | host transports and deferred work admission |
-| `runtimePermissionGate.mu` | runtime generations and permission claims; `retireTokenAnd` runs its callback under it (called with `authMu` held) |
+| `runtimePermissionGate.mu` + per-subject locks | runtime generations and permission claims. Since PR 7 the subject lock is held across the callbacks (runtime creation in `publish`, kill in `retireAnd`/`retireTokenAnd`, delivery in `consume`), and `mu` only for map access. Before, one global `mu` was held across `engine.Ensure` and kills, so every runtime start or stop stalled every session's reports in `generation()`. Callers' locks (session, `authMu`) come before the subject lock |
 | `completionRegistry.mu` | completion entries |
 | `sessionEventPager.mu`, response budget `mu` | event paging state, mailbox response budget |
 | `FileAuthority.mu` (RW) | credential registry and replay ledger; `WithValid` holds it shared during a short callback |
@@ -241,3 +242,7 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
    session-originated actions follow the host action classification (PR 4
    slices). `accountCall` (#10) moves with account manage.
 6. Delete the gate and `dispatchMu`.
+7. The runtime permission gate: per-subject locks across its callbacks,
+   `mu` for the map only. Found while slicing archive: the gate's global
+   mutex was a second daemon-wide lock behind every runtime start and stop.
+   Done.

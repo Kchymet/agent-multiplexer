@@ -38,6 +38,7 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "workgroup start, stalled resolving its members", hold: holdWorkgroupAction, blocked: false},
 		{name: "archive of a3 (exclusive), stalled stopping its runtime", hold: holdArchive, blocked: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
+		{name: "host start of a3, stalled launching its runtime", hold: holdRuntimeStart, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
@@ -199,6 +200,25 @@ func holdQueuedExclusive(t *testing.T, f *independenceFixture, held func(), rele
 	held()
 	<-actions
 	<-actions
+}
+
+// holdRuntimeStart is a host `start` of a3 stalling inside the runtime
+// launch itself (Engine.Ensure), where the permission gate publishes a3's new
+// generation.
+func holdRuntimeStart(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	eng := f.d.engine.(*fakeEngine)
+	eng.ensurePublished = func(engine.Instance) {
+		held()
+		<-release
+	}
+	f.d.launchSpec = testLaunchSpecResolver
+	f.d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
+		return "", nil, []string{"sh"}, nil
+	}
+	f.d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
+	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"}); !r.OK {
+		t.Errorf("start = %+v", r)
+	}
 }
 
 // holdPeerCredential is a2's GitHub credential read stalling inside its
