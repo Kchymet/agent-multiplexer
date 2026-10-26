@@ -262,6 +262,9 @@ func (r *sessionRuntime) dispatchSessionReport(ctx context.Context, principal ac
 	if req.Fields[sessionreport.FieldRuntimeGeneration] != generation {
 		return rpcDenied("report_runtime_replaced")
 	}
+	if r.beforeReportEffect != nil {
+		r.beforeReportEffect(session.ID)
+	}
 	if err := r.applySessionReport(session, generation, req); err != nil {
 		return rpcFailed(reportErrorCode(err))
 	}
@@ -299,10 +302,9 @@ var (
 	errReportLifecycle     = errors.New("permission report lifecycle invalid")
 	errReportCapture       = errors.New("capture source unavailable")
 	stageSessionTranscript = core.StageSessionTranscript
-	// At most four unpublished captures (one per subject, see reportLocks)
-	// bound staging disk to 1 GiB without blocking admission while copies run.
-	// Captures are deltas after a runtime's first, so slots turn over quickly.
-	sessionCaptureSlot = make(chan struct{}, 4)
+	// One unpublished capture globally bounds staging disk to 256 MiB without
+	// blocking management dispatch/effect admission while the copy runs.
+	sessionCaptureSlot = make(chan struct{}, 1)
 	// sessionCaptureSlotWait bounds how long one capture queues for the slot.
 	sessionCaptureSlotWait = 5 * time.Second
 )
@@ -433,9 +435,10 @@ func openSessionTranscriptSource(session store.Session) (*os.File, error) {
 	return f, nil
 }
 
-// dispatchSessionCapture keeps the daemon-wide dispatch/effect locks away from
-// the potentially 256 MiB copy. Both short gates authenticate and bind the exact
-// subject/runtime incarnation; only the final gate publishes the private stage.
+// dispatchSessionCapture keeps the session's admission away from the
+// potentially 256 MiB copy. Both short admissions authenticate and bind the
+// exact subject/runtime incarnation; only the final one publishes the private
+// stage.
 func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal access.Principal, req access.Request) sessionrpc.DispatchResult {
 	// The wait is bounded: this subject's mailbox is served serially, so a
 	// capture parked behind other agents' copies would hold up its own status
@@ -450,10 +453,7 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	case <-ctx.Done():
 		return rpcFailed("report_capture_unavailable")
 	}
-	unlockSubject := r.reportLocks.lock(principal.SubjectID)
-	defer unlockSubject()
-	release, _ := lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitShared)
-	ctx = withAdmission(ctx, admitShared)
+	release := r.d.admitSession(principal.SubjectID)
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
 		release()
 		return rpcDenied("credential_invalid")
@@ -490,7 +490,7 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	}
 	defer stage.Abort()
 
-	release, _ = lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitShared)
+	release = r.d.admitSession(principal.SubjectID)
 	defer release()
 	if err := ctx.Err(); err != nil {
 		return rpcFailed("report_capture_unavailable")

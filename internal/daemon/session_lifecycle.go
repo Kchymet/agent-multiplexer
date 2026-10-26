@@ -43,9 +43,7 @@ type sessionRuntime struct {
 	poll                time.Duration
 	now                 func() time.Time
 	callbackTimeout     time.Duration
-	dispatchMu          sync.RWMutex
-	reportLocks         subjectLocks
-	credentialMu        sync.Mutex
+	dispatchMu          sync.Mutex
 	// progress, if set, receives (done, total) as reconcile visits each
 	// session. Startup sets it so lifecycle clients can show mailbox adoption.
 	progress    func(done, total int)
@@ -64,6 +62,10 @@ type sessionRuntime struct {
 	events              *sessionEventPager
 	eventsErr           error
 	credentialOperation func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error)
+	// beforeReportEffect, when set, runs just before a report's write, under
+	// whatever locks the report path holds there. Tests use it to model a slow
+	// report; production leaves it nil.
+	beforeReportEffect func(subjectID string)
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -86,12 +88,7 @@ func (r *sessionRuntime) start(ctx context.Context) error {
 	if r.eventsErr != nil {
 		return fmt.Errorf("initialize session event pager: %w", r.eventsErr)
 	}
-	release, ok := lockAdmission(ctx, &r.dispatchMu, &r.d.effectMu, admitExclusive)
-	if !ok {
-		return ctx.Err()
-	}
-	defer release()
-	return r.reconcileLocked(ctx)
+	return r.reconcile(ctx)
 }
 
 func (r *sessionRuntime) run(ctx context.Context) {
@@ -207,114 +204,11 @@ func finished(done <-chan struct{}) bool {
 	}
 }
 
-// reconcile runs every poll tick. Exclusive admission blocks every session's
-// reports, so it first checks, without any gate, whether anything would
-// change; in the steady state nothing does and no lock is taken. When there is
-// work it only tries the gate: a busy gate is retried next tick rather than
-// queueing as a pending writer, which would stall every new reader.
 func (r *sessionRuntime) reconcile(ctx context.Context) error {
-	needed, err := r.reconcileNeeded(ctx)
-	if err != nil || !needed {
-		return err
-	}
-	if !tryLockExclusive(&r.dispatchMu, &r.d.effectMu) {
-		return nil
-	}
-	defer func() {
-		r.d.effectMu.Unlock()
-		r.dispatchMu.Unlock()
-	}()
-	return r.reconcileLocked(ctx)
-}
-
-// reconcileNeeded reports whether reconcileLocked would open, renew, close,
-// revoke or kill anything. It mirrors reconcileLocked's decisions using only
-// reads; anything it cannot classify as a no-op counts as work.
-func (r *sessionRuntime) reconcileNeeded(ctx context.Context) (bool, error) {
-	if r.hostCredentialDue(ctx) {
-		return true, nil
-	}
-	sessions, err := r.storedSessions()
-	if err != nil {
-		return false, err
-	}
-	current := make(map[string]store.Session, len(sessions))
-	for _, session := range sessions {
-		current[session.ID] = session
-	}
-	live := r.d.liveRuntimeIDs()
-	for _, session := range sessions {
-		archived := session.Archived || current[session.RootID].Archived
-		_, served := r.servers[session.ID]
-		if archived {
-			if r.completions.has(session.ID) {
-				continue
-			}
-			_, published := r.d.permissions.generation(session.ID)
-			if served || live[session.ID] || published || r.d.authority.HasCurrent(access.SubjectSession, session.ID) {
-				return true, nil
-			}
-			continue
-		}
-		if served {
-			if r.credentialDue(ctx, session.ID) {
-				return true, nil
-			}
-			continue
-		}
-		if r.retiring(session.ID) {
-			continue
-		}
-		return true, nil // a new session's mailbox to open
-	}
-	for id := range r.servers {
-		if _, ok := current[id]; !ok && !r.completions.has(id) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// credentialDue reports whether a served session's credential needs renewal
-// or failed validation (both handled by renewCurrent).
-func (r *sessionRuntime) credentialDue(ctx context.Context, id string) bool {
-	credential, err := r.loadCredential(id)
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	if err != nil || r.d.authority.Valid(ctx, credentialPrincipal(credential)) != nil {
-		return true
-	}
-	return !r.now().Add(credentialRenewBefore).Before(time.UnixMilli(credential.NotAfter))
-}
-
-// hostCredentialDue mirrors ensureHostCredential's no-op condition.
-func (r *sessionRuntime) hostCredentialDue(ctx context.Context) bool {
-	credential, err := access.LoadCredential(r.d.authority.CredentialDir(access.SubjectHost, access.LocalHostSubject))
-	if err != nil || r.d.authority.Valid(ctx, credentialPrincipal(credential)) != nil {
-		return true
-	}
-	return !r.now().Add(credentialRenewBefore).Before(time.UnixMilli(credential.NotAfter))
-}
-
-// storedSessions is every session reconcile considers, including the console.
-func (r *sessionRuntime) storedSessions() ([]store.Session, error) {
-	db, err := store.Open()
-	if err != nil {
-		return nil, err
-	}
-	sessions, err := db.AllSessions()
-	closeErr := db.Close()
-	if err != nil {
-		return nil, err
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	return append(sessions, console.Session()), nil
-}
-
-func (r *sessionRuntime) reconcileLocked(ctx context.Context) error {
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+	r.d.effectMu.Lock()
+	defer r.d.effectMu.Unlock()
 	if err := r.d.ensureHostCredential(ctx, r.now()); err != nil {
 		return fmt.Errorf("renew host credential: %w", err)
 	}
@@ -773,8 +667,8 @@ func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
 		}
 	}
 stop:
-	release, _ := lockAdmission(context.Background(), nil, &c.d.effectMu, admitExclusive)
-	defer release()
+	c.d.effectMu.Lock()
+	defer c.d.effectMu.Unlock()
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return
 	}

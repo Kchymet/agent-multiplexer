@@ -148,12 +148,12 @@ type Daemon struct {
 	// authenticated host actions, session mailbox dispatch, credential rotation,
 	// and completion revocation. A policy mutation cannot commit between a
 	// session's last current-generation check and admission of its exact effect.
-	// Authorization changes hold it exclusively; other effects share it (see
-	// admission.go for the holder audit).
+	// Holders not yet split per resource take it exclusively; session-scoped
+	// work takes it shared plus sessionLocks (admitSession). See
+	// docs/daemon-locking.md.
 	effectMu sync.RWMutex
-	// actionMu serializes host and session actions among themselves, ahead of
-	// the admission gate, so shared-admission creations never interleave.
-	actionMu sync.Mutex
+	// sessionLocks orders effects on one session's own state.
+	sessionLocks keyedLocks
 
 	// shutdown is closed only by the authenticated host control path. Process
 	// IDs are diagnostics, never authority to signal a process.
@@ -283,23 +283,6 @@ func (d *Daemon) instanceActivity(k engine.Key) engine.Activity {
 
 // liveAgents is the set of agent ids whose agent pane (TabAgent) is running in
 // the engine, for the workspace source's liveness annotation.
-// liveRuntimeIDs is every session id with any engine pane or structured
-// runtime, the set killRuntimeFor would act on.
-func (d *Daemon) liveRuntimeIDs() map[string]bool {
-	m := map[string]bool{}
-	if d.engine != nil {
-		for _, k := range d.engine.Live() {
-			m[k.AgentID] = true
-		}
-	}
-	if d.codex != nil {
-		for id := range d.codex.Live() {
-			m[id] = true
-		}
-	}
-	return m
-}
-
 func liveAgents(eng engine.Engine) map[string]bool {
 	m := map[string]bool{}
 	for _, k := range eng.Live() {
@@ -918,6 +901,7 @@ func readHostActions(reader *bufio.Reader, retire context.CancelFunc) (<-chan co
 }
 
 type accessGuardContextKey struct{}
+type effectAdmissionContextKey struct{}
 type deferredLifetimeContextKey struct{}
 
 func withAccessGuard(ctx context.Context, valid func(context.Context) error) context.Context {
@@ -954,6 +938,15 @@ func deferredContext(ctx context.Context) (context.Context, func()) {
 		stopLifetime()
 		cancel()
 	}
+}
+
+func withEffectAdmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, effectAdmissionContextKey{}, true)
+}
+
+func effectAdmissionHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(effectAdmissionContextKey{}).(bool)
+	return held
 }
 
 // revalidateDeferred is a no-op for internal/test callers without a streaming

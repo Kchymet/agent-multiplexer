@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"amux/internal/access"
@@ -32,73 +31,57 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 	if !effectAdmissionHeld(ctx) {
-		// Actions are serialized among themselves first; then the admission gate
-		// in the action's mode (admission.go). An action that only creates or
-		// starts work shares the gate, so it never stalls session reports.
-		d.actionMu.Lock()
-		defer d.actionMu.Unlock()
-		mode := admitExclusive
-		if sharedAdmissionAction(a) {
-			mode = admitShared
-		}
 		waitStart := time.Now()
 		var admitted time.Time
 		defer func() {
+			// The gates taken below serialize every session's reports; an action
+			// holding them for long is the usual cause of a daemon-wide stall.
 			if admitted.IsZero() {
 				return
 			}
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held admission (%s) %v (waited %v)", a.Action, a.ID, admissionModeName(mode),
+				log.Printf("action %s %s held the effect gate %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
-		var dispatch *sync.RWMutex
-		if d.sessionRPC != nil {
-			dispatch = &d.sessionRPC.dispatchMu
-		}
 		// Use the same lock order as mailbox serving: dispatch ownership, then
 		// effect admission. For an explicit restore, drain the old completion
 		// owner before taking effectMu; its cleanup may already be waiting there.
 		// Holding dispatchMu prevents another old-principal call entering between
 		// that drain and the final admission lock.
-		if restore, _ := hostRestoreRequested(a); restore && dispatch != nil {
-			releaseDispatch, ok := lockAdmission(ctx, nil, dispatch, admitExclusive)
-			if !ok {
-				return fail("admission cancelled")
-			}
-			defer releaseDispatch()
-			d.sessionRPC.completions.cancelAndWait(a.ID)
-			session, found, err := lookupSession(a.ID)
-			if err != nil {
-				return fail("restore session: %v", err)
-			}
-			if found && session.Role() == store.RoleCoordinator {
-				// A group restore also regrants eligible members. Drain any
-				// member completion owner before taking its cleanup effect lock.
-				db, err := store.OpenReadOnly()
+		if d.sessionRPC != nil {
+			d.sessionRPC.dispatchMu.Lock()
+			defer d.sessionRPC.dispatchMu.Unlock()
+			if restore, _ := hostRestoreRequested(a); restore {
+				d.sessionRPC.completions.cancelAndWait(a.ID)
+				session, found, err := lookupSession(a.ID)
 				if err != nil {
-					return fail("restore members: %v", err)
+					return fail("restore session: %v", err)
 				}
-				children, err := db.Children(a.ID)
-				db.Close()
-				if err != nil {
-					return fail("restore members: %v", err)
-				}
-				for _, child := range children {
-					if !child.Archived {
-						d.sessionRPC.completions.cancelAndWait(child.ID)
+				if found && session.Role() == store.RoleCoordinator {
+					// A group restore also regrants eligible members. Drain any
+					// member completion owner before taking its cleanup effect lock.
+					db, err := store.OpenReadOnly()
+					if err != nil {
+						return fail("restore members: %v", err)
+					}
+					children, err := db.Children(a.ID)
+					db.Close()
+					if err != nil {
+						return fail("restore members: %v", err)
+					}
+					for _, child := range children {
+						if !child.Archived {
+							d.sessionRPC.completions.cancelAndWait(child.ID)
+						}
 					}
 				}
 			}
-			dispatch = nil // already held exclusively
 		}
-		release, ok := lockAdmission(ctx, dispatch, &d.effectMu, mode)
-		if !ok {
-			return fail("admission cancelled")
-		}
-		defer release()
+		d.effectMu.Lock()
+		defer d.effectMu.Unlock()
 		admitted = time.Now()
-		ctx = withAdmission(ctx, mode)
+		ctx = withEffectAdmission(ctx)
 	}
 	if err := revalidateDeferred(ctx); err != nil {
 		return fail("authorization changed before execution: %v", err)

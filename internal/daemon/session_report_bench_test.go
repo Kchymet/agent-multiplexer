@@ -107,20 +107,78 @@ func BenchmarkStoreOpen(b *testing.B) {
 }
 
 // BenchmarkConcurrentReportsDuringSlowEffect measures what two sessions'
-// reports cost while a slow creation repeatedly holds admission for 100ms — the shape of the user-visible stall. It
-// reports per-report p50/max latency rather than throughput.
+// reports cost while a third session repeatedly runs something slow for 100ms
+// — the shape of the user-visible stall. The holders go through the real
+// paths, so the numbers track whatever locks those take
+// (docs/daemon-locking.md):
+//
+//   - host-action: a host `start` of a3 (a creation, a restart);
+//   - peer-report: a3's own report, stalled inside its write.
+//
+// It reports per-report p50/max latency rather than throughput.
 func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
+	b.Run("host-action", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.agentsUnder = func(string) ([]string, error) {
+				slow()
+				return nil, nil
+			}
+			return func() { d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"}) }
+		})
+	})
+	b.Run("peer-report", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			runtime.beforeReportEffect = func(id string) {
+				if id == "a3" {
+					slow()
+				}
+			}
+			return nil // the holder is a3's own report loop
+		})
+	})
+}
+
+// benchmarkReportsDuringSlowHolder runs a1 and a2's report pairs while a holder
+// for a3 repeats. setup wires slow (a 100ms stall) into the holder's path and
+// returns one holder iteration, or nil to repeat a3's report.
+func benchmarkReportsDuringSlowHolder(b *testing.B, setup func(d *Daemon, runtime *sessionRuntime, slow func()) func()) {
 	store.ShareHandles(true)
 	defer store.ShareHandles(false)
 	const runtimeID = "33333333-3333-4333-8333-333333333333"
 	sessions := []store.Session{
 		{ID: "a1", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 		{ID: "a2", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+		{ID: "a3", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 	}
 	d, runtime, principals := sessionRuntimeFixture(b, sessions...)
+	d.sessionRPC = runtime
+	b.Cleanup(runtime.completions.close)
+	d.engine = newFakeEngine()
 	generations := map[string]string{}
 	for _, s := range sessions {
 		generations[s.ID] = publishTestRuntime(b, d, s.ID)
+	}
+	report := func(id string) error {
+		for _, req := range []sessionrpc.DispatchRequest{
+			{Principal: principals[id], RequestID: "0123456789abcdef0123456789abcdef",
+				Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}},
+			reportRequest(principals[id], sessionreport.Activity, map[string]string{
+				sessionreport.FieldRuntimeGeneration: generations[id], sessionreport.FieldState: core.StateRunning,
+			}),
+		} {
+			if result, err := runtime.dispatch(context.Background(), req); err != nil || result.Status != sessionrpc.StatusOK {
+				return fmt.Errorf("report %s = %+v, %v", id, result, err)
+			}
+		}
+		return nil
+	}
+	hold := setup(d, runtime, func() { time.Sleep(100 * time.Millisecond) })
+	if hold == nil {
+		hold = func() {
+			if err := report("a3"); err != nil {
+				b.Error(err)
+			}
+		}
 	}
 	stop := make(chan struct{})
 	holderDone := make(chan struct{})
@@ -132,12 +190,7 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 				return
 			default:
 			}
-			// A creation: serialized with other actions, shared admission.
-			d.actionMu.Lock()
-			release, _ := lockAdmission(context.Background(), &runtime.dispatchMu, &d.effectMu, admitShared)
-			time.Sleep(100 * time.Millisecond)
-			release()
-			d.actionMu.Unlock()
+			hold()
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -145,23 +198,15 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 	var latencies []time.Duration
 	b.ResetTimer()
 	var wg sync.WaitGroup
-	for _, s := range sessions {
+	for _, s := range sessions[:2] {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			for i := 0; i < b.N; i++ {
 				start := time.Now()
-				for _, req := range []sessionrpc.DispatchRequest{
-					{Principal: principals[id], RequestID: "0123456789abcdef0123456789abcdef",
-						Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}},
-					reportRequest(principals[id], sessionreport.Activity, map[string]string{
-						sessionreport.FieldRuntimeGeneration: generations[id], sessionreport.FieldState: core.StateRunning,
-					}),
-				} {
-					if result, err := runtime.dispatch(context.Background(), req); err != nil || result.Status != sessionrpc.StatusOK {
-						b.Errorf("report = %+v, %v", result, err)
-						return
-					}
+				if err := report(id); err != nil {
+					b.Error(err)
+					return
 				}
 				mu.Lock()
 				latencies = append(latencies, time.Since(start))
