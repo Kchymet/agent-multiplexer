@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"amux/internal/access"
@@ -44,6 +45,10 @@ type sessionRuntime struct {
 	now                 func() time.Time
 	callbackTimeout     time.Duration
 	dispatchMu          sync.Mutex
+	// reportsOnly is set when the daemon begins stopping: until run returns the
+	// mailboxes serve only session reports, so the engine's wait-for-idle can
+	// still see a busy agent's turn end while no new effect is admitted.
+	reportsOnly atomic.Bool
 	// progress, if set, receives (done, total) as reconcile visits each
 	// session. Startup sets it so lifecycle clients can show mailbox adoption.
 	progress    func(done, total int)

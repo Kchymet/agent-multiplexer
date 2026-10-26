@@ -53,6 +53,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return rpcInvalid("invalid_call"), nil
 	}
 	req := request.Call.AccessRequest()
+	if r.reportsOnly.Load() && !isSessionReport(req) {
+		return rpcFailed("daemon_stopping"), nil
+	}
 	if credentialbroker.IsVerb(req.Verb) {
 		return r.dispatchCredential(ctx, request)
 	}
