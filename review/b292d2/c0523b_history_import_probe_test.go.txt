@@ -1,0 +1,65 @@
+package daemon
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"amux/internal/codexapp"
+	"amux/internal/codexcfg"
+	"amux/internal/store"
+)
+
+func importFixture(t *testing.T) (store.Session, string) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	const cid = "22222222-2222-4222-8222-222222222222"
+	s := store.Session{ID: "c1", RootID: "r", Agent: "codex", ClaudeID: cid, Dir: t.TempDir()}
+	t.Setenv("CODEX_HOME", codexcfg.AgentHome(s.Dir))
+	dir := filepath.Join(codexcfg.AgentHome(s.Dir), "sessions", "2026", "07", "02")
+	_ = os.MkdirAll(dir, 0o755)
+	roll := filepath.Join(dir, "rollout-2026-07-02T10-00-00-"+cid+".jsonl")
+	body := `{"timestamp":"2026-07-02T10:00:00Z","type":"session_meta","payload":{"id":"` + cid + `"}}` + "\n" +
+		`{"timestamp":"2026-07-02T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"PRE-MIGRATION PROMPT"}]}}` + "\n"
+	if err := os.WriteFile(roll, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return s, roll
+}
+
+func logText(t *testing.T, id string) string {
+	b, _ := os.ReadFile(codexapp.EventLogPathFor(id))
+	return string(b)
+}
+
+// Notices-only log created by a cold-start notice before the import.
+func TestProbeImportSkippedAfterNoticeOnlyLog(t *testing.T) {
+	s, _ := importFixture(t)
+	_ = codexapp.AppendNotice(s.ID, "info", "starting agent") // startStructuredForPrompt order
+	imported, err := importCodexHistory(s)
+	t.Logf("after notice-only log: imported=%v err=%v historyPresent=%v", imported, err, strings.Contains(logText(t, s.ID), "PRE-MIGRATION"))
+}
+
+// Retry gap: first import fails, a later supervisor/notice creates the log,
+// the cause is repaired, retry permanently skips.
+func TestProbeImportFailureThenPermanentSkip(t *testing.T) {
+	s, roll := importFixture(t)
+	_ = os.Chmod(roll, 0)
+	_, err1 := importCodexHistory(s)
+	_ = codexapp.AppendNotice(s.ID, "info", "supervisor first event")
+	_ = os.Chmod(roll, 0o644)
+	imported, err2 := importCodexHistory(s)
+	t.Logf("first err=%v; after repair: imported=%v err=%v historyPresent=%v", err1 != nil, imported, err2, strings.Contains(logText(t, s.ID), "PRE-MIGRATION"))
+}
+
+// Control: clean first import.
+func TestProbeImportControl(t *testing.T) {
+	s, _ := importFixture(t)
+	imported, err := importCodexHistory(s)
+	again, _ := importCodexHistory(s)
+	t.Logf("clean: imported=%v err=%v historyPresent=%v secondRunImported=%v", imported, err, strings.Contains(logText(t, s.ID), "PRE-MIGRATION"), again)
+}

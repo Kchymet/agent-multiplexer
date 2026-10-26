@@ -738,3 +738,74 @@ Posted as PR206 issuecomment-6407678613.
   requests. The abandoned request is still dispatched (the R2 shape), so its
   response is never released and pins a pool slot for 60s under a slow gate.
   Suggested a regression plus a signed client deadline.
+
+---
+
+## c0523b `a4c8e53` — history import, A5, launch fence (mailbox integration still pending)
+
+Suites pass: accounts, codexapp, centralauth, claudecfg, codexcfg, panespec,
+daemon, cmd/amux; `go vet ./...` is clean.
+
+### A5 — SETTLED
+The fresh-thread fallback (`isNoRollout`) is removed. Every resume target
+(resumable, legacy v0, or PTY-pinned with no identity) fails the launch
+visibly on any resume error. Re-running my A5 probe gives all three cases
+`launchErr=true`, no `thread/start`, thread kept. Residual: a legacy
+store-pinned thread whose rollout genuinely never existed now fails every
+launch. Ask: make the error name a user-visible recovery (e.g. recreate the
+workload), and document it.
+
+### A1-R1 pending reuse — SETTLED
+Every resolve gets its own 24-byte nonce (hash stored). Pinning a launch
+retires all older pending launches; pending entries are capped at 16.
+`ensurePane` (the only `engine.Ensure` caller, 6 sites) retires the launch
+when the engine reused the live pane or the spawn failed, so attaches do not
+accumulate. A killed process's late request can no longer claim its
+replacement's permit. Minor: if the Lookup→Ensure race lets a concurrent
+Ensure win, an unused pending launch is left behind until eviction. It is
+harmless, because its nonce exists only in a discarded argv.
+
+### History import (`codex_history_import.go`) — REPRODUCED gaps
+Probe: `c0523b_history_import_probe_test.go.txt`, with a real PTY rollout in
+the session's private `CODEX_HOME`.
+
+| Case | imported | history in log |
+|---|---|---|
+| clean (control) | true; a second run imports nothing (idempotent) | yes |
+| cold-start notice written first (`AppendNotice`, as `startStructuredForPrompt` → `structuredJournal("starting agent")` does before `ensureSupervisor`) | false | **no** |
+| first import fails (rollout unreadable), a later append creates the log, cause repaired, retry | false | **no** |
+
+Root's retry gap is confirmed, and **a second trigger needs no failure at
+all**: any structured notice written before the import permanently disables
+it. Today startup runs `importCodexHistories()` before restore and prompts,
+so the trigger needs a failed or missed startup import (or a session that
+gains a rollout later), and from then on every launch's own "starting
+agent" notice keeps it skipped. Other notice writers:
+`steer.go:347/366/378`.
+
+Fix direction (no protocol change): treat "already imported" as an explicit
+marker (e.g. a first-line import record, or a sidecar state), not mere log
+existence. A log that contains only amux notices, or no import marker while
+a rollout exists, is importable: merge by writing `import prefix + existing
+notices` atomically, or keep notices in order after the prefix. On import
+failure, do not proceed silently to `Ensure`: either fail visibly or record
+retry-pending, so the supervisor's first append cannot end the retry window.
+
+Other points:
+- **Publication.** `os.Link(tmp, path)` followed by a deferred `Remove`
+  leaves `Nlink=2` briefly, and readers that require `Nlink==1` may reject
+  the file in that window. There is also no parent-directory fsync. Prefer
+  the existing no-replace rename (`renameat2 RENAME_NOREPLACE` /
+  `renamex_np RENAME_EXCL`), then fsync the directory.
+- **Race.** If the supervisor's first append wins the link race,
+  `EEXIST → (false, nil)` silently drops the import, which is the same
+  permanent-skip class. Not reachable today, because import runs before
+  `Ensure` in the same goroutine, but the comment claims safety for it.
+- **Fidelity.** It uses the same cold PTY mapper
+  (`runtimeevents.MapCodexLine`), so events match what the PTY reader showed,
+  plus one meta notice marking the boundary. Pinned home and thread are
+  correct (`Identity.ThreadID` else `ClaudeID`; harness path from `s.Dir`).
+  There is no duplicate risk, because nothing backfills on resume.
+- **Startup cost.** Startup imports synchronously for every row, reading
+  whole rollouts before restore. That cost is one-time, but failed sessions
+  retry on every startup. Bounded; note it in the docs.
