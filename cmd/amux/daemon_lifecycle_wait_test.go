@@ -82,7 +82,7 @@ func TestDaemonStartWaitsForSlowLiveDaemon(t *testing.T) {
 		return nil
 	})
 	exited := make(chan error) // never: the child is still running
-	if err := awaitDaemonReady(syscall.ENOENT, exited, 30*time.Second); err != nil {
+	if err := awaitDaemonReady(syscall.ENOENT, exited, 30*time.Second, nil); err != nil {
 		t.Fatalf("slow but live daemon reported as failed: %v", err)
 	}
 }
@@ -93,7 +93,7 @@ func TestDaemonStartReportsExitedChildPromptly(t *testing.T) {
 	exited := make(chan error, 1)
 	exited <- errors.New("exit status 1")
 	start := time.Now()
-	err := awaitDaemonReady(syscall.ENOENT, exited, 30*time.Second)
+	err := awaitDaemonReady(syscall.ENOENT, exited, 30*time.Second, nil)
 	if err == nil || !strings.Contains(err.Error(), "stopped before accepting") || !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("exited child error = %v", err)
 	}
@@ -113,7 +113,7 @@ func TestDaemonStartAcceptsOtherOwnerAfterChildExits(t *testing.T) {
 	})
 	exited := make(chan error, 1)
 	exited <- nil
-	if err := awaitDaemonReady(syscall.ENOENT, exited, 30*time.Second); err != nil {
+	if err := awaitDaemonReady(syscall.ENOENT, exited, 30*time.Second, nil); err != nil {
 		t.Fatalf("answering daemon after a clean child exit reported as failure: %v", err)
 	}
 }
