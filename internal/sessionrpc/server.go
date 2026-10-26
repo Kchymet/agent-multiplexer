@@ -31,6 +31,22 @@ type ServerOptions struct {
 	// goroutine and must not block. It is never called for a mailbox whose
 	// directory cannot be watched (see Watched).
 	RequestNotify func()
+	// Slow, if set, reports whether a call may run long enough that this
+	// subject's other requests must not wait behind it. Slow calls are
+	// dispatched in arrival order by one worker per mailbox, at most
+	// MaxSlowRequests at a time; every other call is dispatched in arrival
+	// order by ServeOnce itself and never waits for a slow one. It sees the
+	// call before authentication and may only choose a lane.
+	Slow func(Call) bool
+}
+
+// MaxSlowRequests bounds one mailbox's claimed slow-lane requests. Further
+// slow requests stay claimed until the lane has room.
+const MaxSlowRequests = 8
+
+type slowJob struct {
+	ctx  context.Context
+	name string
 }
 
 type pendingReceipt struct {
@@ -77,8 +93,20 @@ type Server struct {
 	responseUsage   *os.File
 	// watch reports request publication; nil when the requests directory
 	// cannot be watched and callers must keep polling.
-	watch *dirWatch
-	wake  wakeSignal
+	watch  *dirWatch
+	wake   wakeSignal
+	notify func()
+
+	// slow-lane state; inflight is guarded by mu. publishMu serializes response
+	// publication with itself (its capacity scan rewinds a shared directory
+	// stream) and with cleanupResponses, which removes temporaries it does not
+	// recognize, now that the slow lane publishes concurrently with ServeOnce.
+	slow      func(Call) bool
+	slowJobs  chan slowJob
+	inflight  map[string]struct{}
+	slowStop  chan struct{}
+	slowDone  chan struct{}
+	publishMu sync.Mutex
 
 	serveMu sync.Mutex
 	// rejectRequests drains an over-capacity client-writable queue without ever
@@ -181,6 +209,14 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 		responseWriter: atomicWriteAt, wake: newWakeSignal(),
 	}
 	notify := options.RequestNotify
+	server.notify = notify
+	if options.Slow != nil {
+		server.slow = options.Slow
+		server.slowJobs = make(chan slowJob, MaxSlowRequests)
+		server.inflight = make(map[string]struct{})
+		server.slowStop, server.slowDone = make(chan struct{}), make(chan struct{})
+		go server.runSlow()
+	}
 	if watch, err := watchDir(requests, filepath.Join(trustedMailboxHostDir, RequestsDirName), func() {
 		server.wake.notify()
 		if notify != nil {
@@ -251,6 +287,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 	s.settleExpired()
 	processed := 0
 	overflow := false
+	laneFull := false // see processOrDefer
 	// blocked records exhausted response capacity. The pass continues so a
 	// release queued behind a blocked request can still free that capacity.
 	blocked := false
@@ -271,7 +308,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 			processed++
 			continue
 		}
-		if err := s.processClaimed(ctx, name, !blocked); errors.Is(err, ErrResponseCapacity) {
+		if err := s.processOrDefer(ctx, name, !blocked, &laneFull); errors.Is(err, ErrResponseCapacity) {
 			blocked = true
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return processed, err
@@ -318,7 +355,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 				return processed, err
 			}
 			if claimed {
-				if err := s.processClaimed(ctx, name, !blocked); errors.Is(err, ErrResponseCapacity) {
+				if err := s.processOrDefer(ctx, name, !blocked, &laneFull); errors.Is(err, ErrResponseCapacity) {
 					blocked = true
 				} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 					return processed, err
@@ -396,6 +433,97 @@ func (s *Server) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// processOrDefer dispatches a claimed request now, or hands it to the slow
+// lane. A request the lane already owns is skipped; one the lane has no room
+// for stays claimed for a later pass.
+// admit is processClaimed's: a pass blocked on response capacity hands no new
+// work to the lane either. laneFull is per pass: once the lane had no room, the
+// pass hands it nothing more, so a slot freed mid-pass cannot go to a later
+// request ahead of the one just left waiting.
+func (s *Server) processOrDefer(ctx context.Context, name string, admit bool, laneFull *bool) error {
+	if s.slow == nil {
+		return s.processClaimed(ctx, name, admit)
+	}
+	s.mu.Lock()
+	_, owned := s.inflight[name]
+	s.mu.Unlock()
+	if owned {
+		return nil
+	}
+	if !s.claimedSlow(name) {
+		return s.processClaimed(ctx, name, admit)
+	}
+	if !admit {
+		return ErrResponseCapacity
+	}
+	if *laneFull {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || len(s.inflight) >= MaxSlowRequests {
+		*laneFull = true
+		return nil
+	}
+	s.inflight[name] = struct{}{}
+	s.slowJobs <- slowJob{ctx: ctx, name: name} // capacity MaxSlowRequests: never blocks
+	return nil
+}
+
+// claimedSlow peeks at a claimed request's unauthenticated call to pick its
+// lane. Anything unreadable is processed inline, which rejects it.
+func (s *Server) claimedSlow(name string) bool {
+	raw, err := readRegularAt(s.processing, name, maxEnvelopeFileBytes)
+	if err != nil {
+		return false
+	}
+	var envelope access.SignedRequest
+	if unmarshalBounded(raw, maxEnvelopeFileBytes, &envelope) != nil {
+		return false
+	}
+	var call Call
+	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &call) != nil || call.Kind != CallOperation {
+		return false
+	}
+	return s.slow(cloneCall(call))
+}
+
+// runSlow dispatches the slow lane in arrival order. A request whose
+// processing fails stays claimed, and a later pass retries it as before.
+func (s *Server) runSlow() {
+	defer close(s.slowDone)
+	for {
+		select {
+		case <-s.slowStop:
+			return // queued jobs stay claimed for the next server
+		case job := <-s.slowJobs:
+			err := s.processClaimed(job.ctx, job.name, true)
+			s.mu.Lock()
+			delete(s.inflight, job.name)
+			s.mu.Unlock()
+			if errors.Is(err, ErrResponseCapacity) {
+				continue // retried by the pass that next finds capacity
+			}
+			// Requests left claimed while the lane was full can now be taken.
+			s.wake.notify()
+			if s.notify != nil {
+				s.notify()
+			}
+		}
+	}
+}
+
+// Busy reports whether the slow lane holds a request. Close waits for it, so a
+// caller holding a lock that dispatch may need must hand the close off.
+func (s *Server) Busy() bool {
+	if s.slow == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inflight) != 0
 }
 
 func (s *Server) claim(name string) (bool, error) {
@@ -662,6 +790,8 @@ func (s *Server) publishResponse(response *Response, reservation *responseReserv
 	if err != nil {
 		return err
 	}
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
 	if err := s.ensureResponseCapacity(len(encoded)); err != nil {
 		return err
 	}
@@ -825,6 +955,8 @@ func (s *Server) runSettlement() {
 }
 
 func (s *Server) cleanupResponses() error {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
 	names, _, err := nextNames(s.responseCleanup, MaxQueuedRequests)
 	if err != nil {
 		return err
@@ -1107,7 +1239,15 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.mu.Unlock()
 	s.watch.Close()
+	// Join the slow lane before settling receipts: a slow dispatch may still
+	// register one.
+	if s.slowStop != nil {
+		close(s.slowStop)
+		<-s.slowDone
+	}
+	s.mu.Lock()
 	s.settlementStopOnce.Do(func() { close(s.settlementStop) })
 	pending := s.pending
 	s.pending = make(map[string]pendingReceipt)
