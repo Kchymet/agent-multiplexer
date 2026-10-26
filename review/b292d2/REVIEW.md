@@ -870,3 +870,21 @@ Fix direction, without rewriting a live runtime's log:
   central-auth native tests (`TestSmokeCentralAPIKeyBindingNative`,
   `TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace`, the broker
   round-trips) run on the normal build.
+
+---
+
+## PR206 `e9781e2` → `fddfce0`
+
+- **The macOS repeat reproduced the stall, and it is fixture-side.** At
+  `e9781e2`, `pressure-2` recorded `launcher exit 126 on fetch 14` while
+  `files=0` and every queue was empty. The temporary job reported success
+  because its `| tee | grep` pipeline runs without pipefail.
+  (issuecomment-6407840504)
+- **`fddfce0` ordering fix is correct.** `ahead` is captured before the
+  client signs, giving a strictly earlier ms prefix. macOS pressure: 15/15 at
+  `fddfce0`, 29/30 overall.
+- **Ubuntu failure** `TestAccountsPTYScrolling` is in nativetui, which PR206
+  does not touch, and passes 20/20 locally on merged and master trees.
+- **Remaining:** integrate current master (#212/#214/#204/#215), remove the
+  temporary job, classify or accept the 1/30 launcher 126 (capture launcher
+  stderr), and green CI on the final head.
