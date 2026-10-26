@@ -29,6 +29,7 @@ import (
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/daemonstatus"
 	"amux/internal/engine/local"
 	"amux/internal/nativetui"
 	"amux/internal/vtdemo"
@@ -366,26 +367,30 @@ func daemonStop(mustExist bool) error {
 // waitDaemonStopped waits for both endpoint removal and singleton-lock
 // release. Socket absence alone is not process identity and can precede final
 // engine cleanup.
+//
+// While it waits it shows what the daemon's teardown is waiting on (busy
+// agents finishing their turn, SIGTERM/SIGKILL escalation, lock release), read
+// from the status file the daemon publishes; the shutdown connection itself is
+// drained before any agent stops, so it cannot carry this.
 func waitDaemonStopped() error {
 	start := time.Now()
 	deadline := start.Add(daemonStopBudget())
+	progress := newLifecycleProgress("daemon stopping", daemonstatus.OpStopping, daemonStopBudget())
+	defer progress.finish()
 	var lastErr error
-	announced := false
 	for time.Now().Before(deadline) {
 		if probeErr := startupProbe(); probeErr == nil {
 			lastErr = fmt.Errorf("daemon still accepting authenticated connections")
 		} else if !daemonMayStart(probeErr) {
 			return fmt.Errorf("cannot verify daemon shutdown: %w", daemonConnectionError(probeErr))
 		} else if singletonReleased() {
-			fmt.Println("daemon stopped")
+			progress.finish()
+			fmt.Printf("daemon stopped (%s)\n", time.Since(start).Round(100*time.Millisecond))
 			return nil
 		} else {
 			lastErr = fmt.Errorf("daemon listener closed but singleton lock is still held")
 		}
-		if !announced && time.Since(start) > 2*time.Second {
-			announced = true
-			fmt.Printf("daemon stopping: letting busy agents finish their turn (up to %s)…\n", daemonStopBudget().Round(time.Second))
-		}
+		progress.update(time.Now())
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("daemon did not complete authenticated shutdown within %s: %w", daemonStopBudget().Round(time.Second), lastErr)
@@ -586,13 +591,23 @@ func startDaemonAfterDial(self string, initialErr error, explicitBootstrap bool)
 	// The child is in its own session, so this process exiting never stops it.
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	return awaitDaemonReady(initialErr, exited, daemonStartupBudget)
+	// Only an explicit start reports progress: auto-start precedes the TUI and
+	// other commands whose output must not carry lifecycle chatter.
+	var progress *lifecycleProgress
+	if explicitBootstrap {
+		progress = newLifecycleProgress("daemon starting", daemonstatus.OpStarting, daemonStartupBudget)
+	}
+	return awaitDaemonReady(initialErr, exited, daemonStartupBudget, progress)
 }
 
 // awaitDaemonReady waits for the spawned daemon to accept a connection. A
 // fixed few-second window used to report failure for every startup that had
 // many mailboxes to reconcile, although the daemon came up moments later.
-func awaitDaemonReady(initialErr error, exited <-chan error, budget time.Duration) error {
+//
+// A non-nil progress shows the daemon's startup phase (mailbox reconciliation)
+// while it waits.
+func awaitDaemonReady(initialErr error, exited <-chan error, budget time.Duration, progress *lifecycleProgress) error {
+	defer progress.finish()
 	lastErr := initialErr
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
@@ -614,6 +629,7 @@ func awaitDaemonReady(initialErr error, exited <-chan error, budget time.Duratio
 			return fmt.Errorf("daemon process stopped before accepting connections (%v; see %s); initial connection failed: %w; last connection failed: %w", waitErr, core.LogPath(), initialErr, lastErr)
 		case <-time.After(75 * time.Millisecond):
 		}
+		progress.update(time.Now())
 	}
 	return fmt.Errorf("daemon did not come up within %s (see %s); initial connection failed: %w; last connection failed: %w", budget, core.LogPath(), initialErr, lastErr)
 }

@@ -345,7 +345,7 @@ func TestShutdownWaitsForIdle(t *testing.T) {
 
 	start := time.Now()
 	// Generous idle budget (it should return well before it), short kill grace.
-	inst.(*instance).shutdownWith(2*time.Second, 300*time.Millisecond)
+	inst.(*instance).shutdownWith(2*time.Second, 300*time.Millisecond, nil)
 	waited := time.Since(start)
 	if inst.Alive() {
 		t.Fatal("instance should be dead after shutdown")
@@ -381,7 +381,7 @@ func TestShutdownIdleWaitIsBounded(t *testing.T) {
 
 	const idleBudget = 200 * time.Millisecond
 	start := time.Now()
-	inst.(*instance).shutdownWith(idleBudget, 300*time.Millisecond)
+	inst.(*instance).shutdownWith(idleBudget, 300*time.Millisecond, nil)
 	waited := time.Since(start)
 	if inst.Alive() {
 		t.Fatal("instance should be dead after a bounded shutdown wait")

@@ -44,8 +44,11 @@ type sessionRuntime struct {
 	now                 func() time.Time
 	callbackTimeout     time.Duration
 	dispatchMu          sync.Mutex
-	servers             map[string]*sessionrpc.Server
-	initialized         map[string]bool
+	// progress, if set, receives (done, total) as reconcile visits each
+	// session. Startup sets it so lifecycle clients can show mailbox adoption.
+	progress    func(done, total int)
+	servers     map[string]*sessionrpc.Server
+	initialized map[string]bool
 	// serving holds each subject's in-flight ServeOnce pass (closed when it
 	// returns) and closing each retired server whose Close waits on that pass.
 	// Mailboxes are served concurrently: one subject's slow request (discovery
@@ -217,7 +220,10 @@ func (r *sessionRuntime) reconcile(ctx context.Context) error {
 	for _, session := range sessions {
 		current[session.ID] = session
 	}
-	for _, session := range sessions {
+	for i, session := range sessions {
+		if r.progress != nil {
+			r.progress(i, len(sessions))
+		}
 		// The durable parent flag also fences active members after a restart.
 		session.Archived = session.Archived || current[session.RootID].Archived
 		if session.Archived && !r.completions.has(session.ID) {
@@ -237,6 +243,9 @@ func (r *sessionRuntime) reconcile(ctx context.Context) error {
 		if err := r.open(ctx, session); err != nil {
 			log.Printf("session RPC %s unavailable: %v", session.ID, err)
 		}
+	}
+	if r.progress != nil {
+		r.progress(len(sessions), len(sessions))
 	}
 	for id := range r.servers {
 		if _, ok := current[id]; !ok && !r.completions.has(id) {
