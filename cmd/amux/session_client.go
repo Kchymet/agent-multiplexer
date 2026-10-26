@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"amux/internal/core"
@@ -95,6 +97,9 @@ func restrictedReport(verb string, fields map[string]string) error {
 // processes and queued requests behind a busy daemon.
 const hookReportTimeout = 10 * time.Second
 
+// reportServiceRetry spaces retries while a new session's mailbox is unserved.
+const reportServiceRetry = 100 * time.Millisecond
+
 // reportWithin is restrictedReport bounded for a generated hook (hook=true) or
 // with the explicit command's full wait.
 func reportWithin(hook bool, verb string, fields map[string]string) error {
@@ -116,6 +121,19 @@ func restrictedReportWithin(timeout time.Duration, verb string, fields map[strin
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	contextResult, err := client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
+	for errors.Is(err, os.ErrNotExist) {
+		// No service record yet: a freshly created session's runtime starts
+		// before the daemon serves its mailbox, and its first reports (session
+		// start, the initial prompt) would otherwise be lost, leaving the member
+		// "unknown" for its whole first turn. Nothing was published, so retry
+		// within the report's deadline.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("read current report context: session mailbox is not served yet: %w", err)
+		case <-time.After(reportServiceRetry):
+		}
+		contextResult, err = client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
+	}
 	if err != nil {
 		return fmt.Errorf("read current report context: %w", err)
 	}
