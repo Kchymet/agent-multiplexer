@@ -93,6 +93,16 @@ func TestEmptyContainersHaveNoDisclosure(t *testing.T) {
 	if !strings.Contains(out, "⛁ empty-repository") {
 		t.Fatalf("empty repo lost its repo glyph:\n%s", out)
 	}
+	// A childless workgroup still needs a row marker in the arrow column so it
+	// doesn't read as a bare title; repos already have ⛁ and keep a blank there.
+	if !strings.Contains(out, " "+leaf+" empty-workgroup") {
+		t.Fatalf("empty workgroup lost its leaf marker:\n%s", out)
+	}
+	for _, unwanted := range []string{leaf + " payments", leaf + " ⛁"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("leaf marker leaked onto %q:\n%s", unwanted, out)
+		}
+	}
 
 	for _, id := range []string{"empty-wg", "empty-repo"} {
 		m.selectByID(id)

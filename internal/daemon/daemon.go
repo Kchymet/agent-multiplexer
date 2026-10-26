@@ -29,6 +29,7 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
+	"amux/internal/daemonstatus"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
 	"amux/internal/launchenv"
@@ -182,6 +183,9 @@ type Daemon struct {
 	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
+	// status publishes startup/shutdown progress for lifecycle clients. Run
+	// creates it only once it holds the singleton lock, which owns the file.
+	status *daemonstatus.Reporter
 }
 
 type launchResolver func(panespec.LaunchSpec, int) (dir string, env, argv []string, err error)
@@ -314,6 +318,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// independent defers: their LIFO ordering previously stopped engines before
 	// RPC completion and background owners had drained.
 	defer func() {
+		d.status.Begin(daemonstatus.OpStopping, daemonstatus.PhaseDraining)
 		d.stopDeferredAdmission()
 		cancelRun()
 		// Retire structured-control transports before joining anything that may be
@@ -339,18 +344,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.persistLiveAgents()
 		}
 		if codexOwned {
+			d.status.Phase(daemonstatus.PhaseCodex)
 			d.codex.Shutdown()
 			d.closeCentralCodex()
 		}
 		if engineOwned {
+			d.status.Phase(daemonstatus.PhaseAgents)
+			d.observeEngineShutdown()
 			d.engine.Shutdown()
 		}
+		d.status.Phase(daemonstatus.PhaseReleasing)
 		if cleanupSocket != nil {
 			cleanupSocket()
 		}
 		if authorityOwned {
 			_ = d.authority.Close()
 		}
+		// The status file belongs to the lock holder; drop it while still
+		// holding the lock so it never outlives this daemon's ownership.
+		d.status.Clear()
 		releaseSingletonLock(lock)
 	}()
 	startRunWorker(func() {
@@ -374,6 +386,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	d.status = daemonstatus.NewReporter(daemonstatus.Path())
+	d.status.Begin(daemonstatus.OpStarting, daemonstatus.PhaseReconciling)
 	// Acquiring singleton ownership commits this Run to owning the injected or
 	// default engine through every later startup failure. Persistence begins only
 	// after the listener and restore state are ready, but engine teardown does not
@@ -391,7 +405,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.sessionRPC = newSessionRuntime(d)
 	sessionRPCOwned = true
-	if err := d.sessionRPC.start(ctx); err != nil {
+	d.sessionRPC.progress = d.status.Count
+	err = d.sessionRPC.start(ctx)
+	d.sessionRPC.progress = nil
+	if err != nil {
 		return fmt.Errorf("start session RPC: %w", err)
 	}
 	startRunWorker(func() {
@@ -401,10 +418,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		return err
 	}
+	d.status.Phase(daemonstatus.PhaseListening)
 	ln, cleanupSocket, err = d.listen(sock, d.authority.BootID())
 	if err != nil {
 		return err
 	}
+	// Ready: a client's probe now succeeds, so there is no progress to report
+	// until shutdown begins.
+	d.status.Clear()
 
 	// The structured-control supervisor manager is bound to the daemon's context:
 	// its App Servers live and die with the daemon, not with any pane or client.
@@ -445,6 +466,38 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		d.startServingConnection(ctx, conn)
 	}
+}
+
+// shutdownObservable is the engine hook that reports per-instance progress
+// through a graceful Shutdown (the local engine implements it).
+type shutdownObservable interface {
+	SetShutdownObserver(func([]local.ShutdownProgress))
+}
+
+// observeEngineShutdown routes the engine's per-instance shutdown progress to
+// the status file, labelled with each session's title as last polled.
+func (d *Daemon) observeEngineShutdown() {
+	obs, ok := d.engine.(shutdownObservable)
+	if !ok || d.status == nil {
+		return
+	}
+	titles := map[string]string{}
+	d.mu.RLock()
+	for _, s := range d.sessions {
+		titles[s.ID] = s.Title
+	}
+	d.mu.RUnlock()
+	obs.SetShutdownObserver(func(progress []local.ShutdownProgress) {
+		agents := make([]daemonstatus.Agent, 0, len(progress))
+		for _, p := range progress {
+			a := daemonstatus.Agent{ID: p.Key.AgentID, Title: titles[p.Key.AgentID], Tab: p.Key.Tab, State: p.State}
+			if !p.Until.IsZero() {
+				a.Until = p.Until.UnixMilli()
+			}
+			agents = append(agents, a)
+		}
+		d.status.Agents(agents)
+	})
 }
 
 // startDeferredWork registers action-owned asynchronous work before launching

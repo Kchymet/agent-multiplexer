@@ -44,22 +44,6 @@ type Copier struct {
 	wake    chan struct{}
 }
 
-// SerialFile is a terminal with writes serialized, for sharing amux's stdout
-// between Bubble Tea and a Copier: an OSC 52 then lands between frames (Bubble
-// Tea writes each frame in one Write) rather than inside one. It stays an
-// *os.File underneath, as Bubble Tea needs the descriptor for raw mode and the
-// window size.
-type SerialFile struct {
-	*os.File
-	mu sync.Mutex
-}
-
-func (f *SerialFile) Write(p []byte) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.File.Write(p)
-}
-
 // Tool is one clipboard command: argv receives the text on stdin, encoded as
 // UTF-16LE with a BOM when UTF16 is set (clip.exe reads anything else in the
 // console's OEM code page and mangles non-ASCII text).

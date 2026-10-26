@@ -62,7 +62,7 @@ func TestSteeringVerbsAccepted(t *testing.T) {
 		}
 	}
 	// The lifecycle verbs stay accepted and stay non-steering.
-	for _, v := range []string{VerbNewWorkgroup, VerbAddAgent, VerbRename, VerbArchive, VerbUnarchive, VerbStart} {
+	for _, v := range []string{VerbNewWorkgroup, VerbNewWorkgroupEmpty, VerbAddAgent, VerbRename, VerbArchive, VerbUnarchive, VerbStart} {
 		if !SessionVerbs[v] {
 			t.Errorf("lifecycle verb %q dropped from SessionVerbs", v)
 		}

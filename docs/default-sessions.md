@@ -65,6 +65,8 @@ authentication instead. Selected accounts and network access are shared. See [Se
 the workgroup parent containing members; repo homes and the console do not mount
 the amux data/state tree. Their wider views are explicit authenticated daemon
 grants, so they change amux through the CLI and change code by steering an agent.
+The hierarchy of those grants inside one workgroup, host over coordinator over
+members, is drawn in [Workgroup permissions](workgroup-permissions.md).
 
 Existing processes keep the namespace they started with. A legacy coordinator
 that still sees its member-containing parent or broad state invalidates any

@@ -16,6 +16,15 @@ import (
 
 func isTerminal(f *os.File) bool { return isatty.IsTerminal(f.Fd()) }
 
+// terminalWidth reports f's column count, or 0 when it is not a terminal.
+func terminalWidth(f *os.File) int {
+	ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+	if err != nil {
+		return 0
+	}
+	return int(ws.Col)
+}
+
 // hiddenReadSignals end or suspend the process while echo is off. Their
 // default actions would leave the user's terminal without echo, so
 // readHiddenLine restores it first and then lets each take effect.
