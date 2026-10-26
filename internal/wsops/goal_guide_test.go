@@ -151,6 +151,28 @@ func TestMemberGuideEndsPRLifecycleReadyForReview(t *testing.T) {
 	}
 }
 
+// A coordinator verifies member PRs; it must treat a finished PR left in draft
+// as incomplete and never equate "do not merge" with draft, in every runtime.
+func TestCoordinatorGuideRequiresReadyMemberPRs(t *testing.T) {
+	for _, kind := range []string{agent.GoalRuntime, agent.HookGoalRuntime, "claude"} {
+		root := store.Session{ID: "wg1", Name: "payments", Agent: kind, Dir: "/sandbox/wg1"}
+		guide := strings.Join(strings.Fields(coordinatorGuide(root)), " ")
+		for _, want := range []string{
+			"marked ready for review (`gh pr ready <n>`)",
+			"a finished PR left in draft is incomplete work",
+			"it never means \"keep the PR draft\"",
+			"every member PR it produced is green and marked ready for review",
+		} {
+			if !strings.Contains(guide, want) {
+				t.Errorf("%s coordinator guide missing %q", kind, want)
+			}
+		}
+		if agent.GoalMode(root) && !strings.Contains(guide, "\"do not merge\" never means draft") {
+			t.Errorf("%s goal section does not say do-not-merge never means draft", kind)
+		}
+	}
+}
+
 // The console dispatches creations for the user, so its guide must name the
 // creation fields the daemon actually accepts — a guide that teaches a field
 // the allowlist refuses sends the model into an error it cannot diagnose.
