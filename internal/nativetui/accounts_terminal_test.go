@@ -76,6 +76,37 @@ type accountsPTY struct {
 	initial     accountsInputFrame
 	blockStatus chan (<-chan struct{})
 	requests    chan accountRequest
+	// screenData is signalled (coalesced) each time the screen emulator
+	// absorbs PTY output, so render waits wake on output instead of polling.
+	screenData chan struct{}
+}
+
+// onData returns a coalescing notification channel for an emulator's OnData
+// callback; register it before the first Feed.
+func onData(term *vterm.Terminal) chan struct{} {
+	c := make(chan struct{}, 1)
+	term.OnData(func() {
+		select {
+		case c <- struct{}{}:
+		default:
+		}
+	})
+	return c
+}
+
+// awaitOutput blocks until ready holds, re-checking only when data signals new
+// emulator output. The deadline bounds a broken renderer; it is not a delay.
+func awaitOutput(t *testing.T, data <-chan struct{}, ready func() bool, failure func() string) {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for !ready() {
+		select {
+		case <-data:
+		case <-timer.C:
+			t.Fatal(failure())
+		}
+	}
 }
 
 func startAccountsPTY(t *testing.T, w, h int) *accountsPTY {
@@ -88,19 +119,18 @@ func startAccountsPTY(t *testing.T, w, h int) *accountsPTY {
 		t.Fatal(err)
 	}
 	a := &accountsPTY{input: master, frames: make(chan accountsInputFrame, 512), paneInput: make(chan []byte, 64), blockStatus: make(chan (<-chan struct{}), 1), requests: make(chan accountRequest, 64), screen: vterm.NewRemote(w, h, nil, nil)}
+	a.screenData = onData(a.screen)
 	m := popupFixture(t, w, h)
 	m.focus = focusSidebar
 	spy := vterm.NewRemote(m.mainWidth(), m.paneRows(), func(b []byte) { a.paneInput <- append([]byte(nil), b...) }, nil)
+	spyData := onData(spy)
 	pane := m.cur().Render()
 	spy.Feed([]byte("\x1b[?1002h\x1b[?1006h" + strings.ReplaceAll(pane, "\n", "\r\n")))
 	// Feed is parsed asynchronously. Start the program only once the spy shows
 	// the pane, or its first frame (captured below as the initial viewport) can
 	// show an empty pane that a later frame then replaces on screen.
-	for deadline := time.Now().Add(3 * time.Second); terminalText(spy.Render()) != terminalText(pane); time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("pane fixture did not render")
-		}
-	}
+	awaitOutput(t, spyData, func() bool { return terminalText(spy.Render()) == terminalText(pane) },
+		func() string { return "pane fixture did not render" })
 	m.terms[paneKey{m.attached, m.tab}] = spy
 	snapshot := m.accountOverview
 	snapshot.profiles[0].canAPI = true
@@ -164,19 +194,14 @@ func startAccountsPTY(t *testing.T, w, h int) *accountsPTY {
 		spy.Close()
 	})
 	a.initial = a.wait(t, func(f accountsInputFrame) bool { return !f.open && strings.Contains(f.view, "Accounts") })
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	// The reader appends to output before feeding the screen, so the screen's
+	// data signal also announces every output append.
+	awaitOutput(t, a.screenData, func() bool {
 		a.mu.Lock()
+		defer a.mu.Unlock()
 		out := a.output.String()
-		a.mu.Unlock()
-		if strings.Contains(out, "\x1b[?1002h") && strings.Contains(out, "\x1b[?1006h") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("production terminal mouse modes not enabled")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return strings.Contains(out, "\x1b[?1002h") && strings.Contains(out, "\x1b[?1006h")
+	}, func() string { return "production terminal mouse modes not enabled" })
 	return a
 }
 func (a *accountsPTY) send(t *testing.T, raw string) {
@@ -210,13 +235,10 @@ func terminalText(s string) string {
 }
 func (a *accountsPTY) rendered(t *testing.T, f accountsInputFrame, name string, w, h int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for terminalText(a.screen.Render()) != terminalText(f.view) {
-		if time.Now().After(deadline) {
-			t.Fatalf("PTY renderer did not show the model viewport:\n%s\nwant:\n%s", terminalText(a.screen.Render()), terminalText(f.view))
-		}
-		time.Sleep(time.Millisecond)
-	}
+	awaitOutput(t, a.screenData, func() bool { return terminalText(a.screen.Render()) == terminalText(f.view) },
+		func() string {
+			return fmt.Sprintf("PTY renderer did not show the model viewport:\n%s\nwant:\n%s", terminalText(a.screen.Render()), terminalText(f.view))
+		})
 	if dir := os.Getenv("AMUX_ACCOUNTS_NAV_RENDER_DIR"); dir != "" {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("accounts-%dx%d-%s.txt", w, h, name)), []byte(terminalText(a.screen.Render())+"\n"), 0600); err != nil {
 			t.Fatal(err)
