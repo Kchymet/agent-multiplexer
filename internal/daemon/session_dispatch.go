@@ -62,6 +62,16 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 	if req.Route == access.RouteAction && req.Verb == sessionreport.Capture {
 		return r.dispatchSessionCapture(ctx, request.Principal, req), nil
 	}
+	if req.Route == access.RouteQuery && isSessionReport(req) {
+		// The report context is read-only correlation: it discloses only the
+		// caller's own runtime generation, and every report that carries it is
+		// re-checked under the effect gate. Serving it outside the daemon-wide
+		// gates halves the gated work of every hook and status-line report.
+		if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
+			return rpcDenied("credential_invalid"), nil
+		}
+		return r.dispatchSessionReport(ctx, request.Principal, req), nil
+	}
 	var action core.Action
 	if !isSessionReport(req) {
 		var err error

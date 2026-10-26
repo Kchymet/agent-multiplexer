@@ -73,8 +73,10 @@ type Daemon struct {
 	// unaffected. nil in tests that don't exercise structured control.
 	codex *codexapp.Manager
 	// centralCodex owns the central Codex home when codex.auth is central.
-	centralCodex    *centralCodex
-	accountMu       sync.Mutex
+	centralCodex *centralCodex
+	accountMu    sync.Mutex
+	// readiness is the last account snapshot, reused by creation preflight.
+	readiness       accountReadinessCache
 	accountAttempts map[string]*accountAttempt
 	accountNow      func() time.Time
 	// claudeUsage reads a Claude usage report; nil uses the vendor API.
@@ -219,6 +221,10 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 // workspace switcher, so the only source is the workspace registry — annotated
 // with which agents are running, i.e. "live in the engine".
 func Default(self string) *Daemon {
+	// The long-lived daemon opens the store on every reconcile tick and several
+	// times per session report; reuse pooled connections instead of paying
+	// SQLite connection setup and schema parsing each time.
+	store.ShareHandles(true)
 	eng := local.New()
 	ws := source.NewWorkspace()
 	d := New(self, []source.Source{ws}, 2*time.Second)

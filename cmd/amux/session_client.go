@@ -86,6 +86,25 @@ func restrictedQueryRequest(query sessionrpc.Query, dst any) error {
 // one client: the returned generation is only correlation, while the daemon's
 // final effect gate decides whether that incarnation is still current.
 func restrictedReport(verb string, fields map[string]string) error {
+	return restrictedReportWithin(35*time.Second, verb, fields)
+}
+
+// hookReportTimeout bounds a generated hook's report. Hooks are async and
+// best-effort, and Claude kills them shortly after this anyway: a report the
+// daemon has not served by then is stale, and waiting longer only stacks
+// processes and queued requests behind a busy daemon.
+const hookReportTimeout = 10 * time.Second
+
+// reportWithin is restrictedReport bounded for a generated hook (hook=true) or
+// with the explicit command's full wait.
+func reportWithin(hook bool, verb string, fields map[string]string) error {
+	if hook {
+		return restrictedReportWithin(hookReportTimeout, verb, fields)
+	}
+	return restrictedReport(verb, fields)
+}
+
+func restrictedReportWithin(timeout time.Duration, verb string, fields map[string]string) error {
 	if !sessionreport.IsVerb(verb) {
 		return fmt.Errorf("unknown self report %q", verb)
 	}
@@ -94,7 +113,7 @@ func restrictedReport(verb string, fields map[string]string) error {
 		return fmt.Errorf("open fixed session report context: %w", err)
 	}
 	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	contextResult, err := client.Query(ctx, sessionrpc.Query{Verb: sessionreport.Context})
 	if err != nil {

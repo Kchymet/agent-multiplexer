@@ -89,6 +89,16 @@ const (
 // and accepting session lifecycle verbs (docs/remote-provider-sessions.md §1).
 const SessionsFeature = "sessions"
 
+// EmptyWorkgroupFeature says the provider accepts VerbNewWorkgroupEmpty. That
+// verb separates a coordinator's explicit repository grant ceiling from member
+// creation, so clients never have to create a broadly granted root and widen it
+// later. Clients MUST gate the verb on this feature: an older daemon does not
+// know the verb and must fail closed rather than reinterpret its fields. It also
+// guarantees that IDs minted by creation verbs are valid follow-up targets on
+// the same authenticated connection before the next inventory poll publishes
+// them; only daemon-minted IDs receive that provisional grant.
+const EmptyWorkgroupFeature = "sessions-new-workgroup-empty"
+
 // RuntimeEventsFeature is the feature string a provider advertises to opt into
 // streaming structured transcript events for the sessions it publishes
 // (docs/remote-provider-sessions.md §1/§4). It is independent of and additive to
@@ -106,12 +116,13 @@ const RuntimeEventsHistoryFeature = "runtime-events-history"
 // else — including any pane/terminal verb — is rejected with
 // session-result{ok:false,error:"unsupported"}.
 const (
-	VerbNewWorkgroup = "new-workgroup"
-	VerbAddAgent     = "add-agent"
-	VerbRename       = "rename"
-	VerbArchive      = "archive"
-	VerbUnarchive    = "unarchive"
-	VerbStart        = "start"
+	VerbNewWorkgroup      = "new-workgroup"
+	VerbNewWorkgroupEmpty = "new-workgroup-empty"
+	VerbAddAgent          = "add-agent"
+	VerbRename            = "rename"
+	VerbArchive           = "archive"
+	VerbUnarchive         = "unarchive"
+	VerbStart             = "start"
 )
 
 // Session steering verbs (spec §3.1): they act on the agent *inside* a running
@@ -161,17 +172,18 @@ const (
 // with ErrUnsupportedVerb instead — the distinction is how an orchestrator tells
 // "never valid" from "this daemon is older than this verb" (spec §3.2).
 var SessionVerbs = map[string]bool{
-	VerbNewWorkgroup: true,
-	VerbAddAgent:     true,
-	VerbRename:       true,
-	VerbArchive:      true,
-	VerbUnarchive:    true,
-	VerbStart:        true,
-	VerbPrompt:       true,
-	VerbInterject:    true,
-	VerbStop:         true,
-	VerbPermission:   true,
-	VerbGoal:         true,
+	VerbNewWorkgroup:      true,
+	VerbNewWorkgroupEmpty: true,
+	VerbAddAgent:          true,
+	VerbRename:            true,
+	VerbArchive:           true,
+	VerbUnarchive:         true,
+	VerbStart:             true,
+	VerbPrompt:            true,
+	VerbInterject:         true,
+	VerbStop:              true,
+	VerbPermission:        true,
+	VerbGoal:              true,
 }
 
 // SteeringVerbs is the subset of SessionVerbs that steers the agent inside a

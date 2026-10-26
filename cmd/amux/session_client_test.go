@@ -41,11 +41,15 @@ func installRestrictedRPC(t *testing.T, client restrictedSessionRPC) {
 	t.Helper()
 	oldRestricted := sessionContextRestricted
 	oldOpen := openRestrictedSessionRPC
+	oldStatusLine := startStatusLineReport
 	sessionContextRestricted = func() bool { return true }
 	openRestrictedSessionRPC = func() (restrictedSessionRPC, error) { return client, nil }
+	// Run handed-off status-line reports inline so tests observe them.
+	startStatusLineReport = reportStatusLine
 	t.Cleanup(func() {
 		sessionContextRestricted = oldRestricted
 		openRestrictedSessionRPC = oldOpen
+		startStatusLineReport = oldStatusLine
 	})
 }
 

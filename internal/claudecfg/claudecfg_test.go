@@ -558,3 +558,46 @@ func TestGoalHooks(t *testing.T) {
 		t.Error("non-goal reinstall did not restore the Stop status hook")
 	}
 }
+
+// TestObservationHooksNeverBlockClaude pins the latency contract: every amux
+// report hook runs async with a bounded timeout, so a slow daemon cannot stall
+// a prompt or tool call, while goal hooks stay blocking because Claude reads
+// their continuation decision from stdout.
+func TestObservationHooksNeverBlockClaude(t *testing.T) {
+	b, err := encodeHooks(map[string]any{}, "/opt/amux", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Hooks map[string][]struct {
+			Hooks []map[string]any `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for event, groups := range root.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				cmd, _ := h["command"].(string)
+				seen++
+				if strings.Contains(cmd, " agent goal ") {
+					if _, ok := h["async"]; ok {
+						t.Errorf("%s goal hook %q must block", event, cmd)
+					}
+					continue
+				}
+				if h["async"] != true {
+					t.Errorf("%s hook %q is not async", event, cmd)
+				}
+				if timeout, _ := h["timeout"].(float64); timeout <= 0 || timeout > 30 {
+					t.Errorf("%s hook %q timeout = %v", event, cmd, h["timeout"])
+				}
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no hooks installed")
+	}
+}

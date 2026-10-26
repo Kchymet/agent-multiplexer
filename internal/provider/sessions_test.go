@@ -128,6 +128,9 @@ func TestNegotiationAdvertisesSessions(t *testing.T) {
 		if !hasFeature(reg, harnessproto.SessionsFeature) {
 			t.Fatalf("features = %v, want to include %q", reg.Capabilities.Features, harnessproto.SessionsFeature)
 		}
+		if !hasFeature(reg, harnessproto.EmptyWorkgroupFeature) {
+			t.Fatalf("features = %v, want to include %q", reg.Capabilities.Features, harnessproto.EmptyWorkgroupFeature)
+		}
 		if !hasFeature(reg, "gpu") {
 			t.Fatalf("opaque config feature dropped: %v", reg.Capabilities.Features)
 		}
@@ -145,6 +148,9 @@ func TestNegotiationAdvertisesSessions(t *testing.T) {
 		if hasFeature(reg, harnessproto.SessionsFeature) {
 			t.Fatalf("advertised %q while disabled: %v", harnessproto.SessionsFeature, reg.Capabilities.Features)
 		}
+		if hasFeature(reg, harnessproto.EmptyWorkgroupFeature) {
+			t.Fatalf("advertised %q while disabled: %v", harnessproto.EmptyWorkgroupFeature, reg.Capabilities.Features)
+		}
 	})
 
 	t.Run("no-source", func(t *testing.T) {
@@ -161,6 +167,24 @@ func TestNegotiationAdvertisesSessions(t *testing.T) {
 			t.Fatalf("advertised %q with no inventory source", harnessproto.SessionsFeature)
 		}
 	})
+}
+
+func TestUnchangedSnapshotRevokesMissingProvisionalID(t *testing.T) {
+	p := &Provider{cfg: Config{Sessions: func(context.Context) ([]core.Session, error) {
+		return []core.Session{}, nil
+	}}}
+	s := &session{
+		published:   map[string]core.Session{},
+		provisional: map[string]struct{}{"daemon-minted": {}},
+		actions:     map[uint64]*sessionActionCall{},
+	}
+	seq, last := p.publishOnce(context.Background(), s, 7, []byte("[]"))
+	if seq != 7 || string(last) != "[]" {
+		t.Fatalf("unchanged snapshot advanced: seq=%d last=%q", seq, last)
+	}
+	if len(s.provisional) != 0 {
+		t.Fatalf("missing provisional id survived successful poll: %v", s.provisional)
+	}
 }
 
 // TestPublishOnSubscribeAndChange proves an initial snapshot on subscribe and a

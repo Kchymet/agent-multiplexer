@@ -61,6 +61,9 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	if ctx.Err() != nil || revalidateDeferred(ctx) != nil {
 		return fail("account_access_denied")
 	}
+	if r.Operation != hp.AccountStatus {
+		d.readiness.clear()
+	}
 	if r.Operation == hp.AccountDisconnect {
 		d.disconnectAccounts(r.Initiator, false)
 		return hp.AccountResult{OK: true}
@@ -416,6 +419,7 @@ func (d *Daemon) runAccountLogin(ctx context.Context, a *accountAttempt, key str
 		}
 		a.ceremony.State = "succeeded"
 		a.ceremony.AuthURL = ""
+		d.readiness.clear()
 		return nil
 	}
 	var err error
@@ -565,6 +569,11 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 		return nil
 	})
 	snapshot := s.Snapshot()
+	defer func() {
+		if e == nil {
+			d.readiness.store(snapshot, d.accountTime())
+		}
+	}()
 	for i := range snapshot.Profiles {
 		if snapshot.Profiles[i].Source == "central" {
 			snapshot.Profiles[i].SupportedModes = []string{"subscription", "api"}
@@ -659,6 +668,8 @@ func (d *Daemon) retireAccountAttemptLocked(a *accountAttempt, state string) {
 	if a.ceremony.State != "pending" {
 		return
 	}
+	// Expiry and disconnect change profile state outside accountCall.
+	d.readiness.clear()
 	a.cancel()
 	a.ceremony.State = state
 	a.ceremony.AuthURL = ""
@@ -681,6 +692,7 @@ func (d *Daemon) restoreAccountAttemptLocked(a *accountAttempt) {
 	if a.prior.State != "ready" || a.retiredEpoch == 0 {
 		return
 	}
+	d.readiness.clear()
 	_ = accounts.Update(func(s *accounts.State) error {
 		p := s.Profiles[a.profile]
 		if p.DeliveryEpoch != a.retiredEpoch || p.State != "blocked" {

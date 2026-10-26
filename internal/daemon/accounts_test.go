@@ -193,6 +193,35 @@ func TestCreationReadinessChecksCoordinatorAndWorker(t *testing.T) {
 	}
 }
 
+// TestCreationPreflightReusesRecentReadySnapshot pins that creation, which runs
+// under the daemon-wide effect gate, does no native account IO while a recent
+// snapshot already shows the harness ready, and re-probes once that snapshot
+// is stale or an account operation invalidated it.
+func TestCreationPreflightReusesRecentReadySnapshot(t *testing.T) {
+	isolateHome(t)
+	now := time.Unix(1_800_000_000, 0)
+	d := New("", nil, time.Hour)
+	d.accountNow = func() time.Time { return now }
+	d.centralCodex = &centralCodex{}
+	ready := hp.AccountSnapshot{Defaults: map[string]string{"claude": "claude:central"},
+		Profiles: []hp.AccountProfile{{ID: "claude:central", State: "ready"}}}
+	add := core.Action{Action: core.ActionAddAgent, Fields: map[string]string{"agent": "claude"}}
+	d.readiness.store(ready, now)
+	if err := d.accountCreationReady(context.Background(), add); err != nil {
+		t.Fatalf("recent ready snapshot was not reused: %v", err)
+	}
+	// This home has no Claude login, so any fresh probe reports unready.
+	now = now.Add(accountReadinessReuse)
+	if err := d.accountCreationReady(context.Background(), add); err == nil {
+		t.Fatal("stale snapshot admitted creation without a fresh probe")
+	}
+	d.readiness.store(ready, now)
+	d.readiness.clear()
+	if err := d.accountCreationReady(context.Background(), add); err == nil {
+		t.Fatal("cleared snapshot admitted creation without a fresh probe")
+	}
+}
+
 func TestDefaultSelectionsShareCAS(t *testing.T) {
 	d := isolatedAccounts(t)
 	before, _ := accounts.Read()
@@ -259,5 +288,19 @@ func TestClaudeLogoutAndDifferentLoginServeOnlyTheNextLaunch(t *testing.T) {
 	next, _ := accounts.BeginLaunch("old", "claude")
 	if err := acceptClaude("old", next, fresh.Generation); err != nil {
 		t.Fatal("next launch refused the new login", err)
+	}
+}
+
+// Account state changes outside accountCall (attempt expiry or disconnect)
+// also forget cached creation readiness.
+func TestRetiredLoginAttemptClearsReadinessCache(t *testing.T) {
+	d := isolatedAccounts(t)
+	r := beginClaude(t, d, "owner")
+	now := d.accountTime()
+	d.readiness.store(hp.AccountSnapshot{Defaults: map[string]string{"claude": "claude:central"},
+		Profiles: []hp.AccountProfile{{ID: "claude:central", State: "ready"}}}, now)
+	d.disconnectAccounts(r.Initiator, false)
+	if _, ok := d.readiness.recent(now); ok {
+		t.Fatal("retired attempt left cached readiness")
 	}
 }

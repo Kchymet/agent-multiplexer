@@ -216,7 +216,9 @@ func goalPromptHook() {
 func goalStopHook() {
 	state := core.StateReady
 	defer func() {
-		_ = restrictedReport(sessionreport.Activity, map[string]string{sessionreport.FieldState: state})
+		// Bounded like every hook report: Claude waits for this blocking hook,
+		// so a busy daemon must not hold the turn end for the full CLI timeout.
+		_ = reportWithin(true, sessionreport.Activity, map[string]string{sessionreport.FieldState: state})
 	}()
 	path, err := goalFile()
 	if err != nil {

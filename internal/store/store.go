@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"amux/internal/accounts"
 	"amux/internal/core"
@@ -61,7 +63,11 @@ func (s Session) Display() string {
 }
 
 // DB is a handle to the session store.
-type DB struct{ sql *sql.DB }
+type DB struct {
+	sql *sql.DB
+	// shared marks a process-wide handle (see ShareHandles); Close leaves it open.
+	shared bool
+}
 
 // The schema version range says which databases this build can migrate and
 // open. Version zero is the legacy, unmarked schema used before explicit
@@ -95,13 +101,30 @@ func Open() (*DB, error) {
 		return nil, err
 	}
 	dsn := "file:" + core.DBPath() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
-	sqldb, err := sql.Open("sqlite", dsn)
+	sqldb, shared, err := openHandle(dsn)
 	if err != nil {
 		return nil, err
 	}
-	d := &DB{sql: sqldb}
+	d := &DB{sql: sqldb, shared: shared}
+	if _, done := migratedStores.Load(core.DBPath()); done {
+		// This process already brought this database to the current schema and
+		// ran its one-time backfills. Opening is on the daemon's hot path (every
+		// reconcile tick and session lookup), so skip the DDL, legacy import and
+		// grant backfill and keep only the cheap checks: the version (a newer
+		// binary's schema or a recreated file takes the full path below and fails
+		// or migrates exactly as a first open would) and the single-query legacy
+		// workgroup probe, which an older binary's write could still satisfy.
+		if version, err := d.SchemaVersion(); err == nil && version == CurrentSchemaVersion {
+			if err := d.migrateRepoWorkgroups(); err != nil {
+				_ = d.Close()
+				return nil, err
+			}
+			return d, nil
+		}
+		migratedStores.Delete(core.DBPath())
+	}
 	if err := d.migrate(); err != nil {
-		_ = sqldb.Close()
+		_ = d.Close()
 		return nil, err
 	}
 	if err := d.importLegacy(); err != nil {
@@ -109,15 +132,21 @@ func Open() (*DB, error) {
 		_ = err
 	}
 	if err := d.migrateCoordinatorGrants(); err != nil {
-		_ = sqldb.Close()
+		_ = d.Close()
 		return nil, err
 	}
 	if err := d.migrateRepoWorkgroups(); err != nil {
-		_ = sqldb.Close()
+		_ = d.Close()
 		return nil, err
+	}
+	if version, err := d.SchemaVersion(); err == nil && version == CurrentSchemaVersion {
+		migratedStores.Store(core.DBPath(), struct{}{})
 	}
 	return d, nil
 }
+
+// migratedStores holds the database paths this process has fully migrated.
+var migratedStores sync.Map
 
 // OpenReadOnly opens the already-migrated store without creating directories,
 // importing legacy data, running schema migration, or performing backfills.
@@ -125,24 +154,72 @@ func Open() (*DB, error) {
 // initialize or widen a coordinator's repository ceiling.
 func OpenReadOnly() (*DB, error) {
 	dsn := "file:" + core.DBPath() + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)&_pragma=foreign_keys(on)"
-	sqldb, err := sql.Open("sqlite", dsn)
+	sqldb, shared, err := openHandle(dsn)
 	if err != nil {
 		return nil, err
 	}
-	d := &DB{sql: sqldb}
+	d := &DB{sql: sqldb, shared: shared}
 	version, err := d.SchemaVersion()
 	if err != nil {
-		_ = sqldb.Close()
+		_ = d.Close()
 		return nil, err
 	}
 	if version != CurrentSchemaVersion {
-		_ = sqldb.Close()
+		_ = d.Close()
 		return nil, &SchemaVersionError{Have: version, Min: CurrentSchemaVersion, Max: CurrentSchemaVersion}
 	}
 	return d, nil
 }
 
-func (d *DB) Close() error { return d.sql.Close() }
+func (d *DB) Close() error {
+	if d.shared {
+		return nil
+	}
+	return d.sql.Close()
+}
+
+var (
+	shareHandles  atomic.Bool
+	sharedMu      sync.Mutex
+	sharedHandles = map[string]*sql.DB{}
+)
+
+// ShareHandles makes this process reuse one connection pool per database DSN
+// instead of opening (and re-parsing the schema of) a fresh SQLite connection
+// on every Open/OpenReadOnly. The daemon opens the store on every reconcile
+// tick and several times per session report, and connection setup dominated
+// that cost. Short-lived CLI processes keep per-call handles. Turning sharing
+// off closes the pooled handles (tests and benchmarks).
+func ShareHandles(on bool) {
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	shareHandles.Store(on)
+	if !on {
+		for dsn, db := range sharedHandles {
+			_ = db.Close()
+			delete(sharedHandles, dsn)
+		}
+	}
+}
+
+func openHandle(dsn string) (*sql.DB, bool, error) {
+	if !shareHandles.Load() {
+		db, err := sql.Open("sqlite", dsn)
+		return db, false, err
+	}
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	if db, ok := sharedHandles[dsn]; ok {
+		return db, true, nil
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, false, err
+	}
+	db.SetMaxIdleConns(4)
+	sharedHandles[dsn] = db
+	return db, true, nil
+}
 
 func (d *DB) migrate() error {
 	version, err := d.SchemaVersion()
