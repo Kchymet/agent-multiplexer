@@ -700,3 +700,22 @@ killed/replaced, or allocate at spawn.
   exists). The replacement coverage for corrupt-record repair should be the
   A2 regression (corrupt record → login → next-launch delivery; insecure
   store refused, file unchanged). Confirm it exists before final review.
+
+---
+
+## PR206 macOS CI failures (`e3cdeea`, `bd3a6cb`) — signoff SUSPENDED
+
+Posted as PR206 issuecomment-6407618479.
+- **`e3cdeea`: `pressure-2 39/40`.** The timestamps show a genuine stall
+  (more than 160 fetches in about 3s, then about 87s without progress). No
+  `session RPC pressure-2` errors were logged. The failure splits into
+  fixture-exit vs alive-and-retrying. The `bd3a6cb` diagnostics separate those
+  two; still missing: diagnostics on the warmup and fresh failure paths,
+  server-side state (`servers`/`initialized`/`serving`/`closing`), and a
+  goroutine dump.
+- **`bd3a6cb`: `TestReleaseProcessedBehindCapacityBlockedRequest` first pass =
+  nil.** Linux stress gave 0/700 failures. Candidate causes: (A) start-of-pass
+  `cleanupResponses` frees capacity; (B) the release is processed while the
+  low request is missing from the listing; (C) neither file is listed. macOS
+  held-fd scan visibility is a hypothesis only. Discriminating diagnostics and
+  a darwin `listNames` micro-test are proposed on the PR.
