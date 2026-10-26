@@ -260,18 +260,29 @@ func TestReceiptSettlesAndRetiresWithoutResponseCapacity(t *testing.T) {
 
 // A client whose call was committed before a daemon restart still reads that
 // durable success afterwards: awaitResponse checks the response against the
-// service it sent to. The restarted server must keep (and account) the
-// prior-boot response, must not dispatch the request again, and the client's
-// release, signed for the old boot, is rejected so the response falls back to
-// age cleanup.
+// service it sent to, before it looks at the current boot. The ordering is
+// pinned: the client has published and already polled once without a result,
+// and is held before its next read while the server commits, restarts and
+// adopts. The restarted server must keep (and account) the prior-boot response,
+// must not dispatch the request again, and the client's release, signed for the
+// old boot, is rejected so the response falls back to age cleanup.
 func TestRestartPreservesCommittedResponseForWaitingClient(t *testing.T) {
 	var dispatched atomic.Int32
 	f := newFixture(t, Callbacks{Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
 		dispatched.Add(1)
 		return DispatchResult{Status: StatusOK, Body: []byte("committed")}, nil
 	}}, ServerOptions{})
-	// A slow poll models a client suspended across the restart.
-	client := f.client(clientOptions{poll: 2 * time.Second})
+	var reads atomic.Int32
+	parked := make(chan struct{})
+	resume := make(chan struct{})
+	client := f.client(clientOptions{beforeResponseRead: func() {
+		// The first read runs before the server has served anything. Hold the
+		// second until the restart has finished.
+		if reads.Add(1) == 2 {
+			close(parked)
+			<-resume
+		}
+	}})
 	type outcome struct {
 		result Result
 		err    error
@@ -281,15 +292,19 @@ func TestRestartPreservesCommittedResponseForWaitingClient(t *testing.T) {
 		result, err := client.Query(context.Background(), Query{Verb: "snapshot"})
 		done <- outcome{result, err}
 	}()
-	deadline := time.Now().Add(time.Second)
-	for responseCount(t, f.grant.MailboxHostDir) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("request was not answered before the restart")
-		}
-		if _, err := f.server.ServeOnce(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client never polled for its response")
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 0 {
+		t.Fatal("response existed before the server served the request")
+	}
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("request was not committed before the restart")
 	}
 	if err := f.server.Close(); err != nil {
 		t.Fatal(err)
@@ -319,9 +334,7 @@ func TestRestartPreservesCommittedResponseForWaitingClient(t *testing.T) {
 	if err := f.server.Initialize(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if active, _, _ := budget.counts(); active != 1 {
-		t.Fatalf("prior-boot response not adopted into the bounded pool: active=%d", active)
-	}
+	close(resume)
 	var got outcome
 	select {
 	case got = <-done:
@@ -330,6 +343,12 @@ func TestRestartPreservesCommittedResponseForWaitingClient(t *testing.T) {
 	}
 	if got.err != nil || got.result.Status != StatusOK || string(got.result.Body) != "committed" {
 		t.Fatalf("durable pre-restart success lost: %+v, %v", got.result, got.err)
+	}
+	if active, _, _ := budget.counts(); active != 1 {
+		t.Fatalf("prior-boot response not adopted into the bounded pool: active=%d", active)
+	}
+	if n := reads.Load(); n != 2 {
+		t.Fatalf("client read %d times; want exactly the parked read to observe the result", n)
 	}
 	if _, err := f.server.ServeOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -343,46 +362,54 @@ func TestRestartPreservesCommittedResponseForWaitingClient(t *testing.T) {
 }
 
 // Mandatory receipts are one-way. Repeated receipt-requiring operations from
-// the production client through a one-slot pool must each complete and settle;
-// neither the receipt nor its accepted response may hold the slot.
+// the production client must each complete and settle, and neither the receipt
+// nor its accepted response may remain in the pool. The spare-capacity case
+// matters: with free slots a conditional discard would still publish and retain
+// an unread receipt response.
 func TestRepeatedMandatoryReceiptsDoNotExhaustPool(t *testing.T) {
-	budget := &testResponseBudget{limit: 1}
-	settled := make(chan ReceiptSettlement, 16)
-	f := newFixture(t, Callbacks{
-		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
-			return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
-				Grace: 5 * time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
-			}}, nil
-		},
-	}, ServerOptions{ResponseBudget: budget})
-	client := f.client(clientOptions{})
-	for i := 0; i < 8; i++ {
-		result, err, elapsed := pumpUntil(t, []*Server{f.server}, func(ctx context.Context) (Result, error) {
-			return client.Action(ctx, Action{Verb: "done", ID: f.grant.SubjectID})
+	for _, limit := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pool=%d", limit), func(t *testing.T) {
+			budget := &testResponseBudget{limit: limit}
+			settled := make(chan ReceiptSettlement, 16)
+			f := newFixture(t, Callbacks{
+				Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+					return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+						Grace: 5 * time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+					}}, nil
+				},
+			}, ServerOptions{ResponseBudget: budget})
+			client := f.client(clientOptions{})
+			for i := 0; i < 8; i++ {
+				result, err, elapsed := pumpUntil(t, []*Server{f.server}, func(ctx context.Context) (Result, error) {
+					return client.Action(ctx, Action{Verb: "done", ID: f.grant.SubjectID})
+				})
+				if err != nil || !result.ReceiptSent {
+					t.Fatalf("operation %d = %+v, %v", i, result, err)
+				}
+				if elapsed > time.Second {
+					t.Fatalf("operation %d waited %v for response capacity", i, elapsed)
+				}
+				deadline := time.After(2 * time.Second)
+				for waiting := true; waiting; {
+					if _, err := f.server.ServeOnce(context.Background()); err != nil && !errors.Is(err, ErrResponseCapacity) {
+						t.Fatal(err)
+					}
+					select {
+					case value := <-settled:
+						if !value.Received || value.Reason != SettlementReceipt {
+							t.Fatalf("operation %d settled without its receipt: %+v", i, value)
+						}
+						waiting = false
+					case <-deadline:
+						t.Fatalf("operation %d receipt never settled", i)
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
+				if active, _, _ := budget.counts(); active != 0 || responseCount(t, f.grant.MailboxHostDir) != 0 {
+					t.Fatalf("operation %d left retained responses: active=%d files=%d", i, active, responseCount(t, f.grant.MailboxHostDir))
+				}
+			}
 		})
-		if err != nil || !result.ReceiptSent {
-			t.Fatalf("operation %d = %+v, %v", i, result, err)
-		}
-		if elapsed > time.Second {
-			t.Fatalf("operation %d waited %v for response capacity", i, elapsed)
-		}
-		for value := (ReceiptSettlement{}); ; {
-			if _, err := f.server.ServeOnce(context.Background()); err != nil && !errors.Is(err, ErrResponseCapacity) {
-				t.Fatal(err)
-			}
-			select {
-			case value = <-settled:
-			case <-time.After(5 * time.Millisecond):
-				continue
-			}
-			if !value.Received {
-				t.Fatalf("operation %d settled without its receipt: %+v", i, value)
-			}
-			break
-		}
-	}
-	if active, _, _ := budget.counts(); active != 0 || responseCount(t, f.grant.MailboxHostDir) != 0 {
-		t.Fatalf("receipts left retained responses: active=%d files=%d", active, responseCount(t, f.grant.MailboxHostDir))
 	}
 }
 

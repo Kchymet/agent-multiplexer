@@ -28,6 +28,7 @@ type Client struct {
 	poll                 time.Duration
 	beforeRequestPublish func()
 	afterServiceStat     func()
+	beforeResponseRead   func()
 
 	mu     sync.RWMutex
 	closed bool
@@ -39,6 +40,7 @@ type clientOptions struct {
 	poll                 time.Duration
 	beforeRequestPublish func()
 	afterServiceStat     func()
+	beforeResponseRead   func()
 }
 
 // OpenClient discovers only the fixed read-only session context. There is no
@@ -130,6 +132,7 @@ func openClientAt(fixedContextDir string, options clientOptions) (*Client, error
 		context: sessionContext, clock: clock, random: random, poll: poll,
 		beforeRequestPublish: options.beforeRequestPublish,
 		afterServiceStat:     options.afterServiceStat,
+		beforeResponseRead:   options.beforeResponseRead,
 	}, nil
 }
 
@@ -237,6 +240,9 @@ func (c *Client) awaitResponse(ctx context.Context, credential access.Credential
 	ticker := time.NewTicker(c.poll)
 	defer ticker.Stop()
 	for {
+		if c.beforeResponseRead != nil {
+			c.beforeResponseRead()
+		}
 		response, found, err := c.readResponse(credential, service, request)
 		if err != nil {
 			return Response{}, err

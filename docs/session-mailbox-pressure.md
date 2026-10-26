@@ -101,7 +101,9 @@ usage network reads run outside the accounts flock.
    the existing bounded accounting and expire by age. The restarted daemon does
    not dispatch the request again, and a release signed for the old boot is
    rejected by `Verify`. Releasing clients keep the retained set near the
-   in-flight count, so a restart adopts few responses.
+   in-flight count, so a restart between two new daemons adopts few
+   responses. This does not remove every restart delay; see the upgrade limit
+   below.
 5. **Launcher waits for publication within its attempt.** If `service.json` is
    absent (`sessionrpc.ErrUnpublished`; nothing was sent, so no outcome is
    uncertain), the launcher polls for publication inside its existing 10s
@@ -136,12 +138,26 @@ Asserted regressions: `internal/sessionrpc/release_test.go` (production
 pool, 240 calls in total, each under 2s, and the pool drains to zero; a release behind a
 capacity-blocked request; exact digest and replay; a pending receipt plus
 receipt settlement on a full pool; repeated mandatory receipts through a 1-slot
-pool; a client suspended across a restart reads its committed response with no
-second dispatch), and `central_launch_runtime_test.go` (real protected-namespace
+pool and through a 4-slot pool with spare capacity; a client held, with a
+barrier, after an empty poll and before its next read across a restart reads
+its committed response with no second dispatch), and `central_launch_runtime_test.go` (real protected-namespace
 launcher: three lifecycle orders, plus six sessions of real releasing launcher
 traffic through the daemon-global budget; each delivery is on the first attempt
 and under `LaunchRetry`, and the pool peaks at ≤ 32 files). Each regression was
 confirmed to fail with its fix reverted.
+
+### Upgrade limit: retained pool from an older daemon
+
+Keeping committed prior-boot responses is deliberate: a client waiting across
+the restart may still read its success. The cost shows on the first upgrade
+from a daemon without this change. That daemon never retired consumed
+responses, so it can leave up to the full 128-file pool on disk. The new daemon
+adopts all of it, because adoption ignores the limits, and admits nothing new
+until age cleanup drains it. Credential fetches from relaunched agents can
+therefore wait up to `access.MaxResponseAge` (60s) after that first startup.
+Releasing clients prevent this from recurring on later restarts. The pool can
+still be full at a later restart only if non-releasing (old) clients, or
+crashed clients that never released, filled it.
 
 ### Not addressed here
 
