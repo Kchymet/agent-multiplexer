@@ -13,6 +13,7 @@
 
 ## Integrating and developing
 
+- [Architecture overview: clients, control APIs, compute broker and backends](architecture-overview.md)
 - [Contributing and verification commands](../CONTRIBUTING.md)
 - [Local daemon and optional legacy relay](client-server.md)
 - [Agent CLI access and authorization](agent-cli-sandbox.md)
