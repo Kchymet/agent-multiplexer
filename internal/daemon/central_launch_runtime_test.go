@@ -345,7 +345,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" + trampoline +
 		"i=0\nwhile [ $i -lt " + fmt.Sprint(fetches) + " ]; do\n" +
 		"  printf %s $((i+1)) > \"$PWD/started\"\n" +
-		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true 2> \"$PWD/launcher.err\" || { printf 'launcher exit %s on fetch %s' $? $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
+		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true 2> \"$PWD/launcher.err\" || { rc=$?; { command -v \"$tool\"; ls -l \"$tool\"; } > \"$PWD/tool.diag\" 2>&1; printf 'launcher exit %s on fetch %s' $rc $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
 		"  i=$((i+1)); printf %s $i > \"$PWD/fetched\"\ndone\nsleep 60\n"
 	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -548,8 +548,8 @@ func pressureDiagnostics(t *testing.T, d *Daemon, runtime *sessionRuntime, sessi
 			}
 			queues += fmt.Sprintf(" %s=%d%v%v", sub, len(names), names, err)
 		}
-		t.Logf("%s: started=%s fetched=%s failed=%s launcher-stderr=%q alive=%v server[%s] queues:%s output=%q",
-			session.ID, read("started"), read("fetched"), read("failed"), strings.ReplaceAll(read("launcher.err"), mockCentralToken, "<token>"), alive, server[session.ID], queues, output)
+		t.Logf("%s: started=%s fetched=%s failed=%s launcher-stderr=%q tool=%q alive=%v server[%s] queues:%s output=%q",
+			session.ID, read("started"), read("fetched"), read("failed"), strings.ReplaceAll(read("launcher.err"), mockCentralToken, "<token>"), read("tool.diag"), alive, server[session.ID], queues, output)
 	}
 	var stacks bytes.Buffer
 	_ = pprof.Lookup("goroutine").WriteTo(&stacks, 2)
