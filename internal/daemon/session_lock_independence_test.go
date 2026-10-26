@@ -3,12 +3,15 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/credentialbroker"
 	"amux/internal/panespec"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
@@ -33,6 +36,7 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "host action on another session", hold: holdHostAction, blocked: false},
 		{name: "workgroup host action (exclusive fallback)", hold: holdWorkgroupAction, blocked: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
+		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
 	}
 	for _, tc := range tests {
@@ -97,6 +101,11 @@ type independenceFixture struct {
 // reports too, and a3 is the target of unrelated host actions.
 func newIndependenceFixture(t *testing.T) *independenceFixture {
 	t.Helper()
+	ghConfig := t.TempDir()
+	t.Setenv("GH_CONFIG_DIR", ghConfig)
+	if err := os.WriteFile(filepath.Join(ghConfig, "hosts.yml"), []byte("github.com:\n  user: selected\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	const runtimeID = "33333333-3333-4333-8333-333333333333"
 	sessions := []store.Session{
 		{ID: "root", Agent: "claude"},
@@ -187,6 +196,21 @@ func holdQueuedExclusive(t *testing.T, f *independenceFixture, held func(), rele
 	held()
 	<-actions
 	<-actions
+}
+
+// holdPeerCredential is a2's GitHub credential read stalling inside its
+// helper process.
+func holdPeerCredential(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.runtime.credentialOperation = func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error) {
+		held()
+		<-release
+		return credentialbroker.Result{Value: "synthetic"}, nil
+	}
+	o := credentialbroker.Operation{Verb: credentialbroker.Read, Service: "gh:github.com", Account: credentialbroker.GitHubAccount}
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: o.Verb, Fields: o.Fields()}
+	if result, _ := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals["a2"], Call: call}); result.Status != sessionrpc.StatusOK {
+		t.Errorf("peer credential = %+v", result)
+	}
 }
 
 // holdReconcile is a session RPC reconcile pass stalling while it opens a3's

@@ -158,6 +158,9 @@ type Daemon struct {
 	effectMu sync.RWMutex
 	// sessionLocks orders effects on one session's own state.
 	sessionLocks keyedLocks
+	// credentialMu serializes host credential helper processes (keychain, gh)
+	// among themselves. It is a leaf below a session's admission.
+	credentialMu sync.Mutex
 
 	// shutdown is closed only by the authenticated host control path. Process
 	// IDs are diagnostics, never authority to signal a process.
