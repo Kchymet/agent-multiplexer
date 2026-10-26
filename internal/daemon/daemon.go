@@ -956,7 +956,6 @@ func deferredContext(ctx context.Context) (context.Context, func()) {
 	}
 }
 
-
 // revalidateDeferred is a no-op for internal/test callers without a streaming
 // principal. Work accepted from an authenticated connection carries a guard.
 func revalidateDeferred(ctx context.Context) error {
