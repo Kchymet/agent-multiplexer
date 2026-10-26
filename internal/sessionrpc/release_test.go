@@ -57,7 +57,8 @@ func responseCount(t *testing.T, mailboxDir string) int {
 }
 
 // earlierSignedCall signs call as issued at issued. Request IDs begin with the
-// issue time, so an earlier issue time sorts ahead in the server's FIFO scan.
+// issue millisecond, so a strictly earlier millisecond sorts ahead in the
+// server's FIFO scan.
 func earlierSignedCall(t *testing.T, f *fixture, call Call, issued time.Time) (access.SignedRequest, []byte) {
 	t.Helper()
 	credential, err := access.LoadCredential(f.grant.CredentialHostDir)
@@ -133,6 +134,10 @@ func testReleaseBehindBlocked(t *testing.T, stage string) {
 	budget := &testResponseBudget{limit: 1}
 	f := newFixture(t, Callbacks{}, ServerOptions{ResponseBudget: budget})
 	client := f.client(clientOptions{})
+	// Fixed before the client signs anything: the client's release is issued
+	// at or after this instant, so a request issued a millisecond earlier
+	// precedes it in FIFO order regardless of how long the call takes.
+	ahead := time.Now().Add(-time.Millisecond)
 	// Serve the call, but do not process the client's release yet.
 	done := make(chan error, 1)
 	go func() {
@@ -157,7 +162,7 @@ func testReleaseBehindBlocked(t *testing.T, stage string) {
 	if responseCount(t, f.grant.MailboxHostDir) != 1 {
 		t.Fatal("expected the consumed response before its release is served")
 	}
-	blocked, encoded := earlierSignedCall(t, f, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", Fields: map[string]string{"value": "blocked"}}, time.Now().Add(-time.Second))
+	blocked, encoded := earlierSignedCall(t, f, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", Fields: map[string]string{"value": "blocked"}}, ahead)
 	publishEnvelope(t, filepath.Join(f.grant.MailboxHostDir, stage), blocked, encoded)
 	state := func() string {
 		active, commits, releases := budget.counts()
