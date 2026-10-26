@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"amux/internal/access"
 	"amux/internal/console"
@@ -555,10 +556,10 @@ func TestSteerDeliversKeystrokes(t *testing.T) {
 	}{
 		{"claude prompt", "claude",
 			map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "run the tests"},
-			"\x1b[200~run the tests\x1b[201~\r"},
+			"run the tests\r"},
 		{"claude interject", "claude",
 			map[string]string{core.SteerVerb: core.SteerInterject, core.SteerText: "skip the flaky one"},
-			"\x1b[200~skip the flaky one\x1b[201~\r"},
+			"skip the flaky one\r"},
 		{"claude stop", "claude",
 			map[string]string{core.SteerVerb: core.SteerStop}, "\x03"},
 		{"codex prompt", "codex",
@@ -768,11 +769,11 @@ func TestSteerPromptStartsStoppedAgent(t *testing.T) {
 	in := inst.(*fakeInstance)
 	// The write is deferred until the TUI has had time to paint, so poll for it.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && in.written() != "\x1b[200~go\x1b[201~\r" {
+	for time.Now().Before(deadline) && in.written() != "go\r" {
 		time.Sleep(2 * time.Millisecond)
 	}
-	if got := in.written(); got != "\x1b[200~go\x1b[201~\r" {
-		t.Fatalf("pane received %q, want %q", got, "\x1b[200~go\x1b[201~\r")
+	if got := in.written(); got != "go\r" {
+		t.Fatalf("pane received %q, want %q", got, "go\r")
 	}
 }
 
@@ -792,8 +793,8 @@ func TestSteerReachesTheConsole(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("steer: %v", err)
 		}
-		if got := in.written(); got != "\x1b[200~add a repo\x1b[201~\r" {
-			t.Fatalf("pane received %q, want %q", got, "\x1b[200~add a repo\x1b[201~\r")
+		if got := in.written(); got != "add a repo\r" {
+			t.Fatalf("pane received %q, want %q", got, "add a repo\r")
 		}
 	})
 	t.Run("stopped", func(t *testing.T) {
@@ -812,11 +813,11 @@ func TestSteerReachesTheConsole(t *testing.T) {
 		}
 		in := inst.(*fakeInstance)
 		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) && in.written() != "\x1b[200~go\x1b[201~\r" {
+		for time.Now().Before(deadline) && in.written() != "go\r" {
 			time.Sleep(2 * time.Millisecond)
 		}
-		if got := in.written(); got != "\x1b[200~go\x1b[201~\r" {
-			t.Fatalf("pane received %q, want %q", got, "\x1b[200~go\x1b[201~\r")
+		if got := in.written(); got != "go\r" {
+			t.Fatalf("pane received %q, want %q", got, "go\r")
 		}
 	})
 }
@@ -861,10 +862,10 @@ func TestSteerAcksBeforeStarting(t *testing.T) {
 	}
 	in := inst.(*fakeInstance)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && in.written() != "\x1b[200~go\x1b[201~\r" {
+	for time.Now().Before(deadline) && in.written() != "go\r" {
 		time.Sleep(2 * time.Millisecond)
 	}
-	if got := in.written(); got != "\x1b[200~go\x1b[201~\r" {
+	if got := in.written(); got != "go\r" {
 		t.Fatalf("pane received %q, want the prompt to arrive after the ack", got)
 	}
 }
@@ -949,11 +950,17 @@ func TestKeystrokeMappingLivesInTheRegistry(t *testing.T) {
 	}
 }
 
-func TestSteerPasteSequence(t *testing.T) {
+// TestSteerTypesClaudeText pins how steering text reaches Claude: typed as the
+// user's own words, never as a bracketed paste (which Claude hands the model as
+// untrusted <pasted_content>). Newlines become backslash+Enter, long text is
+// spaced into typing-sized pieces that never split a UTF-8 sequence, and
+// control characters that would be keystrokes are refused.
+func TestSteerTypesClaudeText(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
 	in := eng.running("a1")
-	for _, text := range []string{"first\nsecond", "next"} {
+	long := strings.Repeat("é", 200) // 400 bytes: two pieces at 256
+	for _, text := range []string{"first\nsecond\ttabbed", long} {
 		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}); err != nil {
 			t.Fatal(err)
 		}
@@ -961,15 +968,25 @@ func TestSteerPasteSequence(t *testing.T) {
 	if len(in.sequences) != 2 {
 		t.Fatalf("got %d sequences, want two atomic prompts", len(in.sequences))
 	}
-	for i, text := range []string{"first\nsecond", "next"} {
-		steps := in.sequences[i]
-		if len(steps) != 2 || string(steps[0].Bytes) != "\x1b[200~"+text+"\x1b[201~" || string(steps[1].Bytes) != "\r" || steps[1].DelayBefore != 100*time.Millisecond {
-			t.Fatalf("sequence %d: %#v", i, steps)
-		}
+	first := in.sequences[0]
+	if len(first) != 2 || string(first[0].Bytes) != "first\\\rsecond    tabbed" ||
+		string(first[1].Bytes) != "\r" || first[1].DelayBefore != 100*time.Millisecond {
+		t.Fatalf("multi-line prompt: %#v", first)
 	}
-	for _, text := range []string{"x\x1b[201~y", "x\x1b[200~y"} {
+	second := in.sequences[1]
+	var typed []byte
+	for i, step := range second[:len(second)-1] {
+		if !utf8.Valid(step.Bytes) || len(step.Bytes) > 257 || (i > 0 && step.DelayBefore != 5*time.Millisecond) {
+			t.Fatalf("piece %d = %d bytes, delay %v", i, len(step.Bytes), step.DelayBefore)
+		}
+		typed = append(typed, step.Bytes...)
+	}
+	if len(second) != 3 || string(typed) != long || strings.Contains(string(typed), "\x1b[200~") {
+		t.Fatalf("long prompt pieces: %d, typed %q", len(second), typed)
+	}
+	for _, text := range []string{"x\x1b[201~y", "x\x1by", "x\x03y", "x\ry"} {
 		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}); err == nil {
-			t.Fatal("accepted embedded paste delimiter")
+			t.Fatalf("accepted control character in %q", text)
 		}
 	}
 	if len(in.sequences) != 2 {
