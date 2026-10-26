@@ -1206,6 +1206,11 @@ func (d *Daemon) startEngineFor(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	return d.startAgents(ctx, id, ids)
+}
+
+// startAgents starts exactly ids, the agents resolved for id.
+func (d *Daemon) startAgents(ctx context.Context, id string, ids []string) error {
 	if len(ids) == 0 {
 		return fmt.Errorf("no agent to start for %q", id)
 	}

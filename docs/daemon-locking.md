@@ -142,6 +142,8 @@ Which operations take what:
 - Add-agent: prepare the worktree and spec with no lock; commit the row under
   workgroup(root) write; start under session(new id).
 - Move: topology write (short; it changes two workgroups' membership).
+- Any code that resolves a workgroup's members under the shared gate must act
+  only on the set it resolved and locked: creations add members concurrently.
 - Grants and repo scope changes, add/rm repo, new workgroup commit, auth
   reload, account manage: topology write, never held across slow work.
 - Session-originated actions and runtime-event admission: topology read, then
@@ -223,8 +225,10 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      row. Session-originated creations (a coordinator's `add-agent`) still use
      the exclusive path.
    - Workgroup-start slice, done: `start` of a root takes the gate shared,
-     resolves its members (stable: membership changes are exclusive) and locks
-     exactly those sessions.
+     resolves its members once, locks exactly those sessions and starts only
+     those (`startAgents`). Membership is not frozen by the shared gate: a
+     creation adds members under `creationMu` alone. A member added after the
+     resolution is started by its own creation, under its own lock.
    - Next: archive and restore (workgroup locks), rename, then account manage
      and completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
