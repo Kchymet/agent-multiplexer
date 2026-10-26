@@ -1008,3 +1008,14 @@ the trial), and required CI green with the TUI flake rerun.
 Combined-tree evidence: vet and full suite pass; pressure 5/5; replacement
 race stress 0 violations; importer v3 probes pass; release seam inert; gate
 claims verified on #216; docs include the import gate hold.
+
+---
+
+## PR213 FINAL exact head `5d0b826`: SIGNOFF, conditional on required CI green
+
+Deltas re-reviewed: `0815529` preStart/launcher/retireUnstarted, `375852d`
+A5 decision docs, `4bda082` fixture (identical to `23144bb`), `5d0b826` #220
+merge. #220 has no spawn-path overlap. Full suite, pressure 3/3, fence
+stress and importer probes pass at the head. LOW: a `crypto/rand` failure
+after spawn would retire a live launch (effectively unreachable). #222 merges
+cleanly (clean-merge-only condition).
