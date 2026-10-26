@@ -342,7 +342,8 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 	script := "#!/bin/sh\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = " + mockCentralToken + " ] || exit 17\n" +
 		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" + trampoline +
 		"i=0\nwhile [ $i -lt " + fmt.Sprint(fetches) + " ]; do\n" +
-		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true || exit 1\n" +
+		"  printf %s $((i+1)) > \"$PWD/started\"\n" +
+		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true || { printf 'launcher exit %s on fetch %s' $? $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
 		"  i=$((i+1)); printf %s $i > \"$PWD/fetched\"\ndone\nsleep 60\n"
 	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -434,6 +435,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		for fetched(session.ID) < fetches {
 			select {
 			case <-ctx.Done():
+				pressureDiagnostics(t, d, runtime, sessions)
 				t.Fatalf("%s completed %d/%d credential fetches", session.ID, fetched(session.ID), fetches)
 			case <-time.After(20 * time.Millisecond):
 			}
@@ -463,4 +465,49 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		t.Fatalf("response pool peaked at %d files; consumed responses are not being retired", p)
 	}
 	t.Logf("%d releasing fetches; fresh first attempt %v; pool peak %d files", background*fetches, elapsed, peak.Load())
+}
+
+// pressureDiagnostics records, for every background session, how far its
+// fixture got (started vs. completed fetch, recorded launcher exit), whether its
+// pane is alive and what it printed, and the state of its mailbox queues, so a
+// stall can be told apart from a fixture observation problem.
+func pressureDiagnostics(t *testing.T, d *Daemon, runtime *sessionRuntime, sessions []store.Session) {
+	t.Helper()
+	budget := runtime.responseBudget.(*sessionResponseBudget)
+	budget.mu.Lock()
+	t.Logf("budget: files=%d bytes=%d receipts=%d", budget.files, budget.bytes, budget.receipts)
+	budget.mu.Unlock()
+	for _, session := range sessions {
+		dir := filepath.Join(core.SessionsDir(), "root", session.ID)
+		read := func(name string) string {
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return "<" + err.Error() + ">"
+			}
+			return string(b)
+		}
+		alive, output := false, ""
+		if instance, ok := d.engine.Lookup(engine.Key{AgentID: session.ID, Tab: panespec.TabAgent}); ok {
+			alive = instance.Alive()
+			var b strings.Builder
+			instance.Subscribe(engine.Sink{Output: func(p []byte) { b.Write(p) }})()
+			output = strings.ReplaceAll(b.String(), mockCentralToken, "<token>")
+			if len(output) > 2000 {
+				output = "…" + output[len(output)-2000:]
+			}
+		}
+		queues := ""
+		if spec, err := d.launchSpec(context.Background(), session.ID); err == nil {
+			for _, sub := range []string{sessionrpc.RequestsDirName, "processing", sessionrpc.ResponsesDirName} {
+				entries, err := os.ReadDir(filepath.Join(spec.Access.MailboxHostDir, sub))
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				queues += fmt.Sprintf(" %s=%v%v", sub, names, err)
+			}
+		}
+		t.Logf("%s: started=%s fetched=%s failed=%s alive=%v queues:%s output=%q",
+			session.ID, read("started"), read("fetched"), read("failed"), alive, queues, output)
+	}
 }
