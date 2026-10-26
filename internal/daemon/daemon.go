@@ -78,6 +78,11 @@ type Daemon struct {
 	// centralCodex owns the central Codex home when codex.auth is central.
 	centralCodex *centralCodex
 	accountMu    sync.Mutex
+	// accountLocks orders one account profile's sign-in steps (admitAccount).
+	accountLocks keyedLocks
+	// beforeAccountStep, when set, runs inside an account operation's
+	// admission; tests stall it there.
+	beforeAccountStep func(profileID string)
 	// readiness is the last account snapshot, reused by creation preflight.
 	readiness       accountReadinessCache
 	accountAttempts map[string]*accountAttempt

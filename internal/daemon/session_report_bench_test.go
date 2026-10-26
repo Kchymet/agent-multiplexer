@@ -20,6 +20,8 @@ import (
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
 	"amux/internal/wsops"
+
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // reportPopulation is a long-lived install's shape: one live reporting agent
@@ -129,7 +131,10 @@ func BenchmarkStoreOpen(b *testing.B) {
 //   - coordinator-add-agent: the coordinator's own add-agent, stalled creating;
 //   - workgroup-start: a host `start` of the workgroup root, stalled
 //     resolving its members;
-//   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
+//   - reconcile: a reconcile pass, stalled while it opens a3's mailbox;
+//   - self-completion: a3 marking itself done, stalled archiving itself;
+//   - account-sign-in: a console sign-in step, stalled inside its account's
+//     admission.
 //
 // It reports per-report p50/max latency rather than throughput.
 func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
@@ -268,6 +273,35 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 					b.Error(err)
 				}
 			}
+		})
+	})
+	b.Run("self-completion", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			runtime.applyResult = func(ctx context.Context, a core.Action) (string, error) {
+				slow()
+				return wsops.ApplyResult(ctx, a)
+			}
+			principal := principalFor(b, d, "a3")
+			call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSetArchived, ID: "a3",
+				Fields: map[string]string{"archived": "true"}}
+			return func() {
+				if result, _ := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: principal,
+					RequestID: "0123456789abcdef0123456789abcdef", Call: call}); result.Status != sessionrpc.StatusOK {
+					b.Errorf("self-completion = %+v", result)
+				}
+				// Undo it, without the completion's cleanup, for the next round.
+				runtime.completions.cancel("a3")
+				if err := wsops.SetArchived(context.Background(), "a3", false); err != nil {
+					b.Error(err)
+				}
+			}
+		})
+	})
+	b.Run("account-sign-in", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.beforeAccountStep = func(string) { slow() }
+			poll := hp.AccountRequest{Operation: hp.AccountPoll, ProfileID: "claude:central", AttemptID: "attempt", Initiator: "bench"}
+			return func() { d.accountCall(context.Background(), poll, true) }
 		})
 	})
 }

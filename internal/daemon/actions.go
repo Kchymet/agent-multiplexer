@@ -207,6 +207,13 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		d.lockEffectExclusive()
 		defer d.effectMu.Unlock()
 		admitted = time.Now()
+		if d.sessionRPC != nil {
+			if restore, _ := hostRestoreRequested(a); restore {
+				// A self-completion takes no dispatchMu, so one may have registered
+				// since the drain; finish rechecks ownership and skips it.
+				d.sessionRPC.completions.cancel(a.ID)
+			}
+		}
 		ctx = withEffectAdmission(ctx)
 	}
 	if err := revalidateDeferred(ctx); err != nil {

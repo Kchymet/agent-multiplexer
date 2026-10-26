@@ -18,6 +18,8 @@ import (
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
 	"amux/internal/wsops"
+
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // TestSessionReportIndependence records which slow holders delay session A's
@@ -52,6 +54,8 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
+		{name: "a3 marking itself done, stalled archiving itself", hold: holdSelfCompletion("a3"), blocked: false},
+		{name: "account sign-in step, stalled", hold: holdAccountStep("claude:central"), blocked: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -450,4 +454,148 @@ func TestWorkgroupStartStartsOnlyItsLockedMembers(t *testing.T) {
 	if keys := eng.ensuredKeys(); len(keys) != 1 || keys[0].AgentID != "a3" {
 		t.Fatalf("workgroup start launched %v, want only its locked member a3", keys)
 	}
+}
+
+// holdSelfCompletion is id marking itself done (`amux agent done`), stalling
+// inside the archive of itself.
+func holdSelfCompletion(id string) func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	return func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+		f.runtime.applyResult = func(ctx context.Context, a core.Action) (string, error) {
+			if a.ID == id {
+				held()
+				<-release
+			}
+			return wsops.ApplyResult(ctx, a)
+		}
+		if result := f.selfComplete(t, id); result.Status != sessionrpc.StatusOK {
+			t.Errorf("%s done = %+v", id, result)
+		}
+	}
+}
+
+func (f *independenceFixture) selfComplete(t *testing.T, id string) sessionrpc.DispatchResult {
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSetArchived, ID: id,
+		Fields: map[string]string{"archived": "true"}}
+	result, err := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals[id],
+		RequestID: "0123456789abcdef0123456789abcdef", Call: call})
+	if err != nil {
+		t.Errorf("%s done: %v", id, err)
+	}
+	return result
+}
+
+// holdAccountStep is a console sign-in step for profile, stalling inside its
+// admission.
+func holdAccountStep(profile string) func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	return func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+		f.d.beforeAccountStep = func(id string) {
+			if id == profile {
+				held()
+				<-release
+			}
+		}
+		pollAccount(f.d, profile)
+	}
+}
+
+func pollAccount(d *Daemon, profile string) hp.AccountResult {
+	return d.accountCall(context.Background(), hp.AccountRequest{Operation: hp.AccountPoll, ProfileID: profile,
+		AttemptID: "attempt", Initiator: "test"}, true)
+}
+
+// TestSelfCompletionsOfTwoSessionsDoNotWait: a3 marking itself done holds only
+// its own lock, so a2 completes meanwhile, and a3's own report waits for it.
+func TestSelfCompletionsOfTwoSessionsDoNotWait(t *testing.T) {
+	f := newIndependenceFixture(t)
+	release := make(chan struct{})
+	held := make(chan struct{})
+	var once sync.Once
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		holdSelfCompletion("a3")(t, f, func() { once.Do(func() { close(held) }) }, release)
+	}()
+	<-held
+	completed := make(chan sessionrpc.DispatchResult, 1)
+	go func() { completed <- f.selfComplete(t, "a2") }()
+	select {
+	case result := <-completed:
+		if result.Status != sessionrpc.StatusOK {
+			t.Fatalf("a2 done = %+v", result)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a2 marking itself done waited for a3's")
+	}
+	reported := make(chan sessionrpc.DispatchResult, 1)
+	go func() { reported <- f.report(t, "a3") }()
+	select {
+	case result := <-reported:
+		t.Fatalf("a3 reported while its completion held a3: %+v", result)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	// a3 is archived by then, so its late report is refused.
+	if result := <-reported; result.Status != sessionrpc.StatusDenied {
+		t.Fatalf("a3 report after its completion = %+v", result)
+	}
+}
+
+// TestAccountSignInStepsOfTwoAccountsDoNotWait: a sign-in step holds only its
+// profile's lock and the gate shared. Another profile's step and a step during
+// a slow session action proceed; the same profile's next step and an
+// exclusive policy change still order with it.
+func TestAccountSignInStepsOfTwoAccountsDoNotWait(t *testing.T) {
+	d := isolatedAccounts(t)
+	release := make(chan struct{})
+	held := make(chan struct{})
+	var once sync.Once
+	d.beforeAccountStep = func(id string) {
+		if id == "claude:central" {
+			once.Do(func() { close(held) })
+			<-release
+		}
+	}
+	first := make(chan struct{})
+	go func() { defer close(first); pollAccount(d, "claude:central") }()
+	<-held
+	other := make(chan struct{})
+	go func() { defer close(other); pollAccount(d, "codex:central") }()
+	select {
+	case <-other:
+	case <-time.After(10 * time.Second):
+		t.Fatal("codex sign-in step waited for claude's")
+	}
+	same := make(chan struct{})
+	go func() { defer close(same); pollAccount(d, "claude:central") }()
+	select {
+	case <-same:
+		t.Fatal("claude's next sign-in step ran during its stalled one")
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	<-first
+	<-same
+
+	// A slow session action holds the gate shared; a step need not wait.
+	releaseSession := d.admitSession("a3")
+	stepped := make(chan struct{})
+	go func() { defer close(stepped); pollAccount(d, "codex:central") }()
+	select {
+	case <-stepped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sign-in step waited for a session action")
+	}
+	releaseSession()
+
+	d.lockEffectExclusive()
+	stepped = make(chan struct{})
+	go func() { defer close(stepped); pollAccount(d, "codex:central") }()
+	select {
+	case <-stepped:
+		t.Fatal("sign-in step ran during an exclusive holder")
+	case <-time.After(250 * time.Millisecond):
+	}
+	d.effectMu.Unlock()
+	<-stepped
 }

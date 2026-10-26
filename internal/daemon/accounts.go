@@ -46,6 +46,16 @@ func accountRequest(a core.Action) (hp.AccountRequest, error) {
 	return r, nil
 }
 
+// accountSignInStep reports the console sign-in ceremony's operations, which
+// run under their profile's admission instead of the exclusive gate.
+func accountSignInStep(op string) bool {
+	switch op {
+	case hp.AccountLogin, hp.AccountPoll, hp.AccountCancel, hp.AccountComplete:
+		return true
+	}
+	return false
+}
+
 // accountCall is reached only from the authenticated host channel. Restricted
 // session RPC has no account status/manage operation in its closed vocabulary.
 // Provider grants are checked before forwarding onto this host channel.
@@ -55,13 +65,23 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 		return fail("account_request_invalid")
 	}
 	if !effectAdmissionHeld(ctx) && r.Operation != hp.AccountStatus {
-		d.lockEffectExclusive()
-		defer d.effectMu.Unlock()
+		if accountSignInStep(r.Operation) {
+			// A sign-in step changes only its own profile's ceremony and state,
+			// which deliveries already re-check against the accounts CAS.
+			release := d.admitAccount(r.ProfileID)
+			defer release()
+		} else {
+			d.lockEffectExclusive()
+			defer d.effectMu.Unlock()
+		}
 	}
 	if ctx.Err() != nil || revalidateDeferred(ctx) != nil {
 		return fail("account_access_denied")
 	}
 	if r.Operation != hp.AccountStatus {
+		if d.beforeAccountStep != nil {
+			d.beforeAccountStep(r.ProfileID)
+		}
 		d.readiness.clear()
 	}
 	if r.Operation == hp.AccountDisconnect {
