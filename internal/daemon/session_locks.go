@@ -124,6 +124,48 @@ func (d *Daemon) admitShared() (release func()) {
 	return d.effectMu.RUnlock
 }
 
+// admitAccount is admission for one account profile's sign-in step: the gate
+// shared, so exclusive policy changes stay out, then the profile's lock, so
+// one profile's steps stay ordered while two profiles' proceed in parallel.
+// accountMu, below it, still covers the attempt table and the accounts file.
+func (d *Daemon) admitAccount(profileID string) (release func()) {
+	d.effectMu.RLock()
+	unlock := d.accountLocks.lock(profileID)
+	return func() {
+		unlock()
+		d.effectMu.RUnlock()
+	}
+}
+
+// admitArchive admits archiving id under the archived sessions' locks rather
+// than the exclusive gate: id and, for a workgroup root, its members, plus
+// extra. A root's archive also holds creationMu so no member is added
+// meanwhile; a member added before creationMu was taken makes the locked set
+// stale, and it starts again. An agent's archive is one row write that no
+// creation touches, so two agents' archives proceed in parallel. An unknown
+// id locks only itself; the caller's checks refuse it.
+func (d *Daemon) admitArchive(id string, extra ...string) (release func()) {
+	for {
+		ids, root, found := workgroupMembers(id)
+		if !found {
+			ids = []string{id}
+		}
+		release := d.admitSessions(append(ids, extra...)...)
+		if !root {
+			return release
+		}
+		d.creationMu.Lock()
+		if current, _, found := workgroupMembers(id); found && sameMembers(ids, current) {
+			return func() {
+				d.creationMu.Unlock()
+				release()
+			}
+		}
+		d.creationMu.Unlock()
+		release()
+	}
+}
+
 // tryLock acquires key only if it is free right now.
 func (l *keyedLocks) tryLock(key string) (unlock func(), ok bool) {
 	l.mu.Lock()
@@ -244,26 +286,32 @@ func archiveScopedAction(a core.Action) (ids []string, creation bool, ok bool) {
 
 // sessionAndMembers returns id and, for a workgroup root, its members.
 func sessionAndMembers(id string) ([]string, bool) {
+	ids, _, found := workgroupMembers(id)
+	return ids, found
+}
+
+// workgroupMembers is sessionAndMembers, also reporting whether id is a root.
+func workgroupMembers(id string) (ids []string, root, found bool) {
 	db, err := store.OpenReadOnly()
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	defer db.Close()
 	session, found, err := db.GetSession(id)
 	if err != nil || !found {
-		return nil, false
+		return nil, false, false
 	}
-	ids := []string{session.ID}
+	ids = []string{session.ID}
 	if session.IsRoot() {
 		children, err := db.Children(id)
 		if err != nil {
-			return nil, false
+			return nil, false, false
 		}
 		for _, child := range children {
 			ids = append(ids, child.ID)
 		}
 	}
-	return ids, true
+	return ids, session.IsRoot(), true
 }
 
 // sameMembers reports whether two resolutions of a session's members match.
