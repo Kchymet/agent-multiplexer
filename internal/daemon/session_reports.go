@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"amux/internal/access"
@@ -301,7 +303,53 @@ var (
 	// One unpublished capture globally bounds staging disk to 256 MiB without
 	// blocking management dispatch/effect admission while the copy runs.
 	sessionCaptureSlot = make(chan struct{}, 1)
+	// sessionCaptureSlotWait bounds how long one capture queues for the slot.
+	sessionCaptureSlotWait = 5 * time.Second
 )
+
+// captureInterval is the minimum spacing of tool-boundary snapshots for one
+// runtime. Turn, compaction and session boundaries always capture.
+const captureInterval = 30 * time.Second
+
+// captureThrottle remembers when each runtime incarnation last published a
+// snapshot. It only skips redundant work; it never grants anything.
+type captureThrottle struct {
+	mu   sync.Mutex
+	last map[string]captureMark
+}
+
+type captureMark struct {
+	generation string
+	at         time.Time
+}
+
+// throttledCaptureEvent reports whether event fires per tool call, so its
+// snapshots may be spaced out.
+func throttledCaptureEvent(event string) bool {
+	return event == "PostToolUse" || event == "SubagentStop"
+}
+
+func (c *captureThrottle) recent(subject, generation, event string, now time.Time) bool {
+	if c == nil || !throttledCaptureEvent(event) || generation == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mark, ok := c.last[subject]
+	return ok && mark.generation == generation && now.Sub(mark.at) < captureInterval
+}
+
+func (c *captureThrottle) published(subject, generation string, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.last == nil {
+		c.last = make(map[string]captureMark)
+	}
+	c.last[subject] = captureMark{generation: generation, at: now}
+}
 
 func reportErrorCode(err error) string {
 	switch {
@@ -433,9 +481,27 @@ func openSessionTranscriptSource(session store.Session) (*os.File, error) {
 // the potentially 256 MiB copy. Both short gates authenticate and bind the exact
 // subject/runtime incarnation; only the final gate publishes the private stage.
 func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal access.Principal, req access.Request) sessionrpc.DispatchResult {
+	event := req.Fields[sessionreport.FieldEvent]
+	if r.captures.recent(principal.SubjectID, req.Fields[sessionreport.FieldRuntimeGeneration], event, r.now()) {
+		// A tool-boundary snapshot this soon after the last one adds nothing the
+		// next boundary or turn end will not; skipping it keeps N busy agents
+		// from serializing full-transcript copies through the one capture slot.
+		body, err := r.encodeResult(core.Result{Type: "result", OK: true})
+		if err != nil {
+			return rpcFailed("report_encode_failed")
+		}
+		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}
+	}
+	// The wait is bounded: this subject's mailbox is served serially, so a
+	// capture parked behind other agents' copies would hold up its own status
+	// and CLI requests. A dropped snapshot is retried at the next boundary.
+	slotWait := time.NewTimer(sessionCaptureSlotWait)
+	defer slotWait.Stop()
 	select {
 	case sessionCaptureSlot <- struct{}{}:
 		defer func() { <-sessionCaptureSlot }()
+	case <-slotWait.C:
+		return rpcFailed("report_capture_busy")
 	case <-ctx.Done():
 		return rpcFailed("report_capture_unavailable")
 	}
@@ -510,6 +576,7 @@ func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal a
 	if err := stage.Publish(); err != nil {
 		return rpcFailed(reportErrorCode(err))
 	}
+	r.captures.published(principal.SubjectID, generation, r.now())
 	body, err := r.encodeResult(core.Result{Type: "result", OK: true})
 	if err != nil {
 		return rpcFailed("report_encode_failed")

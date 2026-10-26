@@ -1100,9 +1100,18 @@ func SignRequest(cred Credential, bootID string, body []byte, now time.Time, ran
 	if err != nil || len(priv) != ed25519.PrivateKeySize {
 		return SignedRequest{}, ErrInvalidCredential
 	}
+	// The id leads with the issue time so a mailbox, which serves request files
+	// in name order, serves them first-in first-out: a hook's reports keep their
+	// order and no request starves behind later arrivals. The remaining 80 bits
+	// stay random, so ids remain unique and unpredictable.
 	nonce := make([]byte, 16)
-	if _, err := io.ReadFull(random, nonce); err != nil {
+	if _, err := io.ReadFull(random, nonce[6:]); err != nil {
 		return SignedRequest{}, err
+	}
+	issued := uint64(now.UnixMilli())
+	for i := 5; i >= 0; i-- {
+		nonce[i] = byte(issued)
+		issued >>= 8
 	}
 	req := SignedRequest{
 		Protocol: ProtocolVersion, BootID: bootID, KeyID: cred.KeyID, Generation: cred.Generation,

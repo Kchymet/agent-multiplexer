@@ -7,6 +7,9 @@ import (
 	"amux/internal/wsops"
 	"context"
 	"fmt"
+	"sync"
+	"time"
+
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -56,9 +59,48 @@ func (d *Daemon) accountCreationReady(ctx context.Context, a core.Action) error 
 	if len(hs) == 0 {
 		return nil
 	}
+	// Creation runs under the daemon-wide effect gate, and a fresh snapshot does
+	// native account IO (seconds per Codex profile) that would stall every
+	// session's reports. A recent snapshot that already shows the harnesses
+	// ready is enough to admit; anything else is re-probed.
+	if cached, ok := d.readiness.recent(d.accountTime()); ok && checkAccountReadiness(cached, hs) == nil {
+		return nil
+	}
 	snapshot, err := d.accountSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("machine account status unavailable")
 	}
 	return checkAccountReadiness(snapshot, hs)
+}
+
+// accountReadinessReuse is how long a ready snapshot admits creations.
+const accountReadinessReuse = time.Minute
+
+type accountReadinessCache struct {
+	mu       sync.Mutex
+	snapshot hp.AccountSnapshot
+	at       time.Time
+}
+
+func (c *accountReadinessCache) store(snapshot hp.AccountSnapshot, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.snapshot, c.at = snapshot, at
+}
+
+// clear forgets the snapshot after any account change, so a logout or mode
+// switch is never admitted from stale readiness.
+func (c *accountReadinessCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.snapshot, c.at = hp.AccountSnapshot{}, time.Time{}
+}
+
+func (c *accountReadinessCache) recent(now time.Time) (hp.AccountSnapshot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.at.IsZero() || now.Before(c.at) || now.Sub(c.at) >= accountReadinessReuse {
+		return hp.AccountSnapshot{}, false
+	}
+	return c.snapshot, true
 }

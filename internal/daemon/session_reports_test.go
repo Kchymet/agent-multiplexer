@@ -81,7 +81,7 @@ func TestSessionReportVocabularyRejectsAuthorityAndPathFields(t *testing.T) {
 	}
 }
 
-func publishTestRuntime(t *testing.T, d *Daemon, subject string) string {
+func publishTestRuntime(t testing.TB, d *Daemon, subject string) string {
 	t.Helper()
 	generation, err := d.permissions.observe(subject, &fakeInstance{})
 	if err != nil {
@@ -308,5 +308,86 @@ func TestCaptureStreamsOutsideEffectGateAndRejectsReplacement(t *testing.T) {
 	}
 	if _, _, ok := core.SessionCapturedTranscript(session.ID, runtimeID); ok {
 		t.Fatal("replacement published an old runtime's staged capture")
+	}
+}
+
+// TestReportContextServedOutsideEffectGate pins that the read-only report
+// context never queues behind the daemon-wide gates: every hook and status-line
+// report starts with it, and a long effect elsewhere must not stall them all.
+func TestReportContextServedOutsideEffectGate(t *testing.T) {
+	session := store.Session{ID: "a1", RootID: "root", Agent: "claude", Dir: t.TempDir(), ClaudeID: "44444444-4444-4444-8444-444444444444"}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	generation := publishTestRuntime(t, d, session.ID)
+	query := sessionrpc.DispatchRequest{Principal: principals[session.ID], RequestID: "0123456789abcdef0123456789abcdef",
+		Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}}
+	runtime.dispatchMu.Lock()
+	d.effectMu.Lock()
+	done := make(chan sessionrpc.DispatchResult, 1)
+	go func() {
+		result, _ := runtime.dispatch(context.Background(), query)
+		done <- result
+	}()
+	var result sessionrpc.DispatchResult
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("report context waited for the effect gate")
+	}
+	d.effectMu.Unlock()
+	runtime.dispatchMu.Unlock()
+	var body selfReportContext
+	if result.Status != sessionrpc.StatusOK || json.Unmarshal(result.Body, &body) != nil || body.RuntimeGeneration != generation {
+		t.Fatalf("report context = %+v", result)
+	}
+}
+
+// TestToolBoundaryCapturesAreThrottled pins that per-tool snapshots of one
+// runtime are spaced out while turn-end snapshots always copy.
+func TestToolBoundaryCapturesAreThrottled(t *testing.T) {
+	const runtimeID = "88888888-8888-4888-8888-888888888888"
+	session := store.Session{ID: "a1", RootID: "root", Agent: "claude", Dir: t.TempDir(), ClaudeID: runtimeID}
+	home := claudecfg.At(claudecfg.AgentHome(session.Dir))
+	source := home.TranscriptPath(session.Dir, runtimeID)
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, runtime, principals := sessionRuntimeFixture(t, session)
+	generation := publishTestRuntime(t, d, session.ID)
+	now := time.Unix(1_800_000_000, 0)
+	runtime.now = func() time.Time { return now }
+	copies := 0
+	originalStage := stageSessionTranscript
+	stageSessionTranscript = func(ctx context.Context, subject, runtimeID, event string, src io.Reader) (*core.SessionTranscriptStage, error) {
+		copies++
+		return core.StageSessionTranscript(ctx, subject, runtimeID, event, src)
+	}
+	t.Cleanup(func() { stageSessionTranscript = originalStage })
+	capture := func(event string) {
+		t.Helper()
+		result, err := runtime.dispatch(context.Background(), reportRequest(principals[session.ID], sessionreport.Capture, map[string]string{
+			sessionreport.FieldRuntimeGeneration: generation,
+			sessionreport.FieldEvent:             event,
+		}))
+		if err != nil || result.Status != sessionrpc.StatusOK {
+			t.Fatalf("%s capture = %+v, %v", event, result, err)
+		}
+	}
+	capture("PostToolUse")
+	capture("PostToolUse")
+	capture("SubagentStop")
+	if copies != 1 {
+		t.Fatalf("tool-boundary captures copied %d times, want 1", copies)
+	}
+	capture("Stop")
+	if copies != 2 {
+		t.Fatalf("turn-end capture was throttled: %d copies", copies)
+	}
+	now = now.Add(captureInterval)
+	capture("PostToolUse")
+	if copies != 3 {
+		t.Fatalf("capture after the interval was skipped: %d copies", copies)
 	}
 }
