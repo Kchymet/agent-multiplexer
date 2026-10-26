@@ -924,9 +924,9 @@ func TestReceiptDeadlineAtAcceptanceAndIndependentSettlement(t *testing.T) {
 		if value.Received || value.Reason != SettlementGraceExpired {
 			t.Fatalf("late receipt settlement = %+v", value)
 		}
-		receiptResponse := readTestResponse(t, f.grant.MailboxHostDir, receipt.RequestID)
-		if receiptResponse.Status != StatusInvalid || receiptResponse.Code != "receipt_expired" {
-			t.Fatalf("late receipt response = %+v", receiptResponse)
+		// Receipts are one-way: settlement is the outcome, never a response.
+		if _, err := os.Stat(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, responseFileName(receipt.RequestID))); !os.IsNotExist(err) {
+			t.Fatalf("receipt published a response: %v", err)
 		}
 	})
 

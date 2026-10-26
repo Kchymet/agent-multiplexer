@@ -86,16 +86,22 @@ usage network reads run outside the accounts flock.
    first capacity-blocked request. It keeps the blocked request claimed for a
    later pass, still processes releases (and receipts) in the same pass, and
    then reports `ErrResponseCapacity`.
-3. **Receipts never wait for capacity.** A mandatory receipt is verified,
-   authorized and settled even when the pool is exhausted. Its own response is
-   then not published (no client reads it). An accepted receipt retires the
-   response it proved was read. A response with a pending receipt is never
-   retired by a release.
-4. **Prior-boot responses are retired at adoption.** After a daemon restart,
-   retained responses from the previous boot can never be accepted, because
-   clients check the boot ID. Holding them could block every admission for up
-   to 60s, exactly when `restoreLiveAgents` relaunches every agent and each
-   launcher needs a credential. A same-boot reopen keeps its responses.
+3. **Receipts are one-way.** The client never reads a receipt's result
+   (`sendReceipt` is fire-and-forget), so a receipt reserves no capacity and
+   publishes no response, whether or not the pool is full. Previously each
+   mandatory operation left an unread receipt response holding a slot for 60s.
+   Receipts are still verified, authorized and settled exactly as before, and
+   settlement remains the only outcome. An accepted receipt also retires the
+   response it proved was read. A release never retires a response whose
+   receipt is pending.
+4. **Restart keeps committed responses.** `Client.awaitResponse` checks a
+   response against the service the request was sent to, before it looks at
+   the current boot. A client suspended across a restart therefore still reads
+   its committed pre-restart success. Prior-boot responses stay adopted under
+   the existing bounded accounting and expire by age. The restarted daemon does
+   not dispatch the request again, and a release signed for the old boot is
+   rejected by `Verify`. Releasing clients keep the retained set near the
+   in-flight count, so a restart adopts few responses.
 5. **Launcher waits for publication within its attempt.** If `service.json` is
    absent (`sessionrpc.ErrUnpublished`; nothing was sent, so no outcome is
    uncertain), the launcher polls for publication inside its existing 10s
@@ -123,14 +129,18 @@ signed-field or JSON shape change breaks existing in-session clients.
 | Session created while serving, idle daemon | 5.07s, retry guidance | 114ms, first attempt, no guidance |
 | Old (non-releasing) client pressure, 6×250ms | 53.3s | 53.3s (expected: bounded only by the 60s TTL; one run did not deliver within the 120s harness deadline, so results vary) |
 | Unrelated effect holding the gate 12s | 15.1s | 15.1s (not addressed here, see below) |
+| 6 real in-namespace launchers looping credential fetches (240 releasing fetches, ~120 req/s) plus a fresh launch | n/a: stalls once 128 responses are retained (negative control: 38/40 fetches, then 90s deadline) | every fetch succeeds; fresh first attempt 159ms; pool peak 11 files |
 
 Asserted regressions: `internal/sessionrpc/release_test.go` (production
 `Client`: sustained calls through a 1-slot pool; six subjects sharing a 4-slot
 pool, 240 calls in total, each under 2s, and the pool drains to zero; a release behind a
 capacity-blocked request; exact digest and replay; a pending receipt plus
-receipt settlement on a full pool; prior-boot adoption), and
-`central_launch_runtime_test.go` (real protected-namespace launcher, three
-lifecycle orders, first attempt and under `LaunchRetry`). Each regression was
+receipt settlement on a full pool; repeated mandatory receipts through a 1-slot
+pool; a client suspended across a restart reads its committed response with no
+second dispatch), and `central_launch_runtime_test.go` (real protected-namespace
+launcher: three lifecycle orders, plus six sessions of real releasing launcher
+traffic through the daemon-global budget; each delivery is on the first attempt
+and under `LaunchRetry`, and the pool peaks at ≤ 32 files). Each regression was
 confirmed to fail with its fix reverted.
 
 ### Not addressed here

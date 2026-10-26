@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,18 +129,20 @@ func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
 		_, err := client.Query(context.Background(), Query{Verb: "snapshot"})
 		done <- err
 	}()
-	for answered := false; !answered; {
+	// Stop serving once the response exists so no pass can reach the release.
+	for responseCount(t, f.grant.MailboxHostDir) == 0 {
 		if _, err := f.server.ServeOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
-			}
-			answered = true
-		case <-time.After(time.Millisecond):
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not read its response")
 	}
 	if responseCount(t, f.grant.MailboxHostDir) != 1 {
 		t.Fatal("expected the consumed response before its release is served")
@@ -255,38 +258,38 @@ func TestReceiptSettlesAndRetiresWithoutResponseCapacity(t *testing.T) {
 	}
 }
 
-// Responses from an earlier daemon boot can never be accepted by a client, so
-// a restarted server retires them instead of holding adopted capacity for up to
-// MaxResponseAge. A same-boot reopen keeps its responses.
-func TestAdoptionRetiresPriorBootResponses(t *testing.T) {
-	f := newFixture(t, Callbacks{}, ServerOptions{})
-	operation, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot"})
-	publishEnvelope(t, f.grant.RequestsHostDir, operation, encoded)
-	if _, err := f.server.ServeOnce(context.Background()); err != nil {
-		t.Fatal(err)
+// A client whose call was committed before a daemon restart still reads that
+// durable success afterwards: awaitResponse checks the response against the
+// service it sent to. The restarted server must keep (and account) the
+// prior-boot response, must not dispatch the request again, and the client's
+// release, signed for the old boot, is rejected so the response falls back to
+// age cleanup.
+func TestRestartPreservesCommittedResponseForWaitingClient(t *testing.T) {
+	var dispatched atomic.Int32
+	f := newFixture(t, Callbacks{Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+		dispatched.Add(1)
+		return DispatchResult{Status: StatusOK, Body: []byte("committed")}, nil
+	}}, ServerOptions{})
+	// A slow poll models a client suspended across the restart.
+	client := f.client(clientOptions{poll: 2 * time.Second})
+	type outcome struct {
+		result Result
+		err    error
 	}
-	reopen := func(authority *access.FileAuthority, budget ResponseBudget) *Server {
-		t.Helper()
-		server, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, authority, authority, Callbacks{
-			Authorize: func(context.Context, access.Principal, Call) error { return nil },
-			Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
-				return DispatchResult{Status: StatusOK}, nil
-			},
-		}, ServerOptions{ResponseBudget: budget})
-		if err != nil {
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := client.Query(context.Background(), Query{Verb: "snapshot"})
+		done <- outcome{result, err}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for responseCount(t, f.grant.MailboxHostDir) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("request was not answered before the restart")
+		}
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		return server
-	}
-	if err := f.server.Close(); err != nil {
-		t.Fatal(err)
-	}
-	f.server = reopen(f.auth, &testResponseBudget{limit: 1})
-	if err := f.server.Initialize(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if responseCount(t, f.grant.MailboxHostDir) != 1 {
-		t.Fatal("same-boot reopen discarded a response a client may still read")
+		time.Sleep(time.Millisecond)
 	}
 	if err := f.server.Close(); err != nil {
 		t.Fatal(err)
@@ -300,12 +303,86 @@ func TestAdoptionRetiresPriorBootResponses(t *testing.T) {
 	}
 	f.auth = restarted
 	budget := &testResponseBudget{limit: 1}
-	f.server = reopen(restarted, budget)
+	f.server, err = OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, restarted, restarted, Callbacks{
+		Authorize: func(context.Context, access.Principal, Call) error { return nil },
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			dispatched.Add(1)
+			return DispatchResult{Status: StatusOK}, nil
+		},
+	}, ServerOptions{ResponseBudget: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.server.PublishService(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.server.Initialize(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if active, _, _ := budget.counts(); active != 1 {
+		t.Fatalf("prior-boot response not adopted into the bounded pool: active=%d", active)
+	}
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not finish")
+	}
+	if got.err != nil || got.result.Status != StatusOK || string(got.result.Body) != "committed" {
+		t.Fatalf("durable pre-restart success lost: %+v, %v", got.result, got.err)
+	}
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := dispatched.Load(); n != 1 {
+		t.Fatalf("request dispatched %d times across the restart", n)
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("a release signed for the previous boot retired a response")
+	}
+}
+
+// Mandatory receipts are one-way. Repeated receipt-requiring operations from
+// the production client through a one-slot pool must each complete and settle;
+// neither the receipt nor its accepted response may hold the slot.
+func TestRepeatedMandatoryReceiptsDoNotExhaustPool(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	settled := make(chan ReceiptSettlement, 16)
+	f := newFixture(t, Callbacks{
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+				Grace: 5 * time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+			}}, nil
+		},
+	}, ServerOptions{ResponseBudget: budget})
+	client := f.client(clientOptions{})
+	for i := 0; i < 8; i++ {
+		result, err, elapsed := pumpUntil(t, []*Server{f.server}, func(ctx context.Context) (Result, error) {
+			return client.Action(ctx, Action{Verb: "done", ID: f.grant.SubjectID})
+		})
+		if err != nil || !result.ReceiptSent {
+			t.Fatalf("operation %d = %+v, %v", i, result, err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("operation %d waited %v for response capacity", i, elapsed)
+		}
+		for value := (ReceiptSettlement{}); ; {
+			if _, err := f.server.ServeOnce(context.Background()); err != nil && !errors.Is(err, ErrResponseCapacity) {
+				t.Fatal(err)
+			}
+			select {
+			case value = <-settled:
+			case <-time.After(5 * time.Millisecond):
+				continue
+			}
+			if !value.Received {
+				t.Fatalf("operation %d settled without its receipt: %+v", i, value)
+			}
+			break
+		}
+	}
 	if active, _, _ := budget.counts(); active != 0 || responseCount(t, f.grant.MailboxHostDir) != 0 {
-		t.Fatalf("prior-boot response held adopted capacity: active=%d files=%d", active, responseCount(t, f.grant.MailboxHostDir))
+		t.Fatalf("receipts left retained responses: active=%d files=%d", active, responseCount(t, f.grant.MailboxHostDir))
 	}
 }
 

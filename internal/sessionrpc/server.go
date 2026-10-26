@@ -38,8 +38,8 @@ type pendingReceipt struct {
 type responseReservation struct {
 	lease     ResponseLease
 	committed bool
-	// discard marks a receipt processed without response capacity: its
-	// response is never read by the client, so it is not published.
+	// discard marks a one-way receipt: the client never reads a result for
+	// it, so none is published or accounted.
 	discard bool
 }
 
@@ -424,17 +424,19 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 	// acceptance or dispatch. No operation is admitted if the daemon cannot keep
 	// its bounded result artifact.
 	var reservation *responseReservation
-	err = ErrResponseCapacity
-	if admit {
+	switch {
+	case routed.Kind == CallReceipt:
+		// A receipt is one-way: the client never reads a result for it, and it
+		// settles a mandatory completion that frees capacity, so it must neither
+		// wait behind the pool it drains nor retain an unread response.
+		reservation = &responseReservation{discard: true}
+	case !admit:
+		return ErrResponseCapacity
+	default:
 		reservation, err = s.reserveResponse(ctx, requestID)
-	}
-	if errors.Is(err, ErrResponseCapacity) && routed.Kind == CallReceipt {
-		// A receipt settles a mandatory completion and frees capacity; it must
-		// not wait behind the pool it drains. Its result is never read.
-		reservation, err = &responseReservation{discard: true}, nil
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 	defer reservation.release()
 	requestDigestBytes := sha256.Sum256(envelope.Body)
@@ -608,21 +610,6 @@ func (s *Server) retireReceipted(requestID string) {
 	if unlinkAt(s.responses, responseFileName(requestID)) == nil {
 		s.releaseResponseLease(requestID)
 	}
-}
-
-// priorBoot reports whether a retained response was published by an earlier
-// daemon boot. Clients reject such responses (the boot ID changed), so keeping
-// them would only hold adopted capacity until age cleanup.
-func (s *Server) priorBoot(name string) bool {
-	data, err := readRegularAt(s.responses, name, maxEnvelopeFileBytes)
-	if err != nil {
-		return false
-	}
-	var response Response
-	if unmarshalBounded(data, maxEnvelopeFileBytes, &response) != nil {
-		return false
-	}
-	return response.BootID != s.authority.BootID()
 }
 
 func (s *Server) newResponse(request access.SignedRequest, requestDigest string, status Status, code string, body []byte, receiptRequired bool) Response {
@@ -893,12 +880,6 @@ func (s *Server) initializeResponseBudget(ctx context.Context) error {
 			}
 			s.responseAdoptionSeen = make(map[string]struct{})
 			return ErrResponseCapacity
-		}
-		if s.priorBoot(name) {
-			if err := unlinkAt(s.responses, name); err != nil {
-				return err
-			}
-			continue
 		}
 		s.responseAdoptionSeen[requestID] = struct{}{}
 		s.budgetMu.Lock()

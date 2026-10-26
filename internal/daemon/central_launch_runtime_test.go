@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +40,7 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 	t.Run("daemon-lifecycle", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, lifecyclePreOpened) })
 	t.Run("service-published-after-launch", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, lifecycleDelayedService) })
 	t.Run("created-while-serving", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, lifecycleCreatedWhileServing) })
+	t.Run("fresh-launch-under-releasing-client-pressure", testCentralClaudeUnderClientPressure)
 	t.Run("subscription-delivery", func(t *testing.T) { testCentralClaudeTypedLaunch(t, "subscription") })
 	t.Run("api-delivery", func(t *testing.T) { testCentralClaudeTypedLaunch(t, "api") })
 }
@@ -296,4 +300,155 @@ func testCentralClaudeDaemonLifecycle(t *testing.T, mode lifecycleMode) {
 		t.Fatalf("credential delivered after %v, not within the first attempt", elapsed)
 	}
 	t.Logf("first credential attempt delivered %v after the real start action", elapsed)
+}
+
+// testCentralClaudeUnderClientPressure runs real production clients against the
+// real session runtime and its daemon-global response budget. Six sessions'
+// fake Claude repeatedly re-invokes the protected central launcher inside its
+// own namespace; each invocation is one signed credential fetch and release.
+// That is far more traffic than the pool sustains under age-only retirement
+// (128 responses per 60s), so a fresh session's launcher must still be served
+// on its first attempt, every background fetch must succeed, and the pool must
+// stay bounded by in-flight work.
+func testCentralClaudeUnderClientPressure(t *testing.T) {
+	const background, fetches = 6, 40
+	var sessions []store.Session
+	for i := 0; i < background; i++ {
+		sessions = append(sessions, store.Session{ID: fmt.Sprintf("pressure-%d", i), RootID: "root", Agent: "claude"})
+	}
+	d, runtime, _ := sessionRuntimeFixture(t, sessions...)
+	t.Setenv("AMUX_JAIL", "on")
+	t.Setenv("AMUX_SHUTDOWN_GRACE", "0s")
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	t.Cleanup(cancel)
+	fake := filepath.Join(os.Getenv("HOME"), "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(fake), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Background sessions loop the real launcher (the pane's own amux binary),
+	// exec'ing true once delivered; the fresh session only marks delivery.
+	script := "#!/bin/sh\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = " + mockCentralToken + " ] || exit 17\n" +
+		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" +
+		"i=0\nwhile [ $i -lt " + fmt.Sprint(fetches) + " ]; do\n" +
+		"  AMUX_PAYLOAD_CLEAN_EXEC=1 " + launchenv.ToolBinDir + "/amux --amux-payload-clean-exec " + centralauth.LauncherArg + " true || exit 1\n" +
+		"  i=$((i+1)); printf %s $i > \"$PWD/fetched\"\ndone\nsleep 60\n"
+	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUX_CLAUDE_BIN", fake)
+	tok, _ := centralauth.NewSecret(mockCentralToken)
+	if _, err := centralauth.ClaudeStore().Save(tok, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	d.engine = local.New()
+	d.sessionRPC = runtime
+	t.Cleanup(d.engine.Shutdown)
+	if err := runtime.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	serving, stop := context.WithCancel(ctx)
+	joined := make(chan struct{})
+	go func() { defer close(joined); runtime.run(serving) }()
+	t.Cleanup(func() { stop(); <-joined; runtime.close() })
+
+	budget := runtime.responseBudget.(*sessionResponseBudget)
+	var peak atomic.Int64
+	sampling, stopSampling := context.WithCancel(ctx)
+	defer stopSampling()
+	go func() {
+		for sampling.Err() == nil {
+			budget.mu.Lock()
+			files := int64(budget.files)
+			budget.mu.Unlock()
+			if files > peak.Load() {
+				peak.Store(files)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	fetched := func(id string) int {
+		b, _ := os.ReadFile(filepath.Join(core.SessionsDir(), "root", id, "fetched"))
+		n, _ := strconv.Atoi(string(b))
+		return n
+	}
+	for _, session := range sessions {
+		if r := d.handle(ctx, core.Action{Action: core.ActionStart, ID: session.ID}); !r.OK {
+			t.Fatal(r.Error)
+		}
+	}
+	// Let background traffic pass the age-only capacity before the fresh launch.
+	for total := 0; total < sessionrpc.MaxResponseFiles+32; {
+		total = 0
+		for _, session := range sessions {
+			total += fetched(session.ID)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("background fetches stalled at %d", total)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	fresh := store.Session{ID: "fresh", RootID: "root", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "fresh")}
+	if err := os.MkdirAll(fresh.Dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	if r := d.handle(ctx, core.Action{Action: core.ActionStart, ID: fresh.ID}); !r.OK {
+		t.Fatal(r.Error)
+	}
+	for {
+		if b, err := os.ReadFile(filepath.Join(fresh.Dir, "launched")); err == nil && string(b) == "ready" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("fresh launcher was not served under client pressure")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	elapsed := time.Since(began)
+	for _, session := range sessions {
+		for fetched(session.ID) < fetches {
+			select {
+			case <-ctx.Done():
+				t.Fatalf("%s completed %d/%d credential fetches", session.ID, fetched(session.ID), fetches)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	stopSampling()
+	for _, id := range append([]string{fresh.ID}, func() (ids []string) {
+		for _, s := range sessions {
+			ids = append(ids, s.ID)
+		}
+		return
+	}()...) {
+		instance, ok := d.engine.Lookup(engine.Key{AgentID: id, Tab: panespec.TabAgent})
+		if !ok {
+			t.Fatalf("missing runtime for %s", id)
+		}
+		var output strings.Builder
+		instance.Subscribe(engine.Sink{Output: func(b []byte) { output.Write(b) }})()
+		if strings.Contains(output.String(), "retrying automatically") || strings.Contains(output.String(), mockCentralToken) {
+			t.Fatalf("%s launcher output: %q", id, output.String())
+		}
+	}
+	if elapsed >= centralauth.LaunchRetry {
+		t.Fatalf("fresh credential delivered after %v under pressure", elapsed)
+	}
+	if p := peak.Load(); p > sessionrpc.MaxResponseFiles/4 {
+		t.Fatalf("response pool peaked at %d files; consumed responses are not being retired", p)
+	}
+	t.Logf("%d releasing fetches; fresh first attempt %v; pool peak %d files", background*fetches, elapsed, peak.Load())
 }
