@@ -1271,7 +1271,7 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 	// The PTY-era history must be carried forward before the supervisor's
 	// first log line, or it would stay hidden; a failed import refuses this
 	// launch (history kept, retried next launch) rather than lose it.
-	if _, err := importCodexHistory(spec.Session); err != nil {
+	if err := d.importHistory(ctx, spec.Session); err != nil {
 		return nil, fmt.Errorf("import this Codex session's earlier history before launch: %w; the history is kept and the next start retries", err)
 	}
 	// AppServerCommand resolves the sandbox-wrapped launch AND the per-session unix

@@ -124,9 +124,11 @@ launches meanwhile use the normal central login flow. Saved `claude.auth` /
 only `central`. Central Codex auth requires App Server control, so
 `codex.control pty` is reported and overridden. A Codex session last run under
 PTY control has its rollout imported once into its structured event log (before
-any notices already there), so its earlier history stays readable. The outcome is
-recorded beside the log; until then a failed import refuses only that session's
-launch and is retried. A session that already ran structured keeps its log as is.
+any notices already there), so its earlier history stays readable. A log that
+already holds structured events is kept as is. The rewrite never runs while that
+session's runtime is running or starting. The outcome is recorded beside the log
+and inside it; until then a failed import refuses only that session's launch and
+is retried.
 
 `amux auth rebind <claude|codex> WORKLOAD_ID` is optional: it stops one workload
 so its next start uses the current login now rather than at its next launch.

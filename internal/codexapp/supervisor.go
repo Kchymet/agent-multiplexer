@@ -1638,6 +1638,8 @@ func AppendNotice(sessionID, level, text string) error {
 	if sessionID == "" || text == "" {
 		return nil
 	}
+	unlock := LockEventLog(sessionID)
+	defer unlock()
 	path := EventLogPathFor(sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -1653,6 +1655,17 @@ func AppendNotice(sessionID, level, text string) error {
 	defer f.Close()
 	_, err = f.Write(append(b, '\n'))
 	return err
+}
+
+var eventLogLocks sync.Map // session id -> *sync.Mutex
+
+// LockEventLog excludes AppendNotice for one session while its event log is
+// replaced (WithQuiescentLog). The returned function releases it.
+func LockEventLog(sessionID string) func() {
+	v, _ := eventLogLocks.LoadOrStore(sessionID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (s *Supervisor) closeLog() {

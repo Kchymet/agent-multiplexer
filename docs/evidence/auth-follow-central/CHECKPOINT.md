@@ -50,14 +50,20 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
   identity, a legacy v0 identity, or a PTY-pinned id with no identity) is never replaced by an
   empty thread: a resume error fails the launch and leaves the identity unchanged.
 - **PTY history.** Central Codex auth requires the App Server, so `codex.control pty` is reported
-  and overridden. For a session that never ran structured (no persisted identity), the PTY
-  rollout is imported (at daemon startup and before every supervisor launch) as the ordered
-  prefix of its structured log. Notice lines already in the log, including appends that race
-  the replacement, are kept after the prefix. The outcome (`imported` or `structured`) is
-  recorded in `<log>.history.json`. Until then, a failed import refuses only that launch and is
-  retried. An oversized line becomes an omission notice. A session that already ran structured
-  keeps its log, because its rollout also holds the log's own turns and log events carry no time
-  to separate them. The rollout is only read; it is the same file the App Server resumes.
+  and overridden. The decision follows the log's content. A log with structured events (anything
+  other than an amux notice) is the session's history and is kept. Its rollout also holds the
+  log's own turns, and log events carry no time to separate them. Otherwise, the rollout of the
+  thread the next launch resumes (the identity's thread, including a legacy v0 identity, else the
+  PTY-pinned id; this includes the agent's private Codex home) becomes the ordered prefix of the
+  log. The prefix ends in a versioned marker notice, and notices already in the log follow it.
+  - The rewrite runs under `Manager.WithQuiescentLog`, which holds the per-session start gate
+    (no launch can begin), refuses while the session's runtime is running or starting, and
+    excludes `AppendNotice`. Startup and every supervisor launch run it.
+  - The outcome is recorded in `<log>.history.json`. If that write fails after the log was
+    published, the retry recognizes the in-log marker and records the outcome instead of
+    importing again.
+  - Until then, a failed import refuses only that launch and is retried. An oversized line becomes
+    an omission notice. The rollout is only read; it is the same file the App Server resumes.
 - **Corrupt or insecure state.** A corrupt central Claude record never blocks binding or the
   repairing login, and delivery refuses it. An insecure store fails closed.
 
@@ -70,9 +76,11 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
   forged, retry, replacement, kill/respawn in both orders) and for Codex (`codexTokenSource`:
   subscription → API with a real initial delivery, then superseded). Also `ensurePane`
   retire/keep decisions, corrupt-record repair login, PTY history import (order, idempotency,
-  archived, identity thread), and retired legacy defaults.
+  archived, notice-only log, structured-log evidence, v0 identity in the private home, recovery
+  from a failed sidecar write, launch refusal then retry, bounded lines), and retired legacy defaults.
 - `internal/codexapp`: a manager restart under a replacement account resumes the same thread;
-  resume never falls back (resumable, v0 and PTY-pinned cases).
+  resume never falls back (resumable, v0 and PTY-pinned cases); a quiescent-log rewrite excludes
+  notices and refuses a starting runtime.
 
 Older captures under `docs/evidence/accounts-*` are dated records of the previous UI and keep its
 wording.

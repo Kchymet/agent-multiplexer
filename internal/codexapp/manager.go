@@ -73,6 +73,34 @@ func (m *Manager) startGate(sessionID string) chan struct{} {
 	return gate
 }
 
+// ErrLogBusy refuses an event-log rewrite while the session's runtime runs.
+var ErrLogBusy = errors.New("codexapp: session runtime is running")
+
+// WithQuiescentLog runs fn while no supervisor for sessionID runs or starts and
+// AppendNotice is excluded, so fn may replace the session's event log (the
+// one-time history migration). It holds the per-session start gate, so no
+// launch can begin meanwhile, and refuses with ErrLogBusy rather than rewrite
+// an active runtime's log.
+func (m *Manager) WithQuiescentLog(ctx context.Context, sessionID string, fn func() error) error {
+	gate := m.startGate(sessionID)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-gate:
+	}
+	defer func() { gate <- struct{}{} }()
+	m.mu.Lock()
+	s, ok := m.sup[sessionID]
+	_, starting := m.starting[sessionID]
+	m.mu.Unlock()
+	if starting || (ok && s.processRunning()) {
+		return ErrLogBusy
+	}
+	unlock := LockEventLog(sessionID)
+	defer unlock()
+	return fn()
+}
+
 // Get returns the live supervisor for a session id, or false. It is the daemon's
 // "is this session structured right now?" test as well as the route target.
 func (m *Manager) Get(sessionID string) (*Supervisor, bool) {

@@ -118,7 +118,7 @@ func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
 			t.Fatalf("%s marker = %+v", id, m)
 		}
 	}
-	if got := structuredLog(t, "noticed"); len(got) != 4 || !strings.Contains(string(got[0].Payload), "NOTICED-PROMPT") || !strings.Contains(string(got[3].Payload), "starting this launch") {
+	if got := structuredLog(t, "noticed"); len(got) != 4 || !strings.Contains(string(got[0].Payload), "NOTICED-PROMPT") || !strings.Contains(string(got[2].Payload), importMarkerKey) || !strings.Contains(string(got[3].Payload), "starting this launch") {
 		t.Fatalf("notice-only log not migrated in order: %+v", got)
 	}
 	if _, err := os.Stat(codexapp.EventLogPathFor("never-run")); !os.IsNotExist(err) {
@@ -144,27 +144,87 @@ func TestCodexPTYHistoryIsImportedOnceIntoStructuredLog(t *testing.T) {
 	}
 }
 
-// A session that already ran structured keeps its canonical log untouched:
-// its rollout also holds the log's own turns, which would be duplicated.
-func TestCodexHistoryStructuredSessionKeepsLog(t *testing.T) {
+// The decision follows the log's content, not whether an identity exists. A
+// log with structured events is the session's history and stays untouched; a
+// session with an identity (even legacy v0) but no structured history has the
+// resumed thread's rollout imported, including from its private Codex home.
+func TestCodexHistoryDecidesFromStructuredEvidence(t *testing.T) {
 	home := historyHome(t)
 	const thread = "44444444-4444-4444-8444-444444444444"
 	legacyRollout(t, home, thread, "ROLLOUT-PROMPT", "ROLLOUT")
 	if err := codexapp.SaveIdentity(codexapp.Identity{SessionID: "s", ThreadID: thread, Resumable: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := codexapp.AppendNotice("s", "info", "structured since creation"); err != nil {
+	if err := os.MkdirAll(filepath.Dir(codexapp.EventLogPathFor("s")), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	existing, _ := os.ReadFile(codexapp.EventLogPathFor("s"))
+	structured := `{"type":"prompt","direction":"in","payload":{"text":"STRUCTURED-TURN"}}` + "\n"
+	if err := os.WriteFile(codexapp.EventLogPathFor("s"), []byte(structured), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if ok, err := importCodexHistory(store.Session{ID: "s", Agent: "codex", ClaudeID: thread, Dir: t.TempDir()}); ok || err != nil {
 		t.Fatalf("import = %v, %v", ok, err)
 	}
-	if b, _ := os.ReadFile(codexapp.EventLogPathFor("s")); !bytes.Equal(b, existing) {
+	if b, _ := os.ReadFile(codexapp.EventLogPathFor("s")); string(b) != structured {
 		t.Fatal("structured log rewritten")
 	}
 	if m := marker(t, "s"); m.Outcome != "structured" {
 		t.Fatalf("marker = %+v", m)
+	}
+
+	// v0 identity, notices-only log, the identity's thread rolled out in the
+	// agent's private Codex home (the store's pinned id is stale).
+	const pinned, private = "55555555-5555-4555-8555-555555555555", "88888888-8888-4888-8888-888888888888"
+	legacyRollout(t, home, pinned, "STALE-PROMPT", "STALE")
+	dir := t.TempDir()
+	agentHome := filepath.Join(dir, ".amux", "codex")
+	// legacyRollout writes under <home>/codex: here, the agent's private home.
+	legacyRollout(t, filepath.Dir(agentHome), private, "PRIVATE-PROMPT", "PRIVATE")
+	if err := codexapp.SaveIdentity(codexapp.Identity{SessionID: "v0", ThreadID: private}); err != nil {
+		t.Fatal(err)
+	}
+	if err := codexapp.AppendNotice("v0", "info", "earlier launch notice"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := importCodexHistory(store.Session{ID: "v0", Agent: "codex", ClaudeID: pinned, Dir: dir}); !ok || err != nil {
+		t.Fatalf("v0 import = %v, %v", ok, err)
+	}
+	got := structuredLog(t, "v0")
+	if len(got) != 4 || !strings.Contains(string(got[0].Payload), "PRIVATE-PROMPT") || !strings.Contains(string(got[3].Payload), "earlier launch notice") {
+		t.Fatalf("v0 import = %+v", got)
+	}
+}
+
+// The log is published before the outcome sidecar. If writing the sidecar
+// fails, the retry recognizes the import marker inside the log and records
+// the outcome instead of prepending the rollout again.
+func TestCodexHistoryImportRecoversFailedMarkerWrite(t *testing.T) {
+	home := historyHome(t)
+	const thread = "99999999-9999-4999-8999-999999999999"
+	legacyRollout(t, home, thread, "ONCE-PROMPT", "ONCE")
+	s := store.Session{ID: "marker", Agent: "codex", ClaudeID: thread, Dir: t.TempDir()}
+	// A directory where the sidecar's temporary file goes makes its write fail.
+	if err := os.MkdirAll(historyMarkerPath(s.ID)+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importCodexHistory(s); err == nil {
+		t.Fatal("sidecar failure not reported")
+	}
+	published, _ := os.ReadFile(codexapp.EventLogPathFor(s.ID))
+	if !bytes.Contains(published, []byte(importMarkerKey)) {
+		t.Fatal("log not published with its import marker")
+	}
+	if err := os.Remove(historyMarkerPath(s.ID) + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := importCodexHistory(s); ok || err != nil {
+		t.Fatalf("retry = %v, %v", ok, err)
+	}
+	if b, _ := os.ReadFile(codexapp.EventLogPathFor(s.ID)); !bytes.Equal(b, published) || bytes.Count(b, []byte("ONCE-PROMPT")) != 1 {
+		t.Fatalf("retry re-imported history: %s", b)
+	}
+	if m := marker(t, s.ID); m.Outcome != "imported" || m.Thread != thread || m.Lines != 2 {
+		t.Fatalf("recovered marker = %+v", m)
 	}
 }
 

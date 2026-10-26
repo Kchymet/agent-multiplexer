@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -692,5 +694,51 @@ func TestManagerAdoptsPTYConversation(t *testing.T) {
 	id, ok := LoadIdentity("migrating")
 	if !ok || id.ThreadID != "pty-thread" || !id.Resumable {
 		t.Fatalf("PTY adoption was not persisted: %+v", id)
+	}
+}
+
+// The history migration's log rewrite excludes AppendNotice and any launch,
+// and is refused while the session's runtime is starting.
+func TestWithQuiescentLogSerializesNoticesAndRefusesStartingRuntime(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := NewManager(ctx, "")
+	defer m.Shutdown()
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- m.WithQuiescentLog(ctx, "q", func() error {
+			close(entered)
+			<-release
+			if err := os.MkdirAll(filepath.Dir(EventLogPathFor("q")), 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(EventLogPathFor("q"), []byte("{\"type\":\"notice\"}\n"), 0o600)
+		})
+	}()
+	<-entered
+	appended := make(chan error, 1)
+	go func() { appended <- AppendNotice("q", "info", "late notice") }()
+	select {
+	case err := <-appended:
+		t.Fatalf("AppendNotice ran during the rewrite: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-appended; err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(EventLogPathFor("q")); !strings.Contains(string(b), "late notice") || !strings.HasPrefix(string(b), "{\"type\":\"notice\"}\n") {
+		t.Fatalf("notice lost or reordered: %q", b)
+	}
+	m.mu.Lock()
+	m.starting["busy"] = New(Config{SessionID: "busy"})
+	m.mu.Unlock()
+	if err := m.WithQuiescentLog(ctx, "busy", func() error { t.Fatal("rewrote a starting runtime's log"); return nil }); !errors.Is(err, ErrLogBusy) {
+		t.Fatalf("starting runtime = %v", err)
 	}
 }
