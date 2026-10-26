@@ -17,7 +17,6 @@
 - [Architecture overview: clients, control APIs, compute broker and backends](architecture-overview.md)
 - [Contributing and verification commands](../CONTRIBUTING.md)
 - [Local daemon and optional legacy relay](client-server.md)
-- [Daemon locking: lock holders, target per-resource locks and ordering](daemon-locking.md)
 - [Agent CLI access and authorization](agent-cli-sandbox.md)
 - [Machine login and broker identity specification (discussion draft)](broker-identity-spec.md)
 - [Scoped transcript/event queries](scoped-runtime-events.md)
