@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/panespec"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
@@ -113,7 +115,8 @@ func BenchmarkStoreOpen(b *testing.B) {
 // (docs/daemon-locking.md):
 //
 //   - host-action: a host `start` of a3 (a creation, a restart);
-//   - peer-report: a3's own report, stalled inside its write.
+//   - peer-report: a3's own report, stalled inside its write;
+//   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
 //
 // It reports per-report p50/max latency rather than throughput.
 func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
@@ -134,6 +137,21 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 				}
 			}
 			return nil // the holder is a3's own report loop
+		})
+	})
+	b.Run("reconcile", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.launchSpec = func(_ context.Context, id string) (panespec.LaunchSpec, error) {
+				if id == "a3" {
+					slow()
+				}
+				return panespec.LaunchSpec{}, errors.New("bench: no launch spec")
+			}
+			return func() {
+				if err := runtime.reconcile(context.Background()); err != nil {
+					b.Error(err)
+				}
+			}
 		})
 	})
 }

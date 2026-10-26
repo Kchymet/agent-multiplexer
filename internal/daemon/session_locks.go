@@ -78,3 +78,50 @@ func (d *Daemon) admitSession(id string) (release func()) {
 		d.effectMu.RUnlock()
 	}
 }
+
+// tryLock acquires key only if it is free right now.
+func (l *keyedLocks) tryLock(key string) (unlock func(), ok bool) {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[string]*keyedLock)
+	}
+	entry := l.locks[key]
+	if entry == nil {
+		entry = &keyedLock{}
+		l.locks[key] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+	drop := func() {
+		l.mu.Lock()
+		if entry.refs--; entry.refs == 0 {
+			delete(l.locks, key)
+		}
+		l.mu.Unlock()
+	}
+	if !entry.mu.TryLock() {
+		drop()
+		return nil, false
+	}
+	return func() {
+		entry.mu.Unlock()
+		drop()
+	}, true
+}
+
+// tryAdmitSession is admitSession for a caller that must not queue: it fails
+// instead of waiting for an exclusive gate holder or the session's lock.
+func (d *Daemon) tryAdmitSession(id string) (release func(), ok bool) {
+	if !d.effectMu.TryRLock() {
+		return nil, false
+	}
+	unlock, ok := d.sessionLocks.tryLock(id)
+	if !ok {
+		d.effectMu.RUnlock()
+		return nil, false
+	}
+	return func() {
+		unlock()
+		d.effectMu.RUnlock()
+	}, true
+}
