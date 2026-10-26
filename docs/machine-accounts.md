@@ -105,8 +105,11 @@ tabs of a session share its principal); a Codex launch never enters the sandbox.
 **Codex threads.** A new Codex process resumes the exact persisted thread under
 the current central account; the account the thread previously ran under is
 kept in its identity as history (`priorChatgptAccounts`) and a notice records
-the change. A resume target is never replaced by an empty thread: a resume
-error fails the launch visibly and leaves the identity unchanged. The pinned
+the change. A resume target is never replaced by an empty thread: a missing
+rollout is not evidence of empty history, so a resume error fails the launch
+visibly with the thread id, leaves the identity unchanged, and requires an
+explicit recovery or a new session. Only a current identity that records its
+thread as never run starts fresh. The pinned
 Codex 0.157.1 accepts another account's injected tokens for a resumed thread and
 replays its full history, including opaque encrypted reasoning
 ([evidence](evidence/auth-follow-central/CHECKPOINT.md)). The real backend may
