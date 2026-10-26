@@ -14,13 +14,15 @@ in. Each PR updates this file and the row it flips in
 `BenchmarkConcurrentReportsDuringSlowEffect` runs two sessions' report pairs
 (context query + activity) while a third session repeatedly stalls for 100ms
 on a real path: `host-action` is a host `start` through the host action
-admission, `peer-report` is that session's own report stalled in its write.
+admission, `peer-report` is that session's own report stalled in its write,
+`reconcile` is a reconcile pass stalled while it opens that session's mailbox.
 `BenchmarkSessionReportDispatch` is one report with no contention.
 
 | Benchmark | Before split (664f1e7) | After PR 2 |
 | --- | --- | --- |
 | ConcurrentReportsDuringSlowEffect/host-action | p50 1.3ms, max 102ms | unchanged (PR 4) |
 | ConcurrentReportsDuringSlowEffect/peer-report | p50 0.9ms, max 104ms | p50 0.45ms, max 2.7ms |
+| ConcurrentReportsDuringSlowEffect/reconcile | p50 1.3ms, max 102.5ms | p50 0.45–1.1ms, max 2.1–2.6ms (PR 3) |
 | SessionReportDispatch activity/shared | 0.25–0.3ms/op | 0.27ms/op |
 | SessionReportDispatch context/shared | 0.18–0.2ms/op | 0.19ms/op |
 
@@ -31,7 +33,7 @@ records which slow holders delay a report from session `a1`:
 | --- | --- | --- |
 | a2's report, stalled inside its write | no | PR 2 |
 | host `start` of a3, stalled in its effect | yes | PR 4 |
-| reconcile pass, stalled partway | yes | PR 3 |
+| reconcile pass, stalled while it opens a3's mailbox | no | PR 3 |
 
 ## What the global gate protects
 
@@ -53,7 +55,7 @@ check reads and its effect writes.
 
 | # | Holder | Locks | Check reads | Effect writes | Target lock |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `sessionRuntime.reconcile` (session_lifecycle.go), every 50ms tick and at start | both | host credential; all store sessions; each session's credential | host credential rotation; per session: credential renew/rotate, mailbox server open/close (`servers`, `initialized`, `serving`, `closing` maps, owned by the run goroutine), console accounts listener, revoke + `killRuntimeFor` | no gate for the scan; session lock per session it changes; host credential under the authority's own lock |
+| 1 | `sessionRuntime.reconcile` (session_lifecycle.go), every 50ms tick and at start | both | host credential; all store sessions; each session's credential | host credential rotation; per session: credential renew/rotate, mailbox server open/close (`servers`, `initialized`, `serving`, `closing` maps, owned by the run goroutine), console accounts listener, revoke + `killRuntimeFor` since PR 3: no lock for the scan or the lock-free pre-check; gate shared + session(id) for each session it changes, rereading the row there; host credential under the gate shared. Tick passes try-acquire and leave a busy session to the next tick |
 | 2 | `sessionRuntime.dispatch`, report actions (activity, model, limits, permission-*) | gate shared + session(self) since PR 2 | authority `Valid`; own session row and its root's archive flag (`resolver.Lookup`, `lookupSession`); own runtime generation (`permissions`) | own hook-state file, own runtime-model file, own permission-observation journal (read-check-append); `accounts.ObserveClaude` (accounts state, flock'd) | session lock (self) |
 | 3 | `sessionRuntime.dispatch`, every other operation | both | `policy.Authorize`: membership, grants, archive state across the caller's workgroup | restricted queries (read only); self-completion (archive self, `completions.begin`); `d.handle` for the canonical action | topology read + the locks of the action's targets (as for host actions) |
 | 4 | `withFinalAdmission` (session_dispatch.go), twice per runtime-events page | both | authority `Valid`, `policy.Authorize` | none: it gates disclosure | topology read + session lock of the paged subject |
@@ -176,6 +178,11 @@ transition `effectMu` becomes a read/write gate:
 - `dispatchMu` stays exclusive for unconverted holders only. Converted holders
   skip it: they never begin a completion, the one effect the restore drain
   fences.
+- A goroutine that serves other sessions (the reconcile tick) never queues for
+  the gate or a session lock. It try-acquires and skips. A queued writer on a
+  `sync.RWMutex` also stalls every new reader, so exclusive holders that may
+  wait behind a slow shared holder should move to try-and-retry acquisition
+  (#210 did this) as they are classified in PR 4.
 
 Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
 
@@ -186,12 +193,19 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
 2. Session reports (#2, #5): gate read + session(self) through
    `admitSession`, with `keyedLocks` for the per-session locks. Flips the peer
    report row. Done.
-3. Reconcile (#1): per-session work under session locks, scan with no gate.
-   Flips the reconcile row.
+3. Reconcile (#1): store scan and a lock-free pre-check with no lock (an
+   archived session with no server, credential or runtime is skipped instead of
+   revoked and killed on every tick). Each session it changes is handled under
+   `admitSession`, with a reread of its row. Tick passes use
+   `tryAdmitSession`. Flips the reconcile row. Done.
 4. Host actions (#8, #9, #11): the per-action lock classifier, with the
    topology-write fallback. Flips the host action row. This may take more than
    one PR (lifecycle actions first, then creation with work moved before the
-   lock, then account manage).
+   lock, then account manage). Includes steer's deferred admission and
+   try-and-retry exclusive acquisition for account changes and completion
+   `finish`, as carried over from #210.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
-   #4, #6, #7, #10).
+   #4, #6, #7, #10). From #210: a dedicated credential lock, so keychain and
+   `gh` helper processes serialize only among themselves; read-only restricted
+   queries under shared admission.
 6. Delete the gate and `dispatchMu`.
