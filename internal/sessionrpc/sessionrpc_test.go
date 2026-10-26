@@ -677,10 +677,12 @@ func TestRestartCleanupAndAdoptionProgressBeyondOneChunk(t *testing.T) {
 	f.server = nil
 	responseDir := filepath.Join(f.grant.MailboxHostDir, ResponsesDirName)
 	old := clock.Now().Add(-time.Duration(access.MaxResponseAge+1) * time.Second)
+	// Current-boot artifacts are adopted; prior-boot ones are retired instead.
+	current := []byte(`{"bootId":"` + f.auth.BootID() + `"}`)
 	for index := 0; index < MaxResponseFiles+1; index++ {
 		name := fmt.Sprintf("%032x.res", index+1)
 		path := filepath.Join(responseDir, name)
-		if err := os.WriteFile(path, []byte("{}"), regularFileMode); err != nil {
+		if err := os.WriteFile(path, current, regularFileMode); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chtimes(path, old, old); err != nil {

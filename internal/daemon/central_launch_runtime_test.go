@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,8 +34,9 @@ func TestCentralClaudeLaunchDeliversTokenInsideProtectedNamespace(t *testing.T) 
 		}
 		t.Skipf("protected namespace unavailable: %v", err)
 	}
-	t.Run("daemon-lifecycle", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, false) })
-	t.Run("service-published-after-launch", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, true) })
+	t.Run("daemon-lifecycle", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, lifecyclePreOpened) })
+	t.Run("service-published-after-launch", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, lifecycleDelayedService) })
+	t.Run("created-while-serving", func(t *testing.T) { testCentralClaudeDaemonLifecycle(t, lifecycleCreatedWhileServing) })
 	t.Run("subscription-delivery", func(t *testing.T) { testCentralClaudeTypedLaunch(t, "subscription") })
 	t.Run("api-delivery", func(t *testing.T) { testCentralClaudeTypedLaunch(t, "api") })
 }
@@ -162,10 +164,24 @@ func testCentralClaudeTypedLaunch(t *testing.T, mode string) {
 	}
 }
 
+type lifecycleMode int
+
+const (
+	// The session exists before the runtime starts, so its mailbox is open.
+	lifecyclePreOpened lifecycleMode = iota
+	// The runtime publishes service only after the launcher is already waiting.
+	lifecycleDelayedService
+	// The session is stored and started while the run loop is serving: its
+	// mailbox is published by a reconcile that must wait for the start action.
+	lifecycleCreatedWhileServing
+)
+
 // Exercise production lifecycle gates and the reconciliation loop, unlike the
 // direct mailbox server fixture above. PTY startup must return without waiting
 // for the child's credential query: that query needs those same admission locks.
-func testCentralClaudeDaemonLifecycle(t *testing.T, delayedService bool) {
+// In every mode the launcher's first credential attempt must succeed: a miss
+// prints retry guidance and costs at least one LaunchRetry.
+func testCentralClaudeDaemonLifecycle(t *testing.T, mode lifecycleMode) {
 	d, runtime, _ := sessionRuntimeFixture(t)
 	t.Setenv("AMUX_JAIL", "on")
 	t.Setenv("AMUX_SHUTDOWN_GRACE", "0s")
@@ -175,15 +191,21 @@ func testCentralClaudeDaemonLifecycle(t *testing.T, delayedService bool) {
 	if err := os.MkdirAll(s.Dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
+	putSession := func() {
+		t.Helper()
+		db, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := db.PutSession(s); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
+	if mode != lifecycleCreatedWhileServing {
+		putSession()
 	}
 	fake := filepath.Join(os.Getenv("HOME"), "bin", "claude")
 	if err := os.MkdirAll(filepath.Dir(fake), 0700); err != nil {
@@ -213,10 +235,14 @@ func testCentralClaudeDaemonLifecycle(t *testing.T, delayedService bool) {
 		go func() { defer close(joined); runtime.run(serving) }()
 		t.Cleanup(func() { stop(); <-joined; runtime.close() })
 	}
-	if !delayedService {
+	if mode != lifecycleDelayedService {
 		startService()
 	}
+	if mode == lifecycleCreatedWhileServing {
+		putSession()
+	}
 	// A real action holds dispatchMu/effectMu while starting the sandboxed PTY.
+	began := time.Now()
 	finished := make(chan core.Result, 1)
 	go func() { finished <- d.handle(ctx, core.Action{Action: core.ActionStart, ID: s.ID}) }()
 	select {
@@ -227,32 +253,24 @@ func testCentralClaudeDaemonLifecycle(t *testing.T, delayedService bool) {
 	case <-ctx.Done():
 		t.Fatal("start action blocked on its own credential query")
 	}
-	if delayedService {
+	instance, ok := d.engine.Lookup(engine.Key{AgentID: s.ID, Tab: panespec.TabAgent})
+	if !ok {
+		t.Fatal("missing launcher instance")
+	}
+	var outputMu sync.Mutex
+	output := ""
+	unsubscribe := instance.Subscribe(engine.Sink{Output: func(b []byte) {
+		outputMu.Lock()
+		output += string(b)
+		outputMu.Unlock()
+	}})
+	defer unsubscribe()
+	if mode == lifecycleDelayedService {
 		// Provisioning exists, but reconciliation has not published service.json.
-		// Observe the actual child's failed query before allowing publication.
-		instance, ok := d.engine.Lookup(engine.Key{AgentID: s.ID, Tab: panespec.TabAgent})
-		if !ok {
-			t.Fatal("missing launcher instance")
-		}
-		chunks := make(chan string, 32)
-		unsubscribe := instance.Subscribe(engine.Sink{Output: func(b []byte) {
-			select {
-			case chunks <- string(b):
-			default:
-			}
-		}})
-		defer unsubscribe()
-		output := ""
-		for !strings.Contains(output, "retrying automatically") && !strings.Contains(output, "amux auth login") {
-			select {
-			case chunk := <-chunks:
-				output += chunk
-			case <-ctx.Done():
-				t.Fatal("launcher did not report unpublished mailbox service")
-			}
-		}
-		if strings.Contains(output, "amux auth login") || strings.Contains(output, mockCentralToken) || !strings.Contains(output, "mailbox request failed") {
-			t.Fatalf("unpublished service misdiagnosed: %s", output)
+		// The launcher must keep its first attempt open rather than fail it.
+		time.Sleep(time.Second)
+		if _, err := os.Stat(observed); !os.IsNotExist(err) {
+			t.Fatalf("Claude started before the mailbox was published: %v", err)
 		}
 		startService()
 	}
@@ -268,5 +286,14 @@ func testCentralClaudeDaemonLifecycle(t *testing.T, delayedService bool) {
 			t.Fatal("daemon reconciliation did not deliver the launch credential")
 		}
 	}
-	t.Log("real daemon start action returned; reconciliation served the protected Claude credential request")
+	elapsed := time.Since(began)
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	if strings.Contains(output, "retrying automatically") || strings.Contains(output, mockCentralToken) {
+		t.Fatalf("first credential attempt failed: %q", output)
+	}
+	if elapsed >= centralauth.LaunchRetry {
+		t.Fatalf("credential delivered after %v, not within the first attempt", elapsed)
+	}
+	t.Logf("first credential attempt delivered %v after the real start action", elapsed)
 }

@@ -23,7 +23,9 @@ import (
 	"amux/internal/store"
 )
 
-// signedCall publishes one legitimate signed query and waits for its response.
+// measureSignedCall publishes one legitimate signed query and waits for its
+// response without releasing it: the pre-release (old) client model. It is the
+// negative control for retirement and still exhausts the pool until age cleanup.
 func measureSignedCall(ctx context.Context, d *Daemon, grant access.SessionAccess) (time.Duration, error) {
 	credential, err := access.LoadCredential(grant.CredentialHostDir)
 	if err != nil {
@@ -56,6 +58,12 @@ func measureSignedCall(ctx context.Context, d *Daemon, grant access.SessionAcces
 	}
 }
 
+// TestMeasureMailboxPressure is an opt-in measurement (AMUX_MEASURE_PRESSURE=
+// per-subject interval, e.g. 250ms): six subjects of old-client traffic on the
+// real session runtime and global budget while a fresh central Claude session
+// starts through the real protected-namespace launcher. It logs, not asserts;
+// the asserted regressions live in internal/sessionrpc/release_test.go and
+// central_launch_runtime_test.go.
 func TestMeasureMailboxPressure(t *testing.T) {
 	if os.Getenv("AMUX_MEASURE_PRESSURE") == "" {
 		t.Skip()
@@ -67,7 +75,7 @@ func TestMeasureMailboxPressure(t *testing.T) {
 	d, runtime, _ := sessionRuntimeFixture(t, bg...)
 	t.Setenv("AMUX_JAIL", "on")
 	t.Setenv("AMUX_SHUTDOWN_GRACE", "0s")
-	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 240*time.Second)
 	t.Cleanup(cancel)
 	fake := filepath.Join(os.Getenv("HOME"), "bin", "claude")
 	os.MkdirAll(filepath.Dir(fake), 0700)

@@ -161,6 +161,9 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 		return Result{}, ErrInvalidRecord
 	}
 	service, err := c.loadService(credential)
+	if errors.Is(err, os.ErrNotExist) {
+		return Result{}, errors.Join(ErrUnpublished, err)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -186,6 +189,9 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 	}
 	if response.ReceiptRequired {
 		result.ReceiptSent = c.sendReceipt(credential, service, response) == nil
+	} else {
+		// Best effort: an unsent release only leaves the response to age cleanup.
+		_ = c.sendAck(credential, service, CallRelease, response)
 	}
 	if response.Status != StatusOK {
 		if response.Status == StatusReplay || response.Status == StatusIndeterminate {
@@ -294,7 +300,14 @@ func (c *Client) sendReceipt(originalCredential access.Credential, originalServi
 	if service.BootID != originalService.BootID || credential.KeyID != originalCredential.KeyID || credential.Generation != originalCredential.Generation {
 		return ErrRestarted
 	}
-	call := Call{Kind: CallReceipt, Receipt: &Receipt{RequestID: response.RequestID, ResponseDigest: responseDigest(response)}}
+	return c.sendAck(credential, service, CallReceipt, response)
+}
+
+// sendAck publishes a receipt or release naming response. Neither awaits a
+// result: a receipt settles through the server's grace window and a release
+// produces no response at all.
+func (c *Client) sendAck(credential access.Credential, service Service, kind CallKind, response Response) error {
+	call := Call{Kind: kind, Receipt: &Receipt{RequestID: response.RequestID, ResponseDigest: responseDigest(response)}}
 	body, err := marshalBounded(call, access.MaxBodyBytes)
 	if err != nil {
 		return err

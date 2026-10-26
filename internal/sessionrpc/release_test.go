@@ -1,0 +1,402 @@
+package sessionrpc
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"amux/internal/access"
+)
+
+// pumpUntil serves until operation returns. Unlike pumpClient it tolerates
+// ErrResponseCapacity, which is the condition these tests exercise.
+func pumpUntil(t *testing.T, servers []*Server, operation func(context.Context) (Result, error)) (Result, error, time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	started := time.Now()
+	go func() {
+		result, err := operation(ctx)
+		done <- outcome{result, err}
+	}()
+	for {
+		for _, server := range servers {
+			if _, err := server.ServeOnce(ctx); err != nil && !errors.Is(err, ErrQueueFull) && !errors.Is(err, ErrResponseCapacity) && ctx.Err() == nil {
+				t.Fatal(err)
+			}
+		}
+		select {
+		case got := <-done:
+			return got.result, got.err, time.Since(started)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func responseCount(t *testing.T, mailboxDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(mailboxDir, ResponsesDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
+}
+
+// lowSignedCall signs call with an all-zero request ID, which sorts before
+// any client-generated request in the server's queue order.
+func lowSignedCall(t *testing.T, f *fixture, call Call) (access.SignedRequest, []byte) {
+	t.Helper()
+	credential, err := access.LoadCredential(f.grant.CredentialHostDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := access.SignRequest(credential, f.auth.BootID(), body, time.Now(), zeroReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return envelope, encoded
+}
+
+// The production client releases each consumed response, so one response slot
+// sustains any number of sequential calls instead of one per MaxResponseAge.
+// An old client that never releases still exhausts the slot (negative control)
+// and falls back to unchanged age cleanup.
+func TestClientReleaseRetiresConsumedResponses(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	f := newFixture(t, Callbacks{}, ServerOptions{ResponseBudget: budget})
+	client := f.client(clientOptions{})
+	for i := 0; i < 20; i++ {
+		result, err, elapsed := pumpUntil(t, []*Server{f.server}, func(ctx context.Context) (Result, error) {
+			return client.Query(ctx, Query{Verb: "snapshot", Fields: map[string]string{"value": fmt.Sprint(i)}})
+		})
+		if err != nil || string(result.Body) != fmt.Sprintf("ok:%d", i) {
+			t.Fatalf("call %d = %+v, %v", i, result, err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("call %d waited %v for response capacity", i, elapsed)
+		}
+	}
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if active, _, _ := budget.counts(); active != 0 || responseCount(t, f.grant.MailboxHostDir) != 0 {
+		t.Fatalf("consumed responses retained: active=%d files=%d", active, responseCount(t, f.grant.MailboxHostDir))
+	}
+
+	// Negative control: requests whose responses are never released.
+	for i := 0; i < 2; i++ {
+		envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot"})
+		publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+		_, err := f.server.ServeOnce(context.Background())
+		if i == 0 && err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 && !errors.Is(err, ErrResponseCapacity) {
+			t.Fatalf("unreleased response did not hold capacity: %v", err)
+		}
+	}
+}
+
+// A release must be processed even when an ordinary request ahead of it in
+// queue order is blocked on the very capacity the release frees.
+func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	f := newFixture(t, Callbacks{}, ServerOptions{ResponseBudget: budget})
+	client := f.client(clientOptions{})
+	// Serve the call, but do not process the client's release yet.
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Query(context.Background(), Query{Verb: "snapshot"})
+		done <- err
+	}()
+	for answered := false; !answered; {
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			answered = true
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("expected the consumed response before its release is served")
+	}
+	blocked, encoded := lowSignedCall(t, f, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", Fields: map[string]string{"value": "blocked"}})
+	publishEnvelope(t, f.grant.RequestsHostDir, blocked, encoded)
+
+	if _, err := f.server.ServeOnce(context.Background()); !errors.Is(err, ErrResponseCapacity) {
+		t.Fatalf("first pass = %v, want the low request capacity-blocked", err)
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 0 {
+		t.Fatal("release queued behind a capacity-blocked request was not processed")
+	}
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if response := readTestResponse(t, f.grant.MailboxHostDir, blocked.RequestID); string(response.Body) != "ok:blocked" {
+		t.Fatalf("blocked request response = %+v", response)
+	}
+}
+
+// Retirement requires proof of the exact signed response. A release never
+// produces a response of its own, and a replayed release is rejected by the
+// replay ledger without effect.
+func TestReleaseRequiresExactOwnedResponse(t *testing.T) {
+	f := newFixture(t, Callbacks{}, ServerOptions{})
+	operation, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot"})
+	publishEnvelope(t, f.grant.RequestsHostDir, operation, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := readTestResponse(t, f.grant.MailboxHostDir, operation.RequestID)
+	release := func(digest string) access.SignedRequest {
+		envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallRelease, Receipt: &Receipt{RequestID: operation.RequestID, ResponseDigest: digest}})
+		publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		return envelope
+	}
+	wrong := responseDigest(response)
+	wrong = wrong[:len(wrong)-1] + string("0123456789abcdef"[(int(wrong[len(wrong)-1])+1)%16])
+	release(wrong)
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("release with a wrong digest retired the response")
+	}
+	accepted := release(responseDigest(response))
+	if responseCount(t, f.grant.MailboxHostDir) != 0 {
+		t.Fatal("exact release did not retire the response or produced its own")
+	}
+	// Recreate an identically named response and replay the accepted release.
+	data, _ := json.Marshal(response)
+	if err := os.WriteFile(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, responseFileName(operation.RequestID)), data, regularFileMode); err != nil {
+		t.Fatal(err)
+	}
+	replayed, _ := json.Marshal(accepted)
+	publishEnvelope(t, f.grant.RequestsHostDir, accepted, replayed)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("replayed release had an effect")
+	}
+}
+
+// A response awaiting a mandatory receipt is never released. Its receipt is
+// processed even with the response pool exhausted, and acceptance retires it.
+func TestReceiptSettlesAndRetiresWithoutResponseCapacity(t *testing.T) {
+	budget := &testResponseBudget{limit: 1}
+	settled := make(chan ReceiptSettlement, 1)
+	f := newFixture(t, Callbacks{
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+				Grace: 5 * time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+			}}, nil
+		},
+	}, ServerOptions{ResponseBudget: budget})
+	operation, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID})
+	publishEnvelope(t, f.grant.RequestsHostDir, operation, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := readTestResponse(t, f.grant.MailboxHostDir, operation.RequestID)
+	if !response.ReceiptRequired {
+		t.Fatal("expected a receipt-required response")
+	}
+	release, releaseBytes := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallRelease, Receipt: &Receipt{RequestID: operation.RequestID, ResponseDigest: responseDigest(response)}})
+	publishEnvelope(t, f.grant.RequestsHostDir, release, releaseBytes)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("release retired a response with a pending mandatory receipt")
+	}
+	if active, _, _ := budget.counts(); active != 1 {
+		t.Fatalf("pool should be exhausted by the pending response: active=%d", active)
+	}
+	receipt, receiptBytes := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallReceipt, Receipt: &Receipt{RequestID: operation.RequestID, ResponseDigest: responseDigest(response)}})
+	publishEnvelope(t, f.grant.RequestsHostDir, receipt, receiptBytes)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case value := <-settled:
+		if !value.Received || value.Reason != SettlementReceipt {
+			t.Fatalf("settlement = %+v", value)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("receipt was blocked by exhausted response capacity")
+	}
+	if active, _, _ := budget.counts(); active != 0 || responseCount(t, f.grant.MailboxHostDir) != 0 {
+		t.Fatalf("accepted receipt did not retire its response: active=%d files=%d", active, responseCount(t, f.grant.MailboxHostDir))
+	}
+}
+
+// Responses from an earlier daemon boot can never be accepted by a client, so
+// a restarted server retires them instead of holding adopted capacity for up to
+// MaxResponseAge. A same-boot reopen keeps its responses.
+func TestAdoptionRetiresPriorBootResponses(t *testing.T) {
+	f := newFixture(t, Callbacks{}, ServerOptions{})
+	operation, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot"})
+	publishEnvelope(t, f.grant.RequestsHostDir, operation, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reopen := func(authority *access.FileAuthority, budget ResponseBudget) *Server {
+		t.Helper()
+		server, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, authority, authority, Callbacks{
+			Authorize: func(context.Context, access.Principal, Call) error { return nil },
+			Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+				return DispatchResult{Status: StatusOK}, nil
+			},
+		}, ServerOptions{ResponseBudget: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return server
+	}
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.server = reopen(f.auth, &testResponseBudget{limit: 1})
+	if err := f.server.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if responseCount(t, f.grant.MailboxHostDir) != 1 {
+		t.Fatal("same-boot reopen discarded a response a client may still read")
+	}
+	if err := f.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.auth.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := access.Open(f.authDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.auth = restarted
+	budget := &testResponseBudget{limit: 1}
+	f.server = reopen(restarted, budget)
+	if err := f.server.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if active, _, _ := budget.counts(); active != 0 || responseCount(t, f.grant.MailboxHostDir) != 0 {
+		t.Fatalf("prior-boot response held adopted capacity: active=%d files=%d", active, responseCount(t, f.grant.MailboxHostDir))
+	}
+}
+
+// Several subjects share one daemon-wide response pool far smaller than their
+// combined traffic, as hook and event reads do in practice. With production
+// clients every call completes promptly and the pool drains to zero.
+func TestSharedResponsePoolSustainsProductionClientTraffic(t *testing.T) {
+	root := t.TempDir()
+	authority, err := access.Open(filepath.Join(root, "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	budget := &testResponseBudget{limit: 4}
+	const subjects, calls = 6, 40
+	var servers []*Server
+	var clients []*Client
+	for i := 0; i < subjects; i++ {
+		grant, err := authority.EnsureSession(context.Background(), fmt.Sprintf("subject-%d", i), filepath.Join(root, fmt.Sprintf("ns-%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestContext(t, grant.CredentialHostDir, grant.SubjectID, grant.MailboxHostDir)
+		server, err := OpenServerMailbox(grant.SubjectID, grant.MailboxHostDir, authority, authority, Callbacks{
+			Authorize: func(context.Context, access.Principal, Call) error { return nil },
+			Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+				return DispatchResult{Status: StatusOK, Body: []byte("ok")}, nil
+			},
+		}, ServerOptions{ResponseBudget: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.PublishService(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = server.Close() })
+		client, err := openClientAt(grant.CredentialHostDir, clientOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = client.Close() })
+		servers = append(servers, server)
+		clients = append(clients, client)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var serving sync.WaitGroup
+	for _, server := range servers {
+		serving.Add(1)
+		go func() {
+			defer serving.Done()
+			for ctx.Err() == nil {
+				_, _ = server.ServeOnce(ctx)
+				time.Sleep(2 * time.Millisecond)
+			}
+		}()
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, subjects*calls)
+	for _, client := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < calls; i++ {
+				callCtx, callCancel := context.WithTimeout(ctx, 2*time.Second)
+				started := time.Now()
+				_, err := client.Query(callCtx, Query{Verb: "snapshot"})
+				callCancel()
+				if err != nil {
+					errs <- fmt.Errorf("call %d after %v: %w", i, time.Since(started), err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if active, _, _ := budget.counts(); active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			active, _, _ := budget.counts()
+			t.Fatalf("shared pool did not drain after released traffic: active=%d", active)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	serving.Wait()
+}

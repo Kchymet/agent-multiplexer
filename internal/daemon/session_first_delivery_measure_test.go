@@ -17,6 +17,10 @@ import (
 	"amux/internal/store"
 )
 
+// TestMeasureFirstDelivery is an opt-in measurement (AMUX_MEASURE_FIRST=1,
+// optional AMUX_MEASURE_HOLD=12s): a fresh central Claude session started by a
+// real action on the serving runtime, optionally while an unrelated admitted
+// effect holds the dispatch/effect gate.
 func TestMeasureFirstDelivery(t *testing.T) {
 	if os.Getenv("AMUX_MEASURE_FIRST") == "" {
 		t.Skip()

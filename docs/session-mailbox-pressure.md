@@ -34,15 +34,17 @@ records every accepted request ID in the replay ledger until the request's
 signed expiry (≤ `MaxRequestAge`, 30s). A request is never re-dispatched because
 its response file exists.
 
-## Second, independent defect: first credential attempt always misses
+## Second, independent defect: first credential attempt can miss publication
 
-A session's mailbox server is opened and `service.json` is published only by
-the next `reconcile` pass in the run loop. That pass needs the dispatch/effect
-admission locks, which the creating/starting action holds until it returns.
-The PTY launcher starts inside that action. Its first fetch reads no
-`service.json`, fails immediately with "mailbox request failed", and sleeps
-`LaunchRetry` (5s). Every new central Claude session therefore waits ≥5s even on
-an idle daemon.
+A session created after the runtime started gets its mailbox server opened, and
+`service.json` published, only by a later `reconcile` pass in the run loop.
+That pass needs the dispatch/effect admission locks, which the creating/starting
+action holds until it returns. The PTY launcher starts inside that action. In
+the fixture below (session stored and started while the runtime is serving), the
+launcher's first fetch consistently read no `service.json`, failed immediately
+with "mailbox request failed", and slept `LaunchRetry` (5s). Whether a given
+production launch loses this race depends on namespace startup time versus the
+next reconcile (≤50ms after the action returns).
 
 ## Evidence (real runtime: `runtime.start`/`run`, real global budget, real
 ## protected-namespace launcher, legitimate signed requests)
@@ -68,7 +70,7 @@ or 330ms (26 MB Claude config template, small repo). Startup response-budget
 adoption cannot wedge: `Existing` adoption bypasses limits. The #198 account
 usage network reads run outside the accounts flock.
 
-## Fix (in progress on this branch)
+## Fix
 
 1. **Authenticated retirement.** After the client reads a response (and after
    any required receipt is settled), it publishes a signed `release` call
@@ -80,5 +82,62 @@ usage network reads run outside the accounts flock.
    requests, not 60s of history. Old clients and crashed clients still fall back
    to the unchanged 60s age cleanup. Every bound (files, bytes, receipts, queue,
    replay ledger) is unchanged.
-2. **Publish before launch.** The mailbox service is published before the
-   runtime is started, so the launcher's first fetch is served.
+2. **Release behind a blocked request.** `ServeOnce` no longer aborts at the
+   first capacity-blocked request. It keeps the blocked request claimed for a
+   later pass, still processes releases (and receipts) in the same pass, and
+   then reports `ErrResponseCapacity`.
+3. **Receipts never wait for capacity.** A mandatory receipt is verified,
+   authorized and settled even when the pool is exhausted. Its own response is
+   then not published (no client reads it). An accepted receipt retires the
+   response it proved was read. A response with a pending receipt is never
+   retired by a release.
+4. **Prior-boot responses are retired at adoption.** After a daemon restart,
+   retained responses from the previous boot can never be accepted, because
+   clients check the boot ID. Holding them could block every admission for up
+   to 60s, exactly when `restoreLiveAgents` relaunches every agent and each
+   launcher needs a credential. A same-boot reopen keeps its responses.
+5. **Launcher waits for publication within its attempt.** If `service.json` is
+   absent (`sessionrpc.ErrUnpublished`; nothing was sent, so no outcome is
+   uncertain), the launcher polls for publication inside its existing 10s
+   attempt instead of failing and sleeping 5s. Mailbox ownership stays
+   unchanged: the run loop is still the only goroutine that opens, initializes,
+   serves and closes servers. Opening from `startAgent` was rejected because
+   `serveCurrent`/`startPass` read those maps without the lock, and
+   `restoreLiveAgents` calls `startAgent` outside the gate. If publication does
+   not happen within 10s, the launcher prints a specific "not published"
+   message.
+
+### Compatibility
+
+A new client talking to an old daemon gets an `invalid_call` response to its
+release. That response is retained like any other, which doubles occupancy
+until the daemon is restarted. Panes bind-mount the daemon's own executable,
+and a daemon restart relaunches live agents, so after "install + daemon
+restart" every client and server is new. The service record is unchanged: no
+signed-field or JSON shape change breaks existing in-session clients.
+
+### After the fix (same harnesses)
+
+| Scenario | Before | After |
+| --- | --- | --- |
+| Session created while serving, idle daemon | 5.07s, retry guidance | 114ms, first attempt, no guidance |
+| Old (non-releasing) client pressure, 6×250ms | 53.3s | 53.3s (expected: bounded only by the 60s TTL; one run did not deliver within the 120s harness deadline, so results vary) |
+| Unrelated effect holding the gate 12s | 15.1s | 15.1s (not addressed here, see below) |
+
+Asserted regressions: `internal/sessionrpc/release_test.go` (production
+`Client`: sustained calls through a 1-slot pool; six subjects sharing a 4-slot
+pool, 240 calls in total, each under 2s, and the pool drains to zero; a release behind a
+capacity-blocked request; exact digest and replay; a pending receipt plus
+receipt settlement on a full pool; prior-boot adoption), and
+`central_launch_runtime_test.go` (real protected-namespace launcher, three
+lifecycle orders, first attempt and under `LaunchRetry`). Each regression was
+confirmed to fail with its fix reverted.
+
+### Not addressed here
+
+Any admitted effect that holds `dispatchMu`/`effectMu` (creation, restart,
+archive) still delays every session's mailbox publication and gated
+dispatches, including credential delivery, for its duration. The 12s row
+above shows this. Measured creation holds are short (90–330ms); no ≥10s
+holder was identified in current source, and it overlaps the auth
+runtime-boundary work.
