@@ -590,3 +590,113 @@ identity/thread unchanged, no `thread/start`.
 `ErrInsecureStore`. `BindAll` is one transaction. There is no legacy fallback
 for new workloads, and `config set` accepts only central. Re-run my A2 probe
 once the daemon tests compile.
+
+---
+
+## PR206 final exact-head review `e3cdeea` — SIGNOFF (CI-conditional)
+
+Posted on PR206 (issuecomment-6407449941). The only production delta since
+`08af41b` is the nil-by-default `beforeResponseRead` test hook. Targeted
+negative controls, overlaid into the head `server.go`:
+- **Mutation A** (conditional receipt discard): `RepeatedMandatoryReceipts/pool=4`
+  fails with `active=1 files=1`; `pool=1` alone would pass.
+- **Mutation B** (prior-boot deletion): the restart test fails at the
+  client-outcome assertion.
+- The barrier test passed `-race -count=30`. `sessionrpc` and `centralauth`
+  pass under race.
+
+---
+
+## c0523b `1272cfb` — test migration review (auth final review resumes after mailbox merge)
+
+`1272cfb` changes tests plus `amuxcfg/config.go` (App Server control is now
+forced for every Codex workload). **No implementation change** to
+`resumeRequiredFor` (`codexapp/manager.go:347`) or to pending-launch reuse
+(`accounts/store.go:459`). A5 and A1-R1 are therefore not settled.
+
+Suite status at `1272cfb`: accounts, codexapp, amuxcfg and daemon pass;
+**`centralauth` fails** (`TestLaunchClassifiesFailuresAndRecovers`, stale
+launcher guidance — known WIP).
+
+### A5 — REPRODUCED at `1272cfb`: unknown legacy history is still assumed empty
+`c0523b_a5_unknown_legacy_probe_test.go.txt` (codexapp, real
+`resumeThreadFor`/`resumeRequiredFor` + `fakeServer` with
+`resumeErr: "no rollout found"`):
+
+| Identity | resumeRequired | Outcome |
+|---|---|---|
+| none (legacy PTY thread id from the store) | false | **fresh `thread/start`, thread replaced by `thr_1`** |
+| v0, no central account | false | **fresh `thread/start`, thread replaced by `thr_1`** |
+| control: resumable v1 | true | launch fails, no `thread/start` |
+
+`1272cfb` forces App Server control for all Codex workloads, so every legacy
+PTY conversation now passes through this predicate. The new
+`TestHandshakeResumeRequiredNeverFallsBack` covers only the already-resumable
+case.
+
+### Legacy PTY → App Server migration (root focus, folded into A5)
+- **Same private home: CONFIRMED (CODE-READ).** PTY `Resolve` and
+  `AppServerCommand` both build through `wsops.AgentCommand` → harness
+  `Config` → `codexcfg.Template(s.ID, s.Dir)`, i.e. the same
+  `codexcfg.AgentHome(s.Dir)`. A structured `thread/resume` therefore looks
+  for the legacy rollout in the home where PTY Codex wrote it.
+- **Cold history: NOT preserved through amux surfaces (REPRODUCED).**
+  `c0523b_legacy_pty_cold_history_probe_test.go.txt` puts a real PTY rollout
+  in the agent's private `CODEX_HOME`. The harness still resolves it
+  (`RuntimeTranscriptPath` == rollout), but `RuntimeRecord` returns
+  `Structured=true`, path `…/codexapp/c1.events.jsonl`, and **that file does not
+  exist**. `sessionEventSourcesForTracked` uses only the structured event log
+  (`session_events.go:~841`), and nothing in `codexapp` backfills pre-migration
+  turns into it. Cold readers (provider transcript, `amux agent events`) see
+  **none** of the pre-migration PTY history; only native Codex (resume/TUI)
+  sees it.
+- The changed `query_test` removed exactly the PTY-rollout fixture that would
+  show this, and now asserts only the event-log path, so it no longer proves
+  history is accessible.
+- Same behaviour on upstream for central-mode PTY-pinned sessions: it
+  **predates** this branch, but the migration extends it to every legacy host
+  PTY session.
+- Ask: for a structured session with no structured log yet (or with legacy
+  turns), either include the legacy rollout as an earlier read-only source in
+  the runtime record / event sources, or backfill on first resume. Then
+  restore a fixture with a real rollout and assert its content is readable.
+  Also make legacy resume required (A5) so a "no rollout"-shaped error can
+  never discard it.
+
+### A1-R1 pending-launch reuse — production gates checked → LOW
+Gates checked:
+- `replaceSession` runs under `d.handle`, holding `dispatchMu`+`effectMu`
+  for resolve → kill → spawn.
+- Engine kill is synchronous (`instance.kill` → `terminateReporting`,
+  SIGTERM→SIGKILL, wait).
+- Claude credential dispatch also needs `effectMu`.
+
+So the old process cannot deliver between resolve and spawn. The only
+remaining window: the old process's request was already queued (the R2
+shape, still dispatched after it died), it is dispatched after the restart
+and pins the reused launch, and a login completion (also under `effectMu`)
+lands before the new process's first dispatch. The new process then gets
+`account_runtime_superseded`. This is a liveness problem only, it heals on
+the next restart, and the window is a few ms between two queued dispatches.
+The accounts-level probe shows that the state machine allows it; it is
+**not** proof that it happens in production. Recommended cheap hardening,
+non-blocking: retire `Pending` when the instance that held it is
+killed/replaced, or allocate at spawn.
+
+### Weakened acceptance in the test migration (review of the actual test diffs)
+- `credential_broker_test`: dropped the revoked-session negative and the
+  served-call count, and left `_ = value; _ = d` dead code. Claude broker ops
+  are now always denied, so the revocation check is moot for Claude. The
+  Codex revocation path at line 62 remains. Clean up the dead code; keep one
+  assertion that the broker callback is never invoked (`calls == 0` is
+  asserted per verb, OK).
+- `control_test`: removed the PTY/AppServer frozen-routing matrix and
+  `TestSavedOptInDoesNotRerouteRunningPTY`. That is acceptable, because PTY
+  can no longer be effective and control stays frozen per daemon lifetime.
+  The new test asserts that a fresh daemon keeps AppServer and warns.
+- `query_test`: see cold history above. This is the one weakening that hides
+  a real behaviour gap.
+- `account_migration_unknown_test.go` deleted (CredentialUnknown no longer
+  exists). The replacement coverage for corrupt-record repair should be the
+  A2 regression (corrupt record → login → next-launch delivery; insecure
+  store refused, file unchanged). Confirm it exists before final review.

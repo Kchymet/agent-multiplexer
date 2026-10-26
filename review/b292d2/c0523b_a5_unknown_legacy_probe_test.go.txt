@@ -1,0 +1,37 @@
+package codexapp
+
+import (
+	"context"
+	"testing"
+)
+
+// A5 probe: unknown legacy history (no identity file = legacy PTY thread from
+// the store; v0 identity) with a "no rollout"-shaped resume error.
+func TestProbeA5UnknownLegacyHistory(t *testing.T) {
+	cases := map[string]*Identity{
+		"no-identity (legacy PTY thread)": nil,
+		"v0 identity, no central account": {SessionID: "s-a5", ThreadID: "thr_legacy", Version: 0},
+		"control: resumable identity":     {SessionID: "s-a5", ThreadID: "thr_legacy", Resumable: true, Version: identityVersion},
+	}
+	for name, id := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if id != nil {
+				if err := SaveIdentity(*id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resume := resumeThreadFor("s-a5", "thr_legacy")
+			required := resumeRequiredFor("s-a5", resume)
+			client, server := newMemPair()
+			fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, resumeErr: "no rollout found"}
+			go fs.loop()
+			defer fs.close()
+			sup := New(Config{SessionID: "s-a5", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: resume, ResumeRequired: required})
+			defer sup.Close()
+			err := sup.attach(context.Background(), client)
+			_, started := fs.sawCall("thread/start")
+			t.Logf("resume=%q resumeRequired=%v launchErr=%v freshThreadStarted=%v newThread=%q", resume, required, err != nil, started, sup.ThreadID())
+		})
+	}
+}

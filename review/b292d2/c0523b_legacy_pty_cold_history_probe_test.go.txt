@@ -1,0 +1,52 @@
+package daemon
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"amux/internal/agent"
+	"amux/internal/codexcfg"
+	"amux/internal/store"
+)
+
+// A5/root focus: a legacy PTY Codex session with a real rollout in its private
+// CODEX_HOME. Is its pre-migration history still reachable through the runtime
+// record that providers and normalized events read?
+func TestProbeLegacyPTYColdHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	const cid = "22222222-2222-4222-8222-222222222222"
+	s := store.Session{ID: "c1", RootID: "test-root", Agent: "codex", ClaudeID: cid, Dir: t.TempDir()}
+	t.Setenv("CODEX_HOME", codexcfg.AgentHome(s.Dir))
+	rollDir := filepath.Join(codexcfg.AgentHome(s.Dir), "sessions", "2026", "07", "02")
+	if err := os.MkdirAll(rollDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roll := filepath.Join(rollDir, "rollout-2026-07-02T10-00-00-"+cid+".jsonl")
+	if err := os.WriteFile(roll, []byte("{\"type\":\"session_meta\"}\n{\"type\":\"response_item\",\"payload\":{\"text\":\"PRE-MIGRATION TURN\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	harnessPath, _ := agent.HarnessFor("codex").RuntimeTranscriptPath(s)
+	c, done := dialDaemon(t, testDaemon(t))
+	defer done()
+	rec, err := c.RuntimeRecord("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, statErr := os.Stat(rec.Path)
+	t.Logf("harness rollout path found=%v; RuntimeRecord path=%q structured=%v recordExists=%v pointsAtRollout=%v",
+		harnessPath == roll, rec.Path, rec.Structured, statErr == nil, rec.Path == roll)
+}
