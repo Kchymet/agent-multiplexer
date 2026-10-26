@@ -149,9 +149,32 @@ func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
 	}
 	blocked, encoded := lowSignedCall(t, f, Call{Kind: CallOperation, Route: access.RouteQuery, Verb: "snapshot", Fields: map[string]string{"value": "blocked"}})
 	publishEnvelope(t, f.grant.RequestsHostDir, blocked, encoded)
+	state := func() string {
+		active, commits, releases := budget.counts()
+		out := fmt.Sprintf("budget active=%d commits=%d releases=%d", active, commits, releases)
+		for _, dir := range []string{RequestsDirName, processingDirName, ResponsesDirName} {
+			entries, err := os.ReadDir(filepath.Join(f.grant.MailboxHostDir, dir))
+			names := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			out += fmt.Sprintf(" %s=%v%v", dir, names, err)
+		}
+		return out
+	}
+	// Preconditions: the consumed response holds the only slot, and both the
+	// low request and the client's release are queued, the low one first.
+	before := state()
+	if active, _, _ := budget.counts(); active != 1 {
+		t.Fatalf("precondition: consumed response must hold the only slot: %s", before)
+	}
+	queued, err := os.ReadDir(f.grant.RequestsHostDir)
+	if err != nil || len(queued) != 2 || queued[0].Name() != requestFileName(blocked.RequestID) {
+		t.Fatalf("precondition: want the low request ahead of one release: %s", before)
+	}
 
 	if _, err := f.server.ServeOnce(context.Background()); !errors.Is(err, ErrResponseCapacity) {
-		t.Fatalf("first pass = %v, want the low request capacity-blocked", err)
+		t.Fatalf("first pass = %v, want the low request capacity-blocked\nbefore: %s\nafter:  %s", err, before, state())
 	}
 	if responseCount(t, f.grant.MailboxHostDir) != 0 {
 		t.Fatal("release queued behind a capacity-blocked request was not processed")
