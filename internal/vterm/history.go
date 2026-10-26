@@ -393,6 +393,14 @@ func (t *Terminal) ScrollPages(delta int) bool {
 	return t.scrollTo(t.offset + delta*max(1, t.rows-1))
 }
 
+// ScrollHalfPages moves by half the current viewport height, rounded down,
+// with a minimum of one row. Bounds and live/history semantics match ScrollLines.
+func (t *Terminal) ScrollHalfPages(delta int) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.scrollTo(t.offset + delta*max(1, t.rows/2))
+}
+
 // ScrollToTop shows the oldest history.
 func (t *Terminal) ScrollToTop() bool {
 	t.mu.Lock()

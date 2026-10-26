@@ -738,3 +738,41 @@ func TestMouseTrackedExported(t *testing.T) {
 		t.Fatal("not tracked after DECSET 1000")
 	}
 }
+
+func TestScrollHalfPagesGeometryAndBounds(t *testing.T) {
+	for _, tc := range []struct{ rows, step int }{{1, 1}, {2, 1}, {3, 1}, {5, 2}, {6, 3}, {7, 3}} {
+		t.Run(fmt.Sprint(tc.rows), func(t *testing.T) {
+			term := New(20, tc.rows)
+			defer term.Close()
+			if term.ScrollHalfPages(1) || term.ScrollHalfPages(-1) {
+				t.Fatal("empty history moved")
+			}
+			term.write(numbered(1, 30))
+			if !term.ScrollHalfPages(1) || term.Viewport().Offset != tc.step {
+				t.Fatalf("half up: %+v", term.Viewport())
+			}
+			if !term.ScrollHalfPages(-1) || term.Viewport().Offset != 0 || term.ScrollHalfPages(-1) {
+				t.Fatal("half down did not clamp live")
+			}
+			term.ScrollToTop()
+			if term.ScrollHalfPages(1) {
+				t.Fatal("past oldest row")
+			}
+			term.ScrollLines(-1)
+			term.ScrollHalfPages(1)
+			if v := term.Viewport(); v.Offset != v.HistoryLen {
+				t.Fatalf("partial last step: %+v", v)
+			}
+			term.ReturnLive()
+			term.ScrollPages(1)
+			if term.Viewport().Offset != max(1, tc.rows-1) {
+				t.Fatal("full-page behavior changed")
+			}
+			term.Resize(20, 9)
+			term.ScrollHalfPages(1)
+			if term.Viewport().Offset != 4 {
+				t.Fatal("half step did not follow resized viewport")
+			}
+		})
+	}
+}
