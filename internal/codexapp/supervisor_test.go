@@ -3,6 +3,7 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -389,6 +390,32 @@ func TestHandshakeResumeMissFallsBack(t *testing.T) {
 	}
 	if got := sup.ThreadID(); got != "thr_1" {
 		t.Fatalf("threadID = %q, want thr_1 (the fresh thread from the fallback)", got)
+	}
+}
+
+// A thread known to hold history never falls back to a fresh thread: a resume
+// error (even one shaped like a missing rollout) fails the launch, sends no
+// thread/start, and leaves the persisted identity unchanged.
+func TestHandshakeResumeRequiredNeverFallsBack(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	before := Identity{SessionID: "s-test", ThreadID: "thr_history", Resumable: true, Version: identityVersion, ChatGPTAccount: "acct-old"}
+	if err := SaveIdentity(before); err != nil {
+		t.Fatal(err)
+	}
+	client, server := newMemPair()
+	fs := &fakeServer{t: t, conn: server, respByID: map[string]chan incoming{}, resumeErr: "no rollout found"}
+	go fs.loop()
+	defer fs.close()
+	sup := New(Config{SessionID: "s-test", Endpoint: "unix:///tmp/x.sock", ResumeThreadID: "thr_history", ResumeRequired: resumeRequiredFor("s-test", "thr_history")})
+	defer sup.Close()
+	if err := sup.attach(context.Background(), client); err == nil {
+		t.Fatal("resume failure of a thread with history did not fail the launch")
+	}
+	if _, ok := fs.sawCall("thread/start"); ok {
+		t.Fatal("resume failure started an empty thread")
+	}
+	if got, ok := LoadIdentity("s-test"); !ok || !reflect.DeepEqual(got, before) {
+		t.Fatalf("identity changed: %+v", got)
 	}
 }
 

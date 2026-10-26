@@ -492,8 +492,8 @@ func TestIdentityRecordsBoundAccount(t *testing.T) {
 
 // TestManagerEnsureCentralAuthLifecycle drives the production wiring end to
 // end: Manager.SetChatGPTAuth → Ensure (real child process, WebSocket dial) →
-// injection before the thread → refresh over the wire → restart resumes the
-// thread only under the persisted account.
+// injection before the thread → refresh over the wire → a restart under a
+// replacement account resumes the same thread → a later restart resumes it too.
 func TestManagerEnsureCentralAuthLifecycle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -540,21 +540,29 @@ func TestManagerEnsureCentralAuthLifecycle(t *testing.T) {
 	assertNoSecrets(t, sup)
 	m.Shutdown()
 
-	// Central login now points at another workspace: the resume is refused.
+	// Central login now points at another workspace: the next process takes
+	// it and resumes the same thread, keeping the previous account as history.
 	other := newStubProvider()
 	other.account = "acct-other"
 	m2 := NewManager(ctx, "")
 	m2.SetChatGPTAuth(other)
-	if _, err := ensure(m2); !errors.Is(err, errAccountChanged) {
-		t.Fatalf("Ensure with another account = %v, want errAccountChanged", err)
+	sup2, err := ensure(m2)
+	if err != nil {
+		t.Fatalf("Ensure with another account = %v", err)
 	}
-	refused := <-servers
-	if _, ok := refused.sawCall("thread/resume"); ok {
-		t.Fatal("thread resumed under another account")
+	moved := <-servers
+	if li, ri := methodIndex(moved, "account/login/start"), methodIndex(moved, "thread/resume"); li < 0 || li > ri {
+		t.Fatalf("replacement login=%d resume=%d", li, ri)
+	}
+	if _, ok := moved.sawCall("thread/start"); ok || sup2.ThreadID() != threadID {
+		t.Fatal("replacement account started a new thread")
+	}
+	if id, ok := LoadIdentity("central"); !ok || id.ThreadID != threadID || id.ChatGPTAccount != "acct-other" || len(id.PriorChatGPTAccounts) != 1 || id.PriorChatGPTAccounts[0] != "acct-1" {
+		t.Fatalf("identity after replacement = %+v", id)
 	}
 	m2.Shutdown()
 
-	// Same account: the restart logs in again, then resumes the same thread.
+	// The original account again: the restart logs in, then resumes the thread.
 	m3 := NewManager(ctx, "")
 	defer m3.Shutdown()
 	m3.SetChatGPTAuth(p)

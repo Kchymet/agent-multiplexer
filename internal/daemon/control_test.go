@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +25,6 @@ func isolateControl(t *testing.T) {
 	if err := os.Unsetenv(amuxcfg.ControlEnv); err != nil {
 		t.Fatal(err)
 	}
-	legacyCodexAuth(t)
 }
 
 // legacyClaudeAuth selects the host Claude login for tests of surfaces that
@@ -40,12 +38,6 @@ func legacyClaudeAuth(t *testing.T) {
 
 // legacyCodexAuth selects the host Codex login, under which codex.control
 // keeps its own selection; central Codex auth always requires the App Server.
-func legacyCodexAuth(t *testing.T) {
-	t.Helper()
-	if err := amuxcfg.SetAuthMode("codex", amuxcfg.AuthHost); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestPersistedControlSurvivesFreshDaemon(t *testing.T) {
 	isolateControl(t)
@@ -96,45 +88,36 @@ func TestPersistedControlSurvivesFreshDaemon(t *testing.T) {
 }
 
 func TestControlFrozenForDaemonLifetime(t *testing.T) {
-	for _, initial := range []string{amuxcfg.PTY, amuxcfg.AppServer} {
-		t.Run(initial, func(t *testing.T) {
-			isolateControl(t)
-			if err := amuxcfg.SetCodexControl(initial); err != nil {
-				t.Fatal(err)
-			}
-			d := New("", nil, time.Hour)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			d.codex = codexapp.NewManager(ctx, "")
-			defer d.codex.Shutdown()
-			c, closeClient := dialDaemon(t, d)
-			defer closeClient()
-			other := amuxcfg.AppServer
-			if initial == other {
-				other = amuxcfg.PTY
-			}
-			if err := amuxcfg.SetCodexControl(other); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv(amuxcfg.ControlEnv, other)
-			// Both routing and cold transcript selection retain the startup value.
-			want := initial == amuxcfg.AppServer
-			// An ordinary Codex MEMBER follows the startup selection; a workgroup
-			// coordinator is always structured (TestGoalCoordinatorIsAlwaysStructured),
-			// so it cannot show whether a later edit changed this daemon's routing.
-			member := store.Session{ID: "codex", RootID: "root", Agent: "codex"}
-			if d.structuredControl(member) != want || d.structuredResolvable(member) != want {
-				t.Fatal("config/environment edit changed the existing daemon's routing")
-			}
-			selection, err := c.CodexControl()
-			if err != nil || selection.Effective != initial || selection.Persisted != initial || selection.OverrideSet {
-				t.Fatalf("daemon diagnostics re-read startup inputs: %+v, %v", selection, err)
-			}
-			fresh := New("", nil, time.Hour)
-			if fresh.codexControl.Effective != other {
-				t.Fatal("fresh daemon ignored the changed selection")
-			}
-		})
+	isolateControl(t)
+	if err := amuxcfg.SetCodexControl(amuxcfg.AppServer); err != nil {
+		t.Fatal(err)
+	}
+	d := New("", nil, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.codex = codexapp.NewManager(ctx, "")
+	defer d.codex.Shutdown()
+	c, closeClient := dialDaemon(t, d)
+	defer closeClient()
+	if err := amuxcfg.SetCodexControl(amuxcfg.PTY); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(amuxcfg.ControlEnv, amuxcfg.PTY)
+	// Routing and diagnostics keep the startup snapshot. An ordinary Codex
+	// member shows routing; a goal coordinator is always structured.
+	member := store.Session{ID: "codex", RootID: "root", Agent: "codex"}
+	if !d.structuredControl(member) || !d.structuredResolvable(member) {
+		t.Fatal("config/environment edit changed the existing daemon's routing")
+	}
+	selection, err := c.CodexControl()
+	if err != nil || selection.Effective != amuxcfg.AppServer || selection.Persisted != amuxcfg.AppServer || selection.OverrideSet {
+		t.Fatalf("daemon diagnostics re-read startup inputs: %+v, %v", selection, err)
+	}
+	// A fresh daemon reads the edit, but central Codex auth keeps App Server
+	// control and reports the ignored PTY selection.
+	fresh := New("", nil, time.Hour)
+	if fresh.codexControl.Effective != amuxcfg.AppServer || fresh.codexControl.Persisted != amuxcfg.PTY || fresh.codexControl.Warning == "" {
+		t.Fatalf("fresh daemon control = %+v", fresh.codexControl)
 	}
 }
 
@@ -193,31 +176,5 @@ func TestInvalidControlRejectsBeforeSocketMutation(t *testing.T) {
 	b, err := os.ReadFile(core.SocketPath())
 	if err != nil || string(b) != "untouched" {
 		t.Fatalf("startup touched the socket: %q, %v", b, err)
-	}
-}
-
-func TestSavedOptInDoesNotRerouteRunningPTY(t *testing.T) {
-	isolateControl(t)
-	d, eng := steerDaemon(t)
-	putSession(t, "running-codex", "codex")
-	in := eng.running("running-codex")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	d.codex = codexapp.NewManager(ctx, "")
-	defer d.codex.Shutdown()
-	if err := amuxcfg.SetCodexControl(amuxcfg.AppServer); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(amuxcfg.ControlEnv, amuxcfg.AppServer)
-	// Interject cannot start a process. It must still reach the already-running
-	// PTY instance after opt-in is saved, not fail looking for a supervisor.
-	err := d.steer(ctx, core.Action{ID: "running-codex", Fields: map[string]string{
-		core.SteerVerb: core.SteerInterject, core.SteerText: "still this session",
-	}})
-	if err != nil || !strings.Contains(in.written(), "still this session") {
-		t.Fatalf("running session rerouted: %q, %v", in.written(), err)
-	}
-	if len(eng.ensuredKeys()) != 0 || len(d.codex.Live()) != 0 {
-		t.Fatal("config edit started another session")
 	}
 }

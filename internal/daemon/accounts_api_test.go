@@ -9,6 +9,7 @@ import (
 	"amux/internal/store"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,40 +45,37 @@ func loginAPIForTest(t *testing.T, d *Daemon, harness, key string) {
 	}
 }
 
-func TestClaudeAPIFirstLoginReplacementAndRebind(t *testing.T) {
+func TestClaudeAPIReplacementServesOnlyTheNextLaunch(t *testing.T) {
 	d := isolatedAccounts(t)
 	if err := accounts.Bind("new", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	loginAPIForTest(t, d, "claude", "SYNTHETIC-FIRST-KEY")
-	if err := accounts.Bind("new", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	b, p, err := accounts.Delivery("new", "claude")
+	running, err := accounts.BeginLaunch("new", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
+	loginAPIForTest(t, d, "claude", "SYNTHETIC-FIRST-KEY")
 	cred, err := centralauth.ClaudeStore().Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.Accept("new", b.Revision, p.DeliveryEpoch, "", cred.Generation); err != nil {
+	if err := acceptClaude("new", running, cred.Generation); err != nil {
 		t.Fatal("first API login refused", err)
 	}
 	if err := accounts.ObserveClaude("new", "runtime", []byte(`{"five_hour":{"used_percentage":42}}`)); err == nil {
 		t.Fatal("API key accepted subscription usage")
 	}
 	loginAPIForTest(t, d, "claude", "SYNTHETIC-SECOND-KEY")
-	b, p, err = accounts.Delivery("new", "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
 	cred, err = centralauth.ClaudeStore().Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.Accept("new", b.Revision, p.DeliveryEpoch, "", cred.Generation); err == nil {
-		t.Fatal("existing workload adopted replacement API key")
+	if err := acceptClaude("new", running, cred.Generation); !errors.Is(err, accounts.ErrSuperseded) {
+		t.Fatal("running process adopted replacement API key", err)
+	}
+	next, _ := accounts.BeginLaunch("new", "claude")
+	if err := acceptClaude("new", next, cred.Generation); err != nil {
+		t.Fatal("next launch refused the replacement API key", err)
 	}
 	snapshot, err := d.accountSnapshot(t.Context())
 	if err != nil {
@@ -107,23 +105,27 @@ func TestSmokeCentralAPIKeyBindingNative(t *testing.T) {
 	defer d.disconnectAccounts("", true)
 	loginAPIForTest(t, d, "codex", "sk-synthetic-FIRST-SECRET")
 	source := codexTokenSource{d: d}
-	tok, err := source.CodexChatGPTToken(context.Background(), codexapp.TokenRequest{SessionID: row.ID})
+	first, err := accounts.BeginLaunch(row.ID, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := source.CodexChatGPTToken(context.Background(), codexapp.TokenRequest{SessionID: row.ID, Launch: first})
 	if err != nil || !tok.APIKey || tok.AccountID != "" || tok.PlanType != "" {
 		t.Fatal("first authorized API delivery failed/invented identity", err)
 	}
 	loginAPIForTest(t, d, "codex", "sk-synthetic-SECOND-SECRET")
-	if _, err := source.CodexChatGPTToken(t.Context(), codexapp.TokenRequest{SessionID: row.ID}); err == nil {
-		t.Fatal("native replacement adopted without rebind")
+	if _, err := source.CodexChatGPTToken(t.Context(), codexapp.TokenRequest{SessionID: row.ID, Launch: first}); err == nil {
+		t.Fatal("running process adopted the native replacement")
 	}
-	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountRebind, ProfileID: "codex:central", Revision: profileRevision(t, "codex:central"), WorkloadID: row.ID}, false)
-	if !out.OK {
-		t.Fatal(out)
+	next, err := accounts.BeginLaunch(row.ID, "codex")
+	if err != nil {
+		t.Fatal(err)
 	}
-	tok, err = source.CodexChatGPTToken(t.Context(), codexapp.TokenRequest{SessionID: row.ID})
+	tok, err = source.CodexChatGPTToken(t.Context(), codexapp.TokenRequest{SessionID: row.ID, Launch: next})
 	if err != nil || tok.AccessToken != "sk-synthetic-SECOND-SECRET" {
-		t.Fatal("explicit rebind failed", err)
+		t.Fatal("next launch did not receive the replacement", err)
 	}
-	t.Log("Native API ceremony, first credential delivery, replacement refusal and explicit rebind passed without model calls")
+	t.Log("Native API ceremony, first delivery, running-process refusal and next-launch replacement passed without model calls")
 }
 
 func TestClaudeAPIDeliveryRequiresTypedLauncher(t *testing.T) {
@@ -131,12 +133,13 @@ func TestClaudeAPIDeliveryRequiresTypedLauncher(t *testing.T) {
 	d, r, principals := sessionRuntimeFixture(t, row)
 	defer d.disconnectAccounts("", true)
 	loginAPIForTest(t, d, "claude", "synthetic-typed-key")
-	call := centralCall()
-	out, err := r.dispatch(t.Context(), sessionrpc.DispatchRequest{Principal: principals[row.ID], Call: call})
+	call := launchCall(t, row.ID)
+	untyped := centralCall()
+	untyped.Fields[centralauth.LaunchField] = call.Fields[centralauth.LaunchField]
+	out, err := r.dispatch(t.Context(), sessionrpc.DispatchRequest{Principal: principals[row.ID], Call: untyped})
 	if err != nil || out.Code != "credential_type_unsupported" || len(out.Body) != 0 {
 		t.Fatal("old launcher received API material", err)
 	}
-	call.Fields[centralauth.FormatField] = centralauth.TypedFormat
 	out, err = r.dispatch(t.Context(), sessionrpc.DispatchRequest{Principal: principals[row.ID], Call: call})
 	var delivery centralauth.Delivery
 	if err != nil || out.Status != sessionrpc.StatusOK || json.Unmarshal(out.Body, &delivery) != nil || delivery.Kind != centralauth.KindClaudeAPIKey || delivery.Token != "synthetic-typed-key" {

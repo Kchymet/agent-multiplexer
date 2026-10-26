@@ -27,7 +27,8 @@ func TestClaudeObservationProvenanceAndEpoch(t *testing.T) {
 	isolated(t)
 	Bind("w", "claude")
 	b, p, _ := Delivery("w", "claude")
-	Accept("w", b.Revision, p.DeliveryEpoch, "", 1)
+	l, _ := BeginLaunch("w", "claude")
+	Accept("w", b.Revision, p.DeliveryEpoch, "", 1, l)
 	raw := []byte(`{"five_hour":{"used_percentage":42,"resets_at":1892900800}}`)
 	if e := ObserveClaude("w", "runtime-1", raw); e != nil {
 		t.Fatal(e)
@@ -65,7 +66,8 @@ func TestMigrationCapturesPreexistingClaudeCredential(t *testing.T) {
 		t.Fatal("preexisting credential not captured")
 	}
 	b, p, _ := Delivery("legacy", "claude")
-	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", old.Generation); err != nil {
+	running, _ := BeginLaunch("legacy", "claude")
+	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", old.Generation, running); err != nil {
 		t.Fatal(err)
 	}
 	token, _ = centralauth.NewSecret("REPLACEMENT-OPAQUE-TOKEN")
@@ -73,7 +75,11 @@ func TestMigrationCapturesPreexistingClaudeCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", next.Generation); err != nil {
+	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", next.Generation, running); !errors.Is(err, ErrSuperseded) {
+		t.Fatal("running Claude process received the replacement", err)
+	}
+	relaunch, _ := BeginLaunch("legacy", "claude")
+	if err = Accept("legacy", b.Revision, p.DeliveryEpoch, "", next.Generation, relaunch); err != nil {
 		t.Fatal("next Claude launch refused the replacement", err)
 	}
 }
@@ -96,5 +102,26 @@ func TestUnreadableClaudeCredentialDoesNotBlockBinding(t *testing.T) {
 	}
 	if Mode("w", "claude") != "central" {
 		t.Fatal("unreadable credential changed routing")
+	}
+}
+
+func TestInsecureClaudeStoreFailsClosedWithoutRewrite(t *testing.T) {
+	isolated(t)
+	dir := centralauth.ClaudeStore().Dir
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "credential.json")
+	if err := os.WriteFile(path, []byte("evidence"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Bind("w", "claude"); !errors.Is(err, centralauth.ErrInsecureStore) {
+		t.Fatalf("insecure store accepted: %v", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "evidence" {
+		t.Fatal("insecure credential file changed")
 	}
 }

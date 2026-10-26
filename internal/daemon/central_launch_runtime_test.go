@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +107,8 @@ func testCentralClaudeTypedLaunch(t *testing.T, mode string) {
 			t.Fatalf("central launch exposes a credential store: %q", field)
 		}
 	}
-	if !strings.Contains(strings.Join(argv, " "), centralauth.LauncherArg+" "+fake) {
+	// The launcher receives this pane's daemon-allocated process launch.
+	if !regexp.MustCompile(regexp.QuoteMeta(centralauth.LauncherArg+" "+centralauth.LaunchArgPrefix) + `[0-9]+:[0-9a-f]{48} ` + regexp.QuoteMeta(fake)).MatchString(strings.Join(argv, " ")) {
 		t.Fatalf("agent pane does not run the central launcher: %v", argv)
 	}
 	launchEnv, err := launchenv.Build(append(os.Environ(), "ANTHROPIC_API_KEY=inherited-must-not-reach-claude"), env, launchenv.ForRuntime(s.Agent))

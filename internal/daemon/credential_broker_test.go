@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,7 +72,7 @@ func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
 	codex := store.Session{ID: "codex", Agent: "codex", Dir: t.TempDir()}
 	d, r, principals := sessionRuntimeFixture(t, claude, codex)
-	// The Keychain broker serves only the explicitly selected legacy host mode.
+	// The Keychain broker served only the legacy host mode, which is retired.
 	if err := amuxcfg.SetAuthMode("claude", amuxcfg.AuthHost); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +130,9 @@ func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 			}
 		})
 	}
-	for _, verb := range []string{credentialbroker.Read, credentialbroker.Write, credentialbroker.Read, credentialbroker.Delete} {
+	// A binding recorded as host before migration still follows central: the
+	// host Keychain is never served, even for well-formed operations.
+	for _, verb := range []string{credentialbroker.Read, credentialbroker.Write, credentialbroker.Delete} {
 		o.Verb = verb
 		o.Value = "rotated synthetic token"
 		call.Verb, call.Fields = verb, o.Fields()
@@ -139,28 +140,11 @@ func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 		if verb == credentialbroker.Read {
 			call.Route = access.RouteQuery
 		}
-		if err := r.authorize(ctx, principals[claude.ID], call); err != nil {
-			t.Fatal(err)
-		}
-		res, err := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[claude.ID], Call: call})
-		if err != nil || res.Status != sessionrpc.StatusOK {
-			t.Fatalf("broker operation failed: %v", err)
-		}
-		if verb == credentialbroker.Read {
-			var result credentialbroker.Result
-			if json.Unmarshal(res.Body, &result) != nil || result.Value != value {
-				t.Fatal("broker did not read current shared credentials")
-			}
+		res, _ := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[claude.ID], Call: call})
+		if res.Status == sessionrpc.StatusOK || calls != 0 {
+			t.Fatalf("retired host Keychain served %s", verb)
 		}
 	}
-	if calls != 4 {
-		t.Fatal("unexpected broker calls")
-	}
-	if err := d.authority.Revoke(ctx, access.SubjectSession, claude.ID); err != nil {
-		t.Fatal(err)
-	}
-	res, _ := r.dispatch(ctx, sessionrpc.DispatchRequest{Principal: principals[claude.ID], Call: call})
-	if res.Status != sessionrpc.StatusDenied || calls != 4 {
-		t.Fatal("revoked session reached credentials")
-	}
+	_ = value
+	_ = d
 }

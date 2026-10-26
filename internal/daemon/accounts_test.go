@@ -6,6 +6,7 @@ import (
 	"amux/internal/core"
 	"context"
 	"encoding/json"
+	"errors"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 	"os"
 	"strings"
@@ -192,11 +193,13 @@ func TestCreationReadinessChecksCoordinatorAndWorker(t *testing.T) {
 	}
 }
 
-func TestDifferentProfileDefaultsShareCAS(t *testing.T) {
+func TestDefaultSelectionsShareCAS(t *testing.T) {
 	d := isolatedAccounts(t)
 	before, _ := accounts.Read()
-	a := hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: "claude:host", Revision: before.Profiles["claude:host"].Revision, DefaultRevision: before.DefaultRevisions["claude"]}
-	b := hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: "claude:environment", Revision: before.Profiles["claude:environment"].Revision, DefaultRevision: a.DefaultRevision}
+	// Two clients confirming from one snapshot: only the first succeeds.
+	a := hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: "claude:central", Revision: before.Profiles["claude:central"].Revision, DefaultRevision: before.DefaultRevisions["claude"]}
+	b := a
+	b.Revision++ // the first selection advanced the profile revision
 	if out := d.accountCall(t.Context(), a, false); !out.OK {
 		t.Fatal(out)
 	}
@@ -222,23 +225,23 @@ func TestCancelledClaudeReplacementRestoresReadyCredential(t *testing.T) {
 	}
 }
 
-func TestClaudeLogoutReplacementCannotReuseOldBinding(t *testing.T) {
+func TestClaudeLogoutAndDifferentLoginServeOnlyTheNextLaunch(t *testing.T) {
 	d := isolatedAccounts(t)
 	r := beginClaude(t, d, "owner")
 	completeClaude(t, d, r)
 	if err := accounts.Bind("old", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	b, p, err := accounts.Delivery("old", "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
+	running, _ := accounts.BeginLaunch("old", "claude")
 	old, _ := centralauth.ClaudeStore().Load()
-	if err = accounts.Accept("old", b.Revision, p.DeliveryEpoch, "", old.Generation); err != nil {
+	if err := acceptClaude("old", running, old.Generation); err != nil {
 		t.Fatal(err)
 	}
-	if out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountLogout, ProfileID: p.ID, Revision: profileRevision(t, p.ID)}, false); !out.OK {
+	if out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountLogout, ProfileID: "claude:central", Revision: profileRevision(t, "claude:central")}, false); !out.OK {
 		t.Fatal(out)
+	}
+	if _, _, err := accounts.Delivery("old", "claude"); !errors.Is(err, accounts.ErrBlocked) {
+		t.Fatal("delivery open after logout", err)
 	}
 	r = beginClaude(t, d, "owner")
 	r.Operation = hp.AccountComplete
@@ -247,24 +250,14 @@ func TestClaudeLogoutReplacementCannotReuseOldBinding(t *testing.T) {
 		t.Fatal(out)
 	}
 	fresh, _ := centralauth.ClaudeStore().Load()
-	b, p, _ = accounts.Delivery("old", "claude")
 	if fresh.Generation == old.Generation {
 		t.Fatal("generation repeated")
 	}
-	if err = accounts.Accept("old", b.Revision, p.DeliveryEpoch, "", fresh.Generation); err == nil {
-		t.Fatal("opaque replacement moved old workload")
+	if err := acceptClaude("old", running, fresh.Generation); !errors.Is(err, accounts.ErrSuperseded) {
+		t.Fatal("opaque replacement moved the running process", err)
 	}
-}
-
-func TestDefaultMigrationPinsSyntheticConsoleBeforeChangingSource(t *testing.T) {
-	d := isolatedAccounts(t)
-	before, _ := accounts.Read()
-	out := d.accountCall(t.Context(), hp.AccountRequest{Operation: hp.AccountDefault, ProfileID: "claude:host", Revision: before.Profiles["claude:host"].Revision, DefaultRevision: before.DefaultRevisions["claude"]}, false)
-	if !out.OK {
-		t.Fatal(out)
-	}
-	after, _ := accounts.Read()
-	if after.Bindings["console"].ProfileID != before.Defaults["claude"] || after.Defaults["claude"] != "claude:host" {
-		t.Fatal("synthetic console changed with default", after.Bindings["console"])
+	next, _ := accounts.BeginLaunch("old", "claude")
+	if err := acceptClaude("old", next, fresh.Generation); err != nil {
+		t.Fatal("next launch refused the new login", err)
 	}
 }

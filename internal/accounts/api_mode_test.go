@@ -55,14 +55,14 @@ func TestReplacementServesNextLaunchOnly(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrBlocked) {
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrSuperseded) {
 					t.Fatalf("running process retargeted: %v", err)
 				}
 				// Rediscovery cannot move the running process either.
 				if err := BindExisting("existing", harness); err != nil {
 					t.Fatal(err)
 				}
-				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrBlocked) {
+				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrSuperseded) {
 					t.Fatalf("rediscovery removed fence: %v", err)
 				}
 				next, err := BeginLaunch("existing", harness)
@@ -74,10 +74,10 @@ func TestReplacementServesNextLaunchOnly(t *testing.T) {
 				}
 				s, _ := Read()
 				got := s.Bindings["existing"]
-				if got.CredentialMode != after || got.CredentialVersion != 42 || got.Launch != next {
+				if got.CredentialMode != after || got.CredentialVersion != 42 || got.Launch != next.Seq {
 					t.Fatalf("next launch not pinned: %+v", got)
 				}
-				if len(got.History) != 1 || got.History[0].Launch != first || got.History[0].Mode != before || got.History[0].Version != 41 {
+				if len(got.History) != 1 || got.History[0].Launch != first.Seq || got.History[0].Mode != before || got.History[0].Version != 41 {
 					t.Fatalf("previous runtime evidence lost: %+v", got.History)
 				}
 				if err := Accept("existing", b.Revision, p.DeliveryEpoch, "", 42, first); !errors.Is(err, ErrSuperseded) {

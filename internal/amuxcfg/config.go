@@ -159,15 +159,16 @@ func ResolveCodexControl() (Control, error) {
 		}
 	}
 	// Central Codex auth delivers tokens through the supervised App Server's
-	// external-auth flow; a PTY Codex has no equivalent input. Explicit host and
-	// environment modes keep the selection above.
-	mode, err := AuthMode("codex")
-	if err != nil {
+	// external-auth flow; a PTY Codex has no equivalent input. Every workload
+	// follows central auth (the legacy codex.auth modes are retired), so App
+	// Server control is always in effect. A malformed legacy codex.auth value
+	// still fails startup rather than being silently ignored.
+	if _, err := AuthMode("codex"); err != nil {
 		return c, err
 	}
-	if mode == AuthCentral && c.Effective != AppServer {
+	if c.Effective != AppServer {
 		if c.Source != "default" {
-			c.Warning = fmt.Sprintf("codex.auth is central, which requires App Server control; ignoring codex.control %s from %s (run `amux config set codex.auth host` to keep it)", c.Effective, c.Source)
+			c.Warning = fmt.Sprintf("central Codex auth requires App Server control; ignoring codex.control %s from %s", c.Effective, c.Source)
 		}
 		c.Effective, c.Source = AppServer, "codex.auth"
 	}

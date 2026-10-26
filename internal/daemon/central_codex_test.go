@@ -35,8 +35,9 @@ func TestCentralCodexOwnerAvailableRegardlessOfCreationDefault(t *testing.T) {
 		if d.centralCodex == nil {
 			t.Fatalf("%s default disabled central profile management", mode)
 		}
-		if accounts.Mode("unbound", "codex") != mode {
-			t.Fatal("legacy source changed")
+		// A retired legacy setting never routes a workload away from central.
+		if accounts.Mode("unbound", "codex") != amuxcfg.AuthCentral {
+			t.Fatal("legacy setting routed a workload")
 		}
 		d.closeCentralCodex()
 	}

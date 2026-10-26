@@ -1,7 +1,7 @@
 package daemon
 
 import (
-	"os"
+	"amux/internal/codexapp"
 	"path/filepath"
 	"testing"
 
@@ -105,26 +105,17 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
-	legacyCodexAuth(t) // PTY rollout resolution is the subject here
-
-	const cid = "22222222-2222-4222-8222-222222222222"
-	rollDir := filepath.Join(home, "codex", "sessions", "2026", "07", "02")
-	if err := os.MkdirAll(rollDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	roll := filepath.Join(rollDir, "rollout-2026-07-02T10-00-00-"+cid+".jsonl")
-	if err := os.WriteFile(roll, []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PutSession(store.Session{ID: "c1", RootID: "test-root", Agent: "codex", ClaudeID: cid, Dir: t.TempDir()}); err != nil {
+	// Central Codex auth always runs Codex under the App Server, so both a
+	// session pinned by the older PTY path and one never run resolve to the
+	// structured event record (the App Server resumes the pinned rollout).
+	if err := db.PutSession(store.Session{ID: "c1", RootID: "test-root", Agent: "codex", ClaudeID: "22222222-2222-4222-8222-222222222222", Dir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	// A codex session with no rollout on disk: tracked, but never run.
 	if err := db.PutSession(store.Session{ID: "c2", RootID: "test-root", Agent: "codex", Dir: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
@@ -132,37 +123,18 @@ func TestQueryRuntimeRecordCarriesRuntime(t *testing.T) {
 
 	c, done := dialDaemon(t, testDaemon(t))
 	defer done()
-
-	got, err := c.RuntimeRecord("c1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Runtime != "codex" || got.Path != roll {
-		t.Errorf("RuntimeRecord(c1) = %+v, want codex at %q", got, roll)
-	}
-
-	// The path-only query still answers for a provider that predates the record
-	// query.
-	path, err := c.RuntimePath("c1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path != roll {
-		t.Errorf("RuntimePath(c1) = %q, want %q", path, roll)
-	}
-
-	// A session that has never run has no transcript — but it does have amux's own
-	// journal, which is where an accepted `prompt` writes the progress of the cold
-	// start it kicked off. Answering "nothing to read" for it would leave the one
-	// case that most needs the events with no stream at all.
-	unrun, err := c.RuntimeRecord("c2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unrun.Path != "" {
-		t.Errorf("RuntimeRecord(c2).Path = %q, want empty: there is no rollout", unrun.Path)
-	}
-	if unrun.Runtime != "codex" || unrun.Journal != core.JournalPath("c2") {
-		t.Errorf("RuntimeRecord(c2) = %+v, want codex with the session's journal", unrun)
+	for _, id := range []string{"c1", "c2"} {
+		got, err := c.RuntimeRecord(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Runtime != "codex" || !got.Structured || got.Path != codexapp.EventLogPathFor(id) {
+			t.Errorf("RuntimeRecord(%s) = %+v, want the structured event record", id, got)
+		}
+		// The path-only query still answers for a provider that predates the
+		// record query.
+		if path, err := c.RuntimePath(id); err != nil || path != got.Path {
+			t.Errorf("RuntimePath(%s) = %q, %v", id, path, err)
+		}
 	}
 }
