@@ -32,6 +32,7 @@ import (
 	"amux/internal/daemonstatus"
 	"amux/internal/engine/local"
 	"amux/internal/nativetui"
+	_ "amux/internal/termbg"
 	"amux/internal/vtdemo"
 )
 
