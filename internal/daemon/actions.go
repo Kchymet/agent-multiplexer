@@ -522,6 +522,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		return err
 	}
 	if err := revalidateDeferred(ctx); err != nil {
+		retireUnstarted(id, argv)
 		return err
 	}
 	kill()
@@ -532,6 +533,7 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		})
 	})
 	if err != nil {
+		retireUnstarted(id, argv)
 		return err
 	}
 	if _, ok := published.(engine.Instance); !ok {

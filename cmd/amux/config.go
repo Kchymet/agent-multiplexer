@@ -160,9 +160,9 @@ compare saved settings, this shell's override, and the running daemon selection.
 
 claude.auth and codex.auth are retired. Every workload follows the central
 login (amux auth login). A saved host, shared or environment value was
-migrated: workloads keep that still-usable login only until the first central
-login completes, then move to central at their next launch. Central Codex auth
-always uses App Server control.
+migrated to central once; no credential is copied, so run amux auth login once
+if Accounts reports the migration as pending. Central Codex auth always uses
+App Server control.
 `)
 }
 

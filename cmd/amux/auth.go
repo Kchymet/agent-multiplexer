@@ -78,10 +78,11 @@ Every workload, including existing and archived ones, follows its harness's
 central configuration. Each new harness process uses the newest successfully
 configured login, including a different account, subscription or API key;
 running processes keep what they received and are never stopped by login.
-Older host, shared and environment selections were migrated automatically:
-a workload keeps its still-usable older login only until the first central
-login completes. Login pauses new credential delivery until completion or
-cancellation.
+Older host, shared and environment selections were migrated to central once,
+automatically; no credential is copied, so a harness without a central login
+needs one "amux auth login" before its workloads launch again (status reports
+the migration as pending). Login pauses new credential delivery until
+completion or cancellation.
 `)
 }
 

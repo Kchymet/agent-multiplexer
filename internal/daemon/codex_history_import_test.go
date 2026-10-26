@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 
-	"amux/internal/panespec"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -228,9 +227,10 @@ func TestCodexHistoryImportRecoversFailedMarkerWrite(t *testing.T) {
 	}
 }
 
-// A failed import refuses that session's launch through the real supervisor
-// launch path, leaves the migration pending (no marker, no log), and the next
-// launch after repair imports the history before anything else is logged.
+// A failed import refuses that session's launch through the supervisor
+// manager's spawn path (shared by start, restart and replace), leaves the
+// migration pending (no marker, no log), and the next launch after repair
+// imports the history before anything else is logged.
 func TestCodexHistoryImportFailureBlocksLaunchAndRetries(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores the unreadable-rollout fixture")
@@ -239,15 +239,28 @@ func TestCodexHistoryImportFailureBlocksLaunchAndRetries(t *testing.T) {
 	const thread = "66666666-6666-4666-8666-666666666666"
 	rollout := legacyRollout(t, home, thread, "RETRY-PROMPT", "RETRY")
 	s := store.Session{ID: "retry", Agent: "codex", ClaudeID: thread, Dir: t.TempDir()}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	d := New("", nil, 0)
-	d.codex = codexapp.NewManager(ctx, "")
-	defer d.codex.Shutdown()
+	m := codexapp.NewManager(ctx, "")
+	defer m.Shutdown()
+	m.SetPreStart(importBeforeLaunch)
+	launch := func() error {
+		// The process would fail to start; the hook runs before it.
+		_, err := m.Ensure(ctx, s.ID, s.Dir, nil, []string{"/nonexistent/codex"}, "unix://"+filepath.Join(t.TempDir(), "s.sock"), "", "", s.ClaudeID)
+		return err
+	}
 	if err := os.Chmod(rollout, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.ensureSupervisorSpec(ctx, panespec.LaunchSpec{Session: s}); err == nil || !strings.Contains(err.Error(), "earlier history") {
+	if err := launch(); err == nil || !strings.Contains(err.Error(), "earlier history") {
 		t.Fatalf("launch with an unreadable rollout = %v", err)
 	}
 	if _, err := os.Stat(historyMarkerPath(s.ID)); !os.IsNotExist(err) {
@@ -259,9 +272,9 @@ func TestCodexHistoryImportFailureBlocksLaunchAndRetries(t *testing.T) {
 	if err := os.Chmod(rollout, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The repaired launch imports first; whatever later launch step fails in
-	// this unsandboxed test cannot undo that.
-	_, _ = d.ensureSupervisorSpec(ctx, panespec.LaunchSpec{Session: s})
+	if err := launch(); err != nil && strings.Contains(err.Error(), "earlier history") {
+		t.Fatalf("repaired launch still refused: %v", err)
+	}
 	if got := structuredLog(t, s.ID); len(got) < 3 || !strings.Contains(string(got[0].Payload), "RETRY-PROMPT") {
 		t.Fatalf("retry did not import history first: %+v", got)
 	}

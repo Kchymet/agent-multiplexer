@@ -272,3 +272,26 @@ func (d *Daemon) importHistory(ctx context.Context, s store.Session) error {
 	}
 	return nil
 }
+
+// importBeforeLaunch is the supervisor manager's pre-start hook: every fresh
+// App Server spawn (start, restart, replace) carries the session's PTY-era
+// history forward before the supervisor's first log line. A failed import
+// refuses that launch; the history is kept and the next start retries.
+func importBeforeLaunch(sessionID string) error {
+	db, err := store.Open()
+	if err != nil {
+		return fmt.Errorf("import this Codex session's earlier history before launch: %w", err)
+	}
+	s, ok, err := lookupPolicySession(db, sessionID)
+	db.Close()
+	if err != nil {
+		return fmt.Errorf("import this Codex session's earlier history before launch: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if _, err := importCodexHistory(s); err != nil {
+		return fmt.Errorf("import this Codex session's earlier history before launch: %w; the history is kept and the next start retries", err)
+	}
+	return nil
+}

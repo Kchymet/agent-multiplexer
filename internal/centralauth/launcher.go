@@ -55,6 +55,12 @@ func LaunchCredential(argv []string, stderr io.Writer, fetch func() (Credential,
 	token, err := fetch()
 	for previous := ""; err != nil; token, err = fetch() {
 		message := launchGuidance(err)
+		if errors.Is(err, fetchSuperseded) {
+			// Permanent for this launch: exit so the pane can be relaunched,
+			// which allocates a fresh launch on the current login.
+			fmt.Fprintln(stderr, "amux: "+message)
+			return 75
+		}
 		if message != previous {
 			fmt.Fprintln(stderr, "amux: "+message+"\nWaiting for authorized credential delivery; retrying automatically.")
 			previous = message
@@ -203,7 +209,11 @@ func fetchCredentialFromSession(typed bool, launch string) (Credential, error) {
 	var rejected *sessionrpc.RemoteError
 	if typed && errors.As(err, &rejected) && (rejected.Code == "access_denied" || rejected.Code == "credential_access_denied" || rejected.Code == "invalid_operation") {
 		typed = false
-		result, err = client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: map[string]string{HarnessField: string(Claude)}})
+		untyped := map[string]string{HarnessField: string(Claude)}
+		if launch != "" {
+			untyped[LaunchField] = launch // the launch fence still applies
+		}
+		result, err = client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: untyped})
 	}
 	if err != nil {
 		var remote *sessionrpc.RemoteError

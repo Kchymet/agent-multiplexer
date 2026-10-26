@@ -84,9 +84,11 @@ Login never stops a workload. Each launch is fenced by a daemon-allocated launch
   (a reconnect to a live process keeps its launch). The launch never enters the
   sandbox.
 - Claude: the daemon allocates a launch for each resolved agent pane and passes
-  it to the in-sandbox launcher's argv, which its exec into Claude replaces. A
-  resolve whose pane the engine reuses (a reattach) or fails to start is retired,
-  so every started process holds a fresh launch.
+  it in the in-sandbox launcher's argv. The exec into Claude drops it from
+  Claude's argv, but on Linux the bubblewrap parent keeps showing it to same-uid
+  processes for the pane's lifetime; it yields only that launch's snapshot. A
+  resolve whose pane the engine reuses (a reattach), or that fails or is abandoned
+  before start, is retired, so every started process holds a fresh launch.
 
 The first delivery to a launch pins the current mode, account and credential
 version, and retires every older launch. Further deliveries to the same launch

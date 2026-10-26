@@ -148,6 +148,7 @@ type Delivery struct {
 // it fetches the session's credential over the mailbox and execs Claude.
 const LauncherArg = "--amux-claude-central-exec"
 
-// LaunchArgPrefix follows LauncherArg with this pane's process launch. It is
-// argv of the launcher only: the exec into Claude replaces it.
+// LaunchArgPrefix follows LauncherArg with this pane's process launch. The
+// exec into Claude drops it from Claude's own argv; a sandbox wrapper process
+// (bubblewrap) still shows it, which grants only this launch's snapshot.
 const LaunchArgPrefix = "--amux-launch="

@@ -35,13 +35,16 @@ const StoreVersion = 2
 const historyLimit = 8
 
 // pendingLimit bounds allocated launches awaiting their first delivery. The
-// daemon does not allocate for a reattach to a live pane, so only launches
-// that started (or failed to start) a process occupy it.
+// daemon retires a launch whose resolve started no process (a reattach the
+// engine reused, a failed or abandoned start), so live waiting launches stay
+// well within it.
 const pendingLimit = 16
 
 // Launch identifies one harness process launch. The nonce is handed only to
-// that launched process (the Codex supervisor, or the Claude launcher's argv,
-// which its exec replaces); metadata keeps only its hash.
+// that launch (the daemon-side Codex supervisor, or the Claude launcher's
+// argv); metadata keeps only its hash. On Linux the bubblewrap parent keeps
+// that argv for the pane's lifetime, readable by same-uid processes: knowing
+// it yields only the snapshot this launch already holds, never a later one.
 type Launch struct {
 	Seq   uint64
 	Nonce string

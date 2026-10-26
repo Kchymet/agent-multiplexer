@@ -72,6 +72,13 @@ which a fake cannot prove either way. If it does, that turn fails visibly and th
     quiescent. A final notice write from a supervisor that is still draining could land on the
     replaced inode. This applies only to a session with no marker whose log holds only notices,
     so no turn events can be lost. No reaper redesign was made for it.
+- **Open decision (review of 5845948, finding 1).** Following A5, a resume target is never replaced
+  by an empty thread. A legacy v0 identity or a PTY-pinned id whose thread never ran a turn, and so
+  has no rollout anywhere, therefore fails every launch with `no rollout found`. The thread id is
+  named in the error. Recovery today is manual: remove `<state>/codexapp/<id>.json` for a v0
+  identity, or clear the session's pinned conversation id. A possible evidence-based relaxation is
+  to start fresh only when no rollout for that thread exists in the agent's or the user's Codex
+  home. That needs a root decision because it reopens A5.
 - **Corrupt or insecure state.** A corrupt central Claude record never blocks binding or the
   repairing login, and delivery refuses it. An insecure store fails closed.
 

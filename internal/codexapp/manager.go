@@ -30,6 +30,9 @@ type Manager struct {
 	stopContextWatch  func() bool
 	bin               string // codex binary override (AMUX_CODEX_BIN), "" ⇒ "codex"
 	chatgptAuth       TokenProvider
+	// preStart runs on every fresh spawn, under the session's start gate and
+	// event-log lock, before the supervisor's first log line (SetPreStart).
+	preStart func(sessionID string) error
 
 	mu       sync.Mutex
 	sup      map[string]*Supervisor
@@ -166,6 +169,16 @@ func (m *Manager) existingForEnsure(ctx context.Context, sessionID string) (*Sup
 // SetChatGPTAuth selects the central ChatGPT token provider for supervisors
 // started from now on (nil restores the legacy per-home credentials). Running
 // supervisors keep the provider they started with.
+// SetPreStart installs fn to run before every fresh App Server spawn, with no
+// runtime for that session running or starting and AppendNotice excluded, so
+// fn may replace the session's event log (the one-time history migration). An
+// error refuses that launch. fn must not call back into the manager.
+func (m *Manager) SetPreStart(fn func(sessionID string) error) {
+	m.mu.Lock()
+	m.preStart = fn
+	m.mu.Unlock()
+}
+
 func (m *Manager) SetChatGPTAuth(p TokenProvider) {
 	m.mu.Lock()
 	m.chatgptAuth = p
@@ -238,6 +251,17 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 		return nil, err
 	} else if ok {
 		return s, nil
+	}
+	m.mu.Lock()
+	preStart := m.preStart
+	m.mu.Unlock()
+	if preStart != nil {
+		unlock := LockEventLog(sessionID)
+		err := preStart(sessionID)
+		unlock()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	cfg := Config{

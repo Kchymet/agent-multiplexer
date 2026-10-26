@@ -88,6 +88,7 @@ func (d *Daemon) resumeWithSharedAuth(ctx context.Context) {
 		}
 		// Resolving a launch can take time; recheck before interrupting the pane.
 		if !pending.force && d.instanceActivity(k) != engine.ActivitySafe {
+			retireUnstarted(k.AgentID, argv)
 			continue
 		}
 		d.permissions.retireAnd(k.AgentID, func() { d.engine.Kill(k) })

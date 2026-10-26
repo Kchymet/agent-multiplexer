@@ -75,8 +75,9 @@ func centralCredentialFields(f map[string]string) bool {
 	return len(f) == n && f[centralauth.HarnessField] == string(centralauth.Claude)
 }
 
-// parseAccountLaunch reads "<seq>:<nonce>". A request without a launch (an
-// older launcher) is held to the current launch and never gets a replacement.
+// parseAccountLaunch reads "<seq>:<nonce>". A request without a valid launch
+// (an older launcher) yields the zero launch, which no allocation matches, so
+// it is refused rather than given any credential.
 func parseAccountLaunch(v string) (accounts.Launch, bool) {
 	seq, nonce, ok := strings.Cut(v, ":")
 	n, err := strconv.ParseUint(seq, 10, 64)
