@@ -58,7 +58,6 @@ type sessionRuntime struct {
 	closing             map[string]chan struct{}
 	passes              sync.WaitGroup
 	completions         *completionRegistry
-	captures            *captureThrottle
 	responseBudget      sessionrpc.ResponseBudget
 	events              *sessionEventPager
 	eventsErr           error
@@ -77,7 +76,6 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
-	r.captures = &captureThrottle{}
 	r.events, r.eventsErr = newDaemonSessionEventPager(d)
 	return r
 }

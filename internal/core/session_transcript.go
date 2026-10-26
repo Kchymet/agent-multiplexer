@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +27,17 @@ type sessionTranscriptMeta struct {
 	RuntimeID string `json:"runtime_id"`
 	Bytes     int64  `json:"bytes"`
 	Updated   int64  `json:"updated"`
+	// Source identity and the digest of the captured tail let the next capture
+	// append only the bytes Claude added since, instead of re-copying the whole
+	// append-only transcript. Absent (older captures) means copy in full.
+	SourceDev uint64 `json:"source_dev,omitempty"`
+	SourceIno uint64 `json:"source_ino,omitempty"`
+	Anchor    string `json:"anchor,omitempty"`
 }
+
+// sessionTranscriptAnchorBytes is how much of the captured tail must still match
+// the source for an append to continue the same transcript.
+const sessionTranscriptAnchorBytes = 4 << 10
 
 // SessionTranscriptStage is a private, unpublished transcript snapshot. Its
 // fields are intentionally opaque outside core: callers can only publish it to
@@ -37,6 +49,21 @@ type SessionTranscriptStage struct {
 	tmpName   string
 	size      int64
 	finished  bool
+	// base > 0 marks a delta stage: tmpName holds only the bytes after base,
+	// appended to the published copy (which must still be base bytes long).
+	base      int64
+	sourceDev uint64
+	sourceIno uint64
+	// durable stages fsync; tool-boundary deltas skip it (see syncCaptureEvent).
+	durable bool
+}
+
+// syncCaptureEvent reports whether a capture at event must be durable on disk
+// before it is acknowledged. Turn, compaction and session ends are the restore
+// points; per-tool snapshots are superseded within seconds, and an fsync on
+// each one made every tool call pay a disk flush.
+func syncCaptureEvent(event string) bool {
+	return event != "PostToolUse" && event != "SubagentStop" && event != "UserPromptSubmit"
 }
 
 func sessionTranscriptPaths(subjectID, runtimeID string) (content, metadata, logPath string) {
@@ -65,13 +92,36 @@ func CaptureSessionTranscript(subjectID, runtimeID, event string, src io.Reader)
 // StageSessionTranscript copies src into an unpublished private file with
 // constant working memory. Context cancellation is checked between reads. The
 // caller must call Publish or Abort; abandoned stages are not visible to restore.
+//
+// When src is a regular *os.File continuing the transcript already captured
+// (same inode, not shorter, captured tail unchanged), only the new bytes are
+// staged and Publish appends them. Truncation, replacement, or any mismatch
+// re-copies in full.
 func StageSessionTranscript(ctx context.Context, subjectID, runtimeID, event string, src io.Reader) (*SessionTranscriptStage, error) {
-	content, _, _ := sessionTranscriptPaths(subjectID, runtimeID)
+	content, metadata, _ := sessionTranscriptPaths(subjectID, runtimeID)
 	if content == "" || src == nil {
 		return nil, errors.New("managed transcript requires subject, runtime, and source")
 	}
 	if err := os.MkdirAll(filepath.Dir(content), 0o700); err != nil {
 		return nil, err
+	}
+	var dev, ino uint64
+	base := int64(0)
+	if f, ok := src.(*os.File); ok {
+		if info, err := f.Stat(); err == nil && info.Mode().IsRegular() {
+			dev, ino = fileIdentity(info)
+			base = appendBase(f, info.Size(), dev, ino, content, metadata, subjectID, runtimeID)
+			if base > 0 {
+				if _, err := f.Seek(base, io.SeekStart); err != nil {
+					base = 0
+				}
+			}
+			if base == 0 {
+				if _, err := f.Seek(0, io.SeekStart); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(content), ".capture-*.tmp")
 	if err != nil {
@@ -88,15 +138,20 @@ func StageSessionTranscript(ctx context.Context, subjectID, runtimeID, event str
 	if err := tmp.Chmod(0o600); err != nil {
 		return nil, err
 	}
-	written, err := io.Copy(tmp, io.LimitReader(contextReader{ctx: ctx, r: src}, MaxSessionTranscriptBytes+1))
+	written, err := io.Copy(tmp, io.LimitReader(contextReader{ctx: ctx, r: src}, MaxSessionTranscriptBytes-base+1))
 	if err != nil {
 		return nil, err
 	}
-	if written > MaxSessionTranscriptBytes {
+	if base+written > MaxSessionTranscriptBytes {
 		return nil, ErrSessionTranscriptTooLarge
 	}
-	if err := tmp.Sync(); err != nil {
-		return nil, err
+	// A full copy replaces the published file by rename and is always synced;
+	// a delta is appended at Publish, which decides durability.
+	durable := base == 0 || syncCaptureEvent(event)
+	if base == 0 {
+		if err := tmp.Sync(); err != nil {
+			return nil, err
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return nil, err
@@ -104,8 +159,50 @@ func StageSessionTranscript(ctx context.Context, subjectID, runtimeID, event str
 	keep = true
 	return &SessionTranscriptStage{
 		subjectID: subjectID, runtimeID: runtimeID, event: event,
-		tmpName: tmpName, size: written,
+		tmpName: tmpName, size: base + written, base: base,
+		sourceDev: dev, sourceIno: ino, durable: durable,
 	}, nil
+}
+
+// appendBase returns how many already-captured bytes src provably continues,
+// or 0 when the capture must start over.
+func appendBase(src *os.File, srcSize int64, dev, ino uint64, content, metadata, subjectID, runtimeID string) int64 {
+	if ino == 0 {
+		return 0
+	}
+	b, err := os.ReadFile(metadata)
+	if err != nil {
+		return 0
+	}
+	var meta sessionTranscriptMeta
+	if json.Unmarshal(b, &meta) != nil || meta.SubjectID != subjectID || meta.RuntimeID != runtimeID ||
+		meta.SourceDev != dev || meta.SourceIno != ino || meta.Anchor == "" ||
+		meta.Bytes <= 0 || meta.Bytes > srcSize || meta.Bytes > MaxSessionTranscriptBytes {
+		return 0
+	}
+	info, err := os.Lstat(content)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != meta.Bytes {
+		return 0 // a crash between append and metadata, or a damaged copy
+	}
+	anchor, err := tailAnchor(src, meta.Bytes)
+	if err != nil || anchor != meta.Anchor {
+		return 0 // rewritten in place
+	}
+	return meta.Bytes
+}
+
+// tailAnchor digests the sessionTranscriptAnchorBytes ending at size.
+func tailAnchor(r io.ReaderAt, size int64) (string, error) {
+	n := int64(sessionTranscriptAnchorBytes)
+	if size < n {
+		n = size
+	}
+	buf := make([]byte, n)
+	if _, err := r.ReadAt(buf, size-n); err != nil && !(errors.Is(err, io.EOF) && n == 0) {
+		return "", err
+	}
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Publish atomically makes a completed stage visible with exact provenance.
@@ -119,7 +216,21 @@ func (s *SessionTranscriptStage) Publish() error {
 	}
 	meta := sessionTranscriptMeta{
 		SubjectID: s.subjectID, RuntimeID: s.runtimeID, Bytes: s.size,
-		Updated: time.Now().UnixMilli(),
+		Updated: time.Now().UnixMilli(), SourceDev: s.sourceDev, SourceIno: s.sourceIno,
+	}
+	if s.base > 0 {
+		return s.publishDelta(content, metadata, logPath, meta)
+	}
+	if s.sourceIno != 0 {
+		f, err := os.Open(s.tmpName)
+		if err != nil {
+			return err
+		}
+		meta.Anchor, err = tailAnchor(f, s.size)
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
 	}
 	b, err := json.Marshal(meta)
 	if err != nil {
@@ -145,6 +256,63 @@ func (s *SessionTranscriptStage) Publish() error {
 	if backup != "" {
 		_ = os.Remove(backup)
 	}
+	appendSessionCaptureLog(logPath, s.event, s.size)
+	return nil
+}
+
+// publishDelta appends a delta stage to the published copy. If the copy no
+// longer has exactly base bytes the stage is refused; the next capture sees the
+// mismatch and starts over with a full copy.
+func (s *SessionTranscriptStage) publishDelta(content, metadata, logPath string, meta sessionTranscriptMeta) error {
+	delta, err := os.Open(s.tmpName)
+	if err != nil {
+		return err
+	}
+	defer delta.Close()
+	out, err := os.OpenFile(content, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	info, err := out.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != s.base {
+		_ = out.Close()
+		return errors.Join(errors.New("managed transcript changed during capture"), err)
+	}
+	if _, err := io.Copy(out, delta); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if s.durable {
+		if err := out.Sync(); err != nil {
+			_ = out.Close()
+			return err
+		}
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	f, err := os.Open(content)
+	if err != nil {
+		return err
+	}
+	meta.Anchor, err = tailAnchor(f, s.size)
+	_ = f.Close()
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	write := writeSessionTranscriptMeta
+	if !s.durable {
+		write = privateWrite
+	}
+	if err := write(metadata, b); err != nil {
+		return err
+	}
+	s.finished = true
+	_ = os.Remove(s.tmpName)
 	appendSessionCaptureLog(logPath, s.event, s.size)
 	return nil
 }
@@ -211,6 +379,29 @@ func (r contextReader) Read(p []byte) (int, error) {
 	default:
 		return r.r.Read(p)
 	}
+}
+
+// privateWrite is atomicPrivateWrite without the fsync, for records that a
+// later durable capture supersedes.
+func privateWrite(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".record-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func atomicPrivateWrite(path string, data []byte) error {

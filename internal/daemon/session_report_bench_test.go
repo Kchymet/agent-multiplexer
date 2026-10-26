@@ -3,7 +3,10 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"testing"
+	"time"
 
 	"amux/internal/access"
 	"amux/internal/core"
@@ -101,4 +104,78 @@ func BenchmarkStoreOpen(b *testing.B) {
 			_ = db.Close()
 		}
 	})
+}
+
+// BenchmarkConcurrentReportsDuringSlowEffect measures what two sessions'
+// reports cost while a slow effect (a creation, a restart) repeatedly holds
+// the daemon-wide gate for 100ms — the shape of the user-visible stall. It
+// reports per-report p50/max latency rather than throughput.
+func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
+	store.ShareHandles(true)
+	defer store.ShareHandles(false)
+	const runtimeID = "33333333-3333-4333-8333-333333333333"
+	sessions := []store.Session{
+		{ID: "a1", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+		{ID: "a2", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+	}
+	d, runtime, principals := sessionRuntimeFixture(b, sessions...)
+	generations := map[string]string{}
+	for _, s := range sessions {
+		generations[s.ID] = publishTestRuntime(b, d, s.ID)
+	}
+	stop := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			runtime.dispatchMu.Lock()
+			d.effectMu.Lock()
+			time.Sleep(100 * time.Millisecond)
+			d.effectMu.Unlock()
+			runtime.dispatchMu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	var mu sync.Mutex
+	var latencies []time.Duration
+	b.ResetTimer()
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			for i := 0; i < b.N; i++ {
+				start := time.Now()
+				for _, req := range []sessionrpc.DispatchRequest{
+					{Principal: principals[id], RequestID: "0123456789abcdef0123456789abcdef",
+						Call: sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: sessionreport.Context}},
+					reportRequest(principals[id], sessionreport.Activity, map[string]string{
+						sessionreport.FieldRuntimeGeneration: generations[id], sessionreport.FieldState: core.StateRunning,
+					}),
+				} {
+					if result, err := runtime.dispatch(context.Background(), req); err != nil || result.Status != sessionrpc.StatusOK {
+						b.Errorf("report = %+v, %v", result, err)
+						return
+					}
+				}
+				mu.Lock()
+				latencies = append(latencies, time.Since(start))
+				mu.Unlock()
+			}
+		}(s.ID)
+	}
+	wg.Wait()
+	b.StopTimer()
+	close(stop)
+	<-holderDone
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	if len(latencies) > 0 {
+		b.ReportMetric(float64(latencies[len(latencies)/2].Microseconds()), "p50-us")
+		b.ReportMetric(float64(latencies[len(latencies)-1].Microseconds()), "max-us")
+	}
 }
