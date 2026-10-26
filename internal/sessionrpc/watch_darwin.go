@@ -51,11 +51,12 @@ func platformWatchDir(dir *os.File, _ string, notify func()) (*dirWatch, error) 
 	}
 	// The registration owns a duplicate of the held descriptor, so closing the
 	// caller's directory and this watch are independent. No path is opened.
-	fd, err := unix.Dup(int(dir.Fd()))
+	// The duplicate is close-on-exec atomically: the daemon spawns sandboxed
+	// processes concurrently, and none may inherit a host mailbox descriptor.
+	fd, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("kqueue watch: %w", err)
 	}
-	unix.CloseOnExec(fd)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var change [1]unix.Kevent_t
