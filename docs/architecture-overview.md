@@ -18,24 +18,20 @@ which also explains the Harness-side roles, registration and pooling.
                ↕ /api/ws snapshot+actions        ↕ authenticated local RPC
 ┌──────────────┴─────────────┐    ┌──────────────┴─────────────┐
 │ Harness control API        │    │ amux control API           │
-│ auth, fleet view, pools,   │    │ workgroups, worktrees,     │
-│ placement, provider tokens │    │ agent lifecycle, provide   │
-└──────────────┬─────────────┘    └──────────────┬─────────────┘
-               ↕ control · pool/provider verbs   ↕ control · amux provide
-               │ ┌─────────────────────────────┐ │
-               ├─┤ Compute-pool registration & ├─┤
-               │ │ discovery                   │ │
-               │ │ API: pool catalog, tokens,  │ │
-               │ │ owner/org access policy     │ │
-               │ │ wire: harnessproto v2 / TLS │ │
-               │ │ register, caps, compute flag│ │
-               │ └──────────────┬──────────────┘ │
-               ↕ Postgres       ↕ provider hub   ↕ same daemon (local)
-┌──────────────┴────────────────┴────────────────┴─────────────┐
-│ Compute broker                                               │
-│ manages sessions: durable event log, prompt and turn         │
-│ delivery, placement onto a backend, status back to clients   │
-│ (cloud: Harness broker role on k8s · local: the amux daemon) │
+│ auth, fleet, pools, tokens │    │ workgroups, agents, provide│
+└───┬──────────────────┬─────┘    └─────┬──────────────────┬───┘
+    ↕ control          │                │                  ↕ localhost
+    │                  └───────┬────────┘                  │ request /
+    │                          ↕ request / schedule agent  │ control
+    │           ┌──────────────┴───────────────┐           │
+    │           │ Compute-pool registry        │           │
+    │           │ API: catalog, tokens, policy │           │
+    │           │ wire: harnessproto v2 / TLS  │           │
+    │           └──────────────┬───────────────┘           │
+    │                          ↕ compute registration      │
+┌───┴──────────────────────────┴───────────────────────────┴───┐
+│ Compute broker: sessions, event log, placement onto backend  │
+│ cloud: Harness broker role on k8s · local: the amux daemon   │
 └──────┬─────────────────────────┬─────────────────────────┬───┘
        ↕ commands/status+events  ↕                         ↕
 ┌──────┴───────────┐  ┌──────────┴─────────────┐  ┌────────┴──────────┐
@@ -66,14 +62,23 @@ flow back toward the clients.
   accepting session controls. See
   [amux as a remote compute provider](remote-provider.md) and
   [Provider session, steering and runtime-event protocol](remote-provider-sessions.md).
-- **Registration and discovery are two surfaces, not one service.** On the
-  Harness control API, pools and enrollment tokens are created and listed
-  (`pool.*` and `provider.*` actions; the catalog lives in Harness's Postgres).
-  On the wire, `amux provide` presents that token to the broker over TLS and
-  advertises labels, features and the harnesses it can run; a machine
-  registered this way is itself a pool whose id is the `providerId` that
-  `amux doctor` prints. Grouped and organization pools are made on Harness,
-  not in amux. See [Compute pools and machines](remote-provider.md#compute-pools-and-machines).
+- **Local requests never touch the registry.** The amux API's outer path is
+  localhost request / control: the TUI and CLI create and control agents on
+  their own daemon directly, with no enrollment and no pool involved. That
+  holds whether or not the machine is also enrolled with Harness.
+- **The compute-pool registry is two surfaces, not one service.** On the
+  Harness control API it is the pool catalog, enrollment tokens and placement
+  requests (`pool.*` and `provider.*` actions; the catalog lives in Harness's
+  Postgres). On the amux side it is `amux provide`: the daemon presents the
+  enrollment token to the broker over TLS, advertises labels, features and the
+  harnesses it can run, and receives agents scheduled onto it over the joined
+  request / schedule agent path. The `compute` flag in that registration is
+  what makes the broker treat the machine as a placement engine, which is the
+  compute registration edge in the diagram. An **owned**, non-revoked
+  registration is itself a pool whose id is the `providerId` that
+  `amux doctor` prints; a legacy unowned daemon has no machine pool. Grouped
+  and organization pools are made on Harness, not in amux. See
+  [Compute pools and machines](remote-provider.md#compute-pools-and-machines).
 - **Session runtimes** such as Claude Code and Codex App Server run as
   processes on a backend. amux resolves them per agent kind and scopes each
   pane to its worktree with bubblewrap on Linux/WSL2 or Seatbelt on macOS; see
