@@ -1,0 +1,119 @@
+package sessionrpc
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"amux/internal/access"
+)
+
+func countResponses(t *testing.T, dir string) int {
+	e, err := os.ReadDir(filepath.Join(dir, ResponsesDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(e)
+}
+
+// (1) Production client, mandatory-receipt operations: after each op is
+// receipted and the server drains, how many response files remain retained?
+func runReceiptRetention(t *testing.T, receipt bool) (retained int, settled []string) {
+	var mu sync.Mutex
+	f := newFixture(t, Callbacks{Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+		r := DispatchResult{Status: StatusOK, Body: []byte("done")}
+		if receipt {
+			r.Receipt = &ReceiptHooks{Grace: 2 * time.Second, Settled: func(s ReceiptSettlement) {
+				mu.Lock()
+				settled = append(settled, string(s.Reason))
+				mu.Unlock()
+			}}
+		}
+		return r, nil
+	}}, ServerOptions{ResponseBudget: &testResponseBudget{limit: 4}})
+	c := f.client(clientOptions{poll: time.Millisecond})
+	for i := 0; i < 8; i++ { // twice the pool
+		r, err := pumpClient(t, f.server, func(ctx context.Context) (Result, error) {
+			return c.Action(ctx, Action{Verb: "complete", ID: "subject-a"})
+		})
+		if err != nil || r.Status != StatusOK {
+			t.Fatalf("op %d: %+v %v", i, r, err)
+		}
+		for j := 0; j < 3; j++ { // let receipt/release be processed
+			_, _ = f.server.ServeOnce(context.Background())
+		}
+	}
+	return countResponses(t, f.grant.MailboxHostDir), settled
+}
+
+func TestProbeReceiptResponseRetention(t *testing.T) {
+	n, s := runReceiptRetention(t, true)
+	t.Logf("mandatory-receipt ops=8 pool=4: retained response files=%d settlements=%v", n, s)
+}
+
+func TestProbeReleaseRetentionControl(t *testing.T) {
+	n, _ := runReceiptRetention(t, false)
+	t.Logf("ordinary ops=8 pool=4 (release path): retained response files=%d", n)
+}
+
+// (2b) Durable completion across restart: receipt-required op committed by the
+// old boot, client suspended past the restart.
+func TestProbeOldBootCompletionAcrossRestart(t *testing.T) {
+	var dispatch atomic.Int32
+	var mu sync.Mutex
+	var settled []string
+	cb := Callbacks{Authorize: func(context.Context, access.Principal, Call) error { return nil }, Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+		dispatch.Add(1)
+		return DispatchResult{Status: StatusOK, Body: []byte("archived"), Receipt: &ReceiptHooks{Grace: time.Second, Settled: func(s ReceiptSettlement) {
+			mu.Lock()
+			settled = append(settled, string(s.Reason))
+			mu.Unlock()
+		}}}, nil
+	}}
+	f := newFixture(t, cb, ServerOptions{})
+	client := f.client(clientOptions{poll: 1500 * time.Millisecond})
+	done := make(chan error, 1)
+	var res Result
+	go func() { r, err := client.Action(context.Background(), Action{Verb: "complete", ID: "subject-a"}); res = r; done <- err }()
+	for deadline := time.Now().Add(time.Second); ; {
+		if e, _ := os.ReadDir(filepath.Join(f.grant.MailboxHostDir, RequestsDirName)); len(e) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no request")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.server.Close()
+	f.server = nil
+	_ = f.auth.Close()
+	reopened, err := access.Open(f.authDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.auth = reopened
+	server, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, reopened, reopened, cb, ServerOptions{ResponseBudget: &testResponseBudget{limit: MaxResponseFiles}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server = server
+	_ = server.PublishService(context.Background())
+	_ = server.Initialize(context.Background())
+	err = <-done
+	for i := 0; i < 5; i++ {
+		_, _ = server.ServeOnce(context.Background())
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Logf("completion across restart: status=%q body=%q err=%v dispatches=%d settlements=%v",
+		res.Status, res.Body, err, dispatch.Load(), settled)
+}

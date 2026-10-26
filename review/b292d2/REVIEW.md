@@ -417,3 +417,176 @@ Regressions:
 - Corrupt `accounts.json`: every operation refused and the file byte-identical
   afterwards.
 - Valid control: delivery works, generation unchanged, no epoch bump.
+
+---
+
+## 1a4fce mailbox checkpoint `964ddfa` — review (PRIORITY)
+
+Base `d347440`; fix = one-way `CallRelease`, release processed behind a
+capacity-blocked request, receipt without capacity, prior-boot retirement at
+adoption, launcher waits for publication within the 10s attempt. Author tests
+pass (`go test ./internal/sessionrpc ./internal/centralauth`). Probes below run
+via `go test -overlay`. `mbx_sessionrpc_probe_export.go.txt` overlays a
+non-test `ProbeOpenClientAt` so a daemon-package probe can use the
+**production** `sessionrpc.Client`. Pre-fix control tree = upstream (sessionrpc
+unchanged since `3397deb`).
+
+### M-OK1 REPRODUCED fix: production clients + real daemon + fresh native credential
+`mbx_prodclient_daemon_pressure_probe_test.go.txt` = the author's real-runtime
+harness (6 subjects × 250ms, real protected-namespace Claude launcher, real
+global budget). Background traffic is replaced by hook-shaped pairs
+(`report-context` + `version`) through the production client.
+
+| Tree | budget after warmup | fresh credential | launcher guidance | background |
+|---|---|---|---|---|
+| `964ddfa` | files=0 bytes=0 | **117.9ms, first attempt** | none | 138 ok / 0 timed out, max 134ms |
+| pre-fix control | files=128 | 53.1s | 10s timeout message | 81 ok / 6 timed out, max 21.7s |
+
+Also, my earlier real-client saturation probe now reports `busy=128 first=<nil>
+after 21ms`: the 128 busy queries were released. The probe's own assertion
+"expected starvation" therefore fails on `964ddfa`, which is the intended
+result. `TestMeasureFirstDelivery`: 114.6ms with no guidance (was 5.07s). The
+author's stat-only harness still gives files=128 / 54.4s, correctly as the
+**old-client compat control**.
+
+### M1 REPRODUCED (root finding, author ACKed): receipt responses still retained
+`mbx_receipt_completion_probe_test.go.txt` `TestProbeReceiptResponseRetention`:
+production client, 8 mandatory-receipt actions, pool limit 4, server drained
+after each → **3 response files retained** (all receipt responses; settlements
+all `receipt`). Control with 8 ordinary ops (release path) → **0 retained**. The
+receipt's own `.res` is published whenever capacity exists
+(`processClaimed` `CallReceipt` → `publishResponse`), `sendReceipt`/`sendAck`
+never reads it, and nothing releases it, so each mandatory op holds one slot
+for 60s. Only once the pool is full does the `discard` branch apply.
+**Fix: make receipts always one-way like release.** Reserve nothing and
+publish nothing; `Verify` still consumes the replay ledger; receipt status
+stays internal (a client never reads it). Regression: the probe must retain 0.
+
+### M2 REPRODUCED: prior-boot retirement turns committed success into ErrRestarted+ErrIndeterminate
+`priorBoot`'s rationale "Clients reject such responses" is **false**.
+`Client.awaitResponse` calls `readResponse(credential, service, request)`
+against the **original** service, whose boot ID matches the old-boot response,
+before it compares the current boot. `sendReceipt` documents that "A restart
+after receiving a durable response does not invalidate that success".
+Suspended-client probes (client polls every 1.5s; old boot commits; restart;
+new boot `Initialize` adopts):
+
+| Probe | pre-fix | `964ddfa` |
+|---|---|---|
+| ordinary action (`mbx_oldboot_probe_test.go.txt`) | `ok "committed"`, dispatches=1 | `ErrIndeterminate`+`ErrRestarted`, dispatches=1 |
+| mandatory-receipt completion | `ok "archived"`, dispatches=1, settlement `server_closed` | `ErrIndeterminate`+`ErrRestarted`, dispatches=1, settlement `server_closed` |
+| no-restart control | `ok` | `ok` |
+
+Safety properties hold: exactly one effect, no automatic replay (dispatch stays
+1 after further passes), completion settlement unchanged, and a client that
+already read its response keeps it. What is lost is observation of a committed
+success, including `agent done`-style completions, which invites a
+*manual* duplicate retry. The existing `TestInFlightRestartIsIndeterminateAndNotRetried`
+covers only a zero-effect request.
+
+Verdict: acceptable **only** as documented, bounded uncertainty under root's
+criteria. Required:
+(a) Correct the `priorBoot` comment and the docs: old clients can read
+    old-boot responses, and cleanup deliberately trades that for capacity.
+(b) Add the committed-effect regression above: exactly 1 dispatch,
+    `ErrRestarted`+`ErrIndeterminate`, no replay.
+(c) Preferably **exempt `ReceiptRequired` (completion) responses**, or account
+    prior-boot responses in a separate bounded pool that does not block new
+    admission (they are already bounded on disk). That fixes the post-restart
+    blackout without losing durable completion.
+Note: a release of an old-boot response after restart is refused today
+(`retireResponse` requires `BootID == current`, and the client signs with the
+original service boot), so age cleanup is the only other retirement path.
+
+### Other review points (CODE-READ)
+- Release routing on the unverified kind is safe: `processRelease` re-verifies
+  (replay ledger consumed), checks the subject, then `Valid`, then an exact
+  digest/key/generation/boot match. It never retires a pending-receipt or
+  `ReceiptRequired` response. A forged release is a no-op and is deleted.
+- `blocked` keeps scanning within a pass, so a release behind a
+  capacity-blocked request is processed. Non-release requests with
+  `admit=false` stay in `processing/`, unverified and undispatched. Good.
+- Each op now sends 2 request files (op + release), so queue and replay-ledger
+  load roughly doubles. The 128 queue bound still applies; consider whether
+  the ledger has a bound.
+- `ErrUnpublished` (service.json `ErrNotExist`) also covers a retiring or
+  archived mailbox. The launcher then waits the full 10s before guidance. That
+  is acceptable.
+
+---
+
+## c0523b auth checkpoint `400c151` — review of A1–A5 fixes
+
+Read `docs/evidence/auth-follow-central/CHECKPOINT.md` (checkpoint 2). Stale
+tests are known WIP, so for the probe every `internal/accounts/*_test.go` was
+overlaid empty. Probe: `c0523b_launch_fence_probe_test.go.txt`.
+
+### Launch fence — REPRODUCED behaviour (accounts level, Claude shape)
+- Same launch, retry after a lost response → same snapshot accepted. Good.
+- Running P1 after a replacement login (v2) → `ErrSuperseded`. Good.
+- Forged next seq without a nonce, launch-less, wrong nonce → refused. Good.
+- Two reattach resolves while P1 is alive → one pending launch reused
+  (`launches=2`), no accumulation. Good.
+- **A1-R1 HAZARD (liveness, not credential leak):** a pending launch is reused
+  by *every* resolve until its first delivery, including a user restart's new
+  process. If a killed or dying process P2 that was spawned with that pending
+  argv delivers first, and a replacement (v3) lands before the new P3's first
+  fetch, then **P3 — a freshly started process — gets `ErrSuperseded`**.
+  Reproduced: `new process P3 sharing reused pending launch after replacement:
+  err=account_runtime_superseded`. A further restart recovers, because pending
+  is then nil, but the user's "restart to use the new login" is defeated
+  once. Fix: allocate or bind the launch at actual spawn (engine `spawn` under
+  `e.mu`, only when no live instance), or retire the pending launch when
+  `replaceSession`/auth-reload kills the old instance, so a kill-and-respawn
+  always gets a fresh launch.
+
+### Actual runtime boundary of the pending nonce (CODE-READ)
+- Allocation happens at argv resolve (`panespec.centralLauncher`), not at
+  spawn. `paneOpen` resolves on **every attach**, even when
+  `engine.Ensure` returns the live instance (`local.go` Ensure:
+  `if alive { return in }`). After each delivery the next attach therefore
+  allocates a new pending launch whose nonce exists only in a discarded argv,
+  in daemon memory, and in plaintext in `accounts.json` (`Pending.Nonce`,
+  under AuthDir, which is not mounted in panes). I found no path that hands
+  a discarded argv to a running process: the engine never re-spawns from a
+  stored spec. So there is **no future-account permit reachable by a running
+  process**. The cost is one fsynced accounts write per pane attach.
+- Linux: the agent pane runs under `bwrap --die-with-parent --unshare-pid`.
+  The nonce is in launcher argv only inside that pane's own pid namespace
+  until `exec` replaces it, and other tabs cannot see it.
+- macOS (seatbelt, no pid namespace): while a launcher waits (login pending,
+  mailbox down), the nonce is visible via `ps` to same-uid processes,
+  including the session's shell tab. A shell tab claiming the pending launch
+  only gets what the launcher would have received, which is consistent with
+  the stated consistency-not-isolation scope. Document this in the PR.
+
+### A3 / migration boundary (CODE-READ) — holds, with caveats
+`accounts.Mode` is now constant central, and nothing in `cmd/` writes
+`accounts.json` (all writers are daemon-side), so the v1→v2 migration happens
+under the new daemon. Linux panes use `--die-with-parent`, and engine Shutdown
+terminates instances on restart. Caveats: (1) on macOS a SIGKILLed old daemon
+leaves seatbelt panes to the pty hangup only. (2) An **old** daemon reading a
+v2 store gets `account_store_invalid` (its `read()` requires Version 1), so
+any downgrade or rollback blocks delivery. Keep the `accounts.v1.json`
+restore note in the docs.
+
+### A5 / unknown legacy history (CODE-READ) — partially fixed
+`resumeRequiredFor` = identity present && same thread && (`Resumable` ||
+`ChatGPTAccount` || `PriorChatGPTAccounts`). It is **false** for (a) a v0
+legacy identity without central account (`resumeThreadFor` still resumes it)
+and (b) a legacy PTY thread id from the store with no identity file
+(`legacyThreadID`). Both may hold real history, yet still get the
+"no rollout" → fresh-thread fallback, i.e. unknown history is treated as
+empty. Ask: treat unknown legacy (v0 / no-identity with a non-empty thread
+id) as resume-required, or fall back only after positively establishing
+absence (no rollout for that thread id in the agent's `CODEX_HOME/sessions`,
+and in any older home layout earlier amux versions used). Otherwise fail
+visibly with an explicit "start fresh" action. Regression: v0 identity and
+no-identity legacy thread, plus a "no rollout" resume error → launch fails,
+identity/thread unchanged, no `thread/start`.
+
+### A2 / A4 — resolved as designed (CODE-READ)
+`bind` skips bootstrap on a corrupt record and fails only on
+`ErrInsecureStore`. `BindAll` is one transaction. There is no legacy fallback
+for new workloads, and `config set` accepts only central. Re-run my A2 probe
+once the daemon tests compile.

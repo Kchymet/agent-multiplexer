@@ -1,0 +1,63 @@
+package accounts
+
+import (
+	"errors"
+	"testing"
+)
+
+func probeState(t *testing.T, id string) (Binding, uint64) {
+	t.Helper()
+	s, err := Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := s.Bindings[id]
+	return b, s.Profiles[b.ProfileID].DeliveryEpoch
+}
+
+func probeAccept(t *testing.T, id string, version uint64, l Launch) error {
+	b, epoch := probeState(t, id)
+	return Accept(id, b.Revision, epoch, "", version, l)
+}
+
+// Launch-fence probe for 400c151 (Claude path: account "" and opaque version).
+func TestProbeLaunchFence(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir()); t.Setenv("XDG_CONFIG_HOME", t.TempDir()); t.Setenv("HOME", t.TempDir())
+	const id = "w"
+	l1, err := BeginLaunch(id, "claude") // daemon starts process P1
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := probeAccept(t, id, 1, l1); err != nil {
+		t.Fatalf("P1 first delivery: %v", err)
+	}
+	if err := probeAccept(t, id, 1, l1); err != nil {
+		t.Fatalf("P1 retry (lost response) must re-deliver same snapshot: %v", err)
+	}
+	// Reattach: paneOpen resolves argv again while P1 is alive; engine reuses P1.
+	l2, _ := BeginLaunch(id, "claude")
+	l2b, _ := BeginLaunch(id, "claude")
+	b, _ := probeState(t, id)
+	t.Logf("after 2 reattach resolves: pending=%+v launches=%d (reused=%v)", b.Pending != nil, b.Launches, l2 == l2b)
+	// Replacement login -> version 2. Running P1 must not get it.
+	if err := probeAccept(t, id, 2, l1); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("P1 after replacement: want superseded, got %v", err)
+	}
+	// Forged next seq without nonce, launch-less, wrong nonce.
+	for name, l := range map[string]Launch{"forged-seq": {Seq: l2.Seq}, "launchless": {}, "wrong-nonce": {Seq: l2.Seq, Nonce: "00"}} {
+		if err := probeAccept(t, id, 2, l); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	// Restart race: user restart reuses pending l2 for P3 while dying P2 (spawned
+	// earlier with the same pending argv) still delivers first.
+	if err := probeAccept(t, id, 2, l2); err != nil { // P2 (killed, racing) pins v2
+		t.Fatal(err)
+	}
+	// Another replacement (v3) lands before P3's first fetch.
+	err = probeAccept(t, id, 3, l2) // P3: a NEW process presenting the reused launch
+	t.Logf("new process P3 sharing reused pending launch after replacement: err=%v", err)
+	if errors.Is(err, ErrSuperseded) {
+		t.Log("HAZARD: a freshly started process is pinned/superseded via a launch consumed by another process")
+	}
+}

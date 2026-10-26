@@ -1,0 +1,166 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"amux/internal/access"
+	"amux/internal/centralauth"
+	"amux/internal/core"
+	"amux/internal/engine"
+	"amux/internal/engine/local"
+	"amux/internal/panespec"
+	"amux/internal/sessionrpc"
+	"amux/internal/store"
+)
+
+
+var probeClients sync.Map
+
+// probeProductionCall issues one hook-shaped pair (report-context + version)
+// through the production sessionrpc.Client, which sends releases.
+func probeProductionCall(ctx context.Context, t *testing.T, grant access.SessionAccess) (time.Duration, error) {
+	v, ok := probeClients.Load(grant.SubjectID)
+	if !ok {
+		path := filepath.Join(grant.CredentialHostDir, sessionrpc.ContextFileName)
+		b, _ := json.Marshal(sessionrpc.SessionContext{Protocol: sessionrpc.ProtocolVersion, SubjectID: grant.SubjectID, MailboxDir: grant.MailboxHostDir})
+		_ = os.Chmod(path, 0o600)
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			return 0, err
+		}
+		_ = os.Chmod(path, 0o400)
+		c, err := sessionrpc.ProbeOpenClientAt(grant.CredentialHostDir)
+		if err != nil {
+			return 0, err
+		}
+		v, _ = probeClients.LoadOrStore(grant.SubjectID, c)
+	}
+	c := v.(*sessionrpc.Client)
+	start := time.Now()
+	if _, err := c.Query(ctx, sessionrpc.Query{Verb: "report-context"}); err != nil && ctx.Err() != nil {
+		return time.Since(start), err
+	}
+	if _, err := c.Query(ctx, sessionrpc.Query{Verb: "version"}); err != nil && ctx.Err() != nil {
+		return time.Since(start), err
+	}
+	return time.Since(start), nil
+}
+
+func TestProbeProductionClientPressure(t *testing.T) {
+	if os.Getenv("AMUX_PROBE_PRESSURE") == "" {
+		t.Skip()
+	}
+	var bg []store.Session
+	for i := 0; i < 6; i++ {
+		bg = append(bg, store.Session{ID: fmt.Sprintf("bg%d", i), RootID: "root", Agent: "claude"})
+	}
+	d, runtime, _ := sessionRuntimeFixture(t, bg...)
+	t.Setenv("AMUX_JAIL", "on")
+	t.Setenv("AMUX_SHUTDOWN_GRACE", "0s")
+	ctx, cancel := context.WithTimeout(t.Context(), 240*time.Second)
+	t.Cleanup(cancel)
+	fake := filepath.Join(os.Getenv("HOME"), "bin", "claude")
+	os.MkdirAll(filepath.Dir(fake), 0700)
+	os.WriteFile(fake, []byte("#!/bin/sh\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = "+mockCentralToken+" ] || exit 17\nprintf ready > \"$PWD/launched\"\nsleep 60\n"), 0700)
+	t.Setenv("AMUX_CLAUDE_BIN", fake)
+	tok, _ := centralauth.NewSecret(mockCentralToken)
+	centralauth.ClaudeStore().Save(tok, time.Now())
+	d.engine = local.New()
+	d.sessionRPC = runtime
+	t.Cleanup(d.engine.Shutdown)
+	if err := runtime.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	serving, stop := context.WithCancel(ctx)
+	joined := make(chan struct{})
+	go func() { defer close(joined); runtime.run(serving) }()
+	t.Cleanup(func() { stop(); <-joined; runtime.close() })
+
+	rate, _ := time.ParseDuration(os.Getenv("AMUX_PROBE_PRESSURE"))
+	traffic, stopTraffic := context.WithCancel(ctx)
+	var mu sync.Mutex
+	var lat []time.Duration
+	var wg sync.WaitGroup
+	for _, s := range bg {
+		grant, err := d.authority.EnsureSession(ctx, s.ID, filepath.Join(core.SessionsDir(), "root", s.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for traffic.Err() == nil {
+				c, cc := context.WithTimeout(traffic, 35*time.Second)
+				l, err := probeProductionCall(c, t, grant)
+				cc()
+				if traffic.Err() != nil {
+					return
+				}
+				mu.Lock()
+				if err != nil {
+					l = -l
+				}
+				lat = append(lat, l)
+				mu.Unlock()
+				time.Sleep(rate)
+			}
+		}()
+	}
+	time.Sleep(8 * time.Second)
+	runtime.responseBudget.(*sessionResponseBudget).mu.Lock()
+	b := runtime.responseBudget.(*sessionResponseBudget)
+	t.Logf("budget after warmup: files=%d bytes=%d receipts=%d", b.files, b.bytes, b.receipts)
+	b.mu.Unlock()
+
+	s := store.Session{ID: "fresh", RootID: "root", Agent: "claude", Dir: filepath.Join(core.SessionsDir(), "root", "fresh")}
+	os.MkdirAll(s.Dir, 0700)
+	db, _ := store.Open()
+	db.PutSession(s)
+	db.Close()
+	begin := time.Now()
+	if r := d.handle(ctx, core.Action{Action: core.ActionStart, ID: s.ID}); !r.OK {
+		t.Fatal(r.Error)
+	}
+	instance, _ := d.engine.Lookup(engine.Key{AgentID: s.ID, Tab: panespec.TabAgent})
+	var omu sync.Mutex
+	out := ""
+	unsub := instance.Subscribe(engine.Sink{Output: func(b []byte) { omu.Lock(); out += string(b); omu.Unlock() }})
+	defer unsub()
+	for {
+		if b, err := os.ReadFile(filepath.Join(s.Dir, "launched")); err == nil && string(b) == "ready" {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("no delivery")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	omu.Lock()
+	t.Logf("credential delivered after %v; launcher: %q", time.Since(begin), strings.TrimSpace(out))
+	omu.Unlock()
+	stopTraffic()
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	failed := 0
+	var ok []time.Duration
+	for _, l := range lat {
+		if l < 0 {
+			failed++
+		} else {
+			ok = append(ok, l)
+		}
+	}
+	sort.Slice(ok, func(i, j int) bool { return ok[i] < ok[j] })
+	if len(ok) > 0 {
+		t.Logf("background calls: %d ok, %d timed out; p50=%v p90=%v max=%v", len(ok), failed, ok[len(ok)/2], ok[len(ok)*9/10], ok[len(ok)-1])
+	}
+}

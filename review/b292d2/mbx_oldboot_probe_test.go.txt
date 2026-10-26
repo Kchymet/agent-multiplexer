@@ -1,0 +1,85 @@
+package sessionrpc
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"amux/internal/access"
+)
+
+// A client suspended across a daemon restart: its action was dispatched and the
+// old boot committed a durable success response before the restart. After the
+// new boot adopts the mailbox, does the client still observe that success?
+func runOldBootDurable(t *testing.T, restart bool) (Result, error, int32) {
+	var dispatch atomic.Int32
+	f := newFixture(t, Callbacks{Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+		dispatch.Add(1)
+		return DispatchResult{Status: StatusOK, Body: []byte("committed")}, nil
+	}}, ServerOptions{})
+	client := f.client(clientOptions{poll: 1500 * time.Millisecond}) // "suspended" between polls
+	type out struct {
+		r   Result
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		r, err := client.Action(context.Background(), Action{Verb: "mutate", ID: "subject-a"})
+		done <- out{r, err}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if e, _ := os.ReadDir(filepath.Join(f.grant.MailboxHostDir, RequestsDirName)); len(e) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no request")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // client did its first (empty) read, now waits
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if restart {
+		_ = f.server.Close()
+		f.server = nil
+		_ = f.auth.Close()
+		reopened, err := access.Open(f.authDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.auth = reopened
+		server, err := OpenServerMailbox(f.grant.SubjectID, f.grant.MailboxHostDir, reopened, reopened, Callbacks{
+			Authorize: func(context.Context, access.Principal, Call) error { return nil },
+			Dispatch:  func(context.Context, DispatchRequest) (DispatchResult, error) { dispatch.Add(1); return DispatchResult{Status: StatusOK}, nil },
+		}, ServerOptions{ResponseBudget: &testResponseBudget{limit: MaxResponseFiles}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.server = server
+		if err := server.PublishService(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Initialize(context.Background()); err != nil { // adoption pass
+			t.Fatal(err)
+		}
+	}
+	got := <-done
+	return got.r, got.err, dispatch.Load()
+}
+
+func TestProbeOldBootDurableSuccessAcrossRestart(t *testing.T) {
+	r, err, n := runOldBootDurable(t, true)
+	t.Logf("restart+adoption: status=%q body=%q err=%v restarted=%v indeterminate=%v dispatches=%d",
+		r.Status, r.Body, err, errors.Is(err, ErrRestarted), errors.Is(err, ErrIndeterminate), n)
+}
+
+func TestProbeOldBootDurableNoRestartControl(t *testing.T) {
+	r, err, n := runOldBootDurable(t, false)
+	t.Logf("no restart: status=%q body=%q err=%v dispatches=%d", r.Status, r.Body, err, n)
+}

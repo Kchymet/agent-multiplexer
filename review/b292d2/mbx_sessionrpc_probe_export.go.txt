@@ -1,0 +1,4 @@
+package sessionrpc
+
+// ProbeOpenClientAt exposes the production client for a review probe (overlay only).
+func ProbeOpenClientAt(dir string) (*Client, error) { return openClientAt(dir, clientOptions{}) }
