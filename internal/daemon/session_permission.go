@@ -15,7 +15,14 @@ import (
 // runtimePermissionGate binds permission decisions to one live runtime
 // incarnation. A request is claimed while the lock is held and before delivery;
 // a delivery with an uncertain outcome therefore cannot be retried.
+//
+// Every rule is per subject, so each subject has its own lock (subjects),
+// held across the callbacks a decision, publication or retirement runs
+// (runtime creation, kill, delivery). mu guards only the runtimes map and is
+// never held across a callback, so one subject's slow runtime start never
+// delays another subject's reports. Order: a subject lock, then mu.
 type runtimePermissionGate struct {
+	subjects keyedLocks
 	mu       sync.Mutex
 	random   io.Reader
 	runtimes map[string]permissionRuntime
@@ -69,6 +76,8 @@ func (g *runtimePermissionGate) observeExcluding(subject string, runtime any, ex
 	if g == nil || strings.TrimSpace(subject) == "" || runtime == nil {
 		return "", fmt.Errorf("permission runtime unavailable")
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.observeLocked(subject, runtime, excluded)
@@ -98,7 +107,7 @@ func (g *runtimePermissionGate) observeLocked(subject string, runtime any, exclu
 }
 
 // publish makes runtime visibility and generation rotation one boundary. The
-// creator runs while the same gate lock that guards consumption is held, so no
+// creator runs while the subject's gate lock that guards consumption is held, so no
 // old-generation decision can cross Engine.Ensure/AppServer publication before
 // the replacement generation is installed.
 func (g *runtimePermissionGate) publish(subject string, create func() (any, error)) (any, string, error) {
@@ -107,14 +116,14 @@ func (g *runtimePermissionGate) publish(subject string, create func() (any, erro
 
 // publishWithBaseline also records every unresolved durable request that
 // predates runtime creation. Baseline capture, creation visibility, and
-// generation publication occur under the one gate lock, so a request cannot
+// generation publication occur under the subject's gate lock, so a request cannot
 // fall into a gap and later be relabeled as belonging to the replacement.
 func (g *runtimePermissionGate) publishWithBaseline(subject string, baseline func() ([]string, error), create func() (any, error)) (any, string, error) {
 	if g == nil || strings.TrimSpace(subject) == "" || create == nil {
 		return nil, "", fmt.Errorf("permission runtime unavailable")
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	var excluded []string
 	var err error
 	if baseline != nil {
@@ -130,7 +139,9 @@ func (g *runtimePermissionGate) publishWithBaseline(subject string, baseline fun
 	if runtime == nil {
 		return nil, "", fmt.Errorf("permission runtime unavailable")
 	}
+	g.mu.Lock()
 	generation, err := g.observeLocked(subject, runtime, excluded)
+	g.mu.Unlock()
 	return runtime, generation, err
 }
 
@@ -150,6 +161,8 @@ func (g *runtimePermissionGate) generation(subject string) (string, bool) {
 	if g == nil {
 		return "", false
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	runtime, ok := g.runtimes[subject]
@@ -160,6 +173,8 @@ func (g *runtimePermissionGate) token(subject string) (permissionRuntimeToken, b
 	if g == nil {
 		return permissionRuntimeToken{}, false
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	runtime, ok := g.runtimes[subject]
@@ -170,6 +185,8 @@ func (g *runtimePermissionGate) matches(subject string, token permissionRuntimeT
 	if g == nil || token.identity == "" || token.generation == "" {
 		return false
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	runtime, ok := g.runtimes[subject]
@@ -180,13 +197,16 @@ func (g *runtimePermissionGate) retireTokenAnd(subject string, token permissionR
 	if g == nil || token.identity == "" || token.generation == "" {
 		return false
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	runtime, ok := g.runtimes[subject]
 	if !ok || runtime.identity != token.identity || runtime.generation != token.generation {
+		g.mu.Unlock()
 		return false
 	}
 	delete(g.runtimes, subject)
+	g.mu.Unlock()
 	if stop != nil {
 		stop()
 	}
@@ -197,6 +217,8 @@ func (g *runtimePermissionGate) retire(subject string) {
 	if g == nil {
 		return
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
 	delete(g.runtimes, subject)
 	g.mu.Unlock()
@@ -211,12 +233,14 @@ func (g *runtimePermissionGate) retireAnd(subject string, stop func()) {
 		}
 		return
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
 	delete(g.runtimes, subject)
+	g.mu.Unlock()
 	if stop != nil {
 		stop()
 	}
-	g.mu.Unlock()
 }
 
 // bindRequest is the sole generation-publication seam. Event producers call it
@@ -227,23 +251,33 @@ func (g *runtimePermissionGate) bindRequest(subject, requestID string, handle an
 	if g == nil || strings.TrimSpace(requestID) == "" || handle == nil || validate == nil {
 		return "", fmt.Errorf("permission request requires a live runtime and request id")
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	runtime, ok := g.runtimes[subject]
-	if !ok || runtime.identity != permissionRuntimeIdentity(handle) {
-		return "", fmt.Errorf("permission runtime was replaced")
+	var err error
+	switch {
+	case !ok || runtime.identity != permissionRuntimeIdentity(handle):
+		err = fmt.Errorf("permission runtime was replaced")
+	default:
+		if _, excluded := runtime.excluded[requestID]; excluded {
+			err = fmt.Errorf("permission request %q predates this runtime", requestID)
+		} else if _, claimed := runtime.claimed[requestID]; claimed {
+			err = fmt.Errorf("permission request %q was already consumed", requestID)
+		}
 	}
-	if _, excluded := runtime.excluded[requestID]; excluded {
-		return "", fmt.Errorf("permission request %q predates this runtime", requestID)
-	}
-	if _, claimed := runtime.claimed[requestID]; claimed {
-		return "", fmt.Errorf("permission request %q was already consumed", requestID)
+	g.mu.Unlock()
+	if err != nil {
+		return "", err
 	}
 	if err := validate(); err != nil {
 		return "", err
 	}
+	// The subject lock excludes retirement and replacement since the check.
+	g.mu.Lock()
 	runtime.requests[requestID] = struct{}{}
 	g.runtimes[subject] = runtime
+	g.mu.Unlock()
 	return runtime.generation, nil
 }
 
@@ -264,22 +298,27 @@ func (g *runtimePermissionGate) consume(subject, generation, requestID string, h
 	if g == nil || strings.TrimSpace(generation) == "" || strings.TrimSpace(requestID) == "" || handle == nil || validate == nil || deliver == nil {
 		return fmt.Errorf("permission requires a live runtime generation and request id")
 	}
+	unlock := g.subjects.lock(subject)
+	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	runtime, ok := g.runtimes[subject]
 	if !ok || runtime.generation != generation || runtime.identity != permissionRuntimeIdentity(handle) {
+		g.mu.Unlock()
 		return fmt.Errorf("permission runtime generation is stale")
 	}
 	if _, observed := runtime.requests[requestID]; !observed {
+		g.mu.Unlock()
 		return fmt.Errorf("permission request %q was not observed on this runtime", requestID)
 	}
 	if _, duplicate := runtime.claimed[requestID]; duplicate {
+		g.mu.Unlock()
 		return fmt.Errorf("permission request %q was already consumed", requestID)
 	}
 	// Claim before delivery. Even an error may mean the runtime accepted the
 	// decision before its acknowledgement was lost.
 	runtime.claimed[requestID] = struct{}{}
 	g.runtimes[subject] = runtime
+	g.mu.Unlock()
 	if err := validate(); err != nil {
 		return err
 	}
