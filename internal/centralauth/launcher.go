@@ -142,13 +142,19 @@ var openSession = func() (sessionQuerier, error) { return sessionrpc.OpenClient(
 // FetchFromSession asks the daemon for this session's Claude credential over
 // the signed mailbox. Errors are fixed RPC codes, never values or paths.
 func FetchFromSession() (Secret, error) {
-	c, e := fetchCredentialFromSession(false)
+	c, e := fetchCredentialFromSession(false, "")
 	return c.Token, e
 }
 
-func FetchCredentialFromSession() (Credential, error) { return fetchCredentialFromSession(true) }
+func FetchCredentialFromSession() (Credential, error) { return fetchCredentialFromSession(true, "") }
 
-func fetchCredentialFromSession(typed bool) (Credential, error) {
+// FetchLaunchCredentialFromSession requests the credential for one process
+// launch. Repeated requests for it receive the same credential version.
+func FetchLaunchCredentialFromSession(launch string) func() (Credential, error) {
+	return func() (Credential, error) { return fetchCredentialFromSession(true, launch) }
+}
+
+func fetchCredentialFromSession(typed bool, launch string) (Credential, error) {
 	client, err := openSession()
 	if err != nil {
 		return Credential{}, fetchMailbox
@@ -159,6 +165,9 @@ func fetchCredentialFromSession(typed bool) (Credential, error) {
 	fields := map[string]string{HarnessField: string(Claude)}
 	if typed {
 		fields[FormatField] = TypedFormat
+	}
+	if launch != "" {
+		fields[LaunchField] = launch
 	}
 	result, err := client.Query(ctx, sessionrpc.Query{Verb: QueryVerb, Fields: fields})
 	// Pre-API daemons reject the extra field. Subscription-only fallback is safe:

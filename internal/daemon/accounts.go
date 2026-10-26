@@ -224,7 +224,6 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 			if !ok || b.Harness != p.Harness || p.State != "ready" {
 				return accounts.ErrBlocked
 			}
-			b.LegacySource = ""
 			b.Revision++
 			b.Origin = "explicit-rebind"
 			s.Bindings[r.WorkloadID] = b

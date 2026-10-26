@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"amux/internal/accounts"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,9 +96,9 @@ type TokenRequest struct {
 	// PreviousAccountID is the account the App Server was using (from the
 	// refresh request, or the account injected earlier); "" on first injection.
 	PreviousAccountID string
-	// Launch is the account service launch sequence of the requesting process
-	// (Config.AccountLaunch); 0 for an unsequenced test supervisor.
-	Launch uint64
+	// Launch is the account service launch of the requesting process
+	// (Config.AccountLaunch). Its nonce is never logged or emitted.
+	Launch accounts.Launch
 }
 
 // TokenProvider supplies centrally owned ChatGPT tokens. Implementations must
@@ -125,7 +126,7 @@ var (
 type tokenAuth struct {
 	provider  TokenProvider
 	sessionID string
-	launch    uint64
+	launch    accounts.Launch
 
 	mu       sync.Mutex
 	account  string
@@ -155,7 +156,7 @@ type tokenRefresh struct {
 	err  error
 }
 
-func newTokenAuth(p TokenProvider, sessionID, account string, launch uint64) *tokenAuth {
+func newTokenAuth(p TokenProvider, sessionID, account string, launch accounts.Launch) *tokenAuth {
 	if p == nil {
 		return nil
 	}

@@ -124,13 +124,15 @@ type Issuer interface {
 
 // QueryVerb is the restricted session RPC query that delivers the central
 // credential for the requesting session's own harness. HarnessField selects
-// the harness; optional FormatField negotiates typed API-key delivery. The
-// session identity comes from the signed request.
+// the harness; optional FormatField negotiates typed API-key delivery;
+// LaunchField names the process launch ("<seq>:<nonce>") the daemon allocated
+// for this pane. The session identity comes from the signed request.
 const (
 	QueryVerb    = "central-credential"
 	HarnessField = "harness"
 	FormatField  = "credential-format"
 	TypedFormat  = "typed-v1"
+	LaunchField  = "launch"
 )
 
 // Delivery is the mailbox response body. Token is the raw value: it exists
@@ -145,3 +147,7 @@ type Delivery struct {
 // trampoline run Launch: after inherited descriptors are marked close-on-exec,
 // it fetches the session's credential over the mailbox and execs Claude.
 const LauncherArg = "--amux-claude-central-exec"
+
+// LaunchArgPrefix follows LauncherArg with this pane's process launch. It is
+// argv of the launcher only: the exec into Claude replaces it.
+const LaunchArgPrefix = "--amux-launch="

@@ -447,7 +447,7 @@ func TestResumeRefusesDifferentPersistedAccount(t *testing.T) {
 	defer fs.close()
 	defer sup.Close()
 	sup.cfg.ResumeThreadID = "thr_1"
-	sup.auth = newTokenAuth(p, "s-auth", "acct-old")
+	sup.auth = newTokenAuth(p, "s-auth", "acct-old", 0)
 	if err := sup.attach(context.Background(), client); !errors.Is(err, errAccountChanged) {
 		t.Fatalf("attach = %v, want errAccountChanged", err)
 	}
@@ -629,7 +629,7 @@ func TestLoginCompletionErrorRedacted(t *testing.T) {
 // A completion for another login (a browser login started by a native
 // client carries a loginId) is not the token login's outcome.
 func TestForeignLoginCompletionIgnored(t *testing.T) {
-	a := newTokenAuth(newStubProvider(), "s", "")
+	a := newTokenAuth(newStubProvider(), "s", "", 0)
 	ch := make(chan loginOutcome, 1)
 	a.completed = ch
 	if _, ok := a.loginCompleted(json.RawMessage(`{"loginId":"browser-1","success":true}`)); ok {

@@ -144,13 +144,13 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	}
 	// A superseded process never receives a credential, and a refresh is only
 	// for the process that the binding currently pins.
-	if req.Launch < binding.Launch || (req.Refresh && req.Launch != binding.Launch) {
+	if req.Launch.Seq < binding.Launch || (req.Refresh && req.Launch.Seq != binding.Launch) {
 		return codexapp.ChatGPTToken{}, accounts.ErrSuperseded
 	}
 	// The current process keeps its account; a newer launch takes the current
 	// central login (another account continues the same thread).
 	previous := req.PreviousAccountID
-	if req.Launch == binding.Launch && binding.DeliveredEpoch != 0 && binding.ExpectedAccount != "" {
+	if req.Launch.Seq == binding.Launch && binding.DeliveredEpoch != 0 && binding.ExpectedAccount != "" {
 		if previous != "" && previous != binding.ExpectedAccount {
 			return codexapp.ChatGPTToken{}, codexauth.ErrAccountChanged
 		}

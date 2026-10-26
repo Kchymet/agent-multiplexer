@@ -225,7 +225,7 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 	if msg.response.attempt != nil {
 		switch s.attempt.state {
 		case "succeeded":
-			s.notice = "Login complete. Use d to choose this machine account for new workloads."
+			s.notice = "Login complete. Workloads use it from their next launch; running ones keep their current login."
 		case "failed":
 			s.notice = "Login failed. Review the refreshed profile status before retrying."
 		case "cancelled":
@@ -236,8 +236,6 @@ func (m *model) updateAccounts(msg accountsReplyMsg) tea.Cmd {
 	case "cancel":
 		s.attempt = accountAttempt{}
 		s.notice = "Login cancelled."
-	case "default":
-		s.notice = "Default updated for new workloads. Existing bindings are unchanged."
 	case "logout":
 		s.notice = "Logout requested. Refresh status to check local cleanup."
 	}
@@ -377,7 +375,7 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r":
 		return m, m.requestAccounts(accountRequest{op: "status"})
-	case "e", "enter", "a", "d", "x":
+	case "e", "enter", "a", "x":
 		if s.stale || !s.snapshot.canManage {
 			s.notice = "Account management unavailable. Refresh status before making changes."
 			return m, nil
@@ -399,12 +397,6 @@ func (m *model) handleAccounts(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.confirm = &req
 			} else {
 				s.notice = "Login unavailable here; inspect the profile's login instructions."
-			}
-		case "d":
-			if p != nil && p.canDefault && !p.defaultProfile {
-				req := s.request("default")
-				s.scroll = 0
-				s.confirm = &req
 			}
 		case "x":
 			if p != nil && p.canLogout {
@@ -560,11 +552,11 @@ func (m *model) renderAccounts() string {
 			lines = append(lines, dimStyle.Render("  "+source))
 		}
 		if s.snapshot.legacyDefaults[harness] {
-			lines = append(lines, "  New workloads: preserved legacy default")
+			lines = append(lines, "  Migrated from an older login: central login required")
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, dimStyle.Render("Tab/↑↓/jk: select · e: subscription · a: API key"), dimStyle.Render("d: default · x: logout · r: refresh"), "Existing workload bindings stay fixed.")
+	lines = append(lines, dimStyle.Render("Tab/↑↓/jk: select · e: subscription · a: API key"), dimStyle.Render("x: logout · r: refresh"), "Workloads follow this login at their next launch.")
 	if p := s.profile(); p != nil {
 		identity, plan := accountText(p.account), accountText(p.plan)
 		if identity == "" {
@@ -575,7 +567,7 @@ func (m *model) renderAccounts() string {
 		}
 		lines = append(lines, "", "Selected: "+accountHarnessName(p.harness), "Account: "+identity, "Plan: "+plan, accountText(p.loginHelp))
 		if compact && s.snapshot.legacyDefaults[p.harness] {
-			lines = append(lines, "New workloads: preserved legacy default")
+			lines = append(lines, "Migrated from an older login: central login required")
 		}
 		if p.statusDetail != "" {
 			lines = append(lines, p.statusDetail)
@@ -669,11 +661,9 @@ func accountConfirmation(r accountRequest, p *accountProfile) string {
 	}
 	switch r.op {
 	case "logout":
-		return "Log out " + label + "?\n\nFuture credential delivery stops for workloads bound to this profile. Already delivered tokens may remain valid upstream. Workloads will not switch accounts automatically."
-	case "default":
-		return "Use " + label + " as the machine default?\n\nOnly new workloads use this default. Existing workload account bindings stay fixed."
+		return "Log out " + label + "?\n\nFuture credential delivery stops for every workload. Already delivered tokens may remain valid upstream. Running workloads are not stopped."
 	default:
-		return "Start " + r.loginMode + " login for " + label + "?\n\nLogin temporarily pauses new credential delivery to workloads bound to this profile. Replacement or a mode change may require explicit rebind for existing workloads. Follow the login instructions; Esc cancels the attempt."
+		return "Start " + r.loginMode + " login for " + label + "?\n\nLogin temporarily pauses new credential delivery. Every workload uses the new login, account or mode from its next launch; running workloads keep their current login and are not stopped. Follow the login instructions; Esc cancels the attempt."
 	}
 }
 

@@ -598,7 +598,10 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 		"--chdir", dir,
 	)
 	args = append(args, "--")
-	launchArgv = centralLauncher(tab, s, launchArgv)
+	launchArgv, err = centralLauncher(tab, s, launchArgv)
+	if err != nil {
+		return nil, err
+	}
 	return append(args, append([]string{self, payloadExecArg}, launchArgv...)...), nil
 }
 
@@ -618,12 +621,19 @@ func agentAuthError(s store.Session, launchDir string) error {
 // centralLauncher routes a central-mode Claude agent pane through the payload
 // trampoline's credential launcher, which runs after inherited descriptors are
 // closed. The token is fetched there, so it never appears in this argv, the
-// sandbox launcher's environment, or the engine spec.
-func centralLauncher(tab int, s store.Session, argv []string) []string {
+// sandbox launcher's environment, or the engine spec. Each resolved launch
+// gets its own account launch: the pane's process receives the newest central
+// credential once, and repeated requests from it receive that same version.
+// A launch resolved for a pane that is then reused is never delivered.
+func centralLauncher(tab int, s store.Session, argv []string) ([]string, error) {
 	if tab != TabAgent || agent.HarnessFor(s.Agent).Kind() != "claude" || accounts.Mode(s.ID, "claude") != amuxcfg.AuthCentral {
-		return argv
+		return argv, nil
 	}
-	return append([]string{centralauth.LauncherArg}, argv...)
+	launch, err := accounts.BeginLaunch(s.ID, "claude")
+	if err != nil {
+		return nil, fmt.Errorf("allocate Claude account launch: %w", err)
+	}
+	return append([]string{centralauth.LauncherArg, centralauth.LaunchArgPrefix + strconv.FormatUint(launch.Seq, 10) + ":" + launch.Nonce}, argv...), nil
 }
 
 const (

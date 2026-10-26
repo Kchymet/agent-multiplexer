@@ -232,7 +232,7 @@ func (m *model) accountOverviewLines() []string {
 				}
 			}
 			if m.accountOverview.legacyDefaults[harness] {
-				label = accountHarnessName(harness) + ": legacy default"
+				label = accountHarnessName(harness) + ": login required"
 			}
 		}
 		lines = append(lines, cellPad(" "+keyStyle.Render(label), sidebarWidth), cellPad("   "+budget, sidebarWidth))

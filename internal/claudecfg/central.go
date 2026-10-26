@@ -17,9 +17,8 @@ import (
 	"amux/internal/cfghome"
 )
 
-// AuthMode is the source a launch without a workload uses: central, or the
-// still-usable legacy login of an installation whose central profile has never
-// been configured. Unreadable account metadata shares no host store.
+// AuthMode is the source a launch without a workload uses. Every workload
+// follows central since the account store's version 2 migration.
 func AuthMode() string {
 	if mode := accounts.GlobalMode("claude"); mode != "blocked" {
 		return mode

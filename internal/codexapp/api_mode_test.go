@@ -38,7 +38,7 @@ func TestAPIKeyInjectedWithoutSubscriptionIdentityOrEvents(t *testing.T) {
 
 func TestAPIKeyCannotClaimSubscriptionIdentity(t *testing.T) {
 	for _, tok := range []ChatGPTToken{{AccessToken: firstToken, APIKey: true, AccountID: "invented"}, {AccessToken: firstToken, APIKey: true, PlanType: "pro"}} {
-		auth := newTokenAuth(providerFunc(func(context.Context, TokenRequest) (ChatGPTToken, error) { return tok, nil }), "test", "")
+		auth := newTokenAuth(providerFunc(func(context.Context, TokenRequest) (ChatGPTToken, error) { return tok, nil }), "test", "", 0)
 		if _, err := auth.fetch(t.Context(), false, ""); err == nil {
 			t.Fatal("API credential claimed subscription identity")
 		}

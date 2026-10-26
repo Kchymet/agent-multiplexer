@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"amux/internal/accounts"
 	"context"
 	"encoding/json"
 	"errors"
@@ -102,9 +103,9 @@ type Config struct {
 	// empty for a new process: a launch pins whatever the central login holds,
 	// and a reconnect keeps this process's account (tokenAuth).
 	ChatGPTAccount string
-	// AccountLaunch is the account service's launch sequence for this process;
-	// every token request carries it so a superseded process cannot be re-pinned.
-	AccountLaunch uint64
+	// AccountLaunch is the account service's launch of this process; every
+	// token request carries it so a superseded process cannot be re-pinned.
+	AccountLaunch accounts.Launch
 	// PriorChatGPTAccounts are earlier accounts of the resumed thread, kept
 	// as evidence when a replacement login continues it.
 	PriorChatGPTAccounts []string

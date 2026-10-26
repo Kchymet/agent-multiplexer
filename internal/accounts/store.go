@@ -8,6 +8,7 @@ import (
 	"amux/internal/centralauth"
 	"amux/internal/core"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,29 @@ const StoreVersion = 2
 // historyLimit bounds the per-binding record of earlier runtimes' deliveries.
 const historyLimit = 8
 
+// pendingLimit bounds allocated launches awaiting their first delivery. A
+// launch resolved for a pane that was then reused is never delivered.
+const pendingLimit = 4
+
+// Launch identifies one harness process launch. The nonce is handed only to
+// that process (the Codex supervisor, or the Claude launcher's argv, which its
+// exec replaces); metadata keeps only its hash.
+type Launch struct {
+	Seq   uint64
+	Nonce string
+}
+
+// PendingLaunch is an allocated launch awaiting its first delivery.
+type PendingLaunch struct {
+	Seq       uint64 `json:"seq"`
+	NonceHash string `json:"nonceHash"`
+}
+
+func nonceHash(nonce string) string {
+	sum := sha256.Sum256([]byte("amux-account-launch\x00" + nonce))
+	return hex.EncodeToString(sum[:])
+}
+
 // Delivered is what one runtime (one launched harness process) received.
 // It is evidence, never a credential.
 type Delivered struct {
@@ -56,12 +80,16 @@ type Binding struct {
 	CredentialVersion uint64 `json:"credentialVersion,omitempty"`
 	Revision          uint64 `json:"revision"`
 	Origin            string `json:"origin"`
-	// Launch is the current runtime's launch sequence; Launches allocates them.
-	Launch   uint64 `json:"launch,omitempty"`
-	Launches uint64 `json:"launches,omitempty"`
-	// LegacySource is the pre-central login this workload keeps using until the
-	// central profile is first configured. It is cleared, never restored, then.
-	LegacySource string      `json:"legacySource,omitempty"`
+	// Launch is the current runtime's launch sequence and LaunchNonce the hash
+	// of its nonce. Pending are allocated launches whose process has not
+	// received a credential yet. Launches allocates sequences.
+	Launch      uint64          `json:"launch,omitempty"`
+	LaunchNonce string          `json:"launchNonce,omitempty"`
+	Pending     []PendingLaunch `json:"pendingLaunches,omitempty"`
+	Launches    uint64          `json:"launches,omitempty"`
+	// MigratedFrom records the pre-central source of a migrated binding. It is
+	// evidence only and never routes a launch.
+	MigratedFrom string      `json:"migratedFrom,omitempty"`
 	History      []Delivered `json:"history,omitempty"`
 }
 
@@ -74,15 +102,11 @@ type State struct {
 	Bindings         map[string]Binding           `json:"bindings"`
 	// CredentialVersion fences opaque Claude replacement independently of epochs.
 	CredentialVersion map[string]uint64 `json:"credentialVersion"`
-	// LegacyFallback is the legacy source new workloads start on while a
-	// harness's central profile has never been configured.
-	LegacyFallback map[string]string `json:"legacyFallback,omitempty"`
+	// Migrated is the pre-central default of each harness migrated from version
+	// 1, kept as evidence. Until that harness's first central login the
+	// migration is reported as pending (MigrationPending).
+	Migrated map[string]string `json:"migrated,omitempty"`
 }
-
-// LegacyUsable reports whether a legacy source can still authenticate a new
-// process. Harness packages register it; an unregistered check means unusable,
-// which routes the launch to the central login flow.
-var LegacyUsable = map[string]func(source string) bool{}
 
 func ID(h, mode string) string { return h + ":" + mode }
 func Path() string             { return filepath.Join(core.AuthDir(), "accounts.json") }
@@ -91,17 +115,18 @@ func initial() (State, error) {
 	if _, e := rand.Read(nonce[:]); e != nil {
 		return State{}, e
 	}
-	s := State{DefaultRevisions: map[string]uint64{"claude": 1, "codex": 1}, Version: StoreVersion, MachineID: hex.EncodeToString(nonce[:]), Profiles: map[string]hp.AccountProfile{}, Defaults: map[string]string{}, Bindings: map[string]Binding{}, CredentialVersion: map[string]uint64{}, LegacyFallback: map[string]string{}}
+	s := State{DefaultRevisions: map[string]uint64{"claude": 1, "codex": 1}, Version: StoreVersion, MachineID: hex.EncodeToString(nonce[:]), Profiles: map[string]hp.AccountProfile{}, Defaults: map[string]string{}, Bindings: map[string]Binding{}, CredentialVersion: map[string]uint64{}, Migrated: map[string]string{}}
 	for _, h := range []string{"claude", "codex"} {
-		// A legacy claude.auth / codex.auth setting only seeds the transition
-		// fallback; the default is always the central profile.
+		// A legacy claude.auth / codex.auth setting is migrated once: the
+		// default is always the central profile, and the old selection is
+		// recorded so the pending central login is reported.
 		mode, e := amuxcfg.AuthMode(h)
 		if e != nil {
 			return s, e
 		}
 		s.Defaults[h] = ID(h, amuxcfg.AuthCentral)
 		if mode != amuxcfg.AuthCentral {
-			s.LegacyFallback[h] = mode
+			s.Migrated[h] = mode
 		}
 		for _, m := range amuxcfg.AuthModes(h) {
 			p := hp.AccountProfile{ID: ID(h, m), Harness: h, Source: m, Revision: 1, DeliveryEpoch: 1, State: "unconfigured", Identity: hp.AccountIdentity{State: "unknown", Evidence: "external"}, Limits: hp.AccountLimits{State: "unavailable", Source: "unsupported"}, LoginMethod: "external"}
@@ -151,7 +176,6 @@ func Update(fn func(*State) error) error {
 	if e = fn(&s); e != nil {
 		return e
 	}
-	s.normalize()
 	if from == 1 {
 		if e = backupV1(dir); e != nil {
 			return e
@@ -228,10 +252,9 @@ func load() (State, int, error) {
 	if s.DefaultRevisions == nil {
 		s.DefaultRevisions = map[string]uint64{"claude": 1, "codex": 1}
 	}
-	if s.LegacyFallback == nil {
-		s.LegacyFallback = map[string]string{}
+	if s.Migrated == nil {
+		s.Migrated = map[string]string{}
 	}
-	s.normalize()
 	return s, from, nil
 }
 
@@ -258,21 +281,23 @@ func backupV1(dir string) error {
 	return e
 }
 
-// migrateV1 moves every default and binding to the harness's central profile.
-// A non-central default or binding keeps its source as the transition fallback
-// unless central was already configured. Delivered evidence of the current
-// runtime is preserved; the next launch re-pins it. Idempotent by version.
+// migrateV1 moves every default and binding to the harness's central profile,
+// once. No credential is copied: host and shared logins hold rotating refresh
+// tokens, and environment credentials are not amux's to move. A harness whose
+// central profile was never configured reports the migration as pending until
+// its first central login; launches meanwhile use the central login flow.
+// Delivered evidence of central runtimes is preserved. Idempotent by version.
 func (s *State) migrateV1() {
 	if s.DefaultRevisions == nil {
 		s.DefaultRevisions = map[string]uint64{"claude": 1, "codex": 1}
 	}
-	if s.LegacyFallback == nil {
-		s.LegacyFallback = map[string]string{}
+	if s.Migrated == nil {
+		s.Migrated = map[string]string{}
 	}
 	for _, h := range []string{"claude", "codex"} {
 		central := ID(h, amuxcfg.AuthCentral)
-		if d, ok := s.Profiles[s.Defaults[h]]; ok && d.Source != amuxcfg.AuthCentral && !s.centralConfigured(h) {
-			s.LegacyFallback[h] = d.Source
+		if d, ok := s.Profiles[s.Defaults[h]]; ok && d.Source != amuxcfg.AuthCentral {
+			s.Migrated[h] = d.Source
 		}
 		if s.Defaults[h] != central {
 			s.Defaults[h] = central
@@ -283,10 +308,8 @@ func (s *State) migrateV1() {
 		if b.Harness != "claude" && b.Harness != "codex" {
 			continue
 		}
-		if b.Source != amuxcfg.AuthCentral && b.Source != "" && !s.centralConfigured(b.Harness) {
-			b.LegacySource = b.Source
-		}
 		if b.Source != amuxcfg.AuthCentral {
+			b.MigratedFrom = b.Source
 			// Legacy runtimes never received central evidence.
 			b.DeliveredEpoch, b.CredentialMode, b.ExpectedAccount, b.CredentialVersion = 0, "", "", 0
 		}
@@ -306,27 +329,26 @@ func (s *State) centralConfigured(h string) bool {
 	return s.Profiles[id].State == "ready" || s.CredentialVersion[id] != 0
 }
 
-// normalize retires the transition fallback once central is configured: the
-// newest successfully configured login then serves every next launch.
-func (s *State) normalize() {
-	for _, h := range []string{"claude", "codex"} {
-		if !s.centralConfigured(h) {
-			continue
-		}
-		delete(s.LegacyFallback, h)
-		for id, b := range s.Bindings {
-			if b.Harness == h && b.LegacySource != "" {
-				b.LegacySource = ""
-				b.Revision++
-				s.Bindings[id] = b
-			}
-		}
+// MigrationPending names the pre-central source of a harness migrated from
+// version 1 whose central profile has not been configured yet, or "".
+func (s State) MigrationPending(h string) string {
+	if s.centralConfigured(h) {
+		return ""
 	}
+	return s.Migrated[h]
 }
 
 func Read() (State, error) { return read() }
 func (s State) Snapshot() hp.AccountSnapshot {
 	out := hp.AccountSnapshot{DefaultRevisions: s.DefaultRevisions, Version: 1, Defaults: s.Defaults, Profiles: []hp.AccountProfile{}}
+	for _, h := range []string{"claude", "codex"} {
+		if from := s.MigrationPending(h); from != "" {
+			if out.MigrationPending == nil {
+				out.MigrationPending = map[string]string{}
+			}
+			out.MigrationPending[h] = from
+		}
+	}
 	for _, p := range s.Profiles {
 		out.Profiles = append(out.Profiles, p)
 	}
@@ -360,12 +382,11 @@ func bind(session, h string) error {
 	}
 	return Update(func(s *State) error {
 		// Bootstrap the opaque version of a credential stored before the
-		// account service so that it counts as configured central state.
+		// account service so that it counts as configured central state. An
+		// unreadable credential stays unconfigured here; delivery reports it.
 		if h == "claude" && s.CredentialVersion[ID(h, "central")] == 0 {
 			if c, err := centralauth.ClaudeStore().Load(); err == nil {
 				s.CredentialVersion[ID(h, "central")] = c.Generation
-			} else if !errors.Is(err, centralauth.ErrNotConfigured) {
-				return err
 			}
 		}
 		if b, ok := s.Bindings[session]; ok {
@@ -374,31 +395,16 @@ func bind(session, h string) error {
 			}
 			return nil
 		}
-		b := Binding{ProfileID: ID(h, amuxcfg.AuthCentral), Harness: h, Source: amuxcfg.AuthCentral, Revision: 1, Origin: "machine-default"}
-		if !s.centralConfigured(h) {
-			b.LegacySource = s.LegacyFallback[h]
-		}
-		s.Bindings[session] = b
+		s.Bindings[session] = Binding{ProfileID: ID(h, amuxcfg.AuthCentral), Harness: h, Source: amuxcfg.AuthCentral, Revision: 1, Origin: "machine-default"}
 		return nil
 	})
 }
 
-// Mode is the source the next launch of this workload uses: central, or its
-// still-usable legacy login while central has never been configured. An
-// unusable legacy login routes to central, whose login flow then applies.
+// Mode is the source a launch of this workload uses. Every binding follows
+// central; "blocked" reports unreadable account metadata.
 func Mode(session, h string) string {
-	s, e := Read()
-	if e != nil {
+	if _, e := Read(); e != nil {
 		return "blocked"
-	}
-	legacy := s.LegacyFallback[h]
-	if b, ok := s.Bindings[session]; ok && b.Harness == h {
-		legacy = b.LegacySource
-	}
-	if legacy != "" && !s.centralConfigured(h) {
-		if usable := LegacyUsable[h]; usable != nil && usable(legacy) {
-			return legacy
-		}
 	}
 	return amuxcfg.AuthCentral
 }
@@ -422,47 +428,51 @@ func Delivery(session, h string) (Binding, hp.AccountProfile, error) {
 	return b, p, nil
 }
 
-// BeginLaunch allocates the launch sequence for a new harness process. The
-// process's first delivery pins the newest credential to this launch; any
-// delivery for an older launch is then refused.
-func BeginLaunch(session, h string) (uint64, error) {
+// BeginLaunch allocates a launch for a new harness process. The process's
+// first delivery pins the newest central credential to this launch; after
+// that, deliveries to it must match, and any older launch is superseded.
+func BeginLaunch(session, h string) (Launch, error) {
 	if e := BindExisting(session, h); e != nil {
-		return 0, e
+		return Launch{}, e
 	}
-	var seq uint64
+	var raw [24]byte
+	if _, e := rand.Read(raw[:]); e != nil {
+		return Launch{}, e
+	}
+	l := Launch{Nonce: hex.EncodeToString(raw[:])}
 	e := Update(func(s *State) error {
 		b, ok := s.Bindings[session]
 		if !ok || b.Harness != h {
 			return ErrBlocked
 		}
 		b.Launches = max(b.Launches, b.Launch) + 1
-		seq = b.Launches
+		l.Seq = b.Launches
+		b.Pending = append(b.Pending, PendingLaunch{Seq: l.Seq, NonceHash: nonceHash(l.Nonce)})
+		if len(b.Pending) > pendingLimit {
+			b.Pending = append([]PendingLaunch(nil), b.Pending[len(b.Pending)-pendingLimit:]...)
+		}
 		s.Bindings[session] = b
 		return nil
 	})
-	return seq, e
+	return l, e
 }
 
-// Accept records a delivery to a runtime. Without a launch argument the
-// delivery is itself a new process launch (the Claude launcher execs once per
-// credential); a supervised Codex process passes its BeginLaunch sequence.
-func Accept(session string, revision, epoch uint64, account string, version uint64, launch ...uint64) error {
-	return AcceptAuthorized(session, revision, epoch, account, version, func(commit func() error) error { return commit() }, launch...)
+// Accept records a delivery to the runtime of one process launch.
+func Accept(session string, revision, epoch uint64, account string, version uint64, l Launch) error {
+	return AcceptAuthorized(session, revision, epoch, account, version, func(commit func() error) error { return commit() }, l)
 }
 
 // AcceptAuthorized holds metadata ownership before acquiring an authority lease.
 // Admission performs only local validation; it must not wait for a runtime.
 //
-// A newer launch pins whatever the central profile currently holds: mode,
-// account and version may all differ from the previous runtime. The current
-// launch must keep its mode and account (same-account Codex refresh), and an
-// opaque or API credential its version. An older launch is superseded.
-func AcceptAuthorized(session string, revision, epoch uint64, account string, version uint64, admit func(func() error) error, launch ...uint64) error {
-	var seq uint64
-	allocate := len(launch) == 0
-	if !allocate {
-		seq = launch[0]
-	}
+// The first delivery of an allocated launch pins whatever the central profile
+// currently holds: mode, account and version may all differ from the previous
+// runtime. Later deliveries to the same launch must keep its mode and account
+// (same-account Codex refresh), and an opaque or API credential its version.
+// A repeated request therefore never selects a replacement; only a new process
+// launch does. An older launch is superseded; an unallocated one is refused.
+func AcceptAuthorized(session string, revision, epoch uint64, account string, version uint64, admit func(func() error) error, l Launch) error {
+	hash := nonceHash(l.Nonce)
 	return Update(func(s *State) error {
 		return admit(func() error {
 			b, ok := s.Bindings[session]
@@ -477,14 +487,16 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 			if mode == "" {
 				mode = "subscription"
 			}
-			if allocate {
-				b.Launches = max(b.Launches, b.Launch) + 1
-				seq = b.Launches
+			pending := -1
+			for i, q := range b.Pending {
+				if q.Seq == l.Seq && q.NonceHash == hash {
+					pending = i
+				}
 			}
 			switch {
-			case seq < b.Launch:
+			case l.Seq < b.Launch:
 				return ErrSuperseded
-			case seq == b.Launch && b.DeliveredEpoch != 0:
+			case l.Seq == b.Launch && b.LaunchNonce == hash && b.DeliveredEpoch != 0:
 				if b.CredentialMode != "" && b.CredentialMode != mode {
 					return ErrBlocked
 				}
@@ -494,15 +506,23 @@ func AcceptAuthorized(session string, revision, epoch uint64, account string, ve
 				if (b.Harness == "claude" || mode == "api") && b.CredentialVersion != 0 && b.CredentialVersion != version {
 					return ErrBlocked
 				}
-			default:
+			case pending >= 0:
 				if b.DeliveredEpoch != 0 {
 					b.History = append(b.History, Delivered{Launch: b.Launch, Epoch: b.DeliveredEpoch, Mode: b.CredentialMode, Account: b.ExpectedAccount, Version: b.CredentialVersion})
 					if len(b.History) > historyLimit {
 						b.History = append([]Delivered(nil), b.History[len(b.History)-historyLimit:]...)
 					}
 				}
-				b.Launch = seq
-				b.Launches = max(b.Launches, seq)
+				b.Launch, b.LaunchNonce = l.Seq, hash
+				var keep []PendingLaunch
+				for _, q := range b.Pending {
+					if q.Seq > l.Seq {
+						keep = append(keep, q)
+					}
+				}
+				b.Pending = keep
+			default:
+				return ErrBlocked // not a launch the daemon allocated
 			}
 			b.CredentialMode = mode
 			b.DeliveredEpoch = epoch

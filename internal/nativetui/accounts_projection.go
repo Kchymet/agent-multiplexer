@@ -16,7 +16,7 @@ const accountObservationMaxAge = time.Duration(harnessproto.AccountLimitsTTLMill
 func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 	out := accountSnapshot{canManage: true, defaultRevisions: in.DefaultRevisions, legacyDefaults: make(map[string]bool)}
 	for _, harness := range []string{"claude", "codex"} {
-		out.legacyDefaults[harness] = in.Defaults[harness] != "" && in.Defaults[harness] != harness+":central"
+		out.legacyDefaults[harness] = in.MigrationPending[harness] != ""
 	}
 	seen := make(map[string]bool)
 	for _, p := range in.Profiles {
@@ -62,16 +62,7 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 			out.profiles = append(out.profiles, row)
 			continue
 		}
-		// Under a preserved legacy default, new workloads spend the host or
-		// shared login's budget, so the row shows that profile's limits.
 		lp := p
-		if out.legacyDefaults[p.Harness] {
-			for _, q := range in.Profiles {
-				if q.ID == in.Defaults[p.Harness] && q.Harness == p.Harness && (q.Source == "host" || q.Source == "shared") {
-					lp = q
-				}
-			}
-		}
 		limits := lp.Limits
 		confidence := "unknown"
 		if limits.Source == "codex-native" || limits.Source == "claude-usage" || limits.Source == "claude-probe" {
@@ -118,9 +109,6 @@ func projectAccounts(in harnessproto.AccountSnapshot) accountSnapshot {
 				l.reason = "Stale after 5 minutes; usage is an observation, not a billing guarantee."
 				if limits.Source == "claude-probe" {
 					l.reason = "Read from a one-token quota probe every 15 minutes; usage is an observation, not a billing guarantee."
-				}
-				if lp.ID != p.ID {
-					l.reason += " Read from the legacy default " + lp.ID + " login."
 				}
 				if advisory {
 					l.reason += " Reported by session " + limits.SessionID + ", runtime " + limits.RuntimeGeneration + "; account identity remains unverified."
