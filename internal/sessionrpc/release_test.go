@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"golang.org/x/sys/unix"
 )
 
 // pumpUntil serves until operation returns. Unlike pumpClient it tolerates
@@ -160,7 +161,19 @@ func TestReleaseProcessedBehindCapacityBlockedRequest(t *testing.T) {
 			}
 			out += fmt.Sprintf(" %s=%v%v", dir, names, err)
 		}
-		return out
+		// The server's own held-descriptor view, which ServeOnce scans.
+		for label, dir := range map[string]*os.File{"held-requests": f.server.requests, "held-processing": f.server.processing} {
+			names, more, err := listNames(dir, MaxQueuedRequests)
+			out += fmt.Sprintf(" %s=%v more=%v %v", label, names, more, err)
+		}
+		entries, _ := os.ReadDir(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName))
+		for _, entry := range entries {
+			var stat unix.Stat_t
+			if err := unix.Lstat(filepath.Join(f.grant.MailboxHostDir, ResponsesDirName, entry.Name()), &stat); err == nil {
+				out += fmt.Sprintf(" stat(%s)=nlink:%d mode:%o size:%d mtime:%s", entry.Name(), stat.Nlink, stat.Mode&0o7777, stat.Size, statModTime(stat).Format(time.RFC3339Nano))
+			}
+		}
+		return out + " now:" + time.Now().Format(time.RFC3339Nano)
 	}
 	// Preconditions: the consumed response holds the only slot, and both the
 	// low request and the client's release are queued, the low one first.

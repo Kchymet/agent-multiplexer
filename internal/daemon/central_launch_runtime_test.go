@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -359,6 +361,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 	if err := runtime.start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	runtime.inspect = make(chan func())
 	serving, stop := context.WithCancel(ctx)
 	joined := make(chan struct{})
 	go func() { defer close(joined); runtime.run(serving) }()
@@ -397,6 +400,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		}
 		select {
 		case <-ctx.Done():
+			pressureDiagnostics(t, d, runtime, sessions)
 			t.Fatalf("background fetches stalled at %d", total)
 		case <-time.After(20 * time.Millisecond):
 		}
@@ -426,6 +430,7 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 		}
 		select {
 		case <-ctx.Done():
+			pressureDiagnostics(t, d, runtime, append(sessions, fresh))
 			t.Fatal("fresh launcher was not served under client pressure")
 		case <-time.After(10 * time.Millisecond):
 		}
@@ -469,14 +474,37 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 
 // pressureDiagnostics records, for every background session, how far its
 // fixture got (started vs. completed fetch, recorded launcher exit), whether its
-// pane is alive and what it printed, and the state of its mailbox queues, so a
-// stall can be told apart from a fixture observation problem.
+// pane is alive and what it printed, the server's own view of that subject
+// (captured on the run goroutine, which owns those maps), and its mailbox
+// queues. It ends with every goroutine's stack, so a pass blocked in dispatch
+// or on a lock is visible. Everything here is read-only: the mailbox is found
+// from the authority root, never through provisioning.
 func pressureDiagnostics(t *testing.T, d *Daemon, runtime *sessionRuntime, sessions []store.Session) {
 	t.Helper()
 	budget := runtime.responseBudget.(*sessionResponseBudget)
 	budget.mu.Lock()
 	t.Logf("budget: files=%d bytes=%d receipts=%d", budget.files, budget.bytes, budget.receipts)
 	budget.mu.Unlock()
+	server := map[string]string{}
+	captured := make(chan struct{})
+	select {
+	case runtime.inspect <- func() {
+		for _, session := range sessions {
+			id := session.ID
+			inFlight := "none"
+			if done, ok := runtime.serving[id]; ok {
+				inFlight = fmt.Sprintf("finished=%v", finished(done))
+			}
+			_, closing := runtime.closing[id]
+			server[id] = fmt.Sprintf("open=%v initialized=%v pass=%s closing=%v",
+				runtime.servers[id] != nil, runtime.initialized[id], inFlight, closing)
+		}
+		close(captured)
+	}:
+		<-captured
+	case <-time.After(2 * time.Second):
+		t.Log("server state: run loop did not accept an inspection within 2s (blocked in reconcile or serve)")
+	}
 	for _, session := range sessions {
 		dir := filepath.Join(core.SessionsDir(), "root", session.ID)
 		read := func(name string) string {
@@ -496,18 +524,20 @@ func pressureDiagnostics(t *testing.T, d *Daemon, runtime *sessionRuntime, sessi
 				output = "…" + output[len(output)-2000:]
 			}
 		}
+		mailbox := filepath.Join(d.authority.Root(), "mailboxes", filepath.Base(d.authority.CredentialDir(access.SubjectSession, session.ID)))
 		queues := ""
-		if spec, err := d.launchSpec(context.Background(), session.ID); err == nil {
-			for _, sub := range []string{sessionrpc.RequestsDirName, "processing", sessionrpc.ResponsesDirName} {
-				entries, err := os.ReadDir(filepath.Join(spec.Access.MailboxHostDir, sub))
-				names := make([]string, 0, len(entries))
-				for _, entry := range entries {
-					names = append(names, entry.Name())
-				}
-				queues += fmt.Sprintf(" %s=%v%v", sub, names, err)
+		for _, sub := range []string{sessionrpc.RequestsDirName, "processing", sessionrpc.ResponsesDirName} {
+			entries, err := os.ReadDir(filepath.Join(mailbox, sub))
+			names := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				names = append(names, entry.Name())
 			}
+			queues += fmt.Sprintf(" %s=%d%v%v", sub, len(names), names, err)
 		}
-		t.Logf("%s: started=%s fetched=%s failed=%s alive=%v queues:%s output=%q",
-			session.ID, read("started"), read("fetched"), read("failed"), alive, queues, output)
+		t.Logf("%s: started=%s fetched=%s failed=%s alive=%v server[%s] queues:%s output=%q",
+			session.ID, read("started"), read("fetched"), read("failed"), alive, server[session.ID], queues, output)
 	}
+	var stacks bytes.Buffer
+	_ = pprof.Lookup("goroutine").WriteTo(&stacks, 2)
+	t.Logf("goroutines:\n%s", stacks.String())
 }
