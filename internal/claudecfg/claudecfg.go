@@ -607,9 +607,14 @@ func SettingsPath() string { return User().SettingsPath() }
 var hookEvents = []struct{ event, state string }{
 	{"SessionStart", core.StateReady},       // launched, no turn yet
 	{"UserPromptSubmit", core.StateRunning}, // a turn began
-	{"Notification", core.StateWaiting},     // needs the user (permission / idle prompt)
-	{"Stop", core.StateReady},               // finished the turn
-	{"SessionEnd", core.StateIdle},          // agent exited
+	// A tool finished, so the turn is running again: this clears "waiting"
+	// after an approved permission prompt, and restores "running" mid-turn if
+	// the UserPromptSubmit report was lost (e.g. a member's first turn, whose
+	// hooks fire before its mailbox is served).
+	{"PostToolUse", core.StateRunning},
+	{"Notification", core.StateWaiting}, // needs the user (permission / idle prompt)
+	{"Stop", core.StateReady},           // finished the turn
+	{"SessionEnd", core.StateIdle},      // agent exited
 }
 
 // HookEventState returns the activity state a Claude Code hook event implies, and
