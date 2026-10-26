@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"amux/internal/access"
@@ -301,6 +302,8 @@ var (
 	// One unpublished capture globally bounds staging disk to 256 MiB without
 	// blocking management dispatch/effect admission while the copy runs.
 	sessionCaptureSlot = make(chan struct{}, 1)
+	// sessionCaptureSlotWait bounds how long one capture queues for the slot.
+	sessionCaptureSlotWait = 5 * time.Second
 )
 
 func reportErrorCode(err error) string {
@@ -433,9 +436,16 @@ func openSessionTranscriptSource(session store.Session) (*os.File, error) {
 // the potentially 256 MiB copy. Both short gates authenticate and bind the exact
 // subject/runtime incarnation; only the final gate publishes the private stage.
 func (r *sessionRuntime) dispatchSessionCapture(ctx context.Context, principal access.Principal, req access.Request) sessionrpc.DispatchResult {
+	// The wait is bounded: this subject's mailbox is served serially, so a
+	// capture parked behind other agents' copies would hold up its own status
+	// and CLI requests. A dropped snapshot is retried at the next boundary.
+	slotWait := time.NewTimer(sessionCaptureSlotWait)
+	defer slotWait.Stop()
 	select {
 	case sessionCaptureSlot <- struct{}{}:
 		defer func() { <-sessionCaptureSlot }()
+	case <-slotWait.C:
+		return rpcFailed("report_capture_busy")
 	case <-ctx.Done():
 		return rpcFailed("report_capture_unavailable")
 	}

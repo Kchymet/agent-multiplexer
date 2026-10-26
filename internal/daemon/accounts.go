@@ -58,6 +58,9 @@ func (d *Daemon) accountCall(ctx context.Context, r hp.AccountRequest, ceremony 
 	if ctx.Err() != nil || revalidateDeferred(ctx) != nil {
 		return fail("account_access_denied")
 	}
+	if r.Operation != hp.AccountStatus {
+		d.readiness.clear()
+	}
 	if r.Operation == hp.AccountDisconnect {
 		d.disconnectAccounts(r.Initiator, false)
 		return hp.AccountResult{OK: true}
@@ -571,6 +574,11 @@ func (d *Daemon) accountSnapshot(ctx context.Context) (hp.AccountSnapshot, error
 		return nil
 	})
 	snapshot := s.Snapshot()
+	defer func() {
+		if e == nil {
+			d.readiness.store(snapshot, d.accountTime())
+		}
+	}()
 	for i := range snapshot.Profiles {
 		if snapshot.Profiles[i].Source == "central" {
 			snapshot.Profiles[i].SupportedModes = []string{"subscription", "api"}
