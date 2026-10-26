@@ -121,11 +121,12 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 	guarded := withGuardSubject(withAccessGuard(ctx, func(checkCtx context.Context) error {
 		return r.finalAuthorize(checkCtx, request.Principal, req)
 	}), request.Principal.SubjectID)
-	if _, scoped := sessionScopedAction(action); scoped && !selfCompletionShape(request.Principal, action) {
-		// A start, restart or steer of one session (a coordinator prompting its
-		// member, say) takes only the target's admission inside handle, which
-		// reruns the guard there, immediately before the effect. Check once
-		// first so a denied caller gets the same codes as on the exclusive path.
+	if !selfCompletionShape(request.Principal, action) && splitAction(action) {
+		// An action handle admits per resource (a coordinator prompting,
+		// creating or archiving a member, say) takes only those locks inside
+		// handle, plus the caller's, and reruns the guard there, immediately
+		// before the effect. Check once first so a denied caller gets the same
+		// codes as on the exclusive path.
 		release := r.d.admitShared()
 		denied, ok := r.admissionCheck(ctx, request.Principal, req)
 		release()

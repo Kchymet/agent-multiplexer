@@ -120,7 +120,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		if len(ids) == 0 {
 			return fail("no agent to start for %q", a.ID)
 		}
-		unlock := d.sessionLocks.lock(ids...)
+		unlock := d.sessionLocks.lock(append(ids, guardSubject(ctx))...)
 		defer unlock()
 		lockedMembers = ids
 		admitted := time.Now()
@@ -131,16 +131,23 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			}
 		}()
 	} else if creationAction(a) && !effectAdmissionHeld(ctx) {
-		// Creating a session changes no existing session's authorization:
-		// archive, grants and membership moves are exclusive, so they cannot
-		// cross it. Creations serialize among themselves on creationMu, which
-		// also keeps reconcile from opening a half-created session's mailbox.
+		// Creating a session changes no existing session's authorization.
+		// Grants and membership moves are exclusive, and archive and delete
+		// hold creationMu, so none crosses it. Creations serialize among
+		// themselves on creationMu, which also keeps reconcile from opening a
+		// half-created session's mailbox. A guarded caller's session is locked
+		// so an archive of the caller cannot cross its guard.
 		waitStart := time.Now()
-		release := d.admitShared()
+		release := sync.OnceFunc(d.admitSessions(guardSubject(ctx)))
 		defer release()
 		d.creationMu.Lock()
 		var once sync.Once
-		releaseCreation = func() { once.Do(d.creationMu.Unlock) }
+		releaseCreation = func() {
+			once.Do(func() {
+				d.creationMu.Unlock()
+				release()
+			})
+		}
 		defer releaseCreation()
 		admitted := time.Now()
 		defer func() {
@@ -319,10 +326,13 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			// startEngineFor's root fan-out to the members.
 			start := func() error { return d.startAgent(ctx, newID) }
 			if releaseCreation != nil {
+				// Start under the new session's admission, taken together with
+				// the caller's in one sorted acquisition: adding a key to a
+				// held set could deadlock against a workgroup archive.
 				releaseCreation()
 				start = func() error {
-					unlock := d.sessionLocks.lock(newID)
-					defer unlock()
+					release := d.admitSessions(newID, guardSubject(ctx))
+					defer release()
 					return d.startAgent(ctx, newID)
 				}
 			}

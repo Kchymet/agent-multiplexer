@@ -46,6 +46,7 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "host start of a3, stalled launching its runtime", hold: holdRuntimeStart, blocked: false},
 		{name: "host agent-set-repos of a3, stalled in its git work", hold: holdDispatch(core.Action{Action: core.ActionAgentSetRepos, ID: "a3", Fields: map[string]string{"repos": ""}}), blocked: false},
 		{name: "host add-repo, stalled cloning", hold: holdDispatch(core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": "https://example.invalid/r.git"}}), blocked: false},
+		{name: "coordinator's own add-agent, stalled creating", hold: holdCoordinatorAddAgent, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
@@ -244,6 +245,21 @@ func holdDispatch(action core.Action) func(t *testing.T, f *independenceFixture,
 		if r := f.d.handle(context.Background(), action); !r.OK {
 			t.Errorf("%s = %+v", action.Action, r)
 		}
+	}
+}
+
+// holdCoordinatorAddAgent is the workgroup's coordinator adding an agent
+// through its own session mailbox, stalling inside the creation.
+func holdCoordinatorAddAgent(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.d.dispatch = func(context.Context, core.Action, func(string)) (string, error) {
+		held()
+		<-release
+		return "", nil
+	}
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionAddAgent, ID: "root",
+		Fields: map[string]string{"agent": "claude"}}
+	if result, _ := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals["root"], Call: call}); result.Status != sessionrpc.StatusOK {
+		t.Errorf("coordinator add-agent = %+v", result)
 	}
 }
 
