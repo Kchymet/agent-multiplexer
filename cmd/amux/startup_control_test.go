@@ -394,11 +394,9 @@ func TestAutoAndManualControl(t *testing.T) {
 				}
 				defer c.Close()
 				selection, err := c.CodexControl()
+				// Central Codex auth keeps App Server control even under a pty override.
 				want := amuxcfg.AppServer
-				if override == "pty" {
-					want = amuxcfg.PTY
-				}
-				if err != nil || selection.Effective != want || selection.Persisted != amuxcfg.AppServer || selection.OverrideSet != (override != "absent") {
+				if err != nil || selection.Effective != want || (override == "pty") != (selection.Warning != "") || selection.Persisted != amuxcfg.AppServer || selection.OverrideSet != (override != "absent") {
 					t.Fatalf("startup selection = %+v, %v; want %s", selection, err, want)
 				}
 				// An ordinary ensure/start of an already-running daemon does not

@@ -83,12 +83,12 @@ func TestNonAgentTabsSkipLaunchSideEffects(t *testing.T) {
 	}
 }
 
-// The agent scope no longer mounts the user's harness config: a codex agent's
+// The agent scope never mounts the user's harness config: a codex agent's
 // config is a private copy inside its dir (CODEX_HOME points there), so neither
-// $CODEX_HOME nor Claude's ~/.claude is bound — only the shared auth file, at its
-// template path, so the copy's symlink to it resolves. Shared hook and
-// transcript state must not enter the namespace.
-func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
+// $CODEX_HOME nor Claude's ~/.claude is bound, and (with legacy host auth
+// retired) neither is the host login. Only MCP integration credentials are
+// shared. Shared hook and transcript state must not enter the namespace.
+func TestCodexAgentScopeBindsOnlyMCPCredentials(t *testing.T) {
 	ch := t.TempDir()
 	t.Setenv("CODEX_HOME", ch)
 	useCodexAuth(t, amuxcfg.AuthHost)
@@ -104,8 +104,8 @@ func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	if hasBind(binds, ch) {
 		t.Errorf("codex TabAgent scope must not bind the user's $CODEX_HOME; got %v", binds)
 	}
-	if !hasBind(binds, auth) {
-		t.Errorf("codex TabAgent scope missing the shared auth.json bind %q; got %v", auth, binds)
+	if hasBind(binds, auth) {
+		t.Errorf("codex TabAgent scope binds the host login %q; got %v", auth, binds)
 	}
 	if !hasBind(binds, mcpAuth) {
 		t.Errorf("codex TabAgent scope missing shared MCP credentials bind %q; got %v", mcpAuth, binds)
@@ -118,9 +118,9 @@ func TestCodexAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	}
 }
 
-// Likewise for Claude: the user's ~/.claude and ~/.claude.json are no longer
-// mounted; only .credentials.json is, at its own path.
-func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
+// Likewise for Claude: neither the user's ~/.claude and ~/.claude.json nor,
+// with legacy host auth retired, .credentials.json is mounted.
+func TestClaudeAgentScopeBindsNoHostLogin(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
 	useClaudeAuth(t, amuxcfg.AuthHost)
@@ -133,8 +133,8 @@ func TestClaudeAgentScopeBindsOnlySharedAuth(t *testing.T) {
 	if hasBind(binds, cfg) || hasBind(binds, "/home/tester/.claude") || hasBind(binds, "/home/tester/.claude.json") {
 		t.Errorf("claude TabAgent scope must not bind the user's config home; got %v", binds)
 	}
-	if !hasBind(binds, cred) {
-		t.Errorf("claude TabAgent scope missing the shared credentials bind %q; got %v", cred, binds)
+	if hasBind(binds, cred) {
+		t.Errorf("claude TabAgent scope binds the host login %q; got %v", cred, binds)
 	}
 }
 

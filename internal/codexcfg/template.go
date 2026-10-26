@@ -40,18 +40,17 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 		// A hard link shares the credential without failing that regular-file check.
 		HardlinkShared: []string{MCPCredentialsFile},
 	}
-	if mode := accounts.Mode(agentID, "codex"); mode != amuxcfg.AuthHost {
-		// Central and environment modes never share the host account login
-		// (auth.json holds its refresh token): a legacy link is unlinked without
-		// being followed. MCP OAuth credentials are separate integration
-		// credentials and keep their existing sharing.
-		sp.Shared = []string{MCPCredentialsFile, "mcp-oauth-locks"}
-		sp.Retire = []string{AuthFile}
-		if mode == amuxcfg.AuthCentral {
-			// The daemon's App Server adapter supplies the ChatGPT tokens; an
-			// inherited API key would select a different account.
-			sp.AuthUnsetEnv = APIKeyEnv
-		}
+	// Every workload follows central auth and never shares the host account
+	// login (auth.json holds its refresh token): a legacy link from the retired
+	// host mode is unlinked without being followed. MCP OAuth credentials are
+	// separate integration credentials and keep their existing sharing. The
+	// daemon's App Server adapter supplies the credential; an inherited API key
+	// would select a different account.
+	sp.Shared = []string{MCPCredentialsFile, "mcp-oauth-locks"}
+	sp.Retire = []string{AuthFile}
+	// Only a test-fixture build can route a workload to the environment.
+	if accounts.Mode(agentID, "codex") != amuxcfg.AuthEnvironment {
+		sp.AuthUnsetEnv = APIKeyEnv
 	}
 	return sp
 }
@@ -59,14 +58,13 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 // APIKeyEnv are the inherited Codex account variables (see launchenv).
 var APIKeyEnv = []string{"OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"}
 
-// AuthMode is the effective codex.auth selection. An invalid setting yields
-// central, which shares no host login; daemon startup reports the error.
+// AuthMode is the source a launch without a workload uses. Every workload
+// follows central since the account store's version 2 migration.
 func AuthMode() string {
-	mode, err := amuxcfg.AuthMode("codex")
-	if err != nil {
-		return amuxcfg.AuthCentral
+	if mode := accounts.GlobalMode("codex"); mode != "blocked" {
+		return mode
 	}
-	return mode
+	return amuxcfg.AuthCentral
 }
 
 // AgentHome is where an agent's private Codex home lives: under its sandbox dir.

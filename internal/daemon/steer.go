@@ -439,7 +439,10 @@ func (d *Daemon) startForSteer(ctx context.Context, id string, key engine.Key, p
 	// its coordinator, not a "start every member" (which is what `start <root>`
 	// means — see startEngineFor).
 	err := d.admitDeferredEffect(ctx, func(admitCtx context.Context) error {
-		if err := d.startAgent(admitCtx, id); err != nil {
+		// The prompt being typed below is this start's turn, and the prompt hook
+		// makes it the coordinator's goal; a goal continuation on top of it
+		// would be a second, competing submission.
+		if err := d.startAgentWith(admitCtx, id, startIntent{}); err != nil {
 			return err
 		}
 		in, ok := d.engine.Lookup(key)

@@ -6,47 +6,25 @@ import (
 	"testing"
 
 	"amux/internal/amuxcfg"
-	"amux/internal/claudecfg"
 )
 
-func TestClaudeAuthCommandRoutesLoginAndStatusToSharedStore(t *testing.T) {
+// A saved retired claude.auth value never makes status inspect another
+// store: without a daemon, status describes only the central login.
+func TestClaudeAuthStatusIgnoresRetiredLegacySetting(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "old-private-home"))
-	t.Setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/wrong/account")
-	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "mock-stale-token")
-	t.Setenv("ANTHROPIC_API_KEY", "mock-key")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("AMUX_SOCK", filepath.Join(home, "no-daemon.sock"))
 	if err := amuxcfg.SetAuthMode("claude", amuxcfg.AuthShared); err != nil {
 		t.Fatal(err)
 	}
+	// A legacy status run would execute this and fail the test.
 	bin := filepath.Join(home, "claude")
-	// Fail if auth gets agent flags, a different cwd/store, or inherited tokens.
-	script := `#!/bin/sh
-set -eu
-test "$#" = 2
-test "$1" = auth
-test "$PWD" = "$CLAUDE_CONFIG_DIR"
-test "$PWD" = "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
-test -z "${CLAUDE_CODE_OAUTH_TOKEN-}"
-test -z "${ANTHROPIC_API_KEY-}"
-case "$2" in
-  login) printf 'mock credential' > .credentials.json ;;
-  status) test -f .credentials.json ;;
-  *) exit 1 ;;
-esac
-`
-	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("AMUX_CLAUDE_BIN", bin)
-	if err := claudecfg.Login(func() error { return runClaudeAuth("login") }); err != nil {
-		t.Fatal(err)
-	}
-	if !claudecfg.SharedAuthEnabled() {
-		t.Fatal("successful login did not enable shared store")
-	}
 	if err := cmdAuth([]string{"status"}); err != nil {
 		t.Fatal(err)
 	}

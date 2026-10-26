@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"runtime/pprof"
 	"strconv"
@@ -115,7 +116,8 @@ func testCentralClaudeTypedLaunch(t *testing.T, mode string) {
 			t.Fatalf("central launch exposes a credential store: %q", field)
 		}
 	}
-	if !strings.Contains(strings.Join(argv, " "), centralauth.LauncherArg+" "+fake) {
+	// The launcher receives this pane's daemon-allocated process launch.
+	if !regexp.MustCompile(regexp.QuoteMeta(centralauth.LauncherArg+" "+centralauth.LaunchArgPrefix) + `[0-9]+:[0-9a-f]{48} ` + regexp.QuoteMeta(fake)).MatchString(strings.Join(argv, " ")) {
 		t.Fatalf("agent pane does not run the central launcher: %v", argv)
 	}
 	launchEnv, err := launchenv.Build(append(os.Environ(), "ANTHROPIC_API_KEY=inherited-must-not-reach-claude"), env, launchenv.ForRuntime(s.Agent))
@@ -309,6 +311,9 @@ func testCentralClaudeDaemonLifecycle(t *testing.T, mode lifecycleMode) {
 // real session runtime and its daemon-global response budget. Six sessions'
 // fake Claude repeatedly re-invokes the protected central launcher inside its
 // own namespace; each invocation is one signed credential fetch and release.
+// The loop presents one daemon-allocated account launch (written by the test
+// once the pane holds its own): its first fetch pins it and the rest are the
+// idempotent same-launch re-deliveries a retry or lost response produces.
 // That is far more traffic than the pool sustains under age-only retirement
 // (128 responses per 60s), so a fresh session's launcher must still be served
 // on its first attempt, every background fetch must succeed, and the pool must
@@ -343,9 +348,10 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 	trampoline += "esac\n"
 	script := "#!/bin/sh\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = " + mockCentralToken + " ] || exit 17\n" +
 		"case \"$PWD\" in */fresh) printf ready > \"$PWD/launched\"; sleep 60; exit 0;; esac\n" + trampoline +
+		"printf waiting > \"$PWD/waiting\"\nwhile [ ! -s \"$PWD/launch\" ]; do sleep 0.05; done\nlaunch=$(cat \"$PWD/launch\")\n" +
 		"i=0\nwhile [ $i -lt " + fmt.Sprint(fetches) + " ]; do\n" +
 		"  printf %s $((i+1)) > \"$PWD/started\"\n" +
-		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " true 2> \"$PWD/launcher.err\" || { rc=$?; { command -v \"$tool\"; ls -l \"$tool\"; } > \"$PWD/tool.diag\" 2>&1; printf 'launcher exit %s on fetch %s' $rc $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
+		"  AMUX_PAYLOAD_CLEAN_EXEC=1 \"$tool\" --amux-payload-clean-exec " + centralauth.LauncherArg + " \"" + centralauth.LaunchArgPrefix + "$launch\" true 2> \"$PWD/launcher.err\" || { rc=$?; { command -v \"$tool\"; ls -l \"$tool\"; } > \"$PWD/tool.diag\" 2>&1; printf 'launcher exit %s on fetch %s' $rc $((i+1)) > \"$PWD/failed\"; exit 1; }\n" +
 		"  i=$((i+1)); printf %s $i > \"$PWD/fetched\"\ndone\nsleep 60\n"
 	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -401,6 +407,29 @@ func testCentralClaudeUnderClientPressure(t *testing.T) {
 	for _, session := range sessions {
 		if r := d.handle(ctx, core.Action{Action: core.ActionStart, ID: session.ID}); !r.OK {
 			t.Fatal(r.Error)
+		}
+	}
+	// Once each pane holds its own launch, allocate the one its loop presents.
+	for _, session := range sessions {
+		dir := filepath.Join(core.SessionsDir(), "root", session.ID)
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "waiting")); err == nil {
+				break
+			}
+			failFast(sessions)
+			select {
+			case <-ctx.Done():
+				pressureDiagnostics(t, d, runtime, sessions)
+				t.Fatalf("%s pane did not receive its own launch credential", session.ID)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		launch, err := accounts.BeginLaunch(session.ID, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "launch"), []byte(strconv.FormatUint(launch.Seq, 10)+":"+launch.Nonce), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
 	// Let background traffic pass the age-only capacity before the fresh launch.

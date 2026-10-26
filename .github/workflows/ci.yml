@@ -139,12 +139,12 @@ jobs:
           export AMUX_TEST_CODEX_PACKAGE="$RUNNER_TEMP/agent-runtimes/codex"
           export AMUX_TEST_CLAUDE_BIN="$RUNNER_TEMP/agent-runtimes/claude/package/claude"
           for runtime in claude codex codex-app-server; do
-            AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
+            AMUX_TEST_AGENT_RUNTIME="$runtime" go test -tags amuxfixture ./internal/daemon \
               -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
           done
           export AMUX_TEST_CODEX_PACKAGE="$RUNNER_TEMP/agent-runtimes/codex-current"
           for runtime in codex codex-app-server; do
-            AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
+            AMUX_TEST_AGENT_RUNTIME="$runtime" go test -tags amuxfixture ./internal/daemon \
               -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=180s -v
           done
       - name: test old and relocated Codex App Server sockets
@@ -202,7 +202,7 @@ jobs:
           export AMUX_TEST_CODEX_PACKAGE="$RUNNER_TEMP/agent-runtimes/codex"
           export AMUX_TEST_CLAUDE_BIN="$RUNNER_TEMP/agent-runtimes/claude/package/claude"
           for runtime in claude codex codex-app-server; do
-            AMUX_TEST_AGENT_RUNTIME="$runtime" go test ./internal/daemon \
+            AMUX_TEST_AGENT_RUNTIME="$runtime" go test -tags amuxfixture ./internal/daemon \
               -run '^TestAgentRuntimeCommandSurface$' -count=1 -timeout=120s -v
           done
       - name: test native goal and Claude continuation after restart

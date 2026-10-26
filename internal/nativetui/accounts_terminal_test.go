@@ -91,7 +91,16 @@ func startAccountsPTY(t *testing.T, w, h int) *accountsPTY {
 	m := popupFixture(t, w, h)
 	m.focus = focusSidebar
 	spy := vterm.NewRemote(m.mainWidth(), m.paneRows(), func(b []byte) { a.paneInput <- append([]byte(nil), b...) }, nil)
-	spy.Feed([]byte("\x1b[?1002h\x1b[?1006h" + strings.ReplaceAll(m.cur().Render(), "\n", "\r\n")))
+	pane := m.cur().Render()
+	spy.Feed([]byte("\x1b[?1002h\x1b[?1006h" + strings.ReplaceAll(pane, "\n", "\r\n")))
+	// Feed is parsed asynchronously. Start the program only once the spy shows
+	// the pane, or its first frame (captured below as the initial viewport) can
+	// show an empty pane that a later frame then replaces on screen.
+	for deadline := time.Now().Add(3 * time.Second); terminalText(spy.Render()) != terminalText(pane); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("pane fixture did not render")
+		}
+	}
 	m.terms[paneKey{m.attached, m.tab}] = spy
 	snapshot := m.accountOverview
 	snapshot.profiles[0].canAPI = true

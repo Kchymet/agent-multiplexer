@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ func TestIdentitySaveLoadRemove(t *testing.T) {
 	if !ok {
 		t.Fatal("load: not found after save")
 	}
-	if got != id {
+	if !reflect.DeepEqual(got, id) {
 		t.Fatalf("loaded %+v, want %+v", got, id)
 	}
 	if err := RemoveIdentity("sess-1"); err != nil {
