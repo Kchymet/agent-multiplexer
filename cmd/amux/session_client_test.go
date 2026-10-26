@@ -41,6 +41,9 @@ func installRestrictedRPC(t *testing.T, client restrictedSessionRPC) {
 	t.Helper()
 	oldRestricted := sessionContextRestricted
 	oldOpen := openRestrictedSessionRPC
+	oldCursorDir := eventCursorDir
+	cursorDir := t.TempDir()
+	eventCursorDir = func() string { return cursorDir }
 	oldStatusLine := startStatusLineReport
 	sessionContextRestricted = func() bool { return true }
 	openRestrictedSessionRPC = func() (restrictedSessionRPC, error) { return client, nil }
@@ -50,6 +53,7 @@ func installRestrictedRPC(t *testing.T, client restrictedSessionRPC) {
 		sessionContextRestricted = oldRestricted
 		openRestrictedSessionRPC = oldOpen
 		startStatusLineReport = oldStatusLine
+		eventCursorDir = oldCursorDir
 	})
 }
 
