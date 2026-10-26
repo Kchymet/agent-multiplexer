@@ -176,12 +176,23 @@ outcomes unchanged:
   the server skip stale requests is a protocol redesign and is out of scope
   here.
 - **Old or crashed clients** (see Compatibility) retire only by TTL.
-- **Long admitted effects.** Any admitted effect that holds
-  `dispatchMu`/`effectMu` (creation, restart, archive) still delays every
-  session's mailbox publication and every gated dispatch, including credential
-  delivery, for its duration. The 12s row above shows this. Measured creation
-  holds are short (90–330ms). #207/#209 moved report traffic out of the gate
-  and log slow dispatches.
+- **Exclusive gate holders.** The 12s row above was measured before #212,
+  when every gated holder took `dispatchMu` and `effectMu` exclusively. The
+  creation-hold figures (90–330ms) come from the same base. Since #212, session
+  reports and transcript capture take the gate shared plus their own session
+  lock, so they no longer wait on each other. On the current base (`dbc684a`),
+  the holders that still take the gate exclusively are:
+  - reconcile;
+  - central-credential and credential-broker delivery;
+  - host actions (creation, start, restart, archive and restore);
+  - deferred start;
+  - session-originated actions and runtime-event admission.
+
+  So a slow exclusive holder still delays credential delivery, and every other
+  exclusive holder, for its duration. `docs/daemon-locking.md` is the current
+  map of holders and the order in which later PRs move them; this residual
+  shrinks as those land. Slow dispatches, actions and reconciles are logged
+  (#207).
 
 ### Integration with #207/#209 (FIFO request ids)
 
@@ -192,15 +203,41 @@ names, and a blocked pass keeps scanning. Tests that need a particular pass
 order now control it explicitly: an earlier issue time, or staging the request
 in `processing/`. Tests no longer assume a fixed request id.
 
-### Historical, unexplained: one macOS pressure stall before #207
+### macOS pressure-test failures
 
-One macOS run of the pressure test (CI run 40263237208, on a tree without
-#207) stalled at 39 of 40 fetches for one session for about 87s. Before the
-stall, more than 160 fetches had succeeded in about 3s, and no
-`session RPC` error was logged. The stall did not recur, and that run had no
-diagnostics, so its cause is not established. The test's failure paths now
-record the fixture markers, pane liveness and output, server state captured on
-the run goroutine, mailbox queues, the budget and every goroutine's stack. A
-held-descriptor scan probe (`TestHeldDirectoryListingSeesEveryPublishAndClaim`)
-checks the directory-visibility premise directly. Repeated macOS runs on the
-merged tree are recorded on the PR.
+Two macOS failures of the releasing-client pressure test have been seen. They
+are recorded separately because only the second one has evidence.
+
+- **Before #207, cause unknown.** CI run 40263237208 had a session stopped at
+  39 of 40 fetches for about 87s. Before the stall, more than 160 fetches had
+  succeeded in about 3s, and no `session RPC` error was logged. That run had no
+  diagnostics. Its cause is not established, and it is not assumed to match the
+  next item.
+- **On the #207-merged tree, a fixture exit.** In CI run 40265529519 (head
+  `e9781e2`, temporary repeat job), 1 of 15 runs failed:
+  - `pressure-2` recorded `launcher exit 126 on fetch 14`;
+  - the response budget was 0 and every mailbox queue was empty, so no request
+    was stranded in the daemon;
+  - the nested launcher process, which only this fixture runs from inside a
+    pane, exited with 126.
+
+  Its stderr was not kept, so it is unknown which path returned 126: the
+  shell failing to exec the pane's tool, the launcher's resolve or exec, or the
+  trampoline's descriptor setup. That job's green conclusion hid this failure
+  (no `pipefail`); the job has since been removed.
+
+The other repeat run (head `fddfce0`) passed all 15: 3,600 fetches, fresh first
+attempt 152–586ms, pool peak 7. Blocked-release ordering passed ×1000 and the
+held-descriptor visibility probe
+(`TestHeldDirectoryListingSeesEveryPublishAndClaim`) passed ×20.
+
+The pressure test now fails as soon as any session records a launcher failure,
+while the runtime is still serving. It keeps that launcher's stderr and the
+tool's `command -v`/`ls -l`, together with:
+- the fixture markers;
+- pane liveness and output;
+- server state captured on the run goroutine;
+- mailbox queues and the budget;
+- every goroutine's stack.
+
+A recurrence will therefore name the failing path.
