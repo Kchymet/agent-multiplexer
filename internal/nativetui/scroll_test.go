@@ -242,3 +242,59 @@ func TestPaneClickModifierContract(t *testing.T) {
 		})
 	}
 }
+
+func TestHalfPageKeyScopeAndSelection(t *testing.T) {
+	for _, focused := range []focus{focusAgent, focusSidebar} {
+		m, term, input := scrollModel(t, 40, 7)
+		feedPane(t, term, historyRows(20))
+		m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
+		m.handleMouse(selectionEvent(tea.MouseActionMotion, 2, 0))
+		m.focus = focused
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+		wantOffset := 0
+		if focused == focusAgent {
+			wantOffset = 3
+		}
+		if term.Viewport().Offset != wantOffset || input() != "" || m.selection != nil || m.focus != focused {
+			t.Fatal("half up scope/invalidation")
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+		if term.Viewport().Offset != 0 || input() != "" {
+			t.Fatal("half down scope")
+		}
+		m.confirm = &confirmState{message: "confirm"}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+		if term.Viewport().Offset != 0 || input() != "" {
+			t.Fatal("modal leaked history shortcut")
+		}
+	}
+}
+
+func TestHalfPageRebindingInRail(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for action, chord := range map[string]string{keymap.ScrollHalfUp: "f5", keymap.ScrollHalfDown: "f6"} {
+		if _, err := keymap.Set(action, chord); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := railModel(40, 23)
+	var err error
+	m.keys, err = keymap.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.cursor = 20
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if m.cursor != 20 {
+		t.Fatal("vacated Ctrl keys still move rail")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyF5})
+	if m.cursor != 10 {
+		t.Fatal("rebound half-up did not page rail")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyF6})
+	if m.cursor != 20 {
+		t.Fatal("rebound half-down did not page rail")
+	}
+}
