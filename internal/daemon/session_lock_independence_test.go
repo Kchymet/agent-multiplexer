@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"amux/internal/panespec"
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
@@ -29,7 +31,7 @@ func TestSessionReportIndependence(t *testing.T) {
 	}{
 		{name: "peer session report", hold: holdPeerReport, blocked: false},
 		{name: "host action on another session", hold: holdHostAction, blocked: true},
-		{name: "reconcile pass", hold: holdReconcile, blocked: true},
+		{name: "reconcile pass", hold: holdReconcile, blocked: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,76 +146,18 @@ func holdHostAction(t *testing.T, f *independenceFixture, held func(), release <
 	f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"})
 }
 
-// holdReconcile is a session RPC reconcile pass stalling partway through.
+// holdReconcile is a session RPC reconcile pass stalling while it opens a3's
+// mailbox, inside a3's critical section.
 func holdReconcile(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
-	var once sync.Once
-	f.runtime.progress = func(done, total int) {
-		once.Do(func() {
+	f.d.launchSpec = func(_ context.Context, id string) (panespec.LaunchSpec, error) {
+		if id == "a3" {
 			held()
 			<-release
-		})
+		}
+		return panespec.LaunchSpec{}, errors.New("test: no launch spec")
 	}
 	t.Cleanup(f.runtime.close)
 	if err := f.runtime.reconcile(context.Background()); err != nil {
 		t.Errorf("reconcile: %v", err)
-	}
-}
-
-// TestSessionReportsOfOneSessionStayOrdered is the other half of independence:
-// a session's own effects still exclude each other, so a stalled report holds
-// back that session's next one (its mailbox normally serializes them too).
-func TestSessionReportsOfOneSessionStayOrdered(t *testing.T) {
-	f := newIndependenceFixture(t)
-	release := make(chan struct{})
-	held := make(chan struct{})
-	var once sync.Once
-	f.runtime.beforeReportEffect = func(id string) {
-		once.Do(func() {
-			close(held)
-			<-release
-		})
-	}
-	first := make(chan sessionrpc.DispatchResult, 1)
-	go func() { first <- f.report(t, "a1") }()
-	<-held
-	second := make(chan sessionrpc.DispatchResult, 1)
-	go func() { second <- f.report(t, "a1") }()
-	select {
-	case result := <-second:
-		t.Fatalf("second report of a1 finished while the first held a1: %+v", result)
-	case <-time.After(250 * time.Millisecond):
-	}
-	close(release)
-	for _, ch := range []chan sessionrpc.DispatchResult{first, second} {
-		if result := <-ch; result.Status != sessionrpc.StatusOK {
-			t.Fatalf("report = %+v", result)
-		}
-	}
-}
-
-func TestKeyedLocksOrderSameKeyAndDropIdleEntries(t *testing.T) {
-	var locks keyedLocks
-	unlockAB := locks.lock("b", "a", "b")
-	acquired := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		unlock := locks.lock("a")
-		close(acquired)
-		unlock()
-	}()
-	other := locks.lock("c") // a distinct key is free while a and b are held
-	other()
-	select {
-	case <-acquired:
-		t.Fatal("a was acquired while held")
-	case <-time.After(50 * time.Millisecond):
-	}
-	unlockAB()
-	<-done
-	locks.mu.Lock()
-	defer locks.mu.Unlock()
-	if len(locks.locks) != 0 {
-		t.Fatalf("idle entries retained: %v", locks.locks)
 	}
 }

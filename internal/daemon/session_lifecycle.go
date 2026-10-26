@@ -111,11 +111,11 @@ func (r *sessionRuntime) run(ctx context.Context) {
 
 func (r *sessionRuntime) serve(ctx context.Context) error {
 	start := time.Now()
-	if err := r.reconcile(ctx); err != nil {
+	if err := r.reconcileTick(ctx); err != nil {
 		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowSessionReconcile {
-		// reconcile holds the daemon-wide gates every report needs.
+		// reconcile runs on the serving goroutine: no new pass starts meanwhile.
 		log.Printf("session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
 	}
 	return r.serveCurrent(ctx)
@@ -202,66 +202,6 @@ func finished(done <-chan struct{}) bool {
 	default:
 		return false
 	}
-}
-
-func (r *sessionRuntime) reconcile(ctx context.Context) error {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
-	defer r.d.effectMu.Unlock()
-	if err := r.d.ensureHostCredential(ctx, r.now()); err != nil {
-		return fmt.Errorf("renew host credential: %w", err)
-	}
-	db, err := store.Open()
-	if err != nil {
-		return err
-	}
-	sessions, err := db.AllSessions()
-	closeErr := db.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	sessions = append(sessions, console.Session())
-	current := make(map[string]store.Session, len(sessions))
-	for _, session := range sessions {
-		current[session.ID] = session
-	}
-	for i, session := range sessions {
-		if r.progress != nil {
-			r.progress(i, len(sessions))
-		}
-		// The durable parent flag also fences active members after a restart.
-		session.Archived = session.Archived || current[session.RootID].Archived
-		if session.Archived && !r.completions.has(session.ID) {
-			r.closeAndRevoke(ctx, session.ID)
-			continue
-		}
-		if session.Archived { // pending completion retains only its existing server/key
-			continue
-		}
-		if _, ok := r.servers[session.ID]; ok {
-			r.renewCurrent(ctx, session)
-			continue
-		}
-		if r.retiring(session.ID) {
-			continue
-		}
-		if err := r.open(ctx, session); err != nil {
-			log.Printf("session RPC %s unavailable: %v", session.ID, err)
-		}
-	}
-	if r.progress != nil {
-		r.progress(len(sessions), len(sessions))
-	}
-	for id := range r.servers {
-		if _, ok := current[id]; !ok && !r.completions.has(id) {
-			r.closeAndRevoke(ctx, id)
-		}
-	}
-	return nil
 }
 
 func (d *Daemon) ensureHostCredential(ctx context.Context, now time.Time) error {
