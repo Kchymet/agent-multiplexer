@@ -62,7 +62,7 @@ func (r *sessionRuntime) centralCredentialSession(ctx context.Context, principal
 func (r *sessionRuntime) dispatchCentralCredential(ctx context.Context, request sessionrpc.DispatchRequest) (sessionrpc.DispatchResult, error) {
 	r.dispatchMu.Lock()
 	defer r.dispatchMu.Unlock()
-	r.d.effectMu.Lock()
+	r.d.lockEffectExclusive()
 	defer r.d.effectMu.Unlock()
 	ctx = withEffectAdmission(ctx)
 	req := request.Call.AccessRequest()

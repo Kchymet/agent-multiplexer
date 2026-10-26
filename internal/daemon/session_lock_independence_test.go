@@ -30,7 +30,9 @@ func TestSessionReportIndependence(t *testing.T) {
 		blocked bool
 	}{
 		{name: "peer session report", hold: holdPeerReport, blocked: false},
-		{name: "host action on another session", hold: holdHostAction, blocked: true},
+		{name: "host action on another session", hold: holdHostAction, blocked: false},
+		{name: "workgroup host action (exclusive fallback)", hold: holdWorkgroupAction, blocked: true},
+		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
 	}
 	for _, tc := range tests {
@@ -97,6 +99,7 @@ func newIndependenceFixture(t *testing.T) *independenceFixture {
 	t.Helper()
 	const runtimeID = "33333333-3333-4333-8333-333333333333"
 	sessions := []store.Session{
+		{ID: "root", Agent: "claude"},
 		{ID: "a1", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 		{ID: "a2", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 		{ID: "a3", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
@@ -146,6 +149,46 @@ func holdHostAction(t *testing.T, f *independenceFixture, held func(), release <
 	f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"})
 }
 
+// holdWorkgroupAction is a host `start` of the workgroup root, which starts
+// every member and so still takes the exclusive gate.
+func holdWorkgroupAction(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.d.agentsUnder = func(id string) ([]string, error) {
+		held()
+		<-release
+		return nil, nil
+	}
+	f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "root"})
+}
+
+// holdQueuedExclusive is a slow host action on a3 with a workgroup action
+// queued behind it for the exclusive gate. A writer parked in
+// sync.RWMutex.Lock would stall every new shared holder; the queued one must
+// not.
+func holdQueuedExclusive(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	sessionHeld := make(chan struct{})
+	var once sync.Once
+	f.d.agentsUnder = func(id string) ([]string, error) {
+		once.Do(func() { close(sessionHeld) })
+		<-release
+		return nil, nil
+	}
+	actions := make(chan struct{}, 2)
+	go func() {
+		f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"})
+		actions <- struct{}{}
+	}()
+	<-sessionHeld
+	go func() {
+		f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "root"})
+		actions <- struct{}{}
+	}()
+	// Give the workgroup action time to reach the gate and start waiting.
+	time.Sleep(50 * time.Millisecond)
+	held()
+	<-actions
+	<-actions
+}
+
 // holdReconcile is a session RPC reconcile pass stalling while it opens a3's
 // mailbox, inside a3's critical section.
 func holdReconcile(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
@@ -159,5 +202,36 @@ func holdReconcile(t *testing.T, f *independenceFixture, held func(), release <-
 	t.Cleanup(f.runtime.close)
 	if err := f.runtime.reconcile(context.Background()); err != nil {
 		t.Errorf("reconcile: %v", err)
+	}
+}
+
+// TestSessionHostActionExcludesThatSessionsReports: a host action on a1 runs
+// under a1's lock, so a1's own report waits for it.
+func TestSessionHostActionExcludesThatSessionsReports(t *testing.T) {
+	f := newIndependenceFixture(t)
+	release := make(chan struct{})
+	held := make(chan struct{})
+	f.d.agentsUnder = func(id string) ([]string, error) {
+		close(held)
+		<-release
+		return nil, nil
+	}
+	actionDone := make(chan struct{})
+	go func() {
+		defer close(actionDone)
+		f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a1"})
+	}()
+	<-held
+	reported := make(chan sessionrpc.DispatchResult, 1)
+	go func() { reported <- f.report(t, "a1") }()
+	select {
+	case result := <-reported:
+		t.Fatalf("a1 reported while a host action held a1: %+v", result)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	<-actionDone
+	if result := <-reported; result.Status != sessionrpc.StatusOK {
+		t.Fatalf("report = %+v", result)
 	}
 }
