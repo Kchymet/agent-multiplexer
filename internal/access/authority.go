@@ -151,8 +151,15 @@ type FileAuthority struct {
 
 	mu       sync.RWMutex
 	registry registryFile
-	replay   replayFile
 	watchers map[string]map[chan struct{}]struct{}
+
+	// replay is the in-memory ledger every replay decision is taken on, under
+	// replayMu alone; journal makes each acceptance durable (replay_journal.go).
+	// Verify holds mu for reading around both, so no registry change commits
+	// between a request's credential check and its acceptance.
+	replayMu sync.Mutex
+	replay   replayFile
+	journal  *replayJournal
 }
 
 type issuerCredential struct {
@@ -252,8 +259,12 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 	if a.replay.Entries == nil {
 		a.replay.Entries = map[string]replayRecord{}
 	}
+	if err := a.recoverReplay(); err != nil {
+		return nil, err
+	}
 	boot := make([]byte, 32)
 	if _, err := io.ReadFull(random, boot); err != nil {
+		_ = a.closeReplay()
 		return nil, fmt.Errorf("create daemon boot nonce: %w", err)
 	}
 	a.bootID = hex.EncodeToString(boot)
@@ -273,6 +284,7 @@ func (a *FileAuthority) Close() error {
 	for keyID := range a.watchers {
 		a.invalidateLocked(keyID)
 	}
+	replayErr := a.closeReplay()
 	rootErr := a.rootDir.Close()
 	a.rootDir = nil
 	err := syscall.Flock(int(a.lock.Fd()), syscall.LOCK_UN)
@@ -280,6 +292,9 @@ func (a *FileAuthority) Close() error {
 	a.lock = nil
 	if err != nil {
 		return err
+	}
+	if replayErr != nil {
+		return replayErr
 	}
 	if rootErr != nil {
 		return rootErr
@@ -938,8 +953,11 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 		return Principal{}, ErrExpired
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// Reading the registry needs only the read lock, which still excludes
+	// every rotation, revocation and close until the acceptance below is
+	// durable. Concurrent requests meet only on the replay ledger.
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return Principal{}, ErrAuthorityClosed
 	}
@@ -961,43 +979,14 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 	if err != nil || !ed25519.Verify(pub, signingBytes(req), sig) {
 		return Principal{}, ErrInvalidCredential
 	}
-	replayKey := req.KeyID + ":" + fmt.Sprint(req.Generation) + ":" + req.RequestID
-	if _, exists := a.replay.Entries[replayKey]; exists {
-		return Principal{}, ErrReplay
-	}
-	nextReplay := cloneReplay(a.replay)
-	for key, entry := range nextReplay.Entries {
-		if entry.ExpiresAt < now.Add(-clockSkew).UnixMilli() {
-			delete(nextReplay.Entries, key)
-		}
-	}
-	if len(nextReplay.Entries) >= maxReplayEntries {
-		return Principal{}, ErrCapacity
-	}
 	bodyHash := sha256.Sum256(req.Body)
-	nextReplay.Entries[replayKey] = replayRecord{
+	if err := a.acceptReplay(replayRecord{
 		KeyID: req.KeyID, Generation: req.Generation, RequestID: req.RequestID,
 		BodyDigest: hex.EncodeToString(bodyHash[:]), ExpiresAt: req.ExpiresAt,
-	}
-	if err := stateFits(nextReplay); err != nil {
+	}, now); err != nil {
 		return Principal{}, err
 	}
-	committed, err := a.commit(filepath.Join(a.root, "replay.json"), nextReplay, 0o600)
-	if committed {
-		a.replay = nextReplay
-	}
-	if err != nil {
-		return Principal{}, fmt.Errorf("persist replay acceptance: %w", err)
-	}
 	return Principal{KeyID: rec.KeyID, SubjectID: rec.SubjectID, Kind: rec.Kind, Generation: rec.Generation}, nil
-}
-
-func cloneReplay(in replayFile) replayFile {
-	out := replayFile{Version: in.Version, Entries: make(map[string]replayRecord, len(in.Entries))}
-	for key, value := range in.Entries {
-		out.Entries[key] = value
-	}
-	return out
 }
 
 // Valid rechecks generation and revocation for long-lived connections before
