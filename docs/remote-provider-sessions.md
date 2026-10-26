@@ -259,15 +259,15 @@ The design, lifetime, native-CLI attach syntax, and validation posture are in
 
 ```json
 {"type":"sessions-subscribe"}
-{"type":"session-action","reqId":"r7","action":"new-workgroup",
+{"type":"session-action","reqId":"r7","action":"new-workgroup-empty",
  "id":"","target":"","fields":{"name":"payments-fix","repos":"api,web"}}
 ```
 
-**Lifecycle verbs**: `new-workgroup`, `add-agent`, `rename`, `archive`,
+**Lifecycle verbs**: `new-workgroup`, `new-workgroup-empty`, `add-agent`, `rename`, `archive`,
 `unarchive`, `start`. Semantics mirror the daemon's local lifecycle operations;
 `fields` carries the same form fields the daemon's own clients send. `id` targets
 an existing session (the workgroup for `add-agent`; the agent/workgroup for
-`rename`/`archive`/`unarchive`/`start`) and is empty for `new-workgroup`.
+`rename`/`archive`/`unarchive`/`start`) and is empty for either workgroup-creation verb.
 Internally `archive`/`unarchive` map to the daemon's explicit `set-archived`
 (deterministic, not a toggle) and `start` ensures the agent's engine process is
 running. They are all synchronous: a success is `result:"applied"` (§2).
@@ -282,6 +282,26 @@ separate compute-provider path are unaffected.)
 Authorization: the connection itself is the credential (registered provider,
 token-authenticated at register). The daemon SHOULD additionally gate verbs by
 local configuration (e.g. read-only publishing: inventory yes, verbs no).
+
+`new-workgroup` is the legacy/Android creation contract: a non-empty `repos`
+field is both the explicit coordinator grant ceiling and the repository set of
+one idle initial member; an explicitly empty value creates no member. Its
+creation prompt belongs to the coordinator. `new-workgroup-empty` is the
+browser-safe split contract: `repos` MUST be present (including when empty), is
+only the explicit grant ceiling, and the verb creates zero ordinary members.
+The caller follows it with one `add-agent` per intended member and addresses
+that returned ID when prompting. Providers that implement this verb advertise
+`sessions-new-workgroup-empty`; clients MUST gate on that feature. An older
+provider rejects the unknown verb before mutation, so mixed versions cannot
+silently widen grants or create an implicit duplicate member.
+
+The feature also closes the inventory-poll race in this sequence. A successful
+creation result's non-empty `newId` is immediately usable as a lifecycle or
+steering target on that same authenticated connection, even before the next
+`sessions` snapshot. This is a provisional grant only for an ID the daemon
+itself just minted; the next successful inventory snapshot promotes it when
+present or revokes it when absent, and a poll error/reconnect revokes it. A
+caller-selected ID never receives this treatment.
 
 ### 3.1 Steering verbs
 

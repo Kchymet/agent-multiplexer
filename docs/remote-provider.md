@@ -439,6 +439,14 @@ capabilities before it asks the local daemon to create the workgroup. The chosen
 harness and model apply to the workgroup coordinator as well as any later
 agents, so a Codex-only provider never creates a hidden Claude coordinator.
 
+Browser workgroup creation additionally requires the
+`sessions-new-workgroup-empty` provider feature. It sends the versioned
+`new-workgroup-empty` lifecycle verb with a present `repos` grant ceiling, then
+creates each intended member explicitly. A browser must not fall back to legacy
+`new-workgroup`: on an older host that verb couples non-empty grants to one
+implicit member and would change session counts. Updating the host is the only
+safe mixed-version recovery.
+
 ## Failure behavior summary
 
 | Event | Provider behavior |
