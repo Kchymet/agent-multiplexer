@@ -107,9 +107,11 @@ func BenchmarkStoreOpen(b *testing.B) {
 }
 
 // BenchmarkConcurrentReportsDuringSlowEffect measures what two sessions'
-// reports cost while a slow effect (a creation, a restart) repeatedly holds
-// the daemon-wide gate for 100ms — the shape of the user-visible stall. It
-// reports per-report p50/max latency rather than throughput.
+// reports cost while a slow host action on a third session (a creation, a
+// restart) repeatedly runs for 100ms — the shape of the user-visible stall.
+// The holder goes through the real host action admission, so the numbers
+// track whatever locks that path takes (docs/daemon-locking.md). It reports
+// per-report p50/max latency rather than throughput.
 func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 	store.ShareHandles(true)
 	defer store.ShareHandles(false)
@@ -117,8 +119,16 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 	sessions := []store.Session{
 		{ID: "a1", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 		{ID: "a2", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
+		{ID: "a3", RootID: "root", Agent: "claude", ClaudeID: runtimeID},
 	}
 	d, runtime, principals := sessionRuntimeFixture(b, sessions...)
+	d.sessionRPC = runtime
+	b.Cleanup(runtime.completions.close)
+	d.engine = newFakeEngine()
+	d.agentsUnder = func(string) ([]string, error) {
+		time.Sleep(100 * time.Millisecond)
+		return nil, nil
+	}
 	generations := map[string]string{}
 	for _, s := range sessions {
 		generations[s.ID] = publishTestRuntime(b, d, s.ID)
@@ -133,11 +143,7 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 				return
 			default:
 			}
-			runtime.dispatchMu.Lock()
-			d.effectMu.Lock()
-			time.Sleep(100 * time.Millisecond)
-			d.effectMu.Unlock()
-			runtime.dispatchMu.Unlock()
+			d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"})
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -145,7 +151,7 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 	var latencies []time.Duration
 	b.ResetTimer()
 	var wg sync.WaitGroup
-	for _, s := range sessions {
+	for _, s := range sessions[:2] {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
