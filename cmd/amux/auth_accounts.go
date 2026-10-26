@@ -216,18 +216,34 @@ func authMachineStatus(harness string) error {
 		if s.Defaults[harness] != p.ID {
 			fmt.Printf("New workloads still use a preserved legacy source; run amux auth default %s to select this configuration.\n", harness)
 		}
-		for _, w := range p.Limits.Windows {
-			fresh := "current"
-			if time.Now().UnixMilli()-p.Limits.ObservedAt > hp.AccountLimitsTTLMillis {
-				fresh = "stale"
+		printAccountLimits(p.Limits)
+		for _, q := range s.Profiles {
+			if q.ID == s.Defaults[harness] && q.ID != p.ID {
+				fmt.Printf("%s legacy default %s limits: %s (%s)\n", harness, q.ID, q.Limits.State, q.Limits.Source)
+				printAccountLimits(q.Limits)
 			}
-			fmt.Printf("  %s: %.1f%% used; resets %d (%s)\n", w.Name, w.UsedPercent, w.ResetsAt, fresh)
 		}
 		if p.Error != "" {
 			fmt.Println(p.Error)
 		}
 	}
 	return nil
+}
+
+func printAccountLimits(l hp.AccountLimits) {
+	for _, w := range l.Windows {
+		fresh := "current"
+		if time.Now().UnixMilli()-l.ObservedAt > hp.AccountLimitsTTLMillis {
+			fresh = "stale"
+		}
+		fmt.Printf("  %s: %.1f%% used; resets %d (%s)\n", w.Name, w.UsedPercent, w.ResetsAt, fresh)
+	}
+	if l.ResetsAvailable != nil {
+		fmt.Printf("  rate-limit resets available: %d\n", *l.ResetsAvailable)
+	}
+	if l.RefreshError != "" {
+		fmt.Printf("  last limits refresh failed: %s\n", l.RefreshError)
+	}
 }
 
 func completeClaudeToken(c accountService, r hp.AccountRequest, raw string) error {

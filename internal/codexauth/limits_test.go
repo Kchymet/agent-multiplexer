@@ -17,3 +17,18 @@ func TestNativeLimitsDecodeUnknownAndMultipleBuckets(t *testing.T) {
 		t.Fatal("invalid percent accepted")
 	}
 }
+
+func TestNativeLimitsDecodeResetCredits(t *testing.T) {
+	q, e := decodeLimits([]byte(`{"rateLimits":{"primary":{"usedPercent":10}},"rateLimitResetCredits":{"availableCount":2,"credits":null}}`), 10)
+	if e != nil || q.ResetsAvailable == nil || *q.ResetsAvailable != 2 {
+		t.Fatalf("%+v %v", q, e)
+	}
+	for _, raw := range []string{`{"rateLimits":{"primary":{"usedPercent":10}}}`, `{"rateLimitResetCredits":null}`} {
+		if q, e = decodeLimits([]byte(raw), 10); e != nil || q.ResetsAvailable != nil {
+			t.Fatalf("absent count must stay absent: %+v %v", q, e)
+		}
+	}
+	if _, e = decodeLimits([]byte(`{"rateLimitResetCredits":{"availableCount":-1}}`), 0); e == nil {
+		t.Fatal("negative count accepted")
+	}
+}

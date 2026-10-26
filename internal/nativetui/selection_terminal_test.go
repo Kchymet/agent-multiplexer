@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"amux/internal/termoutput"
+	"amux/internal/clipboard"
 	"amux/internal/vterm"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -33,8 +33,12 @@ func TestSelectionPTYRendererAndClipboard(t *testing.T) {
 	}
 	m, term, input := scrollModel(t, width-sidebarWidth-1, height-3)
 	feedPane(t, term, historyRows(20)+"\x1b[H\x1b[2JA界éZ\r\nsecond\x1b[?1002h\x1b[?1006h")
-	output := termoutput.New(slave)
-	m.copyText = output.Copy
+	output := &clipboard.SerialFile{File: slave}
+	m.clip = isolatedClipboard(t, output)
+	m.bindClipboard(term)
+	hidden := vterm.NewRemote(width-sidebarWidth-1, height-3, nil, nil)
+	m.bindClipboard(hidden)
+	t.Cleanup(func() { hidden.Close() })
 	frames := make(chan accountsInputFrame, 512)
 	fixture := &accountsInputModel{model: m, frames: frames}
 	p := newProgram(fixture, tea.WithInput(slave), tea.WithOutput(output), tea.WithoutSignalHandler(), tea.WithEnvironment([]string{"TERM=xterm-256color"}))
@@ -116,6 +120,17 @@ func TestSelectionPTYRendererAndClipboard(t *testing.T) {
 	waitPane(t, "actual terminal mouse modes", func() bool {
 		return strings.Contains(readRaw(), "\x1b[?1002h") && strings.Contains(readRaw(), "\x1b[?1006h")
 	})
+	// The same production visible-pane callback and Copier deliver app-owned
+	// copy before local selection. Queries and hidden panes must not copy.
+	appCopy := "app copy ✓"
+	feedPane(t, hidden, string(clipboard.Sequence([]byte("hidden copy"), false)))
+	feedPane(t, term, "\x1b]52;c;?\a"+string(clipboard.Sequence([]byte(appCopy), false)))
+	waitPane(t, "visible app clipboard through shared output", func() bool {
+		return strings.Contains(readRaw(), string(clipboard.Sequence([]byte(appCopy), false)))
+	})
+	if strings.Count(readRaw(), "\x1b]52;") != 1 || input() != "" {
+		t.Fatal("hidden copy or clipboard query escaped its guard")
+	}
 	// Shift owns the press locally even though the child reports mouse.
 	// Remove Shift on motion/release to verify capture survives raw decoding.
 	send("\x1b[<4;29;2M\x1b[<32;31;2M")
@@ -125,15 +140,15 @@ func TestSelectionPTYRendererAndClipboard(t *testing.T) {
 		return s.Cells[1][28].Content == "界" && s.Cells[1][28].Style.Bg == ansi.IndexedColor(24) &&
 			s.Cells[1][30].Content == "é" && s.Cells[1][30].Style.Bg == ansi.IndexedColor(24)
 	})
-	if strings.Contains(readRaw(), "\x1b]52;") {
-		t.Fatal("clipboard write before explicit release")
+	if strings.Count(readRaw(), "\x1b]52;") != 1 {
+		t.Fatal("local clipboard write before explicit release")
 	}
 	save("selected")
 	send("\x1b[<0;31;2m")
 	awaitFrame(func(f accountsInputFrame) bool { return f.events >= 3 })
 	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("界é")) + "\a"
 	waitPane(t, "OSC52 on the rendered PTY", func() bool { return strings.Contains(readRaw(), want) })
-	if strings.Count(readRaw(), "\x1b]52;") != 1 || input() != "" {
+	if strings.Count(readRaw(), "\x1b]52;") != 2 || input() != "" {
 		t.Fatalf("copy count or local routing incorrect: child=%q", input())
 	}
 	// Exercise actual key decoding and outer header rendering, not direct
@@ -152,6 +167,21 @@ func TestSelectionPTYRendererAndClipboard(t *testing.T) {
 	save("live")
 	if input() != "" {
 		t.Fatalf("local history chords leaked to child: %q", input())
+	}
+	// Bracketed text paste must remain text even when it spells rail/global
+	// commands. Assert exact child bytes and focus after the real decoder.
+	var pasted string
+	for _, text := range []string{"q", "s", "alt+h", "alt+1", "ctrl+c", "first\nsecond\r\n界é\tend"} {
+		send("\x1b[200~" + text + "\x1b[201~")
+		f := awaitFrame(func(f accountsInputFrame) bool { return f.event == "key:["+text+"]" })
+		pasted += text
+		waitPane(t, "focused pasted text reaches child intact", func() bool { return input() == pasted })
+		if f.focus != focusAgent || f.open {
+			t.Fatal("pasted text triggered amux navigation")
+		}
+	}
+	if strings.Count(readRaw(), "\x1b]52;") != 2 {
+		t.Fatal("paste unexpectedly copied or queried the clipboard")
 	}
 	// Ask Bubble Tea to query the resized real output descriptor. WithOutput
 	// must preserve term.File or this message never yields a WindowSizeMsg.

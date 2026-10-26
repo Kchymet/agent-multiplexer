@@ -50,7 +50,10 @@ func TestCompletedGoalStaysObservableAndNextTaskStartsFreshGoal(t *testing.T) {
 	if fresh.TokensUsed != 0 || fresh.CreatedAt == 7 {
 		t.Fatalf("fresh goal inherited the completed goal's accounting: %+v", fresh)
 	}
-	if got, ok := s.Goal(); !ok || got.Status != GoalActive || got.Objective != "now add the regression test" {
+	got, ok = awaitSupervisorGoal(s, func(st GoalState) bool {
+		return st.Status == GoalActive && st.Objective == "now add the regression test"
+	}, 2*time.Second)
+	if !ok || got.Status != GoalActive || got.Objective != "now add the regression test" {
 		t.Fatalf("supervisor view after the next task = %+v ok=%t", got, ok)
 	}
 }

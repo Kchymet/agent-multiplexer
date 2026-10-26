@@ -34,12 +34,13 @@ func TestAccountRemainingTruth(t *testing.T) {
 		{"unused", 0, false, false, now, now.Add(time.Minute), "available", 100, "fresh"},
 		{"exhausted", 100, false, false, now, now.Add(time.Minute), "available", 0, "fresh"},
 		{"missing", 0, true, false, now, now.Add(time.Minute), "available", 0, "unknown"},
-		{"expired", 23, false, false, now.Add(-time.Hour), now, "available", 0, "stale"},
-		{"future", 23, false, false, now.Add(time.Minute), now.Add(time.Hour), "available", 0, "stale"},
-		{"unobserved", 23, false, false, time.Time{}, now.Add(time.Hour), "available", 0, "stale"},
-		{"no freshness", 23, false, false, now, time.Time{}, "available", 0, "stale"},
-		{"refresh failed", 23, false, true, now, now.Add(time.Hour), "available", 0, "stale"},
-		{"reported stale", 23, false, false, now, now.Add(time.Hour), "stale", 0, "stale"},
+		// An aged observation keeps its last-known value, labeled stale.
+		{"expired", 23, false, false, now.Add(-time.Hour), now, "available", 77, "stale"},
+		{"future", 23, false, false, now.Add(time.Minute), now.Add(time.Hour), "available", 0, "unknown"},
+		{"unobserved", 23, false, false, time.Time{}, now.Add(time.Hour), "available", 0, "unknown"},
+		{"no freshness", 23, false, false, now, time.Time{}, "available", 77, "stale"},
+		{"refresh failed", 23, false, true, now, now.Add(time.Hour), "available", 77, "stale"},
+		{"reported stale", 23, false, false, now, now.Add(time.Hour), "stale", 77, "stale"},
 		{"unavailable", 23, false, false, now, now.Add(time.Hour), "unavailable", 0, "unknown"},
 		{"invalid", math.NaN(), false, false, now, now.Add(time.Hour), "available", 0, "unknown"},
 		{"over limit", 101, false, false, now, now.Add(time.Hour), "available", 0, "unknown"},
@@ -56,11 +57,14 @@ func TestAccountRemainingTruth(t *testing.T) {
 			summary := ansi.Strip(accountUsageSummary(l, now, tc.stale))
 			rail := accountRailBudget(accountProfile{limits: []accountLimit{l}}, now, tc.stale)
 			for _, out := range []string{summary, rail} {
-				if state != "fresh" && (strings.Contains(out, "%") || !strings.Contains(out, state)) {
+				if state == "unknown" && (strings.Contains(out, "%") || !strings.Contains(out, state)) {
 					t.Fatalf("untruthful budget: %s", out)
 				}
-				if state == "fresh" && !strings.Contains(out, fmt.Sprintf("%g%%", tc.want)) {
+				if state != "unknown" && !strings.Contains(out, fmt.Sprintf("%g%%", tc.want)) {
 					t.Fatalf("missing remaining budget: %s", out)
+				}
+				if (state == "stale") != strings.Contains(out, "stale") {
+					t.Fatalf("stale observation not labeled: %s", out)
 				}
 			}
 		})
@@ -69,7 +73,7 @@ func TestAccountRemainingTruth(t *testing.T) {
 	if got := accountRailBudget(p, now, false); got != "API · not applicable" {
 		t.Fatal(got)
 	}
-	if got := accountRailBudget(p, now, true); !strings.Contains(got, "stale") {
+	if got := accountRailBudget(p, now, true); got != "API · not applicable" {
 		t.Fatal(got)
 	}
 	if got := accountRailBudget(accountProfile{}, now, false); got != "budget unknown" {

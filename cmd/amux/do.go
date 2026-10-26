@@ -116,6 +116,13 @@ flags:
   amux do rename <id> -f name="api spike"
   amux do move <id> --target <root>
   amux do add-agent <root> -f repos=api,web -f prompt="port the auth flow"
+
+From an agent session the request is authorized by that session's fixed
+authenticated grant, never by an id, flag, or environment variable: a member
+may act only on itself (start, steer prompt|interject|stop, rename, archive
+itself), a coordinator also on its workgroup's current direct members (plus
+add-agent, steer permission, archive a member). Host-only actions are refused.
+See docs/agent-cli-sandbox.md for the full scope table.
 `, actionList())
 }
 

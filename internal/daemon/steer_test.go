@@ -26,7 +26,7 @@ import (
 
 // isolateHome points the store (and every config path) at a temp dir so a test
 // never reads or writes the developer's real amux data.
-func isolateHome(t *testing.T) {
+func isolateHome(t testing.TB) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)

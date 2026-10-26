@@ -26,6 +26,7 @@ import (
 	"amux/internal/accounts"
 	"amux/internal/agent"
 	"amux/internal/amuxcfg"
+	"amux/internal/claudecfg"
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
@@ -75,6 +76,20 @@ type Daemon struct {
 	accountMu       sync.Mutex
 	accountAttempts map[string]*accountAttempt
 	accountNow      func() time.Time
+	// claudeUsage reads a Claude usage report; nil uses the vendor API.
+	claudeUsage func(context.Context, string) (claudeUsageReport, error)
+	// claudeProbe reads a setup-token's windows; nil sends the quota probe.
+	claudeProbe func(context.Context, string) ([]harnessproto.AccountLimitWindow, error)
+	// claudeLogin reads a host or shared Claude login; nil reads its store.
+	claudeLogin func(mode string) (claudecfg.OAuthLogin, error)
+	// hostCodexLimits reads the host Codex login's windows; nil runs codex.
+	hostCodexLimits func(context.Context) (harnessproto.AccountLimits, error)
+	// claudePaused fingerprints the credential each profile's persisted
+	// RetryAt pause applies to. Only the account limits loop touches it.
+	claudePaused map[string][32]byte
+	// claudeNoUsage fingerprints each central credential the usage report
+	// refused for scope; those profiles are probed instead.
+	claudeNoUsage map[string][32]byte
 
 	// Captured once at construction; config edits never reroute a running daemon.
 	codexControl amuxcfg.Control
@@ -391,6 +406,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
 	codexOwned = true
 	d.startCentralCodex(ctx)
+	// Budgets refresh independently of clients and sessions of either harness.
+	startRunWorker(func() { d.accountLimitsLoop(ctx) })
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
@@ -1345,27 +1362,31 @@ func (d *Daemon) restorable(agentID string) bool {
 	return false
 }
 
-// killEngineFor stops the engine instances (all tabs) of an agent and, if id is a
-// workgroup root, its direct children — used when an agent is deleted or
-// archived so the process actually stops, not just the store record. It reads
-// the current snapshot (still pre-deletion when called from handle) to find
-// children.
+// killEngineFor stops all tabs of the target and its stored direct members.
+// Membership must come from the store: a stale rail can omit newly added members
+// or still list a member that has moved into a foreign workgroup.
 func (d *Daemon) killEngineFor(id string) {
 	if d.engine == nil && d.codex == nil {
 		return
 	}
-	// Serialize archive/delete with credential restarts so a pending reload
-	// cannot resurrect a session being removed.
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 	ids := map[string]bool{id: true}
-	d.mu.RLock()
-	for _, s := range d.sessions {
-		if s.RootID == id {
-			ids[s.ID] = true
+	if db, err := store.OpenReadOnly(); err == nil {
+		children, err := db.Children(id)
+		db.Close()
+		if err != nil {
+			log.Printf("session %s member shutdown lookup: %v", id, err)
+		} else {
+			for _, child := range children {
+				ids[child.ID] = true
+			}
 		}
+	} else {
+		// The durable parent archive flag also drives member reconciliation, including
+		// recovery after this lookup fails. Never fall back to stale ownership.
+		log.Printf("session %s shutdown store: %v", id, err)
 	}
-	d.mu.RUnlock()
 	for aid := range ids {
 		d.killRuntimeLocked(aid)
 	}

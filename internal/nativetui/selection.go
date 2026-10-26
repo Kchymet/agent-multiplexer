@@ -24,10 +24,10 @@ type paneGesture struct {
 	cancelled  bool
 	button     tea.MouseButton
 	buttons    map[tea.MouseButton]bool // app gestures may hold multiple buttons
-	cols, rows int
+	cols, rows int                      // press-time bounds; growing a window does not expand capture
 }
 
-type clipboardResultMsg struct{ err error }
+type clipboardQueuedMsg struct{}
 
 func (m *model) mouseModal() bool {
 	return m.accounts != nil || m.archiveSearch != nil || m.form != nil || m.confirm != nil || m.picker != nil
@@ -131,11 +131,14 @@ func (m *model) selectionMouse(ev tea.MouseMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		text := selectedCells(s).Text
-		if text == "" || m.copyText == nil {
+		if text == "" || m.clip == nil {
 			return true, nil
 		}
-		copyText := m.copyText
-		return true, func() tea.Msg { return clipboardResultMsg{copyText(text)} }
+		clip := m.clip
+		return true, func() tea.Msg {
+			clip([]byte(text))
+			return clipboardQueuedMsg{}
+		}
 	}
 	if m.mouseModal() || tea.MouseEvent(ev).IsWheel() || ev.Action != tea.MouseActionPress {
 		if ev.Action == tea.MouseActionRelease {
@@ -185,6 +188,8 @@ func selectedCells(s *paneSelection) termselect.Selection {
 }
 
 func (m *model) renderSelectedPane(t *vterm.Terminal) string {
+	// Output can be parsed between Update and View. Clear stale coordinates
+	// here as well so a frame never highlights newly arrived text.
 	m.validateSelection()
 	s := m.selection
 	if s == nil || !s.moved {

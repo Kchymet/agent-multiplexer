@@ -98,8 +98,9 @@ usage: amux agent <command>
                      and preserves any pre-existing status-line command.
   name <text>        set this agent's display name  (alias: label)
   label <text>       alias of "name"
-  done               report the task complete: archive this agent off the active
-                     rail (reversible — amux workgroup unarchive <id>).
+  done               archive this member; a coordinator archives its workgroup
+                     and members, only after explicit user confirmation.
+                     Restoration requires the host (workgroup unarchive <id>).
                      identity comes only from the fixed session context
   goal [show]        Claude coordinator goal mode: show the goal, or mark it
                      complete "<summary>" | ask "<question>" |
@@ -111,6 +112,8 @@ usage: amux agent <command>
 
 Commands use the private file mailbox from the ordinary sandboxed shell.
 Keep both sandboxes enabled. Discovery grants no cross-session write access.
+`+"`amux status`"+` and `+"`amux do`"+` from a session are scoped the same way: to the
+session itself, or for a coordinator to its workgroup and current direct members.
 
 Further self-reporting channels (topic, progress, attention, fields) are
 specified in docs/agent-protocol.md and planned.
@@ -287,7 +290,8 @@ func cmdAgentPermission(args []string) error {
 }
 
 // cmdAgentDone is the terminal self-report: an agent declares its task finished
-// and archives its own session so it drops off the active rail. It is the
+// and archives its own session so it drops off the active rail. For a coordinator,
+// after explicit user confirmation, this archives its workgroup and members. It is the
 // self-scoped form of the management verb `amux workgroup archive <id>` —
 // instead of taking an id, it resolves the caller's own store id solely from the
 // fixed authenticated session context.

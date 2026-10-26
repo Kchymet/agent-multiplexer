@@ -1,4 +1,4 @@
-package termoutput
+package clipboard
 
 import (
 	"bytes"
@@ -22,12 +22,10 @@ func (*memoryFile) Close() error { return nil }
 
 func TestClipboardRequestContainsOnlyExplicitSelection(t *testing.T) {
 	f := &memoryFile{}
-	o := New(f)
-	if err := o.Copy(""); err != nil || f.Len() != 0 {
-		t.Fatalf("empty selection changed output: %q, %v", f.String(), err)
-	}
+	o := &SerialFile{File: f}
+
 	selected := "界e\u0301 👩‍💻\nsecond line\x1b]52;c;?\a"
-	if err := o.Copy(selected); err != nil {
+	if _, err := o.Write(Sequence([]byte(selected), false)); err != nil {
 		t.Fatal(err)
 	}
 	request := f.String()
@@ -72,7 +70,7 @@ func (f *fragmentFile) Write(p []byte) (int, error) {
 
 func TestRenderAndClipboardRequestsCannotInterleave(t *testing.T) {
 	f := &fragmentFile{}
-	o := New(f)
+	o := &SerialFile{File: f}
 	const frame = "\x1b[1;1Hrendered pane\x1b[0m"
 	const request = "\x1b]52;c;c2VsZWN0ZWQ=\a" // independently encoded "selected"
 	const workers = 32
@@ -84,7 +82,7 @@ func TestRenderAndClipboardRequestsCannotInterleave(t *testing.T) {
 			if _, err := io.WriteString(o, frame); err != nil {
 				t.Error(err)
 			}
-			if err := o.Copy("selected"); err != nil {
+			if _, err := o.Write(Sequence([]byte("selected"), false)); err != nil {
 				t.Error(err)
 			}
 		})
@@ -123,8 +121,8 @@ func (f *failingFile) Write(p []byte) (int, error) { return len(p) / 2, f.err }
 func TestClipboardReportsWriteFailures(t *testing.T) {
 	want := errors.New("terminal disconnected")
 	for _, err := range []error{nil, want} {
-		o := New(&failingFile{err: err})
-		got := o.Copy("selected")
+		o := &SerialFile{File: &failingFile{err: err}}
+		_, got := o.Write(Sequence([]byte("selected"), false))
 		if err == nil && !errors.Is(got, io.ErrShortWrite) || err != nil && !errors.Is(got, want) {
 			t.Fatalf("underlying error %v: Copy error = %v", err, got)
 		}
@@ -138,7 +136,7 @@ func TestOutputRetainsTerminalDetectionAndResize(t *testing.T) {
 	}
 	defer master.Close()
 	defer slave.Close()
-	o := New(slave)
+	o := &SerialFile{File: slave}
 	var terminal term.File = o // the exact interface Bubble Tea asserts
 	if terminal.Fd() != slave.Fd() || !term.IsTerminal(terminal.Fd()) {
 		t.Fatal("wrapper lost the terminal descriptor or TTY detection")

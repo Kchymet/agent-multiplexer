@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"amux/internal/access"
 	"amux/internal/console"
@@ -131,7 +132,25 @@ func lookupPolicySession(db policyStore, id string) (store.Session, bool, error)
 		// wsops.ResolveSession from authorization: a read must not create/migrate.
 		return console.Session(), true, nil
 	}
-	return db.GetSession(id)
+	s, found, err := db.GetSession(id)
+	if err != nil || !found {
+		return s, found, err
+	}
+	s, err = inheritParentArchive(s, db.GetSession)
+	return s, found, err
+}
+
+// inheritParentArchive is a read-side lifecycle projection. A parent's archive
+// fences its members without losing their independent completion state.
+func inheritParentArchive(s store.Session, lookup func(string) (store.Session, bool, error)) (store.Session, error) {
+	if !s.IsRoot() && !s.Archived {
+		parent, found, err := lookup(s.RootID)
+		if err != nil {
+			return s, err
+		}
+		s.Archived = found && parent.Archived
+	}
+	return s, nil
 }
 
 func policyResource(s store.Session) access.Resource {
@@ -139,6 +158,16 @@ func policyResource(s store.Session) access.Resource {
 		ID: s.ID, RootID: s.RootID, Role: s.Role(), Scope: s.Scope,
 		Repo: s.Repo, Archived: s.Archived,
 	}
+}
+
+func splitRepoList(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func containsString(values []string, want string) bool {
@@ -232,8 +261,9 @@ func (r *daemonAccessResolver) scopedRepoRows(ctx context.Context, principal acc
 				visible = true
 			case store.RoleCoordinator:
 				visible = coordinatorGrantsInitialized && containsString(coordinatorGrants, repo.Name)
-			case store.RoleRepo:
-				visible = subject.Repo == repo.Name
+			case store.RoleRepo, store.RoleAgent:
+				// Self scope: the repos this session itself is scoped to.
+				visible = containsString(splitRepoList(subject.Repo), repo.Name)
 			}
 			if visible {
 				rows = append(rows, core.RepoRow{Name: repo.Name})
@@ -244,19 +274,10 @@ func (r *daemonAccessResolver) scopedRepoRows(ctx context.Context, principal acc
 	return rows, err
 }
 
-func policyVisible(db policyStore, subject, target store.Session) (bool, error) {
-	switch subject.Role() {
-	case store.RoleConsole:
-		return true, nil
-	case store.RoleCoordinator:
-		return target.ID == subject.ID || target.RootID == subject.ID, nil
-	case store.RoleRepo:
-		return target.ID == subject.ID, nil
-	case store.RoleAgent:
-		return target.ID == subject.ID, nil
-	default:
-		return false, nil
-	}
+// policyVisible is the store-row form of access.InWorkgroupScope, so every
+// filtered list projection uses the same scope as Policy.Authorize.
+func policyVisible(_ policyStore, subject, target store.Session) (bool, error) {
+	return access.InWorkgroupScope(policyResource(subject), policyResource(target)), nil
 }
 
 func normalizedWorkgroupRow(root store.Session) core.WorkgroupRow {

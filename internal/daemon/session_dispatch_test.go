@@ -46,7 +46,18 @@ func sessionRuntimeFixtureWithClock(t *testing.T, now func() time.Time, sessions
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, session := range sessions {
+	for i := range sessions {
+		if sessions[i].Dir == "" {
+			if sessions[i].IsRoot() {
+				sessions[i].Dir = store.CoordinatorDir(sessions[i].ID)
+			} else {
+				sessions[i].Dir = filepath.Join(core.SessionsDir(), sessions[i].RootID, sessions[i].ID)
+			}
+			if err := os.MkdirAll(sessions[i].Dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		session := sessions[i]
 		if err := db.PutSession(session); err != nil {
 			_ = db.Close()
 			t.Fatal(err)

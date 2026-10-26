@@ -7,4 +7,4 @@
    loading…               │history-014                                
  ↵ open  ↑↓ move ─────────│A界éZ                                      
 ──────────────────────────┴───────────────────────────────────────────
-copy sent to terminal                                                 
+copy queued                                                           

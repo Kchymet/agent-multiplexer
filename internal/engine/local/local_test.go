@@ -23,6 +23,8 @@ func TestPaneColorEnvironment(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	t.Setenv("TERM", "dumb")
 	t.Setenv("TMUX", "launcher")
+	t.Setenv("TERM_PROGRAM", "tmux")
+	t.Setenv("TERM_PROGRAM_VERSION", "3.8")
 	t.Setenv("COLORTERM", "truecolor")
 	for _, tc := range []struct {
 		name  string
@@ -61,8 +63,10 @@ func TestPaneColorEnvironment(t *testing.T) {
 					}
 				}
 			}
-			if _, exists := got["TMUX"]; exists {
-				t.Error("pane inherited launcher TMUX")
+			for _, key := range []string{"TMUX", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"} {
+				if _, exists := got[key]; exists {
+					t.Errorf("pane inherited launcher %s", key)
+				}
 			}
 			if got["COLORTERM"] != "truecolor" {
 				t.Error("lost terminal color capability")
@@ -189,6 +193,37 @@ func TestLocalEngineFanoutPersistenceReplay(t *testing.T) {
 	}
 	if _, ok := eng.Lookup(key); ok {
 		t.Fatal("killed instance should be removed from the engine")
+	}
+}
+
+// A clipboard write reaches the subscribers attached when the agent makes it,
+// but never the replay: re-running it on reattach would overwrite whatever the
+// user copied since with the agent's stale selection.
+func TestReplayOmitsClipboardWrites(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+	key := engine.Key{AgentID: "clip", Tab: 0}
+	// "aGk=" is base64("hi"); the OSC is split across two writes, both after
+	// the live subscriber attaches.
+	script := `sleep 0.3; printf 'A\033]52;c;aG'; sleep 0.2; printf 'k=\007B\033]0;title\007DONE'; sleep 30`
+	inst, err := eng.Ensure(context.Background(), engine.Spec{Key: key, Argv: []string{"sh", "-c", script}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	live := &collector{}
+	inst.Subscribe(live.sink())
+	waitFor(t, live, "DONE", 3*time.Second)
+	if !live.has("\x1b]52;c;aGk=\a") {
+		t.Fatalf("live subscriber missed the clipboard write: %q", live.buf.String())
+	}
+	replay := &collector{}
+	inst.Subscribe(replay.sink())
+	waitFor(t, replay, "DONE", time.Second)
+	replay.mu.Lock()
+	got := replay.buf.String()
+	replay.mu.Unlock()
+	if want := "AB\x1b]0;title\aDONE"; !strings.Contains(got, want) || strings.Contains(got, "52;") {
+		t.Fatalf("replay = %q, want %q without the OSC 52", got, want)
 	}
 }
 

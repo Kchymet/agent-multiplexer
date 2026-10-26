@@ -349,6 +349,7 @@ func TestSessionRuntimeRearmsGlobalInitializationBeforeFreshDispatch(t *testing.
 	if err := runtime.serveCurrent(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	runtime.waitPasses()
 	if !runtime.initialized["a-fresh"] {
 		t.Fatal("initial mailbox did not finish initialization")
 	}
@@ -374,6 +375,7 @@ func TestSessionRuntimeRearmsGlobalInitializationBeforeFreshDispatch(t *testing.
 	if err := runtime.serveCurrent(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	runtime.waitPasses()
 	if !runtime.initialized["z-retained"] {
 		t.Fatal("later mailbox was not initialized")
 	}

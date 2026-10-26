@@ -1,0 +1,59 @@
+Master integration: 3397debc1a95cc6ca26de9a2c8aea972b1c4779e
+Toolchain: Go 1.26.10
+
+make test vet notices-check vuln: PASS (root and harnessproto; no vulnerabilities)
+go test -race ./internal/clipboard ./internal/termselect: PASS
+
+AMUX_SELECTION_EVIDENCE=docs/evidence/pane-selection go test ./internal/nativetui -run Test(SelectionPTYRendererAndClipboard|AccountsPTY) -count=1 -v
+=== RUN   TestAccountsPTYScrolling
+=== RUN   TestAccountsPTYScrolling/80x24/sgr-wheel
+=== RUN   TestAccountsPTYScrolling/80x24/x10-wheel
+=== RUN   TestAccountsPTYScrolling/80x24/trackpad-burst
+=== RUN   TestAccountsPTYScrolling/120x32/sgr-wheel
+=== RUN   TestAccountsPTYScrolling/120x32/x10-wheel
+=== RUN   TestAccountsPTYScrolling/120x32/trackpad-burst
+=== RUN   TestAccountsPTYScrolling/52x12/sgr-wheel
+=== RUN   TestAccountsPTYScrolling/52x12/x10-wheel
+=== RUN   TestAccountsPTYScrolling/52x12/trackpad-burst
+--- PASS: TestAccountsPTYScrolling (0.90s)
+    --- PASS: TestAccountsPTYScrolling/80x24/sgr-wheel (0.11s)
+    --- PASS: TestAccountsPTYScrolling/80x24/x10-wheel (0.10s)
+    --- PASS: TestAccountsPTYScrolling/80x24/trackpad-burst (0.10s)
+    --- PASS: TestAccountsPTYScrolling/120x32/sgr-wheel (0.10s)
+    --- PASS: TestAccountsPTYScrolling/120x32/x10-wheel (0.10s)
+    --- PASS: TestAccountsPTYScrolling/120x32/trackpad-burst (0.09s)
+    --- PASS: TestAccountsPTYScrolling/52x12/sgr-wheel (0.10s)
+    --- PASS: TestAccountsPTYScrolling/52x12/x10-wheel (0.10s)
+    --- PASS: TestAccountsPTYScrolling/52x12/trackpad-burst (0.10s)
+=== RUN   TestAccountsPTYSecretSelectionIsolation
+=== RUN   TestAccountsPTYSecretSelectionIsolation/e
+=== RUN   TestAccountsPTYSecretSelectionIsolation/a
+--- PASS: TestAccountsPTYSecretSelectionIsolation (0.05s)
+    --- PASS: TestAccountsPTYSecretSelectionIsolation/e (0.02s)
+    --- PASS: TestAccountsPTYSecretSelectionIsolation/a (0.03s)
+=== RUN   TestAccountsPTYProviderSelection
+=== RUN   TestAccountsPTYProviderSelection/80x24
+=== RUN   TestAccountsPTYProviderSelection/120x32
+=== RUN   TestAccountsPTYProviderSelection/52x12
+--- PASS: TestAccountsPTYProviderSelection (0.48s)
+    --- PASS: TestAccountsPTYProviderSelection/80x24 (0.15s)
+    --- PASS: TestAccountsPTYProviderSelection/120x32 (0.16s)
+    --- PASS: TestAccountsPTYProviderSelection/52x12 (0.17s)
+=== RUN   TestAccountsPTYSelectionGuards
+--- PASS: TestAccountsPTYSelectionGuards (0.08s)
+=== RUN   TestSelectionPTYRendererAndClipboard
+--- PASS: TestSelectionPTYRendererAndClipboard (0.07s)
+PASS
+ok  	amux/internal/nativetui	1.594s
+
+AMUX_TEST_CODEX_BIN=<checksum-pinned Codex 0.157.1> AMUX_REQUIRE_CODEX_SCROLL=1 go test ./internal/nativetui -run ^TestCodexEmbeddedScroll$ -count=1 -timeout=180s -v
+=== RUN   TestCodexEmbeddedScroll
+=== RUN   TestCodexEmbeddedScroll/always
+    codex_scroll_integration_test.go:268: real Codex 0.157.1 always: recovered rendered marker 070; draft preserved; local wheel sent no input; indicator and input/output live returns verified
+=== RUN   TestCodexEmbeddedScroll/no-alt
+    codex_scroll_integration_test.go:268: real Codex 0.157.1 no-alt: recovered rendered marker 070; draft preserved; local wheel sent no input; indicator and input/output live returns verified
+--- PASS: TestCodexEmbeddedScroll (22.65s)
+    --- PASS: TestCodexEmbeddedScroll/always (11.82s)
+    --- PASS: TestCodexEmbeddedScroll/no-alt (10.81s)
+PASS
+ok  	amux/internal/nativetui	22.663s

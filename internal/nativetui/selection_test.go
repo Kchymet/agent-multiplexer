@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/clipboard"
 	"amux/internal/core"
-	"amux/internal/termoutput"
 	"amux/internal/vterm"
 	tea "github.com/charmbracelet/bubbletea"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -38,7 +38,7 @@ func TestPaneSelectionCopiesWholeGlyphsAndHighlightsSameCells(t *testing.T) {
 			m, term, input := scrollModel(t, 12, 4)
 			feedPane(t, term, "\x1b[7mA界éZ\x1b[0m\r\nsecond\r\nthird")
 			var copied []string
-			m.copyText = func(s string) error { copied = append(copied, s); return nil }
+			m.clip = func(s []byte) { copied = append(copied, string(s)) }
 			a, b := selectionEvent(tea.MouseActionPress, 2, 0), selectionEvent(tea.MouseActionMotion, 2, 1)
 			if reverse {
 				a.Y, b.Y = b.Y, a.Y
@@ -86,7 +86,7 @@ func TestHistoricalSelectionUsesDisplayedRows(t *testing.T) {
 	feedPane(t, term, historyRows(12))
 	term.ScrollToTop()
 	var copied string
-	m.copyText = func(s string) error { copied = s; return nil }
+	m.clip = func(s []byte) { copied = string(s) }
 	m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
 	finishSelection(m, selectionEvent(tea.MouseActionRelease, 10, 1))
 	if copied != "history-001\nhistory-002" || input() != "" || term.Viewport().Offset == 0 {
@@ -103,7 +103,7 @@ func TestAlternateFrameHistorySelectionUsesDisplayedRows(t *testing.T) {
 		t.Fatal("alternate history is not displayed")
 	}
 	var copied string
-	m.copyText = func(s string) error { copied = s; return nil }
+	m.clip = func(s []byte) { copied = string(s) }
 	m.handleMouse(selectionEvent(tea.MouseActionPress, 4, 0))
 	finishSelection(m, selectionEvent(tea.MouseActionRelease, 5, 1))
 	if copied != "界 row\nsecond" || input() != "" {
@@ -115,7 +115,7 @@ func TestSelectionReleaseInRailStaysInPane(t *testing.T) {
 	m, term, input := scrollModel(t, 12, 4)
 	feedPane(t, term, "first\r\nsecond")
 	var copied string
-	m.copyText = func(s string) error { copied = s; return nil }
+	m.clip = func(s []byte) { copied = string(s) }
 	m.handleMouse(selectionEvent(tea.MouseActionPress, 2, 0))
 	ev := selectionEvent(tea.MouseActionMotion, -100, 1)
 	ev.Alt = true // ownership stays local after modifier change
@@ -151,7 +151,7 @@ func TestSelectionMousePriorityAndGestureLatch(t *testing.T) {
 			}
 			feedPane(t, term, data)
 			copies := 0
-			m.copyText = func(s string) error { copies++; return nil }
+			m.clip = func([]byte) { copies++ }
 			press := selectionEvent(tea.MouseActionPress, 0, 0)
 			press.Shift, press.Alt = tc.shift, tc.alt
 			m.handleMouse(press)
@@ -187,7 +187,7 @@ func TestSelectionInvalidationConsumesGestureTail(t *testing.T) {
 			m, term, _ := scrollModel(t, 20, 4)
 			feedPane(t, term, historyRows(10))
 			copies := 0
-			m.copyText = func(string) error { copies++; return nil }
+			m.clip = func([]byte) { copies++ }
 			m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
 			m.handleMouse(selectionEvent(tea.MouseActionMotion, 4, 1))
 			switch reason {
@@ -238,7 +238,7 @@ func TestOtherPaneOutputDoesNotCancelSelection(t *testing.T) {
 	m.terms[paneKey{"other", tabAgent}] = other
 	m.byPane = map[string]paneKey{"other": {"other", tabAgent}}
 	var copy string
-	m.copyText = func(s string) error { copy = s; return nil }
+	m.clip = func(s []byte) { copy = string(s) }
 	m.handleMouse(selectionEvent(tea.MouseActionPress, 0, 0))
 	m.handlePaneFrame(&core.PaneFrame{PaneID: "other", Type: core.FramePaneOutput, Data: []byte("busy")})
 	finishSelection(m, selectionEvent(tea.MouseActionRelease, 2, 0))
@@ -254,10 +254,11 @@ func TestSelectionClipboardThroughRealOutputWrapper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	m.copyText = termoutput.New(f).Copy
+	m.clip = isolatedClipboard(t, &clipboard.SerialFile{File: f})
 	feedPane(t, term, "abcdef\x1b]52;c;c2VjcmV0\a\x1b]52;c;?\a")
 	_ = m.View()
-	// Ordinary clicks, output (including child OSC52), and rendering never copy.
+	// Without an app-copy callback, output/rendering and ordinary clicks do
+	// not trigger local-selection copy. App-copy coexistence has PTY coverage.
 	m.handleMouse(selectionEvent(tea.MouseActionPress, 1, 0))
 	finishSelection(m, selectionEvent(tea.MouseActionRelease, 1, 0))
 	if info, _ := f.Stat(); info.Size() != 0 {
@@ -267,6 +268,7 @@ func TestSelectionClipboardThroughRealOutputWrapper(t *testing.T) {
 	finishSelection(m, selectionEvent(tea.MouseActionRelease, 2, 0))
 	// Duplicate releases cannot copy again.
 	finishSelection(m, selectionEvent(tea.MouseActionRelease, 2, 0))
+	waitPane(t, "queued selection delivery", func() bool { info, _ := f.Stat(); return info.Size() > 0 })
 	_, _ = f.Seek(0, io.SeekStart)
 	b, err := io.ReadAll(f)
 	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("abc")) + "\a"
@@ -350,4 +352,14 @@ func TestShiftWheelRemainsLocalDuringAppGesture(t *testing.T) {
 	m.handleMouse(release)
 	want := "\x1b[<0;1;1M\x1b[<4;5;2m"
 	waitPane(t, "resized app release without local wheel bytes", func() bool { return input() == want })
+}
+
+// Exercise the real Copier without invoking the developer's host clipboard.
+func isolatedClipboard(t *testing.T, out io.Writer) func([]byte) {
+	t.Helper()
+	t.Setenv("PATH", t.TempDir())
+	for _, key := range []string{"TMUX", "DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME", "WSL_INTEROP"} {
+		t.Setenv(key, "")
+	}
+	return clipboard.New(out).Copy
 }

@@ -11,15 +11,16 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"amux/internal/clipboard"
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/keymap"
-	"amux/internal/termoutput"
 	"amux/internal/vterm"
 )
 
@@ -37,7 +38,9 @@ func Run(focusID string) error {
 	// A broken keys section falls back to the defaults for the bad entries —
 	// never lock the user out of navigation — and surfaces on the status line.
 	keys, keysErr := keymap.Load()
+	out := &clipboard.SerialFile{File: os.Stdout}
 	m := &model{
+		clip:    clipboard.New(out).Copy,
 		keys:    keys,
 		terms:   map[paneKey]*vterm.Terminal{},
 		byPane:  map[string]paneKey{},
@@ -48,9 +51,7 @@ func Run(focusID string) error {
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
-	output := termoutput.New(os.Stdout)
-	m.copyText = output.Copy
-	_, err := newProgram(m, tea.WithOutput(output)).Run()
+	_, err := newProgram(m, tea.WithOutput(out)).Run()
 	if m.accounts != nil {
 		m.accounts.dispose()
 	}
@@ -97,7 +98,6 @@ type daemonClient interface {
 type model struct {
 	selection      *paneSelection
 	gesture        *paneGesture
-	copyText       func(string) error
 	client         daemonClient
 	reconnectPanes bool // rebuild connection-bound mirrors after the next inventory
 	sessions       []core.Session
@@ -129,6 +129,15 @@ type model struct {
 	accountOverviewSerial uint64
 	accounts              *accountsState
 	accountCall           accountCaller // nil uses the authenticated host account service
+
+	// clip queues local selections and pane OSC 52 writes through one Copier.
+	// Nil disables copying.
+	// Only the pane on screen may copy: a selection is made in the visible
+	// pane, and a hidden agent must not silently replace the clipboard. shown
+	// is that pane, published by renderMain because clipboard callbacks run on
+	// each terminal's parsing goroutine, not the Update goroutine.
+	clip  func([]byte)
+	shown atomic.Pointer[vterm.Terminal]
 }
 
 // confirmState is a pending yes/no confirmation modal: the question shown, and
@@ -183,12 +192,8 @@ func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.validateSelection()
 	switch msg := msg.(type) {
-	case clipboardResultMsg:
-		if msg.err != nil {
-			m.status = "clipboard write failed"
-		} else {
-			m.status = "copy sent to terminal"
-		}
+	case clipboardQueuedMsg:
+		m.status = "copy queued"
 		return m, nil
 	case accountOverviewReplyMsg:
 		return m, m.updateAccountOverview(msg)
@@ -893,6 +898,7 @@ func (m *model) launchPane(id string, tab int) tea.Cmd {
 		default:
 		}
 	})
+	m.bindClipboard(t)
 	key := paneKey{id, tab}
 	m.terms[key] = t
 	m.byPane[pid] = key
