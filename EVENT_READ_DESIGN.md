@@ -106,7 +106,12 @@ amux agent events [<session-id>] [--after <sequence> | --cursor <token>] [--json
 With no ID, the command obtains the caller subject from the fixed authenticated
 session context and requests its own page. A coordinator supplies a member ID,
 including an archived member still in its workgroup. Text output prints events
-and a copyable `next cursor: ...`; `--json` emits exactly one page. It never
+and a copyable `next cursor: ...`; `--json` emits exactly one page. The CLI
+remembers, per target, the last 64 cursors it was issued together with each
+page's `scanned_sequence`. When one of them comes back `cursor_invalid`
+(expired, evicted, daemon restart, source change), it resumes the read with
+`after_sequence` at that sequence and notes the resume on stderr. An unknown
+cursor still fails, with a hint to pass `--after`. It never
 opens the store or transcript locally and does not auto-start the daemon.
 
 This worker owns the page types, pager implementation in
