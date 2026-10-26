@@ -152,11 +152,11 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   (ChatGPT) sign in once on the host, and the daemon delivers only a session
   credential, never a refresh token, to each authorized session. TUI/web Accounts
   and `amux auth accounts` show one Claude and one Codex configuration and limits;
-  configuration is through amux CLI/TUI only. `amux auth default <claude|codex>`
-  selects the amux configuration for new workloads while
-  existing bindings stay fixed. Legacy `claude.auth` / `codex.auth` settings seed
-  the first defaults. Existing host/shared/environment defaults and bindings
-  remain internal compatibility state; web Accounts is read-only. Codex MCP credential files stay shared. macOS GitHub
+  configuration is through amux CLI/TUI only; web Accounts is read-only. Every
+  workload follows the central configuration: each new harness process uses the
+  newest successfully configured login (another account, subscription or API key
+  included) while running processes keep theirs. Older host/shared/environment
+  selections were migrated to central once, automatically. Codex MCP credential files stay shared. macOS GitHub
   authentication uses the daemon broker. Copied config
   can itself contain secrets such as inline MCP tokens; it is readable by the
   receiving session. See [machine accounts](docs/machine-accounts.md) and
@@ -584,12 +584,13 @@ Auto-launching amux on terminal open is optional and off by default. If you want
 it, opt in by sourcing the shim (`scripts/amux.sh`) from your shell rc; set
 `AMUX_SKIP=1` in any shell to bypass it.
 
-### Persistent Codex App Server opt-in
+### Codex App Server control
 
-Use `amux config set codex.control app-server` to save the daemon's Codex backend
-selection across restarts (`pty` is the default and rollback value). Changes
-require an operator-controlled `amux daemon restart`, which stops hosted agents;
-they do not change routing in a running daemon. `amux doctor` compares saved
+Central Codex auth delivers credentials through the supervised App Server, so
+every Codex session runs under it; a saved or environment `codex.control pty` is
+reported and overridden. Changes to `codex.control` require an
+operator-controlled `amux daemon restart`, which stops hosted agents; they do not
+change routing in a running daemon. `amux doctor` compares saved
 config, the shell override, and the running daemon's reported selection. See the
 [operator enable/restart/rollback sequence and override precedence](docs/codex-app-server-supervision.md#opt-in-and-fallback).
 

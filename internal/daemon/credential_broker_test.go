@@ -71,7 +71,7 @@ func TestGitHubBrokerAllHarnessesReadOnly(t *testing.T) {
 func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 	claude := store.Session{ID: "claude", Agent: "claude", Dir: t.TempDir()}
 	codex := store.Session{ID: "codex", Agent: "codex", Dir: t.TempDir()}
-	d, r, principals := sessionRuntimeFixture(t, claude, codex)
+	_, r, principals := sessionRuntimeFixture(t, claude, codex)
 	// The Keychain broker served only the legacy host mode, which is retired.
 	if err := amuxcfg.SetAuthMode("claude", amuxcfg.AuthHost); err != nil {
 		t.Fatal(err)
@@ -90,18 +90,10 @@ func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 	selected := credentialbroker.ClaudeServices(claudecfg.CredentialSelector())[1]
 	o := credentialbroker.Operation{Verb: credentialbroker.Read, Service: selected, Account: credentialbroker.HostAccount()}
 	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteQuery, Verb: o.Verb, Fields: o.Fields()}
-	value := "synthetic host token"
+	// The backend is never reached: any call is a failure.
 	calls := 0
-	r.credentialOperation = func(_ context.Context, op credentialbroker.Operation) (credentialbroker.Result, error) {
+	r.credentialOperation = func(context.Context, credentialbroker.Operation) (credentialbroker.Result, error) {
 		calls++
-		switch op.Verb {
-		case credentialbroker.Read:
-			return credentialbroker.Result{Value: value}, nil
-		case credentialbroker.Write:
-			value = op.Value
-		case credentialbroker.Delete:
-			value = ""
-		}
 		return credentialbroker.Result{}, nil
 	}
 	for _, tc := range []struct {
@@ -145,6 +137,4 @@ func TestCredentialBrokerRestrictsHarnessAccountAndOperations(t *testing.T) {
 			t.Fatalf("retired host Keychain served %s", verb)
 		}
 	}
-	_ = value
-	_ = d
 }

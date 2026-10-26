@@ -1,101 +1,74 @@
-# Auth follows central — work-in-progress checkpoint 2 (2026-10-25)
+# Auth follows central — design and evidence (2026-10-25)
 
-Branch `amux/355340-c0523b`; upstream merged through `b277792` (includes #202 `ca0411d`).
-This responds to review b292d2 (`review/b292d2/REVIEW.md` at `2da36b3`), findings A1–A5,
-and to root's feedback. Still WIP: some daemon and nativetui tests need updating (listed below).
+Branch `amux/355340-c0523b`. User-facing behaviour:
+[machine accounts](../../machine-accounts.md#defaults-and-existing-workloads).
+Formal properties: P11 and P17 in the [broker identity spec](../../broker-identity-spec.md).
 
-## Native result (Codex 0.157.1, CI-pinned, sha256 verified) — asserted
+## Native evidence (Codex 0.157.1, CI-pinned, sha256 verified)
 
-`internal/codexapp/cross_account_resume_smoke_test.go` (opt-in `AMUX_TEST_CODEX_BIN`;
-synthetic unsigned JWTs and a local TLS fake ChatGPT backend; it makes no real account
-or network calls and copies no credential). PASS (29.5s). It asserts:
+`internal/codexapp/cross_account_resume_smoke_test.go` is opt-in (`AMUX_TEST_CODEX_BIN`). It uses
+synthetic unsigned JWTs and a local TLS fake ChatGPT backend. It makes no real account or network
+calls and copies no credential. Request compression is disabled so the fake can read bodies.
 
-- Phase 1 runs as `acct-alpha`. Phase 2 is a new App Server that runs `thread/resume` on the
-  same thread with `acct-bravo` tokens injected. The thread id is unchanged, and the request is sent
-  with the `acct-bravo` header and no `previous_response_id`. Its `input` contains, in order,
-  `user:PROMPT-ONE`, `reasoning:ENC-acct-alpha-1`, `assistant:answer 1`, `user:PROMPT-TWO`.
-- Phase 3 runs as `acct-charlie`. The backend rejects the turn with `invalid_encrypted_content`.
-  The turn fails, the identity keeps the same thread, and `thread/start` is never called.
-- Phase 4 recovers on the same thread with the full ordered history plus `PROMPT-FOUR`.
-- Within one process (reconnect), the bound account is still enforced: another account's token is refused.
+1. Phase 1 runs as `acct-alpha`. The fake returns a reasoning item with `encrypted_content`.
+2. Phase 2 is a new App Server running `thread/resume` on the same thread with `acct-bravo` tokens
+   injected. The thread id is unchanged, the request is sent with the `acct-bravo` header and no
+   `previous_response_id`, and its `input` contains, in order, `user:PROMPT-ONE`,
+   `reasoning:ENC-acct-alpha-1`, `assistant:answer 1`, `user:PROMPT-TWO`.
+3. Phase 3 runs as `acct-charlie`. The backend rejects the turn with `invalid_encrypted_content`.
+   The turn fails, the identity keeps the same thread, and `thread/start` is never called.
+4. Phase 4 recovers on the same thread with the full ordered history.
+5. Within one process (reconnect), the bound account is still enforced.
 
 Conclusion: continuing a thread under another account is supported natively. The earlier refusal
-was amux policy. The real backend may still refuse foreign `encrypted_content`; a fake cannot
-prove otherwise. If it does, that turn fails visibly and the thread and history are kept (phase 3).
+was amux policy. Residual risk: the real backend may refuse another account's encrypted reasoning,
+which a fake cannot prove either way. If it does, that turn fails visibly and the thread is kept.
 
-## Implemented design (addresses A1–A5)
+## Design
 
-**Migration (A4).** `accounts.json` moves from v1 to v2 once, inside the existing flock. It is
-idempotent by version. The v1 file is kept once as `accounts.v1.json` (`O_EXCL`). Unknown
-or newer versions and malformed JSON are refused, and the file is left unchanged.
-- Every default and binding (live, dormant, archived, console) becomes `<h>:central`.
-- **No legacy fallback and no credential copying** (copying would fork rotating refresh chains;
-  environment credentials are not amux's to move). The old source is kept only as evidence:
-  `Binding.MigratedFrom`, `State.Migrated`.
-- Until the first central login, Accounts, the CLI and `AccountSnapshot.migrationPending`
-  report "migrated from X: central login required". Launches meanwhile use the existing
-  central login flow. Running processes are not stopped (panes do not survive the daemon
-  restart that installs the upgrade).
-- New workloads are never seeded with a legacy source. Selecting a host, shared or
-  environment default returns `account_legacy_source_retired`. `config set` accepts only
-  central, and `unset` cannot bring back a legacy source.
+- **Store v2 migration.** It runs once, idempotently, under the store lock. Every default and
+  binding (live, dormant, archived, console) moves to `<h>:central`. The v1 file is kept once
+  as `accounts.v1.json`. Newer, unknown or malformed metadata is refused and never rewritten.
+  No credential is copied: rotating refresh chains must keep one owner. A harness without a
+  central login reports *migration pending — central login required*
+  (`AccountSnapshot.migrationPending`). Legacy sources cannot be selected again.
+- **Launch fence.** The daemon allocates a launch (a sequence plus a 24-byte random nonce; only
+  the hash is persisted) for each Claude agent-pane resolve and each Codex App Server process.
+  - The first delivery pins mode, account and version, and retires every older pending launch.
+  - Repeated deliveries to the same launch (timeout or lost-response retry, abandoned duplicate,
+    reconnect, same-account refresh) return the same snapshot. After a replacement they get
+    `account_runtime_superseded`.
+  - An older, unallocated or nonce-mismatched launch is refused.
+  - `ensurePane` retires a launch whose resolve started no process (the engine reused the
+    running pane, or the spawn failed). A pane that exits between classification and `Ensure`
+    is respawned with its own fresh launch.
+  - Epoch, pending-login and revision fences are unchanged. Up to eight previous runtimes'
+    evidence is kept.
+  - Scope: this is runtime consistency, not isolation inside a session.
+- **Codex threads.** A new process resumes the exact persisted thread under the current account
+  and records the earlier accounts in `Identity.PriorChatGPTAccounts`. A resume target (a resumable
+  identity, a legacy v0 identity, or a PTY-pinned id with no identity) is never replaced by an
+  empty thread: a resume error fails the launch and leaves the identity unchanged.
+- **PTY history.** Central Codex auth requires the App Server, so `codex.control pty` is reported
+  and overridden. A session whose canonical structured log is absent has the rollout of the
+  thread it will resume imported once (at daemon startup and before supervisor launch) as an
+  ordered prefix of that log, published with a no-clobber link. The rollout is only read; it is
+  the same file the App Server resumes and appends to.
+- **Corrupt or insecure state.** A corrupt central Claude record never blocks binding or the
+  repairing login, and delivery refuses it. An insecure store fails closed.
 
-**A3.** With no legacy fallback, `accounts.Mode` is constant (central) for the whole life of a
-runtime, so the Keychain broker gate cannot change under a running process. A host-mode
-runtime from before the upgrade cannot outlive the daemon restart that migrates.
+## Regression tests
 
-**Process launch fence (A1; follows the refined review: no one-shot consumption).**
-- Allocation happens only in the daemon: `accounts.BeginLaunch`.
-  - Claude: in `panespec.centralLauncher` while the daemon resolves the agent-tab argv. The launch
-    is passed as the launcher argv `--amux-launch=<seq>:<nonce>` (48 hex chars), which the exec into Claude replaces.
-  - Codex: in `Manager.Ensure` on the fresh-process path only. The launch stays inside the daemon-side supervisor.
-- Each binding has at most one pending launch. Every resolve before its first delivery reuses the same
-  pending launch, so a reattach (a resolve whose pane was reused) neither builds up allocations nor
-  displaces the one a waiting launcher holds.
-- The first delivery for the pending seq and nonce pins the newest central mode, account and version.
-- Repeated deliveries to the same launch (a timeout, a lost response, or an abandoned duplicate per
-  R2) get the same snapshot. After a replacement login they get `account_runtime_superseded`
-  ("restart to use the current login"), never the new credential.
-- An older launch is superseded. A forged or unallocated seq, a wrong nonce, or a request with no
-  launch is refused.
-- The fences for epoch (logout, pending), state and binding revision are unchanged. A revision change
-  during delivery returns a retryable `account_revision_changed`.
-- Previous runtimes' delivered evidence is kept in `Binding.History` (at most 8 entries).
-- Scope, as the review states it: this guarantees runtime consistency, not isolation from a malicious
-  process inside the same session. Codex is stronger, because its launch never enters the sandbox.
+- `internal/accounts`: migration, idempotency, pending reporting, mode/API/account replacement,
+  Claude idempotent retry and superseded refusal, forged/unallocated launches, kill/respawn race,
+  bounded pending launches, logout before first delivery, insecure store.
+- `internal/daemon`: the real admission path for Claude (`dispatchCentralCredential`: launch-less,
+  forged, retry, replacement, kill/respawn in both orders) and for Codex (`codexTokenSource`:
+  subscription → API with a real initial delivery, then superseded). Also `ensurePane`
+  retire/keep decisions, corrupt-record repair login, PTY history import (order, idempotency,
+  archived, identity thread), and retired legacy defaults.
+- `internal/codexapp`: a manager restart under a replacement account resumes the same thread;
+  resume never falls back (resumable, v0 and PTY-pinned cases).
 
-**Codex thread bookkeeping (A5 and root point 2).** A new process does not use the
-sidecar's account as a constraint. It resumes the same `ThreadID` and records earlier accounts
-in `Identity.PriorChatGPTAccounts`, emitting a notice when the account changed.
-`Config.ResumeRequired` is set for a resumable identity, or one with central account history, and
-**disables the fallback to an empty thread**: a resume error fails the launch and leaves the identity
-unchanged. Only legacy (v0) or never-run threads keep the missing-rollout fallback.
-`account_rebind_requires_new_workload` is removed; `rebind` now just applies the current login immediately.
-
-**Corrupt or insecure state (A2, C4).** An unreadable or corrupt central Claude record no longer fails
-binding: bind, `AccountLogin` and logout proceed, delivery refuses with `central_credential_unavailable`,
-and login replaces the record. An `ErrInsecureStore` still fails closed. Corrupt `accounts.json` is refused
-and left byte-identical. Login, logout and default now bind every row in one `accounts.BindAll`
-transaction instead of one fsync per row under `effectMu`.
-
-**Wording.** CLI help and `config` help; TUI notices, confirmations and footer (the `d` default action is
-removed; the old "Existing workload bindings stay fixed" line is gone); launcher guidance no longer mentions rebind.
-
-## Overlap with 1a4fce (mailbox)
-
-My changes touch `centralauth/launcher.go`: the optional `launch` request field, new
-`fetchSuperseded` and `fetchChanged` guidance, and a `fetchCredentialFromSession(typed, launch)`
-signature. They also touch `daemon/central_credential.go` (field validation, and passing the launch to `Accept`).
-They do not change mailbox timing, budgets or publication. I will merge 1a4fce first and resolve conflicts on my side.
-
-## Remaining
-
-- Update the stale tests: `internal/accounts/api_mode_test.go` (the Launch type), the daemon account tests
-  (migration, overview, fencing, rebind, `central_credential`), `centralauth` launcher guidance, nativetui
-  account tests and evidence fixtures, and panespec central launcher argv.
-- Add regressions: Claude same-launch retry after a lost response, then replacement leading to superseded,
-  then a new launch delivering; a forged seq or a request with no launch refused; a corrupt record followed
-  by login and a next-launch delivery; insecure store refused with the file unchanged; resume-required with
-  a no-rollout error leaves the identity unchanged.
-- Docs: `machine-accounts.md`, `broker-identity-spec.md`, `sandbox-config.md`, README, and CONTRIBUTING
-  (prefer forward migration). Then `make test`, `make vet`, CI, and the draft PR.
+Older captures under `docs/evidence/accounts-*` are dated records of the previous UI and keep its
+wording.

@@ -427,6 +427,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.codex = codexapp.NewManager(ctx, os.Getenv("AMUX_CODEX_BIN"))
 	codexOwned = true
 	d.startCentralCodex(ctx)
+	// Before any session relaunches, carry PTY-era Codex history into the
+	// structured logs that are now every Codex session's canonical source.
+	d.importCodexHistories()
 	// Budgets refresh independently of clients and sessions of either harness.
 	startRunWorker(func() { d.accountLimitsLoop(ctx) })
 	// The engine's agents live in this process; stop them cleanly on shutdown.
@@ -1265,6 +1268,11 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 		return nil, err
 	}
 	sess := spec.Session
+	// A session first launched structured after startup (e.g. restored from
+	// archive) still carries its PTY-era history forward first.
+	if _, err := importCodexHistory(sess); err != nil {
+		log.Printf("amux: Codex history import for %s: %v", agentID, err)
+	}
 	var work *codexapp.RestartWork
 	if len(restart) > 0 {
 		work = restart[0]
