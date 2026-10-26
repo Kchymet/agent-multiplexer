@@ -309,6 +309,21 @@ func repoScopedAction(a core.Action) ([]string, bool) {
 	return nil, false
 }
 
+// splitAction reports whether handle admits a by resource rather than with the
+// exclusive gate.
+func splitAction(a core.Action) bool {
+	if _, ok := sessionScopedAction(a); ok {
+		return true
+	}
+	if _, _, ok := archiveScopedAction(a); ok {
+		return true
+	}
+	if _, ok := repoScopedAction(a); ok {
+		return true
+	}
+	return creationAction(a) || workgroupStart(a)
+}
+
 // sessionScopedAction names the one session an action touches when it runs
 // with only that session's admission: starting, restarting, recreating or
 // steering one existing session. Anything else, a workgroup start included

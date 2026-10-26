@@ -38,6 +38,7 @@ records which slow holders delay a report from session `a1`:
 | one-key archive toggle of a3 (may restore: still exclusive) | yes | restore slice |
 | host `agent-set-repos` of a3, stalled in its git work | no | PR 4, repo slice |
 | host `add-repo`, stalled cloning | no | PR 4, repo slice |
+| the coordinator's own `add-agent` (through its mailbox), stalled creating | no | PR 4, session-originated slice |
 | archive of a1's own workgroup | yes, and a1 is then refused | correct: a1 is archived |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
@@ -252,6 +253,12 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      work with creations and deletions. `refresh` only wakes the poller and
      takes no gate at all. `rm-repo` and `coordinator-set-repos` (they change
      many sessions' authorization) stay exclusive.
+   - Session-originated slice, done: an action a session sends (a
+     coordinator creating, archiving, re-scoping, starting or steering a
+     member) takes the same per-resource admission as the host's
+     (`splitAction`), plus the caller's own session lock. The creation branch
+     locks the caller during the creation, then takes {caller, new session}
+     in one sorted acquisition to start it. Self-completion stays exclusive.
    - Next: restore, move and the remaining policy changes, then account
      manage and completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,

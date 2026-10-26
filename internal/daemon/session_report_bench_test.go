@@ -126,6 +126,7 @@ func BenchmarkStoreOpen(b *testing.B) {
 //   - runtime-start: a host `start` of a3, stalled inside the runtime launch;
 //   - archive: a host archive of a3, stalled stopping its runtime;
 //   - add-repo: a host `add-repo`, stalled cloning;
+//   - coordinator-add-agent: the coordinator's own add-agent, stalled creating;
 //   - workgroup-start: a host `start` of the workgroup root, stalled
 //     resolving its members;
 //   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
@@ -226,6 +227,22 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 			}
 			return func() {
 				d.handle(context.Background(), core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": "https://example.invalid/r.git"}})
+			}
+		})
+	})
+	b.Run("coordinator-add-agent", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.dispatch = func(context.Context, core.Action, func(string)) (string, error) {
+				slow()
+				return "", nil
+			}
+			principal := principalFor(b, d, "root")
+			call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionAddAgent, ID: "root",
+				Fields: map[string]string{"agent": "claude"}}
+			return func() {
+				if result, _ := runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: principal, Call: call}); result.Status != sessionrpc.StatusOK {
+					b.Errorf("coordinator add-agent = %+v", result)
+				}
 			}
 		})
 	})
