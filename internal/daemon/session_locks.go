@@ -84,6 +84,13 @@ func (d *Daemon) admitSession(id string) (release func()) {
 	}
 }
 
+// admitShared is admission for work that only reads policy or state: it takes
+// the gate shared and no session lock.
+func (d *Daemon) admitShared() (release func()) {
+	d.effectMu.RLock()
+	return d.effectMu.RUnlock
+}
+
 // tryLock acquires key only if it is free right now.
 func (l *keyedLocks) tryLock(key string) (unlock func(), ok bool) {
 	l.mu.Lock()

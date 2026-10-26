@@ -99,21 +99,15 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		}
 		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.lockEffectExclusive()
-	defer r.d.effectMu.Unlock()
-	ctx = withEffectAdmission(ctx)
-
-	if err := r.d.authority.Valid(ctx, request.Principal); err != nil {
-		return rpcDenied("credential_invalid"), nil
-	}
-	// Authorize again under the dispatch lock, immediately before the exact
-	// canonical action executes. Membership, grants and archive state are live.
-	if err := r.policy.Authorize(ctx, request.Principal, req); err != nil {
-		return rpcDenied("access_denied"), nil
-	}
 	if req.Route == access.RouteQuery {
+		// Restricted queries only read. The shared gate is enough: every policy
+		// mutation takes it exclusively, so none lands between this
+		// authorization and the disclosure.
+		release := r.d.admitShared()
+		defer release()
+		if denied, ok := r.admissionCheck(ctx, request.Principal, req); !ok {
+			return denied, nil
+		}
 		body, err := r.restrictedQuery(ctx, request.Principal, action)
 		if err != nil {
 			if errors.Is(err, access.ErrDenied) {
@@ -122,6 +116,34 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 			return rpcFailed("query_failed"), nil
 		}
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
+	}
+	guarded := withAccessGuard(ctx, func(checkCtx context.Context) error {
+		return r.finalAuthorize(checkCtx, request.Principal, req)
+	})
+	if _, scoped := sessionScopedAction(action); scoped && !selfCompletionShape(request.Principal, action) {
+		// A start, restart or steer of one session (a coordinator prompting its
+		// member, say) takes only the target's admission inside handle, which
+		// reruns the guard there, immediately before the effect. Check once
+		// first so a denied caller gets the same codes as on the exclusive path.
+		release := r.d.admitShared()
+		denied, ok := r.admissionCheck(ctx, request.Principal, req)
+		release()
+		if !ok {
+			return denied, nil
+		}
+		return r.actionResult(r.d.handle(guarded, action))
+	}
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+	r.d.lockEffectExclusive()
+	defer r.d.effectMu.Unlock()
+	ctx = withEffectAdmission(ctx)
+	guarded = withEffectAdmission(guarded)
+
+	// Authorize again under the dispatch lock, immediately before the exact
+	// canonical action executes. Membership, grants and archive state are live.
+	if denied, ok := r.admissionCheck(ctx, request.Principal, req); !ok {
+		return denied, nil
 	}
 
 	if selfCompletionShape(request.Principal, action) {
@@ -153,13 +175,22 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body, Receipt: hooks}, nil
 	}
 
-	guarded := withAccessGuard(ctx, func(checkCtx context.Context) error {
-		if err := r.d.authority.Valid(checkCtx, request.Principal); err != nil {
-			return err
-		}
-		return r.policy.Authorize(checkCtx, request.Principal, req)
-	})
-	result := r.d.handle(guarded, action)
+	return r.actionResult(r.d.handle(guarded, action))
+}
+
+// admissionCheck is the credential and policy check every dispatch repeats
+// under its admission, with the codes a denied caller sees.
+func (r *sessionRuntime) admissionCheck(ctx context.Context, principal access.Principal, req access.Request) (sessionrpc.DispatchResult, bool) {
+	if err := r.d.authority.Valid(ctx, principal); err != nil {
+		return rpcDenied("credential_invalid"), false
+	}
+	if err := r.policy.Authorize(ctx, principal, req); err != nil {
+		return rpcDenied("access_denied"), false
+	}
+	return sessionrpc.DispatchResult{}, true
+}
+
+func (r *sessionRuntime) actionResult(result core.Result) (sessionrpc.DispatchResult, error) {
 	body, err := r.encodeResult(result)
 	if err != nil {
 		return rpcFailed("encode_failed"), nil
@@ -193,12 +224,12 @@ func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal ac
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 }
 
+// withFinalAdmission only checks: it gates a disclosure, so the shared gate is
+// enough to keep every policy mutation (all exclusive) from crossing it.
 func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.d.lockEffectExclusive()
-	defer r.d.effectMu.Unlock()
-	return r.finalAuthorize(withEffectAdmission(ctx), principal, req)
+	release := r.d.admitShared()
+	defer release()
+	return r.finalAuthorize(ctx, principal, req)
 }
 
 func (r *sessionRuntime) finalAuthorize(ctx context.Context, principal access.Principal, req access.Request) error {
