@@ -36,6 +36,8 @@ records which slow holders delay a report from session `a1`:
 | host `start` of the workgroup root, stalled resolving its members | no | PR 4, workgroup-start slice |
 | host archive of a3, stalled stopping its runtime | no | PR 4, archive slice |
 | one-key archive toggle of a3 (may restore: still exclusive) | yes | restore slice |
+| host `agent-set-repos` of a3, stalled in its git work | no | PR 4, repo slice |
+| host `add-repo`, stalled cloning | no | PR 4, repo slice |
 | archive of a1's own workgroup | yes, and a1 is then refused | correct: a1 is archived |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
@@ -244,8 +246,14 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      scoped action or deferred steer locks the caller (`withGuardSubject`)
      along with the target. The one-key toggle (it may restore) and restore
      stay exclusive: restore drains completions under `dispatchMu`.
-   - Next: restore, move, grants and repo scope, then account manage and
-     completion `finish`.
+   - Repo slice, done: `add-repo` (a clone plus a repo home session, so a
+     creation) and `agent-set-repos` of one agent (that agent's lock) run
+     under the gate shared plus `creationMu`, which also serializes their git
+     work with creations and deletions. `refresh` only wakes the poller and
+     takes no gate at all. `rm-repo` and `coordinator-set-repos` (they change
+     many sessions' authorization) stay exclusive.
+   - Next: restore, move and the remaining policy changes, then account
+     manage and completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is

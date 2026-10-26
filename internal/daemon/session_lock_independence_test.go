@@ -44,6 +44,8 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "archive of a1's workgroup, stalled stopping a runtime", hold: holdArchive(core.ActionSetArchived, "root"), blocked: true, denied: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
 		{name: "host start of a3, stalled launching its runtime", hold: holdRuntimeStart, blocked: false},
+		{name: "host agent-set-repos of a3, stalled in its git work", hold: holdDispatch(core.Action{Action: core.ActionAgentSetRepos, ID: "a3", Fields: map[string]string{"repos": ""}}), blocked: false},
+		{name: "host add-repo, stalled cloning", hold: holdDispatch(core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": "https://example.invalid/r.git"}}), blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
@@ -227,6 +229,21 @@ func holdRuntimeStart(t *testing.T, f *independenceFixture, held func(), release
 	f.d.agentsUnder = func(id string) ([]string, error) { return []string{id}, nil }
 	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"}); !r.OK {
 		t.Errorf("start = %+v", r)
+	}
+}
+
+// holdDispatch runs a store-backed host action that stalls inside its own
+// work (the wsops dispatch the daemon calls).
+func holdDispatch(action core.Action) func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	return func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+		f.d.dispatch = func(context.Context, core.Action, func(string)) (string, error) {
+			held()
+			<-release
+			return "", nil
+		}
+		if r := f.d.handle(context.Background(), action); !r.OK {
+			t.Errorf("%s = %+v", action.Action, r)
+		}
 	}
 }
 

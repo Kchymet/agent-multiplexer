@@ -125,6 +125,7 @@ func BenchmarkStoreOpen(b *testing.B) {
 //   - creation: a host `new-workgroup`, stalled launching its coordinator;
 //   - runtime-start: a host `start` of a3, stalled inside the runtime launch;
 //   - archive: a host archive of a3, stalled stopping its runtime;
+//   - add-repo: a host `add-repo`, stalled cloning;
 //   - workgroup-start: a host `start` of the workgroup root, stalled
 //     resolving its members;
 //   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
@@ -214,6 +215,17 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 				if err := wsops.SetArchived(context.Background(), "a3", false); err != nil {
 					b.Error(err)
 				}
+			}
+		})
+	})
+	b.Run("add-repo", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			d.dispatch = func(context.Context, core.Action, func(string)) (string, error) {
+				slow()
+				return "", nil
+			}
+			return func() {
+				d.handle(context.Background(), core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": "https://example.invalid/r.git"}})
 			}
 		})
 	})

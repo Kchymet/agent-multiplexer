@@ -283,6 +283,32 @@ func sameMembers(a, b []string) bool {
 	return true
 }
 
+// repoScopedAction reports a repo action that runs under the shared gate and
+// creationMu instead of the exclusive gate, with the sessions it changes:
+// tracking a new repo (none: its home session is a creation) or re-scoping
+// one agent's repos (that agent).
+func repoScopedAction(a core.Action) ([]string, bool) {
+	switch a.Action {
+	case core.ActionAddRepo:
+		return nil, true
+	case core.ActionAgentSetRepos:
+		if a.ID == "" || a.ID == console.ID {
+			return nil, false
+		}
+		db, err := store.OpenReadOnly()
+		if err != nil {
+			return nil, false
+		}
+		defer db.Close()
+		session, found, err := db.GetSession(a.ID)
+		if err != nil || !found || session.IsRoot() {
+			return nil, false
+		}
+		return []string{session.ID}, true
+	}
+	return nil, false
+}
+
 // sessionScopedAction names the one session an action touches when it runs
 // with only that session's admission: starting, restarting, recreating or
 // steering one existing session. Anything else, a workgroup start included
