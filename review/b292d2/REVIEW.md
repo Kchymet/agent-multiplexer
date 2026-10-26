@@ -1019,3 +1019,4 @@ merge. #220 has no spawn-path overlap. Full suite, pressure 3/3, fence
 stress and importer probes pass at the head. LOW: a `crypto/rand` failure
 after spawn would retire a live launch (effectively unreachable). #222 merges
 cleanly (clean-merge-only condition).
+- Addendum: CI 40268972045 all four green at 5d0b826; signoff unconditional.
