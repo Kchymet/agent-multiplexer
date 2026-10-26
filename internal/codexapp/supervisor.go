@@ -98,10 +98,16 @@ type Config struct {
 	// owned ChatGPT tokens injected over the protocol (auth.go) instead of any
 	// credential in its own Codex home. Nil keeps the legacy behaviour.
 	ChatGPTAuth TokenProvider
-	// ChatGPTAccount is the account a resumed thread was bound to (from its
-	// persisted Identity); injection refuses a token for any other account.
-	// "" accepts the provider's account, as for a fresh or migrated session.
+	// ChatGPTAccount constrains injection to one account. The manager leaves it
+	// empty for a new process: a launch pins whatever the central login holds,
+	// and a reconnect keeps this process's account (tokenAuth).
 	ChatGPTAccount string
+	// AccountLaunch is the account service's launch sequence for this process;
+	// every token request carries it so a superseded process cannot be re-pinned.
+	AccountLaunch uint64
+	// PriorChatGPTAccounts are earlier accounts of the resumed thread, kept
+	// as evidence when a replacement login continues it.
+	PriorChatGPTAccounts []string
 }
 
 // Supervisor is a running (or resumable) App Server plus the amux-side client.
@@ -198,7 +204,7 @@ func New(cfg Config) *Supervisor {
 		hub:       newEventHub(),
 		approvals: newApprovalTracker(),
 		state:     &streamState{},
-		auth:      newTokenAuth(cfg.ChatGPTAuth, cfg.SessionID, cfg.ChatGPTAccount),
+		auth:      newTokenAuth(cfg.ChatGPTAuth, cfg.SessionID, cfg.ChatGPTAccount, cfg.AccountLaunch),
 	}
 }
 
@@ -267,7 +273,13 @@ type Identity struct {
 	// ChatGPTAccount is the central ChatGPT account (not a credential) the
 	// thread ran under; empty for sessions that never used central auth.
 	ChatGPTAccount string `json:"chatgptAccount,omitempty"`
+	// PriorChatGPTAccounts are accounts the thread ran under before a
+	// replacement central login continued it, oldest first (bounded).
+	PriorChatGPTAccounts []string `json:"priorChatgptAccounts,omitempty"`
 }
+
+// priorAccountLimit bounds Identity.PriorChatGPTAccounts.
+const priorAccountLimit = 8
 
 // identityVersion is the current Identity schema version (see Identity.Version).
 const identityVersion = 1
@@ -648,6 +660,9 @@ func (s *Supervisor) initialize(ctx context.Context) error {
 	if s.auth != nil {
 		if err := s.auth.login(ctx, s.rpc); err != nil {
 			return err
+		}
+		if n := len(s.cfg.PriorChatGPTAccounts); n > 0 && s.cfg.ResumeThreadID != "" && s.cfg.PriorChatGPTAccounts[n-1] != s.auth.boundAccount() {
+			s.emit(notice("info", "codex: this thread continues under the current central account"))
 		}
 	}
 	return nil
@@ -1290,10 +1305,24 @@ func (s *Supervisor) identityLocked() Identity {
 		ControlMode: harnessproto.ControlModeStructured,
 		Resumable:   s.resumable,
 		Version:     identityVersion,
-		// Bound by the first successful token injection, so a restart resumes
-		// the thread only with the same ChatGPT account.
-		ChatGPTAccount: s.auth.boundAccount(),
+		// Bound by this process's first successful token injection. A later
+		// process may continue the thread under the current central account.
+		ChatGPTAccount:       s.auth.boundAccount(),
+		PriorChatGPTAccounts: s.priorAccountsLocked(),
 	}
+}
+
+// priorAccountsLocked is the resumed thread's account history plus, when this
+// process continues it under another account, the account it ran under before.
+func (s *Supervisor) priorAccountsLocked() []string {
+	prior := append([]string(nil), s.cfg.PriorChatGPTAccounts...)
+	if current := s.auth.boundAccount(); current != "" && len(prior) > 0 && prior[len(prior)-1] == current {
+		prior = prior[:len(prior)-1]
+	}
+	if len(prior) > priorAccountLimit {
+		prior = prior[len(prior)-priorAccountLimit:]
+	}
+	return prior
 }
 
 func (s *Supervisor) onRequest(id json.RawMessage, method string, params json.RawMessage) {

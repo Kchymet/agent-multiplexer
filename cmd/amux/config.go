@@ -71,8 +71,8 @@ func cmdConfig(args []string) error {
 			return fmt.Errorf("usage: amux config set <setting> <value>")
 		}
 		if harness, ok := authSetting(args[1]); ok {
-			if args[2] == "" {
-				return fmt.Errorf("%s must be one of %q (use unset to reset)", args[1], amuxcfg.AuthModes(harness))
+			if args[2] != amuxcfg.AuthCentral {
+				return fmt.Errorf("%s is retired: every workload follows the central login; run `amux auth login %s`", args[1], harness)
 			}
 			if err := amuxcfg.SetAuthMode(harness, args[2]); err != nil {
 				return err
@@ -148,8 +148,8 @@ usage: amux config <subcommand>
   get codex.control  print saved control mode (pty when unconfigured)
   set codex.control <app-server|pty>  save the daemon's Codex rollout selection
   unset codex.control  restore the default (pty)
-  get|set|unset claude.auth  central (default) | host | shared | environment
-  get|set|unset codex.auth   central (default) | host | environment
+  get|unset claude.auth      retired: every workload follows central auth
+  get|unset codex.auth       retired: every workload follows central auth
   path               print the config file path
 
 Keybindings live in the "keys" section of the config file (see path). A rebind
@@ -158,11 +158,10 @@ requires a daemon restart; changing it does not reroute running sessions.
 AMUX_CODEX_CONTROL overrides the saved value when nonempty. Run amux doctor to
 compare saved settings, this shell's override, and the running daemon selection.
 
-claude.auth and codex.auth choose how sessions authenticate. central delivers
-one host login (amux auth login) to every session; host shares the host
-harness login as before; shared (Claude) uses an older amux shared login;
-environment provides nothing, leaving API keys, apiKeyHelper, cloud providers
-and gateways to the environment and harness settings. Central Codex auth
+claude.auth and codex.auth are retired. Every workload follows the central
+login (amux auth login). A saved host, shared or environment value was
+migrated: workloads keep that still-usable login only until the first central
+login completes, then move to central at their next launch. Central Codex auth
 always uses App Server control.
 `)
 }

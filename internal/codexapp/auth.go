@@ -95,6 +95,9 @@ type TokenRequest struct {
 	// PreviousAccountID is the account the App Server was using (from the
 	// refresh request, or the account injected earlier); "" on first injection.
 	PreviousAccountID string
+	// Launch is the account service launch sequence of the requesting process
+	// (Config.AccountLaunch); 0 for an unsequenced test supervisor.
+	Launch uint64
 }
 
 // TokenProvider supplies centrally owned ChatGPT tokens. Implementations must
@@ -122,6 +125,7 @@ var (
 type tokenAuth struct {
 	provider  TokenProvider
 	sessionID string
+	launch    uint64
 
 	mu       sync.Mutex
 	account  string
@@ -151,11 +155,11 @@ type tokenRefresh struct {
 	err  error
 }
 
-func newTokenAuth(p TokenProvider, sessionID, account string) *tokenAuth {
+func newTokenAuth(p TokenProvider, sessionID, account string, launch uint64) *tokenAuth {
 	if p == nil {
 		return nil
 	}
-	return &tokenAuth{provider: p, sessionID: sessionID, account: account}
+	return &tokenAuth{provider: p, sessionID: sessionID, account: account, launch: launch}
 }
 
 // boundAccount is the account injection established ("" before, or when the
@@ -170,7 +174,7 @@ func (a *tokenAuth) boundAccount() string {
 }
 
 func (a *tokenAuth) fetch(ctx context.Context, refresh bool, previous string) (ChatGPTToken, error) {
-	tok, err := a.provider.CodexChatGPTToken(ctx, TokenRequest{SessionID: a.sessionID, Refresh: refresh, PreviousAccountID: previous})
+	tok, err := a.provider.CodexChatGPTToken(ctx, TokenRequest{SessionID: a.sessionID, Refresh: refresh, PreviousAccountID: previous, Launch: a.launch})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ChatGPTToken{}, fmt.Errorf("codexapp: central ChatGPT auth: %w", ctxErr)
@@ -188,8 +192,7 @@ func (a *tokenAuth) fetch(ctx context.Context, refresh bool, previous string) (C
 
 // login installs a token on a freshly initialized App Server. It runs on every
 // handshake, so a reconnect re-establishes auth before any thread RPC. The
-// account is bound by the first login (or by the resumed thread's persisted
-// identity) and never changes afterwards.
+// account is bound by this process's first login and never changes for it.
 func (a *tokenAuth) login(ctx context.Context, rpc *rpcConn) error {
 	a.mu.Lock()
 	previous := a.account

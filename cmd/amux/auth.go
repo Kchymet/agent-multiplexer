@@ -52,8 +52,8 @@ usage: amux auth <command>
   status [claude|codex]           show the amux-owned configuration and limits
   accounts [--json]             view Claude/Codex configuration and limits
   logout <claude|codex>          fence delivery and clear the central login
-  default <claude|codex>         use the amux configuration for new workloads
-  rebind <claude|codex> <id>      explicitly bind and stop one workload
+  default <claude|codex>         confirm the central configuration (always the default)
+  rebind <claude|codex> <id>      stop one workload so it relaunches on the current login now
   restart [--force]               restart idle Claude agents with current credentials
 
 login runs `+"`claude setup-token`"+` (browser sign-in) and then asks you to paste
@@ -71,13 +71,17 @@ short-lived ChatGPT tokens from the daemon. A setup-token is valid for one
 year and is not refreshed; run login again to reissue it before then.
 Reissuing does not revoke the previous token. Status never prints a secret.
 
-One amux-owned configuration is available for each harness. Legacy source
-bindings remain internal for compatibility. Configuration uses amux CLI/TUI;
-Harness web account views are read-only.
+One amux-owned configuration is available for each harness. Configuration
+uses amux CLI/TUI; Harness web account views are read-only.
 
-Defaults affect newly created workloads. Existing workloads keep their binding;
-use explicit rebind after replacing an opaque Claude credential. Login pauses
-new credential delivery until completion or cancellation.
+Every workload, including existing and archived ones, follows its harness's
+central configuration. Each new harness process uses the newest successfully
+configured login, including a different account, subscription or API key;
+running processes keep what they received and are never stopped by login.
+Older host, shared and environment selections were migrated automatically:
+a workload keeps its still-usable older login only until the first central
+login completes. Login pauses new credential delivery until completion or
+cancellation.
 `)
 }
 

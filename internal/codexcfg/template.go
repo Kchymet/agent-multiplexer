@@ -59,14 +59,14 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 // APIKeyEnv are the inherited Codex account variables (see launchenv).
 var APIKeyEnv = []string{"OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"}
 
-// AuthMode is the effective codex.auth selection. An invalid setting yields
-// central, which shares no host login; daemon startup reports the error.
+// AuthMode is the source a launch without a workload uses: central, or the
+// still-usable legacy login of an installation whose central profile has never
+// been configured. Unreadable account metadata shares no host login.
 func AuthMode() string {
-	mode, err := amuxcfg.AuthMode("codex")
-	if err != nil {
-		return amuxcfg.AuthCentral
+	if mode := accounts.GlobalMode("codex"); mode != "blocked" {
+		return mode
 	}
-	return mode
+	return amuxcfg.AuthCentral
 }
 
 // AgentHome is where an agent's private Codex home lives: under its sandbox dir.

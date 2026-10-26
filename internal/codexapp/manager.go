@@ -229,7 +229,16 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 	}
 	m.mu.Unlock()
 	cfg.ResumeThreadID = resumeThreadFor(sessionID, legacyThreadID)
-	cfg.ChatGPTAccount = boundAccountFor(sessionID, cfg.ResumeThreadID)
+	// This is an actual process launch: it takes the newest central login, so
+	// the resumed thread's previous account is history, not a constraint.
+	cfg.PriorChatGPTAccounts = priorAccountsFor(sessionID, cfg.ResumeThreadID)
+	if cfg.ChatGPTAuth != nil {
+		launch, err := accounts.BeginLaunch(sessionID, "codex")
+		if err != nil {
+			return nil, err
+		}
+		cfg.AccountLaunch = launch
+	}
 	if len(launch) > 0 {
 		cfg.Sandbox = launch[0].Sandbox
 		cfg.RestartWork = launch[0].RestartWork
@@ -331,18 +340,22 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 	}
 }
 
-// boundAccountFor returns the ChatGPT account a resumed thread ran under, so
-// central auth cannot silently move an existing conversation to another
-// account. A fresh thread is bound by its first injection instead.
-func boundAccountFor(sessionID, resumeThreadID string) string {
+// priorAccountsFor returns the ChatGPT accounts a resumed thread ran under,
+// oldest first. A new process may continue the thread under the current
+// central account; these remain in its identity as evidence.
+func priorAccountsFor(sessionID, resumeThreadID string) []string {
 	if resumeThreadID == "" {
-		return ""
+		return nil
 	}
 	id, ok := LoadIdentity(sessionID)
 	if !ok || id.ThreadID != resumeThreadID {
-		return ""
+		return nil
 	}
-	return id.ChatGPTAccount
+	prior := append([]string(nil), id.PriorChatGPTAccounts...)
+	if id.ChatGPTAccount != "" {
+		prior = append(prior, id.ChatGPTAccount)
+	}
+	return prior
 }
 
 // Close stops and forgets the supervisor for a session (its App Server exits). It

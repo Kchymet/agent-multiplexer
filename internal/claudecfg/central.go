@@ -17,15 +17,14 @@ import (
 	"amux/internal/cfghome"
 )
 
-// AuthMode is the effective claude.auth selection. An unreadable or invalid
-// setting yields central, which shares no host store; LaunchAuthError reports
-// the configuration error so the launch fails instead of guessing.
+// AuthMode is the source a launch without a workload uses: central, or the
+// still-usable legacy login of an installation whose central profile has never
+// been configured. Unreadable account metadata shares no host store.
 func AuthMode() string {
-	mode, err := amuxcfg.AuthMode("claude")
-	if err != nil {
-		return amuxcfg.AuthCentral
+	if mode := accounts.GlobalMode("claude"); mode != "blocked" {
+		return mode
 	}
-	return mode
+	return amuxcfg.AuthCentral
 }
 
 // HostStoreShared reports whether sessions may reach a host Claude credential
@@ -164,18 +163,15 @@ func LaunchAuthError(sp cfghome.Spec, projectDir string, environ []string) error
 			return fmt.Errorf("amux Claude central credential unusable: %w; run `amux auth login` on the host", err)
 		}
 		if !st.Configured {
-			return fmt.Errorf("%w: run `amux auth login` on the host to create one central Claude token for all sessions; "+
-				"to keep a previous method instead run one of `amux config set claude.auth host` (host Claude login), "+
-				"`amux config set claude.auth shared` (older amux login) or "+
-				"`amux config set claude.auth environment` (API key, apiKeyHelper, cloud provider or gateway)", ErrCentralLoginRequired)
+			return fmt.Errorf("%w: run `amux auth login claude` on the host to create one central Claude login for all sessions", ErrCentralLoginRequired)
 		}
 		if conflicts := CentralConflicts(sp, projectDir, environ); len(conflicts) > 0 {
-			return fmt.Errorf("claude.auth is central, but %s would override or redirect the central token; "+
-				"remove it, or run `amux config set claude.auth environment` to keep that method", strings.Join(conflicts, ", "))
+			return fmt.Errorf("%s would override or redirect the central Claude login; remove it, "+
+				"or use `amux auth login claude --api-key` for an API key", strings.Join(conflicts, ", "))
 		}
 	case amuxcfg.AuthShared:
 		if !SharedAuthEnabled() {
-			return fmt.Errorf("claude.auth is shared, but no older amux shared Claude login exists; run `amux config unset claude.auth` and `amux auth login`")
+			return fmt.Errorf("the older amux shared Claude login is no longer available; run `amux auth login claude`")
 		}
 	}
 	return nil
