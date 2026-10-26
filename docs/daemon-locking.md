@@ -34,7 +34,9 @@ records which slow holders delay a report from session `a1`:
 | a2's report, stalled inside its write | no | PR 2 |
 | host `start` of a3, stalled in its effect | no | PR 4 |
 | host `start` of the workgroup root, stalled resolving its members | no | PR 4, workgroup-start slice |
-| host archive of a3 (a policy mutation: still exclusive), stalled stopping its runtime | yes | archive slice |
+| host archive of a3, stalled stopping its runtime | no | PR 4, archive slice |
+| one-key archive toggle of a3 (may restore: still exclusive) | yes | restore slice |
+| archive of a1's own workgroup | yes, and a1 is then refused | correct: a1 is archived |
 | an exclusive action queued behind a slow `start` of a3 | no | PR 4 (try-and-retry writers) |
 | a2's GitHub credential read, stalled in its helper | no | PR 5 |
 | host `new-workgroup`, stalled launching its coordinator | no | PR 4, creation slice |
@@ -230,8 +232,20 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
      those (`startAgents`). Membership is not frozen by the shared gate: a
      creation adds members under `creationMu` alone. A member added after the
      resolution is started by its own creation, under its own lock.
-   - Next: archive and restore (workgroup locks), rename, then account manage
-     and completion `finish`.
+   - Archive slice, done: explicit archive (`set-archived true`), `rename`,
+     `delete` and `kill` of an agent or workgroup (`archiveScopedAction`) take
+     the gate shared plus the target's session lock and, for a root, every
+     member's. Archive and delete then take `creationMu` and re-resolve the
+     members; if a creation added one in between, they start again. So that
+     an archive or delete of a session principal cannot cross that principal's
+     guard, every shared holder whose check depends on a session principal
+     also locks it: restricted queries lock the caller, runtime-event
+     admission locks the caller and the subject, and a session-originated
+     scoped action or deferred steer locks the caller (`withGuardSubject`)
+     along with the target. The one-key toggle (it may restore) and restore
+     stay exclusive: restore drains completions under `dispatchMu`.
+   - Next: restore, move, grants and repo scope, then account manage and
+     completion `finish`.
 5. Session-originated dispatch, credential paths, runtime-event admission (#3,
    #4, #6, #7). First slice, done: restricted queries and runtime-event final
    admission take the gate shared (they only read, and every policy writer is

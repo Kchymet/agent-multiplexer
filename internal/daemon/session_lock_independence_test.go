@@ -32,11 +32,16 @@ func TestSessionReportIndependence(t *testing.T) {
 		// returns when release is closed.
 		hold    func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{})
 		blocked bool
+		// denied is set when the holder archives a1 itself, so the report that
+		// waited for it is then refused.
+		denied bool
 	}{
 		{name: "peer session report", hold: holdPeerReport, blocked: false},
 		{name: "host action on another session", hold: holdHostAction, blocked: false},
 		{name: "workgroup start, stalled resolving its members", hold: holdWorkgroupAction, blocked: false},
-		{name: "archive of a3 (exclusive), stalled stopping its runtime", hold: holdArchive, blocked: true},
+		{name: "archive of a3, stalled stopping its runtime", hold: holdArchive(core.ActionSetArchived, "a3"), blocked: false},
+		{name: "one-key archive toggle of a3 (exclusive), stalled stopping its runtime", hold: holdArchive(core.ActionArchive, "a3"), blocked: true},
+		{name: "archive of a1's workgroup, stalled stopping a runtime", hold: holdArchive(core.ActionSetArchived, "root"), blocked: true, denied: true},
 		{name: "exclusive action queued behind a slow session action", hold: holdQueuedExclusive, blocked: false},
 		{name: "host start of a3, stalled launching its runtime", hold: holdRuntimeStart, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
@@ -84,8 +89,12 @@ func TestSessionReportIndependence(t *testing.T) {
 				result = <-reported
 			}
 			<-holderDone
-			if result.Status != sessionrpc.StatusOK {
-				t.Fatalf("report = %+v", result)
+			want := sessionrpc.StatusOK
+			if tc.denied {
+				want = sessionrpc.StatusDenied
+			}
+			if result.Status != want {
+				t.Fatalf("report = %+v, want %s", result, want)
 			}
 			if blocked != tc.blocked {
 				t.Fatalf("report blocked by %s = %v, want %v (update docs/daemon-locking.md with this row)", tc.name, blocked, tc.blocked)
@@ -251,17 +260,27 @@ func holdCreation(t *testing.T, f *independenceFixture, held func(), release <-c
 	}
 }
 
-// holdArchive is a host archive of a3, a policy mutation that still takes
-// the exclusive gate, stalling while it stops a3's runtime.
-func holdArchive(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
-	eng := f.d.engine.(*fakeEngine)
-	eng.running("a3")
-	eng.killObserved = func(engine.Instance) {
-		held()
-		<-release
-	}
-	if r := f.d.handle(context.Background(), core.Action{Action: core.ActionSetArchived, ID: "a3", Fields: map[string]string{"archived": "true"}}); !r.OK {
-		t.Errorf("archive = %+v", r)
+// holdArchive archives id with verb, stalling while it stops a3's runtime.
+// An explicit archive runs under the archived sessions' locks; the one-key
+// toggle, which may restore, still takes the exclusive gate.
+func holdArchive(verb, id string) func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	return func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+		eng := f.d.engine.(*fakeEngine)
+		eng.running("a3")
+		var once sync.Once
+		eng.killObserved = func(engine.Instance) {
+			once.Do(func() {
+				held()
+				<-release
+			})
+		}
+		action := core.Action{Action: verb, ID: id}
+		if verb == core.ActionSetArchived {
+			action.Fields = map[string]string{"archived": "true"}
+		}
+		if r := f.d.handle(context.Background(), action); !r.OK {
+			t.Errorf("archive = %+v", r)
+		}
 	}
 }
 

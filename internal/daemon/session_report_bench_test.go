@@ -19,6 +19,7 @@ import (
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // reportPopulation is a long-lived install's shape: one live reporting agent
@@ -123,6 +124,7 @@ func BenchmarkStoreOpen(b *testing.B) {
 //   - peer-credential: a3's GitHub credential read, stalled in its helper;
 //   - creation: a host `new-workgroup`, stalled launching its coordinator;
 //   - runtime-start: a host `start` of a3, stalled inside the runtime launch;
+//   - archive: a host archive of a3, stalled stopping its runtime;
 //   - workgroup-start: a host `start` of the workgroup root, stalled
 //     resolving its members;
 //   - reconcile: a reconcile pass, stalled while it opens a3's mailbox.
@@ -199,6 +201,19 @@ func BenchmarkConcurrentReportsDuringSlowEffect(b *testing.B) {
 			return func() {
 				eng.Kill(engine.Key{AgentID: "a3", Tab: panespec.TabAgent})
 				d.handle(context.Background(), core.Action{Action: core.ActionStart, ID: "a3"})
+			}
+		})
+	})
+	b.Run("archive", func(b *testing.B) {
+		benchmarkReportsDuringSlowHolder(b, func(d *Daemon, runtime *sessionRuntime, slow func()) func() {
+			eng := d.engine.(*fakeEngine)
+			eng.killObserved = func(engine.Instance) { slow() }
+			return func() {
+				eng.running("a3")
+				d.handle(context.Background(), core.Action{Action: core.ActionSetArchived, ID: "a3", Fields: map[string]string{"archived": "true"}})
+				if err := wsops.SetArchived(context.Background(), "a3", false); err != nil {
+					b.Error(err)
+				}
 			}
 		})
 	})

@@ -100,10 +100,11 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		return r.dispatchSessionReport(ctx, request.Principal, req), nil
 	}
 	if req.Route == access.RouteQuery {
-		// Restricted queries only read. The shared gate is enough: every policy
-		// mutation takes it exclusively, so none lands between this
-		// authorization and the disclosure.
-		release := r.d.admitShared()
+		// Restricted queries only read. The shared gate keeps exclusive policy
+		// mutations out, and the caller's session lock keeps out an archive or
+		// delete of the caller, so none lands between this authorization and
+		// the disclosure.
+		release := r.d.admitSessions(request.Principal.SubjectID)
 		defer release()
 		if denied, ok := r.admissionCheck(ctx, request.Principal, req); !ok {
 			return denied, nil
@@ -117,9 +118,9 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 		}
 		return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 	}
-	guarded := withAccessGuard(ctx, func(checkCtx context.Context) error {
+	guarded := withGuardSubject(withAccessGuard(ctx, func(checkCtx context.Context) error {
 		return r.finalAuthorize(checkCtx, request.Principal, req)
-	})
+	}), request.Principal.SubjectID)
 	if _, scoped := sessionScopedAction(action); scoped && !selfCompletionShape(request.Principal, action) {
 		// A start, restart or steer of one session (a coordinator prompting its
 		// member, say) takes only the target's admission inside handle, which
@@ -224,10 +225,11 @@ func (r *sessionRuntime) dispatchRuntimeEvents(ctx context.Context, principal ac
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 }
 
-// withFinalAdmission only checks: it gates a disclosure, so the shared gate is
-// enough to keep every policy mutation (all exclusive) from crossing it.
+// withFinalAdmission only checks: it gates a disclosure. The shared gate keeps
+// exclusive policy mutations out, and the caller's and subject's session locks
+// keep out an archive or delete of either.
 func (r *sessionRuntime) withFinalAdmission(ctx context.Context, principal access.Principal, req access.Request) error {
-	release := r.d.admitShared()
+	release := r.d.admitSessions(principal.SubjectID, req.ID)
 	defer release()
 	return r.finalAuthorize(ctx, principal, req)
 }
