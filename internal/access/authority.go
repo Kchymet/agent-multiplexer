@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -149,6 +150,13 @@ type FileAuthority struct {
 	lock     *os.File
 	rootDir  *os.File
 
+	// signer is the issuer's signing snapshot, published by open and cleared by
+	// Close. The issuer key never changes while the authority is open, and
+	// signing reads no registry state, so service and response signing never
+	// wait on mu: a slow registry writer or read lease must not stall every
+	// mailbox's responses.
+	signer atomic.Pointer[issuerSigner]
+
 	mu       sync.RWMutex
 	registry registryFile
 	watchers map[string]map[chan struct{}]struct{}
@@ -166,6 +174,12 @@ type issuerCredential struct {
 	KeyID      string `json:"keyId"`
 	PublicKey  string `json:"publicKey"`
 	PrivateKey string `json:"privateKey"`
+}
+
+// issuerSigner is immutable once published.
+type issuerSigner struct {
+	keyID string
+	key   ed25519.PrivateKey
 }
 
 type daemonTLSCredential struct {
@@ -268,6 +282,12 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 		return nil, fmt.Errorf("create daemon boot nonce: %w", err)
 	}
 	a.bootID = hex.EncodeToString(boot)
+	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
+	if err != nil || len(priv) != ed25519.PrivateKeySize {
+		_ = a.closeReplay()
+		return nil, fmt.Errorf("invalid access issuer key")
+	}
+	a.signer.Store(&issuerSigner{keyID: a.issuer.KeyID, key: ed25519.PrivateKey(priv)})
 	ok = true
 	return a, nil
 }
@@ -281,6 +301,7 @@ func (a *FileAuthority) Close() error {
 	if a.lock == nil {
 		return nil
 	}
+	a.signer.Store(nil)
 	for keyID := range a.watchers {
 		a.invalidateLocked(keyID)
 	}
@@ -308,27 +329,24 @@ func (a *FileAuthority) BootID() string { return a.bootID }
 // IssuerKeyID identifies the daemon authority signer without exposing its
 // private key. An empty value means the authority has been closed.
 func (a *FileAuthority) IssuerKeyID() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+	signer := a.signer.Load()
+	if signer == nil {
 		return ""
 	}
-	return a.issuer.KeyID
+	return signer.keyID
 }
 
 // SignIssuer signs exact, caller-domain-separated service/response bytes for
 // filesystem RPC. The issuer private key never leaves the authority.
+//
+// A signature that races Close is one Close could equally have followed: the
+// issuer key is unchanged until the next open, so nothing it signs is stale.
 func (a *FileAuthority) SignIssuer(message []byte) ([]byte, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+	signer := a.signer.Load()
+	if signer == nil {
 		return nil, ErrAuthorityClosed
 	}
-	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
-	if err != nil || len(priv) != ed25519.PrivateKeySize {
-		return nil, ErrInvalidCredential
-	}
-	return ed25519.Sign(ed25519.PrivateKey(priv), message), nil
+	return ed25519.Sign(signer.key, message), nil
 }
 
 func subjectKey(kind SubjectKind, id string) string {
@@ -941,7 +959,7 @@ func (a *FileAuthority) revokeLocked(kind SubjectKind, subjectID, expectedKeyID 
 // Verify authenticates and durably consumes a signed mailbox request. A
 // duplicate is always ErrReplay; successful results are never replayed from this
 // API, and callers must not blindly retry non-idempotent actions after a crash.
-func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal, error) {
+func (a *FileAuthority) Verify(ctx context.Context, req SignedRequest) (Principal, error) {
 	now := a.now()
 	if req.Protocol != ProtocolVersion || subtle.ConstantTimeCompare([]byte(req.BootID), []byte(a.bootID)) != 1 ||
 		!validHexID(req.RequestID, 16) || len(req.Body) == 0 || len(req.Body) > MaxBodyBytes {
@@ -956,7 +974,7 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 	// Reading the registry needs only the read lock, which still excludes
 	// every rotation, revocation and close until the acceptance below is
 	// durable. Concurrent requests meet only on the replay ledger.
-	a.mu.RLock()
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return Principal{}, ErrAuthorityClosed
@@ -991,8 +1009,8 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 
 // Valid rechecks generation and revocation for long-lived connections before
 // each action or pushed frame.
-func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
-	a.mu.RLock()
+func (a *FileAuthority) Valid(ctx context.Context, p Principal) error {
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return ErrAuthorityClosed
@@ -1012,7 +1030,7 @@ func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
 // fn must not call the authority, perform network IO, or wait for a runtime.
 // Revocation/rotation cannot commit between validation and this effect.
 func (a *FileAuthority) WithValid(ctx context.Context, p Principal, fn func() error) error {
-	a.mu.RLock()
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if err := ctx.Err(); err != nil {
 		return err
