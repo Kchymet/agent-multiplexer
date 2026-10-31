@@ -86,6 +86,11 @@ type sessionRuntime struct {
 	// inspect, when set by a test, runs a function on the run goroutine, which
 	// owns the serving maps. Nil in production: a nil channel never fires.
 	inspect chan func()
+
+	// slowRequests writes slow mailbox request lines; loop watches the serving
+	// loop for stalls (session_stall_log.go).
+	slowRequests *slowRequestLog
+	loop         *loopWatchdog
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -99,6 +104,8 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		applyResult:    wsops.ApplyResult,
 		guardOpenPRs:   wsops.GuardOpenPRs,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
+		slowRequests:   newSlowRequestLog(),
+		loop:           newLoopWatchdog(),
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
@@ -126,6 +133,7 @@ func (r *sessionRuntime) run(ctx context.Context) {
 	// Join every admitted pass before the daemon tears down: close takes
 	// dispatch ownership, which an in-flight dispatch may still be waiting for.
 	defer r.passes.Wait()
+	go r.loop.watch(ctx, loopStallAfter/4)
 	all := true
 	for {
 		if err := r.serveReconciled(ctx, all); err != nil && ctx.Err() == nil {
@@ -191,6 +199,8 @@ func (r *sessionRuntime) notifier(id string) func() {
 // serveOne serves id at once if its mailbox is open and every mailbox is
 // initialized.
 func (r *sessionRuntime) serveOne(ctx context.Context, id string) {
+	r.loop.enter("serve")
+	defer r.loop.leave()
 	r.markDue(id)
 	if err := r.serveDue(ctx, func(string) bool { return false }); err != nil && ctx.Err() == nil {
 		log.Printf("session RPC: %v", err)
@@ -202,10 +212,13 @@ func (r *sessionRuntime) serve(ctx context.Context) error { return r.serveReconc
 // serveReconciled reconciles, then serves every mailbox when all is set and
 // otherwise only those that are not watched or were just initialized.
 func (r *sessionRuntime) serveReconciled(ctx context.Context, all bool) error {
+	defer r.loop.leave()
+	r.loop.enter("reconcile")
 	start := time.Now()
 	if err := r.reconcileTick(ctx); err != nil {
 		return err
 	}
+	r.loop.enter("serve")
 	if elapsed := time.Since(start); elapsed >= slowSessionReconcile {
 		// reconcile runs on the serving goroutine: no new pass starts meanwhile.
 		log.Printf("session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
@@ -375,10 +388,13 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	if err != nil {
 		return err
 	}
+	if r.slowRequests == nil {
+		r.slowRequests = newSlowRequestLog()
+	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
 		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow,
-			SlowRequest: logSlowSessionRequest})
+			SlowRequest: r.slowRequests.report})
 	if err != nil {
 		return err
 	}
@@ -440,17 +456,6 @@ func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrp
 		}
 	}()
 	return r.dispatch(ctx, request)
-}
-
-// logSlowSessionRequest names the phase that held a slow mailbox request. A
-// request's verb and age come from it before authentication; the rest is the
-// daemon's own measurement. A large authority lock wait means the stall was
-// another holder of that lock, not this request's work.
-func logSlowSessionRequest(t sessionrpc.RequestTiming) {
-	r := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
-	log.Printf("session RPC %s: slow request %s %s %s took %v (age %v; reserve %v, verify %v, authorize %v, dispatch %v, sign %v, publish %v; authority lock wait %v; status %s %s)",
-		t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Total), r(t.Age), r(t.Reserve), r(t.Verify), r(t.Authorize),
-		r(t.Dispatch), r(t.Sign), r(t.Publish), r(t.LockWait), t.Status, t.Code)
 }
 
 // slowSessionDispatch and slowSessionReconcile are the durations worth a

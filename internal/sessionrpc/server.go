@@ -40,7 +40,8 @@ type ServerOptions struct {
 	Slow func(Call) bool
 	// SlowRequest, if set, receives the timing of every request that took at
 	// least SlowRequestThreshold from the start of its processing to its
-	// response, so a stall can be attributed to the phase that held it.
+	// response, or that waited that long before its processing began (its Age),
+	// so a stall can be attributed to the phase that held it, or to the queue.
 	SlowRequest func(RequestTiming)
 }
 
@@ -90,7 +91,7 @@ func (s *Server) startTimer(envelope access.SignedRequest, routed Call) *request
 
 func (s *Server) reportTimer(t *requestTimer) {
 	t.Total = time.Since(t.start)
-	if t.Total < SlowRequestThreshold {
+	if t.Total < SlowRequestThreshold && t.Age < SlowRequestThreshold {
 		return
 	}
 	t.LockWait = t.lockWait.Total()

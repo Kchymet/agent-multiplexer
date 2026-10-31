@@ -100,3 +100,24 @@ func TestSlowRequestReportsAuthorityLockWait(t *testing.T) {
 	}
 	t.Logf("held %v: verify %v, authority lock wait %v", timing.Total, timing.Verify, timing.LockWait)
 }
+
+// A request processed quickly after waiting in the queue is still reported:
+// that wait is the stall a caller saw.
+func TestQueuedRequestReportsItsWait(t *testing.T) {
+	var log timingLog
+	f := newFixture(t, Callbacks{}, ServerOptions{SlowRequest: log.record})
+	envelope, encoded := earlierSignedCall(t, f, Query{Verb: "report-context"}.call(), time.Now().Add(-2*SlowRequestThreshold))
+	publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+	fresh, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Query{Verb: "report-context"}.call())
+	publishEnvelope(t, f.grant.RequestsHostDir, fresh, encoded)
+	if _, err := f.server.ServeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := log.all()
+	if len(got) != 1 || got[0].RequestID != envelope.RequestID {
+		t.Fatalf("reports = %+v, want only the queued request", got)
+	}
+	if got[0].Age < SlowRequestThreshold || got[0].Total >= SlowRequestThreshold || got[0].Status != StatusOK {
+		t.Fatalf("queued request timing = %+v", got[0])
+	}
+}
