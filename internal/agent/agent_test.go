@@ -100,6 +100,38 @@ func TestArgvClaudeOpus55(t *testing.T) {
 	}
 }
 
+// A short alias stored by an older amux (or passed as -f model=opus) launches as
+// the detailed model ID, keeping any context-window suffix; unknown models pass
+// through unchanged.
+func TestArgvClaudeAliasesResolveToDetailedIDs(t *testing.T) {
+	t.Setenv("AMUX_CLAUDE_BIN", "/test/claude")
+	t.Setenv("AMUX_PERMISSION_MODE", "none")
+	for in, want := range map[string]string{
+		"opus":             "claude-opus-5-5",
+		" Sonnet ":         "claude-sonnet-5-5",
+		"haiku":            "claude-haiku-5-5",
+		"fable":            "claude-fable-5-1",
+		"opus[1m]":         "claude-opus-5-5[1m]",
+		"claude-fable-5-1": "claude-fable-5-1",
+		"claude-opus-4-8":  "claude-opus-4-8",
+		"my-custom-model":  "my-custom-model",
+	} {
+		argv, err := Argv("claude", in)
+		if err != nil {
+			t.Fatalf("Argv(%q): %v", in, err)
+		}
+		if got := argv[len(argv)-1]; got != want {
+			t.Errorf("Argv(%q) model = %q, want %q", in, got, want)
+		}
+	}
+	if got := CanonicalModel("codex", " gpt-5.5 "); got != "gpt-5.5" {
+		t.Errorf("CanonicalModel(codex) = %q, want gpt-5.5 unchanged", got)
+	}
+	if got := CanonicalModel("codex", "opus"); got != "opus" {
+		t.Errorf("CanonicalModel(codex, opus) = %q, want no Claude alias mapping", got)
+	}
+}
+
 // An explicit path is passed through untouched.
 func TestArgvAbsolutePassThrough(t *testing.T) {
 	t.Setenv("AMUX_CLAUDE_BIN", "/usr/bin/env")

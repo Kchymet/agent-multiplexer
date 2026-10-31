@@ -34,6 +34,7 @@ import (
 	"amux/internal/engine/local"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
+	"amux/internal/prwatch"
 	"amux/internal/source"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -208,6 +209,9 @@ type Daemon struct {
 	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
+	// prs watches workgroup members' GitHub PRs and wakes their coordinators
+	// (internal/prwatch, prwatch.go). Built in New, started by Run.
+	prs *prwatch.Watcher
 	// status publishes startup/shutdown progress for lifecycle clients. Run
 	// creates it only once it holds the singleton lock, which owns the file.
 	status *daemonstatus.Reporter
@@ -241,6 +245,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	}
 	d.launchSpec = d.launchSpecFor
 	d.listen = listenOwnedUnix
+	d.prs = d.newPRWatcher()
 	d.permissionBaseline = d.loadPermissionBaseline
 	return d
 }
@@ -279,6 +284,8 @@ func Default(self string) *Daemon {
 		}
 		return ""
 	})
+	ws.SetPRs(d.sessionPRs)
+	ws.SetGoalStatus(d.coordinatorGoalStatus)
 	ws.SetModelObserved(func(id, kind, model string) {
 		if kind == "codex" && d.codex != nil {
 			d.codex.SetModel(id, model)
@@ -323,6 +330,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	ctx = runCtx
+	// The session mailboxes outlive runCtx: teardown keeps serving their
+	// reports through the engine's wait-for-idle, then cancels this itself.
+	rpcCtx, cancelRPC := context.WithCancel(context.WithoutCancel(runCtx))
+	var rpcWG sync.WaitGroup
 	var runWG sync.WaitGroup
 	startRunWorker := func(work func()) {
 		runWG.Add(1)
@@ -348,6 +359,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer func() {
 		d.status.Begin(daemonstatus.OpStopping, daemonstatus.PhaseDraining)
 		d.stopDeferredAdmission()
+		if sessionRPCOwned {
+			d.sessionRPC.reportsOnly.Store(true)
+		}
 		cancelRun()
 		// Retire structured-control transports before joining anything that may be
 		// blocked in an admitted JSON-RPC write. This is intentionally earlier than
@@ -365,6 +379,21 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// cleanup. Join them before sessionRuntime.close takes dispatch ownership
 		// and waits for completion owners, avoiding an inverted shutdown wait.
 		d.deferredWG.Wait()
+		// A Claude agent's turn ending reaches the daemon only as a hook report
+		// through its session mailbox, so wait for mid-turn agents while the
+		// mailboxes still serve reports (and nothing else). Closing them first
+		// would leave every busy agent busy until the grace ran out. Reports stop
+		// before the restart journal records which agents were mid-turn and
+		// before termination, whose exit hooks must not rewrite that state.
+		if engineOwned {
+			if w, ok := d.engine.(idleWaiter); ok {
+				d.status.Phase(daemonstatus.PhaseAgents)
+				d.observeEngineShutdown()
+				w.WaitIdle()
+			}
+		}
+		cancelRPC()
+		rpcWG.Wait()
 		if sessionRPCOwned {
 			d.sessionRPC.close()
 		}
@@ -439,9 +468,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("start session RPC: %w", err)
 	}
-	startRunWorker(func() {
-		d.sessionRPC.run(ctx)
-	})
+	rpcWG.Add(1)
+	go func() {
+		defer rpcWG.Done()
+		d.sessionRPC.run(rpcCtx)
+	}()
 	sock := core.SocketPath()
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		return err
@@ -486,6 +517,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	})
 
 	startRunWorker(func() { d.pollLoop(ctx) })
+	// Member PRs are polled on their own (much slower) clock.
+	startRunWorker(func() { d.prWatchLoop(ctx) })
 
 	// Close the listener when ctx ends so Accept returns.
 	startRunWorker(func() { <-ctx.Done(); _ = ln.Close() })
@@ -506,6 +539,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 // through a graceful Shutdown (the local engine implements it).
 type shutdownObservable interface {
 	SetShutdownObserver(func([]local.ShutdownProgress))
+}
+
+// idleWaiter is the engine hook that runs a graceful Shutdown's wait-for-idle
+// on its own, so the daemon can keep serving agents' activity reports during
+// it (the local engine implements it).
+type idleWaiter interface {
+	WaitIdle()
 }
 
 // observeEngineShutdown routes the engine's per-instance shutdown progress to

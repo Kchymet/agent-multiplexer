@@ -36,6 +36,12 @@ type JournalRecord struct {
 	Level string `json:"level"`
 	Text  string `json:"text"`
 	At    int64  `json:"at,omitempty"` // unix millis
+	// Type, when set, makes the line a typed amux event (e.g. pr_state) rather
+	// than a notice: the reader emits a runtime event of this type carrying
+	// Payload. Text stays the human summary, so a reader that predates Type
+	// still shows the line as a notice.
+	Type    string          `json:"type,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // JournalDir holds the per-session amux journals.
@@ -55,14 +61,23 @@ func JournalPath(sessionID string) string {
 // O_APPEND of one short line, so concurrent writers interleave whole lines
 // rather than tearing one. A blank id or text is a no-op.
 func AppendJournal(sessionID, level, text string) error {
+	return AppendJournalRecord(sessionID, JournalRecord{Level: level, Text: text})
+}
+
+// AppendJournalRecord appends one record (a notice, or a typed event when
+// r.Type is set) with AppendJournal's semantics.
+func AppendJournalRecord(sessionID string, r JournalRecord) error {
 	path := JournalPath(sessionID)
-	if path == "" || text == "" {
+	if path == "" || r.Text == "" {
 		return nil
 	}
-	if level == "" {
-		level = JournalInfo
+	if r.Level == "" {
+		r.Level = JournalInfo
 	}
-	b, err := json.Marshal(JournalRecord{Level: level, Text: text, At: time.Now().UnixMilli()})
+	if r.At == 0 {
+		r.At = time.Now().UnixMilli()
+	}
+	b, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}

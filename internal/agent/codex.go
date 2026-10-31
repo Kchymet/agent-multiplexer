@@ -21,10 +21,20 @@ type codexHarness struct{}
 
 func (codexHarness) Kind() string { return "codex" }
 
-// codexModels is the built-in Codex model catalog, gpt-5.5 (the recommended
-// default) first. It is the fallback for a machine whose Codex has never cached
-// the live catalog (never run, or too old to fetch one).
-var codexModels = []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
+// codexModels is the built-in Codex model catalog of full model IDs, Codex's
+// current default (gpt-6-astra) first. It mirrors the picker-visible catalog
+// the harness web UI offers (frontend/src/modelCatalog.ts there) and is the
+// fallback for a machine whose Codex has never cached the live catalog (never
+// run, or too old to fetch one).
+var codexModels = []string{
+	"gpt-6-astra",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+	"gpt-5.5",
+	"gpt-5.4-mini",
+	"gpt-5.3-codex-spark",
+}
 
 // Models is the live catalog Codex cached for the signed-in account
 // (codexcfg.Home.CachedModels — the same list its own /model picker offers, in

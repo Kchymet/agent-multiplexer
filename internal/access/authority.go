@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -149,16 +150,36 @@ type FileAuthority struct {
 	lock     *os.File
 	rootDir  *os.File
 
+	// signer is the issuer's signing snapshot, published by open and cleared by
+	// Close. The issuer key never changes while the authority is open, and
+	// signing reads no registry state, so service and response signing never
+	// wait on mu: a slow registry writer or read lease must not stall every
+	// mailbox's responses.
+	signer atomic.Pointer[issuerSigner]
+
 	mu       sync.RWMutex
 	registry registryFile
-	replay   replayFile
 	watchers map[string]map[chan struct{}]struct{}
+
+	// replay is the in-memory ledger every replay decision is taken on, under
+	// replayMu alone; journal makes each acceptance durable (replay_journal.go).
+	// Verify holds mu for reading around both, so no registry change commits
+	// between a request's credential check and its acceptance.
+	replayMu sync.Mutex
+	replay   replayFile
+	journal  *replayJournal
 }
 
 type issuerCredential struct {
 	KeyID      string `json:"keyId"`
 	PublicKey  string `json:"publicKey"`
 	PrivateKey string `json:"privateKey"`
+}
+
+// issuerSigner is immutable once published.
+type issuerSigner struct {
+	keyID string
+	key   ed25519.PrivateKey
 }
 
 type daemonTLSCredential struct {
@@ -252,11 +273,21 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 	if a.replay.Entries == nil {
 		a.replay.Entries = map[string]replayRecord{}
 	}
+	if err := a.recoverReplay(); err != nil {
+		return nil, err
+	}
 	boot := make([]byte, 32)
 	if _, err := io.ReadFull(random, boot); err != nil {
+		_ = a.closeReplay()
 		return nil, fmt.Errorf("create daemon boot nonce: %w", err)
 	}
 	a.bootID = hex.EncodeToString(boot)
+	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
+	if err != nil || len(priv) != ed25519.PrivateKeySize {
+		_ = a.closeReplay()
+		return nil, fmt.Errorf("invalid access issuer key")
+	}
+	a.signer.Store(&issuerSigner{keyID: a.issuer.KeyID, key: ed25519.PrivateKey(priv)})
 	ok = true
 	return a, nil
 }
@@ -270,9 +301,11 @@ func (a *FileAuthority) Close() error {
 	if a.lock == nil {
 		return nil
 	}
+	a.signer.Store(nil)
 	for keyID := range a.watchers {
 		a.invalidateLocked(keyID)
 	}
+	replayErr := a.closeReplay()
 	rootErr := a.rootDir.Close()
 	a.rootDir = nil
 	err := syscall.Flock(int(a.lock.Fd()), syscall.LOCK_UN)
@@ -280,6 +313,9 @@ func (a *FileAuthority) Close() error {
 	a.lock = nil
 	if err != nil {
 		return err
+	}
+	if replayErr != nil {
+		return replayErr
 	}
 	if rootErr != nil {
 		return rootErr
@@ -293,27 +329,24 @@ func (a *FileAuthority) BootID() string { return a.bootID }
 // IssuerKeyID identifies the daemon authority signer without exposing its
 // private key. An empty value means the authority has been closed.
 func (a *FileAuthority) IssuerKeyID() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+	signer := a.signer.Load()
+	if signer == nil {
 		return ""
 	}
-	return a.issuer.KeyID
+	return signer.keyID
 }
 
 // SignIssuer signs exact, caller-domain-separated service/response bytes for
 // filesystem RPC. The issuer private key never leaves the authority.
+//
+// A signature that races Close is one Close could equally have followed: the
+// issuer key is unchanged until the next open, so nothing it signs is stale.
 func (a *FileAuthority) SignIssuer(message []byte) ([]byte, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+	signer := a.signer.Load()
+	if signer == nil {
 		return nil, ErrAuthorityClosed
 	}
-	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
-	if err != nil || len(priv) != ed25519.PrivateKeySize {
-		return nil, ErrInvalidCredential
-	}
-	return ed25519.Sign(ed25519.PrivateKey(priv), message), nil
+	return ed25519.Sign(signer.key, message), nil
 }
 
 func subjectKey(kind SubjectKind, id string) string {
@@ -926,7 +959,7 @@ func (a *FileAuthority) revokeLocked(kind SubjectKind, subjectID, expectedKeyID 
 // Verify authenticates and durably consumes a signed mailbox request. A
 // duplicate is always ErrReplay; successful results are never replayed from this
 // API, and callers must not blindly retry non-idempotent actions after a crash.
-func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal, error) {
+func (a *FileAuthority) Verify(ctx context.Context, req SignedRequest) (Principal, error) {
 	now := a.now()
 	if req.Protocol != ProtocolVersion || subtle.ConstantTimeCompare([]byte(req.BootID), []byte(a.bootID)) != 1 ||
 		!validHexID(req.RequestID, 16) || len(req.Body) == 0 || len(req.Body) > MaxBodyBytes {
@@ -938,8 +971,11 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 		return Principal{}, ErrExpired
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// Reading the registry needs only the read lock, which still excludes
+	// every rotation, revocation and close until the acceptance below is
+	// durable. Concurrent requests meet only on the replay ledger.
+	a.rlock(ctx)
+	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return Principal{}, ErrAuthorityClosed
 	}
@@ -961,49 +997,20 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 	if err != nil || !ed25519.Verify(pub, signingBytes(req), sig) {
 		return Principal{}, ErrInvalidCredential
 	}
-	replayKey := req.KeyID + ":" + fmt.Sprint(req.Generation) + ":" + req.RequestID
-	if _, exists := a.replay.Entries[replayKey]; exists {
-		return Principal{}, ErrReplay
-	}
-	nextReplay := cloneReplay(a.replay)
-	for key, entry := range nextReplay.Entries {
-		if entry.ExpiresAt < now.Add(-clockSkew).UnixMilli() {
-			delete(nextReplay.Entries, key)
-		}
-	}
-	if len(nextReplay.Entries) >= maxReplayEntries {
-		return Principal{}, ErrCapacity
-	}
 	bodyHash := sha256.Sum256(req.Body)
-	nextReplay.Entries[replayKey] = replayRecord{
+	if err := a.acceptReplay(replayRecord{
 		KeyID: req.KeyID, Generation: req.Generation, RequestID: req.RequestID,
 		BodyDigest: hex.EncodeToString(bodyHash[:]), ExpiresAt: req.ExpiresAt,
-	}
-	if err := stateFits(nextReplay); err != nil {
+	}, now); err != nil {
 		return Principal{}, err
-	}
-	committed, err := a.commit(filepath.Join(a.root, "replay.json"), nextReplay, 0o600)
-	if committed {
-		a.replay = nextReplay
-	}
-	if err != nil {
-		return Principal{}, fmt.Errorf("persist replay acceptance: %w", err)
 	}
 	return Principal{KeyID: rec.KeyID, SubjectID: rec.SubjectID, Kind: rec.Kind, Generation: rec.Generation}, nil
 }
 
-func cloneReplay(in replayFile) replayFile {
-	out := replayFile{Version: in.Version, Entries: make(map[string]replayRecord, len(in.Entries))}
-	for key, value := range in.Entries {
-		out.Entries[key] = value
-	}
-	return out
-}
-
 // Valid rechecks generation and revocation for long-lived connections before
 // each action or pushed frame.
-func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
-	a.mu.RLock()
+func (a *FileAuthority) Valid(ctx context.Context, p Principal) error {
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return ErrAuthorityClosed
@@ -1023,7 +1030,7 @@ func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
 // fn must not call the authority, perform network IO, or wait for a runtime.
 // Revocation/rotation cannot commit between validation and this effect.
 func (a *FileAuthority) WithValid(ctx context.Context, p Principal, fn func() error) error {
-	a.mu.RLock()
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if err := ctx.Err(); err != nil {
 		return err

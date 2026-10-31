@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"amux/internal/access"
@@ -39,11 +40,16 @@ type sessionRuntime struct {
 	resolver            *daemonAccessResolver
 	policy              access.Policy
 	applyResult         func(context.Context, core.Action) (string, error)
+	guardOpenPRs        func(context.Context, core.Action) error
 	encodeResult        func(core.Result) ([]byte, error)
 	poll                time.Duration
 	now                 func() time.Time
 	callbackTimeout     time.Duration
 	dispatchMu          sync.Mutex
+	// reportsOnly is set when the daemon begins stopping: until run returns the
+	// mailboxes serve only session reports, so the engine's wait-for-idle can
+	// still see a busy agent's turn end while no new effect is admitted.
+	reportsOnly atomic.Bool
 	// progress, if set, receives (done, total) as reconcile visits each
 	// session. Startup sets it so lifecycle clients can show mailbox adoption.
 	progress    func(done, total int)
@@ -91,6 +97,7 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		responseBudget: newSessionResponseBudget(),
 		wakes:          make(chan string, sessionWakeQueue),
 		applyResult:    wsops.ApplyResult,
+		guardOpenPRs:   wsops.GuardOpenPRs,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
@@ -370,7 +377,8 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
-		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow})
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow,
+			SlowRequest: logSlowSessionRequest})
 	if err != nil {
 		return err
 	}
@@ -432,6 +440,17 @@ func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrp
 		}
 	}()
 	return r.dispatch(ctx, request)
+}
+
+// logSlowSessionRequest names the phase that held a slow mailbox request. A
+// request's verb and age come from it before authentication; the rest is the
+// daemon's own measurement. A large authority lock wait means the stall was
+// another holder of that lock, not this request's work.
+func logSlowSessionRequest(t sessionrpc.RequestTiming) {
+	r := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
+	log.Printf("session RPC %s: slow request %s %s %s took %v (age %v; reserve %v, verify %v, authorize %v, dispatch %v, sign %v, publish %v; authority lock wait %v; status %s %s)",
+		t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Total), r(t.Age), r(t.Reserve), r(t.Verify), r(t.Authorize),
+		r(t.Dispatch), r(t.Sign), r(t.Publish), r(t.LockWait), t.Status, t.Code)
 }
 
 // slowSessionDispatch and slowSessionReconcile are the durations worth a

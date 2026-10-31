@@ -29,7 +29,6 @@ func TestHiddenReadChild(t *testing.T) {
 	if out == "" {
 		t.Skip("PTY test helper")
 	}
-	// The marker orders the parent after the binary's startup terminal queries.
 	_, _ = os.Stdout.WriteString(hiddenReadReady)
 	line, err := readHiddenLine(os.Stdin)
 	if err != nil {
@@ -38,6 +37,56 @@ func TestHiddenReadChild(t *testing.T) {
 	}
 	_ = os.WriteFile(out, []byte(line), 0o600)
 	os.Exit(0)
+}
+
+const startupQueryChildEnv = "AMUX_TEST_STARTUP_QUERY_CHILD"
+
+// TestStartupQueryChild is the subprocess TestNoStartupTerminalQuery runs on a
+// terminal: by the time a test body runs, every package init has.
+func TestStartupQueryChild(t *testing.T) {
+	if os.Getenv(startupQueryChildEnv) == "" {
+		t.Skip("PTY test helper")
+	}
+	_, _ = os.Stdout.WriteString("startup-done\n")
+	os.Exit(0)
+}
+
+// Bubble Tea's package init asks the terminal for its background color and
+// waits up to 5s for an answer. amux settles that answer itself (package
+// termbg), so a binary started on a terminal that never answers neither sends
+// the query nor stalls.
+func TestNoStartupTerminalQuery(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Skipf("no pty: %v", err)
+	}
+	defer master.Close()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStartupQueryChild$")
+	cmd.Env = append(os.Environ(), startupQueryChildEnv+"=1", "TERM=xterm-256color")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = slave.Close()
+	var out bytes.Buffer
+	b := make([]byte, 4096)
+	for !strings.Contains(out.String(), "startup-done") {
+		n, err := master.Read(b) // never answered, as by a terminal that ignores queries
+		out.Write(b[:n])
+		if err != nil {
+			break
+		}
+	}
+	elapsed := time.Since(start)
+	_ = cmd.Wait()
+	if strings.Contains(out.String(), "\x1b]11;?") {
+		t.Errorf("binary queried the terminal's background color at startup: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "startup-done") || elapsed > 3*time.Second {
+		t.Errorf("startup on an unanswering terminal took %v (output %q)", elapsed, out.String())
+	}
 }
 
 type hiddenReadPTY struct {
@@ -73,14 +122,6 @@ func startHiddenRead(t *testing.T) *hiddenReadPTY {
 		b := make([]byte, 4096)
 		for {
 			n, err := master.Read(b)
-			// Answer the binary's startup terminal queries (background color,
-			// cursor position) as a real terminal would.
-			if bytes.Contains(b[:n], []byte("\x1b]11;?")) {
-				_, _ = master.Write([]byte("\x1b]11;rgb:0000/0000/0000\x1b\\"))
-			}
-			if bytes.Contains(b[:n], []byte("\x1b[6n")) {
-				_, _ = master.Write([]byte("\x1b[1;1R"))
-			}
 			p.mu.Lock()
 			p.echo.Write(b[:n])
 			p.mu.Unlock()

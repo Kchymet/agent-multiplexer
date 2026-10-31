@@ -32,6 +32,7 @@ import (
 	"amux/internal/daemonstatus"
 	"amux/internal/engine/local"
 	"amux/internal/nativetui"
+	_ "amux/internal/termbg"
 	"amux/internal/vtdemo"
 )
 
@@ -137,7 +138,8 @@ usage: amux <command>
   workgroup open <id>  open the dashboard focused on a workgroup or agent
   workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)
   workgroup archive | unarchive <id>  mark a workgroup done / bring it back
-  workgroup rm <id>  delete a workgroup (removes its worktrees + branches)
+                     (archive refuses while an open PR remains; --force overrides)
+  workgroup rm <id> [--force]  delete a workgroup (removes its worktrees + branches)
   workgroup ls       list workgroups and their agents
   agent name <text>  set the calling agent's display name (from its own tab)
   status [--json]    print workgroups and exit (--json for the raw snapshot)
@@ -338,6 +340,7 @@ func daemonRun() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	daemon.DumpGoroutinesOnSignal(ctx, os.Stderr)
 	return daemon.Default(self).Run(ctx)
 }
 
