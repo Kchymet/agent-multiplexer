@@ -68,25 +68,44 @@ func TestHarnessDoctor(t *testing.T) {
 
 // TestHarnessModelCatalog pins each harness's built-in model catalog and
 // default — what is offered with nothing discovered from the CLIs' config homes:
-// Claude leads with opus, Codex with gpt-5.5, and Hermes enumerates none (amux
+// Claude leads with claude-opus-5-5, Codex with gpt-6-astra, and Hermes enumerates none (amux
 // passes no --model).
 func TestHarnessModelCatalog(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
-	if got, want := HarnessFor("claude").Models(), []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5-5"}; !reflect.DeepEqual(got, want) {
+	if got, want := HarnessFor("claude").Models(), []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("claude Models() = %v, want %v", got, want)
 	}
-	if got := HarnessFor("claude").DefaultModel(); got != "opus" {
-		t.Errorf("claude DefaultModel() = %q, want opus", got)
+	if got := HarnessFor("claude").DefaultModel(); got != "claude-opus-5-5" {
+		t.Errorf("claude DefaultModel() = %q, want claude-opus-5-5", got)
 	}
-	if got := HarnessFor("codex").DefaultModel(); got != "gpt-5.5" {
-		t.Errorf("codex DefaultModel() = %q, want gpt-5.5", got)
+	if got, want := HarnessFor("codex").Models(), []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex-spark"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("codex Models() = %v, want %v", got, want)
+	}
+	if got := HarnessFor("codex").DefaultModel(); got != "gpt-6-astra" {
+		t.Errorf("codex DefaultModel() = %q, want gpt-6-astra", got)
 	}
 	if got := HarnessFor("hermes").Models(); len(got) != 0 {
 		t.Errorf("hermes Models() = %v, want none", got)
 	}
 	if got := HarnessFor("hermes").DefaultModel(); got != "" {
 		t.Errorf("hermes DefaultModel() = %q, want empty", got)
+	}
+}
+
+// A short alias in the user's .claude.json is pre-filled as its detailed ID.
+func TestClaudePreferredModelAlias(t *testing.T) {
+	claudeHome := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	if err := os.WriteFile(filepath.Join(claudeHome, ".claude.json"), []byte(`{"model":"sonnet"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := HarnessFor("claude").PreferredModel(); got != "claude-sonnet-5-5" {
+		t.Errorf("claude PreferredModel() = %q, want claude-sonnet-5-5", got)
+	}
+	want := []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}
+	if got := HarnessFor("claude").Models(); !reflect.DeepEqual(got, want) {
+		t.Errorf("claude Models() = %v, want %v", got, want)
 	}
 }
 
@@ -150,8 +169,9 @@ func TestArgvThroughHarness(t *testing.T) {
 // TestHarnessModelsDiscovered pins that the catalogs are live, not baked in:
 // Codex offers exactly what its models cache lists (in its order, so its top
 // pick becomes the default) plus the user's configured model even when the
-// cache doesn't list it; Claude keeps its aliases first and appends the extra
-// models Claude Code cached for the account plus the user's configured model.
+// cache doesn't list it; Claude keeps its detailed IDs first and appends the
+// extra models Claude Code cached for the account plus the user's configured
+// model, resolving any short alias among them so none is offered twice.
 func TestHarnessModelsDiscovered(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -182,11 +202,11 @@ func TestHarnessModelsDiscovered(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(claudeHome, ".claude.json"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	want = []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-fable-5-1[1m]", "claude-opus-5"}
+	want = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5"}
 	if got := HarnessFor("claude").Models(); !reflect.DeepEqual(got, want) {
 		t.Errorf("claude Models() = %v, want %v", got, want)
 	}
-	if got := HarnessFor("claude").DefaultModel(); got != "opus" {
+	if got := HarnessFor("claude").DefaultModel(); got != "claude-opus-5-5" {
 		t.Errorf("claude DefaultModel() = %q, want opus regardless of extras", got)
 	}
 }

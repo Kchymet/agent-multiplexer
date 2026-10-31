@@ -127,7 +127,7 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Agent: kind, Model: coord.Model, Mode: store.ModeInteractive, Prompt: strings.TrimSpace(prompt),
+		Agent: kind, Model: agent.CanonicalModel(kind, coord.Model), Mode: store.ModeInteractive, Prompt: strings.TrimSpace(prompt),
 		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
@@ -240,7 +240,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	claudeID := agent.HarnessFor(kind).NewSessionID()
 	a := store.Session{
 		ID: agentID, RootID: rootID,
-		Agent: kind, Model: spec.Model,
+		Agent: kind, Model: agent.CanonicalModel(kind, spec.Model),
 		Mode: store.NormalizeMode(spec.Mode),
 		Repo: store.JoinRepos(repos), Branch: branch, Dir: dir,
 		ClaudeID: claudeID, Prompt: spec.Prompt, Created: store.Now(),
@@ -797,7 +797,14 @@ func Apply(ctx context.Context, a core.Action) error {
 // set-archived engine-stop split that motivated this lived in exactly that gap.)
 // stopEngine runs before ApplyResult so it can read the still-present snapshot —
 // e.g. a root delete cascades to children that ApplyResult is about to remove.
+//
+// Archive (set-archived=true) and delete first pass the open pull-request guard
+// (GuardOpenPRs) — before stopEngine, so a refused archive leaves the agent
+// running. ApplyResult alone is the raw store mutation and is not guarded.
 func Dispatch(ctx context.Context, a core.Action, stopEngine func(id string)) (string, error) {
+	if err := GuardOpenPRs(ctx, a); err != nil {
+		return "", err
+	}
 	if stopEngine != nil && core.DescriptorFor(a.Action).StopsEngine {
 		stopEngine(a.ID)
 	}

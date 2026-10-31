@@ -44,6 +44,7 @@ until the exit condition below:
 Between iterations you don't need to hammer the API. Watch actively while CI is
 running; when you're waiting on a human reviewer, poll on a sane cadence (the
 `/loop` skill can re-run this check every few minutes) rather than spinning.
+Ending a turn does not end the loop: see **Ending a turn with the PR open**.
 
 ### 1. Get CI green
 
@@ -149,9 +150,34 @@ preserve the combined intent.
 Babysitting is done when **the PR is merged** — by the user, or by you if
 you're authorized. The merge is the final step of the lifecycle.
 
-When a task session has to stop before the merge, it may stop only when **all**
-hold, and then reports the PR as ready-for-review and green with nothing
-outstanding:
+Closed counts too: if the PR is closed (superseded, abandoned, or the user
+closed it), babysitting is over — say so and why.
+
+### Ending a turn with the PR open
+
+Waiting on a human reviewer usually outlasts one turn. A turn may end with the
+PR still open, but never unattended:
+
+1. **Arm a follow-up first**, and name it in your final message:
+   - Claude Code: `ScheduleWakeup`, the `/loop` skill re-running this loop every
+     few minutes, or a `Monitor` / `run_in_background` until-loop on
+     `gh pr view <n> --json state,mergeable,statusCheckRollup,reviewDecision`.
+   - A harness with no self-scheduling (e.g. Codex): say that your coordinator
+     (or the user) re-prompts you when the PR's state changes.
+2. **Report the PR's state** — URL; draft or ready; CI green / red / pending;
+   mergeable or conflicting; review approved / changes requested / awaiting.
+
+**A task member never runs `amux agent done` while its PR is open** — archiving
+stops its runtime and orphans the PR. The only exception is a task that
+explicitly says someone else owns the merge (a review loop, the coordinator, a
+named person); then say who in your final message.
+
+### Handing off before the merge
+
+When a task session hands the PR off before the merge (the task names someone
+else as the merge owner, or the session genuinely cannot continue), it may do so
+only when **all** hold, and then reports the PR as ready-for-review and green
+with nothing outstanding, naming who now owns it:
 
 - The PR is marked ready for review, not draft:
 
@@ -182,7 +208,8 @@ similar) into the PR body or your report.
   can't fix, a design disagreement — stop and report it clearly with the specific
   blocker and what you tried. Don't churn.
 
-Report the outcome plainly: merged (with URL), or ready-for-review (with URL,
-confirming it is marked ready for review — not draft — green, with nothing
-outstanding, awaiting the user's merge), or blocked (with why; if it is still
-draft, say why). Don't claim done if it isn't.
+Report the outcome plainly: merged or closed (with URL), or ready-for-review
+(with URL, confirming it is marked ready for review — not draft — green, with
+nothing outstanding, awaiting the user's merge, plus the follow-up you armed or
+who owns the merge), or blocked (with why; if it is still draft, say why).
+Don't claim done if it isn't.

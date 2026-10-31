@@ -319,7 +319,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			newID, err = d.dispatch(ctx, a, d.killEngineFor)
 		}
 		if err != nil {
-			return fail("%v", err)
+			return failErr(err)
 		}
 		d.triggerPoll()
 		r := ok()
@@ -701,4 +701,20 @@ func ok() core.Result { return core.Result{Type: "result", OK: true} }
 
 func fail(format string, args ...any) core.Result {
 	return core.Result{Type: "result", OK: false, Error: fmt.Sprintf(format, args...)}
+}
+
+// codeOpenPullRequests marks the open-PR guard's refusal (wsops.OpenPRError).
+// Its message holds only session ids, branches, PR URLs and remedies, so it is
+// the one action failure a restricted caller sees verbatim.
+const codeOpenPullRequests = "open_pull_requests"
+
+// failErr is fail("%v", err), tagging a guard refusal with its stable code.
+func failErr(err error) core.Result {
+	r := fail("%v", err)
+	var open *wsops.OpenPRError
+	if errors.As(err, &open) {
+		r.Code = codeOpenPullRequests
+		r.Error = open.Error()
+	}
+	return r
 }

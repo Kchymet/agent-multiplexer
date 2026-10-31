@@ -959,7 +959,7 @@ func (a *FileAuthority) revokeLocked(kind SubjectKind, subjectID, expectedKeyID 
 // Verify authenticates and durably consumes a signed mailbox request. A
 // duplicate is always ErrReplay; successful results are never replayed from this
 // API, and callers must not blindly retry non-idempotent actions after a crash.
-func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal, error) {
+func (a *FileAuthority) Verify(ctx context.Context, req SignedRequest) (Principal, error) {
 	now := a.now()
 	if req.Protocol != ProtocolVersion || subtle.ConstantTimeCompare([]byte(req.BootID), []byte(a.bootID)) != 1 ||
 		!validHexID(req.RequestID, 16) || len(req.Body) == 0 || len(req.Body) > MaxBodyBytes {
@@ -974,7 +974,7 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 	// Reading the registry needs only the read lock, which still excludes
 	// every rotation, revocation and close until the acceptance below is
 	// durable. Concurrent requests meet only on the replay ledger.
-	a.mu.RLock()
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return Principal{}, ErrAuthorityClosed
@@ -1009,8 +1009,8 @@ func (a *FileAuthority) Verify(_ context.Context, req SignedRequest) (Principal,
 
 // Valid rechecks generation and revocation for long-lived connections before
 // each action or pushed frame.
-func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
-	a.mu.RLock()
+func (a *FileAuthority) Valid(ctx context.Context, p Principal) error {
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if a.rootDir == nil {
 		return ErrAuthorityClosed
@@ -1030,7 +1030,7 @@ func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
 // fn must not call the authority, perform network IO, or wait for a runtime.
 // Revocation/rotation cannot commit between validation and this effect.
 func (a *FileAuthority) WithValid(ctx context.Context, p Principal, fn func() error) error {
-	a.mu.RLock()
+	a.rlock(ctx)
 	defer a.mu.RUnlock()
 	if err := ctx.Err(); err != nil {
 		return err

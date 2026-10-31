@@ -123,3 +123,25 @@ func TestJournalIsOrderedLast(t *testing.T) {
 		t.Error("the journal carries no permission events; replaying it for one is pure cost")
 	}
 }
+
+// A typed journal record (the PR watcher's pr_state) is emitted as an event of
+// its own type carrying its payload, not as a notice.
+func TestMapJournalLineTypedEvent(t *testing.T) {
+	line := `{"level":"info","text":"PR o/r#7: merged","type":"pr_state","payload":{"session":"m1","pr":{"number":7},"changes":["merged"],"wake":true}}`
+	evs := MapJournalLine(harnessproto.RuntimeClaude, []byte(line))
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypePRState || evs[0].Direction != harnessproto.DirMeta {
+		t.Fatalf("events = %+v", evs)
+	}
+	var body struct {
+		Session string   `json:"session"`
+		Changes []string `json:"changes"`
+	}
+	if err := json.Unmarshal(evs[0].Payload, &body); err != nil || body.Session != "m1" || body.Changes[0] != "merged" {
+		t.Fatalf("payload %s: %v", evs[0].Payload, err)
+	}
+	// A typed record without a payload degrades to its notice.
+	evs = MapJournalLine(harnessproto.RuntimeClaude, []byte(`{"level":"info","text":"x","type":"pr_state"}`))
+	if len(evs) != 1 || evs[0].Type != harnessproto.TypeNotice {
+		t.Fatalf("payload-less typed record = %+v", evs)
+	}
+}

@@ -14,7 +14,7 @@ jobs:
   build-test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-15]
+        os: [ubuntu-latest, macos-26]
     runs-on: ${{ matrix.os }}
     env:
       # Short canonical paths fit Darwin Unix sockets and no-follow traversal.
@@ -165,8 +165,9 @@ jobs:
 
   seatbelt-runtime:
     # Pinned rather than macos-latest so an image bump is a reviewed change.
-    # macOS 14 images are being retired (actions/runner-images#13518).
-    runs-on: macos-15
+    # macOS 26 arm64 is the newest GA image; macOS 14 images are being
+    # retired (actions/runner-images#13518).
+    runs-on: macos-26
     env:
       TMPDIR: /private/tmp
       AMUX_REQUIRE_NAMESPACE_TEST: "1"
