@@ -1656,13 +1656,22 @@ func AppendNotice(sessionID, level, text string) error {
 	if sessionID == "" || text == "" {
 		return nil
 	}
+	return AppendEvent(sessionID, notice(level, text))
+}
+
+// AppendEvent appends one amux-originated event (a notice, a pr_state) to a
+// session's structured event log, under the same lock as AppendNotice.
+func AppendEvent(sessionID string, ev harnessproto.RuntimeEvent) error {
+	if sessionID == "" || ev.Type == "" {
+		return nil
+	}
 	unlock := LockEventLog(sessionID)
 	defer unlock()
 	path := EventLogPathFor(sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	b, err := json.Marshal(notice(level, text))
+	b, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}

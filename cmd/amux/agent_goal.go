@@ -70,12 +70,15 @@ reports itself blocked, or the user pauses it.
 
 usage: amux agent goal [show [--json]]
        amux agent goal complete "<summary>"    the objective is done and verified
-                                               (archive finished members first; it
-                                               lists idle unarchived members)
+                                               (archive finished members first: PR
+                                               merged or closed; it lists idle
+                                               unarchived members)
        amux agent goal ask "<question>"        stop and wait for the user's answer
        amux agent goal wait "<waiting on>"     end this turn only; an armed background
                                                wake-up (Monitor / run_in_background)
                                                resumes the goal. Never wait without one.
+                                               Name the member/PR awaited and the wake-up;
+                                               it must cover every open member PR.
        amux agent goal blocked "<reason>"      a repeating blocker only the user can clear
 
 The user pauses, resumes or clears the goal from the host:
@@ -268,33 +271,64 @@ func finishedMemberReminder() string {
 }
 
 // idleMemberReminder lists the direct members in a coordinator's scoped
-// snapshot that are neither archived nor running, with the archive command.
-// The scoped snapshot holds only this workgroup, so a row with a root is one
-// of its members.
+// snapshot that are neither archived nor running. The scoped snapshot holds
+// only this workgroup, so a row with a root is one of its members. Members the
+// daemon's PR watcher still sees owning an open PR are listed apart, with no
+// archive command: archiving one orphans its PR.
 func idleMemberReminder(sessions []core.Session) string {
-	var idle []core.Session
+	var archivable, openPR []core.Session
 	for _, s := range sessions {
 		if s.IsRoot || s.RootID == "" || s.Archived || s.State == core.StateRunning {
 			continue
 		}
-		idle = append(idle, s)
+		if ownsOpenPR(s) {
+			openPR = append(openPR, s)
+		} else {
+			archivable = append(archivable, s)
+		}
 	}
-	if len(idle) == 0 {
+	if len(archivable) == 0 && len(openPR) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\nreminder: %d member(s) are not running but still unarchived:\n", len(idle))
-	for _, s := range idle {
-		state := s.State
-		if state == "" {
-			state = core.StateIdle
+	fmt.Fprintf(&b, "\nreminder: %d member(s) are not running but still unarchived.\n", len(archivable)+len(openPR))
+	if len(archivable) > 0 {
+		b.WriteString("Archive each one that is finished: its PR is merged or closed (or its task was\n")
+		b.WriteString("delivered with no PR) and you won't reassign it:\n")
+		for _, s := range archivable {
+			fmt.Fprintf(&b, "  %-10s %-8s %s\n", s.ID, memberState(s), s.Title)
+			fmt.Fprintf(&b, "    amux do set-archived %s -f archived=true\n", s.ID)
 		}
-		fmt.Fprintf(&b, "  %-10s %-8s %s\n", s.ID, state, s.Title)
 	}
-	b.WriteString("Archive each finished member now (its work is verified and it won't be reassigned):\n")
-	for _, s := range idle {
-		fmt.Fprintf(&b, "  amux do set-archived %s -f archived=true\n", s.ID)
+	if len(openPR) > 0 {
+		b.WriteString("Do not archive these: each still owns an open PR. Keep them babysitting it\n")
+		b.WriteString("until it is merged or closed:\n")
+		for _, s := range openPR {
+			fmt.Fprintf(&b, "  %-10s %-8s %s  (%s)\n", s.ID, memberState(s), s.Title, strings.Join(openPRURLs(s), ", "))
+		}
 	}
-	b.WriteString("Keep a member only if you expect to reuse it, and say why in your final summary.\n")
+	b.WriteString("Keep a finished member only if you expect to reuse it, and say why in your final summary.\n")
 	return b.String()
+}
+
+func memberState(s core.Session) string {
+	if s.State == "" {
+		return core.StateIdle
+	}
+	return s.State
+}
+
+func ownsOpenPR(s core.Session) bool { return len(openPRURLs(s)) > 0 }
+
+func openPRURLs(s core.Session) []string {
+	if s.PRs == nil {
+		return nil
+	}
+	var urls []string
+	for _, pr := range *s.PRs {
+		if pr.State == "open" {
+			urls = append(urls, pr.URL)
+		}
+	}
+	return urls
 }

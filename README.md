@@ -170,13 +170,19 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   or `amux wg unarchive <id>`). Workgroups are never archived automatically:
   when a coordinator's goal completes, the workgroup stays on the active rail
   with its completed goal visible, and the coordinator asks whether to archive
-  it or take another task. Its own finished members, though, it is expected to
-  archive itself as it goes (`amux do set-archived <member> -f archived=true`),
-  so a long-done workgroup does not keep showing live members. After explicit user confirmation, the coordinator can
+  it or take another task. Its own finished members (PR merged or closed, or
+  task delivered with no PR), though, it is expected to archive itself as it
+  goes (`amux do set-archived <member> -f archived=true`), so a long-done
+  workgroup does not keep showing live members; a member that still owns an
+  open PR is never archived. After explicit user confirmation, the coordinator can
   run `amux agent done` to archive its workgroup and all direct members, stopping
   runtimes and revoking credentials. Host workgroup restoration also restores
   previously active members; already-completed members stay archived. Task-mode
-  member agents still use `amux agent done` to archive only themselves.
+  member agents still use `amux agent done` to archive only themselves — once
+  their PR is merged or closed, never while it is open (archiving stops the
+  runtime and would orphan the PR). A coordinator tracks every member PR to
+  merged or closed in a `COORDINATION.md` PR ledger before reporting a goal
+  complete, handing still-open PRs to the user with what needs a human.
 - **Mode** — an agent runs as a **task** (short) or **loop** (long/autonomous),
   shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.
 - **Default sessions** — every container on the rail hosts one long-lived agent
@@ -259,17 +265,24 @@ This applies to native terminal launches and new/resumed app-server threads.
 
 The model picker is live, not a baked-in list: Codex agents offer whatever your
 Codex has cached as available to your account (`~/.codex/models_cache.json`, the
-same list its own `/model` picker shows, in the same order), and Claude agents
-offer the built-in aliases and `claude-opus-5-5` (Claude Opus 5.5), plus any extra
+same list its own `/model` picker shows, in the same order; with no cache, amux
+falls back to `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+`gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`), and Claude agents offer
+detailed model IDs — `claude-opus-5-5` (Claude Opus 5.5, the default),
+`claude-sonnet-5-5` (Sonnet 5.5), `claude-haiku-5-5` (Haiku 5.5), and
+`claude-fable-5-1` (Fable 5.1) — plus any extra
 models Claude Code has cached for your account (`additionalModelOptionsCache` in
 `~/.claude.json`). The model set in each CLI's own config (`model` in `config.toml`
 / `.claude.json`) is always offered and pre-filled. Run the CLI once outside amux
 to refresh what it caches.
 
-To select Opus 5.5 explicitly, choose `claude-opus-5-5` in a Claude model picker
-or pass `--agent claude --model claude-opus-5-5` when creating an agent. For a
+To select a model explicitly, choose it in a model picker or pass e.g.
+`--agent claude --model claude-sonnet-5-5` when creating an agent. For a
 workgroup coordinator, use `--coordinator claude --coordinator-model claude-opus-5-5`.
-The built-in Claude default remains `opus`. Opus 5.5 requires Claude Code
+Claude Code's short aliases (`opus`, `sonnet`, `haiku`, `fable`, including a
+`[1m]` suffix) are still accepted anywhere a model is given — on the command
+line, in `-f model=…` fields, in `.claude.json`, or stored on agents created by an
+older amux — and are resolved to the detailed ID above before launch. Opus 5.5 requires Claude Code
 v2.1.280 or newer; see the [official model configuration guide](https://code.claude.com/docs/en/model-config).
 
 An in-session `/model` switch is reconciled back into amux automatically. Claude
@@ -402,6 +415,9 @@ amux workgroup create <repo>...  # workgroup limited to those repos, with a firs
 amux workgroup move <agent> [<root>|--new]  # into another workgroup, or a new one of its own
 amux workgroup archive | unarchive <id>
 amux workgroup rm|rename|ls
+#   archive/rm (and `amux agent done`) refuse while the session's amux/<wg>-<member>*
+#   branches still head an open PR; finish or close it, or pass --force (host).
+#   If gh is unavailable or errors, the check is skipped with a warning.
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
 amux config [ls|get|set|unset|path]  # TUI keybindings and Codex control mode
@@ -622,6 +638,18 @@ and relaunches with a continuation. Paused, complete, blocked, input-waiting and
 budget-limited goals are never resumed automatically. `amux config set
 goal.auto_resume off` turns the Claude-side continuation off (default on; applied
 at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
+
+### PR watch
+
+The daemon tracks the GitHub PRs each workgroup member owns (head branch
+`amux/<wg>-<member>[-suffix]`) with the host's `gh` login, one `gh pr list` per
+repository every 3 minutes (`AMUX_PR_POLL_INTERVAL`, `off` to disable). Members'
+rows in `amux status --json` carry a `prs` list, every change is a `pr_state`
+event in `amux agent events <member>`, and a meaningful transition (CI red, CI
+green after red, merge conflict, review, merged, closed, draft → ready) wakes
+the coordinator with one short de-duplicated prompt once it is idle. A goal
+coordinator's status shows its goal status (`goal waiting`, `goal active`, …).
+See [PR watch](docs/pr-watch.md).
 
 ## Roadmap
 

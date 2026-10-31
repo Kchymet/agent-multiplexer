@@ -121,12 +121,15 @@ func validateSessionAction(req access.Request) error {
 		return joinValidation(requireID(), noTarget(), fields("name"), requireField(req.Fields, "name"))
 	case core.ActionMove:
 		return joinValidation(requireID(), fields())
-	case core.ActionDelete, core.ActionKill, core.ActionRmRepo:
+	case core.ActionDelete, core.ActionKill:
+		return joinValidation(requireID(), noTarget(), fields(wsops.FieldForce), optionalBool(req.Fields, wsops.FieldForce))
+	case core.ActionRmRepo:
 		return joinValidation(requireID(), noTarget(), fields())
 	case core.ActionArchive:
 		return fmt.Errorf("toggle archive is host-only; restricted callers must request an explicit archive")
 	case core.ActionSetArchived:
-		if err := joinValidation(requireID(), noTarget(), fields("archived"), requireField(req.Fields, "archived")); err != nil {
+		if err := joinValidation(requireID(), noTarget(), fields("archived", wsops.FieldForce), requireField(req.Fields, "archived"),
+			optionalBool(req.Fields, wsops.FieldForce)); err != nil {
 			return err
 		}
 		if err := requiredBool(req.Fields, "archived"); err != nil {

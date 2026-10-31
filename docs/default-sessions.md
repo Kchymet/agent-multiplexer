@@ -133,10 +133,12 @@ that supervises exactly that natively: Codex's App Server thread goal
 - **A completed goal leaves the workgroup open.** Goal completion itself
   archives nothing: the completed goal stays visible and the coordinator keeps
   running. The coordinator's guide makes archiving its own *finished* members
-  (work verified, PR merged/closed or task delivered, not being reassigned) an
-  expected step, done with `amux do set-archived <member> -f archived=true`
-  during the task and for every finished member before it reports completion;
-  it keeps a member only when it expects to reuse it, and says why. It then ends
+  (PR merged or closed, or task delivered with no PR, and not being
+  reassigned) an expected step, done with
+  `amux do set-archived <member> -f archived=true` during the task and for
+  every finished member before it reports completion; a member that still owns
+  an open PR is never archived, and a finished one is kept only when reuse is
+  expected, with the reason. It then ends
   by asking the user whether to archive the workgroup or give it another task. After explicit user confirmation,
   the coordinator can run `amux agent done` to archive its workgroup and members.
   The host can also archive it (`x` on the rail, `amux workgroup archive <id>`).
@@ -195,8 +197,9 @@ Claude coordinator; there is no opt-in.
   (`running` when continuing, `ready` otherwise), replacing the plain Stop
   status hook. A failure lets the turn end rather than trapping it.
 - **The model moves its own goal** with `amux agent goal complete "<summary>"`
-  (which, when direct members are neither archived nor running, prints them
-  with the `set-archived` command to archive the finished ones),
+  (which, when direct members are neither archived nor running, lists them:
+  those with no open PR with the `set-archived` command for the ones whose PR
+  is merged or closed, and open-PR owners apart, to keep babysitting),
   `amux agent goal ask "<question>"` (stop and wait for the user — also
   `AskUserQuestion` for concrete choices), `amux agent goal wait "<on what>"`
   and `amux agent goal blocked "<reason>"`. `wait` is how a coordinator idles
@@ -204,7 +207,13 @@ Claude coordinator; there is no opt-in.
   (`Monitor` or a `run_in_background` until-loop) and runs `goal wait`, which
   lets exactly the next Stop through; the goal is active again after it, so the
   turn the wake-up starts continues under goal pressure. The wait spends no
-  continuation budget and refunds none. Its guide tells it to ask for genuinely user-owned information
+  continuation budget and refunds none. amux itself is one such wake-up
+  source: it prompts the coordinator when a member's PR changes state (see
+  [PR watch](pr-watch.md)), but the coordinator still arms its own. The
+  wake-up must cover every open member PR, and the `wait` note names what is
+  awaited (member, repo#PR) and the wake-up armed. A goal is complete only when
+  every member PR is merged or closed, or explicitly handed to the user with
+  what needs a human. Its guide tells it to ask for genuinely user-owned information
   rather than guess, and to pick a sensible default for anything optional.
 - **Only the user pauses it.** The same `goal` steer verb (`status`,
   `objective`) moves the file through the pinned session root; resuming an idle

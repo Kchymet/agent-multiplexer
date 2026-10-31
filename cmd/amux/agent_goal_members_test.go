@@ -9,30 +9,41 @@ import (
 	"amux/internal/claudegoal"
 	"amux/internal/core"
 	"amux/internal/sessionrpc"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 func TestIdleMemberReminderListsOnlyIdleUnarchivedMembers(t *testing.T) {
+	merged := harnessproto.SessionPRs{{Repo: "o/r", Number: 1, URL: "https://github.com/o/r/pull/1", State: "merged"}}
+	open := harnessproto.SessionPRs{
+		{Repo: "o/r", Number: 3, URL: "https://github.com/o/r/pull/3", State: "open"},
+		{Repo: "o/r", Number: 2, URL: "https://github.com/o/r/pull/2", State: "closed"},
+	}
 	sessions := []core.Session{
 		{ID: "wg1", IsRoot: true, State: core.StateReady, Title: "workgroup"},
-		{ID: "m-ready", RootID: "wg1", State: core.StateReady, Title: "port auth"},
+		{ID: "m-ready", RootID: "wg1", State: core.StateReady, Title: "port auth", PRs: &merged},
 		{ID: "m-idle", RootID: "wg1", Title: "docs"},
 		{ID: "m-wait", RootID: "wg1", State: core.StateWaiting, Title: "needs input"},
+		{ID: "m-open", RootID: "wg1", State: core.StateReady, Title: "in review", PRs: &open},
 		{ID: "m-run", RootID: "wg1", State: core.StateRunning, Title: "busy"},
 		{ID: "m-done", RootID: "wg1", Archived: true, State: core.StateIdle, Title: "archived"},
 	}
 	got := idleMemberReminder(sessions)
 	for _, want := range []string{
-		"3 member(s)",
+		"4 member(s)",
+		"its PR is merged or closed",
 		"amux do set-archived m-ready -f archived=true",
 		"amux do set-archived m-idle -f archived=true",
 		"amux do set-archived m-wait -f archived=true",
+		"Do not archive these: each still owns an open PR",
+		"m-open",
+		"https://github.com/o/r/pull/3",
 		"say why",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reminder lacks %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{"m-run", "m-done", "set-archived wg1"} {
+	for _, forbidden := range []string{"m-run", "m-done", "set-archived wg1", "set-archived m-open", "pull/2"} {
 		if strings.Contains(got, forbidden) {
 			t.Errorf("reminder lists %q:\n%s", forbidden, got)
 		}
@@ -40,8 +51,12 @@ func TestIdleMemberReminderListsOnlyIdleUnarchivedMembers(t *testing.T) {
 	if got := idleMemberReminder(sessions[:1]); got != "" {
 		t.Errorf("no members, reminder = %q", got)
 	}
-	if got := idleMemberReminder([]core.Session{sessions[0], sessions[4], sessions[5]}); got != "" {
+	if got := idleMemberReminder([]core.Session{sessions[0], sessions[5], sessions[6]}); got != "" {
 		t.Errorf("only running/archived members, reminder = %q", got)
+	}
+	onlyOpen := idleMemberReminder([]core.Session{sessions[0], sessions[4]})
+	if !strings.Contains(onlyOpen, "still owns an open PR") || strings.Contains(onlyOpen, "set-archived") {
+		t.Errorf("open-PR-only reminder:\n%s", onlyOpen)
 	}
 }
 

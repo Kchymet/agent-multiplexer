@@ -71,7 +71,7 @@ One JSON object per line, same `wire` framing as all provider traffic.
    "state":"running","status":"running · 2 agents",
    "startedAt":1751500000,"archived":false},
   {"id":"a2","title":"idempotency","rootId":"a1","isRoot":false,
-   "section":"workgroups","repos":"api","mode":"task","model":"gpt-5.6-codex",
+   "section":"workgroups","repos":"api","mode":"task","model":"gpt-5.6-sol",
    "state":"waiting","status":"waiting · needs input",
    "startedAt":1751500100,"archived":false}
 ]}
@@ -490,7 +490,9 @@ nothing for it (honest degradation) — the feature stays advertised.
 - **Vocabulary the daemon emits** (a stable set; a consumer maps it onto its own
   model): `turn_start`, `prompt` (`in`), `text`, `thinking`, `tool_call`,
   `tool_result`, `plan`, `usage` (`meta`), `permission_request`,
-  `permission_resolved`, `notice` (`meta`), `turn_end`, and `raw`. `raw` carries
+  `permission_resolved`, `notice` (`meta`), `pr_state` (`meta`; amux's PR
+  watcher, `{session, pr, changes, wake}` — see [PR watch](pr-watch.md)),
+  `turn_end`, and `raw`. `raw` carries
   `{runtime, native_type, body}` and is the passthrough for any record entry the
   reader has no mapping for — **never dropped**.
 - `permission_request` carries

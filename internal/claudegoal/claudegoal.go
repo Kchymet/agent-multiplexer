@@ -242,9 +242,10 @@ func ContinuationPrompt(s State) string {
 Objective: %s
 
 Keep making real progress toward the verified end state: check members' evidence, dispatch or steer work, fix what falls short. Do not restate a plan without acting on it.
-- Done and verified: member PRs are green and marked ready for review (`+"`gh pr ready <n>`"+`), not left draft — "do not merge" never means draft. Then run `+"`amux agent goal complete \"<summary>\"`"+` and give your final summary.
+- Track every member PR to merged or closed in your COORDINATION.md PR ledger (member, repo#PR, state). Re-prompt the member on red CI, a conflict, review activity, a PR left draft, or silence. Never archive a member that still owns an open PR.
+- Done and verified: every member PR is merged or closed, or green, marked ready for review (`+"`gh pr ready <n>`"+`) — not left draft; "do not merge" never means draft — and explicitly handed to the user with what needs a human (e.g. merge approval). Then run `+"`amux agent goal complete \"<summary>\"`"+` and give your final summary with the PR ledger.
 - Need a decision only the user can make, or information you cannot find: run `+"`amux agent goal ask \"<question>\"`"+`, then ask it plainly and end your turn. Choose a sensible default for anything optional instead.
-- Waiting on members or CI: never busy-poll across continuations. If nothing can move until they report, first arm a background wake-up (a Monitor, or a run_in_background until-loop on the member's events or the PR/CI state), then run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn; the wake-up's notification resumes the goal. Never run goal wait without an armed wake-up.
+- Waiting on members or CI: never busy-poll across continuations. If nothing can move until they report, first arm a background wake-up (a Monitor, or a run_in_background until-loop on the member's events or the PR/CI state) that covers every open member PR, then run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` — naming the member/PR awaited and the wake-up armed — and end your turn; the wake-up's notification resumes the goal. Never run goal wait without an armed wake-up.
 - Hard blocker that repeats and needs the user: run `+"`amux agent goal blocked \"<reason>\"`"+` and explain it.`,
 		s.Continuations, MaxContinuations, s.Objective)
 }

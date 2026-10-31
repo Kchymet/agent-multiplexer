@@ -86,7 +86,8 @@ up or pass your own id. Run `+"`amux agent --help`"+` to see the available comma
 the ones you will normally need are `+"`amux agent sessions --json`"+` for cross-session
 discovery, `+"`amux agent events --json`"+` to read your own
 normalized history, `+"`amux agent name <display name>`"+` to name yourself, and
-`+"`amux agent done`"+` to mark your task complete. These commands work from the
+`+"`amux agent done`"+` to mark your task complete (only once your PR is merged or
+closed — see "Shipping your work"). These commands work from the
 ordinary sandboxed shell through a private file mailbox. Keep amux’s OS sandbox
 and the configured approval controls enabled. Name and done target the launched session even if environment IDs change;
 explicit commands report failure when the daemon cannot confirm the operation.
@@ -128,6 +129,18 @@ explicitly authorize you to. Marking ready is the hand-off to review, not the
 end. "Do not merge" means do not run `+"`gh pr merge`"+` and do not enable
 auto-merge — it never means "keep the PR draft". A finished PR left in draft is
 an incomplete task.
+
+You own your PR until it is **merged or closed**. Do not run `+"`amux agent done`"+`
+while it is open — archiving stops your runtime and orphans the PR — unless your
+task explicitly says someone else owns the merge; then name who in your final
+message. Before you end a turn with the PR open, arm a follow-up that re-checks
+it (ScheduleWakeup, `+"`/loop`"+` or a Monitor where your harness has them; otherwise
+say your coordinator will re-prompt you) and say which.
+
+End every turn's final message with your PR's URL and state: draft or ready, CI
+(green / red / pending), mergeable or conflicting, and review status (approved /
+changes requested / awaiting review). Your coordinator tracks your PR from that
+report and its own checks.
 `, repos, s.Branch)
 }
 
@@ -297,7 +310,9 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
 - `+"`amux do set-archived <member> -f archived=true`"+` — archive a finished member.
   This is an expected step, not an option: see "Archiving finished members".
-  Restoring an archived member or this workgroup requires the host.
+  Restoring an archived member or this workgroup requires the host. It is refused
+  while the member still owns an open PR; add `+"`-f force=true`"+` only to
+  deliberately orphan it.
 - After explicit user confirmation, `+"`amux agent done`"+` archives your own
   workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
@@ -309,6 +324,24 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   so send it back. "Do not merge" /
   "the user merges" means no `+"`gh pr merge`"+` and no auto-merge; it never means
   "keep the PR draft". Say so when you dispatch PR work.
+
+## Track every member PR to merged or closed
+A member PR marked ready is handed to review, not finished. You own the outcome
+of every PR your members open until it is **merged or closed**:
+- Keep a **PR ledger** in `+"`COORDINATION.md`"+`: one row per member PR — member,
+  repo#PR, state (draft / ready / merged / closed, CI, mergeable, review) — and
+  update it from evidence (`+"`gh pr view <n> --json state,isDraft,mergeable,statusCheckRollup,reviewDecision`"+`
+  and the member's events), not from the member's last word.
+- React to what you see by re-prompting the member
+  (`+"`amux do steer <member> -f verb=prompt -f text=\"…\"`"+`): red CI, a merge
+  conflict, new review comments or changes requested, a PR left draft, or a
+  member that went quiet with its PR still open. Tell it what changed and to
+  resume babysitting.
+- Never archive a member that still owns an open PR: the archive stops its
+  runtime and orphans the PR. A member is finished when its PR is merged or
+  closed; hand off or close an open PR first.
+- Never end a turn with open member PRs and nothing scheduled to look at them
+  again.
 
 `, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
 	b.WriteString(goalSection(root))
@@ -483,15 +516,16 @@ func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
 func memberArchiveSection(root store.Session) string {
 	return `## Archiving finished members
 Archive each member as soon as it is finished; do not leave it on the rail:
-- A member is **finished** when its work is verified — its PR is merged or
-  closed, or its task is delivered and checked — and you will not give it more
-  work.
+- A member is **finished** when its PR is merged or closed (see "Track every
+  member PR to merged or closed"), or its task was delivered with no PR, and you
+  will not give it more work. A member that still owns an open PR is not
+  finished: never archive it.
 - Archive it then, during the task, not only at the end:
   ` + "`amux do set-archived <member> -f archived=true`" + `. Check ` + "`amux status --json`" + `
-  first: never archive a member that is still running.
+  first: never archive a member while it is running.
 - Before you report a task complete (and before marking a goal complete),
-  archive every finished member. The members
-  left unarchived should be exactly those still working or kept on purpose.
+  archive every finished member. The members left unarchived should be exactly
+  those still working, still owning an open PR, or kept on purpose.
 - Keep a finished member only if you expect to reuse it soon (for example a
   follow-up on the same branch). Note it in ` + "`COORDINATION.md`" + ` and in your
   report with the reason.
@@ -505,19 +539,24 @@ Archive each member as soon as it is finished; do not leave it on the rail:
 func completionSection(root store.Session) string {
 	return fmt.Sprintf(`## Finishing a task
 Finishing a task does not archive the workgroup: this workgroup and you stay on
-the active rail. Before you call a task finished, archive every finished member
-(see "Archiving finished members") and check that every member PR it
-produced is green and marked ready for review (`+"`gh pr view <n> --json isDraft`"+`
-prints false), not left in draft; the user merges unless the task authorizes
-merging. End each finished task with your final summary, listing those PR URLs
-as ready for review, and ask the user whether to archive the workgroup or give it another task. Wait for explicit
+the active rail. A task is finished only when every member PR it produced is
+**merged or closed**, or explicitly handed to the user. Before you hand a PR
+off, check that it is green and marked ready for review
+(`+"`gh pr view <n> --json isDraft`"+` prints false), not left in draft, with nothing
+outstanding but the human step; the user merges unless the task authorizes
+merging. Before you call a task finished, archive every finished member (see
+"Archiving finished members"). End each finished task with your final summary:
+the PR ledger (each member PR's URL and state), and for every PR still open,
+exactly what needs a human (e.g. merge approval, a design decision). Then ask
+the user whether to archive the workgroup or give it another task. Wait for explicit
 user confirmation before archiving; goal completion is not confirmation.
 After confirmation, run `+"`amux agent done`"+`: your authenticated identity selects
 this workgroup (%s), and the daemon durably archives you and its direct members
 before stopping runtimes. Report success only when the command confirms it.
 Do not delegate self-archive to a member: a member's `+"`amux agent done`"+` archives
-only that member. Archiving finished members with
-`+"`amux do set-archived <member> -f archived=true`"+` needs no confirmation.
+only that member. Archiving finished members (PR merged or closed) with
+`+"`amux do set-archived <member> -f archived=true`"+` needs no confirmation; a
+member whose PR is still open keeps babysitting it.
 Restoration is host-only: restoring the workgroup restores previously active
 members too. Previously completed members stay archived.
 `, root.ID)
@@ -550,8 +589,11 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
 - Pursue the goal to the requested end state: scope it, dispatch members
   (`+"`add-agent`"+`, `+"`steer`"+`), verify their evidence (session views, branches, PRs,
   CI), and fix or re-dispatch what falls short. Progress must change real state.
-  A member PR is done only when it is green and marked ready for review, not
-  draft; "do not merge" never means draft.
+  A member PR must be green and marked ready for review, not draft; "do not
+  merge" never means draft. The goal is complete only when every member PR is
+  merged or closed, or explicitly handed to the user with what needs a human.
+- Track open member PRs in the `+"`COORDINATION.md`"+` PR ledger and re-prompt the
+  member on red CI, a conflict, review activity or silence.
 - Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
   verified — never because you are stopping, out of ideas, or near a budget.
   Archive every finished member first (see "Archiving finished members");
@@ -589,9 +631,10 @@ status.
 - Pursue the goal to the requested end state: scope it, dispatch members
   (`+"`add-agent`"+`, `+"`steer`"+`), verify their evidence (session views, branches, PRs,
   CI), and fix or re-dispatch what falls short. Progress must change real state;
-  a continuation that only restates a plan is wasted. A member PR is done only
-  when it is green and marked ready for review, not draft; "do not merge" never
-  means draft.
+  a continuation that only restates a plan is wasted. A member PR must be green
+  and marked ready for review, not draft; "do not merge" never means draft. The
+  goal is complete only when every member PR is merged or closed, or explicitly
+  handed to the user with what needs a human.
 - Run `+"`amux agent goal complete \"<summary>\"`"+` only when the objective is true
   and verified — never because you are stopping, out of ideas, or near the
   continuation budget. Archive every finished member first (see "Archiving
@@ -622,10 +665,17 @@ Never busy-poll: every continuation is a full model call against the goal's
 continuation budget. When nothing can move until a member, a PR or CI reports:
 1. Arm a background wake-up first — a `+"`Monitor`"+`, or a `+"`run_in_background`"+`
    until-loop on the member's events (`+"`amux agent events`"+`) or the PR/CI state.
+   It must cover **every open member PR**: e.g. one loop that polls
+   `+"`gh pr view <n> --json state,mergeable,statusCheckRollup,reviewDecision`"+` for
+   each PR in the ledger plus each member's state, and exits on any change.
 2. Run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn.
+   The note names what is awaited (member, repo#PR) and the wake-up you armed,
+   e.g. `+"`amux agent goal wait \"m1 agent-multiplexer#12 review, m2 CI; Monitor polls both\"`"+`.
    That lets this one turn end; the turn the wake-up's notification starts
    continues the goal as active.
 Never run `+"`goal wait`"+` without an armed wake-up: nothing would resume the goal.
+amux's PR watcher (docs/pr-watch.md) also sends you a prompt when a member PR
+changes state, but still arm your own wake-up before `+"`goal wait`"+`.
 
 ### Blockers, pausing and limits
 - Run `+"`amux agent goal blocked \"<reason>\"`"+` only after the same blocker

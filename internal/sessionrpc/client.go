@@ -15,6 +15,7 @@ import (
 
 	"amux/internal/access"
 	"amux/internal/core"
+	"golang.org/x/sys/unix"
 )
 
 type Client struct {
@@ -183,6 +184,9 @@ func (c *Client) Do(ctx context.Context, call Call) (Result, error) {
 			fmt.Errorf("publish session RPC request: %w", err))
 	}
 	response, err := c.awaitResponse(ctx, credential, service, envelope)
+	if errors.Is(err, ErrNotExecuted) {
+		return Result{RequestID: envelope.RequestID}, err
+	}
 	if err != nil {
 		return Result{RequestID: envelope.RequestID}, errors.Join(ErrIndeterminate, err)
 	}
@@ -266,7 +270,27 @@ func (c *Client) loadService(credential access.Credential) (Service, error) {
 	return service, nil
 }
 
+// awaitResponse waits for request's response. While the request is still
+// unclaimed the client may withdraw it: when it expires past the point any
+// daemon could accept it, or when ctx ends first. The daemon claims a request
+// by renaming it out of requests/, so exactly one of that rename and the
+// client's unlink succeeds; a successful unlink proves the request never ran
+// (ErrNotExecuted). Once the unlink finds it gone, it may have run, and only a
+// response can say what happened.
 func (c *Client) awaitResponse(ctx context.Context, credential access.Credential, service Service, request access.SignedRequest) (Response, error) {
+	cancelAt := time.UnixMilli(request.ExpiresAt).Add(requestCancelAfter)
+	claimed := false
+	withdraw := func() bool {
+		if claimed {
+			return false
+		}
+		if err := unix.Unlinkat(int(c.requests.Fd()), requestFileName(request.RequestID), 0); err != nil {
+			claimed = true // gone (claimed) or unremovable: no longer ours to cancel
+			return false
+		}
+		_ = unix.Fsync(int(c.requests.Fd()))
+		return true
+	}
 	// Wake when the response is published, or service.json is replaced by a
 	// restart, rather than on a tick. The watches are registered before the
 	// first read below, so a response that landed before them is still found.
@@ -298,8 +322,25 @@ func (c *Client) awaitResponse(ctx context.Context, credential access.Credential
 		if currentService.BootID != service.BootID {
 			return Response{}, ErrRestarted
 		}
-		waitWake(ctx.Done(), wake, interval)
+		wait := interval
+		if !claimed {
+			untilCancel := cancelAt.Sub(c.clock())
+			if untilCancel <= 0 {
+				if withdraw() {
+					return Response{}, fmt.Errorf("%w: request expired before the daemon claimed it", ErrNotExecuted)
+				}
+				continue // claimed meanwhile: its response may already be there
+			}
+			wait = min(wait, untilCancel)
+		}
+		waitWake(ctx.Done(), wake, wait)
 		if err := ctx.Err(); err != nil {
+			if withdraw() {
+				return Response{}, fmt.Errorf("%w: %w", ErrNotExecuted, err)
+			}
+			if response, found, readErr := c.readResponse(credential, service, request); readErr == nil && found {
+				return response, nil
+			}
 			return Response{}, fmt.Errorf("%w: %w", ErrIndeterminate, err)
 		}
 	}

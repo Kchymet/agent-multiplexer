@@ -53,6 +53,19 @@ const (
 	// MaxResponseBytes is the per-subject bound for daemon-created response
 	// files. Count admission remains independently enforced.
 	MaxResponseBytes = int64(8 << 20)
+
+	// requestClockSkew mirrors the authority's tolerance: Verify still accepts
+	// a request until this long after its expiry.
+	requestClockSkew = 5 * time.Second
+	// requestCancelAfter is how long after a request's expiry its client stops
+	// waiting for an unclaimed request and withdraws it: no daemon can accept
+	// it any more.
+	requestCancelAfter = requestClockSkew + time.Second
+	// expiredDropAfter is how long after expiry the daemon discards an
+	// unclaimed request unanswered. It is later than requestCancelAfter, so a
+	// client still waiting withdraws its own request first and learns that it
+	// did not run.
+	expiredDropAfter = requestCancelAfter + 10*time.Second
 )
 
 var (
@@ -62,7 +75,11 @@ var (
 	ErrResponseCapacity = errors.New("session RPC response capacity exceeded")
 	ErrRestarted        = errors.New("session RPC daemon boot changed")
 	ErrIndeterminate    = errors.New("session RPC outcome is indeterminate")
-	ErrClosed           = errors.New("session RPC endpoint is closed")
+	// ErrNotExecuted means the call timed out before the daemon claimed its
+	// request, and the client withdrew it: the call certainly did not run and
+	// is safe to retry.
+	ErrNotExecuted = errors.New("session RPC timed out, not executed")
+	ErrClosed      = errors.New("session RPC endpoint is closed")
 	// ErrUnpublished means the mailbox has no service record yet, so nothing was
 	// sent. A freshly provisioned session sees it until the daemon publishes.
 	ErrUnpublished = errors.New("session RPC service is not published")
