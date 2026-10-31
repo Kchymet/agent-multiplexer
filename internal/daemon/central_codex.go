@@ -181,12 +181,15 @@ func (s codexTokenSource) CodexChatGPTToken(ctx context.Context, req codexapp.To
 	// effectMu. Delivery must never acquire effectMu: that creates a cycle.
 	// The authority read lease plus metadata CAS is the delivery admission point.
 	err = accounts.AcceptAuthorized(req.SessionID, binding.Revision, profile.DeliveryEpoch, t.AccountID, t.Generation, func(commit func() error) error {
-		return s.d.authority.WithValid(ctx, principal, func() error {
-			if !s.authorized(req.SessionID) {
-				return errors.New("central Codex auth: session not authorized")
-			}
-			return commit()
-		})
+		// The session check opens the store (SQLite, with a busy timeout), so
+		// it runs just before the lease rather than under it: a lease delays
+		// every revocation and rotation. Archive takes no authority lock, so
+		// the check was never atomic with it under the lease either; the
+		// lease still orders this commit against revocation.
+		if !s.authorized(req.SessionID) {
+			return errors.New("central Codex auth: session not authorized")
+		}
+		return s.d.authority.WithValid(ctx, principal, commit)
 	}, req.Launch)
 	if err != nil {
 		return codexapp.ChatGPTToken{}, err

@@ -599,3 +599,72 @@ func TestAccountSignInStepsOfTwoAccountsDoNotWait(t *testing.T) {
 	d.effectMu.Unlock()
 	<-stepped
 }
+
+// TestServingContinuesDuringLongAuthorityLease reproduces the live stall: a
+// long authority read lease with a registry writer waiting for it blocked
+// every mailbox in ensureHostCredential's Valid on each reconcile tick, and
+// every report in its own Valid, for the whole lease. Both finish promptly
+// now; the writer publishes once the lease ends.
+func TestServingContinuesDuringLongAuthorityLease(t *testing.T) {
+	f := newIndependenceFixture(t)
+	t.Cleanup(f.runtime.close)
+	f.d.launchSpec = func(context.Context, string) (panespec.LaunchSpec, error) {
+		return panespec.LaunchSpec{}, errors.New("test: no launch spec")
+	}
+	ctx := context.Background()
+	if _, err := f.d.authority.EnsureHost(ctx); err != nil {
+		t.Fatal(err)
+	}
+	leased, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unlease := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unlease)
+	go func() {
+		_ = f.d.authority.WithValid(ctx, f.principals["a2"], func() error {
+			close(leased)
+			<-release
+			return nil
+		})
+	}()
+	<-leased
+	time.AfterFunc(10*time.Second, unlease)
+	rotated := make(chan error, 1)
+	go func() {
+		_, err := f.d.authority.Rotate(ctx, access.SubjectSession, "a3")
+		rotated <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // the rotation is waiting to publish
+
+	ticked := make(chan error, 1)
+	go func() { ticked <- f.runtime.reconcileTick(ctx) }()
+	select {
+	case err := <-ticked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile tick waited behind the authority lease")
+	}
+	reported := make(chan sessionrpc.DispatchResult, 1)
+	go func() { reported <- f.report(t, "a1") }()
+	select {
+	case result := <-reported:
+		if result.Status != sessionrpc.StatusOK {
+			t.Fatalf("report = %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("report waited behind the authority lease")
+	}
+	select {
+	case err := <-rotated:
+		t.Fatalf("rotation published during the lease: %v", err)
+	default:
+	}
+	unlease()
+	if err := <-rotated; err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.authority.Valid(ctx, f.principals["a3"]); err == nil {
+		t.Fatal("a3's old generation still valid after its rotation returned")
+	}
+}

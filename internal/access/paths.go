@@ -56,8 +56,8 @@ func (a *FileAuthority) EnsureSession(_ context.Context, subjectID, sessionDir s
 	if err := validateSubject(SubjectSession, subjectID); err != nil {
 		return SessionAccess{}, err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return SessionAccess{}, ErrAuthorityClosed
 	}

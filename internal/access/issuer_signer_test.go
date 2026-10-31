@@ -66,15 +66,19 @@ func TestSignIssuerDoesNotWaitBehindQueuedWriter(t *testing.T) {
 		_, err := a.Rotate(context.Background(), SubjectSession, "a2")
 		rotated <- err
 	}()
-	// TryRLock fails exactly when a writer is waiting: from then on every new
-	// reader of mu blocks until the lease ends.
-	for deadline := time.Now().Add(5 * time.Second); a.mu.TryRLock(); {
-		a.mu.RUnlock()
-		if time.Now().After(deadline) {
-			t.Fatal("the rotation never queued behind the read lease")
-		}
-		time.Sleep(time.Millisecond)
+	// The rotation cannot publish during the lease, but within publishPolite
+	// it waits without queueing on mu (lockPublish), so new readers are not
+	// blocked.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-rotated:
+		t.Fatalf("rotation published during a read lease: %v", err)
+	default:
 	}
+	if !a.mu.TryRLock() {
+		t.Fatal("a waiting rotation blocks new readers of mu")
+	}
+	a.mu.RUnlock()
 
 	message := []byte("amux-sessionrpc-response-v1\x00convoy")
 	start := time.Now()

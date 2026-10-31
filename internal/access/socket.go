@@ -154,13 +154,11 @@ func (a *FileAuthority) VerifyProof(ctx context.Context, challenge SocketChallen
 	if challenge.BootID != a.bootID || proof.Type != FrameProof || !validHexID(proof.ClientNonce, 16) {
 		return Principal{}, ErrInvalidCredential
 	}
-	a.mu.Lock()
-	if a.rootDir == nil {
-		a.mu.Unlock()
+	view := a.view.Load()
+	if view == nil {
 		return Principal{}, ErrAuthorityClosed
 	}
-	rec, ok := a.registry.Records[proof.KeyID]
-	a.mu.Unlock()
+	rec, ok := view.Records[proof.KeyID]
 	if !ok || rec.Generation != proof.Generation {
 		return Principal{}, ErrInvalidCredential
 	}
