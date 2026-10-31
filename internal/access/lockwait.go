@@ -34,10 +34,12 @@ func (a *FileAuthority) rlock(ctx context.Context) {
 		w, _ = ctx.Value(lockWaitKey{}).(*LockWait)
 	}
 	if w == nil {
+		a.yieldToWriter()
 		a.mu.RLock()
 		return
 	}
 	start := time.Now()
+	a.yieldToWriter()
 	a.mu.RLock()
 	w.nanos.Add(int64(time.Since(start)))
 }

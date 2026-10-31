@@ -191,3 +191,73 @@ func TestLeaseRecordsAuthorityLockWait(t *testing.T) {
 		t.Fatalf("lock wait = %v, want at least the 100ms publication", wait.Total())
 	}
 }
+
+// Leases that overlap continuously (Verify holds one across a journal fsync,
+// and many mailboxes verify at once) never leave mu free, so a writer that
+// only polled TryLock could wait forever: a revocation would never take
+// effect and Close would hang. The yield bound lets it in promptly.
+func TestWritersProgressThroughContinuouslyOverlappingLeases(t *testing.T) {
+	// Short leases: the yield lets the writer in within about publishPolite.
+	writersProgressThroughLeases(t, 8, 5*time.Millisecond, time.Second)
+}
+
+// Leases each longer than leaseYieldMax defeat the yield; the blocking
+// fallback still lets the writer in once the leases in flight end.
+func TestWritersProgressThroughOverlappingLongLeases(t *testing.T) {
+	writersProgressThroughLeases(t, 4, 3*leaseYieldMax/2, publishBlockAfter+2*time.Second)
+}
+
+func writersProgressThroughLeases(t *testing.T, holders int, hold, bound time.Duration) {
+	a, principals, _ := convoyAuthority(t, "leaser", "rotated", "revoked")
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var leases sync.WaitGroup
+	leases.Add(holders)
+	for i := 0; i < holders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			time.Sleep(time.Duration(i) * hold / time.Duration(holders)) // stagger: no gap between leases
+			leases.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if err := a.WithValid(context.Background(), principals["leaser"], func() error {
+					time.Sleep(hold)
+					return nil
+				}); err != nil {
+					return // closed
+				}
+			}
+		}(i)
+	}
+	leases.Wait()
+	defer func() { close(stop); wg.Wait() }()
+	time.Sleep(20 * time.Millisecond)
+	if a.mu.TryLock() {
+		a.mu.Unlock()
+		t.Log("mu was free once; the leases may not overlap on this machine")
+	}
+
+	timed := func(what string, fn func() error) {
+		t.Helper()
+		start := time.Now()
+		within(t, what, bound, fn)
+		t.Logf("%s published in %v through overlapping leases", what, time.Since(start))
+	}
+	timed("Rotate", func() error {
+		_, err := a.Rotate(context.Background(), SubjectSession, "rotated")
+		return err
+	})
+	if err := a.Valid(context.Background(), principals["rotated"]); err == nil {
+		t.Fatal("old generation still valid after Rotate returned")
+	}
+	timed("Revoke", func() error { return a.Revoke(context.Background(), SubjectSession, "revoked") })
+	if err := a.Valid(context.Background(), principals["revoked"]); err == nil {
+		t.Fatal("revoked generation still valid after Revoke returned")
+	}
+	timed("Close", a.Close)
+}

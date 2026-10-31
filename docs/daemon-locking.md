@@ -124,7 +124,7 @@ are and sit below every resource lock in the order.
 | `completionRegistry.mu` | completion entries |
 | `sessionEventPager.mu`, response budget `mu` | event paging state, mailbox response budget |
 | `FileAuthority.writeMu` | registry writers (issue, rotate, revoke, regrant, renew, `Current`'s publication repair, `EnsureSession`) and their file IO: staging, the registry commit, credential and mailbox publication. Readers never take it |
-| `FileAuthority.mu` (RW) | the lease lock: `Verify` and `WithValid` hold it shared from their check through their effect (the replay acceptance, the accounts CAS). A writer takes it exclusively only to swap in a registry it already committed (`publish`), by `TryLock` retry, never parked, so a long lease delays that writer and nothing else. Below `writeMu` |
+| `FileAuthority.mu` (RW) | the lease lock: `Verify` and `WithValid` hold it shared from their check through their effect (the replay acceptance, the accounts CAS). A writer takes it exclusively only to swap in a registry it already committed (`publish`), with bounded politeness (`lockPublish`): `TryLock` retry for 50ms; then new leases yield to it for up to 100ms each, so in-flight leases drain; after 2s a blocking `Lock`, which waits only for in-flight leases (the plain RWMutex guarantee). Below `writeMu` |
 | `FileAuthority.view` (atomic) | the published registry. `Valid`, `HasCurrent`, `VerifyProof` and `WatchInvalidation` read it with no lock |
 | `FileAuthority.watchMu` | invalidation watchers; `publish` closes them after storing `view`, below `mu` |
 | `store` `sharedMu`; SQLite | pooled handles; SQLite WAL with `busy_timeout(5000)` serializes writers itself |
@@ -318,8 +318,19 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
    - `Valid`, `HasCurrent`, `VerifyProof` and `WatchInvalidation` read an
      atomic snapshot of the registry (`view`) and never wait.
    - Writers serialize on `writeMu`, which covers all their file IO, and take
-     `mu` only for the in-memory swap, by `TryLock` retry, so a waiting writer
-     never blocks a new lease (`Verify`, `WithValid`).
+     `mu` only for the in-memory swap, in three bounded phases
+     (`lockPublish`):
+     - For the first 50ms they only retry `TryLock`, so a waiting writer
+       never blocks a new lease (`Verify`, `WithValid`).
+     - Then they raise `writerYield`: each new lease waits up to 100ms for
+       the writer, so the leases in flight drain. Leases overlapping without
+       a gap (Verify holds one across a journal fsync) can no longer starve a
+       revocation or Close.
+     - After 2s they block in `Lock`, waiting only for in-flight leases as a
+       plain RWMutex would. So a revocation always publishes, and Close
+       always finishes, once those leases end. A lease longer than 2s still
+       holds new leases for its remainder, as before; none of the remaining
+       leases does slow work.
    - Semantics are unchanged: a rotation or revocation is published before
      its call returns, so every check that starts afterwards sees it, and its
      watchers are closed by then. A lease still excludes publication from its
@@ -329,4 +340,9 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
    `TestAuthorityLeasesDoNotWaitForAWritersFileIO` (access),
    `TestRequestServedDuringLongAuthorityLeaseWithWriterWaiting` (sessionrpc),
    `TestServingContinuesDuringLongAuthorityLease` (daemon). Each fails or
-   hangs on the old authority. Done.
+   hangs on the old authority. Writer progress:
+   `TestWritersProgressThroughContinuouslyOverlappingLeases` (Rotate, Revoke
+   and Close each publish in about 60ms through gapless 5ms leases; they
+   starve without the yield) and `TestWritersProgressThroughOverlappingLongLeases`
+   (150ms leases defeat the yield; the 2s fallback still gets the writer in).
+   Done.

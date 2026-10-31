@@ -178,6 +178,9 @@ type FileAuthority struct {
 	// registers under it, so no invalidation falls between the two.
 	watchMu  sync.Mutex
 	watchers map[string]map[chan struct{}]struct{}
+	// writerYield is set while a writer has waited past publishPolite to
+	// publish; new leases wait on it briefly (yieldToWriter).
+	writerYield atomic.Pointer[chan struct{}]
 
 	// replay is the in-memory ledger every replay decision is taken on, under
 	// replayMu alone; journal makes each acceptance durable (replay_journal.go).
@@ -1134,18 +1137,64 @@ func (a *FileAuthority) publish(next registryFile, invalidated string) {
 // publishRetryMax caps lockPublish's backoff between attempts.
 const publishRetryMax = 2 * time.Millisecond
 
-// lockPublish takes mu exclusively without queueing on it. A writer parked
-// in sync.RWMutex.Lock blocks every new lease, so one long lease would stall
-// every mailbox's Verify behind it; retrying TryLock lets leases continue
-// while the writer waits for a moment with none held. Leases are short, so
-// such a moment comes quickly.
+// lockPublish's progress bounds. A writer first only retries TryLock. Past
+// publishPolite it raises writerYield, which holds each new lease back for up
+// to leaseYieldMax, so the leases in flight drain (Verify holds one across a
+// journal fsync, a few ms) and the writer gets in even when leases overlap
+// continuously. Past publishBlockAfter it falls back to a blocking Lock: it
+// then waits only for the leases already in flight, the plain RWMutex
+// guarantee, at the cost of holding new leases until they end. A revocation
+// therefore always publishes, and Close always finishes, once in-flight
+// leases end.
+const (
+	publishPolite     = 50 * time.Millisecond
+	leaseYieldMax     = 100 * time.Millisecond
+	publishBlockAfter = 2 * time.Second
+)
+
+// lockPublish takes mu exclusively. A writer parked in sync.RWMutex.Lock
+// blocks every new lease, so one long lease would stall every mailbox's
+// Verify behind it; retrying TryLock lets leases continue while the writer
+// waits for a moment with none held, within the bounds above.
 func (a *FileAuthority) lockPublish() {
+	start := time.Now()
 	wait := 50 * time.Microsecond
+	var yield chan struct{}
+	defer func() {
+		if yield != nil {
+			a.writerYield.Store(nil)
+			close(yield)
+		}
+	}()
 	for !a.mu.TryLock() {
+		waited := time.Since(start)
+		if waited >= publishBlockAfter {
+			a.mu.Lock()
+			return
+		}
+		if yield == nil && waited >= publishPolite {
+			yield = make(chan struct{})
+			a.writerYield.Store(&yield)
+		}
 		time.Sleep(wait)
 		if wait < publishRetryMax {
 			wait *= 2
 		}
+	}
+}
+
+// yieldToWriter holds a new lease back, for at most leaseYieldMax, while a
+// writer that has waited past publishPolite is trying to publish.
+func (a *FileAuthority) yieldToWriter() {
+	yield := a.writerYield.Load()
+	if yield == nil {
+		return
+	}
+	timer := time.NewTimer(leaseYieldMax)
+	defer timer.Stop()
+	select {
+	case <-*yield:
+	case <-timer.C:
 	}
 }
 

@@ -66,8 +66,9 @@ func TestSignIssuerDoesNotWaitBehindQueuedWriter(t *testing.T) {
 		_, err := a.Rotate(context.Background(), SubjectSession, "a2")
 		rotated <- err
 	}()
-	// The rotation cannot publish during the lease, but it waits without
-	// queueing on mu (lockPublish), so new readers are never blocked.
+	// The rotation cannot publish during the lease, but within publishPolite
+	// it waits without queueing on mu (lockPublish), so new readers are not
+	// blocked.
 	time.Sleep(50 * time.Millisecond)
 	select {
 	case err := <-rotated:
