@@ -3,6 +3,7 @@ package clipboard
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
 	"os"
 	"os/exec"
@@ -44,13 +45,37 @@ type Copier struct {
 	wake    chan struct{}
 }
 
-// Tool is one clipboard command: argv receives the text on stdin, encoded as
-// UTF-16LE with a BOM when UTF16 is set (clip.exe reads anything else in the
-// console's OEM code page and mangles non-ASCII text).
+// Tool is one clipboard command: argv receives the text on stdin, re-encoded
+// per Encoding.
 type Tool struct {
-	Argv  []string
-	UTF16 bool
+	Argv     []string
+	Encoding Encoding
 }
+
+// Encoding is how a Tool wants the UTF-8 text on its stdin.
+type Encoding byte
+
+const (
+	// UTF8 passes the text through unchanged.
+	UTF8 Encoding = iota
+	// UTF16LE re-encodes it as UTF-16LE with no byte-order mark. clip.exe
+	// reads non-UTF-16 input in the console's OEM code page, mangling
+	// non-ASCII text, but it copies a leading BOM onto the clipboard
+	// verbatim, so Windows pastes start with U+FEFF; without the BOM it
+	// recognizes UTF-16 by its byte pattern (IsTextUnicode).
+	UTF16LE
+	// Base64 sends the UTF-8 text base64-encoded, so the bytes on the pipe
+	// are pure ASCII and no console code page or BOM handling on the Windows
+	// side can alter them; the receiving script decodes them back to UTF-8.
+	Base64
+)
+
+// psSetClipboard decodes base64 UTF-8 from stdin and sets it as the Windows
+// clipboard text. Reading ASCII sidesteps [Console]::InputEncoding entirely
+// (whose UTF8 default object carries a BOM preamble), and Set-Clipboard takes
+// a .NET string, so no BOM can reach the clipboard.
+const psSetClipboard = "$b=[Console]::In.ReadToEnd().Trim(); " +
+	"Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))"
 
 // New returns a Copier for this process's environment that writes the terminal
 // route to out. out must be safe to write concurrently with whatever else draws
@@ -94,6 +119,12 @@ func (c *Copier) loop() {
 
 // deliver runs both routes for one copy, synchronously.
 func (c *Copier) deliver(text []byte) {
+	// A byte-order mark is never meaningful copied text (a child that read a
+	// BOM-prefixed file, or encoded one itself, would paste U+FEFF).
+	text = bytes.TrimPrefix(text, []byte("\uFEFF"))
+	if len(text) == 0 {
+		return
+	}
 	if c.out != nil {
 		tmux := c.env("TMUX") != ""
 		if !tmux || c.runTimeout([]string{"tmux", "load-buffer", "-w", "-"}, text) != nil {
@@ -101,11 +132,7 @@ func (c *Copier) deliver(text []byte) {
 		}
 	}
 	for _, t := range c.tools() {
-		in := text
-		if t.UTF16 {
-			in = utf16LE(text)
-		}
-		if c.runTimeout(t.Argv, in) == nil {
+		if c.runTimeout(t.Argv, t.Encoding.encode(text)) == nil {
 			return
 		}
 	}
@@ -119,18 +146,22 @@ func (c *Copier) runTimeout(argv []string, stdin []byte) error {
 
 // Tools lists the clipboard commands to try on this host, best first, keeping
 // only those lookPath finds. WSL prefers the Windows clipboard directly over
-// WSLg's X/Wayland bridge, whose sync to Windows is unreliable.
+// WSLg's X/Wayland bridge, whose sync to Windows is unreliable. PowerShell
+// leads there because its base64 route is immune to Windows console
+// encodings; clip.exe (faster to start, but heuristic about its input
+// encoding) is the fallback.
 func Tools(goos string, env func(string) string, lookPath func(string) (string, error), wsl bool) []Tool {
 	var cand []Tool
 	switch {
 	case goos == "darwin":
 		cand = append(cand, Tool{Argv: []string{"pbcopy"}})
 	case wsl:
+		ps := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", psSetClipboard}
 		cand = append(cand,
-			Tool{Argv: []string{"clip.exe"}, UTF16: true},
-			Tool{Argv: []string{"/mnt/c/Windows/System32/clip.exe"}, UTF16: true},
-			Tool{Argv: []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-				"[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"}})
+			Tool{Argv: append([]string{"powershell.exe"}, ps...), Encoding: Base64},
+			Tool{Argv: append([]string{"/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"}, ps...), Encoding: Base64},
+			Tool{Argv: []string{"clip.exe"}, Encoding: UTF16LE},
+			Tool{Argv: []string{"/mnt/c/Windows/System32/clip.exe"}, Encoding: UTF16LE})
 	}
 	if goos != "darwin" {
 		if env("WAYLAND_DISPLAY") != "" {
@@ -175,11 +206,20 @@ func runTool(ctx context.Context, argv []string, stdin []byte) error {
 	return cmd.Run()
 }
 
-// utf16LE re-encodes UTF-8 text as UTF-16LE behind a byte-order mark.
+func (e Encoding) encode(text []byte) []byte {
+	switch e {
+	case UTF16LE:
+		return utf16LE(text)
+	case Base64:
+		return base64.StdEncoding.AppendEncode(nil, text)
+	}
+	return text
+}
+
+// utf16LE re-encodes UTF-8 text as UTF-16LE, without a byte-order mark.
 func utf16LE(text []byte) []byte {
 	units := utf16.Encode([]rune(string(text)))
-	out := make([]byte, 2, 2+2*len(units))
-	out[0], out[1] = 0xff, 0xfe
+	out := make([]byte, 0, 2*len(units))
 	for _, u := range units {
 		out = append(out, byte(u), byte(u>>8))
 	}
