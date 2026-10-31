@@ -25,7 +25,10 @@ func TestExpiredBacklogDrainsWhileAuthorityWriterQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := filepath.Join(f.grant.MailboxHostDir, RequestsDirName)
-	issued := time.Now().Add(-3 * time.Minute)
+	// Expired past Verify's clock skew, so each is rejected without any
+	// authority state, but recent enough that the server still claims and
+	// answers it rather than discarding an abandoned request.
+	issued := time.Now().Add(-access.MaxRequestAge - 7*time.Second)
 	for i := 0; i < backlog; i++ {
 		envelope, encoded := earlierSignedCall(t, f, Query{Verb: "report-context"}.call(), issued)
 		publishEnvelope(t, requests, envelope, encoded)
