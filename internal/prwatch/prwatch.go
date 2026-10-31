@@ -96,6 +96,18 @@ const (
 	Dropped
 )
 
+// Wake is one queued notification together with the authority-bearing identity
+// observed when it was produced. Deliver must re-resolve this relationship at
+// the exact prompt boundary; Text alone is never authority to disclose it.
+type Wake struct {
+	SessionID string
+	Workgroup string
+	Repo      string
+	Branch    string // the member branch that owned the PR
+	PRBranch  string // the observed PR head (Branch or a permitted suffix)
+	Text      string
+}
+
 // Config wires a Watcher to its environment. Every function is required
 // except Logf, Now and Interval.
 type Config struct {
@@ -107,8 +119,11 @@ type Config struct {
 	Save func(sessionID, state string) error
 	// Emit records a change on the member's event stream.
 	Emit func(Change)
-	// Deliver prompts a workgroup's coordinator with wake-up lines.
-	Deliver  func(ctx context.Context, workgroup string, lines []string) Delivery
+	// Deliver revalidates and prompts a workgroup's coordinator. Its result is
+	// per wake so a mixed batch can drop stale relationships without withholding
+	// independent eligible notifications. A missing/misaligned result is treated
+	// as Deferred.
+	Deliver  func(ctx context.Context, workgroup string, wakes []Wake) []Delivery
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
 	Interval time.Duration
@@ -125,7 +140,7 @@ type record struct {
 
 type pendingWake struct {
 	key  string
-	line string
+	wake Wake
 	at   time.Time
 }
 
@@ -350,9 +365,9 @@ func (w *Watcher) noteSuccess() {
 	w.failures = 0
 }
 
-// owns reports whether a PR head branch belongs to a member branch: the branch
+// Owns reports whether a PR head branch belongs to a member branch: the branch
 // itself or the branch plus a "-suffix".
-func owns(branch, head string) bool {
+func Owns(branch, head string) bool {
 	return head == branch || strings.HasPrefix(head, branch+"-")
 }
 
@@ -385,7 +400,7 @@ func (w *Watcher) observe(ctx context.Context, m Member, open map[string][]harne
 	}
 	for _, repo := range m.Repos {
 		for _, pr := range open[repo] {
-			if !owns(m.Branch, pr.Branch) || seen[prKey(pr)] {
+			if !Owns(m.Branch, pr.Branch) || seen[prKey(pr)] {
 				continue
 			}
 			if p, ok := prevBy[prKey(pr)]; ok {
@@ -683,7 +698,10 @@ func (w *Watcher) enqueue(m Member, c Change, now time.Time) {
 		label = m.SessionID + " (" + label + ")"
 	}
 	line := fmt.Sprintf("member %s PR %s: %s — %s", label, prKey(c.PR), strings.Join(c.Wake, "; "), c.PR.URL)
-	w.pending[c.Workgroup] = append(w.pending[c.Workgroup], pendingWake{key: key, line: line, at: now})
+	w.pending[c.Workgroup] = append(w.pending[c.Workgroup], pendingWake{key: key, wake: Wake{
+		SessionID: c.SessionID, Workgroup: c.Workgroup, Repo: c.PR.Repo,
+		Branch: m.Branch, PRBranch: c.PR.Branch, Text: line,
+	}, at: now})
 }
 
 func (w *Watcher) remember(key string) {
@@ -715,7 +733,7 @@ func (w *Watcher) Flush(ctx context.Context) {
 			if now.Sub(p.at) <= MaxPendingAge {
 				queue = append(queue, p)
 			} else {
-				w.cfg.Logf("prwatch: dropping stale wake-up for %s: %s", wg, p.line)
+				w.cfg.Logf("prwatch: dropping stale wake-up for %s member %s repo %s", wg, p.wake.SessionID, p.wake.Repo)
 			}
 		}
 		if len(queue) == 0 {
@@ -723,24 +741,45 @@ func (w *Watcher) Flush(ctx context.Context) {
 			continue
 		}
 		w.pending[wg] = queue
-		lines := make([]string, 0, len(queue))
+		wakes := make([]Wake, len(queue))
 		for i, p := range queue {
-			if i == maxWakeLines {
-				lines = append(lines, fmt.Sprintf("(+%d more PR updates)", len(queue)-maxWakeLines))
-				break
-			}
-			lines = append(lines, p.line)
+			wakes[i] = p.wake
 		}
-		switch w.cfg.Deliver(ctx, wg, lines) {
-		case Delivered:
-			for _, p := range queue {
-				w.remember(p.key)
+		results := w.cfg.Deliver(ctx, wg, wakes)
+		remaining := queue[:0]
+		for i, p := range queue {
+			result := Deferred
+			if i < len(results) {
+				result = results[i]
 			}
+			switch result {
+			case Delivered:
+				w.remember(p.key)
+			case Dropped:
+			default:
+				remaining = append(remaining, p)
+			}
+		}
+		if len(remaining) == 0 {
 			delete(w.pending, wg)
-		case Dropped:
-			delete(w.pending, wg)
+		} else {
+			w.pending[wg] = remaining
 		}
 	}
+}
+
+// WakeLines renders a bounded batch after delivery has removed unauthorized
+// entries. It never receives stale text from the daemon's authorization seam.
+func WakeLines(wakes []Wake) []string {
+	lines := make([]string, 0, min(len(wakes), maxWakeLines+1))
+	for i, wake := range wakes {
+		if i == maxWakeLines {
+			lines = append(lines, fmt.Sprintf("(+%d more PR updates)", len(wakes)-maxWakeLines))
+			break
+		}
+		lines = append(lines, wake.Text)
+	}
+	return lines
 }
 
 // Pending reports how many wake-ups are queued for a workgroup (tests,
