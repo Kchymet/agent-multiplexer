@@ -17,6 +17,9 @@ import (
 	"amux/internal/sessionreport"
 	"amux/internal/sessionrpc"
 	"amux/internal/store"
+	"amux/internal/wsops"
+
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // TestSessionReportIndependence records which slow holders delay session A's
@@ -46,9 +49,13 @@ func TestSessionReportIndependence(t *testing.T) {
 		{name: "host start of a3, stalled launching its runtime", hold: holdRuntimeStart, blocked: false},
 		{name: "host agent-set-repos of a3, stalled in its git work", hold: holdDispatch(core.Action{Action: core.ActionAgentSetRepos, ID: "a3", Fields: map[string]string{"repos": ""}}), blocked: false},
 		{name: "host add-repo, stalled cloning", hold: holdDispatch(core.Action{Action: core.ActionAddRepo, Fields: map[string]string{"source": "https://example.invalid/r.git"}}), blocked: false},
+		{name: "coordinator's own add-agent, stalled creating", hold: holdCoordinatorAddAgent, blocked: false},
+		{name: "a3's completion cleanup, stalled stopping its runtime", hold: holdCompletion, blocked: false},
 		{name: "peer session credential helper", hold: holdPeerCredential, blocked: false},
 		{name: "workgroup creation, stalled launching its coordinator", hold: holdCreation, blocked: false},
 		{name: "reconcile pass", hold: holdReconcile, blocked: false},
+		{name: "a3 marking itself done, stalled archiving itself", hold: holdSelfCompletion("a3"), blocked: false},
+		{name: "account sign-in step, stalled", hold: holdAccountStep("claude:central"), blocked: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,6 +254,46 @@ func holdDispatch(action core.Action) func(t *testing.T, f *independenceFixture,
 	}
 }
 
+// holdCoordinatorAddAgent is the workgroup's coordinator adding an agent
+// through its own session mailbox, stalling inside the creation.
+func holdCoordinatorAddAgent(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	f.d.dispatch = func(context.Context, core.Action, func(string)) (string, error) {
+		held()
+		<-release
+		return "", nil
+	}
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionAddAgent, ID: "root",
+		Fields: map[string]string{"agent": "claude"}}
+	if result, _ := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals["root"], Call: call}); result.Status != sessionrpc.StatusOK {
+		t.Errorf("coordinator add-agent = %+v", result)
+	}
+}
+
+// holdCompletion is a3's completion cleanup (revoke, then stop the runtime)
+// stalling in the kill.
+func holdCompletion(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	eng := f.d.engine.(*fakeEngine)
+	eng.running("a3")
+	var once sync.Once
+	eng.killObserved = func(engine.Instance) {
+		once.Do(func() {
+			held()
+			<-release
+		})
+	}
+	c := f.runtime.completions
+	c.minimum, c.runtime, c.poll, c.abandon = time.Millisecond, time.Millisecond, time.Millisecond, time.Millisecond
+	if err := wsops.SetArchived(context.Background(), "a3", true); err != nil {
+		t.Error(err)
+		return
+	}
+	c.begin(f.principals["a3"], "0123456789abcdef0123456789abcdef", "a3")
+	deadline := time.Now().Add(10 * time.Second)
+	for c.has("a3") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // holdPeerCredential is a2's GitHub credential read stalling inside its
 // helper process.
 func holdPeerCredential(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
@@ -407,4 +454,148 @@ func TestWorkgroupStartStartsOnlyItsLockedMembers(t *testing.T) {
 	if keys := eng.ensuredKeys(); len(keys) != 1 || keys[0].AgentID != "a3" {
 		t.Fatalf("workgroup start launched %v, want only its locked member a3", keys)
 	}
+}
+
+// holdSelfCompletion is id marking itself done (`amux agent done`), stalling
+// inside the archive of itself.
+func holdSelfCompletion(id string) func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	return func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+		f.runtime.applyResult = func(ctx context.Context, a core.Action) (string, error) {
+			if a.ID == id {
+				held()
+				<-release
+			}
+			return wsops.ApplyResult(ctx, a)
+		}
+		if result := f.selfComplete(t, id); result.Status != sessionrpc.StatusOK {
+			t.Errorf("%s done = %+v", id, result)
+		}
+	}
+}
+
+func (f *independenceFixture) selfComplete(t *testing.T, id string) sessionrpc.DispatchResult {
+	call := sessionrpc.Call{Kind: sessionrpc.CallOperation, Route: access.RouteAction, Verb: core.ActionSetArchived, ID: id,
+		Fields: map[string]string{"archived": "true"}}
+	result, err := f.runtime.dispatch(context.Background(), sessionrpc.DispatchRequest{Principal: f.principals[id],
+		RequestID: "0123456789abcdef0123456789abcdef", Call: call})
+	if err != nil {
+		t.Errorf("%s done: %v", id, err)
+	}
+	return result
+}
+
+// holdAccountStep is a console sign-in step for profile, stalling inside its
+// admission.
+func holdAccountStep(profile string) func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+	return func(t *testing.T, f *independenceFixture, held func(), release <-chan struct{}) {
+		f.d.beforeAccountStep = func(id string) {
+			if id == profile {
+				held()
+				<-release
+			}
+		}
+		pollAccount(f.d, profile)
+	}
+}
+
+func pollAccount(d *Daemon, profile string) hp.AccountResult {
+	return d.accountCall(context.Background(), hp.AccountRequest{Operation: hp.AccountPoll, ProfileID: profile,
+		AttemptID: "attempt", Initiator: "test"}, true)
+}
+
+// TestSelfCompletionsOfTwoSessionsDoNotWait: a3 marking itself done holds only
+// its own lock, so a2 completes meanwhile, and a3's own report waits for it.
+func TestSelfCompletionsOfTwoSessionsDoNotWait(t *testing.T) {
+	f := newIndependenceFixture(t)
+	release := make(chan struct{})
+	held := make(chan struct{})
+	var once sync.Once
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		holdSelfCompletion("a3")(t, f, func() { once.Do(func() { close(held) }) }, release)
+	}()
+	<-held
+	completed := make(chan sessionrpc.DispatchResult, 1)
+	go func() { completed <- f.selfComplete(t, "a2") }()
+	select {
+	case result := <-completed:
+		if result.Status != sessionrpc.StatusOK {
+			t.Fatalf("a2 done = %+v", result)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a2 marking itself done waited for a3's")
+	}
+	reported := make(chan sessionrpc.DispatchResult, 1)
+	go func() { reported <- f.report(t, "a3") }()
+	select {
+	case result := <-reported:
+		t.Fatalf("a3 reported while its completion held a3: %+v", result)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	// a3 is archived by then, so its late report is refused.
+	if result := <-reported; result.Status != sessionrpc.StatusDenied {
+		t.Fatalf("a3 report after its completion = %+v", result)
+	}
+}
+
+// TestAccountSignInStepsOfTwoAccountsDoNotWait: a sign-in step holds only its
+// profile's lock and the gate shared. Another profile's step and a step during
+// a slow session action proceed; the same profile's next step and an
+// exclusive policy change still order with it.
+func TestAccountSignInStepsOfTwoAccountsDoNotWait(t *testing.T) {
+	d := isolatedAccounts(t)
+	release := make(chan struct{})
+	held := make(chan struct{})
+	var once sync.Once
+	d.beforeAccountStep = func(id string) {
+		if id == "claude:central" {
+			once.Do(func() { close(held) })
+			<-release
+		}
+	}
+	first := make(chan struct{})
+	go func() { defer close(first); pollAccount(d, "claude:central") }()
+	<-held
+	other := make(chan struct{})
+	go func() { defer close(other); pollAccount(d, "codex:central") }()
+	select {
+	case <-other:
+	case <-time.After(10 * time.Second):
+		t.Fatal("codex sign-in step waited for claude's")
+	}
+	same := make(chan struct{})
+	go func() { defer close(same); pollAccount(d, "claude:central") }()
+	select {
+	case <-same:
+		t.Fatal("claude's next sign-in step ran during its stalled one")
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	<-first
+	<-same
+
+	// A slow session action holds the gate shared; a step need not wait.
+	releaseSession := d.admitSession("a3")
+	stepped := make(chan struct{})
+	go func() { defer close(stepped); pollAccount(d, "codex:central") }()
+	select {
+	case <-stepped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sign-in step waited for a session action")
+	}
+	releaseSession()
+
+	d.lockEffectExclusive()
+	stepped = make(chan struct{})
+	go func() { defer close(stepped); pollAccount(d, "codex:central") }()
+	select {
+	case <-stepped:
+		t.Fatal("sign-in step ran during an exclusive holder")
+	case <-time.After(250 * time.Millisecond):
+	}
+	d.effectMu.Unlock()
+	<-stepped
 }

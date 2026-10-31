@@ -391,6 +391,45 @@ func TestShutdownIdleWaitIsBounded(t *testing.T) {
 	}
 }
 
+// WaitIdle spends the wait-for-idle without terminating anything, and the
+// Shutdown after it terminates at once rather than waiting a second budget.
+func TestWaitIdleThenShutdownWaitsOnce(t *testing.T) {
+	const idleBudget = 300 * time.Millisecond
+	t.Setenv("AMUX_SHUTDOWN_GRACE", idleBudget.String())
+	eng := New(WithActivity(func(engine.Key) engine.Activity { return engine.ActivityBusy }))
+	defer eng.Shutdown()
+
+	spec := engine.Spec{
+		Key:  engine.Key{AgentID: "busy-twice", Tab: 0},
+		Argv: []string{"sh", "-c", "trap 'exit 0' TERM; printf READY; while :; do sleep 0.02; done"},
+		Cols: 80, Rows: 24,
+	}
+	inst, err := eng.Ensure(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	waitFor(t, c, "READY", 3*time.Second)
+
+	start := time.Now()
+	eng.WaitIdle()
+	if waited := time.Since(start); waited < idleBudget {
+		t.Fatalf("WaitIdle returned after %v; should have waited out the busy budget (%v)", waited, idleBudget)
+	}
+	if !inst.Alive() {
+		t.Fatal("WaitIdle terminated the instance")
+	}
+	start = time.Now()
+	eng.Shutdown()
+	if inst.Alive() {
+		t.Fatal("instance should be dead after Shutdown")
+	}
+	if took := time.Since(start); took >= idleBudget {
+		t.Fatalf("Shutdown after WaitIdle took %v; it waited for idle again", took)
+	}
+}
+
 // Shutdown terminates instances in parallel, so its total cost is ~one grace
 // period even with several stubborn (SIGTERM-ignoring) agents, not N of them.
 func TestShutdownTerminatesInParallel(t *testing.T) {

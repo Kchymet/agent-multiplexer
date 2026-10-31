@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"amux/internal/access"
@@ -44,6 +45,10 @@ type sessionRuntime struct {
 	now                 func() time.Time
 	callbackTimeout     time.Duration
 	dispatchMu          sync.Mutex
+	// reportsOnly is set when the daemon begins stopping: until run returns the
+	// mailboxes serve only session reports, so the engine's wait-for-idle can
+	// still see a busy agent's turn end while no new effect is admitted.
+	reportsOnly atomic.Bool
 	// progress, if set, receives (done, total) as reconcile visits each
 	// session. Startup sets it so lifecycle clients can show mailbox adoption.
 	progress    func(done, total int)
@@ -736,8 +741,11 @@ func (c *completionRegistry) finish(subjectID string, entry *completionEntry) {
 		}
 	}
 stop:
-	c.d.lockEffectExclusive()
-	defer c.d.effectMu.Unlock()
+	// Revocation and the kill change only this subject, so its admission is
+	// enough; a restore cancels the entry before it takes the gate, and owns
+	// rechecks that here.
+	release := c.d.admitSession(subjectID)
+	defer release()
 	if !c.owns(subjectID, entry) || !c.archived(subjectID) {
 		return
 	}
