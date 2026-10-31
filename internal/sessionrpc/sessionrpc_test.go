@@ -1763,7 +1763,7 @@ func TestResponseSignatureBindsStatusBodyAndRequest(t *testing.T) {
 
 var _ io.Reader = zeroReader{}
 
-func TestUnansweredRequestPreservesDeadlineAndIndeterminate(t *testing.T) {
+func TestUnclaimedRequestPreservesDeadlineAndIsWithdrawn(t *testing.T) {
 	var dispatch atomic.Int32
 	f := newFixture(t, Callbacks{Dispatch: countDispatch(&dispatch)}, ServerOptions{})
 	client := f.client(clientOptions{poll: time.Millisecond})
@@ -1771,14 +1771,15 @@ func TestUnansweredRequestPreservesDeadlineAndIndeterminate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	result, err := client.Query(ctx, Query{Verb: "unanswered"})
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrIndeterminate) {
-		t.Fatalf("deadline lost its identity or uncertain-effect semantics: %v", err)
+	// Never claimed, so the client withdrew it: the outcome is known.
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrNotExecuted) || errors.Is(err, ErrIndeterminate) {
+		t.Fatalf("deadline lost its identity or its not-executed outcome: %v", err)
 	}
 	if result.RequestID == "" || dispatch.Load() != 0 {
 		t.Fatalf("request was not published without dispatch: %+v, dispatches=%d", result, dispatch.Load())
 	}
 	entries, err := os.ReadDir(f.grant.RequestsHostDir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("deadline retried or lost request: entries=%d err=%v", len(entries), err)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("deadline retried or kept the withdrawn request: entries=%d err=%v", len(entries), err)
 	}
 }
