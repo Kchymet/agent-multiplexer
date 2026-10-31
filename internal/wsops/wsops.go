@@ -127,7 +127,7 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
-		Agent: kind, Model: coord.Model, Mode: store.ModeInteractive, Prompt: strings.TrimSpace(prompt),
+		Agent: kind, Model: agent.CanonicalModel(kind, coord.Model), Mode: store.ModeInteractive, Prompt: strings.TrimSpace(prompt),
 		Dir: store.CoordinatorDir(rootID), ClaudeID: agent.HarnessFor(kind).NewSessionID(),
 		Created: store.Now(),
 	}
@@ -240,7 +240,7 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	claudeID := agent.HarnessFor(kind).NewSessionID()
 	a := store.Session{
 		ID: agentID, RootID: rootID,
-		Agent: kind, Model: spec.Model,
+		Agent: kind, Model: agent.CanonicalModel(kind, spec.Model),
 		Mode: store.NormalizeMode(spec.Mode),
 		Repo: store.JoinRepos(repos), Branch: branch, Dir: dir,
 		ClaudeID: claudeID, Prompt: spec.Prompt, Created: store.Now(),

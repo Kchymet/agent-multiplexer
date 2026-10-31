@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"amux/internal/cfghome"
 	"amux/internal/claudecfg"
@@ -23,23 +24,68 @@ type claudeHarness struct{}
 
 func (claudeHarness) Kind() string { return "claude" }
 
-// claudeModels is the built-in Claude model catalog — aliases followed by
-// explicit model IDs, with opus first (the default).
-var claudeModels = []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5-5"}
+// claudeModels is the built-in Claude model catalog: detailed model IDs, with
+// Opus first (the default). amux passes these IDs to Claude Code verbatim so a
+// launch names exactly the model the picker showed.
+var claudeModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}
+
+// claudeModelAliases maps Claude Code's short model aliases — which older amux
+// releases offered and so may already be stored on a session, set in a user's
+// .claude.json, or passed on the command line (`--model opus`, `-f model=opus`)
+// — to the detailed ID amux now offers in their place.
+var claudeModelAliases = map[string]string{
+	"opus":   "claude-opus-5-5",
+	"sonnet": "claude-sonnet-5-5",
+	"haiku":  "claude-haiku-5-5",
+	"fable":  "claude-fable-5-1",
+}
+
+// CanonicalClaudeModel resolves a short Claude alias to its detailed model ID,
+// preserving a context-window suffix (`opus[1m]` → `claude-opus-5-5[1m]`).
+// Anything that is not a known alias — a detailed ID, a custom model, or "" —
+// is returned trimmed but otherwise unchanged.
+func CanonicalClaudeModel(model string) string {
+	model = strings.TrimSpace(model)
+	base, suffix := model, ""
+	if i := strings.IndexByte(model, '['); i > 0 {
+		base, suffix = model[:i], model[i:]
+	}
+	if id, ok := claudeModelAliases[strings.ToLower(base)]; ok {
+		return id + suffix
+	}
+	return model
+}
+
+// canonicalClaudeModels applies CanonicalClaudeModel to each entry.
+func canonicalClaudeModels(models []string) []string {
+	out := make([]string, len(models))
+	for i, m := range models {
+		out[i] = CanonicalClaudeModel(m)
+	}
+	return out
+}
 
 // Models is the built-in catalog plus whatever Claude Code has cached as
 // additionally selectable for this account (claudecfg.Home.AdditionalModels —
 // a preview or org-enabled model amux's catalog predates) and the user's
 // configured model (.claude.json), so a model named by full id is offered too.
+// Discovered aliases are resolved to detailed IDs so none is offered twice.
 func (claudeHarness) Models() []string {
 	user := claudecfg.User()
-	return mergeModels(claudeModels, user.AdditionalModels(), []string{user.PreferredModel()})
+	return mergeModels(claudeModels,
+		canonicalClaudeModels(user.AdditionalModels()),
+		[]string{CanonicalClaudeModel(user.PreferredModel())})
 }
 
-// DefaultModel is the first-offered model — always the built-in opus, since
-// the discovered extras are appended after the aliases.
+// DefaultModel is the first-offered model — always the built-in Opus ID, since
+// the discovered extras are appended after the catalog.
 func (h claudeHarness) DefaultModel() string { return h.Models()[0] }
-func (claudeHarness) PreferredModel() string { return claudecfg.PreferredModel() }
+
+// PreferredModel is the user's configured Claude model, with a short alias
+// resolved to its detailed ID.
+func (claudeHarness) PreferredModel() string {
+	return CanonicalClaudeModel(claudecfg.PreferredModel())
+}
 
 // CurrentModel prefers Claude's live status-line report (updated immediately by
 // `/model`) and falls back to the latest assistant transcript entry for sessions
@@ -64,7 +110,9 @@ func (claudeHarness) Argv(model string, extra ...string) ([]string, error) {
 	if pm := envOr("AMUX_PERMISSION_MODE", "auto"); pm != "" && pm != "none" {
 		args = append(args, "--permission-mode", pm)
 	}
-	if model != "" {
+	// A short alias stored by an older amux (or passed via -f model=opus) is
+	// launched as the detailed ID the catalog now offers.
+	if model = CanonicalClaudeModel(model); model != "" {
 		args = append(args, "--model", model)
 	}
 	return finishArgv(bin, args, extra), nil

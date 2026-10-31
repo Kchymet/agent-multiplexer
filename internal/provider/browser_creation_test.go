@@ -22,13 +22,21 @@ import (
 func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 	for _, tc := range []struct {
 		name, runtime, model string
-		grants               []string
+		// stored is the persisted model when it differs from the one sent: a
+		// legacy short Claude alias is stored as its detailed ID.
+		stored string
+		grants []string
 	}{
 		{name: "empty codex", runtime: "codex", model: "gpt-5.6-sol"},
-		{name: "one claude", runtime: "claude", model: "opus", grants: []string{"api"}},
+		{name: "one claude", runtime: "claude", model: "claude-opus-5-5", grants: []string{"api"}},
+		{name: "legacy claude alias", runtime: "claude", model: "opus", stored: "claude-opus-5-5", grants: []string{"api"}},
 		{name: "multiple codex", runtime: "codex", model: "gpt-6-astra", grants: []string{"api", "web"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			wantModel := tc.model
+			if tc.stored != "" {
+				wantModel = tc.stored
+			}
 			browserCreationStore(t, "api", "web", "secret")
 			prompted := map[string]int{}
 			p := &Provider{cfg: Config{ApplyAction: func(ctx context.Context, action core.Action) (string, error) {
@@ -71,7 +79,7 @@ func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 			if err != nil || !initialized || !reflect.DeepEqual(grants, tc.grants) {
 				t.Fatalf("grants = %v initialized=%v err=%v, want %v/true", grants, initialized, err, tc.grants)
 			}
-			if root.Agent != tc.runtime || root.Model != tc.model || root.Prompt != "" {
+			if root.Agent != tc.runtime || root.Model != wantModel || root.Prompt != "" {
 				t.Fatalf("coordinator selection drifted: %+v", root)
 			}
 			db.Close()
@@ -109,7 +117,7 @@ func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 				t.Fatalf("members = %+v err=%v, want %d", children, err, len(tc.grants))
 			}
 			for i, child := range children {
-				if child.Agent != tc.runtime || child.Model != tc.model || child.Prompt != "" || child.Repo != tc.grants[i] {
+				if child.Agent != tc.runtime || child.Model != wantModel || child.Prompt != "" || child.Repo != tc.grants[i] {
 					t.Fatalf("member %d selection drifted: %+v", i, child)
 				}
 			}

@@ -257,17 +257,24 @@ This applies to native terminal launches and new/resumed app-server threads.
 
 The model picker is live, not a baked-in list: Codex agents offer whatever your
 Codex has cached as available to your account (`~/.codex/models_cache.json`, the
-same list its own `/model` picker shows, in the same order), and Claude agents
-offer the built-in aliases and `claude-opus-5-5` (Claude Opus 5.5), plus any extra
+same list its own `/model` picker shows, in the same order; with no cache, amux
+falls back to `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+`gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`), and Claude agents offer
+detailed model IDs — `claude-opus-5-5` (Claude Opus 5.5, the default),
+`claude-sonnet-5-5` (Sonnet 5.5), `claude-haiku-5-5` (Haiku 5.5), and
+`claude-fable-5-1` (Fable 5.1) — plus any extra
 models Claude Code has cached for your account (`additionalModelOptionsCache` in
 `~/.claude.json`). The model set in each CLI's own config (`model` in `config.toml`
 / `.claude.json`) is always offered and pre-filled. Run the CLI once outside amux
 to refresh what it caches.
 
-To select Opus 5.5 explicitly, choose `claude-opus-5-5` in a Claude model picker
-or pass `--agent claude --model claude-opus-5-5` when creating an agent. For a
+To select a model explicitly, choose it in a model picker or pass e.g.
+`--agent claude --model claude-sonnet-5-5` when creating an agent. For a
 workgroup coordinator, use `--coordinator claude --coordinator-model claude-opus-5-5`.
-The built-in Claude default remains `opus`. Opus 5.5 requires Claude Code
+Claude Code's short aliases (`opus`, `sonnet`, `haiku`, `fable`, including a
+`[1m]` suffix) are still accepted anywhere a model is given — on the command
+line, in `-f model=…` fields, in `.claude.json`, or stored on agents created by an
+older amux — and are resolved to the detailed ID above before launch. Opus 5.5 requires Claude Code
 v2.1.280 or newer; see the [official model configuration guide](https://code.claude.com/docs/en/model-config).
 
 An in-session `/model` switch is reconciled back into amux automatically. Claude

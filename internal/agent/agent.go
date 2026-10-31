@@ -31,6 +31,17 @@ func Argv(kind, model string, extra ...string) ([]string, error) {
 	return HarnessFor(kind).Argv(model, extra...)
 }
 
+// CanonicalModel resolves a model choice for kind to the detailed ID amux stores
+// and launches: a short Claude alias (`opus`) becomes its full model ID
+// (`claude-opus-5-5`); every other value, and every other harness, is returned
+// trimmed but unchanged.
+func CanonicalModel(kind, model string) string {
+	if Canonical(kind) == "claude" {
+		return CanonicalClaudeModel(model)
+	}
+	return strings.TrimSpace(model)
+}
+
 // finishArgv resolves bin to an absolute path and appends the harness args and
 // caller's trailing args. Shared by every harness's Argv so path resolution and
 // arg ordering stay identical across kinds.
