@@ -375,7 +375,8 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
-		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow})
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow,
+			SlowRequest: logSlowSessionRequest})
 	if err != nil {
 		return err
 	}
@@ -437,6 +438,17 @@ func (r *sessionRuntime) dispatchCallback(ctx context.Context, request sessionrp
 		}
 	}()
 	return r.dispatch(ctx, request)
+}
+
+// logSlowSessionRequest names the phase that held a slow mailbox request. A
+// request's verb and age come from it before authentication; the rest is the
+// daemon's own measurement. A large authority lock wait means the stall was
+// another holder of that lock, not this request's work.
+func logSlowSessionRequest(t sessionrpc.RequestTiming) {
+	r := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
+	log.Printf("session RPC %s: slow request %s %s %s took %v (age %v; reserve %v, verify %v, authorize %v, dispatch %v, sign %v, publish %v; authority lock wait %v; status %s %s)",
+		t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Total), r(t.Age), r(t.Reserve), r(t.Verify), r(t.Authorize),
+		r(t.Dispatch), r(t.Sign), r(t.Publish), r(t.LockWait), t.Status, t.Code)
 }
 
 // slowSessionDispatch and slowSessionReconcile are the durations worth a
