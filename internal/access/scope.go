@@ -83,9 +83,6 @@ var rules = map[Route]map[string]Rule{
 		core.QuerySessions: {Scope: ScopeFiltered},
 		core.QuerySnapshot: {Scope: ScopeFiltered},
 		core.QueryRepos:    {Scope: ScopeFiltered},
-		// Empty unless the caller is a coordinator and the host enabled
-		// coordinator.archive_scope=host (daemon restrictedQuery).
-		core.QueryHostSessions: {Scope: ScopeFiltered},
 
 		core.QueryRuntimeEvents: {Scope: ScopeWorkgroup},
 

@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -515,39 +514,6 @@ func daemonMayStart(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
-// restrictedStatus is `amux status --json` inside an agent session: the scoped
-// snapshot, plus the host-wide staleness view when the host enabled it.
-type restrictedStatus struct {
-	core.Snapshot
-	HostSessions *core.HostSessionsView `json:"hostSessions,omitempty"`
-}
-
-// printHostSessions renders the host-wide staleness view, stalest first.
-func printHostSessions(w io.Writer, view core.HostSessionsView) {
-	fmt.Fprintln(w, "\nother sessions on this host (coordinator.archive_scope=host; stalest first):")
-	if len(view.Sessions) == 0 {
-		fmt.Fprintln(w, "  (none)")
-	}
-	for _, s := range view.Sessions {
-		role := s.Role
-		if role == "" {
-			role = "agent"
-		}
-		last := "never"
-		if s.LastActivity > 0 {
-			last = time.UnixMilli(s.LastActivity).Format("2006-01-02 15:04")
-		}
-		mark := "archivable"
-		if !s.Archivable {
-			mark = "not archivable: " + s.Reason
-		}
-		fmt.Fprintf(w, "  %-12s %-11s %-8s last %s  %s  [%s]\n", s.ID, role, s.State, last, s.Title, mark)
-	}
-	if view.Truncated {
-		fmt.Fprintln(w, "  (truncated)")
-	}
-}
-
 // restrictedSessionClient identifies a CLI launched inside an amux agent. Both
 // variables name the same store session; AMUX_WORKSPACE is the legacy alias.
 func restrictedSessionClient(getenv func(string) string) bool {
@@ -703,16 +669,8 @@ func cmdStatus(args []string) error {
 			return err
 		}
 		snapshot := core.Snapshot{Type: "snapshot", Sessions: sessions}
-		// A coordinator the host granted coordinator.archive_scope=host also
-		// gets the read-only host-wide staleness view. An older daemon (unknown
-		// query) or any other caller simply has none.
-		var hostView *core.HostSessionsView
-		var view core.HostSessionsView
-		if err := queryRows(core.QueryHostSessions, &view); err == nil && view.Enabled {
-			hostView = &view
-		}
 		if asJSON {
-			b, err := json.MarshalIndent(restrictedStatus{Snapshot: snapshot, HostSessions: hostView}, "", "  ")
+			b, err := json.MarshalIndent(snapshot, "", "  ")
 			if err != nil {
 				return err
 			}
@@ -721,6 +679,7 @@ func cmdStatus(args []string) error {
 		}
 		if len(sessions) == 0 {
 			fmt.Println("(no visible sessions)")
+			return nil
 		}
 		for _, s := range sessions {
 			state := s.State
@@ -728,9 +687,6 @@ func cmdStatus(args []string) error {
 				state = core.StateIdle
 			}
 			fmt.Printf("%-20s %-8s %-8s %s\n", s.Title, s.Kind, state, s.Cwd)
-		}
-		if hostView != nil {
-			printHostSessions(os.Stdout, *hostView)
 		}
 		return nil
 	}

@@ -43,7 +43,7 @@ func validateSessionQuery(req access.Request) error {
 	}
 	switch req.Verb {
 	case core.QueryVersion, core.QueryCodexControl, core.QueryRepos,
-		core.QuerySessions, core.QuerySnapshot, core.QueryHostSessions:
+		core.QuerySessions, core.QuerySnapshot:
 		if req.ID != "" || len(req.Fields) != 0 {
 			return fmt.Errorf("query %q does not accept an id", req.Verb)
 		}

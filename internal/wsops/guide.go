@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"amux/internal/agent"
-	"amux/internal/amuxcfg"
 	"amux/internal/claudegoal"
 	"amux/internal/hostprep"
 	"amux/internal/store"
@@ -311,10 +310,6 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   "keep the PR draft". Say so when you dispatch PR work.
 
 `, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
-	if amuxcfg.HostArchiveScope() {
-		b.WriteString(hostArchiveSection)
-		b.WriteString("\n")
-	}
 	b.WriteString(goalSection(root))
 	b.WriteString("\n")
 	b.WriteString(completionSection(root))
@@ -477,28 +472,6 @@ func firstOf(list string) string {
 }
 
 func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
-
-// hostArchiveSection is included only while the host has set
-// coordinator.archive_scope=host; it teaches exactly what access.HostScopeArchive
-// and the daemon's activity check allow.
-const hostArchiveSection = `## Housekeeping: archiving stale sessions host-wide
-The host has set ` + "`coordinator.archive_scope=host`" + `: besides your own members, you
-may archive finished, no-longer-useful sessions anywhere on this host.
-- ` + "`amux status --json`" + ` adds a read-only ` + "`hostSessions`" + ` view of every other active
-  workgroup and agent, stalest first: id, title, role, parent workgroup
-  (` + "`rootId`" + `), state, ` + "`lastActivity`" + ` / ` + "`created`" + ` (unix ms), member count, and whether
-  you may archive it now (` + "`archivable`" + `, else ` + "`reason`" + `).
-- ` + "`amux do set-archived <id> -f archived=true`" + ` archives an idle ordinary agent, or a
-  whole workgroup (with its members). Targets that are running, waiting on a
-  permission or input prompt, or of unknown state are refused
-  (` + "`archive_target_running`" + `, ` + "`archive_target_waiting`" + `, ` + "`archive_target_state_unknown`" + `),
-  as are the console and repo homes. Every such archive is audited on the host.
-- This grants nothing else on foreign sessions: restoring, deleting, steering,
-  starting or reading their history stays with the host or their coordinator.
-- Archive only what is clearly finished or abandoned (merged/closed work, long
-  idle with nothing pending). When in doubt, list the candidates for the user
-  instead of archiving. Never archive another workgroup's live work.
-`
 
 // Task completion never implies archive permission. A coordinator must ask for
 // explicit user confirmation before using its authenticated self-archive path.

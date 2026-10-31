@@ -98,7 +98,7 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		applyResult:    wsops.ApplyResult,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
-	r.policy = access.Policy{Resolver: r.resolver, HostArchive: hostArchiveEnabled}
+	r.policy = access.Policy{Resolver: r.resolver}
 	r.completions = newCompletionRegistry(d)
 	r.events, r.eventsErr = newDaemonSessionEventPager(d)
 	return r

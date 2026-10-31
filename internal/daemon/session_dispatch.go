@@ -127,9 +127,6 @@ func (r *sessionRuntime) dispatch(ctx context.Context, request sessionrpc.Dispat
 	if selfCompletionShape(request.Principal, action) {
 		return r.selfComplete(ctx, request, req, action)
 	}
-	if subject, target, ok := r.hostScopeArchive(ctx, request.Principal, req); ok {
-		return r.dispatchHostArchive(ctx, request, req, action, subject, target)
-	}
 	if splitAction(action) {
 		// An action handle admits per resource (a coordinator prompting,
 		// creating or archiving a member, say) takes only those locks inside
@@ -290,12 +287,6 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 			return nil, err
 		}
 		value = rows
-	case core.QueryHostSessions:
-		view, err := r.hostSessionsView(ctx, principal)
-		if err != nil {
-			return nil, err
-		}
-		value = view
 	case core.QueryRepos:
 		rows, err := r.resolver.scopedRepoRows(ctx, principal)
 		if err != nil {

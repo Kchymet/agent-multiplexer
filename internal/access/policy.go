@@ -42,18 +42,7 @@ type Resolver interface {
 	ProviderAllows(context.Context, string, Request) (bool, error)
 }
 
-type Policy struct {
-	Resolver Resolver
-	// HostArchive reports whether the host enabled coordinator.archive_scope=host
-	// (see HostScopeArchive). Nil means the default members scope. It is read on
-	// each decision so the host's change applies without a restart.
-	HostArchive func(context.Context) bool
-}
-
-// hostArchiveEnabled fails closed: no callback, no host-wide archive.
-func (p Policy) hostArchiveEnabled(ctx context.Context) bool {
-	return p.HostArchive != nil && p.HostArchive(ctx)
-}
+type Policy struct{ Resolver Resolver }
 
 func (p Policy) Authorize(ctx context.Context, principal Principal, req Request) error {
 	if principal.Kind == SubjectHost {
@@ -126,13 +115,6 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 	}
 	self := target.ID == subject.ID
 	if !InWorkgroupScope(subject, target) {
-		// The only effect that reaches past a coordinator's workgroup is the
-		// host-enabled archive of an idle foreign session; activity (running,
-		// waiting on a permission or input) is checked by the daemon, which owns
-		// the live state, at the same admission boundary.
-		if HostScopeArchive(subject, target, req) && p.hostArchiveEnabled(ctx) {
-			return nil
-		}
 		return ErrDenied
 	}
 	// Reads may page an archived member while it still belongs to the scope;
@@ -147,39 +129,6 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 		return p.authorizeAddAgent(ctx, subject, req)
 	}
 	return nil
-}
-
-// HostScopeArchive reports whether req is the shape of archive a coordinator
-// may perform on a session outside its workgroup when the host has set
-// coordinator.archive_scope=host: an explicit archive (never a restore or a
-// toggle) of another, still-active ordinary agent or workgroup. The console,
-// repo homes, the hidden single-member legacy repo roots and the caller itself
-// are never targets on this path; self-archive keeps its own completion path.
-// It does not consult the setting or live activity; callers do.
-func HostScopeArchive(subject, target Resource, req Request) bool {
-	if subject.Role != "coordinator" || req.Route != RouteAction || req.Verb != core.ActionSetArchived {
-		return false
-	}
-	if len(req.Fields) != 1 || req.Fields["archived"] != "true" || req.Target != "" {
-		return false
-	}
-	if target.ID == "" || target.ID == subject.ID || target.Archived || InWorkgroupScope(subject, target) {
-		return false
-	}
-	return HostArchivableTarget(target)
-}
-
-// HostArchivableTarget is the role half of HostScopeArchive: an ordinary
-// workgroup member, or a workgroup (its coordinator root, which cascades to its
-// members).
-func HostArchivableTarget(target Resource) bool {
-	switch target.Role {
-	case "":
-		return target.RootID != ""
-	case "coordinator":
-		return target.RootID == ""
-	}
-	return false
 }
 
 // InWorkgroupScope reports whether target is within subject's workgroup scope:

@@ -107,14 +107,13 @@ flags, and environment variables only ever name a target.
 | query `version`, `codex-control` | session | yes | yes | Host paths and overrides stripped. |
 | query `agent-sessions` | session | yes | yes | Read-only discovery (see above). |
 | query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members; granted repos | |
-| query `host-sessions` (`hostSessions` in `amux status --json`) | filtered | no (empty) | every other active session, read-only, when `coordinator.archive_scope=host` | Ids, titles, roles, parent workgroup, state, created/last activity, archivability. No paths, prompts, branches, or history. |
 | query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
 | `rename` (`amux agent name`) | workgroup | itself | itself, members | |
 | `start` | workgroup | itself | workgroup (cascades), members | |
 | `steer` prompt / interject / stop | workgroup | itself | itself, members | |
 | `steer` permission | workgroup | no | members only | Never one's own prompt; needs request id and runtime generation. |
 | `steer` goal | host | no | no | Rejected for every session principal. |
-| `set-archived archived=true` (`amux agent done`) | workgroup | itself | members; its own workgroup (cascades to members) | Coordinators archive their workgroup only after explicit user confirmation. Repo homes never archive themselves. Console: any. With `coordinator.archive_scope=host`, see below. |
+| `set-archived archived=true` (`amux agent done`) | workgroup | itself | members; its own workgroup (cascades to members) | Coordinators archive their workgroup only after explicit user confirmation. Repo homes never archive themselves. Console: any. |
 | `set-archived archived=false`, `archive` toggle | host | no | no | Restore needs host regrant. |
 | `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. |
 | `delete`, `kill`, `move`, `agent-set-repos` | host | no | no | Console. |
@@ -123,34 +122,6 @@ flags, and environment variables only ever name a target.
 | `coordinator-set-repos`, `restart`, `auth-reload`, `account-manage`, `codex-login`, `subscribe`, `query` | host | no | no | |
 | `pane.*` | host | no | no | Restricted principals use one-shot mailbox RPC only. |
 | query `runtime-path`, `runtime-record`, `accounts`, `account-manage`, `account-ceremony`, `codex-auth` | host | no | no | Raw host paths and credentials. |
-
-### Host-scope coordinator archive
-
-The host setting `coordinator.archive_scope` (`members` by default) widens one
-coordinator effect. With `amux config set coordinator.archive_scope host`, every
-coordinator may also `set-archived archived=true` any **other** active ordinary
-agent or workgroup on the host (a workgroup cascades to its members), and gets
-the read-only `host-sessions` projection to judge which are stale. The daemon
-reads the setting per request, so a change applies (and a reset revokes)
-immediately; `amux config` refuses to read or change it from an agent session,
-and an agent's sandbox never reaches the host config file.
-
-- Refused targets: anything running, waiting on a permission or input prompt,
-  or of unknown activity (`archive_target_running`, `archive_target_waiting`,
-  `archive_target_state_unknown`; for a workgroup, any active member counts);
-  the console; repo homes; already-archived sessions; the caller itself (self
-  archive keeps `amux agent done`).
-- Activity is checked at admission and again in the effect guard, under the
-  target's and members' session locks.
-- Restore, the `archive` toggle, delete/kill, steer, start, rename, history
-  reads, and every other operation on a foreign session remain denied. Inside
-  an agent session `amux do archive <id>` is sent as an explicit
-  `set-archived archived=true`.
-- Each host-scope archive is logged by the daemon (`audit: coordinator …`) and
-  appended to `~/.local/state/amux/audit/coordinator-archive.jsonl`
-  (`at`, `coordinator`, `target`, `targetRole`, `targetRoot`, `scope`).
-- Coordinator guides gain a "Housekeeping" section on their next launch while
-  the setting is `host`.
 
 Self reports (`amux agent status|hook|permission|model|capture`), the credential
 broker, and central auth queries are authorized by their own self-only checks

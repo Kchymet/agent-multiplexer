@@ -121,11 +121,7 @@ From an agent session the request is authorized by that session's fixed
 authenticated grant, never by an id, flag, or environment variable: a member
 may act only on itself (start, steer prompt|interject|stop, rename, archive
 itself), a coordinator also on its workgroup's current direct members (plus
-add-agent, steer permission, archive a member). When the host has set
-coordinator.archive_scope=host a coordinator may also archive (only archive)
-any idle session outside its workgroup; see amux status --json "hostSessions".
-Inside an agent "archive" is always an explicit archive, never a restore.
-Host-only actions are refused.
+add-agent, steer permission, archive a member). Host-only actions are refused.
 See docs/agent-cli-sandbox.md for the full scope table.
 `, actionList())
 }
@@ -271,7 +267,7 @@ func sendAction(a core.Action) error {
 // daemon's Result.NewID), so a create command can start or switch to it.
 func sendActionID(a core.Action) (string, error) {
 	if sessionContextRestricted() {
-		return restrictedAction(restrictedArchiveDirection(a))
+		return restrictedAction(a)
 	}
 	c, err := dial()
 	if err != nil {
@@ -293,17 +289,6 @@ func sendActionID(a core.Action) (string, error) {
 			return f.Result.NewID, nil
 		}
 	}
-}
-
-// restrictedArchiveDirection turns the one-key archive toggle into an explicit
-// archive for an agent session: a restricted caller may only ever archive, so
-// `amux do archive <id>` means archive, never a restore.
-func restrictedArchiveDirection(a core.Action) core.Action {
-	if a.Action == core.ActionArchive && len(a.Fields) == 0 {
-		a.Action = core.ActionSetArchived
-		a.Fields = map[string]string{"archived": "true"}
-	}
-	return a
 }
 
 // queryRows asks the daemon for a read model (QueryRepos, QuerySessions) and
