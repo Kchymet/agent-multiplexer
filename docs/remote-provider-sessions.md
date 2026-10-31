@@ -71,7 +71,7 @@ One JSON object per line, same `wire` framing as all provider traffic.
    "state":"running","status":"running · 2 agents",
    "startedAt":1751500000,"archived":false},
   {"id":"a2","title":"idempotency","rootId":"a1","isRoot":false,
-   "section":"workgroups","repos":"api","mode":"task","model":"gpt-5.6-codex",
+   "section":"workgroups","repos":"api","mode":"task","model":"gpt-5.6-sol",
    "state":"waiting","status":"waiting · needs input",
    "startedAt":1751500100,"archived":false}
 ]}

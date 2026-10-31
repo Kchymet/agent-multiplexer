@@ -55,7 +55,7 @@ const (
 // session's statusline or an earlier probe is newer than that.
 const (
 	claudeMessagesURL   = "https://api.anthropic.com/v1/messages"
-	claudeProbeModel    = "claude-haiku-4-5"
+	claudeProbeModel    = "claude-haiku-5-5"
 	claudeProbeInterval = 15 * time.Minute
 )
 

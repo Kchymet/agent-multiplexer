@@ -54,7 +54,7 @@ func TestParseCreateFlagsAgent(t *testing.T) {
 }
 
 func TestCreateWorkspaceFieldsDistinguishOmittedAndSelectedRepos(t *testing.T) {
-	cfg := createCfg{name: "group", agent: "claude", mode: "task", model: "opus"}
+	cfg := createCfg{name: "group", agent: "claude", mode: "task", model: "claude-opus-5-5"}
 	fields := createWorkspaceFields(nil, cfg)
 	if _, explicit := fields["repos"]; explicit {
 		t.Fatalf("zero repos must omit the initial grant field, got %q", fields["repos"])
