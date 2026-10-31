@@ -339,6 +339,7 @@ func daemonRun() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	daemon.DumpGoroutinesOnSignal(ctx, os.Stderr)
 	return daemon.Default(self).Run(ctx)
 }
 

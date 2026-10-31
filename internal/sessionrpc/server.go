@@ -38,6 +38,70 @@ type ServerOptions struct {
 	// order by ServeOnce itself and never waits for a slow one. It sees the
 	// call before authentication and may only choose a lane.
 	Slow func(Call) bool
+	// SlowRequest, if set, receives the timing of every request that took at
+	// least SlowRequestThreshold from the start of its processing to its
+	// response, so a stall can be attributed to the phase that held it.
+	SlowRequest func(RequestTiming)
+}
+
+// SlowRequestThreshold is the processing time that reports a request to
+// ServerOptions.SlowRequest.
+const SlowRequestThreshold = time.Second
+
+// RequestTiming breaks down one request's processing. Verb, Kind and Age come
+// from the request before authentication and are for diagnosis only.
+type RequestTiming struct {
+	SubjectID string
+	RequestID string
+	Kind      CallKind
+	Verb      string
+	Status    Status
+	Code      string
+	// Age is how long before processing began the request says it was issued.
+	Age time.Duration
+	// Reserve, Verify, Authorize (both credential rechecks and the policy
+	// callback), Dispatch, Sign and Publish partition Total, apart from
+	// decoding and bookkeeping.
+	Reserve, Verify, Authorize, Dispatch, Sign, Publish, Total time.Duration
+	// LockWait is the time spent waiting for the authority's lock anywhere in
+	// the request, including inside the callbacks; it overlaps the phases.
+	LockWait time.Duration
+}
+
+// requestTimer accumulates one request's RequestTiming.
+type requestTimer struct {
+	RequestTiming
+	start    time.Time
+	lockWait *access.LockWait
+}
+
+func (s *Server) startTimer(envelope access.SignedRequest, routed Call) *requestTimer {
+	now := time.Now()
+	t := &requestTimer{start: now}
+	t.SubjectID, t.RequestID, t.Kind = s.subjectID, envelope.RequestID, routed.Kind
+	if validCode(routed.Verb) {
+		t.Verb = routed.Verb
+	}
+	if envelope.IssuedAt > 0 {
+		t.Age = s.clock().Sub(time.UnixMilli(envelope.IssuedAt))
+	}
+	return t
+}
+
+func (s *Server) reportTimer(t *requestTimer) {
+	t.Total = time.Since(t.start)
+	if t.Total < SlowRequestThreshold {
+		return
+	}
+	t.LockWait = t.lockWait.Total()
+	s.slowRequest(t.RequestTiming)
+}
+
+// phase adds the time since *mark to d and moves the mark.
+func (t *requestTimer) phase(d *time.Duration, mark *time.Time) {
+	now := time.Now()
+	*d += now.Sub(*mark)
+	*mark = now
 }
 
 // MaxSlowRequests bounds one mailbox's claimed slow-lane requests. Further
@@ -59,6 +123,7 @@ type pendingReceipt struct {
 }
 
 type responseReservation struct {
+	timer     *requestTimer
 	lease     ResponseLease
 	committed bool
 	// discard marks a one-way receipt: the client never reads a result for
@@ -96,6 +161,8 @@ type Server struct {
 	watch  *dirWatch
 	wake   wakeSignal
 	notify func()
+	// slowRequest is ServerOptions.SlowRequest.
+	slowRequest func(RequestTiming)
 
 	// slow-lane state; inflight is guarded by mu. publishMu serializes response
 	// publication with itself (its capacity scan rewinds a shared directory
@@ -210,6 +277,7 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 	}
 	notify := options.RequestNotify
 	server.notify = notify
+	server.slowRequest = options.SlowRequest
 	if options.Slow != nil {
 		server.slow = options.Slow
 		server.slowJobs = make(chan slowJob, MaxSlowRequests)
@@ -574,6 +642,12 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &routed) == nil && routed.Kind == CallRelease {
 		return s.processRelease(ctx, name, envelope)
 	}
+	timer := s.startTimer(envelope, routed)
+	if s.slowRequest != nil {
+		ctx, timer.lockWait = access.WithLockWait(ctx)
+		defer s.reportTimer(timer)
+	}
+	mark := timer.start
 	// Reserve the worst-case per-subject response capacity before durable replay
 	// acceptance or dispatch. No operation is admitted if the daemon cannot keep
 	// its bounded result artifact.
@@ -592,11 +666,14 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 			return err
 		}
 	}
+	reservation.timer = timer
+	timer.phase(&timer.Reserve, &mark)
 	defer reservation.release()
 	requestDigestBytes := sha256.Sum256(envelope.Body)
 	requestDigest := hex.EncodeToString(requestDigestBytes[:])
 
 	principal, verifyErr := s.authority.Verify(ctx, envelope)
+	timer.phase(&timer.Verify, &mark)
 	if verifyErr != nil {
 		status, code := verifyStatus(verifyErr)
 		response := s.newResponse(envelope, requestDigest, status, code, nil, false)
@@ -621,14 +698,18 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 		}
 		return unlinkAt(s.processing, name)
 	}
-	if err := s.authority.Valid(ctx, principal); err != nil {
+	err = s.authority.Valid(ctx, principal)
+	timer.phase(&timer.Authorize, &mark)
+	if err != nil {
 		response := s.newResponse(envelope, requestDigest, StatusDenied, "credential_invalid", nil, false)
 		if err := s.publishResponse(&response, reservation); err != nil && !errors.Is(err, unix.EEXIST) {
 			return err
 		}
 		return unlinkAt(s.processing, name)
 	}
-	if err := s.callbacks.Authorize(ctx, principal, cloneCall(call)); err != nil {
+	err = s.callbacks.Authorize(ctx, principal, cloneCall(call))
+	timer.phase(&timer.Authorize, &mark)
+	if err != nil {
 		response := s.newResponse(envelope, requestDigest, StatusDenied, "access_denied", nil, false)
 		if err := s.publishResponse(&response, reservation); err != nil && !errors.Is(err, unix.EEXIST) {
 			return err
@@ -638,7 +719,9 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 	// Authorize may block while rotation, revocation, or archival commits. Check
 	// credential generation again before receipt acceptance or dispatch. The
 	// dispatcher still owns the atomic current-generation/policy execution guard.
-	if err := s.authority.Valid(ctx, principal); err != nil {
+	err = s.authority.Valid(ctx, principal)
+	timer.phase(&timer.Authorize, &mark)
+	if err != nil {
 		response := s.newResponse(envelope, requestDigest, StatusDenied, "credential_invalid", nil, false)
 		if err := s.publishResponse(&response, reservation); err != nil && !errors.Is(err, unix.EEXIST) {
 			return err
@@ -671,6 +754,7 @@ func (s *Server) processClaimed(ctx context.Context, name string, admit bool) er
 	}
 
 	result, dispatchErr := s.callbacks.Dispatch(ctx, DispatchRequest{Principal: principal, RequestID: requestID, Call: cloneCall(call)})
+	timer.phase(&timer.Dispatch, &mark)
 	hooks := result.Receipt
 	if dispatchErr != nil {
 		if hooks != nil {
@@ -783,6 +867,13 @@ func (s *Server) publishResponse(response *Response, reservation *responseReserv
 		reservation.committed = true
 		return nil
 	}
+	timer := reservation.timer
+	if timer == nil {
+		timer = &requestTimer{}
+	}
+	timer.Status, timer.Code = response.Status, response.Code
+	mark := time.Now()
+	defer func() { timer.phase(&timer.Publish, &mark) }()
 	if err := signResponse(s.signer, response); err != nil {
 		return err
 	}
@@ -790,6 +881,7 @@ func (s *Server) publishResponse(response *Response, reservation *responseReserv
 	if err != nil {
 		return err
 	}
+	timer.phase(&timer.Sign, &mark)
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
 	if err := s.ensureResponseCapacity(len(encoded)); err != nil {
