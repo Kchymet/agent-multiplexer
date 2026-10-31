@@ -70,6 +70,9 @@ reports itself blocked, or the user pauses it.
 
 usage: amux agent goal [show [--json]]
        amux agent goal complete "<summary>"    the objective is done and verified
+                                               (archive finished members first: PR
+                                               merged or closed; it lists idle
+                                               unarchived members)
        amux agent goal ask "<question>"        stop and wait for the user's answer
        amux agent goal wait "<waiting on>"     end this turn only; an armed background
                                                wake-up (Monitor / run_in_background)
@@ -163,6 +166,7 @@ func goalMark(status string, args []string) error {
 	switch status {
 	case claudegoal.StatusComplete:
 		fmt.Println("goal complete: give your final summary, then end the turn. The workgroup stays open.")
+		fmt.Print(finishedMemberReminder())
 	case claudegoal.StatusInput:
 		fmt.Println("goal waiting for input: ask the user your question and end the turn; their reply resumes the goal.")
 	case claudegoal.StatusWaiting:
@@ -248,4 +252,83 @@ func goalStopHook() {
 	}
 	state = core.StateRunning
 	fmt.Println(string(out))
+}
+
+// finishedMemberReminder is what `goal complete` adds when the coordinator
+// still has idle, unarchived direct members: finished members should be
+// archived before the task is reported complete. It reads the coordinator's own
+// scoped snapshot; any failure prints nothing, because a reminder must never
+// block or fail completion.
+func finishedMemberReminder() string {
+	if !sessionContextRestricted() {
+		return ""
+	}
+	var sessions []core.Session
+	if err := queryRows(core.QuerySnapshot, &sessions); err != nil {
+		return ""
+	}
+	return idleMemberReminder(sessions)
+}
+
+// idleMemberReminder lists the direct members in a coordinator's scoped
+// snapshot that are neither archived nor running. The scoped snapshot holds
+// only this workgroup, so a row with a root is one of its members. Members the
+// daemon's PR watcher still sees owning an open PR are listed apart, with no
+// archive command: archiving one orphans its PR.
+func idleMemberReminder(sessions []core.Session) string {
+	var archivable, openPR []core.Session
+	for _, s := range sessions {
+		if s.IsRoot || s.RootID == "" || s.Archived || s.State == core.StateRunning {
+			continue
+		}
+		if ownsOpenPR(s) {
+			openPR = append(openPR, s)
+		} else {
+			archivable = append(archivable, s)
+		}
+	}
+	if len(archivable) == 0 && len(openPR) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nreminder: %d member(s) are not running but still unarchived.\n", len(archivable)+len(openPR))
+	if len(archivable) > 0 {
+		b.WriteString("Archive each one that is finished: its PR is merged or closed (or its task was\n")
+		b.WriteString("delivered with no PR) and you won't reassign it:\n")
+		for _, s := range archivable {
+			fmt.Fprintf(&b, "  %-10s %-8s %s\n", s.ID, memberState(s), s.Title)
+			fmt.Fprintf(&b, "    amux do set-archived %s -f archived=true\n", s.ID)
+		}
+	}
+	if len(openPR) > 0 {
+		b.WriteString("Do not archive these: each still owns an open PR. Keep them babysitting it\n")
+		b.WriteString("until it is merged or closed:\n")
+		for _, s := range openPR {
+			fmt.Fprintf(&b, "  %-10s %-8s %s  (%s)\n", s.ID, memberState(s), s.Title, strings.Join(openPRURLs(s), ", "))
+		}
+	}
+	b.WriteString("Keep a finished member only if you expect to reuse it, and say why in your final summary.\n")
+	return b.String()
+}
+
+func memberState(s core.Session) string {
+	if s.State == "" {
+		return core.StateIdle
+	}
+	return s.State
+}
+
+func ownsOpenPR(s core.Session) bool { return len(openPRURLs(s)) > 0 }
+
+func openPRURLs(s core.Session) []string {
+	if s.PRs == nil {
+		return nil
+	}
+	var urls []string
+	for _, pr := range *s.PRs {
+		if pr.State == "open" {
+			urls = append(urls, pr.URL)
+		}
+	}
+	return urls
 }
