@@ -92,15 +92,30 @@ func TestClientClaimedRequestAtDeadlineStaysIndeterminate(t *testing.T) {
 		_, err := client.Query(ctx, Query{Verb: "report-context"})
 		done <- err
 	}()
+	// Serve until the call is dispatched: a pass can run while the request is
+	// still the client's publication temporary and find nothing to claim.
 	served := make(chan error, 1)
 	go func() {
-		for queuedRequests(t, f.grant.MailboxHostDir) == 0 {
-			time.Sleep(time.Millisecond)
+		for {
+			if _, err := f.server.ServeOnce(context.Background()); err != nil {
+				served <- err
+				return
+			}
+			select {
+			case <-entered:
+				served <- nil
+				return
+			case <-time.After(time.Millisecond):
+			}
 		}
-		_, err := f.server.ServeOnce(context.Background())
-		served <- err
 	}()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-served:
+		t.Fatalf("server stopped before dispatch: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request was never dispatched")
+	}
 	cancel()
 	err := <-done
 	close(finish)
