@@ -196,6 +196,9 @@ func publishNativeTool(s store.Session) (string, error) {
 	if err := publishNativeGitHub(parent); err != nil {
 		return "", err
 	}
+	if err := publishNativeGit(parent); err != nil {
+		return "", err
+	}
 	return dest, nil
 }
 
@@ -326,7 +329,7 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 			return nil, err
 		}
 	}
-	for _, path := range []string{filepath.Join(filepath.Dir(tool), "gh"), filepath.Join(filepath.Dir(tool), "gh-real"), filepath.Join(filepath.Dir(tool), "gitconfig"), config.ConfigDir()} {
+	for _, path := range []string{filepath.Join(filepath.Dir(tool), "gh"), filepath.Join(filepath.Dir(tool), "gh-real"), filepath.Join(filepath.Dir(tool), "gitconfig"), filepath.Join(filepath.Dir(tool), "git"), config.ConfigDir()} {
 		if err := policy.grant(path, false, true); err != nil {
 			return nil, err
 		}
