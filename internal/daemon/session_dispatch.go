@@ -170,6 +170,9 @@ func (r *sessionRuntime) selfComplete(ctx context.Context, request sessionrpc.Di
 		return denied, nil
 	}
 	if !r.isSelfCompletion(ctx, request.Principal, action) {
+		if ctx.Err() != nil {
+			return rpcDeadline(), nil
+		}
 		// Never fall through to the ordinary wsops dispatch for a claimed
 		// self-completion: that path stops the runtime before its response.
 		return rpcDenied("completion_not_current"), nil
@@ -202,16 +205,25 @@ func (r *sessionRuntime) selfComplete(ctx context.Context, request sessionrpc.Di
 }
 
 // admissionCheck is the credential and policy check every dispatch repeats
-// under its admission, with the codes a denied caller sees.
+// under its admission, with the codes a denied caller sees. A callback
+// deadline that expired while the dispatch waited for its admission is not a
+// denial: the policy lookup fails on the context, and nothing has run.
 func (r *sessionRuntime) admissionCheck(ctx context.Context, principal access.Principal, req access.Request) (sessionrpc.DispatchResult, bool) {
 	if err := r.d.authority.Valid(ctx, principal); err != nil {
 		return rpcDenied("credential_invalid"), false
 	}
 	if err := r.policy.Authorize(ctx, principal, req); err != nil {
+		if ctx.Err() != nil {
+			return rpcDeadline(), false
+		}
 		return rpcDenied("access_denied"), false
 	}
 	return sessionrpc.DispatchResult{}, true
 }
+
+// rpcDeadline answers a call whose callback deadline expired before its effect
+// began. The call did not run, so the outcome is known and it may be retried.
+func rpcDeadline() sessionrpc.DispatchResult { return rpcFailed("deadline_exceeded") }
 
 func (r *sessionRuntime) actionResult(result core.Result) (sessionrpc.DispatchResult, error) {
 	body, err := r.encodeResult(result)

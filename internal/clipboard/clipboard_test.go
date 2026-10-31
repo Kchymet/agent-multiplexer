@@ -3,11 +3,14 @@ package clipboard
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"path"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestParseOSC52(t *testing.T) {
@@ -110,8 +113,8 @@ func TestToolsSelection(t *testing.T) {
 		wsl  bool
 		want string
 	}{
-		{"wsl prefers clip.exe over WSLg", "linux", map[string]string{"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}, all, true, "/bin/clip.exe"},
-		{"wsl falls back to powershell", "linux", nil, only("powershell.exe"), true, "/bin/powershell.exe"},
+		{"wsl prefers powershell over WSLg", "linux", map[string]string{"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}, all, true, "/bin/powershell.exe"},
+		{"wsl falls back to clip.exe", "linux", nil, only("clip.exe"), true, "/bin/clip.exe"},
 		{"wayland", "linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}, all, false, "/bin/wl-copy"},
 		{"x11 xclip", "linux", map[string]string{"DISPLAY": ":0"}, all, false, "/bin/xclip"},
 		{"x11 xsel", "linux", map[string]string{"DISPLAY": ":0"}, only("xsel"), false, "/bin/xsel"},
@@ -123,15 +126,80 @@ func TestToolsSelection(t *testing.T) {
 			t.Errorf("%s: first tool = %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	ts := Tools("linux", env(nil), all, true)
-	if !ts[0].UTF16 || ts[len(ts)-1].UTF16 {
-		t.Errorf("clip.exe needs UTF-16 input and powershell does not: %+v", ts)
+	for _, tl := range Tools("linux", env(nil), all, true) {
+		name := path.Base(tl.Argv[0])
+		switch name {
+		case "powershell.exe":
+			if tl.Encoding != Base64 {
+				t.Errorf("powershell must read base64 (console-encoding proof): %+v", tl)
+			}
+			script := tl.Argv[len(tl.Argv)-1]
+			// The old script set [Console]::InputEncoding to a BOM-carrying
+			// UTF8 object; the base64 route must not depend on it.
+			if strings.Contains(script, "InputEncoding") || !strings.Contains(script, "FromBase64String") || !strings.Contains(script, "Set-Clipboard") {
+				t.Errorf("powershell script = %q", script)
+			}
+		case "clip.exe":
+			if tl.Encoding != UTF16LE {
+				t.Errorf("clip.exe needs UTF-16LE input: %+v", tl)
+			}
+		default:
+			t.Errorf("unexpected WSL tool %q", name)
+		}
 	}
 }
 
-func TestUTF16LE(t *testing.T) {
-	if got, want := utf16LE([]byte("a✓")), []byte{0xff, 0xfe, 'a', 0, 0x13, 0x27}; !bytes.Equal(got, want) {
-		t.Errorf("utf16LE = % x, want % x", got, want)
+// Regression: clip.exe pastes a leading BOM into Windows as U+FEFF, so no
+// encoding may emit one, and non-ASCII text must still round-trip.
+func TestEncodingsCarryNoBOM(t *testing.T) {
+	text := "a✓ é 日本 🙂"
+	u16 := UTF16LE.encode([]byte(text))
+	if bytes.HasPrefix(u16, []byte{0xff, 0xfe}) || bytes.HasPrefix(u16, []byte{0xfe, 0xff}) {
+		t.Errorf("UTF16LE output starts with a BOM: % x", u16[:2])
+	}
+	if got, want := UTF16LE.encode([]byte("a✓")), []byte{'a', 0, 0x13, 0x27}; !bytes.Equal(got, want) {
+		t.Errorf("UTF16LE(a✓) = % x, want % x", got, want)
+	}
+	units := make([]uint16, len(u16)/2)
+	for i := range units {
+		units[i] = uint16(u16[2*i]) | uint16(u16[2*i+1])<<8
+	}
+	if got := string(utf16.Decode(units)); got != text {
+		t.Errorf("UTF16LE round trip = %q, want %q", got, text)
+	}
+
+	b64 := Base64.encode([]byte(text))
+	for _, c := range b64 {
+		if c >= 0x80 {
+			t.Fatalf("Base64 output is not ASCII: %q", b64)
+		}
+	}
+	dec, err := base64.StdEncoding.DecodeString(string(b64))
+	if err != nil || string(dec) != text || bytes.HasPrefix(dec, []byte("\uFEFF")) {
+		t.Errorf("Base64 round trip = %q, %v; want %q", dec, err, text)
+	}
+	if got := UTF8.encode([]byte(text)); string(got) != text {
+		t.Errorf("UTF8 = %q", got)
+	}
+}
+
+// A BOM in the copied text itself (an agent that read a BOM-prefixed file) is
+// stripped before either route sees it.
+func TestDeliverStripsLeadingBOM(t *testing.T) {
+	tools := []Tool{{Argv: []string{"clip.exe"}, Encoding: UTF16LE}}
+	c, out, runs := fakeCopier(nil, tools, nil)
+	c.deliver([]byte("\uFEFFhé"))
+	if out.String() != string(Sequence([]byte("hé"), false)) {
+		t.Errorf("terminal got %q", out)
+	}
+	if len(*runs) != 1 || !bytes.Equal((*runs)[0].stdin, UTF16LE.encode([]byte("hé"))) {
+		t.Errorf("runs = %+v", *runs)
+	}
+
+	c, out, runs = fakeCopier(nil, tools, nil)
+	c.deliver([]byte("\uFEFF"))
+	if out.Len() != 0 || len(*runs) != 0 {
+		t.Errorf("a bare BOM should copy nothing: out %q, runs %+v", out, *runs)
 	}
 }
 
@@ -159,7 +227,7 @@ func fakeCopier(env map[string]string, tools []Tool, fail map[string]bool) (*Cop
 }
 
 func TestDeliverRoutes(t *testing.T) {
-	clip := []Tool{{Argv: []string{"clip.exe"}, UTF16: true}, {Argv: []string{"powershell.exe"}}}
+	clip := []Tool{{Argv: []string{"clip.exe"}, Encoding: UTF16LE}, {Argv: []string{"powershell.exe"}}}
 
 	t.Run("plain terminal emits OSC 52 and runs the first tool", func(t *testing.T) {
 		c, out, runs := fakeCopier(nil, clip, nil)

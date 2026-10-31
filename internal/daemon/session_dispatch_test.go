@@ -319,7 +319,10 @@ func TestSessionRPCCallbacksAreDeadlineBoundAndNonPanicking(t *testing.T) {
 	}
 	_, runtime, principals := sessionRuntimeFixture(t, session)
 	t.Cleanup(runtime.completions.close)
-	runtime.callbackTimeout = 20 * time.Millisecond
+	// Long enough that a slow runner reaches the planted effect before the
+	// deadline; a deadline that expires earlier is covered by
+	// TestSessionRPCDeadlineBeforeEffectIsNotADenial.
+	runtime.callbackTimeout = 250 * time.Millisecond
 	call := sessionrpc.Call{
 		Kind: sessionrpc.CallOperation, Route: access.RouteAction,
 		Verb: core.ActionSetArchived, ID: session.ID,
@@ -340,7 +343,7 @@ func TestSessionRPCCallbacksAreDeadlineBoundAndNonPanicking(t *testing.T) {
 	if err != nil || result.Status != sessionrpc.StatusIndeterminate {
 		t.Fatalf("deadline callback = %+v, err=%v", result, err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("cooperative callback exceeded deadline bound: %v", elapsed)
 	}
 
