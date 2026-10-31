@@ -135,8 +135,15 @@ func allowSteer(req Request, self bool, _ Resource) bool {
 // workgroup (which cascades to its members; guides require explicit user
 // confirmation first). Repo homes and other roots never archive themselves,
 // and every restore is host-only.
+//
+// Forcing past the open pull-request guard (force=true) is narrower: only a
+// coordinator archiving a direct member may. An agent can never force its own
+// completion, nor a coordinator its whole workgroup — that takes the host.
 func allowArchive(req Request, self bool, target Resource) bool {
 	if req.Fields["archived"] != "true" {
+		return false
+	}
+	if req.Fields["force"] == "true" && self {
 		return false
 	}
 	return target.RootID != "" || (self && target.Role == "coordinator")

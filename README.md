@@ -400,6 +400,9 @@ amux workgroup create <repo>...  # workgroup limited to those repos, with a firs
 amux workgroup move <agent> [<root>|--new]  # into another workgroup, or a new one of its own
 amux workgroup archive | unarchive <id>
 amux workgroup rm|rename|ls
+#   archive/rm (and `amux agent done`) refuse while the session's amux/<wg>-<member>*
+#   branches still head an open PR; finish or close it, or pass --force (host).
+#   If gh is unavailable or errors, the check is skipped with a warning.
 amux status [--json]       # print rail state as text (--json for the raw snapshot)
 amux refresh               # ask the daemon to re-poll its sources now
 amux config [ls|get|set|unset|path]  # TUI keybindings and Codex control mode

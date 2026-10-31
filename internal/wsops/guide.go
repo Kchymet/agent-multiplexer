@@ -296,7 +296,8 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 - `+"`amux do start <member>`"+` — bring a stopped member up without prompting it;
   `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
 - `+"`amux do set-archived <member> -f archived=true`"+` — mark a member done. Restoring
-  an archived member or this workgroup requires the host.
+  an archived member or this workgroup requires the host. It is refused while the member
+  still owns an open PR; add `+"`-f force=true`"+` only to deliberately orphan it.
 - After explicit user confirmation, `+"`amux agent done`"+` archives your own
   workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
