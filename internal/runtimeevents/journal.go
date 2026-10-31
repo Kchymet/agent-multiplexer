@@ -44,6 +44,10 @@ func MapJournalLine(runtime string, line []byte) []harnessproto.RuntimeEvent {
 	if err := json.Unmarshal(line, &r); err != nil || r.Text == "" {
 		return []harnessproto.RuntimeEvent{rawEventFor(runtime, "amux/journal-unparsable", json.RawMessage(line))}
 	}
+	if r.Type != "" && r.Type != harnessproto.TypeNotice && len(r.Payload) > 0 && json.Valid(r.Payload) {
+		// A typed amux event (e.g. pr_state): amux metadata, not runtime output.
+		return []harnessproto.RuntimeEvent{{Type: r.Type, Direction: harnessproto.DirMeta, Payload: r.Payload}}
+	}
 	level := r.Level
 	if level == "" {
 		level = core.JournalInfo

@@ -12,7 +12,10 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/prwatch"
 	"amux/internal/store"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // untrackedTTL bounds how long a Claude session amux didn't launch stays on the
@@ -45,6 +48,12 @@ type Workspace struct {
 	// modelObserved is notified after a runtime-selected model is reconciled into
 	// the store, so a live structured controller can update its next-turn default.
 	modelObserved func(id, kind, model string)
+	// prs, if set, reports the PRs a session owns (the daemon's PR watcher);
+	// rows carry them and their status gains a short PR suffix.
+	prs func(id string) []harnessproto.SessionPR
+	// goalStatus, if set, reports a goal coordinator's goal status word
+	// ("none" with no goal, "" when unknown) for its status line.
+	goalStatus func(store.Session) string
 }
 
 func NewWorkspace() *Workspace { return &Workspace{} }
@@ -54,6 +63,12 @@ func (w *Workspace) SetLiveness(f func() map[string]bool) { w.engineLive = f }
 
 // SetControlMode installs the control-mode probe (see Workspace.controlMode).
 func (w *Workspace) SetControlMode(f func(id string) string) { w.controlMode = f }
+
+// SetPRs installs the PR probe (see Workspace.prs).
+func (w *Workspace) SetPRs(f func(id string) []harnessproto.SessionPR) { w.prs = f }
+
+// SetGoalStatus installs the goal-status probe (see Workspace.goalStatus).
+func (w *Workspace) SetGoalStatus(f func(store.Session) string) { w.goalStatus = f }
 
 // SetModelObserved installs the live-controller reconciliation callback.
 func (w *Workspace) SetModelObserved(f func(id, kind, model string)) { w.modelObserved = f }
@@ -159,18 +174,20 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode), Model: r.Model,
 			Role:      store.RoleCoordinator,
 			State:     rootState,
-			Status:    fmt.Sprintf("%s · %d agent%s%s", stateLabel(ownState), len(active), plural(len(active)), goalModeSuffix(r)),
+			Status:    fmt.Sprintf("%s · %d agent%s%s", stateLabel(ownState), len(active), plural(len(active)), w.goalSuffix(r, ownState)),
 			Cwd:       containerDir(r),
 			CanAttach: true, // opens the coordinator
 			CanKill:   true, // delete the whole root
 		}, true)) // the coordinator resolves in steer.go — steerable
 		for i, s := range active {
+			prs := w.sessionPRs(s.ID)
 			out = append(out, w.withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
 				Model:     s.Model,
 				State:     subStates[i],
-				Status:    stateLabel(subStates[i]) + subSuffix(s) + noticeSuffix(s) + configSuffix(s),
+				PRs:       prList(prs),
+				Status:    stateLabel(subStates[i]) + subSuffix(s) + prSuffix(prs) + noticeSuffix(s) + configSuffix(s),
 				Cwd:       s.Dir,
 				CanAttach: true,
 				CanKill:   true,
@@ -523,6 +540,55 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+func (w *Workspace) sessionPRs(id string) []harnessproto.SessionPR {
+	if w.prs == nil {
+		return nil
+	}
+	return w.prs(id)
+}
+
+// prList is the row's PRs field (nil when there are none).
+func prList(prs []harnessproto.SessionPR) *harnessproto.SessionPRs {
+	if len(prs) == 0 {
+		return nil
+	}
+	list := harnessproto.SessionPRs(prs)
+	return &list
+}
+
+// prSuffix is a member row's short PR state, e.g. " · PR #247 CI✗ conflict".
+func prSuffix(prs []harnessproto.SessionPR) string {
+	if s := prwatch.Summary(prs); s != "" {
+		return " · " + s
+	}
+	return ""
+}
+
+// goalSuffix is goalModeSuffix with the coordinator's live goal status, so a
+// coordinator waiting on a wake-up reads differently from an idle one:
+// " · goal waiting", " · goal active", " · goal paused", " · goal mode (no
+// goal)". ownState is the coordinator's own activity: a goal marked waiting
+// whose coordinator is running again reads active.
+func (w *Workspace) goalSuffix(root store.Session, ownState string) string {
+	base := goalModeSuffix(root)
+	if !agent.GoalMode(root) || w.goalStatus == nil {
+		return base
+	}
+	switch status := w.goalStatus(root); status {
+	case "":
+		return base
+	case "none":
+		return " · goal mode (no goal)"
+	case "waiting":
+		if ownState == core.StateRunning {
+			return " · goal active"
+		}
+		return " · goal waiting"
+	default:
+		return " · goal " + status
+	}
 }
 
 // goalModeSuffix states a coordinator's task lifecycle on its rail/status line.

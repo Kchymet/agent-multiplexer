@@ -490,7 +490,9 @@ nothing for it (honest degradation) — the feature stays advertised.
 - **Vocabulary the daemon emits** (a stable set; a consumer maps it onto its own
   model): `turn_start`, `prompt` (`in`), `text`, `thinking`, `tool_call`,
   `tool_result`, `plan`, `usage` (`meta`), `permission_request`,
-  `permission_resolved`, `notice` (`meta`), `turn_end`, and `raw`. `raw` carries
+  `permission_resolved`, `notice` (`meta`), `pr_state` (`meta`; amux's PR
+  watcher, `{session, pr, changes, wake}` — see [PR watch](pr-watch.md)),
+  `turn_end`, and `raw`. `raw` carries
   `{runtime, native_type, body}` and is the passthrough for any record entry the
   reader has no mapping for — **never dropped**.
 - `permission_request` carries

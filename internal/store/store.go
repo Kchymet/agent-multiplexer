@@ -265,6 +265,11 @@ CREATE TABLE IF NOT EXISTS coordinator_repo_grants (
 CREATE TABLE IF NOT EXISTS coordinator_grant_migrations (
   version INTEGER PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS session_prs (
+  session_id TEXT PRIMARY KEY,
+  state      TEXT NOT NULL DEFAULT '',
+  updated    INTEGER NOT NULL DEFAULT 0
+);
 `); err != nil {
 		return err
 	}
@@ -530,6 +535,9 @@ func (d *DB) DeleteSession(id string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM coordinator_grant_state WHERE coordinator_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM session_prs WHERE session_id=?`, id); err != nil && !missingTable(err) {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {

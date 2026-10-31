@@ -621,6 +621,18 @@ budget-limited goals are never resumed automatically. `amux config set
 goal.auto_resume off` turns the Claude-side continuation off (default on; applied
 at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
 
+### PR watch
+
+The daemon tracks the GitHub PRs each workgroup member owns (head branch
+`amux/<wg>-<member>[-suffix]`) with the host's `gh` login, one `gh pr list` per
+repository every 3 minutes (`AMUX_PR_POLL_INTERVAL`, `off` to disable). Members'
+rows in `amux status --json` carry a `prs` list, every change is a `pr_state`
+event in `amux agent events <member>`, and a meaningful transition (CI red, CI
+green after red, merge conflict, review, merged, closed, draft → ready) wakes
+the coordinator with one short de-duplicated prompt once it is idle. A goal
+coordinator's status shows its goal status (`goal waiting`, `goal active`, …).
+See [PR watch](docs/pr-watch.md).
+
 ## Roadmap
 
 - **Thin-client TUI** — migrate the native TUI onto `muxclient` so the default app

@@ -34,6 +34,7 @@ import (
 	"amux/internal/engine/local"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
+	"amux/internal/prwatch"
 	"amux/internal/source"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -208,6 +209,9 @@ type Daemon struct {
 	permissionBaseline func(string) ([]string, error)
 	// sessionRPC owns bounded per-session mailbox serving and lifecycle hooks.
 	sessionRPC *sessionRuntime
+	// prs watches workgroup members' GitHub PRs and wakes their coordinators
+	// (internal/prwatch, prwatch.go). Built in New, started by Run.
+	prs *prwatch.Watcher
 	// status publishes startup/shutdown progress for lifecycle clients. Run
 	// creates it only once it holds the singleton lock, which owns the file.
 	status *daemonstatus.Reporter
@@ -241,6 +245,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	}
 	d.launchSpec = d.launchSpecFor
 	d.listen = listenOwnedUnix
+	d.prs = d.newPRWatcher()
 	d.permissionBaseline = d.loadPermissionBaseline
 	return d
 }
@@ -279,6 +284,8 @@ func Default(self string) *Daemon {
 		}
 		return ""
 	})
+	ws.SetPRs(d.sessionPRs)
+	ws.SetGoalStatus(d.coordinatorGoalStatus)
 	ws.SetModelObserved(func(id, kind, model string) {
 		if kind == "codex" && d.codex != nil {
 			d.codex.SetModel(id, model)
@@ -510,6 +517,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	})
 
 	startRunWorker(func() { d.pollLoop(ctx) })
+	// Member PRs are polled on their own (much slower) clock.
+	startRunWorker(func() { d.prWatchLoop(ctx) })
 
 	// Close the listener when ctx ends so Accept returns.
 	startRunWorker(func() { <-ctx.Done(); _ = ln.Close() })

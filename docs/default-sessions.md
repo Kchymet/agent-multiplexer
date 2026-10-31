@@ -198,7 +198,9 @@ Claude coordinator; there is no opt-in.
   (`Monitor` or a `run_in_background` until-loop) and runs `goal wait`, which
   lets exactly the next Stop through; the goal is active again after it, so the
   turn the wake-up starts continues under goal pressure. The wait spends no
-  continuation budget and refunds none. Its guide tells it to ask for genuinely user-owned information
+  continuation budget and refunds none. amux itself is one such wake-up
+  source: it prompts the coordinator when a member's PR changes state (see
+  [PR watch](pr-watch.md)). Its guide tells it to ask for genuinely user-owned information
   rather than guess, and to pick a sensible default for anything optional.
 - **Only the user pauses it.** The same `goal` steer verb (`status`,
   `objective`) moves the file through the pinned session root; resuming an idle
