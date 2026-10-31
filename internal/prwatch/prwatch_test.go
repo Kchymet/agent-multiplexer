@@ -399,6 +399,59 @@ func TestMixedDeliveryKeepsOnlyDeferredEntries(t *testing.T) {
 	}
 }
 
+func TestIndeterminateDeliverySuppressesOnlyUncertainRetry(t *testing.T) {
+	h := newHarness(t)
+	h.gh.set(7, "amux/wg-m1", "OPEN", nil)
+	h.gh.set(8, "amux/wg-m2", "OPEN", nil)
+	h.poll()
+	h.deliver = Deferred
+	h.gh.update(7, func(pr map[string]any) { pr["state"] = "CLOSED" })
+	h.gh.update(8, func(pr map[string]any) { pr["mergeable"] = "CONFLICTING" })
+	h.poll()
+
+	calls := 0
+	h.deliverFn = func(_ string, wakes []Wake) []Delivery {
+		calls++
+		results := make([]Delivery, len(wakes))
+		for i, wake := range wakes {
+			switch wake.SessionID {
+			case "m1":
+				results[i] = Indeterminate
+			case "m2":
+				results[i] = Deferred
+			default:
+				t.Fatalf("unexpected wake %+v", wake)
+			}
+		}
+		return results
+	}
+	h.w.Flush(context.Background())
+	if got := h.w.Pending("wg"); got != 1 {
+		t.Fatalf("pending after indeterminate/deferred = %d, want only deferred entry", got)
+	}
+	if calls != 1 {
+		t.Fatalf("delivery calls = %d, want 1", calls)
+	}
+	if wakes := h.takeWakes(); len(wakes) != 0 {
+		t.Fatalf("indeterminate outcome was claimed as delivered: %v", wakes)
+	}
+	if got := strings.Join(h.logs, "\n"); !strings.Contains(got, "indeterminate") || !strings.Contains(got, "automatic retry suppressed") {
+		t.Fatalf("missing reconciliation diagnostic: %q", got)
+	}
+
+	h.deliverFn = nil
+	h.deliver = Delivered
+	h.w.Flush(context.Background())
+	wakes := h.takeWakes()
+	if len(wakes) != 1 || len(wakes[0]) != 1 || !strings.Contains(wakes[0][0], "member m2 PR o/r#8") {
+		t.Fatalf("delivered wakes = %v, want only independently deferred m2", wakes)
+	}
+	h.w.Flush(context.Background())
+	if calls != 1 || h.w.Pending("wg") != 0 || len(h.takeWakes()) != 0 {
+		t.Fatal("indeterminate notification was automatically retried")
+	}
+}
+
 func TestMembershipChangeDuringObservationDropsOldRoute(t *testing.T) {
 	h := newHarness(t)
 	h.gh.set(7, "amux/wg-m1", "OPEN", nil)

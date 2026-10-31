@@ -256,8 +256,20 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 		authorized = append(authorized, wakes[i])
 	}
 	text := prWakeText(agent.HookGoals(sess), prwatch.WakeLines(authorized))
-	if err := d.beginPRWake(ctx, sess, text); err != nil {
-		log.Printf("prwatch: wake-up for %s failed: %v", workgroup, err)
+	outcome, err := d.beginPRWake(ctx, sess, text)
+	if err != nil {
+		if outcome == prwatch.Indeterminate {
+			for _, i := range eligible {
+				results[i] = prwatch.Indeterminate
+			}
+			log.Printf("prwatch: wake-up for %s indeterminate; automatic retry suppressed: %v", workgroup, err)
+			return results
+		}
+		log.Printf("prwatch: wake-up for %s deferred: %v", workgroup, err)
+		return results
+	}
+	if outcome != prwatch.Delivered {
+		log.Printf("prwatch: wake-up for %s returned unexpected admission outcome %d", workgroup, outcome)
 		return results
 	}
 	for _, i := range eligible {
@@ -336,7 +348,7 @@ func resolvePRWakes(workgroup string, wakes []prwatch.Wake) (root store.Session,
 // delivery admission. A live structured coordinator splits turn/start from the
 // long model turn: BeginPrompt is the bounded effect protected here, while its
 // waiter runs under daemon lifecycle ownership after these locks are released.
-func (d *Daemon) beginPRWake(ctx context.Context, sess store.Session, text string) error {
+func (d *Daemon) beginPRWake(ctx context.Context, sess store.Session, text string) (prwatch.Delivery, error) {
 	if d.codex != nil {
 		if sup, ok := d.codex.Get(sess.ID); ok {
 			return d.beginStructuredPRWake(ctx, sess.ID, sup, text)
@@ -346,12 +358,15 @@ func (d *Daemon) beginPRWake(ctx context.Context, sess store.Session, text strin
 		core.SteerVerb: core.SteerPrompt, core.SteerText: text,
 	}})
 	if !res.OK {
-		return fmt.Errorf("%s", res.Error)
+		return prwatch.Deferred, fmt.Errorf("%s", res.Error)
 	}
-	return nil
+	return prwatch.Delivered, nil
 }
 
-func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter structuredPromptStarter, text string) error {
+func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter structuredPromptStarter, text string) (prwatch.Delivery, error) {
+	if err := ctx.Err(); err != nil {
+		return prwatch.Deferred, err
+	}
 	waiter := make(chan func(context.Context) error, 1)
 	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
 		wait := <-waiter
@@ -362,20 +377,25 @@ func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter s
 			structuredJournal(id, core.JournalError, fmt.Sprintf("prompt: %v", err))
 		}
 	}) {
-		return context.Canceled
+		return prwatch.Deferred, context.Canceled
 	}
 	admitCtx, cancel := context.WithTimeout(ctx, steerEffectAdmissionTimeout)
 	defer cancel()
+	if err := admitCtx.Err(); err != nil {
+		waiter <- nil
+		return prwatch.Deferred, err
+	}
 	wait, err := starter.BeginPrompt(admitCtx, text)
 	if err != nil || wait == nil {
 		waiter <- nil
-		if err != nil {
-			return err
+		if err == nil {
+			err = fmt.Errorf("prompt runtime returned no turn waiter")
 		}
-		return fmt.Errorf("prompt runtime returned no turn waiter")
+		structuredJournal(id, core.JournalError, fmt.Sprintf("PR watcher turn-start outcome is unknown; automatic retry suppressed; reconcile PR state manually: %v", err))
+		return prwatch.Indeterminate, err
 	}
 	waiter <- wait
-	return nil
+	return prwatch.Delivered, nil
 }
 
 // prWakeText renders the wake-up prompt.

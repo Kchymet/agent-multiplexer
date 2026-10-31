@@ -83,7 +83,10 @@ func (s *Supervisor) ObservedGoal() (state GoalState, present, known bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, present = goalState(s.goal)
-	return state, present, s.goalObserved
+	// Manager.Get/live also exclude a reconnecting supervisor. Keep the direct
+	// observation surface fail-closed as well: an old reader callback may still
+	// be retiring, and only the replacement reader may make the state known.
+	return state, present, s.goalObserved && !s.reconnecting
 }
 
 func goalState(g *threadGoal) (GoalState, bool) {
@@ -173,6 +176,9 @@ func (s *Supervisor) observeGoal(method string, params json.RawMessage) {
 	}
 	if json.Unmarshal(params, &p) != nil {
 		return
+	}
+	if s.beforeGoalRecord != nil {
+		s.beforeGoalRecord()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

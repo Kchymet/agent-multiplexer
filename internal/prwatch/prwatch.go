@@ -92,6 +92,10 @@ const (
 	Delivered Delivery = iota
 	// Deferred: the coordinator cannot take a prompt now; retry later.
 	Deferred
+	// Indeterminate: prompt admission may have taken effect, but no response
+	// proved it. Suppress automatic retry without claiming delivery; a visible
+	// diagnostic directs manual reconciliation.
+	Indeterminate
 	// Dropped: the coordinator is gone (archived, deleted); discard.
 	Dropped
 )
@@ -121,8 +125,8 @@ type Config struct {
 	Emit func(Change)
 	// Deliver revalidates and prompts a workgroup's coordinator. Its result is
 	// per wake so a mixed batch can drop stale relationships without withholding
-	// independent eligible notifications. A missing/misaligned result is treated
-	// as Deferred.
+	// independent eligible notifications. Indeterminate suppresses retry without
+	// claiming delivery. A missing/misaligned result is treated as Deferred.
 	Deliver  func(ctx context.Context, workgroup string, wakes []Wake) []Delivery
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
@@ -755,6 +759,9 @@ func (w *Watcher) Flush(ctx context.Context) {
 			switch result {
 			case Delivered:
 				w.remember(p.key)
+			case Indeterminate:
+				w.remember(p.key)
+				w.cfg.Logf("prwatch: wake-up outcome indeterminate for %s member %s repo %s; automatic retry suppressed", wg, p.wake.SessionID, p.wake.Repo)
 			case Dropped:
 			default:
 				remaining = append(remaining, p)

@@ -294,6 +294,128 @@ func TestManagerReconnectsTransportWithoutReplacingLiveProcess(t *testing.T) {
 	}
 }
 
+func TestManagerReconnectRetiresOldGoalCallbackBeforeUnknownReset(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	servers := make(chan *fakeServer, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fs := &fakeServer{t: t, conn: &wsConn{c: conn}, respByID: map[string]chan incoming{}}
+		defer fs.close()
+		servers <- fs
+		fs.loop()
+	}))
+	defer server.Close()
+
+	m := NewManager(context.Background(), "")
+	defer m.Shutdown()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
+	ensure := func() (*Supervisor, error) {
+		return m.Ensure(context.Background(), "goal-gap", "", nil, []string{"sleep", "60"}, endpoint, "gpt-main", "", "")
+	}
+	sup, err := ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := <-servers
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	releaseCallback := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseCallback()
+	sup.beforeGoalRecord = func() {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	}
+	first.pushNotify("thread/goal/updated", map[string]any{
+		"threadId": "thr_1",
+		"goal":     map[string]any{"threadId": "thr_1", "objective": "old", "status": GoalPaused, "createdAt": 1},
+	})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("old reader goal callback did not enter gate")
+	}
+
+	sup.mu.Lock()
+	oldRPC := sup.rpc
+	sup.mu.Unlock()
+	if err := oldRPC.close(); err != nil {
+		t.Fatal(err)
+	}
+	reconnected := make(chan struct {
+		sup *Supervisor
+		err error
+	}, 1)
+	go func() {
+		s, err := ensure()
+		reconnected <- struct {
+			sup *Supervisor
+			err error
+		}{s, err}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		sup.mu.Lock()
+		joining := sup.reconnecting
+		sup.mu.Unlock()
+		if joining {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reconnect did not begin while old callback was gated")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := m.Get("goal-gap"); ok || sup.live() {
+		t.Fatal("reconnecting supervisor remained live through retired-reader gap")
+	}
+	if _, _, known := sup.ObservedGoal(); known {
+		t.Fatal("old-reader goal state was known during reconnect")
+	}
+
+	releaseCallback()
+	var got struct {
+		sup *Supervisor
+		err error
+	}
+	select {
+	case got = <-reconnected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reconnect did not finish after old callback retired")
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.sup != sup {
+		t.Fatal("reconnect replaced supervisor")
+	}
+	second := <-servers
+	if state, present, known := sup.ObservedGoal(); !present || known || state.Status != GoalPaused {
+		t.Fatalf("post-join old observation = %+v present=%t known=%t, want retained but unknown", state, present, known)
+	}
+
+	second.pushNotify("thread/goal/updated", map[string]any{
+		"threadId": "thr_1",
+		"goal":     map[string]any{"threadId": "thr_1", "objective": "new", "status": GoalActive, "createdAt": 2},
+	})
+	deadline = time.Now().Add(time.Second)
+	for {
+		state, present, known := sup.ObservedGoal()
+		if present && known && state.Status == GoalActive && state.Objective == "new" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replacement observation did not become known: %+v present=%t known=%t", state, present, known)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestManagerProcessExitAfterRetiredTransportClosesServingLifetime(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	connected := make(chan *fakeServer, 1)

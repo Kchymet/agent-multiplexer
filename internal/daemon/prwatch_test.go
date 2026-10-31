@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,8 +311,12 @@ func TestCoordinatorWakeFailsClosedOnGoalReadinessAndPermission(t *testing.T) {
 func TestStructuredPRWakeAdmitsTurnBeforeDeferredWait(t *testing.T) {
 	d := New("", nil, time.Hour)
 	steerer := &gatedPromptSteerer{started: make(chan struct{}), release: make(chan struct{})}
-	if err := d.beginStructuredPRWake(context.Background(), "wg", steerer, "check PR"); err != nil {
+	outcome, err := d.beginStructuredPRWake(context.Background(), "wg", steerer, "check PR")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if outcome != prwatch.Delivered {
+		t.Fatalf("admission outcome = %v, want Delivered", outcome)
 	}
 	select {
 	case <-steerer.started:
@@ -333,5 +338,65 @@ func TestStructuredPRWakeAdmitsTurnBeforeDeferredWait(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("structured model-turn waiter did not finish")
+	}
+}
+
+type failingPromptStarter struct {
+	calls int
+	err   error
+}
+
+func (s *failingPromptStarter) BeginPrompt(context.Context, string) (func(context.Context) error, error) {
+	s.calls++
+	return nil, s.err
+}
+
+func TestStructuredPRWakeIndeterminateStartSuppressesRetry(t *testing.T) {
+	isolateHome(t)
+	d := New("", nil, time.Hour)
+	starter := &failingPromptStarter{err: context.DeadlineExceeded}
+	outcome, err := d.beginStructuredPRWake(context.Background(), "wg", starter, "check PR")
+	if !errors.Is(err, context.DeadlineExceeded) || outcome != prwatch.Indeterminate {
+		t.Fatalf("admission = %v, %v, want Indeterminate deadline", outcome, err)
+	}
+	d.deferredWG.Wait()
+	if starter.calls != 1 {
+		t.Fatalf("BeginPrompt calls = %d, want exactly 1", starter.calls)
+	}
+	found := false
+	for _, rec := range core.ReadJournal("wg") {
+		if strings.Contains(rec.Text, "outcome is unknown") && strings.Contains(rec.Text, "automatic retry suppressed") && strings.Contains(rec.Text, "manually") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("indeterminate start did not leave a visible manual-reconciliation diagnostic")
+	}
+}
+
+func TestStructuredPRWakeUnavailableBeforeAdmissionStaysDeferred(t *testing.T) {
+	d := New("", nil, time.Hour)
+	d.stopDeferredAdmission()
+	starter := &failingPromptStarter{err: errors.New("must not be called")}
+	outcome, err := d.beginStructuredPRWake(context.Background(), "wg", starter, "check PR")
+	if !errors.Is(err, context.Canceled) || outcome != prwatch.Deferred {
+		t.Fatalf("admission = %v, %v, want safely Deferred cancellation", outcome, err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("BeginPrompt called %d times before admission", starter.calls)
+	}
+}
+
+func TestStructuredPRWakeCancelledBeforeAdmissionStaysDeferred(t *testing.T) {
+	d := New("", nil, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	starter := &failingPromptStarter{err: errors.New("must not be called")}
+	outcome, err := d.beginStructuredPRWake(ctx, "wg", starter, "check PR")
+	if !errors.Is(err, context.Canceled) || outcome != prwatch.Deferred {
+		t.Fatalf("admission = %v, %v, want safely Deferred cancellation", outcome, err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("BeginPrompt called %d times after pre-admission cancellation", starter.calls)
 	}
 }
