@@ -98,7 +98,8 @@ func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
 	// The guide is hard-wrapped prose; match phrases against its unwrapped form.
 	flat := strings.Join(strings.Fields(guide), " ")
 	for _, want := range []string{
-		"archives nothing",
+		"does not archive the workgroup",
+		"archive every finished member",
 		"ask the user whether to archive the workgroup",
 		"Wait for explicit user confirmation before archiving",
 		"goal completion is not confirmation",

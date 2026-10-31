@@ -130,10 +130,14 @@ that supervises exactly that natively: Codex's App Server thread goal
   every idle turn, with no TUI attached and nothing scheduled by amux. The
   objective, token budget and usage are the runtime's own, and `get_goal` /
   `update_goal` are the model's view of them. amux sets no budget of its own.
-- **A completed goal leaves the workgroup open.** Nothing is archived when a
-  goal completes: the completed goal stays visible, the coordinator and its
-  members keep running, and the coordinator ends by asking the user whether to
-  archive the workgroup or give it another task. After explicit user confirmation,
+- **A completed goal leaves the workgroup open.** Goal completion itself
+  archives nothing: the completed goal stays visible and the coordinator keeps
+  running. The coordinator's guide makes archiving its own *finished* members
+  (work verified, PR merged/closed or task delivered, not being reassigned) an
+  expected step, done with `amux do set-archived <member> -f archived=true`
+  during the task and for every finished member before it reports completion;
+  it keeps a member only when it expects to reuse it, and says why. It then ends
+  by asking the user whether to archive the workgroup or give it another task. After explicit user confirmation,
   the coordinator can run `amux agent done` to archive its workgroup and members.
   The host can also archive it (`x` on the rail, `amux workgroup archive <id>`).
   Both stop runtimes and revoke credentials; transcripts and worktrees remain.
@@ -190,7 +194,9 @@ Claude coordinator; there is no opt-in.
   the objective and the honest ways out. It also reports the turn's activity
   (`running` when continuing, `ready` otherwise), replacing the plain Stop
   status hook. A failure lets the turn end rather than trapping it.
-- **The model moves its own goal** with `amux agent goal complete "<summary>"`,
+- **The model moves its own goal** with `amux agent goal complete "<summary>"`
+  (which, when direct members are neither archived nor running, prints them
+  with the `set-archived` command to archive the finished ones),
   `amux agent goal ask "<question>"` (stop and wait for the user — also
   `AskUserQuestion` for concrete choices), `amux agent goal wait "<on what>"`
   and `amux agent goal blocked "<reason>"`. `wait` is how a coordinator idles

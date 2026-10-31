@@ -170,7 +170,9 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   or `amux wg unarchive <id>`). Workgroups are never archived automatically:
   when a coordinator's goal completes, the workgroup stays on the active rail
   with its completed goal visible, and the coordinator asks whether to archive
-  it or take another task. After explicit user confirmation, the coordinator can
+  it or take another task. Its own finished members, though, it is expected to
+  archive itself as it goes (`amux do set-archived <member> -f archived=true`),
+  so a long-done workgroup does not keep showing live members. After explicit user confirmation, the coordinator can
   run `amux agent done` to archive its workgroup and all direct members, stopping
   runtimes and revoking credentials. Host workgroup restoration also restores
   previously active members; already-completed members stay archived. Task-mode

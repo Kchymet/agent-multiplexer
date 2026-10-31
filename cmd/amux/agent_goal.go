@@ -70,6 +70,8 @@ reports itself blocked, or the user pauses it.
 
 usage: amux agent goal [show [--json]]
        amux agent goal complete "<summary>"    the objective is done and verified
+                                               (archive finished members first; it
+                                               lists idle unarchived members)
        amux agent goal ask "<question>"        stop and wait for the user's answer
        amux agent goal wait "<waiting on>"     end this turn only; an armed background
                                                wake-up (Monitor / run_in_background)
@@ -161,6 +163,7 @@ func goalMark(status string, args []string) error {
 	switch status {
 	case claudegoal.StatusComplete:
 		fmt.Println("goal complete: give your final summary, then end the turn. The workgroup stays open.")
+		fmt.Print(finishedMemberReminder())
 	case claudegoal.StatusInput:
 		fmt.Println("goal waiting for input: ask the user your question and end the turn; their reply resumes the goal.")
 	case claudegoal.StatusWaiting:
@@ -246,4 +249,52 @@ func goalStopHook() {
 	}
 	state = core.StateRunning
 	fmt.Println(string(out))
+}
+
+// finishedMemberReminder is what `goal complete` adds when the coordinator
+// still has idle, unarchived direct members: finished members should be
+// archived before the task is reported complete. It reads the coordinator's own
+// scoped snapshot; any failure prints nothing, because a reminder must never
+// block or fail completion.
+func finishedMemberReminder() string {
+	if !sessionContextRestricted() {
+		return ""
+	}
+	var sessions []core.Session
+	if err := queryRows(core.QuerySnapshot, &sessions); err != nil {
+		return ""
+	}
+	return idleMemberReminder(sessions)
+}
+
+// idleMemberReminder lists the direct members in a coordinator's scoped
+// snapshot that are neither archived nor running, with the archive command.
+// The scoped snapshot holds only this workgroup, so a row with a root is one
+// of its members.
+func idleMemberReminder(sessions []core.Session) string {
+	var idle []core.Session
+	for _, s := range sessions {
+		if s.IsRoot || s.RootID == "" || s.Archived || s.State == core.StateRunning {
+			continue
+		}
+		idle = append(idle, s)
+	}
+	if len(idle) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nreminder: %d member(s) are not running but still unarchived:\n", len(idle))
+	for _, s := range idle {
+		state := s.State
+		if state == "" {
+			state = core.StateIdle
+		}
+		fmt.Fprintf(&b, "  %-10s %-8s %s\n", s.ID, state, s.Title)
+	}
+	b.WriteString("Archive each finished member now (its work is verified and it won't be reassigned):\n")
+	for _, s := range idle {
+		fmt.Fprintf(&b, "  amux do set-archived %s -f archived=true\n", s.ID)
+	}
+	b.WriteString("Keep a member only if you expect to reuse it, and say why in your final summary.\n")
+	return b.String()
 }

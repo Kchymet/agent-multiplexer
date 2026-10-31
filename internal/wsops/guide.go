@@ -295,8 +295,9 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   permission request (both ids come from the member's `+"`permission_request`"+` event).
 - `+"`amux do start <member>`"+` — bring a stopped member up without prompting it;
   `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
-- `+"`amux do set-archived <member> -f archived=true`"+` — mark a member done. Restoring
-  an archived member or this workgroup requires the host.
+- `+"`amux do set-archived <member> -f archived=true`"+` — archive a finished member.
+  This is an expected step, not an option: see "Archiving finished members".
+  Restoring an archived member or this workgroup requires the host.
 - After explicit user confirmation, `+"`amux agent done`"+` archives your own
   workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
@@ -311,6 +312,8 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 
 `, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
 	b.WriteString(goalSection(root))
+	b.WriteString("\n")
+	b.WriteString(memberArchiveSection(root))
 	b.WriteString("\n")
 	b.WriteString(completionSection(root))
 	b.WriteString("\n")
@@ -473,12 +476,37 @@ func firstOf(list string) string {
 
 func launchStamp() string { return time.Now().Format("2006-01-02 15:04 MST") }
 
+// memberArchiveSection makes archiving finished members part of the
+// coordinator's job. Without it long-done workgroups keep showing live members
+// on the rail. It covers members only; self/workgroup archive still waits for
+// the user (completionSection).
+func memberArchiveSection(root store.Session) string {
+	return `## Archiving finished members
+Archive each member as soon as it is finished; do not leave it on the rail:
+- A member is **finished** when its work is verified — its PR is merged or
+  closed, or its task is delivered and checked — and you will not give it more
+  work.
+- Archive it then, during the task, not only at the end:
+  ` + "`amux do set-archived <member> -f archived=true`" + `. Check ` + "`amux status --json`" + `
+  first: never archive a member that is still running.
+- Before you report a task complete (and before marking a goal complete),
+  archive every finished member. The members
+  left unarchived should be exactly those still working or kept on purpose.
+- Keep a finished member only if you expect to reuse it soon (for example a
+  follow-up on the same branch). Note it in ` + "`COORDINATION.md`" + ` and in your
+  report with the reason.
+- This covers members only. Archiving yourself and the workgroup
+  (` + "`amux agent done`" + `) still needs explicit user confirmation.
+`
+}
+
 // Task completion never implies archive permission. A coordinator must ask for
 // explicit user confirmation before using its authenticated self-archive path.
 func completionSection(root store.Session) string {
 	return fmt.Sprintf(`## Finishing a task
-Finishing a task archives nothing: this workgroup, you and your members stay on
-the active rail. Before you call a task finished, check that every member PR it
+Finishing a task does not archive the workgroup: this workgroup and you stay on
+the active rail. Before you call a task finished, archive every finished member
+(see "Archiving finished members") and check that every member PR it
 produced is green and marked ready for review (`+"`gh pr view <n> --json isDraft`"+`
 prints false), not left in draft; the user merges unless the task authorizes
 merging. End each finished task with your final summary, listing those PR URLs
@@ -488,8 +516,8 @@ After confirmation, run `+"`amux agent done`"+`: your authenticated identity sel
 this workgroup (%s), and the daemon durably archives you and its direct members
 before stopping runtimes. Report success only when the command confirms it.
 Do not delegate self-archive to a member: a member's `+"`amux agent done`"+` archives
-only that member. You may still mark verified members done with
-`+"`amux do set-archived <member> -f archived=true`"+`.
+only that member. Archiving finished members with
+`+"`amux do set-archived <member> -f archived=true`"+` needs no confirmation.
 Restoration is host-only: restoring the workgroup restores previously active
 members too. Previously completed members stay archived.
 `, root.ID)
@@ -526,9 +554,10 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
   draft; "do not merge" never means draft.
 - Call `+"`update_goal`"+` with status `+"`complete`"+` only when the objective is true and
   verified — never because you are stopping, out of ideas, or near a budget.
-  Completing the goal archives nothing: the completed goal stays visible on the
-  thread and this workgroup stays open (see "Finishing a task"). Finish all
-  member work and give your final summary before ending that turn; the user's
+  Archive every finished member first (see "Archiving finished members");
+  completing the goal does not do it for you. The completed goal stays visible
+  on the thread and this workgroup stays open (see "Finishing a task"). Finish
+  all member work and give your final summary before ending that turn; the user's
   next task becomes a fresh goal with its own accounting.
 - Ask the user only for genuine input (`+"`request_user_input`"+`); an open question is
   not a reason to shrink the objective. Use status `+"`blocked`"+` only after the same
@@ -565,8 +594,11 @@ status.
   means draft.
 - Run `+"`amux agent goal complete \"<summary>\"`"+` only when the objective is true
   and verified — never because you are stopping, out of ideas, or near the
-  continuation budget. Completing the goal archives nothing (see "Finishing a
-  task"); give your final summary in the same turn.
+  continuation budget. Archive every finished member first (see "Archiving
+  finished members"). Completing the goal does not archive the workgroup (see
+  "Finishing a task"). When unarchived idle members remain, it lists them with
+  the archive command: archive the finished ones, or say why each is kept, in
+  your final summary in the same turn.
 
 ### Getting what you need from the user
 Before dispatching work, check the task for gaps. When the task is missing
