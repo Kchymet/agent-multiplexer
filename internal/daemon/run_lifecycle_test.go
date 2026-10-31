@@ -455,18 +455,26 @@ type idleTestEngine struct {
 	key      engine.Key
 	activity func(engine.Key) engine.Activity
 	budget   time.Duration
-	// during runs as the wait begins, standing in for the agent's hooks.
+	// during runs as the wait begins, standing in for the agent's hooks. The
+	// wait does not return until it has finished: its observations must all
+	// be made while the wait is in progress, before teardown continues.
 	during func()
 	waited chan time.Duration
 }
 
 func (e *idleTestEngine) WaitIdle() {
 	start := time.Now()
-	go e.during()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.during()
+	}()
 	for e.activity(e.key) == engine.ActivityBusy && time.Since(start) < e.budget {
 		time.Sleep(10 * time.Millisecond)
 	}
-	e.waited <- time.Since(start)
+	waited := time.Since(start)
+	<-done
+	e.waited <- waited
 }
 
 // A Claude agent's turn end reaches the daemon only as a hook report through
