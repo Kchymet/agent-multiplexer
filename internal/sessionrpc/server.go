@@ -418,6 +418,12 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 				processed++
 				continue
 			}
+			if dropped, err := s.dropExpired(name); err != nil {
+				return processed, err
+			} else if dropped {
+				processed++
+				continue
+			}
 			claimed, err := s.claim(name)
 			if err != nil {
 				return processed, err
@@ -592,6 +598,30 @@ func (s *Server) Busy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.inflight) != 0
+}
+
+// dropExpired removes an unclaimed request that expired long enough ago that
+// Verify would reject it and its client has stopped waiting (see
+// expiredDropAfter), without claiming it or signing and publishing that
+// rejection. A backlog of abandoned hook calls then costs one read and one
+// unlink each instead of two directory syncs, a signature and a published
+// response, and a live call queued behind it is reached sooner. The expiry
+// read here is unauthenticated, so it can only discard: whoever can write the
+// request can already delete it. Anything unreadable is left to claim, which
+// rejects it as before.
+func (s *Server) dropExpired(name string) (bool, error) {
+	raw, err := readRegularAt(s.requests, name, maxEnvelopeFileBytes)
+	if err != nil {
+		return false, nil
+	}
+	var envelope access.SignedRequest
+	if unmarshalBounded(raw, maxEnvelopeFileBytes, &envelope) != nil || envelope.ExpiresAt <= 0 {
+		return false, nil
+	}
+	if !s.clock().After(time.UnixMilli(envelope.ExpiresAt).Add(expiredDropAfter)) {
+		return false, nil
+	}
+	return true, unlinkAt(s.requests, name)
 }
 
 func (s *Server) claim(name string) (bool, error) {
