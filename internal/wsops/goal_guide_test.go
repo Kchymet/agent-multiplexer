@@ -249,6 +249,7 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 	for _, want := range []string{
 		"It must cover **every open member PR**",
 		"The note names what is awaited (member, repo#PR) and the wake-up you armed",
+		"amux's PR watcher (docs/pr-watch.md) also sends you a prompt when a member PR changes state, but still arm your own wake-up before `goal wait`.",
 	} {
 		if !strings.Contains(hooked, want) {
 			t.Errorf("claude goal coordinator guide missing %q", want)

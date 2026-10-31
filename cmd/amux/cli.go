@@ -379,13 +379,18 @@ func cmdSession(args []string) error {
 		fmt.Printf("coordinator %s grants: %s\n", args[1], orNone(strings.Join(repos, ", ")))
 		return nil
 	case "rm", "delete":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workgroup rm <id>")
+		id, force, err := idAndForce(args[1:])
+		if err != nil {
+			return fmt.Errorf("usage: amux workgroup rm <id> [--force]")
 		}
-		if err := sendAction(core.Action{Action: core.ActionDelete, ID: args[1]}); err != nil {
+		a := core.Action{Action: core.ActionDelete, ID: id}
+		if force {
+			a.Fields = map[string]string{wsops.FieldForce: "true"}
+		}
+		if err := sendAction(a); err != nil {
 			return err
 		}
-		fmt.Printf("removed %s\n", args[1])
+		fmt.Printf("removed %s\n", id)
 		return nil
 	case "rename":
 		if len(args) < 3 {
@@ -393,13 +398,18 @@ func cmdSession(args []string) error {
 		}
 		return sendAction(core.Action{Action: core.ActionRename, ID: args[1], Fields: map[string]string{"name": strings.Join(args[2:], " ")}})
 	case "archive", "done":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workgroup archive <id>")
+		id, force, err := idAndForce(args[1:])
+		if err != nil {
+			return fmt.Errorf("usage: amux workgroup archive <id> [--force]")
 		}
-		if err := sendAction(core.Action{Action: core.ActionSetArchived, ID: args[1], Fields: map[string]string{"archived": "true"}}); err != nil {
+		fields := map[string]string{"archived": "true"}
+		if force {
+			fields[wsops.FieldForce] = "true"
+		}
+		if err := sendAction(core.Action{Action: core.ActionSetArchived, ID: id, Fields: fields}); err != nil {
 			return err
 		}
-		fmt.Printf("archived %s\n", args[1])
+		fmt.Printf("archived %s\n", id)
 		return nil
 	case "unarchive", "restore":
 		if len(args) < 2 {
@@ -968,4 +978,25 @@ func pickCoordinatorKind(current string) string {
 		}
 	}
 	return wsops.CoordinatorKind("")
+}
+
+// idAndForce parses `<id> [--force|-f]` (flag on either side) for the archive
+// and rm verbs. --force skips the open pull-request guard; access policy still
+// decides whether the caller may send it.
+func idAndForce(args []string) (id string, force bool, err error) {
+	for _, a := range args {
+		switch a {
+		case "--force", "-f", "-force":
+			force = true
+		default:
+			if id != "" || strings.HasPrefix(a, "-") {
+				return "", false, fmt.Errorf("unexpected argument %q", a)
+			}
+			id = a
+		}
+	}
+	if id == "" {
+		return "", false, fmt.Errorf("missing id")
+	}
+	return id, force, nil
 }

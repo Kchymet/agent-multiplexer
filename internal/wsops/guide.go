@@ -309,7 +309,8 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 - `+"`amux do start <member>`"+` — bring a stopped member up without prompting it;
   `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
 - `+"`amux do set-archived <member> -f archived=true`"+` — mark a member done. Restoring
-  an archived member or this workgroup requires the host.
+  an archived member or this workgroup requires the host. It is refused while the member
+  still owns an open PR; add `+"`-f force=true`"+` only to deliberately orphan it.
 - After explicit user confirmation, `+"`amux agent done`"+` archives your own
   workgroup, including its direct members. It cannot archive a foreign workgroup.
 - Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
@@ -639,6 +640,8 @@ continuation budget. When nothing can move until a member, a PR or CI reports:
    That lets this one turn end; the turn the wake-up's notification starts
    continues the goal as active.
 Never run `+"`goal wait`"+` without an armed wake-up: nothing would resume the goal.
+amux's PR watcher (docs/pr-watch.md) also sends you a prompt when a member PR
+changes state, but still arm your own wake-up before `+"`goal wait`"+`.
 
 ### Blockers, pausing and limits
 - Run `+"`amux agent goal blocked \"<reason>\"`"+` only after the same blocker

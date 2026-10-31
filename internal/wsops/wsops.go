@@ -797,7 +797,14 @@ func Apply(ctx context.Context, a core.Action) error {
 // set-archived engine-stop split that motivated this lived in exactly that gap.)
 // stopEngine runs before ApplyResult so it can read the still-present snapshot —
 // e.g. a root delete cascades to children that ApplyResult is about to remove.
+//
+// Archive (set-archived=true) and delete first pass the open pull-request guard
+// (GuardOpenPRs) — before stopEngine, so a refused archive leaves the agent
+// running. ApplyResult alone is the raw store mutation and is not guarded.
 func Dispatch(ctx context.Context, a core.Action, stopEngine func(id string)) (string, error) {
+	if err := GuardOpenPRs(ctx, a); err != nil {
+		return "", err
+	}
 	if stopEngine != nil && core.DescriptorFor(a.Action).StopsEngine {
 		stopEngine(a.ID)
 	}

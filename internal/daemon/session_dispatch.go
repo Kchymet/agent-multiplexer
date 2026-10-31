@@ -175,7 +175,11 @@ func (r *sessionRuntime) selfComplete(ctx context.Context, request sessionrpc.Di
 		return rpcDenied("completion_not_current"), nil
 	}
 	// Completion is deliberately not d.handle/wsops.Dispatch: those stop the
-	// runtime before the durable response and its receipt can be observed.
+	// runtime before the durable response and its receipt can be observed. So
+	// it runs the open-PR guard itself; a self-completion can never force.
+	if err := r.guardOpenPRs(ctx, action); err != nil {
+		return r.actionResult(failErr(err))
+	}
 	if _, err := r.applyResult(ctx, action); err != nil {
 		archived, known := r.completionArchiveState(ctx, action.ID)
 		if archived || !known {
@@ -213,6 +217,11 @@ func (r *sessionRuntime) actionResult(result core.Result) (sessionrpc.DispatchRe
 	body, err := r.encodeResult(result)
 	if err != nil {
 		return rpcFailed("encode_failed"), nil
+	}
+	if !result.OK && result.Code == codeOpenPullRequests {
+		// The open-PR refusal is built from ids, branches and PR URLs only, and
+		// the caller needs those URLs to act on it.
+		return sessionrpc.DispatchResult{Status: sessionrpc.StatusFailed, Code: codeOpenPullRequests, Body: body}, nil
 	}
 	if !result.OK {
 		// Host-side action failures can contain filesystem details. Restricted
