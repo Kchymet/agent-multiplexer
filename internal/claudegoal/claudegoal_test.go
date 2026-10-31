@@ -237,3 +237,23 @@ func TestRestartPromptIsNeverANewTask(t *testing.T) {
 		t.Fatal("the restart prompt lacks the continuation marker")
 	}
 }
+
+// The continuation must keep a coordinator tracking member PRs to merged or
+// closed, and its waits must name what they await and cover every open PR.
+func TestContinuationTracksMemberPRsToMergedOrClosed(t *testing.T) {
+	prompt := ContinuationPrompt(State{Status: StatusActive, Objective: "ship it"})
+	for _, want := range []string{
+		"Track every member PR to merged or closed",
+		"PR ledger (member, repo#PR, state)",
+		"Re-prompt the member on red CI, a conflict, review activity",
+		"Never archive a member that still owns an open PR.",
+		"every member PR is merged or closed, or green, marked ready for review",
+		"explicitly handed to the user with what needs a human",
+		"covers every open member PR",
+		"naming the member/PR awaited and the wake-up armed",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("continuation prompt missing %q", want)
+		}
+	}
+}

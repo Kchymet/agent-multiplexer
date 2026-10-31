@@ -137,3 +137,56 @@ func TestInstalledPRSkillsMarkPRReady(t *testing.T) {
 		}
 	}
 }
+
+// Task members archived themselves as soon as their PR was ready, stopping the
+// runtime and orphaning the PR. The shipped skills must keep a member on its PR
+// until it is merged or closed, arm a follow-up before ending a turn with the
+// PR open, and never tell a member to archive once its PR is merely ready.
+func TestInstalledPRSkillsKeepMembersOnOpenPRs(t *testing.T) {
+	dest := t.TempDir()
+	if err := Install(dest); err != nil {
+		t.Fatal(err)
+	}
+	for skill, wants := range map[string][]string{
+		"create-pr": {
+			"owns its PR until the PR is **merged or closed**",
+			"A member is **finished** when its PR is **merged or closed** — not when it is ready for review.",
+			"**Never run `amux agent done` while your PR is open.**",
+			"your final message must say who owns the merge",
+			"The PR is merged or closed (`gh pr view <n> --json state -q .state` prints `MERGED` or `CLOSED`)",
+			"**Ending a turn while the PR is open.**",
+			"`ScheduleWakeup`",
+			"your coordinator (or the user) re-prompts you",
+			"End **every** turn with the PR's URL and state",
+			"**Mark it ready for review** — `gh pr ready <n>`",
+		},
+		"babysit-pr": {
+			"### Ending a turn with the PR open",
+			"**Arm a follow-up first**",
+			"`ScheduleWakeup`",
+			"your coordinator (or the user) re-prompts you",
+			"**A task member never runs `amux agent done` while its PR is open**",
+			"Ending a turn does not end the loop",
+		},
+	} {
+		b, err := os.ReadFile(filepath.Join(dest, skill, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(b)), " ")
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing %q", skill, want)
+			}
+		}
+		for _, forbidden := range []string{
+			"has no outstanding feedback, the session's job is finished",
+			"may stop before the merge once its PR is open",
+			"When a task session has to stop before the merge, it may stop",
+		} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s still tells a member to stop once its PR is ready: %q", skill, forbidden)
+			}
+		}
+	}
+}
