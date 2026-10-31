@@ -98,7 +98,8 @@ func assertCompletionLeavesWorkgroupOpen(t *testing.T, kind, guide, id string) {
 	// The guide is hard-wrapped prose; match phrases against its unwrapped form.
 	flat := strings.Join(strings.Fields(guide), " ")
 	for _, want := range []string{
-		"archives nothing",
+		"does not archive the workgroup",
+		"archive every finished member",
 		"ask the user whether to archive the workgroup",
 		"Wait for explicit user confirmation before archiving",
 		"goal completion is not confirmation",
@@ -231,7 +232,7 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 			"Never end a turn with open member PRs and nothing scheduled",
 			"A task is finished only when every member PR it produced is **merged or closed**, or explicitly handed to the user.",
 			"exactly what needs a human (e.g. merge approval",
-			"mark finished members (PR merged or closed) done",
+			"Archiving finished members (PR merged or closed) with `amux do set-archived <member> -f archived=true` needs no confirmation; a member whose PR is still open keeps babysitting it.",
 		} {
 			if !strings.Contains(guide, want) {
 				t.Errorf("%s coordinator guide missing %q", kind, want)

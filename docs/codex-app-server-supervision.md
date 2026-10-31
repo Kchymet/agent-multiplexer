@@ -130,7 +130,9 @@ second launch command leaves an existing listener connectable.
 
 ## Goal completion
 
-A goal transitioning to `complete` archives nothing. The completed goal stays
+A goal transitioning to `complete` archives nothing by itself (the coordinator
+guide has the coordinator archive its finished members before completing; Codex
+has no amux hook at `update_goal`, so this is guidance only). The completed goal stays
 observable on the thread (`get_goal`, the rail's goal state), the workgroup
 stays on the active rail, and its coordinator and members keep running; the
 coordinator's guide tells it to finish with a summary and ask the user whether
