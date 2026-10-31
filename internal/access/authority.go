@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -149,6 +150,13 @@ type FileAuthority struct {
 	lock     *os.File
 	rootDir  *os.File
 
+	// signer is the issuer's signing snapshot, published by open and cleared by
+	// Close. The issuer key never changes while the authority is open, and
+	// signing reads no registry state, so service and response signing never
+	// wait on mu: a slow registry writer or read lease must not stall every
+	// mailbox's responses.
+	signer atomic.Pointer[issuerSigner]
+
 	mu       sync.RWMutex
 	registry registryFile
 	watchers map[string]map[chan struct{}]struct{}
@@ -166,6 +174,12 @@ type issuerCredential struct {
 	KeyID      string `json:"keyId"`
 	PublicKey  string `json:"publicKey"`
 	PrivateKey string `json:"privateKey"`
+}
+
+// issuerSigner is immutable once published.
+type issuerSigner struct {
+	keyID string
+	key   ed25519.PrivateKey
 }
 
 type daemonTLSCredential struct {
@@ -268,6 +282,12 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 		return nil, fmt.Errorf("create daemon boot nonce: %w", err)
 	}
 	a.bootID = hex.EncodeToString(boot)
+	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
+	if err != nil || len(priv) != ed25519.PrivateKeySize {
+		_ = a.closeReplay()
+		return nil, fmt.Errorf("invalid access issuer key")
+	}
+	a.signer.Store(&issuerSigner{keyID: a.issuer.KeyID, key: ed25519.PrivateKey(priv)})
 	ok = true
 	return a, nil
 }
@@ -281,6 +301,7 @@ func (a *FileAuthority) Close() error {
 	if a.lock == nil {
 		return nil
 	}
+	a.signer.Store(nil)
 	for keyID := range a.watchers {
 		a.invalidateLocked(keyID)
 	}
@@ -308,27 +329,24 @@ func (a *FileAuthority) BootID() string { return a.bootID }
 // IssuerKeyID identifies the daemon authority signer without exposing its
 // private key. An empty value means the authority has been closed.
 func (a *FileAuthority) IssuerKeyID() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+	signer := a.signer.Load()
+	if signer == nil {
 		return ""
 	}
-	return a.issuer.KeyID
+	return signer.keyID
 }
 
 // SignIssuer signs exact, caller-domain-separated service/response bytes for
 // filesystem RPC. The issuer private key never leaves the authority.
+//
+// A signature that races Close is one Close could equally have followed: the
+// issuer key is unchanged until the next open, so nothing it signs is stale.
 func (a *FileAuthority) SignIssuer(message []byte) ([]byte, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+	signer := a.signer.Load()
+	if signer == nil {
 		return nil, ErrAuthorityClosed
 	}
-	priv, err := base64.RawStdEncoding.DecodeString(a.issuer.PrivateKey)
-	if err != nil || len(priv) != ed25519.PrivateKeySize {
-		return nil, ErrInvalidCredential
-	}
-	return ed25519.Sign(ed25519.PrivateKey(priv), message), nil
+	return ed25519.Sign(signer.key, message), nil
 }
 
 func subjectKey(kind SubjectKind, id string) string {
