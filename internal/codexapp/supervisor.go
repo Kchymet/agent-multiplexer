@@ -163,6 +163,7 @@ type Supervisor struct {
 
 	resumable    bool // a rollout exists; native attach and later resume are safe
 	goal         *threadGoal
+	goalObserved bool
 	goalRevision uint64
 	restartWork  *RestartWork // frozen before shutdown clears active-turn state
 
@@ -691,6 +692,11 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 	previousDone := s.rpcDone
 	previousCancel := s.runCancel
 	s.reconnecting = true
+	// A transport gap can hide goal updates made by another client. The
+	// replacement connection resumes the thread but does not perform the full
+	// startup goal read, so retain the last value for status history while
+	// marking it unknown for decisions until a fresh goal notification arrives.
+	s.goalObserved = false
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

@@ -71,9 +71,19 @@ type GoalState struct {
 // handshake and every thread/goal/updated since), or ok=false when the thread
 // has no goal or none was observed yet.
 func (s *Supervisor) Goal() (GoalState, bool) {
+	state, present, _ := s.ObservedGoal()
+	return state, present
+}
+
+// ObservedGoal returns the last goal value together with two distinct facts:
+// present says the observed thread has a goal, while known says an authoritative
+// read or notification has established whether it has one. A transport gap can
+// make a retained value unknown until another notification is observed.
+func (s *Supervisor) ObservedGoal() (state GoalState, present, known bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return goalState(s.goal)
+	state, present = goalState(s.goal)
+	return state, present, s.goalObserved
 }
 
 func goalState(g *threadGoal) (GoalState, bool) {
@@ -144,6 +154,7 @@ func sameGoal(a, b *threadGoal) bool {
 // the state actually changed. The generation is what a host-side decision is
 // admitted against: it advances once per real change, whoever made it.
 func (s *Supervisor) recordGoalLocked(g *threadGoal) {
+	s.goalObserved = true
 	if sameGoal(s.goal, g) {
 		s.goal = g
 		return

@@ -217,6 +217,9 @@ func TestManagerReconnectsTransportWithoutReplacingLiveProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, present, known := sup.ObservedGoal(); present || !known {
+		t.Fatalf("initial no-goal observation = present %t known %t, want confirmed none", present, known)
+	}
 	first := <-servers
 	sup.mu.Lock()
 	pid := sup.proc.Process.Pid
@@ -245,6 +248,9 @@ func TestManagerReconnectsTransportWithoutReplacingLiveProcess(t *testing.T) {
 	}
 	if reconnected != sup {
 		t.Fatal("transport recovery replaced the supervisor")
+	}
+	if _, present, known := sup.ObservedGoal(); present || known {
+		t.Fatalf("post-gap no-goal observation = present %t known %t, want unknown", present, known)
 	}
 	sup.mu.Lock()
 	gotPID := sup.proc.Process.Pid

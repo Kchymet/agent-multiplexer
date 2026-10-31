@@ -548,8 +548,11 @@ func (d *Daemon) coordinatorGoalStatusKnown(sess store.Session) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		g, ok := sup.Goal()
-		if !ok {
+		g, present, known := sup.ObservedGoal()
+		if !known {
+			return "", false
+		}
+		if !present {
 			return "none", true
 		}
 		return g.Status, true
