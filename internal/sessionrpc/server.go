@@ -164,10 +164,12 @@ type Server struct {
 	// slowRequest is ServerOptions.SlowRequest.
 	slowRequest func(RequestTiming)
 
-	// slow-lane state; inflight is guarded by mu. publishMu serializes response
-	// publication with itself (its capacity scan rewinds a shared directory
-	// stream) and with cleanupResponses, which removes temporaries it does not
-	// recognize, now that the slow lane publishes concurrently with ServeOnce.
+	// slow-lane state; inflight is guarded by mu. publishMu serializes every
+	// use of the shared responseUsage and responseCleanup directory streams,
+	// which their scans rewind: response publication, the capacity check a
+	// reservation makes before it, budget initialization, and cleanupResponses,
+	// which also removes temporaries it does not recognize. The slow lane
+	// publishes concurrently with ServeOnce.
 	slow      func(Call) bool
 	slowJobs  chan slowJob
 	inflight  map[string]struct{}
@@ -339,7 +341,10 @@ func (s *Server) initializeLocked(ctx context.Context) error {
 	if s.isClosed() {
 		return ErrClosed
 	}
-	if err := s.initializeResponseBudget(ctx); err != nil {
+	s.publishMu.Lock()
+	err := s.initializeResponseBudget(ctx)
+	s.publishMu.Unlock()
+	if err != nil {
 		return err
 	}
 	return s.cleanupResponses()
@@ -1250,7 +1255,10 @@ func rewindDirectory(dir *os.File) error {
 }
 
 func (s *Server) reserveResponse(ctx context.Context, requestID string) (*responseReservation, error) {
-	if err := s.ensureResponseCapacity(maxEnvelopeFileBytes); err != nil {
+	s.publishMu.Lock()
+	err := s.ensureResponseCapacity(maxEnvelopeFileBytes)
+	s.publishMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	reservation := &responseReservation{}
@@ -1288,6 +1296,11 @@ func (s *Server) releaseReceiptLease(requestID string) {
 	}
 }
 
+// ensureResponseCapacity scans responses/ through the shared responseUsage
+// stream, which it rewinds; the caller holds publishMu, as every user of that
+// stream must. A fast-lane reservation and a slow-lane publication otherwise
+// drive the same directory stream at once, which corrupts os.File's buffered
+// directory state and can crash the daemon.
 func (s *Server) ensureResponseCapacity(additional int) error {
 	if additional <= 0 || additional > maxEnvelopeFileBytes {
 		return ErrInvalidRecord
