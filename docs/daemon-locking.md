@@ -88,7 +88,10 @@ The central Codex token delivery (central_codex.go) already avoids the gate:
 the codexapp per-session gate is sometimes taken below `effectMu`, so delivery
 uses `authority.WithValid` (an authority read lease) plus the accounts CAS as
 its admission point. That pattern, a check and a short effect under the lock of
-the one resource that can invalidate it, is the model for the split.
+the one resource that can invalidate it, is the model for the split. Its
+session check (a store read) runs just before the lease, not under it: archive
+takes no authority lock, so that check was never atomic with it, and the lease
+still orders the commit against revocation.
 
 Some runtime replacements already happen outside the gate. Start and restart
 publish a new runtime generation under it, but pane open (`paneOpen`) and the
@@ -120,7 +123,10 @@ are and sit below every resource lock in the order.
 | `runtimePermissionGate.mu` + per-subject locks | runtime generations and permission claims. Since PR 7 the subject lock is held across the callbacks (runtime creation in `publish`, kill in `retireAnd`/`retireTokenAnd`, delivery in `consume`), and `mu` only for map access. Before, one global `mu` was held across `engine.Ensure` and kills, so every runtime start or stop stalled every session's reports in `generation()`. Callers' locks (session, `authMu`) come before the subject lock |
 | `completionRegistry.mu` | completion entries |
 | `sessionEventPager.mu`, response budget `mu` | event paging state, mailbox response budget |
-| `FileAuthority.mu` (RW) | credential registry and replay ledger; `WithValid` holds it shared during a short callback |
+| `FileAuthority.writeMu` | registry writers (issue, rotate, revoke, regrant, renew, `Current`'s publication repair, `EnsureSession`) and their file IO: staging, the registry commit, credential and mailbox publication. Readers never take it |
+| `FileAuthority.mu` (RW) | the lease lock: `Verify` and `WithValid` hold it shared from their check through their effect (the replay acceptance, the accounts CAS). A writer takes it exclusively only to swap in a registry it already committed (`publish`), by `TryLock` retry, never parked, so a long lease delays that writer and nothing else. Below `writeMu` |
+| `FileAuthority.view` (atomic) | the published registry. `Valid`, `HasCurrent`, `VerifyProof` and `WatchInvalidation` read it with no lock |
+| `FileAuthority.watchMu` | invalidation watchers; `publish` closes them after storing `view`, below `mu` |
 | `store` `sharedMu`; SQLite | pooled handles; SQLite WAL with `busy_timeout(5000)` serializes writers itself |
 | accounts state flock | `accounts.Update` read-modify-write of the accounts file |
 | codexapp manager per-session gate, engine `local` mutexes | one runtime's supervisor/instance |
@@ -303,3 +309,24 @@ Once nothing takes the gate in write mode, it and `dispatchMu` are deleted.
    `mu` for the map only. Found while slicing archive: the gate's global
    mutex was a second daemon-wide lock behind every runtime start and stop.
    Done.
+8. The access authority (`FileAuthority`). A SIGUSR1 dump of a stalled daemon
+   showed one long `WithValid` lease with `WatchInvalidation` waiting to write
+   behind it; every mailbox then blocked in `Valid` (from
+   `ensureHostCredential`, every 50ms reconcile tick) for the whole lease,
+   about 10s each time. `Current` also held the write lock across credential
+   file writes. Now:
+   - `Valid`, `HasCurrent`, `VerifyProof` and `WatchInvalidation` read an
+     atomic snapshot of the registry (`view`) and never wait.
+   - Writers serialize on `writeMu`, which covers all their file IO, and take
+     `mu` only for the in-memory swap, by `TryLock` retry, so a waiting writer
+     never blocks a new lease (`Verify`, `WithValid`).
+   - Semantics are unchanged: a rotation or revocation is published before
+     its call returns, so every check that starts afterwards sees it, and its
+     watchers are closed by then. A lease still excludes publication from its
+     check to its effect.
+   - Central Codex delivery's store read moved out of its lease.
+   Repros: `TestAuthorityChecksDoNotWaitBehindALeaseAndAWaitingWriter`,
+   `TestAuthorityLeasesDoNotWaitForAWritersFileIO` (access),
+   `TestRequestServedDuringLongAuthorityLeaseWithWriterWaiting` (sessionrpc),
+   `TestServingContinuesDuringLongAuthorityLease` (daemon). Each fails or
+   hangs on the old authority. Done.

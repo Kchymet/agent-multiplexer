@@ -20,8 +20,8 @@ func (w *LockWait) Total() time.Duration {
 
 type lockWaitKey struct{}
 
-// WithLockWait returns a context whose authority reads (Verify, Valid,
-// WithValid) add their lock wait to the returned LockWait.
+// WithLockWait returns a context whose authority leases (Verify, WithValid)
+// add their lock wait to the returned LockWait. Valid takes no lock.
 func WithLockWait(ctx context.Context) (context.Context, *LockWait) {
 	w := &LockWait{}
 	return context.WithValue(ctx, lockWaitKey{}, w), w

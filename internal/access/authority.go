@@ -157,8 +157,26 @@ type FileAuthority struct {
 	// mailbox's responses.
 	signer atomic.Pointer[issuerSigner]
 
+	// writeMu serializes registry writers (issue, rotate, revoke, regrant,
+	// renew, credential and mailbox publication) and covers their file IO.
+	// Writers read registry under it alone: only they replace it.
+	writeMu sync.Mutex
+	// mu is the lease lock. Verify and WithValid hold it shared so no registry
+	// change is published between their check and their effect. A writer
+	// takes it exclusively only to publish a registry it has already
+	// committed (publish), and without queueing (lockPublish), so a long
+	// lease delays that writer but never the other leases.
 	mu       sync.RWMutex
 	registry registryFile
+	// view is the published registry, nil once closed. Valid, HasCurrent,
+	// VerifyProof and WatchInvalidation read it without any lock, so no lease
+	// or writer can stall a validity check. A published registry is never
+	// mutated: writers clone it.
+	view atomic.Pointer[registryFile]
+	// watchMu guards watchers. publish closes an invalidated key's watchers
+	// under it after storing view, and WatchInvalidation checks view and
+	// registers under it, so no invalidation falls between the two.
+	watchMu  sync.Mutex
 	watchers map[string]map[chan struct{}]struct{}
 
 	// replay is the in-memory ledger every replay decision is taken on, under
@@ -243,7 +261,7 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 		}
 	}()
 	a := &FileAuthority{
-		root: root, now: now, rand: random,
+		root: root, now: now, rand: &lockedReader{r: random},
 		registry: registryFile{Version: ProtocolVersion, Current: map[string]string{}, Records: map[string]CredentialRecord{}},
 		replay:   replayFile{Version: ProtocolVersion, Entries: map[string]replayRecord{}},
 		commit:   atomicJSONCommit,
@@ -288,6 +306,8 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 		return nil, fmt.Errorf("invalid access issuer key")
 	}
 	a.signer.Store(&issuerSigner{keyID: a.issuer.KeyID, key: ed25519.PrivateKey(priv)})
+	view := a.registry
+	a.view.Store(&view)
 	ok = true
 	return a, nil
 }
@@ -296,15 +316,20 @@ func open(root string, now func() time.Time, random io.Reader) (*FileAuthority, 
 // exactly one FileAuthority for its lifetime; opening a second object would
 // otherwise retain stale registry/revocation memory.
 func (a *FileAuthority) Close() error {
-	a.mu.Lock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	a.lockPublish()
 	defer a.mu.Unlock()
 	if a.lock == nil {
 		return nil
 	}
 	a.signer.Store(nil)
+	a.view.Store(nil)
+	a.watchMu.Lock()
 	for keyID := range a.watchers {
 		a.invalidateLocked(keyID)
 	}
+	a.watchMu.Unlock()
 	replayErr := a.closeReplay()
 	rootErr := a.rootDir.Close()
 	a.rootDir = nil
@@ -386,8 +411,8 @@ func (a *FileAuthority) Ensure(_ context.Context, kind SubjectKind, subjectID st
 	if err := validateSubject(kind, subjectID); err != nil {
 		return "", err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return "", ErrAuthorityClosed
 	}
@@ -421,8 +446,8 @@ func (a *FileAuthority) Current(_ context.Context, kind SubjectKind, subjectID s
 	if err := validateSubject(kind, subjectID); err != nil {
 		return CredentialRecord{}, err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return CredentialRecord{}, ErrAuthorityClosed
 	}
@@ -476,8 +501,8 @@ func (a *FileAuthority) Regrant(_ context.Context, kind SubjectKind, subjectID s
 	if expectedRevokedGeneration == 0 {
 		return "", ErrGenerationChanged
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return "", ErrAuthorityClosed
 	}
@@ -508,8 +533,8 @@ func (a *FileAuthority) RenewExpired(_ context.Context, kind SubjectKind, subjec
 	if expectedKeyID == "" {
 		return "", ErrGenerationChanged
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return "", ErrAuthorityClosed
 	}
@@ -597,8 +622,8 @@ func (a *FileAuthority) Rotate(_ context.Context, kind SubjectKind, subjectID st
 	if err := validateSubject(kind, subjectID); err != nil {
 		return "", err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return "", ErrAuthorityClosed
 	}
@@ -673,10 +698,7 @@ func (a *FileAuthority) issueLocked(kind SubjectKind, subjectID, oldKeyID string
 	}
 	committed, err := a.commit(filepath.Join(a.root, "registry.json"), nextRegistry, 0o600)
 	if committed {
-		a.registry = nextRegistry
-		if oldKeyID != "" {
-			a.invalidateLocked(oldKeyID)
-		}
+		a.publish(nextRegistry, oldKeyID)
 	}
 	if err != nil {
 		if !committed {
@@ -895,8 +917,8 @@ func (a *FileAuthority) Revoke(_ context.Context, kind SubjectKind, subjectID st
 	if err := validateSubject(kind, subjectID); err != nil {
 		return err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return ErrAuthorityClosed
 	}
@@ -910,8 +932,8 @@ func (a *FileAuthority) RevokeCurrent(_ context.Context, principal Principal) er
 	if err := validateSubject(principal.Kind, principal.SubjectID); err != nil {
 		return err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if a.rootDir == nil {
 		return ErrAuthorityClosed
 	}
@@ -950,8 +972,7 @@ func (a *FileAuthority) revokeLocked(kind SubjectKind, subjectID, expectedKeyID 
 	delete(next.Current, key)
 	committed, err := a.commit(filepath.Join(a.root, "registry.json"), next, 0o600)
 	if committed {
-		a.registry = next
-		a.invalidateLocked(keyID)
+		a.publish(next, keyID)
 	}
 	return err
 }
@@ -1009,21 +1030,22 @@ func (a *FileAuthority) Verify(ctx context.Context, req SignedRequest) (Principa
 
 // Valid rechecks generation and revocation for long-lived connections before
 // each action or pushed frame.
-func (a *FileAuthority) Valid(ctx context.Context, p Principal) error {
-	a.rlock(ctx)
-	defer a.mu.RUnlock()
-	if a.rootDir == nil {
+// It reads the published registry without a lock, so it never waits for a
+// lease or a writer. A rotation or revocation is visible to every check that
+// starts after its call returns.
+func (a *FileAuthority) Valid(_ context.Context, p Principal) error {
+	view := a.view.Load()
+	if view == nil {
 		return ErrAuthorityClosed
 	}
-	return a.validLocked(p)
+	return a.validIn(view, p)
 }
 
 // HasCurrent reports whether the subject has a current credential generation.
 // It is a cheap read for callers deciding whether a revocation has work to do.
 func (a *FileAuthority) HasCurrent(kind SubjectKind, subjectID string) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.registry.Current[currentKey(kind, subjectID)] != ""
+	view := a.view.Load()
+	return view != nil && view.Current[currentKey(kind, subjectID)] != ""
 }
 
 // WithValid admits a short local effect under a current-principal read lease.
@@ -1044,10 +1066,12 @@ func (a *FileAuthority) WithValid(ctx context.Context, p Principal, fn func() er
 	return fn()
 }
 
-func (a *FileAuthority) validLocked(p Principal) error {
-	rec, ok := a.registry.Records[p.KeyID]
+func (a *FileAuthority) validLocked(p Principal) error { return a.validIn(&a.registry, p) }
+
+func (a *FileAuthority) validIn(registry *registryFile, p Principal) error {
+	rec, ok := registry.Records[p.KeyID]
 	if !ok || rec.SubjectID != p.SubjectID || rec.Kind != p.Kind || rec.Generation != p.Generation ||
-		a.registry.Current[currentKey(rec.Kind, rec.SubjectID)] != p.KeyID {
+		registry.Current[currentKey(rec.Kind, rec.SubjectID)] != p.KeyID {
 		return ErrInvalidCredential
 	}
 	if rec.RevokedAt != 0 {
@@ -1061,14 +1085,17 @@ func (a *FileAuthority) validLocked(p Principal) error {
 
 // WatchInvalidation registers a long-lived connection for synchronous closure
 // after a committed rotation or revocation. Registration and validity testing
-// share the authority lock, so no invalidation can be missed between them.
+// share watchMu, and publish stores the new registry before it closes
+// watchers under watchMu, so no invalidation can be missed between them.
+// Neither takes mu: registering never waits for a lease.
 func (a *FileAuthority) WatchInvalidation(p Principal) (<-chan struct{}, func(), error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.rootDir == nil {
+	a.watchMu.Lock()
+	defer a.watchMu.Unlock()
+	view := a.view.Load()
+	if view == nil {
 		return nil, nil, ErrAuthorityClosed
 	}
-	if err := a.validLocked(p); err != nil {
+	if err := a.validIn(view, p); err != nil {
 		return nil, nil, err
 	}
 	ch := make(chan struct{})
@@ -1077,8 +1104,8 @@ func (a *FileAuthority) WatchInvalidation(p Principal) (<-chan struct{}, func(),
 	}
 	a.watchers[p.KeyID][ch] = struct{}{}
 	cancel := func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
+		a.watchMu.Lock()
+		defer a.watchMu.Unlock()
 		if watchers := a.watchers[p.KeyID]; watchers != nil {
 			delete(watchers, ch)
 			if len(watchers) == 0 {
@@ -1089,6 +1116,40 @@ func (a *FileAuthority) WatchInvalidation(p Principal) (<-chan struct{}, func(),
 	return ch, cancel, nil
 }
 
+// publish makes a committed registry the one leases and readers see, then
+// closes the watchers of the key it invalidated, if any. The caller holds
+// writeMu. Only the swap holds mu exclusively; file IO happens before it.
+func (a *FileAuthority) publish(next registryFile, invalidated string) {
+	a.lockPublish()
+	a.registry = next
+	a.view.Store(&next)
+	a.mu.Unlock()
+	if invalidated != "" {
+		a.watchMu.Lock()
+		a.invalidateLocked(invalidated)
+		a.watchMu.Unlock()
+	}
+}
+
+// publishRetryMax caps lockPublish's backoff between attempts.
+const publishRetryMax = 2 * time.Millisecond
+
+// lockPublish takes mu exclusively without queueing on it. A writer parked
+// in sync.RWMutex.Lock blocks every new lease, so one long lease would stall
+// every mailbox's Verify behind it; retrying TryLock lets leases continue
+// while the writer waits for a moment with none held. Leases are short, so
+// such a moment comes quickly.
+func (a *FileAuthority) lockPublish() {
+	wait := 50 * time.Microsecond
+	for !a.mu.TryLock() {
+		time.Sleep(wait)
+		if wait < publishRetryMax {
+			wait *= 2
+		}
+	}
+}
+
+// invalidateLocked closes keyID's watchers. The caller holds watchMu.
 func (a *FileAuthority) invalidateLocked(keyID string) {
 	for ch := range a.watchers[keyID] {
 		close(ch)
@@ -1271,4 +1332,18 @@ func syncDir(dir string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// lockedReader serializes reads of the authority's random source: writers
+// (under writeMu) and challenges (under a shared lease) draw from it
+// concurrently.
+type lockedReader struct {
+	mu sync.Mutex
+	r  io.Reader
+}
+
+func (l *lockedReader) Read(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.r.Read(p)
 }

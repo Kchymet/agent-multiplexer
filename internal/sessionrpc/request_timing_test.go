@@ -55,9 +55,12 @@ func TestSlowRequestReportsItsDispatchPhase(t *testing.T) {
 	}
 }
 
-// A request held up by another holder of the authority lock says so: the time
-// is lock wait in verify, not this request's own work.
-func TestSlowRequestReportsAuthorityLockWait(t *testing.T) {
+// The live stall: one long authority lease (a 10s WithValid) with a registry
+// writer waiting for it froze every mailbox, because Verify and Valid queued
+// behind the writer. A live request is now served at once, and nothing in it
+// waits on the authority lock. (access tests cover lock-wait attribution.)
+func TestRequestServedDuringLongAuthorityLeaseWithWriterWaiting(t *testing.T) {
+	const lease = 10 * time.Second
 	var log timingLog
 	f := newFixture(t, Callbacks{}, ServerOptions{SlowRequest: log.record})
 	ctx := context.Background()
@@ -84,19 +87,36 @@ func TestSlowRequestReportsAuthorityLockWait(t *testing.T) {
 		})
 	}()
 	<-leased
-	go func() { _, _ = f.auth.Rotate(ctx, access.SubjectSession, "subject-b") }()
-	time.Sleep(50 * time.Millisecond) // let the rotation queue behind the lease
-	time.AfterFunc(SlowRequestThreshold+200*time.Millisecond, unlease)
-	if _, err := f.server.ServeOnce(ctx); err != nil {
+	time.AfterFunc(lease, unlease)
+	rotated := make(chan error, 1)
+	go func() {
+		_, err := f.auth.Rotate(ctx, access.SubjectSession, "subject-b")
+		rotated <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // the rotation is waiting to publish
+	start := time.Now()
+	served := make(chan error, 1)
+	go func() {
+		_, err := f.server.ServeOnce(ctx)
+		served <- err
+	}()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(SlowRequestThreshold):
+		t.Fatalf("request still unserved %v into a %v lease", time.Since(start), lease)
+	}
+	t.Logf("served in %v during a %v lease with a rotation waiting", time.Since(start), lease)
+	if n := responseCount(t, f.grant.MailboxHostDir); n != 1 {
+		t.Fatalf("responses = %d, want 1", n)
+	}
+	if got := log.all(); len(got) != 0 {
+		t.Fatalf("request reported slow: %+v", got)
+	}
+	unlease()
+	if err := <-rotated; err != nil {
 		t.Fatal(err)
 	}
-	got := log.all()
-	if len(got) != 1 {
-		t.Fatalf("slow request reports = %+v, want one", got)
-	}
-	timing := got[0]
-	if timing.LockWait < SlowRequestThreshold || timing.Verify < SlowRequestThreshold || timing.RequestID != envelope.RequestID {
-		t.Fatalf("timing did not attribute the stall to the authority lock: %+v", timing)
-	}
-	t.Logf("held %v: verify %v, authority lock wait %v", timing.Total, timing.Verify, timing.LockWait)
 }
