@@ -621,6 +621,19 @@ budget-limited goals are never resumed automatically. `amux config set
 goal.auto_resume off` turns the Claude-side continuation off (default on; applied
 at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
 
+### Coordinator housekeeping (host-wide archive)
+
+By default a coordinator archives only its own workgroup's members. On the host
+(never from an agent session), `amux config set coordinator.archive_scope host`
+lets every coordinator see a read-only staleness view of all other sessions
+(`hostSessions` in `amux status --json`) and archive any idle ordinary agent or
+workgroup with `amux do set-archived <id> -f archived=true`. Running or waiting
+targets, the console and repo homes are refused; restore, delete and steer stay
+host-only. Every such archive is audited in
+`~/.local/state/amux/audit/coordinator-archive.jsonl`. It applies immediately;
+`amux config unset coordinator.archive_scope` reverts it. See
+[the scope table](docs/agent-cli-sandbox.md#host-scope-coordinator-archive).
+
 ## Roadmap
 
 - **Thin-client TUI** — migrate the native TUI onto `muxclient` so the default app

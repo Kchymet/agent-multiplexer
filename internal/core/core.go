@@ -257,7 +257,47 @@ const (
 	QueryAccountManage   = "account-manage"
 	QueryAccountCeremony = "account-ceremony"
 	QueryCodexAuth       = "codex-auth"
+	// QueryHostSessions is the read-only, host-wide staleness projection
+	// (-> HostSessionsView) a coordinator gets when the host has set
+	// coordinator.archive_scope=host. Every other caller gets Enabled=false
+	// and no rows. It carries no paths, prompts, branches or transcripts.
+	QueryHostSessions = "host-sessions"
 )
+
+// HostSessionsView is the QueryHostSessions read model.
+type HostSessionsView struct {
+	// Enabled reports whether this caller holds host-wide archive authority.
+	Enabled bool `json:"enabled"`
+	// Sessions are the host's active (unarchived) workgroups and agents outside
+	// the caller's workgroup, stalest first.
+	Sessions []HostSessionRow `json:"sessions,omitempty"`
+	// Truncated is set when more sessions exist than the projection carries.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// HostSessionRow is one foreign session's staleness summary.
+type HostSessionRow struct {
+	ID string `json:"id"`
+	// RootID is the parent workgroup of a member; empty for a workgroup,
+	// console or repo home.
+	RootID string `json:"rootId,omitempty"`
+	Title  string `json:"title"`
+	Role   string `json:"role,omitempty"` // "" agent | coordinator | repo | console
+	Agent  string `json:"agent,omitempty"`
+	// State is the live activity (idle | ready | waiting | running | unknown).
+	State    string `json:"state"`
+	Archived bool   `json:"archived"`
+	// Members counts a workgroup's active members.
+	Members int `json:"members,omitempty"`
+	// Created and LastActivity are unix millis; LastActivity is the latest
+	// runtime hook report, falling back to Created.
+	Created      int64 `json:"created"`
+	LastActivity int64 `json:"lastActivity"`
+	// Archivable reports whether a coordinator may archive it now; Reason says
+	// why not otherwise.
+	Archivable bool   `json:"archivable"`
+	Reason     string `json:"reason,omitempty"`
+}
 
 // CodexAuthStatus is the QueryCodexAuth read model. It never carries a token.
 type CodexAuthStatus struct {

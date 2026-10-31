@@ -252,3 +252,99 @@ func SetGoalAutoResume(value *bool) error {
 	}
 	return Write(top)
 }
+
+// CoordinatorArchiveScopeKey is the config path of the host switch
+// (`coordinator.archive_scope`) that decides how far a workgroup coordinator's
+// archive authority reaches:
+//
+//   - ArchiveScopeMembers (the default): a coordinator archives only its own
+//     workgroup's current direct members (and, with user confirmation, its own
+//     workgroup through `amux agent done`).
+//   - ArchiveScopeHost: a coordinator may additionally archive any idle
+//     ordinary agent or workgroup on the host, and sees a read-only staleness
+//     projection of every session to decide which. Restore, delete, steer and
+//     every other effect on a foreign session stay host-only.
+//
+// The daemon reads it on every authorization decision that depends on it, so a
+// change applies immediately. It lives in the host's config file, which agent
+// sandboxes cannot reach; the CLI also refuses to change it from an agent.
+const CoordinatorArchiveScopeKey = "coordinator.archive_scope"
+
+const (
+	ArchiveScopeMembers = "members"
+	ArchiveScopeHost    = "host"
+)
+
+func coordinatorSection(top map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if b, ok := top["coordinator"]; ok {
+		return object(b, core.ConfigPath()+": coordinator")
+	}
+	return map[string]json.RawMessage{}, nil
+}
+
+// SavedCoordinatorArchiveScope returns the persisted value, or empty when
+// unconfigured (the default is ArchiveScopeMembers).
+func SavedCoordinatorArchiveScope() (string, error) {
+	top, err := Read()
+	if err != nil {
+		return "", err
+	}
+	section, err := coordinatorSection(top)
+	if err != nil {
+		return "", err
+	}
+	b, ok := section["archive_scope"]
+	if !ok {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(b, &value); err != nil || (value != ArchiveScopeMembers && value != ArchiveScopeHost) {
+		return "", fmt.Errorf("%s: %s must be %q or %q", core.ConfigPath(), CoordinatorArchiveScopeKey, ArchiveScopeMembers, ArchiveScopeHost)
+	}
+	return value, nil
+}
+
+// CoordinatorArchiveScope is the effective value. Any read or parse failure
+// resolves to ArchiveScopeMembers alongside the error, so a broken config can
+// never widen authority.
+func CoordinatorArchiveScope() (string, error) {
+	value, err := SavedCoordinatorArchiveScope()
+	if err != nil || value == "" {
+		return ArchiveScopeMembers, err
+	}
+	return value, nil
+}
+
+// HostArchiveScope reports whether coordinators hold host-wide archive
+// authority. It fails closed.
+func HostArchiveScope() bool {
+	value, err := CoordinatorArchiveScope()
+	return err == nil && value == ArchiveScopeHost
+}
+
+// SetCoordinatorArchiveScope saves a value, or unsets it when value is empty.
+func SetCoordinatorArchiveScope(value string) error {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "" && value != ArchiveScopeMembers && value != ArchiveScopeHost {
+		return fmt.Errorf("%s must be %q or %q", CoordinatorArchiveScopeKey, ArchiveScopeMembers, ArchiveScopeHost)
+	}
+	top, err := Read()
+	if err != nil {
+		return err
+	}
+	section, err := coordinatorSection(top)
+	if err != nil {
+		return err
+	}
+	if value == "" {
+		delete(section, "archive_scope")
+	} else {
+		section["archive_scope"], _ = json.Marshal(value)
+	}
+	if len(section) == 0 {
+		delete(top, "coordinator")
+	} else {
+		top["coordinator"], _ = json.Marshal(section)
+	}
+	return Write(top)
+}
