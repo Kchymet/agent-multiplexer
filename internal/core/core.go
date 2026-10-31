@@ -351,6 +351,9 @@ type Result struct {
 	NewID       string `json:"newId,omitempty"`       // id of a session the action created (so a client can switch to it)
 	RestartedID string `json:"restartedId,omitempty"` // replace the client's agent pane after a restart
 	Error       string `json:"error,omitempty"`
+	// Code is a stable machine-readable failure class, set only where a caller
+	// must tell a failure apart (e.g. "open_pull_requests" from the archive guard).
+	Code string `json:"code,omitempty"`
 }
 
 // Pane frame types (PaneFrame.Type), streamed daemon -> client for an attached

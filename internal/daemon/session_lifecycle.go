@@ -40,6 +40,7 @@ type sessionRuntime struct {
 	resolver            *daemonAccessResolver
 	policy              access.Policy
 	applyResult         func(context.Context, core.Action) (string, error)
+	guardOpenPRs        func(context.Context, core.Action) error
 	encodeResult        func(core.Result) ([]byte, error)
 	poll                time.Duration
 	now                 func() time.Time
@@ -96,6 +97,7 @@ func newSessionRuntime(d *Daemon) *sessionRuntime {
 		responseBudget: newSessionResponseBudget(),
 		wakes:          make(chan string, sessionWakeQueue),
 		applyResult:    wsops.ApplyResult,
+		guardOpenPRs:   wsops.GuardOpenPRs,
 		encodeResult:   func(result core.Result) ([]byte, error) { return json.Marshal(result) },
 	}
 	r.policy = access.Policy{Resolver: r.resolver}
