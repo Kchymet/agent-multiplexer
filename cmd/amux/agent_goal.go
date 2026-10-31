@@ -74,6 +74,8 @@ usage: amux agent goal [show [--json]]
        amux agent goal wait "<waiting on>"     end this turn only; an armed background
                                                wake-up (Monitor / run_in_background)
                                                resumes the goal. Never wait without one.
+                                               Name the member/PR awaited and the wake-up;
+                                               it must cover every open member PR.
        amux agent goal blocked "<reason>"      a repeating blocker only the user can clear
 
 The user pauses, resumes or clears the goal from the host:

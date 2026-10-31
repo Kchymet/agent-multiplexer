@@ -165,7 +165,7 @@ func TestCoordinatorGuideRequiresReadyMemberPRs(t *testing.T) {
 			"marks its PR ready for review (`gh pr ready <n>`) once the code is complete and CI is green",
 			"a finished PR left in draft is incomplete work",
 			"it never means \"keep the PR draft\"",
-			"every member PR it produced is green and marked ready for review",
+			"Before you hand a PR off, check that it is green and marked ready for review",
 		} {
 			if !strings.Contains(guide, want) {
 				t.Errorf("%s coordinator guide missing %q", kind, want)
@@ -208,6 +208,71 @@ func TestGoalFileEnvOnlyForClaudeCoordinator(t *testing.T) {
 		}
 		if tc.want && got != claudegoal.StatePath(tc.s.Dir) {
 			t.Errorf("%s: goal file %q, want %q", tc.name, got, claudegoal.StatePath(tc.s.Dir))
+		}
+	}
+}
+
+// Coordinators sat "waiting" with ready member PRs nobody babysat, and archived
+// members whose PRs were still open. Every coordinator guide must make merged or
+// closed the finish line, keep a PR ledger, react by re-prompting members, and
+// refuse to archive a member that still owns an open PR.
+func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
+	for _, kind := range []string{agent.GoalRuntime, agent.HookGoalRuntime, "hermes"} {
+		root := store.Session{ID: "wg1", Name: "payments", Agent: kind, Dir: "/sandbox/wg1"}
+		guide := strings.Join(strings.Fields(coordinatorGuide(root)), " ")
+		for _, want := range []string{
+			"## Track every member PR to merged or closed",
+			"A member PR marked ready is handed to review, not finished.",
+			"Keep a **PR ledger** in `COORDINATION.md`: one row per member PR — member, repo#PR, state",
+			"React to what you see by re-prompting the member",
+			"red CI, a merge conflict, new review comments",
+			"Never archive a member that still owns an open PR",
+			"A member is finished when its PR is merged or closed",
+			"Never end a turn with open member PRs and nothing scheduled",
+			"A task is finished only when every member PR it produced is **merged or closed**, or explicitly handed to the user.",
+			"exactly what needs a human (e.g. merge approval",
+			"mark finished members (PR merged or closed) done",
+		} {
+			if !strings.Contains(guide, want) {
+				t.Errorf("%s coordinator guide missing %q", kind, want)
+			}
+		}
+		if agent.GoalMode(root) && !strings.Contains(guide, "The goal is complete only when every member PR is merged or closed, or explicitly handed to the user with what needs a human.") {
+			t.Errorf("%s goal section does not make merged/closed the goal's finish line", kind)
+		}
+		if strings.Contains(guide, "A member PR is done only when it is green and marked ready") {
+			t.Errorf("%s coordinator guide still calls a ready PR done", kind)
+		}
+	}
+	claude := store.Session{ID: "wg3", Name: "payments", Agent: agent.HookGoalRuntime, Dir: "/sandbox/wg3"}
+	hooked := strings.Join(strings.Fields(coordinatorGuide(claude)), " ")
+	for _, want := range []string{
+		"It must cover **every open member PR**",
+		"The note names what is awaited (member, repo#PR) and the wake-up you armed",
+	} {
+		if !strings.Contains(hooked, want) {
+			t.Errorf("claude goal coordinator guide missing %q", want)
+		}
+	}
+}
+
+// A member must own its PR to merged or closed: never archive itself while the
+// PR is open, arm a follow-up before ending a turn, and report the PR's state
+// every turn so its coordinator can track it.
+func TestMemberGuideOwnsPRUntilMergedOrClosed(t *testing.T) {
+	guide := strings.Join(strings.Fields(memberGuide(store.Session{ID: "m1", RootID: "wg1", Agent: "claude", Branch: "amux/wg1-m1"})), " ")
+	for _, want := range []string{
+		"You own your PR until it is **merged or closed**.",
+		"Do not run `amux agent done` while it is open",
+		"unless your task explicitly says someone else owns the merge; then name who",
+		"arm a follow-up that re-checks it",
+		"say your coordinator will re-prompt you",
+		"End every turn's final message with your PR's URL and state: draft or ready, CI",
+		"mergeable or conflicting, and review status",
+		"(only once your PR is merged or closed",
+	} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("member guide missing %q", want)
 		}
 	}
 }

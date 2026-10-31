@@ -13,11 +13,11 @@ Keep two lifecycles distinct:
 
 - **The PR** is done when it's merged (or you've hit something only a human can
   decide, and said so). The **babysit-pr** skill drives that.
-- **The amux session** — if it's a single-task session — may stop before the
-  merge once its PR is open, green, marked ready for review (not draft), and has
-  no outstanding review feedback, because producing that PR was the whole point.
-  Phase 5 marks it done; the user (or a separate PR-review loop) carries the PR
-  to merge.
+- **The amux session** owns its PR until the PR is **merged or closed**. A
+  turn may end while the PR is open — ready for review and waiting on a human —
+  but only with a follow-up armed (Phase 4), and the session is **not** marked
+  done while its PR is open. Phase 5 marks a task session done once its PR is
+  merged or closed, or when the task explicitly says someone else owns the merge.
 
 ## The PR lifecycle — read this first
 
@@ -184,33 +184,56 @@ gh pr ready <n>       # safe to re-run if it is already ready
 gh pr view <n> --json isDraft -q .isDraft   # must print false
 ```
 
-Then keep babysitting — CI regressions, review feedback, conflicts — until it
-merges or this session has to stop:
+Ready is the hand-off to review, not the end. Then keep babysitting — CI
+regressions, review feedback, conflicts — until the PR is **merged or closed**,
+following the **babysit-pr** skill: watch CI, critically evaluate review
+feedback, address what's worth addressing, and resolve conflicts. The merge is
+the final step; merge yourself only if your task explicitly authorizes it,
+otherwise the user merges.
 
-- **If a separate PR-review loop owns merging** (this project may run one — it
-  reviews open PRs and merges the clean ones), the deliverable of a task session
-  is still an open, green, **ready-for-review (non-draft) PR**. Address any review
-  feedback that has arrived, then go to Phase 5. A review loop owning the merge
-  is **not** a reason to leave the PR draft — a draft PR is invisible to that
-  loop.
-- **If this session is responsible for seeing the PR through** (you were told to,
-  there's no review loop, or it's a long-lived loop session), follow the
-  **babysit-pr** skill fully: watch CI, critically evaluate review feedback,
-  address what's worth addressing, and resolve conflicts until the PR merges.
-  The merge is the final step; merge yourself only if your task explicitly
-  authorizes it, otherwise the user merges.
+**Ending a turn while the PR is open.** Waiting on a human reviewer is normal,
+but a turn that ends with nothing scheduled leaves the PR unattended. Before you
+end a turn with your PR still open, arm a follow-up that re-checks it, and say
+which one in your final message:
+
+- **Claude Code:** `ScheduleWakeup`, or the `/loop` skill re-running babysit-pr
+  every few minutes, or a `Monitor` / `run_in_background` until-loop on
+  `gh pr view <n> --json state,mergeable,statusCheckRollup,reviewDecision`.
+- **A harness with no self-scheduling (e.g. Codex):** say so — your coordinator
+  (or the user) re-prompts you when the PR's CI, mergeability or review state
+  changes, and the next turn resumes babysitting.
+
+End **every** turn with the PR's URL and state: draft or ready, CI
+(green / red / pending), mergeable or conflicting, and review status
+(approved / changes requested / awaiting review), plus the follow-up you armed.
+
+**If someone else explicitly owns the merge** (the task says so — e.g. a separate
+PR-review loop that reviews open PRs and merges the clean ones, or a named
+person), the deliverable is still an open, green, **ready-for-review (non-draft)
+PR**. Address any review feedback that has arrived, name who owns the merge in
+your final message, then go to Phase 5. Someone else owning the merge is **not**
+a reason to leave the PR draft — a draft PR is invisible to a review loop.
 
 Not merging is not the same as staying draft: "do not merge" means no
 `gh pr merge` and no auto-merge, nothing more.
 
 ## Phase 5 — Finish the amux session
 
-A **task-driven member** amux agent session exists to produce one change. Once its PR is
-open, green, marked ready for review, and has no outstanding feedback, the
-session's job is finished, so mark
-it done to clear it from the active rail. This is reversible — it archives, it does not delete.
+A **task-driven member** amux agent session exists to produce one change, and it
+owns that change's PR until the PR is terminal. A member is **finished** when its
+PR is **merged or closed** — not when it is ready for review. Then mark it done
+to clear it from the active rail. This is reversible — it archives, it does not
+delete.
 
-**Only do this when all three hold:**
+**Never run `amux agent done` while your PR is open.** Archiving stops your
+runtime, so nobody would be left to fix a CI regression, answer review feedback
+or resolve a conflict — the PR is orphaned. While the PR is open, end the turn
+with a follow-up armed (Phase 4) instead. The one exception: the task explicitly
+says someone else owns the merge (a PR-review loop, the coordinator, a named
+person) — then you may finish with the PR open and ready for review, and your
+final message must say who owns the merge.
+
+**Only do this when all four hold:**
 
 - `$AMUX_ROLE` is not `coordinator`. A coordinator reports the outcome and asks
   the user whether to archive the workgroup or give it another task. It must wait
@@ -219,6 +242,8 @@ it done to clear it from the active rail. This is reversible — it archives, it
 - `$AMUX_MODE` is `task` — **never** archive an `interactive` session. The human
   drives an interactive session and owns when it ends; archiving it out from under
   them defeats its purpose.
+- The PR is merged or closed (`gh pr view <n> --json state -q .state` prints
+  `MERGED` or `CLOSED`), or the task explicitly hands the merge to someone else.
 - This PR is the session's whole job. A task can be long-lived — a PR-review loop
   that merges approved PRs is a `task`, but it's never "done" after one PR. If the
   session has more work queued, keeps looping, or the PR is one of several
@@ -228,7 +253,9 @@ it done to clear it from the active rail. This is reversible — it archives, it
 your own session from the fixed launch context, so you don't pass an id:
 
 ```sh
-if [ "$AMUX_MODE" = "task" ] && [ "$AMUX_ROLE" != "coordinator" ]; then
+state=$(gh pr view <n> --json state -q .state)   # MERGED | CLOSED | OPEN
+if [ "$AMUX_MODE" = "task" ] && [ "$AMUX_ROLE" != "coordinator" ] &&
+   { [ "$state" = MERGED ] || [ "$state" = CLOSED ]; }; then
   amux agent done   # archives your own session; reversible
 fi
 ```
@@ -247,11 +274,12 @@ Restoration is host-only: `amux workgroup unarchive <workgroup-id>` restores the
 workgroup and its previously active members together. Members already completed
 before the group archive stay archived.
 
-Report the PR URL, that it is ready for review (not draft), and the confirmed
-lifecycle outcome. If it is still draft, say exactly why (work genuinely in
-progress). If you did not archive
-(interactive session, a long-lived loop, more work remains, or no confirmation
-for the coordinator), say so and why.
+Report the PR URL and its state (merged / closed, or ready for review — not
+draft — with CI, mergeability and review status) and the confirmed lifecycle
+outcome. If it is still draft, say exactly why (work genuinely in progress). If
+you did not archive (the PR is still open, interactive session, a long-lived
+loop, more work remains, or no confirmation for the coordinator), say so and
+why, and name the follow-up you armed.
 
 ## Guardrails
 

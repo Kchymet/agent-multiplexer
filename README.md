@@ -174,7 +174,11 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   run `amux agent done` to archive its workgroup and all direct members, stopping
   runtimes and revoking credentials. Host workgroup restoration also restores
   previously active members; already-completed members stay archived. Task-mode
-  member agents still use `amux agent done` to archive only themselves.
+  member agents still use `amux agent done` to archive only themselves — once
+  their PR is merged or closed, never while it is open (archiving stops the
+  runtime and would orphan the PR). A coordinator tracks every member PR to
+  merged or closed in a `COORDINATION.md` PR ledger before reporting a goal
+  complete, handing still-open PRs to the user with what needs a human.
 - **Mode** — an agent runs as a **task** (short) or **loop** (long/autonomous),
   shown with a glyph and exported as `$AMUX_MODE` for your launch wrapper.
 - **Default sessions** — every container on the rail hosts one long-lived agent

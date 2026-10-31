@@ -205,8 +205,9 @@ Refresh `updated` without changing any channel.
 
 Declare the agent's task **complete**. This is a *terminal* lifecycle report, not
 an activity state (§8): a task-mode workgroup member that has finished its task
-and integrated its artifact calls this to retire its own session from the active
-rail. The workgroup and its coordinator remain available. A coordinator may also
+and integrated its artifact (its PR merged or closed) calls this to retire its
+own session from the active rail. A member never calls it while its PR is open:
+archiving stops its runtime, and nobody would be left to babysit the PR. The workgroup and its coordinator remain available. A coordinator may also
 call it after explicit user confirmation to archive its own whole workgroup.
 Goal completion alone never authorizes archive.
 
