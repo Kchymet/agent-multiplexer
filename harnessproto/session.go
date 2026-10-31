@@ -80,6 +80,50 @@ type Session struct {
 	// an ordinary agent (or a bare container row with no session: a root or repo
 	// published by a daemon that predates default sessions carries no Runtime).
 	Role string `json:"role,omitempty"`
+
+	// PRs are the GitHub pull requests this session owns, as last observed by
+	// the daemon's PR watcher (a workgroup member's PRs are the ones whose head
+	// branch is the member's branch, or that branch plus a "-suffix"). Open PRs
+	// and those amux saw open before they merged or closed are listed, newest
+	// first. Additive/omitempty: absent when the session owns no tracked PR or
+	// the daemon predates the watcher. A pointer, like Caps, so Session stays a
+	// comparable struct.
+	PRs *SessionPRs `json:"prs,omitempty"`
+}
+
+// SessionPRs is Session.PRs' list.
+type SessionPRs []SessionPR
+
+// SessionPR is one pull request a session owns (Session.PRs), summarized from
+// GitHub. Enumerated fields are lower-case renderings of GitHub's values.
+type SessionPR struct {
+	Repo   string `json:"repo"` // owner/name
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	Branch string `json:"branch"`          // head branch
+	State  string `json:"state"`           // open | merged | closed
+	Draft  bool   `json:"draft,omitempty"` // still a draft
+	// Mergeable is mergeable | conflicting | unknown.
+	Mergeable string `json:"mergeable,omitempty"`
+	// MergeState is GitHub's mergeStateStatus (clean, blocked, behind, dirty,
+	// unstable, ...).
+	MergeState string `json:"mergeState,omitempty"`
+	// Checks summarizes the status-check rollup: pass | fail | pending, or empty
+	// when the PR has no checks.
+	Checks       string   `json:"checks,omitempty"`
+	FailedChecks []string `json:"failedChecks,omitempty"`
+	// ReviewDecision is approved | changes_requested | review_required, or empty.
+	ReviewDecision string    `json:"reviewDecision,omitempty"`
+	LastReview     *PRReview `json:"lastReview,omitempty"`
+	// Updated is when amux last observed this PR change (unix millis).
+	Updated int64 `json:"updated,omitempty"`
+}
+
+// PRReview is the most recently submitted review on a PR.
+type PRReview struct {
+	Author string `json:"author,omitempty"`
+	State  string `json:"state"`        // approved | changes_requested | commented | dismissed
+	At     string `json:"at,omitempty"` // submittedAt (RFC 3339)
 }
 
 // Session roles (Session.Role): the built-in default sessions a daemon hosts for
