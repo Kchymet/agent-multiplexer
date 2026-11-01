@@ -1,0 +1,8 @@
+event: events
+data: {"seq":58,"runtime":"claude","events":[{"type":"turn_start","direction":"out"}]}
+
+: keepalive
+
+event: auth
+data: {"code":"auth.expired"}
+

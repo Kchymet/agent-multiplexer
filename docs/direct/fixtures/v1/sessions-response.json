@@ -1,0 +1,47 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "sessions": [
+    {
+      "id": "771951",
+      "title": "Direct access",
+      "kind": "claude",
+      "is_root": true,
+      "section": "workgroups",
+      "state": "running",
+      "status": "running",
+      "runtime": "claude",
+      "role": "coordinator",
+      "caps": {
+        "prompt": true,
+        "stop": true
+      }
+    },
+    {
+      "id": "e1deda",
+      "title": "Backend implementation",
+      "kind": "claude",
+      "mode": "task",
+      "model": "claude-opus-5-5",
+      "root_id": "771951",
+      "repos": "agent-multiplexer",
+      "section": "workgroups",
+      "state": "idle",
+      "status": "idle",
+      "started_at": 1792999000,
+      "runtime": "claude",
+      "caps": {
+        "prompt": true,
+        "stop": false
+      },
+      "prs": [
+        {
+          "repo": "owner/agent-multiplexer",
+          "number": 273,
+          "url": "https://github.com/owner/agent-multiplexer/pull/273",
+          "branch": "amux/771951-e1deda",
+          "state": "open"
+        }
+      ]
+    }
+  ]
+}

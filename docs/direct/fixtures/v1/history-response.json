@@ -1,0 +1,18 @@
+{
+  "session_id": "e1deda",
+  "runtime": "claude",
+  "seq": 42,
+  "head_seq": 57,
+  "has_more": true,
+  "events": [
+    {
+      "type": "text",
+      "item_id": "msg_1",
+      "direction": "out",
+      "payload": {
+        "text": "Done.",
+        "final": true
+      }
+    }
+  ]
+}

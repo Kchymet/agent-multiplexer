@@ -16,6 +16,11 @@ func StateDir() string {
 	return filepath.Join(home, ".local", "state", "amux")
 }
 
+// DirectStateDir holds `amux direct`'s identity, grant registry and admin
+// socket. It is inside StateDir, which pane sandboxes never mount, so no agent
+// can read the registry or reach the admin channel.
+func DirectStateDir() string { return filepath.Join(StateDir(), "direct", "v1") }
+
 // ProtectedStateDir resolves the login account's home without consulting HOME
 // or XDG. It is used only to decide whether automatic daemon bootstrap has a
 // pre-existing host credential. A restricted process must not obtain host

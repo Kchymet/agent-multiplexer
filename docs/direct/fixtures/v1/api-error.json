@@ -1,0 +1,4 @@
+{
+  "code": "auth.expired",
+  "error": "access token expired"
+}
