@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+	"unicode/utf16"
 
 	"amux/internal/cfghome"
 	"amux/internal/claudecfg"
+	"amux/internal/claudegoal"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/hostprep"
@@ -169,7 +172,11 @@ func (h claudeHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 		// Pinned but no transcript under any candidate path: don't silently start
 		// fresh — make the fallback visible in the log and on the rail.
 		warnResumeFailed(req)
-		return LaunchDecision{Dir: req.Dir, Extra: append([]string{"--session-id", s.ClaudeID}, freshExtra(req.Prompt)...)}, nil
+		extra, err := h.launchPrompt(req)
+		if err != nil {
+			return LaunchDecision{}, err
+		}
+		return LaunchDecision{Dir: req.Dir, Extra: append([]string{"--session-id", s.ClaudeID}, extra...)}, nil
 	}
 	any, err := home.AnySessionRooted(req.Root, req.Dir)
 	if err != nil {
@@ -178,7 +185,11 @@ func (h claudeHarness) PlanLaunch(req LaunchRequest) (LaunchDecision, error) {
 	if any {
 		return LaunchDecision{Dir: req.Dir, Extra: resumedExtra(req, "--continue")}, nil
 	}
-	return LaunchDecision{Dir: req.Dir, Extra: freshExtra(req.Prompt)}, nil
+	extra, err := h.launchPrompt(req)
+	if err != nil {
+		return LaunchDecision{}, err
+	}
+	return LaunchDecision{Dir: req.Dir, Extra: extra}, nil
 }
 
 // carryOver copies cwd's project dir (its transcripts and their per-session
@@ -388,4 +399,103 @@ func (h claudeHarness) Doctor() []string {
 		out = append(out, home.MungeDrift()...)
 	}
 	return out
+}
+
+// launchPrompt is the initial prompt of a fresh Claude conversation. A Claude task
+// session starts in goal mode, so its task becomes the active goal at launch
+// rather than an ordinary first turn the model may end whenever it likes:
+//
+//   - A workgroup coordinator (HookGoals) runs amux's own goal loop. Its goal is
+//     seeded into the state file here, before Claude starts, instead of being
+//     left to the UserPromptSubmit hook: the positional launch prompt is not a
+//     reliable UserPromptSubmit event, so a coordinator could otherwise start
+//     with no goal and its Stop hook would let the first turn end. The prompt is
+//     passed as typed, so a UserPromptSubmit that does fire re-establishes the
+//     same objective (claudegoal.OnPrompt) and changes nothing.
+//   - Any other task-mode session (a workgroup member) uses Claude Code's
+//     native /goal: the launch prompt becomes `/goal <task>`, which installs
+//     Claude's session-scoped goal Stop hook with the task as its condition and
+//     starts working on it. Coordinators do not, because two goal Stop hooks
+//     would contradict each other (amux's `goal wait`/`ask` let a stop through
+//     that the native goal would block).
+//
+// An interactive session is the human's to drive, so its prompt is passed
+// unchanged, as is a resume (PlanLaunch never calls this for one): an existing
+// conversation keeps whatever goal it already has.
+func (claudeHarness) launchPrompt(req LaunchRequest) ([]string, error) {
+	s, prompt := req.Session, strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		return nil, nil
+	}
+	if HookGoals(s) {
+		if err := seedHookGoal(req.Root, prompt); err != nil {
+			return nil, err
+		}
+		return []string{prompt}, nil
+	}
+	if !NativeClaudeGoal(s) {
+		return []string{prompt}, nil
+	}
+	cond, err := nativeGoalCondition(req.Root, s, prompt)
+	if err != nil {
+		return nil, err
+	}
+	return []string{GoalCommand(cond)}, nil
+}
+
+// NativeClaudeGoal reports whether a fresh launch of s starts Claude Code's
+// native /goal with its task: a Claude task-mode session that is an ordinary
+// agent (a workgroup member). Coordinators run amux's goal hooks (HookGoals)
+// instead; console, repo homes and interactive sessions are human-driven.
+func NativeClaudeGoal(s store.Session) bool {
+	return Canonical(s.Agent) == HookGoalRuntime && s.Role() == store.RoleAgent &&
+		store.NormalizeMode(s.Mode) == store.ModeTask
+}
+
+// GoalCommand is the launch prompt that sets condition as Claude Code's native
+// goal.
+func GoalCommand(condition string) string { return "/goal " + condition }
+
+// MaxNativeGoalCondition is Claude Code's limit on a /goal condition, in
+// JavaScript string length (UTF-16 code units); a longer one is refused with
+// "Goal condition is limited to 4000 characters" and no goal is set.
+const MaxNativeGoalCondition = 4000
+
+// NativeGoalTaskRel is where a member's task is written, relative to its
+// session dir, when it is too long to be a /goal condition itself.
+var NativeGoalTaskRel = filepath.Join(".amux", "task.md")
+
+// nativeGoalCondition is the /goal condition for a task: the task itself when
+// it fits, otherwise a pointer to the full task written beside the session's
+// other private amux state, so the goal is still set (and the model still
+// reads the whole task) instead of /goal refusing the launch prompt.
+func nativeGoalCondition(root *hostprep.Root, s store.Session, prompt string) (string, error) {
+	if len(utf16.Encode([]rune(prompt))) <= MaxNativeGoalCondition {
+		return prompt, nil
+	}
+	if err := root.AtomicWrite(NativeGoalTaskRel, []byte(prompt+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return "Complete the task written in " + filepath.Join(s.Dir, NativeGoalTaskRel) +
+		" — read the whole file first; it is your assigned task, too long to state here. The goal is met only when everything it asks for is done and verified.", nil
+}
+
+// seedHookGoal establishes prompt as a Claude coordinator's active goal before
+// its first launch. A goal already on file is left alone: a fresh start after a
+// lost transcript replays the creation prompt, and must not overwrite a goal
+// the user has since replaced, paused or completed.
+func seedHookGoal(root *hostprep.Root, prompt string) error {
+	b, err := root.ReadFile(claudegoal.StateRel)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	cur, err := claudegoal.Decode(b)
+	if err != nil {
+		return err
+	}
+	if !cur.None() {
+		return nil
+	}
+	next := claudegoal.OnPrompt(cur, prompt, time.Now())
+	return root.AtomicWrite(claudegoal.StateRel, claudegoal.Encode(next), 0o600)
 }
