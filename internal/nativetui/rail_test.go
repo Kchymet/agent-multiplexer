@@ -17,7 +17,6 @@ func groupedRail() *model {
 		{ID: "wg", Title: "payments", IsRoot: true, Section: core.SectionWorkgroups},
 		{ID: "wg-agent", Title: "workgroup-child", RootID: "wg", Section: core.SectionWorkgroups},
 		{ID: "repo", Title: "acme/api", Kind: "repo", Section: core.SectionRepos},
-		{ID: "repo-agent", Title: "repo-child", RootID: "repo", Section: core.SectionRepos},
 		{ID: "archived", Title: "archived-child", RootID: "wg", Section: core.SectionArchived},
 		{ID: "detached", Title: "external-session", Section: core.SectionDetached},
 	}}
@@ -27,8 +26,7 @@ func TestFoldGroupsAndSections(t *testing.T) {
 	for _, tc := range []struct {
 		id, child, sibling string
 	}{
-		{"wg", "workgroup-child", "repo-child"},
-		{"repo", "repo-child", "workgroup-child"},
+		{"wg", "workgroup-child", "acme/api"},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			m := groupedRail()
@@ -80,12 +78,11 @@ func TestEmptyContainersHaveNoDisclosure(t *testing.T) {
 		core.Session{ID: "empty-repo", Title: "empty-repository", Kind: "repo", Section: core.SectionRepos},
 	)
 	out := plain(m.renderSidebar())
-	for _, want := range []string{"▾ payments", "▾ ⛁ acme/api"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("populated container lost disclosure %q:\n%s", want, out)
-		}
+	if !strings.Contains(out, "▾ payments") {
+		t.Fatalf("populated workgroup lost its disclosure:\n%s", out)
 	}
-	for _, unwanted := range []string{"▾ empty-workgroup", "▸ empty-workgroup", "▾ ⛁ empty-repository", "▸ ⛁ empty-repository"} {
+	// Repos are leaves: no agent nests under a repo, so no repo row ever folds.
+	for _, unwanted := range []string{"▾ empty-workgroup", "▸ empty-workgroup", "▾ ⛁", "▸ ⛁"} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("empty container rendered disclosure %q:\n%s", unwanted, out)
 		}
@@ -164,33 +161,34 @@ func TestFoldNavigation(t *testing.T) {
 
 func TestFoldSnapshotAndPendingAttach(t *testing.T) {
 	m := groupedRail()
-	m.selectByID("repo")
+	m.selectByID("wg")
 	m.toggleRailGroup()
 	// Inserting a session before the selection must retain the selected ID.
 	sessions := append([]core.Session{{ID: "new-console"}}, m.sessions...)
 	m.Update(frameMsg{f: daemon.Frame{Snapshot: &core.Snapshot{Sessions: sessions}}})
-	if m.selected().ID != "repo" || !m.collapsed[railGroup{core.SectionRepos, "repo"}] {
+	if m.selected().ID != "wg" || !m.collapsed[railGroup{core.SectionWorkgroups, "wg"}] {
 		t.Fatal("snapshot lost selection or fold")
 	}
-	m.selectEntry(railEntry{section: core.SectionRepos})
+	m.selectEntry(railEntry{section: core.SectionWorkgroups})
 	m.toggleRailGroup()
-	m.pending = "repo-agent"
-	if m.tryPendingAttach() == nil || m.selected().ID != "repo-agent" {
+	m.pending = "wg-agent"
+	if m.tryPendingAttach() == nil || m.selected().ID != "wg-agent" {
 		t.Fatal("pending attach must select the new agent")
 	}
-	if m.hidden(m.selected()) || !strings.Contains(plain(m.renderSidebar()), "repo-child") {
+	if m.hidden(m.selected()) || !strings.Contains(plain(m.renderSidebar()), "workgroup-child") {
 		t.Fatal("pending attach must reveal the section and parent")
 	}
 }
 
 func TestRefreshMovesHiddenSelectionToAncestor(t *testing.T) {
 	m := groupedRail()
-	m.setRailCollapsed(railGroup{core.SectionRepos, "repo"}, true)
+	m.sessions = append(m.sessions, core.Session{ID: "wg2", Title: "billing", IsRoot: true, Section: core.SectionWorkgroups})
+	m.setRailCollapsed(railGroup{core.SectionWorkgroups, "wg2"}, true)
 	m.selectByID("wg-agent")
 	sessions := append([]core.Session(nil), m.sessions...)
-	sessions[2].Section, sessions[2].RootID = core.SectionRepos, "repo"
+	sessions[2].RootID = "wg2"
 	m.refreshSessions(sessions)
-	if m.selected() == nil || m.selected().ID != "repo" {
+	if m.selected() == nil || m.selected().ID != "wg2" {
 		t.Fatal("moved agent should select its visible folded parent")
 	}
 	m.refreshSessions(nil)

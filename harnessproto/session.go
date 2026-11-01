@@ -200,7 +200,7 @@ const (
 // pinned above them all.
 const (
 	SectionWorkgroups = "workgroups" // cross-repo workgroups + nested agents
-	SectionRepos      = "repos"      // tracked repos + their single-repo agents
+	SectionRepos      = "repos"      // tracked repos (each row is its repo home)
 	SectionDetached   = "detached"   // Claude sessions amux didn't launch
 	SectionArchived   = "archived"   // agents marked done/archived (reversible)
 )

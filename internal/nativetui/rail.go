@@ -17,7 +17,10 @@ var railSections = []struct{ key, hotkey, empty string }{
 	{core.SectionDetached, "", ""},
 }
 
-func container(s *core.Session) bool { return s.Kind == "repo" || s.IsRoot }
+// container reports whether a row can hold nested rows. Only workgroup roots
+// do: every agent belongs to a workgroup, and a repo row is a leaf (its repo
+// home) — no agent ever nests under a repo.
+func container(s *core.Session) bool { return s.IsRoot }
 
 func (m *model) group(s *core.Session) railGroup {
 	return railGroup{section: s.Section, id: s.ID}

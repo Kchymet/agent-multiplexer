@@ -7,8 +7,8 @@ import (
 	"amux/internal/store"
 )
 
-// Container rows that are default sessions open themselves; bare containers
-// (from a daemon predating default sessions) still fall through to their first
+// Container rows that are default sessions open themselves; a bare workgroup
+// root (from a daemon predating coordinators) still falls through to its first
 // agent. Neither the console nor a container session can be moved or re-scoped.
 func TestAttachableRoles(t *testing.T) {
 	coordinator := &core.Session{ID: "wg1", IsRoot: true, Role: store.RoleCoordinator, Section: core.SectionWorkgroups}
@@ -45,7 +45,7 @@ func TestAttachableRoles(t *testing.T) {
 	}
 
 	// Enter on a coordinator attaches the coordinator; on a bare root, its first
-	// agent; on a bare repo with no agent, nothing (the new-agent form opens).
+	// agent. A repo row never nests agents.
 	m := &model{sessions: []core.Session{*coordinator, *member, *bareRoot, {ID: "a0", RootID: "wg0", Kind: "claude", Section: core.SectionWorkgroups}, *bareRepo}}
 	m.cursor = 0
 	m.attachSelected()
