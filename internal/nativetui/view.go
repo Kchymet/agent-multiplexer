@@ -107,6 +107,9 @@ func cellPad(s string, width int) string {
 // color.
 func (m *model) renderTopBorder() string {
 	label := titleStyle.Render(" amux ")
+	if self := m.selfMetric(); self != "" {
+		label += dimStyle.Render(self + " ") // amux's own CPU/RSS (resources.go)
+	}
 	railHint := keyStyle.Render(" "+keyLabel(m.keys.Chord(keymap.FocusAgent))+" ") + dimStyle.Render("▸")
 	left := borderSeg(sidebarWidth, m.borderStyle(focusSidebar), label, railHint)
 
@@ -341,15 +344,24 @@ func (m *model) renderRow(i int, s core.Session) string {
 		// ⛁ glyph lines up with the workgroup titles' structural glyphs.
 		icon = "  " + glyph(s)
 	}
-	label := truncate(fmt.Sprintf("%s%s%s %s", mark, indent, icon, s.Title), sidebarWidth)
+	label := fmt.Sprintf("%s%s%s %s", mark, indent, icon, s.Title)
+	cell, cols := m.railMetric(&s) // fixed-width resource cell (resources.go)
+	if cols {
+		// Pad so the cell sits flush right.
+		w := sidebarWidth - metricWidth
+		label = truncate(label, w)
+		label += strings.Repeat(" ", max(0, w-ansi.StringWidth(label)))
+	} else {
+		label = truncate(label, sidebarWidth)
+	}
 	var line string
 	switch {
 	case m.sectionCursor == "" && i == m.cursor:
-		line = selStyle.Width(sidebarWidth).Render(label)
+		line = selStyle.Width(sidebarWidth).Render(label + cell.plain)
 	case s.IsRoot:
-		line = titleStyle.Render(label)
+		line = titleStyle.Render(label) + cell.styled
 	default:
-		line = label
+		line = label + cell.styled
 	}
 	if sub := m.rowStatus(s, indent); sub != "" {
 		line += "\n" + sub
@@ -412,6 +424,9 @@ func (m *model) renderMain() string {
 	if m.confirm != nil {
 		return m.renderDialog()
 	}
+	if m.res.open {
+		return m.renderResources()
+	}
 	if t := m.cur(); t != nil {
 		return m.renderSelectedPane(t)
 	}
@@ -459,6 +474,8 @@ func (m *model) renderHelp() string {
 			return ansi.Truncate(hints("login", []hint{{"c", "cancel"}, {"PgUp/PgDn", "scroll"}, {"Esc", "cancel and close"}}), m.w, "")
 		}
 		return ansi.Truncate(hints("accounts", []hint{{"e", "subscription"}, {"a", "API key"}, {"x", "logout"}, {"r", "refresh"}, {"Esc", "close"}}), m.w, "")
+	case m.res.open:
+		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {"↑↓", "scroll"}, {"t/Esc", "close"}}), m.w, "")
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:
@@ -470,7 +487,7 @@ func (m *model) renderHelp() string {
 			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
 		})
 	default:
-		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {"←/→", "collapse/expand"}, {"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
+		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {"←/→", "collapse/expand"}, {"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
 	}
 }
 

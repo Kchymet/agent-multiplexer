@@ -140,7 +140,8 @@ type model struct {
 	accountOverviewStale  bool
 	accountOverviewSerial uint64
 	accounts              *accountsState
-	accountCall           accountCaller // nil uses the authenticated host account service
+	accountCall           accountCaller  // nil uses the authenticated host account service
+	res                   resourcesState // daemon resource samples and the top panel (resources.go)
 
 	// clip queues local selections and pane OSC 52 writes through one Copier.
 	// Nil disables copying.
@@ -248,6 +249,11 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.refreshAccountOverview()
 		}
 		return m, nil
+	case resourcesTickMsg:
+		if msg.serial == m.res.serial {
+			return m, m.pollResources()
+		}
+		return m, nil
 	case accountsReplyMsg:
 		return m, m.updateAccounts(msg)
 	case accountsExpiredMsg:
@@ -274,12 +280,13 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.client = msg.c
 		m.reconnectPanes = len(m.terms) > 0
 		m.status = ""
-		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview())
+		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview(), m.startResources())
 
 	case disconnectedMsg:
 		m.clearSelection()
 		m.accountOverviewSerial++
 		m.accountOverviewStale = true
+		m.res.serial++ // stop the resources poll chain until reconnected
 		if s := m.accounts; s != nil {
 			s.dispose()
 			s.serial++ // fence callbacks from the retired connection
@@ -324,6 +331,9 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if p := msg.f.Pane; p != nil {
 			m.handlePaneFrame(p)
+		}
+		if d := msg.f.Data; d != nil && d.Query == core.QueryResources {
+			m.applyResources(d)
 		}
 		if cmd := m.tryPendingAttach(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -477,6 +487,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// The resources panel captures every key while open.
+	if m.res.open {
+		return m.handleResourcesKey(k)
+	}
 
 	// Global jumps work everywhere — even with the agent focused — so you can
 	// always move between the rail and the agent without a prefix. The chords
@@ -558,6 +572,9 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "s":
 		return m, m.openAccounts()
+	case "t": // top-style resources panel
+		m.toggleResources()
+		return m, nil
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
