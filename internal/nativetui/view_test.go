@@ -48,7 +48,7 @@ func TestAddAgentKeyOnRepo(t *testing.T) {
 	m := &model{sessions: []core.Session{{ID: "acme/api", Title: "acme/api", Kind: "repo", Section: core.SectionRepos}}}
 	m.handleKey(key("a"))
 	if m.form == nil || m.form.action != "new-workgroup" || m.form.id != "" || m.form.values()["repos"] != "acme/api" {
-		t.Fatalf("repo agent form not opened correctly: %+v", m.form)
+		t.Fatalf("repo workgroup form not opened correctly: %+v", m.form)
 	}
 }
 

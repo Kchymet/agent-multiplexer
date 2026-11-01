@@ -23,6 +23,7 @@ import (
 	"github.com/creack/pty"
 
 	"amux/internal/clipboard"
+	"amux/internal/termmodes"
 )
 
 // mouseTrackModes are the DEC private modes a child sets to ask for mouse
@@ -61,6 +62,14 @@ type Terminal struct {
 	// lock without re-locking (the mutex isn't reentrant).
 	mouseModes map[ansi.Mode]bool // mouse-tracking DEC modes currently enabled
 
+	// The child's text-cursor state: DECTCEM visibility (?25h/l, reported
+	// per active screen by the emulator's CursorVisibility callback) and the
+	// raw DECSCUSR parameter (CSI Ps SP q; 0 = the terminal's default shape).
+	// The embedder forwards both to the outer terminal's hardware cursor (see
+	// Cursor). Guarded by t.mu like mouseModes.
+	cursorHidden bool
+	cursorStyle  int
+
 	// Remote mode (set by NewRemote): there is no local PTY; input and the
 	// emulator's query replies are routed through onInput, and resizes are
 	// propagated through onResize.
@@ -78,6 +87,7 @@ type Terminal struct {
 	// nudges the goroutine; done stops it on Close.
 	fmu   sync.Mutex
 	fbuf  []byte
+	fmode termmodes.Tracker // every Feed byte, so a backlog trim can restate modes
 	fwake chan struct{}
 	done  chan struct{}
 	once  sync.Once
@@ -133,8 +143,21 @@ func New(cols, rows int) *Terminal {
 	// raw mouse events (any mouse-tracking mode) instead of local history.
 	// These callbacks run under t.mu (see field docs).
 	t.emu.SetCallbacks(vt.Callbacks{
-		EnableMode:  func(m ansi.Mode) { t.noteMode(m, true) },
-		DisableMode: func(m ansi.Mode) { t.noteMode(m, false) },
+		EnableMode:       func(m ansi.Mode) { t.noteMode(m, true) },
+		DisableMode:      func(m ansi.Mode) { t.noteMode(m, false) },
+		CursorVisibility: func(visible bool) { t.cursorHidden = !visible },
+	})
+	// DECSCUSR: keep the child's raw parameter rather than the emulator's
+	// decoded style, which folds 0 ("terminal default") into 1 (blinking
+	// block). Forwarding 0 as 0 keeps the user's own configured cursor shape.
+	// Falls through so the emulator tracks the style as well.
+	t.emu.RegisterCsiHandler(ansi.Command(0, ' ', 'q'), func(params ansi.Params) bool {
+		n, _, _ := params.Param(0, 0)
+		if n < 0 || n > 6 {
+			n = 0
+		}
+		t.cursorStyle = n
+		return false
 	})
 	// The emulator has no OSC 52 handler and silently drops the sequence, which
 	// is how agents copy a mouse selection; hand writes to the embedder, which
@@ -301,14 +324,20 @@ func (t *Terminal) ingest(b []byte) {
 // daemon, just as pump does for a local PTY. It never blocks the caller and never
 // drops — bytes are appended to the coalesced backlog in order. Only a backlog
 // past feedCap (a client hopelessly behind) is trimmed to its recent tail, with a
-// RIS prepended so the emulator clears before applying the retained repaint.
+// RIS prepended so the emulator clears before applying the retained repaint, and
+// the terminal modes the stream has set restated after it: a full-screen agent
+// sets them once at startup (Codex: alternate screen and mouse reporting), so the
+// tail alone would leave the wheel local with nothing to scroll.
 func (t *Terminal) Feed(p []byte) {
 	t.fmu.Lock()
+	t.fmode.Write(p)
 	t.fbuf = append(t.fbuf, p...)
 	if len(t.fbuf) > feedCap {
 		tail := t.fbuf[len(t.fbuf)-feedKeep:]
-		kept := make([]byte, 0, feedKeep+2)
+		pre := t.fmode.Preamble()
+		kept := make([]byte, 0, 2+len(pre)+feedKeep)
 		kept = append(kept, 0x1b, 'c') // RIS: reset before the retained tail
+		kept = append(kept, pre...)
 		t.fbuf = append(kept, tail...)
 	}
 	t.fmu.Unlock()
@@ -381,6 +410,35 @@ func (t *Terminal) Render() string {
 	}
 	t.mu.Unlock()
 	return pad(raw, cols, rows)
+}
+
+// Cursor is the child's text cursor as the outer terminal should show it: its
+// cell in the pane (0-based), whether it is visible, and its DECSCUSR shape.
+// It is not visible while the child hides it (DECTCEM) or while the pane is
+// scrolled back into history, where the live cursor row is off screen. A
+// cursor in the pending-wrap column past the last cell is reported on the
+// last cell, where terminals draw it.
+type Cursor struct {
+	X, Y    int
+	Visible bool
+	// Style is the DECSCUSR parameter: 0 terminal default, 1/2 blinking/steady
+	// block, 3/4 underline, 5/6 bar (vim INSERT mode, Codex's composer).
+	Style int
+}
+
+// Cursor reports the child's text cursor. The embedder draws it with the
+// outer terminal's hardware cursor, which is the only way to show a thin bar:
+// a painted cell can only be a block or an underline.
+func (t *Terminal) Cursor() Cursor {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pos := t.emu.CursorPosition()
+	return Cursor{
+		X:       max(0, min(pos.X, t.cols-1)),
+		Y:       max(0, min(pos.Y, t.rows-1)),
+		Visible: !t.cursorHidden && t.offset == 0,
+		Style:   t.cursorStyle,
+	}
 }
 
 // pad forces s into an exact cols×rows block. It relies on the emulator having

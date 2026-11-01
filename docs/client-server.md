@@ -69,7 +69,10 @@ session inventory and reopens every previously open tab that still exists. Its
 terminal mirrors bind input and resize callbacks to the new connection, and the
 daemon replays their screens. The selected tab and sidebar focus are preserved.
 Closing and reopening the dashboard also reattaches to existing agents; it does
-not stop their processes. Older dashboards that show a saved screen but ignore
+not stop their processes. The sidebar's folds and selected row are saved to
+`~/.local/state/amux/tui-state.json` and restored on the next open, reconciled
+against the fresh inventory: archived or deleted rows never reappear, and
+groups the dashboard has not seen before open expanded. Older dashboards that show a saved screen but ignore
 keys after a daemon restart need to be reopened once after upgrading.
 
 ## Protocol 1 — UI ⇄ Multiplexer Server (`internal/muxproto`)
@@ -104,6 +107,10 @@ preceded by `pane.reset`, bounding memory without silent corruption. Discrete
 frames (snapshots, results) remain droppable — each is a full state.
 
 ## Upstream pane bridge
+
+The mux reaches the daemon only through the shared host backend
+(`internal/hostbackend`, see [connection-access.md](connection-access.md)), the
+same operations the Harness relay provider uses.
 
 Each legacy pane opens a separate freshly authenticated primary-daemon client
 stream. The mux translates pane open/input/resize/close to the existing daemon

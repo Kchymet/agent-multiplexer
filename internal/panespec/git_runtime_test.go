@@ -62,20 +62,25 @@ func TestRuntimeGitObjectGrantIsExactReadOnly(t *testing.T) {
 	if _, err := os.Stat(poolConfig); err != nil {
 		t.Fatalf("fixture lacks planted pool config: %v", err)
 	}
+	shim := ""
+	if isolationPlatform == "darwin" {
+		// Apple's git shim is the host's git, as on a Mac without Homebrew
+		// Git, even when the runner has one: the pane must run the real Git
+		// behind it, never the shim, which needs xcrun's cache.
+		t.Setenv("PATH", "/usr/bin:/bin")
+		shim = appleGitShim
+	}
 	script := `set -eu
+if [ -n "$4" ]; then test "$(command -v git)" != "$4"; fi
 test "$(git -C "$1" show HEAD:README.md)" = authorized-base
 test ! -e "$2"
 if touch "$3/session-write" 2>/dev/null; then exit 31; fi
 `
-	argv, err := scope(checkout, TabAgent, s, spec.Access, spec.GitObjects, []string{"/bin/sh", "-c", script, "probe", checkout, poolConfig, mounts[0].ObjectsMountDir})
+	argv, err := scope(checkout, TabAgent, s, spec.Access, spec.GitObjects, []string{"/bin/sh", "-c", script, "probe", checkout, poolConfig, mounts[0].ObjectsMountDir, shim})
 	if err != nil {
 		t.Fatal(err)
 	}
 	overlay := platformLaunchEnv(spec)
-	if isolationPlatform == "darwin" {
-		// Exercise Apple's Git shim even when the runner also has Homebrew Git.
-		overlay = append(overlay, "PATH=/usr/bin:/bin")
-	}
 	launchEnv, err := launchenv.Build([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, overlay, launchenv.ForRuntime(s.Agent))
 	if err != nil {
 		t.Fatal(err)

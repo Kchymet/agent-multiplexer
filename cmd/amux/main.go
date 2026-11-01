@@ -85,6 +85,7 @@ var commands = []command{
 	{names: []string{"serve"}, run: cmdServe, hidden: true},
 	{names: []string{"harness"}, run: func([]string) error { return cmdHarness() }, hidden: true},
 	{names: []string{"provide"}, run: cmdProvide},
+	{names: []string{"direct"}, run: cmdDirect},
 	// hidden: embedded-terminal fidelity check (Phase 0 spike)
 	{names: []string{"_vtdemo"}, run: vtdemo.Run, hidden: true},
 	{names: []string{"agent"}, run: cmdAgent},
@@ -152,6 +153,7 @@ usage: amux <command>
   auth login | status | restart  manage one shared Claude login for all agent sessions
   provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
   provide install | uninstall  run provider mode as a user service (survives reboot)
+  direct serve | enroll | clients  direct web/Android access over your LAN or VPN (opt-in)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print CLI, daemon and database versions + compatibility
   licenses           print bundled dependency licenses and notices

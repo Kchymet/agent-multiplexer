@@ -18,6 +18,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/muxproto"
 	"amux/internal/panespec"
+	"amux/internal/termmodes"
 )
 
 // Server is a running multiplexer server.
@@ -135,6 +136,9 @@ type paneOut struct {
 	exit    bool
 	exitErr string
 	route   *route // nil only in transport-only tests
+	// modes follows the bytes this client's emulator will apply for the pane,
+	// so a resync can restate them ahead of the retained tail.
+	modes termmodes.Tracker
 }
 
 const (
@@ -889,12 +893,16 @@ func (cl *client) paneOutputFor(paneID string, route *route, data []byte) {
 	if route != nil {
 		b.route = route
 	}
+	b.modes.Write(data)
 	b.data = append(b.data, data...)
 	if len(b.data) > paneOutCap {
-		tail := b.data[len(b.data)-paneOutKeep:]
-		kept := make([]byte, len(tail)) // copy so the multi-MiB backing array is freed
-		copy(kept, tail)
-		b.data = kept
+		// A full-screen agent sets its modes once at startup; restate them so
+		// the cleared client emulator does not lose mouse reporting or the
+		// alternate screen. A fresh slice frees the multi-MiB backing array.
+		pre := b.modes.Preamble()
+		kept := make([]byte, 0, len(pre)+paneOutKeep)
+		kept = append(kept, pre...)
+		b.data = append(kept, b.data[len(b.data)-paneOutKeep:]...)
 		b.reset = true
 	}
 	cl.obMu.Unlock()
@@ -923,6 +931,9 @@ func (cl *client) paneResetFor(paneID string, route *route) {
 		b.route = route
 	}
 	b.reset = true
+	// The client clears its emulator, then applies whatever is still pending.
+	b.modes = termmodes.Tracker{}
+	b.modes.Write(b.data)
 	cl.obMu.Unlock()
 	cl.signalWrite()
 }

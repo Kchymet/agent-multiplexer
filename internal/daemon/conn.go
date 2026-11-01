@@ -9,6 +9,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/termmodes"
 )
 
 // connState is the daemon's per-connection state: a buffered write pump plus the
@@ -51,6 +52,9 @@ type paneOut struct {
 	reset   bool
 	exit    bool
 	exitErr string
+	// modes follows every byte queued for this pane, so a resync can restate
+	// them ahead of the retained tail (see paneOutput).
+	modes termmodes.Tracker
 }
 
 const (
@@ -184,16 +188,27 @@ func (cl *connState) paneOutput(paneID string, data []byte) {
 		b = &paneOut{}
 		cl.obuf[paneID] = b
 	}
+	b.modes.Write(data)
 	b.data = append(b.data, data...)
 	if len(b.data) > paneOutCap {
-		tail := b.data[len(b.data)-paneOutKeep:]
-		kept := make([]byte, len(tail)) // copy so the multi-MiB backing array is freed
-		copy(kept, tail)
-		b.data = kept
+		b.data = resyncTail(b.data, &b.modes)
 		b.reset = true
 	}
 	cl.obMu.Unlock()
 	cl.signalWrite()
+}
+
+// resyncTail is what a resync replays after the client clears its emulator: the
+// last paneOutKeep bytes, preceded by the terminal modes the stream has set. A
+// full-screen agent sets its modes once at startup (Codex: the alternate screen
+// and mouse reporting), so the tail alone would leave the cleared emulator on
+// the primary screen with the wheel kept local. The result is a fresh slice, so
+// the multi-MiB backing array is freed.
+func resyncTail(data []byte, modes *termmodes.Tracker) []byte {
+	pre := modes.Preamble()
+	kept := make([]byte, 0, len(pre)+paneOutKeep)
+	kept = append(kept, pre...)
+	return append(kept, data[len(data)-paneOutKeep:]...)
 }
 
 // paneExit records a pane's exit after any buffered output, so the client sees

@@ -28,7 +28,7 @@ func key(s string) tea.KeyMsg {
 	}
 }
 
-// drive opens a fresh repo-agent form and applies the keys, returning the first
+// drive opens a fresh repo workgroup form and applies the keys, returning the first
 // (Prompt) text field's value. The form opens in normal mode, so editing tests
 // press "i" first to start typing.
 func drive(keys ...string) string {
@@ -130,7 +130,7 @@ func TestFormsCarryHarnessField(t *testing.T) {
 		name string
 		open func(*model)
 	}{
-		{"new-repo-agent", func(m *model) { m.openNewRepoWorkgroupForm("repo", "Repo") }},
+		{"new-repo-workgroup", func(m *model) { m.openNewRepoWorkgroupForm("repo", "Repo") }},
 		{"add-agent", func(m *model) { m.openAddAgentForm("root", "Root") }},
 	}
 	for _, tc := range cases {

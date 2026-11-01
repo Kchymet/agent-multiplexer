@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/hostbackend"
 	"amux/internal/wiretls"
 )
 
@@ -57,7 +58,7 @@ func trimScheme(spec, scheme string) string {
 // Run starts a server listening with TLS on the local Unix socket plus any extra
 // TLS listen specs, until interrupted.
 func Run(extra ...string) error {
-	return RunWithPrimary(daemonPrimary{}, extra...)
+	return RunWithPrimary(daemonPrimary{backend: hostbackend.New()}, extra...)
 }
 
 // RunWithPrimary is the authority-injection seam. Production passes the

@@ -314,6 +314,7 @@ func (t *Terminal) installHistoryHooks() {
 		t.emu.ClearScrollback()
 		t.alt.clear()
 		t.offset = 0
+		t.cursorHidden, t.cursorStyle = false, 0 // RIS resets the cursor silently
 		return false
 	})
 }

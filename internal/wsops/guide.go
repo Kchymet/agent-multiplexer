@@ -621,8 +621,9 @@ never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, bu
 // questions.
 func hookGoalSection(root store.Session) string {
 	return fmt.Sprintf(`## Goal mode (amux goal hooks)
-This coordinator runs in goal mode by default. Claude Code has no native goal
-engine, so amux runs one with hooks: every task this workgroup receives — from
+This coordinator runs in goal mode by default, through amux's goal hooks (not
+Claude Code's own `+"`/goal`"+` — never run it here; two goal loops would fight).
+Your launch task is already your active goal, and every task this workgroup receives — from
 the rail, the web dashboard, `+"`amux do steer %s -f verb=prompt`"+`, or typed
 into this terminal — becomes your active goal, and when you end a turn while the
 goal is still active, amux continues it with a goal-continuation message

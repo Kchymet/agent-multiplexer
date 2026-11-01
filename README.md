@@ -26,8 +26,8 @@ orchestrator; this is not a hostile multi-tenant boundary.
 │   ◐ web-banner            │                                                    │
 │ REPOS                     │                                                    │
 │ ⛁ acme/api                │                                                    │
-│   ● hotfix-auth           │                                                    │
 │ ⛁ acme/web                │                                                    │
+│                           │                                                    │
 │ ──────────────────────────┴────────────────────────────────────────────────  │
 │ ↵ open  ↑↓ move           │ a +agent · w +group · m move · x done · q quit     │
 └───────────────────────────┴────────────────────────────────────────────────────┘
@@ -308,7 +308,7 @@ Global navigation uses configurable chords (no prefix):
 | key | action |
 |-----|--------|
 | `↑/↓`, `k/j` | move the rail cursor (including section headers) |
-| `Space` | fold/unfold the selected section, repo, or workgroup |
+| `Space` | fold/unfold the selected section or workgroup |
 | `←/→`, `h/l` | collapse/expand a group; move to its parent/first child |
 | `Enter` | open the selected session — an agent, or a workgroup's coordinator / a repo's home; fold/unfold a section header |
 | `Alt+l` / `Alt+h` | focus the agent pane / the rail |

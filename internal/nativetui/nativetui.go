@@ -20,6 +20,7 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/hostbackend"
 	"amux/internal/keymap"
 	"amux/internal/vterm"
 )
@@ -39,7 +40,9 @@ func Run(focusID string) error {
 	// never lock the user out of navigation — and surfaces on the status line.
 	keys, keysErr := keymap.Load()
 	out := &clipboard.SerialFile{File: os.Stdout}
+	hw := newCursorOut(out)
 	m := &model{
+		hw:      hw,
 		clip:    clipboard.New(out).Copy,
 		keys:    keys,
 		terms:   map[paneKey]*vterm.Terminal{},
@@ -51,7 +54,9 @@ func Run(focusID string) error {
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
-	_, err := newProgram(m, tea.WithOutput(out)).Run()
+	m.openRailState(railStatePath())
+	_, err := newProgram(m, tea.WithOutput(hw)).Run()
+	m.flushRailState()
 	if m.accounts != nil {
 		m.accounts.dispose()
 	}
@@ -96,6 +101,11 @@ type daemonClient interface {
 }
 
 type model struct {
+	// hw drives the outer terminal's cursor for the focused pane (hwcursor.go);
+	// lastView is the previous frame, to spot cursor-only changes. hw is nil in
+	// tests that render without a program.
+	hw             *cursorOut
+	lastView       string
 	selection      *paneSelection
 	gesture        *paneGesture
 	client         daemonClient
@@ -104,7 +114,8 @@ type model struct {
 	keys           keymap.Keymap      // global hotkeys; zero value = built-in defaults
 	cursor         int                // index into the full snapshot when a session is selected
 	sectionCursor  string             // selected section header, or empty for a session
-	collapsed      map[railGroup]bool // local to this TUI; survives snapshot refreshes
+	collapsed      map[railGroup]bool // local to this TUI; survives snapshot refreshes and restarts (state)
+	state          *railStateStore    // persisted rail view (railstate.go); nil disables
 	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
 	// so the selected row stays visible when the rail overflows its height.
 	railScroll int
@@ -165,7 +176,7 @@ type actionSentMsg struct{ err error }
 func (m *model) Init() tea.Cmd { return tea.Batch(connectCmd, waitData(m.dataCh)) }
 
 func connectCmd() tea.Msg {
-	c, err := daemon.Dial()
+	c, err := hostbackend.New().Connect()
 	if err != nil {
 		return disconnectedMsg{}
 	}
@@ -189,7 +200,23 @@ func waitData(ch chan struct{}) tea.Cmd {
 // cur returns the terminal for the currently shown agent+tab, or nil.
 func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab}] }
 
+// Update handles msg, then schedules a debounced save of the rail view if the
+// message changed it (folds, selection, or a refresh that pruned rows).
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if t, ok := msg.(railStateTickMsg); ok {
+		if m.state != nil && t.serial == m.state.serial {
+			m.flushRailState()
+		}
+		return m, nil
+	}
+	next, cmd := m.update(msg)
+	if save := m.persistRailState(); save != nil {
+		cmd = tea.Batch(cmd, save)
+	}
+	return next, cmd
+}
+
+func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.validateSelection()
 	switch msg := msg.(type) {
 	case clipboardQueuedMsg:
@@ -270,6 +297,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s := msg.f.Snapshot; s != nil {
 			m.refreshSessions(s.Sessions)
+			m.applyRailRestore()
 			if m.reconnectPanes {
 				m.reconnectPanes = false
 				cmds = append(cmds, m.restorePanes()...)
@@ -743,22 +771,11 @@ func (m *model) attachSelected() tea.Cmd {
 	}
 	// A container row that hosts a default session (the console, a workgroup's
 	// coordinator, a repo's home — Role set) opens that session itself. A bare
-	// container from a daemon that predates default sessions falls back to its
-	// first agent: a repo header opens the first agent nested under it, or the
-	// new-workgroup form for the repo if it has none; a workgroup root opens its
+	// workgroup root from a daemon that predates coordinators falls back to its
 	// first agent.
-	if s.Role == "" {
-		if s.Kind == "repo" {
-			if sub := m.firstChild(s.ID); sub != nil {
-				s = sub
-			} else {
-				m.openNewRepoWorkgroupForm(s.ID, s.Title)
-				return nil
-			}
-		} else if s.IsRoot {
-			if sub := m.firstChild(s.ID); sub != nil {
-				s = sub
-			}
+	if s.Role == "" && s.IsRoot {
+		if sub := m.firstChild(s.ID); sub != nil {
+			s = sub
 		}
 	}
 	if !attachable(s) {
@@ -778,8 +795,8 @@ func (m *model) attachSelected() tea.Cmd {
 
 // tryPendingAttach attaches to a freshly created session once it shows up in a
 // snapshot, so creating an agent immediately opens and starts it instead of
-// leaving it initialized-but-never-run. A workgroup root or repo header resolves
-// to its first agent; anything with nothing runnable (e.g. an empty new
+// leaving it initialized-but-never-run. A bare workgroup root resolves to its
+// first agent; anything with nothing runnable (e.g. an empty new
 // workgroup) just clears the pending attach. It's a no-op until the id lands.
 func (m *model) tryPendingAttach() tea.Cmd {
 	defer m.validateSelection()
@@ -790,7 +807,7 @@ func (m *model) tryPendingAttach() tea.Cmd {
 	if s == nil {
 		return nil // not in this snapshot yet — wait for the next one
 	}
-	if s.Role == "" && (s.Kind == "repo" || s.IsRoot) {
+	if s.Role == "" && s.IsRoot {
 		s = m.firstChild(s.ID)
 	}
 	if s == nil || !attachable(s) {

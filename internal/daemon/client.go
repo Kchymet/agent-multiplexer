@@ -414,11 +414,21 @@ func (c *Client) Dispatch(a core.Action) (string, error) {
 			continue
 		}
 		if !frame.Result.OK {
-			return "", fmt.Errorf("%s", frame.Result.Error)
+			return "", &RejectedError{Msg: frame.Result.Error}
 		}
 		return frame.Result.NewID, nil
 	}
 }
+
+// RejectedError is the daemon's own not-OK answer to an action: the daemon
+// received it and replied with a failure. It is not proof that nothing
+// happened (a stop can fail after the interrupt was delivered, for instance);
+// it only rules out the transport ambiguity of a send or read failure, which
+// leaves even whether the daemon saw the action unknown. Its text is the
+// daemon's message, unchanged.
+type RejectedError struct{ Msg string }
+
+func (e *RejectedError) Error() string { return e.Msg }
 
 // PaneOpen asks the daemon to attach this connection to a tab of an agent,
 // streaming its output back as pane frames. The caller mints paneID (unique
@@ -705,4 +715,64 @@ func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, error) {
 			return nil, err
 		}
 	}
+}
+
+// RelayHostProof checks that another local process holds the current host
+// credential, using the daemon's own challenge/proof unchanged: it opens the
+// host socket (pinned by this process's host credential), hands the daemon's
+// issuer-signed challenge to prove, forwards the returned proof, and requires
+// the daemon's welcome. The host listener admits only SubjectHost keys, so a
+// session or provider credential fails here. The authenticated connection is
+// closed without sending any request. `amux direct` uses it to gate its local
+// administration channel.
+func RelayHostProof(ctx context.Context, prove func(access.SocketChallenge) (access.SocketProof, error)) error {
+	pin, err := access.LoadCredential(access.DefaultCredentialDir(access.SubjectHost, access.LocalHostSubject))
+	if err != nil {
+		return fmt.Errorf("load daemon host credential: %w", err)
+	}
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", core.SocketPath())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	stop := watchAuthCancellation(ctx, conn)
+	defer stop()
+	_ = conn.SetDeadline(time.Now().Add(authDeadline))
+	tlsConfig, err := access.ClientTLSConfig(pin)
+	if err != nil {
+		return fmt.Errorf("load daemon TLS pin: %w", err)
+	}
+	secure := tls.Client(conn, tlsConfig)
+	if err := secure.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("verify daemon TLS identity: %w", err)
+	}
+	reader := bufio.NewReader(secure)
+	line, err := readBoundedLine(reader, access.MaxBodyBytes)
+	if err != nil {
+		return fmt.Errorf("read daemon challenge: %w", err)
+	}
+	var challenge access.SocketChallenge
+	if err := json.Unmarshal(line, &challenge); err != nil {
+		return fmt.Errorf("invalid daemon challenge: %w", err)
+	}
+	if err := access.VerifyChallenge(pin, challenge); err != nil {
+		return fmt.Errorf("verify daemon identity: %w", err)
+	}
+	proof, err := prove(challenge)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(secure).Encode(proof); err != nil {
+		return err
+	}
+	line, err = readBoundedLine(reader, access.MaxBodyBytes)
+	if err != nil {
+		return fmt.Errorf("read daemon authentication: %w", err)
+	}
+	var welcome access.SocketWelcome
+	if err := json.Unmarshal(line, &welcome); err != nil || welcome.Type != access.FrameWelcome || !welcome.OK {
+		return access.ErrInvalidCredential
+	}
+	return nil
 }
