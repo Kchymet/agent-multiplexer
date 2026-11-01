@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
 )
 
@@ -432,16 +433,64 @@ func FixtureSourcesEnabled() bool {
 // Mode is the source a launch of this workload uses. Every binding follows
 // central; "blocked" reports unreadable account metadata.
 func Mode(session, h string) string {
-	s, e := Read()
-	if e != nil {
+	bindings, ok := modeBindings()
+	if !ok {
 		return "blocked"
 	}
-	if b, ok := s.Bindings[session]; ok && b.Harness == h {
+	if b, ok := bindings[session]; ok && b.Harness == h {
 		if src := fixtureSource(b); src != "" {
 			return src
 		}
 	}
 	return amuxcfg.AuthCentral
+}
+
+// modeCache holds the bindings Mode last decoded, keyed by the store file's
+// identity. The daemon's rail poll asks Mode about every session (through each
+// harness's config template) several times per poll, and decoding the whole
+// store — one binding per session — each time made that poll quadratic. Every
+// write replaces the file by rename, so a new inode (or any change in size,
+// mtime or mode) misses the cache and takes load's full validation again.
+var modeCache struct {
+	sync.Mutex
+	key      modeCacheKey
+	bindings map[string]Binding
+}
+
+type modeCacheKey struct {
+	dev, ino, size uint64
+	mtime          int64
+	mode           uint32
+}
+
+func modeBindings() (map[string]Binding, bool) {
+	var st syscall.Stat_t
+	statErr := syscall.Lstat(Path(), &st)
+	key := modeCacheKey{dev: uint64(st.Dev), ino: uint64(st.Ino), size: uint64(st.Size), mtime: st.Mtim.Nano(), mode: uint32(st.Mode)}
+	if statErr == nil {
+		modeCache.Lock()
+		if modeCache.bindings != nil && modeCache.key == key {
+			bindings := modeCache.bindings
+			modeCache.Unlock()
+			return bindings, true
+		}
+		modeCache.Unlock()
+	}
+	s, e := Read()
+	if e != nil {
+		return nil, false
+	}
+	if statErr == nil && s.Bindings != nil {
+		// Read reopened the file; cache only if it is still the one stat saw.
+		var again syscall.Stat_t
+		if syscall.Lstat(Path(), &again) == nil && again.Ino == st.Ino && again.Dev == st.Dev &&
+			again.Size == st.Size && again.Mtim == st.Mtim && again.Mode == st.Mode {
+			modeCache.Lock()
+			modeCache.key, modeCache.bindings = key, s.Bindings
+			modeCache.Unlock()
+		}
+	}
+	return s.Bindings, true
 }
 
 // GlobalMode is Mode for a launch with no workload, such as host diagnostics.

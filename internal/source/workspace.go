@@ -120,14 +120,29 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			trackedDirs[s.Dir] = true
 		}
 	}
-	for _, r := range roots {
-		r = w.reconcileModel(db, r)
-		subs, err := db.Children(r.ID)
-		if err != nil {
-			return nil, err
+	// One scan groups every member under its root (in Children's creation
+	// order) instead of a query per workgroup.
+	all, err := db.AllSessions()
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[string][]store.Session, len(roots))
+	for _, s := range all {
+		if s.RootID != "" {
+			children[s.RootID] = append(children[s.RootID], s)
 		}
+	}
+	for _, r := range roots {
+		// An archived session has no runtime whose model could have moved, so
+		// only live rows pay for the transcript/model lookup.
+		if !r.Archived {
+			r = w.reconcileModel(db, r)
+		}
+		subs := children[r.ID]
 		for i := range subs {
-			subs[i] = w.reconcileModel(db, subs[i])
+			if !r.Archived && !subs[i].Archived {
+				subs[i] = w.reconcileModel(db, subs[i])
+			}
 		}
 		if r.Role() == store.RoleRepo {
 			// A repo's home session renders AS the repo header (below), not as a
