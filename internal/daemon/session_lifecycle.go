@@ -91,6 +91,10 @@ type sessionRuntime struct {
 	// loop for stalls (session_stall_log.go).
 	slowRequests *slowRequestLog
 	loop         *loopWatchdog
+
+	// freshCredentials caches, per subject, the credential credentialFresh
+	// last read from disk. Owned by the run goroutine.
+	freshCredentials map[string]freshCredential
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -221,7 +225,7 @@ func (r *sessionRuntime) serveReconciled(ctx context.Context, all bool) error {
 	r.loop.enter("serve")
 	if elapsed := time.Since(start); elapsed >= slowSessionReconcile {
 		// reconcile runs on the serving goroutine: no new pass starts meanwhile.
-		log.Printf("session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
+		stallLog.printf("slow-reconcile", "session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
 	}
 	if all {
 		return r.serveCurrent(ctx)
@@ -537,6 +541,7 @@ func credentialPrincipal(credential access.Credential) access.Principal {
 }
 
 func (r *sessionRuntime) closeServer(id string) {
+	delete(r.freshCredentials, id)
 	if id == console.ID && r.consoleAccountClose != nil {
 		r.consoleAccountClose()
 		r.consoleAccountClose = nil

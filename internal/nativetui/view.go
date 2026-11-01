@@ -27,11 +27,18 @@ var (
 )
 
 func (m *model) View() string {
+	if m.frames.enabled && m.frames.viewValid {
+		if m.hw != nil {
+			m.hw.set(m.hardwareCursor(), true)
+		}
+		return m.lastView
+	}
 	v := m.view()
 	if m.hw != nil {
 		m.hw.set(m.hardwareCursor(), v == m.lastView)
-		m.lastView = v
 	}
+	m.lastView = v
+	m.frames.viewValid = m.frames.enabled
 	return v
 }
 
@@ -39,7 +46,7 @@ func (m *model) view() string {
 	if m.w == 0 || m.h == 0 {
 		return "starting…"
 	}
-	body := lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(), m.renderDivider(), m.renderMain())
+	body := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar(), m.renderDivider(), m.renderMain())
 	view := strings.Join([]string{
 		m.renderTopBorder(),
 		body,

@@ -1783,3 +1783,37 @@ func TestUnclaimedRequestPreservesDeadlineAndIsWithdrawn(t *testing.T) {
 		t.Fatalf("deadline retried or kept the withdrawn request: entries=%d err=%v", len(entries), err)
 	}
 }
+
+// The settlement loop sleeps while no receipt is pending, so an idle mailbox
+// costs no wakeups; each new receipt must wake it again.
+func TestSettlementResumesAfterIdle(t *testing.T) {
+	clock := newTestClock(time.Now())
+	settled := make(chan ReceiptSettlement, 1)
+	f := newFixture(t, Callbacks{
+		Dispatch: func(context.Context, DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Status: StatusOK, Receipt: &ReceiptHooks{
+				Grace: time.Second, Settled: func(value ReceiptSettlement) { settled <- value },
+			}}, nil
+		},
+	}, ServerOptions{Clock: clock.Now, SettlementInterval: time.Millisecond})
+	for round := 0; round < 2; round++ {
+		envelope, encoded := signedCall(t, f.auth, f.grant.CredentialHostDir, Call{
+			Kind: CallOperation, Route: access.RouteAction, Verb: "done", ID: f.grant.SubjectID,
+		})
+		publishEnvelope(t, f.grant.RequestsHostDir, envelope, encoded)
+		if _, err := f.server.ServeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(2 * time.Second)
+		select {
+		case value := <-settled:
+			if value.Reason != SettlementGraceExpired {
+				t.Fatalf("round %d settlement = %+v", round, value)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("round %d receipt did not settle", round)
+		}
+		// Let the loop observe the empty pending set and go idle.
+		time.Sleep(10 * time.Millisecond)
+	}
+}

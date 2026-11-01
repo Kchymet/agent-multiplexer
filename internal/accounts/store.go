@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
 )
 
@@ -432,16 +433,68 @@ func FixtureSourcesEnabled() bool {
 // Mode is the source a launch of this workload uses. Every binding follows
 // central; "blocked" reports unreadable account metadata.
 func Mode(session, h string) string {
-	s, e := Read()
-	if e != nil {
+	bindings, ok := modeBindings()
+	if !ok {
 		return "blocked"
 	}
-	if b, ok := s.Bindings[session]; ok && b.Harness == h {
+	if b, ok := bindings[session]; ok && b.Harness == h {
 		if src := fixtureSource(b); src != "" {
 			return src
 		}
 	}
 	return amuxcfg.AuthCentral
+}
+
+// modeCache holds the bindings Mode last decoded, keyed by the store file's
+// identity. The daemon's rail poll asks Mode about every session (through each
+// harness's config template) several times per poll, and decoding the whole
+// store — one binding per session — each time made that poll quadratic. Every
+// write replaces the file by rename, so a new inode (or any change in size,
+// mtime or mode) misses the cache and takes load's full validation again.
+var modeCache struct {
+	sync.Mutex
+	info     os.FileInfo
+	bindings map[string]Binding
+}
+
+// sameStoreFile reports that a and b describe the same, unchanged file. The
+// change time is compared too, so an in-place write of the same size within
+// a coarse-mtime filesystem's granularity (WSL drvfs, 9p) still misses; where
+// it cannot be read, the cache is never trusted.
+func sameStoreFile(a, b os.FileInfo) bool {
+	if a == nil || b == nil || !os.SameFile(a, b) || a.Size() != b.Size() ||
+		!a.ModTime().Equal(b.ModTime()) || a.Mode() != b.Mode() {
+		return false
+	}
+	ac, aok := changeTime(a)
+	bc, bok := changeTime(b)
+	return aok && bok && ac == bc
+}
+
+func modeBindings() (map[string]Binding, bool) {
+	info, statErr := os.Lstat(Path())
+	if statErr == nil {
+		modeCache.Lock()
+		if modeCache.bindings != nil && sameStoreFile(modeCache.info, info) {
+			bindings := modeCache.bindings
+			modeCache.Unlock()
+			return bindings, true
+		}
+		modeCache.Unlock()
+	}
+	s, e := Read()
+	if e != nil {
+		return nil, false
+	}
+	if statErr == nil && s.Bindings != nil {
+		// Read reopened the file; cache only if it is still the one stat saw.
+		if again, err := os.Lstat(Path()); err == nil && sameStoreFile(info, again) {
+			modeCache.Lock()
+			modeCache.info, modeCache.bindings = info, s.Bindings
+			modeCache.Unlock()
+		}
+	}
+	return s.Bindings, true
 }
 
 // GlobalMode is Mode for a launch with no workload, such as host diagnostics.

@@ -9,43 +9,30 @@ import (
 	"amux/internal/sessionrpc"
 )
 
-// slowRequestLog writes the daemon's slow mailbox request lines. A request
-// whose own processing was slow is always logged. One that was only queued a
-// long time is logged at most once per subject per queueLogInterval: when a
-// stall ends, a mailbox's whole backlog reports at once, and one line with a
-// count says as much as fifty.
+// slowRequestLog writes the daemon's slow mailbox request lines through a
+// rateLog. A request that was only queued a long time is logged at most once
+// per subject per queueLogInterval: when a stall ends, a mailbox's whole
+// backlog reports at once, and one line with a count says as much as fifty.
+// The key is per subject so one session's (possibly backdated) requests
+// cannot hold the line that would report another's stall. A request whose own
+// processing was slow is logged at most once per verb per interval, with the
+// same count. Both keys carry request text, which rateLog bounds.
 type slowRequestLog struct {
-	now   func() time.Time
-	logf  func(string, ...any)
-	mu    sync.Mutex
-	last  map[string]time.Time
-	quiet map[string]int
+	rate *rateLog
 }
 
-const queueLogInterval = time.Second
+const queueLogInterval = stallLogInterval
 
-func newSlowRequestLog() *slowRequestLog {
-	return &slowRequestLog{now: time.Now, logf: log.Printf, last: map[string]time.Time{}, quiet: map[string]int{}}
-}
+func newSlowRequestLog() *slowRequestLog { return &slowRequestLog{rate: newRateLog(queueLogInterval)} }
 
 func (l *slowRequestLog) report(t sessionrpc.RequestTiming) {
 	r := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
 	if t.Total < sessionrpc.SlowRequestThreshold {
-		l.mu.Lock()
-		now := l.now()
-		if last, ok := l.last[t.SubjectID]; ok && now.Sub(last) < queueLogInterval {
-			l.quiet[t.SubjectID]++
-			l.mu.Unlock()
-			return
-		}
-		more := l.quiet[t.SubjectID]
-		l.last[t.SubjectID], l.quiet[t.SubjectID] = now, 0
-		l.mu.Unlock()
-		l.logf("session RPC %s: request %s %s %s waited %v before processing, then took %v (status %s %s; %d more such requests since the last line)",
-			t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Age), r(t.Total), t.Status, t.Code, more)
+		l.rate.printf("queued:"+t.SubjectID, "session RPC %s: request %s %s %s waited %v before processing, then took %v (status %s %s)",
+			t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Age), r(t.Total), t.Status, t.Code)
 		return
 	}
-	l.logf("session RPC %s: slow request %s %s %s took %v (age %v; reserve %v, verify %v, authorize %v, dispatch %v, sign %v, publish %v; authority lock wait %v; status %s %s)",
+	l.rate.printf("slow:"+t.Verb, "session RPC %s: slow request %s %s %s took %v (age %v; reserve %v, verify %v, authorize %v, dispatch %v, sign %v, publish %v; authority lock wait %v; status %s %s)",
 		t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Total), r(t.Age), r(t.Reserve), r(t.Verify), r(t.Authorize),
 		r(t.Dispatch), r(t.Sign), r(t.Publish), r(t.LockWait), t.Status, t.Code)
 }

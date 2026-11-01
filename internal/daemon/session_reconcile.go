@@ -47,7 +47,7 @@ func (r *sessionRuntime) reconcilePass(ctx context.Context, wait bool) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := db.AllSessions()
+	sessions, err := db.SessionHeads()
 	closeErr := db.Close()
 	if err != nil {
 		return err
@@ -175,7 +175,18 @@ func (r *sessionRuntime) retired(id string) bool {
 
 // credentialFresh reports, without a lock, that renewCurrent would do nothing:
 // the served credential is valid and not yet due for rotation.
+//
+// The credential last read for id is cached: while its principal is still the
+// subject's current one, the file holds that same credential (an issue or
+// rotation changes the current principal before anything could rewrite it),
+// so only an authority change or an approaching expiry rereads the file.
+// Reading and decoding every live session's credential each tick was a third
+// of an idle daemon's reconcile cost.
 func (r *sessionRuntime) credentialFresh(ctx context.Context, id string) bool {
+	if cached, ok := r.freshCredentials[id]; ok && r.credentialCurrent(ctx, cached) {
+		return true
+	}
+	delete(r.freshCredentials, id)
 	credential, err := r.loadCredential(id)
 	if errors.Is(err, os.ErrNotExist) {
 		return true // launchSpec performs first provisioning
@@ -183,8 +194,26 @@ func (r *sessionRuntime) credentialFresh(ctx context.Context, id string) bool {
 	if err != nil {
 		return false
 	}
-	return r.d.authority.Valid(ctx, credentialPrincipal(credential)) == nil &&
-		r.now().Add(credentialRenewBefore).Before(time.UnixMilli(credential.NotAfter))
+	cached := freshCredential{principal: credentialPrincipal(credential), notAfter: credential.NotAfter}
+	if !r.credentialCurrent(ctx, cached) {
+		return false
+	}
+	if r.freshCredentials == nil {
+		r.freshCredentials = make(map[string]freshCredential)
+	}
+	r.freshCredentials[id] = cached
+	return true
+}
+
+// freshCredential is what credentialFresh needs from a session's credential.
+type freshCredential struct {
+	principal access.Principal
+	notAfter  int64
+}
+
+func (r *sessionRuntime) credentialCurrent(ctx context.Context, c freshCredential) bool {
+	return r.d.authority.Valid(ctx, c.principal) == nil &&
+		r.now().Add(credentialRenewBefore).Before(time.UnixMilli(c.notAfter))
 }
 
 // ensureHostCredentialShared renews the host credential under the shared

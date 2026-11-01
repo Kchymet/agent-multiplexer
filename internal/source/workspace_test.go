@@ -358,3 +358,38 @@ func TestAgentLabel(t *testing.T) {
 		}
 	}
 }
+
+// An archived session has no runtime, so the poll leaves its stored model
+// alone instead of paying a transcript/model lookup per archived row.
+func TestPollSkipsModelReconcileForArchived(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("HOME", t.TempDir())
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := store.Session{ID: "wg", Scope: store.ScopeWork, Agent: "claude", Created: 1, Archived: true}
+	member := store.Session{ID: "agent", RootID: "wg", Agent: "claude", Model: "sonnet", ClaudeID: "runtime-id", Created: 2, Archived: true}
+	for _, s := range []store.Session{root, member} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	if err := core.WriteSessionRuntimeModel("agent", "runtime-id", "claude-opus-4-7"); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorkspace()
+	w.SetModelObserved(func(id, kind, model string) { t.Errorf("archived %s reconciled to %s", id, model) })
+	if _, err := w.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if got, _, _ := db.GetSession("agent"); got.Model != "sonnet" {
+		t.Fatalf("archived model = %q, want unchanged", got.Model)
+	}
+}
