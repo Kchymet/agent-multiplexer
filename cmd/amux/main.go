@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,6 +32,7 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/daemonstatus"
 	"amux/internal/engine/local"
+	"amux/internal/logrotate"
 	"amux/internal/nativetui"
 	_ "amux/internal/termbg"
 	"amux/internal/vtdemo"
@@ -343,6 +345,12 @@ func daemonRun() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	daemon.DumpGoroutinesOnSignal(ctx, os.Stderr)
+	// Bound daemon.log by size. Only acts when stdout/stderr are that file (the
+	// spawned daemon); a daemon run in a terminal is left alone.
+	logrotate.Watch(ctx, logrotate.Policy{
+		Path: core.LogPath(), MaxBytes: logrotate.DefaultMaxBytes, Keep: logrotate.DefaultKeep,
+		FDs: []int{1, 2},
+	}, logrotate.DefaultInterval, log.Printf)
 	return daemon.Default(self).Run(ctx)
 }
 
