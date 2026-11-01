@@ -179,9 +179,16 @@ feature disabled fails to start with a clear error rather than pretending.
 
 ### Claude coordinators: goal mode through amux's hooks
 
-Claude Code has no native goal engine, so for a Claude coordinator amux runs
-one itself (`agent.HookGoals`, `internal/claudegoal`). It is on for every
+For a Claude coordinator amux runs its own goal engine (`agent.HookGoals`,
+`internal/claudegoal`) rather than Claude Code's native `/goal`, because it
+needs states `/goal` does not have (asking the user, waiting on members,
+user pause/resume from the host, restart continuation). It is on for every
 Claude coordinator; there is no opt-in.
+
+- **Seeded at launch.** A fresh coordinator's launch task is written to the
+  goal file as the active goal before Claude starts (`agent.claudeHarness`
+  `launchPrompt`), so it never depends on `UserPromptSubmit` firing for the
+  positional launch prompt. An existing goal on file is never overwritten.
 
 - **State.** The goal lives in the coordinator's own session directory,
   `.amux/goal.json` (`$AMUX_GOAL_FILE` in its environment): objective, status
@@ -237,3 +244,15 @@ Claude coordinator; there is no opt-in.
   is the new task.
 - **Limits.** The state file is the coordinator's own sandbox state, like the
   model's `update_goal` on Codex — not an authority boundary.
+
+### Claude members: Claude Code's native `/goal`
+
+A Claude workgroup member in task mode starts in goal mode through Claude
+Code's own `/goal` (`agent.NativeClaudeGoal`): a fresh launch passes
+`/goal <task>` as the initial prompt instead of the bare task, so the task is
+the session's active goal from its first turn and Claude's goal Stop hook keeps
+it working until the condition holds. A task longer than `/goal`'s 4000-character
+condition limit is written to `.amux/task.md` in the member's session directory
+and the goal points at that file (a too-long condition would otherwise be
+refused and leave no goal). Interactive members, resumed conversations and
+every non-Claude harness (Codex included) launch with their prompt unchanged.
