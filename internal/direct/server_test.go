@@ -749,3 +749,26 @@ func TestUnresolvedActionsAreKeptAndCapacityFailsClosed(t *testing.T) {
 		t.Fatalf("applies %d", f.applies.Load())
 	}
 }
+
+// A poll that races token expiry must still close 4002, not drop the socket.
+func TestWatchExpiryDuringPollStillSendsCloseCode(t *testing.T) {
+	f := newFake(testRows()...)
+	a := openTestAuthority(t, t.TempDir(), Lifetimes{Access: time.Second}, nil)
+	srv, err := NewServer(Config{Authority: a, Backend: f, Endpoints: []string{testEndpoint},
+		WatchPoll: time.Millisecond, Revalidate: time.Hour, Keepalive: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { r.Host = testHost; srv.ServeHTTP(w, r) }))
+	t.Cleanup(ts.Close)
+	for range 5 {
+		tok := enroll(t, a, []string{PermRead}, allSessions)
+		f.blockSnapshot.Store(false)
+		conn := dialWatch(t, ts, "")
+		_ = conn.WriteJSON(WatchAuth{Type: "auth", AccessToken: tok.AccessToken})
+		go func() { time.Sleep(300 * time.Millisecond); f.blockSnapshot.Store(true) }() // a poll is in flight at expiry
+		if code, reason := closeCode(t, conn); code != CloseAuthExpired || reason != CodeAuthExpired {
+			t.Fatalf("close: %d %s", code, reason)
+		}
+	}
+}

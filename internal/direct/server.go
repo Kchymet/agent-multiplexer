@@ -794,7 +794,10 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 	push := func() bool {
 		rows, err := s.cfg.Backend.Snapshot(ctx)
 		if err != nil {
-			return ctx.Err() == nil // transient daemon failure: keep the socket, retry next tick
+			// A daemon failure keeps the socket and retries next tick. If the
+			// lease ended, the loop's ctx.Done branch sends the auth close code;
+			// returning false here would drop the socket without one.
+			return true
 		}
 		if ctx.Err() != nil {
 			return true // the loop reports why; never send data after the lease ended
