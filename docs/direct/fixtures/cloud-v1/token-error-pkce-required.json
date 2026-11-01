@@ -1,0 +1,4 @@
+{
+  "error": "invalid_request",
+  "error_description": "code_verifier is required for this code"
+}

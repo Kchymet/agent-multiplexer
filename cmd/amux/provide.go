@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"amux/internal/direct"
 	"amux/internal/hostbackend"
 	"amux/internal/provider"
 	"amux/internal/providercfg"
@@ -133,6 +134,7 @@ type provideFlags struct {
 	publishSes                               bool
 	readOnly                                 bool
 	rtEvents                                 bool
+	directEnroll                             bool
 	labels                                   multiFlag
 	features                                 multiFlag
 	harnesses                                multiFlag
@@ -153,6 +155,7 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
 	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
 	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
+	fs.BoolVar(&f.directEnroll, "direct-enroll", false, "offer cloud-assisted direct enrollment (direct-enroll-v1) while `amux direct cloud enable` is in effect on this host (default $AMUX_PROVIDER_DIRECT_ENROLL; off by default)")
 	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
 	fs.Var(&f.harnesses, "harness", "restrict automatic discovery to this harness (repeatable; auto resets the restriction)")
 	fs.StringVar(&f.identityMode, "identity-mode", "", "credential source (machine; default $AMUX_PROVIDER_IDENTITY_MODE)")
@@ -260,6 +263,9 @@ func provideRun(args []string) error {
 		OnStatus: func(st provider.Status) { _ = provider.WriteStatus(provider.StatusPath(), st) },
 	}
 	wireHostBackend(&cfg, hostbackend.New(), publish, readonly, runtimeEvents)
+	if resolvedBool(fs, "direct-enroll", f.directEnroll, "AMUX_PROVIDER_DIRECT_ENROLL", file.DirectEnroll) {
+		wireDirectEnroll(&cfg)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -433,4 +439,23 @@ func mergeFeatures(env string, flags multiFlag) []string {
 		add(f)
 	}
 	return out
+}
+
+// wireDirectEnroll offers direct-enroll-v1. The provider already acts with the
+// host credential for the local daemon; this bridge narrows what the relay can
+// reach on the direct server's host-only admin channel to exactly two typed
+// operations (status for advertisement, cloud-code issuance), and the direct
+// server enforces the operator's policy, pins, ceiling, PKCE and caps.
+func wireDirectEnroll(cfg *provider.Config) {
+	cfg.DirectEnroll = direct.NewRelayIssuer(func(ctx context.Context, req direct.AdminRequest) (direct.AdminResponse, error) {
+		cred, err := hostCredential()
+		if err != nil {
+			return direct.AdminResponse{}, err
+		}
+		root, err := directRoot()
+		if err != nil {
+			return direct.AdminResponse{}, err
+		}
+		return direct.AdminCall(ctx, root, cred, req)
+	})
 }

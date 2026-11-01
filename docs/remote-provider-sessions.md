@@ -288,7 +288,11 @@ field is both the explicit coordinator grant ceiling and the repository set of
 one idle initial member; an explicitly empty value creates no member. Its
 creation prompt belongs to the coordinator. `new-workgroup-empty` is the
 browser-safe split contract: `repos` MUST be present (including when empty), is
-only the explicit grant ceiling, and the verb creates zero ordinary members.
+only the grant ceiling, and the verb creates zero ordinary members. For both
+verbs a non-empty `repos` limits the workgroup to exactly those tracked repos;
+an empty or absent value lets its coordinator assign every repo tracked on the
+host, live. No remote verb can grant an untracked repo or change a ceiling
+after creation; that is the authenticated host's `coordinator-set-repos`.
 The caller follows it with one `add-agent` per intended member and addresses
 that returned ID when prompting. Providers that implement this verb advertise
 `sessions-new-workgroup-empty`; clients MUST gate on that feature. An older

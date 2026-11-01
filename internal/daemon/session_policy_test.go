@@ -162,8 +162,11 @@ func TestDaemonAccessResolverNeverDerivesCoordinatorGrantFromChildren(t *testing
 		if err != nil {
 			t.Fatalf("scopedRepoRows(%s): %v", coordinator, err)
 		}
-		if len(rows) != 0 {
-			t.Fatalf("coordinator %s saw repos from child history: %+v", coordinator, rows)
+		// Every tracked repo is visible, but child history never marks one granted.
+		for _, row := range rows {
+			if row.Granted == nil || *row.Granted {
+				t.Fatalf("coordinator %s granted repos from child history: %+v", coordinator, rows)
+			}
 		}
 	}
 
@@ -193,6 +196,10 @@ func TestScopedCoordinatorRowsAreCurrentAndPathFree(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != "wg1" {
 		t.Fatalf("rows = %+v, want only wg1", rows)
+	}
+	// The coordinator discovers its own repository ceiling from its own row.
+	if wantGrants := db.coordinatorRepos["wg1"]; !rows[0].Granted || !reflect.DeepEqual(rows[0].Grants, wantGrants) {
+		t.Fatalf("own grants = %v granted=%v, want %v", rows[0].Grants, rows[0].Granted, wantGrants)
 	}
 	if rows[0].Dir != "" {
 		t.Fatalf("root leaked dir %q", rows[0].Dir)
@@ -254,14 +261,19 @@ func TestScopedReposExposeNamesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Visibility is not authority: a coordinator sees every tracked repo, and
+	// only its grants are marked granted.
 	got := map[string]bool{}
 	for _, row := range rows {
-		got[row.Name] = true
 		if row.Source != "" {
 			t.Fatalf("repo %s leaked source %q", row.Name, row.Source)
 		}
+		if row.Granted == nil {
+			t.Fatalf("coordinator row %s lacks a grant mark", row.Name)
+		}
+		got[row.Name] = *row.Granted
 	}
-	if !reflect.DeepEqual(got, map[string]bool{"api": true, "web": true}) {
+	if !reflect.DeepEqual(got, map[string]bool{"api": true, "web": true, "hidden": false}) {
 		t.Fatalf("repos = %v", got)
 	}
 }

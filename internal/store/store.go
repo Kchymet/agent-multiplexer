@@ -284,6 +284,11 @@ CREATE TABLE IF NOT EXISTS session_prs (
 	if err := d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// all_repos marks a coordinator whose ceiling is the live set of tracked
+	// repositories rather than a fixed list (see CoordinatorRepoGrants).
+	if err := d.addColumn("coordinator_grant_state", "all_repos", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	// Covers SessionHeads, so the daemon's per-tick scan reads only this index
 	// instead of every row's overflow pages (archived follows the prompt).
 	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_heads ON sessions(created, id, root_id, archived)`); err != nil {

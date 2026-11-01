@@ -96,7 +96,7 @@ func cmdRepo(args []string) error {
 			return nil
 		}
 		for _, r := range repos {
-			fmt.Printf("%-24s %s\n", r.Name, r.Source)
+			fmt.Println(repoLine(r))
 		}
 		return nil
 	case "rm", "remove":
@@ -366,17 +366,21 @@ func cmdSession(args []string) error {
 		fmt.Printf("agent %s repos: %s\n", args[1], orNone(strings.Join(repos, ", ")))
 		return nil
 	case "grants":
-		// Host-only grant administration. An empty repo list deliberately stores
-		// an initialized empty ceiling; omission during low-level creation is the
-		// distinct documented default of all currently tracked repositories.
+		// Host-only grant administration. --all (the default for a workgroup
+		// created without repos) follows every tracked repository live; a repo
+		// list fixes the ceiling to exactly those; --none (or an empty list)
+		// deliberately seals the workgroup to no repositories.
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [repo...]")
+			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [--all | --none | repo...]")
 		}
-		repos := args[2:]
-		if err := sendAction(core.Action{Action: core.ActionCoordinatorSetRepos, ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
+		action, label, err := grantsAction(args[1], args[2:])
+		if err != nil {
 			return err
 		}
-		fmt.Printf("coordinator %s grants: %s\n", args[1], orNone(strings.Join(repos, ", ")))
+		if err := sendAction(action); err != nil {
+			return err
+		}
+		fmt.Printf("coordinator %s grants: %s\n", args[1], label)
 		return nil
 	case "rm", "delete":
 		id, force, err := idAndForce(args[1:])
@@ -482,7 +486,7 @@ usage: amux workgroup [command]
                      must be within that workgroup's), or with --new / no target
                      into a new workgroup of its own limited to its repos
   repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
-  grants <coordinator> [repo...]  replace its host-managed repo ceiling
+  grants <coordinator> [--all|--none|repo...]  set its host-managed repo ceiling
   rename <id> <name>  set a display name (the id is unchanged)
   archive <id>       drop a session off the active rail  (alias: done)
   unarchive <id>     put an archived session back  (alias: restore)
@@ -545,12 +549,48 @@ func sessionList() error {
 	return nil
 }
 
+// grantsAction maps `amux workgroup grants <id> [--all | --none | repo...]` to
+// the host-only coordinator-set-repos action, plus the confirmation label.
+func grantsAction(id string, args []string) (core.Action, string, error) {
+	fields := map[string]string{"repos": ""}
+	label := "none"
+	switch {
+	case len(args) == 1 && args[0] == "--all":
+		fields["all"], label = "1", "all tracked repos"
+	case len(args) == 1 && args[0] == "--none", len(args) == 0:
+	default:
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				return core.Action{}, "", fmt.Errorf("usage: amux workgroup grants <coordinator-id> [--all | --none | repo...]")
+			}
+		}
+		fields["repos"], label = strings.Join(args, ","), strings.Join(args, ", ")
+	}
+	return core.Action{Action: core.ActionCoordinatorSetRepos, ID: id, Fields: fields}, label, nil
+}
+
+// repoLine renders one `amux repo ls` row. A coordinator's listing carries no
+// sources but marks whether each tracked repo is granted to its workgroup.
+func repoLine(r core.RepoRow) string {
+	if r.Granted == nil {
+		return fmt.Sprintf("%-24s %s", r.Name, r.Source)
+	}
+	mark := "granted"
+	if !*r.Granted {
+		mark = "not granted (host: amux workgroup grants)"
+	}
+	return fmt.Sprintf("%-24s %s", r.Name, mark)
+}
+
 // grantsTag renders a workgroup's repository ceiling for `workgroup ls`, so a
 // workgroup limited to one repo reads as such ("· repos: api") next to one
 // granted several or none. A legacy coordinator with no ceiling yet shows none.
 func grantsTag(r core.WorkgroupRow) string {
 	if !r.Granted {
 		return ""
+	}
+	if r.GrantsAll {
+		return " · repos: all tracked"
 	}
 	if len(r.Grants) == 0 {
 		return " · repos: (none)"

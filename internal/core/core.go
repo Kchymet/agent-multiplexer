@@ -257,6 +257,11 @@ const (
 	QueryAccountManage   = "account-manage"
 	QueryAccountCeremony = "account-ceremony"
 	QueryCodexAuth       = "codex-auth"
+	// QueryResources returns the daemon's latest cached process resource sample
+	// (-> procstat.Snapshot): per-session and per-workgroup CPU/memory and amux's
+	// own overhead. The sampler runs in the background; the query never samples.
+	// Host only.
+	QueryResources = "resources"
 )
 
 // CodexAuthStatus is the QueryCodexAuth read model. It never carries a token.
@@ -393,6 +398,10 @@ type Data struct {
 type RepoRow struct {
 	Name   string `json:"name"`
 	Source string `json:"source"`
+	// Granted is set only on a coordinator's restricted listing, which shows
+	// every tracked repo (visibility) and marks the ones its workgroup may give
+	// members worktrees of (authority). Nil on host listings.
+	Granted *bool `json:"granted,omitempty"`
 }
 
 // WorkgroupRow is one workgroup root plus its agents, the QuerySessions element
@@ -414,8 +423,12 @@ type WorkgroupRow struct {
 	// scope for it, the ceiling simply names one repo. Additive/omitempty.
 	Grants  []string `json:"grants,omitempty"`
 	Granted bool     `json:"granted,omitempty"`
-	Agent   string   `json:"agent,omitempty"` // the root session's runtime kind
-	Dir     string   `json:"dir,omitempty"`
+	// GrantsAll says the ceiling follows every repository tracked on the host
+	// (Grants then lists the current set) — the default for a workgroup created
+	// without naming repos.
+	GrantsAll bool   `json:"grantsAll,omitempty"`
+	Agent     string `json:"agent,omitempty"` // the root session's runtime kind
+	Dir       string `json:"dir,omitempty"`
 }
 
 // AgentRow is one agent (child session) under a WorkgroupRow.

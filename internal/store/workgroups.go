@@ -132,7 +132,7 @@ func (d *DB) CheckCoordinatorRepos(id string, repos []string) error {
 	}
 	for _, repo := range normalizedGrantRepos(repos) {
 		if !allowed[repo] {
-			return fmt.Errorf("repository %q is outside coordinator %q grants", repo, id)
+			return fmt.Errorf("repository %q is outside coordinator %q grants (or is not tracked); the host can widen them with `amux workgroup grants %s --all` (or `... %s <repo>...`)", repo, id, id, id)
 		}
 	}
 	return nil
