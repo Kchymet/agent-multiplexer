@@ -216,6 +216,16 @@ func (r *sessionRuntime) admissionCheck(ctx context.Context, principal access.Pr
 		if ctx.Err() != nil {
 			return rpcDeadline(), false
 		}
+		var notGranted *access.RepoNotGrantedError
+		if errors.As(err, &notGranted) {
+			// Built from the caller's own repo name and workgroup id only, so the
+			// coordinator learns which repo was refused and who can widen it.
+			denied := rpcDenied(codeRepoNotGranted)
+			if body, encErr := r.encodeResult(core.Result{Type: "result", Code: codeRepoNotGranted, Error: notGranted.Error()}); encErr == nil {
+				denied.Body = body
+			}
+			return denied, false
+		}
 		return rpcDenied("access_denied"), false
 	}
 	return sessionrpc.DispatchResult{}, true
@@ -379,6 +389,10 @@ func selfCompletionShape(principal access.Principal, action core.Action) bool {
 	return principal.Kind == access.SubjectSession && principal.SubjectID == action.ID &&
 		action.Action == core.ActionSetArchived && action.Fields["archived"] == "true"
 }
+
+// codeRepoNotGranted is the add-agent denial for a repository outside the
+// coordinator's grants; its body carries an explanatory core.Result.
+const codeRepoNotGranted = "repo_not_granted"
 
 func rpcDenied(code string) sessionrpc.DispatchResult {
 	return sessionrpc.DispatchResult{Status: sessionrpc.StatusDenied, Code: code}

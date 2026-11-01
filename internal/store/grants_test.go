@@ -122,3 +122,41 @@ func TestOpenReadOnlyNeverMigratesOrWrites(t *testing.T) {
 		t.Fatalf("read-only open lost the existing database: %v", err)
 	}
 }
+
+// An all-tracked ceiling follows the host's tracked repos live.
+func TestAllTrackedGrantsFollowTrackedRepos(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	db, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.PutRepo(Repo{Name: "api"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(Session{ID: "wg", Scope: ScopeWork}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCoordinatorRepoGrantsAllTracked("wg"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRepo(Repo{Name: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if repos, initialized, err := db.CoordinatorRepoGrants("wg"); err != nil || !initialized || !reflect.DeepEqual(repos, []string{"api", "web"}) {
+		t.Fatalf("grants after tracking web = %v initialized=%v err=%v", repos, initialized, err)
+	}
+	if err := db.DeleteRepo("api"); err != nil {
+		t.Fatal(err)
+	}
+	if repos, _, err := db.CoordinatorRepoGrants("wg"); err != nil || !reflect.DeepEqual(repos, []string{"web"}) {
+		t.Fatalf("grants after untracking api = %v err=%v", repos, err)
+	}
+	// An explicit list leaves all-tracked mode.
+	if err := db.SetCoordinatorRepoGrants("wg", []string{"web"}); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := db.CoordinatorGrantsAllTracked("wg"); err != nil || all {
+		t.Fatalf("fixed list still all-tracked: %v %v", all, err)
+	}
+}

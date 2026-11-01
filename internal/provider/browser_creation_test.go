@@ -34,6 +34,12 @@ func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wantModel := tc.model
+			// A browser-created workgroup that names no repos may assign every
+			// repository tracked on the host (the regression: it got none).
+			want := tc.grants
+			if len(want) == 0 {
+				want = []string{"api", "secret", "web"}
+			}
 			if tc.stored != "" {
 				wantModel = tc.stored
 			}
@@ -76,8 +82,8 @@ func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 				t.Fatalf("new-workgroup-empty precreated members: %+v err=%v", children, err)
 			}
 			grants, initialized, err := db.CoordinatorRepoGrants(rootID)
-			if err != nil || !initialized || !reflect.DeepEqual(grants, tc.grants) {
-				t.Fatalf("grants = %v initialized=%v err=%v, want %v/true", grants, initialized, err, tc.grants)
+			if err != nil || !initialized || !reflect.DeepEqual(grants, want) {
+				t.Fatalf("grants = %v initialized=%v err=%v, want %v/true", grants, initialized, err, want)
 			}
 			if root.Agent != tc.runtime || root.Model != wantModel || root.Prompt != "" {
 				t.Fatalf("coordinator selection drifted: %+v", root)
@@ -85,7 +91,7 @@ func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 			db.Close()
 
 			var memberIDs []string
-			for _, repo := range tc.grants {
+			for _, repo := range want {
 				memberID, err := p.applyAuthorizedSessionAction(wire, harnessproto.MuxMsg{
 					Action: harnessproto.VerbAddAgent, ID: rootID,
 					Fields: map[string]string{"repos": repo, "prompt": "", "agent": tc.runtime, "model": tc.model, "identity_mode": harnessproto.IdentityMachine},
@@ -113,11 +119,11 @@ func TestBrowserEmptyWorkgroupContract(t *testing.T) {
 			}
 			defer db.Close()
 			children, err = db.Children(rootID)
-			if err != nil || len(children) != len(tc.grants) {
-				t.Fatalf("members = %+v err=%v, want %d", children, err, len(tc.grants))
+			if err != nil || len(children) != len(want) {
+				t.Fatalf("members = %+v err=%v, want %d", children, err, len(want))
 			}
 			for i, child := range children {
-				if child.Agent != tc.runtime || child.Model != wantModel || child.Prompt != "" || child.Repo != tc.grants[i] {
+				if child.Agent != tc.runtime || child.Model != wantModel || child.Prompt != "" || child.Repo != want[i] {
 					t.Fatalf("member %d selection drifted: %+v", i, child)
 				}
 			}

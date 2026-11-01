@@ -160,6 +160,9 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 					return nil, err
 				}
 				wg.Grants, wg.Granted = grants, initialized
+				if wg.GrantsAll, err = db.CoordinatorGrantsAllTracked(r.ID); err != nil {
+					return nil, err
+				}
 			}
 			subs, _ := db.Children(r.ID)
 			for _, s := range subs {

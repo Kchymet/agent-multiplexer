@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1133,8 +1134,12 @@ func TestHostCreatedCoordinatorOmittedGrantsPermitFirstRepoAgent(t *testing.T) {
 	}
 }
 
-func TestHostCreatedCoordinatorExplicitEmptyGrantCeiling(t *testing.T) {
+// A workgroup created with an explicitly empty repos field — what remote
+// clients such as the web dashboard send — may assign any repository tracked
+// on the host, including one tracked after creation. Only the host seals it.
+func TestCreatedCoordinatorEmptyReposGrantsAllTracked(t *testing.T) {
 	isolateStore(t)
+	ctx := context.Background()
 	db, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -1146,29 +1151,83 @@ func TestHostCreatedCoordinatorExplicitEmptyGrantCeiling(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	rootID, err := ApplyResult(context.Background(), core.Action{
-		Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "sealed", "repos": ""},
+	rootID, err := ApplyResult(ctx, core.Action{
+		Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": "remote", "repos": ""},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	grantsOf := func() ([]string, bool, bool) {
+		t.Helper()
+		db, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		grants, initialized, err := db.CoordinatorRepoGrants(rootID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := db.CoordinatorGrantsAllTracked(rootID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return grants, initialized, all
+	}
+	if grants, initialized, all := grantsOf(); !initialized || !all || !reflect.DeepEqual(grants, []string{"api"}) {
+		t.Fatalf("empty-repos creation grants = %v initialized=%v all=%v, want [api]/true/true", grants, initialized, all)
+	}
+	// A repo tracked after the workgroup was created is immediately assignable.
 	db, err = store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	grants, initialized, err := db.CoordinatorRepoGrants(rootID)
-	if err != nil || !initialized || len(grants) != 0 {
-		t.Fatalf("explicit empty creation grants = %v, initialized=%v, err=%v", grants, initialized, err)
-	}
-	if err := db.Close(); err != nil {
+	if err := db.PutRepo(store.Repo{Name: "web"}); err != nil {
+		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := ApplyResult(context.Background(), core.Action{
+	_ = db.Close()
+	if grants, _, _ := grantsOf(); !reflect.DeepEqual(grants, []string{"api", "web"}) {
+		t.Fatalf("live grants after tracking web = %v, want [api web]", grants)
+	}
+	if err := checkGrant(rootID, []string{"web"}); err != nil {
+		t.Fatalf("later-tracked repo refused: %v", err)
+	}
+	if err := checkGrant(rootID, []string{"untracked"}); err == nil {
+		t.Fatal("untracked repo accepted under all-tracked grants")
+	}
+	// The host can still seal the workgroup deliberately, and reopen it.
+	if _, err := ApplyResult(ctx, core.Action{
+		Action: core.ActionCoordinatorSetRepos, ID: rootID, Fields: map[string]string{"repos": ""},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if grants, initialized, all := grantsOf(); !initialized || all || len(grants) != 0 {
+		t.Fatalf("sealed grants = %v initialized=%v all=%v", grants, initialized, all)
+	}
+	if _, err := ApplyResult(ctx, core.Action{
 		Action: core.ActionAddAgent, ID: rootID,
 		Fields: map[string]string{"agent": "claude", "repos": "api"},
 	}); err == nil || !strings.Contains(err.Error(), "outside coordinator") {
-		t.Fatalf("explicit empty ceiling accepted first repo agent: %v", err)
+		t.Fatalf("sealed ceiling accepted repo agent: %v", err)
 	}
+	if _, err := ApplyResult(ctx, core.Action{
+		Action: core.ActionCoordinatorSetRepos, ID: rootID, Fields: map[string]string{"all": "1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if grants, _, all := grantsOf(); !all || !reflect.DeepEqual(grants, []string{"api", "web"}) {
+		t.Fatalf("reopened grants = %v all=%v", grants, all)
+	}
+}
+
+func checkGrant(rootID string, repos []string) error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.CheckCoordinatorRepos(rootID, repos)
 }
 
 // Re-scoping cannot turn unknown/ungranted repositories into new authority.
@@ -1511,5 +1570,77 @@ func TestAgentIDsUnderConsole(t *testing.T) {
 	}
 	if _, err := AgentIDsUnder("nope"); err == nil {
 		t.Fatal("an unknown id still resolves — the console case must not loosen the lookup")
+	}
+}
+
+// Host grant changes on an existing workgroup — widen, narrow, clear, reset to
+// all tracked — take effect immediately for every worktree-forking path:
+// add-agent, agent-set-repos and move. Refusals name the repo and the host
+// command that widens grants.
+func TestHostGrantChangesApplyLiveToWorktreePaths(t *testing.T) {
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
+	isolateStore(t)
+	ctx := context.Background()
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"api", "web"} {
+		gitDir := bareRepoWithCommit(t)
+		if err := db.PutRepo(store.Repo{Name: name, Source: gitDir, GitDir: gitDir}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	newWG := func(name string) string {
+		t.Helper()
+		id, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	setGrants := func(id string, fields map[string]string) {
+		t.Helper()
+		if _, err := ApplyResult(ctx, core.Action{Action: core.ActionCoordinatorSetRepos, ID: id, Fields: fields}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := func(what, repo, wg string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), `"`+repo+`"`) || !strings.Contains(err.Error(), "amux workgroup grants "+wg) {
+			t.Fatalf("%s: err = %v, want refusal naming %q and `amux workgroup grants %s`", what, err, repo, wg)
+		}
+	}
+	a, b := newWG("a"), newWG("b")
+
+	// add-agent: narrow, then widen.
+	setGrants(a, map[string]string{"repos": "api"})
+	_, err = AddAgent(ctx, a, AgentSpec{Agent: "claude", Repos: []string{"web"}})
+	refused("add-agent web after narrowing", "web", a, err)
+	setGrants(a, map[string]string{"repos": "api,web"})
+	member, err := AddAgent(ctx, a, AgentSpec{Agent: "claude", Repos: []string{"web"}})
+	if err != nil {
+		t.Fatalf("add-agent web after widening: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(member.Dir, "web", ".git")); err != nil {
+		t.Fatalf("widened add-agent has no worktree: %v", err)
+	}
+
+	// agent-set-repos: clear, then reset to all tracked.
+	setGrants(a, map[string]string{"repos": ""})
+	refused("agent-set-repos after clearing", "api", a, SetAgentRepos(ctx, member.ID, []string{"api", "web"}))
+	setGrants(a, map[string]string{"all": "1"})
+	if err := SetAgentRepos(ctx, member.ID, []string{"api", "web"}); err != nil {
+		t.Fatalf("agent-set-repos after reset to all tracked: %v", err)
+	}
+
+	// move: into a constrained workgroup, then after the host widens it.
+	setGrants(b, map[string]string{"repos": "api"})
+	_, err = MoveAgent(ctx, member.ID, b)
+	refused("move into constrained workgroup", "web", b, err)
+	setGrants(b, map[string]string{"all": "1"})
+	if _, err := MoveAgent(ctx, member.ID, b); err != nil {
+		t.Fatalf("move after widening: %v", err)
 	}
 }
