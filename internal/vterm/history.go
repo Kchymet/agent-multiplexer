@@ -5,7 +5,6 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
 )
 
 // Pane-local history and viewport.
@@ -315,7 +314,7 @@ func (t *Terminal) installHistoryHooks() {
 		t.emu.ClearScrollback()
 		t.alt.clear()
 		t.offset = 0
-		t.cursorHidden, t.cursorShape = false, vt.CursorBlock // RIS resets the cursor silently
+		t.cursorHidden, t.cursorStyle = false, 0 // RIS resets the cursor silently
 		return false
 	})
 }
