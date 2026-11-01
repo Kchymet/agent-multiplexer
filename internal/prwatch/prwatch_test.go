@@ -16,10 +16,11 @@ import (
 
 // fakeGH serves `gh pr list` / `gh pr view` from in-memory PRs.
 type fakeGH struct {
-	mu    sync.Mutex
-	prs   map[int]map[string]any // number -> gh JSON object
-	err   error
-	calls []string
+	mu        sync.Mutex
+	prs       map[int]map[string]any // number -> gh JSON object
+	err       error
+	calls     []string
+	beforeRun func()
 }
 
 func newFakeGH() *fakeGH { return &fakeGH{prs: map[int]map[string]any{}} }
@@ -50,6 +51,11 @@ func check(name, status, conclusion string) map[string]any {
 }
 
 func (f *fakeGH) run(_ context.Context, args ...string) ([]byte, error) {
+	if f.beforeRun != nil {
+		before := f.beforeRun
+		f.beforeRun = nil
+		before()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, strings.Join(args, " "))
@@ -99,16 +105,17 @@ func (f *fakeGH) callCount() int {
 }
 
 type harness struct {
-	t       *testing.T
-	gh      *fakeGH
-	w       *Watcher
-	saved   map[string]string
-	events  []Change
-	wakes   [][]string
-	deliver Delivery
-	logs    []string
-	now     time.Time
-	members []Member
+	t         *testing.T
+	gh        *fakeGH
+	w         *Watcher
+	saved     map[string]string
+	events    []Change
+	wakes     [][]string
+	deliver   Delivery
+	deliverFn func(string, []Wake) []Delivery
+	logs      []string
+	now       time.Time
+	members   []Member
 }
 
 func newHarness(t *testing.T) *harness {
@@ -126,7 +133,7 @@ func newHarness(t *testing.T) *harness {
 func (h *harness) build() *Watcher {
 	return New(Config{
 		Run:     h.gh.run,
-		Members: func() ([]Member, error) { return h.members, nil },
+		Members: func() ([]Member, error) { return append([]Member(nil), h.members...), nil },
 		Load: func() (map[string]string, error) {
 			out := map[string]string{}
 			for k, v := range h.saved {
@@ -143,11 +150,18 @@ func (h *harness) build() *Watcher {
 			return nil
 		},
 		Emit: func(c Change) { h.events = append(h.events, c) },
-		Deliver: func(_ context.Context, wg string, lines []string) Delivery {
-			if h.deliver == Delivered {
-				h.wakes = append(h.wakes, lines)
+		Deliver: func(_ context.Context, wg string, wakes []Wake) []Delivery {
+			if h.deliverFn != nil {
+				return h.deliverFn(wg, wakes)
 			}
-			return h.deliver
+			results := make([]Delivery, len(wakes))
+			for i := range results {
+				results[i] = h.deliver
+			}
+			if h.deliver == Delivered {
+				h.wakes = append(h.wakes, WakeLines(wakes))
+			}
+			return results
 		},
 		Logf: func(format string, args ...any) { h.logs = append(h.logs, fmt.Sprintf(format, args...)) },
 		Now:  func() time.Time { return h.now },
@@ -317,6 +331,157 @@ func TestDeferredWakeIsHeldAndDeliveredOnce(t *testing.T) {
 	h.poll()
 	if w := h.takeWakes(); len(w) != 0 {
 		t.Fatalf("redelivered: %v", w)
+	}
+}
+
+func TestDeferredWakeRetainsAuthorityIdentity(t *testing.T) {
+	h := newHarness(t)
+	h.gh.set(7, "amux/wg-m1-topic", "OPEN", nil)
+	h.poll()
+	h.deliver = Deferred
+	h.gh.update(7, func(pr map[string]any) { pr["state"] = "MERGED" })
+	h.poll()
+
+	var got []Wake
+	h.deliverFn = func(workgroup string, wakes []Wake) []Delivery {
+		if workgroup != "wg" {
+			t.Fatalf("workgroup = %q, want wg", workgroup)
+		}
+		got = append([]Wake(nil), wakes...)
+		return []Delivery{Deferred}
+	}
+	h.w.Flush(context.Background())
+	if len(got) != 1 {
+		t.Fatalf("wakes = %+v, want one", got)
+	}
+	wake := got[0]
+	if wake.SessionID != "m1" || wake.Workgroup != "wg" || wake.Repo != "o/r" ||
+		wake.Branch != "amux/wg-m1" || wake.PRBranch != "amux/wg-m1-topic" ||
+		!strings.Contains(wake.Text, "member m1 (alice) PR o/r#7: merged") {
+		t.Fatalf("wake lost authority identity: %+v", wake)
+	}
+}
+
+func TestMixedDeliveryKeepsOnlyDeferredEntries(t *testing.T) {
+	h := newHarness(t)
+	h.gh.set(7, "amux/wg-m1", "OPEN", nil)
+	h.gh.set(8, "amux/wg-m2", "OPEN", nil)
+	h.poll()
+	h.deliver = Deferred
+	h.gh.update(7, func(pr map[string]any) { pr["state"] = "CLOSED" })
+	h.gh.update(8, func(pr map[string]any) { pr["mergeable"] = "CONFLICTING" })
+	h.poll()
+
+	h.deliverFn = func(_ string, wakes []Wake) []Delivery {
+		results := make([]Delivery, len(wakes))
+		for i, wake := range wakes {
+			switch wake.SessionID {
+			case "m1":
+				results[i] = Dropped
+			case "m2":
+				results[i] = Deferred
+			default:
+				t.Fatalf("unexpected wake %+v", wake)
+			}
+		}
+		return results
+	}
+	h.w.Flush(context.Background())
+	if got := h.w.Pending("wg"); got != 1 {
+		t.Fatalf("pending after mixed drop/defer = %d, want 1", got)
+	}
+	h.deliverFn = nil
+	h.deliver = Delivered
+	h.w.Flush(context.Background())
+	wakes := h.takeWakes()
+	if len(wakes) != 1 || len(wakes[0]) != 1 || !strings.Contains(wakes[0][0], "member m2 PR o/r#8") {
+		t.Fatalf("delivered wakes = %v, want only m2", wakes)
+	}
+}
+
+func TestIndeterminateDeliverySuppressesOnlyUncertainRetry(t *testing.T) {
+	h := newHarness(t)
+	h.gh.set(7, "amux/wg-m1", "OPEN", nil)
+	h.gh.set(8, "amux/wg-m2", "OPEN", nil)
+	h.poll()
+	h.deliver = Deferred
+	h.gh.update(7, func(pr map[string]any) { pr["state"] = "CLOSED" })
+	h.gh.update(8, func(pr map[string]any) { pr["mergeable"] = "CONFLICTING" })
+	h.poll()
+
+	calls := 0
+	h.deliverFn = func(_ string, wakes []Wake) []Delivery {
+		calls++
+		results := make([]Delivery, len(wakes))
+		for i, wake := range wakes {
+			switch wake.SessionID {
+			case "m1":
+				results[i] = Indeterminate
+			case "m2":
+				results[i] = Deferred
+			default:
+				t.Fatalf("unexpected wake %+v", wake)
+			}
+		}
+		return results
+	}
+	h.w.Flush(context.Background())
+	if got := h.w.Pending("wg"); got != 1 {
+		t.Fatalf("pending after indeterminate/deferred = %d, want only deferred entry", got)
+	}
+	if calls != 1 {
+		t.Fatalf("delivery calls = %d, want 1", calls)
+	}
+	if wakes := h.takeWakes(); len(wakes) != 0 {
+		t.Fatalf("indeterminate outcome was claimed as delivered: %v", wakes)
+	}
+	if got := strings.Join(h.logs, "\n"); !strings.Contains(got, "indeterminate") || !strings.Contains(got, "automatic retry suppressed") {
+		t.Fatalf("missing reconciliation diagnostic: %q", got)
+	}
+
+	h.deliverFn = nil
+	h.deliver = Delivered
+	h.w.Flush(context.Background())
+	wakes := h.takeWakes()
+	if len(wakes) != 1 || len(wakes[0]) != 1 || !strings.Contains(wakes[0][0], "member m2 PR o/r#8") {
+		t.Fatalf("delivered wakes = %v, want only independently deferred m2", wakes)
+	}
+	h.w.Flush(context.Background())
+	if calls != 1 || h.w.Pending("wg") != 0 || len(h.takeWakes()) != 0 {
+		t.Fatal("indeterminate notification was automatically retried")
+	}
+}
+
+func TestMembershipChangeDuringObservationDropsOldRoute(t *testing.T) {
+	h := newHarness(t)
+	h.gh.set(7, "amux/wg-m1", "OPEN", nil)
+	h.poll()
+	h.gh.update(7, func(pr map[string]any) {
+		pr["statusCheckRollup"] = []any{check("build", "COMPLETED", "FAILURE")}
+	})
+	h.gh.beforeRun = func() { h.members[0].Workgroup = "other" }
+	var observed []Wake
+	h.deliverFn = func(workgroup string, wakes []Wake) []Delivery {
+		observed = append([]Wake(nil), wakes...)
+		results := make([]Delivery, len(wakes))
+		for i, wake := range wakes {
+			if workgroup == wake.Workgroup && wake.Workgroup == h.members[0].Workgroup {
+				results[i] = Delivered
+			} else {
+				results[i] = Dropped
+			}
+		}
+		return results
+	}
+	h.poll()
+	if len(observed) != 1 || observed[0].Workgroup != "wg" || observed[0].SessionID != "m1" {
+		t.Fatalf("observed wake = %+v, want original structured route", observed)
+	}
+	if wakes := h.takeWakes(); len(wakes) != 0 {
+		t.Fatalf("old-route text delivered after move: %v", wakes)
+	}
+	if got := h.w.Pending("wg"); got != 0 {
+		t.Fatalf("old-route wake remained pending after definitive drop: %d", got)
 	}
 }
 

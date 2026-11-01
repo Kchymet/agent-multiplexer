@@ -71,9 +71,30 @@ type GoalState struct {
 // handshake and every thread/goal/updated since), or ok=false when the thread
 // has no goal or none was observed yet.
 func (s *Supervisor) Goal() (GoalState, bool) {
+	state, present, _ := s.ObservedGoal()
+	return state, present
+}
+
+// ObservedGoal returns the last goal value together with two distinct facts:
+// present says the observed thread has a goal, while known says an authoritative
+// read or notification has established whether it has one. A transport gap can
+// make a retained value unknown until another notification is observed.
+func (s *Supervisor) ObservedGoal() (state GoalState, present, known bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return goalState(s.goal)
+	state, present = goalState(s.goal)
+	// Manager.Get/live also exclude a reconnecting supervisor. Keep the direct
+	// observation surface fail-closed as well: an old reader callback may still
+	// be retiring, and only the replacement reader may make the state known.
+	known = s.goalObserved && !s.reconnecting
+	rpc := s.rpc
+	s.mu.Unlock()
+	// Match live's lock order: never hold Supervisor.mu while taking rpc.mu. A
+	// callback from a retired reader may update the retained status after a
+	// cancelled join, but a non-live transport cannot make that value known.
+	if !known || rpc == nil || !rpc.live() {
+		known = false
+	}
+	return state, present, known
 }
 
 func goalState(g *threadGoal) (GoalState, bool) {
@@ -144,6 +165,7 @@ func sameGoal(a, b *threadGoal) bool {
 // the state actually changed. The generation is what a host-side decision is
 // admitted against: it advances once per real change, whoever made it.
 func (s *Supervisor) recordGoalLocked(g *threadGoal) {
+	s.goalObserved = true
 	if sameGoal(s.goal, g) {
 		s.goal = g
 		return
@@ -162,6 +184,9 @@ func (s *Supervisor) observeGoal(method string, params json.RawMessage) {
 	}
 	if json.Unmarshal(params, &p) != nil {
 		return
+	}
+	if s.beforeGoalRecord != nil {
+		s.beforeGoalRecord()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

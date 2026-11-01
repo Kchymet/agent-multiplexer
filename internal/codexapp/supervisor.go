@@ -163,8 +163,11 @@ type Supervisor struct {
 
 	resumable    bool // a rollout exists; native attach and later resume are safe
 	goal         *threadGoal
+	goalObserved bool
 	goalRevision uint64
 	restartWork  *RestartWork // frozen before shutdown clears active-turn state
+	// beforeGoalRecord gates a parsed goal notification in reconnect tests.
+	beforeGoalRecord func()
 
 	// goalOp serializes host-side goal operations (a read plus a set/clear) so an
 	// observed task and an explicit goal verb cannot interleave their decisions.
@@ -691,6 +694,10 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 	previousDone := s.rpcDone
 	previousCancel := s.runCancel
 	s.reconnecting = true
+	// Invalidate immediately as well as after the reader join below. If the
+	// reconnect exits before that join (cancellation or process loss), clearing
+	// reconnecting must not re-expose a pre-gap observation as authoritative.
+	s.goalObserved = false
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -721,6 +728,14 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 			return fmt.Errorf("codexapp reconnect: wait for previous reader: %w", ctx.Err())
 		}
 	}
+	// The old reader and every synchronous notification callback have now
+	// retired. Reset only here: an old in-flight goal callback could otherwise
+	// overwrite an earlier reset. The replacement connection resumes the thread
+	// without the full startup goal read, so only its observations may make the
+	// retained value authoritative again.
+	s.mu.Lock()
+	s.goalObserved = false
+	s.mu.Unlock()
 	if !s.processRunning() {
 		return errors.New("codexapp: App Server process exited")
 	}

@@ -207,30 +207,195 @@ func (d *Daemon) emitPRState(c prwatch.Change) {
 //     or one waiting on the user's answer, which only the user may move.
 //
 // Anything else is deferred and retried; prwatch bounds how long it waits.
-func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, lines []string) prwatch.Delivery {
-	sess, ok, err := lookupSession(workgroup)
-	if err != nil {
-		return prwatch.Deferred
+func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []prwatch.Wake) []prwatch.Delivery {
+	results := make([]prwatch.Delivery, len(wakes))
+	for i := range results {
+		results[i] = prwatch.Deferred
 	}
-	if !ok || sess.Archived || sess.Role() != store.RoleCoordinator {
-		return prwatch.Dropped
+	if len(wakes) == 0 {
+		return results
+	}
+
+	// Membership moves and coordinator-grant changes take the effect gate
+	// exclusively. Member archive/delete and repo changes take these session
+	// locks; repo creation/rebinding and repo-set changes also take creationMu.
+	// Hold the same ordered admission through the final store read and exact
+	// prompt admission so none of those mutations can cross the disclosure.
+	ids := make([]string, 1, len(wakes)+1)
+	ids[0] = workgroup
+	for _, wake := range wakes {
+		ids = append(ids, wake.SessionID)
+	}
+	release := d.admitSessions(ids...)
+	defer release()
+	d.creationMu.Lock()
+	defer d.creationMu.Unlock()
+	if d.prWakeAdmission != nil {
+		d.prWakeAdmission()
+	}
+
+	sess, eligible, dropped, err := resolvePRWakes(workgroup, wakes)
+	if err != nil {
+		log.Printf("prwatch: revalidate wake-up for %s: %v", workgroup, err)
+		return results
+	}
+	for _, i := range dropped {
+		results[i] = prwatch.Dropped
+	}
+	if len(eligible) == 0 {
+		return results
 	}
 	if ready, why := d.coordinatorTakesWake(sess); !ready {
 		if why != "" {
 			log.Printf("prwatch: wake-up for %s deferred: %s", workgroup, why)
 		}
-		return prwatch.Deferred
+		return results
 	}
-	text := prWakeText(agent.HookGoals(sess), lines)
-	res := d.handle(ctx, core.Action{Action: core.ActionSteer, ID: sess.ID, Fields: map[string]string{
+	authorized := make([]prwatch.Wake, 0, len(eligible))
+	for _, i := range eligible {
+		authorized = append(authorized, wakes[i])
+	}
+	text := prWakeText(agent.HookGoals(sess), prwatch.WakeLines(authorized))
+	outcome, err := d.beginPRWake(ctx, sess, text)
+	if err != nil {
+		if outcome == prwatch.Indeterminate {
+			for _, i := range eligible {
+				results[i] = prwatch.Indeterminate
+			}
+			log.Printf("prwatch: wake-up for %s indeterminate; automatic retry suppressed: %v", workgroup, err)
+			return results
+		}
+		log.Printf("prwatch: wake-up for %s deferred: %v", workgroup, err)
+		return results
+	}
+	if outcome != prwatch.Delivered {
+		log.Printf("prwatch: wake-up for %s returned unexpected admission outcome %d", workgroup, outcome)
+		return results
+	}
+	for _, i := range eligible {
+		results[i] = prwatch.Delivered
+	}
+	log.Printf("prwatch: woke coordinator %s (%d PR update(s))", workgroup, len(eligible))
+	return results
+}
+
+// resolvePRWakes re-reads every authority-bearing identity from the store.
+// Archived members remain eligible while their current RootID and repository
+// binding remain in scope; missing, moved, deleted, rebranched, ungranted, or
+// rebound entries are definitive drops and are never rerouted.
+func resolvePRWakes(workgroup string, wakes []prwatch.Wake) (root store.Session, eligible, dropped []int, err error) {
+	db, err := store.OpenReadOnly()
+	if err != nil {
+		return store.Session{}, nil, nil, err
+	}
+	defer db.Close()
+	root, ok, err := db.GetSession(workgroup)
+	if err != nil {
+		return store.Session{}, nil, nil, err
+	}
+	if !ok || root.Archived || root.Role() != store.RoleCoordinator {
+		for i := range wakes {
+			dropped = append(dropped, i)
+		}
+		return root, nil, dropped, nil
+	}
+	grants, initialized, err := db.CoordinatorRepoGrants(workgroup)
+	if err != nil {
+		return store.Session{}, nil, nil, err
+	}
+	granted := make(map[string]bool, len(grants))
+	for _, repo := range grants {
+		granted[repo] = true
+	}
+	for i, wake := range wakes {
+		if wake.Workgroup != workgroup || wake.SessionID == "" || wake.Repo == "" ||
+			wake.Branch == "" || !prwatch.Owns(wake.Branch, wake.PRBranch) {
+			dropped = append(dropped, i)
+			continue
+		}
+		member, found, err := db.GetSession(wake.SessionID)
+		if err != nil {
+			return store.Session{}, nil, nil, err
+		}
+		if !found || member.IsRoot() || member.RootID != workgroup || member.Branch != wake.Branch {
+			dropped = append(dropped, i)
+			continue
+		}
+		bound := false
+		for _, name := range store.SplitRepos(member.Repo) {
+			if !initialized || !granted[name] {
+				continue
+			}
+			repo, found, err := db.Repo(name)
+			if err != nil {
+				return store.Session{}, nil, nil, err
+			}
+			if found && prwatch.RepoSlug(repo.Source) == wake.Repo {
+				bound = true
+				break
+			}
+		}
+		if !bound {
+			dropped = append(dropped, i)
+			continue
+		}
+		eligible = append(eligible, i)
+	}
+	return root, eligible, dropped, nil
+}
+
+// beginPRWake admits the prompt while the caller holds the coordinator/member
+// delivery admission. A live structured coordinator splits turn/start from the
+// long model turn: BeginPrompt is the bounded effect protected here, while its
+// waiter runs under daemon lifecycle ownership after these locks are released.
+func (d *Daemon) beginPRWake(ctx context.Context, sess store.Session, text string) (prwatch.Delivery, error) {
+	if d.codex != nil {
+		if sup, ok := d.codex.Get(sess.ID); ok {
+			return d.beginStructuredPRWake(ctx, sess.ID, sup, text)
+		}
+	}
+	res := d.handle(withEffectAdmission(ctx), core.Action{Action: core.ActionSteer, ID: sess.ID, Fields: map[string]string{
 		core.SteerVerb: core.SteerPrompt, core.SteerText: text,
 	}})
 	if !res.OK {
-		log.Printf("prwatch: wake-up for %s failed: %s", workgroup, res.Error)
-		return prwatch.Deferred
+		return prwatch.Deferred, fmt.Errorf("%s", res.Error)
 	}
-	log.Printf("prwatch: woke coordinator %s (%d PR update(s))", workgroup, len(lines))
-	return prwatch.Delivered
+	return prwatch.Delivered, nil
+}
+
+func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter structuredPromptStarter, text string) (prwatch.Delivery, error) {
+	if err := ctx.Err(); err != nil {
+		return prwatch.Deferred, err
+	}
+	waiter := make(chan func(context.Context) error, 1)
+	if !d.startDeferredContext(ctx, func(workCtx context.Context) {
+		wait := <-waiter
+		if wait == nil {
+			return
+		}
+		if err := wait(workCtx); err != nil {
+			structuredJournal(id, core.JournalError, fmt.Sprintf("prompt: %v", err))
+		}
+	}) {
+		return prwatch.Deferred, context.Canceled
+	}
+	admitCtx, cancel := context.WithTimeout(ctx, steerEffectAdmissionTimeout)
+	defer cancel()
+	if err := admitCtx.Err(); err != nil {
+		waiter <- nil
+		return prwatch.Deferred, err
+	}
+	wait, err := starter.BeginPrompt(admitCtx, text)
+	if err != nil || wait == nil {
+		waiter <- nil
+		if err == nil {
+			err = fmt.Errorf("prompt runtime returned no turn waiter")
+		}
+		structuredJournal(id, core.JournalError, fmt.Sprintf("PR watcher turn-start outcome is unknown; automatic retry suppressed; reconcile PR state manually: %v", err))
+		return prwatch.Indeterminate, err
+	}
+	waiter <- wait
+	return prwatch.Delivered, nil
 }
 
 // prWakeText renders the wake-up prompt.
@@ -269,12 +434,19 @@ func (d *Daemon) coordinatorTakesWake(sess store.Session) (bool, string) {
 	if !live {
 		return false, ""
 	}
-	if status := d.coordinatorGoalStatus(sess); status != "" {
+	status, goalKnown := d.coordinatorGoalStatusKnown(sess)
+	if !goalKnown {
+		return false, "goal state is unknown"
+	}
+	if status != "" {
 		switch status {
 		case claudegoal.StatusActive, claudegoal.StatusWaiting, "none":
 		default:
 			return false, "goal is " + status
 		}
+	}
+	if d.coordinatorHasOpenPermission(sess) {
+		return false, "permission is open"
 	}
 	h := agent.HarnessFor(sess.Agent)
 	switch h.Activity(sess) {
@@ -286,8 +458,25 @@ func (d *Daemon) coordinatorTakesWake(sess store.Session) (bool, string) {
 		if h.RailState(sess) == core.StateWaiting && claudeIdleAfterTurn(h, sess) {
 			return true, ""
 		}
+	case engine.ActivityUnknown:
+		return false, "readiness is unknown"
 	}
 	return false, ""
+}
+
+func (d *Daemon) coordinatorHasOpenPermission(sess store.Session) bool {
+	if d.codex != nil {
+		if sup, ok := d.codex.Get(sess.ID); ok && len(sup.OpenApprovals()) > 0 {
+			return true
+		}
+	}
+	// Legacy/diagnostic observations are not authority to answer a permission,
+	// but an unresolved one is sufficient reason not to inject automatic input.
+	if len(core.PendingPermissions(sess.ID)) > 0 {
+		return true
+	}
+	rec := permissionRecord(agent.HarnessFor(sess.Agent), sess)
+	return rec.Path != "" && len(runtimeevents.OpenPermissions(rec)) > 0
 }
 
 // claudeIdleAfterTurn reports whether a "waiting" Claude session is merely
@@ -347,35 +536,46 @@ func lastTurnEnded(path string) bool {
 // goal coordinator with no goal, or "" when the session is not in goal mode or
 // its goal is unknown (a Codex coordinator whose runtime is not up).
 func (d *Daemon) coordinatorGoalStatus(sess store.Session) string {
+	status, _ := d.coordinatorGoalStatusKnown(sess)
+	return status
+}
+
+// coordinatorGoalStatusKnown distinguishes a coordinator with no goal from a
+// goal coordinator whose state could not be read. Status surfaces retain the
+// empty-string fallback, but automatic wake-up fails closed on known=false.
+func (d *Daemon) coordinatorGoalStatusKnown(sess store.Session) (string, bool) {
 	switch {
 	case agent.HookGoals(sess):
 		st, err := readHookGoal(sess)
 		if err != nil {
-			return ""
+			return "", false
 		}
 		if st.None() {
-			return "none"
+			return "none", true
 		}
 		// A coordinator that ran `goal wait` and ended its turn has its goal
 		// flipped back to active by the Stop hook, keeping the wait note: that
 		// is the idle "waiting on a wake-up" state, not active work.
 		if st.Status == claudegoal.StatusActive && st.Note != "" {
-			return claudegoal.StatusWaiting
+			return claudegoal.StatusWaiting, true
 		}
-		return st.Status
+		return st.Status, true
 	case agent.NativeGoals(sess):
 		if d.codex == nil {
-			return ""
+			return "", false
 		}
 		sup, ok := d.codex.Get(sess.ID)
 		if !ok {
-			return ""
+			return "", false
 		}
-		g, ok := sup.Goal()
-		if !ok {
-			return "none"
+		g, present, known := sup.ObservedGoal()
+		if !known {
+			return "", false
 		}
-		return g.Status
+		if !present {
+			return "none", true
+		}
+		return g.Status, true
 	}
-	return ""
+	return "", true
 }

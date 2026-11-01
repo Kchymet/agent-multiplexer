@@ -212,6 +212,10 @@ type Daemon struct {
 	// prs watches workgroup members' GitHub PRs and wakes their coordinators
 	// (internal/prwatch, prwatch.go). Built in New, started by Run.
 	prs *prwatch.Watcher
+	// prWakeAdmission runs after a watcher delivery holds its final membership,
+	// repo, and coordinator admission. Production leaves it nil; tests use it to
+	// prove mutations cannot cross the authority recheck and prompt boundary.
+	prWakeAdmission func()
 	// status publishes startup/shutdown progress for lifecycle clients. Run
 	// creates it only once it holds the singleton lock, which owns the file.
 	status *daemonstatus.Reporter

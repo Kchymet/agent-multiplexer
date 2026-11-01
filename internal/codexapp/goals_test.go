@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+func TestGoalObservationDistinguishesUnknownFromConfirmedNone(t *testing.T) {
+	s, fs, client := newFakePair(t)
+	defer fs.close()
+	defer s.Close()
+
+	if state, present, known := s.ObservedGoal(); present || known || state != (GoalState{}) {
+		t.Fatalf("unstarted observation = %+v present=%t known=%t, want unknown", state, present, known)
+	}
+	attach(t, s, client)
+	if state, present, known := s.ObservedGoal(); present || !known || state != (GoalState{}) {
+		t.Fatalf("handshake observation = %+v present=%t known=%t, want confirmed none", state, present, known)
+	}
+}
+
 func TestRestartResumesOnlyPreviouslyActiveGoal(t *testing.T) {
 	saved := &threadGoal{ThreadID: "thr_saved", Objective: "keep working", Status: "active", CreatedAt: 123}
 	for _, tc := range []struct {
