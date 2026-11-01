@@ -80,3 +80,29 @@ func TestResourcesUnsupportedFlag(t *testing.T) {
 		t.Fatalf("linux snapshot flagged unsupported: %+v", snap)
 	}
 }
+
+// The sampler's owners come from the polled rows' stored directories and root
+// ids, not from the directory names.
+func TestResourceOwners(t *testing.T) {
+	d := New("", nil, time.Hour)
+	d.sessions = []core.Session{
+		{ID: "wg2", IsRoot: true, Cwd: "/s/wg2"},
+		{ID: "moved", RootID: "wg2", Cwd: "/s/wg1/moved"},
+		{ID: "legacy", RootID: "wg1", Cwd: "/s/wg1/repo-main"},
+		{ID: "nodir", RootID: "wg1"},
+	}
+	got := d.resourceOwners()
+	want := []procstat.Owner{
+		{Dir: "/s/wg2", Session: "wg2", Workgroup: "wg2"},
+		{Dir: "/s/wg1/moved", Session: "moved", Workgroup: "wg2"},
+		{Dir: "/s/wg1/repo-main", Session: "legacy", Workgroup: "wg1"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("owners = %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("owners[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
