@@ -81,9 +81,14 @@ type Sink struct {
 
 // InputStep is one write in an atomic input sequence. DelayBefore is measured
 // after the previous write completes, not after the sequence is queued.
+// NotBeforeAge holds the step until the instance has been running at least that
+// long (measured from its process start), then DelayBefore applies as usual. It
+// lets a caller say "only once the runtime has booted" without knowing when the
+// runtime started: a just-launched TUI drops keystrokes, an old one needs no wait.
 type InputStep struct {
-	Bytes       []byte
-	DelayBefore time.Duration
+	Bytes        []byte
+	DelayBefore  time.Duration
+	NotBeforeAge time.Duration
 }
 
 // Instance is one running agent pane. Several subscribers may attach at once;

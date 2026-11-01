@@ -549,6 +549,33 @@ func TestInputSequenceSeparatesWritesAndPreservesOrder(t *testing.T) {
 	}
 }
 
+// NotBeforeAge is measured from the process start, not from when the input is
+// queued: text sent to a just-launched runtime waits out the remainder, and the
+// same hold on a runtime that is already old enough adds no wait at all.
+func TestInputSequenceNotBeforeAgeMeasuresFromStart(t *testing.T) {
+	eng := New()
+	defer eng.Shutdown()
+	inst, err := eng.Ensure(context.Background(), engine.Spec{Key: engine.Key{AgentID: "boot"}, Argv: []string{"sh", "-c", "stty raw -echo; printf READY; cat"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	c := &collector{}
+	inst.Subscribe(c.sink())
+	const hold = 600 * time.Millisecond
+	inst.InputSequence([]engine.InputStep{{Bytes: []byte("EARLY"), NotBeforeAge: hold}})
+	waitFor(t, c, "EARLY", 5*time.Second)
+	if age := time.Since(started); age < hold {
+		t.Fatalf("held text reached a %v-old runtime, want at least %v", age, hold)
+	}
+	again := time.Now()
+	inst.InputSequence([]engine.InputStep{{Bytes: []byte("BOOTED"), NotBeforeAge: hold}})
+	waitFor(t, c, "BOOTED", 3*time.Second)
+	if waited := time.Since(again); waited > hold/2 {
+		t.Fatalf("a runtime past its hold still delayed input by %v", waited)
+	}
+}
+
 func TestInputSequenceCopiesAndDropsAtomically(t *testing.T) {
 	in := &instance{inCh: make(chan []engine.InputStep, 1), inDone: make(chan struct{})}
 	text := []byte("paste")

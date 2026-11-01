@@ -130,8 +130,8 @@ type Daemon struct {
 	// once after the first poll resolves sessions/specs.
 	pendingRestore []restartRecord
 
-	// steerSettle is how long a `prompt` that had to start the agent waits for the
-	// runtime's TUI to paint before typing into it. Zero means steerStartSettle;
+	// steerSettle is how old a runtime must be before typed steering text reaches
+	// it, so its TUI has painted a composer. Zero means steerStartSettle;
 	// tests set it small so they don't sleep.
 	steerSettle time.Duration
 

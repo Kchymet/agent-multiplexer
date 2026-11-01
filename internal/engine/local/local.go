@@ -327,9 +327,10 @@ type subscriber struct {
 }
 
 type instance struct {
-	key  engine.Key
-	ptmx *os.File
-	cmd  *exec.Cmd
+	key     engine.Key
+	started time.Time // process start; InputStep.NotBeforeAge is measured from it
+	ptmx    *os.File
+	cmd     *exec.Cmd
 
 	mu        sync.Mutex
 	ring      []byte
@@ -390,6 +391,7 @@ func spawn(spec engine.Spec, onExit func(engine.Key, *instance), activity engine
 		return nil, err
 	}
 	in := &instance{
+		started:  time.Now(),
 		key:      spec.Key,
 		ptmx:     ptmx,
 		cmd:      cmd,
@@ -453,7 +455,7 @@ func (in *instance) Input(p []byte) {
 func (in *instance) InputSequence(steps []engine.InputStep) {
 	copied := make([]engine.InputStep, len(steps))
 	for i, step := range steps {
-		copied[i] = engine.InputStep{Bytes: append([]byte(nil), step.Bytes...), DelayBefore: step.DelayBefore}
+		copied[i] = engine.InputStep{Bytes: append([]byte(nil), step.Bytes...), DelayBefore: step.DelayBefore, NotBeforeAge: step.NotBeforeAge}
 	}
 	select {
 	case <-in.inDone:
@@ -478,6 +480,15 @@ func (in *instance) inputLoop() {
 			return
 		case steps := <-in.inCh:
 			for _, step := range steps {
+				if wait := step.NotBeforeAge - time.Since(in.started); step.NotBeforeAge > 0 && wait > 0 {
+					timer := time.NewTimer(wait)
+					select {
+					case <-in.inDone:
+						timer.Stop()
+						return
+					case <-timer.C:
+					}
+				}
 				if step.DelayBefore > 0 {
 					timer := time.NewTimer(step.DelayBefore)
 					select {
