@@ -19,7 +19,7 @@ const resourceIntervalEnv = "AMUX_RESOURCE_INTERVAL"
 // sampling cost never lands on an RPC.
 func (d *Daemon) startResourceSampler(ctx context.Context, start func(func())) {
 	if runtime.GOOS != "linux" {
-		d.resourcesOff = "resource sampling needs Linux procfs"
+		d.setResourcesOff("resource sampling needs Linux procfs")
 		return
 	}
 	interval, err := procstat.ParseInterval(os.Getenv(resourceIntervalEnv))
@@ -28,18 +28,48 @@ func (d *Daemon) startResourceSampler(ctx context.Context, start func(func())) {
 		interval = procstat.DefaultInterval
 	}
 	if interval == 0 {
-		d.resourcesOff = "resource sampling disabled (" + resourceIntervalEnv + "=off)"
+		d.setResourcesOff("resource sampling disabled (" + resourceIntervalEnv + "=off)")
 		return
 	}
 	s := procstat.New(procstat.Config{
 		Interval:      interval,
 		SessionsDir:   core.SessionsDir(),
 		WorkspacesDir: core.WorkspacesDir(),
+		Owners:        d.resourceOwners,
 	})
 	d.resourcesMu.Lock()
 	d.resources = s
 	d.resourcesMu.Unlock()
 	start(func() { s.Run(ctx) })
+}
+
+func (d *Daemon) setResourcesOff(reason string) {
+	d.resourcesMu.Lock()
+	d.resourcesOff = reason
+	d.resourcesMu.Unlock()
+}
+
+// resourceOwners reports each polled session's stored directory and owner, so
+// the sampler attributes by stored ownership rather than by path shape (a
+// moved member's sandbox stays under its old workgroup's directory; a legacy
+// sub-session's directory is not named after its id). The sampler calls it on
+// its own cadence; it copies from the poll loop's cached rows and touches
+// neither the store nor any RPC path.
+func (d *Daemon) resourceOwners() []procstat.Owner {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	owners := make([]procstat.Owner, 0, len(d.sessions))
+	for _, s := range d.sessions {
+		if s.Cwd == "" || s.ID == "" {
+			continue
+		}
+		wg := s.RootID
+		if wg == "" {
+			wg = s.ID // a root, the console or a repo home is its own group
+		}
+		owners = append(owners, procstat.Owner{Dir: s.Cwd, Session: s.ID, Workgroup: wg})
+	}
+	return owners
 }
 
 // resourceSnapshot is the QueryResources read model: the sampler's cached
