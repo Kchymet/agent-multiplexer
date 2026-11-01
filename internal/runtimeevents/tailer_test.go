@@ -465,3 +465,44 @@ func TestClaudeStreamStampsRuntime(t *testing.T) {
 		t.Fatal("no batch from the claude stream")
 	}
 }
+
+// TestIdleTailDoesNotReresolveEveryTick pins the idle-provider CPU fix: the
+// resolver is a fresh authenticated daemon round trip in production, so an
+// idle subscription must not call it once per poll tick. It resolves on
+// admission and the first sweep, then again only when a sweep reads new bytes.
+func TestIdleTailDoesNotReresolveEveryTick(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	write(t, path, `{"type":"user","message":{"role":"user","content":"hi"}}`+"\n")
+	var resolves atomic.Int64
+	resolve := func(context.Context, string) (Record, bool) {
+		resolves.Add(1)
+		return Record{Runtime: harnessproto.RuntimeClaude, Path: path}, true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, ok := StreamContext(resolve, testPoll)(ctx, "a1", 0)
+	if !ok {
+		t.Fatal("stream was not admitted")
+	}
+	if got := collect(t, ch); len(got) != 2 {
+		t.Fatalf("initial events = %+v", got)
+	}
+	// collect waited 120ms of quiet: ~24 poll ticks at testPoll.
+	idle := resolves.Load()
+	if idle > 2 {
+		t.Fatalf("idle tail resolved the record %d times; want admission + first sweep only", idle)
+	}
+	time.Sleep(20 * testPoll)
+	if got := resolves.Load(); got != idle {
+		t.Fatalf("idle tail kept resolving: %d -> %d over 20 idle ticks", idle, got)
+	}
+
+	// Growth must still refresh before binding the new events.
+	write(t, path, `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"yo"}],"stop_reason":"end_turn"}}`+"\n")
+	if got := collect(t, ch); len(got) != 2 {
+		t.Fatalf("growth events = %+v", got)
+	}
+	if got := resolves.Load(); got != idle+1 {
+		t.Fatalf("resolves after growth = %d, want %d", got, idle+1)
+	}
+}

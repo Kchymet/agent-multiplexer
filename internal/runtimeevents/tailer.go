@@ -120,9 +120,17 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 	}
 	binder := newPermissionEventBinder()
 	ordinal, first := positionSources(sources, afterSeq)
+	// stale marks that the record's permission bindings must be re-resolved
+	// before the next bind: on the first sweep, after a resync, and whenever a
+	// sweep consumed new bytes. An idle sweep (no source grew) has no events to
+	// bind, so it skips the resolve. That resolve is a fresh authenticated daemon
+	// round trip (TLS handshake plus a full inventory push); paying it once per
+	// tick for every subscribed session made an idle provider spin at >100% CPU.
+	stale := true
 	resyncAll := func() {
 		binder = newPermissionEventBinder()
 		ordinal, first = positionSources(sources, afterSeq)
+		stale = true
 	}
 
 	t := time.NewTicker(poll)
@@ -133,6 +141,7 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 		// again from the first source, which reassigns ordinals in source order. A
 		// second failure just waits for the next tick.
 		var batch harnessproto.RuntimeEventBatch
+		before := sourceOffsets(sources)
 		for attempt := 0; attempt < 2; attempt++ {
 			batch = harnessproto.RuntimeEventBatch{}
 			if sweep(sources[first:], &ordinal, afterSeq, &batch, resyncAll) {
@@ -141,14 +150,24 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 			}
 			batch = harnessproto.RuntimeEventBatch{}
 		}
+		if !stale && !sameOffsets(before, sources) {
+			stale = true
+		}
 		bindings := map[string]string(nil)
-		// Resolve on every sweep, including one whose events were all skipped by
-		// afterSeq. The latter seeds the exact open occurrence so a resolution
-		// appended later can retain its originally bound generation.
-		if refresh != nil {
+		// Resolve on every sweep that read anything, including one whose events
+		// were all skipped by afterSeq. The latter seeds the exact open occurrence
+		// so a resolution appended later can retain its originally bound
+		// generation. A resolution can only arrive as appended bytes, which marks
+		// the sweep that reads it stale, so skipping idle sweeps never binds an
+		// event against older bindings than before. A failed resolve stays stale
+		// and is retried on the next tick.
+		if refresh != nil && stale {
 			if current, ok := refresh(ctx, sessionID); ok {
 				bindings = current.PermissionBindings
+				stale = false
 			}
+		} else if refresh == nil {
+			stale = false
 		}
 		binder.seed(bindings)
 		if len(batch.Events) > 0 {
@@ -168,6 +187,25 @@ func tail(ctx context.Context, rec Record, refresh ContextResolver, sessionID st
 		case <-t.C:
 		}
 	}
+}
+
+// sourceOffsets records each source's read offset, so the caller can tell
+// whether a sweep consumed anything.
+func sourceOffsets(sources []*tailSource) []int64 {
+	out := make([]int64, len(sources))
+	for i, s := range sources {
+		out[i] = s.offset
+	}
+	return out
+}
+
+func sameOffsets(before []int64, sources []*tailSource) bool {
+	for i, s := range sources {
+		if before[i] != s.offset {
+			return false
+		}
+	}
+	return true
 }
 
 // splitBatch cuts one sweep's events into frames of at most maxBatchEvents
