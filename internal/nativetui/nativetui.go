@@ -54,7 +54,9 @@ func Run(focusID string) error {
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
+	m.openRailState(railStatePath())
 	_, err := newProgram(m, tea.WithOutput(hw)).Run()
+	m.flushRailState()
 	if m.accounts != nil {
 		m.accounts.dispose()
 	}
@@ -112,7 +114,8 @@ type model struct {
 	keys           keymap.Keymap      // global hotkeys; zero value = built-in defaults
 	cursor         int                // index into the full snapshot when a session is selected
 	sectionCursor  string             // selected section header, or empty for a session
-	collapsed      map[railGroup]bool // local to this TUI; survives snapshot refreshes
+	collapsed      map[railGroup]bool // local to this TUI; survives snapshot refreshes and restarts (state)
+	state          *railStateStore    // persisted rail view (railstate.go); nil disables
 	// railScroll is the sidebar's vertical scroll offset in rendered lines, kept
 	// so the selected row stays visible when the rail overflows its height.
 	railScroll int
@@ -197,7 +200,23 @@ func waitData(ch chan struct{}) tea.Cmd {
 // cur returns the terminal for the currently shown agent+tab, or nil.
 func (m *model) cur() *vterm.Terminal { return m.terms[paneKey{m.attached, m.tab}] }
 
+// Update handles msg, then schedules a debounced save of the rail view if the
+// message changed it (folds, selection, or a refresh that pruned rows).
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if t, ok := msg.(railStateTickMsg); ok {
+		if m.state != nil && t.serial == m.state.serial {
+			m.flushRailState()
+		}
+		return m, nil
+	}
+	next, cmd := m.update(msg)
+	if save := m.persistRailState(); save != nil {
+		cmd = tea.Batch(cmd, save)
+	}
+	return next, cmd
+}
+
+func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.validateSelection()
 	switch msg := msg.(type) {
 	case clipboardQueuedMsg:
@@ -278,6 +297,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s := msg.f.Snapshot; s != nil {
 			m.refreshSessions(s.Sessions)
+			m.applyRailRestore()
 			if m.reconnectPanes {
 				m.reconnectPanes = false
 				cmds = append(cmds, m.restorePanes()...)
