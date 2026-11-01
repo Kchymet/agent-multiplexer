@@ -453,23 +453,21 @@ func Mode(session, h string) string {
 // mtime or mode) misses the cache and takes load's full validation again.
 var modeCache struct {
 	sync.Mutex
-	key      modeCacheKey
+	info     os.FileInfo
 	bindings map[string]Binding
 }
 
-type modeCacheKey struct {
-	dev, ino, size uint64
-	mtime          int64
-	mode           uint32
+// sameStoreFile reports that a and b describe the same, unchanged file.
+func sameStoreFile(a, b os.FileInfo) bool {
+	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() &&
+		a.ModTime().Equal(b.ModTime()) && a.Mode() == b.Mode()
 }
 
 func modeBindings() (map[string]Binding, bool) {
-	var st syscall.Stat_t
-	statErr := syscall.Lstat(Path(), &st)
-	key := modeCacheKey{dev: uint64(st.Dev), ino: uint64(st.Ino), size: uint64(st.Size), mtime: st.Mtim.Nano(), mode: uint32(st.Mode)}
+	info, statErr := os.Lstat(Path())
 	if statErr == nil {
 		modeCache.Lock()
-		if modeCache.bindings != nil && modeCache.key == key {
+		if modeCache.bindings != nil && sameStoreFile(modeCache.info, info) {
 			bindings := modeCache.bindings
 			modeCache.Unlock()
 			return bindings, true
@@ -482,11 +480,9 @@ func modeBindings() (map[string]Binding, bool) {
 	}
 	if statErr == nil && s.Bindings != nil {
 		// Read reopened the file; cache only if it is still the one stat saw.
-		var again syscall.Stat_t
-		if syscall.Lstat(Path(), &again) == nil && again.Ino == st.Ino && again.Dev == st.Dev &&
-			again.Size == st.Size && again.Mtim == st.Mtim && again.Mode == st.Mode {
+		if again, err := os.Lstat(Path()); err == nil && sameStoreFile(info, again) {
 			modeCache.Lock()
-			modeCache.key, modeCache.bindings = key, s.Bindings
+			modeCache.info, modeCache.bindings = info, s.Bindings
 			modeCache.Unlock()
 		}
 	}
