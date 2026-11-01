@@ -1572,3 +1572,75 @@ func TestAgentIDsUnderConsole(t *testing.T) {
 		t.Fatal("an unknown id still resolves — the console case must not loosen the lookup")
 	}
 }
+
+// Host grant changes on an existing workgroup — widen, narrow, clear, reset to
+// all tracked — take effect immediately for every worktree-forking path:
+// add-agent, agent-set-repos and move. Refusals name the repo and the host
+// command that widens grants.
+func TestHostGrantChangesApplyLiveToWorktreePaths(t *testing.T) {
+	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
+	isolateStore(t)
+	ctx := context.Background()
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"api", "web"} {
+		gitDir := bareRepoWithCommit(t)
+		if err := db.PutRepo(store.Repo{Name: name, Source: gitDir, GitDir: gitDir}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	newWG := func(name string) string {
+		t.Helper()
+		id, err := ApplyResult(ctx, core.Action{Action: core.ActionNewWorkgroup, Fields: map[string]string{"name": name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	setGrants := func(id string, fields map[string]string) {
+		t.Helper()
+		if _, err := ApplyResult(ctx, core.Action{Action: core.ActionCoordinatorSetRepos, ID: id, Fields: fields}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := func(what, repo, wg string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), `"`+repo+`"`) || !strings.Contains(err.Error(), "amux workgroup grants "+wg) {
+			t.Fatalf("%s: err = %v, want refusal naming %q and `amux workgroup grants %s`", what, err, repo, wg)
+		}
+	}
+	a, b := newWG("a"), newWG("b")
+
+	// add-agent: narrow, then widen.
+	setGrants(a, map[string]string{"repos": "api"})
+	_, err = AddAgent(ctx, a, AgentSpec{Agent: "claude", Repos: []string{"web"}})
+	refused("add-agent web after narrowing", "web", a, err)
+	setGrants(a, map[string]string{"repos": "api,web"})
+	member, err := AddAgent(ctx, a, AgentSpec{Agent: "claude", Repos: []string{"web"}})
+	if err != nil {
+		t.Fatalf("add-agent web after widening: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(member.Dir, "web", ".git")); err != nil {
+		t.Fatalf("widened add-agent has no worktree: %v", err)
+	}
+
+	// agent-set-repos: clear, then reset to all tracked.
+	setGrants(a, map[string]string{"repos": ""})
+	refused("agent-set-repos after clearing", "api", a, SetAgentRepos(ctx, member.ID, []string{"api", "web"}))
+	setGrants(a, map[string]string{"all": "1"})
+	if err := SetAgentRepos(ctx, member.ID, []string{"api", "web"}); err != nil {
+		t.Fatalf("agent-set-repos after reset to all tracked: %v", err)
+	}
+
+	// move: into a constrained workgroup, then after the host widens it.
+	setGrants(b, map[string]string{"repos": "api"})
+	_, err = MoveAgent(ctx, member.ID, b)
+	refused("move into constrained workgroup", "web", b, err)
+	setGrants(b, map[string]string{"all": "1"})
+	if _, err := MoveAgent(ctx, member.ID, b); err != nil {
+		t.Fatalf("move after widening: %v", err)
+	}
+}

@@ -473,6 +473,13 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error
 		if err != nil {
 			return "", err
 		}
+		if len(repos) == 0 {
+			// A move grants exactly the member's assigned repos: for a repo-less
+			// member that is none, not the all-tracked creation default.
+			if err := db.SetCoordinatorRepoGrants(newRoot, nil); err != nil {
+				return "", err
+			}
+		}
 		targetRootID, created = newRoot, newRoot
 	} else {
 		target, ok, _ := db.GetSession(targetRootID)

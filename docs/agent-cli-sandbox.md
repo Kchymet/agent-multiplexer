@@ -106,7 +106,7 @@ flags, and environment variables only ever name a target.
 | --- | --- | --- | --- | --- |
 | query `version`, `codex-control` | session | yes | yes | Host paths and overrides stripped. |
 | query `agent-sessions` | session | yes | yes | Read-only discovery (see above). |
-| query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members; granted repos | |
+| query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members (its own row carries its grants); every tracked repo, names only, each marked granted or not | Seeing a repo is not authority to fork it. |
 | query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
 | `rename` (`amux agent name`) | workgroup | itself | itself, members | |
 | `start` | workgroup | itself | workgroup (cascades), members | |
@@ -115,7 +115,7 @@ flags, and environment variables only ever name a target.
 | `steer` goal | host | no | no | Rejected for every session principal. |
 | `set-archived archived=true` (`amux agent done`) | workgroup | itself | members; its own workgroup (cascades to members) | Coordinators archive their workgroup only after explicit user confirmation. Repo homes never archive themselves. Console: any. Refused while the target (or, for a workgroup, any member) owns an open PR; `force=true` overrides, allowed for the host, the console, and a coordinator on a direct member — never on itself. |
 | `set-archived archived=false`, `archive` toggle | host | no | no | Restore needs host regrant. |
-| `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. |
+| `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. An ungranted repo is denied `repo_not_granted` with a message naming it and `amux workgroup grants`. |
 | `delete`, `kill`, `move`, `agent-set-repos` | host | no | no | Console. `delete`/`kill` refuse while an open PR remains unless `force=true`. |
 | `new-workgroup`, `create-workspace`, `refresh` | host | no | no | Console; a repo home may create a workgroup limited to its own repo. |
 | `add-repo`, `rm-repo` | host | no | no | Console. |

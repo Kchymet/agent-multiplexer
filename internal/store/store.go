@@ -139,10 +139,6 @@ func Open() (*DB, error) {
 		_ = d.Close()
 		return nil, err
 	}
-	if err := d.migrateEmptyCoordinatorGrants(); err != nil {
-		_ = d.Close()
-		return nil, err
-	}
 	if version, err := d.SchemaVersion(); err == nil && version == CurrentSchemaVersion {
 		migratedStores.Store(core.DBPath(), struct{}{})
 	}

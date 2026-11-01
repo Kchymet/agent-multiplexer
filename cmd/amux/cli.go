@@ -96,7 +96,7 @@ func cmdRepo(args []string) error {
 			return nil
 		}
 		for _, r := range repos {
-			fmt.Printf("%-24s %s\n", r.Name, r.Source)
+			fmt.Println(repoLine(r))
 		}
 		return nil
 	case "rm", "remove":
@@ -373,16 +373,11 @@ func cmdSession(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [--all | --none | repo...]")
 		}
-		repos := args[2:]
-		fields := map[string]string{"repos": strings.Join(repos, ",")}
-		label := orNone(strings.Join(repos, ", "))
-		if len(repos) == 1 && (repos[0] == "--all" || repos[0] == "--none") {
-			fields["repos"], label = "", "none"
-			if repos[0] == "--all" {
-				fields["all"], label = "1", "all tracked repos"
-			}
+		action, label, err := grantsAction(args[1], args[2:])
+		if err != nil {
+			return err
 		}
-		if err := sendAction(core.Action{Action: core.ActionCoordinatorSetRepos, ID: args[1], Fields: fields}); err != nil {
+		if err := sendAction(action); err != nil {
 			return err
 		}
 		fmt.Printf("coordinator %s grants: %s\n", args[1], label)
@@ -552,6 +547,39 @@ func sessionList() error {
 		}
 	}
 	return nil
+}
+
+// grantsAction maps `amux workgroup grants <id> [--all | --none | repo...]` to
+// the host-only coordinator-set-repos action, plus the confirmation label.
+func grantsAction(id string, args []string) (core.Action, string, error) {
+	fields := map[string]string{"repos": ""}
+	label := "none"
+	switch {
+	case len(args) == 1 && args[0] == "--all":
+		fields["all"], label = "1", "all tracked repos"
+	case len(args) == 1 && args[0] == "--none", len(args) == 0:
+	default:
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				return core.Action{}, "", fmt.Errorf("usage: amux workgroup grants <coordinator-id> [--all | --none | repo...]")
+			}
+		}
+		fields["repos"], label = strings.Join(args, ","), strings.Join(args, ", ")
+	}
+	return core.Action{Action: core.ActionCoordinatorSetRepos, ID: id, Fields: fields}, label, nil
+}
+
+// repoLine renders one `amux repo ls` row. A coordinator's listing carries no
+// sources but marks whether each tracked repo is granted to its workgroup.
+func repoLine(r core.RepoRow) string {
+	if r.Granted == nil {
+		return fmt.Sprintf("%-24s %s", r.Name, r.Source)
+	}
+	mark := "granted"
+	if !*r.Granted {
+		mark = "not granted (host: amux workgroup grants)"
+	}
+	return fmt.Sprintf("%-24s %s", r.Name, mark)
 }
 
 // grantsTag renders a workgroup's repository ceiling for `workgroup ls`, so a

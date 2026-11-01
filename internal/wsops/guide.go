@@ -297,15 +297,17 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   normalized state (idle | ready | waiting | running), title, and repos.
 - `+"`amux agent events <member> --json`"+` — a member's normalized history: the
   evidence for what it did (continue with `+"`--cursor`"+`).
-- `+"`amux repo ls`"+` — the repositories tracked on this host that you may give
-  members (your grant; unless the host limited this workgroup, that is every
-  tracked repo, including ones tracked after it was created).
+- `+"`amux repo ls`"+` — every repository tracked on this host, each marked
+  `+"`granted`"+` or `+"`not granted`"+` for this workgroup. You may give members
+  worktrees of granted repos only. Unless the host limited this workgroup, every
+  tracked repo is granted, including ones tracked after it was created.
 - `+"`amux do add-agent %s -f repos=a,b -f prompt=\"…\"`"+` — add a member to this
   workgroup (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are
   optional). Each repo in `+"`repos`"+` gives the member its own amux linked worktree on
-  its own branch — never have a member clone a tracked repo by hand. A repo that
-  `+"`amux repo ls`"+` does not list is not tracked or not granted: tracking a repo and
-  changing a workgroup's grants are the host's (the user's) decision. Pass
+  its own branch — never have a member clone a tracked repo by hand. A repo marked
+  `+"`not granted`"+` (or not listed, i.e. not tracked) is refused: tracking a repo and
+  widening a workgroup's grants (`+"`amux workgroup grants <id> …`"+`) are the host's
+  (the user's) decision, so ask the user when the task needs one. Pass
   `+"`-f model=…`"+` explicitly when a task calls for a specific model; otherwise the
   member gets its harness's default.
 - `+"`amux do steer <member> -f verb=prompt -f text=\"…\"`"+` — send a member a prompt

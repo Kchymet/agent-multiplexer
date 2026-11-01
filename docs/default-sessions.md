@@ -53,9 +53,9 @@ Adding, re-scoping or moving a member checks the destination coordinator's grant
 ceiling. Moving to a new workgroup grants exactly the member's assigned repos.
 Only an explicit host grant update can expand a fixed ceiling. A workgroup
 created without naming repos holds the all-tracked ceiling instead: it follows
-the host's tracked repos as they are added and removed. A one-time repair moves
-initialized-but-empty ceilings (left by remote creation before this mode
-existed) to all-tracked; the host can re-seal with `amux workgroup grants <id> --none`.
+the host's tracked repos as they are added and removed. Existing ceilings are never
+rewritten: the host adjusts any workgroup's ceiling at any time with
+`amux workgroup grants <id> [--all | --none | repo...]`, effective immediately.
 
 ## Scope
 

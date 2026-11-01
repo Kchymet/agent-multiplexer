@@ -265,18 +265,24 @@ func (r *daemonAccessResolver) scopedRepoRows(ctx context.Context, principal acc
 			}
 		}
 		for _, repo := range repos {
+			row := core.RepoRow{Name: repo.Name}
 			visible := false
 			switch subject.Role() {
 			case store.RoleConsole:
 				visible = true
 			case store.RoleCoordinator:
-				visible = coordinatorGrantsInitialized && containsString(coordinatorGrants, repo.Name)
+				// Visibility is not authority: a coordinator always sees every
+				// tracked repo, marked with whether its workgroup may give members
+				// worktrees of it (enforced separately at add-agent).
+				visible = true
+				granted := coordinatorGrantsInitialized && containsString(coordinatorGrants, repo.Name)
+				row.Granted = &granted
 			case store.RoleRepo, store.RoleAgent:
 				// Self scope: the repos this session itself is scoped to.
 				visible = containsString(splitRepoList(subject.Repo), repo.Name)
 			}
 			if visible {
-				rows = append(rows, core.RepoRow{Name: repo.Name})
+				rows = append(rows, row)
 			}
 		}
 		return nil

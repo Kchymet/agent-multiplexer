@@ -393,6 +393,10 @@ type Data struct {
 type RepoRow struct {
 	Name   string `json:"name"`
 	Source string `json:"source"`
+	// Granted is set only on a coordinator's restricted listing, which shows
+	// every tracked repo (visibility) and marks the ones its workgroup may give
+	// members worktrees of (authority). Nil on host listings.
+	Granted *bool `json:"granted,omitempty"`
 }
 
 // WorkgroupRow is one workgroup root plus its agents, the QuerySessions element

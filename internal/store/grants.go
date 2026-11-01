@@ -7,12 +7,7 @@ import (
 	"strings"
 )
 
-const (
-	coordinatorGrantMigrationVersion = 1
-	// emptyGrantMigrationVersion converts initialized-but-empty ceilings to
-	// all-tracked mode (see migrateEmptyCoordinatorGrants).
-	emptyGrantMigrationVersion = 2
-)
+const coordinatorGrantMigrationVersion = 1
 
 // CoordinatorRepoGrants returns the persistent repository ceiling and whether
 // it was deliberately initialized. An initialized empty result is distinct
@@ -183,38 +178,6 @@ func (d *DB) migrateCoordinatorGrants() error {
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO coordinator_grant_migrations(version) VALUES(?)`, coordinatorGrantMigrationVersion); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// migrateEmptyCoordinatorGrants is a one-time repair. Before all-tracked mode
-// existed, a workgroup created remotely (the web dashboard's empty-workgroup
-// verb, or new-workgroup with an empty repos field) persisted an initialized
-// EMPTY ceiling, so its coordinator could neither list nor assign any of the
-// host's repositories. Those coordinators move to all-tracked mode. Fixed,
-// nonempty ceilings and uninitialized legacy coordinators are left as they are;
-// the host can re-seal any workgroup with `amux workgroup grants <id> --none`.
-func (d *DB) migrateEmptyCoordinatorGrants() error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var marker int
-	err = tx.QueryRow(`SELECT version FROM coordinator_grant_migrations WHERE version=?`, emptyGrantMigrationVersion).Scan(&marker)
-	if err == nil {
-		return tx.Commit()
-	}
-	if err != sql.ErrNoRows {
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE coordinator_grant_state SET all_repos=1
-		WHERE initialized=1 AND NOT EXISTS (
-			SELECT 1 FROM coordinator_repo_grants g WHERE g.coordinator_id=coordinator_grant_state.coordinator_id)`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`INSERT INTO coordinator_grant_migrations(version) VALUES(?)`, emptyGrantMigrationVersion); err != nil {
 		return err
 	}
 	return tx.Commit()

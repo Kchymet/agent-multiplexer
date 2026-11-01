@@ -12,6 +12,23 @@ import (
 
 var ErrDenied = errors.New("access denied")
 
+// RepoNotGrantedError is the add-agent denial for a repository outside the
+// coordinator's grants. It is an ErrDenied (errors.Is) whose message names only
+// what the caller sent and its own workgroup, so it is safe to return to the
+// restricted caller verbatim.
+type RepoNotGrantedError struct {
+	Repo, Workgroup string
+}
+
+func (e *RepoNotGrantedError) Error() string {
+	return fmt.Sprintf("repository %q is not granted to workgroup %s (or is not tracked on this host): "+
+		"`amux repo ls` lists every tracked repo and marks the granted ones; "+
+		"the host can widen this workgroup's grants with `amux workgroup grants %s --all` (or `... %s <repo>...`)",
+		e.Repo, e.Workgroup, e.Workgroup, e.Workgroup)
+}
+
+func (e *RepoNotGrantedError) Unwrap() error { return ErrDenied }
+
 type Route string
 
 const (
@@ -177,7 +194,7 @@ func (p Policy) authorizeAddAgent(ctx context.Context, subject Resource, req Req
 			return err
 		}
 		if !ok {
-			return ErrDenied
+			return &RepoNotGrantedError{Repo: repo, Workgroup: subject.ID}
 		}
 	}
 	return nil
