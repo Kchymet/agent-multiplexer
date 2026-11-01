@@ -551,6 +551,11 @@ func (p *Provider) applyDirectives(adopt []harnessproto.AdoptPane, kill []string
 // ---- protocol goroutines ----
 
 // readLoop handles orchestrator → provider frames until the connection errors.
+//
+// Any frame from the orchestrator proves it is alive, so each one refreshes the
+// liveness clock the heartbeat checks — not only a pong. The orchestrator may
+// stop reading for a while (flow control while it persists a large replay); it
+// then sends unsolicited pongs, and frames it writes meanwhile count too.
 func (p *Provider) readLoop(s *session) {
 	for {
 		m, err := s.hc.ReadMux()
@@ -558,6 +563,7 @@ func (p *Provider) readLoop(s *session) {
 			s.cancel()
 			return
 		}
+		atomic.StoreInt64(&s.lastPong, time.Now().UnixNano())
 		switch m.Type {
 		case harnessproto.MSpawn:
 			if p.cfg.AllowCompute {
@@ -582,8 +588,7 @@ func (p *Provider) readLoop(s *session) {
 				p.mu.Unlock()
 			}
 		case harnessproto.MPong:
-			atomic.StoreInt64(&s.lastPong, time.Now().UnixNano())
-			// The heartbeat is the liveness signal a report can actually trust: a
+			// lastPong was refreshed above. The heartbeat is the liveness signal a report can actually trust: a
 			// registered-but-silent provider looks identical to a working one until
 			// this timestamp goes stale.
 			pong, panes := time.Now(), p.paneCount()
@@ -674,7 +679,9 @@ func (p *Provider) drainAll(hc *harnessproto.Conn, sent map[string]int64) error 
 }
 
 // heartbeat pings at the orchestrator's cadence and declares the connection dead
-// after 4 missed intervals without a pong (per spec).
+// after 4 intervals with nothing from the orchestrator — no pong (solicited or
+// an unsolicited keepalive) and no other frame (per spec, widened so a broker
+// applying flow control is not mistaken for a dead one).
 func (p *Provider) heartbeat(s *session, hbSec int) {
 	d := time.Duration(hbSec) * p.hbScale
 	t := time.NewTicker(d)
