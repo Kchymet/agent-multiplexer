@@ -195,6 +195,19 @@ func TestResourcesPanelBeforeFirstSample(t *testing.T) {
 	if m.res.interval() != resourcesBackoff {
 		t.Fatalf("interval %v, want backoff", m.res.interval())
 	}
+	if out := ansi.Strip(m.renderMain()); !strings.Contains(out, "unavailable: unknown query") {
+		t.Fatalf("panel lacks the reason: %q", out)
+	}
+	// A running sampler without its first sample is not a failure.
+	m.Update(resourcesFrame(t, procstat.Snapshot{}))
+	if m.res.unavailable || m.res.interval() != resourcesDefaultInterval {
+		t.Fatalf("pending first sample treated as unavailable")
+	}
+	// A disabled sampler reports why.
+	m.Update(resourcesFrame(t, procstat.Snapshot{Error: "resource sampling disabled"}))
+	if out := ansi.Strip(m.renderMain()); !m.res.unavailable || !strings.Contains(out, "sampling disabled") {
+		t.Fatalf("panel = %q", out)
+	}
 	if strings.Contains(ansi.Strip(m.renderRow(1, m.sessions[1])), "%") {
 		t.Fatal("no columns without samples")
 	}

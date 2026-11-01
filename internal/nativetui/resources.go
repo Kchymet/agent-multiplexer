@@ -46,7 +46,8 @@ type resourcesTickMsg struct{ serial uint64 }
 type resourcesState struct {
 	serial      uint64             // poll-chain fence: bumped on (dis)connect
 	snap        *procstat.Snapshot // latest sample with SampledAt != 0
-	unavailable bool               // the last reply failed or had no sample
+	unavailable bool               // the last reply failed or sampling is off
+	reason      string             // why, for the panel
 
 	// Derived once per sample (rebuild):
 	rows     map[string]metric // session id -> its rail cell
@@ -83,6 +84,7 @@ type resourcesCacheKey struct {
 	sessions      int
 	unavailable   bool
 	snapshotValid bool
+	reason        string
 }
 
 // active reports whether resource columns are shown: once a sample arrived
@@ -128,11 +130,20 @@ func (m *model) pollResources() tea.Cmd {
 func (m *model) applyResources(d *core.Data) {
 	r := &m.res
 	var snap procstat.Snapshot
-	if !d.OK || json.Unmarshal(d.Rows, &snap) != nil || snap.SampledAt == 0 {
-		r.unavailable = true
+	switch {
+	case !d.OK:
+		r.unavailable, r.reason = true, d.Error
+		return
+	case json.Unmarshal(d.Rows, &snap) != nil:
+		r.unavailable, r.reason = true, "unreadable resource sample"
+		return
+	case snap.SampledAt == 0:
+		// Sampling is off or unsupported (Error says why), or the sampler has
+		// not completed its first sample yet (keep polling at the usual pace).
+		r.unavailable, r.reason = snap.Error != "", snap.Error
 		return
 	}
-	r.unavailable = false
+	r.unavailable, r.reason = false, ""
 	if r.snap != nil && r.snap.SampledAt == snap.SampledAt && r.snap.Error == snap.Error {
 		return
 	}
@@ -304,7 +315,7 @@ var (
 func (m *model) renderResources() string {
 	r := &m.res
 	w, h := m.mainWidth(), m.paneRows()
-	key := resourcesCacheKey{0, r.sortMem, r.scroll, w, h, len(m.sessions), r.unavailable, r.snap != nil}
+	key := resourcesCacheKey{0, r.sortMem, r.scroll, w, h, len(m.sessions), r.unavailable, r.snap != nil, r.reason}
 	if r.snap != nil {
 		key.sampledAt = r.snap.SampledAt
 	}
@@ -330,7 +341,10 @@ func (m *model) resourcesLines(w, h int) []string {
 	if s == nil {
 		msg := "waiting for the daemon's first resource sample…"
 		if r.unavailable {
-			msg = "resource sampling is unavailable (daemon too old or sampler disabled)"
+			msg = "resource sampling is unavailable"
+			if r.reason != "" {
+				msg += ": " + r.reason
+			}
 		}
 		return append(lines, "", dimStyle.Render(" "+truncate(msg, w-1)))
 	}
