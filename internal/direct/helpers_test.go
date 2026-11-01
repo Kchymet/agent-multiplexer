@@ -29,6 +29,7 @@ type fakeBackend struct {
 	applies       atomic.Int64
 	histories     atomic.Int64
 	streams       atomic.Int64
+	activeApplies atomic.Int64
 	blockSnapshot atomic.Bool
 	blockApply    atomic.Bool
 	applied       chan core.Action
@@ -82,6 +83,8 @@ func (f *fakeBackend) Apply(ctx context.Context, a core.Action) (string, error) 
 		return "", err // like hostbackend: a cancelled call never dials
 	}
 	f.applies.Add(1)
+	f.activeApplies.Add(1)
+	defer f.activeApplies.Add(-1)
 	if f.blockApply.Load() {
 		<-ctx.Done()
 		return "", ctx.Err()
