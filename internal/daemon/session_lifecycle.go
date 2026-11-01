@@ -225,7 +225,7 @@ func (r *sessionRuntime) serveReconciled(ctx context.Context, all bool) error {
 	r.loop.enter("serve")
 	if elapsed := time.Since(start); elapsed >= slowSessionReconcile {
 		// reconcile runs on the serving goroutine: no new pass starts meanwhile.
-		log.Printf("session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
+		stallLog.printf("slow-reconcile", "session RPC: slow reconcile took %v", elapsed.Round(time.Millisecond))
 	}
 	if all {
 		return r.serveCurrent(ctx)

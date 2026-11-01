@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -56,7 +55,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
+				stallLog.printf("action-held:"+a.Action, "action %s %s held session %s %v (waited %v)", a.Action, a.ID, id,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -85,7 +84,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
+				stallLog.printf("action-held:"+a.Action, "action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -102,7 +101,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held repo work %v (waited %v)", a.Action, a.ID,
+				stallLog.printf("action-held:"+a.Action, "action %s %s held repo work %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -126,7 +125,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
+				stallLog.printf("action-held:"+a.Action, "action %s %s held %d sessions %v (waited %v)", a.Action, a.ID, len(ids),
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -152,7 +151,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		admitted := time.Now()
 		defer func() {
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held creation %v (waited %v)", a.Action, a.ID,
+				stallLog.printf("action-held:"+a.Action, "action %s %s held creation %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
@@ -166,7 +165,7 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 				return
 			}
 			if held := time.Since(admitted); held >= slowSessionDispatch {
-				log.Printf("action %s %s held the effect gate %v (waited %v)", a.Action, a.ID,
+				stallLog.printf("action-held:"+a.Action, "action %s %s held the effect gate %v (waited %v)", a.Action, a.ID,
 					held.Round(time.Millisecond), admitted.Sub(waitStart).Round(time.Millisecond))
 			}
 		}()
