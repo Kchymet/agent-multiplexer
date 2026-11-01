@@ -38,6 +38,13 @@ const (
 	OpList          = "list"
 	OpRevoke        = "revoke"
 	OpResetIdentity = "reset_identity"
+	// Cloud-assisted enrollment. Policy operations are for the host operator's
+	// CLI. OpCloudStatus and OpIssueCloudCode are the only operations the
+	// provider's relay bridge (RelayIssuer) can send.
+	OpCloudEnable    = "cloud_enable"
+	OpCloudDisable   = "cloud_disable"
+	OpCloudStatus    = "cloud_status"
+	OpIssueCloudCode = "issue_cloud_code"
 )
 
 const adminDeadline = 20 * time.Second
@@ -53,12 +60,14 @@ type adminFrame struct {
 
 // AdminRequest is one administration call.
 type AdminRequest struct {
-	Op          string        `json:"op"`
-	Label       string        `json:"label,omitempty"`
-	Permissions []string      `json:"permissions,omitempty"`
-	Resource    ResourceScope `json:"resource,omitempty"`
-	TTLSeconds  int64         `json:"ttl_seconds,omitempty"`
-	ClientID    string        `json:"client_id,omitempty"`
+	Op          string              `json:"op"`
+	Label       string              `json:"label,omitempty"`
+	Permissions []string            `json:"permissions,omitempty"`
+	Resource    ResourceScope       `json:"resource,omitempty"`
+	TTLSeconds  int64               `json:"ttl_seconds,omitempty"`
+	ClientID    string              `json:"client_id,omitempty"`
+	Cloud       *CloudPolicyRequest `json:"cloud,omitempty"`
+	Issue       *CloudIssueRequest  `json:"issue,omitempty"`
 }
 
 // AdminResponse answers it.
@@ -70,6 +79,9 @@ type AdminResponse struct {
 	ServerID  string       `json:"server_id,omitempty"`
 	Endpoints []string     `json:"endpoints,omitempty"`
 	Clients   []ClientInfo `json:"clients,omitempty"`
+	// Code is a stable refusal code (cloud issuance); Error stays the message.
+	Code  string       `json:"code,omitempty"`
+	Cloud *CloudStatus `json:"cloud,omitempty"`
 }
 
 // EncodeBundle renders a paste bundle.
@@ -234,6 +246,45 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 			return fail(err)
 		}
 		return AdminResponse{OK: true, ServerID: id}
+	case OpCloudEnable:
+		if req.Cloud == nil {
+			return fail(errors.New("cloud enable needs a policy"))
+		}
+		st, err := a.EnableCloud(*req.Cloud)
+		if err != nil {
+			return fail(err)
+		}
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Endpoints: endpoints, Cloud: &st}
+	case OpCloudDisable:
+		st, err := a.DisableCloud("disabled by host")
+		if err != nil {
+			return fail(err)
+		}
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Cloud: &st}
+	case OpCloudStatus:
+		st := a.CloudStatus()
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Endpoints: endpoints, Cloud: &st}
+	case OpIssueCloudCode:
+		if req.Issue == nil {
+			return AdminResponse{Code: CloudErrInvalidRequest, Error: "issuance needs a request"}
+		}
+		if len(endpoints) == 0 {
+			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux direct serve` with configured endpoints"}
+		}
+		code, exp, err := a.IssueCloudCode(*req.Issue)
+		if err != nil {
+			var ce *CloudError
+			if errors.As(err, &ce) {
+				return AdminResponse{Code: ce.Code, Error: ce.Msg}
+			}
+			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
+		}
+		sid := a.ServerID()
+		bundle, err := EncodeBundle(Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp})
+		if err != nil {
+			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
+		}
+		return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: sid, Endpoints: endpoints}
 	}
 	return fail(fmt.Errorf("unknown admin operation %q", req.Op))
 }
@@ -310,7 +361,7 @@ func OfflineAdminister(ctx context.Context, root string, cred access.Credential,
 	if cred.Kind != access.SubjectHost {
 		return AdminResponse{}, errors.New("administration requires the host credential")
 	}
-	if req.Op == OpEnroll {
+	if req.Op == OpEnroll || req.Op == OpIssueCloudCode {
 		return AdminResponse{}, errors.New("enrollment needs a running `amux direct serve` (it publishes the configured endpoints)")
 	}
 	if err := verify(ctx, func(ch access.SocketChallenge) (access.SocketProof, error) {

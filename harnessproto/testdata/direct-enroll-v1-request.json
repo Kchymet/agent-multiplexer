@@ -1,0 +1,1 @@
+{"type":"direct-enroll","reqId":"de1","directEnroll":{"issueKey":"6f1c2a9e-4b7d-4e0a-9c3f-2d8e7b6a5c41","requester":"usr_01HZXK5Q8M","codeChallenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGEgnrNKBk","codeChallengeMethod":"S256","permissions":["read","steer"],"resource":{"kind":"workgroups","workgroups":["771951"]},"label":"Pixel"}}

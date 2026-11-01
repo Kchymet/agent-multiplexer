@@ -184,6 +184,7 @@ func applyProvideFlags(cfg *providercfg.Config, f *provideFlags, fset *flag.Flag
 	assign("publish-sessions", func() { cfg.PublishSessions = f.publishSes })
 	assign("read-only-sessions", func() { cfg.ReadOnlySessions = f.readOnly })
 	assign("runtime-events", func() { cfg.RuntimeEvents = f.rtEvents })
+	assign("direct-enroll", func() { cfg.DirectEnroll = f.directEnroll })
 	assign("label", func() { cfg.Labels = parseLabels("", f.labels) })
 	assign("harness", func() { cfg.Harnesses = providercfg.NormalizeHarnesses(f.harnesses) })
 	assign("identity-mode", func() { cfg.IdentityMode = f.identityMode })

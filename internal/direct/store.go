@@ -24,11 +24,18 @@ func DefaultRoot() (string, error) { return core.DirectStateDir() }
 // creates one.
 var ErrNoStore = errors.New("no direct store exists (run `amux direct serve` first)")
 
+// stateVersion is the grants.json schema. Version 2 added PKCE-bound cloud
+// enrollment codes and the cloud issuance policy. A version-1 reader (amux
+// 15fcf0e and earlier) refuses version 2, so a downgrade can never read an
+// outstanding cloud code as an unbound ordinary enrollment code. Version 1 is
+// migrated forward atomically on open (see migrateLocked); nothing else is
+// accepted and nothing is ever reinitialized.
 const (
-	stateVersion = 1
-	grantsFile   = "grants.json"
-	identityName = "identity.json"
-	lockName     = "lock"
+	stateVersion   = 2
+	stateVersionS1 = 1
+	grantsFile     = "grants.json"
+	identityName   = "identity.json"
+	lockName       = "lock"
 	// AdminSocketName is the admin channel socket inside the root.
 	AdminSocketName = "admin.sock"
 )
@@ -65,6 +72,10 @@ type grantRecord struct {
 	RevokedAt          int64                  `json:"revokedAt,omitempty"`
 	RevokeReason       string                 `json:"revokeReason,omitempty"`
 	Idem               map[string]*idemRecord `json:"idem,omitempty"`
+	// Provenance of a cloud-assisted enrollment (v2). It is set from the
+	// redeemed code, never from client input, and survives any client_label.
+	Origin         string `json:"origin,omitempty"`
+	CloudRequester string `json:"cloudRequester,omitempty"`
 }
 
 type codeRecord struct {
@@ -75,6 +86,47 @@ type codeRecord struct {
 	ExpiresAt  int64         `json:"expiresAt"`
 	ConsumedAt int64         `json:"consumedAt,omitempty"`
 	ClientID   string        `json:"clientId,omitempty"`
+
+	// Cloud-issued codes (v2). Origin is OriginCloud; a manual code has none.
+	// Challenge is the RFC 7636 S256 code_challenge the redeemer must satisfy.
+	Origin     string `json:"origin,omitempty"`
+	Challenge  string `json:"challenge,omitempty"`
+	PolicyGen  uint64 `json:"policyGen,omitempty"`
+	Requester  string `json:"requester,omitempty"`
+	ProviderID string `json:"providerId,omitempty"`
+	IssueKey   string `json:"issueKey,omitempty"` // key into storeState.CloudIssues
+}
+
+// cloudPolicy is the host operator's cloud issuance policy. Only host-proven
+// admin requests change it; every change bumps Generation, and a cloud code is
+// redeemable only while the policy is enabled at the generation it was issued
+// under.
+type cloudPolicy struct {
+	Enabled        bool          `json:"enabled"`
+	Generation     uint64        `json:"generation"`
+	Perms          []string      `json:"perms,omitempty"`
+	Resource       ResourceScope `json:"resource"`
+	OwnerPin       string        `json:"ownerPin,omitempty"`
+	ProviderPin    string        `json:"providerPin,omitempty"`
+	MaxOutstanding int           `json:"maxOutstanding,omitempty"`
+	MaxPerHour     int           `json:"maxPerHour,omitempty"`
+	Issued         []int64       `json:"issued,omitempty"` // issuance times within the last hour
+	ChangedAt      int64         `json:"changedAt,omitempty"`
+	DisableReason  string        `json:"disableReason,omitempty"`
+}
+
+// cloudIssue is the idempotency record of one cloud issuance key. Code is the
+// replay material: the issued code itself, kept only while the code is
+// unconsumed and unexpired so a lost relay reply can be retried with the same
+// key without minting a second code. It is useless without the client's PKCE
+// verifier, is never logged, and is cleared at consumption or expiry; the
+// record then stays as a tombstone so the same key is refused, not reminted.
+type cloudIssue struct {
+	ReqHash   string `json:"reqHash"`
+	CodeHash  string `json:"codeHash"`
+	Code      string `json:"code,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt"`
 }
 
 type storeState struct {
@@ -82,6 +134,8 @@ type storeState struct {
 	IdentityGeneration string                  `json:"identityGeneration"`
 	Codes              map[string]*codeRecord  `json:"codes"`  // key: sha256(code)
 	Grants             map[string]*grantRecord `json:"grants"` // key: client id
+	Cloud              *cloudPolicy            `json:"cloud,omitempty"`
+	CloudIssues        map[string]*cloudIssue  `json:"cloudIssues,omitempty"` // key: sha256(issue key)
 }
 
 // store is the on-disk registry. Exactly one process holds its lock; that
@@ -154,20 +208,42 @@ func (s *store) saveIdentity(id *Identity) error {
 	return s.write(s.root, identityName, data)
 }
 
-func (s *store) loadState() (*storeState, error) {
+// loadState reads the registry. It reports whether the file is version 1 and
+// must be migrated before anything else is written. A missing file is a new,
+// empty version-2 registry.
+func (s *store) loadState() (*storeState, bool, error) {
 	data, err := os.ReadFile(s.path(grantsFile))
 	if errors.Is(err, os.ErrNotExist) {
-		return &storeState{V: stateVersion, Codes: map[string]*codeRecord{}, Grants: map[string]*grantRecord{}}, nil
+		return &storeState{V: stateVersion, Codes: map[string]*codeRecord{}, Grants: map[string]*grantRecord{}, CloudIssues: map[string]*cloudIssue{}}, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var st storeState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, fmt.Errorf("direct grants: %w", err)
+		return nil, false, fmt.Errorf("direct grants: %w", err)
 	}
-	if st.V != stateVersion {
-		return nil, fmt.Errorf("direct grants: unsupported version %d (refusing to reinitialize)", st.V)
+	migrate := false
+	switch st.V {
+	case stateVersion:
+	case stateVersionS1:
+		// A version-1 registry has no cloud data by construction: version-1
+		// binaries never write it. Fields that would only exist in version 2 mean
+		// the file is not what it claims; refuse rather than guess.
+		if st.Cloud != nil || len(st.CloudIssues) != 0 {
+			return nil, false, errors.New("direct grants: version 1 file carries version 2 cloud data (refusing to load)")
+		}
+		for _, c := range st.Codes {
+			if c.Origin != "" || c.Challenge != "" {
+				return nil, false, errors.New("direct grants: version 1 file carries version 2 cloud data (refusing to load)")
+			}
+		}
+		migrate = true
+	default:
+		return nil, false, fmt.Errorf("direct grants: unsupported version %d (refusing to reinitialize)", st.V)
+	}
+	if st.CloudIssues == nil {
+		st.CloudIssues = map[string]*cloudIssue{}
 	}
 	if st.Codes == nil {
 		st.Codes = map[string]*codeRecord{}
@@ -175,7 +251,7 @@ func (s *store) loadState() (*storeState, error) {
 	if st.Grants == nil {
 		st.Grants = map[string]*grantRecord{}
 	}
-	return &st, nil
+	return &st, migrate, nil
 }
 
 func (s *store) saveState(st *storeState) error {

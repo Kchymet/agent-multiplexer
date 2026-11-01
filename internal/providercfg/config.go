@@ -40,6 +40,7 @@ type Config struct {
 	PublishSessions                          bool              // advertise the "sessions" feature
 	ReadOnlySessions                         bool              // publish inventory but reject lifecycle verbs
 	RuntimeEvents                            bool              // advertise "runtime-events" (needs PublishSessions)
+	DirectEnroll                             bool              // offer "direct-enroll-v1" while `amux direct cloud` is enabled
 	Labels                                   map[string]string // scheduling labels (advisory)
 	Features                                 []string          // opaque capability feature strings
 }
@@ -148,6 +149,7 @@ func (c Config) Marshal() []byte {
 	boolean("allow-compute", c.AllowCompute)
 	boolean("read-only-sessions", c.ReadOnlySessions)
 	boolean("runtime-events", c.RuntimeEvents)
+	boolean("direct-enroll", c.DirectEnroll)
 
 	if len(c.Features) > 0 {
 		feats := append([]string(nil), c.Features...)
@@ -273,6 +275,8 @@ func (c *Config) assign(key string, val any) error {
 		return boolean(&c.ReadOnlySessions)
 	case "runtime-events":
 		return boolean(&c.RuntimeEvents)
+	case "direct-enroll":
+		return boolean(&c.DirectEnroll)
 	case "identity-mode":
 		return str(&c.IdentityMode)
 	case "harnesses":

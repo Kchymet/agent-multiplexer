@@ -95,6 +95,13 @@ type Config struct {
 	// provider also advertises "runtime-events-history".
 	RuntimeEventHistory func(ctx context.Context, sessionID string, beforeSeq int64, limit int) (harnessproto.RuntimeEventHistory, bool)
 
+	// DirectEnroll offers direct-enroll-v1 (docs/direct-cloud-enrollment.md).
+	// Before each dial the provider asks it whether this host's direct server
+	// has cloud issuance enabled; only then does it advertise the feature and
+	// the direct capabilities, and only then does it answer direct-enroll. Nil
+	// (the default) disables the feature entirely.
+	DirectEnroll DirectEnroller
+
 	// OnStatus, when set, receives a snapshot every time the connection state
 	// changes (dial, register, disconnect, heartbeat, stop). The CLI wires it to
 	// the status file doctor reads; nil reports nothing. It is called from the
@@ -124,7 +131,8 @@ type Provider struct {
 	wake  chan struct{} // active session's send-loop wake; nil while disconnected
 	grace *time.Timer   // pane-survival deadline while disconnected
 
-	graceDur time.Duration // grace window from the last registered (seconds → duration)
+	graceDur time.Duration                    // grace window from the last registered (seconds → duration)
+	direct   *harnessproto.DirectCapabilities // direct-enroll-v1 offer for the next/current registration (mu)
 
 	// Tunables; defaulted by New, overridable by tests.
 	backoffMin time.Duration
@@ -171,6 +179,7 @@ func (p *Provider) Run(ctx context.Context) error {
 		if p.cfg.DiscoverExecution != nil {
 			p.cfg.Execution = p.cfg.DiscoverExecution(ctx)
 		}
+		p.discoverDirect(ctx)
 		p.setStatus(func(s *Status) { s.State = StateDialing })
 		conn, err := p.dial(ctx)
 		if err != nil {
@@ -227,6 +236,8 @@ func (p *Provider) dial(ctx context.Context) (net.Conn, error) {
 // send-loop wake, and the last-pong clock for liveness.
 type session struct {
 	accountChannel AccountChannel
+	directInFlight atomic.Int32 // direct-enroll requests awaiting the host
+	providerID     string       // this connection's registered id (MRegistered.ProviderID)
 	hc             *harnessproto.Conn
 	done           chan struct{}
 	once           sync.Once
@@ -359,6 +370,7 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 
 	rtCtx, rtCancel := context.WithCancel(ctx)
 	s := &session{
+		providerID:  m.ProviderID,
 		hc:          hc,
 		done:        make(chan struct{}),
 		wake:        make(chan struct{}, 1),
@@ -446,6 +458,7 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
 		Features:  p.features(),
+		Direct:    p.directOffer(),
 	}
 }
 
@@ -455,9 +468,13 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 func (p *Provider) features() []string {
 	out := []string{}
 	for _, f := range p.cfg.Features {
-		if f != harnessproto.AccountsV1 {
+		// Granted features are never taken from opaque config strings.
+		if f != harnessproto.AccountsV1 && f != harnessproto.DirectEnrollV1 {
 			out = append(out, f)
 		}
+	}
+	if p.directOffer() != nil {
+		out = appendUnique(out, harnessproto.DirectEnrollV1)
 	}
 	if p.cfg.OpenAccounts != nil && (p.cfg.AccountStatus || p.cfg.AccountUse) {
 		out = appendUnique(out, harnessproto.AccountsV1)
@@ -595,6 +612,8 @@ func (p *Provider) readLoop(s *session) {
 			p.onSessionsSubscribe(s)
 		case harnessproto.MAccountRequest, harnessproto.MAccountCeremony:
 			p.handleAccount(s, m)
+		case harnessproto.MDirectEnroll:
+			p.handleDirectEnroll(s, m)
 		case harnessproto.MSessionAction:
 			p.handleSessionAction(s, m)
 		case harnessproto.MRuntimeEventsSubscribe:

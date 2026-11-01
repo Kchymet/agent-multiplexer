@@ -1,0 +1,1 @@
+{"type":"register","versions":[1,2],"token":"hp_token","name":"mybox","capabilities":{"os":"linux","arch":"amd64","features":["direct-enroll-v1"],"direct":{"serverId":"AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U","endpoints":["https://amux.home.example:8443"],"issuance":true}}}

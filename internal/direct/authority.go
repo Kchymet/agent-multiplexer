@@ -161,9 +161,19 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 	if err != nil {
 		return nil, err
 	}
-	state, err := st.loadState()
+	state, migrate, err := st.loadState()
 	if err != nil {
 		return nil, err
+	}
+	if migrate {
+		// Version 1 -> 2 is one atomic replace that keeps every grant, code,
+		// revocation, used-refresh and idempotency record. If it does not
+		// commit, the open fails and the version-1 file stays as it was: the
+		// registry is never reinitialized or partially rewritten.
+		state.V = stateVersion
+		if err := st.saveState(state); err != nil {
+			return nil, fmt.Errorf("direct grants: migrate version %d to %d: %w", stateVersionS1, stateVersion, err)
+		}
 	}
 	if id == nil {
 		if id, err = newIdentity(); err != nil {
@@ -341,10 +351,22 @@ func validLabel(label string) error {
 	return nil
 }
 
-// RedeemCode exchanges a code for a new grant. The code is consumed and the
-// grant committed durably before the tokens are returned; a second redemption,
-// concurrent or later, fails with invalid_grant.
+// RedeemCode exchanges a manual (operator-pasted) code for a new grant. See
+// Redeem.
 func (a *Authority) RedeemCode(code, label, kind string) (TokenResponse, error) {
+	return a.Redeem(code, label, kind, "")
+}
+
+// Redeem exchanges a code for a new grant. The code is consumed and the grant
+// committed durably before the tokens are returned; a second redemption,
+// concurrent or later, fails with invalid_grant.
+//
+// A cloud-issued code also needs its RFC 7636 code_verifier. A missing or
+// malformed verifier is a request error that leaves the code usable; a wrong
+// verifier consumes it. A cloud code is redeemable only while the cloud policy
+// is enabled at the generation it was issued under. A manual code takes no
+// verifier: sending one is a request error, and the code stays usable.
+func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, error) {
 	if label == "" {
 		label = "direct client"
 	}
@@ -379,17 +401,25 @@ func (a *Authority) RedeemCode(code, label, kind string) (TokenResponse, error) 
 	if rec == nil || rec.ConsumedAt != 0 || now >= rec.ExpiresAt {
 		return TokenResponse{}, errInvalidCode
 	}
+	if err := a.checkVerifierLocked(key, rec, verifier, now); err != nil {
+		return TokenResponse{}, err
+	}
 	g := &grantRecord{
 		ClientID: clientID, Label: label, ClientKind: kind, Perms: slices.Clone(rec.Perms), Resource: rec.Resource,
 		IdentityGeneration: a.identity.Generation, CreatedAt: now,
 		AbsoluteExpiry: now + int64(a.life.Absolute/time.Second), IdleTTL: int64(a.life.Idle / time.Second),
 		LastRefreshAt: now, RefreshHash: hashToken(refresh),
 	}
+	if rec.Origin == OriginCloud {
+		g.Origin, g.CloudRequester = OriginCloud, rec.Requester
+	}
+	replay := a.takeReplayLocked(rec)
 	rec.ConsumedAt, rec.ClientID = now, clientID
 	a.state.Grants[clientID] = g
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			rec.ConsumedAt, rec.ClientID = 0, ""
+			a.restoreReplayLocked(rec, replay)
 			delete(a.state.Grants, clientID)
 		} else {
 			// The code stays consumed; the unreturned grant is revoked so no
@@ -594,11 +624,16 @@ func (a *Authority) revokeAllLocked(reason string) []*Lease {
 		if c.ConsumedAt == 0 {
 			c.ConsumedAt = now
 		}
+		a.takeReplayLocked(c)
 	}
+	// Cloud issuance stops with the identity: the operator re-enables it
+	// deliberately, under a new generation.
+	a.disableCloudLocked(reason, now)
 	return all
 }
 
-// ResetIdentity replaces the server identity and revokes every grant and code.
+// ResetIdentity replaces the server identity, revokes every grant and code and
+// disables cloud issuance.
 func (a *Authority) ResetIdentity() (string, error) {
 	id, err := newIdentity()
 	if err != nil {
@@ -656,6 +691,10 @@ type ClientInfo struct {
 	RevokedAt      int64         `json:"revoked_at,omitempty"`
 	RevokeReason   string        `json:"revoke_reason,omitempty"`
 	ActiveLeases   int           `json:"active_operations"`
+	// Origin is "cloud" for a cloud-assisted enrollment, whose requester is the
+	// Harness user that initiated it. Set by the server, not the client label.
+	Origin         string `json:"origin,omitempty"`
+	CloudRequester string `json:"cloud_requester,omitempty"`
 }
 
 // List returns every grant, newest first.
@@ -668,7 +707,7 @@ func (a *Authority) List() []ClientInfo {
 			ClientID: g.ClientID, Label: g.Label, ClientKind: g.ClientKind, Permissions: slices.Clone(g.Perms),
 			ResourceScope: g.Resource, CreatedAt: g.CreatedAt, LastRefreshAt: g.LastRefreshAt,
 			GrantExpiresAt: g.AbsoluteExpiry, RevokedAt: g.RevokedAt, RevokeReason: g.RevokeReason,
-			ActiveLeases: len(a.leases[g.ClientID]),
+			ActiveLeases: len(a.leases[g.ClientID]), Origin: g.Origin, CloudRequester: g.CloudRequester,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
@@ -677,10 +716,14 @@ func (a *Authority) List() []ClientInfo {
 
 func (a *Authority) pruneLocked(now int64) {
 	for h, c := range a.state.Codes {
+		if now >= c.ExpiresAt {
+			a.takeReplayLocked(c) // replay material never outlives its code
+		}
 		if now > c.ExpiresAt+86400 {
 			delete(a.state.Codes, h)
 		}
 	}
+	a.pruneCloudLocked(now)
 	for id, g := range a.state.Grants {
 		if g.RevokedAt != 0 && now > g.RevokedAt+int64(revokedRetention/time.Second) && len(a.leases[id]) == 0 {
 			delete(a.state.Grants, id)

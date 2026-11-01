@@ -309,7 +309,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, "code is required")
 			return
 		}
-		resp, err = s.cfg.Authority.RedeemCode(code, vals.Get("client_label"), vals.Get("client_kind"))
+		resp, err = s.cfg.Authority.Redeem(code, vals.Get("client_label"), vals.Get("client_kind"), vals.Get("code_verifier"))
 	case GrantTypeRefresh:
 		rt := vals.Get("refresh_token")
 		if rt == "" {
@@ -321,7 +321,10 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		writeOAuth(w, http.StatusBadRequest, OAuthUnsupportedGrantType, "unsupported grant_type")
 		return
 	}
+	var reqErr *requestError
 	switch {
+	case errors.As(err, &reqErr):
+		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, reqErr.Error())
 	case errors.Is(err, errInvalidCode):
 		s.recordFailure(src)
 		writeOAuth(w, http.StatusBadRequest, OAuthInvalidGrant, "the code or refresh token is invalid, expired, used or revoked")
