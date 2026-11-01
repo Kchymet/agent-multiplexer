@@ -21,6 +21,7 @@ import (
 	"amux/internal/clipboard"
 	"amux/internal/engine"
 	"amux/internal/launchenv"
+	"amux/internal/termmodes"
 )
 
 // scrollbackBytes bounds the per-instance replay buffer. It's enough to repaint
@@ -330,9 +331,13 @@ type instance struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
 
-	mu            sync.Mutex
-	ring          []byte
-	ringStrip     clipboard.Stripper // keeps OSC 52 copies out of the replay
+	mu        sync.Mutex
+	ring      []byte
+	ringStrip clipboard.Stripper // keeps OSC 52 copies out of the replay
+	// modes follows every output byte; once the ring has dropped the start of
+	// the stream (ringTrimmed), Subscribe restates them ahead of the replay.
+	modes         termmodes.Tracker
+	ringTrimmed   bool
 	subs          map[int]*subscriber
 	nextSub       int
 	exited        bool
@@ -407,8 +412,15 @@ func (in *instance) Subscribe(sink engine.Sink) func() {
 	defer in.mu.Unlock()
 	// Replay the scrollback first so the subscriber paints the current screen,
 	// then register so live output (serialized on in.mu by pump) follows in order.
+	// A trimmed ring no longer holds the startup bytes where a full-screen agent
+	// switched screens and enabled mouse reporting, so restate those modes first;
+	// without them the subscriber's emulator keeps the wheel local (see termmodes).
 	if len(in.ring) > 0 && sink.Output != nil {
-		sink.Output(append([]byte(nil), in.ring...))
+		var replay []byte
+		if in.ringTrimmed {
+			replay = in.modes.Preamble()
+		}
+		sink.Output(append(replay, in.ring...))
 	}
 	if in.exited {
 		if sink.Exit != nil {
@@ -598,9 +610,11 @@ func (in *instance) pump() {
 // and a replay re-running them would clobber the user's clipboard with stale
 // text on every reattach. Caller holds in.mu.
 func (in *instance) appendRing(p []byte) {
+	in.modes.Write(p)
 	in.ring = in.ringStrip.Strip(in.ring, p)
 	if over := len(in.ring) - scrollbackBytes; over > 0 {
 		in.ring = in.ring[over:]
+		in.ringTrimmed = true
 	}
 }
 
