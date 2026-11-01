@@ -420,9 +420,12 @@ func (c *Client) Dispatch(a core.Action) (string, error) {
 	}
 }
 
-// RejectedError is the daemon's own answer refusing an action: the daemon
-// received it and decided. Any other Dispatch error (a send or read failure)
-// leaves the outcome unknown. Its text is the daemon's message, unchanged.
+// RejectedError is the daemon's own not-OK answer to an action: the daemon
+// received it and replied with a failure. It is not proof that nothing
+// happened (a stop can fail after the interrupt was delivered, for instance);
+// it only rules out the transport ambiguity of a send or read failure, which
+// leaves even whether the daemon saw the action unknown. Its text is the
+// daemon's message, unchanged.
 type RejectedError struct{ Msg string }
 
 func (e *RejectedError) Error() string { return e.Msg }

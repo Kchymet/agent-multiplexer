@@ -86,8 +86,11 @@ func fixtureFiles(t *testing.T, id *Identity, proof string) map[string][]byte {
 		"token-response.json": js(TokenResponse{AccessToken: fixtureAccess, TokenType: "Bearer", ExpiresIn: 600, RefreshToken: fixtureRefresh,
 			Scope: "read steer", ClientID: fixtureClientID, ServerID: id.ServerID, GrantExpiresAt: fixtureNow.Unix() + 90*86400,
 			ResourceScope: ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"771951"}}}),
-		"token-error.json":       js(OAuthError{Error: OAuthInvalidGrant, Description: "the code or refresh token is invalid, expired, used or revoked"}),
-		"api-error.json":         js(APIError{Code: CodeAuthExpired, Error: "access token expired"}),
+		"token-error.json":        js(OAuthError{Error: OAuthInvalidGrant, Description: "the code or refresh token is invalid, expired, used or revoked"}),
+		"api-error.json":          js(APIError{Code: CodeAuthExpired, Error: "access token expired"}),
+		"api-error-capacity.json": js(APIError{Code: CodeCapacity, Error: errCapacity.Error()}),
+		"token-error-unavailable.json": js(OAuthError{Error: OAuthTemporarilyUnavail,
+			Description: "the grant store did not confirm the write; no token was returned, and the presented code or refresh token may already be consumed"}),
 		"sessions-response.json": js(sessions),
 		"history-response.json": js(HistoryResponse{SessionID: "e1deda", Runtime: "claude", Seq: 42, HeadSeq: 57, HasMore: true,
 			Events: []RuntimeEvent{{Type: hp.TypeText, ItemID: "msg_1", Direction: hp.DirOut, Payload: textEvent}}}),
@@ -203,7 +206,7 @@ func TestDirectFixtures(t *testing.T) {
 	// Every JSON fixture decodes strictly into its wire type.
 	strict := map[string]any{
 		"hello-request.json": &HelloRequest{}, "hello-response.json": &HelloResponse{}, "bundle.json": &Bundle{},
-		"token-response.json": &TokenResponse{}, "token-error.json": &OAuthError{}, "api-error.json": &APIError{},
+		"token-response.json": &TokenResponse{}, "token-error.json": &OAuthError{}, "api-error.json": &APIError{}, "api-error-capacity.json": &APIError{}, "token-error-unavailable.json": &OAuthError{},
 		"sessions-response.json": &SessionsResponse{}, "history-response.json": &HistoryResponse{},
 		"action-request-prompt.json": &ActionRequest{}, "action-request-stop.json": &ActionRequest{},
 		"action-response.json": &ActionResponse{}, "watch-auth.json": &WatchAuth{}, "watch-welcome.json": &WatchWelcome{},

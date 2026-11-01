@@ -92,6 +92,7 @@ const (
 	CodeOriginNotAllowed = "origin_not_allowed"
 	CodeProtocol         = "protocol_unsupported"
 	CodeRateLimited      = "rate_limited"
+	CodeCapacity         = "capacity_exhausted" // the grant's action records are full: enroll again
 	CodeUnavailable      = "unavailable"
 	CodeRejected         = "rejected"
 	CodeInternal         = "internal"

@@ -328,8 +328,12 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	case err != nil && strings.Contains(err.Error(), "client_kind"), err != nil && strings.Contains(err.Error(), "label"):
 		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, err.Error())
 	case err != nil:
+		// The store write failed. Whether the presented code or refresh token
+		// was consumed is unknown (a write can fail after its rename). Clients
+		// must not assume the old token is still usable; see docs/direct-access.md.
 		s.cfg.Logf("direct: token endpoint: %v", err)
-		writeOAuth(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail, "the grant store could not commit; nothing was issued")
+		writeOAuth(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail,
+			"the grant store did not confirm the write; no token was returned, and the presented code or refresh token may already be consumed")
 	default:
 		w.Header().Set("Pragma", "no-cache")
 		writeJSON(w, http.StatusOK, resp)
@@ -646,7 +650,9 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		writeAuthErr(w, err)
 		return
 	case errors.Is(err, errCapacity):
-		writeErr(w, http.StatusTooManyRequests, CodeRateLimited, err.Error())
+		// Not a temporary throttle: retrying will not help. The client must
+		// enroll again (a new grant starts with an empty record set).
+		writeErr(w, http.StatusConflict, CodeCapacity, err.Error())
 		return
 	case err != nil:
 		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not record the action; it was not executed")
@@ -671,6 +677,9 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Authority.FinishAction(l, req.IdemKey, true, "", "")
 		writeJSON(w, http.StatusOK, ActionResponse{OK: true})
 	case errors.As(err, &rejected):
+		// The daemon answered not-OK. That is a known answer, not proof of no
+		// side effect; it is recorded and replayed, never re-run. (For S1, a
+		// client repeating a stop under a new key is safe.)
 		s.cfg.Logf("direct: action %s on %s rejected: %v", req.Verb, sid, err)
 		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeRejected, "the daemon rejected the action")
 		writeErr(w, http.StatusUnprocessableEntity, CodeRejected, "the daemon rejected the action")

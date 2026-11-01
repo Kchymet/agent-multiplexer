@@ -742,7 +742,7 @@ func TestUnresolvedActionsAreKeptAndCapacityFailsClosed(t *testing.T) {
 	if w := do(s, "POST", PathSession+"/a1/actions", fresh.AccessToken, actionBody(VerbStop, "", "k1")); apiCode(t, w) != CodeIdemAmbiguous {
 		t.Fatalf("old ambiguous key re-executable: %s", w.Body)
 	}
-	if w := do(s, "POST", PathSession+"/a1/actions", fresh.AccessToken, actionBody(VerbStop, "", "k3")); w.Code != http.StatusTooManyRequests {
+	if w := do(s, "POST", PathSession+"/a1/actions", fresh.AccessToken, actionBody(VerbStop, "", "k3")); w.Code != http.StatusConflict || apiCode(t, w) != CodeCapacity {
 		t.Fatalf("capacity: %d %s", w.Code, w.Body)
 	}
 	if f.applies.Load() != 2 {
@@ -750,25 +750,36 @@ func TestUnresolvedActionsAreKeptAndCapacityFailsClosed(t *testing.T) {
 	}
 }
 
-// A poll that races token expiry must still close 4002, not drop the socket.
-func TestWatchExpiryDuringPollStillSendsCloseCode(t *testing.T) {
-	f := newFake(testRows()...)
-	a := openTestAuthority(t, t.TempDir(), Lifetimes{Access: time.Second}, nil)
-	srv, err := NewServer(Config{Authority: a, Backend: f, Endpoints: []string{testEndpoint},
-		WatchPoll: time.Millisecond, Revalidate: time.Hour, Keepalive: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { r.Host = testHost; srv.ServeHTTP(w, r) }))
-	t.Cleanup(ts.Close)
-	for range 5 {
-		tok := enroll(t, a, []string{PermRead}, allSessions)
-		f.blockSnapshot.Store(false)
-		conn := dialWatch(t, ts, "")
-		_ = conn.WriteJSON(WatchAuth{Type: "auth", AccessToken: tok.AccessToken})
-		go func() { time.Sleep(300 * time.Millisecond); f.blockSnapshot.Store(true) }() // a poll is in flight at expiry
-		if code, reason := closeCode(t, conn); code != CloseAuthExpired || reason != CodeAuthExpired {
-			t.Fatalf("close: %d %s", code, reason)
-		}
+// An inventory read in flight when the lease ends must still yield the strict
+// auth close code, not a dropped socket. The fake signals once Snapshot has
+// entered and is blocked; the lease then ends by expiry or revocation.
+func TestWatchLeaseEndDuringSnapshotSendsCloseCode(t *testing.T) {
+	for _, end := range []string{"expiry", "revoke"} {
+		t.Run(end, func(t *testing.T) {
+			f := newFake(testRows()...)
+			f.blockSnapshot.Store(true)
+			a := openTestAuthority(t, t.TempDir(), Lifetimes{Access: 2 * time.Second}, nil)
+			srv := newTestServer(t, a, f)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { r.Host = testHost; srv.ServeHTTP(w, r) }))
+			t.Cleanup(ts.Close)
+			tok := enroll(t, a, []string{PermRead}, allSessions)
+			conn := dialWatch(t, ts, "")
+			_ = conn.WriteJSON(WatchAuth{Type: "auth", AccessToken: tok.AccessToken})
+			select {
+			case <-f.snapBlocked:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Snapshot never entered")
+			}
+			wantCode, wantReason := CloseAuthExpired, CodeAuthExpired
+			if end == "revoke" {
+				wantCode, wantReason = CloseAuthRevoked, CodeAuthRevoked
+				if err := a.Revoke(tok.ClientID, "test"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code, reason := closeCode(t, conn); code != wantCode || reason != wantReason {
+				t.Fatalf("close: %d %s", code, reason)
+			}
+		})
 	}
 }

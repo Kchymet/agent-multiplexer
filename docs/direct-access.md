@@ -169,6 +169,13 @@ grant_type=urn:amux:params:oauth:grant-type:enrollment-code&code=…&client_labe
 
 **Errors.** `{"error":"invalid_request"|"invalid_grant"|"unsupported_grant_type"|"temporarily_unavailable"}`.
 
+| Status | `error` | Was the presented code or refresh token consumed? | Client action |
+| --- | --- | --- | --- |
+| 400 | `invalid_request`, `unsupported_grant_type` | No: refused before the grant store | Fix the request |
+| 400 | `invalid_grant` | It is unusable, whether unknown, expired, used or revoked. Reuse of a consumed refresh token also revokes the grant | Enroll again |
+| 429 | `temporarily_unavailable`, with `Retry-After` | No: the per-source limiter refused it before the grant store | Wait, then retry with the same token |
+| 503 | `temporarily_unavailable` | **Unknown**: the store write did not confirm, and it may have committed after its rename. No token was returned ([fixture](direct/fixtures/v1/token-error-unavailable.json)) | Do **not** assume the old token still works and do not retry with it automatically; report "reauthorization required" |
+
 **Rules:**
 
 - **Secrets.** Never put a secret in a URL. A query string on the token
@@ -218,8 +225,9 @@ cookies.
 | 409 | `idem_in_progress` | — |
 | 409 | `idem_ambiguous` | — |
 | 421 | `endpoint_not_bound` | — |
-| 422 | `rejected` | The daemon refused the action |
+| 422 | `rejected` | The daemon answered not-OK. This is not proof of no side effect (a stop can fail after the interrupt was delivered); repeating a stop is safe |
 | 422 | `idem_conflict` | — |
+| 409 | `capacity_exhausted` | The grant holds too many unresolved or recent actions; retrying will not help. Enroll again ([fixture](direct/fixtures/v1/api-error-capacity.json)) |
 | 429 | `rate_limited` | — |
 | 503 | `unavailable` | — |
 
@@ -245,13 +253,15 @@ body.
 - **During execution.** Once handed to the daemon, the call runs under a
   60-second execution bound. Token expiry and client disconnect do not cancel
   it; revocation does.
-- **Outcome known.** A daemon refusal, or a failure before the daemon was
-  reached, is recorded as a known outcome and replayed for the same key.
+- **Outcome known.** The daemon's not-OK answer, or a failure before the
+  daemon was reached, is recorded and replayed for the same key. A not-OK
+  answer is the daemon's report, not a guarantee that nothing happened.
 - **Outcome unknown.** Cancellation, or a transport failure after dispatch,
   is recorded as ambiguous. That key never executes again, and its records are
   never pruned.
 - **Capacity.** A grant can hold 1,024 records at most. Unresolved ones count
-  toward that, so at the limit new actions fail closed with `429`.
+  toward that, so at the limit new actions fail closed with `409
+  capacity_exhausted`, and the client enrolls again.
 - **Crashes.** Exactly-once execution across a process crash is not claimed.
 
 **Transcripts.** They use amux's own sequence space and never reuse a relay

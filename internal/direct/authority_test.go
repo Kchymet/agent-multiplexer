@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -416,5 +417,41 @@ func TestIdentityChangeOnDiskRevokesGrants(t *testing.T) {
 	b := openTestAuthority(t, root, Lifetimes{}, nil)
 	if _, err := b.Refresh(tok.RefreshToken); !errors.Is(err, errInvalidCode) {
 		t.Fatalf("grant from the old identity: %v", err)
+	}
+}
+
+// A revoke whose write fails reports failure with repair-before-restart
+// guidance, still refuses the grant in the running process, and becomes
+// durable on the next successful commit.
+func TestRevokePersistenceFailure(t *testing.T) {
+	root := t.TempDir()
+	a, err := OpenAuthority(root, Lifetimes{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := enroll(t, a, []string{PermRead}, allSessions)
+	failingWrites(a, false)
+	resp := Administer(a, nil, AdminRequest{Op: OpRevoke, ClientID: tok.ClientID})
+	if resp.OK || !strings.Contains(resp.Error, "NOT persisted") || !strings.Contains(resp.Error, "before restarting") {
+		t.Fatalf("admin response: %+v", resp)
+	}
+	if _, err := a.Admit(context.Background(), tok.AccessToken, PermRead); !errors.Is(err, errAuthRevoked) {
+		t.Fatalf("running process still admits the grant: %v", err)
+	}
+	if _, err := a.Refresh(tok.RefreshToken); !errors.Is(err, errInvalidCode) {
+		t.Fatalf("running process still refreshes the grant: %v", err)
+	}
+	// Storage repaired: retrying the revoke commits it.
+	a.st.write = writeAtomic
+	if resp := Administer(a, nil, AdminRequest{Op: OpRevoke, ClientID: tok.ClientID}); !resp.OK {
+		t.Fatalf("retried revoke: %+v", resp)
+	}
+	a.Close()
+	b := openTestAuthority(t, root, Lifetimes{}, nil)
+	if _, err := b.Refresh(tok.RefreshToken); !errors.Is(err, errInvalidCode) {
+		t.Fatalf("revocation not durable after reopen: %v", err)
+	}
+	if b.List()[0].RevokedAt == 0 {
+		t.Fatal("reopened registry shows the grant active")
 	}
 }

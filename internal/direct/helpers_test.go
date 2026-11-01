@@ -36,10 +36,11 @@ type fakeBackend struct {
 	batches       map[string]chan hp.RuntimeEventBatch // per session: streams never share a channel
 	applyErr      error
 	streamStarted chan struct{}
+	snapBlocked   chan struct{} // receives when a blocking Snapshot has entered
 }
 
 func newFake(rows ...core.Session) *fakeBackend {
-	return &fakeBackend{rows: rows, applied: make(chan core.Action, 16), batches: map[string]chan hp.RuntimeEventBatch{}, streamStarted: make(chan struct{}, 4)}
+	return &fakeBackend{rows: rows, applied: make(chan core.Action, 16), batches: map[string]chan hp.RuntimeEventBatch{}, streamStarted: make(chan struct{}, 4), snapBlocked: make(chan struct{}, 16)}
 }
 
 // feed returns the batch channel of one session's stream.
@@ -61,6 +62,10 @@ func (f *fakeBackend) setRows(rows ...core.Session) {
 func (f *fakeBackend) Snapshot(ctx context.Context) ([]core.Session, error) {
 	f.snapshots.Add(1)
 	if f.blockSnapshot.Load() {
+		select {
+		case f.snapBlocked <- struct{}{}:
+		default:
+		}
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
