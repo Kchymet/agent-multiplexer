@@ -694,6 +694,10 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 	previousDone := s.rpcDone
 	previousCancel := s.runCancel
 	s.reconnecting = true
+	// Invalidate immediately as well as after the reader join below. If the
+	// reconnect exits before that join (cancellation or process loss), clearing
+	// reconnecting must not re-expose a pre-gap observation as authoritative.
+	s.goalObserved = false
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

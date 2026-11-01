@@ -347,6 +347,34 @@ func TestManagerReconnectRetiresOldGoalCallbackBeforeUnknownReset(t *testing.T) 
 	if err := oldRPC.close(); err != nil {
 		t.Fatal(err)
 	}
+	waitReconnecting := func(what string) {
+		deadline := time.Now().Add(time.Second)
+		for {
+			sup.mu.Lock()
+			joining := sup.reconnecting
+			sup.mu.Unlock()
+			if joining {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s reconnect did not begin while old callback was gated", what)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	failedCtx, cancelFailed := context.WithCancel(context.Background())
+	failed := make(chan error, 1)
+	go func() { failed <- sup.reconnect(failedCtx) }()
+	waitReconnecting("cancelled")
+	cancelFailed()
+	if err := <-failed; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled old-reader join = %v, want context cancellation", err)
+	}
+	if _, _, known := sup.ObservedGoal(); known {
+		t.Fatal("failed reconnect re-exposed pre-gap goal observation")
+	}
+
 	reconnected := make(chan struct {
 		sup *Supervisor
 		err error
@@ -358,19 +386,7 @@ func TestManagerReconnectRetiresOldGoalCallbackBeforeUnknownReset(t *testing.T) 
 			err error
 		}{s, err}
 	}()
-	deadline := time.Now().Add(time.Second)
-	for {
-		sup.mu.Lock()
-		joining := sup.reconnecting
-		sup.mu.Unlock()
-		if joining {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("reconnect did not begin while old callback was gated")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitReconnecting("replacement")
 	if _, ok := m.Get("goal-gap"); ok || sup.live() {
 		t.Fatal("reconnecting supervisor remained live through retired-reader gap")
 	}
@@ -403,7 +419,7 @@ func TestManagerReconnectRetiresOldGoalCallbackBeforeUnknownReset(t *testing.T) 
 		"threadId": "thr_1",
 		"goal":     map[string]any{"threadId": "thr_1", "objective": "new", "status": GoalActive, "createdAt": 2},
 	})
-	deadline = time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second)
 	for {
 		state, present, known := sup.ObservedGoal()
 		if present && known && state.Status == GoalActive && state.Objective == "new" {
@@ -413,6 +429,48 @@ func TestManagerReconnectRetiresOldGoalCallbackBeforeUnknownReset(t *testing.T) 
 			t.Fatalf("replacement observation did not become known: %+v present=%t known=%t", state, present, known)
 		}
 		time.Sleep(time.Millisecond)
+	}
+
+	lateEntered := make(chan struct{})
+	lateRelease := make(chan struct{})
+	var lateEnteredOnce, lateReleaseOnce sync.Once
+	releaseLateCallback := func() { lateReleaseOnce.Do(func() { close(lateRelease) }) }
+	defer releaseLateCallback()
+	sup.beforeGoalRecord = func() {
+		lateEnteredOnce.Do(func() { close(lateEntered) })
+		<-lateRelease
+	}
+	second.pushNotify("thread/goal/updated", map[string]any{
+		"threadId": "thr_1",
+		"goal":     map[string]any{"threadId": "thr_1", "objective": "late-old", "status": GoalPaused, "createdAt": 3},
+	})
+	select {
+	case <-lateEntered:
+	case <-time.After(time.Second):
+		t.Fatal("late old-reader goal callback did not enter gate")
+	}
+	sup.mu.Lock()
+	lateRPC, lateDone := sup.rpc, sup.rpcDone
+	sup.mu.Unlock()
+	if err := lateRPC.close(); err != nil {
+		t.Fatal(err)
+	}
+	lateCtx, cancelLate := context.WithCancel(context.Background())
+	lateFailed := make(chan error, 1)
+	go func() { lateFailed <- sup.reconnect(lateCtx) }()
+	waitReconnecting("late-cancelled")
+	cancelLate()
+	if err := <-lateFailed; !errors.Is(err, context.Canceled) {
+		t.Fatalf("late cancelled old-reader join = %v, want context cancellation", err)
+	}
+	releaseLateCallback()
+	select {
+	case <-lateDone:
+	case <-time.After(time.Second):
+		t.Fatal("late old reader did not retire after callback release")
+	}
+	if state, present, known := sup.ObservedGoal(); !present || known || state.Status != GoalPaused || state.Objective != "late-old" {
+		t.Fatalf("released retired-reader observation = %+v present=%t known=%t, want retained but unknown", state, present, known)
 	}
 }
 

@@ -81,12 +81,20 @@ func (s *Supervisor) Goal() (GoalState, bool) {
 // make a retained value unknown until another notification is observed.
 func (s *Supervisor) ObservedGoal() (state GoalState, present, known bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	state, present = goalState(s.goal)
 	// Manager.Get/live also exclude a reconnecting supervisor. Keep the direct
 	// observation surface fail-closed as well: an old reader callback may still
 	// be retiring, and only the replacement reader may make the state known.
-	return state, present, s.goalObserved && !s.reconnecting
+	known = s.goalObserved && !s.reconnecting
+	rpc := s.rpc
+	s.mu.Unlock()
+	// Match live's lock order: never hold Supervisor.mu while taking rpc.mu. A
+	// callback from a retired reader may update the retained status after a
+	// cancelled join, but a non-live transport cannot make that value known.
+	if !known || rpc == nil || !rpc.live() {
+		known = false
+	}
+	return state, present, known
 }
 
 func goalState(g *threadGoal) (GoalState, bool) {
