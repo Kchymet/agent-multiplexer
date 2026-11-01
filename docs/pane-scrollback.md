@@ -108,6 +108,20 @@ Codex 0.157.1 has two transcript modes (`codex-rs/tui/src/transcript_mode.rs`):
   its viewport moves. Every committed row scrolls off row 0 and lands in
   primary history exactly once, losslessly.
 
+### Reopening a long-running pane
+
+The engine replays only the last 256 KiB of a pane's output to a client that
+opens it. Codex sets the alternate screen and mouse reporting exactly once at
+startup, so once its repaints outgrow that tail a mirror rebuilt from the tail
+alone sat on the primary screen without mouse reporting: the wheel stayed
+local with no history to scroll, while Page Up/Down still reached Codex. The
+engine therefore follows each pane's DEC private modes (`internal/termmodes`,
+on the emulator's own parser) and, when the ring has been trimmed, restates
+them ahead of the replay. Modes the program turned off or reset (RIS) stay off.
+The daemon's and remote provider's slow-consumer resyncs, and `vterm.Feed`'s
+own backlog trim, still restart a mirror from a bare tail; they fire only for
+a client more than 4 MiB behind.
+
 ## Viewport lifecycle
 
 The viewport returns to live whenever the program or the user moves on:

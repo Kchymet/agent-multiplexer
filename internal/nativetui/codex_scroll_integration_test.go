@@ -20,6 +20,7 @@ import (
 	"github.com/creack/pty"
 
 	"amux/internal/codexcfg"
+	"amux/internal/termmodes"
 	"amux/internal/vterm"
 )
 
@@ -46,8 +47,29 @@ func TestCodexEmbeddedScroll(t *testing.T) {
 }
 
 type scrollCapture struct {
-	mu   sync.Mutex
-	data []byte
+	mu      sync.Mutex
+	data    []byte
+	mirrors []*vterm.Terminal
+}
+
+// feed records child output and hands it to every attached mirror in the same
+// critical section, so a mirror attached mid-stream sees each byte exactly once.
+func (c *scrollCapture) feed(b []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data = append(c.data, b...)
+	for _, m := range c.mirrors {
+		m.Feed(b)
+	}
+}
+
+// attach starts a new mirror the way a reattaching client does: it is fed
+// replay(output so far) and then every later byte.
+func (c *scrollCapture) attach(m *vterm.Terminal, replay func([]byte) []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m.Feed(replay(append([]byte(nil), c.data...)))
+	c.mirrors = append(c.mirrors, m)
 }
 
 func (c *scrollCapture) write(b []byte) {
@@ -123,6 +145,7 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 	}
 	var raw, input scrollCapture
 	term := vterm.NewRemote(100, 28, func(b []byte) { input.write(b); _, _ = f.Write(b) }, nil)
+	raw.mirrors = []*vterm.Terminal{term}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -130,8 +153,7 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 		for {
 			n, err := f.Read(b)
 			if n > 0 {
-				raw.write(b[:n])
-				term.Feed(b[:n])
+				raw.feed(b[:n])
 			}
 			if err != nil {
 				return
@@ -146,7 +168,9 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 	m.terms = map[paneKey]*vterm.Terminal{{m.attached, tabAgent}: term}
 	frame := func() string { return ansi.Strip(term.Render()) }
 	evidence := os.Getenv("AMUX_CODEX_SCROLL_EVIDENCE")
-	save := func(name string) {
+	// saveFrom records the view of the given model, so the reattach probe saves
+	// its own mirror's frames rather than the original pane's.
+	saveFrom := func(view *model, name string) {
 		t.Helper()
 		if evidence == "" {
 			return
@@ -155,7 +179,7 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		data := map[string][]byte{name + ".ansi": []byte(m.View()), name + ".txt": []byte(ansi.Strip(m.View())), "pty.raw": raw.bytes(), "input.raw": input.bytes()}
+		data := map[string][]byte{name + ".ansi": []byte(view.View()), name + ".txt": []byte(ansi.Strip(view.View())), "pty.raw": raw.bytes(), "input.raw": input.bytes()}
 		args, _ := json.MarshalIndent(argv, "", "  ")
 		data["argv.json"] = args
 		for file, b := range data {
@@ -164,6 +188,7 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 			}
 		}
 	}
+	save := func(name string) { t.Helper(); saveFrom(m, name) }
 	await := func(label string, ok func() bool) {
 		t.Helper()
 		deadline := time.Now().Add(40 * time.Second)
@@ -275,6 +300,10 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 		ev.Shift = false
 		m.handleMouse(ev)
 		await("reporting wheel reaches child", func() bool { return bytes.Contains(input.bytes()[len(before):], []byte("\x1b[<64;3;3M")) })
+		// The bytes alone do not prove a scroll: Codex must move its transcript.
+		await("reporting wheel scrolls Codex transcript", func() bool {
+			return strings.Contains(frame(), "Back to bottom") && !strings.Contains(frame(), "CODEX-HISTORY-100")
+		})
 		stable()
 		if !strings.Contains(frame(), draft+"x") {
 			t.Fatal("reporting wheel changed draft")
@@ -291,5 +320,108 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 	}
 	await("new child output returns live", func() bool { return term.Viewport().Offset == 0 && strings.Contains(frame(), "NEXT-HISTORY-004") })
 	save("output-live")
+	if mode == "always" {
+		reattachCodexWheel(t, f, &raw, &input, saveFrom)
+	}
 	t.Logf("real Codex 0.157.1 %s: recovered rendered marker 070; draft preserved; local wheel and Ctrl+U/D sent no input; half-page keys recovered earlier content and restored draft; indicator and input/output live returns verified", mode)
+}
+
+// reattachCodexWheel opens a second mirror the way the native TUI reopens a
+// long-running pane: from the engine's replay tail, which no longer holds the
+// startup bytes where Codex enables the alternate screen and mouse reporting
+// (it sends them exactly once). A plain wheel over the reattached pane must
+// still reach Codex and visibly scroll its transcript, like Page Up does.
+func reattachCodexWheel(t *testing.T, f *os.File, raw, input *scrollCapture, saveFrom func(*model, string)) {
+	t.Helper()
+	re := vterm.NewRemote(100, 28, func(b []byte) { input.write(b); _, _ = f.Write(b) }, nil)
+	t.Cleanup(func() { _ = re.Close() })
+	raw.attach(re, codexReplayTail)
+	// PaneOpen forces a repaint by resizing (see engine/local); do the same.
+	_ = pty.Setsize(f, &pty.Winsize{Cols: 99, Rows: 28})
+	time.Sleep(300 * time.Millisecond)
+	_ = pty.Setsize(f, &pty.Winsize{Cols: 100, Rows: 28})
+	m := railModel(1, 31)
+	m.w = 127
+	m.attached = "ag00"
+	m.focus = focusAgent
+	m.terms = map[paneKey]*vterm.Terminal{{m.attached, tabAgent}: re}
+	frame := func() string { return ansi.Strip(re.Render()) }
+	save := func(name string) { t.Helper(); saveFrom(m, name) }
+	await := func(label string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if ok() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		save("reattach-failure")
+		t.Fatalf("reattached %s: viewport=%+v mouse=%v\n%s", label, re.Viewport(), re.MouseTracked(), frame())
+	}
+	live := func() bool {
+		return strings.Contains(frame(), "NEXT-HISTORY-100") && !strings.Contains(frame(), "Back to bottom")
+	}
+	scrolled := func() bool {
+		return strings.Contains(frame(), "Back to bottom") && !strings.Contains(frame(), "NEXT-HISTORY-100")
+	}
+	await("repaint shows live transcript", live)
+	const draft = "REATTACH-DRAFT"
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(draft)})
+	await("draft in composer", func() bool { return strings.Contains(frame(), "› "+draft) })
+	keepsDraft := func(step string) {
+		t.Helper()
+		if !strings.Contains(frame(), "› "+draft) {
+			save("reattach-failure")
+			t.Fatalf("reattached %s changed the draft:\n%s", step, frame())
+		}
+	}
+	save("reattach-live")
+	if v := re.Viewport(); !v.AltScreen || !re.MouseTracked() {
+		t.Fatalf("reattached mirror alt=%v mouse=%v; replay lost Codex's modes", v.AltScreen, re.MouseTracked())
+	}
+
+	before := input.bytes()
+	m.handleMouse(paneWheel(tea.MouseButtonWheelUp))
+	await("plain wheel up scrolls Codex transcript", scrolled)
+	if !bytes.Contains(input.bytes()[len(before):], []byte("\x1b[<64;")) {
+		t.Fatalf("reattached wheel did not reach Codex as an SGR report: %q", input.bytes()[len(before):])
+	}
+	if re.Viewport().Offset != 0 {
+		t.Fatal("reporting wheel moved amux's local viewport")
+	}
+	keepsDraft("wheel up")
+	save("reattach-wheel-up")
+	m.handleMouse(paneWheel(tea.MouseButtonWheelDown))
+	await("plain wheel down returns Codex to live", live)
+	keepsDraft("wheel down")
+
+	// The user's contrast: raw Page Up/Down are keys Codex handles itself.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyPgUp})
+	await("page up scrolls Codex transcript", scrolled)
+	keepsDraft("page up")
+	save("reattach-pgup")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyPgDown})
+	await("page down returns Codex to live", live)
+	keepsDraft("page down")
+	save("reattach-pgdown")
+	t.Logf("reattached from a replay tail without Codex's startup modes: plain wheel and raw PgUp/PgDn moved Codex's rendered transcript both ways; draft preserved")
+}
+
+// codexReplayTail is what the engine's replay ring holds once Codex's output
+// has outgrown it: the tail from the first synchronized frame after startup.
+// Like the engine's Subscribe, it restates the tracked terminal modes first.
+func codexReplayTail(all []byte) []byte {
+	setup := bytes.Index(all, []byte("\x1b[?1003h"))
+	frame := bytes.Index(all[max(setup, 0):], []byte("\x1b[?2026h"))
+	if setup < 0 || frame < 0 {
+		panic("Codex output lacks its startup modes or a synchronized frame")
+	}
+	tail := all[setup+frame:]
+	if bytes.Contains(tail, []byte("\x1b[?1000h")) || bytes.Contains(tail, []byte("\x1b[?1049h")) {
+		panic("Codex re-sent its startup modes; the tail would not exercise their loss")
+	}
+	var modes termmodes.Tracker
+	modes.Write(all)
+	return append(modes.Preamble(), tail...)
 }
