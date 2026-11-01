@@ -45,8 +45,10 @@ type Conn interface {
 }
 
 // ErrUnavailable marks a call that never reached an authenticated daemon (no
-// socket, failed TLS pin or host proof). Its text is what relay peers have
-// always seen, so it is kept verbatim.
+// socket, failed TLS pin or host proof). Its text is the provider's existing
+// "daemon unreachable: …" error, kept unchanged for Harness peers. The legacy
+// mux previously prefixed the same failure "authenticate primary daemon: …";
+// it now reports this text instead (cosmetic; no caller matches on it).
 var ErrUnavailable = errors.New("daemon unreachable")
 
 // PaneWriteTimeout bounds one pane input or resize write on a relay pane.

@@ -31,7 +31,7 @@ profile, not stable machine ids.
 
 | Path | Access | Owner in amux |
 | --- | --- | --- |
-| Native TUI and CLI → local daemon | internal native path (not a descriptor route) | `internal/hostbackend` → `daemon.DialContext` |
+| Native TUI → local daemon | internal native path (not a descriptor route) | `internal/hostbackend` → `daemon.DialContext` |
 | Harness web and Android → this host's sessions | `harness-relay`, through Harness | `amux provide`: `provider.HarnessRelay` transport + `internal/hostbackend` operations |
 | Legacy compatibility relay (`amux serve`) | legacy shared-token mux | `internal/mux` → `internal/hostbackend` |
 | `direct` to amux | **not implemented**: no listener, endpoint, enrollment or credential exists | none |
@@ -47,8 +47,10 @@ alias for this registration, not a global machine id.
 
 `internal/hostbackend.HostDaemon` holds the session operations every transport
 needs: inventory snapshot, lifecycle/control apply, runtime-record
-resolution, account connections and pane streams. Transports reach the local
-daemon only through it:
+resolution, account connections and pane streams. The provider, the legacy
+mux and the native TUI reach the local daemon only through it. Other CLI
+commands still dial the daemon (or session RPC) directly; this seam does not
+cover them yet.
 
 - **Provider (production Harness relay):** `cmd/amux/provide.go`
   `wireHostBackend` routes the provider's session, verb, runtime-event and
