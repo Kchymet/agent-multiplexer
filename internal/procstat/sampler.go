@@ -18,8 +18,11 @@ import (
 const (
 	DefaultInterval = 3 * time.Second
 	DefaultTopN     = 5
-	// clockTicks is USER_HZ, the unit of /proc/<pid>/stat times. It is 100 on
-	// every Linux ABI Go supports.
+	// clockTicks is USER_HZ, the unit of /proc/<pid>/stat times. The kernel
+	// converts its internal tick rate (CONFIG_HZ, which does vary) to USER_HZ
+	// before exporting it, and USER_HZ is a fixed ABI constant of 100 on every
+	// architecture Go supports (only alpha and ia64 differed). Reading it via
+	// sysconf(_SC_CLK_TCK) would need cgo for the same answer.
 	clockTicks = 100
 	// metaTTL bounds how stale a cached cmdline/cwd may get. Exec changes comm,
 	// which invalidates the cache at once; the TTL catches `cd` and same-name
@@ -48,6 +51,11 @@ type Config struct {
 	// SelfNames are executable basenames that count as amux itself
 	// (default {"amux"}).
 	SelfNames []string
+	// Owners, when set, reports every stored session's directory and owner.
+	// The sampler calls it at most every ownersTTL, on its own goroutine, and
+	// attributes a process under one of those directories to its stored owner
+	// before falling back to parsing the sandbox path.
+	Owners func() []Owner
 	// PageSize converts stat's rss pages to bytes (os.Getpagesize).
 	PageSize int
 	// CPUs overrides the reported CPU count (runtime.NumCPU).
@@ -55,6 +63,16 @@ type Config struct {
 	// Now overrides the clock (tests).
 	Now func() time.Time
 }
+
+// Owner is one stored session directory and who owns it (Config.Owners).
+type Owner struct {
+	Dir       string // the session's stored directory (sandbox / worktree base)
+	Session   string // session id
+	Workgroup string // its workgroup root id; empty means the session is its own group
+}
+
+// ownersTTL is how often Config.Owners is consulted.
+const ownersTTL = 10 * time.Second
 
 // procKey identifies one process instance: a pid reused by a new process has a
 // different starttime.
@@ -95,6 +113,7 @@ type Sampler struct {
 	meta       map[procKey]*procMeta
 	pss        map[procKey]pssEntry
 	memTotal   uint64 // read once; MemTotal does not change
+	ownersAt   time.Time
 }
 
 // New returns a Sampler; it does nothing until Run or Sample is called.
@@ -171,7 +190,13 @@ func (s *Sampler) sampleMeasured() {
 	snap.Self.Sampler.WallMS = ms(wall)
 	if cpuOK {
 		snap.Self.Sampler.CPUMS = ms(cpu1 - cpu0)
-		snap.Self.Sampler.CPUPercent = round1(100 * float64(cpu1-cpu0) / float64(s.cfg.Interval))
+		// Cost over the time this sample actually covers; the configured
+		// interval stands in only for the first sample.
+		window := time.Duration(snap.WindowMS) * time.Millisecond
+		if window <= 0 {
+			window = s.cfg.Interval
+		}
+		snap.Self.Sampler.CPUPercent = round1(100 * float64(cpu1-cpu0) / float64(window))
 	}
 	s.latest = snap
 }
@@ -218,6 +243,7 @@ func (s *Sampler) sample() (Snapshot, error) {
 	if s.memTotal == 0 {
 		s.memTotal = s.rd.memTotal()
 	}
+	s.refreshOwners(now)
 	uptime, uptimeOK := s.rd.uptimeSeconds()
 	window := 0.0 // seconds
 	havePrev := s.prevUptime > 0 || !s.prevAt.IsZero()
@@ -404,6 +430,20 @@ func resolve(p *live, procs map[int]*live) claim {
 	return p.owner
 }
 
+// refreshOwners re-reads Config.Owners when it is due and re-attributes the
+// cached processes against it (no procfs reads: claims are derived from the
+// cached cwd/argv).
+func (s *Sampler) refreshOwners(now time.Time) {
+	if s.cfg.Owners == nil || (!s.ownersAt.IsZero() && now.Sub(s.ownersAt) < ownersTTL) {
+		return
+	}
+	s.ownersAt = now
+	s.attr = s.attr.withOwners(s.cfg.Owners())
+	for _, m := range s.meta {
+		m.claim = s.attr.direct(m.comm, m.cwd, m.argv)
+	}
+}
+
 func (s *Sampler) metaFor(name string, key procKey, comm string, now time.Time) *procMeta {
 	// Spread refreshes over a few samples rather than rereading every process
 	// in the same one.
@@ -482,7 +522,7 @@ func shortCmd(argv []string) string {
 	if len(argv) == 0 {
 		return ""
 	}
-	parts := append([]string{filepath.Base(argv[0])}, argv[1:]...)
+	parts := redactArgv(append([]string{filepath.Base(argv[0])}, argv[1:]...))
 	s := strings.Join(parts, " ")
 	if len(s) > cmdMax {
 		// Cut on a rune boundary.

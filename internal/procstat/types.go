@@ -11,19 +11,26 @@
 //
 // # Attribution
 //
-// A process is claimed directly when its cwd or its cmdline contains an amux
-// sandbox path:
+// A process is claimed directly when its cwd or one of its arguments lies under
+// a session directory the daemon has stored; that stored owner (session id and
+// workgroup) is authoritative. Failing that, the sandbox path's shape is used:
 //
 //   - <data>/sessions/<wg>/<agent>/...       -> session <agent> in workgroup <wg>
 //   - <data>/sessions/<wg>/coordinator/...   -> session <wg> (the coordinator)
 //   - <data>/workspaces/<wg>/...             -> session <wg> (workgroup level)
 //
-// cwd is checked before cmdline. A process whose executable is amux and that is
-// not inside a sandbox is claimed by amux itself (Self), with a Role taken from
-// its subcommand. Every other process inherits the claim of its nearest
-// claimed ancestor, so an agent's compiler, emulator or gradle daemon counts
-// against the agent that started it, and the daemon's own git/gh children count
-// as amux overhead. A process with no claimed ancestor is Unattributed.
+// cwd is checked before arguments; argument matching is by substring, so a
+// process that merely names a sandbox path (an editor opening an agent's file)
+// counts against that agent. Long-lived amux processes (daemon, provide,
+// serve, the TUI) are always amux's own (Self), whatever cwd they inherited;
+// other amux invocations (an agent's hooks) belong to the sandbox they run in,
+// else to Self. Every other process inherits the claim of its nearest claimed
+// ancestor, so an agent's compiler, emulator or gradle daemon counts against
+// the agent that started it, and the daemon's own git/gh children count as
+// amux overhead. A process with no claimed ancestor is Unattributed.
+//
+// Published command lines (Process.Cmd) have secret-looking flag values,
+// key=value pairs, auth headers and well-known token shapes redacted.
 //
 // # Units
 //
