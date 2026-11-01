@@ -193,12 +193,12 @@ func (m *model) renderSelectedPane(t *vterm.Terminal) string {
 	m.validateSelection()
 	s := m.selection
 	if s == nil || !s.moved {
-		return m.renderPane(t)
+		return t.Render()
 	}
 	snap := t.Snapshot()
 	if snap.Revision != s.snapshot.Revision {
 		m.clearSelection()
-		return m.renderPane(t)
+		return t.Render()
 	}
 	for _, span := range selectedCells(s).Spans {
 		for x := span.Start; x < span.End; x++ {
@@ -216,15 +216,4 @@ func (m *model) renderSelectedPane(t *vterm.Terminal) string {
 		lines[y] = line + strings.Repeat(" ", max(0, snap.Cols-ansi.StringWidth(line)))
 	}
 	return strings.Join(lines, "\n")
-}
-
-// renderPane draws the agent pane, with the child's text cursor while the pane
-// has keyboard focus (the way a terminal multiplexer shows the cursor only in
-// its active pane). The outer terminal's cursor stays hidden under Bubble Tea,
-// so without this an agent relying on the hardware cursor shows none.
-func (m *model) renderPane(t *vterm.Terminal) string {
-	if m.focus == focusAgent {
-		return t.RenderCursor()
-	}
-	return t.Render()
 }

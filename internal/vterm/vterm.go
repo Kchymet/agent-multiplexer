@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync"
 
-	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
@@ -64,11 +63,11 @@ type Terminal struct {
 
 	// The child's text-cursor state: DECTCEM visibility (?25h/l, reported
 	// per active screen by the emulator's CursorVisibility callback) and the
-	// DECSCUSR shape (CSI Ps SP q). The outer terminal's own cursor stays
-	// hidden while Bubble Tea owns the screen, so RenderCursor paints this
-	// cursor into the pane itself. Guarded by t.mu like mouseModes.
+	// raw DECSCUSR parameter (CSI Ps SP q; 0 = the terminal's default shape).
+	// The embedder forwards both to the outer terminal's hardware cursor (see
+	// Cursor). Guarded by t.mu like mouseModes.
 	cursorHidden bool
-	cursorShape  vt.CursorStyle
+	cursorStyle  int
 
 	// Remote mode (set by NewRemote): there is no local PTY; input and the
 	// emulator's query replies are routed through onInput, and resizes are
@@ -145,7 +144,18 @@ func New(cols, rows int) *Terminal {
 		EnableMode:       func(m ansi.Mode) { t.noteMode(m, true) },
 		DisableMode:      func(m ansi.Mode) { t.noteMode(m, false) },
 		CursorVisibility: func(visible bool) { t.cursorHidden = !visible },
-		CursorStyle:      func(style vt.CursorStyle, _ bool) { t.cursorShape = style },
+	})
+	// DECSCUSR: keep the child's raw parameter rather than the emulator's
+	// decoded style, which folds 0 ("terminal default") into 1 (blinking
+	// block). Forwarding 0 as 0 keeps the user's own configured cursor shape.
+	// Falls through so the emulator tracks the style as well.
+	t.emu.RegisterCsiHandler(ansi.Command(0, ' ', 'q'), func(params ansi.Params) bool {
+		n, _, _ := params.Param(0, 0)
+		if n < 0 || n > 6 {
+			n = 0
+		}
+		t.cursorStyle = n
+		return false
 	})
 	// The emulator has no OSC 52 handler and silently drops the sequence, which
 	// is how agents copy a mouse selection; hand writes to the embedder, which
@@ -394,61 +404,33 @@ func (t *Terminal) Render() string {
 	return pad(raw, cols, rows)
 }
 
-// RenderCursor is Render with the child's text cursor drawn into the block,
-// for the pane that has keyboard focus. Bubble Tea keeps the real terminal's
-// cursor hidden and paints the pane from cell contents alone, so an agent that
-// relies on the hardware cursor — Codex's composer, Claude Code's vim INSERT
-// mode (which switches to a bar via DECSCUSR) — would otherwise show no cursor
-// at all. The cursor is drawn only on the live screen and only while the child
-// has it enabled (DECTCEM). A cell cannot hold a thin bar without hiding the
-// character under it, so block and bar shapes both render as a reverse-video
-// cell; the underline shape renders as an underlined cell.
-func (t *Terminal) RenderCursor() string {
-	t.mu.Lock()
-	cols, rows := t.cols, t.rows
-	var raw string
-	switch {
-	case t.offset > 0:
-		raw = t.renderScrolled()
-	case t.cursorHidden:
-		raw = t.emu.Render()
-	default:
-		grid := t.visibleCells()
-		pos := t.emu.CursorPosition()
-		paintCursor(grid, pos.X, pos.Y, t.cursorShape)
-		lines := make(uv.Lines, len(grid))
-		for y, row := range grid {
-			lines[y] = uv.Line(row)
-		}
-		raw = lines.Render()
-	}
-	t.mu.Unlock()
-	return pad(raw, cols, rows)
+// Cursor is the child's text cursor as the outer terminal should show it: its
+// cell in the pane (0-based), whether it is visible, and its DECSCUSR shape.
+// It is not visible while the child hides it (DECTCEM) or while the pane is
+// scrolled back into history, where the live cursor row is off screen. A
+// cursor in the pending-wrap column past the last cell is reported on the
+// last cell, where terminals draw it.
+type Cursor struct {
+	X, Y    int
+	Visible bool
+	// Style is the DECSCUSR parameter: 0 terminal default, 1/2 blinking/steady
+	// block, 3/4 underline, 5/6 bar (vim INSERT mode, Codex's composer).
+	Style int
 }
 
-// paintCursor styles the cell at (x, y) as a cursor of the given shape. A
-// cursor in the pending-wrap column past the last cell is drawn on the last
-// cell, as terminals do; one on a wide character's continuation is drawn on
-// the character itself.
-func paintCursor(grid [][]uv.Cell, x, y int, shape vt.CursorStyle) {
-	if y < 0 || y >= len(grid) || len(grid[y]) == 0 {
-		return
+// Cursor reports the child's text cursor. The embedder draws it with the
+// outer terminal's hardware cursor, which is the only way to show a thin bar:
+// a painted cell can only be a block or an underline.
+func (t *Terminal) Cursor() Cursor {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pos := t.emu.CursorPosition()
+	return Cursor{
+		X:       max(0, min(pos.X, t.cols-1)),
+		Y:       max(0, min(pos.Y, t.rows-1)),
+		Visible: !t.cursorHidden && t.offset == 0,
+		Style:   t.cursorStyle,
 	}
-	row := grid[y]
-	x = max(0, min(x, len(row)-1))
-	for x > 0 && row[x].IsZero() {
-		x--
-	}
-	c := &row[x]
-	if c.IsZero() || c.Content == "" {
-		*c = uv.EmptyCell
-	}
-	if shape == vt.CursorUnderline {
-		c.Style.Underline = uv.UnderlineStyleSingle
-		return
-	}
-	c.Style.Attrs |= uv.AttrReverse
-	c.Style.Attrs &^= uv.AttrConceal
 }
 
 // pad forces s into an exact cols×rows block. It relies on the emulator having

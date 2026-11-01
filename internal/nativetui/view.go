@@ -27,6 +27,15 @@ var (
 )
 
 func (m *model) View() string {
+	v := m.view()
+	if m.hw != nil {
+		m.hw.set(m.hardwareCursor(), v == m.lastView)
+		m.lastView = v
+	}
+	return v
+}
+
+func (m *model) view() string {
 	if m.w == 0 || m.h == 0 {
 		return "starting…"
 	}

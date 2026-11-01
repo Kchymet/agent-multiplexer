@@ -39,7 +39,9 @@ func Run(focusID string) error {
 	// never lock the user out of navigation — and surfaces on the status line.
 	keys, keysErr := keymap.Load()
 	out := &clipboard.SerialFile{File: os.Stdout}
+	hw := newCursorOut(out)
 	m := &model{
+		hw:      hw,
 		clip:    clipboard.New(out).Copy,
 		keys:    keys,
 		terms:   map[paneKey]*vterm.Terminal{},
@@ -51,7 +53,7 @@ func Run(focusID string) error {
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
-	_, err := newProgram(m, tea.WithOutput(out)).Run()
+	_, err := newProgram(m, tea.WithOutput(hw)).Run()
 	if m.accounts != nil {
 		m.accounts.dispose()
 	}
@@ -96,6 +98,11 @@ type daemonClient interface {
 }
 
 type model struct {
+	// hw drives the outer terminal's cursor for the focused pane (hwcursor.go);
+	// lastView is the previous frame, to spot cursor-only changes. hw is nil in
+	// tests that render without a program.
+	hw             *cursorOut
+	lastView       string
 	selection      *paneSelection
 	gesture        *paneGesture
 	client         daemonClient
