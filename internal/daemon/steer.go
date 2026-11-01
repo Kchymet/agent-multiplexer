@@ -37,7 +37,9 @@ import (
 
 // steerStartSettle is how long a just-started runtime is given to paint its
 // composer before the text is typed into it. A TUI that hasn't finished booting
-// drops keystrokes, so a `prompt` that starts the agent waits this long first.
+// drops keystrokes, so typed text waits until the runtime is this old — whether
+// the `prompt` started the agent or found it already launched (creation starts
+// an agent before a remote client's follow-up prompt arrives).
 // It is a heuristic, which is exactly why a steering verb reports "accepted"
 // rather than "applied".
 const steerStartSettle = 2 * time.Second
@@ -172,6 +174,15 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 				in.InputSequence(payload)
 				return nil
 			})
+		}
+		if verb == core.SteerPrompt || verb == core.SteerInterject {
+			// "Up" is not "booted". Creation auto-starts the agent, so a remote
+			// client's prompt that follows its add-agent/new-workgroup finds a
+			// runtime launched milliseconds ago, and a Claude Code that is still
+			// painting drops the submit key: the text never runs. Hold typed text
+			// until the runtime is as old as the cold-start settle; an agent that
+			// booted long ago is not delayed at all.
+			d.holdUntilBooted(payload)
 		}
 		in.InputSequence(payload)
 		return nil
@@ -697,12 +708,23 @@ func typedSteerText(verb string, keys agent.Keys, text string) ([]engine.InputSt
 // deferInput reserves the startup wait in the same FIFO as subsequent input,
 // so a second prompt cannot overtake the prompt that started the runtime.
 func (d *Daemon) deferInput(in engine.Instance, payload []engine.InputStep) {
+	d.holdUntilBooted(payload)
+	in.InputSequence(payload)
+}
+
+// holdUntilBooted makes payload wait until its runtime has been running for the
+// startup settle. The wait is measured from the runtime's own start, not from
+// when the text was queued, so a prompt queued behind one already held does not
+// wait a second settle, and one sent to a long-running agent does not wait.
+func (d *Daemon) holdUntilBooted(payload []engine.InputStep) {
+	if len(payload) == 0 {
+		return
+	}
 	settle := d.steerSettle
 	if settle == 0 {
 		settle = steerStartSettle
 	}
-	payload[0].DelayBefore += settle
-	in.InputSequence(payload)
+	payload[0].NotBeforeAge = settle
 }
 
 // steerHookGoal applies the host `goal` control to a Claude coordinator's goal

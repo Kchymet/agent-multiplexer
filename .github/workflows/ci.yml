@@ -123,6 +123,11 @@ jobs:
           name: codex-scroll-evidence
           path: ${{ runner.temp }}/codex-scroll-evidence
           if-no-files-found: error
+      - name: test a prompt sent right after a headless Claude launch is submitted
+        env:
+          AMUX_TEST_CLAUDE_BIN: ${{ runner.temp }}/agent-runtimes/claude/package/claude
+          TERM: xterm-256color
+        run: go test ./internal/daemon -run '^TestNativeClaudeSubmitsPromptSentRightAfterLaunch$' -count=1 -timeout=120s -v
       - name: test native attach shows a turn that ran with no TUI attached
         env:
           AMUX_TEST_CODEX_BIN: ${{ runner.temp }}/codex-0.157.1/codex-x86_64-unknown-linux-musl

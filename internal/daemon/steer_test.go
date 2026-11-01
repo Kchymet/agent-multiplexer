@@ -1041,8 +1041,52 @@ func TestSteerStartupDelayPrecedesLaterPrompt(t *testing.T) {
 	}
 	inst, _ := eng.Lookup(engine.Key{AgentID: "a1", Tab: panespec.TabAgent})
 	in := inst.(*fakeInstance)
-	if len(in.sequences) != 2 || in.sequences[0][0].DelayBefore != d.steerSettle || in.sequences[1][0].DelayBefore != 0 {
+	// Both are held to the same point — the runtime's age reaching the settle —
+	// rather than the second waiting a settle of its own after the first.
+	if len(in.sequences) != 2 {
 		t.Fatalf("startup ordering: %#v", in.sequences)
+	}
+	for i, seq := range in.sequences {
+		if seq[0].NotBeforeAge != d.steerSettle || seq[0].DelayBefore != 0 {
+			t.Fatalf("prompt %d hold = age %v / delay %v, want age %v / delay 0", i, seq[0].NotBeforeAge, seq[0].DelayBefore, d.steerSettle)
+		}
+	}
+}
+
+// TestSteerPromptAfterRemoteCreationWaitsForBoot is the web dashboard's
+// creation flow: add-agent (which starts the agent at once, with no client
+// attached) followed milliseconds later by a `prompt` to the returned id. The
+// runtime is already up, so the prompt takes the live path — and must still be
+// held until the runtime has booted. Typed into a Claude Code that is still
+// painting, the submit key is dropped and the user later opens an empty
+// conversation that never saw the web prompt.
+func TestSteerPromptAfterRemoteCreationWaitsForBoot(t *testing.T) {
+	d, eng := steerDaemon(t)
+	putSession(t, "a1", "claude")
+	if err := d.startAgent(context.Background(), "a1"); err != nil { // creation's auto-start
+		t.Fatal(err)
+	}
+	if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: "creation status"}}); err != nil {
+		t.Fatal(err)
+	}
+	inst, ok := eng.Lookup(engine.Key{AgentID: "a1", Tab: panespec.TabAgent})
+	if !ok {
+		t.Fatal("creation's auto-start left no runtime")
+	}
+	in := inst.(*fakeInstance)
+	if len(in.sequences) != 1 {
+		t.Fatalf("prompt to a just-created agent: %#v", in.sequences)
+	}
+	if got := in.sequences[0][0].NotBeforeAge; got != d.steerSettle {
+		t.Fatalf("prompt to a just-started runtime is typed with boot hold %v, want %v", got, d.steerSettle)
+	}
+	// Non-text verbs act on a turn in flight; they are never held.
+	markBusy(t, "a1")
+	if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerStop}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := in.sequences[1][0].NotBeforeAge; got != 0 {
+		t.Fatalf("stop held for boot: %v", got)
 	}
 }
 
