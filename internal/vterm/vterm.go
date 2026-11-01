@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
@@ -60,6 +61,14 @@ type Terminal struct {
 	// inside emu.Write while pump/Feed hold t.mu — so they're guarded by the same
 	// lock without re-locking (the mutex isn't reentrant).
 	mouseModes map[ansi.Mode]bool // mouse-tracking DEC modes currently enabled
+
+	// The child's text-cursor state: DECTCEM visibility (?25h/l, reported
+	// per active screen by the emulator's CursorVisibility callback) and the
+	// DECSCUSR shape (CSI Ps SP q). The outer terminal's own cursor stays
+	// hidden while Bubble Tea owns the screen, so RenderCursor paints this
+	// cursor into the pane itself. Guarded by t.mu like mouseModes.
+	cursorHidden bool
+	cursorShape  vt.CursorStyle
 
 	// Remote mode (set by NewRemote): there is no local PTY; input and the
 	// emulator's query replies are routed through onInput, and resizes are
@@ -133,8 +142,10 @@ func New(cols, rows int) *Terminal {
 	// raw mouse events (any mouse-tracking mode) instead of local history.
 	// These callbacks run under t.mu (see field docs).
 	t.emu.SetCallbacks(vt.Callbacks{
-		EnableMode:  func(m ansi.Mode) { t.noteMode(m, true) },
-		DisableMode: func(m ansi.Mode) { t.noteMode(m, false) },
+		EnableMode:       func(m ansi.Mode) { t.noteMode(m, true) },
+		DisableMode:      func(m ansi.Mode) { t.noteMode(m, false) },
+		CursorVisibility: func(visible bool) { t.cursorHidden = !visible },
+		CursorStyle:      func(style vt.CursorStyle, _ bool) { t.cursorShape = style },
 	})
 	// The emulator has no OSC 52 handler and silently drops the sequence, which
 	// is how agents copy a mouse selection; hand writes to the embedder, which
@@ -381,6 +392,63 @@ func (t *Terminal) Render() string {
 	}
 	t.mu.Unlock()
 	return pad(raw, cols, rows)
+}
+
+// RenderCursor is Render with the child's text cursor drawn into the block,
+// for the pane that has keyboard focus. Bubble Tea keeps the real terminal's
+// cursor hidden and paints the pane from cell contents alone, so an agent that
+// relies on the hardware cursor — Codex's composer, Claude Code's vim INSERT
+// mode (which switches to a bar via DECSCUSR) — would otherwise show no cursor
+// at all. The cursor is drawn only on the live screen and only while the child
+// has it enabled (DECTCEM). A cell cannot hold a thin bar without hiding the
+// character under it, so block and bar shapes both render as a reverse-video
+// cell; the underline shape renders as an underlined cell.
+func (t *Terminal) RenderCursor() string {
+	t.mu.Lock()
+	cols, rows := t.cols, t.rows
+	var raw string
+	switch {
+	case t.offset > 0:
+		raw = t.renderScrolled()
+	case t.cursorHidden:
+		raw = t.emu.Render()
+	default:
+		grid := t.visibleCells()
+		pos := t.emu.CursorPosition()
+		paintCursor(grid, pos.X, pos.Y, t.cursorShape)
+		lines := make(uv.Lines, len(grid))
+		for y, row := range grid {
+			lines[y] = uv.Line(row)
+		}
+		raw = lines.Render()
+	}
+	t.mu.Unlock()
+	return pad(raw, cols, rows)
+}
+
+// paintCursor styles the cell at (x, y) as a cursor of the given shape. A
+// cursor in the pending-wrap column past the last cell is drawn on the last
+// cell, as terminals do; one on a wide character's continuation is drawn on
+// the character itself.
+func paintCursor(grid [][]uv.Cell, x, y int, shape vt.CursorStyle) {
+	if y < 0 || y >= len(grid) || len(grid[y]) == 0 {
+		return
+	}
+	row := grid[y]
+	x = max(0, min(x, len(row)-1))
+	for x > 0 && row[x].IsZero() {
+		x--
+	}
+	c := &row[x]
+	if c.IsZero() || c.Content == "" {
+		*c = uv.EmptyCell
+	}
+	if shape == vt.CursorUnderline {
+		c.Style.Underline = uv.UnderlineStyleSingle
+		return
+	}
+	c.Style.Attrs |= uv.AttrReverse
+	c.Style.Attrs &^= uv.AttrConceal
 }
 
 // pad forces s into an exact cols×rows block. It relies on the emulator having
