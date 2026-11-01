@@ -1,0 +1,16 @@
+{
+  "access_token": "amxa_QkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGE",
+  "token_type": "Bearer",
+  "expires_in": 600,
+  "refresh_token": "amxr_YmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5_gIE",
+  "scope": "read steer",
+  "client_id": "c_AAAAAAAAAAAAAAAAAAAAAA",
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "grant_expires_at": 1800776000,
+  "resource_scope": {
+    "kind": "workgroups",
+    "workgroups": [
+      "771951"
+    ]
+  }
+}

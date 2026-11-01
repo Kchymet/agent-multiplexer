@@ -1,0 +1,4 @@
+{
+  "error": "temporarily_unavailable",
+  "error_description": "the grant store did not confirm the write; no token was returned, and the presented code or refresh token may already be consumed"
+}

@@ -1,0 +1,5 @@
+{
+  "protocol": "amux-direct/1",
+  "client_nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "endpoint": "https://amux.home.example:8443"
+}

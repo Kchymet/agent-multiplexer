@@ -34,7 +34,7 @@ profile, not stable machine ids.
 | Native TUI → local daemon | internal native path (not a descriptor route) | `internal/hostbackend` → `daemon.DialContext` |
 | Harness web and Android → this host's sessions | `harness-relay`, through Harness | `amux provide`: `provider.HarnessRelay` transport + `internal/hostbackend` operations |
 | Legacy compatibility relay (`amux serve`) | legacy shared-token mux | `internal/mux` → `internal/hostbackend` |
-| `direct` to amux | **not implemented**: no listener, endpoint, enrollment or credential exists | none |
+| `direct` to amux (S1) | opt-in `amux direct serve`: destination-issued grants, paste enrollment, read + prompt/stop | `internal/direct` → `internal/hostbackend` (see [direct-access.md](direct-access.md)) |
 
 The provider's outbound link is a **provider transport**, not a client direct
 route. `amux provide` dials the broker over TLS, registers with its bearer
@@ -69,10 +69,15 @@ Cancellation closes the authenticated transport and waits for the in-flight
 callback before returning. A late result is discarded, but an effect the daemon
 already committed is not rolled back.
 
+## Direct access
+
+[direct-access.md](direct-access.md) describes S1: the listener, the server
+identity (`server_id`, separate from any client's local `backend_id`), the
+destination-issued credentials, manual paste enrollment, and the wire fixtures
+under `docs/direct/fixtures/v1`.
+
 ## Not yet built
 
-Direct access to amux needs, at minimum: a listener, destination-issued
-(`backend`-scope) credentials and enrollment, server-issued backend identity
-with authenticated alias binding, and a way to publish it as a route. Harness
-Headscale OIDC login is also future work. None of it is implied by the code
-above.
+Cloud-assisted enrollment, an authenticated binding between a Harness provider
+alias and a direct `server_id`, publishing direct routes from a catalog, and
+Harness Headscale OIDC login. None of it is implied by the code above.

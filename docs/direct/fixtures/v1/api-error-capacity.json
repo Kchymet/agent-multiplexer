@@ -1,0 +1,4 @@
+{
+  "code": "capacity_exhausted",
+  "error": "this client has too many recent or unresolved actions; enroll again to continue"
+}

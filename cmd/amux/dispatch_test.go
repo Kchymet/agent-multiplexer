@@ -48,6 +48,7 @@ var helpBlocks = []helpBlock{
 	{cmd: "auth", usage: authUsage, verbs: verbNames(authSubcommands)},
 	{cmd: "daemon", usage: daemonUsage, verbs: verbNames(daemonSubcommands)},
 	{cmd: "provide", usage: provideUsage, verbs: verbNames(provideSubcommands)},
+	{cmd: "direct", usage: directUsage, verbs: verbNames(directSubcommands)},
 }
 
 // verbNames is the set of verbs a dispatch table accepts, for the blocks the
