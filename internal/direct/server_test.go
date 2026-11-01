@@ -567,14 +567,32 @@ func TestRevokeBarrierAdmitsNoNewPrivilegedCall(t *testing.T) {
 	if err := a.Revoke(victim.ClientID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	// The barrier: the in-flight handler finished before Revoke returned.
+	// The barrier is the admitted operation, not this test goroutine's later
+	// publication of its recorder: Apply has exited and the victim's lease has
+	// drained before Revoke returns.
+	if got := f.activeApplies.Load(); got != 0 {
+		t.Fatalf("Revoke returned with %d Apply calls still running", got)
+	}
+	grants := a.List()
+	var victimGrant *ClientInfo
+	for i := range grants {
+		if grants[i].ClientID == victim.ClientID {
+			victimGrant = &grants[i]
+			break
+		}
+	}
+	if victimGrant == nil || victimGrant.ActiveLeases != 0 {
+		t.Fatalf("victim grant after Revoke = %+v; want no active leases", victimGrant)
+	}
+	// ServeHTTP has also finished by now, but the goroutine sends the recorder
+	// after it returns. Await that separate publication instead of racing it.
 	select {
 	case w := <-inflight:
 		if apiCode(t, w) != CodeAuthRevoked {
 			t.Fatalf("in-flight action: %d %s", w.Code, w.Body)
 		}
-	default:
-		t.Fatal("Revoke returned while the admitted action was still running")
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight handler did not publish its revoked response")
 	}
 	f.blockApply.Store(false)
 	applied := f.applies.Load()
@@ -590,6 +608,9 @@ func TestRevokeBarrierAdmitsNoNewPrivilegedCall(t *testing.T) {
 	}
 	if w := do(s, "POST", PathSession+"/a1/actions", other.AccessToken, actionBody(VerbStop, "", "ok")); w.Code != 200 {
 		t.Fatalf("other client: %d %s", w.Code, w.Body)
+	}
+	if got := f.applies.Load(); got != applied+1 {
+		t.Fatalf("unrelated grant reached Apply %d times after baseline %d; want once", got, applied)
 	}
 }
 
