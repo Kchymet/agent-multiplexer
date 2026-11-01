@@ -20,6 +20,7 @@ import (
 	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/hostbackend"
 	"amux/internal/keymap"
 	"amux/internal/vterm"
 )
@@ -172,7 +173,7 @@ type actionSentMsg struct{ err error }
 func (m *model) Init() tea.Cmd { return tea.Batch(connectCmd, waitData(m.dataCh)) }
 
 func connectCmd() tea.Msg {
-	c, err := daemon.Dial()
+	c, err := hostbackend.New().Connect()
 	if err != nil {
 		return disconnectedMsg{}
 	}

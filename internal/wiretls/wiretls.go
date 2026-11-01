@@ -8,6 +8,7 @@
 package wiretls
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -82,6 +83,12 @@ func Dial(network, addr string) (net.Conn, error) {
 // DialCA is Dial with explicit CA file and server-name override, for callers
 // (e.g. provider mode) that carry their own config rather than the environment.
 func DialCA(network, addr, caFile, serverName string) (net.Conn, error) {
+	return DialCAContext(context.Background(), network, addr, caFile, serverName)
+}
+
+// DialCAContext is DialCA whose TCP connect and TLS handshake are abandoned
+// when ctx is cancelled. Verification is identical to DialCA.
+func DialCAContext(ctx context.Context, network, addr, caFile, serverName string) (net.Conn, error) {
 	cfg, err := ClientConfig(caFile, serverName)
 	if err != nil {
 		return nil, err
@@ -91,7 +98,8 @@ func DialCA(network, addr, caFile, serverName string) (net.Conn, error) {
 			cfg.ServerName = host
 		}
 	}
-	return tls.Dial(network, addr, cfg)
+	d := tls.Dialer{Config: cfg}
+	return d.DialContext(ctx, network, addr)
 }
 
 // poolFromFile appends the PEM certs in file to base (a fresh pool when base is

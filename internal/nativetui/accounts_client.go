@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"amux/internal/daemon"
+	"amux/internal/hostbackend"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -45,7 +45,7 @@ func (t *machineAccountTransport) connection(ctx context.Context) (accountConnec
 		return c, nil
 	}
 	t.mu.Unlock()
-	c, err := daemon.DialContext(ctx)
+	c, err := hostbackend.New().ConnectContext(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -25,7 +25,6 @@ import (
 	"github.com/creack/pty"
 
 	"amux/internal/core"
-	"amux/internal/wiretls"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -213,15 +212,14 @@ func (p *Provider) Run(ctx context.Context) error {
 	}
 }
 
-// dial opens the connection: the injected dialer for tests, else a TLS dial to
-// the orchestrator. Provider mode is TLS-only; a tls:-scheme prefix is accepted
-// and stripped.
+// dial opens the connection: the injected dialer for tests, else the Harness
+// relay transport (TLS-only) described by the configuration.
 func (p *Provider) dial(ctx context.Context) (net.Conn, error) {
 	if p.cfg.Dial != nil {
 		return p.cfg.Dial(ctx)
 	}
 	p.cfg.Logf("dialing %s", p.cfg.Orchestrator)
-	return wiretls.DialCA("tcp", stripScheme(p.cfg.Orchestrator), p.cfg.CAFile, p.cfg.ServerName)
+	return p.cfg.Relay().Dial(ctx)
 }
 
 // session is one connection's transient state: the typed conn, a done channel

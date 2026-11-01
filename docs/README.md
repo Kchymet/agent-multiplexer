@@ -18,6 +18,7 @@
 - [Architecture overview: clients, control APIs, compute broker and backends](architecture-overview.md)
 - [Contributing and verification commands](../CONTRIBUTING.md)
 - [Local daemon and optional legacy relay](client-server.md)
+- [Connection access and the host backend seam](connection-access.md)
 - [Daemon locking: what each lock owns and the lock order](daemon-locking.md)
 - [Session RPC scheduling: wakeups, fast and slow lanes, ordering](session-rpc-scheduling.md)
 - [Agent CLI access and authorization](agent-cli-sandbox.md)

@@ -105,6 +105,10 @@ frames (snapshots, results) remain droppable — each is a full state.
 
 ## Upstream pane bridge
 
+The mux reaches the daemon only through the shared host backend
+(`internal/hostbackend`, see [connection-access.md](connection-access.md)), the
+same operations the Harness relay provider uses.
+
 Each legacy pane opens a separate freshly authenticated primary-daemon client
 stream. The mux translates pane open/input/resize/close to the existing daemon
 pane actions and translates pane output/reset/exit frames back to `muxproto`.

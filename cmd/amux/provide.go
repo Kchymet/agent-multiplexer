@@ -11,8 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"amux/internal/core"
-	"amux/internal/daemon"
+	"amux/internal/hostbackend"
 	"amux/internal/provider"
 	"amux/internal/providercfg"
 	"amux/internal/runtimeevents"
@@ -244,7 +243,6 @@ func provideRun(args []string) error {
 		AccountStatus:     resolvedBool(fs, "account-status", f.accountStatus, "AMUX_PROVIDER_ACCOUNT_STATUS", file.AccountStatus),
 		AccountManage:     false, // legacy saved/env grants cannot enable remote configuration
 		AccountUse:        resolvedBool(fs, "account-use", f.accountUse, "AMUX_PROVIDER_ACCOUNT_USE", providerAccountUseDefault(file, publish, readonly)),
-		OpenAccounts:      openProviderAccounts,
 		DiscoverExecution: executionDiscovery(execution),
 		Orchestrator:      addr,
 		Token:             token,
@@ -261,31 +259,7 @@ func provideRun(args []string) error {
 		// inferring it from a log tail.
 		OnStatus: func(st provider.Status) { _ = provider.WriteStatus(provider.StatusPath(), st) },
 	}
-	if publish {
-		// The published inventory and transcript paths come from the daemon — the
-		// single store owner — over its socket, the same authority lifecycle verbs
-		// already use (applyViaDaemon). The provider process never opens the store
-		// itself; with no daemon reachable, publishing degrades cleanly (a poll error
-		// publishes nothing, a resolve miss emits no events).
-		cfg.PublishSessions = true
-		cfg.ReadOnlySessions = readonly
-		cfg.Sessions = sessionsViaDaemon
-		if !readonly {
-			cfg.ApplyAction = applyViaDaemon
-		}
-		if runtimeEvents {
-			// Structured transcripts: tail each published session's on-disk runtime
-			// record — Claude Code's session JSONL or Codex's rollout, whichever the
-			// session's harness wrote — and stream contract events stamped with that
-			// runtime. Read-only; a session with no record on disk simply emits
-			// nothing (honest degradation).
-			cfg.RuntimeEvents = true
-			cfg.RuntimeEventStream = runtimeevents.StreamContext(runtimeRecordViaDaemon(), 0)
-			// Newest-first pages of the same records, so an orchestrator can show
-			// the latest page at once and fetch older history only on demand.
-			cfg.RuntimeEventHistory = runtimeevents.HistoryContext(runtimeRecordViaDaemon())
-		}
-	}
+	wireHostBackend(&cfg, hostbackend.New(), publish, readonly, runtimeEvents)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -342,76 +316,58 @@ func resolvedBool(fs *flag.FlagSet, flagName string, flagValue bool, envName str
 	return fileValue
 }
 
-// sessionsViaDaemon fetches the published session rail from the local daemon —
-// the store owner — instead of opening the store in this process. The daemon
-// serves its already-computed snapshot (engine liveness baked in), so the
-// inventory the provider publishes matches exactly what the daemon shows. It dials
-// fresh per poll; an unreachable daemon returns an error the provider handles by
-// publishing nothing that cycle.
-func sessionsViaDaemon(ctx context.Context) ([]core.Session, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// wireHostBackend routes every session-facing provider hook to the shared local
+// host backend — the daemon, the single store and engine owner — over its
+// authenticated socket. The provider process never opens the store itself; with
+// no daemon reachable, publishing degrades cleanly (a poll error publishes
+// nothing, a resolve miss emits no events). Account access always goes through
+// it; inventory, lifecycle verbs and transcripts only when published.
+func wireHostBackend(cfg *provider.Config, h hostbackend.HostDaemon, publish, readOnly, runtimeEvents bool) {
+	cfg.OpenAccounts = func(ctx context.Context) (provider.AccountChannel, error) {
+		a, err := h.OpenAccounts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return a, nil
 	}
-	c, err := daemon.Dial()
-	if err != nil {
-		return nil, fmt.Errorf("daemon unreachable: %w", err)
+	if !publish {
+		return
 	}
-	defer c.Close()
-	type result struct {
-		sessions []core.Session
-		err      error
+	cfg.PublishSessions = true
+	cfg.ReadOnlySessions = readOnly
+	cfg.Sessions = h.Snapshot
+	if !readOnly {
+		cfg.ApplyAction = h.Apply
 	}
-	ch := make(chan result, 1)
-	go func() {
-		sessions, err := c.Snapshot()
-		ch <- result{sessions: sessions, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		_ = c.Close()
-		return nil, ctx.Err()
-	case got := <-ch:
-		return got.sessions, got.err
+	if runtimeEvents {
+		// Structured transcripts: tail each published session's on-disk runtime
+		// record — Claude Code's session JSONL or Codex's rollout, whichever the
+		// session's harness wrote — and stream contract events stamped with that
+		// runtime. Read-only; a session with no record on disk simply emits
+		// nothing (honest degradation).
+		cfg.RuntimeEvents = true
+		cfg.RuntimeEventStream = runtimeevents.StreamContext(runtimeRecordResolver(h), 0)
+		// Newest-first pages of the same records, so an orchestrator can show
+		// the latest page at once and fetch older history only on demand.
+		cfg.RuntimeEventHistory = runtimeevents.HistoryContext(runtimeRecordResolver(h))
 	}
 }
 
-// runtimeRecordViaDaemon resolves a published session id to its on-disk
-// transcript and the runtime that wrote it, through the daemon (which resolves it
-// via the session's harness), so the provider tails transcripts without opening
-// the store. ok=false — a missing daemon, an error, or a record naming no file at
-// all — means the provider advertises runtime-events but honestly emits nothing
-// for that session.
+// runtimeRecordResolver resolves a published session id to its on-disk
+// transcript and the runtime that wrote it, through the host backend, so the
+// provider tails transcripts without opening the store. ok=false — a missing
+// daemon, an error, or a record naming no file at all — means the provider
+// advertises runtime-events but honestly emits nothing for that session.
 //
 // A record with no transcript but an amux journal is still worth tailing: that is
 // a session which has not run yet, and an accepted `prompt` cold-starting it
 // reports its progress into that journal before any transcript exists.
-func runtimeRecordViaDaemon() runtimeevents.ContextResolver {
+func runtimeRecordResolver(h hostbackend.HostDaemon) runtimeevents.ContextResolver {
 	return func(ctx context.Context, sessionID string) (runtimeevents.Record, bool) {
 		if sessionID == "" || ctx.Err() != nil {
 			return runtimeevents.Record{}, false
 		}
-		c, err := daemon.Dial()
-		if err != nil {
-			return runtimeevents.Record{}, false
-		}
-		defer c.Close()
-		type result struct {
-			rec core.RuntimeRecord
-			err error
-		}
-		ch := make(chan result, 1)
-		go func() {
-			rec, err := c.RuntimeRecord(sessionID)
-			ch <- result{rec: rec, err: err}
-		}()
-		var rec core.RuntimeRecord
-		select {
-		case <-ctx.Done():
-			_ = c.Close()
-			return runtimeevents.Record{}, false
-		case got := <-ch:
-			rec, err = got.rec, got.err
-		}
+		rec, err := h.RuntimeRecord(ctx, sessionID)
 		if err != nil || (rec.Path == "" && rec.Journal == "") {
 			return runtimeevents.Record{}, false
 		}
@@ -420,60 +376,6 @@ func runtimeRecordViaDaemon() runtimeevents.ContextResolver {
 			Permissions: rec.Permissions, Journal: rec.Journal,
 			Structured: rec.Structured, PermissionBindings: rec.PermissionBindings,
 		}, true
-	}
-}
-
-// applyViaDaemon runs one lifecycle verb through the local daemon so the daemon
-// stays authoritative — it owns the engine (needed for "start") and re-polls to
-// surface the change. It dials fresh per call (verbs are infrequent), sends the
-// action, and returns the id of any session it created. Snapshot frames that
-// arrive first are skipped; a non-OK result surfaces the daemon's error.
-func applyViaDaemon(ctx context.Context, a core.Action) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	c, err := daemon.Dial()
-	if err != nil {
-		return "", fmt.Errorf("daemon unreachable: %w", err)
-	}
-	defer c.Close()
-	if err := c.Send(a); err != nil {
-		return "", err
-	}
-	for {
-		f, err := nextDaemonFrame(ctx, c)
-		if err != nil {
-			return "", err
-		}
-		if f.Result != nil {
-			if !f.Result.OK {
-				return "", errors.New(f.Result.Error)
-			}
-			return f.Result.NewID, nil
-		}
-	}
-}
-
-// nextDaemonFrame makes the legacy daemon client's blocking read cancellable
-// without changing that shared client package (owned by the primary daemon
-// work). Closing the per-call client unblocks Next; the buffered result channel
-// lets the reader finish without depending on its caller after cancellation.
-func nextDaemonFrame(ctx context.Context, c *daemon.Client) (daemon.Frame, error) {
-	type result struct {
-		frame daemon.Frame
-		err   error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		frame, err := c.Next()
-		ch <- result{frame: frame, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		_ = c.Close()
-		return daemon.Frame{}, ctx.Err()
-	case got := <-ch:
-		return got.frame, got.err
 	}
 }
 
