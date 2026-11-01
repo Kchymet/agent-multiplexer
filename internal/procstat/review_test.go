@@ -61,10 +61,14 @@ func TestStoredOwnershipBeatsPathShape(t *testing.T) {
 	root := fixture(t)
 	relink(t, root, "300", fixSessions+"/771951/agent-multiplexer-main/src") // legacy sub-session
 	owners := []Owner{
-		{Dir: fixSessions + "/771951/374179", Session: "374179", Workgroup: "888888"}, // moved
+		// moved to workgroup 888888, sandbox still under 771951
+		{Dir: fixSessions + "/771951/374179", Session: "374179", Workgroup: "888888"},
+		// legacy repo-branch sub-session directory
 		{Dir: fixSessions + "/771951/agent-multiplexer-main/", Session: "legacy1", Workgroup: "771951"},
-		{Dir: fixSessions + "/771951", Session: "771951"}, // the container: its own group
-		{Dir: "/", Session: "bogus"},                      // ignored
+		// the container: its own group
+		{Dir: fixSessions + "/771951", Session: "771951"},
+		// a root-directory owner is ignored
+		{Dir: "/", Session: "bogus"},
 	}
 	c := &clock{t: time.Unix(1000, 0)}
 	s := New(Config{
