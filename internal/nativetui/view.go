@@ -311,21 +311,19 @@ func (m *model) renderRow(i int, s core.Session) string {
 		mark = "▌" // open session; keep arrows for disclosure and circles for activity
 	}
 	icon := glyph(s)
-	if container(&s) {
-		// Keep container titles aligned, but reserve disclosure arrows for rows
-		// that actually have children to fold and unfold. A childless workgroup
-		// takes the leaf bullet in the arrow column so it still reads as a row;
-		// a childless repo already has its ⛁ glyph to mark the row.
-		icon = " "
-		switch {
-		case m.groupHasChildren(&s):
+	switch {
+	case container(&s):
+		// Reserve disclosure arrows for workgroups that actually have children
+		// to fold and unfold. A childless workgroup takes the leaf bullet in the
+		// arrow column so it still reads as a row.
+		icon = leaf
+		if m.groupHasChildren(&s) {
 			icon = disclosure(m.collapsed[m.group(&s)])
-		case s.Kind != "repo":
-			icon = leaf
 		}
-		if s.Kind == "repo" {
-			icon += " " + glyph(s)
-		}
+	case s.Kind == "repo":
+		// A repo row never has children; keep the arrow column blank so its
+		// ⛁ glyph lines up with the workgroup titles' structural glyphs.
+		icon = "  " + glyph(s)
 	}
 	label := truncate(fmt.Sprintf("%s%s%s %s", mark, indent, icon, s.Title), sidebarWidth)
 	var line string

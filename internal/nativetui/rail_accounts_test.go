@@ -20,7 +20,7 @@ func TestArchivedSearchSeparateFromRail(t *testing.T) {
 	spy := &reconnectClient{}
 	m.client = spy
 	m.sessions = append(m.sessions, core.Session{ID: "other", Title: "Old Unicode α", Archived: true, Section: core.SectionRepos})
-	original := m.sessions[5]
+	original := m.sessions[4]
 	for _, entry := range m.railEntries() {
 		if entry.section == core.SectionArchived || (entry.section == "" && archivedSession(m.sessions[entry.index])) {
 			t.Fatal("archive remains navigable in the rail")
@@ -38,7 +38,7 @@ func TestArchivedSearchSeparateFromRail(t *testing.T) {
 	if rows := m.archivedMatches(); len(rows) != 1 || rows[0].ID != original.ID {
 		t.Fatalf("archive search lost the full snapshot: %+v", rows)
 	}
-	if m.attached != "" || m.sessions[5] != original {
+	if m.attached != "" || m.sessions[4] != original {
 		t.Fatal("typing mutated the archived workload")
 	}
 	cursor, section := m.cursor, m.sectionCursor
@@ -49,7 +49,7 @@ func TestArchivedSearchSeparateFromRail(t *testing.T) {
 	if actions := spy.recorded(); len(actions) != 0 {
 		t.Fatalf("archive details dispatched runtime/lifecycle actions: %+v", actions)
 	}
-	if m.attached != "" || len(m.terms) != 0 || m.confirm != nil || m.cursor != cursor || m.sectionCursor != section || m.sessions[5] != original {
+	if m.attached != "" || len(m.terms) != 0 || m.confirm != nil || m.cursor != cursor || m.sectionCursor != section || m.sessions[4] != original {
 		t.Fatal("archive details changed runtime, archive state, or rail selection")
 	}
 	if m.archiveSearch == nil || m.archiveSearch.details != original.ID || !strings.Contains(plain(m.renderArchiveSearch()), "Restore before reopening") {
@@ -145,8 +145,8 @@ func TestArchivedDetailsRestoreNeverOpensPane(t *testing.T) {
 	// The restored row arrives in the active inventory; it must still await a
 	// separate user action in the rail before any runtime is opened.
 	sessions := append([]core.Session(nil), m.sessions...)
-	sessions[5].Section = core.SectionWorkgroups
-	sessions[5].Archived = false
+	sessions[4].Section = core.SectionWorkgroups
+	sessions[4].Archived = false
 	m.refreshSessions(sessions)
 	runReconnectCommands(m.tryPendingAttach())
 	if m.attached != "" || m.pending != "" || len(m.terms) != 0 || len(spy.recorded()) != 1 {
@@ -161,7 +161,7 @@ func TestArchivedDetailsCannotRetargetAfterInventoryChange(t *testing.T) {
 	m.handleKey(key("/"))
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	sessions := append([]core.Session(nil), m.sessions...)
-	sessions[5].ID = "replacement"
+	sessions[4].ID = "replacement"
 	m.refreshSessions(sessions)
 	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlR})
 	runReconnectCommands(cmd)

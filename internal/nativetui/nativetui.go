@@ -743,22 +743,11 @@ func (m *model) attachSelected() tea.Cmd {
 	}
 	// A container row that hosts a default session (the console, a workgroup's
 	// coordinator, a repo's home — Role set) opens that session itself. A bare
-	// container from a daemon that predates default sessions falls back to its
-	// first agent: a repo header opens the first agent nested under it, or the
-	// new-workgroup form for the repo if it has none; a workgroup root opens its
+	// workgroup root from a daemon that predates coordinators falls back to its
 	// first agent.
-	if s.Role == "" {
-		if s.Kind == "repo" {
-			if sub := m.firstChild(s.ID); sub != nil {
-				s = sub
-			} else {
-				m.openNewRepoWorkgroupForm(s.ID, s.Title)
-				return nil
-			}
-		} else if s.IsRoot {
-			if sub := m.firstChild(s.ID); sub != nil {
-				s = sub
-			}
+	if s.Role == "" && s.IsRoot {
+		if sub := m.firstChild(s.ID); sub != nil {
+			s = sub
 		}
 	}
 	if !attachable(s) {
@@ -778,8 +767,8 @@ func (m *model) attachSelected() tea.Cmd {
 
 // tryPendingAttach attaches to a freshly created session once it shows up in a
 // snapshot, so creating an agent immediately opens and starts it instead of
-// leaving it initialized-but-never-run. A workgroup root or repo header resolves
-// to its first agent; anything with nothing runnable (e.g. an empty new
+// leaving it initialized-but-never-run. A bare workgroup root resolves to its
+// first agent; anything with nothing runnable (e.g. an empty new
 // workgroup) just clears the pending attach. It's a no-op until the id lands.
 func (m *model) tryPendingAttach() tea.Cmd {
 	defer m.validateSelection()
@@ -790,7 +779,7 @@ func (m *model) tryPendingAttach() tea.Cmd {
 	if s == nil {
 		return nil // not in this snapshot yet — wait for the next one
 	}
-	if s.Role == "" && (s.Kind == "repo" || s.IsRoot) {
+	if s.Role == "" && s.IsRoot {
 		s = m.firstChild(s.ID)
 	}
 	if s == nil || !attachable(s) {
