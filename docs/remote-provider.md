@@ -187,12 +187,16 @@ legacy mux relay also requires TLS and a nonempty bearer token.
   `kill` — exactly v1. The environment split holds: the provider supplies the
   local execution environment, the orchestrator supplies workload-specific
   vars (see `internal/harness/harness.go`).
-- `pong` `{t}`.
+- `pong` `{t}` — the answer to a `ping`, or an unsolicited keepalive (`t`
+  omitted) the orchestrator sends while it has stopped reading to apply flow
+  control (for example while persisting a large runtime-events replay).
 
 ### Liveness and disconnect semantics
 
 - Heartbeat every `heartbeatSeconds` (default 15); either side treats 4
-  missed intervals as a dead connection.
+  intervals with nothing from its peer as a dead connection. Any inbound frame
+  counts, not only a ping or pong: a peer that is streaming is alive, and a
+  ping queued behind a large frame must not age the clock.
 - **A dropped connection does not kill panes.** Processes keep running for
   `graceSeconds` (default 60) while output accumulates in per-pane replay
   buffers (bounded, default 4 MiB per pane). Reconnect within grace →
