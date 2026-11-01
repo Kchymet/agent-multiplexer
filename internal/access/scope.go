@@ -94,6 +94,8 @@ var rules = map[Route]map[string]Rule{
 		core.QueryAccountManage:   {Scope: ScopeHost},
 		core.QueryAccountCeremony: {Scope: ScopeHost},
 		core.QueryCodexAuth:       {Scope: ScopeHost},
+		// Host-wide process data (other sessions' commands and usage).
+		core.QueryResources: {Scope: ScopeHost},
 	},
 }
 

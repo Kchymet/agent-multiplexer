@@ -98,6 +98,10 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 	if a.Query == core.QuerySnapshot {
 		return d.snapshot().Sessions, nil
 	}
+	// QueryResources likewise serves the background sampler's cached sample.
+	if a.Query == core.QueryResources {
+		return d.resourceSnapshot(), nil
+	}
 
 	db, err := store.Open()
 	if err != nil {

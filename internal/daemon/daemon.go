@@ -34,6 +34,7 @@ import (
 	"amux/internal/engine/local"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
+	"amux/internal/procstat"
 	"amux/internal/prwatch"
 	"amux/internal/source"
 	"amux/internal/store"
@@ -46,6 +47,12 @@ import (
 // owns the agent engine: agents run inside the daemon-held engine, not the UI,
 // so closing or restarting a client never stops them.
 type Daemon struct {
+	// resources is the background process sampler behind QueryResources (nil
+	// until Run starts it, or when sampling is off; resourcesOff says why).
+	resourcesMu  sync.Mutex
+	resources    *procstat.Sampler
+	resourcesOff string
+
 	sources  []source.Source
 	interval time.Duration
 	self     string // absolute path to the amux binary (for spawning rails)
@@ -523,6 +530,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	startRunWorker(func() { d.pollLoop(ctx) })
 	// Member PRs are polled on their own (much slower) clock.
 	startRunWorker(func() { d.prWatchLoop(ctx) })
+	// Per-session CPU/memory, sampled off the RPC path.
+	d.startResourceSampler(ctx, startRunWorker)
 
 	// Close the listener when ctx ends so Accept returns.
 	startRunWorker(func() { <-ctx.Done(); _ = ln.Close() })

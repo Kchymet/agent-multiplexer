@@ -8,6 +8,7 @@
 //	daemon   run the polling/serving daemon (foreground)
 //	agent    self-reporting run by an agent about itself (status/hook/name/done)
 //	status   print current workgroups as text and exit
+//	top      per-session CPU/memory and amux's own overhead
 //	version  print CLI, daemon, and database versions
 package main
 
@@ -32,6 +33,7 @@ import (
 	"amux/internal/daemonstatus"
 	"amux/internal/engine/local"
 	"amux/internal/nativetui"
+	"amux/internal/procstat"
 	_ "amux/internal/termbg"
 	"amux/internal/vtdemo"
 )
@@ -92,6 +94,7 @@ var commands = []command{
 	// deprecated alias for "amux agent hook"
 	{names: []string{"hook"}, run: func(args []string) error { return cmdAgentStatus(args, true) }, hidden: true},
 	{names: []string{"status"}, run: cmdStatus},
+	{names: []string{"top"}, run: cmdTop},
 	{names: []string{"refresh"}, run: func([]string) error { return cmdRefresh() }},
 	{names: []string{"doctor", "health", "check"}, run: func([]string) error { return cmdDoctor() }},
 	{names: []string{"config", "conf", "cfg"}, run: cmdConfig},
@@ -144,6 +147,7 @@ usage: amux <command>
   workgroup ls       list workgroups and their agents
   agent name <text>  set the calling agent's display name (from its own tab)
   status [--json]    print workgroups and exit (--json for the raw snapshot)
+  top [--json] [--mem] [-n N]  per-session CPU/memory, top processes, amux overhead
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: versions, compatibility, dependencies + runtime
@@ -708,7 +712,13 @@ func cmdStatus(args []string) error {
 			continue
 		}
 		if asJSON {
-			b, err := json.MarshalIndent(f.Snapshot, "", "  ")
+			// Per-session cpu/memory from the daemon's cached resource sample;
+			// omitted (best effort) when the daemon predates it.
+			var res *procstat.Snapshot
+			if r, err := queryResources(); err == nil {
+				res = &r
+			}
+			b, err := json.MarshalIndent(statusWithResources(*f.Snapshot, res), "", "  ")
 			if err != nil {
 				return err
 			}
