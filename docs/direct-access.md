@@ -4,8 +4,10 @@
 sessions over a route you already have (your LAN, or a VPN/tailnet you already
 run), with no cloud service in the data path. It is opt-in and off by default.
 
-This is the first delivery step. Cloud-assisted enrollment, Headscale and a
-Harness identity provider are later work and nothing here depends on them.
+This is the first delivery step. Optional, off-by-default cloud-assisted
+enrollment is described in [direct-cloud-enrollment.md](direct-cloud-enrollment.md);
+Headscale and a Harness identity provider are later work, and nothing here
+depends on any of them.
 
 ## What it is
 

@@ -1,0 +1,21 @@
+{
+  "type": "direct-enroll",
+  "reqId": "de1",
+  "directEnroll": {
+    "issueKey": "6f1c2a9e-4b7d-4e0a-9c3f-2d8e7b6a5c41",
+    "requester": "usr_01HZXK5Q8M",
+    "codeChallenge": "55yjceR04mztOD5CcZ3l2hHCFLTG2cd4VGjHGAwfubA",
+    "codeChallengeMethod": "S256",
+    "permissions": [
+      "read",
+      "steer"
+    ],
+    "resource": {
+      "kind": "workgroups",
+      "workgroups": [
+        "771951"
+      ]
+    },
+    "label": "Pixel"
+  }
+}

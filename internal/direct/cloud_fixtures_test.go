@@ -9,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // The cloud-v1 fixtures are the additive contract for cloud-assisted
@@ -32,7 +35,26 @@ func cloudFixtureFiles(t *testing.T) map[string][]byte {
 		"token-request-enrollment-pkce.txt": form(url.Values{"grant_type": {GrantTypeEnrollmentCode}, "code": {fixtureCode},
 			"client_label": {"Pixel"}, "client_kind": {ClientAndroid}, "code_verifier": {fixtureVerifier}}),
 		"token-error-pkce-required.json": js(OAuthError{Error: OAuthInvalidRequest, Description: "code_verifier is required for this code"}),
+		// Relay frames (Harness <-> provider), as harnessproto encodes them.
+		"direct-enroll-request.json": js(hp.MuxMsg{Type: hp.MDirectEnroll, ReqID: "de1", DirectEnroll: &hp.DirectEnrollRequest{
+			IssueKey: fixtureIssueKey, Requester: fixtureRequester, CodeChallenge: S256Challenge(fixtureVerifier),
+			CodeChallengeMethod: hp.DirectEnrollMethodS256, Permissions: []string{PermRead, PermSteer},
+			Resource: hp.DirectResource{Kind: hp.DirectResourceWorkgroups, Workgroups: []string{"771951"}}, Label: "Pixel"}}),
+		"direct-enroll-result.json": js(hp.HarnessMsg{Type: hp.HDirectEnrollResult, ReqID: "de1", DirectEnroll: &hp.DirectEnrollResult{
+			Bundle: string(bytes.TrimSpace(mustBundle(t))), ExpiresAt: fixtureNow.Unix() + int64(CloudCodeTTL/time.Second), ServerID: fixtureIdentity(t).ServerID}}),
+		"direct-enroll-refused.json": js(hp.HarnessMsg{Type: hp.HDirectEnrollResult, ReqID: "de2", DirectEnroll: &hp.DirectEnrollResult{Error: hp.DirectEnrollErrOwnerMismatch}}),
 	}
+}
+
+func mustBundle(t *testing.T) []byte {
+	t.Helper()
+	id := fixtureIdentity(t)
+	b, err := EncodeBundle(Bundle{V: 1, ServerID: id.ServerID, Endpoints: []string{fixtureEndpoint}, Code: fixtureCode,
+		ExpiresAt: fixtureNow.Unix() + int64(CloudCodeTTL/time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(b)
 }
 
 func TestCloudFixtures(t *testing.T) {

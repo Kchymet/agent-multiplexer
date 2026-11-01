@@ -310,6 +310,8 @@ type Capabilities struct {
 	OS       string   `json:"os,omitempty"`
 	Arch     string   `json:"arch,omitempty"`
 	Features []string `json:"features,omitempty"`
+	// Direct is present only with DirectEnrollV1 (see directenroll.go).
+	Direct *DirectCapabilities `json:"direct,omitempty"`
 }
 
 // PaneOffer is a still-running pane a reconnecting provider offers for resume.
@@ -369,6 +371,9 @@ type MuxMsg struct {
 	// the provider's default; the provider also clamps it).
 	BeforeSeq int64 `json:"beforeSeq,omitempty"`
 	Limit     int   `json:"limit,omitempty"`
+
+	// direct-enroll-v1 (direct-enroll; also uses ReqID).
+	DirectEnroll *DirectEnrollRequest `json:"directEnroll,omitempty"`
 }
 
 // HarnessMsg is a harness -> server message (v2: provider -> orchestrator).
@@ -430,6 +435,9 @@ type HarnessMsg struct {
 	// older events exist; request them with beforeSeq = Seq-len(Events)+1.
 	HeadSeq int64 `json:"headSeq,omitempty"`
 	HasMore bool  `json:"hasMore,omitempty"`
+
+	// direct-enroll-v1 (direct-enroll-result; also uses ReqID).
+	DirectEnroll *DirectEnrollResult `json:"directEnroll,omitempty"`
 }
 
 // Conn is a typed harnessproto connection: one JSON object per line over any byte

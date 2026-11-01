@@ -144,6 +144,27 @@ var goldenFrames = []struct {
 			{Type: TypeText, ItemID: "m3", Direction: DirOut, Payload: json.RawMessage(`{"text":"hello"}`)},
 		},
 	}},
+	{"direct-enroll-v1-register", HarnessMsg{
+		Type: HRegister, Versions: []int{1, 2}, Token: "hp_token", Name: "mybox",
+		Capabilities: &Capabilities{OS: "linux", Arch: "amd64", Features: []string{DirectEnrollV1},
+			Direct: &DirectCapabilities{ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U", Endpoints: []string{"https://amux.home.example:8443"}, Issuance: true}},
+	}},
+	{"direct-enroll-v1-request", MuxMsg{
+		Type: MDirectEnroll, ReqID: "de1", DirectEnroll: &DirectEnrollRequest{
+			IssueKey: "6f1c2a9e-4b7d-4e0a-9c3f-2d8e7b6a5c41", Requester: "usr_01HZXK5Q8M",
+			CodeChallenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGEgnrNKBk", CodeChallengeMethod: DirectEnrollMethodS256,
+			Permissions: []string{"read", "steer"}, Resource: DirectResource{Kind: DirectResourceWorkgroups, Workgroups: []string{"771951"}},
+			Label: "Pixel",
+		},
+	}},
+	{"direct-enroll-v1-result", HarnessMsg{
+		Type: HDirectEnrollResult, ReqID: "de1", DirectEnroll: &DirectEnrollResult{
+			Bundle: "amux-direct:1:eyJ2IjoxfQ", ExpiresAt: 1793000300, ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U",
+		},
+	}},
+	{"direct-enroll-v1-refused", HarnessMsg{
+		Type: HDirectEnrollResult, ReqID: "de2", DirectEnroll: &DirectEnrollResult{Error: DirectEnrollErrOwnerMismatch},
+	}},
 }
 
 func TestGoldenFrames(t *testing.T) {
