@@ -51,6 +51,7 @@ func Run(focusID string) error {
 		status:  "connecting…",
 		pending: focusID,
 	}
+	m.frames.enabled = true
 	if keysErr != nil {
 		m.status = "keybindings: " + keysErr.Error()
 	}
@@ -149,6 +150,8 @@ type model struct {
 	// each terminal's parsing goroutine, not the Update goroutine.
 	clip  func([]byte)
 	shown atomic.Pointer[vterm.Terminal]
+
+	frames frameCache // frame.go
 }
 
 // confirmState is a pending yes/no confirmation modal: the question shown, and
@@ -208,6 +211,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flushRailState()
 		}
 		return m, nil
+	}
+	switch {
+	case frameDataOnly(msg), msg == tea.Msg(termDataMsg{}):
+		before := m.layoutMark()
+		next, cmd := m.update(msg)
+		if m.layoutMark() != before {
+			m.invalidateRail()
+		} else if _, data := msg.(termDataMsg); data && m.frames.shownData.Swap(false) {
+			m.invalidateView()
+		}
+		if save := m.persistRailState(); save != nil {
+			cmd = tea.Batch(cmd, save)
+		}
+		return next, cmd
+	default:
+		m.invalidateRail()
 	}
 	next, cmd := m.update(msg)
 	if save := m.persistRailState(); save != nil {
@@ -922,6 +941,9 @@ func (m *model) launchPane(id string, tab int) tea.Cmd {
 		},
 	)
 	t.OnData(func() {
+		if m.shown.Load() == t {
+			m.frames.shownData.Store(true)
+		}
 		select {
 		case m.dataCh <- struct{}{}:
 		default:
