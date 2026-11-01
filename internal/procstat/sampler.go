@@ -127,7 +127,7 @@ func New(cfg Config) *Sampler {
 		prevTicks: map[procKey]uint64{},
 		meta:      map[procKey]*procMeta{},
 		pss:       map[procKey]pssEntry{},
-		latest:    Snapshot{IntervalMS: cfg.Interval.Milliseconds(), Error: "no sample yet"},
+		latest:    Snapshot{IntervalMS: cfg.Interval.Milliseconds(), Error: "no sample yet", Sessions: []SessionUsage{}, Workgroups: []WorkgroupUsage{}},
 	}
 }
 
@@ -274,6 +274,8 @@ func (s *Sampler) sample() (Snapshot, error) {
 		WindowMS:      int64(window * 1000),
 		CPUs:          s.cfg.CPUs,
 		MemTotalBytes: s.memTotal,
+		Sessions:      []SessionUsage{},
+		Workgroups:    []WorkgroupUsage{},
 	}
 	type group struct {
 		wg    string
@@ -539,4 +541,6 @@ func ParseInterval(v string) (time.Duration, error) {
 
 // Disabled is the snapshot a daemon serves when sampling is off or
 // unsupported.
-func Disabled(reason string) Snapshot { return Snapshot{Error: reason} }
+func Disabled(reason string) Snapshot {
+	return Snapshot{Error: reason, Sessions: []SessionUsage{}, Workgroups: []WorkgroupUsage{}}
+}
