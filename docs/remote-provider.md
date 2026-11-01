@@ -139,6 +139,11 @@ port. That topology does not reduce the authority granted above. See
 - TLS: standard hostname + chain verification against the system roots, with
   an optional CA file for private CAs. Authentication is a bearer token
   inside the TLS channel, issued by the orchestrator's operator.
+- Code: the link is `provider.HarnessRelay`, a provider transport rather than a
+  client access route. Session operations on this host go through the shared
+  host backend (`internal/hostbackend`); see
+  [connection-access.md](connection-access.md). A pending dial or TLS
+  handshake is abandoned on operator stop.
 - Reconnect: jittered exponential backoff (1s doubling to a 30s cap),
   forever — except terminal registration errors (`bad-token`, `revoked`,
   `unsupported-version`), which exit with a message instead of retrying.
