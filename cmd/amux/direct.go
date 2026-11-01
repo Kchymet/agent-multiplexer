@@ -93,7 +93,7 @@ cloud enable flags (each one required except the caps; all-sessions covers
 ordinary sessions, never the amux console):
   --owner <user-id>       the Harness user id allowed to request codes
   --provider <id>         this host's Harness provider id (provider_id in the
-                          ` + "`amux provide`" + ` status file / amux doctor)
+                          amux provide status file, shown by amux doctor)
   --permissions <list>    ceiling: read | read,steer
   --all-sessions          ceiling: any ordinary session, or
   --workgroup <root-id>   ceiling: these workgroups (repeatable)
