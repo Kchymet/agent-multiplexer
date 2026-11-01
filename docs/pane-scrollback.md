@@ -118,9 +118,18 @@ local with no history to scroll, while Page Up/Down still reached Codex. The
 engine therefore follows each pane's DEC private modes (`internal/termmodes`,
 on the emulator's own parser) and, when the ring has been trimmed, restates
 them ahead of the replay. Modes the program turned off or reset (RIS) stay off.
-The daemon's and remote provider's slow-consumer resyncs, and `vterm.Feed`'s
-own backlog trim, still restart a mirror from a bare tail; they fire only for
-a client more than 4 MiB behind.
+
+The same holds wherever a stream is cut down to a tail for a client that fell
+more than 4 MiB behind: the daemon's and the mux server's per-connection resync
+(`pane.reset`, then the last 256 KiB) and `vterm.Feed`'s own backlog trim (RIS,
+then the last 256 KiB) each follow the modes of the bytes they queue and
+restate them after the reset, so the cleared mirror keeps Codex's alternate
+screen and mouse reporting. The remote provider's replay trim is not covered;
+its consumer is the orchestrator, not an amux mirror.
+
+The engine's tracker exists only in a daemon that has it: an upgrade does not
+replace a running daemon, so panes keep the old behaviour until `amux daemon
+restart`.
 
 ## Viewport lifecycle
 
