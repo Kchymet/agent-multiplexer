@@ -24,6 +24,15 @@ type rateLog struct {
 // stallLogInterval bounds each stall line kind to one line per interval.
 const stallLogInterval = 10 * time.Second
 
+// rateLogMaxKeys bounds the keys a rateLog tracks. Keys can carry
+// client-chosen text (a request's verb, read before authorization), so past
+// this many live keys, entries older than the interval are pruned, and if
+// every entry is still live a new key shares one overflow key, rate-limited
+// like any other, instead of growing the maps.
+const rateLogMaxKeys = 512
+
+const rateLogOverflowKey = "\x00overflow"
+
 func newRateLog(interval time.Duration) *rateLog {
 	return &rateLog{now: time.Now, logf: log.Printf, interval: interval, last: map[string]time.Time{}, quiet: map[string]int{}}
 }
@@ -33,6 +42,12 @@ func newRateLog(interval time.Duration) *rateLog {
 func (l *rateLog) printf(key, format string, args ...any) {
 	l.mu.Lock()
 	now := l.now()
+	if _, known := l.last[key]; !known && len(l.last) >= rateLogMaxKeys {
+		l.pruneLocked(now)
+		if len(l.last) >= rateLogMaxKeys {
+			key = rateLogOverflowKey
+		}
+	}
 	if last, ok := l.last[key]; ok && now.Sub(last) < l.interval {
 		l.quiet[key]++
 		l.mu.Unlock()
@@ -46,6 +61,17 @@ func (l *rateLog) printf(key, format string, args ...any) {
 		line += fmt.Sprintf(" [%d similar lines suppressed in the last %v]", suppressed, now.Sub(since).Round(time.Second))
 	}
 	l.logf("%s", line)
+}
+
+// pruneLocked drops keys whose last line is older than the interval: their
+// next line would be logged anyway. A pruned key's suppressed count is lost.
+func (l *rateLog) pruneLocked(now time.Time) {
+	for key, last := range l.last {
+		if key != rateLogOverflowKey && now.Sub(last) >= l.interval {
+			delete(l.last, key)
+			delete(l.quiet, key)
+		}
+	}
 }
 
 // stallLog rate-limits the daemon's own stall lines (actions holding locks,

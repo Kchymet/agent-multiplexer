@@ -457,10 +457,18 @@ var modeCache struct {
 	bindings map[string]Binding
 }
 
-// sameStoreFile reports that a and b describe the same, unchanged file.
+// sameStoreFile reports that a and b describe the same, unchanged file. The
+// change time is compared too, so an in-place write of the same size within
+// a coarse-mtime filesystem's granularity (WSL drvfs, 9p) still misses; where
+// it cannot be read, the cache is never trusted.
 func sameStoreFile(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() &&
-		a.ModTime().Equal(b.ModTime()) && a.Mode() == b.Mode()
+	if a == nil || b == nil || !os.SameFile(a, b) || a.Size() != b.Size() ||
+		!a.ModTime().Equal(b.ModTime()) || a.Mode() != b.Mode() {
+		return false
+	}
+	ac, aok := changeTime(a)
+	bc, bok := changeTime(b)
+	return aok && bok && ac == bc
 }
 
 func modeBindings() (map[string]Binding, bool) {

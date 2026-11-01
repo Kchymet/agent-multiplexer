@@ -11,10 +11,12 @@ import (
 
 // slowRequestLog writes the daemon's slow mailbox request lines through a
 // rateLog. A request that was only queued a long time is logged at most once
-// per queueLogInterval across every subject: when a stall ends, every
-// mailbox's backlog reports at once, and one line with a count says as much
-// as hundreds. A request whose own processing was slow is logged at most once
-// per verb per interval, with the same count.
+// per subject per queueLogInterval: when a stall ends, a mailbox's whole
+// backlog reports at once, and one line with a count says as much as fifty.
+// The key is per subject so one session's (possibly backdated) requests
+// cannot hold the line that would report another's stall. A request whose own
+// processing was slow is logged at most once per verb per interval, with the
+// same count. Both keys carry request text, which rateLog bounds.
 type slowRequestLog struct {
 	rate *rateLog
 }
@@ -26,7 +28,7 @@ func newSlowRequestLog() *slowRequestLog { return &slowRequestLog{rate: newRateL
 func (l *slowRequestLog) report(t sessionrpc.RequestTiming) {
 	r := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
 	if t.Total < sessionrpc.SlowRequestThreshold {
-		l.rate.printf("queued", "session RPC %s: request %s %s %s waited %v before processing, then took %v (status %s %s)",
+		l.rate.printf("queued:"+t.SubjectID, "session RPC %s: request %s %s %s waited %v before processing, then took %v (status %s %s)",
 			t.SubjectID, t.RequestID, t.Kind, t.Verb, r(t.Age), r(t.Total), t.Status, t.Code)
 		return
 	}
