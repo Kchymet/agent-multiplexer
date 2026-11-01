@@ -68,3 +68,15 @@ func TestResourcesQueryNotRestricted(t *testing.T) {
 		t.Fatal("restricted sessions accepted the host-only resources query")
 	}
 }
+
+func TestResourcesUnsupportedFlag(t *testing.T) {
+	d := New("", nil, time.Hour)
+	d.startResourceSampler(context.Background(), func(f func()) {})
+	snap := d.resourceSnapshot()
+	if runtime.GOOS != "linux" && (!snap.Unsupported || snap.Sessions == nil) {
+		t.Fatalf("non-linux snapshot = %+v", snap)
+	}
+	if runtime.GOOS == "linux" && snap.Unsupported {
+		t.Fatalf("linux snapshot flagged unsupported: %+v", snap)
+	}
+}

@@ -40,6 +40,10 @@ func cmdTop(args []string) error {
 		fmt.Println(string(b))
 		return nil
 	}
+	if snap.Unsupported {
+		fmt.Printf("resource sampling is unsupported on this host: %s\n", snap.Error)
+		return nil
+	}
 	if snap.SampledAt == 0 && snap.Error != "" {
 		return errors.New(snap.Error)
 	}

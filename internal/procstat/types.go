@@ -68,6 +68,10 @@ type Snapshot struct {
 	// sampler disabled) or the last sample failed; the other fields then hold
 	// the last good sample, if any.
 	Error string `json:"error,omitempty"`
+	// Unsupported is true when this host cannot be sampled at all (no Linux
+	// procfs, e.g. macOS); every figure is then zero. Additive: absent from
+	// daemons that predate it.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 // Usage is an aggregate over a set of processes.

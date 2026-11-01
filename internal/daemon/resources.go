@@ -48,6 +48,9 @@ func (d *Daemon) resourceSnapshot() procstat.Snapshot {
 	d.resourcesMu.Lock()
 	s, off := d.resources, d.resourcesOff
 	d.resourcesMu.Unlock()
+	if s == nil && runtime.GOOS != "linux" {
+		return procstat.Unsupported(off)
+	}
 	if s == nil {
 		if off == "" {
 			off = "resource sampler not running"

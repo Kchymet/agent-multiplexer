@@ -539,8 +539,14 @@ func ParseInterval(v string) (time.Duration, error) {
 	return d, nil
 }
 
-// Disabled is the snapshot a daemon serves when sampling is off or
-// unsupported.
+// Unsupported is the snapshot a daemon serves on a host without procfs.
+func Unsupported(reason string) Snapshot {
+	s := Disabled(reason)
+	s.Unsupported = true
+	return s
+}
+
+// Disabled is the snapshot a daemon serves when sampling is off.
 func Disabled(reason string) Snapshot {
 	return Snapshot{Error: reason, Sessions: []SessionUsage{}, Workgroups: []WorkgroupUsage{}}
 }
