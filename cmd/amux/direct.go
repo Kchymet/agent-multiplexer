@@ -89,7 +89,7 @@ enroll flags (the running server publishes its endpoints into the bundle):
 `)
 }
 
-func directRoot() string { return direct.DefaultRoot() }
+func directRoot() (string, error) { return direct.DefaultRoot() }
 
 // hostCredential loads the host credential from the protected directory, which
 // HOME and XDG cannot redirect.
@@ -135,10 +135,14 @@ func cmdDirectServe(args []string) error {
 	if *listen == "" {
 		return errors.New("--listen is required")
 	}
+	root, err := directRoot()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return direct.Serve(ctx, direct.ServeConfig{
-		Root: directRoot(), Listen: *listen, AllowPublicBind: *public, CertFile: *cert, KeyFile: *key,
+		Root: root, Listen: *listen, AllowPublicBind: *public, CertFile: *cert, KeyFile: *key,
 		Endpoints: endpoints, AllowOrigins: origins,
 		Life:    direct.Lifetimes{Access: *accessTTL, Idle: *idle, Absolute: *absolute},
 		Backend: direct.HostBackend{H: hostbackend.New()},
@@ -157,9 +161,13 @@ func adminRun(req direct.AdminRequest) (direct.AdminResponse, error) {
 	if err != nil {
 		return direct.AdminResponse{}, err
 	}
+	root, err := directRoot()
+	if err != nil {
+		return direct.AdminResponse{}, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := direct.AdminCall(ctx, directRoot(), cred, req)
+	resp, err := direct.AdminCall(ctx, root, cred, req)
 	if err == nil {
 		return resp, nil
 	}
@@ -169,7 +177,7 @@ func adminRun(req direct.AdminRequest) (direct.AdminResponse, error) {
 	}
 	// No server is listening: administer the store directly. If a server owns
 	// the lock after all, this refuses rather than writing beside it.
-	resp, err = direct.OfflineAdminister(ctx, directRoot(), cred, relayHostProof, req)
+	resp, err = direct.OfflineAdminister(ctx, root, cred, relayHostProof, req)
 	if errors.Is(err, direct.ErrStoreBusy) {
 		return resp, errors.New("the direct store is owned by a running server whose admin socket is unreachable")
 	}

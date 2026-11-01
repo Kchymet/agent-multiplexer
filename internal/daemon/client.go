@@ -414,11 +414,18 @@ func (c *Client) Dispatch(a core.Action) (string, error) {
 			continue
 		}
 		if !frame.Result.OK {
-			return "", fmt.Errorf("%s", frame.Result.Error)
+			return "", &RejectedError{Msg: frame.Result.Error}
 		}
 		return frame.Result.NewID, nil
 	}
 }
+
+// RejectedError is the daemon's own answer refusing an action: the daemon
+// received it and decided. Any other Dispatch error (a send or read failure)
+// leaves the outcome unknown. Its text is the daemon's message, unchanged.
+type RejectedError struct{ Msg string }
+
+func (e *RejectedError) Error() string { return e.Msg }
 
 // PaneOpen asks the daemon to attach this connection to a tab of an agent,
 // streaming its output back as pane frames. The caller mints paneID (unique

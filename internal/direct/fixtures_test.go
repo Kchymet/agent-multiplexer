@@ -76,18 +76,18 @@ func fixtureFiles(t *testing.T, id *Identity, proof string) map[string][]byte {
 	}}
 	textEvent := json.RawMessage(`{"text":"Done.","final":true}`)
 	return map[string][]byte{
-		"hello-request.json":          js(HelloRequest{Protocol: Protocol, ClientNonce: fixtureNonce, Endpoint: fixtureEndpoint}),
-		"hello-response.json":         js(HelloResponse{Proof: proof}),
-		"bundle.txt":                  []byte(bundle + "\n"),
-		"bundle.json":                 js(Bundle{V: 1, ServerID: id.ServerID, Endpoints: []string{fixtureEndpoint}, Code: fixtureCode, ExpiresAt: fixtureNow.Unix() + 600}),
+		"hello-request.json":           js(HelloRequest{Protocol: Protocol, ClientNonce: fixtureNonce, Endpoint: fixtureEndpoint}),
+		"hello-response.json":          js(HelloResponse{Proof: proof}),
+		"bundle.txt":                   []byte(bundle + "\n"),
+		"bundle.json":                  js(Bundle{V: 1, ServerID: id.ServerID, Endpoints: []string{fixtureEndpoint}, Code: fixtureCode, ExpiresAt: fixtureNow.Unix() + 600}),
 		"token-request-enrollment.txt": form(url.Values{"grant_type": {GrantTypeEnrollmentCode}, "code": {fixtureCode}, "client_label": {"Pixel"}, "client_kind": {ClientAndroid}}),
-		"token-request-refresh.txt":   form(url.Values{"grant_type": {GrantTypeRefresh}, "refresh_token": {fixtureRefresh}}),
-		"revoke-request.txt":          form(url.Values{"token": {fixtureRefresh}}),
+		"token-request-refresh.txt":    form(url.Values{"grant_type": {GrantTypeRefresh}, "refresh_token": {fixtureRefresh}}),
+		"revoke-request.txt":           form(url.Values{"token": {fixtureRefresh}}),
 		"token-response.json": js(TokenResponse{AccessToken: fixtureAccess, TokenType: "Bearer", ExpiresIn: 600, RefreshToken: fixtureRefresh,
 			Scope: "read steer", ClientID: fixtureClientID, ServerID: id.ServerID, GrantExpiresAt: fixtureNow.Unix() + 90*86400,
 			ResourceScope: ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"771951"}}}),
-		"token-error.json":      js(OAuthError{Error: OAuthInvalidGrant, Description: "the code or refresh token is invalid, expired, used or revoked"}),
-		"api-error.json":        js(APIError{Code: CodeAuthExpired, Error: "access token expired"}),
+		"token-error.json":       js(OAuthError{Error: OAuthInvalidGrant, Description: "the code or refresh token is invalid, expired, used or revoked"}),
+		"api-error.json":         js(APIError{Code: CodeAuthExpired, Error: "access token expired"}),
 		"sessions-response.json": js(sessions),
 		"history-response.json": js(HistoryResponse{SessionID: "e1deda", Runtime: "claude", Seq: 42, HeadSeq: 57, HasMore: true,
 			Events: []RuntimeEvent{{Type: hp.TypeText, ItemID: "msg_1", Direction: hp.DirOut, Payload: textEvent}}}),
@@ -100,6 +100,7 @@ func fixtureFiles(t *testing.T, id *Identity, proof string) map[string][]byte {
 		"watch-auth.json":            js(WatchAuth{Type: "auth", AccessToken: fixtureAccess}),
 		"watch-welcome.json":         js(WatchWelcome{Type: "welcome", ServerID: id.ServerID, ExpiresAt: fixtureNow.Unix() + 600}),
 		"watch-snapshot.json":        js(WatchSnapshot{Type: "snapshot", Sessions: sessions.Sessions}),
+		"ws-close-codes.json":        js(CloseCodes),
 	}
 }
 
@@ -130,9 +131,21 @@ func TestDirectFixtures(t *testing.T) {
 	id := fixtureIdentity(t)
 	var proof string
 	if os.Getenv("UPDATE_DIRECT_FIXTURES") == "1" {
-		var err error
-		if proof, err = id.SignHello(HelloRequest{Protocol: Protocol, ClientNonce: fixtureNonce, Endpoint: fixtureEndpoint}, fixtureNow); err != nil {
-			t.Fatal(err)
+		// Keep the committed proof when it still verifies: ES256 signatures are
+		// randomized, and re-signing would churn a pinned fixture for nothing.
+		if raw, err := os.ReadFile(filepath.Join(fixtureDir, "hello-response.json")); err == nil {
+			var old HelloResponse
+			if json.Unmarshal(raw, &old) == nil {
+				if _, err := VerifyHello(old.Proof, id.ServerID, HelloRequest{Protocol: Protocol, ClientNonce: fixtureNonce, Endpoint: fixtureEndpoint}, fixtureNow); err == nil {
+					proof = old.Proof
+				}
+			}
+		}
+		if proof == "" {
+			var err error
+			if proof, err = id.SignHello(HelloRequest{Protocol: Protocol, ClientNonce: fixtureNonce, Endpoint: fixtureEndpoint}, fixtureNow); err != nil {
+				t.Fatal(err)
+			}
 		}
 		files := fixtureFiles(t, id, proof)
 		files["SHA256SUMS"] = sums(files)
@@ -194,7 +207,7 @@ func TestDirectFixtures(t *testing.T) {
 		"sessions-response.json": &SessionsResponse{}, "history-response.json": &HistoryResponse{},
 		"action-request-prompt.json": &ActionRequest{}, "action-request-stop.json": &ActionRequest{},
 		"action-response.json": &ActionResponse{}, "watch-auth.json": &WatchAuth{}, "watch-welcome.json": &WatchWelcome{},
-		"watch-snapshot.json": &WatchSnapshot{},
+		"watch-snapshot.json": &WatchSnapshot{}, "ws-close-codes.json": &map[string]int{},
 	}
 	for n, v := range strict {
 		dec := json.NewDecoder(bytes.NewReader(want[n]))

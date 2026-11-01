@@ -15,10 +15,14 @@ import (
 // `amux direct serve`); administer it through the admin channel instead.
 var ErrStoreBusy = errors.New("direct store is owned by another process")
 
-// DefaultRoot is the direct state directory. It lives under the amux state
-// directory, which agent sandboxes never mount (see core.StateDir and the
-// panespec manifests), and is created 0700.
-func DefaultRoot() string { return core.DirectStateDir() }
+// DefaultRoot is the direct state directory (core.DirectStateDir): resolved
+// from the login account, not HOME, inside the state directory agent sandboxes
+// never mount, and created 0700.
+func DefaultRoot() (string, error) { return core.DirectStateDir() }
+
+// ErrNoStore means no direct store exists yet; offline administration never
+// creates one.
+var ErrNoStore = errors.New("no direct store exists (run `amux direct serve` first)")
 
 const (
 	stateVersion = 1
@@ -31,7 +35,7 @@ const (
 
 type idemRecord struct {
 	BodyHash string `json:"bodyHash"`
-	State    string `json:"state"` // admitted | done
+	State    string `json:"state"` // admitted | done | ambiguous
 	Boot     string `json:"boot"`  // process that admitted it
 	OK       bool   `json:"ok,omitempty"`
 	Code     string `json:"code,omitempty"`
@@ -42,6 +46,7 @@ type idemRecord struct {
 const (
 	idemAdmitted = "admitted"
 	idemDone     = "done"
+	idemUnknown  = "ambiguous" // outcome unknown; never pruned, never re-run
 )
 
 type grantRecord struct {

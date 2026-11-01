@@ -318,6 +318,11 @@ func OfflineAdminister(ctx context.Context, root string, cred access.Credential,
 	}); err != nil {
 		return AdminResponse{}, fmt.Errorf("host authentication failed: %w", err)
 	}
+	if _, err := os.Stat(filepath.Join(root, identityName)); errors.Is(err, os.ErrNotExist) {
+		return AdminResponse{}, ErrNoStore
+	} else if err != nil {
+		return AdminResponse{}, err
+	}
 	a, err := OpenAuthority(root, Lifetimes{}, nil)
 	if err != nil {
 		return AdminResponse{}, err

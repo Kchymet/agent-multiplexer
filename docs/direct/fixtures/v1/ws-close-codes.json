@@ -1,0 +1,6 @@
+{
+  "auth.expired": 4002,
+  "auth.invalid": 4001,
+  "auth.revoked": 4401,
+  "denied": 4403
+}

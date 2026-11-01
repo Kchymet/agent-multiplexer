@@ -105,12 +105,19 @@ const (
 	OAuthTemporarilyUnavail   = "temporarily_unavailable"
 )
 
-// WebSocket close codes.
+// WebSocket close codes. The close reason is the matching code string.
 const (
-	CloseAuthExpired = 4002 // reason "auth.expired": refresh, then reconnect
-	CloseAuthRevoked = 4401 // reason "auth.revoked" or "auth.invalid"
-	CloseDenied      = 4403 // reason "denied"
+	CloseAuthInvalid = 4001 // "auth.invalid": unknown token (e.g. server restart); one serialized refresh, then reconnect
+	CloseAuthExpired = 4002 // "auth.expired": refresh, then reconnect
+	CloseAuthRevoked = 4401 // "auth.revoked": the grant is gone; enroll again
+	CloseDenied      = 4403 // "denied": the grant lacks the permission
 )
+
+// CloseCodes is the fixture form of the close-code table.
+var CloseCodes = map[string]int{
+	CodeAuthInvalid: CloseAuthInvalid, CodeAuthExpired: CloseAuthExpired,
+	CodeAuthRevoked: CloseAuthRevoked, CodeDenied: CloseDenied,
+}
 
 // HelloRequest is the body of POST /direct/v1/hello.
 type HelloRequest struct {

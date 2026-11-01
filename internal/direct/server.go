@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"amux/internal/daemon"
 	"amux/internal/hostbackend"
 
 	"github.com/gorilla/websocket"
@@ -504,6 +505,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
+	_ = rc.Flush() // the client sees the open stream at once, before any event
 	send := func(event string, v any) bool {
 		data, _ := json.Marshal(v)
 		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -634,35 +636,62 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if code := l.AuthEnded(); code != "" { // expiry before execution still denies
+		writeErr(w, http.StatusUnauthorized, code, "access ended before the action ran")
+		return
+	}
 	out, rec, err := s.cfg.Authority.BeginAction(l, req.IdemKey, bodyHash, false)
-	if err != nil {
-		if errors.Is(err, errAuthRevoked) {
-			writeAuthErr(w, err)
-		} else {
-			writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not record the action; it was not executed")
-		}
+	switch {
+	case errors.Is(err, errAuthRevoked):
+		writeAuthErr(w, err)
+		return
+	case errors.Is(err, errCapacity):
+		writeErr(w, http.StatusTooManyRequests, CodeRateLimited, err.Error())
+		return
+	case err != nil:
+		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not record the action; it was not executed")
 		return
 	}
 	if s.idemReply(w, out, rec) {
 		return
 	}
-	_, err = s.cfg.Backend.Apply(l.Context(), act)
+	if code := l.AuthEnded(); code != "" {
+		s.cfg.Authority.AbortAction(l, req.IdemKey)
+		writeErr(w, http.StatusUnauthorized, code, "access ended before the action ran")
+		return
+	}
+	// From here the action is admitted: it runs under a bounded execution
+	// lifetime that only revocation cuts short, not token expiry or disconnect.
+	exec, cancel := l.ExecContext(actionExecLimit)
+	_, err = s.cfg.Backend.Apply(exec, act)
+	cancel()
+	var rejected *daemon.RejectedError
 	switch {
 	case err == nil:
 		s.cfg.Authority.FinishAction(l, req.IdemKey, true, "", "")
 		writeJSON(w, http.StatusOK, ActionResponse{OK: true})
-	case l.AuthEnded() != "":
-		// The daemon may or may not have committed it; the record stays admitted.
-		writeErr(w, http.StatusUnauthorized, l.AuthEnded(), "access ended during the action; its outcome is unknown")
-	case errors.Is(err, hostbackend.ErrUnavailable):
-		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeUnavailable, "the amux daemon is not reachable")
-		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "the amux daemon is not reachable")
-	default:
+	case errors.As(err, &rejected):
 		s.cfg.Logf("direct: action %s on %s rejected: %v", req.Verb, sid, err)
 		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeRejected, "the daemon rejected the action")
 		writeErr(w, http.StatusUnprocessableEntity, CodeRejected, "the daemon rejected the action")
+	case errors.Is(err, hostbackend.ErrUnavailable):
+		// The call never reached an authenticated daemon: nothing ran.
+		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeUnavailable, "the amux daemon was not reachable; the action did not run")
+		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "the amux daemon was not reachable; the action did not run")
+	default:
+		// Cancelled (revocation or the execution bound) or a transport failure
+		// after dispatch: the daemon may or may not have applied it.
+		s.cfg.Authority.AmbiguousAction(l, req.IdemKey)
+		if l.Revoked() {
+			writeErr(w, http.StatusUnauthorized, CodeAuthRevoked, "access revoked during the action; its outcome is unknown")
+		} else {
+			writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "the action's outcome is unknown; it will not run again with this idem_key")
+		}
 	}
 }
+
+// actionExecLimit bounds one admitted daemon call.
+const actionExecLimit = 60 * time.Second
 
 func actionHash(sid string, req ActionRequest) string {
 	canon, _ := json.Marshal(struct {
@@ -692,7 +721,7 @@ func (s *Server) idemReply(w http.ResponseWriter, out idemOutcome, rec *idemReco
 	case idemInProgress:
 		writeErr(w, http.StatusConflict, CodeIdemInProgress, "an action with this idem_key is still running")
 	case idemAmbiguous:
-		writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "an action with this idem_key was admitted before a restart and its outcome is unknown; it will not run again")
+		writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "an action with this idem_key has an unknown outcome; it will not run again")
 	default:
 		return false
 	}
@@ -720,7 +749,7 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var auth WatchAuth
 	if err := conn.ReadJSON(&auth); err != nil || auth.Type != "auth" {
-		closeWith(CloseAuthRevoked, CodeAuthInvalid)
+		closeWith(CloseAuthInvalid, CodeAuthInvalid)
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -734,7 +763,7 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errDenied):
 			closeWith(CloseDenied, CodeDenied)
 		default:
-			closeWith(CloseAuthRevoked, CodeAuthInvalid)
+			closeWith(CloseAuthInvalid, CodeAuthInvalid)
 		}
 		return
 	}

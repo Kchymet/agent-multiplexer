@@ -22,12 +22,19 @@ const (
 	DefaultAbsoluteTT = 90 * 24 * time.Hour
 	DefaultCodeTTL    = 10 * time.Minute
 	MaxCodeTTL        = time.Hour
-	maxUsedRefresh    = 20000
 	idemRetention     = 24 * time.Hour
-	maxIdemPerGrant   = 1024
 	revokedRetention  = 30 * 24 * time.Hour
 	revokeDrain       = 10 * time.Second
 )
+
+// maxUsedRefresh bounds a grant's consumed-refresh history. Reaching it ends
+// the grant (fail closed) instead of evicting history. A var for tests.
+var maxUsedRefresh = 20000
+
+// maxIdemPerGrant bounds a grant's idempotency records. Unresolved (admitted or
+// ambiguous) records are never pruned, so a grant that accumulates this many
+// fails closed for new actions. A var for tests.
+var maxIdemPerGrant = 1024
 
 // Authorization failures. Each maps to one wire code.
 var (
@@ -86,6 +93,7 @@ type Authority struct {
 
 	access   map[string]accessRec // sha256(token) -> record; memory only
 	tomb     map[string]int64     // revoked access-token hashes -> exp
+	running  map[string]bool      // idempotency keys executing in this process
 	leases   map[string]map[*Lease]struct{}
 	closed   bool
 	degraded error                 // set after an ambiguous commit; blocks issuance until restart
@@ -171,7 +179,7 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 	}
 	a := &Authority{
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
-		access: map[string]accessRec{}, tomb: map[string]int64{}, leases: map[string]map[*Lease]struct{}{},
+		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
 	}
 	if state.IdentityGeneration != id.Generation {
 		// A grant issued under another identity can never be valid again.
@@ -265,6 +273,9 @@ func ValidateResource(r ResourceScope) (ResourceScope, error) {
 		for _, id := range ids {
 			if !validSessionID(id) {
 				return r, fmt.Errorf("invalid workgroup id %q", id)
+			}
+			if id == ConsoleID {
+				return r, errors.New("the console cannot be granted over direct access")
 			}
 		}
 		sort.Strings(ids)
@@ -477,7 +488,7 @@ func (a *Authority) revokeAndUnlock(g *grantRecord, reason string, now int64) (T
 	drained := a.drain(g.ClientID, leases)
 	switch {
 	case err != nil:
-		return TokenResponse{}, fmt.Errorf("revocation (%s) in effect but not persisted: %w", reason, err)
+		return TokenResponse{}, fmt.Errorf("revocation (%s) is in effect in this process but was NOT persisted (%w); a restart before the store is repaired will revive the grant", reason, err)
 	case !drained:
 		return TokenResponse{}, fmt.Errorf("revocation (%s) persisted but operations did not finish within %s", reason, revokeDrain)
 	}
@@ -525,7 +536,8 @@ func (a *Authority) Revoke(clientID, reason string) error {
 	a.mu.Unlock()
 	drained := a.drain(clientID, leases)
 	if err != nil {
-		return fmt.Errorf("revocation is in effect in this process but was not persisted: %w", err)
+		return fmt.Errorf("revocation of %s is in effect in this running process but was NOT persisted (%w); "+
+			"repair the store's storage and run the revoke again before restarting, or a restart will revive the grant", clientID, err)
 	}
 	if !drained {
 		return fmt.Errorf("revocation persisted, but operations of %s did not finish within %s", clientID, revokeDrain)
@@ -696,25 +708,40 @@ type Grant struct {
 // Can reports whether the grant holds perm.
 func (g Grant) Can(perm string) bool { return slices.Contains(g.Perms, perm) }
 
-// Lease is one admitted operation or stream of one grant. Its context is
-// cancelled when the grant is revoked; Revoke waits for Done.
+// Lease is one admitted operation or stream of one grant. Revoke cancels it
+// and waits for Done, which is the revoke barrier.
+//
+// A lease has two contexts. Context ends on revocation, on access-token expiry
+// and when the request goes away: every authorization read and every stream
+// runs under it. ExecContext ends only on revocation (or its own bound): an
+// action that has already been admitted and handed to the daemon is not
+// abandoned because the token expired or the client disconnected mid-call.
 type Lease struct {
 	Grant
 	ExpiresAt int64 // access token expiry (unix seconds)
 	ctx       context.Context
-	cancelFn  context.CancelCauseFunc
+	rctx      context.Context // revocation / release only
+	rcancel   context.CancelCauseFunc
+	release   func()
 	done      chan struct{}
 	once      sync.Once
 	a         *Authority
 }
 
-// Context is cancelled with cause auth.revoked on revocation.
+// Context is cancelled on revocation (cause auth.revoked), on access-token
+// expiry (cause auth.expired) and with the request.
 func (l *Lease) Context() context.Context { return l.ctx }
 
-func (l *Lease) cancel(cause error) { l.cancelFn(cause) }
+// ExecContext bounds one already-admitted daemon call: it ends on revocation or
+// after limit, never on token expiry or client disconnect.
+func (l *Lease) ExecContext(limit time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(l.rctx, limit)
+}
+
+func (l *Lease) cancel(cause error) { l.rcancel(cause) }
 
 // Revoked reports whether the lease was cancelled by revocation.
-func (l *Lease) Revoked() bool { return errors.Is(context.Cause(l.ctx), errAuthRevoked) }
+func (l *Lease) Revoked() bool { return errors.Is(context.Cause(l.rctx), errAuthRevoked) }
 
 // Expired reports whether the lease ended because its access token expired.
 func (l *Lease) Expired() bool {
@@ -743,7 +770,8 @@ func (l *Lease) Done() {
 			}
 		}
 		l.a.mu.Unlock()
-		l.cancelFn(context.Canceled)
+		l.rcancel(context.Canceled)
+		l.release()
 		close(l.done)
 	})
 }
@@ -780,12 +808,14 @@ func (a *Authority) Admit(parent context.Context, token, perm string) (*Lease, e
 	}
 	// The lease ends at the access token's expiry: a stalled backend call is
 	// cancelled then, with a cause distinct from revocation.
+	rctx, rcancel := context.WithCancelCause(context.Background())
 	dctx, dcancel := context.WithDeadlineCause(parent, time.Now().Add(time.Unix(rec.exp, 0).Sub(a.now())), errAuthExpired)
 	ctx, ccancel := context.WithCancelCause(dctx)
-	cancel := func(cause error) { ccancel(cause); dcancel() }
+	stop := context.AfterFunc(rctx, func() { ccancel(context.Cause(rctx)) })
 	l := &Lease{
 		Grant:     Grant{ClientID: g.ClientID, Perms: slices.Clone(g.Perms), Resource: g.Resource},
-		ExpiresAt: rec.exp, ctx: ctx, cancelFn: cancel, done: make(chan struct{}), a: a,
+		ExpiresAt: rec.exp, ctx: ctx, rctx: rctx, rcancel: rcancel, done: make(chan struct{}), a: a,
+		release: func() { stop(); ccancel(context.Canceled); dcancel() },
 	}
 	if a.leases[g.ClientID] == nil {
 		a.leases[g.ClientID] = map[*Lease]struct{}{}
@@ -805,16 +835,23 @@ const (
 	idemAmbiguous
 )
 
+// errCapacity: the grant holds too many unresolved or recent actions.
+var errCapacity = errors.New("this client has too many recent or unresolved actions; enroll again to continue")
+
+func runKey(clientID, key string) string { return clientID + "\x00" + key }
+
 // BeginAction records an action's idempotency key durably before it executes.
 // It returns idemReplay with the stored result when the same key and body
-// already completed. A key admitted by an earlier process that never recorded a
-// result is ambiguous and is never executed again.
+// already completed. An admitted key that is not running in this process (it
+// ended without a recorded outcome, or a previous process admitted it) is
+// ambiguous and is never executed again. Ambiguous and admitted records are
+// never pruned; at capacity new actions fail closed.
 //
 // With peek set it only reports an existing record and never creates one.
 func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idemOutcome, *idemRecord, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if l.ctx.Err() != nil {
+	if l.rctx.Err() != nil {
 		return 0, nil, errAuthRevoked
 	}
 	g := a.state.Grants[l.ClientID]
@@ -826,7 +863,7 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 		g.Idem = map[string]*idemRecord{}
 	}
 	for k, r := range g.Idem {
-		if now > r.At+int64(idemRetention/time.Second) && r.State == idemDone {
+		if r.State == idemDone && now > r.At+int64(idemRetention/time.Second) {
 			delete(g.Idem, k)
 		}
 	}
@@ -837,7 +874,7 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 		case r.State == idemDone:
 			copied := *r
 			return idemReplay, &copied, nil
-		case r.Boot == a.boot:
+		case r.State == idemAdmitted && a.running[runKey(l.ClientID, key)]:
 			return idemInProgress, nil, nil
 		default:
 			return idemAmbiguous, nil, nil
@@ -846,36 +883,67 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 	if peek {
 		return idemProceed, nil, nil
 	}
-	if len(g.Idem) >= maxIdemPerGrant {
-		return 0, nil, errors.New("too many recent actions for this client; retry later")
-	}
 	if a.degraded != nil {
 		return 0, nil, errDegraded
+	}
+	if len(g.Idem) >= maxIdemPerGrant {
+		return 0, nil, errCapacity
 	}
 	g.Idem[key] = &idemRecord{BodyHash: bodyHash, State: idemAdmitted, Boot: a.boot, At: now}
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			delete(g.Idem, key)
 		}
-		// Ambiguous: the admitted record stays, so the action never runs blind.
+		// Ambiguous commit: the admitted record stays and is not running, so a
+		// retry reports ambiguous and the action never runs blind.
 		return 0, nil, err
 	}
+	a.running[runKey(l.ClientID, key)] = true
 	return idemProceed, nil, nil
 }
 
-// FinishAction records an action's result. A persistence failure leaves the
-// record admitted, which a retry then reports as in progress or ambiguous.
+// FinishAction records a known outcome (ok, or the daemon's refusal, or a
+// failure before the daemon was reached). A persistence failure leaves the
+// record admitted and no longer running, which reads as ambiguous.
 func (a *Authority) FinishAction(l *Lease, key string, ok bool, code, msg string) {
+	a.endAction(l, key, func(r *idemRecord) { r.State, r.OK, r.Code, r.Error = idemDone, ok, code, msg })
+}
+
+// AmbiguousAction records that the call's outcome is unknown: it may or may
+// not have taken effect. The record is permanent for the grant.
+func (a *Authority) AmbiguousAction(l *Lease, key string) {
+	a.endAction(l, key, func(r *idemRecord) { r.State = idemUnknown })
+}
+
+// AbortAction removes an admitted record for an action that was never handed
+// to the daemon (its lease ended first).
+func (a *Authority) AbortAction(l *Lease, key string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	delete(a.running, runKey(l.ClientID, key))
+	g := a.state.Grants[l.ClientID]
+	if g == nil || g.Idem[key] == nil || g.Idem[key].State != idemAdmitted {
+		return
+	}
+	r := g.Idem[key]
+	delete(g.Idem, key)
+	if err := a.commitLocked(); rolledBack(err) {
+		g.Idem[key] = r // stays admitted, not running: ambiguous, never re-run
+	}
+}
+
+func (a *Authority) endAction(l *Lease, key string, set func(*idemRecord)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.running, runKey(l.ClientID, key))
 	g := a.state.Grants[l.ClientID]
 	if g == nil || g.Idem[key] == nil {
 		return
 	}
 	r := g.Idem[key]
 	prev := *r
-	r.State, r.OK, r.Code, r.Error = idemDone, ok, code, msg
+	set(r)
 	if err := a.commitLocked(); rolledBack(err) {
-		*r = prev // stays admitted: a retry reports in progress, then ambiguous
+		*r = prev
 	}
 }

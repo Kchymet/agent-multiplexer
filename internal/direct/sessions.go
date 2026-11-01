@@ -70,11 +70,21 @@ func validSessionID(id string) bool {
 		!strings.ContainsAny(id, "/\\\x00") && !strings.Contains(id, "://")
 }
 
+// ConsoleID is the machine-wide console session. It carries operator and
+// account powers, so S1 direct access never exposes it: not in inventory,
+// history, streams or actions, under any grant, including all_sessions.
+const ConsoleID = "console"
+
+func isConsole(row core.Session) bool { return row.ID == ConsoleID || row.Role == hp.RoleConsole }
+
 // inScope reports whether row is inside the grant's resource scope, judged from
 // the fresh inventory rows only. For a workgroup grant that is the workgroup's
 // root row and every row whose root (followed through the authoritative rows)
 // is that root.
 func inScope(g Grant, row core.Session, byID map[string]core.Session) bool {
+	if isConsole(row) {
+		return false
+	}
 	switch g.Resource.Kind {
 	case ResourceAllSessions:
 		return true

@@ -246,3 +246,43 @@ func TestIsolationSupportRejectsUnsafeBubblewrapAndDisabledJail(t *testing.T) {
 		})
 	}
 }
+
+// The direct server's grant registry, identity and admin socket live in the
+// protected direct state directory. No pane manifest may mount it, or anything
+// containing it, so an agent can neither read the registry nor reach the admin
+// channel (whose host-proof gate is the second line of defense).
+func TestManifestNeverMountsDirectState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	useFakeSecureBwrap(t)
+	directRoot, err := core.DirectStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected, err := core.ProtectedStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.Session{ID: "agent-a", RootID: "root", Agent: "claude", Dir: filepath.Join(home, "sessions", "root", "agent-a")}
+	spec := testLaunchSpec(t, s)
+	argv, err := scope(s.Dir, TabAgent, s, spec.Access, spec.GitObjects, []string{"/usr/bin/true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, arg := range argv {
+		if !filepath.IsAbs(arg) || i == 0 {
+			continue
+		}
+		switch argv[i-1] {
+		case "--bind", "--ro-bind", "--dev-bind", "--bind-try", "--ro-bind-try":
+		default:
+			continue
+		}
+		for _, guarded := range []string{directRoot, filepath.Join(core.StateDir(), "direct"), protected, core.StateDir()} {
+			if arg == guarded || strings.HasPrefix(guarded, arg+string(filepath.Separator)) || strings.HasPrefix(arg, guarded+string(filepath.Separator)) {
+				t.Errorf("manifest mounts %s, which exposes the direct state %s", arg, guarded)
+			}
+		}
+	}
+}

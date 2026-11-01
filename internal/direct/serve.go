@@ -64,6 +64,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
+		admin.ln.Close()
 		return err
 	}
 	ctx, cancel := context.WithCancel(ctx)
