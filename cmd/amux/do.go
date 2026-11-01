@@ -78,7 +78,7 @@ var actionGlosses = map[string]string{
 	core.ActionAddRepo:             "track a repo                  -f source=OWNER/REPO|url|path",
 	core.ActionRmRepo:              "untrack a repo                id is the repo name",
 	core.ActionAgentSetRepos:       "re-scope an agent's repos     -f repos=api,web",
-	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web (host only)",
+	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web | -f all=1 (every tracked repo, live) (host only)",
 	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
 	core.ActionNewWorkgroup:        "create a workgroup            -f name=… [-f prompt=…] [-f repos=a,b (its repos; one = single-repo) -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
 	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",

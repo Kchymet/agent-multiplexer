@@ -194,6 +194,10 @@ func TestScopedCoordinatorRowsAreCurrentAndPathFree(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != "wg1" {
 		t.Fatalf("rows = %+v, want only wg1", rows)
 	}
+	// The coordinator discovers its own repository ceiling from its own row.
+	if wantGrants := db.coordinatorRepos["wg1"]; !rows[0].Granted || !reflect.DeepEqual(rows[0].Grants, wantGrants) {
+		t.Fatalf("own grants = %v granted=%v, want %v", rows[0].Grants, rows[0].Granted, wantGrants)
+	}
 	if rows[0].Dir != "" {
 		t.Fatalf("root leaked dir %q", rows[0].Dir)
 	}

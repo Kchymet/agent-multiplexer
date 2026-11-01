@@ -209,6 +209,16 @@ func (r *daemonAccessResolver) scopedSessionRows(ctx context.Context, principal 
 				return err
 			}
 			row := normalizedWorkgroupRow(root)
+			if root.ID == subject.ID && subject.Role() == store.RoleCoordinator {
+				// A coordinator sees its own repository ceiling — the repos it may
+				// give members worktrees of — so discovery does not depend on the
+				// host's view. Other rows never carry another workgroup's grants.
+				grants, initialized, err := db.CoordinatorRepoGrants(root.ID)
+				if err != nil {
+					return err
+				}
+				row.Grants, row.Granted = grants, initialized
+			}
 			for _, child := range children {
 				visible, err := policyVisible(db, subject, child)
 				if err != nil {

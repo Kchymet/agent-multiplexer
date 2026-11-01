@@ -113,8 +113,10 @@ bridges its primary-owned pane streams. (See `docs/client-server.md`.)
   Create with `w`, `amux workgroup new`, or `amux workgroup repo <repo>`.
   Repository selection sets the coordinator's explicit grant ceiling and seeds
   an idle first member; the task belongs to the coordinator. Without a repository
-  selection, creation starts with just the coordinator and grants currently tracked
-  repos. An explicitly empty `repos` action field grants none.
+  selection — including an empty `repos` field, as remote clients send — the
+  coordinator may assign every repo tracked on the host, live (repos tracked
+  later included). The host narrows or seals that with
+  `amux workgroup grants <id> [--all | --none | repo...]`.
 - **Agent** — one agent (Claude Code or Codex, picked per agent by its **harness**)
   with its own subdirectory and a git **worktree per repo** it works on. An agent
   always belongs to exactly one workgroup and appears under it; there is no

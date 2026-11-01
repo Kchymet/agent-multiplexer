@@ -414,8 +414,12 @@ type WorkgroupRow struct {
 	// scope for it, the ceiling simply names one repo. Additive/omitempty.
 	Grants  []string `json:"grants,omitempty"`
 	Granted bool     `json:"granted,omitempty"`
-	Agent   string   `json:"agent,omitempty"` // the root session's runtime kind
-	Dir     string   `json:"dir,omitempty"`
+	// GrantsAll says the ceiling follows every repository tracked on the host
+	// (Grants then lists the current set) — the default for a workgroup created
+	// without naming repos.
+	GrantsAll bool   `json:"grantsAll,omitempty"`
+	Agent     string `json:"agent,omitempty"` // the root session's runtime kind
+	Dir       string `json:"dir,omitempty"`
 }
 
 // AgentRow is one agent (child session) under a WorkgroupRow.

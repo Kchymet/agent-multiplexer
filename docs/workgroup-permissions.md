@@ -83,8 +83,12 @@ ids, fields and environment variables only ever name a target
   `checkPermissionRequest`).
 - **add-agent stays inside the ceiling.** A coordinator can add only to its
   own workgroup, with the fields `agent`, `prompt`, `mode`, `model`, `repos`,
-  and every listed repo must be in the grant set the host stored for that
-  coordinator. The ceiling itself (`coordinator-set-repos`) is host-only.
+  and every listed repo must be in the grant set stored for that coordinator:
+  either a fixed list (the workgroup was created naming repos, or the host set
+  one) or, by default, every repo currently tracked on the host. Either way it
+  never reaches an untracked repo. `amux repo ls` shows a coordinator exactly
+  this set. Changing the ceiling (`coordinator-set-repos`) and tracking or
+  untracking repos are host-only.
 - **Self-completion.** `amux agent done` resolves the caller from the fixed
   session context and sends `set-archived archived=true` on that id. For a
   member this archives only the member. For a coordinator it archives the

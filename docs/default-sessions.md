@@ -51,7 +51,11 @@ read-only authorization queries never perform it. Migration does not start agent
 
 Adding, re-scoping or moving a member checks the destination coordinator's grant
 ceiling. Moving to a new workgroup grants exactly the member's assigned repos.
-Only an explicit host grant update can expand a workgroup's ceiling.
+Only an explicit host grant update can expand a fixed ceiling. A workgroup
+created without naming repos holds the all-tracked ceiling instead: it follows
+the host's tracked repos as they are added and removed. A one-time repair moves
+initialized-but-empty ceilings (left by remote creation before this mode
+existed) to all-tracked; the host can re-seal with `amux workgroup grants <id> --none`.
 
 ## Scope
 

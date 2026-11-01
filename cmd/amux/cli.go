@@ -366,17 +366,26 @@ func cmdSession(args []string) error {
 		fmt.Printf("agent %s repos: %s\n", args[1], orNone(strings.Join(repos, ", ")))
 		return nil
 	case "grants":
-		// Host-only grant administration. An empty repo list deliberately stores
-		// an initialized empty ceiling; omission during low-level creation is the
-		// distinct documented default of all currently tracked repositories.
+		// Host-only grant administration. --all (the default for a workgroup
+		// created without repos) follows every tracked repository live; a repo
+		// list fixes the ceiling to exactly those; --none (or an empty list)
+		// deliberately seals the workgroup to no repositories.
 		if len(args) < 2 {
-			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [repo...]")
+			return fmt.Errorf("usage: amux workgroup grants <coordinator-id> [--all | --none | repo...]")
 		}
 		repos := args[2:]
-		if err := sendAction(core.Action{Action: core.ActionCoordinatorSetRepos, ID: args[1], Fields: map[string]string{"repos": strings.Join(repos, ",")}}); err != nil {
+		fields := map[string]string{"repos": strings.Join(repos, ",")}
+		label := orNone(strings.Join(repos, ", "))
+		if len(repos) == 1 && (repos[0] == "--all" || repos[0] == "--none") {
+			fields["repos"], label = "", "none"
+			if repos[0] == "--all" {
+				fields["all"], label = "1", "all tracked repos"
+			}
+		}
+		if err := sendAction(core.Action{Action: core.ActionCoordinatorSetRepos, ID: args[1], Fields: fields}); err != nil {
 			return err
 		}
-		fmt.Printf("coordinator %s grants: %s\n", args[1], orNone(strings.Join(repos, ", ")))
+		fmt.Printf("coordinator %s grants: %s\n", args[1], label)
 		return nil
 	case "rm", "delete":
 		id, force, err := idAndForce(args[1:])
@@ -482,7 +491,7 @@ usage: amux workgroup [command]
                      must be within that workgroup's), or with --new / no target
                      into a new workgroup of its own limited to its repos
   repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
-  grants <coordinator> [repo...]  replace its host-managed repo ceiling
+  grants <coordinator> [--all|--none|repo...]  set its host-managed repo ceiling
   rename <id> <name>  set a display name (the id is unchanged)
   archive <id>       drop a session off the active rail  (alias: done)
   unarchive <id>     put an archived session back  (alias: restore)
@@ -551,6 +560,9 @@ func sessionList() error {
 func grantsTag(r core.WorkgroupRow) string {
 	if !r.Granted {
 		return ""
+	}
+	if r.GrantsAll {
+		return " · repos: all tracked"
 	}
 	if len(r.Grants) == 0 {
 		return " · repos: (none)"

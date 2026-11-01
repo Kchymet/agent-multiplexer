@@ -122,3 +122,77 @@ func TestOpenReadOnlyNeverMigratesOrWrites(t *testing.T) {
 		t.Fatalf("read-only open lost the existing database: %v", err)
 	}
 }
+
+// Before all-tracked mode, a remotely created workgroup (the web dashboard's
+// empty-workgroup verb) persisted an initialized EMPTY ceiling and its
+// coordinator could assign no repository. The one-time repair moves those to
+// all-tracked mode without touching fixed ceilings, and never re-runs over a
+// ceiling the host seals afterwards.
+func TestEmptyCoordinatorGrantMigrationOpensRemoteWorkgroups(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	db, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range []string{"api", "web"} {
+		if err := db.PutRepo(Repo{Name: repo}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"remote-empty", "fixed"} {
+		if err := db.PutSession(Session{ID: id, Scope: ScopeWork}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SetCoordinatorRepoGrants("remote-empty", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCoordinatorRepoGrants("fixed", []string{"api"}); err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to a store written before the repair existed.
+	if _, err := db.sql.Exec(`DELETE FROM coordinator_grant_migrations WHERE version=?`, emptyGrantMigrationVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migratedStores.Delete(core.DBPath())
+
+	db, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repos, initialized, err := db.CoordinatorRepoGrants("remote-empty"); err != nil || !initialized || !reflect.DeepEqual(repos, []string{"api", "web"}) {
+		t.Fatalf("repaired grants = %v initialized=%v err=%v, want [api web]", repos, initialized, err)
+	}
+	if repos, _, err := db.CoordinatorRepoGrants("fixed"); err != nil || !reflect.DeepEqual(repos, []string{"api"}) {
+		t.Fatalf("fixed grants = %v err=%v, want [api]", repos, err)
+	}
+	// A deliberate host seal after the repair survives later opens.
+	if err := db.SetCoordinatorRepoGrants("remote-empty", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migratedStores.Delete(core.DBPath())
+	db, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if repos, initialized, err := db.CoordinatorRepoGrants("remote-empty"); err != nil || !initialized || len(repos) != 0 {
+		t.Fatalf("sealed grants = %v initialized=%v err=%v", repos, initialized, err)
+	}
+	// Untracking a repo removes it from an all-tracked ceiling at once.
+	if err := db.SetCoordinatorRepoGrantsAllTracked("remote-empty"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteRepo("web"); err != nil {
+		t.Fatal(err)
+	}
+	if repos, _, err := db.CoordinatorRepoGrants("remote-empty"); err != nil || !reflect.DeepEqual(repos, []string{"api"}) {
+		t.Fatalf("grants after untracking web = %v err=%v", repos, err)
+	}
+}

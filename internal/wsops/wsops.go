@@ -141,19 +141,17 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	if err := db.PutSession(root); err != nil {
 		return "", err
 	}
-	grants := []string(nil)
-	if selectedGrants == nil {
-		repos, err := db.Repos()
-		if err != nil {
+	// A workgroup that names repositories is limited to exactly those (that is
+	// what "a single-repo workgroup" means). One that names none — however it
+	// was created: the CLI, the TUI, or a remote client such as the web
+	// dashboard, which always sends the field, possibly empty — may assign any
+	// repository tracked on this host, live. Only the authenticated host
+	// narrows that afterwards (coordinator-set-repos).
+	if selectedGrants == nil || len(*selectedGrants) == 0 {
+		if err := db.SetCoordinatorRepoGrantsAllTracked(rootID); err != nil {
 			return rootID, err
 		}
-		for _, repo := range repos {
-			grants = append(grants, repo.Name)
-		}
-	} else {
-		grants = append(grants, (*selectedGrants)...)
-	}
-	if err := db.SetCoordinatorRepoGrants(rootID, grants); err != nil {
+	} else if err := db.SetCoordinatorRepoGrants(rootID, *selectedGrants); err != nil {
 		return rootID, err
 	}
 	if defaultAgent != nil {
@@ -846,6 +844,12 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 			return "", err
 		}
 		defer db.Close()
+		if a.Fields["all"] == "1" {
+			if len(store.SplitRepos(a.Fields["repos"])) != 0 {
+				return "", fmt.Errorf("coordinator-set-repos: all=1 takes no repos")
+			}
+			return "", db.SetCoordinatorRepoGrantsAllTracked(a.ID)
+		}
 		return "", db.SetCoordinatorRepoGrants(a.ID, store.SplitRepos(a.Fields["repos"]))
 	case actionNewRepoAgentLegacy:
 		// Nothing is created: a one-off agent on a repo no longer exists. The
