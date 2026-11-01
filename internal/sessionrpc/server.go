@@ -181,11 +181,14 @@ type Server struct {
 	serveMu sync.Mutex
 	// rejectRequests drains an over-capacity client-writable queue without ever
 	// dispatching a request from that batch. It clears only after observing empty.
-	rejectRequests            bool
-	mu                        sync.Mutex
-	pending                   map[string]pendingReceipt
-	closed                    bool
-	settlementStop            chan struct{}
+	rejectRequests bool
+	mu             sync.Mutex
+	pending        map[string]pendingReceipt
+	closed         bool
+	settlementStop chan struct{}
+	// settlementKick wakes an idle settlement loop when a receipt is
+	// registered; the loop polls only while receipts are pending.
+	settlementKick            chan struct{}
 	settlementDone            chan struct{}
 	settlementStopOnce        sync.Once
 	responseScrubComplete     bool
@@ -276,6 +279,7 @@ func OpenServerMailbox(subjectID, trustedMailboxHostDir string, authority Author
 		pending:        make(map[string]pendingReceipt),
 		responseBudget: options.ResponseBudget, responseLeases: make(map[string]ResponseLease),
 		settlementPoll: settlementPoll, settlementStop: make(chan struct{}), settlementDone: make(chan struct{}),
+		settlementKick: make(chan struct{}, 1),
 		responseWriter: atomicWriteAt, wake: newWakeSignal(),
 	}
 	notify := options.RequestNotify
@@ -987,6 +991,10 @@ func (s *Server) registerReceipt(principal access.Principal, response Response, 
 		principal: principal, digest: persisted.ResponseDigest, deadline: s.clock().Add(grace), hooks: hooks,
 	}
 	s.mu.Unlock()
+	select {
+	case s.settlementKick <- struct{}{}:
+	default:
+	}
 	if hooks.ResponsePersisted != nil {
 		hooks.ResponsePersisted(persisted)
 	}
@@ -1066,6 +1074,10 @@ func (s *Server) settleHooks(requestID string, hooks ReceiptHooks, reason Settle
 	}
 }
 
+// runSettlement settles expired receipts every settlementPoll while any are
+// pending, and otherwise sleeps until registerReceipt kicks it. A daemon
+// serves one mailbox per live session; an unconditional ticker in each one
+// woke hundreds of goroutines every poll on an idle install.
 func (s *Server) runSettlement() {
 	ticker := time.NewTicker(s.settlementPoll)
 	defer func() {
@@ -1073,9 +1085,23 @@ func (s *Server) runSettlement() {
 		close(s.settlementDone)
 	}()
 	for {
+		s.mu.Lock()
+		idle := len(s.pending) == 0
+		s.mu.Unlock()
+		if idle {
+			ticker.Stop()
+			select {
+			case <-s.settlementKick:
+				ticker.Reset(s.settlementPoll)
+				continue
+			case <-s.settlementStop:
+				return
+			}
+		}
 		select {
 		case <-ticker.C:
 			s.settleExpired()
+		case <-s.settlementKick:
 		case <-s.settlementStop:
 			return
 		}

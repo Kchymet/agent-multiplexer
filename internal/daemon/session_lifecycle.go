@@ -91,6 +91,10 @@ type sessionRuntime struct {
 	// loop for stalls (session_stall_log.go).
 	slowRequests *slowRequestLog
 	loop         *loopWatchdog
+
+	// freshCredentials caches, per subject, the credential credentialFresh
+	// last read from disk. Owned by the run goroutine.
+	freshCredentials map[string]freshCredential
 }
 
 func newSessionRuntime(d *Daemon) *sessionRuntime {
@@ -537,6 +541,7 @@ func credentialPrincipal(credential access.Credential) access.Principal {
 }
 
 func (r *sessionRuntime) closeServer(id string) {
+	delete(r.freshCredentials, id)
 	if id == console.ID && r.consoleAccountClose != nil {
 		r.consoleAccountClose()
 		r.consoleAccountClose = nil

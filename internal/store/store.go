@@ -284,6 +284,11 @@ CREATE TABLE IF NOT EXISTS session_prs (
 	if err := d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Covers SessionHeads, so the daemon's per-tick scan reads only this index
+	// instead of every row's overflow pages (archived follows the prompt).
+	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_heads ON sessions(created, id, root_id, archived)`); err != nil {
+		return err
+	}
 	// Version 3 includes the wrapper promotion below. Do not advertise it
 	// until the data migration has committed successfully.
 	if version < 2 {
@@ -504,6 +509,29 @@ func (d *DB) AllSessions() ([]Session, error) {
 		return nil, err
 	}
 	return scanSessions(rows)
+}
+
+// SessionHeads returns every session's ID, RootID and Archived flag, in
+// AllSessions' order, leaving every other field zero. The daemon's reconcile
+// loop scans the whole table every tick and needs only these; selecting full
+// rows (prompts included) through the ORDER BY sorter dominated its cost.
+func (d *DB) SessionHeads() ([]Session, error) {
+	rows, err := d.sql.Query(`SELECT id,root_id,archived FROM sessions ORDER BY created`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Session
+	for rows.Next() {
+		var s Session
+		var archived int64
+		if err := rows.Scan(&s.ID, &s.RootID, &archived); err != nil {
+			return nil, err
+		}
+		s.Archived = archived != 0
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 // Roots returns root containers ordered by creation.

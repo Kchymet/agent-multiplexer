@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"amux/internal/core"
@@ -138,5 +139,55 @@ func TestFieldScopedUpdaterMissingIDNoError(t *testing.T) {
 	}
 	if _, ok, _ := db.GetSession("nope"); ok {
 		t.Error("SetName on a missing id should not create a row")
+	}
+}
+
+// SessionHeads is the daemon's per-tick reconcile scan: it must agree with
+// AllSessions on the fields it returns and be answered from the covering index
+// alone, never the rows (and their prompts' overflow pages).
+func TestSessionHeadsMatchAllSessionsFromACoveringIndex(t *testing.T) {
+	db := openTemp(t)
+	for i, s := range []Session{
+		{ID: "root", Name: "r", Created: 1, Prompt: "x"},
+		{ID: "b", RootID: "root", Created: 3, Archived: true, Prompt: string(make([]byte, 16<<10))},
+		{ID: "a", RootID: "root", Created: 2},
+	} {
+		if err := db.PutSession(s); err != nil {
+			t.Fatalf("PutSession %d: %v", i, err)
+		}
+	}
+	all, err := db.AllSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	heads, err := db.SessionHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heads) != len(all) {
+		t.Fatalf("SessionHeads = %d rows, AllSessions = %d", len(heads), len(all))
+	}
+	for i := range all {
+		want := Session{ID: all[i].ID, RootID: all[i].RootID, Archived: all[i].Archived}
+		if heads[i] != want {
+			t.Fatalf("SessionHeads[%d] = %+v, want %+v", i, heads[i], want)
+		}
+	}
+	rows, err := db.sql.Query(`EXPLAIN QUERY PLAN SELECT id,root_id,archived FROM sessions ORDER BY created`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan += detail + "\n"
+	}
+	if want := "USING COVERING INDEX idx_sessions_heads"; !strings.Contains(plan, want) {
+		t.Fatalf("query plan %q does not contain %q", plan, want)
 	}
 }
