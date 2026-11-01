@@ -203,6 +203,11 @@ func TestResourcesPanelBeforeFirstSample(t *testing.T) {
 	if m.res.unavailable || m.res.interval() != resourcesDefaultInterval {
 		t.Fatalf("pending first sample treated as unavailable")
 	}
+	// An unsupported host backs off even without an error string.
+	m.Update(resourcesFrame(t, procstat.Snapshot{Unsupported: true}))
+	if !m.res.unavailable || m.res.interval() != resourcesBackoff {
+		t.Fatal("unsupported host should back off")
+	}
 	// A disabled sampler reports why.
 	m.Update(resourcesFrame(t, procstat.Snapshot{Error: "resource sampling disabled"}))
 	if out := ansi.Strip(m.renderMain()); !m.res.unavailable || !strings.Contains(out, "sampling disabled") {

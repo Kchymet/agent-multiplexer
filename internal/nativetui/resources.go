@@ -140,7 +140,10 @@ func (m *model) applyResources(d *core.Data) {
 	case snap.SampledAt == 0:
 		// Sampling is off or unsupported (Error says why), or the sampler has
 		// not completed its first sample yet (keep polling at the usual pace).
-		r.unavailable, r.reason = snap.Error != "", snap.Error
+		r.unavailable, r.reason = snap.Error != "" || snap.Unsupported, snap.Error
+		if snap.Unsupported && r.reason == "" {
+			r.reason = "this host has no procfs"
+		}
 		return
 	}
 	r.unavailable, r.reason = false, ""
