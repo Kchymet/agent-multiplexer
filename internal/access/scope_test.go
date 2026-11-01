@@ -233,6 +233,7 @@ func TestScopeMatrix(t *testing.T) {
 		query(core.QueryRuntimeRecord, "a1"),
 		query(core.QueryAccounts, ""),
 		query(core.QueryCodexAuth, ""),
+		query(core.QueryResources, ""),
 	}
 	for _, req := range hostOnly {
 		label := string(req.Route) + " " + req.Verb + " " + req.ID

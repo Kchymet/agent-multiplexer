@@ -257,6 +257,11 @@ const (
 	QueryAccountManage   = "account-manage"
 	QueryAccountCeremony = "account-ceremony"
 	QueryCodexAuth       = "codex-auth"
+	// QueryResources returns the daemon's latest cached process resource sample
+	// (-> procstat.Snapshot): per-session and per-workgroup CPU/memory and amux's
+	// own overhead. The sampler runs in the background; the query never samples.
+	// Host only.
+	QueryResources = "resources"
 )
 
 // CodexAuthStatus is the QueryCodexAuth read model. It never carries a token.
