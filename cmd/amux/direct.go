@@ -50,6 +50,7 @@ var directSubcommands = map[string]func([]string) error{
 	"enroll":         cmdDirectEnroll,
 	"clients":        cmdDirectClients,
 	"reset-identity": cmdDirectResetIdentity,
+	"cloud":          cmdDirectCloud,
 }
 
 func directUsage() {
@@ -67,6 +68,7 @@ usage: amux direct <command>
   clients list                list enrolled clients
   clients revoke <client-id>  revoke a client now (closes its streams first)
   reset-identity --yes        replace the server identity; revokes every client
+  cloud enable|disable|status  cloud-assisted enrollment policy (off by default)
 
 serve flags:
   --listen <ip:port>      address to bind (a private or loopback IP literal)
@@ -86,6 +88,23 @@ enroll flags (the running server publishes its endpoints into the bundle):
   --workgroup <root-id>   grant one workgroup and its members (repeatable)
   --ttl <dur>             code lifetime (default 10m, maximum 1h)
   --json                  print the full response as JSON
+
+cloud enable flags (each one required except the caps; all-sessions covers
+ordinary sessions, never the amux console):
+  --owner <user-id>       the Harness user id allowed to request codes
+  --provider <id>         this host's Harness provider id (provider_id in the
+                          ` + "`amux provide`" + ` status file / amux doctor)
+  --permissions <list>    ceiling: read | read,steer
+  --all-sessions          ceiling: any ordinary session, or
+  --workgroup <root-id>   ceiling: these workgroups (repeatable)
+  --max-outstanding <n>   unredeemed cloud codes at once (default 3)
+  --max-per-hour <n>      cloud codes per hour (default 10)
+
+Enabling cloud enrollment trusts the pinned Harness owner, through Harness, to
+mint enrollment codes up to the ceiling. Codes are bound to the requesting
+client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
+invalidates outstanding cloud codes; grants already redeemed stay until revoked
+(amux direct clients revoke). Identity reset disables cloud enrollment.
 `)
 }
 
@@ -201,16 +220,9 @@ func cmdDirectEnroll(args []string) error {
 	if *label == "" || *perms == "" {
 		return errors.New("--label and --permissions are required")
 	}
-	var resource direct.ResourceScope
-	switch {
-	case *all && len(groups) > 0:
-		return errors.New("choose --all-sessions or --workgroup, not both")
-	case *all:
-		resource = direct.ResourceScope{Kind: direct.ResourceAllSessions}
-	case len(groups) > 0:
-		resource = direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: groups}
-	default:
-		return errors.New("choose the resource scope explicitly: --all-sessions or --workgroup <root-id>")
+	resource, err := directResourceFlags(*all, groups)
+	if err != nil {
+		return err
 	}
 	resp, err := adminRun(direct.AdminRequest{
 		Op: direct.OpEnroll, Label: *label, Permissions: strings.Split(*perms, ","), Resource: resource,
@@ -248,6 +260,9 @@ func cmdDirectClients(args []string) error {
 			if c.RevokedAt != 0 {
 				state = "revoked (" + c.RevokeReason + ")"
 			}
+			if c.Origin == direct.OriginCloud {
+				state += "  cloud:" + c.CloudRequester
+			}
 			scope := c.ResourceScope.Kind
 			if len(c.ResourceScope.Workgroups) > 0 {
 				scope += ":" + strings.Join(c.ResourceScope.Workgroups, ",")
@@ -279,4 +294,107 @@ func cmdDirectResetIdentity(args []string) error {
 	}
 	fmt.Printf("new server_id %s; every client must enroll again\n", resp.ServerID)
 	return nil
+}
+
+func cmdDirectCloud(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: amux direct cloud enable|disable|status")
+	}
+	switch args[0] {
+	case "enable":
+		return cmdDirectCloudEnable(args[1:])
+	case "disable":
+		if len(args) != 1 {
+			return errors.New("usage: amux direct cloud disable")
+		}
+		if _, err := adminRun(direct.AdminRequest{Op: direct.OpCloudDisable}); err != nil {
+			return err
+		}
+		fmt.Println("cloud enrollment disabled; outstanding cloud codes are void. Grants already redeemed stay until `amux direct clients revoke`.")
+		return nil
+	case "status":
+		asJSON := len(args) > 1 && args[1] == "--json"
+		resp, err := adminRun(direct.AdminRequest{Op: direct.OpCloudStatus})
+		if err != nil {
+			return err
+		}
+		if resp.Cloud == nil {
+			resp.Cloud = &direct.CloudStatus{}
+		}
+		if asJSON {
+			return json.NewEncoder(os.Stdout).Encode(resp.Cloud)
+		}
+		printCloudStatus(*resp.Cloud)
+		return nil
+	}
+	return fmt.Errorf("unknown cloud command %q", args[0])
+}
+
+func cmdDirectCloudEnable(args []string) error {
+	fs := flag.NewFlagSet("amux direct cloud enable", flag.ContinueOnError)
+	var groups multiFlag
+	owner := fs.String("owner", "", "")
+	prov := fs.String("provider", "", "")
+	perms := fs.String("permissions", "", "")
+	all := fs.Bool("all-sessions", false, "")
+	maxOut := fs.Int("max-outstanding", 0, "")
+	perHour := fs.Int("max-per-hour", 0, "")
+	fs.Var(&groups, "workgroup", "")
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		directUsage()
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if *owner == "" || *prov == "" || *perms == "" {
+		return errors.New("--owner, --provider and --permissions are required")
+	}
+	resource, err := directResourceFlags(*all, groups)
+	if err != nil {
+		return err
+	}
+	resp, err := adminRun(direct.AdminRequest{Op: direct.OpCloudEnable, Cloud: &direct.CloudPolicyRequest{
+		Permissions: strings.Split(*perms, ","), Resource: resource, OwnerPin: *owner, ProviderPin: *prov,
+		MaxOutstanding: *maxOut, MaxPerHour: *perHour,
+	}})
+	if err != nil {
+		return err
+	}
+	if resp.Cloud != nil {
+		printCloudStatus(*resp.Cloud)
+	}
+	return nil
+}
+
+func directResourceFlags(all bool, groups []string) (direct.ResourceScope, error) {
+	switch {
+	case all && len(groups) > 0:
+		return direct.ResourceScope{}, errors.New("choose --all-sessions or --workgroup, not both")
+	case all:
+		return direct.ResourceScope{Kind: direct.ResourceAllSessions}, nil
+	case len(groups) > 0:
+		return direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: groups}, nil
+	}
+	return direct.ResourceScope{}, errors.New("choose the resource scope explicitly: --all-sessions or --workgroup <root-id>")
+}
+
+func printCloudStatus(c direct.CloudStatus) {
+	if !c.Enabled {
+		fmt.Printf("cloud enrollment: disabled (generation %d", c.Generation)
+		if c.DisableReason != "" {
+			fmt.Printf(", %s", c.DisableReason)
+		}
+		fmt.Println(")")
+		return
+	}
+	scope := c.Resource.Kind
+	if len(c.Resource.Workgroups) > 0 {
+		scope += ":" + strings.Join(c.Resource.Workgroups, ",")
+	}
+	fmt.Printf("cloud enrollment: enabled (generation %d)\n", c.Generation)
+	fmt.Printf("  owner %s  provider %s\n", c.OwnerPin, c.ProviderPin)
+	fmt.Printf("  ceiling %s %s\n", strings.Join(c.Permissions, ","), scope)
+	fmt.Printf("  outstanding %d/%d  issued last hour %d/%d\n", c.Outstanding, c.MaxOutstanding, c.IssuedLastHour, c.MaxPerHour)
 }
