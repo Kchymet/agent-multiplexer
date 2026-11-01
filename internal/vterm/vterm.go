@@ -23,6 +23,7 @@ import (
 	"github.com/creack/pty"
 
 	"amux/internal/clipboard"
+	"amux/internal/termmodes"
 )
 
 // mouseTrackModes are the DEC private modes a child sets to ask for mouse
@@ -86,6 +87,7 @@ type Terminal struct {
 	// nudges the goroutine; done stops it on Close.
 	fmu   sync.Mutex
 	fbuf  []byte
+	fmode termmodes.Tracker // every Feed byte, so a backlog trim can restate modes
 	fwake chan struct{}
 	done  chan struct{}
 	once  sync.Once
@@ -322,14 +324,20 @@ func (t *Terminal) ingest(b []byte) {
 // daemon, just as pump does for a local PTY. It never blocks the caller and never
 // drops — bytes are appended to the coalesced backlog in order. Only a backlog
 // past feedCap (a client hopelessly behind) is trimmed to its recent tail, with a
-// RIS prepended so the emulator clears before applying the retained repaint.
+// RIS prepended so the emulator clears before applying the retained repaint, and
+// the terminal modes the stream has set restated after it: a full-screen agent
+// sets them once at startup (Codex: alternate screen and mouse reporting), so the
+// tail alone would leave the wheel local with nothing to scroll.
 func (t *Terminal) Feed(p []byte) {
 	t.fmu.Lock()
+	t.fmode.Write(p)
 	t.fbuf = append(t.fbuf, p...)
 	if len(t.fbuf) > feedCap {
 		tail := t.fbuf[len(t.fbuf)-feedKeep:]
-		kept := make([]byte, 0, feedKeep+2)
+		pre := t.fmode.Preamble()
+		kept := make([]byte, 0, 2+len(pre)+feedKeep)
 		kept = append(kept, 0x1b, 'c') // RIS: reset before the retained tail
+		kept = append(kept, pre...)
 		t.fbuf = append(kept, tail...)
 	}
 	t.fmu.Unlock()

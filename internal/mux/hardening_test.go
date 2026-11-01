@@ -731,14 +731,64 @@ func TestMuxPaneResyncEmulatorConsistent(t *testing.T) {
 	}
 
 	// Reference emulator: fed the entire stream.
-	ref := vterm.New(80, 24)
-	ref.Feed(full)
+	ref := parsedMirror(t, full)
 	// Resync emulator: clears on reset, then applies only the retained tail.
-	resync := vterm.New(80, 24)
-	resync.Reset()
-	resync.Feed(b.data)
+	resync := parsedMirror(t, append([]byte("\x1bc"), b.data...))
 
 	if ref.Render() != resync.Render() {
 		t.Fatalf("emulator diverged after resync:\n--- full ---\n%s\n--- resync ---\n%s", ref.Render(), resync.Render())
+	}
+}
+
+// parsedMirror is a remote client emulator once its feed goroutine has parsed
+// all of data. (vterm.New alone never parses fed bytes.)
+func parsedMirror(t *testing.T, data []byte) *vterm.Terminal {
+	t.Helper()
+	m := vterm.NewRemote(80, 24, func([]byte) {}, nil)
+	t.Cleanup(func() { _ = m.Close() })
+	m.Feed(data)
+	m.Feed([]byte("\x1b7\x1b[999;1H\x1b[2KSETTLED"))
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(m.Render(), "SETTLED") {
+		if time.Now().After(deadline) {
+			t.Fatal("mirror never parsed its input")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.Feed([]byte("\x1b[2K\x1b8"))
+	settle := m.Viewport().Revision
+	for deadline := time.Now().Add(5 * time.Second); m.Viewport().Revision == settle; {
+		if time.Now().After(deadline) {
+			t.Fatal("mirror never cleared its marker")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return m
+}
+
+// TestMuxPaneResyncRestatesModes: a full-screen agent (Codex) enables the
+// alternate screen and mouse reporting once, at startup. A resync that replays
+// only the recent tail after the client clears its emulator must restate them,
+// or the wheel stays local with nothing to scroll.
+func TestMuxPaneResyncRestatesModes(t *testing.T) {
+	cl := &client{obuf: map[string]*paneOut{}, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	cl.paneOutput("p", []byte("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1003h"))
+	frame := []byte("\x1b[?2026h\x1b[1;1H\x1b[Jrepaint\x1b[?2026l")
+	for !cl.obuf["p"].reset {
+		cl.paneOutput("p", bytes.Repeat(frame, 1024))
+	}
+	resync := parsedMirror(t, append([]byte("\x1bc"), cl.obuf["p"].data...))
+	if v := resync.Viewport(); !v.AltScreen || !resync.MouseTracked() {
+		t.Fatalf("resynced mirror alt=%v mouse=%v; the resync dropped the agent's modes", v.AltScreen, resync.MouseTracked())
+	}
+
+	// Once that is sent, an upstream pane.reset clears the client; the modes it
+	// restated go with it.
+	cl.obuf["p"].data, cl.obuf["p"].reset = nil, false // drained
+	cl.paneReset("p")
+	cl.paneOutput("p", bytes.Repeat([]byte("x"), paneOutCap))
+	resync = parsedMirror(t, append([]byte("\x1bc"), cl.obuf["p"].data...))
+	if v := resync.Viewport(); v.AltScreen || resync.MouseTracked() {
+		t.Fatalf("resync restated modes an upstream reset cleared: alt=%v mouse=%v", v.AltScreen, resync.MouseTracked())
 	}
 }
