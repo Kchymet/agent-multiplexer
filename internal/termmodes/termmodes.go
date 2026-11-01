@@ -17,9 +17,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// altScreenModes switch to the alternate screen. At most one is restated: the
-// one the program set last.
-var altScreenModes = []int{1049, 1047, 47}
+// altScreenModes switch to the alternate screen, with the client emulator's
+// semantics (charmbracelet/x/vt): either one enters it and either one's reset
+// returns to the primary screen, whichever entered. The legacy ?47 does not
+// switch screens there, so it is not tracked. At most one is restated.
+var altScreenModes = []int{1049, 1047}
 
 // tracked are the other modes restated, in order. They change how the client
 // encodes input for the program (mouse reporting and its encoding, cursor-key
@@ -66,10 +68,9 @@ func (t *Tracker) csi(cmd ansi.Cmd, params ansi.Params) {
 	on := final == 'h'
 	params.ForEach(-1, func(_, mode int, _ bool) {
 		if isAlt(mode) {
-			switch {
-			case on:
+			if on {
 				t.alt = mode
-			case t.alt == mode:
+			} else {
 				t.alt = 0
 			}
 			return

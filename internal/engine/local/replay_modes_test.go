@@ -32,6 +32,7 @@ func TestReplayAfterOverflowRestatesTerminalModes(t *testing.T) {
 	}{
 		{name: "codex startup", setup: codexStartup, tracked: true},
 		{name: "tracked app disables", setup: "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1000l\x1b[?1006l\x1b[?1049l"},
+		{name: "cross-alias screen exit", setup: "\x1b[?1049h\x1b[?1000h\x1b[?1000l\x1b[?1047l"},
 		{name: "tracked app resets", setup: "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1bc"},
 		{name: "re-enabled after disable", setup: "\x1b[?1000h\x1b[?1000l\x1b[?1049h\x1b[?1003h\x1b[?1006h", tracked: true},
 	} {
