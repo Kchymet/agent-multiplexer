@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"amux/internal/core"
+	"amux/internal/daemon"
 )
 
 func cachedModel(t *testing.T) *model {
@@ -65,5 +66,19 @@ func TestFrameCacheDisabledRendersEveryView(t *testing.T) {
 	m.sessions[1].Title = "renamed-agent"
 	if !strings.Contains(m.View(), "renamed-agent") {
 		t.Fatal("uncached View served a stale frame")
+	}
+}
+
+// Daemon resource samples (the rail's CPU/memory cells) arrive as data frames
+// and must re-render the rail, unlike pane output.
+func TestFrameCacheResourcesFrameInvalidatesRail(t *testing.T) {
+	m := cachedModel(t)
+	_ = m.View()
+	if !m.frames.railValid {
+		t.Fatal("rail not cached after a render")
+	}
+	m.Update(frameMsg{daemon.Frame{Data: &core.Data{Query: core.QueryResources}}})
+	if m.frames.railValid || m.frames.viewValid {
+		t.Fatalf("resources frame kept the cache: railValid=%v viewValid=%v", m.frames.railValid, m.frames.viewValid)
 	}
 }
