@@ -176,6 +176,7 @@ func cmdDirectServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var cfg direct.ServeConfig
+	var managedReady func(net.Addr, string)
 	if *managed {
 		// The daemon's child: the whole configuration is the saved setting, so
 		// the command line stays constant and nothing typed can widen it.
@@ -184,6 +185,15 @@ func cmdDirectServe(args []string) error {
 		if typed != 1 {
 			return errors.New("--managed takes its configuration from the saved setting (amux direct enable), not flags")
 		}
+		// Ownership first: the daemon named itself before exec, so a daemon
+		// that died before this point is caught here, before anything binds.
+		supervisor, err := directsvc.SupervisorPID(os.Getenv)
+		if err != nil {
+			return err
+		}
+		if err := directsvc.CheckParent(supervisor); err != nil {
+			return fmt.Errorf("amux direct: %w; not starting", err)
+		}
 		s, set, err := directsvc.Load()
 		if err != nil {
 			return err
@@ -191,15 +201,25 @@ func cmdDirectServe(args []string) error {
 		if cfg, err = managedServeConfig(s, set); err != nil {
 			return err
 		}
-		// A daemon that died without stopping us must not leave the listener
-		// holding the direct store (Linux also delivers a parent-death signal).
+		// A daemon that dies later must not leave the listener holding the
+		// direct store either (Linux also delivers a parent-death signal).
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
-		go directsvc.WatchParent(2*time.Second, ctx.Done(), func() {
+		go directsvc.WatchParent(supervisor, 2*time.Second, ctx.Done(), func() {
 			fmt.Fprintln(os.Stderr, "amux direct: supervising daemon exited; stopping")
 			cancel()
 		})
+		fp := directsvc.Fingerprint(s)
+		managedReady = func(addr net.Addr, serverID string) {
+			// The marker is what lets enable/status tell this child's server
+			// from a manual one answering the same admin socket.
+			if err := directsvc.WriteReady(directsvc.ReadyPath(), directsvc.Ready{
+				PID: os.Getpid(), ServerID: serverID, Addr: addr.String(), Fingerprint: fp, At: time.Now(),
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "amux direct: write readiness marker: %v\n", err)
+			}
+		}
 	} else {
 		if *listen == "" {
 			return errors.New("--listen is required")
@@ -220,6 +240,9 @@ func cmdDirectServe(args []string) error {
 	cfg.Logf = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	cfg.Ready = func(addr net.Addr, serverID string) {
 		fmt.Fprintf(os.Stderr, "amux direct: listening on %s (server_id %s)\n", addr, serverID)
+		if managedReady != nil {
+			managedReady(addr, serverID)
+		}
 	}
 	err = direct.Serve(ctx, cfg)
 	if err != nil && !*managed && strings.Contains(err.Error(), "already owns the direct store") {
