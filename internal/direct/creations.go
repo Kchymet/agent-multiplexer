@@ -188,7 +188,7 @@ func (s *Server) answerExisting(w http.ResponseWriter, l *Lease, req ActionReque
 		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not read the creation's record")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, statusOf(v, s.cfg.Now()))
+	s.writeStatus(w, l, http.StatusAccepted, statusOf(v, s.cfg.Now()))
 }
 
 // awaitCreation answers with the creation's status once it is terminal or
@@ -205,13 +205,13 @@ func (s *Server) awaitCreation(w http.ResponseWriter, l *Lease, key string, stat
 		}
 		st := statusOf(v, s.cfg.Now())
 		if st.Version >= 3 {
-			writeJSON(w, status, st)
+			s.writeStatus(w, l, status, st)
 			return
 		}
 		select {
 		case <-changed:
 		case <-deadline.C:
-			writeJSON(w, status, st)
+			s.writeStatus(w, l, status, st)
 			return
 		case <-l.Context().Done():
 			// The creation is recorded and continues; this reader is gone (or
@@ -327,13 +327,13 @@ func (s *Server) creationStatus(w http.ResponseWriter, r *http.Request) {
 			after = st.Version
 		}
 		if wait == 0 || st.Version > after || st.Version >= 3 {
-			s.writeStatus(w, l, st)
+			s.writeStatus(w, l, http.StatusOK, st)
 			return
 		}
 		select {
 		case <-changed:
 		case <-deadline.C:
-			s.writeStatus(w, l, st)
+			s.writeStatus(w, l, http.StatusOK, st)
 			return
 		case <-l.Context().Done():
 			if code := l.AuthEnded(); code != "" {
@@ -344,10 +344,13 @@ func (s *Server) creationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) writeStatus(w http.ResponseWriter, l *Lease, st CreationStatus) {
+// writeStatus discloses a status only while the reader's lease still holds:
+// every answer that carries a CreationStatus (the POST and the GET) goes
+// through it.
+func (s *Server) writeStatus(w http.ResponseWriter, l *Lease, status int, st CreationStatus) {
 	if code := l.AuthEnded(); code != "" {
-		writeErr(w, http.StatusUnauthorized, code, "access ended")
+		writeErr(w, http.StatusUnauthorized, code, "access ended; the creation is unaffected — poll its status with a fresh token")
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	writeJSON(w, status, st)
 }

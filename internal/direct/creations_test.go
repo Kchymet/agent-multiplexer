@@ -480,7 +480,15 @@ func TestAsyncRecordsAfterRestart(t *testing.T) {
 	l.Done()
 	a.Close() // crash: neither outcome recorded
 
-	a = openTestAuthority(t, root, Lifetimes{}, nil)
+	clk := &clock{t: time.Now()}
+	a = openTestAuthority(t, root, Lifetimes{}, clk.now)
+	// Load settled the never-sent record durably: terminal, known not run.
+	a.mu.Lock()
+	never, sent := *a.state.Grants[tok.ClientID].Idem["never"], *a.state.Grants[tok.ClientID].Idem["sent"]
+	a.mu.Unlock()
+	if never.State != idemDone || never.OK || never.Code != CodeUnavailable || sent.State != idemAdmitted {
+		t.Fatalf("after load: never=%+v sent=%+v", never, sent)
+	}
 	next, err := a.Refresh(tok.RefreshToken)
 	if err != nil {
 		t.Fatal(err)
@@ -493,16 +501,168 @@ func TestAsyncRecordsAfterRestart(t *testing.T) {
 	if code, st, _ := getStatus(s, next.AccessToken, ids["sent"], ""); code != 200 || st.Phase != CreatePhaseFailed || st.Code != CodeIdemAmbiguous || !st.Uncertain {
 		t.Fatalf("dispatched: %d %+v", code, st)
 	}
-	for _, key := range []string{"never", "sent"} {
-		if _, st, _ := postAsync(s, next.AccessToken, "wg1", VerbAddAgent, nil, key); st.CreationID != ids[key] || st.Phase != CreatePhaseFailed {
+	// Every mode agrees: never sent is a known "did not run" (unavailable);
+	// sent is ambiguous. Neither runs again.
+	want := map[string]struct {
+		code   string
+		status int
+	}{"never": {CodeUnavailable, 503}, "sent": {CodeIdemAmbiguous, 409}}
+	for key, w := range want {
+		if _, st, _ := postAsync(s, next.AccessToken, "wg1", VerbAddAgent, nil, key); st.CreationID != ids[key] || st.Phase != CreatePhaseFailed || st.Code != w.code {
 			t.Fatalf("async retry %s: %+v", key, st)
 		}
-		if code, ec, _ := act(s, next.AccessToken, "wg1", VerbAddAgent, nil, key); code != 409 || ec != CodeIdemAmbiguous {
+		if code, ec, _ := act(s, next.AccessToken, "wg1", VerbAddAgent, nil, key); code != w.status || ec != w.code {
 			t.Fatalf("sync retry %s: %d %s", key, code, ec)
 		}
 	}
 	if f.applies.Load() != 0 {
 		t.Fatal("a restarted record ran again")
+	}
+	// The settled record is a done record: retention prunes it (freeing its
+	// capacity) on the next admission after idemRetention; the ambiguous one
+	// is kept forever.
+	clk.add(idemRetention + time.Hour)
+	later, err := a.Refresh(next.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.newID = "agent-r"
+	if code, _, _ := act(s, later.AccessToken, "wg1", VerbAddAgent, map[string]string{"repos": "api"}, "after"); code != 200 {
+		t.Fatal("admission after retention")
+	}
+	a.mu.Lock()
+	_, neverKept := a.state.Grants[tok.ClientID].Idem["never"]
+	_, sentKept := a.state.Grants[tok.ClientID].Idem["sent"]
+	a.mu.Unlock()
+	if neverKept || !sentKept {
+		t.Fatalf("retention: never kept=%v sent kept=%v", neverKept, sentKept)
+	}
+	if code, _, _ := getStatus(s, later.AccessToken, ids["never"], ""); code != 404 {
+		t.Fatalf("pruned creation: %d", code)
+	}
+}
+
+// Grant idle lifetime fences a creation queued or running: the worker ends at
+// LastRefreshAt+IdleTTL unless a real refresh moved it. Neither the job nor a
+// status poll extends it.
+func TestAsyncIdleExpiryFencesQueuedAndRunning(t *testing.T) {
+	prev := grantRecheck.Swap(int64(2 * time.Millisecond))
+	defer grantRecheck.Store(prev)
+	recheck := 2 * time.Millisecond
+	setup := func(t *testing.T) (*clock, *Authority, *Server, *fakeBackend, TokenResponse) {
+		clk := &clock{t: time.Now()}
+		f := workflowFake()
+		a := openTestAuthority(t, t.TempDir(), Lifetimes{Idle: time.Hour}, clk.now)
+		return clk, a, newTestServer(t, a, f), f, enroll(t, a, allPerms, allSessions)
+	}
+	record := func(a *Authority, tok TokenResponse, key string) idemRecord {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return *a.state.Grants[tok.ClientID].Idem[key]
+	}
+
+	t.Run("running expires", func(t *testing.T) {
+		clk, a, s, f, tok := setup(t)
+		gated(f)
+		if _, st, _ := postAsync(s, tok.AccessToken, "wg1", VerbAddAgent, nil, "run"); st.Phase != CreatePhasePreparing {
+			t.Fatalf("not preparing: %+v", st)
+		}
+		for range 3 { // polls do not refresh
+			getStatus(s, tok.AccessToken, newCreationID(), "")
+		}
+		clk.add(time.Hour + time.Second)
+		waitFor(t, "idle fence", func() bool { return s.jobs.pending() == 0 })
+		if r := record(a, tok, "run"); r.State != idemUnknown {
+			t.Fatalf("idle-ended running creation: %+v", r)
+		}
+		if f.activeApplies.Load() != 0 {
+			t.Fatal("daemon call still waited on after idle expiry")
+		}
+	})
+	t.Run("running extended by refresh", func(t *testing.T) {
+		clk, a, s, f, tok := setup(t)
+		gate := gated(f)
+		f.newID = "agent-idle"
+		_, st, _ := postAsync(s, tok.AccessToken, "wg1", VerbAddAgent, nil, "ext")
+		clk.add(50 * time.Minute)
+		next, err := a.Refresh(tok.RefreshToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clk.add(20 * time.Minute) // past the original idle deadline, inside the refreshed one
+		time.Sleep(20 * recheck)
+		if s.jobs.pending() != 1 || f.activeApplies.Load() != 1 {
+			t.Fatal("a refreshed grant's running creation was cut")
+		}
+		next, err = a.Refresh(next.RefreshToken) // the reader's own token has expired meanwhile
+		if err != nil {
+			t.Fatal(err)
+		}
+		close(gate)
+		if got := awaitTerminal(t, s, next.AccessToken, st.CreationID); got.Phase != CreatePhaseReady {
+			t.Fatalf("refreshed: %+v", got)
+		}
+	})
+	t.Run("queued extended by refresh", func(t *testing.T) {
+		clk, a, s, f, tok := setup(t)
+		f.newID = "agent-q"
+		free := occupySlots(s)
+		_, st, _ := postAsync(s, tok.AccessToken, "wg1", VerbAddAgent, nil, "qext")
+		clk.add(50 * time.Minute)
+		next, err := a.Refresh(tok.RefreshToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clk.add(20 * time.Minute)
+		time.Sleep(20 * recheck)
+		free()
+		if next, err = a.Refresh(next.RefreshToken); err != nil {
+			t.Fatal(err)
+		}
+		if got := awaitTerminal(t, s, next.AccessToken, st.CreationID); got.Phase != CreatePhaseReady || f.applies.Load() != 1 {
+			t.Fatalf("queued after refresh: %+v", got)
+		}
+	})
+	t.Run("queued expires", func(t *testing.T) {
+		clk, a, s, f, tok := setup(t)
+		free := occupySlots(s)
+		postAsync(s, tok.AccessToken, "wg1", VerbAddAgent, nil, "qexp")
+		clk.add(time.Hour + time.Second)
+		waitFor(t, "idle fence", func() bool { return s.jobs.pending() == 0 })
+		free()
+		if r := record(a, tok, "qexp"); r.State != idemDone || r.Code != CodeAuthExpired || r.DispatchedAt != 0 || f.applies.Load() != 0 {
+			t.Fatalf("idle-ended queued creation: %+v", r)
+		}
+	})
+}
+
+// A POST that would disclose a status after its own access ended answers the
+// auth code instead; the creation is unaffected and a fresh token reads it.
+func TestAsyncPostAppliesAuthEndedBeforeDisclosure(t *testing.T) {
+	prev := asyncInitialWait
+	asyncInitialWait = 3 * time.Second
+	defer func() { asyncInitialWait = prev }()
+	f := workflowFake()
+	a := openTestAuthority(t, t.TempDir(), Lifetimes{Access: time.Second}, nil)
+	s := newTestServer(t, a, f)
+	tok := enroll(t, a, allPerms, allSessions)
+	gate := gated(f)
+	f.newID = "agent-ae"
+	w := do(s, "POST", createPath("wg1"), tok.AccessToken, asyncBody(VerbAddAgent, nil, "ae"))
+	if w.Code != 401 || apiCode(t, w) != CodeAuthExpired || strings.Contains(w.Body.String(), "creation_id") {
+		t.Fatalf("expired during the wait: %d %s", w.Code, w.Body.String())
+	}
+	next, err := a.Refresh(tok.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, st, _ := postAsync(s, next.AccessToken, "wg1", VerbAddAgent, nil, "ae")
+	if st.Phase != CreatePhasePreparing {
+		t.Fatalf("job did not survive the reader's expiry: %+v", st)
+	}
+	close(gate)
+	if got := awaitTerminal(t, s, next.AccessToken, st.CreationID); got.Phase != CreatePhaseReady || got.NewID != "agent-ae" {
+		t.Fatalf("after refresh: %+v", got)
 	}
 }
 

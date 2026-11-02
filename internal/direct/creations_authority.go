@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -137,8 +138,8 @@ func (a *Authority) GrantLive(l *Lease, perm string) error {
 
 // Hold registers a worker lease for l's grant that outlives the request: it
 // ends on revocation (cause auth.revoked, drained like any lease), at the
-// grant's absolute expiry, or on Done — never on access-token expiry or
-// client disconnect. Its Context and ExecContext share that lifetime.
+// grant's idle or absolute expiry or an identity change (watchGrant), or on
+// Done — never on access-token expiry or client disconnect. Its Context and ExecContext share that lifetime.
 func (a *Authority) Hold(l *Lease, perm string) (*Lease, error) {
 	if err := a.GrantLive(l, perm); err != nil {
 		return nil, err
@@ -160,8 +161,70 @@ func (a *Authority) Hold(l *Lease, perm string) (*Lease, error) {
 		a.leases[g.ClientID] = map[*Lease]struct{}{}
 	}
 	a.leases[g.ClientID][h] = struct{}{}
+	go a.watchGrant(h)
 	return h, nil
 }
+
+// undispatchedError is the recorded text of an async creation a previous
+// process admitted but never sent.
+const undispatchedError = "the server stopped before the creation was sent; it did not run"
+
+// normalizeUndispatched runs at load, before anything can execute: an async
+// creation admitted by a previous process without its dispatch marker was
+// provably never sent, so it becomes a terminal, known "did not run"
+// (unavailable). It is never re-run: the key replays that answer in both
+// modes, and as a done record it is pruned after idemRetention like any other.
+// A dispatched async record, and any synchronous admitted record (which
+// carries no marker), stay admitted and so read as ambiguous. It reports
+// whether anything changed.
+func normalizeUndispatched(st *storeState, now int64) bool {
+	changed := false
+	for _, g := range st.Grants {
+		for _, r := range g.Idem {
+			if r.State == idemAdmitted && r.Async && r.DispatchedAt == 0 {
+				r.State, r.OK, r.Code, r.Error, r.EndedAt = idemDone, false, CodeUnavailable, undispatchedError, now
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// watchGrant ends a worker lease when its grant's lifetime does: idle expiry
+// (LastRefreshAt + IdleTTL, re-read each time, so only a real refresh extends
+// it — a status poll or the job itself never does), absolute expiry, or an
+// identity change. Revocation already cancels the lease directly. It returns
+// when the lease ends.
+func (a *Authority) watchGrant(h *Lease) {
+	for {
+		a.mu.Lock()
+		g := a.state.Grants[h.ClientID]
+		now := a.now()
+		var next time.Duration
+		ended := g == nil || g.IdentityGeneration != a.identity.Generation
+		if !ended {
+			deadline := min(g.LastRefreshAt+g.IdleTTL, g.AbsoluteExpiry)
+			ended = now.Unix() >= deadline
+			next = time.Unix(deadline, 0).Sub(now)
+		}
+		a.mu.Unlock()
+		if ended {
+			h.cancel(errGrantEnded)
+			return
+		}
+		t := time.NewTimer(min(next, time.Duration(grantRecheck.Load())))
+		select {
+		case <-h.rctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// grantRecheck caps how long watchGrant sleeps between reads, so a changed
+// clock (or a test clock) is observed promptly. Settable by tests.
+var grantRecheck = func() *atomic.Int64 { var v atomic.Int64; v.Store(int64(time.Second)); return &v }()
 
 // creationView is one creation record as status sees it.
 type creationView struct {
@@ -214,9 +277,11 @@ func statusOf(v creationView, now time.Time) CreationStatus {
 		st.Phase, st.Version = CreatePhasePreparing, 2
 	case r.State == idemAdmitted && r.Async && r.DispatchedAt == 0:
 		// Only an async record carries the dispatch marker, so only its
-		// absence there proves the daemon was never called.
+		// absence there proves the daemon was never called. Load normalizes
+		// such records (normalizeUndispatched); this keeps the read truthful
+		// regardless.
 		st.Phase, st.Version, st.Code = CreatePhaseFailed, 3, CodeUnavailable
-		st.Error = "the server stopped before the creation was sent; it did not run"
+		st.Error = undispatchedError
 	case r.State == idemDone && r.OK && validSessionID(r.NewID) && validSessionID(r.RootID):
 		st.Phase, st.Version, st.NewID, st.RootID = CreatePhaseReady, 3, r.NewID, r.RootID
 	case r.State == idemDone && !r.OK && r.Code != "":

@@ -183,6 +183,14 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 			return nil, fmt.Errorf("direct grants: migrate version %d to %d: %w", stateVersionS1, stateVersion, err)
 		}
 	}
+	if normalizeUndispatched(state, now().Unix()) {
+		// Durable, so sync replay, async replay, status and retention all see
+		// one terminal answer. If it does not commit, the open fails and the
+		// file stays as it was (the same rule as the migration above).
+		if err := st.saveState(state); err != nil {
+			return nil, fmt.Errorf("direct grants: settle undispatched creations: %w", err)
+		}
+	}
 	if id == nil {
 		if id, err = newIdentity(); err != nil {
 			return nil, err

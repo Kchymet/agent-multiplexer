@@ -86,10 +86,15 @@ A client treats a creation as made **only** on `phase == "ready"`. A
   is never called twice for a key.
 * Client disconnect and access-token expiry never cancel an admitted job: it
   holds its own lease. Refresh and poll.
-* Restart: an async record admitted but never dispatched reports `failed` /
-  `unavailable` (it did not run); one dispatched reports `idem_ambiguous`,
-  `uncertain`. Neither is re-run. (A synchronous record carries no dispatch
-  marker and is ambiguous after a restart, as before.)
+* Restart: on load, an async record admitted but never dispatched is durably
+  settled as a terminal, known `unavailable` ("did not run"); status, async
+  replay and sync replay (`503 unavailable`) all give that answer, and as a
+  done record it is pruned after the 24h retention. One dispatched stays
+  ambiguous (`idem_ambiguous`, `uncertain`), as does any synchronous admitted
+  record (it carries no dispatch marker). Neither is re-run.
+* Every answer that carries a `CreationStatus` — the POST (fresh or replay)
+  and the GET — is withheld with the reader's auth code if its own access
+  ended meanwhile; the creation itself is unaffected.
 
 ## Execution
 
@@ -99,17 +104,25 @@ A client treats a creation as made **only** on `phase == "ready"`. A
   `create`) and re-runs the full destination precheck against fresh inventory
   and catalog. It durably commits a dispatch marker, and only then calls the
   daemon.
-* The daemon call is bounded by `min(10 min, grant absolute expiry)` and ends
-  at once on revocation. Revoke drains running jobs like any lease. The cut
+* The job's lease follows the grant's lifetime while queued and while
+  running: it ends at the idle deadline (`last refresh + idle TTL`, re-read
+  continually, so only a real token refresh extends it; the job and status
+  polls never do), at absolute expiry, on an identity reset, or at once on
+  revocation. The daemon call is further bounded by 10 minutes. Revoke drains running jobs like any lease. The cut
   only stops the wait: a creation already sent may still complete on the
   host, which is why it reports `uncertain`.
 * Bounds: ≤4 pending per grant, ≤32 per server, ≤4 concurrent daemon calls;
   reservations are released on every exit path. Records share the grant's
   existing `maxIdemPerGrant` / 24h retention.
 
-## Known limit
+## Known limits and follow-ups
 
 The daemon has no creation request id, so a creation that outlives the bound
 (or whose server restarted after sending) cannot be reconciled to the session
 it produced; it stays `uncertain` rather than `ready`. Closing that needs a
 daemon-side creation id and is tracked as a follow-up.
+
+Status replay identity (binding a replayed status or `new_id` to the session
+incarnation it named, e.g. after that session is deleted and an id reused) is a
+separate follow-up shared with the synchronous replay path; this change adds no
+schema for it.
