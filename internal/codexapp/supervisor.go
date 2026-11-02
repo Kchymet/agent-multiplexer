@@ -950,12 +950,24 @@ func (s *Supervisor) BeginPrompt(ctx context.Context, text string) (func(context
 	// mistaken for ours).
 	s.turnGen++
 	gen := s.turnGen
+	// A pending Prompt's waiter is superseded: this generation takes local
+	// ownership, so neither the old turn's completion nor a transport failure
+	// (failTurn) can reach it any more. Release it now instead of leaving it
+	// blocked until its context ends — which, for daemon deferred work, used to
+	// be only after shutdown had already joined it (2026-11-01 wedge).
+	superseded := s.turnDone
 	s.turnDone = done
 	s.ownTurn = ""
 	s.earlyTerm = map[string]*turnResult{}
 	threadID := s.threadID
 	model := s.cfg.Model
 	s.mu.Unlock()
+	if superseded != nil {
+		select {
+		case superseded <- &turnResult{StopReason: "superseded"}:
+		default:
+		}
+	}
 
 	// turn_start / turn_end are emitted from the OBSERVED turn/started + turn/completed
 	// notifications (onNotify), so every turn is bracketed once regardless of origin.

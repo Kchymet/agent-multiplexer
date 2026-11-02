@@ -405,7 +405,7 @@ func waitDaemonStopped() error {
 			fmt.Printf("daemon stopped (%s)\n", time.Since(start).Round(100*time.Millisecond))
 			return nil
 		} else {
-			lastErr = fmt.Errorf("daemon listener closed but singleton lock is still held")
+			lastErr = fmt.Errorf("daemon listener closed but singleton lock is still held (%s)", daemon.SingletonHolder())
 		}
 		progress.update(time.Now())
 		time.Sleep(100 * time.Millisecond)
@@ -642,6 +642,11 @@ func awaitDaemonReady(initialErr error, exited <-chan error, budget time.Duratio
 			}
 			if waitErr == nil {
 				waitErr = errors.New("exited")
+			}
+			if !singletonReleased() {
+				// The child lost the singleton race to a daemon that no longer
+				// answers (e.g. one wedged mid-shutdown): name it.
+				return fmt.Errorf("daemon process stopped before accepting connections (%v): singleton lock %s %s; initial connection failed: %w; last connection failed: %w", waitErr, core.DaemonLockPath(), daemon.SingletonHolder(), initialErr, lastErr)
 			}
 			return fmt.Errorf("daemon process stopped before accepting connections (%v; see %s); initial connection failed: %w; last connection failed: %w", waitErr, core.LogPath(), initialErr, lastErr)
 		case <-time.After(75 * time.Millisecond):

@@ -29,7 +29,7 @@ func DumpGoroutinesOnSignal(ctx context.Context, w io.Writer) {
 			case <-ctx.Done():
 				return
 			case <-signals:
-				writeGoroutineDump(w)
+				writeGoroutineDump(w, "SIGUSR1")
 			}
 		}
 	}()
@@ -37,9 +37,9 @@ func DumpGoroutinesOnSignal(ctx context.Context, w io.Writer) {
 
 // writeGoroutineDump renders the dump first and writes it in one call, so it
 // is not interleaved with log lines other goroutines write meanwhile.
-func writeGoroutineDump(w io.Writer) {
+func writeGoroutineDump(w io.Writer, reason string) {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "=== amux daemon goroutine dump (SIGUSR1) at %s ===\n", time.Now().Format(time.RFC3339Nano))
+	fmt.Fprintf(&b, "=== amux daemon goroutine dump (%s) at %s ===\n", reason, time.Now().Format(time.RFC3339Nano))
 	if err := pprof.Lookup("goroutine").WriteTo(&b, 2); err != nil {
 		fmt.Fprintf(&b, "goroutine dump failed: %v\n", err)
 	}

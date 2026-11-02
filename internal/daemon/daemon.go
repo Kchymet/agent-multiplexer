@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -206,6 +207,17 @@ type Daemon struct {
 	deferredMu       sync.Mutex
 	deferredDraining bool
 	deferredWG       sync.WaitGroup
+	// deferredLife is the shutdown-owned lifetime of every context-carrying
+	// deferred action (startDeferredContext). An ACKed prompt or cold start
+	// outlives its bounded callback, and may be bound to a serving lifetime
+	// (the session RPC loop) that shutdown ends only after joining deferred
+	// work; Run cancels deferredLife immediately before that join, so the join
+	// can never wait on a context it has not yet cancelled.
+	deferredLife       context.Context
+	cancelDeferredLife context.CancelFunc
+	// shutdownJoinTimeout bounds each join in Run's teardown (see joinShutdown).
+	// Engine joins add the engine's own ShutdownBudget on top.
+	shutdownJoinTimeout time.Duration
 
 	// permissions owns runtime-generation binding and atomic request consumption
 	// for every caller role. It is initialized even in tests that do not Run.
@@ -253,7 +265,10 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 		shutdown:       make(chan struct{}),
 		serving:        make(map[uint64]net.Conn),
 		permissions:    newRuntimePermissionGate(),
+
+		shutdownJoinTimeout: defaultShutdownJoinTimeout,
 	}
+	d.deferredLife, d.cancelDeferredLife = context.WithCancel(context.Background())
 	d.launchSpec = d.launchSpecFor
 	d.listen = listenOwnedUnix
 	d.prs = d.newPRWatcher()
@@ -385,11 +400,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 			_ = ln.Close()
 		}
 		d.drainServingConnections()
-		runWG.Wait()
+		d.joinShutdown("run workers", runWG.Wait)
 		// Deferred effects may enter the same admission locks used by completion
 		// cleanup. Join them before sessionRuntime.close takes dispatch ownership
 		// and waits for completion owners, avoiding an inverted shutdown wait.
-		d.deferredWG.Wait()
+		//
+		// Cancel their lifetime first. Work ACKed over the session RPC is bound
+		// to rpcCtx, which is cancelled only after this join (the mailboxes keep
+		// serving turn-end reports below); a structured prompt waiting on a turn
+		// whose transport was just interrupted can only end by cancellation.
+		// Joining without cancelling deadlocked shutdown with the singleton lock
+		// held (2026-11-01).
+		d.cancelDeferredLife()
+		d.joinShutdown("deferred actions", d.deferredWG.Wait)
 		// A Claude agent's turn ending reaches the daemon only as a hook report
 		// through its session mailbox, so wait for mid-turn agents while the
 		// mailboxes still serve reports (and nothing else). Closing them first
@@ -400,26 +423,28 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if w, ok := d.engine.(idleWaiter); ok {
 				d.status.Phase(daemonstatus.PhaseAgents)
 				d.observeEngineShutdown()
-				w.WaitIdle()
+				d.joinShutdownAfter("engine wait-for-idle", local.ShutdownBudget(), w.WaitIdle)
 			}
 		}
 		cancelRPC()
-		rpcWG.Wait()
+		d.joinShutdown("session RPC loop", rpcWG.Wait)
 		if sessionRPCOwned {
-			d.sessionRPC.close()
+			d.joinShutdown("session RPC close", d.sessionRPC.close)
 		}
 		if persistLiveOnReturn {
 			d.persistLiveAgents()
 		}
 		if codexOwned {
 			d.status.Phase(daemonstatus.PhaseCodex)
-			d.codex.Shutdown()
-			d.closeCentralCodex()
+			d.joinShutdown("codex supervisors", func() {
+				d.codex.Shutdown()
+				d.closeCentralCodex()
+			})
 		}
 		if engineOwned {
 			d.status.Phase(daemonstatus.PhaseAgents)
 			d.observeEngineShutdown()
-			d.engine.Shutdown()
+			d.joinShutdownAfter("engine shutdown", local.ShutdownBudget(), d.engine.Shutdown)
 		}
 		d.status.Phase(daemonstatus.PhaseReleasing)
 		if cleanupSocket != nil {
@@ -612,16 +637,71 @@ func (d *Daemon) startDeferredWork(work func()) bool {
 // it. deferredContext preserves the request's values/authorization guard while
 // rebinding cancellation to the serving lifetime; shutdown still joins it via
 // deferredWG before engines, supervisors, or authority are torn down.
+//
+// Whatever lifetime the caller carries, the work is also bound to
+// deferredLife, which Run cancels immediately before joining deferredWG.
 func (d *Daemon) startDeferredContext(ctx context.Context, work func(context.Context)) bool {
 	workCtx, release := deferredContext(ctx)
+	workCtx, releaseOwner := bindLifetime(workCtx, d.deferredLife)
 	if !d.startDeferredWork(func() {
 		defer release()
+		defer releaseOwner()
 		work(workCtx)
 	}) {
+		releaseOwner()
 		release()
 		return false
 	}
 	return true
+}
+
+// bindLifetime returns ctx additionally cancelled when owner ends. A nil owner
+// leaves ctx unchanged.
+func bindLifetime(ctx, owner context.Context) (context.Context, func()) {
+	if owner == nil {
+		return ctx, func() {}
+	}
+	bound, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(owner, cancel)
+	// AfterFunc runs asynchronously for an already-ended owner; close that
+	// window synchronously, as deferredContext does.
+	if owner.Err() != nil {
+		cancel()
+	}
+	return bound, func() {
+		stop()
+		cancel()
+	}
+}
+
+// defaultShutdownJoinTimeout bounds each non-engine join in Run's teardown.
+const defaultShutdownJoinTimeout = 15 * time.Second
+
+// joinShutdown waits for wait to return, at most shutdownJoinTimeout. A join
+// that does not finish in time is a shutdown bug: it is logged by name with a
+// goroutine dump, and teardown continues so the daemon still releases its
+// socket, authority and singleton lock instead of wedging every successor.
+func (d *Daemon) joinShutdown(name string, wait func()) {
+	d.joinShutdownAfter(name, 0, wait)
+}
+
+// joinShutdownAfter is joinShutdown for a join with its own legitimate budget
+// (the engine's wait-for-idle and kill grace), which extends the bound.
+func (d *Daemon) joinShutdownAfter(name string, budget time.Duration, wait func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wait()
+	}()
+	limit := budget + d.shutdownJoinTimeout
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Printf("daemon shutdown: %s did not finish within %v; continuing teardown so the singleton lock is released", name, limit)
+		writeGoroutineDump(log.Writer(), "shutdown join "+name+" expired")
+	}
 }
 
 func (d *Daemon) stopDeferredAdmission() {
@@ -1147,9 +1227,46 @@ func acquireSingletonLock() (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("daemon already running (singleton lock %s): %w", core.DaemonLockPath(), err)
+		return nil, fmt.Errorf("daemon already running (singleton lock %s, %s): %w", core.DaemonLockPath(), SingletonHolder(), err)
+	}
+	// Record the holder in the lock file itself: the flock, not this content,
+	// is the authority, but a successor that loses the race can then name who
+	// holds it and for how long instead of failing anonymously.
+	if f.Truncate(0) == nil {
+		_, _ = f.WriteAt([]byte(fmt.Sprintf("pid=%d started=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))), 0)
 	}
 	return f, nil
+}
+
+// SingletonHolder describes the process recorded as holding the daemon's
+// singleton lock ("held by pid 123, started 2026-11-01T18:36:02Z (8m12s
+// ago)"), for diagnostics when the lock cannot be acquired. The record is
+// advisory: it is written by the holder after acquiring the flock.
+func SingletonHolder() string {
+	raw, err := os.ReadFile(core.DaemonLockPath())
+	if err != nil {
+		return "holder unknown"
+	}
+	return describeSingletonHolder(string(raw), time.Now())
+}
+
+func describeSingletonHolder(record string, now time.Time) string {
+	var pid, started string
+	for _, field := range strings.Fields(record) {
+		if v, ok := strings.CutPrefix(field, "pid="); ok {
+			pid = v
+		} else if v, ok := strings.CutPrefix(field, "started="); ok {
+			started = v
+		}
+	}
+	if pid == "" {
+		return "holder unknown (no pid recorded; held by a daemon that predates holder records)"
+	}
+	desc := "held by pid " + pid
+	if at, err := time.Parse(time.RFC3339, started); err == nil {
+		desc += fmt.Sprintf(", started %s (%s ago)", started, now.Sub(at).Round(time.Second))
+	}
+	return desc
 }
 
 func releaseSingletonLock(f *os.File) {

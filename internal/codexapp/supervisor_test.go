@@ -729,6 +729,54 @@ func TestBeginPromptReturnsAfterTurnStartBeforeModelCompletion(t *testing.T) {
 	}
 }
 
+// TestBeginPromptReleasesSupersededWaiter: a second Prompt takes local turn
+// ownership, so the first waiter can no longer be reached by its turn's
+// completion or by transport failure. It must be released, not left blocked
+// until its context ends (the daemon's deferred work used to wait on a context
+// shutdown cancelled only after joining it).
+func TestBeginPromptReleasesSupersededWaiter(t *testing.T) {
+	sup, fs, client := newFakePair(t)
+	defer fs.close()
+	defer sup.Close()
+	attach(t, sup, client)
+
+	first, err := sup.BeginPrompt(context.Background(), "first")
+	if err != nil {
+		t.Fatalf("first BeginPrompt: %v", err)
+	}
+	fs.pushTurnStarted()
+	done := make(chan error, 1)
+	go func() { done <- first(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("first waiter returned before being superseded: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	second, err := sup.BeginPrompt(context.Background(), "second")
+	if err != nil {
+		t.Fatalf("second BeginPrompt: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("superseded waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("superseded waiter stayed blocked")
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- second(context.Background()) }()
+	fs.completeTurn("completed")
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second waiter did not observe completion")
+	}
+}
+
 // TestObservedTurnFromAnyOrigin checks that a turn started by *another* client
 // (only turn/started + turn/completed observed, no local Prompt) is still tracked
 // and bracketed — so web steer/interrupt can target a TUI-initiated turn.
