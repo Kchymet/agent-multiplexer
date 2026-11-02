@@ -23,6 +23,11 @@ type ServeConfig struct {
 	Backend         Backend
 	Verify          HostVerifier
 	Logf            func(string, ...any)
+	// GetCertificate, when set, supplies the serving certificate for each new
+	// handshake instead of CertFile/KeyFile, so a renewed certificate can be
+	// swapped in while existing connections keep theirs. HTTPS stays
+	// mandatory: there is no way to serve without a certificate.
+	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	// Ready, when set, is called once the listener and admin socket are up.
 	Ready func(addr net.Addr, serverID string)
 }
@@ -36,12 +41,22 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	if err := CheckBind(cfg.Listen, cfg.AllowPublicBind); err != nil {
 		return err
 	}
-	if cfg.CertFile == "" || cfg.KeyFile == "" {
-		return errors.New("direct serve requires --tls-cert and --tls-key (HTTPS is mandatory, even on a private network)")
-	}
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
-	if err != nil {
-		return fmt.Errorf("load TLS certificate: %w", err)
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.GetCertificate != nil {
+		c, err := cfg.GetCertificate(nil)
+		if err != nil || c == nil {
+			return fmt.Errorf("load TLS certificate: %v", err)
+		}
+		tlsCfg.GetCertificate = cfg.GetCertificate
+	} else {
+		if cfg.CertFile == "" || cfg.KeyFile == "" {
+			return errors.New("direct serve requires --tls-cert and --tls-key (HTTPS is mandatory, even on a private network)")
+		}
+		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return fmt.Errorf("load TLS certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
 	if cfg.Verify == nil {
 		return errors.New("direct serve needs a host verifier for its admin channel")
@@ -69,7 +84,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	tlsLn := tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	tlsLn := tls.NewListener(ln, tlsCfg)
 	hs := &http.Server{
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,

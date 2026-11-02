@@ -47,6 +47,27 @@ type Settings struct {
 	AccessTTL       string   `json:"access_ttl,omitempty"`
 	IdleTTL         string   `json:"idle_ttl,omitempty"`
 	AbsoluteTTL     string   `json:"absolute_ttl,omitempty"`
+	// Tailnet, when set, is tailnet mode (amux direct enable --tailnet): the
+	// listener re-derives its address and endpoint from tailscaled each time
+	// it starts, and its certificate is reloaded in place rather than by a
+	// restart. See TailnetSettings.
+	Tailnet *TailnetSettings `json:"tailnet,omitempty"`
+}
+
+// TailnetSettings is the tailnet half of the setting. Listen and Endpoints
+// above hold the last derived values (or the operator's explicit ones);
+// the listener prefers, in order: an explicit value saved from a typed flag,
+// then the value re-derived from tailscaled at start, never a stale derived
+// one.
+type TailnetSettings struct {
+	Port             int    `json:"port"`
+	Socket           string `json:"socket,omitempty"`            // tailscaled socket; empty: the platform default
+	CertSource       string `json:"cert_source"`                 // "tailscale" (amux obtains and renews) | "explicit"
+	ListenExplicit   bool   `json:"listen_explicit,omitempty"`   // Listen came from --listen, not derivation
+	EndpointExplicit bool   `json:"endpoint_explicit,omitempty"` // Endpoints came from --endpoint
+	DNSName          string `json:"dns_name,omitempty"`          // MagicDNS name at the last enable
+	DefaultOrigin    string `json:"default_origin,omitempty"`    // derived orchestrator origin included in AllowOrigins
+	OriginSource     string `json:"origin_source,omitempty"`     // where DefaultOrigin came from
 }
 
 // Load reads the saved settings. set is false when the section is absent (the
@@ -109,17 +130,34 @@ func (s Settings) Args() []string {
 	add("access-ttl", s.AccessTTL)
 	add("idle-ttl", s.IdleTTL)
 	add("absolute-ttl", s.AbsoluteTTL)
+	if t := s.Tailnet; t != nil {
+		a = append(a, "--tailnet")
+		if t.Port != 0 {
+			add("port", fmt.Sprint(t.Port))
+		}
+		add("tailscale-socket", t.Socket)
+	}
 	return a
 }
 
 // Fingerprint identifies the configuration a child was started with. It covers
-// the settings and the size and modification time of the certificate and key
-// files, so renewing a certificate in place restarts the listener onto the new
-// one, the same way restarting a manual `amux direct serve` would.
+// the settings and, outside tailnet mode, the size and modification time of
+// the certificate and key files, so renewing a certificate in place restarts
+// the listener onto the new one, the same way restarting a manual `amux direct
+// serve` would.
+//
+// In tailnet mode the running child reloads the certificate itself (a renewal
+// it performs, a newer version a later enable installs, or replaced explicit
+// files) without dropping open streams, so a certificate file change is
+// exactly the change the child handles and is left out; every setting still
+// counts, and a changed setting still restarts the child.
 func Fingerprint(s Settings) string {
 	h := sha256.New()
 	b, _ := json.Marshal(s)
 	h.Write(b)
+	if s.Tailnet != nil {
+		return hex.EncodeToString(h.Sum(nil))[:16]
+	}
 	for _, p := range []string{s.TLSCert, s.TLSKey} {
 		if p == "" {
 			continue
