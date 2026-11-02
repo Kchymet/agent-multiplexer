@@ -15,15 +15,17 @@ func registeredStatus() provider.Status {
 	return provider.Status{
 		State: provider.StateRegistered, Orchestrator: "harness.example:7443",
 		ProviderID: "prov-7", OwnerUserID: "usr_1", OwnerEmail: "o@example.com",
-		RegisteredAt: time.Now().Add(-time.Minute),
+		RegisteredAt: time.Now().Add(-time.Minute), PID: 4242,
 	}
 }
+
+func aliveAll(int) bool { return true }
 
 // The simple path: no ids on the command line, both pins come from the
 // registration Harness acknowledged, and the operator sees which account,
 // provider and Harness they are.
 func TestResolveCloudPinsFromRegistration(t *testing.T) {
-	pins, err := resolveCloudPins("", "", registeredStatus(), nil)
+	pins, err := resolveCloudPins("", "", registeredStatus(), nil, aliveAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,10 +39,10 @@ func TestResolveCloudPinsFromRegistration(t *testing.T) {
 		}
 	}
 	// A matching single flag is just a confirmation.
-	if pins, err := resolveCloudPins("usr_1", "", registeredStatus(), nil); err != nil || pins.Provider != "prov-7" {
+	if pins, err := resolveCloudPins("usr_1", "", registeredStatus(), nil, aliveAll); err != nil || pins.Provider != "prov-7" {
 		t.Fatalf("matching --owner: %+v, %v", pins, err)
 	}
-	if pins, err := resolveCloudPins("", "prov-7", registeredStatus(), nil); err != nil || pins.Owner != "usr_1" {
+	if pins, err := resolveCloudPins("", "prov-7", registeredStatus(), nil, aliveAll); err != nil || pins.Owner != "usr_1" {
 		t.Fatalf("matching --provider: %+v, %v", pins, err)
 	}
 }
@@ -48,16 +50,29 @@ func TestResolveCloudPinsFromRegistration(t *testing.T) {
 // Both flags are the advanced override: used verbatim, even with no
 // registration at all, with a visible note when they disagree with it.
 func TestResolveCloudPinsExplicitOverride(t *testing.T) {
-	pins, err := resolveCloudPins("usr_x", "prov-x", provider.Status{}, fs.ErrNotExist)
+	pins, err := resolveCloudPins("usr_x", "prov-x", provider.Status{}, fs.ErrNotExist, aliveAll)
 	if err != nil || pins.Owner != "usr_x" || pins.Provider != "prov-x" || pins.FromReg || pins.Note != "" {
 		t.Fatalf("explicit without registration: %+v, %v", pins, err)
 	}
-	pins, err = resolveCloudPins("usr_x", "prov-7", registeredStatus(), nil)
+	pins, err = resolveCloudPins("usr_x", "prov-7", registeredStatus(), nil, aliveAll)
 	if err != nil || pins.Owner != "usr_x" || !strings.Contains(pins.Note, "differ") {
 		t.Fatalf("explicit disagreeing pins: %+v, %v", pins, err)
 	}
-	if pins, _ := resolveCloudPins("usr_1", "prov-7", registeredStatus(), nil); pins.Note != "" {
+	if pins, _ := resolveCloudPins("usr_1", "prov-7", registeredStatus(), nil, aliveAll); pins.Note != "" {
 		t.Fatalf("agreeing explicit pins carry a note: %q", pins.Note)
+	}
+}
+
+// A registered record whose process is gone (SIGKILL, reboot) is not a live
+// registration: refuse instead of trusting the last snapshot.
+func TestResolveCloudPinsDeadProvider(t *testing.T) {
+	dead := func(int) bool { return false }
+	if _, err := resolveCloudPins("", "", registeredStatus(), nil, dead); err == nil || !strings.Contains(err.Error(), "pid 4242) is no longer running") {
+		t.Fatalf("dead provider: %v", err)
+	}
+	// The explicit override does not depend on the provider at all.
+	if _, err := resolveCloudPins("usr_1", "prov-7", registeredStatus(), nil, dead); err != nil {
+		t.Fatalf("explicit pins with a dead provider: %v", err)
 	}
 }
 
@@ -67,6 +82,10 @@ func TestResolveCloudPinsRefusals(t *testing.T) {
 	rejected := registeredStatus()
 	rejected.State, rejected.LastError = provider.StateRejected, "revoked"
 	never := provider.Status{State: provider.StateDialing}
+	reconnecting := registeredStatus()
+	reconnecting.State = provider.StateDisconnected
+	stopped := registeredStatus()
+	stopped.State = provider.StateStopped
 	unowned := registeredStatus()
 	unowned.OwnerUserID, unowned.OwnerEmail = "", ""
 
@@ -80,7 +99,9 @@ func TestResolveCloudPinsRefusals(t *testing.T) {
 		{"no status file", "", "", provider.Status{}, fs.ErrNotExist, "no Harness provider registration"},
 		{"unreadable status", "", "", provider.Status{}, errors.New("bad json"), "bad json"},
 		{"rejected", "", "", rejected, nil, "rejected (revoked)"},
-		{"never registered", "", "", never, nil, "has not completed a registration"},
+		{"never registered", "", "", never, nil, "not registered with Harness right now (state dialing)"},
+		{"reconnecting", "", "", reconnecting, nil, "not registered with Harness right now (state disconnected)"},
+		{"stopped", "", "", stopped, nil, "not registered with Harness right now (state stopped)"},
 		{"no owner reported", "", "", unowned, nil, "reported no owner for provider prov-7"},
 		{"owner only, no owner reported", "usr_1", "", unowned, nil, "reported no owner"},
 		{"other provider", "", "prov-9", registeredStatus(), nil, "not this host's registered provider prov-7"},
@@ -88,7 +109,7 @@ func TestResolveCloudPinsRefusals(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			pins, err := resolveCloudPins(c.owner, c.prov, c.st, c.stErr)
+			pins, err := resolveCloudPins(c.owner, c.prov, c.st, c.stErr, aliveAll)
 			if err == nil {
 				t.Fatalf("resolved %+v, want an error", pins)
 			}

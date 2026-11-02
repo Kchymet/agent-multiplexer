@@ -364,7 +364,7 @@ func cmdDirectCloudEnable(args []string) error {
 		return err
 	}
 	st, stErr := provider.ReadStatus(provider.StatusPath())
-	pins, err := resolveCloudPins(*owner, *prov, st, stErr)
+	pins, err := resolveCloudPins(*owner, *prov, st, stErr, processAlive)
 	if err != nil {
 		return err
 	}

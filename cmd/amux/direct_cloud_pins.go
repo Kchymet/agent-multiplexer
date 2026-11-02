@@ -39,8 +39,16 @@ type cloudPins struct {
 const cloudPinsOverride = "pass both --owner <harness-user-id> and --provider <provider-id> to pin explicitly"
 
 // resolveCloudPins fills omitted pins from the provider registration. st/stErr
-// are provider.ReadStatus's result, read by the caller (so tests can drive it).
-func resolveCloudPins(owner, prov string, st provider.Status, stErr error) (cloudPins, error) {
+// are provider.ReadStatus's result and alive reports whether a pid is running
+// (processAlive), passed in so tests can drive them.
+//
+// Defaults come only from a provider that is registered right now: state
+// "registered" and its recorded process still alive (the liveness amux doctor
+// uses). A disconnected, reconnecting, stopped or dead provider's last
+// registration may no longer be what Harness holds, so it is refused rather
+// than aged out by some TTL. `amux provide` holds a lock on the status file
+// (provider.LockStatus), so the one live writer is unambiguous.
+func resolveCloudPins(owner, prov string, st provider.Status, stErr error, alive func(int) bool) (cloudPins, error) {
 	if owner != "" && prov != "" {
 		pins := cloudPins{Owner: owner, Provider: prov}
 		if stErr == nil && st.ProviderID != "" && (st.ProviderID != prov || (st.OwnerUserID != "" && st.OwnerUserID != owner)) {
@@ -56,8 +64,10 @@ func resolveCloudPins(owner, prov string, st provider.Status, stErr error) (clou
 		return cloudPins{}, fmt.Errorf("read the provider registration %s: %w; or %s", provider.StatusPath(), stErr, cloudPinsOverride)
 	case st.State == provider.StateRejected:
 		return cloudPins{}, fmt.Errorf("the provider's last registration with %s was rejected (%s): fix the provider registration first, or %s", orNone(st.Orchestrator), orNone(st.LastError), cloudPinsOverride)
-	case st.ProviderID == "":
-		return cloudPins{}, fmt.Errorf("the provider has not completed a registration with Harness (state %s): wait until `amux doctor` shows it registered, or %s", orNone(st.State), cloudPinsOverride)
+	case st.State != provider.StateRegistered || st.ProviderID == "":
+		return cloudPins{}, fmt.Errorf("the provider is not registered with Harness right now (state %s): start `amux provide` and wait until `amux doctor` shows it registered, or %s", orNone(st.State), cloudPinsOverride)
+	case !alive(st.PID):
+		return cloudPins{}, fmt.Errorf("the provider recorded as registered (pid %d) is no longer running: start `amux provide` and wait until `amux doctor` shows it registered, or %s", st.PID, cloudPinsOverride)
 	case st.OwnerUserID == "":
 		return cloudPins{}, fmt.Errorf("Harness reported no owner for provider %s: direct enrollment needs a provider registered to your account (not shared or unowned), and a Harness that reports registration owners. Restart `amux provide` after upgrading Harness, or %s", st.ProviderID, cloudPinsOverride)
 	}

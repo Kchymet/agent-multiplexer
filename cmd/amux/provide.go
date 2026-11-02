@@ -267,6 +267,14 @@ func provideRun(args []string) error {
 		wireDirectEnroll(&cfg)
 	}
 
+	// One provider per host owns the status file; a second would overwrite the
+	// registration doctor reports and direct cloud enable defaults its pins to.
+	releaseStatus, err := provider.LockStatus(provider.StatusPath())
+	if err != nil {
+		return err
+	}
+	defer releaseStatus()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := provider.New(cfg).Run(ctx); err != nil && ctx.Err() == nil {

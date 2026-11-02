@@ -382,7 +382,10 @@ address. To restart the user service after a binary or token change, re-run
 when the provider starts; replacing the file does not update a running process.
 
 The provider loop writes `~/.local/state/amux/provider-status.json` on every
-state change: `dialing` → `registered` → `disconnected`/`rejected`/`stopped`,
+state change. It is single-writer: `amux provide` holds an exclusive lock on
+`provider-status.json.lock` while it runs, and a second provider on the host
+exits with `another amux provide is already running on this host (pid N)`.
+The states are `dialing` → `registered` → `disconnected`/`rejected`/`stopped`,
 plus the negotiated `providerId`, the registered owner Harness reported
 (`owner_user_id`, and `owner_email` for display), the last successful
 registration, the last heartbeat, the live pane count, and the last error. A provider that is running

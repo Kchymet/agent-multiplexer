@@ -89,10 +89,15 @@ Fixtures: `docs/direct/fixtures/ticket-v1` (own `SHA256SUMS`; the `v1` and
 ceiling, then opt the provider in:
 
 ```
-amux provide ...                        # until `amux doctor` shows "registered" and an owner
+amux provide ...                        # running, until `amux doctor` shows "registered" and an owner
 amux direct cloud enable --permissions read,steer --all-sessions
+# restart the provider opted in (stop the running one first: one provider per host):
 amux provide --direct-enroll            # or AMUX_PROVIDER_DIRECT_ENROLL=1, or direct-enroll = true
 ```
+
+The feature is advertised at a registration, so after `enable` the provider
+must register again with the opt-in. Restart it, or restart its service after
+setting `direct-enroll = true`.
 
 `enable` prints what it pinned before applying it:
 
@@ -120,9 +125,16 @@ amux direct cloud disable
 - **The ceiling** has no implicit default. `--all-sessions` covers ordinary
   sessions and never the amux console. `--workgroup console` is refused.
 - **`--owner` and `--provider` are optional.** An omitted pin comes from this
-  host's provider registration. That is the `owner` and `providerId` Harness
-  returned in `registered` to this host's token-authenticated registration, as
-  recorded in the `amux provide` status file and shown by `amux doctor`.
+  host's **current** provider registration. That is the `owner` and
+  `providerId` Harness returned in `registered` to this host's
+  token-authenticated registration, as recorded in the `amux provide` status
+  file and shown by `amux doctor`. It is used only while that provider is
+  registered right now: state `registered` and its process alive, the same
+  liveness `amux doctor` checks. A dialing, disconnected, stopped or dead
+  provider's last snapshot is refused rather than trusted for some period.
+  `amux provide` holds a lock on the status file, so a second provider on the
+  host fails at startup (`another amux provide is already running on this host
+  (pid N)`) instead of making the registration ambiguous.
   Harness fills `owner` from its live provider row, so the defaults are exactly
   the requester and provider it will vouch for. The email is shown only so you
   can recognize the account. It is never used as an identity.
@@ -139,7 +151,8 @@ amux direct cloud disable
 | --- | --- | --- |
 | `no Harness provider registration on this host` | `amux provide` has never run here | Run `amux provide` against Harness |
 | `the provider's last registration … was rejected` | Token revoked or invalid | Fix the provider registration (`amux doctor`) |
-| `the provider has not completed a registration` | Still dialing, never accepted | Wait for `amux doctor` to show `registered` |
+| `the provider is not registered with Harness right now (state …)` | Dialing, reconnecting after a drop (`disconnected`), or stopped | Start `amux provide` and wait for `amux doctor` to show `registered` |
+| `the provider recorded as registered (pid N) is no longer running` | The provider died without recording a stop (SIGKILL, reboot) | Start `amux provide` again |
 | `Harness reported no owner for provider …` | Shared or unowned provider, or a Harness that predates owner reporting | Register the provider to your own account, or upgrade Harness and restart `amux provide` |
 | `--provider X is not this host's registered provider` | Only `--provider` given, for a different provider | Give both `--owner` and `--provider`, or drop the flag |
 | `--owner X is not the registered owner` | Only `--owner` given, for a different account | Give both flags, or drop the flag |
