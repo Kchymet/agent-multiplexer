@@ -148,6 +148,7 @@ const (
 	CodeIdemConflict     = "idem_conflict"
 	CodeIdemInProgress   = "idem_in_progress"
 	CodeIdemAmbiguous    = "idem_ambiguous"
+	CodeIdemExpired      = "idem_expired" // the key was used and its result expired; it will not run again: check the machine
 	CodeEndpointNotBound = "endpoint_not_bound"
 	CodeOriginNotAllowed = "origin_not_allowed"
 	CodeProtocol         = "protocol_unsupported"

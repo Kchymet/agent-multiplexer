@@ -27,11 +27,15 @@ var ErrNoStore = errors.New("no direct store exists (run `amux direct serve` fir
 // stateVersion is the grants.json schema. Version 2 added PKCE-bound cloud
 // enrollment codes and the cloud issuance policy. A version-1 reader (amux
 // 15fcf0e and earlier) refuses version 2, so a downgrade can never read an
-// outstanding cloud code as an unbound ordinary enrollment code. Version 1 is
-// migrated forward atomically on open (see migrateLocked); nothing else is
-// accepted and nothing is ever reinitialized.
+// outstanding cloud code as an unbound ordinary enrollment code. Version 3
+// added the per-grant spent-key tombstones (grantRecord.Spent). A version-2
+// reader refuses version 3: it would otherwise drop the tombstones on its next
+// rewrite and re-admit a spent idem_key. Versions 1 and 2 are migrated forward
+// atomically on open (see loadAuthority); nothing else is accepted and nothing
+// is ever reinitialized.
 const (
-	stateVersion   = 2
+	stateVersion   = 3
+	stateVersionV2 = 2
 	stateVersionS1 = 1
 	grantsFile     = "grants.json"
 	identityName   = "identity.json"
@@ -75,6 +79,10 @@ type grantRecord struct {
 	RevokedAt          int64                  `json:"revokedAt,omitempty"`
 	RevokeReason       string                 `json:"revokeReason,omitempty"`
 	Idem               map[string]*idemRecord `json:"idem,omitempty"`
+	// Spent holds tombstones of completed actions whose full record expired:
+	// spentKey(idem_key) -> spentBody(body hash). It lives as long as the
+	// grant, so a key is never admitted twice (see compactExpiredLocked).
+	Spent map[string]string `json:"spent,omitempty"`
 	// Provenance of a cloud-assisted enrollment (v2). It is set from the
 	// redeemed code, never from client input, and survives any client_label.
 	Origin         string `json:"origin,omitempty"`
@@ -215,9 +223,9 @@ func (s *store) saveIdentity(id *Identity) error {
 	return s.write(s.root, identityName, data)
 }
 
-// loadState reads the registry. It reports whether the file is version 1 and
-// must be migrated before anything else is written. A missing file is a new,
-// empty version-2 registry.
+// loadState reads the registry. It reports whether the file is an older
+// version that must be migrated before anything else is written. A missing
+// file is a new, empty registry of the current version.
 func (s *store) loadState() (*storeState, bool, error) {
 	data, err := os.ReadFile(s.path(grantsFile))
 	if errors.Is(err, os.ErrNotExist) {
@@ -231,8 +239,19 @@ func (s *store) loadState() (*storeState, bool, error) {
 		return nil, false, fmt.Errorf("direct grants: %w", err)
 	}
 	migrate := false
+	// No version before 3 writes spent-key tombstones; a file that claims an
+	// older version yet carries them is not what it claims. Refuse to guess.
+	if st.V != stateVersion {
+		for _, g := range st.Grants {
+			if g != nil && g.Spent != nil {
+				return nil, false, fmt.Errorf("direct grants: version %d file carries version 3 spent keys (refusing to load)", st.V)
+			}
+		}
+	}
 	switch st.V {
 	case stateVersion:
+	case stateVersionV2:
+		migrate = true
 	case stateVersionS1:
 		// A version-1 registry has no cloud data by construction: version-1
 		// binaries never write it. Fields that would only exist in version 2 mean

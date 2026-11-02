@@ -1,0 +1,4 @@
+{
+  "code": "idem_expired",
+  "error": "this idem_key was already used and its recorded result has expired; it will not run again. Check the machine for its effect before retrying with a new idem_key"
+}

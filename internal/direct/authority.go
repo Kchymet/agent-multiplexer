@@ -36,6 +36,14 @@ var maxUsedRefresh = 20000
 // fails closed for new actions. A var for tests.
 var maxIdemPerGrant = 1024
 
+// maxSpentPerGrant bounds a grant's spent-key tombstones (see BeginAction).
+// A full set never evicts one: a completed record that cannot be compacted
+// stays in full in Idem past its retention, so the grant then fills
+// maxIdemPerGrant and new actions fail closed with capacity_exhausted. Each
+// entry is 38 bytes of JSON (two 16-hex strings; TestSpentEntrySize). A var
+// for tests.
+var maxSpentPerGrant = 16384
+
 // Authorization failures. Each maps to one wire code.
 var (
 	errAuthInvalid = errors.New(CodeAuthInvalid)
@@ -174,13 +182,16 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		return nil, err
 	}
 	if migrate {
-		// Version 1 -> 2 is one atomic replace that keeps every grant, code,
-		// revocation, used-refresh and idempotency record. If it does not
-		// commit, the open fails and the version-1 file stays as it was: the
-		// registry is never reinitialized or partially rewritten.
+		// Version 1 or 2 -> 3 is one atomic replace that keeps every grant,
+		// code, revocation, used-refresh and idempotency record (and, from 2,
+		// the cloud data); a version-2 store gains no tombstones until its
+		// records expire. If it does not commit, the open fails and the old
+		// file stays as it was: the registry is never reinitialized or
+		// partially rewritten.
+		from := state.V
 		state.V = stateVersion
 		if err := st.saveState(state); err != nil {
-			return nil, fmt.Errorf("direct grants: migrate version %d to %d: %w", stateVersionS1, stateVersion, err)
+			return nil, fmt.Errorf("direct grants: migrate version %d to %d: %w", from, stateVersion, err)
 		}
 	}
 	if id == nil {
@@ -888,6 +899,7 @@ const (
 	idemConflict
 	idemInProgress
 	idemAmbiguous
+	idemExpired // the key was used; its full result expired; never re-run
 )
 
 // errCapacity: the grant holds too many unresolved or recent actions.
@@ -901,6 +913,11 @@ func runKey(clientID, key string) string { return clientID + "\x00" + key }
 // ended without a recorded outcome, or a previous process admitted it) is
 // ambiguous and is never executed again. Ambiguous and admitted records are
 // never pruned; at capacity new actions fail closed.
+//
+// A completed record keeps its full result for idemRetention after admission.
+// It is then compacted to a spent-key tombstone that lasts as long as the
+// grant: the same key and body answer idemExpired (never run again, and never
+// "did not run"), a different body still answers idemConflict.
 //
 // With peek set it only reports an existing record and never creates one.
 func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idemOutcome, *idemRecord, error) {
@@ -917,15 +934,15 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 	if g.Idem == nil {
 		g.Idem = map[string]*idemRecord{}
 	}
-	for k, r := range g.Idem {
-		if r.State == idemDone && now > r.At+int64(idemRetention/time.Second) {
-			delete(g.Idem, k)
-		}
-	}
+	compactExpiredLocked(g, now)
 	if r := g.Idem[key]; r != nil {
 		switch {
 		case r.BodyHash != bodyHash:
 			return idemConflict, nil, nil
+		case r.State == idemDone && pastRetention(r, now):
+			// Kept whole only because the tombstone set is full: it answers
+			// exactly as its tombstone would, never with a stale result.
+			return idemExpired, nil, nil
 		case r.State == idemDone:
 			copied := *r
 			return idemReplay, &copied, nil
@@ -934,6 +951,12 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 		default:
 			return idemAmbiguous, nil, nil
 		}
+	}
+	if b, ok := g.Spent[spentKey(key)]; ok {
+		if b != spentBody(bodyHash) {
+			return idemConflict, nil, nil
+		}
+		return idemExpired, nil, nil
 	}
 	if peek {
 		return idemProceed, nil, nil
@@ -1034,4 +1057,50 @@ func (a *Authority) endAction(l *Lease, key string, set func(*idemRecord)) {
 	if err := a.commitLocked(); rolledBack(err) {
 		*r = prev
 	}
+}
+
+// compactExpiredLocked turns each completed record past idemRetention into a
+// spent-key tombstone (g.Spent). The full result is dropped; the fact that the
+// key was used, and with which body, is kept for the grant's lifetime. When
+// the tombstone set is full the record is kept whole instead (never evicted),
+// so protection is never silently lost; the grant then reaches
+// maxIdemPerGrant and fails closed. Admitted and ambiguous records are never
+// touched. The change is in memory; the next commit persists it, and until
+// then the on-disk full record refuses a re-run just the same.
+func compactExpiredLocked(g *grantRecord, now int64) {
+	for k, r := range g.Idem {
+		if r.State != idemDone || !pastRetention(r, now) {
+			continue
+		}
+		sk := spentKey(k)
+		if _, dup := g.Spent[sk]; !dup && len(g.Spent) >= maxSpentPerGrant {
+			continue
+		}
+		if g.Spent == nil {
+			g.Spent = map[string]string{}
+		}
+		g.Spent[sk] = spentBody(r.BodyHash)
+		delete(g.Idem, k)
+	}
+}
+
+// pastRetention reports whether a record's full result has expired. Retention
+// runs from admission (At), as it always has.
+func pastRetention(r *idemRecord, now int64) bool {
+	return now > r.At+int64(idemRetention/time.Second)
+}
+
+// spentKey and spentBody are the compact tombstone identity: 64-bit prefixes
+// of sha256(idem_key) and of the request's body hash. A collision can only
+// refuse a request (idem_expired or idem_conflict), never run one twice.
+func spentKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:8])
+}
+
+func spentBody(bodyHash string) string {
+	if len(bodyHash) > 16 {
+		return bodyHash[:16]
+	}
+	return bodyHash
 }
