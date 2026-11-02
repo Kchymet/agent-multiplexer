@@ -56,6 +56,7 @@ func cmdProvide(args []string) error {
 var provideSubcommands = map[string]func([]string) error{
 	"install":   cmdProvideInstall,
 	"uninstall": cmdProvideUninstall,
+	"revoke":    cmdProvideRevoke,
 }
 
 func provideUsage() {
@@ -74,6 +75,14 @@ usage: amux provide [<orchestrator-addr>] [flags]
   (bare)             run in the foreground, reading `+"`"+`amux provide install`+"`"+`'s config file
   install            write the config file and install the user service
   uninstall          stop and remove the user service (the config file is kept)
+  revoke --yes       permanently revoke this provider's broker registration and relay access
+
+Revoke is host-only and requires broker support. It accepts --orchestrator,
+--token-file, --ca and --server-name (or the saved transport settings), and
+waits at most 15 seconds. An unconfirmed result can be retried with the same
+token. Existing direct-client grants remain valid; revoke those separately
+with amux direct clients revoke. Config, token file and service are retained;
+use uninstall separately to stop and remove the service.
 
 Install writes `+"`"+`~/.config/amux/provider.toml`+"`"+` and a user service (a systemd user
 unit on Linux/WSL2, a launchd agent on macOS), so the provider survives reboots

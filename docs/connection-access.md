@@ -46,6 +46,12 @@ direct session traffic goes from the client to `amux direct serve`.
 The `providerId` the broker assigns is the broker's
 alias for this registration, not a global machine id.
 
+`amux provide revoke --yes` revokes that token's broker registration and relay
+access through a standalone authenticated TLS exchange. **Existing direct-client
+grants remain valid**, and agent-session credentials are separate. See
+[provider revocation](remote-provider.md#revoke-this-machines-registration-and-relay-access)
+for acknowledgment guarantees, retries, and local service cleanup.
+
 ## The host backend seam
 
 `internal/hostbackend.HostDaemon` holds the session operations every transport

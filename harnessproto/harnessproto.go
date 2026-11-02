@@ -42,6 +42,8 @@ const (
 	MRegistered = "registered" // v2: accept/reject a register, negotiate version, resolve resume
 	MPong       = "pong"       // v2: heartbeat reply
 
+	MProviderRevoked = "provider-revoked" // v2: result of a standalone provider-revoke
+
 	// v2 "sessions" feature (opt-in, see docs/remote-provider-sessions.md):
 	// orchestrator -> provider. Never sent unless the provider advertised the
 	// "sessions" feature in register.
@@ -70,6 +72,8 @@ const (
 	HRegister = "register" // v2: first frame — offer versions, token, caps, resumable panes
 	HReset    = "reset"    // v2: replay buffer overflowed; frames before Seq are gone
 	HPing     = "ping"     // v2: heartbeat
+
+	HProviderRevoke = "provider-revoke" // v2: standalone first frame; versions + token only
 
 	// v2 "sessions" feature: provider -> orchestrator.
 	HSessions      = "sessions"       // full session-inventory snapshot (replaces the previous one)

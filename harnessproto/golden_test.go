@@ -29,6 +29,9 @@ var goldenFrames = []struct {
 	name string
 	msg  any
 }{
+	{"provider_revoke", HarnessMsg{Type: HProviderRevoke, Versions: []int{2}, Token: "hp_token"}},
+	{"provider_revoked", MuxMsg{Type: MProviderRevoked, OK: true, Version: 2, ProviderID: "prov-7"}},
+	{"provider_revoke_rejected", MuxMsg{Type: MProviderRevoked, Error: ErrBadToken}},
 	{"register", HarnessMsg{
 		Type:     HRegister,
 		Versions: []int{1, 2},
