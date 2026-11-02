@@ -29,6 +29,9 @@ const (
 	// and the machine's allowlisted creation catalog (permission read).
 	PathWorkgroups   = "/direct/v1/workgroups"
 	PathCapabilities = "/direct/v1/capabilities"
+	// PathCreations is GET PathCreations/{creation_id}: the phase of one
+	// creation this grant started (permission create). See CreationStatus.
+	PathCreations = "/direct/v1/creations"
 )
 
 // HelloType is the JWS "typ" header of a hello proof.
@@ -328,10 +331,59 @@ type StreamEnd struct {
 }
 
 // ActionRequest is POST /direct/v1/sessions/{sid}/actions.
+//
+// Async (optional, creation verbs only: add-agent, new-workgroup,
+// new-workgroup-empty) asks for an asynchronous creation: the answer is 202
+// with a CreationStatus, never an ActionResponse. Async is not part of the
+// request's identity: the same idem_key names the same creation whether it is
+// sent synchronously or not. A server without async creation refuses the field
+// with 400 bad_request (CapabilitiesResponse.AsyncCreate tells in advance).
 type ActionRequest struct {
 	Verb    string            `json:"verb"`
 	Fields  map[string]string `json:"fields"`
 	IdemKey string            `json:"idem_key"`
+	Async   bool              `json:"async,omitempty"`
+}
+
+// Creation phases, in order; ready and failed are terminal.
+//   - queued: recorded, waiting for an execution slot (nothing sent yet);
+//   - preparing: handed to the daemon, which is fetching the repo, creating
+//     the worktree, writing the harness config and starting the agent;
+//   - ready: created; NewID and RootID are set;
+//   - failed: Code and Error say why; Uncertain marks an unknown outcome.
+const (
+	CreatePhaseQueued    = "queued"
+	CreatePhasePreparing = "preparing"
+	CreatePhaseReady     = "ready"
+	CreatePhaseFailed    = "failed"
+)
+
+// CreationStatus is the body of an async creation's 202 answer and of
+// GET PathCreations/{creation_id}. It never carries "ok": a client treats a
+// creation as made only when Phase is ready, and the server never reports
+// ready without both NewID and RootID.
+//
+// Version increases with each phase change (queued 1, preparing 2, terminal
+// 3); pass it back as ?after= to long-poll for the next change.
+//
+// Uncertain (on failed, code idem_ambiguous) means the outcome is unknown: the
+// daemon may have created it (the transport was lost after dispatch, the
+// bound ran out, the server restarted after dispatch, or access was revoked
+// mid-creation). It will never run again with this idem_key; check the
+// inventory before retrying with a new one. A failed creation without
+// Uncertain did not run (unavailable, auth.revoked, auth.expired, a
+// precheck refusal) or was refused by the daemon (rejected).
+type CreationStatus struct {
+	CreationID string `json:"creation_id"`
+	Verb       string `json:"verb"`
+	Phase      string `json:"phase"`
+	Version    int    `json:"version"`
+	NewID      string `json:"new_id,omitempty"`
+	RootID     string `json:"root_id,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Uncertain  bool   `json:"uncertain,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
 }
 
 // ActionResponse is a successful action result. NewID is the session a
@@ -370,6 +422,9 @@ type CapabilitiesResponse struct {
 	Verbs           []string         `json:"verbs"`
 	CreateWorkgroup bool             `json:"create_workgroup"`
 	Catalog         *CreationCatalog `json:"catalog,omitempty"`
+	// AsyncCreate reports that this server accepts ActionRequest.Async and
+	// PathCreations for this grant (it holds create).
+	AsyncCreate bool `json:"async_create,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the

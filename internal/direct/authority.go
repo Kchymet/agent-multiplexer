@@ -903,7 +903,10 @@ func runKey(clientID, key string) string { return clientID + "\x00" + key }
 // never pruned; at capacity new actions fail closed.
 //
 // With peek set it only reports an existing record and never creates one.
-func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idemOutcome, *idemRecord, error) {
+//
+// init, when given, completes the new record (a creation's id and verb) before
+// the admission commit, so it is durable with it.
+func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool, init ...func(*idemRecord)) (idemOutcome, *idemRecord, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if l.rctx.Err() != nil {
@@ -944,7 +947,11 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 	if len(g.Idem) >= maxIdemPerGrant {
 		return 0, nil, errCapacity
 	}
-	g.Idem[key] = &idemRecord{BodyHash: bodyHash, State: idemAdmitted, Boot: a.boot, At: now}
+	rec := &idemRecord{BodyHash: bodyHash, State: idemAdmitted, Boot: a.boot, At: now}
+	for _, f := range init {
+		f(rec)
+	}
+	g.Idem[key] = rec
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			delete(g.Idem, key)
@@ -1007,6 +1014,9 @@ func (a *Authority) endAction(l *Lease, key string, set func(*idemRecord)) {
 	r := g.Idem[key]
 	prev := *r
 	set(r)
+	if r.CreationID != "" {
+		r.EndedAt = a.now().Unix()
+	}
 	if err := a.commitLocked(); rolledBack(err) {
 		*r = prev
 	}

@@ -51,6 +51,17 @@ type idemRecord struct {
 	RootID   string   `json:"rootId,omitempty"`   // the created session's workgroup root
 	Affected []string `json:"affected,omitempty"` // archive/unarchive: sessions whose archive state changed
 	At       int64    `json:"at"`
+	// Creation verbs only (all omitted on older records and other verbs).
+	// CreationID is the stable public id of the (grant, idem_key) creation;
+	// Verb its wire verb; Async whether it was started asynchronously;
+	// DispatchedAt is committed before the daemon call, so a record admitted
+	// but never dispatched is known not to have run; EndedAt is set with the
+	// outcome.
+	CreationID   string `json:"creationId,omitempty"`
+	Verb         string `json:"verb,omitempty"`
+	Async        bool   `json:"async,omitempty"`
+	DispatchedAt int64  `json:"dispatchedAt,omitempty"`
+	EndedAt      int64  `json:"endedAt,omitempty"`
 }
 
 const (
