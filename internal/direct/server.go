@@ -1043,7 +1043,7 @@ func (s *Server) idemReply(w http.ResponseWriter, l *Lease, out idemOutcome, rec
 			writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: rec.NewID, RootID: rec.RootID, Affected: rec.Affected})
 		} else {
 			status := http.StatusUnprocessableEntity
-			if rec.Code == CodeUnavailable {
+			if rec.Code == CodeUnavailable || rec.Code == CodeDaemonUpgradeRequired {
 				status = http.StatusServiceUnavailable
 			}
 			writeErr(w, status, rec.Code, rec.Error)

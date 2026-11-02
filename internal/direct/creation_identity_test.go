@@ -324,7 +324,7 @@ func TestDowngradeBetweenPrecheckAndDispatch(t *testing.T) {
 	if code != 503 || ec != CodeDaemonUpgradeRequired || r.f.applies.Load() != 0 {
 		t.Fatalf("%d %s applies=%d", code, ec, r.f.applies.Load())
 	}
-	if code, ec, _ := r.post("wg1", VerbAddAgent, map[string]string{"repos": "api"}, "k"); ec != CodeDaemonUpgradeRequired || code != 422 {
+	if code, ec, _ := r.post("wg1", VerbAddAgent, map[string]string{"repos": "api"}, "k"); ec != CodeDaemonUpgradeRequired || code != 503 {
 		t.Fatalf("replayed refusal: %d %s", code, ec)
 	}
 }
