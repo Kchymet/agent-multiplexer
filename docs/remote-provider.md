@@ -427,6 +427,18 @@ each candidate executable with `--version` before every dial and advertises only
 the successful results, including their reported versions. It discovers every
 supported local harness by default: Claude, Codex, and Hermes when installed.
 
+Every harness is optional. A machine with only Claude and/or Codex registers
+normally and advertises just those; a harness that is not installed is skipped,
+not treated as a failure. The provider logs one summary line — again only when
+the result changes across reconnects — such as:
+
+```
+amux provide: harnesses: advertising claude (2.1.0), codex (codex-cli 0.9.0); not installed (optional, skipped): hermes
+```
+
+An installed CLI that fails its version check, or an allowlisted (`--harness`)
+harness that is missing, is listed under `unavailable:` instead.
+
 Restrict discovery when a provider should accept only selected runtimes:
 
 ```

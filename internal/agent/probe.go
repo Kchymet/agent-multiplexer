@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -27,6 +29,10 @@ func Probe(ctx context.Context, kind string) ProbeResult {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	r.Path = resolveContext(ctx, envOr("AMUX_"+strings.ToUpper(kind)+"_BIN", kind))
+	if !installed(r.Path) {
+		r.Err = fmt.Errorf("%s: %w", r.Path, ErrNotInstalled)
+		return r
+	}
 	cmd := exec.CommandContext(ctx, r.Path, "--version")
 	cmd.WaitDelay = 100 * time.Millisecond
 	var out probeOutput
@@ -40,6 +46,24 @@ func Probe(ctx context.Context, kind string) ProbeResult {
 		r.Err = fmt.Errorf("version check returned no version")
 	}
 	return r
+}
+
+// ErrNotInstalled marks a probe whose executable does not exist on this host —
+// the ordinary state of an optional harness (Hermes on a Claude/Codex machine),
+// as opposed to an installed CLI that failed its version check. Callers test it
+// with errors.Is.
+var ErrNotInstalled = errors.New("not installed")
+
+// installed reports whether a resolved launcher path names something that
+// exists. resolveContext hands back the bare name when no lookup found it, and
+// an explicit path (an AMUX_<KIND>_BIN override) is checked as given.
+func installed(path string) bool {
+	if !strings.ContainsRune(path, '/') {
+		_, err := exec.LookPath(path)
+		return err == nil
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 type probeOutput struct{ strings.Builder }
