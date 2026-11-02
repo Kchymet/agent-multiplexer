@@ -266,7 +266,10 @@ func TestAsyncSameKeyIdentityAcrossModes(t *testing.T) {
 	gate = gated(f)
 	f.newID = "agent-5"
 	syncDone := make(chan int)
-	go func() { code, _, _ := act(s, tok.AccessToken, "wg1", VerbAddAgent, fields, "syncfly"); syncDone <- code }()
+	go func() {
+		code, _, _ := act(s, tok.AccessToken, "wg1", VerbAddAgent, fields, "syncfly")
+		syncDone <- code
+	}()
 	waitFor(t, "sync dispatch", func() bool { return f.activeApplies.Load() == 1 })
 	if _, st, _ := postAsync(s, tok.AccessToken, "wg1", VerbAddAgent, fields, "syncfly"); st.Phase != CreatePhasePreparing {
 		t.Fatalf("sync in flight via async: %+v", st)
