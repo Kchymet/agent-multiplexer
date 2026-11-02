@@ -106,6 +106,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST "+PathSession+"/{sid}/actions", s.actions)
 	mux.HandleFunc("POST "+PathWorkgroups, s.createWorkgroup)
 	mux.HandleFunc("GET "+PathCapabilities, s.capabilities)
+	mux.HandleFunc("GET "+PathAccounts, s.accounts)
 	s.mux = mux
 	return s, nil
 }
@@ -905,6 +906,8 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		ServerID: s.cfg.Authority.ServerID(), Permissions: slices.Clone(l.Perms), ResourceScope: l.Resource,
 		ServerVerbs: ServerVerbs(), Verbs: sessionVerbs(l.Grant), CreateWorkgroup: mayCreateRoots(l.Grant),
 	}
+	accountStatus := mayReadAccounts(l.Grant)
+	resp.AccountStatus = &accountStatus
 	if l.Can(PermCreate) {
 		rows, err := s.cfg.Backend.Snapshot(l.Context())
 		if err != nil {

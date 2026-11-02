@@ -29,6 +29,9 @@ const (
 	// and the machine's allowlisted creation catalog (permission read).
 	PathWorkgroups   = "/direct/v1/workgroups"
 	PathCapabilities = "/direct/v1/capabilities"
+	// PathAccounts is the machine's read-only account status (permission
+	// accounts, all_sessions grants only).
+	PathAccounts = "/direct/v1/accounts"
 )
 
 // HelloType is the JWS "typ" header of a hello proof.
@@ -83,10 +86,13 @@ const (
 	PermApprove = "approve"
 	PermManage  = "manage"
 	PermCreate  = "create"
+	// PermAccounts reads machine account status (with an all_sessions grant
+	// only). It implies nothing else and nothing implies it.
+	PermAccounts = "accounts"
 )
 
 // Permissions is the canonical order permission lists are normalized to.
-var Permissions = []string{PermRead, PermSteer, PermRespond, PermApprove, PermManage, PermCreate}
+var Permissions = []string{PermRead, PermSteer, PermRespond, PermApprove, PermManage, PermCreate, PermAccounts}
 
 // Resource scope kinds. There is no implicit default: enrollment names one.
 const (
@@ -291,6 +297,9 @@ type Session struct {
 	Role        string                   `json:"role,omitempty"`
 	Caps        SessionCaps              `json:"caps"`
 	PRs         []harnessproto.SessionPR `json:"prs,omitempty"`
+	// AccountBinding is set only for a grant that may read machine accounts
+	// (accounts + all_sessions); see mayReadAccounts.
+	AccountBinding *SessionAccountBinding `json:"account_binding,omitempty"`
 }
 
 // SessionsResponse is GET /direct/v1/sessions.
@@ -363,13 +372,17 @@ type CreateRequest = ActionRequest
 // (each row's caps still decide per session). CreateWorkgroup reports whether
 // PathWorkgroups is open to this grant. Catalog is present only with create.
 type CapabilitiesResponse struct {
-	ServerID        string           `json:"server_id"`
-	Permissions     []string         `json:"permissions"`
-	ResourceScope   ResourceScope    `json:"resource_scope"`
-	ServerVerbs     []string         `json:"server_verbs"`
-	Verbs           []string         `json:"verbs"`
-	CreateWorkgroup bool             `json:"create_workgroup"`
-	Catalog         *CreationCatalog `json:"catalog,omitempty"`
+	ServerID        string        `json:"server_id"`
+	Permissions     []string      `json:"permissions"`
+	ResourceScope   ResourceScope `json:"resource_scope"`
+	ServerVerbs     []string      `json:"server_verbs"`
+	Verbs           []string      `json:"verbs"`
+	CreateWorkgroup bool          `json:"create_workgroup"`
+	// AccountStatus is always set by a server that serves PathAccounts: true
+	// when this grant may read it, false when it may not. Absent means the
+	// server predates machine account status.
+	AccountStatus *bool            `json:"account_status,omitempty"`
+	Catalog       *CreationCatalog `json:"catalog,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the
