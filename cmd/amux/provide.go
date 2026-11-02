@@ -251,11 +251,12 @@ func provideRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) }
 	cfg := provider.Config{
 		AccountStatus:     resolvedBool(fs, "account-status", f.accountStatus, "AMUX_PROVIDER_ACCOUNT_STATUS", file.AccountStatus),
 		AccountManage:     false, // legacy saved/env grants cannot enable remote configuration
 		AccountUse:        resolvedBool(fs, "account-use", f.accountUse, "AMUX_PROVIDER_ACCOUNT_USE", providerAccountUseDefault(file, publish, readonly)),
-		DiscoverExecution: executionDiscovery(execution),
+		DiscoverExecution: executionDiscovery(execution, logf),
 		Orchestrator:      addr,
 		Token:             token,
 		Name:              displayName,
@@ -265,7 +266,7 @@ func provideRun(args []string) error {
 		MaxPanes:          mp,
 		AllowCompute:      allowCompute,
 		Features:          mergeFeatures(os.Getenv("AMUX_PROVIDER_FEATURES"), append(multiFlag(file.Features), f.features...)),
-		Logf:              func(format string, a ...any) { fmt.Fprintf(os.Stderr, "amux provide: "+format+"\n", a...) },
+		Logf:              logf,
 		// The status file is how `amux doctor` — and anyone looking at a headless
 		// provider box — sees whether this thing is actually connected, instead of
 		// inferring it from a log tail.
