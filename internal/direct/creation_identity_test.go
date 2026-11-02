@@ -231,9 +231,10 @@ func TestReplayOldRecordUnverifiable(t *testing.T) {
 	}
 }
 
-// A transient identity read failure answers 503 unavailable on every replay
-// path and leaves the record (and grants.json) byte-identical; a later replay
-// answers normally.
+// A failure to read identities (transient, or a downgraded daemon) answers
+// 503 created_identity_unavailable — never unavailable, a not-run code — on
+// every replay path and leaves the record (and grants.json) byte-identical; a
+// later replay answers normally.
 func TestReplayTransientIdentityFailure(t *testing.T) {
 	r := newIdentityRig(t)
 	r.f.newID = "agent-1"
@@ -379,7 +380,6 @@ func TestCreatedWaitOnlyForSameIncarnation(t *testing.T) {
 	}
 }
 
-var _ = strings.Contains
 
 // notRunCodes is the published set of creation failure codes that prove the
 // creation never ran (CreationStatus' doc comment), which clients may answer
