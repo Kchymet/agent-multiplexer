@@ -142,7 +142,9 @@ listener never keeps holding the direct store.
 
 **Readiness belongs to the child.** Once its listener and admin socket are up,
 the child writes `~/.local/state/amux/direct-managed-ready.json` with its pid,
-server id and configuration fingerprint. `enable` and `status` call the
+server id and configuration fingerprint. The daemon removes the marker before
+every start and after every exit, so a marker left by an earlier child cannot
+match a new one that reuses its pid. `enable` and `status` call the
 listener running only when that marker matches the daemon's current child and
 configuration. A manual `amux direct serve` answering the same admin socket
 never counts as the managed listener being ready.

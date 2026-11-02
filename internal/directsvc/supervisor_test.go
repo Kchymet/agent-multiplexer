@@ -281,3 +281,49 @@ func TestSupervisorStopsChildWhenDaemonStops(t *testing.T) {
 		t.Fatalf("final status = %+v, %v", st, err)
 	}
 }
+
+// A readiness marker from an earlier child must never describe a later one:
+// with a recycled pid and the same configuration it would otherwise match.
+// The supervisor removes it before every start and after every exit.
+func TestSupervisorClearsReadyMarkerAroundEachChild(t *testing.T) {
+	h := newHarness(t, enabledCfg)
+	h.sup.ReadyPath = filepath.Join(t.TempDir(), "direct-managed-ready.json")
+	writeMarker := func(pid int) {
+		t.Helper()
+		if err := WriteReady(h.sup.ReadyPath, Ready{PID: pid, ServerID: "sid", Fingerprint: h.sup.Fingerprint(enabledCfg)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	markerAtStart := make(chan bool, 4)
+	start := h.sup.Start
+	h.sup.Start = func(s Settings) (Process, error) {
+		_, err := os.Stat(h.sup.ReadyPath)
+		markerAtStart <- err == nil
+		return start(s)
+	}
+	// Left behind by a child of an earlier daemon, naming the pid the first
+	// fake child will get.
+	writeMarker(1000)
+	h.run()
+	p1 := h.nextStart()
+	if <-markerAtStart {
+		t.Fatal("first child started with an earlier child's readiness marker in place")
+	}
+	writeMarker(p1.pid) // p1 becomes ready
+	p1.exit(errors.New("crashed"))
+	h.waitStatus(func(s Status) bool { return s.Restarts == 1 })
+	h.nextStart()
+	if <-markerAtStart {
+		t.Fatal("restarted child started with the crashed child's readiness marker in place")
+	}
+	if _, err := os.Stat(h.sup.ReadyPath); !os.IsNotExist(err) {
+		t.Fatalf("marker present before the new child wrote one: %v", err)
+	}
+	// Disabling stops the child and clears its marker too.
+	writeMarker(1001)
+	h.set(func(s *Settings) { s.Enabled = false })
+	h.waitStatus(func(s Status) bool { return s.State == StateDisabled })
+	if _, err := os.Stat(h.sup.ReadyPath); !os.IsNotExist(err) {
+		t.Fatalf("marker survived disable: %v", err)
+	}
+}
