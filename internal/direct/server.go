@@ -17,8 +17,12 @@ import (
 	"sync"
 	"time"
 
+	"slices"
+
+	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/hostbackend"
+	amuxstore "amux/internal/store"
 
 	"github.com/gorilla/websocket"
 )
@@ -100,6 +104,8 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET "+PathSession+"/{sid}/history", s.history)
 	mux.HandleFunc("GET "+PathSession+"/{sid}/stream", s.stream)
 	mux.HandleFunc("POST "+PathSession+"/{sid}/actions", s.actions)
+	mux.HandleFunc("POST "+PathWorkgroups, s.createWorkgroup)
+	mux.HandleFunc("GET "+PathCapabilities, s.capabilities)
 	s.mux = mux
 	return s, nil
 }
@@ -152,11 +158,17 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	case http.StatusUnauthorized:
 		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
 	case http.StatusForbidden:
-		if code == CodeDenied {
+		if code == CodeDenied && w.Header().Get("WWW-Authenticate") == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="steer"`)
 		}
 	}
 	writeJSON(w, status, APIError{Code: code, Error: msg})
+}
+
+// writeDenied is a 403 denied naming the permission the operation needs.
+func writeDenied(w http.ResponseWriter, perm, msg string) {
+	w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="`+perm+`"`)
+	writeErr(w, http.StatusForbidden, CodeDenied, msg)
 }
 
 func writeOAuth(w http.ResponseWriter, status int, code, desc string) {
@@ -405,6 +417,10 @@ func bearer(r *http.Request) string {
 // admit authenticates and authorizes perm. It makes no backend call.
 func (s *Server) admit(w http.ResponseWriter, r *http.Request, perm string) *Lease {
 	l, err := s.cfg.Authority.Admit(r.Context(), bearer(r), perm)
+	if errors.Is(err, errDenied) {
+		writeDenied(w, perm, "this client may not perform that operation")
+		return nil
+	}
 	if err != nil {
 		writeAuthErr(w, err)
 		return nil
@@ -618,6 +634,42 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// requiredPerm is the permission a request body's verb needs, read leniently
+// before admission so the permission check still precedes any field
+// validation. An unparseable body or unknown verb needs steer, as in S1, so a
+// grant without steer is refused before it learns anything about the verb.
+func requiredPerm(body []byte, fallback string) string {
+	var peek struct {
+		Verb string `json:"verb"`
+	}
+	if json.Unmarshal(body, &peek) == nil {
+		if p, ok := VerbPermissions[peek.Verb]; ok {
+			return p
+		}
+	}
+	return fallback
+}
+
+// readAction reads and strictly decodes an action-shaped body after the lease
+// was admitted. It reports whether it already answered.
+func readAction(w http.ResponseWriter, r *http.Request, body []byte, req *ActionRequest) bool {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "content type must be application/json")
+		return true
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(req); err != nil || dec.More() {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid action request")
+		return true
+	}
+	if req.IdemKey == "" || len(req.IdemKey) > MaxIdemKeyLen || strings.ContainsAny(req.IdemKey, "\x00\r\n") {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "idem_key is required (1-128 bytes)")
+		return true
+	}
+	return false
+}
+
 func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("sid")
 	if !validSessionID(sid) {
@@ -629,24 +681,13 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "body too large")
 		return
 	}
-	l := s.admit(w, r, PermSteer)
+	l := s.admit(w, r, requiredPerm(body, PermSteer))
 	if l == nil {
 		return
 	}
 	defer l.Done()
 	var req ActionRequest
-	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		writeErr(w, http.StatusBadRequest, CodeBadRequest, "content type must be application/json")
-		return
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || dec.More() {
-		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid action request")
-		return
-	}
-	if req.IdemKey == "" || len(req.IdemKey) > MaxIdemKeyLen || strings.ContainsAny(req.IdemKey, "\x00\r\n") {
-		writeErr(w, http.StatusBadRequest, CodeBadRequest, "idem_key is required (1-128 bytes)")
+	if readAction(w, r, body, &req) {
 		return
 	}
 	act, err := actionFor(sid, req)
@@ -658,23 +699,115 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid fields for "+req.Verb)
 		return
 	}
-	bodyHash := actionHash(sid, req)
+	// The fresh destination check: scope (the console is never in scope),
+	// archive state, the row's own capability and, for add-agent, the machine
+	// catalog and the workgroup's current repo ceiling.
+	precheck := func() ([]string, error) {
+		rows, err := s.cfg.Backend.Snapshot(l.Context())
+		if err != nil {
+			return nil, err
+		}
+		byID := indexRows(rows)
+		row, ok := byID[sid]
+		if !ok || !inScope(l.Grant, row, byID) {
+			return nil, errNotFound
+		}
+		if err := admissible(row, byID, req.Verb); err != nil {
+			return nil, err
+		}
+		if req.Verb == VerbAddAgent {
+			return nil, s.checkCatalog(l, act, sid)
+		}
+		return archiveAffected(row, rows, byID, req.Verb), nil
+	}
+	s.runAction(w, l, req, actionHash(sid, req), act, precheck)
+}
+
+// createWorkgroup is POST /direct/v1/workgroups: new-workgroup or
+// new-workgroup-empty. Only an all_sessions grant holding create may create a
+// root; a workgroup-scoped grant is refused before any backend call.
+func (s *Server) createWorkgroup(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxJSONBody))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "body too large")
+		return
+	}
+	l := s.admit(w, r, PermCreate)
+	if l == nil {
+		return
+	}
+	defer l.Done()
+	if !mayCreateRoots(l.Grant) {
+		writeDenied(w, PermCreate, "a workgroup-scoped client cannot create new workgroups")
+		return
+	}
+	var req CreateRequest
+	if readAction(w, r, body, &req) {
+		return
+	}
+	act, err := createActionFor(req)
+	if errors.Is(err, errUnsupported) {
+		writeErr(w, http.StatusConflict, CodeUnsupportedVerb, "this verb is not available on direct connections")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid fields for "+req.Verb)
+		return
+	}
+	s.runAction(w, l, req, actionHash("", req), act, func() ([]string, error) { return nil, s.checkCatalog(l, act, "") })
+}
+
+// checkCatalog validates a creation action against the machine's current
+// catalog: every harness it will launch must be verified here, and every repo
+// must be tracked (new-workgroup*) or inside the target workgroup's current
+// grant ceiling (add-agent). The daemon enforces the ceiling again itself.
+func (s *Server) checkCatalog(l *Lease, act core.Action, root string) error {
+	cat, err := s.cfg.Backend.Catalog(l.Context())
+	if err != nil {
+		return err
+	}
+	for _, kind := range requestedHarnesses(act) {
+		if !slices.ContainsFunc(cat.Harnesses, func(h CatalogHarness) bool { return h.Name == kind }) {
+			return errNotInCatalog
+		}
+	}
+	allowed := cat.Repos
+	if root != "" {
+		ceiling, ok := cat.Ceilings[root]
+		if !ok {
+			return errNotInCatalog
+		}
+		allowed = ceiling
+	}
+	for _, repo := range amuxstore.SplitRepos(act.Fields["repos"]) {
+		if !slices.Contains(allowed, repo) {
+			return errNotInCatalog
+		}
+	}
+	return nil
+}
+
+// runAction is the shared idempotent execution path: peek the key, run the
+// fresh destination precheck, durably record the key, re-check the lease, and
+// only then hand the action to the daemon under the bounded execution context.
+func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func() ([]string, error)) {
 	if out, rec, err := s.cfg.Authority.BeginAction(l, req.IdemKey, bodyHash, true); err != nil {
 		writeAuthErr(w, err)
 		return
 	} else if s.idemReply(w, out, rec) {
 		return
 	}
-	row, byID, err := authorizeTarget(l.Context(), s.cfg.Backend, l.Grant, sid)
+	affected, err := precheck()
 	if err != nil {
-		s.writeBackendErr(w, l, err)
-		return
-	}
-	if err := steerable(row, byID, req.Verb); err != nil {
-		if errors.Is(err, errArchived) {
-			writeErr(w, http.StatusConflict, CodeArchived, "the session or its workgroup is archived")
-		} else {
+		switch {
+		case errors.Is(err, errArchived):
+			writeErr(w, http.StatusConflict, CodeArchived, "the session or its workgroup is archived (or, for unarchive, not archived)")
+		case errors.Is(err, errUnsupported):
 			writeErr(w, http.StatusConflict, CodeUnsupportedVerb, "this session cannot serve "+req.Verb)
+		case errors.Is(err, errNotInCatalog):
+			writeErr(w, http.StatusUnprocessableEntity, CodeNotInCatalog, "a harness or repository is not in this machine's creation catalog for this target")
+		default:
+			s.writeBackendErr(w, l, err)
 		}
 		return
 	}
@@ -707,18 +840,26 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 	// From here the action is admitted: it runs under a bounded execution
 	// lifetime that only revocation cuts short, not token expiry or disconnect.
 	exec, cancel := l.ExecContext(actionExecLimit)
-	_, err = s.cfg.Backend.Apply(exec, act)
+	newID, err := s.cfg.Backend.Apply(exec, act)
 	cancel()
+	creates := core.DescriptorFor(act.Action).CreatesSession
 	var rejected *daemon.RejectedError
 	switch {
+	case err == nil && creates && validSessionID(newID):
+		s.cfg.Authority.FinishResult(l, req.IdemKey, newID, nil)
+		writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: newID})
+	case err == nil && creates:
+		// The daemon reported success without a usable id. Something may exist,
+		// so the key must never create again: record it as ambiguous.
+		s.cfg.Authority.AmbiguousAction(l, req.IdemKey)
+		writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "the creation's outcome is unknown; it will not run again with this idem_key")
 	case err == nil:
-		s.cfg.Authority.FinishAction(l, req.IdemKey, true, "", "")
-		writeJSON(w, http.StatusOK, ActionResponse{OK: true})
+		s.cfg.Authority.FinishResult(l, req.IdemKey, "", affected)
+		writeJSON(w, http.StatusOK, ActionResponse{OK: true, Affected: affected})
 	case errors.As(err, &rejected):
 		// The daemon answered not-OK. That is a known answer, not proof of no
-		// side effect; it is recorded and replayed, never re-run. (For S1, a
-		// client repeating a stop under a new key is safe.)
-		s.cfg.Logf("direct: action %s on %s rejected: %v", req.Verb, sid, err)
+		// side effect; it is recorded and replayed, never re-run.
+		s.cfg.Logf("direct: action %s on %q rejected: %v", req.Verb, act.ID, err)
 		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeRejected, "the daemon rejected the action")
 		writeErr(w, http.StatusUnprocessableEntity, CodeRejected, "the daemon rejected the action")
 	case errors.Is(err, hostbackend.ErrUnavailable):
@@ -735,6 +876,41 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "the action's outcome is unknown; it will not run again with this idem_key")
 		}
 	}
+}
+
+// capabilities is GET /direct/v1/capabilities. ServerVerbs is everything this
+// server implements; Verbs is the subset this grant's permissions admit. A
+// client tells "server too old" (the route answers 404 without a JSON
+// {"code"} body, or a verb is absent from server_verbs) from "this grant may
+// not" (the verb is in server_verbs but not verbs).
+func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
+	l := s.admit(w, r, PermRead)
+	if l == nil {
+		return
+	}
+	defer l.Done()
+	resp := CapabilitiesResponse{
+		ServerID: s.cfg.Authority.ServerID(), Permissions: slices.Clone(l.Perms), ResourceScope: l.Resource,
+		ServerVerbs: ServerVerbs(), Verbs: sessionVerbs(l.Grant), CreateWorkgroup: mayCreateRoots(l.Grant),
+	}
+	if l.Can(PermCreate) {
+		rows, err := s.cfg.Backend.Snapshot(l.Context())
+		if err != nil {
+			s.writeBackendErr(w, l, err)
+			return
+		}
+		cat, err := s.cfg.Backend.Catalog(l.Context())
+		if err != nil {
+			s.writeBackendErr(w, l, err)
+			return
+		}
+		resp.Catalog = projectCatalog(l.Grant, cat, rows)
+	}
+	if code := l.AuthEnded(); code != "" {
+		writeErr(w, http.StatusUnauthorized, code, "access ended")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // actionExecLimit bounds one admitted daemon call.
@@ -755,7 +931,7 @@ func (s *Server) idemReply(w http.ResponseWriter, out idemOutcome, rec *idemReco
 	switch out {
 	case idemReplay:
 		if rec.OK {
-			writeJSON(w, http.StatusOK, ActionResponse{OK: true})
+			writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: rec.NewID, Affected: rec.Affected})
 		} else {
 			status := http.StatusUnprocessableEntity
 			if rec.Code == CodeUnavailable {

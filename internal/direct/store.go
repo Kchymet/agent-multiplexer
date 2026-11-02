@@ -41,13 +41,15 @@ const (
 )
 
 type idemRecord struct {
-	BodyHash string `json:"bodyHash"`
-	State    string `json:"state"` // admitted | done | ambiguous
-	Boot     string `json:"boot"`  // process that admitted it
-	OK       bool   `json:"ok,omitempty"`
-	Code     string `json:"code,omitempty"`
-	Error    string `json:"error,omitempty"`
-	At       int64  `json:"at"`
+	BodyHash string   `json:"bodyHash"`
+	State    string   `json:"state"` // admitted | done | ambiguous
+	Boot     string   `json:"boot"`  // process that admitted it
+	OK       bool     `json:"ok,omitempty"`
+	Code     string   `json:"code,omitempty"`
+	Error    string   `json:"error,omitempty"`
+	NewID    string   `json:"newId,omitempty"`    // the session a creation verb made
+	Affected []string `json:"affected,omitempty"` // archive/unarchive: sessions whose archive state changed
+	At       int64    `json:"at"`
 }
 
 const (

@@ -1,0 +1,10 @@
+{
+  "verb": "add-agent",
+  "fields": {
+    "agent": "codex",
+    "mode": "task",
+    "prompt": "Fix the flaky test.",
+    "repos": "agent-multiplexer"
+  },
+  "idem_key": "b1f0c6a2-8"
+}

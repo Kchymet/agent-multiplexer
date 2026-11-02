@@ -1,0 +1,18 @@
+{
+  "id": "e1deda",
+  "title": "Backend implementation",
+  "root_id": "771951",
+  "section": "workgroups",
+  "state": "waiting",
+  "runtime": "codex",
+  "control_mode": "structured",
+  "caps": {
+    "prompt": true,
+    "stop": true,
+    "interject": true,
+    "permission": true,
+    "start": true,
+    "rename": true,
+    "archive": true
+  }
+}

@@ -482,16 +482,18 @@ func TestSteeringVerbsRouteToSteer(t *testing.T) {
 			map[string]string{core.SteerVerb: core.SteerStop}},
 		{harnessproto.VerbPermission,
 			map[string]string{
-				harnessproto.FieldRequestID: "perm-9",
-				harnessproto.FieldDecision:  harnessproto.DecisionDeny,
-				harnessproto.FieldReason:    "writes outside the worktree",
-				"nosuchfield":               "dropped",
+				harnessproto.FieldRequestID:         "perm-9",
+				harnessproto.FieldRuntimeGeneration: "gen-3",
+				harnessproto.FieldDecision:          harnessproto.DecisionDeny,
+				harnessproto.FieldReason:            "writes outside the worktree",
+				"nosuchfield":                       "dropped",
 			},
 			map[string]string{
-				core.SteerVerb:      core.SteerPermission,
-				core.SteerRequestID: "perm-9",
-				core.SteerDecision:  core.SteerDeny,
-				core.SteerReason:    "writes outside the worktree",
+				core.SteerVerb:                      core.SteerPermission,
+				core.SteerRequestID:                 "perm-9",
+				harnessproto.FieldRuntimeGeneration: "gen-3", // the daemon's gate binds the decision to it
+				core.SteerDecision:                  core.SteerDeny,
+				core.SteerReason:                    "writes outside the worktree",
 			}},
 	}
 	for _, tc := range cases {

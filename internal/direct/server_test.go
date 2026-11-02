@@ -147,7 +147,12 @@ func TestDeniedOperationsMakeNoBackendCall(t *testing.T) {
 		{"unknown token", "amxa_unknown", PathSession + "/a1/history", "", CodeAuthInvalid},
 		{"refresh as access", reader.RefreshToken, PathSession, "", CodeAuthInvalid},
 		{"read-only prompt", reader.AccessToken, PathSession + "/a1/actions", actionBody(VerbPrompt, "hi", "k1"), CodeDenied},
-		{"unsupported verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("interject", "hi", "k2"), CodeUnsupportedVerb},
+		// interject is implemented but needs respond: insufficient grant, not an
+		// unsupported server. A verb the server never implements is unsupported.
+		{"interject without respond", steer.AccessToken, PathSession + "/a1/actions", actionBody("interject", "hi", "k2"), CodeDenied},
+		{"unsupported verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("delete", "", "k2b"), CodeUnsupportedVerb},
+		{"pane verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("pane.open", "", "k2c"), CodeUnsupportedVerb},
+		{"steer cannot create", steer.AccessToken, PathWorkgroups, `{"verb":"new-workgroup","fields":{},"idem_key":"k2d"}`, CodeDenied},
 		{"extra field", steer.AccessToken, PathSession + "/a1/actions", `{"verb":"prompt","fields":{"text":"x","reason":"y"},"idem_key":"k3"}`, CodeBadRequest},
 		{"stop with fields", steer.AccessToken, PathSession + "/a1/actions", actionBody(VerbStop, "x", "k4"), CodeBadRequest},
 		{"empty prompt", steer.AccessToken, PathSession + "/a1/actions", actionBody(VerbPrompt, "  ", "k5"), CodeBadRequest},

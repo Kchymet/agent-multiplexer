@@ -24,6 +24,11 @@ const (
 	PathClaim   = "/direct/v1/enroll/claim"
 	PathSession = "/direct/v1/sessions"
 	PathWatch   = "/direct/v1/sessions/watch"
+	// PathWorkgroups creates a new workgroup root (permission create, and only
+	// for an all_sessions grant). PathCapabilities is the grant's own verb set
+	// and the machine's allowlisted creation catalog (permission read).
+	PathWorkgroups   = "/direct/v1/workgroups"
+	PathCapabilities = "/direct/v1/capabilities"
 )
 
 // HelloType is the JWS "typ" header of a hello proof.
@@ -61,11 +66,27 @@ const (
 	RefreshTokenPrefix = "amxr_"
 )
 
-// Permissions. A grant always has read; steer is separate and explicit.
+// Permissions. A grant always has read; every other permission is separate
+// and explicit. The set is additive: a permission's meaning never widens, so a
+// grant, code or cloud ceiling issued before a permission existed can never
+// acquire it. steer is exactly prompt and stop, as in S1.
+//
+//   - respond: interject and goal control
+//   - approve: answer a correlated permission request (allow / deny)
+//   - manage: start, rename, archive and unarchive in-scope sessions
+//   - create: add-agent to an in-scope workgroup; new-workgroup and
+//     new-workgroup-empty for an all_sessions grant only
 const (
-	PermRead  = "read"
-	PermSteer = "steer"
+	PermRead    = "read"
+	PermSteer   = "steer"
+	PermRespond = "respond"
+	PermApprove = "approve"
+	PermManage  = "manage"
+	PermCreate  = "create"
 )
+
+// Permissions is the canonical order permission lists are normalized to.
+var Permissions = []string{PermRead, PermSteer, PermRespond, PermApprove, PermManage, PermCreate}
 
 // Resource scope kinds. There is no implicit default: enrollment names one.
 const (
@@ -79,11 +100,39 @@ const (
 	ClientAndroid = "android"
 )
 
-// Action verbs admitted in S1. Everything else fails closed.
+// Action verbs. prompt and stop are S1 (permission steer); the rest each need
+// their own additive permission (VerbPermissions). Everything else fails closed.
 const (
-	VerbPrompt = "prompt"
-	VerbStop   = "stop"
+	VerbPrompt     = "prompt"
+	VerbStop       = "stop"
+	VerbInterject  = "interject"
+	VerbGoal       = "goal"
+	VerbPermission = "permission"
+	VerbStart      = "start"
+	VerbRename     = "rename"
+	VerbArchive    = "archive"
+	VerbUnarchive  = "unarchive"
+	VerbAddAgent   = "add-agent"
+	// Root creation verbs, sent to PathWorkgroups rather than a session.
+	VerbNewWorkgroup      = "new-workgroup"
+	VerbNewWorkgroupEmpty = "new-workgroup-empty"
 )
+
+// ServerVerbs lists every verb this server implements, session verbs first,
+// then the root creation verbs.
+func ServerVerbs() []string {
+	return []string{VerbPrompt, VerbStop, VerbInterject, VerbGoal, VerbPermission, VerbStart, VerbRename,
+		VerbArchive, VerbUnarchive, VerbAddAgent, VerbNewWorkgroup, VerbNewWorkgroupEmpty}
+}
+
+// VerbPermissions maps every admitted verb to the one permission it needs.
+var VerbPermissions = map[string]string{
+	VerbPrompt: PermSteer, VerbStop: PermSteer,
+	VerbInterject: PermRespond, VerbGoal: PermRespond,
+	VerbPermission: PermApprove,
+	VerbStart:      PermManage, VerbRename: PermManage, VerbArchive: PermManage, VerbUnarchive: PermManage,
+	VerbAddAgent: PermCreate, VerbNewWorkgroup: PermCreate, VerbNewWorkgroupEmpty: PermCreate,
+}
 
 // Resource API error codes (JSON body {"code","error"}).
 const (
@@ -105,6 +154,7 @@ const (
 	CodeCapacity         = "capacity_exhausted" // the grant's action records are full: enroll again
 	CodeUnavailable      = "unavailable"
 	CodeRejected         = "rejected"
+	CodeNotInCatalog     = "not_in_catalog" // a creation names a harness or repo this machine/target does not offer
 	CodeInternal         = "internal"
 )
 
@@ -201,10 +251,21 @@ type APIError struct {
 }
 
 // SessionCaps is the per-session control surface a direct client may use: a
-// verb is true only when the daemon can serve it AND the grant may steer.
+// verb is true only when the daemon can serve it for this row, the row's
+// archive state allows it, AND the grant holds the verb's permission. The
+// fields after Stop are additive and omitted when false, so a grant without
+// the newer permissions sees exactly the S1 bytes.
 type SessionCaps struct {
-	Prompt bool `json:"prompt"`
-	Stop   bool `json:"stop"`
+	Prompt     bool `json:"prompt"`
+	Stop       bool `json:"stop"`
+	Interject  bool `json:"interject,omitempty"`
+	Goal       bool `json:"goal,omitempty"`
+	Permission bool `json:"permission,omitempty"`
+	Start      bool `json:"start,omitempty"`
+	Rename     bool `json:"rename,omitempty"`
+	Archive    bool `json:"archive,omitempty"`
+	Unarchive  bool `json:"unarchive,omitempty"`
+	AddAgent   bool `json:"add_agent,omitempty"`
 }
 
 // Session is one inventory row, an allowlisted projection of core.Session.
@@ -272,9 +333,65 @@ type ActionRequest struct {
 	IdemKey string            `json:"idem_key"`
 }
 
-// ActionResponse is a successful action result.
+// ActionResponse is a successful action result. NewID is the session a
+// creation verb made (add-agent: the agent; new-workgroup*: the root); it is
+// recorded with the idempotency key, so a replay returns the same id.
+//
+// Affected, on archive and unarchive, lists every session whose effective
+// archive state the action changes, judged from the fresh inventory it was
+// admitted against: the target, plus for a workgroup root each member that is
+// not archived in its own right. Members archived themselves stay archived
+// after a root unarchive and are not listed.
 type ActionResponse struct {
-	OK bool `json:"ok"`
+	OK       bool     `json:"ok"`
+	NewID    string   `json:"new_id,omitempty"`
+	Affected []string `json:"affected,omitempty"`
+}
+
+// CreateRequest is POST /direct/v1/workgroups: VerbNewWorkgroup or
+// VerbNewWorkgroupEmpty with an exact field allowlist.
+type CreateRequest = ActionRequest
+
+// CapabilitiesResponse is GET /direct/v1/capabilities: what this grant may do
+// on this machine. Verbs are the session verbs the grant's permissions admit
+// (each row's caps still decide per session). CreateWorkgroup reports whether
+// PathWorkgroups is open to this grant. Catalog is present only with create.
+type CapabilitiesResponse struct {
+	ServerID        string           `json:"server_id"`
+	Permissions     []string         `json:"permissions"`
+	ResourceScope   ResourceScope    `json:"resource_scope"`
+	ServerVerbs     []string         `json:"server_verbs"`
+	Verbs           []string         `json:"verbs"`
+	CreateWorkgroup bool             `json:"create_workgroup"`
+	Catalog         *CreationCatalog `json:"catalog,omitempty"`
+}
+
+// CreationCatalog is the allowlisted, machine-appropriate input space for the
+// creation verbs. It never carries repository sources, host paths, account
+// bindings, credentials or configuration: harness names and versions verified
+// on this machine, the machine identity mode, the session modes, and repo
+// names. Repos (tracked repo names) is present only for a grant that may create
+// workgroups; Workgroups lists each in-scope workgroup's repo ceiling for
+// add-agent.
+type CreationCatalog struct {
+	Harnesses     []CatalogHarness   `json:"harnesses"`
+	IdentityModes []string           `json:"identity_modes"`
+	Modes         []string           `json:"modes"`
+	Repos         []string           `json:"repos,omitempty"`
+	Workgroups    []CatalogWorkgroup `json:"workgroups,omitempty"`
+}
+
+// CatalogHarness is one harness this machine verified it can launch.
+type CatalogHarness struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
+// CatalogWorkgroup is one in-scope workgroup root and the repo names its
+// members may be given (its coordinator's grant ceiling).
+type CatalogWorkgroup struct {
+	ID    string   `json:"id"`
+	Repos []string `json:"repos"`
 }
 
 // Watch frames (WebSocket /direct/v1/sessions/watch). The client's first frame
@@ -306,4 +423,7 @@ const (
 	MaxIdemKeyLen    = 128
 	MaxLabelLen      = 64
 	MaxHistoryLimit  = 500
+	MaxNameBytes     = 128  // rename / workgroup name
+	MaxFieldBytes    = 256  // ids, models, request ids, runtime generations
+	MaxReasonBytes   = 4096 // permission reason
 )
