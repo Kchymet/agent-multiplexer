@@ -73,6 +73,42 @@ merge_case() {
 merge_case "PR merge commit, docs"  false 'echo x >>docs/a.md'
 merge_case "PR merge commit, code"  true  'echo x >>docs/a.md; echo x >cmd/new.go'
 
+# Pushes compare the old and new tip directly, never via their merge base. A
+# force push that drops a code commit and adds only docs still changes code
+# relative to what master was, so it must run CI; merge-base (three-dot)
+# semantics would see only the docs and skip.
+force_push_case() {
+  local name=$1 want=$2 new_tip_change=$3
+  rm -rf "$work/repo"; git init -q -b master "$work/repo"
+  mkdir -p "$work/repo/docs" "$work/repo/cmd"
+  echo base >"$work/repo/docs/a.md"; echo base >"$work/repo/cmd/main.go"
+  g add -A && g commit -qm A
+  local a; a=$(g rev-parse HEAD)
+  echo code >>"$work/repo/cmd/main.go" && g commit -qam C
+  local before; before=$(g rev-parse HEAD)
+  g reset -q --hard "$a"
+  (cd "$work/repo" && eval "$new_tip_change") && g add -A && g commit -qm D --allow-empty
+  local got; got=$(cd "$work/repo" && bash "$script" "$before" "$(g rev-parse HEAD)" 2>/dev/null)
+  if [ "$got" = "code=$want" ]; then echo "ok   $name"; else echo "FAIL $name: got $got want code=$want"; fail=1; fi
+}
+force_push_case "force push drops code, adds docs" true  'echo x >>docs/a.md'
+force_push_case "force push re-adds same code + docs" false 'echo code >>cmd/main.go; echo x >>docs/a.md'
+
+# A pushed revert of a code commit is a code change, even if the revert
+# commit's message or a docs edit alongside makes it look like housekeeping.
+revert_case() {
+  rm -rf "$work/repo"; git init -q -b master "$work/repo"
+  mkdir -p "$work/repo/docs" "$work/repo/cmd"
+  echo base >"$work/repo/docs/a.md"; echo base >"$work/repo/cmd/main.go"
+  g add -A && g commit -qm A
+  echo code >>"$work/repo/cmd/main.go" && g commit -qam C
+  local before; before=$(g rev-parse HEAD)
+  g revert --no-edit HEAD >/dev/null && echo x >>"$work/repo/docs/a.md" && g commit -qam docs
+  local got; got=$(cd "$work/repo" && bash "$script" "$before" "$(g rev-parse HEAD)" 2>/dev/null)
+  if [ "$got" = "code=true" ]; then echo "ok   revert of code + docs"; else echo "FAIL revert of code + docs: got $got"; fail=1; fi
+}
+revert_case
+
 # Fail-open cases that never reach a diff.
 check() {
   local name=$1; shift

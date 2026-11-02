@@ -6,7 +6,9 @@
 # Compares the two commits' trees (two-dot): on a pull request pass the merge
 # commit under test as <head> and its first parent (the base tip GitHub merged
 # into) as <base>, so exactly the merge result is classified; on a push pass
-# the previous and the pushed tip.
+# the previous and the pushed tip. Never the merge base (three-dot): after a
+# force push that drops a code commit, the merge base hides that the code
+# changed relative to what the branch was.
 #
 # Prints exactly one line, `code=true` or `code=false`, on stdout (append it to
 # $GITHUB_OUTPUT); the reasoning goes to stderr. It prints `code=false` only
