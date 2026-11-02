@@ -122,17 +122,26 @@ func TestDirectEnrollRefusals(t *testing.T) {
 	bad.IssueKey = ""
 	long := goodEnroll()
 	long.Requester = string(make([]byte, 200))
+	noChallenge := goodEnroll()
+	noChallenge.CodeChallenge, noChallenge.CodeChallengeMethod = "", ""
+	ticketWithChallenge := goodEnroll()
+	ticketWithChallenge.Handoff = hp.DirectHandoffDeviceTicket
+	unknownHandoff := goodEnroll()
+	unknownHandoff.CodeChallenge, unknownHandoff.CodeChallengeMethod, unknownHandoff.Handoff = "", "", "bearer"
 	for name, tc := range map[string]struct {
 		enroller *fakeEnroller
 		msg      hp.MuxMsg
 		status   string
 		want     string
 	}{
-		"not offered":        {&fakeEnroller{}, hp.MuxMsg{ReqID: "r", DirectEnroll: goodEnroll()}, "prov", hp.DirectEnrollErrDisabled},
-		"no request":         {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r"}, "prov", hp.DirectEnrollErrInvalidRequest},
-		"empty issue key":    {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: bad}, "prov", hp.DirectEnrollErrInvalidRequest},
-		"oversized field":    {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: long}, "prov", hp.DirectEnrollErrInvalidRequest},
-		"not registered yet": {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: goodEnroll()}, "", hp.DirectEnrollErrUnavailable},
+		"not offered":              {&fakeEnroller{}, hp.MuxMsg{ReqID: "r", DirectEnroll: goodEnroll()}, "prov", hp.DirectEnrollErrDisabled},
+		"no request":               {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r"}, "prov", hp.DirectEnrollErrInvalidRequest},
+		"empty issue key":          {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: bad}, "prov", hp.DirectEnrollErrInvalidRequest},
+		"oversized field":          {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: long}, "prov", hp.DirectEnrollErrInvalidRequest},
+		"no challenge, no handoff": {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: noChallenge}, "prov", hp.DirectEnrollErrInvalidRequest},
+		"ticket with challenge":    {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: ticketWithChallenge}, "prov", hp.DirectEnrollErrInvalidRequest},
+		"unknown handoff":          {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: unknownHandoff}, "prov", hp.DirectEnrollErrInvalidRequest},
+		"not registered yet":       {&fakeEnroller{caps: offered}, hp.MuxMsg{ReqID: "r", DirectEnroll: goodEnroll()}, "", hp.DirectEnrollErrUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			left, right := net.Pipe()

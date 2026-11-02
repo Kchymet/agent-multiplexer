@@ -26,6 +26,63 @@ direct server, and opt the provider in.
 Harness never sees the verifier, any access or refresh token, or any session
 traffic, and it never dials the advertised endpoints.
 
+## Device tickets (connect another device by QR)
+
+A device ticket lets an owner, signed in to Harness in a browser, connect
+**another** device (typically a phone shown a QR code) without the browser or
+Harness ever holding that device's verifier or tokens, and without the phone
+signing in to Harness.
+
+1. The browser sends the ordinary Harness enrollment request with
+   `handoff: "device_ticket"` and **no** `code_challenge`. Every existing
+   check applies: owner-only, live provider, matching `server_id`, the host's
+   pins, ceiling, capacity, rate limit and issue-key idempotency.
+2. The direct server mints the code **without** a challenge, marked as a
+   ticket, and returns a v2 bundle: `amux-direct:2:` +
+   base64url(`{v:2, server_id, endpoints, code, expires_at, claim:"pkce"}`).
+   Clients that only know v1 refuse it.
+3. The receiving device verifies the endpoint itself (trusted TLS, signed
+   hello naming `server_id`), generates its **own** RFC 7636 verifier, and
+   claims the ticket at the host: `POST /direct/v1/enroll/claim` (form body
+   `code`, `code_challenge`, `code_challenge_method=S256`).
+4. It then redeems with the unchanged cloud grant at `POST /direct/v1/token`
+   with its `code_verifier`, receiving its own grant and tokens.
+
+**Ticket authority.** Until it is claimed, a ticket is registration authority
+for exactly one new grant at its minted scope, for whoever claims it first —
+including the browser that displayed it. It is single-use, expires with the
+cloud code TTL (5 minutes), is bound to this host (`server_id`), to the
+owner/provider pins and to the policy generation, and can never reach an
+existing grant or refresh token.
+
+**Claim rules.**
+
+| Situation | Result |
+| --- | --- |
+| Live unclaimed ticket, valid S256 challenge | Challenge stored and committed durably, then `200 {claimed:true, expires_at}` |
+| Same challenge again (lost answer) | `200`, nothing written |
+| A different challenge after a claim | `invalid_grant`, nothing changed |
+| Not a ticket (manual or PKCE code), consumed, expired, policy changed or disabled | `invalid_grant` |
+| Malformed challenge or method other than `S256` | `invalid_request` |
+| Store write not confirmed | `temporarily_unavailable`; retry with the same challenge |
+
+Failed claims count toward the same per-source limit as the token endpoint.
+Parameters in the URL are refused.
+
+**Redeeming a ticket.** An unclaimed ticket at the token endpoint is
+`invalid_request` and is not consumed, with or without a `code_verifier`.
+After a claim, the cloud PKCE rules above apply unchanged: a wrong verifier
+consumes it, and a policy change since issuance refuses it.
+
+**Ordinary cloud codes are unchanged.** A request without `handoff` still
+requires an S256 challenge; a ticket request carrying one, or an unknown
+`handoff`, is refused. An older host that does not know `handoff` refuses the
+missing challenge (`invalid_challenge`). Hosts that mint tickets advertise
+`capabilities.direct.handoff: true`.
+
+Fixtures: `docs/direct/fixtures/ticket-v1` (own `SHA256SUMS`; the `v1` and
+`cloud-v1` manifests are unchanged and pinned).
+
 ## Operator guide
 
 **Setup.** Register the host with Harness, then turn on issuance with only the

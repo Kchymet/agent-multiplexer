@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -90,13 +91,23 @@ func EncodeBundle(b Bundle) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return BundlePrefix + base64.RawURLEncoding.EncodeToString(data), nil
+	prefix := BundlePrefix
+	if b.V == 2 {
+		prefix = BundlePrefixTicket
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 // DecodeBundle parses and validates a paste bundle (the reference for clients).
 func DecodeBundle(s string, now time.Time) (Bundle, error) {
-	if len(s) < len(BundlePrefix) || s[:len(BundlePrefix)] != BundlePrefix {
-		return Bundle{}, errors.New("not an amux-direct:1 bundle")
+	version := 0
+	switch {
+	case strings.HasPrefix(s, BundlePrefix):
+		version = 1
+	case strings.HasPrefix(s, BundlePrefixTicket):
+		version = 2
+	default:
+		return Bundle{}, errors.New("not an amux-direct bundle")
 	}
 	data, err := base64.RawURLEncoding.DecodeString(s[len(BundlePrefix):])
 	if err != nil {
@@ -109,8 +120,10 @@ func DecodeBundle(s string, now time.Time) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("bundle: %w", err)
 	}
 	switch {
-	case b.V != 1:
+	case b.V != version:
 		return Bundle{}, errors.New("bundle: unsupported version")
+	case version == 1 && b.Claim != "", version == 2 && b.Claim != BundleClaimPKCE:
+		return Bundle{}, errors.New("bundle: claim does not match its version")
 	case b.ServerID == "" || len(b.Endpoints) == 0:
 		return Bundle{}, errors.New("bundle: missing server_id or endpoints")
 	case !validNonce(b.Code):
@@ -280,7 +293,11 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
 		}
 		sid := a.ServerID()
-		bundle, err := EncodeBundle(Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp})
+		b := Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp}
+		if req.Issue.Handoff == HandoffDeviceTicket {
+			b.V, b.Claim = 2, BundleClaimPKCE
+		}
+		bundle, err := EncodeBundle(b)
 		if err != nil {
 			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
 		}

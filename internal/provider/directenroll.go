@@ -63,10 +63,26 @@ func validDirectRequest(r *hp.DirectEnrollRequest) bool {
 	if r == nil {
 		return false
 	}
-	for _, f := range []string{r.IssueKey, r.Requester, r.CodeChallenge, r.CodeChallengeMethod} {
+	for _, f := range []string{r.IssueKey, r.Requester} {
 		if f == "" || len(f) > maxDirectField {
 			return false
 		}
+	}
+	switch r.Handoff {
+	case "":
+		for _, f := range []string{r.CodeChallenge, r.CodeChallengeMethod} {
+			if f == "" || len(f) > maxDirectField {
+				return false
+			}
+		}
+	case hp.DirectHandoffDeviceTicket:
+		// A device ticket carries no challenge; the receiving device binds its
+		// own at the host.
+		if r.CodeChallenge != "" || r.CodeChallengeMethod != "" {
+			return false
+		}
+	default:
+		return false
 	}
 	if len(r.Label) > maxDirectLabel || len(r.Permissions) == 0 || len(r.Permissions) > maxDirectPerms ||
 		len(r.Resource.Workgroups) > maxDirectWorkgroups {

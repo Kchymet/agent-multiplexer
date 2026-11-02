@@ -122,4 +122,26 @@ func TestRelayIssuerEndToEnd(t *testing.T) {
 	if err != nil || !strings.HasPrefix(tok.AccessToken, AccessTokenPrefix) {
 		t.Fatalf("redeem: %v", err)
 	}
+
+	// Device ticket through the same relay: advertised, minted without a
+	// challenge as a v2 bundle, claimed and redeemed by the device.
+	if !caps.Handoff {
+		t.Fatal("handoff not advertised")
+	}
+	treq := relayReq()
+	treq.IssueKey, treq.CodeChallenge, treq.CodeChallengeMethod, treq.Handoff = "ticket-key-0001", "", "", hp.DirectHandoffDeviceTicket
+	tres := r.Enroll(ctx, testProvider, treq)
+	if tres.Error != "" || !strings.HasPrefix(tres.Bundle, BundlePrefixTicket) {
+		t.Fatalf("ticket issue: %+v", tres.Error)
+	}
+	tb, err := DecodeBundle(tres.Bundle, time.Now())
+	if err != nil || tb.V != 2 || tb.Claim != BundleClaimPKCE {
+		t.Fatalf("ticket bundle: %+v %v", tb, err)
+	}
+	if _, err := a.ClaimTicket(tb.Code, testChallenge, CodeChallengeMethodS256); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Redeem(tb.Code, "Pixel 2", ClientAndroid, testVerifier); err != nil {
+		t.Fatalf("ticket redeem: %v", err)
+	}
 }
