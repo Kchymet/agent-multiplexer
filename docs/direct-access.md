@@ -32,6 +32,7 @@ The server serves exactly:
 | `POST /direct/v1/sessions/{sid}/actions` | the verb's own (below) | `prompt`, `interject`, `stop` and the [workflow verbs](#workflow-actions) |
 | `POST /direct/v1/workgroups` | create, `all_sessions` only | `new-workgroup` or `new-workgroup-empty` |
 | `GET /direct/v1/capabilities` | read | The grant's verbs and the machine's creation catalog |
+| `GET /direct/v1/accounts` | accounts, `all_sessions` only | Machine account status, read-only ([below](#machine-accounts)) |
 
 Everything else fails closed:
 
@@ -973,6 +974,92 @@ already visible is checked by the ordinary scope rules, like any other.
 
 Fixtures are in [`direct/fixtures/workflow-v1`](direct/fixtures/workflow-v1)
 (additive; the `v1` set and its `SHA256SUMS` are unchanged).
+
+### Machine accounts
+
+This is the read-only account status the cloud relay serves (a status
+request, managed central profiles, no ceremony). Login, logout, default,
+rebind and every ceremony stay local to the CLI and TUI. Nothing on direct
+reaches them.
+
+**Who can read it.** An `all_sessions` grant holding `accounts`. Nothing else
+implies it. A workgroup-scoped grant, or one without the permission, gets
+`403 denied` with `WWW-Authenticate: … scope="accounts"`, and no backend
+call is made. One rule decides all four places it applies:
+
+- the route;
+- `capabilities.account_status`;
+- `account_binding` on `GET /direct/v1/sessions` rows;
+- `account_binding` on every watch snapshot.
+
+**`capabilities.account_status`** is always serialized by a server that has
+it:
+
+| Value | Meaning |
+| --- | --- |
+| absent | The server predates machine accounts |
+| `false` | Supported, but this grant or its scope may not read it |
+| `true` | Allowed |
+
+**`GET /direct/v1/accounts`** returns this shape
+([fixture](direct/fixtures/accounts-v1/accounts-response.json)):
+
+```json
+{"server_id":"…","defaults":{"claude":"claude:central","codex":"codex:central"},
+ "accounts":[{"harness":"codex","profile_id":"codex:central","source":"central","state":"ready",
+   "mode":"subscription","supported_modes":["subscription","api"],"login_method":"browser","error":"<fixed code>",
+   "identity":{"state":"known","account_id":"…","email":"…","plan":"…","evidence":"native"},
+   "limits":{"state":"known","source":"codex-native","observed_at":0,"attempted_at":0,"refresh_error":"<fixed code>",
+     "retry_at":0,"fresh_until":0,"resets_available":0,
+     "windows":[{"name":"…","used_percent":0,"window_minutes":0,"resets_at":0}]}}]}
+```
+
+**Timestamp units.** These are copied unchanged from the daemon's producers:
+
+- `limits.observed_at`, `attempted_at`, `retry_at` and `fresh_until` are Unix
+  **milliseconds**. Compare them with `Date.now()` or `Instant.ofEpochMilli`.
+- `limits.windows[].resets_at` is Unix **seconds**, the provider's reset
+  time. Use `new Date(resets_at * 1000)` or `Instant.ofEpochSecond`.
+
+The fixture uses small placeholder values (`1000`, `2000`). Client tests that
+check units should use realistic values.
+
+**What the server guarantees:**
+
+- **Profiles.** Only the managed `claude:central` and `codex:central`
+  profiles appear.
+- **Defaults.** These are the daemon's actual ones. A harness without a
+  central default has no entry, and none is invented.
+- **Errors.** `error` and `limits.refresh_error` are fixed codes from the
+  daemon. Any other value, which could be native or provider text, is sent
+  as `unrecognized`.
+- **Limits are pre-attributed.** The response does not carry the fields a
+  client would need to check attribution, so the server applies the cloud
+  client's rule. Windows and `resets_available` appear only when all of
+  these hold:
+  - the observation is for this exact profile and delivery epoch;
+  - it comes from the harness's expected source (`claude-statusline`,
+    `codex-native`);
+  - it has the evidence that source needs: a Claude observation names its
+    session and runtime generation, and a Codex one needs a known
+    `account_id`.
+
+  Otherwise `limits.state` is `unknown` with no windows, and `source` is
+  kept. Unknown never means unlimited.
+- **Never sent:** ceremonies, revisions or CAS data, delivery epochs,
+  `migration_pending`, auth URLs, attempt ids, tokens, per-session
+  attribution (session id, runtime generation), and any non-central profile
+  id.
+
+**Inventory rows** under the same rule carry
+`"account_binding":{"profile_id":"claude:central","source":"central"}`. A row
+bound to a non-central profile carries its `source` only.
+
+**Consent.** Issuing an `accounts` grant (`amux direct enroll --permissions
+read,accounts --all-sessions`), or a cloud ceiling that includes it, is the
+host's consent. The relay's `--account-status` flag does not apply to direct,
+and direct has no account-use switch: the explicit steer, manage and create
+permissions are the consent to use the machine's accounts.
 
 The full cloud-relay comparison is in [direct-cloud-parity.md](direct-cloud-parity.md).
 

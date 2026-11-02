@@ -59,6 +59,8 @@ type fakeBackend struct {
 	lastExpect string
 	// revokeOnRead runs (once) inside SessionIdentities, then the read fails.
 	revokeOnRead func()
+	accounts     hp.AccountSnapshot
+	accountCalls atomic.Int64
 }
 
 // setInc replaces (or with "" deletes) a session's current incarnation.
@@ -164,6 +166,17 @@ func (f *fakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[
 		out[id] = amuxstore.SessionIdentity{ID: id, Incarnation: inc, RootID: parent}
 	}
 	return out, nil
+
+}
+
+func (f *fakeBackend) Accounts(ctx context.Context) (hp.AccountSnapshot, error) {
+	f.accountCalls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return hp.AccountSnapshot{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.accounts, nil
 }
 
 func (f *fakeBackend) Catalog(ctx context.Context) (MachineCatalog, error) {

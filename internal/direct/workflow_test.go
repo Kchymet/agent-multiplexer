@@ -616,7 +616,7 @@ func TestCapabilities(t *testing.T) {
 			VerbRename, VerbArchive, VerbUnarchive, VerbAddAgent}) {
 		t.Fatalf("all capabilities: %s", raw)
 	}
-	for _, leak := range []string{"/home", `"source"`, "account", "token", "secret/wt", "branch", "force"} {
+	for _, leak := range []string{"/home", `"source"`, "account_binding", "account_id", "accountBinding", "token", "secret/wt", "branch", "force"} {
 		if strings.Contains(raw, leak) {
 			t.Fatalf("capabilities leak %q: %s", leak, raw)
 		}

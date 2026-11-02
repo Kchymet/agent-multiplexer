@@ -32,6 +32,8 @@ type Backend interface {
 	// History and Stream read one already-authorized session's transcript.
 	History(ctx context.Context, sessionID string, beforeSeq int64, limit int) (hp.RuntimeEventHistory, bool)
 	Stream(ctx context.Context, sessionID string, afterSeq int64) (<-chan hp.RuntimeEventBatch, bool)
+	// Accounts is the machine's read-only account status (ManagedOnly).
+	Accounts(ctx context.Context) (hp.AccountSnapshot, error)
 	// Catalog is the machine's creation input space, read fresh (harness
 	// probes may be cached briefly).
 	Catalog(ctx context.Context) (MachineCatalog, error)
@@ -298,6 +300,7 @@ func project(g Grant, row core.Session, byID map[string]core.Session) Session {
 		Archived: row.Archived, StartedAt: row.StartedAt, Runtime: row.Runtime, ControlMode: row.ControlMode,
 		Role: row.Role, Caps: caps,
 	}
+	out.AccountBinding = accountBinding(g, row.AccountBinding)
 	if row.PRs != nil {
 		out.PRs = slices.Clone([]hp.SessionPR(*row.PRs))
 	}

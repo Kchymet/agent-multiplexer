@@ -1,0 +1,16 @@
+{
+  "id": "e1deda",
+  "title": "Backend implementation",
+  "root_id": "771951",
+  "section": "workgroups",
+  "runtime": "claude",
+  "caps": {
+    "prompt": false,
+    "interject": false,
+    "stop": false
+  },
+  "account_binding": {
+    "profile_id": "claude:central",
+    "source": "central"
+  }
+}

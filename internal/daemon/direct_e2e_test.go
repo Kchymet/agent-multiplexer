@@ -622,3 +622,34 @@ func TestDirectLiveCloudClientCreationPayloads(t *testing.T) {
 		t.Fatalf("linear did not reach the coordinator task: %q", row.Prompt)
 	}
 }
+
+// Machine account status through the live daemon's account connection: the
+// allowlisted projection for an accounts+all_sessions grant, refused for a
+// scoped one, with no ceremony, revision or attribution fields on the wire.
+func TestDirectLiveAccounts(t *testing.T) {
+	e := newE2E(t)
+	all := e.enroll([]string{direct.PermRead, direct.PermAccounts}, direct.ResourceScope{Kind: direct.ResourceAllSessions})
+	scoped := e.enroll([]string{direct.PermRead, direct.PermAccounts}, direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: []string{"nope"}})
+	code, b := e.call("GET", direct.PathAccounts, all, nil)
+	if code != 200 {
+		t.Fatalf("accounts: %d %s", code, b)
+	}
+	var resp direct.AccountsResponse
+	if err := json.Unmarshal(b, &resp); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("live accounts: %s", b)
+	for _, a := range resp.Accounts {
+		if a.ProfileID != "claude:central" && a.ProfileID != "codex:central" {
+			t.Fatalf("non-central profile on the wire: %+v", a)
+		}
+	}
+	for _, leak := range []string{"ceremony", "revision", "Revision", "deliveryEpoch", "session_id", "runtime_generation", "url"} {
+		if strings.Contains(string(b), leak) {
+			t.Fatalf("live accounts response leaks %q: %s", leak, b)
+		}
+	}
+	if code, b := e.call("GET", direct.PathAccounts, scoped, nil); code != 403 {
+		t.Fatalf("scoped accounts: %d %s", code, b)
+	}
+}
