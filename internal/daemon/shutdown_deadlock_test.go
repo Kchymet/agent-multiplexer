@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -125,7 +126,18 @@ func TestRunShutdownMidTurnRPCPromptReleasesLock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan error, 1)
-	go func() { runDone <- d.Run(ctx) }()
+	runExited := make(chan struct{})
+	go func() { runDone <- d.Run(ctx); close(runExited) }()
+	// On any early failure, stop Run and wait for it before the temp dirs
+	// registered above are removed. (Cleanups run last-registered first.)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runExited:
+		case <-time.After(15 * time.Second):
+			t.Error("Run did not exit during test cleanup")
+		}
+	})
 	select {
 	case <-pollSource.entered:
 	case err := <-runDone:
@@ -159,6 +171,9 @@ func TestRunShutdownMidTurnRPCPromptReleasesLock(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("session RPC prompt %d never reached turn/start", i)
 		}
+		// turn/start precedes the mailbox response: wait, bounded, for this
+		// request's response to be published before reading it.
+		awaitMailboxResponseFile(t, grants[root.ID], requestID, runDone, 10*time.Second)
 		if response := readMailboxResponse(t, grants[root.ID], requestID); response.Status != sessionrpc.StatusOK {
 			t.Fatalf("prompt %d response = %+v", i, response)
 		}
@@ -337,5 +352,28 @@ func TestSingletonHolderNamesPidAndAge(t *testing.T) {
 	}
 	if got := describeSingletonHolder("", now); !strings.HasPrefix(got, "holder unknown") {
 		t.Fatalf("describe empty = %q", got)
+	}
+}
+
+// awaitMailboxResponseFile waits until requestID's response is published in
+// the grant's mailbox. Responses are renamed into place, so once the file
+// exists it is complete. It fails if Run exits first or the wait runs out.
+func awaitMailboxResponseFile(t *testing.T, grant access.SessionAccess, requestID string, runDone <-chan error, limit time.Duration) {
+	t.Helper()
+	path := filepath.Join(grant.MailboxHostDir, sessionrpc.ResponsesDirName, requestID+".res")
+	deadline := time.After(limit)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-runDone:
+			t.Fatalf("Run exited before response %s was published: %v", requestID, err)
+		case <-deadline:
+			t.Fatalf("response %s was not published within %v", requestID, limit)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
