@@ -29,7 +29,7 @@ The server serves exactly:
 | `GET /direct/v1/sessions/watch` (WebSocket) | read | The same inventory, pushed on change |
 | `GET /direct/v1/sessions/{sid}/history?before_seq=&limit=` | read | One newest-first transcript page |
 | `GET /direct/v1/sessions/{sid}/stream?after=` | read | Live transcript tail (SSE format) |
-| `POST /direct/v1/sessions/{sid}/actions` | the verb's own (below) | `prompt`, `stop` and the [workflow verbs](#workflow-actions) |
+| `POST /direct/v1/sessions/{sid}/actions` | the verb's own (below) | `prompt`, `interject`, `stop` and the [workflow verbs](#workflow-actions) |
 | `POST /direct/v1/workgroups` | create, `all_sessions` only | `new-workgroup` or `new-workgroup-empty` |
 | `GET /direct/v1/capabilities` | read | The grant's verbs and the machine's creation catalog |
 
@@ -356,9 +356,26 @@ workgroup root plus every row whose root chain leads to it. Nothing
 client-supplied counts.
 
 **Actions.** `POST /direct/v1/sessions/{sid}/actions` with
-`{"verb":"prompt","fields":{"text":"…"},"idem_key":"…"}` or
+`{"verb":"prompt","fields":{"text":"…"},"idem_key":"…"}`,
+`{"verb":"interject","fields":{"text":"…"},"idem_key":"…"}` or
 `{"verb":"stop","fields":{},"idem_key":"…"}`. Fields are an exact allowlist.
 The other verbs are described under [Workflow actions](#workflow-actions).
+
+`interject` uses the same daemon path as relay/local steering. Claude queues the
+text at its next boundary; supervised Codex steers the active turn. It does not
+start a stopped agent, and supervised Codex rejects it when no turn is active.
+There is no separate `queue` verb or direct-server queue. `prompt` retains its
+existing behavior, including starting a stopped agent.
+
+Both inventory routes advertise `caps.interject` from the daemon's matching
+capability, gated by the grant's `steer` permission and the target/ancestor
+archive state. Clients must treat a missing `caps.interject` on older servers as
+false and use this capability to gate their interject/queue affordance. Text
+fields are nonblank UTF-8, at most 32 KiB, with no additional fields accepted.
+This is an additive `amux-direct/1` change; restart the direct listener after
+upgrading. Existing grants need no migration or re-enrollment. Client owners
+should refresh the pinned [v1 fixtures](direct/fixtures/v1/SHA256SUMS), including
+`action-request-interject.json` and both inventory snapshots.
 
 **Idempotency.** It is grant-scoped and durable, and the record matches the
 body.
@@ -434,8 +451,8 @@ cloud relay: everything except panes and host administration.
 | Permission | Verbs |
 | --- | --- |
 | `read` | (mandatory) inventory, history, stream, watch, capabilities |
-| `steer` | `prompt`, `stop`, exactly as in S1 |
-| `respond` | `interject`, `goal` |
+| `steer` | `prompt`, `interject`, `stop` (interject joined steer in #295) |
+| `respond` | `goal` |
 | `approve` | `permission` |
 | `manage` | `start`, `rename`, `archive`, `unarchive` |
 | `create` | `add-agent`; `new-workgroup` and `new-workgroup-empty` for an `all_sessions` grant |
@@ -487,7 +504,7 @@ oversized values are refused.
 
 | Verb | Fields | Notes |
 | --- | --- | --- |
-| `interject` | `text` | Only while a turn runs (`caps.interject`) |
+| `interject` | `text` | Needs `steer` (see above); only where `caps.interject` |
 | `permission` | `request_id`, `runtime_generation`, `decision` (`allow`/`deny`), optional `reason` | Both ids are required. The daemon consumes the decision only for that request observed open on that live runtime generation, once. A replacement runtime or an answered prompt is refused. There is no "always allow" |
 | `goal` | any of `status` (`active`/`paused`/`complete`/`clear`), `objective`, `token_budget` | Goal sessions only; `clear` takes nothing else |
 | `start` | none | |
@@ -533,9 +550,10 @@ again under its key:
 
 All of these answer `idem_ambiguous`.
 
-**Per-session caps.** Inventory rows add `interject`, `goal`, `permission`,
+**Per-session caps.** Inventory rows add `goal`, `permission`,
 `start`, `rename`, `archive`, `unarchive` and `add_agent`. Each is omitted
-when false, so a `read,steer` grant sees the S1 bytes. A flag is true only
+when false, so a `read,steer` grant sees exactly the v1 fixture bytes
+(`prompt`, `interject`, `stop`). A flag is true only
 when the grant holds the verb's permission and the server would admit the
 verb for that row now. The flags come from the same table and checks the
 authorizer uses.
@@ -566,10 +584,12 @@ Its 200 means the daemon accepted the prompt, not that it was delivered, and
 amux keeps no queue of its own. What happens next depends on the runtime:
 
 - A PTY session (`control_mode` empty or `pty`) gets the text typed into the
-  harness's own input. Claude Code holds it as the next message.
+  harness's own input. The harness decides what to do with it.
 - A structured session (`structured`) gets a new turn start dispatched
-  asynchronously. A failure appears as an error event in the transcript, not
-  in the HTTP answer.
+  asynchronously.
+
+Neither case guarantees the text is queued. Any failure appears in the
+transcript, not in the HTTP answer.
 
 **Telling cases apart.**
 

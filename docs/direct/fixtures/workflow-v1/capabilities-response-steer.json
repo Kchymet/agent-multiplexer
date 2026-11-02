@@ -26,7 +26,8 @@
   ],
   "verbs": [
     "prompt",
-    "stop"
+    "stop",
+    "interject"
   ],
   "create_workgroup": false
 }

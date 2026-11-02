@@ -8,8 +8,8 @@
   "control_mode": "structured",
   "caps": {
     "prompt": true,
-    "stop": true,
     "interject": true,
+    "stop": true,
     "permission": true,
     "start": true,
     "rename": true,

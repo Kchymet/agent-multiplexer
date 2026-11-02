@@ -147,9 +147,10 @@ func TestS1GrantsNeverGainWorkflowVerbs(t *testing.T) {
 				t.Errorf("%s %s: %d %s %q", name, verb, w.Code, w.Body, w.Header().Get("WWW-Authenticate"))
 			}
 		}
-		// The S1 inventory bytes: caps carry only prompt and stop.
+		// The v1 inventory bytes: caps carry only prompt, interject and stop.
 		w := do(s, "GET", PathSession, tok.AccessToken, "")
-		if !strings.Contains(w.Body.String(), `"caps":{"prompt":true,"stop":true}`) || strings.Contains(w.Body.String(), "interject") {
+		if !strings.Contains(w.Body.String(), `"caps":{"prompt":true,"interject":true,"stop":true}`) ||
+			strings.Contains(w.Body.String(), `"rename"`) || strings.Contains(w.Body.String(), `"goal"`) {
 			t.Errorf("%s: S1 caps changed: %s", name, w.Body)
 		}
 	}
@@ -503,15 +504,15 @@ func TestArchiveReportsAffectedMembers(t *testing.T) {
 	}
 }
 
-// respond without steer: interject yes, prompt and stop no.
+// respond without steer: goal yes; prompt, interject and stop no.
 func TestRespondDoesNotImplySteer(t *testing.T) {
 	f := workflowFake()
 	a := openTestAuthority(t, t.TempDir(), Lifetimes{}, nil)
 	s := newTestServer(t, a, f)
 	tok := enroll(t, a, []string{PermRead, PermRespond}, allSessions)
-	for _, verb := range []string{VerbPrompt, VerbStop} {
+	for _, verb := range []string{VerbPrompt, VerbStop, VerbInterject} {
 		fields := map[string]string{}
-		if verb == VerbPrompt {
+		if verb != VerbStop {
 			fields["text"] = "x"
 		}
 		if code, ec, _ := act(s, tok.AccessToken, "a1", verb, fields, "r"+verb); code != 403 || ec != CodeDenied {
@@ -524,8 +525,8 @@ func TestRespondDoesNotImplySteer(t *testing.T) {
 	if f.applies.Load() != 0 || f.snapshots.Load() != 0 {
 		t.Fatal("denied verbs reached the backend")
 	}
-	if code, ec, _ := act(s, tok.AccessToken, "a1", VerbInterject, map[string]string{"text": "x"}, "ri"); code != 200 {
-		t.Fatalf("interject: %d %s", code, ec)
+	if code, ec, _ := act(s, tok.AccessToken, "wg1", VerbGoal, map[string]string{"status": "paused"}, "rg"); code != 200 {
+		t.Fatalf("goal: %d %s", code, ec)
 	}
 }
 
@@ -591,7 +592,7 @@ func TestCapabilities(t *testing.T) {
 		return c, w.Body.String()
 	}
 	c, _ := get(steer.AccessToken)
-	if !slices.Equal(c.Verbs, []string{VerbPrompt, VerbStop}) || c.CreateWorkgroup || c.Catalog != nil ||
+	if !slices.Equal(c.Verbs, []string{VerbPrompt, VerbStop, VerbInterject}) || c.CreateWorkgroup || c.Catalog != nil ||
 		!slices.Equal(c.ServerVerbs, ServerVerbs()) {
 		t.Fatalf("steer capabilities: %+v", c)
 	}

@@ -99,8 +99,8 @@ enroll flags (the running server publishes its endpoints into the bundle):
   --label <text>          name for the client, shown in clients list
   --permissions <list>    comma list, read required (required):
                             read     inventory, history, live stream
-                            steer    prompt, stop
-                            respond  interject, goal control
+                            steer    prompt, interject, stop
+                            respond  goal control
                             approve  answer permission requests (allow/deny)
                             manage   start, rename, archive, unarchive
                             create   add-agent; new workgroups (--all-sessions only)

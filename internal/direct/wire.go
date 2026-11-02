@@ -69,9 +69,9 @@ const (
 // Permissions. A grant always has read; every other permission is separate
 // and explicit. The set is additive: a permission's meaning never widens, so a
 // grant, code or cloud ceiling issued before a permission existed can never
-// acquire it. steer is exactly prompt and stop, as in S1.
+// acquire it. steer is prompt, interject and stop (#295 added interject to it).
 //
-//   - respond: interject and goal control
+//   - respond: goal control
 //   - approve: answer a correlated permission request (allow / deny)
 //   - manage: start, rename, archive and unarchive in-scope sessions
 //   - create: add-agent to an in-scope workgroup; new-workgroup and
@@ -79,7 +79,7 @@ const (
 const (
 	PermRead    = "read"
 	PermSteer   = "steer"
-	PermRespond = "respond"
+	PermRespond = "respond" // goal control
 	PermApprove = "approve"
 	PermManage  = "manage"
 	PermCreate  = "create"
@@ -100,8 +100,9 @@ const (
 	ClientAndroid = "android"
 )
 
-// Action verbs. prompt and stop are S1 (permission steer); the rest each need
-// their own additive permission (VerbPermissions). Everything else fails closed.
+// Action verbs. prompt, interject and stop need steer (interject joined steer
+// in #295); the rest each need their own additive permission
+// (VerbPermissions). Everything else fails closed.
 const (
 	VerbPrompt     = "prompt"
 	VerbStop       = "stop"
@@ -127,8 +128,8 @@ func ServerVerbs() []string {
 
 // VerbPermissions maps every admitted verb to the one permission it needs.
 var VerbPermissions = map[string]string{
-	VerbPrompt: PermSteer, VerbStop: PermSteer,
-	VerbInterject: PermRespond, VerbGoal: PermRespond,
+	VerbPrompt: PermSteer, VerbStop: PermSteer, VerbInterject: PermSteer,
+	VerbGoal:       PermRespond,
 	VerbPermission: PermApprove,
 	VerbStart:      PermManage, VerbRename: PermManage, VerbArchive: PermManage, VerbUnarchive: PermManage,
 	VerbAddAgent: PermCreate, VerbNewWorkgroup: PermCreate, VerbNewWorkgroupEmpty: PermCreate,
@@ -254,11 +255,11 @@ type APIError struct {
 // verb is true only when the daemon can serve it for this row, the row's
 // archive state allows it, AND the grant holds the verb's permission. The
 // fields after Stop are additive and omitted when false, so a grant without
-// the newer permissions sees exactly the S1 bytes.
+// the newer permissions sees exactly the v1 fixture bytes.
 type SessionCaps struct {
 	Prompt     bool `json:"prompt"`
+	Interject  bool `json:"interject"` // S1 field order and tag, as pinned by fixtures/v1
 	Stop       bool `json:"stop"`
-	Interject  bool `json:"interject,omitempty"`
 	Goal       bool `json:"goal,omitempty"`
 	Permission bool `json:"permission,omitempty"`
 	Start      bool `json:"start,omitempty"`

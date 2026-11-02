@@ -44,7 +44,7 @@ func workflowFixtureFiles(t *testing.T) map[string][]byte {
 		"capabilities-response-steer.json": js(CapabilitiesResponse{
 			ServerID: id.ServerID, Permissions: strs(PermRead, PermSteer),
 			ResourceScope: ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"771951"}}, ServerVerbs: ServerVerbs(),
-			Verbs: strs(VerbPrompt, VerbStop),
+			Verbs: strs(VerbPrompt, VerbStop, VerbInterject),
 		}),
 		"session-caps-full.json": js(Session{ID: "e1deda", Title: "Backend implementation", RootID: "771951",
 			Section: hp.SectionWorkgroups, State: hp.StateWaiting, Runtime: "codex", ControlMode: hp.ControlModeStructured,

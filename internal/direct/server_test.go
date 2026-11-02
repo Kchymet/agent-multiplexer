@@ -147,9 +147,9 @@ func TestDeniedOperationsMakeNoBackendCall(t *testing.T) {
 		{"unknown token", "amxa_unknown", PathSession + "/a1/history", "", CodeAuthInvalid},
 		{"refresh as access", reader.RefreshToken, PathSession, "", CodeAuthInvalid},
 		{"read-only prompt", reader.AccessToken, PathSession + "/a1/actions", actionBody(VerbPrompt, "hi", "k1"), CodeDenied},
-		// interject is implemented but needs respond: insufficient grant, not an
+		// permission is implemented but needs approve: insufficient grant, not an
 		// unsupported server. A verb the server never implements is unsupported.
-		{"interject without respond", steer.AccessToken, PathSession + "/a1/actions", actionBody("interject", "hi", "k2"), CodeDenied},
+		{"permission without approve", steer.AccessToken, PathSession + "/a1/actions", actionBody("permission", "hi", "k2"), CodeDenied},
 		{"unsupported verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("delete", "", "k2b"), CodeUnsupportedVerb},
 		{"pane verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("pane.open", "", "k2c"), CodeUnsupportedVerb},
 		{"steer cannot create", steer.AccessToken, PathWorkgroups, `{"verb":"new-workgroup","fields":{},"idem_key":"k2d"}`, CodeDenied},
@@ -243,14 +243,14 @@ func TestArchivedTargetsAndParentsAreNotSteerable(t *testing.T) {
 	var sr SessionsResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &sr)
 	for _, row := range sr.Sessions {
-		if (row.ID == "b1" || row.ID == "wg2") && (row.Caps.Prompt || row.Caps.Stop) {
+		if (row.ID == "b1" || row.ID == "wg2") && (row.Caps.Prompt || row.Caps.Interject || row.Caps.Stop) {
 			t.Errorf("%s advertises steering while archived", row.ID)
 		}
 	}
 	reader := enroll(t, a, []string{PermRead}, allSessions)
 	_ = json.Unmarshal(do(s, "GET", PathSession, reader.AccessToken, "").Body.Bytes(), &sr)
 	for _, row := range sr.Sessions {
-		if row.Caps.Prompt || row.Caps.Stop {
+		if row.Caps.Prompt || row.Caps.Interject || row.Caps.Stop {
 			t.Errorf("read-only grant sees steer caps on %s", row.ID)
 		}
 	}
