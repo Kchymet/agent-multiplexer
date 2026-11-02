@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -166,14 +165,14 @@ func prepareTailnet(ctx context.Context, fs *flag.FlagSet, t *tailnetFlags, s *d
 		}
 		fmt.Fprintf(out, "tailnet   %s · %s · %s · %s\n", node.DNSName, node.IP, displayOr(node.Tailnet, "tailnet"), ctrl)
 	}
-	endpointHost := ""
-	if u, err := url.Parse(s.Endpoints[0]); err == nil {
-		endpointHost = u.Hostname()
+	hosts := tailnet.EndpointHosts(s.Endpoints)
+	if len(hosts) == 0 {
+		return errors.New("no endpoint host to serve a certificate for")
 	}
 
 	switch tn.CertSource {
 	case tailnet.CertExplicit:
-		_, info, err := tailnet.LoadPair(s.TLSCert, s.TLSKey, endpointHost, now)
+		_, info, err := tailnet.LoadPairFor(s.TLSCert, s.TLSKey, hosts, now)
 		if err != nil {
 			return fmt.Errorf("--tls-cert/--tls-key: %w", err)
 		}
@@ -182,8 +181,10 @@ func prepareTailnet(ctx context.Context, fs *flag.FlagSet, t *tailnetFlags, s *d
 			fmt.Fprintf(out, "warning: the certificate expires in under 30 days and amux does not renew explicit certificates\n")
 		}
 	default:
-		if endpointHost != node.DNSName {
-			return fmt.Errorf("endpoint host %s is not this node's MagicDNS name %s, which is the only name a tailnet certificate covers; pass --tls-cert and --tls-key for it", endpointHost, node.DNSName)
+		for _, h := range hosts {
+			if h != node.DNSName {
+				return fmt.Errorf("endpoint host %s is not this node's MagicDNS name %s, which is the only name a tailnet certificate covers; pass --tls-cert and --tls-key for it", h, node.DNSName)
+			}
 		}
 		info, note, err := ensureTailnetCert(ctx, client, node, now)
 		if err != nil {
@@ -342,16 +343,27 @@ func applyTailnetServe(ctx context.Context, s directsvc.Settings, cfg *direct.Se
 	if !tn.EndpointExplicit {
 		cfg.Endpoints = []string{node.Endpoint(tn.Port)}
 	}
+	// The certificate must cover the endpoints actually served (after
+	// re-derivation), not only the ones checked at enable.
+	hosts := tailnet.EndpointHosts(cfg.Endpoints)
+	if len(hosts) == 0 {
+		return nil, errors.New("tailnet: no endpoint host to serve a certificate for")
+	}
 	r := &tailnet.Renewer{Mode: tn.CertSource, Logf: logf}
 	var info tailnet.PairInfo
 	switch tn.CertSource {
 	case tailnet.CertExplicit:
-		pair, i, err := tailnet.LoadPair(s.TLSCert, s.TLSKey, "", now)
+		pair, i, err := tailnet.LoadPairFor(s.TLSCert, s.TLSKey, hosts, now)
 		if err != nil {
-			return nil, fmt.Errorf("load TLS certificate: %w", err)
+			return nil, fmt.Errorf("load TLS certificate for the effective endpoint %s: %w (replace the certificate, or set the endpoint with amux direct enable --endpoint)", strings.Join(cfg.Endpoints, ", "), err)
 		}
-		r.Target, r.CertFile, r.KeyFile, info = tailnet.NewReloader(pair), s.TLSCert, s.TLSKey, i
+		r.Target, r.CertFile, r.KeyFile, r.Hosts, info = tailnet.NewReloader(pair), s.TLSCert, s.TLSKey, hosts, i
 	default:
+		for _, h := range hosts {
+			if h != node.DNSName {
+				return nil, fmt.Errorf("tailnet: endpoint host %s is not this node's MagicDNS name %s, the only name a tailnet certificate covers; pass --tls-cert and --tls-key (amux direct enable)", h, node.DNSName)
+			}
+		}
 		store := tailnetStore(node.DNSName)
 		r.Store = store
 		r.Fetch = func(ctx context.Context, min time.Duration) ([]byte, []byte, error) {
@@ -516,8 +528,10 @@ func tailnetView(s directsvc.Settings, m *directsvc.Status, probe bool) *directT
 		v.CertNotAfter, v.CertError = st.Cert.NotAfter, st.Cert.LastError
 		v.Differs = st.Listen != s.Listen || !slices.Equal(st.Endpoints, s.Endpoints)
 	} else if tn.CertSource == tailnet.CertExplicit {
-		if _, info, err := tailnet.LoadPair(s.TLSCert, s.TLSKey, "", directTailnetNow()); err == nil {
+		if _, info, err := tailnet.LoadPairFor(s.TLSCert, s.TLSKey, tailnet.EndpointHosts(s.Endpoints), directTailnetNow()); err == nil {
 			v.CertNotAfter = info.NotAfter
+		} else {
+			v.CertError = err.Error()
 		}
 	} else if tn.DNSName != "" {
 		if _, info, err := tailnetStore(tn.DNSName).Load(directTailnetNow()); err == nil {

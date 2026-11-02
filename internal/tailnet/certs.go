@@ -4,8 +4,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,8 +27,17 @@ type PairInfo struct {
 }
 
 // ValidatePair checks that certPEM/keyPEM form a matching pair whose leaf
-// covers host and is valid at now. It returns the parsed certificate.
+// covers host (when host is non-empty) and is valid at now.
 func ValidatePair(certPEM, keyPEM []byte, host string, now time.Time) (tls.Certificate, *x509.Certificate, error) {
+	return ValidatePairFor(certPEM, keyPEM, hostList(host), now)
+}
+
+// ValidatePairFor is ValidatePair for every host in hosts: the leaf must
+// cover each one, by DNS name (wildcards included) or IP SAN, as a client
+// dialing that host would require. Trust in the issuer is not checked here,
+// so a private-CA certificate is accepted; VerifyChain is the separate
+// public-root check the managed store applies.
+func ValidatePairFor(certPEM, keyPEM []byte, hosts []string, now time.Time) (tls.Certificate, *x509.Certificate, error) {
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("certificate and key do not form a pair: %w", err)
@@ -36,10 +47,8 @@ func ValidatePair(certPEM, keyPEM []byte, host string, now time.Time) (tls.Certi
 		return tls.Certificate{}, nil, err
 	}
 	pair.Leaf = leaf
-	if host != "" {
-		if err := leaf.VerifyHostname(host); err != nil {
-			return tls.Certificate{}, nil, fmt.Errorf("certificate does not cover %s", host)
-		}
+	if err := Covers(leaf, hosts); err != nil {
+		return tls.Certificate{}, nil, err
 	}
 	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
 		return tls.Certificate{}, nil, fmt.Errorf("certificate is not valid now (valid %s to %s)", leaf.NotBefore.Format(time.RFC3339), leaf.NotAfter.Format(time.RFC3339))
@@ -47,8 +56,45 @@ func ValidatePair(certPEM, keyPEM []byte, host string, now time.Time) (tls.Certi
 	return pair, leaf, nil
 }
 
+// Covers reports, as an error naming the first gap, whether leaf covers
+// every host (DNS name, wildcard, or IP literal).
+func Covers(leaf *x509.Certificate, hosts []string) error {
+	for _, h := range hosts {
+		if err := leaf.VerifyHostname(h); err != nil {
+			return fmt.Errorf("certificate (for %s) does not cover %s", strings.Join(certNames(leaf), ", "), h)
+		}
+	}
+	return nil
+}
+
+func certNames(leaf *x509.Certificate) []string {
+	names := append([]string(nil), leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		names = append(names, ip.String())
+	}
+	if len(names) == 0 && leaf.Subject.CommonName != "" {
+		names = append(names, leaf.Subject.CommonName)
+	}
+	if len(names) == 0 {
+		names = []string{"no names"}
+	}
+	return names
+}
+
+func hostList(host string) []string {
+	if host == "" {
+		return nil
+	}
+	return []string{host}
+}
+
 // LoadPair reads and validates a pair from files.
 func LoadPair(certFile, keyFile, host string, now time.Time) (tls.Certificate, PairInfo, error) {
+	return LoadPairFor(certFile, keyFile, hostList(host), now)
+}
+
+// LoadPairFor reads a pair from files and validates it for every host.
+func LoadPairFor(certFile, keyFile string, hosts []string, now time.Time) (tls.Certificate, PairInfo, error) {
 	c, err := os.ReadFile(certFile)
 	if err != nil {
 		return tls.Certificate{}, PairInfo{}, err
@@ -57,11 +103,27 @@ func LoadPair(certFile, keyFile, host string, now time.Time) (tls.Certificate, P
 	if err != nil {
 		return tls.Certificate{}, PairInfo{}, err
 	}
-	pair, leaf, err := ValidatePair(c, k, host, now)
+	pair, leaf, err := ValidatePairFor(c, k, hosts, now)
 	if err != nil {
 		return tls.Certificate{}, PairInfo{}, fmt.Errorf("%s: %w", certFile, err)
 	}
 	return pair, PairInfo{CertFile: certFile, KeyFile: keyFile, NotAfter: leaf.NotAfter, Issuer: leaf.Issuer.CommonName}, nil
+}
+
+// EndpointHosts returns the hosts of https endpoints (deduplicated), the
+// names a served certificate must cover.
+func EndpointHosts(endpoints []string) []string {
+	var hosts []string
+	for _, e := range endpoints {
+		u, err := url.Parse(e)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		if h := u.Hostname(); !slices.Contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
 }
 
 // FindReusable looks in dir for an existing pair — <name>.crt beside

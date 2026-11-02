@@ -55,6 +55,16 @@ func NewCA(t testing.TB) *CA {
 // notBefore to notAfter.
 func (ca *CA) Issue(t testing.TB, host string, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
 	t.Helper()
+	return ca.IssueNames(t, []string{host}, nil, notBefore, notAfter)
+}
+
+// IssueNames is Issue for several DNS names (wildcards allowed) and IP SANs.
+func (ca *CA) IssueNames(t testing.TB, dnsNames []string, ips []net.IP, notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
+	t.Helper()
+	cn := ""
+	if len(dnsNames) > 0 {
+		cn = dnsNames[0]
+	}
 	ca.mu.Lock()
 	ca.n++
 	serial := ca.n
@@ -63,8 +73,8 @@ func (ca *CA) Issue(t testing.TB, host string, notBefore, notAfter time.Time) (c
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: host},
-		DNSNames: []string{host}, NotBefore: notBefore, NotAfter: notAfter,
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: cn},
+		DNSNames: dnsNames, IPAddresses: ips, NotBefore: notBefore, NotAfter: notAfter,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &k.PublicKey, ca.key)
 	if err != nil {

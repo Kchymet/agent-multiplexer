@@ -546,3 +546,37 @@ func captureStdout(t *testing.T, run func()) string {
 	os.Stdout = old
 	return <-got
 }
+
+// An explicit certificate is checked against the endpoint actually served at
+// every start: after the MagicDNS name changes, a certificate that covered the
+// old derived endpoint is refused with an actionable reason (the supervisor
+// backs off and status shows it) instead of serving a mismatched name. A
+// private CA stays acceptable.
+func TestApplyTailnetServeExplicitCertMustCoverRederivedEndpoint(t *testing.T) {
+	c := newTailnetCLI(t)
+	priv := tailnettest.NewCA(t)
+	cert, key := priv.Issue(t, tnHost, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	dir := t.TempDir()
+	cf, kf := filepath.Join(dir, "c.pem"), filepath.Join(dir, "k.pem")
+	os.WriteFile(cf, cert, 0o644)
+	os.WriteFile(kf, key, 0o600)
+	if err := cmdDirectEnable(c.portArgs("--tls-cert", cf, "--tls-key", kf)); err != nil {
+		t.Fatal(err)
+	}
+	s := loadSaved(t)
+	cfg, _ := settingsServeConfig(s)
+	if _, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf); err != nil {
+		t.Fatalf("private-CA explicit certificate refused: %v", err)
+	}
+	c.api.SetRunning("renamed.example-tailnet.ts.net.", "127.0.0.1")
+	cfg, _ = settingsServeConfig(s)
+	_, err := applyTailnetServe(context.Background(), s, &cfg, true, "", t.Logf)
+	if err == nil || !strings.Contains(err.Error(), "does not cover renamed.example-tailnet.ts.net") || !strings.Contains(err.Error(), "--endpoint") {
+		t.Fatalf("err %v", err)
+	}
+	// Status reports the gap for the saved explicit pair too.
+	s.Endpoints = []string{"https://renamed.example-tailnet.ts.net:" + strconv.Itoa(c.port)}
+	if v := tailnetView(s, nil, false); v.CertError == "" {
+		t.Fatal("status does not flag the uncovered endpoint")
+	}
+}

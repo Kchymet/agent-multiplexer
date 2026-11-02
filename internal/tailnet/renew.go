@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,8 +62,11 @@ type Renewer struct {
 	Store CertStore
 	Fetch func(ctx context.Context, minValidity time.Duration) (certPEM, keyPEM []byte, err error)
 
-	// CertExplicit.
+	// CertExplicit. Hosts are the effective endpoint hosts every reloaded
+	// pair must cover; a replacement that does not is refused and the
+	// current certificate kept.
 	CertFile, KeyFile string
+	Hosts             []string
 
 	Now         func() time.Time
 	Interval    time.Duration // between checks (default 12h)
@@ -75,6 +79,7 @@ type Renewer struct {
 
 	mu      sync.Mutex
 	stamp   string // explicit mode: size+mtime of the files last loaded
+	failed  string // explicit mode: size+mtime of a replacement that was refused
 	state   CertState
 	nextDue time.Time
 }
@@ -204,14 +209,19 @@ func (r *Renewer) checkFiles(now time.Time) error {
 	if stamp == r.stamp {
 		return nil
 	}
-	pair, info, err := LoadPair(r.CertFile, r.KeyFile, "", now)
+	r.failed = stamp
+	if len(r.Hosts) == 0 {
+		return errors.New("no endpoint host to check the certificate against")
+	}
+	pair, info, err := LoadPairFor(r.CertFile, r.KeyFile, r.Hosts, now)
 	if err != nil {
-		// Possibly caught between the operator's two writes: keep serving and
-		// look again at the next (shortened) check.
-		return fmt.Errorf("reload %s: %w", r.CertFile, err)
+		// Possibly caught between the operator's two writes, or a pair for
+		// the wrong name: keep serving the current one and look again at the
+		// next (shortened) check, or as soon as the files change again.
+		return fmt.Errorf("replacement %s not loaded (still serving the previous certificate): %w; fix the files to cover %s", r.CertFile, err, strings.Join(r.Hosts, ", "))
 	}
 	r.Target.Set(pair)
-	r.stamp = stamp
+	r.stamp, r.failed = stamp, ""
 	r.state.NotAfter, r.state.Issuer, r.state.LastRenewal = info.NotAfter, info.Issuer, now
 	r.Logf("direct: reloaded %s (valid until %s)", r.CertFile, info.NotAfter.Format(time.RFC3339))
 	return nil
@@ -243,7 +253,8 @@ func (r *Renewer) Run(ctx context.Context) {
 			t.Stop()
 			if r.Mode == CertExplicit {
 				r.mu.Lock()
-				changed := fileStamp(r.CertFile, r.KeyFile) != r.stamp
+				st := fileStamp(r.CertFile, r.KeyFile)
+				changed := st != r.stamp && st != r.failed
 				r.mu.Unlock()
 				if changed {
 					_ = r.Check(ctx)

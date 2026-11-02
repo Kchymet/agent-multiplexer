@@ -507,7 +507,7 @@ func TestRenewerReloadsExplicitFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	rl := tailnet.NewReloader(pair)
-	r := &tailnet.Renewer{Mode: tailnet.CertExplicit, Target: rl, CertFile: cf, KeyFile: kf, Now: func() time.Time { return now }}
+	r := &tailnet.Renewer{Mode: tailnet.CertExplicit, Target: rl, CertFile: cf, KeyFile: kf, Hosts: []string{"amux.home.example"}, Now: func() time.Time { return now }}
 	r.Prime(info)
 	if err := r.Check(context.Background()); err != nil {
 		t.Fatal(err)
@@ -584,5 +584,64 @@ func TestSocketResolution(t *testing.T) {
 	t.Setenv(tailnet.EnvSocket, "/tmp/x.sock")
 	if tailnet.Socket("") != "/tmp/x.sock" || tailnet.Socket("/explicit") != "/explicit" {
 		t.Fatal("precedence")
+	}
+}
+
+func TestCoverageWildcardIPAndPrivateCA(t *testing.T) {
+	ca := tailnettest.NewCA(t) // a private CA: issuer trust is not part of coverage
+	now := time.Now()
+	wc, wk := ca.IssueNames(t, []string{"*.example-tailnet.ts.net"}, nil, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	if _, _, err := tailnet.ValidatePairFor(wc, wk, []string{host}, now); err != nil {
+		t.Fatalf("wildcard should cover %s: %v", host, err)
+	}
+	if _, _, err := tailnet.ValidatePairFor(wc, wk, []string{"a.b.example-tailnet.ts.net"}, now); err == nil {
+		t.Fatal("wildcard covered two labels")
+	}
+	ipc, ipk := ca.IssueNames(t, []string{host}, []net.IP{net.ParseIP("100.72.81.114")}, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	if _, _, err := tailnet.ValidatePairFor(ipc, ipk, []string{host, "100.72.81.114"}, now); err != nil {
+		t.Fatalf("IP SAN: %v", err)
+	}
+	_, _, err := tailnet.ValidatePairFor(ipc, ipk, []string{host, "100.72.81.115"}, now)
+	if err == nil || !strings.Contains(err.Error(), "does not cover 100.72.81.115") || !strings.Contains(err.Error(), host) {
+		t.Fatalf("uncovered IP: %v", err)
+	}
+	if got := tailnet.EndpointHosts([]string{"https://a.example:8443", "https://a.example", "https://[fd7a::1]:8443"}); strings.Join(got, ",") != "a.example,fd7a::1" {
+		t.Fatalf("endpoint hosts %v", got)
+	}
+}
+
+func TestRenewerRefusesWrongHostReplacementKeepsStream(t *testing.T) {
+	ca := tailnettest.NewCA(t)
+	dir := t.TempDir()
+	now := time.Now()
+	c, k := ca.Issue(t, host, now.Add(-time.Hour), now.Add(60*24*time.Hour))
+	cf, kf := writePair(t, dir, "explicit", c, k)
+	pair, info, err := tailnet.LoadPairFor(cf, kf, []string{host}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl := tailnet.NewReloader(pair)
+	addr := tlsServer(t, rl)
+	stream, served := dialLeafNotAfter(t, addr, ca)
+	defer stream.Close()
+	echo(t, stream, "before\n")
+	r := &tailnet.Renewer{Mode: tailnet.CertExplicit, Target: rl, CertFile: cf, KeyFile: kf, Hosts: []string{host}, Now: func() time.Time { return now }}
+	r.Prime(info)
+	// A complete, valid pair — for the wrong name.
+	wc, wk := ca.Issue(t, "other.example", now.Add(-time.Hour), now.Add(300*24*time.Hour))
+	os.WriteFile(kf, wk, 0o600)
+	os.WriteFile(cf, wc, 0o644)
+	err = r.Check(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "does not cover "+host) || !strings.Contains(err.Error(), "still serving the previous certificate") {
+		t.Fatalf("err %v", err)
+	}
+	if st := r.State(); st.LastError == "" || !st.NotAfter.Equal(info.NotAfter) {
+		t.Fatalf("state %+v", st)
+	}
+	echo(t, stream, "after refused replacement\n")
+	c2, got := dialLeafNotAfter(t, addr, ca)
+	c2.Close()
+	if !got.Equal(served) {
+		t.Fatal("new handshakes got the refused certificate")
 	}
 }

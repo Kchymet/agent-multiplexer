@@ -268,11 +268,17 @@ it, and swaps it in for new TLS handshakes:
   unchanged.
 
 **Your own certificate.** Pass `--tls-cert` and `--tls-key` to use a pair you
-manage, which may come from a private CA. amux checks that it loads and covers
-the endpoint host. It never asks tailscaled for a certificate, never checks the
-tailnet's HTTPS setting or your operator rights, and never writes the files.
-The listener reloads them in place when they change; a half-written pair is
-ignored until it is consistent. A certificate with under 30 days left is served
+manage, which may come from a private CA (issuer trust is not checked). The
+pair must load and cover every endpoint host, by DNS name, wildcard or IP SAN.
+amux checks this at `enable`, again at every start against the endpoints
+actually served after re-derivation, and on every reload. It never asks
+tailscaled for a certificate, never checks the tailnet's HTTPS setting or your
+operator rights, and never writes the files. The listener reloads them in place
+when they change. A half-written pair, or a replacement that does not cover
+the endpoint, is refused: the previous certificate keeps serving, and the
+reason is shown in `status` and `doctor`. A start whose certificate does not
+cover the re-derived endpoint (for example, after the MagicDNS name changed)
+fails with that reason, and the supervisor retries. A certificate with under 30 days left is served
 with a warning, since amux does not renew explicit certificates. Typing both
 flags empty (`--tls-cert= --tls-key=`) switches back to an amux-managed
 certificate.
