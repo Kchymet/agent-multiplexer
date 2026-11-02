@@ -21,6 +21,7 @@ const (
 	PathHello   = "/direct/v1/hello"
 	PathToken   = "/direct/v1/token"
 	PathRevoke  = "/direct/v1/revoke"
+	PathClaim   = "/direct/v1/enroll/claim"
 	PathSession = "/direct/v1/sessions"
 	PathWatch   = "/direct/v1/sessions/watch"
 )
@@ -43,7 +44,16 @@ const (
 )
 
 // BundlePrefix starts a paste bundle: BundlePrefix + base64url(JSON Bundle).
-const BundlePrefix = "amux-direct:1:"
+// BundlePrefixTicket starts a device-ticket bundle (Bundle.V 2): its code must
+// be claimed with the redeeming device's own S256 challenge (PathClaim) before
+// it is redeemed with that device's verifier. A v1-only client refuses it.
+const (
+	BundlePrefix       = "amux-direct:1:"
+	BundlePrefixTicket = "amux-direct:2:"
+)
+
+// BundleClaimPKCE is Bundle.Claim on a v2 (device ticket) bundle.
+const BundleClaimPKCE = "pkce"
 
 // Token prefixes. Every token carries at least 32 random bytes after it.
 const (
@@ -149,6 +159,14 @@ type Bundle struct {
 	Endpoints []string `json:"endpoints"`
 	Code      string   `json:"code"`       // base64url of 32 random bytes; single use
 	ExpiresAt int64    `json:"expires_at"` // unix seconds
+	// Claim is BundleClaimPKCE on a v2 bundle and absent on v1.
+	Claim string `json:"claim,omitempty"`
+}
+
+// ClaimResponse is the PathClaim success body.
+type ClaimResponse struct {
+	Claimed   bool  `json:"claimed"`
+	ExpiresAt int64 `json:"expires_at"`
 }
 
 // ResourceScope is a grant's resource scope, returned as structured metadata.

@@ -94,6 +94,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST "+PathHello, s.hello)
 	mux.HandleFunc("POST "+PathToken, s.token)
 	mux.HandleFunc("POST "+PathRevoke, s.revoke)
+	mux.HandleFunc("POST "+PathClaim, s.claim)
 	mux.HandleFunc("GET "+PathSession, s.sessions)
 	mux.HandleFunc("GET "+PathWatch, s.watch)
 	mux.HandleFunc("GET "+PathSession+"/{sid}/history", s.history)
@@ -340,6 +341,40 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Pragma", "no-cache")
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// claim binds a device ticket to the redeeming device's S256 challenge
+// (Authority.ClaimTicket). Like the token endpoint it is unauthenticated (the
+// ticket is the authority), form-encoded, never takes URL parameters, and
+// counts failed attempts toward the same per-source limit.
+func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
+	src := source(r)
+	if s.limited(src) {
+		w.Header().Set("Retry-After", "60")
+		writeOAuth(w, http.StatusTooManyRequests, OAuthTemporarilyUnavail, "too many failed attempts; retry later")
+		return
+	}
+	vals, err := parseForm(w, r)
+	if err != nil {
+		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, err.Error())
+		return
+	}
+	exp, err := s.cfg.Authority.ClaimTicket(vals.Get("code"), vals.Get("code_challenge"), vals.Get("code_challenge_method"))
+	var reqErr *requestError
+	switch {
+	case errors.As(err, &reqErr):
+		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, reqErr.Error())
+	case errors.Is(err, errInvalidCode):
+		s.recordFailure(src)
+		writeOAuth(w, http.StatusBadRequest, OAuthInvalidGrant, "the ticket is invalid, expired, used or claimed by another device")
+	case err != nil:
+		s.cfg.Logf("direct: claim endpoint: %v", err)
+		writeOAuth(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail,
+			"the grant store did not confirm the claim; retry with the same code_challenge")
+	default:
+		w.Header().Set("Pragma", "no-cache")
+		writeJSON(w, http.StatusOK, ClaimResponse{Claimed: true, ExpiresAt: exp})
 	}
 }
 

@@ -95,6 +95,10 @@ type codeRecord struct {
 	Requester  string `json:"requester,omitempty"`
 	ProviderID string `json:"providerId,omitempty"`
 	IssueKey   string `json:"issueKey,omitempty"` // key into storeState.CloudIssues
+	// Ticket marks a device ticket (HandoffDeviceTicket): minted with no
+	// Challenge, which the redeeming device sets once through ClaimTicket.
+	// Until then it cannot be redeemed.
+	Ticket bool `json:"ticket,omitempty"`
 }
 
 // cloudPolicy is the host operator's cloud issuance policy. Only host-proven

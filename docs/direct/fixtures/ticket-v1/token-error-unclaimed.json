@@ -1,0 +1,4 @@
+{
+  "error": "invalid_request",
+  "error_description": "this device ticket must be claimed with a code_challenge before it is redeemed"
+}

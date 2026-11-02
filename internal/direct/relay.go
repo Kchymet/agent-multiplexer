@@ -31,7 +31,7 @@ func (r *RelayIssuer) Capabilities(ctx context.Context) (*hp.DirectCapabilities,
 	if resp.Cloud == nil || !resp.Cloud.Enabled || resp.ServerID == "" || len(resp.Endpoints) == 0 {
 		return nil, nil
 	}
-	return &hp.DirectCapabilities{ServerID: resp.ServerID, Endpoints: append([]string(nil), resp.Endpoints...), Issuance: true}, nil
+	return &hp.DirectCapabilities{ServerID: resp.ServerID, Endpoints: append([]string(nil), resp.Endpoints...), Issuance: true, Handoff: true}, nil
 }
 
 // relayCodes are the refusal codes passed back over the relay. Anything else
@@ -60,6 +60,7 @@ func (r *RelayIssuer) Enroll(ctx context.Context, providerID string, req hp.Dire
 		Permissions: append([]string(nil), req.Permissions...),
 		Resource:    ResourceScope{Kind: req.Resource.Kind, Workgroups: append([]string(nil), req.Resource.Workgroups...)},
 		Label:       req.Label,
+		Handoff:     req.Handoff,
 	}
 	resp, err := r.call(ctx, AdminRequest{Op: OpIssueCloudCode, Issue: &issue})
 	if err == nil && resp.OK && resp.Bundle != "" {

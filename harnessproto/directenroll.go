@@ -19,6 +19,15 @@ const (
 
 	DirectEnrollMethodS256 = "S256"
 
+	// DirectHandoffDeviceTicket asks for a device ticket instead of a PKCE-bound
+	// code: a short-lived, single-use, registration-only code minted WITHOUT a
+	// challenge, for an owner to hand to another device (a phone, by QR). The
+	// receiving device attaches its own S256 challenge directly at the host
+	// (POST /direct/v1/enroll/claim) before it redeems with its own verifier,
+	// so the issuing browser and the orchestrator never hold a verifier or a
+	// token of that device. A request with this handoff carries no challenge.
+	DirectHandoffDeviceTicket = "device_ticket"
+
 	DirectResourceAllSessions = "all_sessions"
 	DirectResourceWorkgroups  = "workgroups"
 )
@@ -47,6 +56,9 @@ type DirectCapabilities struct {
 	ServerID  string   `json:"serverId"`
 	Endpoints []string `json:"endpoints"`
 	Issuance  bool     `json:"issuance"`
+	// Handoff is set by hosts that also mint device tickets
+	// (DirectEnrollRequest.Handoff). Absent on older hosts.
+	Handoff bool `json:"handoff,omitempty"`
 }
 
 // DirectResource is a requested resource scope (all_sessions, or workgroups by
@@ -69,9 +81,14 @@ type DirectEnrollRequest struct {
 	Permissions         []string       `json:"permissions"`
 	Resource            DirectResource `json:"resource"`
 	Label               string         `json:"label,omitempty"`
+	// Handoff is empty for an ordinary PKCE-bound code, or
+	// DirectHandoffDeviceTicket (then CodeChallenge and CodeChallengeMethod are
+	// empty). An older host ignores it and refuses the missing challenge.
+	Handoff string `json:"handoff,omitempty"`
 }
 
-// DirectEnrollResult answers it: a paste bundle (amux-direct:1:…) on success,
+// DirectEnrollResult answers it: a paste bundle (amux-direct:1:…, or
+// amux-direct:2:… for a device ticket) on success,
 // or a refusal code.
 type DirectEnrollResult struct {
 	Bundle    string `json:"bundle,omitempty"`

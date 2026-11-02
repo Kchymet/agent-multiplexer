@@ -111,7 +111,14 @@ type CloudIssueRequest struct {
 	Permissions         []string      `json:"permissions"`
 	Resource            ResourceScope `json:"resource"`
 	Label               string        `json:"label"`
+	// Handoff is empty for a PKCE-bound code, or HandoffDeviceTicket for a
+	// device ticket (minted with no challenge; see ClaimTicket).
+	Handoff string `json:"handoff,omitempty"`
 }
+
+// HandoffDeviceTicket is CloudIssueRequest.Handoff for a device ticket
+// (harnessproto.DirectHandoffDeviceTicket).
+const HandoffDeviceTicket = "device_ticket"
 
 // requestError is a malformed token request (OAuth invalid_request). It never
 // consumes the code.
@@ -313,6 +320,11 @@ func cloudReqHash(req CloudIssueRequest) string {
 		Perms         []string
 		Res           ResourceScope
 	}{req.Requester, req.ProviderID, req.CodeChallenge, req.CodeChallengeMethod, req.Label, req.Permissions, req.Resource})
+	if req.Handoff != "" {
+		// Only a handoff request extends the hashed tuple, so the hashes of
+		// requests stored before handoff existed are unchanged.
+		b = append(b, "\x00handoff="+req.Handoff...)
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -387,8 +399,21 @@ func (a *Authority) IssueCloudCode(req CloudIssueRequest) (string, int64, error)
 	if subtle.ConstantTimeCompare([]byte(req.ProviderID), []byte(c.ProviderPin)) != 1 {
 		return "", 0, cloudErr(CloudErrProviderMismatch, "the provider is not the one this host pinned")
 	}
-	if req.CodeChallengeMethod != CodeChallengeMethodS256 || !validNonce(req.CodeChallenge) {
-		return "", 0, cloudErr(CloudErrInvalidChallenge, "code_challenge must be S256: base64url of a 32-byte SHA-256")
+	ticket := false
+	switch req.Handoff {
+	case "":
+		if req.CodeChallengeMethod != CodeChallengeMethodS256 || !validNonce(req.CodeChallenge) {
+			return "", 0, cloudErr(CloudErrInvalidChallenge, "code_challenge must be S256: base64url of a 32-byte SHA-256")
+		}
+	case HandoffDeviceTicket:
+		// The receiving device supplies its own challenge at the host. A ticket
+		// request carrying one is malformed, never silently a PKCE code.
+		if req.CodeChallenge != "" || req.CodeChallengeMethod != "" {
+			return "", 0, cloudErr(CloudErrInvalidChallenge, "a device ticket is minted without a code_challenge")
+		}
+		ticket = true
+	default:
+		return "", 0, cloudErr(CloudErrInvalidRequest, "unknown handoff")
 	}
 	perms, err := ValidatePerms(req.Permissions)
 	if err != nil {
@@ -436,7 +461,7 @@ func (a *Authority) IssueCloudCode(req CloudIssueRequest) (string, int64, error)
 	a.state.Codes[codeHash] = &codeRecord{
 		Label: req.Label, Perms: perms, Resource: res, CreatedAt: now, ExpiresAt: exp,
 		Origin: OriginCloud, Challenge: req.CodeChallenge, PolicyGen: c.Generation,
-		Requester: req.Requester, ProviderID: req.ProviderID, IssueKey: keyHash,
+		Requester: req.Requester, ProviderID: req.ProviderID, IssueKey: keyHash, Ticket: ticket,
 	}
 	a.state.CloudIssues[keyHash] = &cloudIssue{ReqHash: reqHash, CodeHash: codeHash, Code: code, CreatedAt: now, ExpiresAt: exp}
 	c.Issued = append(slices.Clone(c.Issued), now)
@@ -465,6 +490,11 @@ func (a *Authority) checkVerifierLocked(key string, rec *codeRecord, verifier st
 			return &requestError{"code_verifier is only valid for cloud-issued codes"}
 		}
 		return nil
+	}
+	if rec.Ticket && rec.Challenge == "" {
+		// Unclaimed: the device must bind its own challenge first. Leaves the
+		// ticket usable for that device.
+		return &requestError{"this device ticket must be claimed with a code_challenge before it is redeemed"}
 	}
 	if verifier == "" {
 		return &requestError{"code_verifier is required for this code"}
@@ -526,4 +556,57 @@ func (a *Authority) pruneCloudLocked(now int64) {
 		}
 		c.Issued = kept
 	}
+}
+
+// ClaimTicket binds a device ticket to the redeeming device's own RFC 7636
+// S256 challenge, at the host, before redemption. It is the only way a
+// ticket's challenge is ever set, and it sets it exactly once:
+//
+//   - the code must be a live device ticket: cloud-issued as a ticket, not
+//     consumed, not expired, and issued under the current enabled cloud policy;
+//   - an unclaimed ticket takes challenge and is committed durably before
+//     success is reported (a failed commit leaves it unclaimed);
+//   - a ticket already claimed with the SAME challenge succeeds again, so a
+//     device that lost the answer can retry; any other challenge is refused
+//     with errInvalidCode and changes nothing.
+//
+// After a claim, redemption needs the claiming device's verifier: whoever else
+// saw the ticket (the issuing browser, the orchestrator, a QR photo) can no
+// longer redeem it. Before a claim, the ticket is registration authority: one
+// new grant at its minted scope, for whoever claims it first.
+func (a *Authority) ClaimTicket(code, challenge, method string) (int64, error) {
+	if code == "" {
+		return 0, &requestError{"code is required"}
+	}
+	if method != CodeChallengeMethodS256 || !validNonce(challenge) {
+		return 0, &requestError{"code_challenge must be S256: base64url of a 32-byte SHA-256"}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.issuableLocked(); err != nil {
+		return 0, err
+	}
+	now := a.now().Unix()
+	rec := a.state.Codes[hashToken(code)]
+	c := a.state.Cloud
+	if rec == nil || !rec.Ticket || rec.Origin != OriginCloud || rec.ConsumedAt != 0 || now >= rec.ExpiresAt ||
+		c == nil || !c.Enabled || c.Generation != rec.PolicyGen {
+		return 0, errInvalidCode
+	}
+	if rec.Challenge != "" {
+		if subtle.ConstantTimeCompare([]byte(rec.Challenge), []byte(challenge)) == 1 {
+			return rec.ExpiresAt, nil
+		}
+		return 0, errInvalidCode
+	}
+	rec.Challenge = challenge
+	if err := a.commitLocked(); err != nil {
+		if rolledBack(err) {
+			rec.Challenge = ""
+		}
+		// Not rolled back: the claim may be durable; the device retries with the
+		// same challenge, which then succeeds.
+		return 0, err
+	}
+	return rec.ExpiresAt, nil
 }
