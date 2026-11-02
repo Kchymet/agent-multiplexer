@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,7 +123,7 @@ func TestExecStarter(t *testing.T) {
 	logPath := filepath.Join(dir, "direct.log")
 
 	runner := filepath.Join(dir, "amux-ok")
-	writeScript(t, runner, "#!/bin/sh\necho \"argv: $*\"\ntrap 'echo stopping; exit 0' TERM\nwhile :; do sleep 0.05; done\n")
+	writeScript(t, runner, "#!/bin/sh\necho \"argv: $*\"\necho \"supervisor: $"+SupervisorPIDEnv+"\"\ntrap 'echo stopping; exit 0' TERM\nwhile :; do sleep 0.05; done\n")
 	p, err := ExecStarter(runner, logPath)(enabledCfg)
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +143,9 @@ func TestExecStarter(t *testing.T) {
 	b, _ := os.ReadFile(logPath)
 	if !strings.Contains(string(b), "argv: direct serve --managed") {
 		t.Fatalf("child argv/log = %q, want the constant managed argv", b)
+	}
+	if !strings.Contains(string(b), "supervisor: "+strconv.Itoa(os.Getpid())) {
+		t.Fatalf("child was not told its supervisor's pid: %q", b)
 	}
 	if strings.Contains(string(b), enabledCfg.TLSKey) {
 		t.Fatalf("settings leaked into argv: %q", b)

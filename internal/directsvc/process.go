@@ -2,11 +2,13 @@ package directsvc
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,7 +40,7 @@ func ExecStarter(self, logPath string) Starter {
 		cmd := exec.Command(self, ManagedArgs()...)
 		cmd.Stdout = io.MultiWriter(f, tail)
 		cmd.Stderr = cmd.Stdout
-		cmd.Env = os.Environ()
+		cmd.Env = append(withoutEnv(os.Environ(), SupervisorPIDEnv), SupervisorPIDEnv+"="+strconv.Itoa(os.Getpid()))
 		configureChild(cmd)
 		if err := cmd.Start(); err != nil {
 			_ = f.Close()
@@ -116,12 +118,45 @@ func (l *lastLine) String() string {
 	return l.last
 }
 
-// WatchParent calls stop once this process's parent changes — the managed
-// child's daemon has exited and the child was re-parented — so a daemon that
-// died without stopping its child does not leave the listener running and
-// holding the direct store. It polls every interval until done is closed.
-func WatchParent(interval time.Duration, done <-chan struct{}, stop func()) {
-	parent := os.Getppid()
+// SupervisorPIDEnv carries the supervising daemon's pid to the managed child.
+// It is fixed by the parent before exec, so the child's ownership check has no
+// window: a daemon that died before the child looked is detected as surely as
+// one that dies later.
+const SupervisorPIDEnv = "AMUX_DIRECT_SUPERVISOR_PID"
+
+// ErrSupervisorGone is returned when the managed child's daemon is not (or no
+// longer) its parent.
+var ErrSupervisorGone = errors.New("the supervising daemon is no longer this process's parent")
+
+// SupervisorPID reads the expected daemon pid from the environment.
+func SupervisorPID(getenv func(string) string) (int, error) {
+	v := getenv(SupervisorPIDEnv)
+	pid, err := strconv.Atoi(v)
+	if err != nil || pid <= 1 {
+		return 0, fmt.Errorf("%s=%q: the managed listener runs only under the daemon (amux direct enable)", SupervisorPIDEnv, v)
+	}
+	return pid, nil
+}
+
+// CheckParent reports ErrSupervisorGone unless the expected daemon is this
+// process's parent right now. The managed child calls it before it binds.
+func CheckParent(expected int) error {
+	if os.Getppid() != expected {
+		return ErrSupervisorGone
+	}
+	return nil
+}
+
+// WatchParent calls stop once this process's parent is not the expected
+// daemon — immediately, if it already isn't — so a daemon that died without
+// stopping its child (before or after the child started) does not leave the
+// listener running and holding the direct store. It polls every interval
+// until done is closed.
+func WatchParent(expected int, interval time.Duration, done <-chan struct{}, stop func()) {
+	if CheckParent(expected) != nil {
+		stop()
+		return
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -129,10 +164,20 @@ func WatchParent(interval time.Duration, done <-chan struct{}, stop func()) {
 		case <-done:
 			return
 		case <-t.C:
-			if os.Getppid() != parent {
+			if CheckParent(expected) != nil {
 				stop()
 				return
 			}
 		}
 	}
+}
+
+func withoutEnv(env []string, key string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

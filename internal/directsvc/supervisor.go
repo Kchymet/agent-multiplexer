@@ -36,8 +36,13 @@ type Supervisor struct {
 	Fingerprint func(Settings) string
 	Start       Starter
 	StatusPath  string
-	Logf        func(string, ...any)
-	Now         func() time.Time
+	// ReadyPath is the managed child's readiness marker. The supervisor
+	// removes it before every start and after every exit, so a marker can
+	// only ever have been written by the child running now — never by an
+	// earlier one whose pid a new child happens to reuse.
+	ReadyPath string
+	Logf      func(string, ...any)
+	Now       func() time.Time
 
 	Poll         time.Duration // how often the setting is re-read (default 2s)
 	StopGrace    time.Duration // SIGTERM → SIGKILL (default 5s)
@@ -54,6 +59,7 @@ func NewSupervisor(self string, logf func(string, ...any)) *Supervisor {
 		Fingerprint: Fingerprint,
 		Start:       ExecStarter(self, LogPath()),
 		StatusPath:  StatusPath(),
+		ReadyPath:   ReadyPath(),
 		Logf:        logf,
 	}
 }
@@ -114,10 +120,19 @@ func (s *Supervisor) Run(ctx context.Context) {
 			s.Logf("direct: write status: %v", err)
 		}
 	}
+	clearReady := func() {
+		if s.ReadyPath == "" {
+			return
+		}
+		if err := os.Remove(s.ReadyPath); err != nil && !os.IsNotExist(err) {
+			s.Logf("direct: remove readiness marker: %v", err)
+		}
+	}
 	stop := func(why string) {
 		if cur == nil {
 			return
 		}
+		defer clearReady()
 		s.Logf("direct: stopping managed listener pid %d (%s)", cur.proc.Pid(), why)
 		_ = cur.proc.Terminate()
 		t := time.NewTimer(s.StopGrace)
@@ -162,6 +177,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 				backoff, nextStart, lastFP = s.BackoffMin, time.Time{}, fp
 			}
 			if cur == nil && !now.Before(nextStart) {
+				clearReady()
 				proc, err := s.Start(cfg)
 				if err != nil {
 					lastErr = err.Error()
@@ -206,6 +222,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 				cur.proc.Pid(), ran.Round(time.Second), lastErr, backoff)
 			backoff = nextBackoff(backoff, s.BackoffMax)
 			cur = nil
+			clearReady()
 		case <-tick.C:
 		}
 	}
