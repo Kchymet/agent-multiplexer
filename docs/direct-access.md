@@ -555,6 +555,10 @@ cookies.
 | 409 | `capacity_exhausted` | The grant holds too many unresolved or recent actions; retrying will not help. Enroll again ([fixture](direct/fixtures/v1/api-error-capacity.json)) |
 | 429 | `rate_limited` | — |
 | 503 | `unavailable` | — |
+| 409 | `created_target_unavailable` | Replay of a recorded creation whose created session or workgroup no longer exists as the exact session that was created (deleted, its id reused by another session, the store replaced, or the member moved to another workgroup). The creation ran; no ids are returned. Terminal for the key: never retry it automatically with the same or a fresh key ([Replaying a creation](#replaying-a-creation)) |
+| 409 | `created_identity_unverifiable` | Replay of a creation recorded before the server kept session identities: its ids cannot be confirmed, so none are returned. The creation ran. Terminal for the key, as above |
+| 503 | `created_identity_unavailable` | Replay of a recorded creation whose identity could not be checked right now (a transient daemon failure, or a daemon that no longer supports identities). The creation ran and the record is unchanged: retry the **same** request later. Never treat it like `unavailable`, never retry the intent with a fresh key because of it |
+| 503 | `daemon_upgrade_required` | A creation was refused because the local amux daemon predates creation identities; nothing was sent to the daemon. Ask the host to upgrade and restart amux. Not in the zero-effect list below: if it was answered after the key was recorded, the key replays the same answer, and the intent needs a new key once the host is upgraded |
 
 **Order of checks.** Credential, then permission, then (for actions) verb and
 field validation. A failure at any of these reaches no backend at all. Only
@@ -619,6 +623,8 @@ body.
   620 KB of `grants.json` per grant, rewritten with every commit; that is the
   accepted cost of the bound.
 - **Crashes.** Exactly-once execution across a process crash is not claimed.
+- **Creations.** A successful creation's replay is checked against the
+  machine's current sessions first; see [Replaying a creation](#replaying-a-creation).
 
 **Client handling of `idem_key`.** Use a fresh random key for each user
 intent, and reuse it only to retry that same intent with the identical body.
@@ -644,6 +650,61 @@ the old file is left in place; if it fails after the rename (the directory
 sync), the complete version-3 file may be in place. Either way that open
 fails, and the next open loads whichever complete file is there; the registry
 is never partially written or reset.
+
+#### Replaying a creation
+
+A creation's `new_id` and `root_id` mean "the session this creation made". The
+machine may later delete either session and reuse its id for an unrelated one
+(ids are short), or its store may be replaced or restored. So with the
+recorded success the server also records each session's store *incarnation*,
+a random token the daemon assigns when it inserts a session and never
+changes. Incarnations are host-only: they are never sent to a client, a
+relay, the inventory or a log.
+
+Every success replay — a synchronous `POST` with the same key and body, an
+asynchronous `POST` (`"async": true`) with them, and `GET
+/direct/v1/creations/{creation_id}` — reads the current incarnations of both
+ids first and answers with the ids only when both still match and the member
+still belongs to that workgroup:
+
+| Current state | Sync `POST` | Async `POST` / `GET` |
+| --- | --- | --- |
+| Both match (archived or not) | `200` with the recorded ids | `ready` with the recorded ids |
+| Either is missing or another session now has the id, or the member moved | `409 created_target_unavailable`, no ids | `failed`, `code: created_target_unavailable`, `uncertain: false`, no ids |
+| The record predates incarnations | `409 created_identity_unverifiable`, no ids | `failed`, `code: created_identity_unverifiable`, `uncertain: false`, no ids |
+| The identities cannot be read now | `503 created_identity_unavailable` | `503 created_identity_unavailable` |
+
+None of these change the record: a later replay checks again. Access is
+checked before and after the lookup, so a revocation during it answers `401`.
+
+**Client treatment.** `created_target_unavailable` and
+`created_identity_unverifiable` are terminal for the key. They are **not**
+"did not run" answers — the creation did run — so neither belongs with the
+zero-effect codes listed under [Asynchronous creation](direct-async-create.md),
+and a client never retries the intent with a fresh key because of them; show
+the user that the session it made is gone or cannot be confirmed, and let them
+decide. `created_identity_unavailable` is transient: retry the same request
+(same key, same body) later. It is never `unavailable`, which on a first
+attempt means the action did not run.
+
+**Daemon upgrade.** Creation identities need a daemon that speaks them (the
+host socket's `host-capabilities` query). With an older daemon, capabilities
+report `daemon_upgrade_required: true` with `create_workgroup` and
+`async_create` false, and every creation answers `503
+daemon_upgrade_required` before its key is recorded and before anything is
+sent to the daemon; other verbs and reads keep working. The direct server
+checks this again on the very connection it creates on, so a daemon swapped
+for an older one between the check and the creation is still refused before
+anything is sent (that rare answer is recorded under the key). The host
+upgrades and restarts amux; no client or grant changes are needed.
+
+**Limits.** A record written before this change replays as
+`created_identity_unverifiable`, and so does one an older binary rewrote
+(it drops the incarnation fields). The check covers the created session and
+its workgroup root, not later changes to either (a rename, archive or new
+members). Incarnations live in the amux store, so a store restored from a
+backup taken after the creation still matches; a store from before it, or a
+new store, does not.
 
 **Transcripts.** They use amux's own sequence space and never reuse a relay
 cursor. The stream ends with a terminal SSE event:
@@ -833,6 +894,10 @@ authorizer uses.
 - `server_verbs`: every verb this server implements;
 - `verbs`: the session verbs this grant may use;
 - `create_workgroup`;
+- `daemon_upgrade_required` (only for a grant holding `create`, only when
+  true): the local daemon predates creation identities, so `create_workgroup`
+  and `async_create` are false and creations answer `503
+  daemon_upgrade_required` until the host upgrades and restarts amux;
 - for a grant holding `create`, a `catalog`:
   - `harnesses`: name and version verified on this machine, plus `models`.
     These are the plain model names that harness's local picker offers, at
@@ -864,8 +929,11 @@ transcript, not in the HTTP answer.
 
 **Acting on a new id.** A request naming a session that the same grant created
 within the last minute can arrive before the daemon's inventory publishes the
-new row. If so, the server re-reads the inventory for up to 3 seconds and
-then checks the published row as usual.
+new row. If so, and the machine's current session with that id is exactly the
+one created (its incarnation matches the recorded one), the server re-reads
+the inventory for up to 3 seconds and then checks the published row as usual.
+It never waits for, or acts on, a different session that reused the id: that
+request answers `404 not_found` at once.
 
 **Telling cases apart.**
 

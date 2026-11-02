@@ -112,11 +112,19 @@ provisional ids.
 the same grant created within the last minute. Every check still runs on the
 published row.
 
-**Known residual (pre-existing; tracked separately).** A replayed creation
-answers with its recorded `new_id`. If that session was deleted and a later
-session reused the id, the replay points at the new session. A deterministic
-incarnation identity is being designed separately; #299 makes no protocol
-change for it.
+**Resolved: replay identity.** A replayed creation used to answer with its
+recorded `new_id` even after that session was deleted and its id reused. Now
+the server records the created session's and root's store incarnations and
+checks them on every replay (sync and async POST, status GET): a deleted,
+reused or replaced target answers `created_target_unavailable` without ids, a
+record from before incarnations `created_identity_unverifiable`, and a
+transient failure to check `503 created_identity_unavailable` with the record
+unchanged. The 3-second wait for a just-created id runs only while the id's
+current incarnation is the created one. The cloud relay's provisional ids are
+a different mechanism; direct needs no Harness change for this. Creating over
+direct now needs a daemon with creation identities: an older daemon answers
+`503 daemon_upgrade_required` before anything is sent, and capabilities say so
+([Replaying a creation](direct-access.md#replaying-a-creation)).
 
 ### Machine creation status
 
