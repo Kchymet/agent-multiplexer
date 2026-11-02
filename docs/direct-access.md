@@ -615,7 +615,9 @@ body.
   tombstones (each two 16-hex-digit hash prefixes, 38 bytes of JSON). When
   they are full, nothing is evicted: an expired record is kept whole instead
   (and still answers `idem_expired`, never its old result), so the grant then
-  reaches the 1,024 limit and fails closed the same way.
+  reaches the 1,024 limit and fails closed the same way. A full set is about
+  620 KB of `grants.json` per grant, rewritten with every commit; that is the
+  accepted cost of the bound.
 - **Crashes.** Exactly-once execution across a process crash is not claimed.
 
 **Client handling of `idem_key`.** Use a fresh random key for each user
