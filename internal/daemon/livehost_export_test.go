@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"amux/internal/access"
+	"amux/internal/amuxcfg"
+	"amux/internal/codexapp"
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/source"
@@ -88,3 +90,24 @@ func (h *LiveHost) Typed(id string) string {
 
 // Poll recomputes the inventory now.
 func (h *LiveHost) Poll() { h.d.pollOnce(context.Background()) }
+
+// AttachStructured switches the daemon to App Server control and attaches a
+// real codexapp.Supervisor for session id, connected to the App Server at
+// endpoint (a test fake). The supervisor's process is a placeholder; all
+// protocol traffic goes to endpoint.
+func (h *LiveHost) AttachStructured(t *testing.T, id, dir, endpoint string) {
+	t.Helper()
+	if h.d.codex == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		h.d.codex = codexapp.NewManager(ctx, "")
+		t.Cleanup(func() { h.d.codex.Shutdown(); cancel() })
+	}
+	h.d.codexControl.Effective = amuxcfg.AppServer
+	// Registered exactly as the daemon's own structured start does, so the
+	// permission gate knows this runtime's generation.
+	if _, _, err := h.d.publishPermissionRuntime(id, func() (any, error) {
+		return h.d.codex.Ensure(t.Context(), id, dir, nil, []string{"sleep", "60"}, endpoint, "", "", "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

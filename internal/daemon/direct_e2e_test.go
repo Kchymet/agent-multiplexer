@@ -20,6 +20,8 @@ import (
 	"amux/internal/hostbackend"
 	"amux/internal/store"
 	"amux/internal/wsops"
+
+	"github.com/gorilla/websocket"
 )
 
 // These tests drive the direct workflow verbs through the whole production
@@ -415,5 +417,152 @@ func TestDirectLiveStopAndGoal(t *testing.T) {
 	}
 	if after := e.h.Typed(agentRes.NewID); len(after) <= len(before) {
 		t.Fatalf("stop delivered nothing to the runtime: %q", after)
+	}
+}
+
+// approvalAppServer is a fake Codex App Server: a turn raises one command
+// approval and waits for the client's decision, which it records.
+type approvalAppServer struct {
+	endpoint  string
+	decisions chan json.RawMessage
+}
+
+func newApprovalAppServer(t *testing.T) *approvalAppServer {
+	t.Helper()
+	a := &approvalAppServer{decisions: make(chan json.RawMessage, 4)}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		const thread, turn, approvalID = "thr-1", "turn-1", 900
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+				Result json.RawMessage `json:"result"`
+			}
+			if json.Unmarshal(raw, &m) != nil {
+				return
+			}
+			if m.Method == "" && string(m.ID) == "900" { // the client's answer to our approval request
+				a.decisions <- m.Result
+				_ = conn.WriteJSON(map[string]any{"method": "serverRequest/resolved", "params": map[string]any{"threadId": thread, "requestId": approvalID}})
+				_ = conn.WriteJSON(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": turn, "status": "completed"}}})
+				continue
+			}
+			if len(m.ID) == 0 || string(m.ID) == "null" {
+				continue
+			}
+			var result any = map[string]any{}
+			switch m.Method {
+			case "initialize":
+				result = map[string]any{"capabilities": map[string]any{}}
+			case "thread/start", "thread/resume":
+				result = map[string]any{"thread": map[string]any{"id": thread}}
+			case "turn/start":
+				result = map[string]any{"turn": map[string]any{"id": turn}}
+			}
+			if conn.WriteJSON(map[string]any{"id": m.ID, "result": result}) != nil {
+				return
+			}
+			if m.Method == "turn/start" {
+				_ = conn.WriteJSON(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": thread, "turn": map[string]any{"id": turn}}})
+				_ = conn.WriteJSON(map[string]any{"id": approvalID, "method": "item/commandExecution/requestApproval", "params": map[string]any{
+					"threadId": thread, "turnId": turn, "itemId": "cmd-1", "command": "rm -rf build", "reason": "clean the build"}})
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	a.endpoint = "ws" + strings.TrimPrefix(srv.URL, "http")
+	return a
+}
+
+// A correlated approval round trip over direct: the permission_request event a
+// client reads carries request_id and runtime_generation, the answer quoting
+// both reaches the runtime exactly once, and a forged generation is refused.
+func TestDirectLivePermissionCorrelation(t *testing.T) {
+	e := newE2E(t)
+	all := e.enroll(everyPerm, direct.ResourceScope{Kind: direct.ResourceAllSessions})
+	_, root, _ := e.act(all, "", direct.VerbNewWorkgroupEmpty, map[string]string{"repos": ""}, "p-root")
+	code, member, bad := e.act(all, root.NewID, direct.VerbAddAgent, map[string]string{"agent": "codex"}, "p-agent")
+	if code != 200 {
+		t.Fatalf("add codex agent: %d %+v", code, bad)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, _ := db.GetSession(member.NewID)
+	db.Close()
+	app := newApprovalAppServer(t)
+	e.h.AttachStructured(t, member.NewID, sess.Dir, app.endpoint)
+
+	if code, _, bad := e.act(all, member.NewID, direct.VerbPrompt, map[string]string{"text": "clean up"}, "p-prompt"); code != 200 {
+		t.Fatalf("prompt: %d %+v", code, bad)
+	}
+	// Read the request the way a client does: direct history.
+	var request map[string]any
+	deadline := time.Now().Add(10 * time.Second)
+	for request == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("no permission_request reached direct history")
+		}
+		code, b := e.call("GET", direct.PathSession+"/"+member.NewID+"/history", all, nil)
+		var page direct.HistoryResponse
+		if code == 200 && json.Unmarshal(b, &page) == nil {
+			for _, ev := range page.Events {
+				if ev.Type == "permission_request" {
+					_ = json.Unmarshal(ev.Payload, &request)
+					t.Logf("direct history permission_request payload: %s", ev.Payload)
+				}
+			}
+		}
+		if request == nil {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	reqID, _ := request["request_id"].(string)
+	gen, _ := request["runtime_generation"].(string)
+	if reqID == "" || gen == "" {
+		t.Fatalf("permission_request lacks the correlation pair: %v", request)
+	}
+	inv := e.inventory(all)
+	if !inv[member.NewID].Caps.Permission {
+		t.Fatalf("structured codex row has no permission cap: %+v", inv[member.NewID].Caps)
+	}
+	// A forged generation never reaches the runtime.
+	if code, _, bad := e.act(all, member.NewID, direct.VerbPermission, map[string]string{
+		"request_id": reqID, "runtime_generation": gen + "x", "decision": "allow"}, "p-forged"); code != 422 || bad.Code != direct.CodeRejected {
+		t.Fatalf("forged generation: %d %+v", code, bad)
+	}
+	select {
+	case d := <-app.decisions:
+		t.Fatalf("a forged generation delivered %s", d)
+	default:
+	}
+	// The exact pair is delivered once.
+	if code, _, bad := e.act(all, member.NewID, direct.VerbPermission, map[string]string{
+		"request_id": reqID, "runtime_generation": gen, "decision": "deny", "reason": "not now"}, "p-answer"); code != 200 {
+		t.Fatalf("answer: %d %+v", code, bad)
+	}
+	select {
+	case d := <-app.decisions:
+		if !strings.Contains(string(d), "decline") && !strings.Contains(string(d), "deny") {
+			t.Fatalf("runtime received %s, want a denial", d)
+		}
+		t.Logf("App Server received decision: %s", d)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the decision never reached the runtime")
+	}
+	// The same request cannot be answered again, under any key.
+	if code, _, bad := e.act(all, member.NewID, direct.VerbPermission, map[string]string{
+		"request_id": reqID, "runtime_generation": gen, "decision": "allow"}, "p-again"); code != 422 || bad.Code != direct.CodeRejected {
+		t.Fatalf("second answer: %d %+v", code, bad)
 	}
 }

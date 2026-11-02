@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,5 +78,25 @@ func TestStructuredOpenPermissions(t *testing.T) {
 	open := OpenPermissions(Record{Runtime: harnessproto.RuntimeCodex, Path: path, Structured: true})
 	if len(open) != 1 || open[0].RequestID != "ap9" {
 		t.Fatalf("OpenPermissions = %+v, want one request ap9", open)
+	}
+}
+
+// The structured supervisor publishes options as objects. A request carrying
+// them must still be open (and so bindable to its runtime generation); before
+// this, the string-only decode silently dropped every supervised approval.
+func TestStructuredOpenPermissionsWithObjectOptions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.events.jsonl")
+	line := `{"type":"permission_request","item_id":"cmd-1","direction":"out","payload":{"action":"rm -rf build","item_id":"cmd-1",` +
+		`"options":[{"id":"accept","kind":"allow","label":"Allow"},{"id":"decline","kind":"deny","label":"Deny"}],` +
+		`"reason":"clean","request_id":"900","thread_id":"thr-1","tool":"command_execution","turn_id":"turn-1"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	open := OpenPermissions(Record{Runtime: harnessproto.RuntimeCodex, Path: path, Structured: true})
+	if len(open) != 1 || open[0].RequestID != "900" || strings.Join(open[0].Options, ",") != "accept,decline" {
+		t.Fatalf("OpenPermissions = %+v, want request 900 with options accept,decline", open)
+	}
+	if got := pendingOptions([]byte(`["allow","deny"]`)); strings.Join(got, ",") != "allow,deny" {
+		t.Fatalf("string options = %v", got)
 	}
 }
