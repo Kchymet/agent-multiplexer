@@ -12,10 +12,10 @@ which also explains the Harness-side roles, registration and pooling.
 
 ```
 ┌────────────────────────────┐    ┌────────────────────────────┐
-│ Cloud portal clients       │    │ Local clients              │
+│ Harness clients            │    │ Local clients              │
 │ Harness web SPA · Android  │    │ amux TUI · amux CLI        │
 └──────────────┬─────────────┘    └──────────────┬─────────────┘
-               ↕ /api/ws snapshot+actions        ↕ authenticated local RPC
+               ↕ cloud API / harness-relay       ↕ authenticated local RPC
 ┌──────────────┴─────────────┐    ┌──────────────┴─────────────┐
 │ Harness control API        │    │ amux control API           │
 │ auth, fleet, pools, tokens │    │ workgroups, agents, provide│
@@ -40,10 +40,17 @@ which also explains the Harness-side roles, registration and pooling.
 │ e.g. Claude Code,│  │ bwrap / macOS sandbox  │  │ v2 speaker over   │
 │ Codex App Server │  │ e.g. Claude Code, Codex│  │ outbound TLS      │
 └──────────────────┘  └────────────────────────┘  └───────────────────┘
+
+Harness web SPA / Android
+          ↕ direct HTTPS (REST / WebSocket inventory / SSE transcript)
+amux direct serve (opt-in, destination-issued grants)
+          ↕ authenticated hostbackend operations
+Local amux daemon (inventory, prompt/stop, runtime-record resolution)
 ```
 
 Every arrow is two-way: commands flow toward the backends, status and events
-flow back toward the clients.
+flow back toward the clients. The direct path bypasses Harness; the direct
+server reads resolved transcripts locally.
 
 - **Local amux works without the cloud.** The right-hand column is the
   standalone path: the TUI and CLI control their own daemon, which manages its
@@ -62,6 +69,13 @@ flow back toward the clients.
   accepting session controls. See
   [amux as a remote compute provider](remote-provider.md) and
   [Provider session, steering and runtime-event protocol](remote-provider-sessions.md).
+- **Direct session traffic bypasses the cloud.** The web and Android clients
+  can use [direct HTTPS](direct-access.md) for inventory, transcripts and
+  prompt/stop. Optional [cloud-assisted discovery/enrollment](direct-cloud-enrollment.md)
+  uses the existing outbound TLS provider link to advertise the direct server
+  and request a destination-issued enrollment code. The client verifies the
+  direct server and redeems the code there; subsequent direct session traffic
+  stays on the direct path.
 - **Local requests never touch the registry.** The amux API's outer path is
   localhost request / control: the TUI and CLI create and control agents on
   their own daemon directly, with no enrollment and no pool involved. That
