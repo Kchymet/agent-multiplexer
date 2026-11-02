@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,5 +83,35 @@ func TestResolverHonorsDeadline(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("resolver ignored context deadline")
+	}
+}
+
+// TestProbeReportsAbsentExecutableAsNotInstalled pins the distinction provider
+// discovery relies on to keep an optional harness optional: a CLI that is not
+// on this host at all (by name or by an override path) is ErrNotInstalled,
+// while an installed CLI that fails its version check is not.
+func TestProbeReportsAbsentExecutableAsNotInstalled(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", filepath.Join(dir, "no-shell"))
+
+	t.Setenv("AMUX_HERMES_BIN", "")
+	if r := Probe(context.Background(), "hermes"); !errors.Is(r.Err, ErrNotInstalled) {
+		t.Fatalf("hermes absent from PATH: probe = %+v, want ErrNotInstalled", r)
+	}
+	t.Setenv("AMUX_HERMES_BIN", filepath.Join(dir, "missing", "hermes"))
+	if r := Probe(context.Background(), "hermes"); !errors.Is(r.Err, ErrNotInstalled) {
+		t.Fatalf("missing override path: probe = %+v, want ErrNotInstalled", r)
+	}
+
+	broken := filepath.Join(dir, "hermes")
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\nexit 3\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMUX_HERMES_BIN", "")
+	r := Probe(context.Background(), "hermes")
+	if r.Err == nil || errors.Is(r.Err, ErrNotInstalled) {
+		t.Fatalf("installed but failing CLI: probe = %+v, want a version-check failure", r)
 	}
 }

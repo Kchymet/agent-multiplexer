@@ -71,7 +71,9 @@ func cmdDoctor() error {
 	for _, d := range deps {
 		if agent.Known(d.bin) {
 			r := agent.Probe(ctx, d.bin)
-			if r.Err != nil {
+			if r.Err != nil && !d.required && errors.Is(r.Err, agent.ErrNotInstalled) {
+				fmt.Printf("  · %-8s %-26s %s\n", d.bin, "not installed (optional)", d.note)
+			} else if r.Err != nil {
 				if d.required {
 					missingRequired = true
 				}
