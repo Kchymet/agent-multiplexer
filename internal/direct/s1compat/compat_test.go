@@ -80,8 +80,8 @@ func TestS1ReaderRefusesV2WithOutstandingCloudCode(t *testing.T) {
 	root, _ := cloudStore(t)
 	before, _ := os.ReadFile(filepath.Join(root, grantsFile))
 	_, err := s1Load(t, root)
-	if err == nil || !strings.Contains(err.Error(), "unsupported version 2") {
-		t.Fatalf("15fcf0e reader on a v2 registry: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "unsupported version 3") {
+		t.Fatalf("15fcf0e reader on a current registry: %v", err)
 	}
 	after, _ := os.ReadFile(filepath.Join(root, grantsFile))
 	if !bytes.Equal(before, after) {
@@ -120,7 +120,7 @@ func TestV1WithCloudFieldsWouldDowngradeToUnboundCode(t *testing.T) {
 	}
 }
 
-// A real S1 registry (accepted by the 15fcf0e reader) migrates to v2 keeping
+// A real S1 registry (accepted by the 15fcf0e reader) migrates to v3 keeping
 // every grant, revocation, used-refresh history and idempotency record.
 func TestV1MigrationPreservesState(t *testing.T) {
 	root := t.TempDir()
@@ -190,7 +190,7 @@ func TestV1MigrationPreservesState(t *testing.T) {
 	migrated, _ := os.ReadFile(path)
 	var head struct{ V int }
 	_ = json.Unmarshal(migrated, &head)
-	if head.V != 2 {
+	if head.V != 3 {
 		t.Fatalf("migrated version %d", head.V)
 	}
 	// Same records, read field by field with the frozen types.
@@ -216,7 +216,7 @@ func TestV1MigrationPreservesState(t *testing.T) {
 		t.Fatal("reuse did not revoke the whole grant after migration")
 	}
 	b.Close()
-	if _, err := s1Load(t, root); err == nil || !strings.Contains(err.Error(), "unsupported version 2") {
+	if _, err := s1Load(t, root); err == nil || !strings.Contains(err.Error(), "unsupported version 3") {
 		t.Fatalf("15fcf0e reader on the migrated registry: %v", err)
 	}
 }

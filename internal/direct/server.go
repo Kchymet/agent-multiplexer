@@ -988,6 +988,10 @@ func actionHash(sid string, req ActionRequest) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// idemExpiredMsg is the fixed idem_expired text. It never says whether the
+// action ran: only that it will not run again.
+const idemExpiredMsg = "this idem_key was already used and its recorded result has expired; it will not run again. Check the machine for its effect before retrying with a new idem_key"
+
 // idemReply answers a non-proceed idempotency outcome; it reports whether it did.
 func (s *Server) idemReply(w http.ResponseWriter, out idemOutcome, rec *idemRecord) bool {
 	switch out {
@@ -1007,6 +1011,8 @@ func (s *Server) idemReply(w http.ResponseWriter, out idemOutcome, rec *idemReco
 		writeErr(w, http.StatusConflict, CodeIdemInProgress, "an action with this idem_key is still running")
 	case idemAmbiguous:
 		writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "an action with this idem_key has an unknown outcome; it will not run again")
+	case idemExpired:
+		writeErr(w, http.StatusConflict, CodeIdemExpired, idemExpiredMsg)
 	default:
 		return false
 	}
