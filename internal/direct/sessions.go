@@ -140,7 +140,7 @@ func project(g Grant, row core.Session, byID map[string]core.Session) Session {
 	steer := g.Can(PermSteer) && !effectivelyArchived(row, byID)
 	caps := SessionCaps{}
 	if row.Caps != nil && steer {
-		caps = SessionCaps{Prompt: row.Caps.Prompt, Stop: row.Caps.Cancel}
+		caps = SessionCaps{Prompt: row.Caps.Prompt, Interject: row.Caps.Interject, Stop: row.Caps.Cancel}
 	}
 	out := Session{
 		ID: row.ID, Title: row.Title, Kind: row.Kind, Mode: row.Mode, Model: row.Model, RootID: row.RootID,
@@ -202,7 +202,7 @@ func authorizeTarget(ctx context.Context, b Backend, g Grant, sid string) (core.
 // allowlist and returns the daemon action. It does not consult the backend.
 func actionFor(sid string, req ActionRequest) (core.Action, error) {
 	switch req.Verb {
-	case VerbPrompt:
+	case VerbPrompt, VerbInterject:
 		for k := range req.Fields {
 			if k != hp.FieldText {
 				return core.Action{}, errBadRequest
@@ -212,7 +212,7 @@ func actionFor(sid string, req ActionRequest) (core.Action, error) {
 		if strings.TrimSpace(text) == "" || len(text) > MaxPromptBytes || !utf8.ValidString(text) {
 			return core.Action{}, errBadRequest
 		}
-		return core.Action{Action: core.ActionSteer, ID: sid, Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}, nil
+		return core.Action{Action: core.ActionSteer, ID: sid, Fields: map[string]string{core.SteerVerb: req.Verb, core.SteerText: text}}, nil
 	case VerbStop:
 		if len(req.Fields) != 0 {
 			return core.Action{}, errBadRequest
@@ -231,7 +231,9 @@ func steerable(row core.Session, byID map[string]core.Session, verb string) erro
 	if row.Caps == nil {
 		return errUnsupported
 	}
-	if verb == VerbPrompt && !row.Caps.Prompt || verb == VerbStop && !row.Caps.Cancel {
+	if verb == VerbPrompt && !row.Caps.Prompt ||
+		verb == VerbInterject && !row.Caps.Interject ||
+		verb == VerbStop && !row.Caps.Cancel {
 		return errUnsupported
 	}
 	return nil

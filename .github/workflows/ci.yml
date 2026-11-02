@@ -11,7 +11,34 @@ on:
   pull_request:
 
 jobs:
+  # Lightweight classifier. When every changed path is documentation prose
+  # (README files, or docs/ outside the test inputs under docs/evidence/ and
+  # docs/direct/fixtures/), the expensive jobs below are skipped; a skipped
+  # job reports success, so no check is left pending. Anything else runs
+  # everything, and so does any failure of this job (even after the verdict
+  # was written, e.g. its behaviour tests failing). See .github/ci-scope.sh.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: classify changed paths
+        id: scope
+        env:
+          # PR: github.sha is the merge commit under test; its first parent is
+          # the base tip it merged into. Push to master: previous vs pushed tip.
+          BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
+          HEAD: ${{ github.sha }}
+        run: .github/ci-scope.sh "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
+      - name: classifier behaviour tests
+        run: bash .github/ci-scope_test.sh
+
   build-test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-26]
@@ -41,6 +68,8 @@ jobs:
         run: make vuln
 
   namespace-runtime:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Keep this on 22.04: its ordinary runner user can create user/PID
     # namespaces without the host-specific AppArmor exception newer Ubuntu
     # releases require for private executable paths.
@@ -174,6 +203,8 @@ jobs:
               -run '^TestCompatCodex01571ProtectedAttachReconnect$' -count=1 -timeout=180s -v
 
   seatbelt-runtime:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Pinned rather than macos-latest so an image bump is a reviewed change.
     # macOS 26 arm64 is the newest GA image; macOS 14 images are being
     # retired (actions/runner-images#13518).

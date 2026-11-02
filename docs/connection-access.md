@@ -34,7 +34,7 @@ profile, not stable machine ids.
 | Native TUI → local daemon | internal native path (not a descriptor route) | `internal/hostbackend` → `daemon.DialContext` |
 | Harness web and Android → this host's sessions | `harness-relay`, through Harness | `amux provide`: `provider.HarnessRelay` transport + `internal/hostbackend` operations |
 | Legacy compatibility relay (`amux serve`) | legacy shared-token mux | `internal/mux` → `internal/hostbackend` |
-| `direct` to amux (S1) | opt-in `amux direct serve`: destination-issued grants, paste enrollment, read + prompt/stop | `internal/direct` → `internal/hostbackend` (see [direct-access.md](direct-access.md)) |
+| `direct` to amux (S1) | opt-in `amux direct serve`: destination-issued grants, paste enrollment, read + prompt/interject/stop | `internal/direct` → `internal/hostbackend` (see [direct-access.md](direct-access.md)) |
 
 The provider's outbound link is a **provider transport**, not a client direct
 route. `amux provide` dials the broker over TLS, registers with its bearer

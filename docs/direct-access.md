@@ -29,11 +29,11 @@ S1 serves exactly:
 | `GET /direct/v1/sessions/watch` (WebSocket) | read | The same inventory, pushed on change |
 | `GET /direct/v1/sessions/{sid}/history?before_seq=&limit=` | read | One newest-first transcript page |
 | `GET /direct/v1/sessions/{sid}/stream?after=` | read | Live transcript tail (SSE format) |
-| `POST /direct/v1/sessions/{sid}/actions` | steer | `prompt` or `stop` |
+| `POST /direct/v1/sessions/{sid}/actions` | steer | `prompt`, `interject` or `stop` |
 
 Everything else fails closed:
 
-- interject, permission answers, goals and lifecycle verbs;
+- permission answers, goals and lifecycle verbs;
 - accounts and panes;
 - raw runtime records and host paths.
 
@@ -548,8 +548,25 @@ workgroup root plus every row whose root chain leads to it. Nothing
 client-supplied counts.
 
 **Actions.** `POST /direct/v1/sessions/{sid}/actions` with
-`{"verb":"prompt","fields":{"text":"…"},"idem_key":"…"}` or
+`{"verb":"prompt","fields":{"text":"…"},"idem_key":"…"}`,
+`{"verb":"interject","fields":{"text":"…"},"idem_key":"…"}` or
 `{"verb":"stop","fields":{},"idem_key":"…"}`. Fields are an exact allowlist.
+
+`interject` uses the same daemon path as relay/local steering. Claude queues the
+text at its next boundary; supervised Codex steers the active turn. It does not
+start a stopped agent, and supervised Codex rejects it when no turn is active.
+There is no separate `queue` verb or direct-server queue. `prompt` retains its
+existing behavior, including starting a stopped agent.
+
+Both inventory routes advertise `caps.interject` from the daemon's matching
+capability, gated by the grant's `steer` permission and the target/ancestor
+archive state. Clients must treat a missing `caps.interject` on older servers as
+false and use this capability to gate their interject/queue affordance. Text
+fields are nonblank UTF-8, at most 32 KiB, with no additional fields accepted.
+This is an additive `amux-direct/1` change; restart the direct listener after
+upgrading. Existing grants need no migration or re-enrollment. Client owners
+should refresh the pinned [v1 fixtures](direct/fixtures/v1/SHA256SUMS), including
+`action-request-interject.json` and both inventory snapshots.
 
 **Idempotency.** It is grant-scoped and durable, and the record matches the
 body.
