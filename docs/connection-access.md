@@ -39,8 +39,11 @@ profile, not stable machine ids.
 The provider's outbound link is a **provider transport**, not a client direct
 route. `amux provide` dials the broker over TLS, registers with its bearer
 token, and serves harnessproto v2 on that link (see
-[remote-provider.md](remote-provider.md)). It advertises no endpoint, listener
-or machine identity. The `providerId` the broker assigns is the broker's
+[remote-provider.md](remote-provider.md)). Optional
+[cloud-assisted discovery/enrollment](direct-cloud-enrollment.md) advertises
+the direct server's `server_id` and HTTPS endpoints over that provider link;
+direct session traffic goes from the client to `amux direct serve`.
+The `providerId` the broker assigns is the broker's
 alias for this registration, not a global machine id.
 
 ## The host backend seam
@@ -76,8 +79,7 @@ identity (`server_id`, separate from any client's local `backend_id`), the
 destination-issued credentials, manual paste enrollment, and the wire fixtures
 under `docs/direct/fixtures/v1`.
 
-## Not yet built
+## Network routing
 
-Cloud-assisted enrollment, an authenticated binding between a Harness provider
-alias and a direct `server_id`, publishing direct routes from a catalog, and
-Harness Headscale OIDC login. None of it is implied by the code above.
+Direct access uses a LAN or VPN/tailnet route the operator already has.
+amux does not enroll the machine in that network.

@@ -48,10 +48,12 @@ backend you can run locally or on a remote box.
 amux has a primary daemon plus an optional legacy compatibility relay. The
 native UI talks directly to the authenticated primary daemon. The legacy
 **multiplexer server** relays state and lifecycle operations to that daemon and
-bridges its primary-owned pane streams. (See `docs/client-server.md`.)
+bridges its primary-owned pane streams. The diagram below shows that legacy
+path; the [architecture overview](docs/architecture-overview.md) also maps
+direct HTTPS access for Harness web and Android clients.
 
 ```
-        UI ⇄ Server protocol                     authenticated pane wire
+        Legacy UI ⇄ Server protocol              authenticated pane wire
           (muxproto, line-JSON)                  (pinned TLS + host proof)
 ┌──────────────┐   TLS + token   ┌────────────────────────┐                 ┌───────────────┐
 │   UI client  │ ───────────────▶│   Multiplexer Server   │ ───────────────▶│ Primary daemon│

@@ -4,11 +4,13 @@ amux's native TUI connects directly to the local primary daemon. The optional
 legacy relay and client library implement the architecture below for explicit
 integrations; multi-server selection is not exposed by the default native UI.
 Remote orchestrators normally connect through [provider mode](remote-provider.md).
+Harness web and Android clients can instead use [direct HTTPS](direct-access.md);
+the [architecture overview](architecture-overview.md) maps that separate path.
 
 ```
 ┌────────┐   UI ⇄ Server protocol    ┌────────────────┐   authenticated pane wire   ┌──────────────┐
 │   UI   │ ───── (muxproto) ───────▶ │  Multiplexer   │ ─────────────────────────▶ │ Primary daemon│
-│ client │ ◀──── newline-JSON ────── │     Server     │ ◀───────────────────────── │  (PTY owner)  │
+│ legacy │ ◀──── newline-JSON ────── │     Server     │ ◀───────────────────────── │  (PTY owner)  │
 └────────┘   TLS over unix / TCP     └────────────────┘     pinned TLS + host proof └──────────────┘
   renders        + bearer              protocol bridge                              owns engine /
   vterms                               + epoch routing                              process lifetime
