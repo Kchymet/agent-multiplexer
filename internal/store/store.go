@@ -149,7 +149,8 @@ func Open() (*DB, error) {
 			_ = d.Close()
 			return nil, err
 		}
-		log.Printf("amux: %v. Nothing was imported. Fix or remove the file, then restart amux to import it.", err)
+		log.Printf("amux: %v. Nothing was imported. To import it, fix the file and restart amux "+
+			"before creating any session: a store that has sessions never imports the registry.", err)
 	}
 	if err := d.migrateCoordinatorGrants(); err != nil {
 		_ = d.Close()

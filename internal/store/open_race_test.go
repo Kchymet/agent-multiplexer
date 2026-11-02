@@ -469,7 +469,7 @@ func TestUnreadableLegacyRegistryIsLeftInPlace(t *testing.T) {
 		t.Fatalf("Open with an unreadable registry: %v", err)
 	}
 	db.Close()
-	if !strings.Contains(logs.String(), "Nothing was imported. Fix or remove the file, then restart amux") {
+	if !strings.Contains(logs.String(), "fix the file and restart amux before creating any session") {
 		t.Fatalf("no diagnostic for the unreadable registry; log = %q", logs.String())
 	}
 	if b, err := os.ReadFile(core.RegistryPath()); err != nil || string(b) != `{not json` {
