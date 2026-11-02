@@ -173,6 +173,12 @@ const (
 	CodeCreatedTargetUnavailable    = "created_target_unavailable"
 	CodeCreatedIdentityUnverifiable = "created_identity_unverifiable"
 	CodeDaemonUpgradeRequired       = "daemon_upgrade_required"
+	// created_identity_unavailable (HTTP 503) answers a replay of a recorded
+	// creation whose identities could not be read right now (a transient
+	// daemon failure, or a daemon that no longer supports identities). The
+	// creation already ran and its record is unchanged: retry the SAME
+	// idem_key later. It is never a "did not run" answer, unlike unavailable.
+	CodeCreatedIdentityUnavailable = "created_identity_unavailable"
 )
 
 // OAuth token endpoint errors (RFC 6749 §5.2 body {"error","error_description"}).

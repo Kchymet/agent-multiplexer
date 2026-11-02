@@ -246,9 +246,10 @@ func TestReplayTransientIdentityFailure(t *testing.T) {
 		r.f.mu.Unlock()
 		r.f.noIdentity.Store(fail == nil) // the second round: daemon downgraded
 		code, ec, _ := r.post("wg1", VerbAddAgent, map[string]string{"repos": "api"}, "k")
-		want := CodeUnavailable
-		if fail == nil {
-			want = CodeDaemonUpgradeRequired
+		// Never unavailable (a "did not run" code): the creation ran.
+		want := CodeCreatedIdentityUnavailable
+		if notRunCodes(t)[ec] {
+			t.Fatalf("replay verification failure answered a not-run code %q", ec)
 		}
 		if code != 503 || ec != want {
 			t.Fatalf("sync: %d %s", code, ec)
@@ -379,3 +380,55 @@ func TestCreatedWaitOnlyForSameIncarnation(t *testing.T) {
 }
 
 var _ = strings.Contains
+
+// notRunCodes is the published set of creation failure codes that prove the
+// creation never ran (CreationStatus' doc comment), which clients may answer
+// with a fresh idem_key.
+func notRunCodes(t *testing.T) map[string]bool {
+	t.Helper()
+	src, err := os.ReadFile("wire.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(strings.ReplaceAll(string(src), "//", " ")), " ")
+	const lead = "Only these failed codes prove the creation was never sent (zero effects): "
+	i := strings.Index(text, lead)
+	if i < 0 {
+		t.Fatal("the published not-run list moved")
+	}
+	list := text[i+len(lead):]
+	list = list[:strings.Index(list, ". ")]
+	out := map[string]bool{}
+	for _, c := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if c != "and" {
+			out[c] = true
+		}
+	}
+	return out
+}
+
+// The identity replay codes and daemon_upgrade_required are outside the
+// published not-run set: a client never answers them with a fresh key.
+func TestIdentityCodesAreNotNotRun(t *testing.T) {
+	set := notRunCodes(t)
+	if !set[CodeUnavailable] || !set[CodeNotInCatalog] || len(set) != 8 {
+		t.Fatalf("parsed not-run set = %v", set)
+	}
+	for _, c := range []string{CodeCreatedTargetUnavailable, CodeCreatedIdentityUnverifiable, CodeCreatedIdentityUnavailable, CodeDaemonUpgradeRequired} {
+		if set[c] {
+			t.Fatalf("%s is in the not-run set", c)
+		}
+	}
+}
+
+// Access ending during the identity lookup answers 401, not a 503.
+func TestReplayRevokedDuringLookup(t *testing.T) {
+	r := newIdentityRig(t)
+	r.f.newID = "agent-1"
+	r.post("wg1", VerbAddAgent, map[string]string{"repos": "api"}, "k")
+	r.f.revokeOnRead = func() { r.a.Revoke(clientOf(t, r.a), "test") }
+	code, ec, res := r.post("wg1", VerbAddAgent, map[string]string{"repos": "api"}, "k")
+	if code != 401 || ec != CodeAuthRevoked || res.NewID != "" {
+		t.Fatalf("revoked during lookup: %d %s", code, ec)
+	}
+}

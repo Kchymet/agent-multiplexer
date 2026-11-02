@@ -57,6 +57,8 @@ type fakeBackend struct {
 	identErr   error
 	identReads atomic.Int64
 	lastExpect string
+	// revokeOnRead runs (once) inside SessionIdentities, then the read fails.
+	revokeOnRead func()
 }
 
 // setInc replaces (or with "" deletes) a session's current incarnation.
@@ -126,6 +128,14 @@ func (f *fakeBackend) ApplyIdentity(ctx context.Context, a core.Action, expectRo
 
 func (f *fakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
 	f.identReads.Add(1)
+	f.mu.Lock()
+	revoke := f.revokeOnRead
+	f.revokeOnRead = nil
+	f.mu.Unlock()
+	if revoke != nil {
+		revoke()
+		return nil, context.Canceled
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

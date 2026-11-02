@@ -24,8 +24,10 @@ import (
 //     to a different root: created_target_unavailable, without ids;
 //   - the record has no incarnations (written before they existed, or an
 //     older binary dropped them): created_identity_unverifiable, without ids;
-//   - the identities cannot be read now: 503 unavailable (or
-//     daemon_upgrade_required); the record is left exactly as it was.
+//   - the identities cannot be read now (a transient failure, or a daemon
+//     without identities): 503 created_identity_unavailable, never
+//     unavailable (a "did not run" code); the record is left exactly as it
+//     was and the same request may be retried.
 //
 // Neither new code is a "did not run" answer: the creation did run. A client
 // never retries either automatically with a new idem_key.
@@ -92,26 +94,35 @@ const (
 	identityReadMsg      = "could not confirm the created session right now; the record is unchanged, retry the same request"
 )
 
-// identityReadErr answers a failure to read identities: the record is left
-// untouched and the same request may be retried.
+// identityReadErr answers a failure to read identities for a replay. The
+// creation already ran, so the answer is never unavailable (which clients
+// read as "did not run" and may retry with a fresh key): it is the
+// replay-specific created_identity_unavailable, 503, and the record is left
+// untouched so the same request may be retried.
 func identityReadErr(w http.ResponseWriter, err error) {
+	msg := identityReadMsg
 	if errors.Is(err, hostbackend.ErrUpgradeRequired) {
-		writeErr(w, http.StatusServiceUnavailable, CodeDaemonUpgradeRequired, "the amux daemon must be upgraded before this creation can be confirmed; the record is unchanged")
-		return
+		msg = "the amux daemon no longer supports session identities, so this recorded creation cannot be confirmed; upgrade and restart the daemon, then retry the same request (the record is unchanged)"
 	}
-	writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, identityReadMsg)
+	writeErr(w, http.StatusServiceUnavailable, CodeCreatedIdentityUnavailable, msg)
 }
 
 // replayCreated answers a synchronous replay of a successful creation.
 func (s *Server) replayCreated(w http.ResponseWriter, l *Lease, rec *idemRecord) {
+	if code := l.AuthEnded(); code != "" {
+		writeErr(w, http.StatusUnauthorized, code, "access ended")
+		return
+	}
 	verdict, err := s.verifyCreated(l.Context(), *rec)
+	// Access may have ended during the lookup (which then fails): that is the
+	// answer, not a misleading 503.
+	if code := l.AuthEnded(); code != "" {
+		writeErr(w, http.StatusUnauthorized, code, "access ended")
+		return
+	}
 	if err != nil {
 		s.cfg.Logf("direct: verify created session: %v", err)
 		identityReadErr(w, err)
-		return
-	}
-	if code := l.AuthEnded(); code != "" {
-		writeErr(w, http.StatusUnauthorized, code, "access ended")
 		return
 	}
 	switch verdict {
@@ -131,7 +142,15 @@ func (s *Server) replayCreated(w http.ResponseWriter, l *Lease, rec *idemRecord)
 func (s *Server) writeCreation(w http.ResponseWriter, l *Lease, status int, v creationView) {
 	st := statusOf(v, s.cfg.Now())
 	if st.Phase == CreatePhaseReady {
+		if code := l.AuthEnded(); code != "" {
+			writeErr(w, http.StatusUnauthorized, code, "access ended; the creation is unaffected — poll its status with a fresh token")
+			return
+		}
 		verdict, err := s.verifyCreated(l.Context(), v.rec)
+		if code := l.AuthEnded(); code != "" {
+			writeErr(w, http.StatusUnauthorized, code, "access ended; the creation is unaffected — poll its status with a fresh token")
+			return
+		}
 		if err != nil {
 			s.cfg.Logf("direct: verify created session: %v", err)
 			identityReadErr(w, err)
