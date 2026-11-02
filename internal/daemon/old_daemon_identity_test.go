@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -237,5 +238,56 @@ func TestOldDaemonIdentityCompat(t *testing.T) {
 	}
 	if after := roots(); after != before {
 		t.Fatalf("the old daemon gained %d workgroups", after-before)
+	}
+
+	// Reconnect across versions: one backend and one direct server whose
+	// connections go to a current daemon, then the old one (a downgrade),
+	// then the current one again (an upgrade). Each fresh connection
+	// negotiates, so creation follows the daemon actually reached.
+	current := daemon.NewLiveHostForTest(t)
+	for k, v := range env { // NewLiveHostForTest isolated HOME; restore ours
+		t.Setenv(k, v)
+	}
+	var useOld atomic.Bool
+	switching := hostbackend.WithDialer(func(ctx context.Context) (hostbackend.Conn, error) {
+		if useOld.Load() {
+			return daemon.DialContext(ctx)
+		}
+		return current.Dial(ctx)
+	})
+	sw, err := direct.NewServer(direct.Config{Authority: auth, Backend: direct.HostBackend{H: switching, Dial: current.Dial,
+		Probe: func(context.Context) []direct.CatalogHarness {
+			return []direct.CatalogHarness{{Name: "claude"}, {Name: "codex"}}
+		}},
+		Endpoints: []string{"https://" + e2eHost}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv = sw
+	ws := core.Action{Action: core.ActionCreateWorkspace, Fields: map[string]string{"name": "reconnect", "repos": ""}}
+	for i, old := range []bool{false, true, false} {
+		useOld.Store(old)
+		err := switching.CreationIdentity(ctx)
+		_, b := call("GET", direct.PathCapabilities, nil)
+		upgrade := strings.Contains(b, `"daemon_upgrade_required":true`)
+		if old {
+			if !errors.Is(err, hostbackend.ErrUpgradeRequired) || !upgrade {
+				t.Fatalf("step %d (old daemon): negotiation %v, capabilities %s", i, err, b)
+			}
+			if _, err := switching.ApplyIdentity(ctx, ws, ""); !errors.Is(err, hostbackend.ErrUpgradeRequired) {
+				t.Fatalf("step %d: create on the old daemon = %v", i, err)
+			}
+			continue
+		}
+		if err != nil || upgrade {
+			t.Fatalf("step %d (current daemon): negotiation %v, capabilities %s", i, err, b)
+		}
+		ident, err := switching.ApplyIdentity(ctx, ws, "")
+		if err != nil || !ident.Complete() {
+			t.Fatalf("step %d: create on the current daemon = %+v %v", i, ident, err)
+		}
+	}
+	if after := roots(); after != before {
+		t.Fatalf("the old daemon gained %d workgroups during the reconnects", after-before)
 	}
 }
