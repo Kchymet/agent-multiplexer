@@ -58,22 +58,49 @@ lifetime.
 A client treats a creation as made **only** on `phase == "ready"`. A
 `CreationStatus` never contains `ok`.
 
-`failed` codes:
+`failed` codes fall in three groups. `uncertain: false` does **not** mean
+"no effects": only the first group proves the creation was never sent.
 
-* `rejected` — the daemon answered with a refusal (reproduced generically).
-* `unavailable` — proven not sent: the daemon dial failed, the dispatch marker
-  could not be recorded, or the server stopped before sending.
-* `auth.revoked` / `auth.expired` / `denied` — access ended while queued; did
-  not run.
+**Did not run — zero effects proven** (recorded only before the dispatch
+marker; any of these after dispatch becomes `idem_ambiguous`). A client may
+start over with a fresh `idem_key`:
+
+* `unavailable` — the daemon dial failed, the dispatch marker could not be
+  recorded, or the server stopped before sending.
+* `auth.revoked` / `auth.expired` / `denied` — access ended while queued.
 * `not_found` / `archived` / `unsupported_verb` / `not_in_catalog` — the
   re-check before dispatch refused it (scope, archive, capability, catalog or
-  ceiling changed while queued); did not run.
+  ceiling changed while queued).
+
+**Known reply, effects may exist:**
+
+* `rejected` — the daemon answered not-OK (reproduced generically). That is a
+  known answer, **not known zero effects**: the daemon may have created the
+  session and then failed to start it, or created a workgroup root or
+  worktrees before failing. Never retry it automatically with a fresh
+  `idem_key`; keep the key and check the machine's session list first.
+
+**Unknown:**
+
 * `idem_ambiguous` with `uncertain: true` — sent, outcome unknown: the
   transport failed after sending, the 10-minute bound or the grant's absolute
   expiry ended the wait, access was revoked mid-creation, the daemon answered
   success without an id, or the server restarted after sending. **The daemon
   may well have created it.** It never runs again under its key; check the
   session list before retrying with a new key.
+
+**Errors on the POST itself** (either mode). These answer before anything is
+recorded or sent, so nothing ran: `400 bad_request`, `403 denied`,
+`404 not_found`, `409 archived`, `409 unsupported_verb`,
+`422 not_in_catalog`, `429 rate_limited`, `409 capacity_exhausted`,
+`503 unavailable`. Not proof of not-run: `422 rejected`, `409 idem_ambiguous`,
+`409 idem_in_progress` (it is running), `422 idem_conflict` (the key already
+names another request), and **any `401`**. A sync creation revoked after
+dispatch answers `401 auth.revoked` with an unknown outcome, and an async POST
+answers `401` when the reader's own token ended while the recorded creation
+continues. Re-authenticate and re-POST the same key; the replay is
+authoritative. After revocation the grant's records are gone, so no retry can
+clear an earlier uncertainty — check the machine.
 
 ## Identity and recovery
 
