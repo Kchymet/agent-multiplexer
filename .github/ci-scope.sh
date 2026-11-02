@@ -21,10 +21,15 @@
 # classified: a file moved out of docs/ into code counts as code.
 set -uo pipefail
 
-# Paths under docs/ that tests read. These are test inputs, not prose.
+# Paths under docs/ that tests actually read. These are test inputs, not prose.
+# Keep this to real reads (grep the tests for "../../docs/"): the rest of
+# docs/evidence/ is explanatory READMEs, checkpoints and captures no code reads.
+#   always-pty.raw   internal/{daemon,termmodes,vterm} tests (os.ReadFile)
+#   direct/fixtures  internal/direct/*fixtures_test.go (whole v1, cloud-v1 and
+#                    ticket-v1 directories, checked against their SHA256SUMS)
 ci_inputs() {
   case "$1" in
-    docs/evidence/* | docs/direct/fixtures/*) return 0 ;;
+    docs/evidence/embedded-scroll/always-pty.raw | docs/direct/fixtures/*) return 0 ;;
     # Embedded into the binary via go:embed (internal/skills/skills.go).
     internal/skills/library/*) return 0 ;;
   esac

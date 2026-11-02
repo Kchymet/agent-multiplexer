@@ -17,8 +17,12 @@ expect() {
   rm -rf "$work/repo"
   git init -q "$work/repo"
   mkdir -p "$work/repo/docs/guide" "$work/repo/docs/evidence/x" "$work/repo/docs/direct/fixtures/v1" \
+    "$work/repo/docs/evidence/embedded-scroll" "$work/repo/docs/evidence/accounts-popup" \
+    "$work/repo/docs/evidence/auth-follow-central" \
     "$work/repo/internal/skills/library/s" "$work/repo/cmd" "$work/repo/.github/workflows"
   for f in README.md docs/a.md docs/guide/b.md docs/evidence/x/raw docs/direct/fixtures/v1/f.json \
+    docs/evidence/embedded-scroll/always-pty.raw docs/evidence/embedded-scroll/README.md \
+    docs/evidence/accounts-popup/README.md docs/evidence/auth-follow-central/CHECKPOINT.md \
     internal/skills/library/s/SKILL.md cmd/main.go go.mod .github/workflows/ci.yml CONTRIBUTING.md; do
     echo base >"$work/repo/$f"
   done
@@ -40,7 +44,16 @@ expect "code only"              true  'echo x >>cmd/main.go'
 expect "config"                 true  'echo x >>go.mod'
 expect "workflow"               true  'echo x >>.github/workflows/ci.yml'
 expect "root prose not README"  true  'echo x >>CONTRIBUTING.md'
-expect "docs evidence fixture"  true  'echo x >>docs/evidence/x/raw'
+# docs/evidence/ is mostly prose and captures no code reads; only the raw PTY
+# capture the terminal tests replay is a CI input.
+expect "evidence README"        false 'echo x >>docs/evidence/accounts-popup/README.md'
+expect "evidence README by fixture" false 'echo x >>docs/evidence/embedded-scroll/README.md'
+expect "evidence CHECKPOINT"    false 'echo x >>docs/evidence/auth-follow-central/CHECKPOINT.md'
+expect "unread evidence capture" false 'echo x >>docs/evidence/x/raw'
+expect "raw fixture tests read" true  'echo x >>docs/evidence/embedded-scroll/always-pty.raw'
+expect "raw fixture deleted"    true  'git rm -q docs/evidence/embedded-scroll/always-pty.raw'
+expect "raw fixture renamed in docs" true 'git mv docs/evidence/embedded-scroll/always-pty.raw docs/evidence/x/pty.raw'
+expect "README + raw fixture"   true  'echo x >>docs/evidence/embedded-scroll/README.md; echo x >>docs/evidence/embedded-scroll/always-pty.raw'
 expect "direct fixture"         true  'echo x >>docs/direct/fixtures/v1/f.json'
 expect "embedded skill"         true  'echo x >>internal/skills/library/s/SKILL.md'
 expect "rename docs to code"    true  'git mv docs/a.md cmd/a.go'

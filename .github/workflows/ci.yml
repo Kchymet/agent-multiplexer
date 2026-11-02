@@ -12,8 +12,9 @@ on:
 
 jobs:
   # Lightweight classifier. When every changed path is documentation prose
-  # (README files, or docs/ outside the test inputs under docs/evidence/ and
-  # docs/direct/fixtures/), the expensive jobs below are skipped; a skipped
+  # (README files, or docs/ outside the files tests read: the raw PTY capture
+  # docs/evidence/embedded-scroll/always-pty.raw and docs/direct/fixtures/),
+  # the expensive jobs below are skipped; a skipped
   # job reports success, so no check is left pending. Anything else runs
   # everything, and so does any failure of this job (even after the verdict
   # was written, e.g. its behaviour tests failing). See .github/ci-scope.sh.
