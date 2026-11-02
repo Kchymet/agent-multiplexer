@@ -285,8 +285,8 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec, 
 			// prepared for the session that will never exist. The id is still
 			// reserved here; records keyed by it alone are removed only if no
 			// row has it (another writer that does not reserve could own them).
-			owned := !errors.Is(err, store.ErrSessionExists) && rowAbsent(db, a.ID)
-			if cleanupErr := removePreparedAgent(ctx, db, a, owned); cleanupErr != nil {
+			owned, removeTree := preparedOwnership(db, a)
+			if cleanupErr := removePreparedAgent(ctx, db, a, owned, removeTree); cleanupErr != nil {
 				err = errors.Join(err, fmt.Errorf("clean up prepared agent %s: %w", a.ID, cleanupErr))
 			}
 		}
@@ -353,7 +353,7 @@ func checkRootIdentity(db *store.DB, rootID, expect string) error {
 // when owned: the caller still holds the id's reservation and no row has the
 // id. Otherwise they are left in place, and RemoveCheckout (which follows a
 // layout record) is not used, so nothing another session owns is touched.
-func removePreparedAgent(ctx context.Context, db *store.DB, a store.Session, owned bool) error {
+func removePreparedAgent(ctx context.Context, db *store.DB, a store.Session, owned, removeTree bool) error {
 	managedRoot, err := sessionStorageRoot(a.Dir)
 	if err != nil {
 		return err
@@ -376,10 +376,36 @@ func removePreparedAgent(ctx context.Context, db *store.DB, a store.Session, own
 			cfghome.Forget(spec)
 		}
 	}
-	if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
-		errs = append(errs, fmt.Errorf("remove agent directory: %w", err))
+	if removeTree {
+		if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
+			errs = append(errs, fmt.Errorf("remove agent directory: %w", err))
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// preparedOwnership decides what a refused creation of a may remove, from
+// the row (if any) that now has its id. The caller still holds the id's
+// reservation.
+//   - No row: everything prepared is this call's (owned, and the tree).
+//   - A row whose Dir is exactly a.Dir: a writer that does not reserve ids (an
+//     older binary's add-agent, whose MkdirAll adopts an existing directory)
+//     now owns the directory; nothing is removed.
+//   - A row elsewhere: only this call's exclusively created tree is removed;
+//     the id-keyed records may be that row's.
+//   - The row cannot be read: nothing is removed.
+func preparedOwnership(db *store.DB, a store.Session) (owned, removeTree bool) {
+	row, found, err := db.GetSession(a.ID)
+	switch {
+	case err != nil:
+		return false, false
+	case !found:
+		return true, true
+	case filepath.Clean(row.Dir) == filepath.Clean(a.Dir):
+		return false, false
+	default:
+		return false, true
+	}
 }
 
 // ensureConfigHome seeds the agent's private harness configuration — a copy of

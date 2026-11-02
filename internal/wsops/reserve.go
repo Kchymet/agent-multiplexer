@@ -72,14 +72,3 @@ func reserveID(db *store.DB) (string, func(), error) {
 	}
 	return "", nil, fmt.Errorf("could not reserve a new session id")
 }
-
-// rowAbsent reports, conservatively, that no session row has id: a read
-// failure counts as present.
-func rowAbsent(db *store.DB, id string) bool {
-	cur, err := db.SessionIdentities([]string{id})
-	if err != nil {
-		return false
-	}
-	_, taken := cur[id]
-	return !taken
-}

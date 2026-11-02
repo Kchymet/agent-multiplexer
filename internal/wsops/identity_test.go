@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"amux/internal/cfghome"
 	"amux/internal/core"
 	"amux/internal/store"
 )
@@ -17,6 +18,16 @@ func identityFixture(t *testing.T) (string, store.Identity) {
 	t.Helper()
 	t.Setenv("AMUX_GIT_TRUST_LOCAL_SOURCE", "1")
 	isolateStore(t)
+	// A codex template, so each member's config seed manifest (keyed by its
+	// id alone) is written and its survival can be checked.
+	tmpl := filepath.Join(os.Getenv("HOME"), ".codex")
+	t.Setenv("CODEX_HOME", tmpl)
+	if err := os.MkdirAll(tmpl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpl, "config.toml"), []byte("model = \"m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	gitDir := bareRepoWithCommit(t)
 	db, err := store.Open()
 	if err != nil {
@@ -252,10 +263,13 @@ func TestSameIDAcrossRootsNeverShared(t *testing.T) {
 	if !ok {
 		t.Fatal("second session missing")
 	}
-	for _, p := range []string{s.Dir, filepath.Join(s.Dir, "acme", ".git"), gitLayoutPath("next", "acme")} {
+	for _, p := range []string{s.Dir, filepath.Join(s.Dir, "acme", ".git"), gitLayoutPath("next", "acme"), manifestOf("next")} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("second session's %s removed: %v", p, err)
 		}
+	}
+	if _, err := os.Lstat(manifestOf("dup")); !os.IsNotExist(err) {
+		t.Fatalf("refused creation's own config manifest survived: %v", err)
 	}
 	if _, err := os.Lstat(gitLayoutPath("dup", "acme")); !os.IsNotExist(err) {
 		t.Fatalf("refused creation's own layout record survived: %v", err)
@@ -265,5 +279,44 @@ func TestSameIDAcrossRootsNeverShared(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(reservationDir()); len(entries) != 0 {
 		t.Fatalf("reservations leaked: %d", len(entries))
+	}
+}
+
+// manifestOf is the config seed manifest of a codex member (cfghome keys it by
+// the session id alone).
+func manifestOf(id string) string { return filepath.Join(cfghome.StateDir(), id+".codex.json") }
+
+// A writer that does not reserve ids (an older binary's add-agent: MkdirAll
+// adopts an existing directory, then upserts its row) wins the id with
+// exactly this creation's directory. The refused creation removes nothing:
+// the winner's row, files and id-keyed records survive.
+func TestRefusalPreservesDirAdoptedByNonReservingWinner(t *testing.T) {
+	rootID, root := identityFixture(t)
+	newAgentID = func(*store.DB) string { return "old" }
+	t.Cleanup(func() { newAgentID = func(db *store.DB) string { return db.NewID() } })
+	marker := ""
+	beforeInsert = func(a store.Session) {
+		db, _ := store.Open()
+		defer db.Close()
+		if err := db.PutSession(store.Session{ID: a.ID, RootID: rootID, Agent: "codex", Dir: a.Dir, Repo: "acme"}); err != nil {
+			t.Error(err)
+		}
+		marker = filepath.Join(a.Dir, "winner-work")
+		os.WriteFile(marker, []byte("x"), 0o644)
+	}
+	t.Cleanup(func() { beforeInsert = func(store.Session) {} })
+	if _, err := ApplyIdentity(context.Background(), addAgentAction(rootID), root.Incarnation); !errors.Is(err, store.ErrSessionExists) {
+		t.Fatalf("loser = %v", err)
+	}
+	dir := store.AgentDir(rootID, "old")
+	for _, p := range []string{marker, filepath.Join(dir, "acme", ".git"), gitLayoutPath("old", "acme"), manifestOf("old")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("winner's %s removed: %v", p, err)
+		}
+	}
+	db, _ := store.Open()
+	defer db.Close()
+	if s, ok, _ := db.GetSession("old"); !ok || s.Dir != dir {
+		t.Fatalf("winner row = %+v %v", s, ok)
 	}
 }
