@@ -118,14 +118,17 @@ session reused the id, the replay points at the new session. A deterministic
 incarnation identity is being designed separately; #299 makes no protocol
 change for it.
 
-### Gap: machine creation status
+### Machine creation status
 
 Harness wraps machine creation asynchronously, because fetching repos and
 creating worktrees can be slow. Direct creation is synchronous under the
-60-second execution bound, so a creation slower than that ends
-`idem_ambiguous`. It never runs again under its key; the client re-reads the
-inventory. Matching the cloud would need an asynchronous creation-status
-route. That is not built.
+60-second execution bound by default; a client that sends `"async": true`
+gets the same queued → preparing → ready | failed flow from
+`GET /direct/v1/creations/{creation_id}`, with no Harness traffic
+([direct-async-create.md](direct-async-create.md)). Remaining limit: a creation
+that outlives the 10-minute bound, or whose server restarted after sending, is
+reported `uncertain` (it may exist) because the daemon has no creation request
+id to reconcile it.
 
 ### Panes: not a machine-session workflow
 

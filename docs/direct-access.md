@@ -770,6 +770,14 @@ again under its key:
 
 All of these answer `idem_ambiguous`.
 
+**Asynchronous creation.** A creation that may outlive the 60-second
+synchronous bound (a large repo fetch or worktree preparation) can be sent
+with `"async": true`: it answers `202` with a `creation_id` at once and is
+followed with `GET /direct/v1/creations/{creation_id}` (queued → preparing →
+ready | failed, long-pollable). `async_create` in capabilities advertises it.
+Clients that do not send `async` are unaffected. See
+[direct-async-create.md](direct-async-create.md).
+
 **Per-session caps.** Inventory rows add `goal`, `permission`,
 `start`, `rename`, `archive`, `unarchive` and `add_agent`. Each is omitted
 when false, so a `read,steer` grant sees exactly the v1 fixture bytes

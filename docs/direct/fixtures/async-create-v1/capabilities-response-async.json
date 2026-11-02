@@ -1,0 +1,55 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "permissions": [
+    "read",
+    "create"
+  ],
+  "resource_scope": {
+    "kind": "workgroups",
+    "workgroups": [
+      "771951"
+    ]
+  },
+  "server_verbs": [
+    "prompt",
+    "stop",
+    "interject",
+    "goal",
+    "permission",
+    "start",
+    "rename",
+    "archive",
+    "unarchive",
+    "add-agent",
+    "new-workgroup",
+    "new-workgroup-empty"
+  ],
+  "verbs": [
+    "add-agent"
+  ],
+  "create_workgroup": false,
+  "catalog": {
+    "harnesses": [
+      {
+        "name": "codex",
+        "version": "0.9.0"
+      }
+    ],
+    "identity_modes": [
+      "machine"
+    ],
+    "modes": [
+      "task",
+      "interactive"
+    ],
+    "workgroups": [
+      {
+        "id": "771951",
+        "repos": [
+          "agent-multiplexer"
+        ]
+      }
+    ]
+  },
+  "async_create": true
+}
