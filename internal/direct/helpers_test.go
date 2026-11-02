@@ -43,7 +43,19 @@ type fakeBackend struct {
 	newID         string // the id Apply reports (creation verbs)
 	// gate, when set, holds Apply (after it counts as dispatched) until a value
 	// is received or ctx ends: a slow creation the test releases explicitly.
-	gate chan struct{}
+	gate         chan struct{}
+	accounts     hp.AccountSnapshot
+	accountCalls atomic.Int64
+}
+
+func (f *fakeBackend) Accounts(ctx context.Context) (hp.AccountSnapshot, error) {
+	f.accountCalls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return hp.AccountSnapshot{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.accounts, nil
 }
 
 func (f *fakeBackend) Catalog(ctx context.Context) (MachineCatalog, error) {

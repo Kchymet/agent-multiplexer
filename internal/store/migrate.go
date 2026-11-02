@@ -2,11 +2,16 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"amux/internal/accounts"
 	"amux/internal/core"
 )
 
@@ -102,51 +107,149 @@ type legacy struct {
 	} `json:"workspaces"`
 }
 
-// importLegacy one-time imports the old JSON registry into the DB, then renames
-// the JSON aside as a backup. It is a no-op if the DB already has sessions or no
-// registry file exists. Each old (multi-repo, single-agent) workspace becomes a
-// root container plus one sub-session that preserves its dir + claude session.
-func (d *DB) importLegacy() error {
-	var n int
-	if err := d.sql.QueryRow(`SELECT count(*) FROM sessions`).Scan(&n); err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil // already have sessions; don't re-import
-	}
-	regPath := core.RegistryPath()
-	b, err := os.ReadFile(regPath)
-	if err != nil {
-		return nil // no legacy registry
-	}
-	var lg legacy
-	if err := json.Unmarshal(b, &lg); err != nil {
-		return err
-	}
+// LegacyRegistryError reports a legacy JSON registry that could not be parsed.
+// Nothing is imported and the file is left in place. Open logs it rather than
+// failing, and the next process's first Open tries the file again.
+type LegacyRegistryError struct {
+	Path string
+	Err  error
+}
 
-	for _, r := range lg.Repos {
-		_ = d.PutRepo(Repo{Name: r.Name, Source: r.Source, GitDir: r.GitDir})
+func (e *LegacyRegistryError) Error() string {
+	return fmt.Sprintf("legacy registry %s: %v", e.Path, e.Err)
+}
+
+func (e *LegacyRegistryError) Unwrap() error { return e.Err }
+
+// legacyRegistryImportVersion is the marker row importLegacy commits together
+// with the imported rows.
+const legacyRegistryImportVersion = 1
+
+// importLegacy one-time imports the old JSON registry into the DB, then renames
+// the JSON aside as a backup. It never imports into a store that already has
+// sessions. Each old (multi-repo, single-agent) workspace becomes a root
+// container plus one sub-session that preserves its dir + claude session.
+//
+// The import is one write transaction: it rechecks the marker and the empty
+// store under the writer reservation, reads the file, writes every row and the
+// marker, and commits them together, so racing first opens (in any process)
+// import at most once and nobody sees a partial import.
+//
+// Error handling separates the import from the housekeeping after it:
+//   - Before the commit, any failure to read the file or write a row is
+//     returned and rolls the whole import back. Open fails, and the file stays
+//     in place for the next Open, so the legacy data is never silently lost.
+//     The exception is a file that cannot be parsed: LegacyRegistryError, which
+//     Open reports without failing (see Open).
+//   - After the commit, the store is complete and the marker prevents a second
+//     import. Moving the file aside is only housekeeping, so a failure (or a
+//     crash before it) is logged with what to do, never returned. Otherwise a
+//     persistent rename error would make every Open fail on a complete store.
+//     Each process's first Open retries the move while the file remains.
+func (d *DB) importLegacy() error {
+	regPath := core.RegistryPath()
+	if _, err := os.Stat(regPath); errors.Is(err, fs.ErrNotExist) {
+		// The file is only moved after an import has committed, so there is
+		// nothing to import and nothing to clean up. Any other Stat error
+		// falls through: the marker decides whether it matters.
+		return nil
 	}
+	committed := false
+	if err := d.writeTx(func(q querier) error {
+		var marked, sessions int
+		if err := q.QueryRow(`SELECT count(*) FROM legacy_registry_import`).Scan(&marked); err != nil {
+			return err
+		}
+		if marked > 0 {
+			committed = true // imported earlier; only the move is left
+			return nil
+		}
+		if err := q.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
+			return err
+		}
+		if sessions > 0 {
+			return nil // already have sessions; don't import into them
+		}
+		b, err := os.ReadFile(regPath)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // moved by an opener that committed before we were let in
+		}
+		if err != nil {
+			return err
+		}
+		var lg legacy
+		if err := json.Unmarshal(b, &lg); err != nil {
+			return &LegacyRegistryError{Path: regPath, Err: err}
+		}
+		if err := importLegacyRows(q, lg); err != nil {
+			return err
+		}
+		if _, err := q.Exec(`INSERT INTO legacy_registry_import(version) VALUES(?)`, legacyRegistryImportVersion); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}); err != nil || !committed {
+		return err
+	}
+	// Keep the registry as a backup, don't delete it. Another opener may have
+	// moved it already.
+	backup := regPath + ".migrated"
+	if err := os.Rename(regPath, backup); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("amux: the legacy registry %s is imported, but moving it to %s failed: %v. "+
+			"The store is complete and will not import it again. amux retries the move "+
+			"when it next starts; to stop this message, move or delete the file yourself.",
+			regPath, backup, err)
+	}
+	return nil
+}
+
+func importLegacyRows(q querier, lg legacy) error {
+	for _, r := range lg.Repos {
+		if err := putRepoRow(q, Repo{Name: r.Name, Source: r.Source, GitDir: r.GitDir}); err != nil {
+			return err
+		}
+	}
+	var sessions []Session
 	for _, w := range lg.Workspaces {
 		mode := NormalizeMode(w.Mode)
 		// root container
-		_ = d.PutSession(Session{
+		root := Session{
 			ID: w.ID, RootID: "", Name: w.Name, Mode: mode,
 			Dir: w.Dir, Created: w.Created, Scope: ScopeWork,
-		})
+		}
+		if err := putSessionRow(q, root); err != nil {
+			return err
+		}
+		id, err := newIDIn(q)
+		if err != nil {
+			return err
+		}
 		// one sub preserving the legacy combined dir + claude session. An empty
 		// agent is left empty (not defaulted): every reader canonicalizes "" to the
 		// default kind via the agent registry, so the persistence layer needn't know
 		// the default's spelling.
-		_ = d.PutSession(Session{
-			ID: d.NewID(), RootID: w.ID, Agent: w.Agent, Mode: mode,
+		sub := Session{
+			ID: id, RootID: w.ID, Agent: w.Agent, Mode: mode,
 			Repo: strings.Join(w.Repos, ","), Dir: w.Dir,
 			ClaudeID: w.SessionID, Prompt: w.InitialPrompt, Created: w.Created,
-		})
+		}
+		if err := putSessionRow(q, sub); err != nil {
+			return err
+		}
+		sessions = append(sessions, root, sub)
 	}
-
-	_ = os.Rename(regPath, regPath+".migrated") // keep as backup, don't delete
-	return nil
+	// Bind accounts before the rows commit, as PutSession does. If the
+	// transaction then rolls back, the bindings name sessions that do not exist,
+	// which nothing reads; the retry binds the sessions it actually writes.
+	bindings := make(map[string]string, len(sessions))
+	for _, s := range sessions {
+		bindings[s.ID] = s.Agent
+	}
+	if len(bindings) == 0 {
+		return nil
+	}
+	return accounts.BindAll(bindings)
 }
 
 func defaultStr(v, def string) string {

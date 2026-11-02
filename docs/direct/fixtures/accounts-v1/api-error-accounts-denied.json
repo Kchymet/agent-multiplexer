@@ -1,0 +1,4 @@
+{
+  "code": "denied",
+  "error": "machine account status needs an all-sessions client"
+}
