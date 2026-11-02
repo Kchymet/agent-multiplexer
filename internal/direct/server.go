@@ -48,6 +48,7 @@ type Server struct {
 	mux       *http.ServeMux
 	limiterMu sync.Mutex
 	failures  map[string][]time.Time // per source address
+	jobs      *creationJobs          // async creations (creations.go)
 }
 
 // NewServer validates the configuration and builds the handler.
@@ -73,7 +74,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	s := &Server{cfg: cfg, hosts: map[string]string{}, origins: map[string]bool{}, failures: map[string][]time.Time{}}
+	s := &Server{cfg: cfg, hosts: map[string]string{}, origins: map[string]bool{}, failures: map[string][]time.Time{}, jobs: newCreationJobs()}
 	for i, e := range cfg.Endpoints {
 		c, err := CanonicalOrigin(e, false)
 		if err != nil {
@@ -106,6 +107,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST "+PathSession+"/{sid}/actions", s.actions)
 	mux.HandleFunc("POST "+PathWorkgroups, s.createWorkgroup)
 	mux.HandleFunc("GET "+PathCapabilities, s.capabilities)
+	mux.HandleFunc("GET "+PathCreations+"/{cid}", s.creationStatus)
 	s.mux = mux
 	return s, nil
 }
@@ -709,7 +711,11 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 	// The fresh destination check: scope (the console is never in scope),
 	// archive state, the row's own capability and, for add-agent, the machine
 	// catalog and the workgroup's current repo ceiling.
-	precheck := func() ([]string, error) {
+	if req.Async && req.Verb != VerbAddAgent {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "async applies only to creation verbs")
+		return
+	}
+	precheck := func(l *Lease) ([]string, error) {
 		rows, err := targetSnapshot(l, s.cfg.Backend, sid)
 		if err != nil {
 			return nil, err
@@ -761,7 +767,7 @@ func (s *Server) createWorkgroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid fields for "+req.Verb)
 		return
 	}
-	s.runAction(w, l, req, actionHash("", req), act, func() ([]string, error) { return nil, s.checkCatalog(l, act, "") })
+	s.runAction(w, l, req, actionHash("", req), act, func(l *Lease) ([]string, error) { return nil, s.checkCatalog(l, act, "") })
 }
 
 // checkCatalog validates a creation action against the machine's current
@@ -797,25 +803,22 @@ func (s *Server) checkCatalog(l *Lease, act core.Action, root string) error {
 // runAction is the shared idempotent execution path: peek the key, run the
 // fresh destination precheck, durably record the key, re-check the lease, and
 // only then hand the action to the daemon under the bounded execution context.
-func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func() ([]string, error)) {
+// With req.Async (creation verbs only) it runs as a background job instead
+// (runCreationAsync); the synchronous path is unchanged.
+func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func(*Lease) ([]string, error)) {
+	if req.Async {
+		s.runCreationAsync(w, l, req, bodyHash, act, precheck)
+		return
+	}
 	if out, rec, err := s.cfg.Authority.BeginAction(l, req.IdemKey, bodyHash, true); err != nil {
 		writeAuthErr(w, err)
 		return
 	} else if s.idemReply(w, out, rec) {
 		return
 	}
-	affected, err := precheck()
+	affected, err := precheck(l)
 	if err != nil {
-		switch {
-		case errors.Is(err, errArchived):
-			writeErr(w, http.StatusConflict, CodeArchived, "the session or its workgroup is archived (or, for unarchive, not archived)")
-		case errors.Is(err, errUnsupported):
-			writeErr(w, http.StatusConflict, CodeUnsupportedVerb, "this session cannot serve "+req.Verb)
-		case errors.Is(err, errNotInCatalog):
-			writeErr(w, http.StatusUnprocessableEntity, CodeNotInCatalog, "a harness or repository is not in this machine's creation catalog for this target")
-		default:
-			s.writeBackendErr(w, l, err)
-		}
+		s.writePrecheckErr(w, l, req.Verb, err)
 		return
 	}
 	if code := l.AuthEnded(); code != "" { // expiry before execution still denies
@@ -823,17 +826,7 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 		return
 	}
 	out, rec, err := s.cfg.Authority.BeginAction(l, req.IdemKey, bodyHash, false)
-	switch {
-	case errors.Is(err, errAuthRevoked):
-		writeAuthErr(w, err)
-		return
-	case errors.Is(err, errCapacity):
-		// Not a temporary throttle: retrying will not help. The client must
-		// enroll again (a new grant starts with an empty record set).
-		writeErr(w, http.StatusConflict, CodeCapacity, err.Error())
-		return
-	case err != nil:
-		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not record the action; it was not executed")
+	if s.writeBeginErr(w, err) {
 		return
 	}
 	if s.idemReply(w, out, rec) {
@@ -849,6 +842,60 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 	exec, cancel := l.ExecContext(actionExecLimit)
 	newID, err := s.cfg.Backend.Apply(exec, act)
 	cancel()
+	status, body := s.settle(l, req.IdemKey, req.Verb, act, affected, newID, err)
+	writeJSON(w, status, body)
+}
+
+// writeBeginErr answers a failure to record an action's key; it reports
+// whether it did. Nothing ran.
+func (s *Server) writeBeginErr(w http.ResponseWriter, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errAuthRevoked):
+		writeAuthErr(w, err)
+	case errors.Is(err, errCapacity):
+		// Not a temporary throttle: retrying will not help. The client must
+		// enroll again (a new grant starts with an empty record set).
+		writeErr(w, http.StatusConflict, CodeCapacity, err.Error())
+	default:
+		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not record the action; it was not executed")
+	}
+	return true
+}
+
+// precheckCode maps a precheck refusal to its wire code, status and text.
+func precheckCode(l *Lease, verb string, err error) (int, string, string) {
+	switch {
+	case errors.Is(err, errArchived):
+		return http.StatusConflict, CodeArchived, "the session or its workgroup is archived (or, for unarchive, not archived)"
+	case errors.Is(err, errUnsupported):
+		return http.StatusConflict, CodeUnsupportedVerb, "this session cannot serve " + verb
+	case errors.Is(err, errNotInCatalog):
+		return http.StatusUnprocessableEntity, CodeNotInCatalog, "a harness or repository is not in this machine's creation catalog for this target"
+	case l.Revoked():
+		return http.StatusUnauthorized, CodeAuthRevoked, "access revoked"
+	case l.Expired() || errors.Is(context.Cause(l.Context()), errGrantEnded):
+		return http.StatusUnauthorized, CodeAuthExpired, "access expired"
+	case errors.Is(err, errNotFound):
+		return http.StatusNotFound, CodeNotFound, "no such session"
+	case errors.Is(err, hostbackend.ErrUnavailable):
+		return http.StatusServiceUnavailable, CodeUnavailable, "the amux daemon is not reachable"
+	}
+	return http.StatusServiceUnavailable, CodeUnavailable, "the amux daemon could not answer"
+}
+
+func (s *Server) writePrecheckErr(w http.ResponseWriter, l *Lease, verb string, err error) {
+	status, code, msg := precheckCode(l, verb, err)
+	if code == CodeUnavailable {
+		s.cfg.Logf("direct: backend: %v", err)
+	}
+	writeErr(w, status, code, msg)
+}
+
+// settle classifies one finished daemon call, records it under key and
+// returns the synchronous answer.
+func (s *Server) settle(l *Lease, key, verb string, act core.Action, affected []string, newID string, err error) (int, any) {
 	creates := core.DescriptorFor(act.Action).CreatesSession
 	var rejected *daemon.RejectedError
 	switch {
@@ -857,36 +904,38 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 		if act.Action == core.ActionAddAgent {
 			res.RootID = act.ID
 		}
-		s.cfg.Authority.FinishResult(l, req.IdemKey, res)
-		writeJSON(w, http.StatusOK, res)
+		s.cfg.Authority.FinishResult(l, key, res)
+		return http.StatusOK, res
 	case err == nil && creates:
 		// The daemon reported success without a usable id. Something may exist,
 		// so the key must never create again: record it as ambiguous.
-		s.cfg.Authority.AmbiguousAction(l, req.IdemKey)
-		writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "the creation's outcome is unknown; it will not run again with this idem_key")
+		s.cfg.Authority.AmbiguousAction(l, key)
+		return http.StatusConflict, APIError{Code: CodeIdemAmbiguous, Error: "the creation's outcome is unknown; it will not run again with this idem_key"}
 	case err == nil:
 		res := ActionResponse{OK: true, Affected: affected}
-		s.cfg.Authority.FinishResult(l, req.IdemKey, res)
-		writeJSON(w, http.StatusOK, res)
+		s.cfg.Authority.FinishResult(l, key, res)
+		return http.StatusOK, res
 	case errors.As(err, &rejected):
 		// The daemon answered not-OK. That is a known answer, not proof of no
 		// side effect; it is recorded and replayed, never re-run.
-		s.cfg.Logf("direct: action %s on %q rejected: %v", req.Verb, act.ID, err)
-		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeRejected, "the daemon rejected the action")
-		writeErr(w, http.StatusUnprocessableEntity, CodeRejected, "the daemon rejected the action")
+		s.cfg.Logf("direct: action %s on %q rejected: %v", verb, act.ID, err)
+		s.cfg.Authority.FinishAction(l, key, false, CodeRejected, "the daemon rejected the action")
+		return http.StatusUnprocessableEntity, APIError{Code: CodeRejected, Error: "the daemon rejected the action"}
 	case errors.Is(err, hostbackend.ErrUnavailable):
-		// The call never reached an authenticated daemon: nothing ran.
-		s.cfg.Authority.FinishAction(l, req.IdemKey, false, CodeUnavailable, "the amux daemon was not reachable; the action did not run")
-		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "the amux daemon was not reachable; the action did not run")
+		// The call never reached an authenticated daemon (the dial failed
+		// before anything was sent): nothing ran.
+		s.cfg.Authority.FinishAction(l, key, false, CodeUnavailable, "the amux daemon was not reachable; the action did not run")
+		return http.StatusServiceUnavailable, APIError{Code: CodeUnavailable, Error: "the amux daemon was not reachable; the action did not run"}
 	default:
-		// Cancelled (revocation or the execution bound) or a transport failure
-		// after dispatch: the daemon may or may not have applied it.
-		s.cfg.Authority.AmbiguousAction(l, req.IdemKey)
+		// Cancelled (revocation, grant expiry or the execution bound) or a
+		// transport failure after dispatch. Closing the socket does not stop
+		// the daemon: it runs an accepted action to completion under its own
+		// lifetime, so the creation may well finish. The outcome is unknown.
+		s.cfg.Authority.AmbiguousAction(l, key)
 		if l.Revoked() {
-			writeErr(w, http.StatusUnauthorized, CodeAuthRevoked, "access revoked during the action; its outcome is unknown")
-		} else {
-			writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "the action's outcome is unknown; it will not run again with this idem_key")
+			return http.StatusUnauthorized, APIError{Code: CodeAuthRevoked, Error: "access revoked during the action; its outcome is unknown"}
 		}
+		return http.StatusConflict, APIError{Code: CodeIdemAmbiguous, Error: "the action's outcome is unknown; it will not run again with this idem_key"}
 	}
 }
 
@@ -904,6 +953,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	resp := CapabilitiesResponse{
 		ServerID: s.cfg.Authority.ServerID(), Permissions: slices.Clone(l.Perms), ResourceScope: l.Resource,
 		ServerVerbs: ServerVerbs(), Verbs: sessionVerbs(l.Grant), CreateWorkgroup: mayCreateRoots(l.Grant),
+		AsyncCreate: l.Can(PermCreate),
 	}
 	if l.Can(PermCreate) {
 		rows, err := s.cfg.Backend.Snapshot(l.Context())

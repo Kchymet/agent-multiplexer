@@ -1,0 +1,11 @@
+{
+  "verb": "new-workgroup",
+  "fields": {
+    "agent": "claude",
+    "name": "Docs",
+    "prompt": "Refresh the guides.",
+    "repos": "harness"
+  },
+  "idem_key": "b1f0c6a2-11",
+  "async": true
+}

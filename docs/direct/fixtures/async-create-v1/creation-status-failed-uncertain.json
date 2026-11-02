@@ -1,0 +1,10 @@
+{
+  "creation_id": "crt_q2b1T0xZbR3n9mWc7yVd8A",
+  "verb": "add-agent",
+  "phase": "failed",
+  "version": 3,
+  "code": "idem_ambiguous",
+  "error": "the creation's outcome is unknown; the daemon may have created it. It will not run again with this idem_key; check the session list before retrying with a new one.",
+  "uncertain": true,
+  "elapsed_ms": 600000
+}
