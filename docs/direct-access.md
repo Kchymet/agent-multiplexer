@@ -548,7 +548,7 @@ cookies.
 | 409 | `idem_in_progress` | — |
 | 409 | `idem_ambiguous` | — |
 | 421 | `endpoint_not_bound` | — |
-| 422 | `rejected` | The daemon answered not-OK. This is not proof of no side effect (a stop can fail after the interrupt was delivered); repeating a stop is safe |
+| 422 | `rejected` | The daemon answered not-OK. This is a known reply, not proof of no side effect (a stop can fail after the interrupt was delivered; a creation may have made the session, then failed to start it, or left a partial workgroup or worktree). Repeating a stop is safe; never retry a rejected creation automatically with a fresh `idem_key` |
 | 422 | `idem_conflict` | — |
 | 422 | `not_in_catalog` | A creation names a harness or repo this machine or target workgroup does not offer ([fixture](direct/fixtures/workflow-v1/api-error-not-in-catalog.json)) |
 | 409 | `capacity_exhausted` | The grant holds too many unresolved or recent actions; retrying will not help. Enroll again ([fixture](direct/fixtures/v1/api-error-capacity.json)) |

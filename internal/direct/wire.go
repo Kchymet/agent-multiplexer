@@ -370,9 +370,15 @@ const (
 // daemon may have created it (the transport was lost after dispatch, the
 // bound ran out, the server restarted after dispatch, or access was revoked
 // mid-creation). It will never run again with this idem_key; check the
-// inventory before retrying with a new one. A failed creation without
-// Uncertain did not run (unavailable, auth.revoked, auth.expired, a
-// precheck refusal) or was refused by the daemon (rejected).
+// inventory before retrying with a new one.
+//
+// Uncertain false is not "no effects". Only these failed codes prove the
+// creation was never sent (zero effects): unavailable, auth.revoked,
+// auth.expired, denied, not_found, archived, unsupported_verb and
+// not_in_catalog. rejected is a known reply, not known zero effects: the
+// daemon answered not-OK, but it may have created the session and failed to
+// start it, or left a partial workgroup or worktree. Never retry a rejected
+// creation automatically with a fresh idem_key; check the machine first.
 type CreationStatus struct {
 	CreationID string `json:"creation_id"`
 	Verb       string `json:"verb"`
