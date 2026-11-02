@@ -14,6 +14,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/core"
+	"amux/internal/daemon"
 	"amux/internal/hostbackend"
 	"amux/internal/runtimeevents"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
@@ -49,6 +50,12 @@ type MachineCatalog struct {
 // never returned to a client.
 type HostBackend struct {
 	H hostbackend.HostDaemon
+	// Dial opens the authenticated daemon client the catalog queries use; nil
+	// dials the local daemon (H.ConnectContext). Probe lists the verified
+	// harnesses; nil probes this machine. Both exist so a live test can drive
+	// an in-process daemon; production leaves them nil.
+	Dial  func(context.Context) (*daemon.Client, error)
+	Probe func(context.Context) []CatalogHarness
 }
 
 // harnessProbeTTL bounds how long a harness probe result is reused. Probing
@@ -116,7 +123,11 @@ func catalogModels(in []string) []string {
 // (names only: RepoRow.Source and WorkgroupRow.Dir are dropped here) and the
 // verified harnesses.
 func (b HostBackend) Catalog(ctx context.Context) (MachineCatalog, error) {
-	c, err := b.H.ConnectContext(ctx)
+	dial := b.Dial
+	if dial == nil {
+		dial = b.H.ConnectContext
+	}
+	c, err := dial(ctx)
 	if err != nil {
 		return MachineCatalog{}, fmt.Errorf("%w: %v", hostbackend.ErrUnavailable, err)
 	}
@@ -148,7 +159,11 @@ func (b HostBackend) Catalog(ctx context.Context) (MachineCatalog, error) {
 			cat.Ceilings[g.ID] = slices.Clone(g.Grants)
 		}
 	}
-	cat.Harnesses = probeHarnesses(ctx)
+	if b.Probe != nil {
+		cat.Harnesses = b.Probe(ctx)
+	} else {
+		cat.Harnesses = probeHarnesses(ctx)
+	}
 	return cat, nil
 }
 
@@ -299,10 +314,38 @@ var (
 	errNotInCatalog = errors.New(CodeNotInCatalog)
 )
 
+// createdWait bounds how long a request naming a session its own grant just
+// created waits for the daemon's inventory (refreshed by a poll the creation
+// triggers) to publish it.
+const createdWait = 3 * time.Second
+
+// targetSnapshot reads the fresh inventory and, when sid is missing but this
+// grant created it, re-reads it until the row appears or createdWait passes.
+// Every authorization check still runs on the row the daemon publishes.
+func targetSnapshot(l *Lease, b Backend, sid string) ([]core.Session, error) {
+	rows, err := b.Snapshot(l.Context())
+	if err != nil || slices.ContainsFunc(rows, func(r core.Session) bool { return r.ID == sid }) || !l.a.Created(l, sid) {
+		return rows, err
+	}
+	deadline := time.Now().Add(createdWait)
+	for time.Now().Before(deadline) {
+		select {
+		case <-l.Context().Done():
+			return nil, l.Context().Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+		if rows, err = b.Snapshot(l.Context()); err != nil || slices.ContainsFunc(rows, func(r core.Session) bool { return r.ID == sid }) {
+			return rows, err
+		}
+	}
+	return rows, nil
+}
+
 // authorizeTarget reads the fresh inventory and returns the target row when it
 // is inside the grant's scope. Not-in-scope and nonexistent are indistinguishable.
-func authorizeTarget(ctx context.Context, b Backend, g Grant, sid string) (core.Session, map[string]core.Session, error) {
-	rows, err := b.Snapshot(ctx)
+func authorizeTarget(l *Lease, b Backend, sid string) (core.Session, map[string]core.Session, error) {
+	g := l.Grant
+	rows, err := targetSnapshot(l, b, sid)
 	if err != nil {
 		return core.Session{}, nil, err
 	}

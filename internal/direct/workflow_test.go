@@ -326,9 +326,9 @@ func TestWorkflowScopeConsoleAndArchiveBeforeApply(t *testing.T) {
 		{"add-agent api-key identity", all.AccessToken, "wg1", VerbAddAgent, map[string]string{"identity_mode": "api-key"}, 400, CodeBadRequest},
 		{"add-agent unknown harness", all.AccessToken, "wg1", VerbAddAgent, map[string]string{"agent": "bash"}, 400, CodeBadRequest},
 		{"add-agent repo path", all.AccessToken, "wg1", VerbAddAgent, map[string]string{"repos": "../etc"}, 400, CodeBadRequest},
-		{"new-workgroup linear", all.AccessToken, "", VerbNewWorkgroup, map[string]string{"linear": "x"}, 400, CodeBadRequest},
+		{"new-workgroup linear with newline", all.AccessToken, "", VerbNewWorkgroup, map[string]string{"linear": "https://l/1\nx"}, 400, CodeBadRequest},
 		{"new-workgroup source", all.AccessToken, "", VerbNewWorkgroup, map[string]string{"source": "/etc"}, 400, CodeBadRequest},
-		{"empty with member", all.AccessToken, "", VerbNewWorkgroupEmpty, map[string]string{"repos": "", "agent": "claude"}, 400, CodeBadRequest},
+		{"empty with unknown agent", all.AccessToken, "", VerbNewWorkgroupEmpty, map[string]string{"repos": "", "agent": "bash"}, 400, CodeBadRequest},
 		{"empty without repos", all.AccessToken, "", VerbNewWorkgroupEmpty, nil, 400, CodeBadRequest},
 		{"empty with defaultAgent", all.AccessToken, "", VerbNewWorkgroupEmpty, map[string]string{"repos": "", "defaultAgent": "1"}, 400, CodeBadRequest},
 	}
@@ -722,5 +722,69 @@ func TestVerbKeyTricksDoNotSplitPermission(t *testing.T) {
 	}
 	if f.applies.Load() != 0 {
 		t.Fatal("a split-permission body reached Apply")
+	}
+}
+
+// The cloud UI's exact machine-creation payloads (harness frontend
+// CreateModals.tsx) are accepted unchanged: empty optional values mean absent,
+// agent/model ride along on an empty root, and linear reaches the daemon.
+func TestCloudClientCreationPayloadsAreAccepted(t *testing.T) {
+	cases := []struct {
+		verb   string
+		fields map[string]string
+		want   map[string]string
+	}{
+		{VerbNewWorkgroupEmpty, map[string]string{"name": "Ops", "repos": "api", "prompt": "", "coordinator": "codex",
+			"coordinator_model": "gpt-6", "agent": "codex", "model": "gpt-6", "identity_mode": "machine"},
+			map[string]string{"name": "Ops", "repos": "api", "coordinator": "codex", "coordinator_model": "gpt-6", "agent": "codex", "model": "gpt-6"}},
+		{VerbNewWorkgroupEmpty, map[string]string{"name": "Any", "repos": "", "prompt": "", "model": ""},
+			map[string]string{"name": "Any", "repos": ""}},
+		{VerbNewWorkgroup, map[string]string{"name": "Fix", "prompt": "do it", "linear": "https://linear.app/x/issue/AGE-1"},
+			map[string]string{"name": "Fix", "prompt": "do it", "linear": "https://linear.app/x/issue/AGE-1"}},
+	}
+	for _, c := range cases {
+		a, err := createActionFor(ActionRequest{Verb: c.verb, Fields: c.fields})
+		if err != nil || !mapsEqual(a.Fields, c.want) {
+			t.Errorf("%s %v: %v %v", c.verb, c.fields, a.Fields, err)
+		}
+	}
+	a, err := actionFor("wg1", ActionRequest{Verb: VerbAddAgent, Fields: map[string]string{"repos": "", "prompt": "", "agent": "claude", "model": "", "identity_mode": "machine"}})
+	if err != nil || !mapsEqual(a.Fields, map[string]string{"repos": "", "agent": "claude"}) {
+		t.Fatalf("cloud add-agent payload: %v %v", a.Fields, err)
+	}
+	// Normalization never hides a key: unknown or authority-bearing fields sent
+	// empty are still refused, and identity_mode must stay machine.
+	for _, bad := range []map[string]string{
+		{"repos": "", "force": ""}, {"repos": "", "account_source": ""}, {"repos": "", "arbitrary": ""},
+		{"repos": "", "identity_mode": ""}, {"repos": "", "identity_mode": "api-key"}, {"repos": "", "defaultAgent": ""},
+	} {
+		if _, err := createActionFor(ActionRequest{Verb: VerbNewWorkgroupEmpty, Fields: bad}); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+		if _, err := actionFor("wg1", ActionRequest{Verb: VerbAddAgent, Fields: bad}); err == nil {
+			t.Errorf("add-agent accepted %v", bad)
+		}
+	}
+	// A key outside a verb's own allowlist is refused even when empty: the
+	// allowlist runs before normalization.
+	for verb, bad := range map[string][]map[string]string{
+		VerbAddAgent:          {{"linear": ""}, {"name": ""}, {"coordinator_model": ""}},
+		VerbNewWorkgroupEmpty: {{"repos": "", "linear": ""}},
+	} {
+		for _, f := range bad {
+			var err error
+			if verb == VerbAddAgent {
+				_, err = actionFor("wg1", ActionRequest{Verb: verb, Fields: f})
+			} else {
+				_, err = createActionFor(ActionRequest{Verb: verb, Fields: f})
+			}
+			if err == nil {
+				t.Errorf("%s accepted out-of-allowlist empty key %v", verb, f)
+			}
+		}
+	}
+	// defaultAgent on an empty root stays refused: it would create a member.
+	if _, err := createActionFor(ActionRequest{Verb: VerbNewWorkgroupEmpty, Fields: map[string]string{"repos": "", "defaultAgent": "1"}}); err == nil {
+		t.Fatal("defaultAgent accepted on new-workgroup-empty")
 	}
 }
