@@ -181,3 +181,58 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatalf("condition never held within the timeout")
 }
+
+// TestStatusRecordsRegisteredOwner: the owner the orchestrator reports at an
+// accepted registration lands in the status file (it defaults the pins of
+// `amux direct cloud enable`), and a later registration without one clears it
+// rather than leaving a stale owner beside a possibly different provider row.
+func TestStatusRecordsRegisteredOwner(t *testing.T) {
+	var mu sync.Mutex
+	var seen []Status
+	last := func() Status {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(seen) == 0 {
+			return Status{}
+		}
+		return seen[len(seen)-1]
+	}
+	conns := make(chan net.Conn, 2)
+	p := newFast(Config{Orchestrator: "pipe", Name: "box", Dial: pipeDialer(conns), OnStatus: func(s Status) {
+		mu.Lock()
+		seen = append(seen, s)
+		mu.Unlock()
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- p.Run(ctx) }()
+
+	registered := func(owner *harnessproto.RegisteredOwner) *harnessproto.Conn {
+		oc := harnessproto.NewConn(<-conns)
+		expectRegister(t, oc)
+		if err := oc.WriteMux(harnessproto.MuxMsg{
+			Type: harnessproto.MRegistered, OK: true, Version: 2, ProviderID: "prov-test",
+			HeartbeatSeconds: 1, GraceSeconds: 60, Owner: owner,
+		}); err != nil {
+			t.Fatalf("send registered: %v", err)
+		}
+		return oc
+	}
+
+	oc := registered(&harnessproto.RegisteredOwner{UserID: "usr_1", Email: "o@example.com"})
+	waitFor(t, func() bool { return last().State == StateRegistered })
+	if st := last(); st.OwnerUserID != "usr_1" || st.OwnerEmail != "o@example.com" {
+		t.Fatalf("registered status = %+v, want the reported owner recorded", st)
+	}
+
+	oc.Close()
+	waitFor(t, func() bool { return last().State != StateRegistered })
+	registered(nil)
+	waitFor(t, func() bool { return last().State == StateRegistered })
+	if st := last(); st.OwnerUserID != "" || st.OwnerEmail != "" {
+		t.Fatalf("re-registered without an owner, status = %+v, want the owner cleared", st)
+	}
+	cancel()
+	<-runErr
+}

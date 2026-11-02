@@ -28,22 +28,73 @@ traffic, and it never dials the advertised endpoints.
 
 ## Operator guide
 
+**Setup.** Register the host with Harness, then turn on issuance with only the
+ceiling, then opt the provider in:
+
 ```
-amux direct cloud enable --owner <harness-user-id> --provider <provider-id> \
-    --permissions read[,steer] (--all-sessions | --workgroup <root-id>...) \
+amux provide ...                        # until `amux doctor` shows "registered" and an owner
+amux direct cloud enable --permissions read,steer --all-sessions
+amux provide --direct-enroll            # or AMUX_PROVIDER_DIRECT_ENROLL=1, or direct-enroll = true
+```
+
+`enable` prints what it pinned before applying it:
+
+```
+resolved from this host's provider registration (registered, registered 2m0s ago):
+  Harness   harness.example.com:7443
+  account   usr_01HZXK5Q8M (you@example.com)
+  provider  prov-42
+cloud enrollment: enabled (generation 3)
+  ...
+```
+
+**Full syntax:**
+
+```
+amux direct cloud enable --permissions read[,steer] (--all-sessions | --workgroup <root-id>...) \
+    [--owner <harness-user-id>] [--provider <provider-id>] \
     [--max-outstanding 3] [--max-per-hour 10]
 amux direct cloud status [--json]
 amux direct cloud disable
-amux provide --direct-enroll          # or AMUX_PROVIDER_DIRECT_ENROLL=1, or direct-enroll = true
 ```
 
 **The flags:**
 
-- **`--provider`** is `provider_id` from the `amux provide` status file (as
-  shown by `amux doctor`). The pins are explicit operator configuration. They
-  are never taken from a relayed request.
 - **The ceiling** has no implicit default. `--all-sessions` covers ordinary
   sessions and never the amux console. `--workgroup console` is refused.
+- **`--owner` and `--provider` are optional.** An omitted pin comes from this
+  host's provider registration. That is the `owner` and `providerId` Harness
+  returned in `registered` to this host's token-authenticated registration, as
+  recorded in the `amux provide` status file and shown by `amux doctor`.
+  Harness fills `owner` from its live provider row, so the defaults are exactly
+  the requester and provider it will vouch for. The email is shown only so you
+  can recognize the account. It is never used as an identity.
+- **Supplying both flags is the advanced override.** They are pinned verbatim
+  and the registration is not needed. `enable` prints a note when they differ
+  from it.
+- **The pins are explicit host configuration.** They are set only by this
+  host-only command, never from a relayed request. Re-running `enable` re-pins
+  and starts a new generation.
+
+**Resolution errors.** `enable` changes nothing and names the fix:
+
+| Message starts with | Cause | Fix |
+| --- | --- | --- |
+| `no Harness provider registration on this host` | `amux provide` has never run here | Run `amux provide` against Harness |
+| `the provider's last registration … was rejected` | Token revoked or invalid | Fix the provider registration (`amux doctor`) |
+| `the provider has not completed a registration` | Still dialing, never accepted | Wait for `amux doctor` to show `registered` |
+| `Harness reported no owner for provider …` | Shared or unowned provider, or a Harness that predates owner reporting | Register the provider to your own account, or upgrade Harness and restart `amux provide` |
+| `--provider X is not this host's registered provider` | Only `--provider` given, for a different provider | Give both `--owner` and `--provider`, or drop the flag |
+| `--owner X is not the registered owner` | Only `--owner` given, for a different account | Give both flags, or drop the flag |
+
+`amux direct cloud status` warns when enabled pins no longer match the latest
+registration (Harness reassigned or recreated the provider). Re-run `enable` to
+re-pin.
+
+**Getting the ids by hand (explicit pins only).** The provider id is
+`providerId` in `amux doctor`. The Harness user id is the `id` field of
+`GET /api/me` on the Harness origin, opened in a browser that is already signed
+in.
 
 **What you are trusting:** enabling issuance means trusting the pinned owner,
 through Harness, to mint enrollment codes up to the ceiling. PKCE does not
@@ -64,7 +115,7 @@ client chose.
 
 | Event | Effect |
 | --- | --- |
-| Harness reassigns the provider's owner | Issuance returns `owner_mismatch` until you re-pin; re-pinning voids earlier codes |
+| Harness reassigns the provider's owner | Issuance returns `owner_mismatch`; `cloud status` warns. Re-run `amux direct cloud enable` to re-pin (voids earlier codes) |
 | Provider recreated in Harness (new id) | `provider_mismatch` until you re-pin |
 | Endpoint change | Restart `amux direct serve`; bundles carry the running endpoints |
 | Direct server not running | Not advertised at the next registration; requests answer `unavailable` |

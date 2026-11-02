@@ -31,7 +31,13 @@ type Status struct {
 	Orchestrator string `json:"orchestrator,omitempty"`
 	State        string `json:"state"`
 	ProviderID   string `json:"provider_id,omitempty"`
-	Panes        int    `json:"panes"`
+	// OwnerUserID and OwnerEmail are the registered owner the orchestrator
+	// reported for ProviderID at the latest accepted registration (empty for a
+	// shared/unowned provider or an older orchestrator). They default the pins
+	// of `amux direct cloud enable`; OwnerEmail is display-only.
+	OwnerUserID string `json:"owner_user_id,omitempty"`
+	OwnerEmail  string `json:"owner_email,omitempty"`
+	Panes       int    `json:"panes"`
 	// The moments are written unconditionally: encoding/json's omitempty does not
 	// fire on a zero time.Time, and a field that is always present is easier to
 	// read than one that lies about being optional. A zero value reads as "never".
