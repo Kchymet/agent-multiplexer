@@ -55,7 +55,8 @@ func newE2E(t *testing.T) *e2e {
 			return []direct.CatalogHarness{{Name: "claude"}, {Name: "codex"}}
 		},
 	}
-	srv, err := direct.NewServer(direct.Config{Authority: auth, Backend: backend, Endpoints: []string{"https://" + e2eHost}})
+	srv, err := direct.NewServer(direct.Config{Authority: auth, Backend: backend, Endpoints: []string{"https://" + e2eHost},
+		Logf: func(f string, a ...any) { t.Logf("direct: "+f, a...) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +490,10 @@ func newApprovalAppServer(t *testing.T) *approvalAppServer {
 func TestDirectLivePermissionCorrelation(t *testing.T) {
 	e := newE2E(t)
 	all := e.enroll(everyPerm, direct.ResourceScope{Kind: direct.ResourceAllSessions})
-	_, root, _ := e.act(all, "", direct.VerbNewWorkgroupEmpty, map[string]string{"repos": ""}, "p-root")
+	code, root, bad := e.act(all, "", direct.VerbNewWorkgroupEmpty, map[string]string{"repos": ""}, "p-root")
+	if code != 200 {
+		t.Fatalf("create root: %d %+v", code, bad)
+	}
 	code, member, bad := e.act(all, root.NewID, direct.VerbAddAgent, map[string]string{"agent": "codex"}, "p-agent")
 	if code != 200 {
 		t.Fatalf("add codex agent: %d %+v", code, bad)

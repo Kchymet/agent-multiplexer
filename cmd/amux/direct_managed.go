@@ -160,21 +160,15 @@ func managedServeConfig(s directsvc.Settings, set bool) (direct.ServeConfig, err
 	if !set || !s.Enabled {
 		return direct.ServeConfig{}, errors.New("the managed direct listener is not enabled (amux direct enable)")
 	}
-	life, err := settingsLifetimes(s)
-	if err != nil {
-		return direct.ServeConfig{}, err
-	}
-	return direct.ServeConfig{
-		Listen: s.Listen, AllowPublicBind: s.AllowPublicBind, CertFile: s.TLSCert, KeyFile: s.TLSKey,
-		Endpoints: append([]string(nil), s.Endpoints...), AllowOrigins: append([]string(nil), s.AllowOrigins...),
-		Life: life,
-	}, nil
+	return settingsServeConfig(s)
 }
 
 func cmdDirectEnable(args []string) error {
 	fs := flag.NewFlagSet("amux direct enable", flag.ContinueOnError)
 	var f directSettingsFlags
 	f.register(fs)
+	var tf tailnetFlags
+	tf.register(fs)
 	noWait := fs.Bool("no-wait", false, "")
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
@@ -190,6 +184,23 @@ func cmdDirectEnable(args []string) error {
 	}
 	if err := f.apply(fs, &s); err != nil {
 		return err
+	}
+	useTailnet, err := tailnetWanted(fs, &tf, s)
+	if err != nil {
+		return err
+	}
+	if useTailnet {
+		// Preflight and derivation read tailscaled and the existing files;
+		// the only write before the setting is saved is a certificate added
+		// to amux's own store.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		err := prepareTailnet(ctx, fs, &tf, &s, os.Stdout)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("direct enable --tailnet: %w\n(nothing saved)", err)
+		}
+	} else {
+		s.Tailnet = nil
 	}
 	s.Enabled = true
 	if err := validateDirectSettings(s); err != nil {
@@ -368,6 +379,11 @@ type directStatusReport struct {
 	Ready    *directsvc.Ready    `json:"ready,omitempty"`
 	Server   *directServerStatus `json:"server,omitempty"`
 	Provider directProviderView  `json:"provider"`
+	// Clients counts active enrolled clients (only when a server answers).
+	Clients *int `json:"enrolled_clients,omitempty"`
+	// Tailnet is tailnet mode's effective address, certificate and origin
+	// state, and a bounded reachability probe of its own endpoint.
+	Tailnet *directTailnetView `json:"tailnet,omitempty"`
 }
 
 type directServerStatus struct {
@@ -412,6 +428,12 @@ func cmdDirectStatus(args []string) error {
 	cfg, cfgErr := providercfg.Load()
 	pst, pstErr := provider.ReadStatus(provider.StatusPath())
 	r.Provider = directProviderCoherence(r.Server, cfg.DirectEnroll && cfgErr == nil, pst, pstErr == nil && processAlive(pst.PID))
+	if r.Server != nil {
+		if n, ok := directClientCount(); ok {
+			r.Clients = &n
+		}
+	}
+	r.Tailnet = tailnetView(r.Setting, r.Managed, r.Server != nil)
 	if asJSON {
 		return json.NewEncoder(os.Stdout).Encode(r)
 	}
@@ -483,7 +505,7 @@ func printDirectStatus(r directStatusReport) {
 	fmt.Println(line)
 	switch {
 	case !r.Set:
-		fmt.Println("setting   direct.enabled off (default) — amux direct enable --listen … --endpoint … --tls-cert … --tls-key …")
+		fmt.Println("setting   direct.enabled off (default) — amux direct enable --tailnet, or --listen … --endpoint … --tls-cert … --tls-key …")
 	default:
 		fmt.Printf("setting   direct.enabled %s · listen %s · endpoints %s\n", onOff(s.Enabled), s.Listen, strings.Join(s.Endpoints, ", "))
 		fmt.Printf("          tls %s · %s\n", s.TLSCert, s.TLSKey)
@@ -507,11 +529,15 @@ func printDirectStatus(r directStatusReport) {
 		if r.Managed == nil || !r.Managed.Serving(r.Ready) || r.Ready.ServerID != r.Server.ServerID {
 			fmt.Println("          (not the daemon's child: a manually run amux direct serve owns the store)")
 		}
+		if r.Clients != nil {
+			fmt.Printf("          enrolled clients %d\n", *r.Clients)
+		}
 		if r.Server.Cloud != nil {
 			fmt.Print("          ")
 			printCloudStatus(*r.Server.Cloud)
 		}
 	}
+	printTailnetView(r.Tailnet)
 	mark := "·"
 	switch {
 	case r.Provider.Stale:
@@ -596,4 +622,7 @@ func reportDirect() {
 		line += " — " + why
 	}
 	fmt.Println(line)
+	if v := tailnetView(s, m, phase == directPhaseRunning); v != nil {
+		reportTailnetDoctor(v)
+	}
 }

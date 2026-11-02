@@ -12,6 +12,7 @@ import (
 	"amux/internal/engine"
 	"amux/internal/panespec"
 	"amux/internal/source"
+	"amux/internal/store"
 )
 
 // LiveHost is a real daemon for cross-package protocol tests (package
@@ -30,7 +31,9 @@ func NewLiveHostForTest(t *testing.T) *LiveHost {
 	t.Helper()
 	d, eng := steerDaemon(t)
 	d.sources = []source.Source{source.NewWorkspace()}
-	d.interval = 20 * time.Millisecond
+	// Tests call Poll explicitly; a fast background poll only adds SQLite
+	// contention with the actions under test.
+	d.interval = 250 * time.Millisecond
 	var err error
 	d.authority, err = access.Open(t.TempDir())
 	if err != nil {
@@ -44,6 +47,14 @@ func NewLiveHostForTest(t *testing.T) *LiveHost {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Create and migrate the store once before any concurrent opener: two
+	// first opens of a fresh database race the schema migration (a separate,
+	// pre-existing store issue), which is not what these tests exercise.
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { d.pollLoop(ctx); close(done) }()
