@@ -249,6 +249,34 @@ func (ix *sourceIndex) openPending() []Pending {
 	return append([]Pending(nil), ix.open...)
 }
 
+// pendingOptions reads a permission request's options in either published
+// shape: a list of option ids, or the structured supervisor's list of
+// {"id","label","kind"} objects (reduced to their ids). An unreadable list is
+// empty; it never hides the request itself, which is what made a structured
+// approval unanswerable when only the string form was accepted.
+func pendingOptions(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var ids []string
+	if json.Unmarshal(raw, &ids) == nil {
+		return ids
+	}
+	var objs []struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(raw, &objs) != nil {
+		return nil
+	}
+	ids = nil // a failed string decode may have left placeholder entries
+	for _, o := range objs {
+		if o.ID != "" {
+			ids = append(ids, o.ID)
+		}
+	}
+	return ids
+}
+
 // applyPending folds decorated events into the list of open requests: a request
 // opens a Pending keyed by its occurrence, a resolution closes that occurrence.
 func applyPending(open []Pending, events []harnessproto.RuntimeEvent) []Pending {
@@ -256,17 +284,17 @@ func applyPending(open []Pending, events []harnessproto.RuntimeEvent) []Pending 
 		switch ev.Type {
 		case TypePermissionRequest:
 			var body struct {
-				RequestID string   `json:"request_id"`
-				Tool      string   `json:"tool"`
-				Action    string   `json:"action"`
-				Options   []string `json:"options"`
+				RequestID string          `json:"request_id"`
+				Tool      string          `json:"tool"`
+				Action    string          `json:"action"`
+				Options   json.RawMessage `json:"options"`
 			}
 			if json.Unmarshal(ev.Payload, &body) != nil || body.RequestID == "" {
 				continue
 			}
 			open = append(open, Pending{
 				RequestID: body.RequestID, Occurrence: ev.ItemID, Tool: body.Tool,
-				Action: body.Action, Options: body.Options,
+				Action: body.Action, Options: pendingOptions(body.Options),
 			})
 		case TypePermissionResolved:
 			for i, o := range open {
