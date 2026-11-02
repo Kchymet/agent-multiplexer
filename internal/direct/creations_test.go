@@ -141,8 +141,11 @@ func TestAsyncCreateSlowThenReady(t *testing.T) {
 	if got.Phase != CreatePhaseReady || got.NewID != "agent-1" || got.RootID != "wg1" {
 		t.Fatalf("add-agent ready: %+v", got)
 	}
-	if f.applies.Load() != 2 || s.jobs.pending() != 0 {
-		t.Fatalf("applies=%d pending=%d", f.applies.Load(), s.jobs.pending())
+	// The job records its terminal status before its deferred release, so the
+	// reservation drops just after the status is readable: observe it, bounded.
+	waitFor(t, "reservations released", func() bool { return s.jobs.pending() == 0 })
+	if n := f.applies.Load(); n != 2 {
+		t.Fatalf("applies=%d, want exactly 2", n)
 	}
 	// A steer-only grant sees no async_create and cannot read creations.
 	steer := enroll(t, a, []string{PermRead, PermSteer}, allSessions)
