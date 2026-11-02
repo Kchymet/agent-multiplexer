@@ -245,11 +245,17 @@ The store is `~/.config/amux/tls/tailnet/<name>/`:
 - a `current` symlink names the committed version, and the saved setting
   points at `current/cert.pem` and `current/key.pem`
 - a new version is written, synced and checked before `current` is replaced
-  by an atomic rename
-- a crash or failed check leaves the previous pair committed, on disk and in
-  the running listener. The pointer, not the newest directory, defines what
-  is served
-- three versions are kept
+  by an atomic rename. Writers (an `enable` and the serving child's renewal)
+  take an exclusive lock on the store, so installs and pruning never race
+- a failed check, write or sync aborts the install and leaves the previous
+  pair committed, on disk and in the running listener. A sync error after
+  the switch is reported as a failed install, and the listener keeps its
+  current certificate until a later check succeeds
+- the pointer, not the newest directory, defines what is served, so a version
+  left half-staged by a crash is never picked up
+- across a power loss, these guarantees hold as far as the filesystem honours
+  `fsync` on files and directories
+- three versions are kept, and the version `current` names is never pruned
 
 **Renewal while serving.** About every 12 hours, the listening process checks
 the certificate. It checks sooner when renewal falls due, and an hour after a

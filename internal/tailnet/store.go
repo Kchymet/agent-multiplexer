@@ -24,6 +24,9 @@ import (
 // complete, valid pair: either the old one or the new one, never a mix. Paths
 // through `current` (CertFile/KeyFile) are what the saved setting names; Load
 // resolves `current` once and reads both files from that one version.
+// Writers serialize on <Dir>/.lock (flock), across processes. Durability
+// across power loss holds as far as the filesystem honours fsync; a sync
+// error is returned as a failed install rather than ignored.
 type CertStore struct {
 	Dir  string // e.g. ~/.config/amux/tls/tailnet/<host>
 	Host string // the name every stored certificate must cover
@@ -83,13 +86,24 @@ func (s CertStore) Install(certPEM, keyPEM []byte, now time.Time) (PairInfo, err
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return PairInfo{}, err
 	}
-	// Versions are named by time, and never reuse an existing name.
+	// One writer at a time, across processes: naming, the pointer switch and
+	// pruning all happen under the store lock. Readers need no lock — the
+	// pointer is replaced atomically.
+	unlock, err := lockFile(filepath.Join(s.Dir, ".lock"))
+	if err != nil {
+		return PairInfo{}, fmt.Errorf("lock certificate store: %w", err)
+	}
+	defer unlock()
+	// Versions are named by time and always sort after every existing one
+	// (decided under the lock), so a pruned name is never reused and the
+	// newest install is the newest version.
 	n := now.UnixNano()
-	for {
-		if _, err := os.Lstat(filepath.Join(s.Dir, "v"+strconv.FormatInt(n, 10))); os.IsNotExist(err) {
-			break
+	if ents, err := os.ReadDir(s.Dir); err == nil {
+		for _, e := range ents {
+			if v := versionNum(e.Name()); strings.HasPrefix(e.Name(), "v") && v >= n {
+				n = v + 1
+			}
 		}
-		n++
 	}
 	name := "v" + strconv.FormatInt(n, 10)
 	tmpDir, err := os.MkdirTemp(s.Dir, ".new-")
@@ -114,13 +128,19 @@ func (s CertStore) Install(certPEM, keyPEM []byte, now time.Time) (PairInfo, err
 		cleanup()
 		return PairInfo{}, err
 	}
-	syncDir(tmpDir)
+	if err := syncDir(tmpDir); err != nil {
+		cleanup()
+		return PairInfo{}, err
+	}
 	vdir := filepath.Join(s.Dir, name)
 	if err := os.Rename(tmpDir, vdir); err != nil {
 		cleanup()
 		return PairInfo{}, err
 	}
-	syncDir(s.Dir)
+	if err := syncDir(s.Dir); err != nil {
+		_ = os.RemoveAll(vdir)
+		return PairInfo{}, err
+	}
 	// The switch: a fresh symlink renamed over `current` is atomic.
 	link := filepath.Join(s.Dir, ".current-"+name)
 	_ = os.Remove(link)
@@ -131,8 +151,13 @@ func (s CertStore) Install(certPEM, keyPEM []byte, now time.Time) (PairInfo, err
 		_ = os.Remove(link)
 		return PairInfo{}, err
 	}
-	syncDir(s.Dir)
-	s.prune(name)
+	// The switch has happened; a failure to sync it is reported (the new pair
+	// is already what Load returns, but its durability across a crash is not
+	// confirmed), and the caller treats it as a failed install.
+	if err := syncDir(s.Dir); err != nil {
+		return PairInfo{}, fmt.Errorf("certificate installed but the store directory could not be synced: %w", err)
+	}
+	s.prune()
 	return PairInfo{CertFile: s.CertFile(), KeyFile: s.KeyFile(), NotAfter: leaf.NotAfter, Issuer: leaf.Issuer.CommonName}, nil
 }
 
@@ -151,8 +176,13 @@ func (s CertStore) Import(certFile, keyFile string, now time.Time) (PairInfo, er
 	return s.Install(c, k, now)
 }
 
-// prune removes versions beyond Keep, oldest first, never the current one.
-func (s CertStore) prune(current string) {
+// prune removes versions beyond Keep, oldest first, never the one `current`
+// names when prune runs (re-read here, under the store lock).
+func (s CertStore) prune() {
+	current, err := os.Readlink(filepath.Join(s.Dir, "current"))
+	if err != nil {
+		return // no committed pointer: remove nothing
+	}
 	keep := s.Keep
 	if keep <= 0 {
 		keep = 3
@@ -196,11 +226,19 @@ func writeSynced(path string, b []byte, mode os.FileMode) error {
 	return err
 }
 
-func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("sync %s: %w", dir, err)
+	}
+	return nil
 }
 
 // VerifyChain checks that pair's leaf chains, through the intermediates it

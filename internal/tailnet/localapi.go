@@ -47,12 +47,17 @@ const AdminDNSURL = "https://login.tailscale.com/admin/dns"
 // synonym (ipn.DefaultControlURL / IsLoginServerSynonym upstream).
 const DefaultControlURL = "https://controlplane.tailscale.com"
 
+// goos is runtime.GOOS, replaceable in tests of platform messages.
+var goos = runtime.GOOS
+
 // DefaultSocket is tailscaled's socket on this platform when it runs as the
-// open-source daemon. The macOS App Store app exposes LocalAPI differently
-// (a loopback port and token) and is not supported here; pass --tls-cert and
-// --tls-key there instead.
+// open-source daemon. The macOS Tailscale app (App Store or standalone)
+// exposes LocalAPI over a loopback port with a token instead, which amux does
+// not support: tailnet mode needs LocalAPI for the name and address, so there
+// the fallback is the plain mode with every value explicit (--listen,
+// --endpoint, --tls-cert, --tls-key), or the open-source tailscaled.
 func DefaultSocket() string {
-	if runtime.GOOS == "darwin" {
+	if goos == "darwin" {
 		return "/var/run/tailscaled.socket"
 	}
 	return "/var/run/tailscale/tailscaled.sock"

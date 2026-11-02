@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -643,5 +644,109 @@ func TestRenewerRefusesWrongHostReplacementKeepsStream(t *testing.T) {
 	c2.Close()
 	if !got.Equal(served) {
 		t.Fatal("new handshakes got the refused certificate")
+	}
+}
+
+func TestUnreachableMessagePerPlatform(t *testing.T) {
+	unreachable := fmt.Errorf("%w at x: dial: no such file", tailnet.ErrUnreachable)
+	t.Run("darwin default socket: app transport, full explicit fallback", func(t *testing.T) {
+		defer tailnet.SetGOOS("darwin")()
+		err := tailnet.Classify(unreachable, tailnet.DefaultSocket())
+		if k := problemKind(t, err); k != tailnet.ProblemUnsupportedTransport {
+			t.Fatalf("kind %s: %v", k, err)
+		}
+		msg := err.Error()
+		for _, want := range []string{"/var/run/tailscaled.socket", "loopback port", "--listen", "--endpoint", "--tls-cert", "--tls-key", "without --tailnet", "open-source tailscaled"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("missing %q: %s", want, msg)
+			}
+		}
+		if strings.Contains(msg, "start Tailscale") {
+			t.Fatalf("tells a running app to start Tailscale: %s", msg)
+		}
+	})
+	t.Run("darwin explicit socket: plainly unreachable", func(t *testing.T) {
+		defer tailnet.SetGOOS("darwin")()
+		if k := problemKind(t, tailnet.Classify(unreachable, "/opt/ts/tailscaled.sock")); k != tailnet.ProblemUnreachable {
+			t.Fatalf("kind %s", k)
+		}
+	})
+	t.Run("linux", func(t *testing.T) {
+		defer tailnet.SetGOOS("linux")()
+		if tailnet.DefaultSocket() != "/var/run/tailscale/tailscaled.sock" {
+			t.Fatal(tailnet.DefaultSocket())
+		}
+		err := tailnet.Classify(unreachable, tailnet.DefaultSocket())
+		if k := problemKind(t, err); k != tailnet.ProblemUnreachable || !strings.Contains(err.Error(), "start Tailscale") {
+			t.Fatalf("kind %s: %v", k, err)
+		}
+	})
+}
+
+// Concurrent installers (an enable and the serving child's renewal, here
+// goroutines with independent lock descriptors, as separate processes have)
+// are serialized: every install succeeds, `current` always names an existing
+// complete version, and pruning keeps at most Keep versions.
+func TestCertStoreConcurrentInstalls(t *testing.T) {
+	ca := tailnettest.NewCA(t)
+	s := newStore(t, ca)
+	now := time.Now()
+	const n = 8
+	pems := make([][2][]byte, n)
+	for i := range pems {
+		c, k := ca.Issue(t, host, now.Add(-time.Hour), now.Add(time.Duration(40+i)*24*time.Hour))
+		pems[i] = [2][]byte{c, k}
+	}
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			_, err := s.Install(pems[i][0], pems[i][1], now)
+			errs <- err
+		}(i)
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	cur, err := os.Readlink(filepath.Join(s.Dir, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir, cur, "key.pem")); err != nil {
+		t.Fatalf("current names a missing version: %v", err)
+	}
+	if _, _, err := s.Load(now); err != nil {
+		t.Fatal(err)
+	}
+	vs, _ := filepath.Glob(filepath.Join(s.Dir, "v*"))
+	if len(vs) > 3 {
+		ents, _ := os.ReadDir(s.Dir)
+		for _, e := range ents {
+			t.Log(e.Name())
+		}
+		l, _ := os.Readlink(filepath.Join(s.Dir, "current"))
+		t.Fatalf("%d versions kept (current %s)", len(vs), l)
+	}
+}
+
+// prune protects whatever `current` names when it runs, even when other
+// version directories (e.g. staged by a crashed writer) sort after it.
+func TestCertStorePruneKeepsActualCurrent(t *testing.T) {
+	ca := tailnettest.NewCA(t)
+	s := newStore(t, ca)
+	now := time.Now()
+	os.MkdirAll(s.Dir, 0o700)
+	for i := 0; i < 4; i++ {
+		os.MkdirAll(filepath.Join(s.Dir, fmt.Sprintf("v9%018d", i)), 0o700)
+	}
+	c, k := ca.Issue(t, host, now.Add(-time.Hour), now.Add(60*24*time.Hour))
+	info, err := s.Install(c, k, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, got, err := s.Load(now)
+	if err != nil || !got.NotAfter.Equal(info.NotAfter) {
+		t.Fatalf("current pruned or wrong: %+v %v", got, err)
 	}
 }

@@ -59,18 +59,22 @@ type Problem struct {
 // socket (network), the node's login state (auth), the tailnet's
 // configuration (identity), and certificate permission or availability.
 const (
-	ProblemUnreachable  = "tailscaled-unreachable"
-	ProblemSocketAccess = "socket-access"
-	ProblemLoggedOut    = "logged-out"
-	ProblemNotRunning   = "not-running"
-	ProblemMagicDNS     = "magicdns-disabled"
-	ProblemNoAddress    = "no-tailscale-address"
-	ProblemHTTPS        = "https-disabled"
-	ProblemCertName     = "cert-name-unavailable"
-	ProblemCertDenied   = "cert-denied"
-	ProblemRateLimited  = "rate-limited"
-	ProblemPortInUse    = "port-in-use"
-	ProblemOther        = "other"
+	ProblemUnreachable = "tailscaled-unreachable"
+	// ProblemUnsupportedTransport: on macOS the default socket is absent,
+	// which is what the Tailscale app (LocalAPI over a loopback port and
+	// token) looks like; amux cannot use that transport.
+	ProblemUnsupportedTransport = "unsupported-localapi-transport"
+	ProblemSocketAccess         = "socket-access"
+	ProblemLoggedOut            = "logged-out"
+	ProblemNotRunning           = "not-running"
+	ProblemMagicDNS             = "magicdns-disabled"
+	ProblemNoAddress            = "no-tailscale-address"
+	ProblemHTTPS                = "https-disabled"
+	ProblemCertName             = "cert-name-unavailable"
+	ProblemCertDenied           = "cert-denied"
+	ProblemRateLimited          = "rate-limited"
+	ProblemPortInUse            = "port-in-use"
+	ProblemOther                = "other"
 )
 
 func (p *Problem) Error() string {
@@ -167,6 +171,12 @@ func CertProblem(n Node) *Problem {
 func classify(err error, socket string) error {
 	var api *APIError
 	switch {
+	case errors.Is(err, ErrUnreachable) && goos == "darwin" && socket == DefaultSocket():
+		// Most likely the Tailscale app, which is running fine but serves
+		// LocalAPI on a loopback port with a token — not a socket amux can use.
+		return &Problem{Kind: ProblemUnsupportedTransport, Err: err,
+			Msg: "no tailscaled socket at " + socket + ". The macOS Tailscale app (App Store or standalone) serves its LocalAPI over a loopback port with a token, which amux does not support, so --tailnet cannot derive this machine's name and address",
+			Fix: "configure the listener explicitly without --tailnet: amux direct enable --listen <tailscale-ip>:8443 --endpoint https://<magicdns-name>:8443 --tls-cert <pem> --tls-key <pem> (values from tailscale status and your certificate); or run the open-source tailscaled, or point --tailscale-socket at its socket"}
 	case errors.Is(err, ErrUnreachable):
 		return &Problem{Kind: ProblemUnreachable, Err: err, Msg: "tailscaled is not reachable at " + socket,
 			Fix: "start Tailscale (tailscale status should answer), or point --tailscale-socket at its socket"}
