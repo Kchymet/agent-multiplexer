@@ -159,6 +159,7 @@ usage: amux <command>
   auth login | status | restart  manage one shared Claude login for all agent sessions
   provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
   provide install | uninstall  run provider mode as a user service (survives reboot)
+  provide revoke --yes  revoke this provider's broker registration and relay access
   direct serve | enroll | clients  direct web/Android access over your LAN or VPN (opt-in)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print CLI, daemon and database versions + compatibility

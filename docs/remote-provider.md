@@ -227,6 +227,81 @@ a possible future extension, not part of v2.
 
 ## Provider mode UX
 
+### Revoke this machine's registration and relay access
+
+From a host terminal, use the provider's saved transport configuration:
+
+```sh
+amux provide revoke --yes
+```
+
+This permanently revokes the broker registration identified by the configured
+provider token, including its relay access. **Existing direct-client grants
+remain valid.** They are destination-issued credentials, independent of Harness
+registration; use `amux direct clients list` and `amux direct clients revoke
+<client-id>` separately to revoke those. Local agent-session credentials and
+central Claude/Codex logins are also independent.
+
+The command is host-only. `--yes` is required before reading credentials or
+contacting the broker. It accepts a positional address or `--orchestrator`,
+`--token-file`, `--ca`, and `--server-name`, so foreground providers can use the
+same transport settings without installing a service. Resolution matches running
+the provider: endpoint flag/operand then saved endpoint; token-file flag then
+saved token-file, otherwise `AMUX_PROVIDER_TOKEN`; TLS flags then `AMUX_TLS_CA`
+and `AMUX_TLS_SERVERNAME`, then saved TLS settings. A missing or unreadable token
+file is an error, never a fallback to an environment token. The token is never
+accepted as a command-line argument.
+
+Revocation opens a separate verified TLS connection and never registers again
+or takes over the running provider's connection/status file. A successful
+acknowledgment means revocation was durably recorded and the receiving broker
+tore down its local relay access. Other broker replicas close existing sockets
+through their existing revocation sweep while healthy; success does **not**
+promise that every remote socket has drained. Effects already committed by a
+session operation are not rolled back. The provider's ordinary disconnect path
+cancels publication/stream hooks; reconnecting with the revoked token is rejected
+and terminates provider panes. Disconnected compute panes may survive until
+reconnect rejection or their existing grace timeout.
+
+The entire exchange has a 15-second deadline and supports interruption. A timeout,
+disconnect, malformed response, or unsupported broker returns an error and never
+claims revocation succeeded. A lost acknowledgment can follow a committed revoke:
+retry with the **same token**. The broker accepts that token for repeat revocation
+only, not for registration. If the token has since been rotated, a stale token
+cannot revoke its replacement. Broker rejection details are limited to known
+error codes so an echoed credential cannot leak into terminal output.
+
+Config, token files, and service installation are retained, including on failure.
+Use `amux provide uninstall` separately to stop/remove the service; uninstall
+alone does **not** revoke the remote registration. Registering again requires a
+new broker-issued credential. No local migration is needed; upgrade the broker
+to support this exchange before using the new command. An older broker is never
+treated as having confirmed revocation.
+
+#### Standalone revocation exchange (harnessproto v2)
+
+On the provider TLS listener, the first frame may be:
+
+```json
+{"type":"provider-revoke","versions":[2],"token":"synthetic-provider-token"}
+```
+
+It is not a `register` frame. The broker derives the target from the token,
+atomically authenticates its current token hash and revokes that registration
+(safe against concurrent rotation), and answers:
+
+```json
+{"type":"provider-revoked","ok":true,"version":2,"providerId":"prov-7"}
+```
+
+An already-revoked matching token receives the same success. The acknowledgment
+follows durable revocation and teardown on the receiving broker, with the
+cross-replica limits above. Failure uses `type:"provider-revoked"`, `ok:false`
+(which the codec may omit), and `error:"bad-token"`, `"unsupported-version"`, or
+`"internal"`. There is no caller-supplied provider ID and no capability or pane
+offer. The client requires the exact success type, version 2, nonempty provider
+ID, and no error. Golden fixtures live in `harnessproto/testdata/provider_revoke*`.
+
 ### User-service setup
 
 Registering a machine (with Harness, providing your personal compute pool)

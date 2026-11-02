@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,7 @@ func (c *scrollCapture) bytes() []byte {
 
 func runCodexScroll(t *testing.T, bin, mode string) {
 	home := t.TempDir()
+	var nextResponseCompleted atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		request, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 		if r.Method != "POST" {
@@ -118,6 +120,9 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 		item := map[string]any{"type": "message", "id": "msg_scroll", "role": "assistant", "status": "completed", "content": []map[string]any{{"type": "output_text", "text": body.String()}}}
 		send(map[string]any{"type": "response.output_item.done", "item": item})
 		send(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_scroll", "status": "completed", "output": []any{item}, "usage": map[string]any{"input_tokens": 20, "output_tokens": 1500, "total_tokens": 1520}}})
+		if prefix == "NEXT-HISTORY" {
+			nextResponseCompleted.Store(true)
+		}
 	}))
 	t.Cleanup(server.Close)
 	config := fmt.Sprintf("check_for_update_on_startup = false\nmodel_provider = 'fixture'\nmodel = 'gpt-5.6'\n[model_providers.fixture]\nname = 'fixture'\nbase_url = %q\nwire_api = 'responses'\nrequires_openai_auth = false\n[projects.%q]\ntrust_level = 'trusted'\n", server.URL, home)
@@ -321,6 +326,15 @@ func runCodexScroll(t *testing.T, bin, mode string) {
 	await("new child output returns live", func() bool { return term.Viewport().Offset == 0 && strings.Contains(frame(), "NEXT-HISTORY-004") })
 	save("output-live")
 	if mode == "always" {
+		// The final numbered delta precedes response.completed and Codex's
+		// completion repaint. Starting navigation at that delta races new
+		// activity against Page Up/Down, leaving "Back to bottom" visible even
+		// after Page Down reaches line 100. Finish the streaming-output probe
+		// before testing navigation on a reattached, idle conversation.
+		await("second response completed", func() bool {
+			return nextResponseCompleted.Load() && strings.Contains(frame(), "NEXT-HISTORY-100")
+		})
+		stable()
 		reattachCodexWheel(t, f, &raw, &input, saveFrom)
 	}
 	t.Logf("real Codex 0.157.1 %s: recovered rendered marker 070; draft preserved; local wheel and Ctrl+U/D sent no input; half-page keys recovered earlier content and restored draft; indicator and input/output live returns verified", mode)
