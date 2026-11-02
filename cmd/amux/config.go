@@ -8,6 +8,7 @@ import (
 
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/directsvc"
 	"amux/internal/keymap"
 )
 
@@ -50,6 +51,14 @@ func cmdConfig(args []string) error {
 				value = amuxcfg.PTY
 			}
 			fmt.Println(value)
+			return nil
+		}
+		if args[1] == directsvc.EnabledKey {
+			s, _, err := directsvc.Load()
+			if err != nil {
+				return err
+			}
+			fmt.Println(onOff(s.Enabled))
 			return nil
 		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
@@ -97,6 +106,9 @@ func cmdConfig(args []string) error {
 			}
 			fmt.Printf("codex.control = %s  (saved; run amux daemon restart to apply; environment overrides still take precedence)\n", args[2])
 			return nil
+		}
+		if args[1] == directsvc.EnabledKey {
+			return fmt.Errorf("%s is changed with amux direct enable|disable, which validate the listener settings first", directsvc.EnabledKey)
 		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
 			on, err := amuxcfg.ParseGoalAutoResume(args[2])
@@ -179,6 +191,8 @@ usage: amux config <subcommand>
   unset goal.auto_resume  restore the default (on)
   get|unset claude.auth      retired: every workload follows central auth
   get|unset codex.auth       retired: every workload follows central auth
+  get direct.enabled  whether the daemon runs the direct listener (off by default);
+                     change it with amux direct enable|disable
   path               print the config file path
 
 Keybindings live in the "keys" section of the config file (see path). A rebind
@@ -246,7 +260,16 @@ func configList() error {
 	default:
 		fmt.Printf("%s %s  (saved; daemon restart required after changes)\n", amuxcfg.GoalAutoResumeKey, onOff(on))
 	}
-	return errors.Join(loadErr, authErr, controlErr, resumeErr)
+	direct, directSet, directErr := directsvc.Load()
+	switch {
+	case directErr != nil:
+		fmt.Printf("%s INVALID\n", directsvc.EnabledKey)
+	case !directSet:
+		fmt.Printf("%s off  (default; amux direct enable|disable — applied by the running daemon)\n", directsvc.EnabledKey)
+	default:
+		fmt.Printf("%s %s  (saved; amux direct enable|disable — applied by the running daemon)\n", directsvc.EnabledKey, onOff(direct.Enabled))
+	}
+	return errors.Join(loadErr, authErr, controlErr, resumeErr, directErr)
 }
 
 func onOff(on bool) string {

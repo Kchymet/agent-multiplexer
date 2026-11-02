@@ -31,6 +31,7 @@ import (
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/daemonstatus"
+	"amux/internal/directsvc"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
 	"amux/internal/launchenv"
@@ -238,6 +239,12 @@ type Daemon struct {
 	// status publishes startup/shutdown progress for lifecycle clients. Run
 	// creates it only once it holds the singleton lock, which owns the file.
 	status *daemonstatus.Reporter
+	// directSupervisor, when set, keeps the daemon-managed direct listener in
+	// step with the persisted direct.enabled setting (internal/directsvc). It
+	// runs as a run worker, so graceful shutdown stops the listener before the
+	// daemon releases its lock. Only Default sets it: tests and embedded
+	// daemons never start a network listener.
+	directSupervisor func(context.Context)
 }
 
 type launchResolver func(panespec.LaunchSpec, int) (dir string, env, argv []string, err error)
@@ -320,6 +327,12 @@ func Default(self string) *Daemon {
 	// Let the engine defer terminating a mid-turn agent on graceful shutdown until
 	// it is safe. The probe closes over d, so it must be set after d is built.
 	eng.SetActivity(d.instanceActivity)
+	// The direct listener is off unless `amux direct enable` saved it on; the
+	// supervisor then runs `amux direct serve --managed` as a child process.
+	// A child rather than in-process: internal/direct already depends on this
+	// package, and a fault in the network-facing TLS server must not take the
+	// agent engine down with it.
+	d.directSupervisor = directsvc.NewSupervisor(self, log.Printf).Run
 	return d
 }
 
@@ -553,6 +566,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	})
 
 	startRunWorker(func() { d.pollLoop(ctx) })
+	if d.directSupervisor != nil {
+		startRunWorker(func() { d.directSupervisor(ctx) })
+	}
 	// Member PRs are polled on their own (much slower) clock.
 	startRunWorker(func() { d.prWatchLoop(ctx) })
 	// Per-session CPU/memory, sampled off the RPC path.

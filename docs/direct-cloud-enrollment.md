@@ -187,8 +187,8 @@ client chose.
 | --- | --- |
 | Harness reassigns the provider's owner | Issuance returns `owner_mismatch`; `cloud status` warns. Re-run `amux direct cloud enable` to re-pin (voids earlier codes) |
 | Provider recreated in Harness (new id) | `provider_mismatch` until you re-pin |
-| Endpoint change | Restart `amux direct serve`; bundles carry the running endpoints |
-| Direct server not running | Not advertised at the next registration; requests answer `unavailable` |
+| Endpoint change | Restart `amux direct serve` (or re-run `amux direct enable --endpoint …`, which the daemon applies); bundles carry the running endpoints, and the provider re-registers with them within about a minute |
+| Direct server not running (or `amux direct disable`) | The running provider withdraws the offer by re-registering within about a minute; until then requests answer `unavailable` |
 
 ## Administration boundary
 
@@ -198,7 +198,8 @@ proof, exactly like `enroll` and `revoke`.
 
 **The provider can reach exactly two operations.** It already holds host
 authority for the local daemon. It can send only `cloud_status` (at each
-registration, to decide whether to advertise) and `issue_cloud_code` (built
+registration, and every 30 seconds while registered, to decide whether to
+advertise) and `issue_cloud_code` (built
 field by field from a typed frame), through `direct.RelayIssuer`.
 
 **No other path changes the policy.** No relay frame can enable, disable, re-pin
@@ -211,8 +212,10 @@ or read the ceiling, and the direct HTTP server has no admin routes.
 **Advertisement.** The provider advertises the feature, with
 `capabilities.direct = {serverId, endpoints, issuance:true}`, only when two
 things hold at registration: it was started with `--direct-enroll`, and the
-direct server reports issuance enabled. Listing the feature in `--feature`
-never advertises it. The ceiling and pins stay on the host.
+direct server reports issuance enabled. While registered it re-checks every
+30 seconds. If the answer changes for two checks in a row, it registers again
+(same token, panes carried over) so the advertisement never outlives the
+server. Listing the feature in `--feature` never advertises it. The ceiling and pins stay on the host.
 
 **Frames:**
 

@@ -45,6 +45,13 @@ type Status struct {
 	RegisteredAt time.Time `json:"registered_at"`
 	HeartbeatAt  time.Time `json:"heartbeat_at"`
 	LastError    string    `json:"last_error,omitempty"`
+	// DirectServerID and DirectEndpoints are the direct-enroll-v1 offer the
+	// provider sent in its latest accepted registration (empty when it
+	// advertised none). They are what the orchestrator was actually told, not
+	// what this host would like it to know; `amux direct status` reports them
+	// as observed.
+	DirectServerID  string   `json:"direct_server_id,omitempty"`
+	DirectEndpoints []string `json:"direct_endpoints,omitempty"`
 }
 
 // StatusPath is the file the provider loop writes its state to. It lives with

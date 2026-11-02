@@ -51,6 +51,14 @@ type Lifetimes struct {
 	Access, Idle, Absolute time.Duration
 }
 
+// Validate reports whether the lifetimes are acceptable (each zero, meaning
+// the default, or between zero and its default), so a configuration can be
+// refused before it is saved rather than when the server next starts.
+func (l Lifetimes) Validate() error {
+	_, err := l.resolve()
+	return err
+}
+
 func (l Lifetimes) resolve() (Lifetimes, error) {
 	pick := func(v, def time.Duration, name string) (time.Duration, error) {
 		if v == 0 {
