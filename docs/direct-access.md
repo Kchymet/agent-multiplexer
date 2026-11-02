@@ -632,10 +632,16 @@ request, never run one twice. Protection ends with the grant record. It is not
 retroactive: a server before this change deleted completed records after 24
 hours, and those keys are unknown to it now, so a client must still never
 reuse a key it has used before. The registry moved to schema version 3 for the
-tombstones; an older binary refuses a version-3 registry instead of silently
-dropping them (downgrading needs the newer `grants.json` restored from
-backup or the clients enrolled again). A version-1 or -2 registry migrates
-forward atomically on open, and a failed migration leaves the old file intact.
+tombstones. An older binary cannot use a version-3 registry: it refuses to
+load it rather than silently dropping them, and direct access stays
+unavailable until a binary with this change runs again. Any other way back
+(an older registry, or enrolling clients again) loses the replay history, and
+clients must still not reuse keys. A version-1 or -2 registry migrates forward
+with one atomic file replace on open. If that write fails before the rename,
+the old file is left in place; if it fails after the rename (the directory
+sync), the complete version-3 file may be in place. Either way that open
+fails, and the next open loads whichever complete file is there; the registry
+is never partially written or reset.
 
 **Transcripts.** They use amux's own sequence space and never reuse a relay
 cursor. The stream ends with a terminal SSE event:

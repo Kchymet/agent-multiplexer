@@ -185,9 +185,11 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		// Version 1 or 2 -> 3 is one atomic replace that keeps every grant,
 		// code, revocation, used-refresh and idempotency record (and, from 2,
 		// the cloud data); a version-2 store gains no tombstones until its
-		// records expire. If it does not commit, the open fails and the old
-		// file stays as it was: the registry is never reinitialized or
-		// partially rewritten.
+		// records expire. On any write error the open fails: before the
+		// rename (errNotCommitted) the old file stays as it was; after it
+		// (errAmbiguousCommit, the directory sync failed) the complete new
+		// file may be in place and the next open loads it. The registry is
+		// never reinitialized or partially rewritten.
 		from := state.V
 		state.V = stateVersion
 		if err := st.saveState(state); err != nil {

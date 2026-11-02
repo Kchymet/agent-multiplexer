@@ -139,32 +139,52 @@ func TestV2MigratesToV3KeepingRecords(t *testing.T) {
 	}
 }
 
-func TestV2MigrationFailureLeavesV2Intact(t *testing.T) {
-	for _, ambiguous := range []bool{false, true} {
-		root, refresh := v2Store(t)
-		path := filepath.Join(root, grantsFile)
-		before, _ := os.ReadFile(path)
-		st, err := openStore(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		st.write = func(dir, name string, data []byte) error {
-			if ambiguous {
+// Injected write failures during the v2 -> v3 migration. "before rename"
+// fails without touching the file (as writeAtomic does when the temp write
+// fails), so the v2 file stays byte-identical. "after rename" really renames
+// the complete v3 file into place and then reports errAmbiguousCommit (as
+// writeAtomic does when the directory sync fails): the open still fails, and
+// the next open loads that complete v3 file with every grant. Neither leaves
+// a partial or reset registry.
+func TestV2MigrationWriteFailures(t *testing.T) {
+	for _, afterRename := range []bool{false, true} {
+		t.Run(fmt.Sprint("afterRename=", afterRename), func(t *testing.T) {
+			root, refresh := v2Store(t)
+			path := filepath.Join(root, grantsFile)
+			before, _ := os.ReadFile(path)
+			st, err := openStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.write = func(dir, name string, data []byte) error {
+				if !afterRename {
+					return errNotCommitted
+				}
+				if err := writeTemp(dir, name, data); err != nil {
+					return err
+				}
 				return errAmbiguousCommit
 			}
-			return errNotCommitted
-		}
-		if _, err := loadAuthority(st, Lifetimes{}.mustResolve(t), time.Now); err == nil || !strings.Contains(err.Error(), "migrate version 2 to 3") {
-			t.Fatalf("failed migration opened: %v", err)
-		}
-		st.close()
-		if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
-			t.Fatal("failed migration rewrote the registry")
-		}
-		a := openTestAuthority(t, root, Lifetimes{}, nil)
-		if _, err := a.Refresh(refresh); err != nil {
-			t.Fatalf("grant lost after a failed migration and retry: %v", err)
-		}
+			if _, err := loadAuthority(st, Lifetimes{}.mustResolve(t), time.Now); err == nil || !strings.Contains(err.Error(), "migrate version 2 to 3") {
+				t.Fatalf("failed migration opened: %v", err)
+			}
+			st.close()
+			after, _ := os.ReadFile(path)
+			want := before
+			if afterRename {
+				want = bytes.Replace(before, []byte(`"v":2`), []byte(`"v":3`), 1)
+			}
+			if !bytes.Equal(after, want) {
+				t.Fatalf("registry after the failed write:\n%s\nwant:\n%s", after, want)
+			}
+			a := openTestAuthority(t, root, Lifetimes{}, nil)
+			if _, err := a.Refresh(refresh); err != nil {
+				t.Fatalf("grant lost after a failed migration and reopen: %v", err)
+			}
+			if got, _ := os.ReadFile(path); !bytes.Contains(got, []byte(`"v":3`)) {
+				t.Fatal("not at version 3 after reopen")
+			}
+		})
 	}
 }
 
