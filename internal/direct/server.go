@@ -507,7 +507,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer l.Done()
-	if _, _, err := authorizeTarget(l.Context(), s.cfg.Backend, l.Grant, sid); err != nil {
+	if _, _, err := authorizeTarget(l, s.cfg.Backend, sid); err != nil {
 		s.writeBackendErr(w, l, err)
 		return
 	}
@@ -553,7 +553,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer l.Done()
-	if _, _, err := authorizeTarget(l.Context(), s.cfg.Backend, l.Grant, sid); err != nil {
+	if _, _, err := authorizeTarget(l, s.cfg.Backend, sid); err != nil {
 		s.writeBackendErr(w, l, err)
 		return
 	}
@@ -611,7 +611,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if s.cfg.Now().Sub(validated) >= s.cfg.Revalidate {
-				if _, _, err := authorizeTarget(l.Context(), s.cfg.Backend, l.Grant, sid); err != nil {
+				if _, _, err := authorizeTarget(l, s.cfg.Backend, sid); err != nil {
 					if !ended() {
 						code := CodeNotFound
 						if !errors.Is(err, errNotFound) {
@@ -710,7 +710,7 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 	// archive state, the row's own capability and, for add-agent, the machine
 	// catalog and the workgroup's current repo ceiling.
 	precheck := func() ([]string, error) {
-		rows, err := s.cfg.Backend.Snapshot(l.Context())
+		rows, err := targetSnapshot(l, s.cfg.Backend, sid)
 		if err != nil {
 			return nil, err
 		}

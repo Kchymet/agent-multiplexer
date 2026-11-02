@@ -75,10 +75,36 @@ func validRepoList(v string) bool {
 	return true
 }
 
+// emptyMeansAbsent are the optional free-text and model fields the cloud
+// client sends as "" when unset. Only these are normalized: every other key,
+// including identity_mode and any unknown key, is kept exactly as sent so the
+// allowlist and its validators still see (and refuse) it. repos is not here:
+// on the daemon an explicit empty repos is meaningful (every tracked repo).
+var emptyMeansAbsent = []string{"prompt", "name", "model", wsops.FieldCoordinatorModel, "linear"}
+
+// withoutEmptyOptional drops the emptyMeansAbsent keys whose value is "".
+func withoutEmptyOptional(f map[string]string) map[string]string {
+	out := make(map[string]string, len(f))
+	for k, v := range f {
+		if v == "" && slices.Contains(emptyMeansAbsent, k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// MaxLinearBytes bounds new-workgroup's linear field (an issue link the daemon
+// prepends to the coordinator's task as "Linear issue to work on: <link>").
+const MaxLinearBytes = 512
+
 // validCreationFields checks the optional fields every creation verb shares.
 // identity_mode, when present, must be machine: direct clients never select a
 // credential source.
 func validCreationFields(f map[string]string) bool {
+	if v, ok := f["linear"]; ok && !fieldLine(v, MaxLinearBytes) {
+		return false
+	}
 	if v, ok := f["identity_mode"]; ok && v != hp.IdentityMachine {
 		return false
 	}
@@ -218,7 +244,13 @@ func actionFor(sid string, req ActionRequest) (core.Action, error) {
 		}
 		return core.Action{Action: core.ActionSetArchived, ID: sid, Fields: map[string]string{"archived": archived}}, nil
 	case VerbAddAgent:
-		if !onlyFields(f, "agent", "prompt", "mode", "model", "repos", "identity_mode") || !validCreationFields(f) {
+		// The key allowlist sees the fields exactly as sent; only then do empty
+		// optional values become absent, and the value validators run.
+		if !onlyFields(f, "agent", "prompt", "mode", "model", "repos", "identity_mode") {
+			return core.Action{}, errBadRequest
+		}
+		f = withoutEmptyOptional(f)
+		if !validCreationFields(f) {
 			return core.Action{}, errBadRequest
 		}
 		return core.Action{Action: core.ActionAddAgent, ID: sid, Fields: creationFields(f)}, nil
@@ -229,22 +261,32 @@ func actionFor(sid string, req ActionRequest) (core.Action, error) {
 // createActionFor validates a root creation request (PathWorkgroups). It does
 // not consult the backend.
 func createActionFor(req CreateRequest) (core.Action, error) {
+	// Each verb checks its key allowlist on the fields exactly as sent; only
+	// then do empty optional values become absent, and the value validators run.
 	f := req.Fields
 	switch req.Verb {
 	case VerbNewWorkgroup:
-		if !onlyFields(f, "name", "prompt", "repos", "agent", "mode", "model",
-			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") || !validCreationFields(f) {
+		if !onlyFields(f, "name", "prompt", "repos", "agent", "mode", "model", "linear",
+			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") {
+			return core.Action{}, errBadRequest
+		}
+		if f = withoutEmptyOptional(f); !validCreationFields(f) {
 			return core.Action{}, errBadRequest
 		}
 		return core.Action{Action: core.ActionNewWorkgroup, Fields: creationFields(f)}, nil
 	case VerbNewWorkgroupEmpty:
-		// A coordinator with an explicit repo ceiling and zero members: repos is
-		// required (possibly empty), and nothing describes a member.
+		// A coordinator and zero members: repos is required (named repos limit
+		// the ceiling; "" is every tracked repo, live). agent/model/mode are
+		// accepted because the cloud client sends them; with no defaultAgent the
+		// daemon creates no member from them. defaultAgent is never accepted.
 		if _, ok := f["repos"]; !ok {
 			return core.Action{}, errBadRequest
 		}
-		if !onlyFields(f, "name", "prompt", "repos", wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") ||
-			!validCreationFields(f) {
+		if !onlyFields(f, "name", "prompt", "repos", "agent", "model", "mode",
+			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") {
+			return core.Action{}, errBadRequest
+		}
+		if f = withoutEmptyOptional(f); !validCreationFields(f) {
 			return core.Action{}, errBadRequest
 		}
 		return core.Action{Action: core.ActionCreateWorkspace, Fields: creationFields(f)}, nil

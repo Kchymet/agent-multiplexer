@@ -727,8 +727,8 @@ oversized values are refused.
 | `archive` | none | Explicit, never a toggle. The daemon's open pull-request guard applies, and `force` is not accepted |
 | `unarchive` | none | The target must itself be archived and have no archived ancestor. A member of an archived workgroup is restored by unarchiving the workgroup |
 | `add-agent` | optional `agent`, `prompt`, `mode`, `model`, `repos`, `identity_mode` | The target is an in-scope, non-archived workgroup root. `repos` must lie inside that workgroup's current repo ceiling, which the daemon enforces again |
-| `new-workgroup` | optional `name`, `prompt`, `repos`, `agent`, `mode`, `model`, `coordinator`, `coordinator_model`, `identity_mode` | `POST /direct/v1/workgroups` |
-| `new-workgroup-empty` | `repos` (required, may be empty), optional `name`, `prompt`, `coordinator`, `coordinator_model`, `identity_mode` | A coordinator with an explicit repo ceiling and no members |
+| `new-workgroup` | optional `name`, `prompt`, `repos`, `agent`, `mode`, `model`, `coordinator`, `coordinator_model`, `identity_mode`, `linear` | `POST /direct/v1/workgroups` |
+| `new-workgroup-empty` | `repos` (required), optional `name`, `prompt`, `coordinator`, `coordinator_model`, `identity_mode`, and `agent`, `model`, `mode` (accepted, but no member is created) | A coordinator with no members. Named repos limit it to exactly those. An empty `repos` means every tracked repo, live, as on the daemon |
 
 More rules:
 
@@ -736,8 +736,13 @@ More rules:
 - Every harness a creation launches must be in the catalog.
 - Repo names must be tracked repos, or inside the target workgroup's repo
   ceiling for `add-agent`.
-- `linear`, `defaultAgent`, `force`, `source`, account fields and paths are
-  refused.
+- `linear` (one line, at most 512 bytes) is accepted on `new-workgroup`. The
+  daemon prepends it to the coordinator's task, as on the relay.
+- An empty `prompt`, `name`, `model`, `coordinator_model` or `linear` counts
+  as absent, which is how the cloud client sends unset fields. Every other
+  key is kept as sent, so an unknown key, or an empty `identity_mode`, is
+  still refused.
+- `defaultAgent`, `force`, `source`, account fields and paths are refused.
 
 **A workgroup-scoped grant can never create a root.** A new root lies outside
 every named workgroup, so creating one would mint authority outside the grant.
@@ -810,6 +815,11 @@ amux keeps no queue of its own. What happens next depends on the runtime:
 Neither case guarantees the text is queued. Any failure appears in the
 transcript, not in the HTTP answer.
 
+**Acting on a new id.** A request naming a session that the same grant created
+within the last minute can arrive before the daemon's inventory publishes the
+new row. If so, the server re-reads the inventory for up to 3 seconds and
+then checks the published row as usual.
+
 **Telling cases apart.**
 
 | What the client sees | Meaning |
@@ -820,6 +830,8 @@ transcript, not in the HTTP answer.
 
 Fixtures are in [`direct/fixtures/workflow-v1`](direct/fixtures/workflow-v1)
 (additive; the `v1` set and its `SHA256SUMS` are unchanged).
+
+The full cloud-relay comparison is in [direct-cloud-parity.md](direct-cloud-parity.md).
 
 ## S1 limits
 
