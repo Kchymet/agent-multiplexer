@@ -90,7 +90,11 @@ start over with a fresh `idem_key`:
   session list before retrying with a new key.
 
 **Errors on the POST itself** (either mode). These answer before anything is
-recorded or sent, so nothing ran: `400 bad_request`, `403 denied`,
+recorded or sent, so *this request* ran nothing. They describe only this
+admission: they never erase an earlier attempt's uncertainty. A client that
+holds an unknown or `rejected` outcome for an earlier attempt keeps that record
+even if a later retry is refused (`denied`, `not_found`, …). The refused codes
+are `400 bad_request`, `403 denied`,
 `404 not_found`, `409 archived`, `409 unsupported_verb`,
 `422 not_in_catalog`, `429 rate_limited`, `409 capacity_exhausted`,
 `503 unavailable`. Not proof of not-run: `422 rejected`, `409 idem_ambiguous`,
@@ -98,9 +102,13 @@ recorded or sent, so nothing ran: `400 bad_request`, `403 denied`,
 names another request), and **any `401`**. A sync creation revoked after
 dispatch answers `401 auth.revoked` with an unknown outcome, and an async POST
 answers `401` when the reader's own token ended while the recorded creation
-continues. Re-authenticate and re-POST the same key; the replay is
-authoritative. After revocation the grant's records are gone, so no retry can
-clear an earlier uncertainty — check the machine.
+continues. Recover by renewing the **same grant** (its refresh token) and
+re-POSTing the same key; that replay is authoritative. Idempotency keys and
+creation ids are scoped to the grant: a replacement enrollment or new client is
+a different grant with an empty record set, and a same-key POST there is a new
+request, not a replay — it would create again. A revoked grant cannot be
+resumed by a new one, so no retry can clear an earlier uncertainty: check the
+machine's session list.
 
 ## Identity and recovery
 

@@ -379,6 +379,9 @@ const (
 // daemon answered not-OK, but it may have created the session and failed to
 // start it, or left a partial workgroup or worktree. Never retry a rejected
 // creation automatically with a fresh idem_key; check the machine first.
+// Replay is per grant: only the same grant (renewed by refresh, never a new
+// enrollment) replays a key; a later refusal never clears an earlier
+// unknown or rejected outcome.
 type CreationStatus struct {
 	CreationID string `json:"creation_id"`
 	Verb       string `json:"verb"`
