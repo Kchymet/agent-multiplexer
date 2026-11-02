@@ -13,6 +13,7 @@
       "role": "coordinator",
       "caps": {
         "prompt": true,
+        "interject": true,
         "stop": true
       }
     },
@@ -31,6 +32,7 @@
       "runtime": "claude",
       "caps": {
         "prompt": true,
+        "interject": true,
         "stop": false
       },
       "prs": [

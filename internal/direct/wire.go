@@ -81,8 +81,9 @@ const (
 
 // Action verbs admitted in S1. Everything else fails closed.
 const (
-	VerbPrompt = "prompt"
-	VerbStop   = "stop"
+	VerbPrompt    = "prompt"
+	VerbInterject = "interject"
+	VerbStop      = "stop"
 )
 
 // Resource API error codes (JSON body {"code","error"}).
@@ -203,8 +204,9 @@ type APIError struct {
 // SessionCaps is the per-session control surface a direct client may use: a
 // verb is true only when the daemon can serve it AND the grant may steer.
 type SessionCaps struct {
-	Prompt bool `json:"prompt"`
-	Stop   bool `json:"stop"`
+	Prompt    bool `json:"prompt"`
+	Interject bool `json:"interject"`
+	Stop      bool `json:"stop"`
 }
 
 // Session is one inventory row, an allowlisted projection of core.Session.

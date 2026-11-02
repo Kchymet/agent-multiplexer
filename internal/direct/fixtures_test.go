@@ -68,10 +68,10 @@ func fixtureFiles(t *testing.T, id *Identity, proof string) map[string][]byte {
 	form := func(v url.Values) []byte { return []byte(v.Encode() + "\n") }
 	sessions := SessionsResponse{ServerID: id.ServerID, Sessions: []Session{
 		{ID: "771951", Title: "Direct access", Kind: "claude", RootID: "", IsRoot: true, Section: hp.SectionWorkgroups,
-			State: hp.StateRunning, Status: "running", Runtime: "claude", Role: hp.RoleCoordinator, Caps: SessionCaps{Prompt: true, Stop: true}},
+			State: hp.StateRunning, Status: "running", Runtime: "claude", Role: hp.RoleCoordinator, Caps: SessionCaps{Prompt: true, Interject: true, Stop: true}},
 		{ID: "e1deda", Title: "Backend implementation", Kind: "claude", Mode: "task", Model: "claude-opus-5-5", RootID: "771951",
 			Repos: "agent-multiplexer", Section: hp.SectionWorkgroups, State: hp.StateIdle, Status: "idle", StartedAt: 1792999000,
-			Runtime: "claude", Caps: SessionCaps{Prompt: true, Stop: false},
+			Runtime: "claude", Caps: SessionCaps{Prompt: true, Interject: true, Stop: false},
 			PRs: []hp.SessionPR{{Repo: "owner/agent-multiplexer", Number: 273, URL: "https://github.com/owner/agent-multiplexer/pull/273", Branch: "amux/771951-e1deda", State: "open"}}},
 	}}
 	textEvent := json.RawMessage(`{"text":"Done.","final":true}`)
@@ -97,13 +97,14 @@ func fixtureFiles(t *testing.T, id *Identity, proof string) map[string][]byte {
 		"stream.sse": []byte("event: events\ndata: " + string(mustJSON(t, StreamBatch{Seq: 58, Runtime: "claude",
 			Events: []RuntimeEvent{{Type: hp.TypeTurnStart, Direction: hp.DirOut}}})) + "\n\n: keepalive\n\n" +
 			"event: auth\ndata: " + string(mustJSON(t, StreamEnd{Code: CodeAuthExpired})) + "\n\n"),
-		"action-request-prompt.json": js(ActionRequest{Verb: VerbPrompt, Fields: map[string]string{"text": "Please run the tests."}, IdemKey: "4f6c1d2e-0b7a-4d3c-9e8f-1a2b3c4d5e6f"}),
-		"action-request-stop.json":   js(ActionRequest{Verb: VerbStop, Fields: map[string]string{}, IdemKey: "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d"}),
-		"action-response.json":       js(ActionResponse{OK: true}),
-		"watch-auth.json":            js(WatchAuth{Type: "auth", AccessToken: fixtureAccess}),
-		"watch-welcome.json":         js(WatchWelcome{Type: "welcome", ServerID: id.ServerID, ExpiresAt: fixtureNow.Unix() + 600}),
-		"watch-snapshot.json":        js(WatchSnapshot{Type: "snapshot", Sessions: sessions.Sessions}),
-		"ws-close-codes.json":        js(CloseCodes),
+		"action-request-prompt.json":    js(ActionRequest{Verb: VerbPrompt, Fields: map[string]string{"text": "Please run the tests."}, IdemKey: "4f6c1d2e-0b7a-4d3c-9e8f-1a2b3c4d5e6f"}),
+		"action-request-interject.json": js(ActionRequest{Verb: VerbInterject, Fields: map[string]string{"text": "Also check the race detector."}, IdemKey: "6e3b7c42-25b1-4a83-91d2-f7810a63c459"}),
+		"action-request-stop.json":      js(ActionRequest{Verb: VerbStop, Fields: map[string]string{}, IdemKey: "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d"}),
+		"action-response.json":          js(ActionResponse{OK: true}),
+		"watch-auth.json":               js(WatchAuth{Type: "auth", AccessToken: fixtureAccess}),
+		"watch-welcome.json":            js(WatchWelcome{Type: "welcome", ServerID: id.ServerID, ExpiresAt: fixtureNow.Unix() + 600}),
+		"watch-snapshot.json":           js(WatchSnapshot{Type: "snapshot", Sessions: sessions.Sessions}),
+		"ws-close-codes.json":           js(CloseCodes),
 	}
 }
 
@@ -208,7 +209,7 @@ func TestDirectFixtures(t *testing.T) {
 		"hello-request.json": &HelloRequest{}, "hello-response.json": &HelloResponse{}, "bundle.json": &Bundle{},
 		"token-response.json": &TokenResponse{}, "token-error.json": &OAuthError{}, "api-error.json": &APIError{}, "api-error-capacity.json": &APIError{}, "token-error-unavailable.json": &OAuthError{},
 		"sessions-response.json": &SessionsResponse{}, "history-response.json": &HistoryResponse{},
-		"action-request-prompt.json": &ActionRequest{}, "action-request-stop.json": &ActionRequest{},
+		"action-request-prompt.json": &ActionRequest{}, "action-request-interject.json": &ActionRequest{}, "action-request-stop.json": &ActionRequest{},
 		"action-response.json": &ActionResponse{}, "watch-auth.json": &WatchAuth{}, "watch-welcome.json": &WatchWelcome{},
 		"watch-snapshot.json": &WatchSnapshot{}, "ws-close-codes.json": &map[string]int{},
 	}

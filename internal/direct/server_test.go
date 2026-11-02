@@ -147,7 +147,7 @@ func TestDeniedOperationsMakeNoBackendCall(t *testing.T) {
 		{"unknown token", "amxa_unknown", PathSession + "/a1/history", "", CodeAuthInvalid},
 		{"refresh as access", reader.RefreshToken, PathSession, "", CodeAuthInvalid},
 		{"read-only prompt", reader.AccessToken, PathSession + "/a1/actions", actionBody(VerbPrompt, "hi", "k1"), CodeDenied},
-		{"unsupported verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("interject", "hi", "k2"), CodeUnsupportedVerb},
+		{"unsupported verb", steer.AccessToken, PathSession + "/a1/actions", actionBody("permission", "hi", "k2"), CodeUnsupportedVerb},
 		{"extra field", steer.AccessToken, PathSession + "/a1/actions", `{"verb":"prompt","fields":{"text":"x","reason":"y"},"idem_key":"k3"}`, CodeBadRequest},
 		{"stop with fields", steer.AccessToken, PathSession + "/a1/actions", actionBody(VerbStop, "x", "k4"), CodeBadRequest},
 		{"empty prompt", steer.AccessToken, PathSession + "/a1/actions", actionBody(VerbPrompt, "  ", "k5"), CodeBadRequest},
@@ -238,14 +238,14 @@ func TestArchivedTargetsAndParentsAreNotSteerable(t *testing.T) {
 	var sr SessionsResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &sr)
 	for _, row := range sr.Sessions {
-		if (row.ID == "b1" || row.ID == "wg2") && (row.Caps.Prompt || row.Caps.Stop) {
+		if (row.ID == "b1" || row.ID == "wg2") && (row.Caps.Prompt || row.Caps.Interject || row.Caps.Stop) {
 			t.Errorf("%s advertises steering while archived", row.ID)
 		}
 	}
 	reader := enroll(t, a, []string{PermRead}, allSessions)
 	_ = json.Unmarshal(do(s, "GET", PathSession, reader.AccessToken, "").Body.Bytes(), &sr)
 	for _, row := range sr.Sessions {
-		if row.Caps.Prompt || row.Caps.Stop {
+		if row.Caps.Prompt || row.Caps.Interject || row.Caps.Stop {
 			t.Errorf("read-only grant sees steer caps on %s", row.ID)
 		}
 	}
