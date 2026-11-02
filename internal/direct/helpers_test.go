@@ -38,6 +38,19 @@ type fakeBackend struct {
 	applyErr      error
 	streamStarted chan struct{}
 	snapBlocked   chan struct{} // receives when a blocking Snapshot has entered
+	catalog       MachineCatalog
+	catalogs      atomic.Int64
+	newID         string // the id Apply reports (creation verbs)
+}
+
+func (f *fakeBackend) Catalog(ctx context.Context) (MachineCatalog, error) {
+	f.catalogs.Add(1)
+	if err := ctx.Err(); err != nil {
+		return MachineCatalog{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.catalog, nil
 }
 
 func newFake(rows ...core.Session) *fakeBackend {
@@ -90,7 +103,10 @@ func (f *fakeBackend) Apply(ctx context.Context, a core.Action) (string, error) 
 		return "", ctx.Err()
 	}
 	f.applied <- a
-	return "", f.applyErr
+	f.mu.Lock()
+	id := f.newID
+	f.mu.Unlock()
+	return id, f.applyErr
 }
 
 func (f *fakeBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {

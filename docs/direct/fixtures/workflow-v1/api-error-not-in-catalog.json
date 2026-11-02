@@ -1,0 +1,4 @@
+{
+  "code": "not_in_catalog",
+  "error": "a harness or repository is not in this machine's creation catalog for this target"
+}

@@ -1,0 +1,12 @@
+{
+  "verb": "new-workgroup",
+  "fields": {
+    "agent": "claude",
+    "coordinator": "codex",
+    "identity_mode": "machine",
+    "name": "Docs",
+    "prompt": "Refresh the guides.",
+    "repos": "harness"
+  },
+  "idem_key": "b1f0c6a2-9"
+}

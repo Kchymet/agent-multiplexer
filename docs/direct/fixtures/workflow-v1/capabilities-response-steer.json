@@ -1,0 +1,33 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "permissions": [
+    "read",
+    "steer"
+  ],
+  "resource_scope": {
+    "kind": "workgroups",
+    "workgroups": [
+      "771951"
+    ]
+  },
+  "server_verbs": [
+    "prompt",
+    "stop",
+    "interject",
+    "goal",
+    "permission",
+    "start",
+    "rename",
+    "archive",
+    "unarchive",
+    "add-agent",
+    "new-workgroup",
+    "new-workgroup-empty"
+  ],
+  "verbs": [
+    "prompt",
+    "stop",
+    "interject"
+  ],
+  "create_workgroup": false
+}

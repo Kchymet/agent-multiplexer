@@ -28,7 +28,7 @@ const (
 	maxDirectInFlight   = 4
 	maxDirectField      = 128
 	maxDirectLabel      = 64
-	maxDirectPerms      = 4
+	maxDirectPerms      = 8 // shape bound only: the host ceiling decides; six permissions exist (direct.Permissions)
 	maxDirectWorkgroups = 64
 )
 

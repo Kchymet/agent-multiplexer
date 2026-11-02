@@ -255,22 +255,26 @@ func randomToken(prefix string) (string, error) {
 }
 
 // ValidatePerms normalizes and checks a permission list: read is mandatory,
-// steer optional, nothing else allowed.
+// every other permission (Permissions) is optional and explicit, and nothing
+// else is allowed. The result is in canonical order, so ["read","steer"]
+// normalizes exactly as it did before the additive permissions existed.
 func ValidatePerms(perms []string) ([]string, error) {
 	set := map[string]bool{}
 	for _, p := range perms {
 		p = strings.TrimSpace(p)
-		if p != PermRead && p != PermSteer {
-			return nil, fmt.Errorf("unknown permission %q (allowed: read, steer)", p)
+		if !slices.Contains(Permissions, p) {
+			return nil, fmt.Errorf("unknown permission %q (allowed: %s)", p, strings.Join(Permissions, ", "))
 		}
 		set[p] = true
 	}
 	if !set[PermRead] {
 		return nil, errors.New("permissions must include read")
 	}
-	out := []string{PermRead}
-	if set[PermSteer] {
-		out = append(out, PermSteer)
+	out := []string{}
+	for _, p := range Permissions {
+		if set[p] {
+			out = append(out, p)
+		}
 	}
 	return out, nil
 }
@@ -958,6 +962,15 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 // record admitted and no longer running, which reads as ambiguous.
 func (a *Authority) FinishAction(l *Lease, key string, ok bool, code, msg string) {
 	a.endAction(l, key, func(r *idemRecord) { r.State, r.OK, r.Code, r.Error = idemDone, ok, code, msg })
+}
+
+// FinishResult records a success together with what it reported (a creation's
+// new id, an archive's affected sessions), so a replay of the same key answers
+// with the same result instead of running again.
+func (a *Authority) FinishResult(l *Lease, key string, res ActionResponse) {
+	a.endAction(l, key, func(r *idemRecord) {
+		r.State, r.OK, r.NewID, r.RootID, r.Affected = idemDone, true, res.NewID, res.RootID, slices.Clone(res.Affected)
+	})
 }
 
 // AmbiguousAction records that the call's outcome is unknown: it may or may

@@ -264,3 +264,13 @@ func TestDirectEnrollOverRegisteredConnection(t *testing.T) {
 		t.Fatalf("provider ids %v", f.calls)
 	}
 }
+
+// Every direct permission fits the relay's shape bound: the host's own ceiling,
+// not this relay, decides what a cloud code may carry.
+func TestDirectEnrollShapeAdmitsEveryDirectPermission(t *testing.T) {
+	r := goodEnroll()
+	r.Permissions = []string{"read", "steer", "respond", "approve", "manage", "create"}
+	if !validDirectRequest(r) {
+		t.Fatalf("a request naming every direct permission was refused: %v", r.Permissions)
+	}
+}

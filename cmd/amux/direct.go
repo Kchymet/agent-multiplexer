@@ -97,7 +97,15 @@ you type over the saved settings, and --no-wait skips waiting for readiness):
 
 enroll flags (the running server publishes its endpoints into the bundle):
   --label <text>          name for the client, shown in clients list
-  --permissions <list>    read | read,steer   (required)
+  --permissions <list>    comma list, read required (required):
+                            read     inventory, history, live stream
+                            steer    prompt, interject, stop
+                            respond  goal control
+                            approve  answer permission requests (allow/deny)
+                            manage   start, rename, archive, unarchive
+                            create   add-agent; new workgroups (--all-sessions only)
+                          e.g. read,steer or read,steer,respond,manage
+                          Nothing implies anything else; there is no "all".
   --all-sessions          grant every session on this host, or
   --workgroup <root-id>   grant one workgroup and its members (repeatable)
   --ttl <dur>             code lifetime (default 10m, maximum 1h)
@@ -105,7 +113,8 @@ enroll flags (the running server publishes its endpoints into the bundle):
 
 cloud enable flags (the ceiling is required; all-sessions covers ordinary
 sessions, never the amux console):
-  --permissions <list>    ceiling: read | read,steer
+  --permissions <list>    ceiling: read plus any of steer, respond, approve,
+                          manage, create (see enroll); codes never exceed it
   --all-sessions          ceiling: any ordinary session, or
   --workgroup <root-id>   ceiling: these workgroups (repeatable)
   --owner <user-id>       advanced: the Harness user id allowed to request codes
@@ -431,7 +440,7 @@ func cmdDirectCloudEnable(args []string) error {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	if *perms == "" {
-		return errors.New("--permissions is required (read or read,steer)")
+		return errors.New("--permissions is required (read plus any of steer, respond, approve, manage, create)")
 	}
 	resource, err := directResourceFlags(*all, groups)
 	if err != nil {

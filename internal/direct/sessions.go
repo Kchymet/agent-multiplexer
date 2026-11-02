@@ -2,11 +2,17 @@ package direct
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
+	"amux/internal/agent"
 	"amux/internal/core"
 	"amux/internal/hostbackend"
 	"amux/internal/runtimeevents"
@@ -24,6 +30,18 @@ type Backend interface {
 	// History and Stream read one already-authorized session's transcript.
 	History(ctx context.Context, sessionID string, beforeSeq int64, limit int) (hp.RuntimeEventHistory, bool)
 	Stream(ctx context.Context, sessionID string, afterSeq int64) (<-chan hp.RuntimeEventBatch, bool)
+	// Catalog is the machine's creation input space, read fresh (harness
+	// probes may be cached briefly).
+	Catalog(ctx context.Context) (MachineCatalog, error)
+}
+
+// MachineCatalog is the backend's unprojected creation catalog: verified
+// harnesses, tracked repo names, and each workgroup root's repo ceiling. It
+// holds names only; repository sources and paths are never read into it.
+type MachineCatalog struct {
+	Harnesses []CatalogHarness
+	Repos     []string
+	Ceilings  map[string][]string // workgroup root id -> repo names its members may use
 }
 
 // HostBackend is the production Backend. Transcript reads resolve the runtime
@@ -31,6 +49,107 @@ type Backend interface {
 // never returned to a client.
 type HostBackend struct {
 	H hostbackend.HostDaemon
+}
+
+// harnessProbeTTL bounds how long a harness probe result is reused. Probing
+// runs each harness binary's version check, as the relay provider does before
+// it advertises execution capabilities.
+const harnessProbeTTL = time.Minute
+
+var harnessProbes struct {
+	sync.Mutex
+	at  time.Time
+	out []CatalogHarness
+}
+
+// probeHarnesses lists the harnesses verified on this machine (in this host
+// process's environment, never an agent's private configuration).
+func probeHarnesses(ctx context.Context) []CatalogHarness {
+	harnessProbes.Lock()
+	defer harnessProbes.Unlock()
+	if harnessProbes.out != nil && time.Since(harnessProbes.at) < harnessProbeTTL {
+		return slices.Clone(harnessProbes.out)
+	}
+	out := []CatalogHarness{}
+	for _, kind := range agent.Kinds() {
+		if r := agent.Probe(ctx, kind); r.Err == nil {
+			out = append(out, CatalogHarness{Name: r.Kind, Version: r.Version, Models: catalogModels(agent.HarnessFor(kind).Models())})
+		}
+	}
+	if ctx.Err() == nil {
+		harnessProbes.at, harnessProbes.out = time.Now(), out
+	}
+	return slices.Clone(out)
+}
+
+// maxCatalogModels bounds one harness's advertised model list.
+const maxCatalogModels = 64
+
+// publicModelRE is the catalog's display filter, deliberately narrower than
+// modelRE (what a creation request may submit). A model name a harness offers
+// can be a provider path that embeds account or project identifiers
+// (arn:aws:bedrock:…:123456789012:…, projects/<project>/…, ft:<model>:<org>::…),
+// so the catalog lists only plain names: no ':', '/' or '@', and no long digit
+// runs. This is a shape filter, not a guarantee that a name carries nothing
+// sensitive; a client may still submit any modelRE-valid model it knows.
+var (
+	publicModelRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,95}$`)
+	longDigitsRE  = regexp.MustCompile(`[0-9]{9,}`)
+)
+
+func publicModel(m string) bool {
+	return publicModelRE.MatchString(m) && !longDigitsRE.MatchString(m)
+}
+
+// catalogModels keeps only public model names, de-duplicated and bounded.
+func catalogModels(in []string) []string {
+	out := []string{}
+	for _, m := range in {
+		if publicModel(m) && !slices.Contains(out, m) && len(out) < maxCatalogModels {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Catalog reads tracked repo names and workgroup repo ceilings from the daemon
+// (names only: RepoRow.Source and WorkgroupRow.Dir are dropped here) and the
+// verified harnesses.
+func (b HostBackend) Catalog(ctx context.Context) (MachineCatalog, error) {
+	c, err := b.H.ConnectContext(ctx)
+	if err != nil {
+		return MachineCatalog{}, fmt.Errorf("%w: %v", hostbackend.ErrUnavailable, err)
+	}
+	defer c.Close()
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stop()
+	var repos []core.RepoRow
+	raw, err := c.Query(core.QueryRepos)
+	if err == nil {
+		err = json.Unmarshal(raw, &repos)
+	}
+	if err != nil {
+		return MachineCatalog{}, err
+	}
+	var groups []core.WorkgroupRow
+	raw, err = c.Query(core.QuerySessions)
+	if err == nil {
+		err = json.Unmarshal(raw, &groups)
+	}
+	if err != nil {
+		return MachineCatalog{}, err
+	}
+	cat := MachineCatalog{Repos: []string{}, Ceilings: map[string][]string{}}
+	for _, r := range repos {
+		cat.Repos = append(cat.Repos, r.Name)
+	}
+	for _, g := range groups {
+		if g.Role == hp.RoleCoordinator {
+			cat.Ceilings[g.ID] = slices.Clone(g.Grants)
+		}
+	}
+	cat.Harnesses = probeHarnesses(ctx)
+	return cat, nil
 }
 
 func (b HostBackend) Snapshot(ctx context.Context) ([]core.Session, error) { return b.H.Snapshot(ctx) }
@@ -137,11 +256,7 @@ func effectivelyArchived(row core.Session, byID map[string]core.Session) bool {
 
 // project is the allowlisted inventory row a client sees.
 func project(g Grant, row core.Session, byID map[string]core.Session) Session {
-	steer := g.Can(PermSteer) && !effectivelyArchived(row, byID)
-	caps := SessionCaps{}
-	if row.Caps != nil && steer {
-		caps = SessionCaps{Prompt: row.Caps.Prompt, Interject: row.Caps.Interject, Stop: row.Caps.Cancel}
-	}
+	caps := rowCaps(g, row, byID)
 	out := Session{
 		ID: row.ID, Title: row.Title, Kind: row.Kind, Mode: row.Mode, Model: row.Model, RootID: row.RootID,
 		IsRoot: row.IsRoot, Repos: row.Repos, Section: row.Section, State: row.State, Status: row.Status,
@@ -177,10 +292,11 @@ func indexRows(rows []core.Session) map[string]core.Session {
 }
 
 var (
-	errNotFound    = errors.New(CodeNotFound)
-	errArchived    = errors.New(CodeArchived)
-	errUnsupported = errors.New(CodeUnsupportedVerb)
-	errBadRequest  = errors.New(CodeBadRequest)
+	errNotFound     = errors.New(CodeNotFound)
+	errArchived     = errors.New(CodeArchived)
+	errUnsupported  = errors.New(CodeUnsupportedVerb)
+	errBadRequest   = errors.New(CodeBadRequest)
+	errNotInCatalog = errors.New(CodeNotInCatalog)
 )
 
 // authorizeTarget reads the fresh inventory and returns the target row when it
@@ -196,45 +312,4 @@ func authorizeTarget(ctx context.Context, b Backend, g Grant, sid string) (core.
 		return core.Session{}, nil, errNotFound
 	}
 	return row, byID, nil
-}
-
-// actionFor validates an S1 action request's verb and fields against an exact
-// allowlist and returns the daemon action. It does not consult the backend.
-func actionFor(sid string, req ActionRequest) (core.Action, error) {
-	switch req.Verb {
-	case VerbPrompt, VerbInterject:
-		for k := range req.Fields {
-			if k != hp.FieldText {
-				return core.Action{}, errBadRequest
-			}
-		}
-		text := req.Fields[hp.FieldText]
-		if strings.TrimSpace(text) == "" || len(text) > MaxPromptBytes || !utf8.ValidString(text) {
-			return core.Action{}, errBadRequest
-		}
-		return core.Action{Action: core.ActionSteer, ID: sid, Fields: map[string]string{core.SteerVerb: req.Verb, core.SteerText: text}}, nil
-	case VerbStop:
-		if len(req.Fields) != 0 {
-			return core.Action{}, errBadRequest
-		}
-		return core.Action{Action: core.ActionSteer, ID: sid, Fields: map[string]string{core.SteerVerb: core.SteerStop}}, nil
-	}
-	return core.Action{}, errUnsupported
-}
-
-// steerable checks the fresh target row for the verb's capability and archive
-// state.
-func steerable(row core.Session, byID map[string]core.Session, verb string) error {
-	if effectivelyArchived(row, byID) {
-		return errArchived
-	}
-	if row.Caps == nil {
-		return errUnsupported
-	}
-	if verb == VerbPrompt && !row.Caps.Prompt ||
-		verb == VerbInterject && !row.Caps.Interject ||
-		verb == VerbStop && !row.Caps.Cancel {
-		return errUnsupported
-	}
-	return nil
 }

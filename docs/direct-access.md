@@ -18,7 +18,7 @@ the local daemon (through `internal/hostbackend`, as the Harness relay provider
 does). The local daemon's authentication and the Harness relay wire are
 unchanged.
 
-S1 serves exactly:
+The server serves exactly:
 
 | Route | Permission | What it does |
 | --- | --- | --- |
@@ -29,12 +29,15 @@ S1 serves exactly:
 | `GET /direct/v1/sessions/watch` (WebSocket) | read | The same inventory, pushed on change |
 | `GET /direct/v1/sessions/{sid}/history?before_seq=&limit=` | read | One newest-first transcript page |
 | `GET /direct/v1/sessions/{sid}/stream?after=` | read | Live transcript tail (SSE format) |
-| `POST /direct/v1/sessions/{sid}/actions` | steer | `prompt`, `interject` or `stop` |
+| `POST /direct/v1/sessions/{sid}/actions` | the verb's own (below) | `prompt`, `interject`, `stop` and the [workflow verbs](#workflow-actions) |
+| `POST /direct/v1/workgroups` | create, `all_sessions` only | `new-workgroup` or `new-workgroup-empty` |
+| `GET /direct/v1/capabilities` | read | The grant's verbs and the machine's creation catalog |
 
 Everything else fails closed:
 
-- permission answers, goals and lifecycle verbs;
-- accounts and panes;
+- delete, move, repo tracking and grant-ceiling changes, restart, account
+  and login actions, and any configuration or host administration;
+- panes and terminals;
 - raw runtime records and host paths.
 
 Inventory rows are an allowlisted projection. Working directories, process ids,
@@ -75,7 +78,9 @@ refused. An explicit console grant would be a separately reviewed feature.
    ```
 
    Choose the scope explicitly: `--all-sessions`, or one or more
-   `--workgroup <root-id>`. Permissions are `read` or `read,steer`. The command
+   `--workgroup <root-id>`. Permissions are `read` plus any of `steer`,
+   `respond`, `approve`, `manage` and `create` (see
+   [Permissions](#permissions)); each is explicit and none implies another. The command
    prints one line, `amux-direct:1:<base64url JSON>`. Paste it into the client
    within its lifetime (default 10 minutes, at most 1 hour). It works once.
 4. **Manage clients.**
@@ -325,7 +330,7 @@ cookies.
 | 401 | `auth.invalid` | Unknown token (e.g. after a server restart): one serialized refresh, then retry once |
 | 401 | `auth.expired` | Refresh, then retry |
 | 401 | `auth.revoked` | The grant is gone: purge this backend only, and enroll again |
-| 403 | `denied` | Missing `steer` |
+| 403 | `denied` | The grant lacks the verb's permission (named in `WWW-Authenticate` `scope`) |
 | 403 | `origin_not_allowed` | — |
 | 404 | `not_found` | Unknown, out-of-scope and console sessions all look the same |
 | 409 | `archived` | Target or one of its ancestors is archived |
@@ -335,6 +340,7 @@ cookies.
 | 421 | `endpoint_not_bound` | — |
 | 422 | `rejected` | The daemon answered not-OK. This is not proof of no side effect (a stop can fail after the interrupt was delivered); repeating a stop is safe |
 | 422 | `idem_conflict` | — |
+| 422 | `not_in_catalog` | A creation names a harness or repo this machine or target workgroup does not offer ([fixture](direct/fixtures/workflow-v1/api-error-not-in-catalog.json)) |
 | 409 | `capacity_exhausted` | The grant holds too many unresolved or recent actions; retrying will not help. Enroll again ([fixture](direct/fixtures/v1/api-error-capacity.json)) |
 | 429 | `rate_limited` | — |
 | 503 | `unavailable` | — |
@@ -353,6 +359,7 @@ client-supplied counts.
 `{"verb":"prompt","fields":{"text":"…"},"idem_key":"…"}`,
 `{"verb":"interject","fields":{"text":"…"},"idem_key":"…"}` or
 `{"verb":"stop","fields":{},"idem_key":"…"}`. Fields are an exact allowlist.
+The other verbs are described under [Workflow actions](#workflow-actions).
 
 `interject` uses the same daemon path as relay/local steering. Claude queues the
 text at its next boundary; supervised Codex steers the active turn. It does not
@@ -433,6 +440,176 @@ is rolled back. Other clients are unaffected.
 running process, but the command reports failure, not success. Repair the
 storage and run the revoke again **before restarting**: a restart re-reads
 disk and would revive the unpersisted grant.
+
+## Workflow actions
+
+These verbs give a direct client the same session workflow as the Harness
+cloud relay: everything except panes and host administration.
+
+### Permissions
+
+| Permission | Verbs |
+| --- | --- |
+| `read` | (mandatory) inventory, history, stream, watch, capabilities |
+| `steer` | `prompt`, `interject`, `stop` (interject joined steer in #295) |
+| `respond` | `goal` |
+| `approve` | `permission` |
+| `manage` | `start`, `rename`, `archive`, `unarchive` |
+| `create` | `add-agent`; `new-workgroup` and `new-workgroup-empty` for an `all_sessions` grant |
+
+**Nothing widens beyond current master.** Interject already joined `steer`
+on master in #295 (c267381), so a `read,steer` grant there already has
+`prompt`, `interject` and `stop`. This change adds nothing to `steer` or
+`read`.
+
+A permission is stored on the code, on the grant it becomes, and in the cloud
+ceiling, and it is copied unchanged on refresh. So every grant, refresh
+token, pending code, device ticket, bundle and cloud policy that exists before
+this change keeps exactly the powers it has on master. A new permission takes
+effect only when the operator names it in `amux direct enroll --permissions`
+or in the `amux direct cloud enable --permissions` ceiling. There is no `all`
+alias.
+
+**Compatibility.**
+
+- An older amux reading a store that holds the new permissions loads it
+  unchanged. At a82bf7d, `loadState` decodes with a lenient `json.Unmarshal`
+  and does not validate perms, and `Admit` admits only an exact
+  `slices.Contains` match. The new names are therefore inert there, and S1
+  routes behave as before.
+- An older binary's cloud issuance runs `ValidatePerms` on the request, so it
+  refuses the new names.
+- An older binary drops the `newId`/`affected` fields of an idempotency record
+  on its next rewrite. Its replay then answers `{"ok":true}` without the id.
+  `TestUnknownStoredPermissionIsInert` checks the same property for this
+  binary.
+
+### Order of checks
+
+Every action runs these checks in order, and a failure at any step makes no
+`Apply`:
+
+1. The credential.
+2. The verb's own permission (403 `denied`, with
+   `WWW-Authenticate: … scope="<permission>"`). An unknown verb needs `steer`,
+   as in S1.
+3. The exact field allowlist (400).
+4. The idempotency key.
+5. A fresh `Snapshot`:
+   - scope; the console is never in scope (404 `not_found`);
+   - archive state (409 `archived`);
+   - the row's own capability (409 `unsupported_verb`);
+   - for creation verbs, a fresh catalog (422 `not_in_catalog`).
+6. Only then does `Apply` run.
+
+### Verbs and fields
+
+Keys are exact. Unknown keys, control characters in names and ids, and
+oversized values are refused.
+
+| Verb | Fields | Notes |
+| --- | --- | --- |
+| `interject` | `text` | Needs `steer` (see above); only where `caps.interject` |
+| `permission` | `request_id`, `runtime_generation`, `decision` (`allow`/`deny`), optional `reason` | Both ids are required. The daemon consumes the decision only for that request observed open on that live runtime generation, once. A replacement runtime or an answered prompt is refused. There is no "always allow" |
+| `goal` | any of `status` (`active`/`paused`/`complete`/`clear`), `objective`, `token_budget` | Goal sessions only; `clear` takes nothing else |
+| `start` | none | |
+| `rename` | `name` | |
+| `archive` | none | Explicit, never a toggle. The daemon's open pull-request guard applies, and `force` is not accepted |
+| `unarchive` | none | The target must itself be archived and have no archived ancestor. A member of an archived workgroup is restored by unarchiving the workgroup |
+| `add-agent` | optional `agent`, `prompt`, `mode`, `model`, `repos`, `identity_mode` | The target is an in-scope, non-archived workgroup root. `repos` must lie inside that workgroup's current repo ceiling, which the daemon enforces again |
+| `new-workgroup` | optional `name`, `prompt`, `repos`, `agent`, `mode`, `model`, `coordinator`, `coordinator_model`, `identity_mode` | `POST /direct/v1/workgroups` |
+| `new-workgroup-empty` | `repos` (required, may be empty), optional `name`, `prompt`, `coordinator`, `coordinator_model`, `identity_mode` | A coordinator with an explicit repo ceiling and no members |
+
+More rules:
+
+- `identity_mode`, when present, must be `machine`.
+- Every harness a creation launches must be in the catalog.
+- Repo names must be tracked repos, or inside the target workgroup's repo
+  ceiling for `add-agent`.
+- `linear`, `defaultAgent`, `force`, `source`, account fields and paths are
+  refused.
+
+**A workgroup-scoped grant can never create a root.** A new root lies outside
+every named workgroup, so creating one would mint authority outside the grant.
+Such a grant can only add agents to its own workgroups.
+
+**Results.** Success is `{"ok":true}`. A creation adds `"new_id"` and
+`"root_id"`:
+
+- for `add-agent`, the new agent, and the target workgroup as its root;
+- for `new-workgroup` and `new-workgroup-empty`, the new root (its coordinator
+  session) in both fields.
+
+A first member that `new-workgroup` creates with repos is not named in the
+result. It appears in the next inventory under that root. `archive` and `unarchive` add `"affected"`,
+the sessions whose effective archive state changed: the target, plus for a
+workgroup root each member that is not archived in its own right. Both are
+recorded with the idempotency key, so a replay returns the same `new_id` and
+`affected` and runs nothing. A creation whose outcome is unknown can never run
+again under its key:
+
+- a transport failure after dispatch;
+- a revocation mid-call;
+- a crash after the key was recorded;
+- a daemon success with no usable id.
+
+All of these answer `idem_ambiguous`.
+
+**Per-session caps.** Inventory rows add `goal`, `permission`,
+`start`, `rename`, `archive`, `unarchive` and `add_agent`. Each is omitted
+when false, so a `read,steer` grant sees exactly the v1 fixture bytes
+(`prompt`, `interject`, `stop`). A flag is true only
+when the grant holds the verb's permission and the server would admit the
+verb for that row now. The flags come from the same table and checks the
+authorizer uses.
+
+### Capabilities
+
+`GET /direct/v1/capabilities` (read) returns:
+
+- `permissions` and `resource_scope`;
+- `server_verbs`: every verb this server implements;
+- `verbs`: the session verbs this grant may use;
+- `create_workgroup`;
+- for a grant holding `create`, a `catalog`:
+  - `harnesses`: name and version verified on this machine, plus `models`.
+    These are the plain model names that harness's local picker offers, at
+    most 64. Names with `:`, `/` or `@`, or a run of nine or more digits, are
+    left out, so provider paths such as Bedrock ARNs, Vertex
+    `projects/…` paths and `ft:` fine-tune ids do not appear. This is a shape
+    filter, not proof that a name carries nothing sensitive. The `model` field
+    accepts more than the list, so such models can still be submitted;
+  - `identity_modes`: `["machine"]`;
+  - `modes`: `task`, `interactive`;
+  - `repos`: tracked repo names, only when the grant may create roots;
+  - `workgroups`: each in-scope live workgroup's id and repo ceiling names.
+
+The catalog never carries repository sources, URLs, host paths, branches,
+account bindings, credentials or configuration.
+
+**Prompting during a turn.** Interject delivers text into the running turn
+(`caps.interject`). A `prompt` is never refused because a turn is running.
+Its 200 means the daemon accepted the prompt, not that it was delivered, and
+amux keeps no queue of its own. What happens next depends on the runtime:
+
+- A PTY session (`control_mode` empty or `pty`) gets the text typed into the
+  harness's own input. The harness decides what to do with it.
+- A structured session (`structured`) gets a new turn start dispatched
+  asynchronously.
+
+Neither case guarantees the text is queued. Any failure appears in the
+transcript, not in the HTTP answer.
+
+**Telling cases apart.**
+
+| What the client sees | Meaning |
+| --- | --- |
+| 404 from capabilities without a JSON `code` body, or a verb absent from `server_verbs` | The server is too old. An old server answers a new verb with 409 `unsupported_verb` (for a steer grant) or 403 |
+| The verb is in `server_verbs` but not in `verbs`, or 403 `denied` naming a scope | The grant lacks the permission: re-enroll with it |
+| 409 `unsupported_verb` | The server has the verb, but this session cannot serve it |
+
+Fixtures are in [`direct/fixtures/workflow-v1`](direct/fixtures/workflow-v1)
+(additive; the `v1` set and its `SHA256SUMS` are unchanged).
 
 ## S1 limits
 

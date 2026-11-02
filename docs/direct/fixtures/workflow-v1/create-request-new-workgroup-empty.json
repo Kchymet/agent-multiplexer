@@ -1,0 +1,8 @@
+{
+  "verb": "new-workgroup-empty",
+  "fields": {
+    "name": "Triage",
+    "repos": ""
+  },
+  "idem_key": "b1f0c6a2-10"
+}

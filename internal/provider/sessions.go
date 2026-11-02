@@ -544,6 +544,10 @@ func steerFields(m harnessproto.MuxMsg) map[string]string {
 	for _, k := range []string{
 		harnessproto.FieldText, harnessproto.FieldRequestID,
 		harnessproto.FieldDecision, harnessproto.FieldReason,
+		// The daemon consumes a permission decision only for the runtime
+		// generation that published the request; dropping it here made every
+		// relayed permission answer fail that check.
+		harnessproto.FieldRuntimeGeneration,
 		harnessproto.FieldGoalStatus, harnessproto.FieldGoalObjective, harnessproto.FieldGoalBudget,
 	} {
 		if v, ok := m.Fields[k]; ok {
