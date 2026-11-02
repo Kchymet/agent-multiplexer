@@ -43,7 +43,11 @@ func helperDaemon() {
 func helperChild() {
 	marker := os.Getenv("AMUX_DIRECTSVC_MARKER")
 	go func() { time.Sleep(20 * time.Second); os.Exit(4) }()
-	WatchParent(10*time.Millisecond, nil, func() {
+	expected, err := SupervisorPID(os.Getenv)
+	if err != nil {
+		os.Exit(5)
+	}
+	WatchParent(expected, 10*time.Millisecond, nil, func() {
 		_ = os.WriteFile(marker, []byte("stopped"), 0o600)
 		os.Exit(0)
 	})
@@ -97,20 +101,53 @@ func TestManagedChildStopsWhenDaemonIsKilled(t *testing.T) {
 	waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
 }
 
-// WatchParent stops a child whose parent exited, on every platform.
-func TestWatchParentStopsOrphanedChild(t *testing.T) {
+// WatchParent stops a child whose daemon exited before the child even
+// started watching: the expected pid is fixed by the parent before exec, so
+// there is no window in which a re-parented child adopts its new parent as
+// the baseline. The shell exits immediately after starting the helper.
+func TestWatchParentStopsChildWhoseParentDiedBeforeWatching(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX re-parenting")
 	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "stopped")
-	// The shell starts the helper in the background and exits soon after, so the
-	// helper is re-parented while it watches (the sleep lets it record the
-	// shell as its parent first).
-	cmd := exec.Command("/bin/sh", "-c", `"$0" -test.run='^$' >/dev/null 2>&1 & sleep 1`, os.Args[0])
+	cmd := exec.Command("/bin/sh", "-c", SupervisorPIDEnv+`=$$ "$0" -test.run='^$' >/dev/null 2>&1 &`, os.Args[0])
 	cmd.Env = append(os.Environ(), "AMUX_DIRECTSVC_HELPER=child", "AMUX_DIRECTSVC_MARKER="+marker)
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
+}
+
+// The same, with the daemon dying after the child is already watching.
+func TestWatchParentStopsChildWhoseParentDiesLater(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX re-parenting")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "stopped")
+	cmd := exec.Command("/bin/sh", "-c", SupervisorPIDEnv+`=$$ "$0" -test.run='^$' >/dev/null 2>&1 & sleep 1`, os.Args[0])
+	cmd.Env = append(os.Environ(), "AMUX_DIRECTSVC_HELPER=child", "AMUX_DIRECTSVC_MARKER="+marker)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
+}
+
+func TestSupervisorPID(t *testing.T) {
+	env := func(v string) func(string) string { return func(string) string { return v } }
+	for _, bad := range []string{"", "x", "1", "0", "-5"} {
+		if _, err := SupervisorPID(env(bad)); err == nil {
+			t.Errorf("SupervisorPID(%q) accepted", bad)
+		}
+	}
+	if pid, err := SupervisorPID(env("4242")); err != nil || pid != 4242 {
+		t.Fatalf("SupervisorPID(4242) = %d, %v", pid, err)
+	}
+	if err := CheckParent(os.Getppid()); err != nil {
+		t.Fatalf("CheckParent(real parent) = %v", err)
+	}
+	if err := CheckParent(os.Getppid() + 1); err == nil {
+		t.Fatal("CheckParent accepted a pid that is not the parent")
+	}
 }

@@ -65,6 +65,10 @@ func writeStatus(path string, st Status) error {
 	if err != nil {
 		return err
 	}
+	return writeFileAtomic(path, b)
+}
+
+func writeFileAtomic(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -81,4 +85,45 @@ func writeStatus(path string, st Status) error {
 		return err
 	}
 	return os.Rename(f.Name(), path)
+}
+
+// Ready is written by the managed child once its listener and admin socket
+// are up. It is what ties "a direct server answers" to "the daemon's child is
+// that server": a manual `amux direct serve` can answer the same admin socket,
+// and readiness must not be borrowed from it.
+type Ready struct {
+	PID         int       `json:"pid"`
+	ServerID    string    `json:"server_id"`
+	Addr        string    `json:"addr"`
+	Fingerprint string    `json:"fingerprint"`
+	At          time.Time `json:"at"`
+}
+
+// ReadyPath is the managed child's readiness marker.
+func ReadyPath() string { return filepath.Join(core.StateDir(), "direct-managed-ready.json") }
+
+// WriteReady records the managed child's readiness.
+func WriteReady(path string, r Ready) error {
+	b, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, b)
+}
+
+// ReadReady reads a readiness marker.
+func ReadReady(path string) (Ready, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Ready{}, err
+	}
+	var r Ready
+	err = json.Unmarshal(b, &r)
+	return r, err
+}
+
+// Serving reports whether the readiness marker belongs to the child the
+// supervisor is running now, with the configuration it was started for.
+func (st Status) Serving(r *Ready) bool {
+	return r != nil && st.State == StateRunning && st.PID != 0 && r.PID == st.PID && r.Fingerprint == st.Fingerprint
 }

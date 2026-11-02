@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,7 @@ type directCLI struct {
 	ensureErr error
 	ensured   int
 	server    *directServerStatus
+	readyPID  int // pid the simulated child writes into its readiness marker (0: none)
 	cert, key string
 }
 
@@ -100,9 +102,13 @@ func (c *directCLI) supervise(state string, lastErr string) {
 				if state == directsvc.StateBackoff {
 					st.NextRetry = time.Now().Add(time.Minute)
 				}
-				b := mustJSON(st)
 				_ = os.MkdirAll(filepath.Dir(directsvc.StatusPath()), 0o755)
-				_ = os.WriteFile(directsvc.StatusPath(), b, 0o644)
+				if state == directsvc.StateRunning && c.readyPID != 0 {
+					// The child's own readiness marker (written in its Ready callback).
+					_ = directsvc.WriteReady(directsvc.ReadyPath(), directsvc.Ready{PID: c.readyPID, ServerID: "sid-1",
+						Addr: s.Listen, Fingerprint: st.Fingerprint, At: time.Now()})
+				}
+				_ = os.WriteFile(directsvc.StatusPath(), mustJSON(st), 0o644)
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -179,12 +185,12 @@ func TestDirectEnableInvalidSavesNothing(t *testing.T) {
 }
 
 // Enable saves absolute paths, starts the daemon through ensureDaemon, and
-// reports ready only once the supervisor runs the saved configuration and the
-// server answers.
+// reports ready only once the supervisor's current child says its own server
+// is up for the saved configuration.
 func TestDirectEnableWaitsForReadiness(t *testing.T) {
 	c := newDirectCLI(t)
 	c.daemonUp = true
-	c.server = &directServerStatus{ServerID: "sid-1", Endpoints: []string{"https://amux.test:8443"}}
+	c.readyPID = 4242
 	c.supervise(directsvc.StateRunning, "")
 	out, err := captureOutput(t, func() error { return cmdDirectEnable(c.enableArgs()) })
 	if err != nil {
@@ -202,15 +208,31 @@ func TestDirectEnableWaitsForReadiness(t *testing.T) {
 	}
 }
 
-// A child that is alive but whose server never answers is not "ready".
-func TestDirectEnableNotReadyUntilServerAnswers(t *testing.T) {
+// A manual `amux direct serve` that owns the store answers the admin socket
+// while the freshly spawned child is still alive (about to fail on the lock).
+// That is not the managed listener being ready.
+func TestDirectEnableNotReadyWhenOnlyManualServerAnswers(t *testing.T) {
 	c := newDirectCLI(t)
 	c.daemonUp = true
+	c.server = &directServerStatus{ServerID: "manual-sid", Endpoints: []string{"https://amux.test:8443"}}
 	directWaitBudget = 500 * time.Millisecond
 	c.supervise(directsvc.StateRunning, "")
 	_, err := captureOutput(t, func() error { return cmdDirectEnable(c.enableArgs()) })
 	if err == nil || !strings.Contains(err.Error(), "not ready") {
-		t.Fatalf("enable with a silent server = %v", err)
+		t.Fatalf("enable with only a manual server answering = %v", err)
+	}
+}
+
+// A readiness marker left by an earlier child is not this child's readiness.
+func TestDirectEnableIgnoresStaleReadyMarker(t *testing.T) {
+	c := newDirectCLI(t)
+	c.daemonUp = true
+	c.readyPID = 1111 // the supervisor reports pid 4242
+	directWaitBudget = 500 * time.Millisecond
+	c.supervise(directsvc.StateRunning, "")
+	_, err := captureOutput(t, func() error { return cmdDirectEnable(c.enableArgs()) })
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("enable with a stale marker = %v", err)
 	}
 }
 
@@ -298,6 +320,17 @@ func TestServeManagedRefusesFlags(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "saved setting") {
 		t.Fatalf("serve --managed with flags = %v", err)
 	}
+	t.Setenv(directsvc.SupervisorPIDEnv, "")
+	if err := cmdDirectServe([]string{"--managed"}); err == nil || !strings.Contains(err.Error(), "runs only under the daemon") {
+		t.Fatalf("serve --managed without a supervisor = %v", err)
+	}
+	// Named supervisor is not our parent (it died before we looked): refuse
+	// before reading settings or binding anything.
+	t.Setenv(directsvc.SupervisorPIDEnv, strconv.Itoa(os.Getppid()+1))
+	if err := cmdDirectServe([]string{"--managed"}); err == nil || !strings.Contains(err.Error(), "no longer this process's parent") {
+		t.Fatalf("serve --managed under a dead supervisor = %v", err)
+	}
+	t.Setenv(directsvc.SupervisorPIDEnv, strconv.Itoa(os.Getppid()))
 	if err := cmdDirectServe([]string{"--managed"}); err == nil || !strings.Contains(err.Error(), "not enabled") {
 		t.Fatalf("serve --managed while disabled = %v", err)
 	}
@@ -308,27 +341,34 @@ func TestDirectPhase(t *testing.T) {
 	on := directsvc.Settings{Enabled: true, Listen: "127.0.0.1:8443", Endpoints: []string{"https://a.test"}, TLSCert: cert, TLSKey: key}
 	fp := directsvc.Fingerprint(on)
 	srv := &directServerStatus{ServerID: "sid"}
+	manual := &directServerStatus{ServerID: "manual-sid"}
 	running := &directsvc.Status{State: directsvc.StateRunning, Fingerprint: fp, DaemonPID: 1, PID: 2}
+	ready := &directsvc.Ready{PID: 2, ServerID: "sid", Fingerprint: fp}
+	stale := &directsvc.Ready{PID: 9, ServerID: "sid", Fingerprint: fp}
 	for name, tc := range map[string]struct {
 		s        directsvc.Settings
 		set      bool
 		m        *directsvc.Status
+		ready    *directsvc.Ready
 		daemonUp bool
 		srv      *directServerStatus
 		want     string
 	}{
-		"unset":                 {directsvc.Settings{}, false, nil, true, nil, directPhaseOff},
-		"disabled":              {directsvc.Settings{Listen: "x"}, true, nil, true, nil, directPhaseOff},
-		"daemon down":           {on, true, running, false, nil, directPhaseConfigured},
-		"old daemon":            {on, true, nil, true, nil, directPhaseConfigured},
-		"pending pickup":        {on, true, &directsvc.Status{State: directsvc.StateDisabled, DaemonPID: 1}, true, nil, directPhaseStarting},
-		"child up, not serving": {on, true, running, true, nil, directPhaseStarting},
-		"running":               {on, true, running, true, srv, directPhaseRunning},
-		"backoff":               {on, true, &directsvc.Status{State: directsvc.StateBackoff, Fingerprint: fp, DaemonPID: 1, LastError: "bind: address in use"}, true, nil, directPhaseFailed},
-		"invalid":               {on, true, &directsvc.Status{State: directsvc.StateInvalid, DaemonPID: 1, LastError: "unknown field"}, true, nil, directPhaseFailed},
+		"unset":                 {directsvc.Settings{}, false, nil, nil, true, nil, directPhaseOff},
+		"disabled":              {directsvc.Settings{Listen: "x"}, true, nil, nil, true, nil, directPhaseOff},
+		"daemon down":           {on, true, running, ready, false, srv, directPhaseConfigured},
+		"old daemon":            {on, true, nil, nil, true, nil, directPhaseConfigured},
+		"pending pickup":        {on, true, &directsvc.Status{State: directsvc.StateDisabled, DaemonPID: 1}, nil, true, nil, directPhaseStarting},
+		"child up, not serving": {on, true, running, nil, true, nil, directPhaseStarting},
+		"manual server answers": {on, true, running, nil, true, manual, directPhaseStarting},
+		"stale marker":          {on, true, running, stale, true, srv, directPhaseStarting},
+		"marker, other server":  {on, true, running, ready, true, manual, directPhaseStarting},
+		"running":               {on, true, running, ready, true, srv, directPhaseRunning},
+		"backoff":               {on, true, &directsvc.Status{State: directsvc.StateBackoff, Fingerprint: fp, DaemonPID: 1, LastError: "bind: address in use"}, nil, true, nil, directPhaseFailed},
+		"invalid":               {on, true, &directsvc.Status{State: directsvc.StateInvalid, DaemonPID: 1, LastError: "unknown field"}, nil, true, nil, directPhaseFailed},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got, why := directPhase(tc.s, tc.set, tc.m, tc.daemonUp, tc.srv); got != tc.want {
+			if got, why := directPhase(tc.s, tc.set, tc.m, tc.ready, tc.daemonUp, tc.srv); got != tc.want {
 				t.Fatalf("phase = %s (%s), want %s", got, why, tc.want)
 			}
 		})

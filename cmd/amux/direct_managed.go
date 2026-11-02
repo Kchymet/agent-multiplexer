@@ -279,8 +279,11 @@ func waitManaged(fp string, running bool, since time.Time) error {
 			last = st
 			switch {
 			case running && st.Fingerprint == fp && st.State == directsvc.StateRunning:
-				if srv := directProbeServer(); srv != nil {
-					fmt.Printf("listener running (pid %d, server_id %s) — amux direct status for details\n", st.PID, srv.ServerID)
+				// Ready means this child's own server is up — not merely that some
+				// server answers the admin socket, which a manual serve can do
+				// while the new child is still about to fail on the store lock.
+				if r := readManagedReady(); st.Serving(r) {
+					fmt.Printf("listener running (pid %d, server_id %s on %s) — amux direct status for details\n", st.PID, r.ServerID, r.Addr)
 					return nil
 				}
 			case running && st.Fingerprint == fp && st.State == directsvc.StateBackoff && st.LastError != "":
@@ -303,6 +306,15 @@ func waitManaged(fp string, running bool, since time.Time) error {
 // directProbeServer is probeDirectServer, replaceable in tests.
 var directProbeServer = probeDirectServer
 
+// readManagedReady reads the managed child's readiness marker, if any.
+func readManagedReady() *directsvc.Ready {
+	r, err := directsvc.ReadReady(directsvc.ReadyPath())
+	if err != nil {
+		return nil
+	}
+	return &r
+}
+
 // Phases `amux direct status` reports for the managed listener.
 const (
 	directPhaseOff        = "off"
@@ -314,7 +326,7 @@ const (
 
 // directPhase condenses the setting, the supervisor's record and the live
 // server into one answer, with the reason when it is not simply running.
-func directPhase(s directsvc.Settings, set bool, m *directsvc.Status, daemonUp bool, srv *directServerStatus) (phase, why string) {
+func directPhase(s directsvc.Settings, set bool, m *directsvc.Status, ready *directsvc.Ready, daemonUp bool, srv *directServerStatus) (phase, why string) {
 	if !set || !s.Enabled {
 		return directPhaseOff, ""
 	}
@@ -329,10 +341,15 @@ func directPhase(s directsvc.Settings, set bool, m *directsvc.Status, daemonUp b
 	}
 	switch m.State {
 	case directsvc.StateRunning:
-		if srv == nil {
-			return directPhaseStarting, "the listener process is up but its server is not answering yet"
+		switch {
+		case m.Serving(ready) && srv != nil && srv.ServerID == ready.ServerID:
+			return directPhaseRunning, ""
+		case m.Serving(ready):
+			return directPhaseStarting, "the managed server reported ready but is not answering its admin socket"
+		case srv != nil:
+			return directPhaseStarting, "another direct server (a manual amux direct serve?) answers for the store; the managed child cannot own it"
 		}
-		return directPhaseRunning, ""
+		return directPhaseStarting, "the listener process is up but its server is not ready yet"
 	case directsvc.StateBackoff:
 		return directPhaseFailed, m.LastError + " (retrying at " + m.NextRetry.Format(time.RFC3339) + ")"
 	case directsvc.StateInvalid:
@@ -348,6 +365,7 @@ type directStatusReport struct {
 	Setting  directsvc.Settings  `json:"setting"`
 	Set      bool                `json:"set"`
 	Managed  *directsvc.Status   `json:"managed,omitempty"`
+	Ready    *directsvc.Ready    `json:"ready,omitempty"`
 	Server   *directServerStatus `json:"server,omitempty"`
 	Provider directProviderView  `json:"provider"`
 }
@@ -389,7 +407,8 @@ func cmdDirectStatus(args []string) error {
 	}
 	r.Server = directProbeServer()
 	daemonUp := startupProbe() == nil
-	r.Phase, r.Reason = directPhase(r.Setting, r.Set, r.Managed, daemonUp, r.Server)
+	r.Ready = readManagedReady()
+	r.Phase, r.Reason = directPhase(r.Setting, r.Set, r.Managed, r.Ready, daemonUp, r.Server)
 	cfg, cfgErr := providercfg.Load()
 	pst, pstErr := provider.ReadStatus(provider.StatusPath())
 	r.Provider = directProviderCoherence(r.Server, cfg.DirectEnroll && cfgErr == nil, pst, pstErr == nil && processAlive(pst.PID))
@@ -485,8 +504,8 @@ func printDirectStatus(r directStatusReport) {
 		fmt.Println("server    not answering")
 	} else {
 		fmt.Printf("server    server_id %s · endpoints %s\n", r.Server.ServerID, strings.Join(r.Server.Endpoints, ", "))
-		if r.Managed == nil || r.Managed.State != directsvc.StateRunning {
-			fmt.Println("          (a manually run amux direct serve owns the store; the daemon will not start a second one)")
+		if r.Managed == nil || !r.Managed.Serving(r.Ready) || r.Ready.ServerID != r.Server.ServerID {
+			fmt.Println("          (not the daemon's child: a manually run amux direct serve owns the store)")
 		}
 		if r.Server.Cloud != nil {
 			fmt.Print("          ")
@@ -567,7 +586,7 @@ func reportDirect() {
 	if st, err := directsvc.ReadStatus(directsvc.StatusPath()); err == nil {
 		m = &st
 	}
-	phase, why := directPhase(s, set, m, startupProbe() == nil, directProbeServer())
+	phase, why := directPhase(s, set, m, readManagedReady(), startupProbe() == nil, directProbeServer())
 	mark := map[string]string{directPhaseRunning: "✓", directPhaseFailed: "✗"}[phase]
 	if mark == "" {
 		mark = "⚠"

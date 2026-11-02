@@ -133,9 +133,19 @@ sensitive. The daemon:
   changes (renewing a certificate in place takes effect within seconds)
 - stops it when the setting is turned off or the daemon stops
 
-If the daemon dies abruptly, the child notices it has lost its parent and
-exits. On Linux the kernel also signals it. This way a stale listener never
-keeps holding the direct store.
+Before exec, the daemon passes its own pid to the child in the environment
+(`AMUX_DIRECT_SUPERVISOR_PID`). The child checks that this pid is still its
+parent before it reads its settings or binds, and keeps checking while it runs.
+A child whose daemon died first, even before the child got that far, exits
+instead of serving. On Linux the kernel also signals it. This way a stale
+listener never keeps holding the direct store.
+
+**Readiness belongs to the child.** Once its listener and admin socket are up,
+the child writes `~/.local/state/amux/direct-managed-ready.json` with its pid,
+server id and configuration fingerprint. `enable` and `status` call the
+listener running only when that marker matches the daemon's current child and
+configuration. A manual `amux direct serve` answering the same admin socket
+never counts as the managed listener being ready.
 
 **Commands.**
 
