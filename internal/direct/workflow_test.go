@@ -685,3 +685,25 @@ func TestCatalogModelsAreSanitized(t *testing.T) {
 		t.Fatalf("models %v", got)
 	}
 }
+
+// Case-folded or duplicated verb keys never let a body be admitted under one
+// permission and executed as a verb needing another.
+func TestVerbKeyTricksDoNotSplitPermission(t *testing.T) {
+	f := workflowFake()
+	a := openTestAuthority(t, t.TempDir(), Lifetimes{}, nil)
+	s := newTestServer(t, a, f)
+	tok := enroll(t, a, []string{PermRead, PermSteer}, allSessions)
+	for _, b := range []string{
+		`{"verb":"prompt","Verb":"archive","fields":{},"idem_key":"t1"}`,
+		`{"Verb":"prompt","verb":"archive","fields":{},"idem_key":"t2"}`,
+		`{"verb":"prompt","verb":"rename","fields":{"name":"x"},"idem_key":"t3"}`,
+	} {
+		w := do(s, "POST", PathSession+"/a1/actions", tok.AccessToken, b)
+		if w.Code == 200 {
+			t.Fatalf("%s: admitted %s", b, w.Body)
+		}
+	}
+	if f.applies.Load() != 0 {
+		t.Fatal("a split-permission body reached Apply")
+	}
+}

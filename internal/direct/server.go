@@ -681,13 +681,20 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "body too large")
 		return
 	}
-	l := s.admit(w, r, requiredPerm(body, PermSteer))
+	perm := requiredPerm(body, PermSteer)
+	l := s.admit(w, r, perm)
 	if l == nil {
 		return
 	}
 	defer l.Done()
 	var req ActionRequest
 	if readAction(w, r, body, &req) {
+		return
+	}
+	// The strict decode must name a verb whose permission is the one admitted.
+	// (Both decodes follow the same JSON rules; this makes the binding explicit.)
+	if want, ok := VerbPermissions[req.Verb]; ok && want != perm || !ok && perm != PermSteer {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid action request")
 		return
 	}
 	act, err := actionFor(sid, req)
