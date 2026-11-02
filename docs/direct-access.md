@@ -547,6 +547,7 @@ cookies.
 | 409 | `unsupported_verb` | — |
 | 409 | `idem_in_progress` | — |
 | 409 | `idem_ambiguous` | — |
+| 409 | `idem_expired` | The key was already used and its recorded result has expired. Terminal for this key: it will not run again, and this is **not** proof that it did not run. Never retry it automatically with the same or a fresh key; check the machine (session list, transcript) first ([fixture](direct/fixtures/idem-retention-v1/api-error-idem-expired.json)) |
 | 421 | `endpoint_not_bound` | — |
 | 422 | `rejected` | The daemon answered not-OK. This is not proof of no side effect (a stop can fail after the interrupt was delivered); repeating a stop is safe |
 | 422 | `idem_conflict` | — |
@@ -601,10 +602,40 @@ body.
 - **Outcome unknown.** Cancellation, or a transport failure after dispatch,
   is recorded as ambiguous. That key never executes again, and its records are
   never pruned.
+- **Retention.** A completed record keeps its full result (replayed as
+  above) for 24 hours from admission. After that it is compacted to a
+  spent-key tombstone that lasts as long as the grant. The same key and body
+  then answer `409 idem_expired` and never run again; a different body under
+  that key is still `422 idem_conflict`. This holds for every action verb and
+  both creation routes, sync and async; an async creation's status `GET`
+  answers `404 not_found` once its retention has passed.
 - **Capacity.** A grant can hold 1,024 records at most. Unresolved ones count
   toward that, so at the limit new actions fail closed with `409
-  capacity_exhausted`, and the client enrolls again.
+  capacity_exhausted`, and the client enrolls again. It can also hold 16,384
+  tombstones (each two 16-hex-digit hash prefixes, 38 bytes of JSON). When
+  they are full, nothing is evicted: an expired record is kept whole instead
+  (and still answers `idem_expired`, never its old result), so the grant then
+  reaches the 1,024 limit and fails closed the same way.
 - **Crashes.** Exactly-once execution across a process crash is not claimed.
+
+**Client handling of `idem_key`.** Use a fresh random key for each user
+intent, and reuse it only to retry that same intent with the identical body.
+Treat `idem_expired`, like `idem_ambiguous`, as terminal for the key: show the
+user that the earlier attempt may have run, and only send the intent again
+under a new key after the user (or a check of the machine) confirms it is
+still wanted. It is never a transient error, and it never means "safe to
+resend".
+
+**Limitations.** A tombstone is keyed by 64-bit prefixes of
+`sha256(idem_key)` and of the body hash; a collision can only refuse a
+request, never run one twice. Protection ends with the grant record. It is not
+retroactive: a server before this change deleted completed records after 24
+hours, and those keys are unknown to it now, so a client must still never
+reuse a key it has used before. The registry moved to schema version 3 for the
+tombstones; an older binary refuses a version-3 registry instead of silently
+dropping them (downgrading needs the newer `grants.json` restored from
+backup or the clients enrolled again). A version-1 or -2 registry migrates
+forward atomically on open, and a failed migration leaves the old file intact.
 
 **Transcripts.** They use amux's own sequence space and never reuse a relay
 cursor. The stream ends with a terminal SSE event:

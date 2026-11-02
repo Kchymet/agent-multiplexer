@@ -126,6 +126,11 @@ func (s *Server) runCreationAsync(w http.ResponseWriter, l *Lease, req ActionReq
 	case idemConflict:
 		writeErr(w, http.StatusUnprocessableEntity, CodeIdemConflict, "idem_key was used with a different request")
 		return
+	case idemExpired:
+		// Spent key, result expired: terminal for this key, and no status
+		// (its creation id is gone too). Never re-run, never "did not run".
+		writeErr(w, http.StatusConflict, CodeIdemExpired, idemExpiredMsg)
+		return
 	case idemReplay, idemInProgress, idemAmbiguous:
 		s.answerExisting(w, l, req)
 		return
@@ -156,6 +161,10 @@ func (s *Server) runCreationAsync(w http.ResponseWriter, l *Lease, req ActionReq
 	if out != idemProceed { // raced with a concurrent request on the same key
 		if out == idemConflict {
 			writeErr(w, http.StatusUnprocessableEntity, CodeIdemConflict, "idem_key was used with a different request")
+			return
+		}
+		if out == idemExpired {
+			writeErr(w, http.StatusConflict, CodeIdemExpired, idemExpiredMsg)
 			return
 		}
 		s.answerExisting(w, l, req)
