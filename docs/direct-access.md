@@ -86,6 +86,100 @@ refused. An explicit console grant would be a separately reviewed feature.
    - `amux direct reset-identity --yes` replaces the server identity and
      revokes every client.
 
+### Run it with the daemon
+
+Running `amux direct serve` by hand means keeping a terminal open and
+restarting it yourself. Instead, the daemon can run the listener for you. This
+is off by default and starts only after you turn it on:
+
+```sh
+amux direct enable --listen 192.168.1.20:8443 \
+  --endpoint https://amux.home.example:8443 \
+  --allow-origin https://harness.example \
+  --tls-cert ~/certs/amux.pem --tls-key ~/certs/amux.key
+```
+
+`enable` takes the same flags as `serve` and checks them the same way before it
+saves anything:
+
+- a private bind address, unless you pass `--allow-public-bind`, which it
+  warns about
+- canonical https endpoints and origins
+- a certificate and key that load
+- lifetimes within their limits
+
+It then saves the settings and sets `direct.enabled` to on in `config.json`.
+If the daemon is stopped, `enable` starts it the usual way. It returns once
+the listener's server answers. `--no-wait` skips that wait but still starts
+the daemon. Running `enable` again with some flags changes only those
+settings. A repeatable flag you type, such as `--endpoint`, replaces the saved
+list.
+
+**What is saved.** The settings live in the `direct` section of
+`config.json`: the listen address, endpoints, origins, lifetimes, and the
+*paths* to the certificate and key. No secret is written there. The server
+identity, enrolled clients and cloud policy stay in the protected direct
+store, exactly as with a manual `serve`.
+
+**Lifecycle.** While `direct.enabled` is on, the daemon runs
+`amux direct serve --managed` as a child process. The child reads only the
+saved settings, so its command line never changes and holds nothing
+sensitive. The daemon:
+
+- starts it when the daemon starts
+- restarts it with backoff when it exits (1 second, doubling to at most a
+  minute)
+- restarts it when the settings change, or when the certificate or key file
+  changes (renewing a certificate in place takes effect within seconds)
+- stops it when the setting is turned off or the daemon stops
+
+If the daemon dies abruptly, the child notices it has lost its parent and
+exits. On Linux the kernel also signals it. This way a stale listener never
+keeps holding the direct store.
+
+**Commands.**
+
+- `amux direct status [--json]` shows the listener's phase (`off`,
+  `configured`, `starting`, `running` or `failed`, with the reason), the saved
+  settings, the daemon supervisor's record (child pid, restarts, last error),
+  the live server identity and cloud policy, and whether the provider is
+  advertising enrollment.
+- `amux direct logs [-n lines]` shows the listener's log
+  (`~/.local/state/amux/direct.log`, rotated at 8 MiB).
+- `amux direct disable` turns the listener off and keeps its settings for the
+  next `enable`.
+- `amux config ls` and `amux config get direct.enabled` show the setting.
+
+**Disabling is not revocation.** `disable` stops the listener. Enrolled
+clients and the cloud enrollment policy stay as they are, so they cannot
+connect while it is off and work again after the next `enable`. To end access,
+use `amux direct clients revoke <client-id>`, `amux direct cloud disable` or
+`amux direct reset-identity --yes`.
+
+**Provider advertisement.** `amux provide --direct-enroll` still has a single
+provider identity. Instead of reading the direct server's offer only when it
+registers, the running provider now re-checks it every 30 seconds. When the
+offer changes, the provider registers again with the same token and name:
+
+- the listener started or stopped
+- cloud enrollment was turned on or off
+- the endpoints or server identity changed
+
+Running panes and relay sessions carry over within the grace window. One
+failed check is treated as the listener restarting and ignored. Two in a row
+change the offer. A disabled listener therefore stops being advertised within
+about a minute. `amux direct status` reports the offer the provider actually
+registered with (from its status file). An expected offer that is not yet
+registered is labelled as inferred, and a mismatch is flagged as stale.
+
+**Existing manual setups.** Nothing changes until you run `enable`. A manual
+`amux direct serve` keeps working. If one is running when you enable, it keeps
+owning the store. The daemon's child then fails with "already owns the direct
+store", shown in `status`, and retries with backoff until you stop the manual
+server. To move over, stop the manual server and run `enable` with the same
+flags. The server identity and enrolled clients carry over, because both use
+the same store.
+
 ### Administration is host-only
 
 The admin socket is `admin.sock` in the direct state directory. The CLI and the

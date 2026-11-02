@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
@@ -34,18 +36,92 @@ const (
 // Any failure (no direct server, issuance off, admin channel refused) means no
 // offer: the feature is never advertised on a guess.
 func (p *Provider) discoverDirect(ctx context.Context) {
-	var offer *hp.DirectCapabilities
-	if p.cfg.DirectEnroll != nil {
-		dctx, cancel := context.WithTimeout(ctx, directDiscoverTimeout)
-		caps, err := p.cfg.DirectEnroll.Capabilities(dctx)
-		cancel()
-		if err == nil && caps != nil && caps.Issuance && caps.ServerID != "" && len(caps.Endpoints) > 0 {
-			offer = caps
-		}
-	}
+	offer := p.probeDirect(ctx)
 	p.mu.Lock()
 	p.direct = offer
 	p.mu.Unlock()
+}
+
+// probeDirect asks the direct server for the offer it would make now.
+func (p *Provider) probeDirect(ctx context.Context) *hp.DirectCapabilities {
+	if p.cfg.DirectEnroll == nil {
+		return nil
+	}
+	dctx, cancel := context.WithTimeout(ctx, directDiscoverTimeout)
+	caps, err := p.cfg.DirectEnroll.Capabilities(dctx)
+	cancel()
+	if err == nil && caps != nil && caps.Issuance && caps.ServerID != "" && len(caps.Endpoints) > 0 {
+		return caps
+	}
+	return nil
+}
+
+// defaultDirectRecheck is how often a registered provider re-checks the direct
+// offer; defaultDirectMisses is how many consecutive checks must disagree with
+// the advertised offer before it re-registers (one failed check is a direct
+// server restarting, not a change). Provider fields carry them so tests can
+// shorten them per instance.
+const (
+	defaultDirectRecheck = 30 * time.Second
+	defaultDirectMisses  = 2
+)
+
+// watchDirect keeps the advertised direct-enroll-v1 offer true for the life of
+// a session. Registration is the only place capabilities reach the
+// orchestrator, so when the direct server starts, stops (the daemon-managed
+// listener being disabled, say) or changes its endpoints or identity, the
+// provider ends the session and the reconnect loop registers again with a
+// fresh discovery. It is the same provider — same token, same identity — and
+// its panes survive the reconnect inside the grace window, so relay sessions
+// are not lost; only the offer changes.
+func (p *Provider) watchDirect(s *session, advertised *hp.DirectCapabilities) {
+	t := time.NewTicker(p.directRecheck)
+	defer t.Stop()
+	misses := 0
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
+		now := p.probeDirect(s.rtCtx)
+		if s.rtCtx.Err() != nil {
+			return
+		}
+		if sameDirectOffer(now, advertised) {
+			misses = 0
+			continue
+		}
+		misses++
+		if misses < p.directMisses {
+			continue
+		}
+		p.cfg.Logf("direct-enroll offer changed (%s → %s); re-registering", describeOffer(advertised), describeOffer(now))
+		s.cancel()
+		return
+	}
+}
+
+func sameDirectOffer(a, b *hp.DirectCapabilities) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if a.ServerID != b.ServerID || a.Issuance != b.Issuance || a.Handoff != b.Handoff || len(a.Endpoints) != len(b.Endpoints) {
+		return false
+	}
+	for i := range a.Endpoints {
+		if a.Endpoints[i] != b.Endpoints[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func describeOffer(c *hp.DirectCapabilities) string {
+	if c == nil {
+		return "none"
+	}
+	return fmt.Sprintf("server %s at %s", c.ServerID, strings.Join(c.Endpoints, ","))
 }
 
 func (p *Provider) directOffer() *hp.DirectCapabilities {

@@ -17,6 +17,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/daemon"
 	"amux/internal/direct"
+	"amux/internal/directsvc"
 	"amux/internal/hostbackend"
 	"amux/internal/provider"
 )
@@ -52,6 +53,10 @@ var directSubcommands = map[string]func([]string) error{
 	"clients":        cmdDirectClients,
 	"reset-identity": cmdDirectResetIdentity,
 	"cloud":          cmdDirectCloud,
+	"enable":         cmdDirectEnable,
+	"disable":        cmdDirectDisable,
+	"status":         cmdDirectStatus,
+	"logs":           cmdDirectLogs,
 }
 
 func directUsage() {
@@ -64,14 +69,22 @@ destination-issued credentials. No cloud service is in the path.
 
 usage: amux direct <command>
 
-  serve                       run the direct server in the foreground
+  enable [serve flags]        save the listener settings and turn it on; the
+                              daemon runs it from now on (starting the daemon
+                              if it is stopped). Off by default.
+  disable                     turn the daemon-managed listener off (settings,
+                              enrolled clients and cloud policy are kept)
+  status [--json]             setting, managed listener, server, provider offer
+  logs [-n lines]             the managed listener's log
+  serve                       run the direct server in the foreground (manual)
   enroll                      print a one-time enrollment bundle to paste into a client
   clients list                list enrolled clients
   clients revoke <client-id>  revoke a client now (closes its streams first)
   reset-identity --yes        replace the server identity; revokes every client
   cloud enable|disable|status  cloud-assisted enrollment policy (off by default)
 
-serve flags:
+serve flags (also accepted by enable, which saves them; enable merges what
+you type over the saved settings, and --no-wait skips waiting for readiness):
   --listen <ip:port>      address to bind (a private or loopback IP literal)
   --endpoint <origin>     https origin clients dial, e.g. https://amux.home.example:8443 (repeatable)
   --allow-origin <origin> exact browser origin allowed to call (repeatable)
@@ -103,6 +116,10 @@ sessions, never the amux console):
                           disagrees with it is refused unless both are given.
   --max-outstanding <n>   unredeemed cloud codes at once (default 3)
   --max-per-hour <n>      cloud codes per hour (default 10)
+
+Disabling the managed listener is not revocation: clients stay enrolled and
+the cloud policy stays as it is, ready for the next enable. Use
+amux direct clients revoke and amux direct cloud disable for those.
 
 Enabling cloud enrollment trusts the pinned Harness owner, through Harness, to
 mint enrollment codes up to the ceiling. Codes are bound to the requesting
@@ -147,6 +164,7 @@ func cmdDirectServe(args []string) error {
 	absolute := fs.Duration("absolute-ttl", 0, "")
 	fs.Var(&endpoints, "endpoint", "")
 	fs.Var(&origins, "allow-origin", "")
+	managed := fs.Bool("managed", false, "")
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
 		directUsage()
@@ -155,26 +173,59 @@ func cmdDirectServe(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if *listen == "" {
-		return errors.New("--listen is required")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var cfg direct.ServeConfig
+	if *managed {
+		// The daemon's child: the whole configuration is the saved setting, so
+		// the command line stays constant and nothing typed can widen it.
+		typed := 0
+		fs.Visit(func(*flag.Flag) { typed++ })
+		if typed != 1 {
+			return errors.New("--managed takes its configuration from the saved setting (amux direct enable), not flags")
+		}
+		s, set, err := directsvc.Load()
+		if err != nil {
+			return err
+		}
+		if cfg, err = managedServeConfig(s, set); err != nil {
+			return err
+		}
+		// A daemon that died without stopping us must not leave the listener
+		// holding the direct store (Linux also delivers a parent-death signal).
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go directsvc.WatchParent(2*time.Second, ctx.Done(), func() {
+			fmt.Fprintln(os.Stderr, "amux direct: supervising daemon exited; stopping")
+			cancel()
+		})
+	} else {
+		if *listen == "" {
+			return errors.New("--listen is required")
+		}
+		cfg = direct.ServeConfig{
+			Listen: *listen, AllowPublicBind: *public, CertFile: *cert, KeyFile: *key,
+			Endpoints: endpoints, AllowOrigins: origins,
+			Life: direct.Lifetimes{Access: *accessTTL, Idle: *idle, Absolute: *absolute},
+		}
 	}
 	root, err := directRoot()
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return direct.Serve(ctx, direct.ServeConfig{
-		Root: root, Listen: *listen, AllowPublicBind: *public, CertFile: *cert, KeyFile: *key,
-		Endpoints: endpoints, AllowOrigins: origins,
-		Life:    direct.Lifetimes{Access: *accessTTL, Idle: *idle, Absolute: *absolute},
-		Backend: direct.HostBackend{H: hostbackend.New()},
-		Verify:  relayHostProof,
-		Logf:    func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
-		Ready: func(addr net.Addr, serverID string) {
-			fmt.Fprintf(os.Stderr, "amux direct: listening on %s (server_id %s)\n", addr, serverID)
-		},
-	})
+	cfg.Root = root
+	cfg.Backend = direct.HostBackend{H: hostbackend.New()}
+	cfg.Verify = relayHostProof
+	cfg.Logf = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
+	cfg.Ready = func(addr net.Addr, serverID string) {
+		fmt.Fprintf(os.Stderr, "amux direct: listening on %s (server_id %s)\n", addr, serverID)
+	}
+	err = direct.Serve(ctx, cfg)
+	if err != nil && !*managed && strings.Contains(err.Error(), "already owns the direct store") {
+		err = fmt.Errorf("%w (if the daemon manages it, see amux direct status; amux direct disable turns it off)", err)
+	}
+	return err
 }
 
 // adminRun sends req to the running server, or, when none owns the store,

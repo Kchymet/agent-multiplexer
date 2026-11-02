@@ -139,6 +139,9 @@ type Provider struct {
 	backoffMax time.Duration
 	graceScale time.Duration // multiplies registered graceSeconds (default 1s)
 	hbScale    time.Duration // multiplies registered heartbeatSeconds (default 1s)
+
+	directRecheck time.Duration // direct offer re-check interval while registered
+	directMisses  int           // consecutive disagreeing checks before re-registering
 }
 
 // New builds a Provider from cfg.
@@ -155,6 +158,9 @@ func New(cfg Config) *Provider {
 		backoffMax: 30 * time.Second,
 		graceScale: time.Second,
 		hbScale:    time.Second,
+
+		directRecheck: defaultDirectRecheck,
+		directMisses:  defaultDirectMisses,
 	}
 }
 
@@ -362,9 +368,14 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	p.cfg.Logf("registered: version=%d providerId=%s heartbeat=%ds grace=%ds", m.Version, m.ProviderID, hb, grace)
 	now := time.Now()
 	panes := p.paneCount()
+	advertised := p.directOffer()
 	p.setStatus(func(s *Status) {
 		s.State, s.ProviderID, s.RegisteredAt, s.LastError, s.Panes = StateRegistered, m.ProviderID, now, "", panes
 		s.OwnerUserID, s.OwnerEmail = "", ""
+		s.DirectServerID, s.DirectEndpoints = "", nil
+		if advertised != nil {
+			s.DirectServerID, s.DirectEndpoints = advertised.ServerID, advertised.Endpoints
+		}
 		if m.Owner != nil {
 			s.OwnerUserID, s.OwnerEmail = m.Owner.UserID, m.Owner.Email
 		}
@@ -402,6 +413,12 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	if p.publishing() {
 		wg.Add(1)
 		go func() { defer wg.Done(); p.publishLoop(s.rtCtx, s) }()
+	}
+	// Keep the direct-enroll offer honest: a registration that advertised it
+	// (or didn't) is re-made when the direct server's answer changes.
+	if p.cfg.DirectEnroll != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); p.watchDirect(s, advertised) }()
 	}
 
 	select {

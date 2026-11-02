@@ -223,6 +223,11 @@ func cmdDoctor() error {
 	fmt.Println("\nProvider")
 	reportProvider()
 
+	// Direct listener: off unless `amux direct enable` saved it on, in which
+	// case the daemon supervises it. Quiet and never fatal when off.
+	fmt.Println("\nDirect")
+	reportDirect()
+
 	// Terminal hotkeys: the native TUI's Alt/Option bindings only work when the
 	// terminal encodes Option as ESC-prefixed Meta. Best-effort and never fatal;
 	// silent when there's nothing to say (non-macOS or an unrecognized terminal).
