@@ -72,13 +72,27 @@ func probeHarnesses(ctx context.Context) []CatalogHarness {
 	out := []CatalogHarness{}
 	for _, kind := range agent.Kinds() {
 		if r := agent.Probe(ctx, kind); r.Err == nil {
-			out = append(out, CatalogHarness{Name: r.Kind, Version: r.Version})
+			out = append(out, CatalogHarness{Name: r.Kind, Version: r.Version, Models: catalogModels(agent.HarnessFor(kind).Models())})
 		}
 	}
 	if ctx.Err() == nil {
 		harnessProbes.at, harnessProbes.out = time.Now(), out
 	}
 	return slices.Clone(out)
+}
+
+// maxCatalogModels bounds one harness's advertised model list.
+const maxCatalogModels = 64
+
+// catalogModels keeps only well-formed model names, de-duplicated and bounded.
+func catalogModels(in []string) []string {
+	out := []string{}
+	for _, m := range in {
+		if modelRE.MatchString(m) && !slices.Contains(out, m) && len(out) < maxCatalogModels {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // Catalog reads tracked repo names and workgroup repo ceilings from the daemon

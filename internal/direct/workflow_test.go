@@ -413,7 +413,7 @@ func TestCreationIdempotency(t *testing.T) {
 	}
 	f.newID = "root-2"
 	code, _, r = act(s, tok.AccessToken, "", VerbNewWorkgroup, fields, "same")
-	if code != 200 || r.NewID != "root-1" || f.applies.Load() != 1 {
+	if code != 200 || r.NewID != "root-1" || r.RootID != "root-1" || f.applies.Load() != 1 {
 		t.Fatalf("replay: %d %+v applies=%d", code, r, f.applies.Load())
 	}
 	// The same key with a different body conflicts.
@@ -474,7 +474,7 @@ func TestCreationReplaySurvivesRestart(t *testing.T) {
 	}
 	f.newID = "agent-8"
 	code, _, r := act(newTestServer(t, a, f), next.AccessToken, "wg1", VerbAddAgent, map[string]string{"repos": "api"}, "k")
-	if code != 200 || r.NewID != "agent-7" || f.applies.Load() != 1 {
+	if code != 200 || r.NewID != "agent-7" || r.RootID != "wg1" || f.applies.Load() != 1 {
 		t.Fatalf("replay after restart: %d %+v applies=%d", code, r, f.applies.Load())
 	}
 }
@@ -676,5 +676,12 @@ func TestRevokeDuringCreationIsAmbiguous(t *testing.T) {
 	}
 	if f.activeApplies.Load() != 0 {
 		t.Fatal("revoke returned before the admitted creation finished")
+	}
+}
+
+func TestCatalogModelsAreSanitized(t *testing.T) {
+	got := catalogModels([]string{"claude-opus-5-5", "claude-opus-5-5", "", "bad model", "x\n", "gpt-6", "/etc/passwd"})
+	if !slices.Equal(got, []string{"claude-opus-5-5", "gpt-6"}) {
+		t.Fatalf("models %v", got)
 	}
 }

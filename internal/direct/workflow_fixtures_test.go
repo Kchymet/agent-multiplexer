@@ -34,7 +34,8 @@ func workflowFixtureFiles(t *testing.T) map[string][]byte {
 				VerbArchive, VerbUnarchive, VerbAddAgent),
 			CreateWorkgroup: true,
 			Catalog: &CreationCatalog{
-				Harnesses:     []CatalogHarness{{Name: "claude", Version: "2.1.0"}, {Name: "codex", Version: "0.9.0"}},
+				Harnesses: []CatalogHarness{{Name: "claude", Version: "2.1.0", Models: []string{"claude-opus-5-5", "claude-sonnet-5-5"}},
+					{Name: "codex", Version: "0.9.0", Models: []string{"gpt-6", "gpt-6-mini"}}},
 				IdentityModes: []string{hp.IdentityMachine}, Modes: []string{"task", "interactive"},
 				Repos:      []string{"agent-multiplexer", "harness"},
 				Workgroups: []CatalogWorkgroup{{ID: "771951", Repos: []string{"agent-multiplexer"}}},
@@ -59,7 +60,7 @@ func workflowFixtureFiles(t *testing.T) map[string][]byte {
 		"create-request-new-workgroup.json": req(VerbNewWorkgroup, map[string]string{"name": "Docs", "prompt": "Refresh the guides.",
 			"repos": "harness", "agent": "claude", "coordinator": "codex", "identity_mode": hp.IdentityMachine}, "b1f0c6a2-9"),
 		"create-request-new-workgroup-empty.json": req(VerbNewWorkgroupEmpty, map[string]string{"name": "Triage", "repos": ""}, "b1f0c6a2-10"),
-		"action-response-created.json":            js(ActionResponse{OK: true, NewID: "4c2a91"}),
+		"action-response-created.json":            js(ActionResponse{OK: true, NewID: "4c2a91", RootID: "771951"}),
 		"action-response-archive.json":            js(ActionResponse{OK: true, Affected: []string{"771951", "e1deda"}}),
 		"api-error-denied.json":                   js(APIError{Code: CodeDenied, Error: "this client may not perform that operation"}),
 		"api-error-not-in-catalog.json": js(APIError{Code: CodeNotInCatalog,

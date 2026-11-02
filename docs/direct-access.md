@@ -511,8 +511,15 @@ More rules:
 every named workgroup, so creating one would mint authority outside the grant.
 Such a grant can only add agents to its own workgroups.
 
-**Results.** Success is `{"ok":true}`. A creation adds `"new_id"`: the new
-agent, or the new workgroup root. `archive` and `unarchive` add `"affected"`,
+**Results.** Success is `{"ok":true}`. A creation adds `"new_id"` and
+`"root_id"`:
+
+- for `add-agent`, the new agent, and the target workgroup as its root;
+- for `new-workgroup` and `new-workgroup-empty`, the new root (its coordinator
+  session) in both fields.
+
+A first member that `new-workgroup` creates with repos is not named in the
+result. It appears in the next inventory under that root. `archive` and `unarchive` add `"affected"`,
 the sessions whose effective archive state changed: the target, plus for a
 workgroup root each member that is not archived in its own right. Both are
 recorded with the idempotency key, so a replay returns the same `new_id` and
@@ -542,7 +549,9 @@ authorizer uses.
 - `verbs`: the session verbs this grant may use;
 - `create_workgroup`;
 - for a grant holding `create`, a `catalog`:
-  - `harnesses`: name and version verified on this machine;
+  - `harnesses`: name and version verified on this machine, plus `models`.
+    These are the well-formed model names that harness's local picker
+    offers, at most 64. The `model` field is not limited to this list;
   - `identity_modes`: `["machine"]`;
   - `modes`: `task`, `interactive`;
   - `repos`: tracked repo names, only when the grant may create roots;
@@ -550,6 +559,17 @@ authorizer uses.
 
 The catalog never carries repository sources, URLs, host paths, branches,
 account bindings, credentials or configuration.
+
+**Prompting during a turn.** Interject delivers text into the running turn
+(`caps.interject`). A `prompt` is never refused because a turn is running.
+Its 200 means the daemon accepted the prompt, not that it was delivered, and
+amux keeps no queue of its own. What happens next depends on the runtime:
+
+- A PTY session (`control_mode` empty or `pty`) gets the text typed into the
+  harness's own input. Claude Code holds it as the next message.
+- A structured session (`structured`) gets a new turn start dispatched
+  asynchronously. A failure appears as an error event in the transcript, not
+  in the HTTP answer.
 
 **Telling cases apart.**
 

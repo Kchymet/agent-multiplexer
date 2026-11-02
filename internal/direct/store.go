@@ -48,6 +48,7 @@ type idemRecord struct {
 	Code     string   `json:"code,omitempty"`
 	Error    string   `json:"error,omitempty"`
 	NewID    string   `json:"newId,omitempty"`    // the session a creation verb made
+	RootID   string   `json:"rootId,omitempty"`   // the created session's workgroup root
 	Affected []string `json:"affected,omitempty"` // archive/unarchive: sessions whose archive state changed
 	At       int64    `json:"at"`
 }

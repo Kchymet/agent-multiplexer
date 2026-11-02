@@ -342,9 +342,14 @@ type ActionRequest struct {
 // admitted against: the target, plus for a workgroup root each member that is
 // not archived in its own right. Members archived themselves stay archived
 // after a root unarchive and are not listed.
+//
+// RootID accompanies NewID: the workgroup root the new session belongs to (the
+// add-agent target, or NewID itself for a new workgroup), so a client can
+// navigate before the next inventory publishes the row.
 type ActionResponse struct {
 	OK       bool     `json:"ok"`
 	NewID    string   `json:"new_id,omitempty"`
+	RootID   string   `json:"root_id,omitempty"`
 	Affected []string `json:"affected,omitempty"`
 }
 
@@ -381,10 +386,13 @@ type CreationCatalog struct {
 	Workgroups    []CatalogWorkgroup `json:"workgroups,omitempty"`
 }
 
-// CatalogHarness is one harness this machine verified it can launch.
+// CatalogHarness is one harness this machine verified it can launch, with the
+// model names its local picker offers (sanitized names only; a creation's
+// model field is not limited to this list, which may lag the runtime).
 type CatalogHarness struct {
-	Name    string `json:"name"`
-	Version string `json:"version,omitempty"`
+	Name    string   `json:"name"`
+	Version string   `json:"version,omitempty"`
+	Models  []string `json:"models,omitempty"`
 }
 
 // CatalogWorkgroup is one in-scope workgroup root and the repo names its

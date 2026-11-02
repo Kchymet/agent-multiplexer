@@ -846,16 +846,21 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 	var rejected *daemon.RejectedError
 	switch {
 	case err == nil && creates && validSessionID(newID):
-		s.cfg.Authority.FinishResult(l, req.IdemKey, newID, nil)
-		writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: newID})
+		res := ActionResponse{OK: true, NewID: newID, RootID: newID}
+		if act.Action == core.ActionAddAgent {
+			res.RootID = act.ID
+		}
+		s.cfg.Authority.FinishResult(l, req.IdemKey, res)
+		writeJSON(w, http.StatusOK, res)
 	case err == nil && creates:
 		// The daemon reported success without a usable id. Something may exist,
 		// so the key must never create again: record it as ambiguous.
 		s.cfg.Authority.AmbiguousAction(l, req.IdemKey)
 		writeErr(w, http.StatusConflict, CodeIdemAmbiguous, "the creation's outcome is unknown; it will not run again with this idem_key")
 	case err == nil:
-		s.cfg.Authority.FinishResult(l, req.IdemKey, "", affected)
-		writeJSON(w, http.StatusOK, ActionResponse{OK: true, Affected: affected})
+		res := ActionResponse{OK: true, Affected: affected}
+		s.cfg.Authority.FinishResult(l, req.IdemKey, res)
+		writeJSON(w, http.StatusOK, res)
 	case errors.As(err, &rejected):
 		// The daemon answered not-OK. That is a known answer, not proof of no
 		// side effect; it is recorded and replayed, never re-run.
@@ -931,7 +936,7 @@ func (s *Server) idemReply(w http.ResponseWriter, out idemOutcome, rec *idemReco
 	switch out {
 	case idemReplay:
 		if rec.OK {
-			writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: rec.NewID, Affected: rec.Affected})
+			writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: rec.NewID, RootID: rec.RootID, Affected: rec.Affected})
 		} else {
 			status := http.StatusUnprocessableEntity
 			if rec.Code == CodeUnavailable {

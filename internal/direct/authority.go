@@ -967,9 +967,9 @@ func (a *Authority) FinishAction(l *Lease, key string, ok bool, code, msg string
 // FinishResult records a success together with what it reported (a creation's
 // new id, an archive's affected sessions), so a replay of the same key answers
 // with the same result instead of running again.
-func (a *Authority) FinishResult(l *Lease, key, newID string, affected []string) {
+func (a *Authority) FinishResult(l *Lease, key string, res ActionResponse) {
 	a.endAction(l, key, func(r *idemRecord) {
-		r.State, r.OK, r.NewID, r.Affected = idemDone, true, newID, slices.Clone(affected)
+		r.State, r.OK, r.NewID, r.RootID, r.Affected = idemDone, true, res.NewID, res.RootID, slices.Clone(res.Affected)
 	})
 }
 
