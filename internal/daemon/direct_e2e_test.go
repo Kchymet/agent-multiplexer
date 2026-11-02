@@ -570,3 +570,44 @@ func TestDirectLivePermissionCorrelation(t *testing.T) {
 		t.Fatalf("second answer: %d %+v", code, bad)
 	}
 }
+
+// The cloud UI's exact creation payloads (harness CreateModals.tsx) work over
+// direct against the live daemon: empty root with agent/model/prompt:"" and a
+// follow-up add-agent with repos:"" and prompt:"".
+func TestDirectLiveCloudClientCreationPayloads(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required to track a repository")
+	}
+	e := newE2E(t)
+	trackLocalRepo(t, "api")
+	all := e.enroll(everyPerm, direct.ResourceScope{Kind: direct.ResourceAllSessions})
+	code, root, bad := e.act(all, "", direct.VerbNewWorkgroupEmpty, map[string]string{
+		"name": "Ops", "repos": "api", "prompt": "", "coordinator": "claude", "coordinator_model": "claude-opus-5-5",
+		"agent": "claude", "model": "claude-opus-5-5", "identity_mode": "machine"}, "cloud-root")
+	if code != 200 {
+		t.Fatalf("cloud empty-root payload: %d %+v", code, bad)
+	}
+	inv := e.eventually(all, "cloud root", func(inv map[string]direct.Session) bool { return inv[root.NewID].IsRoot })
+	if m := membersOf(inv, root.NewID); len(m) != 0 {
+		t.Fatalf("agent/model on an empty root created members %v", m)
+	}
+	code, added, bad := e.act(all, root.NewID, direct.VerbAddAgent, map[string]string{
+		"repos": "api", "prompt": "", "agent": "claude", "model": "claude-opus-5-5", "identity_mode": "machine"}, "cloud-agent")
+	if code != 200 || added.RootID != root.NewID {
+		t.Fatalf("cloud add-agent payload: %d %+v", code, bad)
+	}
+	code, linear, bad := e.act(all, "", direct.VerbNewWorkgroup, map[string]string{
+		"name": "Linked", "prompt": "fix it", "linear": "https://linear.app/x/issue/AGE-1"}, "cloud-linear")
+	if code != 200 {
+		t.Fatalf("linear new-workgroup: %d %+v", code, bad)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _, _ := db.GetSession(linear.NewID)
+	db.Close()
+	if !strings.HasPrefix(row.Prompt, "Linear issue to work on: https://linear.app/x/issue/AGE-1") || !strings.Contains(row.Prompt, "fix it") {
+		t.Fatalf("linear did not reach the coordinator task: %q", row.Prompt)
+	}
+}
