@@ -161,6 +161,18 @@ const (
 	CodeRejected         = "rejected"
 	CodeNotInCatalog     = "not_in_catalog" // a creation names a harness or repo this machine/target does not offer
 	CodeInternal         = "internal"
+	// Creation identity (docs/direct-access.md, "Replaying a creation"). A
+	// replayed creation (sync or async POST, or GET status) whose created
+	// session or workgroup root no longer exists as the exact session that
+	// was created (deleted, its id reused, or the store replaced) answers
+	// created_target_unavailable; a creation recorded before identities were
+	// recorded answers created_identity_unverifiable. Neither carries ids, and
+	// neither says the creation did not run. daemon_upgrade_required means the
+	// local daemon predates creation identities; creation is refused before
+	// anything is sent to it.
+	CodeCreatedTargetUnavailable    = "created_target_unavailable"
+	CodeCreatedIdentityUnverifiable = "created_identity_unverifiable"
+	CodeDaemonUpgradeRequired       = "daemon_upgrade_required"
 )
 
 // OAuth token endpoint errors (RFC 6749 §5.2 body {"error","error_description"}).
@@ -435,6 +447,11 @@ type CapabilitiesResponse struct {
 	// AsyncCreate reports that this server accepts ActionRequest.Async and
 	// PathCreations for this grant (it holds create).
 	AsyncCreate bool `json:"async_create,omitempty"`
+	// DaemonUpgradeRequired reports, to a grant holding create, that the
+	// local amux daemon predates creation identities: CreateWorkgroup and
+	// AsyncCreate are false and every creation answers
+	// daemon_upgrade_required until the host upgrades and restarts it.
+	DaemonUpgradeRequired bool `json:"daemon_upgrade_required,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the

@@ -78,6 +78,9 @@ type Daemon struct {
 	// dispatch applies a store-backed host action (wsops.Dispatch); tests
 	// override it to stall inside an action's own work.
 	dispatch func(ctx context.Context, a core.Action, stopEngine func(id string)) (string, error)
+	// dispatchIdentity is dispatch for a host creation that opted into its
+	// identity (wsops.DispatchIdentity); tests override it like dispatch.
+	dispatchIdentity func(ctx context.Context, a core.Action, expectRoot string, stopEngine func(id string)) (store.Identity, error)
 
 	// codex supervises structured-control Codex sessions (AGE-181): a background
 	// App Server per session, owned by the daemon, independent of any pane. It is
@@ -256,22 +259,23 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	control, err := amuxcfg.ResolveCodexControl()
 	goalAutoResume, goalErr := amuxcfg.ResolveGoalAutoResume()
 	d := &Daemon{
-		codexControl:   control,
-		configErr:      errors.Join(err, goalErr),
-		goalAutoResume: goalAutoResume,
-		sources:        sources,
-		interval:       interval,
-		self:           self,
-		resolve:        panespec.Resolve,
-		agentsUnder:    wsops.AgentIDsUnder,
-		dispatch:       wsops.Dispatch,
-		subs:           map[chan core.Snapshot]struct{}{},
-		pollNow:        make(chan struct{}, 1),
-		liveAgentsPath: core.LiveAgentsPath(),
-		firstPoll:      make(chan struct{}),
-		shutdown:       make(chan struct{}),
-		serving:        make(map[uint64]net.Conn),
-		permissions:    newRuntimePermissionGate(),
+		codexControl:     control,
+		configErr:        errors.Join(err, goalErr),
+		goalAutoResume:   goalAutoResume,
+		sources:          sources,
+		interval:         interval,
+		self:             self,
+		resolve:          panespec.Resolve,
+		agentsUnder:      wsops.AgentIDsUnder,
+		dispatch:         wsops.Dispatch,
+		dispatchIdentity: wsops.DispatchIdentity,
+		subs:             map[chan core.Snapshot]struct{}{},
+		pollNow:          make(chan struct{}, 1),
+		liveAgentsPath:   core.LiveAgentsPath(),
+		firstPoll:        make(chan struct{}),
+		shutdown:         make(chan struct{}),
+		serving:          make(map[uint64]net.Conn),
+		permissions:      newRuntimePermissionGate(),
 
 		shutdownJoinTimeout: defaultShutdownJoinTimeout,
 	}
@@ -1001,7 +1005,7 @@ func (d *Daemon) serveAuthenticated(ctx context.Context, conn net.Conn, consoleO
 	actions, readDone := readHostActions(reader, cancelConnection)
 	defer func() { cancelConnection(); _ = conn.Close(); <-readDone }()
 	for {
-		var a core.Action
+		var frame hostActionFrame
 		select {
 		case <-connectionCtx.Done():
 			return
@@ -1009,8 +1013,9 @@ func (d *Daemon) serveAuthenticated(ctx context.Context, conn net.Conn, consoleO
 			if !ok {
 				return
 			}
-			a = next
+			frame = next
 		}
+		a := frame.Action
 		if connectionCtx.Err() != nil || valid(ctx) != nil {
 			return
 		}
@@ -1037,6 +1042,11 @@ func (d *Daemon) serveAuthenticated(ctx context.Context, conn net.Conn, consoleO
 			if a.Action == core.ActionAccountManage {
 				actionCtx = accountCtx
 			}
+			if frame.Identity != nil {
+				// The host-only creation identity opt-in (creation_identity.go).
+				cl.send(d.hostIdentityAction(actionCtx, frame))
+				continue
+			}
 			res := d.handle(actionCtx, a)
 			if a.Action != "" {
 				cl.send(res)
@@ -1052,8 +1062,8 @@ func (d *Daemon) serveAuthenticated(ctx context.Context, conn net.Conn, consoleO
 const hostActionQueue = 32
 const hostActionMaxBytes = clientFrameLimit
 
-func readHostActions(reader *bufio.Reader, retire context.CancelFunc) (<-chan core.Action, <-chan struct{}) {
-	actions := make(chan core.Action, hostActionQueue)
+func readHostActions(reader *bufio.Reader, retire context.CancelFunc) (<-chan hostActionFrame, <-chan struct{}) {
+	actions := make(chan hostActionFrame, hostActionQueue)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1064,7 +1074,7 @@ func readHostActions(reader *bufio.Reader, retire context.CancelFunc) (<-chan co
 			if err != nil || len(line) > hostActionMaxBytes {
 				return
 			}
-			var action core.Action
+			var action hostActionFrame
 			if json.Unmarshal(line, &action) != nil {
 				return
 			}

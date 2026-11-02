@@ -17,6 +17,7 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/hostbackend"
 	"amux/internal/runtimeevents"
+	amuxstore "amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -34,6 +35,15 @@ type Backend interface {
 	// Catalog is the machine's creation input space, read fresh (harness
 	// probes may be cached briefly).
 	Catalog(ctx context.Context) (MachineCatalog, error)
+	// Creation identity (host-only; see daemon/creation_identity.go).
+	// CreationIdentity is nil when the daemon speaks the protocol and
+	// hostbackend.ErrUpgradeRequired when it does not. ApplyIdentity runs a
+	// creation verb and returns the created identity (expectRoot pins an
+	// add-agent's root incarnation). SessionIdentities reads current
+	// identities (at most amuxstore.MaxIdentityLookup ids).
+	CreationIdentity(ctx context.Context) error
+	ApplyIdentity(ctx context.Context, a core.Action, expectRoot string) (amuxstore.Identity, error)
+	SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error)
 }
 
 // MachineCatalog is the backend's unprojected creation catalog: verified
@@ -171,6 +181,16 @@ func (b HostBackend) Snapshot(ctx context.Context) ([]core.Session, error) { ret
 
 func (b HostBackend) Apply(ctx context.Context, a core.Action) (string, error) {
 	return b.H.Apply(ctx, a)
+}
+
+func (b HostBackend) CreationIdentity(ctx context.Context) error { return b.H.CreationIdentity(ctx) }
+
+func (b HostBackend) ApplyIdentity(ctx context.Context, a core.Action, expectRoot string) (amuxstore.Identity, error) {
+	return b.H.ApplyIdentity(ctx, a, expectRoot)
+}
+
+func (b HostBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
+	return b.H.SessionIdentities(ctx, ids)
 }
 
 func (b HostBackend) resolver() runtimeevents.ContextResolver {
@@ -320,12 +340,21 @@ var (
 const createdWait = 3 * time.Second
 
 // targetSnapshot reads the fresh inventory and, when sid is missing but this
-// grant created it, re-reads it until the row appears or createdWait passes.
-// Every authorization check still runs on the row the daemon publishes.
+// grant just created it, re-reads it until the row appears or createdWait
+// passes. It waits only for the exact session the grant created: the store's
+// current incarnation of sid must be the recorded one, before the wait and
+// again once the row appears. A record without an incarnation, a different or
+// missing current identity, or a failure to read it never waits, and a
+// replacement that appears is never adopted (it is treated as absent). Every
+// authorization check still runs on the row the daemon publishes.
 func targetSnapshot(l *Lease, b Backend, sid string) ([]core.Session, error) {
 	rows, err := b.Snapshot(l.Context())
-	if err != nil || slices.ContainsFunc(rows, func(r core.Session) bool { return r.ID == sid }) || !l.a.Created(l, sid) {
+	if err != nil || slices.ContainsFunc(rows, func(r core.Session) bool { return r.ID == sid }) {
 		return rows, err
+	}
+	inc, created := l.a.createdIncarnation(l, sid)
+	if !created || inc == "" || !sameIncarnation(l, b, sid, inc) {
+		return rows, nil
 	}
 	deadline := time.Now().Add(createdWait)
 	for time.Now().Before(deadline) {
@@ -334,11 +363,23 @@ func targetSnapshot(l *Lease, b Backend, sid string) ([]core.Session, error) {
 			return nil, l.Context().Err()
 		case <-time.After(25 * time.Millisecond):
 		}
-		if rows, err = b.Snapshot(l.Context()); err != nil || slices.ContainsFunc(rows, func(r core.Session) bool { return r.ID == sid }) {
+		if rows, err = b.Snapshot(l.Context()); err != nil {
 			return rows, err
+		}
+		if slices.ContainsFunc(rows, func(r core.Session) bool { return r.ID == sid }) {
+			if !sameIncarnation(l, b, sid, inc) {
+				return slices.DeleteFunc(rows, func(r core.Session) bool { return r.ID == sid }), nil
+			}
+			return rows, nil
 		}
 	}
 	return rows, nil
+}
+
+// sameIncarnation reports whether sid currently has incarnation inc.
+func sameIncarnation(l *Lease, b Backend, sid, inc string) bool {
+	cur, err := b.SessionIdentities(l.Context(), []string{sid})
+	return err == nil && cur[sid].Incarnation == inc
 }
 
 // authorizeTarget reads the fresh inventory and returns the target row when it

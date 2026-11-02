@@ -11,11 +11,13 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"amux/internal/access"
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
+	"amux/internal/store"
 )
 
 // outBuf bounds the client's outbound queue. Actions and pane input/responses
@@ -57,6 +59,10 @@ type Client struct {
 	// write loop never calls Close, so waiting here cannot self-join.
 	writerDone chan struct{}
 	once       sync.Once
+	// identityOK records that this connection's daemon negotiated the
+	// creation identity protocol (NegotiateCreationIdentity). It is per
+	// connection: a reconnect negotiates again.
+	identityOK atomic.Bool
 }
 
 // Dial connects to the daemon socket (single attempt).
@@ -296,6 +302,20 @@ func (c *Client) Send(a core.Action) error {
 	if err != nil {
 		return err
 	}
+	return c.enqueue(b)
+}
+
+// sendRaw sends one already-encoded JSON frame (without its newline) under
+// the same bound and writer as Send.
+func (c *Client) sendRaw(frame []byte) error {
+	b := append(append([]byte(nil), frame...), '\n')
+	if len(b) > clientFrameLimit {
+		return ErrClientFrameTooLarge
+	}
+	return c.enqueue(b)
+}
+
+func (c *Client) enqueue(b []byte) error {
 	select {
 	case c.out <- clientWrite{data: b, ctx: context.Background()}:
 		return nil
@@ -591,6 +611,9 @@ func (c *Client) RuntimeRecord(id string) (core.RuntimeRecord, error) {
 type Frame struct {
 	Snapshot *core.Snapshot
 	Result   *core.Result
+	// Identity accompanies Result on an identity creation's answer
+	// (DispatchIdentity); nil otherwise.
+	Identity *store.Identity
 	Pane     *core.PaneFrame
 	Data     *core.Data
 }
@@ -659,11 +682,11 @@ func (c *Client) NextContext(ctx context.Context) (Frame, error) {
 		}
 		return Frame{Snapshot: &s}, nil
 	case "result":
-		var r core.Result
+		var r identityResult
 		if err := json.Unmarshal(line, &r); err != nil {
 			return Frame{}, err
 		}
-		return Frame{Result: &r}, nil
+		return Frame{Result: &r.Result, Identity: r.Identity}, nil
 	case core.FramePaneReset, core.FramePaneOutput, core.FramePaneExit:
 		var p core.PaneFrame
 		if err := json.Unmarshal(line, &p); err != nil {

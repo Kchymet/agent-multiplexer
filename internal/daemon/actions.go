@@ -314,6 +314,14 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 			return fail("%v", restoreErr)
 		} else if restore {
 			newID, err = d.restoreSessionAccess(ctx, a)
+		} else if call := identityCallFrom(ctx); call != nil {
+			// Only the host loop sets this (hostIdentityAction), and only for a
+			// creation verb: the same dispatch, returning the store identity.
+			var ident store.Identity
+			ident, err = d.dispatchIdentity(ctx, a, call.req.ExpectRoot, d.killEngineFor)
+			if err == nil {
+				newID, call.identity, call.set = ident.ID, ident, true
+			}
 		} else {
 			newID, err = d.dispatch(ctx, a, d.killEngineFor)
 		}

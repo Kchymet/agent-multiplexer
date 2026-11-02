@@ -15,6 +15,7 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/direct"
 	"amux/internal/hostbackend"
+	"amux/internal/store"
 )
 
 // Asynchronous creation against a real daemon. slowConn performs the real
@@ -54,6 +55,31 @@ func (c *slowConn) Dispatch(a core.Action) (string, error) {
 		return id, err
 	case <-c.closed:
 		return "", errors.New("use of closed connection")
+	}
+}
+
+// The identity protocol (hostbackend.IdentityConn) passes through, with
+// creations held exactly like Dispatch.
+func (c *slowConn) NegotiateCreationIdentity() error {
+	return c.Conn.(hostbackend.IdentityConn).NegotiateCreationIdentity()
+}
+
+func (c *slowConn) SessionIdentities(ids []string) (map[string]store.SessionIdentity, error) {
+	return c.Conn.(hostbackend.IdentityConn).SessionIdentities(ids)
+}
+
+func (c *slowConn) DispatchIdentity(a core.Action, req daemon.IdentityRequest) (store.Identity, error) {
+	ident, err := c.Conn.(hostbackend.IdentityConn).DispatchIdentity(a, req)
+	c.dispatches.Add(1)
+	select {
+	case c.created <- ident.ID:
+	default:
+	}
+	select {
+	case <-c.gate:
+		return ident, err
+	case <-c.closed:
+		return store.Identity{}, errors.New("use of closed connection")
 	}
 }
 

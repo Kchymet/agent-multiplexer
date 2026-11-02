@@ -66,6 +66,12 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 	if a.Query == core.QueryCodexControl {
 		return d.codexControl, d.configErr
 	}
+	if a.Query == QueryHostCapabilities {
+		return HostCapabilities{CreationIdentity: CreationIdentityVersion}, nil
+	}
+	if a.Query == QuerySessionIdentities {
+		return sessionIdentities(a)
+	}
 	if a.Query == core.QueryCodexAuth {
 		return d.codexAuthStatus(context.Background()), nil
 	}

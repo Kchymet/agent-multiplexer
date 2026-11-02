@@ -715,23 +715,29 @@ func (s *Server) actions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "async applies only to creation verbs")
 		return
 	}
-	precheck := func(l *Lease) ([]string, error) {
+	precheck := func(l *Lease) (admission, error) {
 		rows, err := targetSnapshot(l, s.cfg.Backend, sid)
 		if err != nil {
-			return nil, err
+			return admission{}, err
 		}
 		byID := indexRows(rows)
 		row, ok := byID[sid]
 		if !ok || !inScope(l.Grant, row, byID) {
-			return nil, errNotFound
+			return admission{}, errNotFound
 		}
 		if err := admissible(row, byID, req.Verb); err != nil {
-			return nil, err
+			return admission{}, err
 		}
 		if req.Verb == VerbAddAgent {
-			return nil, s.checkCatalog(l, act, sid)
+			if err := s.checkCatalog(l, act, sid); err != nil {
+				return admission{}, err
+			}
+			// Negotiate the identity protocol and pin the member to the root
+			// incarnation admitted here (creation_identity.go).
+			inc, err := s.rootIdentity(l, sid)
+			return admission{rootInc: inc}, err
 		}
-		return archiveAffected(row, rows, byID, req.Verb), nil
+		return admission{affected: archiveAffected(row, rows, byID, req.Verb)}, nil
 	}
 	s.runAction(w, l, req, actionHash(sid, req), act, precheck)
 }
@@ -767,7 +773,13 @@ func (s *Server) createWorkgroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "invalid fields for "+req.Verb)
 		return
 	}
-	s.runAction(w, l, req, actionHash("", req), act, func(l *Lease) ([]string, error) { return nil, s.checkCatalog(l, act, "") })
+	s.runAction(w, l, req, actionHash("", req), act, func(l *Lease) (admission, error) {
+		if err := s.checkCatalog(l, act, ""); err != nil {
+			return admission{}, err
+		}
+		// An older daemon is refused here, before the key is recorded.
+		return admission{}, s.cfg.Backend.CreationIdentity(l.Context())
+	})
 }
 
 // checkCatalog validates a creation action against the machine's current
@@ -805,7 +817,7 @@ func (s *Server) checkCatalog(l *Lease, act core.Action, root string) error {
 // only then hand the action to the daemon under the bounded execution context.
 // With req.Async (creation verbs only) it runs as a background job instead
 // (runCreationAsync); the synchronous path is unchanged.
-func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func(*Lease) ([]string, error)) {
+func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func(*Lease) (admission, error)) {
 	if req.Async {
 		s.runCreationAsync(w, l, req, bodyHash, act, precheck)
 		return
@@ -813,10 +825,10 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 	if out, rec, err := s.cfg.Authority.BeginAction(l, req.IdemKey, bodyHash, true); err != nil {
 		writeAuthErr(w, err)
 		return
-	} else if s.idemReply(w, out, rec) {
+	} else if s.idemReply(w, l, out, rec) {
 		return
 	}
-	affected, err := precheck(l)
+	adm, err := precheck(l)
 	if err != nil {
 		s.writePrecheckErr(w, l, req.Verb, err)
 		return
@@ -829,7 +841,7 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 	if s.writeBeginErr(w, err) {
 		return
 	}
-	if s.idemReply(w, out, rec) {
+	if s.idemReply(w, l, out, rec) {
 		return
 	}
 	if code := l.AuthEnded(); code != "" {
@@ -840,9 +852,14 @@ func (s *Server) runAction(w http.ResponseWriter, l *Lease, req ActionRequest, b
 	// From here the action is admitted: it runs under a bounded execution
 	// lifetime that only revocation cuts short, not token expiry or disconnect.
 	exec, cancel := l.ExecContext(actionExecLimit)
-	newID, err := s.cfg.Backend.Apply(exec, act)
+	var ident amuxstore.Identity
+	if core.DescriptorFor(act.Action).CreatesSession {
+		ident, err = s.applyCreation(exec, act, adm)
+	} else {
+		ident.ID, err = s.cfg.Backend.Apply(exec, act)
+	}
 	cancel()
-	status, body := s.settle(l, req.IdemKey, req.Verb, act, affected, newID, err)
+	status, body := s.settle(l, req.IdemKey, req.Verb, act, adm.affected, ident, err)
 	writeJSON(w, status, body)
 }
 
@@ -879,6 +896,8 @@ func precheckCode(l *Lease, verb string, err error) (int, string, string) {
 		return http.StatusUnauthorized, CodeAuthExpired, "access expired"
 	case errors.Is(err, errNotFound):
 		return http.StatusNotFound, CodeNotFound, "no such session"
+	case errors.Is(err, hostbackend.ErrUpgradeRequired):
+		return http.StatusServiceUnavailable, CodeDaemonUpgradeRequired, "the amux daemon must be upgraded (and restarted) before it can create sessions over direct access"
 	case errors.Is(err, hostbackend.ErrUnavailable):
 		return http.StatusServiceUnavailable, CodeUnavailable, "the amux daemon is not reachable"
 	}
@@ -895,17 +914,30 @@ func (s *Server) writePrecheckErr(w http.ResponseWriter, l *Lease, verb string, 
 
 // settle classifies one finished daemon call, records it under key and
 // returns the synchronous answer.
-func (s *Server) settle(l *Lease, key, verb string, act core.Action, affected []string, newID string, err error) (int, any) {
+//
+// A creation's ident is what the daemon created (with incarnations); any other
+// verb's carries nothing. A creation is recorded as a success only with a
+// complete identity of the expected shape; it is the identity the daemon
+// returned, never one read back afterwards.
+func (s *Server) settle(l *Lease, key, verb string, act core.Action, affected []string, ident amuxstore.Identity, err error) (int, any) {
 	creates := core.DescriptorFor(act.Action).CreatesSession
+	newID := ident.ID
+	wantRoot := newID
+	if act.Action == core.ActionAddAgent {
+		wantRoot = act.ID
+	}
 	var rejected *daemon.RejectedError
 	switch {
-	case err == nil && creates && validSessionID(newID):
-		res := ActionResponse{OK: true, NewID: newID, RootID: newID}
-		if act.Action == core.ActionAddAgent {
-			res.RootID = act.ID
-		}
-		s.cfg.Authority.FinishResult(l, key, res)
+	case err == nil && creates && validSessionID(newID) && ident.Complete() && ident.RootID == wantRoot &&
+		(newID != wantRoot || ident.Incarnation == ident.RootIncarnation):
+		res := ActionResponse{OK: true, NewID: newID, RootID: wantRoot}
+		s.cfg.Authority.FinishCreated(l, key, res, ident)
 		return http.StatusOK, res
+	case errors.Is(err, hostbackend.ErrUpgradeRequired):
+		// Negotiated on the dispatch connection before the action was sent:
+		// nothing ran. Reached only if the daemon changed since the precheck.
+		s.cfg.Authority.FinishAction(l, key, false, CodeDaemonUpgradeRequired, "the amux daemon must be upgraded before it can create sessions over direct access; nothing was sent to it")
+		return http.StatusServiceUnavailable, APIError{Code: CodeDaemonUpgradeRequired, Error: "the amux daemon must be upgraded before it can create sessions over direct access; nothing was sent to it"}
 	case err == nil && creates:
 		// The daemon reported success without a usable id. Something may exist,
 		// so the key must never create again: record it as ambiguous.
@@ -956,6 +988,15 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		AsyncCreate: l.Can(PermCreate),
 	}
 	if l.Can(PermCreate) {
+		// A daemon without creation identities cannot create over direct
+		// access: say so up front rather than at the first creation.
+		switch err := s.cfg.Backend.CreationIdentity(l.Context()); {
+		case errors.Is(err, hostbackend.ErrUpgradeRequired):
+			resp.CreateWorkgroup, resp.AsyncCreate, resp.DaemonUpgradeRequired = false, false, true
+		case err != nil:
+			s.writeBackendErr(w, l, err)
+			return
+		}
 		rows, err := s.cfg.Backend.Snapshot(l.Context())
 		if err != nil {
 			s.writeBackendErr(w, l, err)
@@ -993,10 +1034,12 @@ func actionHash(sid string, req ActionRequest) string {
 const idemExpiredMsg = "this idem_key was already used and its recorded result has expired; it will not run again. Check the machine for its effect before retrying with a new idem_key"
 
 // idemReply answers a non-proceed idempotency outcome; it reports whether it did.
-func (s *Server) idemReply(w http.ResponseWriter, out idemOutcome, rec *idemRecord) bool {
+func (s *Server) idemReply(w http.ResponseWriter, l *Lease, out idemOutcome, rec *idemRecord) bool {
 	switch out {
 	case idemReplay:
-		if rec.OK {
+		if isCreationSuccess(rec) {
+			s.replayCreated(w, l, rec)
+		} else if rec.OK {
 			writeJSON(w, http.StatusOK, ActionResponse{OK: true, NewID: rec.NewID, RootID: rec.RootID, Affected: rec.Affected})
 		} else {
 			status := http.StatusUnprocessableEntity
