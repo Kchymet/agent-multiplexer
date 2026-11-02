@@ -130,7 +130,9 @@ sensitive. The daemon:
 - restarts it with backoff when it exits (1 second, doubling to at most a
   minute)
 - restarts it when the settings change, or when the certificate or key file
-  changes (renewing a certificate in place takes effect within seconds)
+  changes (renewing a certificate in place takes effect within seconds).
+  Tailnet mode is the exception for certificate files: there the child reloads
+  them itself without a restart (see [Tailnet mode](#tailnet-mode))
 - stops it when the setting is turned off or the daemon stops
 
 Before exec, the daemon passes its own pid to the child in the environment
@@ -191,6 +193,202 @@ store", shown in `status`, and retries with backoff until you stop the manual
 server. To move over, stop the manual server and run `enable` with the same
 flags. The server identity and enrolled clients carry over, because both use
 the same store.
+
+### Tailnet mode
+
+On a machine in a Tailscale tailnet, one command configures the
+daemon-managed listener from the machine's tailnet identity:
+
+```sh
+amux direct enable --tailnet
+```
+
+This is the same managed listener as above, configured differently. It adds
+no service, no `tailscale serve` proxy, and no second listener. The daemon's
+supervised child is still the only process that binds the address and owns the
+direct store.
+
+**What it derives.** `enable --tailnet` reads tailscaled's LocalAPI
+(`/localapi/v0/status` and `/localapi/v0/prefs`) over its local socket. It
+uses the request shape the official client uses and never changes the socket's
+permissions.
+
+- **Name.** `Self.DNSName`, with the trailing dot trimmed, e.g.
+  `monstrosity-40.example-tailnet.ts.net`.
+- **Address.** The IPv4 address from `Self.TailscaleIPs`, or the IPv6 one if
+  the node has no IPv4. It is in 100.64.0.0/10, which counts as private, so
+  `--allow-public-bind` is never needed.
+- **Listen and endpoint.** Listen is `<address>:8443` and the endpoint is
+  `https://<name>:8443`. `--port <n>` changes the port of both.
+
+The socket is `/var/run/tailscale/tailscaled.sock` on Linux and
+`/var/run/tailscaled.socket` with the open-source daemon on macOS. Use
+`--tailscale-socket <path>` or `AMUX_TAILSCALE_SOCKET` to change it.
+
+**Certificate.** HTTPS stays mandatory. amux reuses a certificate before it
+requests one:
+
+1. **amux's managed store.** It reuses the store's current pair for the name
+   if more than 30 days remain.
+2. **An existing pair in `~/.config/amux/tls/`.** For example `server.crt` and
+   `server.key`. The pair must cover the name, have a matching key, chain to a
+   public root, and have more than 30 days left. It is *copied* into the
+   store; the original files are only read, never changed.
+3. **tailscaled.** Otherwise amux asks for one with
+   `/localapi/v0/cert/<name>?type=pair`. tailscaled obtains it from Let's
+   Encrypt and caches it.
+
+The store is `~/.config/amux/tls/tailnet/<name>/`:
+
+- each pair is a version directory `v<time>/` (mode 0700) with `cert.pem` and
+  `key.pem` (0600)
+- a `current` symlink names the committed version, and the saved setting
+  points at `current/cert.pem` and `current/key.pem`
+- a new version is written, synced and checked before `current` is replaced
+  by an atomic rename
+- a crash or failed check leaves the previous pair committed, on disk and in
+  the running listener. The pointer, not the newest directory, defines what
+  is served
+- three versions are kept
+
+**Renewal while serving.** About every 12 hours, the listening process checks
+the certificate. It checks sooner when renewal falls due, and an hour after a
+failure. With 30 days or less left, it asks tailscaled for a fresh pair, stores
+it, and swaps it in for new TLS handshakes:
+
+- Connections that already exist, including open event streams, keep the
+  certificate they negotiated. Nothing is dropped.
+- A newer version written by a later `enable` is picked up the same way.
+- A failed renewal keeps serving the current certificate and is shown in
+  `status` and `doctor`.
+- In tailnet mode the supervisor's restart fingerprint leaves out the
+  certificate files, which the child reloads itself. Every *setting* still
+  counts, so a changed setting still restarts the child.
+- Outside tailnet mode, the restart-on-certificate-change policy above is
+  unchanged.
+
+**Your own certificate.** Pass `--tls-cert` and `--tls-key` to use a pair you
+manage, which may come from a private CA. amux checks that it loads and covers
+the endpoint host. It never asks tailscaled for a certificate, never checks the
+tailnet's HTTPS setting or your operator rights, and never writes the files.
+The listener reloads them in place when they change; a half-written pair is
+ignored until it is consistent. A certificate with under 30 days left is served
+with a warning, since amux does not renew explicit certificates. Typing both
+flags empty (`--tls-cert= --tls-key=`) switches back to an amux-managed
+certificate.
+
+**Browser origins.** By default the allowed origin is your orchestrator's web
+origin, derived from `provider.toml`'s `orchestrator`. Host and port are kept;
+only the scheme maps:
+
+| `orchestrator` | origin |
+|---|---|
+| `tls:host:port`, `tls://host:port`, `host:port` (the provider always dials TLS) | `https://host:port` |
+| `wss://host[:port]` | `https://host[:port]` |
+| `ws://host[:port]` | `http://host[:port]` |
+
+The default port is dropped, as in every canonical origin. In some cases amux
+saves no default and prints a note instead:
+
+- there is no provider config
+- the address has a path
+- a `server-name` override names a different host, so the web host is unknown
+
+In those cases, and whenever the web app is not on the orchestrator's host and
+port, pass `--allow-origin <exact origin>`. It is repeatable and kept across
+re-enables. `--no-default-origin` drops the derived origin. Origins are exact;
+there are no wildcards.
+
+**Saved mode and precedence.** The setting records `tailnet` (port, socket,
+certificate source, the last derived name and the default origin with its
+source). For listen, endpoint and certificate, amux uses:
+
+1. a flag typed now
+2. an explicit value saved from an earlier flag
+3. a value derived from tailscaled
+
+An empty value (`--listen=`, `--endpoint=`) returns that setting to
+derivation. A plain `amux direct enable` keeps tailnet mode, and
+`--tailnet=false` leaves it.
+
+**Re-derived at every start.** Each time the managed child starts, it reads
+the name and address from tailscaled again, unless they are explicit. It
+serves and advertises those effective values: the admin socket, the provider's
+direct offer and the readiness marker all carry them.
+
+- The child never writes `config.json`, so the configuration fingerprint
+  readiness correlates with is unchanged.
+- If tailscaled is down or logged out at start, the child exits with that
+  reason. The supervisor retries with backoff rather than binding a stale
+  address.
+- While serving, the child re-reads its identity every 5 minutes. A changed
+  name or address is reported in the log, `status` and `doctor` instead of
+  being served silently. Re-deriving means a restart through the supervisor:
+  `amux direct disable && amux direct enable`, or the daemon's next start.
+
+**Plain `amux direct serve`.** With tailnet mode saved and `direct.enabled`
+on, plain `serve` refuses, because the daemon owns that configuration. With it
+off (after `amux direct disable`), plain `serve` runs the saved tailnet
+configuration in the foreground. It re-derives and renews the same way, and the
+store lock still refuses to run beside another server. `serve` with flags is
+unchanged.
+
+**Preflight.** `enable --tailnet` checks everything before it saves anything.
+Each check names its fix:
+
+| problem | message and fix |
+|---|---|
+| tailscaled not reachable | start Tailscale, or `--tailscale-socket` |
+| socket not usable by this user | use an account that runs `tailscale` without sudo (amux does not change permissions) |
+| logged out / awaiting approval / stopped | `tailscale up`, or approve the machine |
+| MagicDNS off | enable it on the [DNS page](https://login.tailscale.com/admin/dns) |
+| HTTPS certificates off | enable *HTTPS Certificates* on the same page, or pass your own certificate |
+| certificate request refused (not operator) | `sudo tailscale set --operator=$USER`, or pass your own certificate |
+| rate limited | retry after the time shown |
+| port in use by another program | free it or choose `--port` |
+
+Re-running `enable` while the managed listener holds the port is not a
+conflict, but only when all of these hold:
+
+- the supervisor's status, the child's readiness marker and the server
+  answering the admin socket agree that the daemon's current child holds it
+- that child's effective address is the one being checked
+
+Nothing is stopped or probed to decide this.
+
+**Status.** `amux direct status` and `amux doctor` add:
+
+- name, port and certificate source
+- the *effective* listen address and endpoints, and the saved ones when they
+  differ
+- certificate expiry and last renewal error
+- the allowed origins, and where the default came from
+- enrolled clients (through the running server's admin socket)
+- identity drift
+- a reachability check: a bounded, read-only HTTPS GET (4 seconds) of the
+  endpoint from this host, made with system trust as a client would
+
+Neither command changes anything on the host.
+
+**Custom control servers (Headscale).** amux reads the control URL from prefs
+and calls any server other than Tailscale's hosted control plane a *custom
+control server*, never Tailscale. Name and address derivation works wherever
+tailscaled's LocalAPI and MagicDNS do. Certificate issuance through tailscaled
+depends on the control server: when it offers no certificate names, `enable
+--tailnet` says so and asks for `--tls-cert/--tls-key`, which work regardless.
+
+**Limits.**
+
+- The macOS App Store / standalone GUI app exposes LocalAPI on a loopback
+  port with a token, not on a socket. amux does not support that transport,
+  and `--tailnet` cannot work there even with your own certificate, because it
+  still needs LocalAPI for the name and address. Use the manual mode instead,
+  with values from `tailscale status` and your certificate:
+  `amux direct enable --listen <100.x.y.z>:8443 --endpoint https://<name>:8443 --tls-cert … --tls-key …`.
+  There is no re-derivation or renewal in that mode.
+- Windows is not supported.
+- Certificates from tailscaled are published in Certificate Transparency logs,
+  as Tailscale's documentation on enabling HTTPS explains.
 
 ### Administration is host-only
 

@@ -72,6 +72,9 @@ usage: amux direct <command>
   enable [serve flags]        save the listener settings and turn it on; the
                               daemon runs it from now on (starting the daemon
                               if it is stopped). Off by default.
+  enable --tailnet            derive listen, endpoint and certificate from this
+                              machine's tailnet (tailscaled LocalAPI) and turn
+                              the managed listener on
   disable                     turn the daemon-managed listener off (settings,
                               enrolled clients and cloud policy are kept)
   status [--json]             setting, managed listener, server, provider offer
@@ -94,6 +97,18 @@ you type over the saved settings, and --no-wait skips waiting for readiness):
   --access-ttl <dur>      access token lifetime (default and maximum 10m)
   --idle-ttl <dur>        refresh idle lifetime (default and maximum 720h)
   --absolute-ttl <dur>    grant absolute lifetime (default and maximum 2160h)
+
+tailnet mode (enable --tailnet; typed serve flags above override what it
+derives, and an empty value returns that setting to derivation):
+  --port <n>              port for the derived listen address and endpoint (default 8443)
+  --tailscale-socket <p>  tailscaled socket (default: the platform's)
+  --no-default-origin     do not allow the orchestrator's web origin by default
+  --tailnet=false         leave tailnet mode
+  The certificate is reused from amux's store or ~/.config/amux/tls when it
+  has over 30 days left, else obtained from tailscaled, and renewed in place
+  while serving. --tls-cert/--tls-key use your own instead.
+  Plain amux direct serve runs the saved tailnet configuration in the
+  foreground only while the managed listener is disabled.
 
 enroll flags (the running server publishes its endpoints into the bundle):
   --label <text>          name for the client, shown in clients list
@@ -177,6 +192,8 @@ func cmdDirectServe(args []string) error {
 	defer stop()
 	var cfg direct.ServeConfig
 	var managedReady func(net.Addr, string)
+	var tailnetRun func(context.Context)
+	logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	if *managed {
 		// The daemon's child: the whole configuration is the saved setting, so
 		// the command line stays constant and nothing typed can widen it.
@@ -201,6 +218,15 @@ func cmdDirectServe(args []string) error {
 		if cfg, err = managedServeConfig(s, set); err != nil {
 			return err
 		}
+		if s.Tailnet != nil {
+			// Re-derive the address and endpoint from tailscaled and load the
+			// certificate this child will renew and reload in place. The
+			// fingerprint stays the saved configuration's, so readiness still
+			// correlates with what the supervisor started.
+			if tailnetRun, err = applyTailnetServe(ctx, s, &cfg, true, directsvc.Fingerprint(s), logf); err != nil {
+				return err
+			}
+		}
 		// A daemon that dies later must not leave the listener holding the
 		// direct store either (Linux also delivers a parent-death signal).
 		var cancel context.CancelFunc
@@ -220,6 +246,19 @@ func cmdDirectServe(args []string) error {
 				fmt.Fprintf(os.Stderr, "amux direct: write readiness marker: %v\n", err)
 			}
 		}
+	} else if typed := visited(fs, "listen", "tls-cert", "tls-key", "allow-public-bind", "access-ttl", "idle-ttl", "absolute-ttl", "endpoint", "allow-origin"); !typed && *listen == "" {
+		// Plain `amux direct serve`: run the saved tailnet configuration in
+		// the foreground, but only while the daemon is not managing it.
+		s, err := savedTailnetManualConfig()
+		if err != nil {
+			return err
+		}
+		if cfg, err = settingsServeConfig(s); err != nil {
+			return err
+		}
+		if tailnetRun, err = applyTailnetServe(ctx, s, &cfg, false, "", logf); err != nil {
+			return err
+		}
 	} else {
 		if *listen == "" {
 			return errors.New("--listen is required")
@@ -237,7 +276,14 @@ func cmdDirectServe(args []string) error {
 	cfg.Root = root
 	cfg.Backend = direct.HostBackend{H: hostbackend.New()}
 	cfg.Verify = relayHostProof
-	cfg.Logf = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
+	cfg.Logf = logf
+	if tailnetRun != nil {
+		// Renewal and drift checks live exactly as long as this listener.
+		rctx, rcancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { tailnetRun(rctx); close(done) }()
+		defer func() { rcancel(); <-done }()
+	}
 	cfg.Ready = func(addr net.Addr, serverID string) {
 		fmt.Fprintf(os.Stderr, "amux direct: listening on %s (server_id %s)\n", addr, serverID)
 		if managedReady != nil {
