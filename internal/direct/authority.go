@@ -194,6 +194,14 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 			return nil, fmt.Errorf("direct grants: migrate version %d to %d: %w", from, stateVersion, err)
 		}
 	}
+	if normalizeUndispatched(state, now().Unix()) {
+		// Durable, so sync replay, async replay, status and retention all see
+		// one terminal answer. If it does not commit, the open fails and the
+		// file stays as it was (the same rule as the migration above).
+		if err := st.saveState(state); err != nil {
+			return nil, fmt.Errorf("direct grants: settle undispatched creations: %w", err)
+		}
+	}
 	if id == nil {
 		if id, err = newIdentity(); err != nil {
 			return nil, err
@@ -920,7 +928,10 @@ func runKey(clientID, key string) string { return clientID + "\x00" + key }
 // "did not run"), a different body still answers idemConflict.
 //
 // With peek set it only reports an existing record and never creates one.
-func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idemOutcome, *idemRecord, error) {
+//
+// init, when given, completes the new record (a creation's id and verb) before
+// the admission commit, so it is durable with it.
+func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool, init ...func(*idemRecord)) (idemOutcome, *idemRecord, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if l.rctx.Err() != nil {
@@ -967,7 +978,11 @@ func (a *Authority) BeginAction(l *Lease, key, bodyHash string, peek bool) (idem
 	if len(g.Idem) >= maxIdemPerGrant {
 		return 0, nil, errCapacity
 	}
-	g.Idem[key] = &idemRecord{BodyHash: bodyHash, State: idemAdmitted, Boot: a.boot, At: now}
+	rec := &idemRecord{BodyHash: bodyHash, State: idemAdmitted, Boot: a.boot, At: now}
+	for _, f := range init {
+		f(rec)
+	}
+	g.Idem[key] = rec
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			delete(g.Idem, key)
@@ -1054,6 +1069,9 @@ func (a *Authority) endAction(l *Lease, key string, set func(*idemRecord)) {
 	r := g.Idem[key]
 	prev := *r
 	set(r)
+	if r.CreationID != "" {
+		r.EndedAt = a.now().Unix()
+	}
 	if err := a.commitLocked(); rolledBack(err) {
 		*r = prev
 	}
