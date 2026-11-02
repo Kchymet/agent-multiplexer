@@ -457,13 +457,18 @@ cloud relay: everything except panes and host administration.
 | `manage` | `start`, `rename`, `archive`, `unarchive` |
 | `create` | `add-agent`; `new-workgroup` and `new-workgroup-empty` for an `all_sessions` grant |
 
-**Nothing widens.** A permission is stored on the code, on the grant it
-becomes, and in the cloud ceiling, and it is copied unchanged on refresh. So
-every grant, refresh token, pending code, device ticket, bundle and cloud
-policy made before these permissions existed (all of them `read` or
-`read,steer`) keeps exactly its S1 powers. A new permission takes effect only
-when the operator names it in `amux direct enroll --permissions` or in the
-`amux direct cloud enable --permissions` ceiling. There is no `all` alias.
+**Nothing widens beyond current master.** Interject already joined `steer`
+on master in #295 (c267381), so a `read,steer` grant there already has
+`prompt`, `interject` and `stop`. This change adds nothing to `steer` or
+`read`.
+
+A permission is stored on the code, on the grant it becomes, and in the cloud
+ceiling, and it is copied unchanged on refresh. So every grant, refresh
+token, pending code, device ticket, bundle and cloud policy that exists before
+this change keeps exactly the powers it has on master. A new permission takes
+effect only when the operator names it in `amux direct enroll --permissions`
+or in the `amux direct cloud enable --permissions` ceiling. There is no `all`
+alias.
 
 **Compatibility.**
 
@@ -568,8 +573,12 @@ authorizer uses.
 - `create_workgroup`;
 - for a grant holding `create`, a `catalog`:
   - `harnesses`: name and version verified on this machine, plus `models`.
-    These are the well-formed model names that harness's local picker
-    offers, at most 64. The `model` field is not limited to this list;
+    These are the plain model names that harness's local picker offers, at
+    most 64. Names with `:`, `/` or `@`, or a run of nine or more digits, are
+    left out, so provider paths such as Bedrock ARNs, Vertex
+    `projects/…` paths and `ft:` fine-tune ids do not appear. This is a shape
+    filter, not proof that a name carries nothing sensitive. The `model` field
+    accepts more than the list, so such models can still be submitted;
   - `identity_modes`: `["machine"]`;
   - `modes`: `task`, `interactive`;
   - `repos`: tracked repo names, only when the grant may create roots;

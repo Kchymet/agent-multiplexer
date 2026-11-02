@@ -681,9 +681,25 @@ func TestRevokeDuringCreationIsAmbiguous(t *testing.T) {
 }
 
 func TestCatalogModelsAreSanitized(t *testing.T) {
-	got := catalogModels([]string{"claude-opus-5-5", "claude-opus-5-5", "", "bad model", "x\n", "gpt-6", "/etc/passwd"})
-	if !slices.Equal(got, []string{"claude-opus-5-5", "gpt-6"}) {
+	in := []string{
+		"claude-opus-5-5", "claude-opus-5-5", "claude-sonnet-4-5[1m]", "gpt-6", "gpt-4o-2024-08-06", "o4-mini",
+		"", "bad model", "x\n", "/etc/passwd",
+		// identifier-bearing provider paths (reviewer examples)
+		"arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus",
+		"projects/my-project/locations/us-east5/publishers/anthropic/models/claude",
+		"ft:gpt-4o-mini:my-org::9abc123",
+		"anthropic.claude-3-5-sonnet-20241022-v2:0",
+		"model@deployment", "custom-123456789012",
+	}
+	want := []string{"claude-opus-5-5", "claude-sonnet-4-5[1m]", "gpt-6", "gpt-4o-2024-08-06", "o4-mini"}
+	if got := catalogModels(in); !slices.Equal(got, want) {
 		t.Fatalf("models %v", got)
+	}
+	// Submission stays wider: a client may still create with a provider model.
+	for _, m := range []string{"anthropic.claude-3-5-sonnet-20241022-v2:0", "ft:gpt-4o-mini:my-org::9abc123", "claude-opus-5-5"} {
+		if _, err := actionFor("wg1", ActionRequest{Verb: VerbAddAgent, Fields: map[string]string{"model": m}}); err != nil {
+			t.Errorf("submitting %q refused: %v", m, err)
+		}
 	}
 }
 

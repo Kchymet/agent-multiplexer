@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -84,11 +85,27 @@ func probeHarnesses(ctx context.Context) []CatalogHarness {
 // maxCatalogModels bounds one harness's advertised model list.
 const maxCatalogModels = 64
 
-// catalogModels keeps only well-formed model names, de-duplicated and bounded.
+// publicModelRE is the catalog's display filter, deliberately narrower than
+// modelRE (what a creation request may submit). A model name a harness offers
+// can be a provider path that embeds account or project identifiers
+// (arn:aws:bedrock:…:123456789012:…, projects/<project>/…, ft:<model>:<org>::…),
+// so the catalog lists only plain names: no ':', '/' or '@', and no long digit
+// runs. This is a shape filter, not a guarantee that a name carries nothing
+// sensitive; a client may still submit any modelRE-valid model it knows.
+var (
+	publicModelRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,95}$`)
+	longDigitsRE  = regexp.MustCompile(`[0-9]{9,}`)
+)
+
+func publicModel(m string) bool {
+	return publicModelRE.MatchString(m) && !longDigitsRE.MatchString(m)
+}
+
+// catalogModels keeps only public model names, de-duplicated and bounded.
 func catalogModels(in []string) []string {
 	out := []string{}
 	for _, m := range in {
-		if modelRE.MatchString(m) && !slices.Contains(out, m) && len(out) < maxCatalogModels {
+		if publicModel(m) && !slices.Contains(out, m) && len(out) < maxCatalogModels {
 			out = append(out, m)
 		}
 	}
