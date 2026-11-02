@@ -119,8 +119,9 @@ checks them on every replay (sync and async POST, status GET): a deleted,
 reused or replaced target answers `created_target_unavailable` without ids, a
 record from before incarnations `created_identity_unverifiable`, and a
 transient failure to check `503 created_identity_unavailable` with the record
-unchanged. The 3-second wait for a just-created id runs only while the id's
-current incarnation is the created one. The cloud relay's provisional ids are
+unchanged. The 3-second wait for a just-created id that is not yet in the
+inventory starts only if the id's current incarnation is the created one,
+and a row that appears during it is used only if that still holds. The cloud relay's provisional ids are
 a different mechanism; direct needs no Harness change for this. Creating over
 direct now needs a daemon with creation identities: an older daemon answers
 `503 daemon_upgrade_required` before anything is sent, and capabilities say so

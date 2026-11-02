@@ -929,11 +929,14 @@ transcript, not in the HTTP answer.
 
 **Acting on a new id.** A request naming a session that the same grant created
 within the last minute can arrive before the daemon's inventory publishes the
-new row. If so, and the machine's current session with that id is exactly the
-one created (its incarnation matches the recorded one), the server re-reads
-the inventory for up to 3 seconds and then checks the published row as usual.
-It never waits for, or acts on, a different session that reused the id: that
-request answers `404 not_found` at once.
+new row. If so, the server waits for it only when the machine's current
+session with that id is exactly the one created: the wait starts only if its
+incarnation matches the recorded one, and then re-reads the inventory for up
+to 3 seconds. A row that appears during the wait is used only if its
+incarnation still matches; otherwise the request answers `404 not_found`.
+Without a match the server does not wait, and the missing row answers `404
+not_found`. This applies only to an id missing from the inventory: a row
+already visible is checked by the ordinary scope rules, like any other.
 
 **Telling cases apart.**
 
