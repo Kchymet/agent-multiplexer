@@ -13,9 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/claudegoal"
+	"amux/internal/core"
 	"amux/internal/daemon"
 	"amux/internal/direct"
 	"amux/internal/hostbackend"
+	"amux/internal/store"
 	"amux/internal/wsops"
 )
 
@@ -357,5 +360,60 @@ func TestDirectLiveFollowUpOnNewIDBeforePoll(t *testing.T) {
 		if code != 200 {
 			t.Fatalf("iteration %d: immediate prompt to new agent: %d %+v", i, code, bad)
 		}
+	}
+}
+
+// stop interrupts a busy turn and goal controls a Claude hook-goal
+// coordinator, both through the live daemon.
+func TestDirectLiveStopAndGoal(t *testing.T) {
+	e := newE2E(t)
+	all := e.enroll(everyPerm, direct.ResourceScope{Kind: direct.ResourceAllSessions})
+	code, root, bad := e.act(all, "", direct.VerbNewWorkgroupEmpty, map[string]string{
+		"repos": "", "coordinator": "claude", "prompt": "ship the parity work"}, "g-root")
+	if code != 200 {
+		t.Fatalf("create: %d %+v", code, bad)
+	}
+	inv := e.eventually(all, "goal root", func(inv map[string]direct.Session) bool { return inv[root.NewID].IsRoot })
+	if !inv[root.NewID].Caps.Goal {
+		t.Fatalf("hook-goal coordinator has no goal cap: %+v", inv[root.NewID].Caps)
+	}
+	if code, _, bad := e.act(all, root.NewID, direct.VerbGoal, map[string]string{"objective": "ship it", "status": "paused"}, "g-1"); code != 200 {
+		t.Fatalf("goal pause: %d %+v", code, bad)
+	}
+	raw, err := os.ReadFile(claudegoal.StatePath(store.CoordinatorDir(root.NewID)))
+	if err != nil || !strings.Contains(string(raw), `"paused"`) || !strings.Contains(string(raw), "ship it") {
+		t.Fatalf("goal state after pause: %q %v", raw, err)
+	}
+	if code, _, bad := e.act(all, root.NewID, direct.VerbGoal, map[string]string{"token_budget": "5"}, "g-2"); code != 422 || bad.Code != direct.CodeRejected {
+		t.Fatalf("hook goal budget must be the daemon's refusal: %d %+v", code, bad)
+	}
+
+	// stop: refused while idle (the daemon will not send Claude's Ctrl+C at an
+	// idle prompt), delivered once the turn is busy.
+	code, agentRes, bad := e.act(all, root.NewID, direct.VerbAddAgent, map[string]string{"agent": "claude"}, "g-agent")
+	if code != 200 {
+		t.Fatalf("add-agent: %d %+v", code, bad)
+	}
+	if code, _, bad := e.act(all, agentRes.NewID, direct.VerbStop, nil, "st-idle"); code != 422 || bad.Code != direct.CodeRejected {
+		t.Fatalf("idle stop: %d %+v", code, bad)
+	}
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, ok, err := db.GetSession(agentRes.NewID)
+	db.Close()
+	if err != nil || !ok {
+		t.Fatalf("agent row: %v %v", ok, err)
+	}
+	if err := core.WriteSessionHookState(sess.ID, sess.ClaudeID, core.StateRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	before := e.h.Typed(agentRes.NewID)
+	if code, _, bad := e.act(all, agentRes.NewID, direct.VerbStop, nil, "st-busy"); code != 200 {
+		t.Fatalf("busy stop: %d %+v", code, bad)
+	}
+	if after := e.h.Typed(agentRes.NewID); len(after) <= len(before) {
+		t.Fatalf("stop delivered nothing to the runtime: %q", after)
 	}
 }

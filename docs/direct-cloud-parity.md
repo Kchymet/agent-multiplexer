@@ -34,8 +34,8 @@ The client path for every row is the shared web/Android shell over
 | `session-action start` | actions | manage | live | parity |
 | `session-action prompt` | actions | steer | live: keystrokes reach the runtime | parity |
 | `session-action interject` | actions | steer (#295) | live: keystrokes | parity |
-| `session-action stop` | actions | steer | unit, daemon | **live proof missing**: needs a busy turn in the live harness |
-| `session-action goal` | actions | respond | unit, daemon | **live proof missing**: needs a goal-mode coordinator in the live harness |
+| `session-action stop` | actions | steer | live: idle stop refused (422), busy stop delivered | parity |
+| `session-action goal` | actions | respond | live: Claude hook-goal coordinator paused with an objective (goal file changes); a budget gets the daemon refusal | parity (a Codex native goal is unit and daemon only) |
 | `session-action permission` | actions | approve | unit, daemon (`runtimePermissionGate.consume`), runtimeevents binding tests | **live proof missing**: a supervised Codex runtime raising a correlated approval, with `request_id` and `runtime_generation` read back through direct history and the reply consumed. Only structured Codex sessions report `caps.permission`; Claude hook reports cannot be answered on either transport |
 | Provisional follow-up on a just-created id (`sessions-new-workgroup-empty` feature) | Any route naming a session the same grant created | the verb's own | live `TestDirectLiveFollowUpOnNewIDBeforePoll` | **fixed in #296**: a miss on a self-created id waits up to 3 s for the daemon to publish it. All checks run on the published row |
 | Harness/model/repo discovery (`register.capabilities.execution`; models and repos are not relayed) | `GET /direct/v1/capabilities` catalog | read (catalog with create) | unit; live repos and ceilings | direct gives more than cloud. Models are plain names only |
