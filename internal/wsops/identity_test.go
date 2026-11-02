@@ -172,14 +172,17 @@ func TestInsertRaceLoserRemovesOnlyItsOwn(t *testing.T) {
 	newAgentID = func(*store.DB) string { return "race" }
 	t.Cleanup(func() { newAgentID = func(db *store.DB) string { return db.NewID() } })
 	winnerMarker := filepath.Join(t.TempDir(), "winner")
+	winnerLayout := gitLayoutPath("race", "acme")
 	beforeInsert = func(a store.Session) {
 		db, _ := store.Open()
 		defer db.Close()
-		// The winner's row lands first (its files live elsewhere).
+		// A writer that does not reserve ids lands the same id first, with its
+		// own files and its own id-keyed layout record.
 		if _, err := db.CreateSession(store.Session{ID: "race", RootID: rootID, Dir: filepath.Dir(winnerMarker)}, ""); err != nil {
 			t.Error(err)
 		}
 		os.WriteFile(winnerMarker, []byte("x"), 0o644)
+		os.WriteFile(winnerLayout, []byte("winner layout"), 0o600)
 	}
 	t.Cleanup(func() { beforeInsert = func(store.Session) {} })
 	_, err := ApplyIdentity(context.Background(), addAgentAction(rootID), root.Incarnation)
@@ -192,9 +195,75 @@ func TestInsertRaceLoserRemovesOnlyItsOwn(t *testing.T) {
 	if _, err := os.Stat(winnerMarker); err != nil {
 		t.Fatal("winner's files removed")
 	}
+	if b, err := os.ReadFile(winnerLayout); err != nil || string(b) != "winner layout" {
+		t.Fatalf("id-keyed layout record of the row owner removed or changed: %q %v", b, err)
+	}
 	db, _ := store.Open()
 	defer db.Close()
 	if s, ok, _ := db.GetSession("race"); !ok || s.Dir != filepath.Dir(winnerMarker) {
 		t.Fatalf("winner row changed: %+v %v", s, ok)
+	}
+}
+
+// Two creations in different workgroups that mint the same id: the id is
+// reserved globally, so the second never prepares it; when the first is then
+// refused (its root replaced) its owned cleanup removes only its own records,
+// and the second session's directory, config home and layout record survive.
+func TestSameIDAcrossRootsNeverShared(t *testing.T) {
+	rootID, root := identityFixture(t)
+	db, _ := store.Open()
+	other, err := db.CreateSession(store.Session{ID: "wg2", Scope: store.ScopeWork, Dir: store.CoordinatorDir("wg2")}, "")
+	if err == nil {
+		err = db.SetCoordinatorRepoGrants("wg2", []string{"acme"})
+	}
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"dup", "dup", "next"}
+	newAgentID = func(*store.DB) string { id := ids[0]; ids = ids[1:]; return id }
+	t.Cleanup(func() { newAgentID = func(db *store.DB) string { return db.NewID() } })
+	var second store.Identity
+	var secondErr error
+	beforeInsert = func(a store.Session) {
+		if a.RootID != rootID {
+			return
+		}
+		beforeInsert = func(store.Session) {}
+		// While the first holds "dup", the second creation (another root)
+		// mints "dup" too and must take another id.
+		second, secondErr = ApplyIdentity(context.Background(), addAgentAction("wg2"), other.Incarnation)
+		// Then the first's root is replaced, so it is refused late.
+		db, _ := store.Open()
+		defer db.Close()
+		db.DeleteSession(rootID)
+		db.CreateSession(store.Session{ID: rootID, Scope: store.ScopeWork}, "")
+	}
+	t.Cleanup(func() { beforeInsert = func(store.Session) {} })
+	if _, err := ApplyIdentity(context.Background(), addAgentAction(rootID), root.Incarnation); !errors.Is(err, store.ErrRootChanged) {
+		t.Fatalf("first = %v", err)
+	}
+	if secondErr != nil || second.ID != "next" {
+		t.Fatalf("second = %+v, %v", second, secondErr)
+	}
+	db, _ = store.Open()
+	defer db.Close()
+	s, ok, _ := db.GetSession("next")
+	if !ok {
+		t.Fatal("second session missing")
+	}
+	for _, p := range []string{s.Dir, filepath.Join(s.Dir, "acme", ".git"), gitLayoutPath("next", "acme")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("second session's %s removed: %v", p, err)
+		}
+	}
+	if _, err := os.Lstat(gitLayoutPath("dup", "acme")); !os.IsNotExist(err) {
+		t.Fatalf("refused creation's own layout record survived: %v", err)
+	}
+	if _, err := os.Lstat(store.AgentDir(rootID, "dup")); !os.IsNotExist(err) {
+		t.Fatalf("refused creation's own directory survived: %v", err)
+	}
+	if entries, _ := os.ReadDir(reservationDir()); len(entries) != 0 {
+		t.Fatalf("reservations leaked: %d", len(entries))
 	}
 }

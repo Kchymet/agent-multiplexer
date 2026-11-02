@@ -127,7 +127,11 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 		}
 	}
 
-	rootID := db.NewID()
+	rootID, release, err := reserveID(db)
+	if err != nil {
+		return "", store.Identity{}, err
+	}
+	defer release()
 	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
@@ -222,10 +226,11 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec, 
 	if err := db.CheckCoordinatorRepos(rootID, spec.Repos); err != nil {
 		return store.Session{}, store.Identity{}, err
 	}
-	agentID, dir, err := reserveAgentDir(db, rootID)
+	agentID, dir, release, err := reserveAgentDir(db, rootID)
 	if err != nil {
 		return store.Session{}, store.Identity{}, err
 	}
+	defer release()
 	// The branch scheme lives in one place (core.BranchFor); everything else — the
 	// worktree, the agent guide, the doctor reconciliation — derives it from there.
 	branch := core.BranchFor(rootID, agentID)
@@ -277,8 +282,11 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec, 
 	if err != nil {
 		if errors.Is(err, store.ErrRootChanged) || errors.Is(err, store.ErrSessionExists) {
 			// A late refusal: nothing was recorded, so remove what this call
-			// prepared for the session that will never exist.
-			if cleanupErr := removePreparedAgent(ctx, db, a); cleanupErr != nil {
+			// prepared for the session that will never exist. The id is still
+			// reserved here; records keyed by it alone are removed only if no
+			// row has it (another writer that does not reserve could own them).
+			owned := !errors.Is(err, store.ErrSessionExists) && rowAbsent(db, a.ID)
+			if cleanupErr := removePreparedAgent(ctx, db, a, owned); cleanupErr != nil {
 				err = errors.Join(err, fmt.Errorf("clean up prepared agent %s: %w", a.ID, cleanupErr))
 			}
 		}
@@ -291,31 +299,32 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec, 
 // id collisions.
 var newAgentID = func(db *store.DB) string { return db.NewID() }
 
-// maxAgentDirAttempts bounds reserveAgentDir's retries on occupied paths.
-const maxAgentDirAttempts = 8
-
-// reserveAgentDir picks a member id whose agent directory this call creates
-// itself, with an exclusive mkdir: an id is free in the store when chosen, but
-// a concurrent creation (or leftover files) may hold the same path, and only a
-// directory this call atomically created is ever removed by a late refusal.
-// An occupied path is never reused; another id is tried instead.
-func reserveAgentDir(db *store.DB, rootID string) (string, string, error) {
+// reserveAgentDir reserves a member id (reserveID) and creates its agent
+// directory with an exclusive mkdir: only a directory this call atomically
+// created is ever removed by a late refusal, and an occupied path (leftover
+// files) is never adopted — the id is released and another one tried.
+func reserveAgentDir(db *store.DB, rootID string) (string, string, func(), error) {
 	if err := os.MkdirAll(store.RootDir(rootID), 0o755); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	for range maxAgentDirAttempts {
-		id := newAgentID(db)
+	for range maxReserveAttempts {
+		id, release, err := reserveID(db)
+		if err != nil {
+			return "", "", nil, err
+		}
 		dir := store.AgentDir(rootID, id)
 		switch err := os.Mkdir(dir, 0o755); {
 		case err == nil:
-			return id, dir, nil
+			return id, dir, release, nil
 		case errors.Is(err, os.ErrExist):
+			release()
 			continue
 		default:
-			return "", "", err
+			release()
+			return "", "", nil, err
 		}
 	}
-	return "", "", fmt.Errorf("could not reserve an agent directory under workgroup %q", rootID)
+	return "", "", nil, fmt.Errorf("could not reserve an agent directory under workgroup %q", rootID)
 }
 
 // beforeInsert is a test seam that runs after an agent is fully prepared and
@@ -336,32 +345,36 @@ func checkRootIdentity(db *store.DB, rootID, expect string) error {
 	return nil
 }
 
-// removePreparedAgent undoes addAgent's preparation of a that was never
-// recorded: the checkouts it added (each a private checkout with its own
-// common Git directory and branch, plus its layout record, all inside the
-// agent directory) and the agent directory with its config home, which
-// reserveAgentDir created exclusively for this call. Nothing that existed
-// before the call is touched.
-func removePreparedAgent(ctx context.Context, db *store.DB, a store.Session) error {
+// removePreparedAgent undoes addAgent's preparation of a, which was never
+// recorded. The agent directory (with the checkouts and their private common
+// Git directories inside it, and the config home) was created exclusively by
+// this call and is always removed. The records keyed by the id alone — each
+// checkout's layout record and the config seed manifest — are removed only
+// when owned: the caller still holds the id's reservation and no row has the
+// id. Otherwise they are left in place, and RemoveCheckout (which follows a
+// layout record) is not used, so nothing another session owns is touched.
+func removePreparedAgent(ctx context.Context, db *store.DB, a store.Session, owned bool) error {
 	managedRoot, err := sessionStorageRoot(a.Dir)
 	if err != nil {
 		return err
 	}
 	var errs []error
-	for _, repoName := range store.SplitRepos(a.Repo) {
-		repo, ok, repoErr := db.Repo(repoName)
-		if repoErr != nil || !ok {
-			errs = append(errs, fmt.Errorf("repository %q: %v", repoName, repoErr))
-			continue
+	if owned {
+		for _, repoName := range store.SplitRepos(a.Repo) {
+			repo, ok, repoErr := db.Repo(repoName)
+			if repoErr != nil || !ok {
+				errs = append(errs, fmt.Errorf("repository %q: %v", repoName, repoErr))
+				continue
+			}
+			wt := filepath.Join(a.Dir, repoName)
+			if err := git.RemoveCheckout(ctx, repo.GitDir, wt, a.Branch, managedRoot,
+				gitStagingDir(), gitLayoutPath(a.ID, repoName)); err != nil {
+				errs = append(errs, fmt.Errorf("remove repo %q: %w", repoName, err))
+			}
 		}
-		wt := filepath.Join(a.Dir, repoName)
-		if err := git.RemoveCheckout(ctx, repo.GitDir, wt, a.Branch, managedRoot,
-			gitStagingDir(), gitLayoutPath(a.ID, repoName)); err != nil {
-			errs = append(errs, fmt.Errorf("remove repo %q: %w", repoName, err))
+		if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
+			cfghome.Forget(spec)
 		}
-	}
-	if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
-		cfghome.Forget(spec)
 	}
 	if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
 		errs = append(errs, fmt.Errorf("remove agent directory: %w", err))
@@ -1038,7 +1051,11 @@ func applyAddAgent(ctx context.Context, a core.Action, expectRoot string) (store
 		return store.Identity{}, err
 	}
 	defer db.Close()
-	root, ok, _ := db.GetSession(a.ID)
+	root, ok, err := db.GetSession(a.ID)
+	if err != nil {
+		// A read failure is not a replaced root.
+		return store.Identity{}, err
+	}
 	if !ok || !root.IsRoot() {
 		if expectRoot != "" {
 			return store.Identity{}, store.ErrRootChanged
