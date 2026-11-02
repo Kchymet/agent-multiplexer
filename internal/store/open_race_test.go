@@ -1,11 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -346,42 +349,112 @@ func TestLegacyImportFailureRollsBackAndRetries(t *testing.T) {
 	}
 }
 
-// If the import commits but the registry cannot be moved aside, Open reports
-// it, and the next Open moves the file without importing it again. The failed
-// rename reproduces the on-disk state a crash between commit and rename would
-// leave; this is not a process-kill test.
-func TestLegacyImportCommittedBeforeRenameIsNotRepeated(t *testing.T) {
+// captureLog redirects the standard logger for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev, flags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(flags) })
+	return &buf
+}
+
+// openInFreshProcess runs one Open in a child process (a restart) and returns
+// its output.
+func openInFreshProcess(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcessOpen$", "-test.count=1")
+	cmd.Env = append(os.Environ(), helperOpenEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fresh process Open: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+// Once the import has committed, moving the registry aside is housekeeping:
+// a persistent rename failure is logged, never fails Open (in this process or
+// later ones), never imports again, and the move is retried by each later
+// process until it succeeds. The failed rename leaves the on-disk state a crash
+// between commit and rename would; this is not a process-kill test.
+func TestLegacyRegistryMoveFailureAfterCommitIsNonFatalAndRetried(t *testing.T) {
 	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
+	logs := captureLog(t)
 	backup := core.RegistryPath() + ".migrated"
 	if err := os.MkdirAll(filepath.Join(backup, "occupied"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if db, err := Open(); err == nil {
-		db.Close()
-		t.Fatal("Open succeeded although the registry could not be moved aside")
+	db, err := Open()
+	if err != nil {
+		t.Fatalf("Open failed on a committed import whose registry could not be moved: %v", err)
+	}
+	db.Close()
+	if !strings.Contains(logs.String(), "is imported, but moving it to") {
+		t.Fatalf("no diagnostic for the failed move; log = %q", logs.String())
 	}
 	if n := countRows(t, raw, `SELECT count(*) FROM legacy_registry_import`); n != 1 {
 		t.Fatal("committed import has no marker")
 	}
 	if _, err := os.Stat(core.RegistryPath()); err != nil {
-		t.Fatalf("registry missing after a failed rename: %v", err)
+		t.Fatalf("registry missing after a failed move: %v", err)
+	}
+	if db, err = Open(); err != nil {
+		t.Fatalf("second Open in the same process: %v", err)
+	}
+	db.Close()
+	if testing.Short() {
+		return
 	}
 
+	// The failure persists across a restart: still usable, still one import,
+	// still reported.
+	if out := openInFreshProcess(t); !strings.Contains(out, "is imported, but moving it to") {
+		t.Fatalf("restart did not retry and report the move; output = %q", out)
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 4 {
+		t.Fatalf("store has %d sessions after a restart, want the 4 imported once", n)
+	}
+
+	// Once the obstacle is gone, the next restart completes the move.
 	if err := os.RemoveAll(backup); err != nil {
+		t.Fatal(err)
+	}
+	openInFreshProcess(t)
+	if _, err := os.Stat(core.RegistryPath()); !os.IsNotExist(err) {
+		t.Fatalf("registry still in place after the retried move: %v", err)
+	}
+	checkRegistryImportedOnce(t, "after the retried move")
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 4 {
+		t.Fatalf("store has %d sessions, want the 4 imported once", n)
+	}
+}
+
+// A registry that exists but cannot be read is an import failure, not an
+// absent registry: Open fails, nothing is marked, and the next Open imports.
+func TestLegacyRegistryReadFailureIsNotTreatedAsAbsent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads files regardless of mode")
+	}
+	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
+	if err := os.Chmod(core.RegistryPath(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := Open(); err == nil {
+		db.Close()
+		t.Fatal("Open succeeded although the registry could not be read")
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`) + countRows(t, raw, `SELECT count(*) FROM legacy_registry_import`); n != 0 {
+		t.Fatal("unreadable registry left rows or a marker behind")
+	}
+	if err := os.Chmod(core.RegistryPath(), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	db, err := Open()
 	if err != nil {
-		t.Fatalf("Open after a committed import: %v", err)
+		t.Fatalf("Open after the registry became readable: %v", err)
 	}
 	db.Close()
-	checkRegistryImportedOnce(t, "after rename retry")
-	if _, err := os.Stat(core.RegistryPath()); !os.IsNotExist(err) {
-		t.Fatalf("registry still in place after a successful Open: %v", err)
-	}
-	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 4 {
-		t.Fatalf("store has %d sessions, want the 4 imported once", n)
-	}
+	checkRegistryImportedOnce(t, "after read failure")
 }
 
 // An unparseable registry does not block Open; it is left untouched and
@@ -390,11 +463,15 @@ func TestLegacyImportCommittedBeforeRenameIsNotRepeated(t *testing.T) {
 // imported by the next process's first Open (a restart), not by this process.
 func TestUnreadableLegacyRegistryIsLeftInPlace(t *testing.T) {
 	raw := seedEmptyStoreWithRegistry(t, `{not json`)
+	logs := captureLog(t)
 	db, err := Open()
 	if err != nil {
 		t.Fatalf("Open with an unreadable registry: %v", err)
 	}
 	db.Close()
+	if !strings.Contains(logs.String(), "Nothing was imported. Fix or remove the file, then restart amux") {
+		t.Fatalf("no diagnostic for the unreadable registry; log = %q", logs.String())
+	}
 	if b, err := os.ReadFile(core.RegistryPath()); err != nil || string(b) != `{not json` {
 		t.Fatalf("registry changed: %q, %v", b, err)
 	}
@@ -417,11 +494,7 @@ func TestUnreadableLegacyRegistryIsLeftInPlace(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcessOpen$", "-test.count=1")
-	cmd.Env = append(os.Environ(), helperOpenEnv+"=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("fresh process Open: %v\n%s", err, out)
-	}
+	openInFreshProcess(t)
 	checkRegistryImportedOnce(t, "after restart")
 }
 

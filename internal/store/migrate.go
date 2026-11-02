@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,8 +108,8 @@ type legacy struct {
 }
 
 // LegacyRegistryError reports a legacy JSON registry that could not be parsed.
-// Nothing is imported and the file is left in place; Open does not fail, and
-// the next process's first Open tries the file again.
+// Nothing is imported and the file is left in place. Open logs it rather than
+// failing, and the next process's first Open tries the file again.
 type LegacyRegistryError struct {
 	Path string
 	Err  error
@@ -132,27 +133,35 @@ const legacyRegistryImportVersion = 1
 // The import is one write transaction: it rechecks the marker and the empty
 // store under the writer reservation, reads the file, writes every row and the
 // marker, and commits them together, so racing first opens (in any process)
-// import at most once and nobody sees a partial import. The file is renamed
-// only after the commit. A crash or failure before the commit leaves the store
-// and the file as they were, and the next Open imports again. A crash after it
-// leaves the marker, so the next Open just moves the file aside.
+// import at most once and nobody sees a partial import.
+//
+// Error handling separates the import from the housekeeping after it:
+//   - Before the commit, any failure to read the file or write a row is
+//     returned and rolls the whole import back. Open fails, and the file stays
+//     in place for the next Open, so the legacy data is never silently lost.
+//     The exception is a file that cannot be parsed: LegacyRegistryError, which
+//     Open reports without failing (see Open).
+//   - After the commit, the store is complete and the marker prevents a second
+//     import. Moving the file aside is only housekeeping, so a failure (or a
+//     crash before it) is logged with what to do, never returned. Otherwise a
+//     persistent rename error would make every Open fail on a complete store.
+//     Each process's first Open retries the move while the file remains.
 func (d *DB) importLegacy() error {
 	regPath := core.RegistryPath()
 	if _, err := os.Stat(regPath); errors.Is(err, fs.ErrNotExist) {
-		// The file is only removed after an import has committed, so there is
-		// nothing left to import.
+		// The file is only moved after an import has committed, so there is
+		// nothing to import and nothing to clean up. Any other Stat error
+		// falls through: the marker decides whether it matters.
 		return nil
-	} else if err != nil {
-		return err
 	}
-	imported := false
+	committed := false
 	if err := d.writeTx(func(q querier) error {
 		var marked, sessions int
 		if err := q.QueryRow(`SELECT count(*) FROM legacy_registry_import`).Scan(&marked); err != nil {
 			return err
 		}
 		if marked > 0 {
-			imported = true // committed earlier; only the rename is left
+			committed = true // imported earlier; only the move is left
 			return nil
 		}
 		if err := q.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
@@ -162,6 +171,9 @@ func (d *DB) importLegacy() error {
 			return nil // already have sessions; don't import into them
 		}
 		b, err := os.ReadFile(regPath)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // moved by an opener that committed before we were let in
+		}
 		if err != nil {
 			return err
 		}
@@ -175,16 +187,19 @@ func (d *DB) importLegacy() error {
 		if _, err := q.Exec(`INSERT INTO legacy_registry_import(version) VALUES(?)`, legacyRegistryImportVersion); err != nil {
 			return err
 		}
-		imported = true
+		committed = true
 		return nil
-	}); err != nil || !imported {
+	}); err != nil || !committed {
 		return err
 	}
 	// Keep the registry as a backup, don't delete it. Another opener may have
-	// moved it aside already; any other failure is reported and retried by the
-	// next Open (the marker prevents a second import).
-	if err := os.Rename(regPath, regPath+".migrated"); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("legacy registry imported, but moving it aside failed: %w", err)
+	// moved it already.
+	backup := regPath + ".migrated"
+	if err := os.Rename(regPath, backup); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("amux: the legacy registry %s is imported, but moving it to %s failed: %v. "+
+			"The store is complete and will not import it again. amux retries the move "+
+			"when it next starts; to stop this message, move or delete the file yourself.",
+			regPath, backup, err)
 	}
 	return nil
 }

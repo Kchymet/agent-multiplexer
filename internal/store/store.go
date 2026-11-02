@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -137,17 +138,18 @@ func Open() (*DB, error) {
 		return nil, err
 	}
 	if err := d.importLegacy(); err != nil {
-		// An unreadable registry is left in place for the user and does not
-		// block usage, as before. The store is still recorded as migrated
-		// below, so a fixed registry is imported by the next process's first
-		// Open (a restart), keeping this process's hot path read-only. Any other failure rolled the import back
-		// (or, after it committed, left the file to be moved aside next time),
-		// so fail this Open and let the next one retry.
+		// A registry that cannot be parsed is left in place and does not block
+		// usage, as before. The store is still recorded as migrated below, so
+		// this process's hot path stays read-only, and a fixed file is imported
+		// by the next process's first Open (a restart). Any other error means
+		// the import rolled back with its file still in place, so fail this
+		// Open; the next one retries it.
 		var unreadable *LegacyRegistryError
 		if !errors.As(err, &unreadable) {
 			_ = d.Close()
 			return nil, err
 		}
+		log.Printf("amux: %v. Nothing was imported. Fix or remove the file, then restart amux to import it.", err)
 	}
 	if err := d.migrateCoordinatorGrants(); err != nil {
 		_ = d.Close()
