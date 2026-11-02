@@ -88,17 +88,17 @@ func TestCloudFixtures(t *testing.T) {
 	}
 }
 
-// The S1 manifest web and Android pin is untouched by cloud enrollment.
+// Pin the v1 manifest shared with web and Android, including interject support.
 func TestS1FixtureManifestPinned(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(fixtureDir, "SHA256SUMS"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := hexSum(raw); got != "a238403245ec643c45bd4869530155ece7cba7e97d4965bfb5ad128880a07b25" {
+	if got := hexSum(raw); got != "94c07c67c3b16d7adeae10e7dc5639b5bb2c76325b0086a6a5a3fb92b8319d36" {
 		t.Fatalf("docs/direct/fixtures/v1/SHA256SUMS changed: %s", got)
 	}
-	if n := bytes.Count(raw, []byte("\n")); n != 22 {
-		t.Fatalf("v1 manifest lists %d payloads, want 22", n)
+	if n := bytes.Count(raw, []byte("\n")); n != 23 {
+		t.Fatalf("v1 manifest lists %d payloads, want 23", n)
 	}
 }
 

@@ -130,7 +130,7 @@ func (f *fakeBackend) total() int64 { return f.snapshots.Load() + f.privileged()
 // Inventory: workgroup wg1 (coordinator + member a1 with private metadata),
 // workgroup wg2 (archived root + member b1), and a detached session.
 func testRows() []core.Session {
-	caps := &core.SessionCaps{Prompt: true, Cancel: true}
+	caps := &core.SessionCaps{Prompt: true, Interject: true, Cancel: true}
 	return []core.Session{
 		{ID: "wg1", Title: "one", IsRoot: true, Role: hp.RoleCoordinator, Section: hp.SectionWorkgroups, Caps: caps, Runtime: "claude"},
 		{ID: "a1", Title: "member", RootID: "wg1", Cwd: "/home/secret/worktree", Pid: 4242, Caps: caps, Runtime: "claude",
