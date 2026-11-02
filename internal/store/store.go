@@ -183,6 +183,22 @@ func (d *DB) openMigrated(path string) (bool, error) {
 			_ = d.Close()
 			return false, err
 		}
+		// The version cannot tell a current store from a pre-incarnation
+		// schema-3 file restored over this path since it was migrated: the
+		// column is additive within version 3 so older binaries keep opening
+		// it. Without the column, take the full migration path again.
+		if present, err := d.hasIncarnations(); err != nil {
+			_ = d.Close()
+			return false, err
+		} else if !present {
+			migratedStores.Delete(path)
+			return false, nil
+		}
+		// An older binary may have inserted rows since (with no incarnation).
+		if err := d.backfillIncarnations(); err != nil {
+			_ = d.Close()
+			return false, err
+		}
 		return true, nil
 	}
 	migratedStores.Delete(path)
@@ -465,6 +481,11 @@ CREATE TABLE IF NOT EXISTS session_prs (
 	if err := addColumn(q, "coordinator_grant_state", "all_repos", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Session incarnations (identity.go): column, index and backfill commit
+	// with the rest of the schema.
+	if err := migrateIncarnations(q); err != nil {
+		return err
+	}
 	// Covers SessionHeads, so the daemon's per-tick scan reads only this index
 	// instead of every row's overflow pages (archived follows the prompt).
 	if _, err := q.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_heads ON sessions(created, id, root_id, archived)`); err != nil {
@@ -581,18 +602,20 @@ func (d *DB) PutSession(s Session) error {
 	return putSessionRow(d.sql, s)
 }
 
-// putSessionRow upserts the whole row; callers bind the session's account.
+// putSessionRow upserts the whole row; callers bind the session's account. A
+// new row gets a fresh incarnation; an existing row keeps its own (the update
+// never names the column).
 func putSessionRow(q querier, s Session) error {
 	_, err := q.Exec(
-		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at,incarnation)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   root_id=excluded.root_id, name=excluded.name, agent=excluded.agent,
 		   model=excluded.model, mode=excluded.mode, repo=excluded.repo,
 		   branch=excluded.branch, dir=excluded.dir, claude_id=excluded.claude_id,
 		   prompt=excluded.prompt, created=excluded.created, scope=excluded.scope,
 		   archived=excluded.archived, archived_at=excluded.archived_at`,
-		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope, b2i(s.Archived), s.ArchivedAt)
+		s.ID, s.RootID, s.Name, s.Agent, s.Model, s.Mode, s.Repo, s.Branch, s.Dir, s.ClaudeID, s.Prompt, s.Created, s.Scope, b2i(s.Archived), s.ArchivedAt, newIncarnation())
 	return err
 }
 
