@@ -41,7 +41,7 @@ user can already do these things from a direct client UI.
 | `session-action goal` | actions | respond | live (below) | backend parity. A Codex native goal is unit/daemon evidence only |
 | `session-action permission` | actions | approve | live (below) | backend parity after the #299 fix |
 | Acting on a just-created id before the next inventory | Any route naming a session the same grant created within the last minute | the verb's own | live `TestDirectLiveFollowUpOnNewIDBeforePoll` | **fixed in #299** (see below) |
-| Machine creation status (`daemon.create_status`: queued → preparing → ready \| failed) | none: direct creation is synchronous | — | — | **gap** (see below) |
+| Machine creation status (`daemon.create_status`: queued → preparing → ready \| failed) | `"async": true` on a creation, then `GET /direct/v1/creations/{creation_id}` | create | unit (acceptance matrix, fixtures); live `TestDirectLiveAsyncSlowCreation`, `TestDirectLiveAsyncRevokeAfterSendIsUncertain` | backend parity; outcome past the 10-minute bound or a restart after dispatch stays `uncertain` (see below) |
 | Harness/model/repo discovery | `GET /direct/v1/capabilities` catalog | read (the catalog needs create) | unit; live repos and ceilings | backend parity, and direct is wider: the relay advertises harnesses only. Models are plain names only |
 | `account-request` with `status` | `GET /direct/v1/accounts` | accounts, `all_sessions` | unit (gate on route, capabilities, list, watch, watch update; projection; attribution matrix); live `TestDirectLiveAccounts` | backend parity |
 | `account-ceremony`, `default`, `login`, `logout`, `rebind` | none | — | `provider/accounts.go` refuses all but status remotely | not a cloud function: local CLI/TUI only |

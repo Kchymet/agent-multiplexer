@@ -380,7 +380,6 @@ func TestCreatedWaitOnlyForSameIncarnation(t *testing.T) {
 	}
 }
 
-
 // notRunCodes is the published set of creation failure codes that prove the
 // creation never ran (CreationStatus' doc comment), which clients may answer
 // with a fresh idem_key.
