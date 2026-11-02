@@ -765,6 +765,24 @@ func TestCloudClientCreationPayloadsAreAccepted(t *testing.T) {
 			t.Errorf("add-agent accepted %v", bad)
 		}
 	}
+	// A key outside a verb's own allowlist is refused even when empty: the
+	// allowlist runs before normalization.
+	for verb, bad := range map[string][]map[string]string{
+		VerbAddAgent:          {{"linear": ""}, {"name": ""}, {"coordinator_model": ""}},
+		VerbNewWorkgroupEmpty: {{"repos": "", "linear": ""}},
+	} {
+		for _, f := range bad {
+			var err error
+			if verb == VerbAddAgent {
+				_, err = actionFor("wg1", ActionRequest{Verb: verb, Fields: f})
+			} else {
+				_, err = createActionFor(ActionRequest{Verb: verb, Fields: f})
+			}
+			if err == nil {
+				t.Errorf("%s accepted out-of-allowlist empty key %v", verb, f)
+			}
+		}
+	}
 	// defaultAgent on an empty root stays refused: it would create a member.
 	if _, err := createActionFor(ActionRequest{Verb: VerbNewWorkgroupEmpty, Fields: map[string]string{"repos": "", "defaultAgent": "1"}}); err == nil {
 		t.Fatal("defaultAgent accepted on new-workgroup-empty")

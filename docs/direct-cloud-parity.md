@@ -70,7 +70,9 @@ user can already do these things from a direct client UI.
 **`add-agent`:**
 
 - The agent starts.
-- The cloud UI payload (`repos:""`, `prompt:""`) is accepted.
+- The cloud UI payloads are accepted: `repos:"api", prompt:""`, and the
+  repo-less `repos:"", prompt:""`, which creates an agent with no
+  repositories.
 - A narrow ceiling refuses an outside repo before Apply.
 - A workgroup-scoped grant works inside its workgroup, gets 404 outside it
   and 403 for root creation.

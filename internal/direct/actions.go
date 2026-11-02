@@ -244,8 +244,13 @@ func actionFor(sid string, req ActionRequest) (core.Action, error) {
 		}
 		return core.Action{Action: core.ActionSetArchived, ID: sid, Fields: map[string]string{"archived": archived}}, nil
 	case VerbAddAgent:
+		// The key allowlist sees the fields exactly as sent; only then do empty
+		// optional values become absent, and the value validators run.
+		if !onlyFields(f, "agent", "prompt", "mode", "model", "repos", "identity_mode") {
+			return core.Action{}, errBadRequest
+		}
 		f = withoutEmptyOptional(f)
-		if !onlyFields(f, "agent", "prompt", "mode", "model", "repos", "identity_mode") || !validCreationFields(f) {
+		if !validCreationFields(f) {
 			return core.Action{}, errBadRequest
 		}
 		return core.Action{Action: core.ActionAddAgent, ID: sid, Fields: creationFields(f)}, nil
@@ -256,11 +261,16 @@ func actionFor(sid string, req ActionRequest) (core.Action, error) {
 // createActionFor validates a root creation request (PathWorkgroups). It does
 // not consult the backend.
 func createActionFor(req CreateRequest) (core.Action, error) {
-	f := withoutEmptyOptional(req.Fields)
+	// Each verb checks its key allowlist on the fields exactly as sent; only
+	// then do empty optional values become absent, and the value validators run.
+	f := req.Fields
 	switch req.Verb {
 	case VerbNewWorkgroup:
 		if !onlyFields(f, "name", "prompt", "repos", "agent", "mode", "model", "linear",
-			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") || !validCreationFields(f) {
+			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") {
+			return core.Action{}, errBadRequest
+		}
+		if f = withoutEmptyOptional(f); !validCreationFields(f) {
 			return core.Action{}, errBadRequest
 		}
 		return core.Action{Action: core.ActionNewWorkgroup, Fields: creationFields(f)}, nil
@@ -273,8 +283,10 @@ func createActionFor(req CreateRequest) (core.Action, error) {
 			return core.Action{}, errBadRequest
 		}
 		if !onlyFields(f, "name", "prompt", "repos", "agent", "model", "mode",
-			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") ||
-			!validCreationFields(f) {
+			wsops.FieldCoordinator, wsops.FieldCoordinatorModel, "identity_mode") {
+			return core.Action{}, errBadRequest
+		}
+		if f = withoutEmptyOptional(f); !validCreationFields(f) {
 			return core.Action{}, errBadRequest
 		}
 		return core.Action{Action: core.ActionCreateWorkspace, Fields: creationFields(f)}, nil

@@ -596,6 +596,17 @@ func TestDirectLiveCloudClientCreationPayloads(t *testing.T) {
 	if code != 200 || added.RootID != root.NewID {
 		t.Fatalf("cloud add-agent payload: %d %+v", code, bad)
 	}
+	// The cloud's repo-less add-agent (repos:"", prompt:"") makes an agent
+	// with no repositories.
+	code, bare, bad := e.act(all, root.NewID, direct.VerbAddAgent, map[string]string{
+		"repos": "", "prompt": "", "agent": "claude", "identity_mode": "machine"}, "cloud-bare")
+	if code != 200 {
+		t.Fatalf("cloud repo-less add-agent payload: %d %+v", code, bad)
+	}
+	inv = e.eventually(all, "bare agent", func(inv map[string]direct.Session) bool { return inv[bare.NewID].RootID == root.NewID })
+	if inv[bare.NewID].Repos != "" {
+		t.Fatalf("repo-less agent has repos %q", inv[bare.NewID].Repos)
+	}
 	code, linear, bad := e.act(all, "", direct.VerbNewWorkgroup, map[string]string{
 		"name": "Linked", "prompt": "fix it", "linear": "https://linear.app/x/issue/AGE-1"}, "cloud-linear")
 	if code != 200 {
