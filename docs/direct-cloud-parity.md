@@ -43,11 +43,12 @@ user can already do these things from a direct client UI.
 | Acting on a just-created id before the next inventory | Any route naming a session the same grant created within the last minute | the verb's own | live `TestDirectLiveFollowUpOnNewIDBeforePoll` | **fixed in #299** (see below) |
 | Machine creation status (`daemon.create_status`: queued → preparing → ready \| failed) | none: direct creation is synchronous | — | — | **gap** (see below) |
 | Harness/model/repo discovery | `GET /direct/v1/capabilities` catalog | read (the catalog needs create) | unit; live repos and ceilings | backend parity, and direct is wider: the relay advertises harnesses only. Models are plain names only |
-| `account-request` with `status` | `GET /direct/v1/accounts` (approved, not yet built) | accounts, `all_sessions` | — | **open**: follow-up PR after #299 |
+| `account-request` with `status` | `GET /direct/v1/accounts` | accounts, `all_sessions` | unit (gate on route, capabilities, list, watch, watch update; projection; attribution matrix); live `TestDirectLiveAccounts` | backend parity |
 | `account-ceremony`, `default`, `login`, `logout`, `rebind` | none | — | `provider/accounts.go` refuses all but status remotely | not a cloud function: local CLI/TUI only |
 | `spawn`/`input`/`resize`/`kill` panes (provider `--allow-compute`) | none | — | — | not a machine-session workflow (see below) |
 | `direct-enroll` | `amux direct enroll`, ticket claim | host | cloud fixtures | Harness brokers direct enrollment |
 | `register`, `ping`, `pong`, `reset`, `provider-revoke` | `hello`, `token`, `revoke` | — | S1 | transport equivalent |
+| Session-event push (FCM on `permission_request` and watched `turn_end`) | none | — | — | **gap**: design pending the user's decision (see below) |
 
 ### Live evidence details
 
@@ -134,7 +135,7 @@ The cloud UI exposes no terminal for machine sessions (`DaemonPane.tsx`: "no
 terminal is ever exposed for a local agent"). Creation plus the transcript
 streams is the direct equivalent. No raw PTY surface is planned.
 
-## Accounts (approved; implementation follows #299)
+## Accounts
 
 **Permission.** A new explicit permission `accounts`, implied by no other
 permission. Machine-wide account metadata requires `accounts` and an
@@ -160,14 +161,24 @@ revision/CAS, auth URL, attempt or token fields.
 when the grant holds `accounts` with `all_sessions`. One helper decides this
 for the route, the capability flag, the list and every watch snapshot.
 
-**Vocabulary.** Harness's broker gets the seventh permission name in a
-follow-up PR after harness #251.
+**Vocabulary.** Harness's broker accepts the seventh permission name in its
+own follow-up PR. The full wire contract is in
+[direct-access.md](direct-access.md#machine-accounts).
 
 ## Harness-only platform features (not machine relay)
 
 - tenancy, sign-in (Google SSO), provider registration and sharing;
 - cloud agents on GKE and compute pools;
 - the backend catalog;
-- **notifications**: FCM push for permission requests and turn ends. A direct
-  client learns of these only while it is open (watch and stream). There is
-  no direct push path.
+
+## Gap: notifications (a machine-workflow gap, design pending)
+
+This is not Harness-only scope. On the cloud, the machine's own session
+events drive FCM pushes: the provider's runtime-event ingest emits
+`permission_request` and watched `turn_end`, and the Android actions reply
+through Harness. A direct client learns of these events only while it is
+open (watch and stream). There is no direct push path.
+
+One option has been put to the user: an optional, content-free Harness
+wake-up, with the session fetch and the approval reply staying direct. Until
+the user chooses, nothing is implemented.

@@ -1,0 +1,67 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "defaults": {
+    "claude": "claude:central",
+    "codex": "codex:central"
+  },
+  "accounts": [
+    {
+      "harness": "claude",
+      "profile_id": "claude:central",
+      "source": "central",
+      "state": "ready",
+      "mode": "subscription",
+      "supported_modes": [
+        "subscription",
+        "api"
+      ],
+      "login_method": "browser",
+      "identity": {
+        "state": "unknown",
+        "evidence": "opaque-token"
+      },
+      "limits": {
+        "state": "known",
+        "source": "claude-statusline",
+        "observed_at": 1000,
+        "resets_available": 2,
+        "windows": [
+          {
+            "name": "5h",
+            "used_percent": 40,
+            "window_minutes": 300,
+            "resets_at": 2000
+          }
+        ]
+      }
+    },
+    {
+      "harness": "codex",
+      "profile_id": "codex:central",
+      "source": "central",
+      "state": "ready",
+      "mode": "subscription",
+      "login_method": "browser",
+      "error": "unrecognized",
+      "identity": {
+        "state": "known",
+        "account_id": "acct-123",
+        "email": "u@example.com",
+        "plan": "pro",
+        "evidence": "native"
+      },
+      "limits": {
+        "state": "known",
+        "source": "codex-native",
+        "observed_at": 1000,
+        "refresh_error": "unrecognized",
+        "windows": [
+          {
+            "name": "weekly",
+            "used_percent": 10
+          }
+        ]
+      }
+    }
+  ]
+}
