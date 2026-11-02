@@ -6,14 +6,19 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"amux/internal/accounts"
 	"amux/internal/core"
@@ -106,30 +111,46 @@ func Open() (*DB, error) {
 		return nil, err
 	}
 	d := &DB{sql: sqldb, shared: shared}
-	if _, done := migratedStores.Load(core.DBPath()); done {
-		// This process already brought this database to the current schema and
-		// ran its one-time backfills. Opening is on the daemon's hot path (every
-		// reconcile tick and session lookup), so skip the DDL, legacy import and
-		// grant backfill and keep only the cheap checks: the version (a newer
-		// binary's schema or a recreated file takes the full path below and fails
-		// or migrates exactly as a first open would) and the single-query legacy
-		// workgroup probe, which an older binary's write could still satisfy.
-		if version, err := d.SchemaVersion(); err == nil && version == CurrentSchemaVersion {
-			if err := d.migrateRepoWorkgroups(); err != nil {
-				_ = d.Close()
-				return nil, err
-			}
-			return d, nil
-		}
-		migratedStores.Delete(core.DBPath())
+	path := core.DBPath()
+	if ok, err := d.openMigrated(path); err != nil {
+		return nil, err
+	} else if ok {
+		return d, nil
+	}
+	// First open of this database in this process. Concurrent first opens (the
+	// daemon starts its poll and request loops together) single-flight here and
+	// recheck, so only one goroutine migrates and the rest take the fast path.
+	// Other processes are serialized by the write transactions below, not by
+	// this lock.
+	unlock := lockMigration(path)
+	defer unlock()
+	if ok, err := d.openMigrated(path); err != nil {
+		return nil, err
+	} else if ok {
+		return d, nil
+	}
+	if err := ensureWAL(path); err != nil {
+		_ = d.Close()
+		return nil, err
 	}
 	if err := d.migrate(); err != nil {
 		_ = d.Close()
 		return nil, err
 	}
 	if err := d.importLegacy(); err != nil {
-		// Non-fatal: a failed import shouldn't block usage.
-		_ = err
+		// A registry that cannot be parsed is left in place and does not block
+		// usage, as before. The store is still recorded as migrated below, so
+		// this process's hot path stays read-only, and a fixed file is imported
+		// by the next process's first Open (a restart). Any other error means
+		// the import rolled back with its file still in place, so fail this
+		// Open; the next one retries it.
+		var unreadable *LegacyRegistryError
+		if !errors.As(err, &unreadable) {
+			_ = d.Close()
+			return nil, err
+		}
+		log.Printf("amux: %v. Nothing was imported. To import it, fix the file and restart amux "+
+			"before creating any session: a store that has sessions never imports the registry.", err)
 	}
 	if err := d.migrateCoordinatorGrants(); err != nil {
 		_ = d.Close()
@@ -140,13 +161,158 @@ func Open() (*DB, error) {
 		return nil, err
 	}
 	if version, err := d.SchemaVersion(); err == nil && version == CurrentSchemaVersion {
-		migratedStores.Store(core.DBPath(), struct{}{})
+		migratedStores.Store(path, struct{}{})
 	}
 	return d, nil
 }
 
+// openMigrated is Open's fast path. It reports true when this process already
+// brought the database at path to the current schema and ran its one-time
+// backfills. Opening is on the daemon's hot path (every reconcile tick and
+// session lookup), so it skips the DDL, legacy import and grant backfill and
+// keeps only the cheap checks: the version (a newer binary's schema or a
+// recreated file takes the full path and fails or migrates exactly as a first
+// open would) and the single-query legacy workgroup probe, which an older
+// binary's write could still satisfy. On error d is closed.
+func (d *DB) openMigrated(path string) (bool, error) {
+	if _, done := migratedStores.Load(path); !done {
+		return false, nil
+	}
+	if version, err := d.SchemaVersion(); err == nil && version == CurrentSchemaVersion {
+		if err := d.migrateRepoWorkgroups(); err != nil {
+			_ = d.Close()
+			return false, err
+		}
+		return true, nil
+	}
+	migratedStores.Delete(path)
+	return false, nil
+}
+
+// walSwitchTimeout bounds ensureWAL's retries; it matches the DSN busy timeout.
+const walSwitchTimeout = 5 * time.Second
+
+// ensureWAL switches a rollback-journal database (a new file, or one created
+// before amux used WAL) to WAL before the store's pool opens connections.
+// Every pooled connection also requests WAL in its DSN, but that switch needs
+// an exclusive lock, and when another process holds the file SQLite can report
+// SQLITE_BUSY at once instead of waiting out busy_timeout, so racing first
+// opens of a new store failed while opening a connection. Here the switch is retried from scratch, on SQLITE_BUSY only,
+// until walSwitchTimeout. Once the file is in WAL mode (which persists) the
+// pragma is a no-op that needs no exclusive lock, so this costs one cheap
+// statement per process and later connections cannot hit the error.
+func ensureWAL(path string) error {
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	deadline := time.Now().Add(walSwitchTimeout)
+	for {
+		var mode string
+		err := db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&mode)
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
+			// A filesystem that cannot use WAL keeps its journal mode, as the
+			// DSN pragma always allowed; only errors are reported.
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// isBusy reports whether err is SQLite's SQLITE_BUSY (any extended code).
+func isBusy(err error) bool {
+	var coded interface{ Code() int }
+	return errors.As(err, &coded) && coded.Code()&0xff == 5
+}
+
 // migratedStores holds the database paths this process has fully migrated.
 var migratedStores sync.Map
+
+// migrationLocks single-flights first opens per database path within this
+// process. Entries are reference counted and removed when idle, so opening
+// many distinct paths (tests) does not accumulate state.
+var (
+	migrationLocksMu sync.Mutex
+	migrationLocks   = map[string]*migrationLock{}
+)
+
+type migrationLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func lockMigration(path string) (unlock func()) {
+	migrationLocksMu.Lock()
+	l := migrationLocks[path]
+	if l == nil {
+		l = &migrationLock{}
+		migrationLocks[path] = l
+	}
+	l.refs++
+	migrationLocksMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		migrationLocksMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(migrationLocks, path)
+		}
+		migrationLocksMu.Unlock()
+	}
+}
+
+// querier is the subset of *sql.DB, *sql.Conn and *sql.Tx migrations use.
+type querier interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// connQuerier adapts a pinned *sql.Conn to querier.
+type connQuerier struct{ c *sql.Conn }
+
+func (q connQuerier) Exec(query string, args ...any) (sql.Result, error) {
+	return q.c.ExecContext(context.Background(), query, args...)
+}
+func (q connQuerier) Query(query string, args ...any) (*sql.Rows, error) {
+	return q.c.QueryContext(context.Background(), query, args...)
+}
+func (q connQuerier) QueryRow(query string, args ...any) *sql.Row {
+	return q.c.QueryRowContext(context.Background(), query, args...)
+}
+
+// writeTx runs fn inside BEGIN IMMEDIATE on one pinned connection and commits
+// if fn succeeds. IMMEDIATE takes SQLite's write reservation before fn reads
+// anything, waiting out other writers (in this or another process, e.g. the
+// daemon and a CLI) via the busy timeout. So fn's check-then-change steps see
+// the latest committed state and cannot interleave with another migrator, and
+// the transaction can never fail with SQLITE_BUSY_SNAPSHOT by upgrading a stale
+// read snapshot. On any failure everything fn did is rolled back; if the
+// rollback itself fails the connection is discarded rather than returned to
+// the pool with a transaction open.
+func (d *DB) writeTx(fn func(querier) error) (err error) {
+	ctx := context.Background()
+	conn, err := d.sql.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	q := connQuerier{conn}
+	if err = fn(q); err == nil {
+		if _, err = conn.ExecContext(ctx, `COMMIT`); err == nil {
+			return nil
+		}
+	}
+	if _, rbErr := conn.ExecContext(ctx, `ROLLBACK`); rbErr != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	return err
+}
 
 // OpenReadOnly opens the already-migrated store without creating directories,
 // importing legacy data, running schema migration, or performing backfills.
@@ -221,15 +387,22 @@ func openHandle(dsn string) (*sql.DB, bool, error) {
 	return db, true, nil
 }
 
+// migrate applies the schema in one write transaction: the version check,
+// every idempotent CREATE/ADD COLUMN and the version bump commit together or
+// not at all, serialized against other migrators in any process.
 func (d *DB) migrate() error {
-	version, err := d.SchemaVersion()
-	if err != nil {
+	return d.writeTx(migrateSchema)
+}
+
+func migrateSchema(q querier) error {
+	var version int
+	if err := q.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
 	if version < MinSchemaVersion || version > CurrentSchemaVersion {
 		return &SchemaVersionError{Have: version, Min: MinSchemaVersion, Max: CurrentSchemaVersion}
 	}
-	if _, err := d.sql.Exec(`
+	if _, err := q.Exec(`
 CREATE TABLE IF NOT EXISTS repos (
   name    TEXT PRIMARY KEY,
   source  TEXT NOT NULL,
@@ -265,6 +438,9 @@ CREATE TABLE IF NOT EXISTS coordinator_repo_grants (
 CREATE TABLE IF NOT EXISTS coordinator_grant_migrations (
   version INTEGER PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS legacy_registry_import (
+  version INTEGER PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS session_prs (
   session_id TEXT PRIMARY KEY,
   state      TEXT NOT NULL DEFAULT '',
@@ -275,29 +451,29 @@ CREATE TABLE IF NOT EXISTS session_prs (
 	}
 	// Idempotently add columns introduced after the initial schema, so existing
 	// DBs gain them (CREATE TABLE IF NOT EXISTS won't alter an existing table).
-	if err := d.addColumn("sessions", "scope", "TEXT NOT NULL DEFAULT 'work'"); err != nil {
+	if err := addColumn(q, "sessions", "scope", "TEXT NOT NULL DEFAULT 'work'"); err != nil {
 		return err
 	}
-	if err := d.addColumn("sessions", "archived", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := addColumn(q, "sessions", "archived", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	if err := d.addColumn("sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := addColumn(q, "sessions", "archived_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	// all_repos marks a coordinator whose ceiling is the live set of tracked
 	// repositories rather than a fixed list (see CoordinatorRepoGrants).
-	if err := d.addColumn("coordinator_grant_state", "all_repos", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := addColumn(q, "coordinator_grant_state", "all_repos", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	// Covers SessionHeads, so the daemon's per-tick scan reads only this index
 	// instead of every row's overflow pages (archived follows the prompt).
-	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_heads ON sessions(created, id, root_id, archived)`); err != nil {
+	if _, err := q.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_heads ON sessions(created, id, root_id, archived)`); err != nil {
 		return err
 	}
 	// Version 3 includes the wrapper promotion below. Do not advertise it
 	// until the data migration has committed successfully.
 	if version < 2 {
-		_, err = d.sql.Exec(`PRAGMA user_version = 2`)
+		_, err := q.Exec(`PRAGMA user_version = 2`)
 		return err
 	}
 	return nil
@@ -312,8 +488,8 @@ func (d *DB) SchemaVersion() (int, error) {
 }
 
 // addColumn adds col to table if it isn't already present.
-func (d *DB) addColumn(table, col, def string) error {
-	rows, err := d.sql.Query(`SELECT name FROM pragma_table_info(?)`, table)
+func addColumn(q querier, table, col, def string) error {
+	rows, err := q.Query(`SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
 		return err
 	}
@@ -330,14 +506,16 @@ func (d *DB) addColumn(table, col, def string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = d.sql.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
+	_, err = q.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
 	return err
 }
 
 // ---- repos ---------------------------------------------------------------
 
-func (d *DB) PutRepo(r Repo) error {
-	_, err := d.sql.Exec(
+func (d *DB) PutRepo(r Repo) error { return putRepoRow(d.sql, r) }
+
+func putRepoRow(q querier, r Repo) error {
+	_, err := q.Exec(
 		`INSERT INTO repos(name,source,git_dir) VALUES(?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET source=excluded.source, git_dir=excluded.git_dir`,
 		r.Name, r.Source, r.GitDir)
@@ -400,7 +578,12 @@ func (d *DB) PutSession(s Session) error {
 	if err := bind(s.ID, s.Agent); err != nil {
 		return err
 	}
-	_, err = d.sql.Exec(
+	return putSessionRow(d.sql, s)
+}
+
+// putSessionRow upserts the whole row; callers bind the session's account.
+func putSessionRow(q querier, s Session) error {
+	_, err := q.Exec(
 		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -587,6 +770,23 @@ func (d *DB) NewID() string {
 		id := hex.EncodeToString(b[:])
 		if _, ok, _ := d.GetSession(id); !ok {
 			return id
+		}
+	}
+}
+
+// newIDIn is NewID inside a transaction, so ids written earlier in it count.
+func newIDIn(q querier) (string, error) {
+	for {
+		var b [3]byte
+		_, _ = rand.Read(b[:])
+		id := hex.EncodeToString(b[:])
+		var one int
+		switch err := q.QueryRow(`SELECT 1 FROM sessions WHERE id=?`, id).Scan(&one); err {
+		case sql.ErrNoRows:
+			return id, nil
+		case nil:
+		default:
+			return "", err
 		}
 	}
 }
