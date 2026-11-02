@@ -364,6 +364,10 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	panes := p.paneCount()
 	p.setStatus(func(s *Status) {
 		s.State, s.ProviderID, s.RegisteredAt, s.LastError, s.Panes = StateRegistered, m.ProviderID, now, "", panes
+		s.OwnerUserID, s.OwnerEmail = "", ""
+		if m.Owner != nil {
+			s.OwnerUserID, s.OwnerEmail = m.Owner.UserID, m.Owner.Email
+		}
 	})
 
 	sent := p.applyDirectives(m.Adopt, m.Kill)

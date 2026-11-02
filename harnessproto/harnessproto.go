@@ -350,6 +350,12 @@ type MuxMsg struct {
 	GraceSeconds     int         `json:"graceSeconds,omitempty"`     // registered: pane survival after disconnect
 	Adopt            []AdoptPane `json:"adopt,omitempty"`            // registered: resumed panes to replay
 	Kill             []string    `json:"kill,omitempty"`             // registered: offered panes to terminate
+	// Owner is the registered owner of this provider, from the orchestrator's
+	// live provider row at this registration. It is present only for an owned,
+	// unshared, unrevoked provider, and absent otherwise (or from an older
+	// orchestrator). The host uses it to default `amux direct cloud enable`
+	// pins; it never authorizes anything by itself.
+	Owner *RegisteredOwner `json:"owner,omitempty"`
 
 	// v2 pong.
 	T int64 `json:"t,omitempty"` // pong: echoes the ping timestamp
@@ -374,6 +380,14 @@ type MuxMsg struct {
 
 	// direct-enroll-v1 (direct-enroll; also uses ReqID).
 	DirectEnroll *DirectEnrollRequest `json:"directEnroll,omitempty"`
+}
+
+// RegisteredOwner identifies the account that owns a provider registration.
+// UserID is the orchestrator's stable user id (the value a direct-enroll
+// requester carries). Email is display-only: it is never an identity input.
+type RegisteredOwner struct {
+	UserID string `json:"userId"`
+	Email  string `json:"email,omitempty"`
 }
 
 // HarnessMsg is a harness -> server message (v2: provider -> orchestrator).

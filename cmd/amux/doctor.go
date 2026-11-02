@@ -649,6 +649,13 @@ func reportProviderStatus() {
 		line = "providerId " + st.ProviderID + " · " + line
 	}
 	fmt.Printf("              %s · %d panes\n", line, st.Panes)
+	if st.OwnerUserID != "" {
+		owner := st.OwnerUserID
+		if st.OwnerEmail != "" {
+			owner += " (" + st.OwnerEmail + ")"
+		}
+		fmt.Printf("              owner %s\n", owner)
+	}
 	if !live && st.State != provider.StateStopped {
 		fmt.Printf("              pid %d is gone — the provider died without recording a stop\n", st.PID)
 	}

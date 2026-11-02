@@ -176,7 +176,8 @@ legacy mux relay also requires TLS and a nonempty bearer token.
 ### Orchestrator → provider
 
 - `registered` `{ok, error?, version, providerId, heartbeatSeconds,
-  graceSeconds, adopt:[{paneId, afterSeq}], kill:[paneId,...]}` — accepts or
+  graceSeconds, adopt:[{paneId, afterSeq}], kill:[paneId,...],
+  owner?:{userId, email?}}` — accepts or
   terminally rejects the registration; negotiates the version (highest
   common; no overlap ⇒ `unsupported-version`); resolves the resume offer
   (every offered pane is adopted or killed — omission means kill). For
@@ -382,8 +383,9 @@ when the provider starts; replacing the file does not update a running process.
 
 The provider loop writes `~/.local/state/amux/provider-status.json` on every
 state change: `dialing` → `registered` → `disconnected`/`rejected`/`stopped`,
-plus the negotiated `providerId`, the last successful registration, the last
-heartbeat, the live pane count, and the last error. A provider that is running
+plus the negotiated `providerId`, the registered owner Harness reported
+(`owner_user_id`, and `owner_email` for display), the last successful
+registration, the last heartbeat, the live pane count, and the last error. A provider that is running
 but has never been accepted looks identical to a working one from the outside;
 this file is the difference, and `amux doctor`'s **Provider** section reads it:
 
@@ -396,12 +398,15 @@ Provider
               /home/you/.config/systemd/user/amux-provide.service · enabled at login
   ✓ status    registered (3s ago)
               providerId prov-42 · registered 2m14s ago · heartbeat 3s ago · 2 panes
+              owner usr_01HZXK5Q8M (you@example.com)
 ```
 
 `providerId` is the physical node's id from `registered`. With Harness, an
 owned registration's personal compute pool has that same id (see
 [Compute pools and machines](#compute-pools-and-machines)); doctor prints the
-node id and leaves the pool reading to the orchestrator.
+node id and leaves the pool reading to the orchestrator. `owner` is present only
+for an owned, unshared provider on a Harness that reports it; it defaults the
+pins of [cloud-assisted direct enrollment](direct-cloud-enrollment.md#operator-guide).
 
 Nothing here can fail the health check — provider mode is opt-in, so "not
 configured" is a normal, healthy state. Doctor does contradict the one lie the
