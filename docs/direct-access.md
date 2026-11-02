@@ -518,7 +518,7 @@ oversized values are refused.
 | `unarchive` | none | The target must itself be archived and have no archived ancestor. A member of an archived workgroup is restored by unarchiving the workgroup |
 | `add-agent` | optional `agent`, `prompt`, `mode`, `model`, `repos`, `identity_mode` | The target is an in-scope, non-archived workgroup root. `repos` must lie inside that workgroup's current repo ceiling, which the daemon enforces again |
 | `new-workgroup` | optional `name`, `prompt`, `repos`, `agent`, `mode`, `model`, `coordinator`, `coordinator_model`, `identity_mode` | `POST /direct/v1/workgroups` |
-| `new-workgroup-empty` | `repos` (required, may be empty), optional `name`, `prompt`, `coordinator`, `coordinator_model`, `identity_mode` | A coordinator with an explicit repo ceiling and no members |
+| `new-workgroup-empty` | `repos` (required), optional `name`, `prompt`, `coordinator`, `coordinator_model`, `identity_mode` | A coordinator with no members. Named repos limit it to exactly those. An empty `repos` means every tracked repo, live, as on the daemon |
 
 More rules:
 
@@ -600,6 +600,11 @@ amux keeps no queue of its own. What happens next depends on the runtime:
 Neither case guarantees the text is queued. Any failure appears in the
 transcript, not in the HTTP answer.
 
+**Acting on a new id.** A request naming a session that the same grant just
+created can arrive before the daemon's inventory publishes the new row. If
+so, the server re-reads the inventory for up to 3 seconds and then checks the
+published row as usual.
+
 **Telling cases apart.**
 
 | What the client sees | Meaning |
@@ -610,6 +615,8 @@ transcript, not in the HTTP answer.
 
 Fixtures are in [`direct/fixtures/workflow-v1`](direct/fixtures/workflow-v1)
 (additive; the `v1` set and its `SHA256SUMS` are unchanged).
+
+The full cloud-relay comparison is in [direct-cloud-parity.md](direct-cloud-parity.md).
 
 ## S1 limits
 

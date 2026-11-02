@@ -964,6 +964,24 @@ func (a *Authority) FinishAction(l *Lease, key string, ok bool, code, msg string
 	a.endAction(l, key, func(r *idemRecord) { r.State, r.OK, r.Code, r.Error = idemDone, ok, code, msg })
 }
 
+// Created reports whether this lease's grant created session id (a recorded,
+// successful creation verb returned it). It never grants access by itself; it
+// only lets the server wait for the daemon to publish the row it just minted.
+func (a *Authority) Created(l *Lease, id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.state.Grants[l.ClientID]
+	if g == nil || g.RevokedAt != 0 || id == "" {
+		return false
+	}
+	for _, r := range g.Idem {
+		if r.State == idemDone && r.OK && r.NewID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // FinishResult records a success together with what it reported (a creation's
 // new id, an archive's affected sessions), so a replay of the same key answers
 // with the same result instead of running again.
