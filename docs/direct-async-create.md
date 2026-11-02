@@ -124,7 +124,8 @@ machine's session list.
 * Restart: on load, an async record admitted but never dispatched is durably
   settled as a terminal, known `unavailable` ("did not run"); status, async
   replay and sync replay (`503 unavailable`) all give that answer, and as a
-  done record it is pruned after the 24h retention. One dispatched stays
+  done record its full result expires after the 24h retention (from
+  admission) like any other. One dispatched stays
   ambiguous (`idem_ambiguous`, `uncertain`), as does any synchronous admitted
   record (it carries no dispatch marker). Neither is re-run.
 * Every answer that carries a `CreationStatus` — the POST (fresh or replay)
@@ -146,9 +147,16 @@ machine's session list.
   revocation. The daemon call is further bounded by 10 minutes. Revoke drains running jobs like any lease. The cut
   only stops the wait: a creation already sent may still complete on the
   host, which is why it reports `uncertain`.
-* Bounds: ≤4 pending per grant, ≤32 per server, ≤4 concurrent daemon calls;
-  reservations are released on every exit path. Records share the grant's
-  existing `maxIdemPerGrant` / 24h retention.
+* Bounds: ≤4 pending per grant, ≤32 per server, ≤4 concurrent daemon calls
+  (`429 rate_limited`, nothing recorded, retry later); reservations are
+  released on every exit path. Records share the grant's existing
+  `maxIdemPerGrant` (`409 capacity_exhausted`, enroll again) and 24h
+  retention.
+* After retention: `GET /direct/v1/creations/{creation_id}` answers `404
+  not_found` (stop tracking it), and a sync or async POST of the same key and
+  body answers the terminal `409 idem_expired` — never a status, never a
+  re-run, and not proof it did not run. See Idempotency in
+  [direct-access.md](direct-access.md).
 
 ## Known limits and follow-ups
 

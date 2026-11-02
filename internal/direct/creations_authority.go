@@ -233,7 +233,9 @@ type creationView struct {
 }
 
 // Creation finds the creation id among l's grant's records. Another grant's
-// id, or an unknown one, is not found.
+// id, an unknown one, or a completed one past its result retention (whether
+// already compacted to a tombstone or kept whole at the tombstone cap) is not
+// found. It never prunes.
 func (a *Authority) Creation(l *Lease, id string) (creationView, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -241,8 +243,12 @@ func (a *Authority) Creation(l *Lease, id string) (creationView, bool) {
 	if g == nil || g.RevokedAt != 0 || id == "" {
 		return creationView{}, false
 	}
+	now := a.now().Unix()
 	for k, r := range g.Idem {
 		if r.CreationID == id {
+			if r.State == idemDone && pastRetention(r, now) {
+				return creationView{}, false
+			}
 			return creationView{rec: *r, running: a.running[runKey(l.ClientID, k)]}, true
 		}
 	}
