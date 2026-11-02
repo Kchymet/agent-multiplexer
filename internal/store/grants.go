@@ -133,15 +133,17 @@ func (d *DB) setCoordinatorGrants(coordinatorID string, repos []string, all bool
 // ceilings already persisted on coordinator rows, but never derives a ceiling
 // from child history and leaves blank legacy coordinators uninitialized.
 func (d *DB) migrateCoordinatorGrants() error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	// Reserve the writer before reading the marker: concurrent first opens (in
+	// this or another process) then run this one at a time, and the later ones
+	// see the committed marker instead of upgrading a stale read snapshot.
+	return d.writeTx(backfillCoordinatorGrants)
+}
+
+func backfillCoordinatorGrants(tx querier) error {
 	var marker int
-	err = tx.QueryRow(`SELECT version FROM coordinator_grant_migrations WHERE version=?`, coordinatorGrantMigrationVersion).Scan(&marker)
+	err := tx.QueryRow(`SELECT version FROM coordinator_grant_migrations WHERE version=?`, coordinatorGrantMigrationVersion).Scan(&marker)
 	if err == nil {
-		return tx.Commit()
+		return nil
 	}
 	if err != sql.ErrNoRows {
 		return err
@@ -177,10 +179,8 @@ func (d *DB) migrateCoordinatorGrants() error {
 			}
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO coordinator_grant_migrations(version) VALUES(?)`, coordinatorGrantMigrationVersion); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err = tx.Exec(`INSERT INTO coordinator_grant_migrations(version) VALUES(?)`, coordinatorGrantMigrationVersion)
+	return err
 }
 
 func normalizedGrantRepos(repos []string) []string {

@@ -102,8 +102,8 @@ type legacy struct {
 	} `json:"workspaces"`
 }
 
-// importLegacy one-time imports the old JSON registry into the DB, then renames
-// the JSON aside as a backup. It is a no-op if the DB already has sessions or no
+// importLegacy one-time imports the old JSON registry into the DB, renaming the
+// JSON aside as a backup. It is a no-op if the DB already has sessions or no
 // registry file exists. Each old (multi-repo, single-agent) workspace becomes a
 // root container plus one sub-session that preserves its dir + claude session.
 func (d *DB) importLegacy() error {
@@ -122,6 +122,13 @@ func (d *DB) importLegacy() error {
 	var lg legacy
 	if err := json.Unmarshal(b, &lg); err != nil {
 		return err
+	}
+	// Claim the registry before importing it, keeping it as a backup. Rename is
+	// atomic, so when several first opens (goroutines or processes) race past
+	// the empty-table check only the one whose rename succeeds imports; the
+	// others would otherwise each add a duplicate sub-session under a fresh id.
+	if err := os.Rename(regPath, regPath+".migrated"); err != nil {
+		return nil // another opener claimed it
 	}
 
 	for _, r := range lg.Repos {
@@ -144,8 +151,6 @@ func (d *DB) importLegacy() error {
 			ClaudeID: w.SessionID, Prompt: w.InitialPrompt, Created: w.Created,
 		})
 	}
-
-	_ = os.Rename(regPath, regPath+".migrated") // keep as backup, don't delete
 	return nil
 }
 

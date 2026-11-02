@@ -1,0 +1,269 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"amux/internal/core"
+)
+
+const concurrentOpeners = 8
+
+// seedLegacySchema writes a pre-versioning (user_version 0) database that lacks
+// every column and table added since, so Open must run the whole upgrade.
+func seedLegacySchema(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(core.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", core.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`
+CREATE TABLE repos (name TEXT PRIMARY KEY, source TEXT NOT NULL, git_dir TEXT NOT NULL);
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY, root_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '',
+  agent TEXT NOT NULL DEFAULT 'claude', model TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'task', repo TEXT NOT NULL DEFAULT '',
+  branch TEXT NOT NULL DEFAULT '', dir TEXT NOT NULL DEFAULT '',
+  claude_id TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE coordinator_grant_state (coordinator_id TEXT PRIMARY KEY, initialized INTEGER NOT NULL CHECK(initialized = 1));
+INSERT INTO repos VALUES('acme','/src/acme','/git/acme');
+INSERT INTO sessions(id,root_id,repo,created) VALUES('wg','', 'acme', 1);
+`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// openConcurrently races n first Opens of the current XDG data dir and returns
+// every error.
+func openConcurrently(n int) []error {
+	start := make(chan struct{})
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			db, err := Open()
+			if err == nil {
+				err = db.Close()
+			}
+			errs[i] = err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	return errs
+}
+
+func checkMigrated(t *testing.T, label string) {
+	t.Helper()
+	db, err := OpenReadOnly()
+	if err != nil {
+		t.Fatalf("%s: OpenReadOnly after concurrent Open: %v", label, err)
+	}
+	defer db.Close()
+	if v, err := db.SchemaVersion(); err != nil || v != CurrentSchemaVersion {
+		t.Fatalf("%s: schema version = %d, %v; want %d", label, v, err, CurrentSchemaVersion)
+	}
+	var markers int
+	if err := db.sql.QueryRow(`SELECT count(*) FROM coordinator_grant_migrations`).Scan(&markers); err != nil || markers != 1 {
+		t.Fatalf("%s: grant migration markers = %d, %v; want exactly 1", label, markers, err)
+	}
+}
+
+// Concurrent first Opens in one process (the daemon starts its poll and socket
+// loops together) must all succeed and migrate exactly once, for a fresh and an
+// upgraded database, with and without shared handles.
+func TestConcurrentFirstOpenMigratesOnce(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		for _, upgrade := range []bool{false, true} {
+			name := fmt.Sprintf("shared=%v/upgrade=%v", shared, upgrade)
+			t.Run(name, func(t *testing.T) {
+				ShareHandles(shared)
+				t.Cleanup(func() { ShareHandles(false) })
+				for round := range 10 {
+					t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+					if upgrade {
+						seedLegacySchema(t)
+					}
+					for i, err := range openConcurrently(concurrentOpeners) {
+						if err != nil {
+							t.Fatalf("round %d opener %d: %v", round, i, err)
+						}
+					}
+					checkMigrated(t, fmt.Sprintf("round %d", round))
+				}
+			})
+		}
+	}
+}
+
+const helperOpenEnv = "AMUX_STORE_TEST_HELPER_OPEN"
+
+// TestHelperProcessOpen is not a test: it is re-executed as a child process by
+// TestConcurrentFirstOpenAcrossProcesses to perform one Open.
+func TestHelperProcessOpen(t *testing.T) {
+	if os.Getenv(helperOpenEnv) != "1" {
+		t.Skip("helper process only")
+	}
+	db, err := Open()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "open:", err)
+		os.Exit(1)
+	}
+	if err := db.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "close:", err)
+		os.Exit(1)
+	}
+}
+
+// The daemon and CLI are separate processes that can both perform a first Open
+// (e.g. a CLI command racing a freshly upgraded daemon), so the migration must
+// also be serialized in the database, not only by an in-process lock.
+func TestConcurrentFirstOpenAcrossProcesses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns processes")
+	}
+	for _, seed := range []string{"fresh", "upgrade", "registry"} {
+		t.Run(seed, func(t *testing.T) {
+			for round := range 3 {
+				dataHome := filepath.Join(t.TempDir(), "data")
+				t.Setenv("XDG_DATA_HOME", dataHome)
+				switch seed {
+				case "upgrade":
+					seedLegacySchema(t)
+				case "registry":
+					seedLegacyRegistry(t)
+				}
+				cmds := make([]*exec.Cmd, concurrentOpeners)
+				outs := make([][]byte, concurrentOpeners)
+				errs := make([]error, concurrentOpeners)
+				var wg sync.WaitGroup
+				for i := range cmds {
+					cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcessOpen$", "-test.count=1")
+					cmd.Env = append(os.Environ(), helperOpenEnv+"=1", "XDG_DATA_HOME="+dataHome)
+					cmds[i] = cmd
+				}
+				for i, cmd := range cmds {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						outs[i], errs[i] = cmd.CombinedOutput()
+					}()
+				}
+				wg.Wait()
+				for i, err := range errs {
+					if err != nil {
+						t.Fatalf("round %d process %d: %v\n%s", round, i, err, outs[i])
+					}
+				}
+				checkMigrated(t, fmt.Sprintf("round %d", round))
+				if seed == "registry" {
+					checkRegistryImportedOnce(t, fmt.Sprintf("round %d", round))
+				}
+			}
+		})
+	}
+}
+
+func seedLegacyRegistry(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(core.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := `{"workspaces":[{"id":"ws","agent":"claude","repos":["acme"],"dir":"/d","created":1}]}`
+	if err := os.WriteFile(core.RegistryPath(), []byte(reg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkRegistryImportedOnce(t *testing.T, label string) {
+	t.Helper()
+	db, err := OpenReadOnly()
+	if err != nil {
+		t.Fatal(err)
+	}
+	subs, err := db.Children("ws")
+	db.Close()
+	if err != nil || len(subs) != 1 {
+		t.Fatalf("%s: legacy workspace has %d sub-sessions (%v), want 1", label, len(subs), err)
+	}
+	if _, err := os.Stat(core.RegistryPath() + ".migrated"); err != nil {
+		t.Fatalf("%s: registry backup: %v", label, err)
+	}
+}
+
+// Racing first opens must import the legacy JSON registry once: each import
+// adds a sub-session under a fresh id, so a double import duplicates it.
+func TestConcurrentFirstOpenImportsLegacyRegistryOnce(t *testing.T) {
+	for round := range 5 {
+		t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+		seedLegacyRegistry(t)
+		for i, err := range openConcurrently(concurrentOpeners) {
+			if err != nil {
+				t.Fatalf("round %d opener %d: %v", round, i, err)
+			}
+		}
+		checkRegistryImportedOnce(t, fmt.Sprintf("round %d", round))
+	}
+}
+
+// A migration that fails part-way must leave the database as it was (no
+// half-applied DDL or advanced version), record nothing process-wide, and be
+// retried in full by the next Open once the obstacle is gone.
+func TestFailedMigrationRollsBackAndRetries(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	seedLegacySchema(t)
+	raw, err := sql.Open("sqlite", core.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// all_repos is added last; occupying it with an incompatible view name makes
+	// that ALTER fail after every earlier step succeeded.
+	if _, err := raw.Exec(`DROP TABLE coordinator_grant_state; CREATE VIEW coordinator_grant_state AS SELECT 1 AS coordinator_id`); err != nil {
+		t.Fatal(err)
+	}
+	for i, err := range openConcurrently(concurrentOpeners) {
+		if err == nil {
+			t.Fatalf("opener %d: Open succeeded over a blocking view", i)
+		}
+	}
+	var version, scope int
+	if err := raw.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 0 {
+		t.Fatalf("user_version after failed migration = %d, %v; want 0", version, err)
+	}
+	if err := raw.QueryRow(`SELECT count(*) FROM pragma_table_info('sessions') WHERE name='scope'`).Scan(&scope); err != nil || scope != 0 {
+		t.Fatalf("sessions.scope present after failed migration (%d, %v); want rolled back", scope, err)
+	}
+	if _, done := migratedStores.Load(core.DBPath()); done {
+		t.Fatal("failed migration was recorded as complete")
+	}
+	migrationLocksMu.Lock()
+	leaked := len(migrationLocks)
+	migrationLocksMu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("%d migration locks left after Open returned", leaked)
+	}
+
+	if _, err := raw.Exec(`DROP VIEW coordinator_grant_state`); err != nil {
+		t.Fatal(err)
+	}
+	for i, err := range openConcurrently(concurrentOpeners) {
+		if err != nil {
+			t.Fatalf("retry opener %d: %v", i, err)
+		}
+	}
+	checkMigrated(t, "retry")
+}
