@@ -18,6 +18,7 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/direct"
 	"amux/internal/hostbackend"
+	"amux/internal/provider"
 )
 
 // cmdDirect is `amux direct`: opt-in direct client access over an existing LAN
@@ -89,14 +90,17 @@ enroll flags (the running server publishes its endpoints into the bundle):
   --ttl <dur>             code lifetime (default 10m, maximum 1h)
   --json                  print the full response as JSON
 
-cloud enable flags (each one required except the caps; all-sessions covers
-ordinary sessions, never the amux console):
-  --owner <user-id>       the Harness user id allowed to request codes
-  --provider <id>         this host's Harness provider id (provider_id in the
-                          amux provide status file, shown by amux doctor)
+cloud enable flags (the ceiling is required; all-sessions covers ordinary
+sessions, never the amux console):
   --permissions <list>    ceiling: read | read,steer
   --all-sessions          ceiling: any ordinary session, or
   --workgroup <root-id>   ceiling: these workgroups (repeatable)
+  --owner <user-id>       advanced: the Harness user id allowed to request codes
+  --provider <id>         advanced: this host's Harness provider id
+                          Both default to the owner and provider Harness
+                          reported at this host's latest amux provide
+                          registration (shown by amux doctor). A flag that
+                          disagrees with it is refused unless both are given.
   --max-outstanding <n>   unredeemed cloud codes at once (default 3)
   --max-per-hour <n>      cloud codes per hour (default 10)
 
@@ -325,6 +329,10 @@ func cmdDirectCloud(args []string) error {
 			return json.NewEncoder(os.Stdout).Encode(resp.Cloud)
 		}
 		printCloudStatus(*resp.Cloud)
+		st, stErr := provider.ReadStatus(provider.StatusPath())
+		if note := cloudPinDrift(*resp.Cloud, st, stErr); note != "" {
+			fmt.Println(note)
+		}
 		return nil
 	}
 	return fmt.Errorf("unknown cloud command %q", args[0])
@@ -348,15 +356,24 @@ func cmdDirectCloudEnable(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if *owner == "" || *prov == "" || *perms == "" {
-		return errors.New("--owner, --provider and --permissions are required")
+	if *perms == "" {
+		return errors.New("--permissions is required (read or read,steer)")
 	}
 	resource, err := directResourceFlags(*all, groups)
 	if err != nil {
 		return err
 	}
+	st, stErr := provider.ReadStatus(provider.StatusPath())
+	pins, err := resolveCloudPins(*owner, *prov, st, stErr)
+	if err != nil {
+		return err
+	}
+	fmt.Println(pins.describe())
+	if pins.Note != "" {
+		fmt.Println(pins.Note)
+	}
 	resp, err := adminRun(direct.AdminRequest{Op: direct.OpCloudEnable, Cloud: &direct.CloudPolicyRequest{
-		Permissions: strings.Split(*perms, ","), Resource: resource, OwnerPin: *owner, ProviderPin: *prov,
+		Permissions: strings.Split(*perms, ","), Resource: resource, OwnerPin: pins.Owner, ProviderPin: pins.Provider,
 		MaxOutstanding: *maxOut, MaxPerHour: *perHour,
 	}})
 	if err != nil {

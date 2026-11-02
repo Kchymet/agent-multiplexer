@@ -46,6 +46,11 @@ var goldenFrames = []struct {
 		Adopt: []AdoptPane{{PaneID: "p1", AfterSeq: 42}},
 		Kill:  []string{"p9"},
 	}},
+	{"registered_owner", MuxMsg{
+		Type: MRegistered, OK: true, Version: 2, ProviderID: "prov-7",
+		HeartbeatSeconds: 15, GraceSeconds: 60,
+		Owner: &RegisteredOwner{UserID: "usr_01HZXK5Q8M", Email: "owner@example.com"},
+	}},
 	{"spawn", MuxMsg{
 		Type: MSpawn, PaneID: "p2", Dir: "/tmp", Env: []string{"K=V"},
 		Argv: []string{"sh", "-c", "echo hi"}, Cols: 80, Rows: 24,
