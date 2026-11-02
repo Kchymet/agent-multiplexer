@@ -303,7 +303,9 @@ func countRows(t *testing.T, raw *sql.DB, query string) int {
 
 // A write failing part-way through the import rolls back every imported row
 // and the marker, fails Open, leaves the registry in place, and the next Open
-// imports it in full.
+// imports it in full. The injected failure stands in for a crash before the
+// commit; this is not a process-kill test (SQLite's own rollback of an
+// interrupted transaction is what makes a real crash equivalent).
 func TestLegacyImportFailureRollsBackAndRetries(t *testing.T) {
 	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
 	if _, err := raw.Exec(`CREATE TRIGGER fail_import BEFORE INSERT ON sessions WHEN NEW.id='boom'
@@ -344,9 +346,10 @@ func TestLegacyImportFailureRollsBackAndRetries(t *testing.T) {
 	}
 }
 
-// If the import commits but the registry cannot be moved aside (as after a
-// crash between the two), Open reports it, and the next Open moves the file
-// without importing it again.
+// If the import commits but the registry cannot be moved aside, Open reports
+// it, and the next Open moves the file without importing it again. The failed
+// rename reproduces the on-disk state a crash between commit and rename would
+// leave; this is not a process-kill test.
 func TestLegacyImportCommittedBeforeRenameIsNotRepeated(t *testing.T) {
 	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
 	backup := core.RegistryPath() + ".migrated"
@@ -382,7 +385,9 @@ func TestLegacyImportCommittedBeforeRenameIsNotRepeated(t *testing.T) {
 }
 
 // An unparseable registry does not block Open; it is left untouched and
-// nothing is imported or marked, so a fixed file is imported later.
+// nothing is imported or marked. Open still records the store as migrated for
+// this process, so its hot path stays read-only: a registry fixed later is
+// imported by the next process's first Open (a restart), not by this process.
 func TestUnreadableLegacyRegistryIsLeftInPlace(t *testing.T) {
 	raw := seedEmptyStoreWithRegistry(t, `{not json`)
 	db, err := Open()
@@ -396,6 +401,28 @@ func TestUnreadableLegacyRegistryIsLeftInPlace(t *testing.T) {
 	if n := countRows(t, raw, `SELECT count(*) FROM legacy_registry_import`); n != 0 {
 		t.Fatal("unreadable registry was marked imported")
 	}
+
+	if err := os.WriteFile(core.RegistryPath(), []byte(twoWorkspaceRegistry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 0 {
+		t.Fatalf("same process imported the fixed registry (%d sessions); expected it to wait for a restart", n)
+	}
+
+	if testing.Short() {
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcessOpen$", "-test.count=1")
+	cmd.Env = append(os.Environ(), helperOpenEnv+"=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fresh process Open: %v\n%s", err, out)
+	}
+	checkRegistryImportedOnce(t, "after restart")
 }
 
 // A registry is never merged into a store that already has sessions.

@@ -107,7 +107,8 @@ type legacy struct {
 }
 
 // LegacyRegistryError reports a legacy JSON registry that could not be parsed.
-// Nothing is imported and the file is left in place.
+// Nothing is imported and the file is left in place; Open does not fail, and
+// the next process's first Open tries the file again.
 type LegacyRegistryError struct {
 	Path string
 	Err  error

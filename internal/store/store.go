@@ -138,7 +138,9 @@ func Open() (*DB, error) {
 	}
 	if err := d.importLegacy(); err != nil {
 		// An unreadable registry is left in place for the user and does not
-		// block usage, as before. Any other failure rolled the import back
+		// block usage, as before. The store is still recorded as migrated
+		// below, so a fixed registry is imported by the next process's first
+		// Open (a restart), keeping this process's hot path read-only. Any other failure rolled the import back
 		// (or, after it committed, left the file to be moved aside next time),
 		// so fail this Open and let the next one retry.
 		var unreadable *LegacyRegistryError
