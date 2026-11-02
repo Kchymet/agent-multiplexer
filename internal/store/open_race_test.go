@@ -267,3 +267,152 @@ func TestFailedMigrationRollsBackAndRetries(t *testing.T) {
 	}
 	checkMigrated(t, "retry")
 }
+
+const twoWorkspaceRegistry = `{"repos":[{"name":"acme","source":"/src/acme","gitDir":"/git/acme"}],
+"workspaces":[{"id":"ws","agent":"claude","repos":["acme"],"dir":"/d","created":1},
+{"id":"boom","agent":"codex","repos":["acme"],"dir":"/e","created":2}]}`
+
+// seedEmptyStoreWithRegistry writes a legacy schema with no sessions plus a
+// registry to import, and returns a raw handle for arranging failures.
+func seedEmptyStoreWithRegistry(t *testing.T, registry string) *sql.DB {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	seedLegacySchema(t)
+	raw, err := sql.Open("sqlite", core.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if _, err := raw.Exec(`DELETE FROM sessions; DELETE FROM repos`); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(core.RegistryPath(), []byte(registry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func countRows(t *testing.T, raw *sql.DB, query string) int {
+	t.Helper()
+	var n int
+	if err := raw.QueryRow(query).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return n
+}
+
+// A write failing part-way through the import rolls back every imported row
+// and the marker, fails Open, leaves the registry in place, and the next Open
+// imports it in full.
+func TestLegacyImportFailureRollsBackAndRetries(t *testing.T) {
+	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
+	if _, err := raw.Exec(`CREATE TRIGGER fail_import BEFORE INSERT ON sessions WHEN NEW.id='boom'
+		BEGIN SELECT RAISE(ABORT, 'injected import failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := Open(); err == nil {
+		db.Close()
+		t.Fatal("Open succeeded although the legacy import failed")
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 0 {
+		t.Fatalf("%d sessions survived a failed import", n)
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM repos`); n != 0 {
+		t.Fatalf("%d repos survived a failed import", n)
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM legacy_registry_import`); n != 0 {
+		t.Fatal("failed import was marked complete")
+	}
+	if _, err := os.Stat(core.RegistryPath()); err != nil {
+		t.Fatalf("registry not left in place after a failed import: %v", err)
+	}
+	if _, done := migratedStores.Load(core.DBPath()); done {
+		t.Fatal("Open recorded the store as migrated after a failed import")
+	}
+
+	if _, err := raw.Exec(`DROP TRIGGER fail_import`); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open()
+	if err != nil {
+		t.Fatalf("retry Open: %v", err)
+	}
+	db.Close()
+	checkRegistryImportedOnce(t, "retry")
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions WHERE root_id='boom'`); n != 1 {
+		t.Fatalf("second workspace has %d sub-sessions after retry, want 1", n)
+	}
+}
+
+// If the import commits but the registry cannot be moved aside (as after a
+// crash between the two), Open reports it, and the next Open moves the file
+// without importing it again.
+func TestLegacyImportCommittedBeforeRenameIsNotRepeated(t *testing.T) {
+	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
+	backup := core.RegistryPath() + ".migrated"
+	if err := os.MkdirAll(filepath.Join(backup, "occupied"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := Open(); err == nil {
+		db.Close()
+		t.Fatal("Open succeeded although the registry could not be moved aside")
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM legacy_registry_import`); n != 1 {
+		t.Fatal("committed import has no marker")
+	}
+	if _, err := os.Stat(core.RegistryPath()); err != nil {
+		t.Fatalf("registry missing after a failed rename: %v", err)
+	}
+
+	if err := os.RemoveAll(backup); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open()
+	if err != nil {
+		t.Fatalf("Open after a committed import: %v", err)
+	}
+	db.Close()
+	checkRegistryImportedOnce(t, "after rename retry")
+	if _, err := os.Stat(core.RegistryPath()); !os.IsNotExist(err) {
+		t.Fatalf("registry still in place after a successful Open: %v", err)
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 4 {
+		t.Fatalf("store has %d sessions, want the 4 imported once", n)
+	}
+}
+
+// An unparseable registry does not block Open; it is left untouched and
+// nothing is imported or marked, so a fixed file is imported later.
+func TestUnreadableLegacyRegistryIsLeftInPlace(t *testing.T) {
+	raw := seedEmptyStoreWithRegistry(t, `{not json`)
+	db, err := Open()
+	if err != nil {
+		t.Fatalf("Open with an unreadable registry: %v", err)
+	}
+	db.Close()
+	if b, err := os.ReadFile(core.RegistryPath()); err != nil || string(b) != `{not json` {
+		t.Fatalf("registry changed: %q, %v", b, err)
+	}
+	if n := countRows(t, raw, `SELECT count(*) FROM legacy_registry_import`); n != 0 {
+		t.Fatal("unreadable registry was marked imported")
+	}
+}
+
+// A registry is never merged into a store that already has sessions.
+func TestLegacyRegistryIsNotImportedIntoAPopulatedStore(t *testing.T) {
+	raw := seedEmptyStoreWithRegistry(t, twoWorkspaceRegistry)
+	if _, err := raw.Exec(`INSERT INTO sessions(id,root_id,created) VALUES('existing','',1)`); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if n := countRows(t, raw, `SELECT count(*) FROM sessions`); n != 1 {
+		t.Fatalf("store has %d sessions, want only the existing one", n)
+	}
+	if _, err := os.Stat(core.RegistryPath()); err != nil {
+		t.Fatalf("registry moved although it was not imported: %v", err)
+	}
+}

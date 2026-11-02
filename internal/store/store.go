@@ -137,8 +137,15 @@ func Open() (*DB, error) {
 		return nil, err
 	}
 	if err := d.importLegacy(); err != nil {
-		// Non-fatal: a failed import shouldn't block usage.
-		_ = err
+		// An unreadable registry is left in place for the user and does not
+		// block usage, as before. Any other failure rolled the import back
+		// (or, after it committed, left the file to be moved aside next time),
+		// so fail this Open and let the next one retry.
+		var unreadable *LegacyRegistryError
+		if !errors.As(err, &unreadable) {
+			_ = d.Close()
+			return nil, err
+		}
 	}
 	if err := d.migrateCoordinatorGrants(); err != nil {
 		_ = d.Close()
@@ -426,6 +433,9 @@ CREATE TABLE IF NOT EXISTS coordinator_repo_grants (
 CREATE TABLE IF NOT EXISTS coordinator_grant_migrations (
   version INTEGER PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS legacy_registry_import (
+  version INTEGER PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS session_prs (
   session_id TEXT PRIMARY KEY,
   state      TEXT NOT NULL DEFAULT '',
@@ -497,8 +507,10 @@ func addColumn(q querier, table, col, def string) error {
 
 // ---- repos ---------------------------------------------------------------
 
-func (d *DB) PutRepo(r Repo) error {
-	_, err := d.sql.Exec(
+func (d *DB) PutRepo(r Repo) error { return putRepoRow(d.sql, r) }
+
+func putRepoRow(q querier, r Repo) error {
+	_, err := q.Exec(
 		`INSERT INTO repos(name,source,git_dir) VALUES(?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET source=excluded.source, git_dir=excluded.git_dir`,
 		r.Name, r.Source, r.GitDir)
@@ -561,7 +573,12 @@ func (d *DB) PutSession(s Session) error {
 	if err := bind(s.ID, s.Agent); err != nil {
 		return err
 	}
-	_, err = d.sql.Exec(
+	return putSessionRow(d.sql, s)
+}
+
+// putSessionRow upserts the whole row; callers bind the session's account.
+func putSessionRow(q querier, s Session) error {
+	_, err := q.Exec(
 		`INSERT INTO sessions(id,root_id,name,agent,model,mode,repo,branch,dir,claude_id,prompt,created,scope,archived,archived_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -748,6 +765,23 @@ func (d *DB) NewID() string {
 		id := hex.EncodeToString(b[:])
 		if _, ok, _ := d.GetSession(id); !ok {
 			return id
+		}
+	}
+}
+
+// newIDIn is NewID inside a transaction, so ids written earlier in it count.
+func newIDIn(q querier) (string, error) {
+	for {
+		var b [3]byte
+		_, _ = rand.Read(b[:])
+		id := hex.EncodeToString(b[:])
+		var one int
+		switch err := q.QueryRow(`SELECT 1 FROM sessions WHERE id=?`, id).Scan(&one); err {
+		case sql.ErrNoRows:
+			return id, nil
+		case nil:
+		default:
+			return "", err
 		}
 	}
 }
