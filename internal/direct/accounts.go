@@ -65,11 +65,11 @@ type AccountIdentity struct {
 type AccountLimits struct {
 	State           string               `json:"state"`
 	Source          string               `json:"source,omitempty"`
-	ObservedAt      int64                `json:"observed_at,omitempty"`
-	AttemptedAt     int64                `json:"attempted_at,omitempty"`
+	ObservedAt      int64                `json:"observed_at,omitempty"`  // Unix milliseconds
+	AttemptedAt     int64                `json:"attempted_at,omitempty"` // Unix milliseconds
 	RefreshError    string               `json:"refresh_error,omitempty"`
-	RetryAt         int64                `json:"retry_at,omitempty"`
-	FreshUntil      int64                `json:"fresh_until,omitempty"`
+	RetryAt         int64                `json:"retry_at,omitempty"`    // Unix milliseconds
+	FreshUntil      int64                `json:"fresh_until,omitempty"` // Unix milliseconds
 	ResetsAvailable *int64               `json:"resets_available,omitempty"`
 	Windows         []AccountLimitWindow `json:"windows,omitempty"`
 }
@@ -79,7 +79,7 @@ type AccountLimitWindow struct {
 	Name          string  `json:"name"`
 	UsedPercent   float64 `json:"used_percent"`
 	WindowMinutes int64   `json:"window_minutes,omitempty"`
-	ResetsAt      int64   `json:"resets_at,omitempty"`
+	ResetsAt      int64   `json:"resets_at,omitempty"` // Unix SECONDS (unlike the limits timestamps)
 }
 
 // SessionAccountBinding is a row's account routing (which machine profile the

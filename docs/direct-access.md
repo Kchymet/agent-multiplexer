@@ -871,6 +871,16 @@ it:
      "windows":[{"name":"…","used_percent":0,"window_minutes":0,"resets_at":0}]}}]}
 ```
 
+**Timestamp units.** These are copied unchanged from the daemon's producers:
+
+- `limits.observed_at`, `attempted_at`, `retry_at` and `fresh_until` are Unix
+  **milliseconds**. Compare them with `Date.now()` or `Instant.ofEpochMilli`.
+- `limits.windows[].resets_at` is Unix **seconds**, the provider's reset
+  time. Use `new Date(resets_at * 1000)` or `Instant.ofEpochSecond`.
+
+The fixture uses small placeholder values (`1000`, `2000`). Client tests that
+check units should use realistic values.
+
 **What the server guarantees:**
 
 - **Profiles.** Only the managed `claude:central` and `codex:central`
