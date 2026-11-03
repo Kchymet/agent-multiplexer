@@ -145,6 +145,49 @@ git push
 Never resolve a conflict by blindly discarding one side — understand both and
 preserve the combined intent.
 
+**Stacked PR** (its base is a predecessor's branch): refresh from that branch,
+fetched from `origin` by name — not the generic refresh above, and never from a
+sibling's worktree — then re-run checks and `git push` exactly as above:
+
+```sh
+P=<predecessor-branch>
+git fetch origin "+refs/heads/$P:refs/remotes/origin/$P"
+git merge --no-edit "origin/$P"
+```
+
+Do this whenever the predecessor branch moves (review fixes, its own merge of
+its base), so upstream changes propagate down the stack. Stay on your own
+branch, and never merge your branch into an unmerged predecessor branch.
+
+#### After a stacked parent lands
+
+Stacks land bottom-up. Once the parent PR is merged (this project
+squash-merges), read the actual state rather than assuming the default branch or
+an automatic retarget:
+
+```sh
+gh pr view <parent> --json state,baseRefName   # MERGED, and L = the branch it landed on
+gh pr view <n> --json state,baseRefName        # your PR: still OPEN? still based on the parent?
+L=<landing-branch>
+git fetch origin "+refs/heads/$L:refs/remotes/origin/$L"
+git merge --no-edit "origin/$L"
+# re-run checks, then:
+git push
+gh pr edit <n> --base "$L"     # skip if baseRefName already is $L
+gh pr diff <n>                 # must show only this PR's change
+```
+
+The squash commit holds the parent's changes under a new commit, so the merge
+may conflict where your branch later edited the parent's lines: resolve for the
+combined intent — your later edits plus anything new on the landing branch.
+`gh pr view <n> --json commits` may still list the old parent commits; that is
+expected and harmless once the diff is right — never force-push to hide them.
+
+Don't strand descendants: before a branch is deleted, retarget every open PR
+still based on it (`gh pr list --base <branch>`). If your PR was closed because
+its base branch was deleted, open a new PR from the same head against the
+landing branch and link the closed one.
+
 ## Exit condition — when babysitting is done
 
 Babysitting is done when **the PR is merged** — by the user, or by you if
@@ -203,6 +246,11 @@ similar) into the PR body or your report.
   ```sh
   gh pr merge <n> --squash --delete-branch
   ```
+
+  Never merge a stacked PR while its base is still an unmerged predecessor
+  branch: land the stack bottom-up onto the final target. If other open PRs are
+  based on this one (`gh pr list --base <your-branch>`), retarget them first or
+  leave out `--delete-branch`, so deleting the branch does not strand them.
 
 - If you're **blocked** — feedback you can't resolve alone, a failing check you
   can't fix, a design disagreement — stop and report it clearly with the specific

@@ -224,7 +224,7 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 		for _, want := range []string{
 			"## Track every member PR to merged or closed",
 			"A member PR marked ready is handed to review, not finished.",
-			"Keep a **PR ledger** in `COORDINATION.md`: one row per member PR — member, repo#PR, state",
+			"Keep a **PR ledger** in `COORDINATION.md`: one row per member PR — member, repo#PR, base branch (and the PR it is stacked on, if any), state",
 			"React to what you see by re-prompting the member",
 			"red CI, a merge conflict, new review comments",
 			"Never archive a member that still owns an open PR",

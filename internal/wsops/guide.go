@@ -115,6 +115,26 @@ squash-merges PRs, so the extra merge commits never reach the default branch.
 Resolve any conflicts on your branch. This keeps you building on the latest
 remote, not a stale snapshot.
 
+## Stacked PRs
+When your coordinator stacks your work on a predecessor member's branch (related
+targets that change many of the same files), your PR's **base** is that
+predecessor branch and its **head** is still your own assigned branch. Use plain
+`+"`git`"+` and `+"`gh`"+` only — no stacking tools — and keep the same merge-only,
+ordinary-push policy:
+- Stay on your own branch. Get the predecessor's pushed work through `+"`origin`"+`,
+  never from a sibling's worktree, naming the ref explicitly (not the generic
+  refresh above):
+  `+"`git fetch origin +refs/heads/<predecessor-branch>:refs/remotes/origin/<predecessor-branch>`"+`
+  then `+"`git merge --no-edit origin/<predecessor-branch>`"+`. Repeat whenever it
+  moves; it carries the landing branch's updates down to you.
+- Open with `+"`gh pr create --base <predecessor-branch> --head <your-branch>`"+` and
+  start the body with `+"`Stacked on #<parent> — merge that first.`"+`
+- Stacks land bottom-up; never merge your branch into an unmerged predecessor
+  branch. After the parent lands, merge the branch it actually landed on into
+  yours, retarget with `+"`gh pr edit <n> --base <landing-branch>`"+`, and check that
+  `+"`gh pr diff <n>`"+` shows only your change. The create-pr and babysit-pr skills
+  give the details.
+
 ## Shipping your work
 When a change is ready for review, use the `+"`create-pr`"+` skill — it encodes this
 project's end-to-end PR flow (commit and push conventions, opening the PR, then
@@ -338,7 +358,8 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
 A member PR marked ready is handed to review, not finished. You own the outcome
 of every PR your members open until it is **merged or closed**:
 - Keep a **PR ledger** in `+"`COORDINATION.md`"+`: one row per member PR — member,
-  repo#PR, state (draft / ready / merged / closed, CI, mergeable, review) — and
+  repo#PR, base branch (and the PR it is stacked on, if any), state
+  (draft / ready / merged / closed, CI, mergeable, review) — and
   update it from evidence (`+"`gh pr view <n> --json state,isDraft,mergeable,statusCheckRollup,reviewDecision`"+`
   and the member's events), not from the member's last word.
 - React to what you see by re-prompting the member
@@ -352,7 +373,45 @@ of every PR your members open until it is **merged or closed**:
 - Never end a turn with open member PRs and nothing scheduled to look at them
   again.
 
-`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID)
+## Stack PRs for related, overlapping targets
+Independent targets get independent PRs against the default branch. When related
+targets would change many of the same files, parallel PRs against the default
+branch conflict with each other on every merge; stack them instead, one member
+and one PR per layer, using native `+"`gh`"+` and `+"`git`"+` only (no stacking tools or
+extensions):
+- **Order the stack** bottom-up and dispatch the bottom layer first. Tell each
+  stacked member its explicit **base** — the predecessor member's branch
+  (`+"`amux/%s-<predecessor>`"+`) — and **head** — its own branch — plus the
+  predecessor PR number once it exists, and that it opens with
+  `+"`gh pr create --base <predecessor-branch>`"+`, starts the PR body with
+  `+"`Stacked on #<parent> — merge that first.`"+`, and keeps current by fetching the
+  predecessor branch from `+"`origin`"+` by name and merging it into its own branch
+  (never from a sibling worktree, never by switching branches).
+- **Record the stack** in the PR ledger: each PR's base, what it is stacked on,
+  and the landing order. Add `+"`Followed by #<child>`"+` to each parent PR body
+  (`+"`gh pr edit`"+`) so reviewers see the order on GitHub.
+- **Propagate upstream changes** top-down: when a lower layer changes (review
+  fixes, a merge of the landing branch), re-prompt each member above it, in
+  order, to merge its predecessor branch, re-run checks and push. The policy
+  stays merge-only with ordinary pushes; no layer ever rewrites pushed history
+  or force-pushes.
+- **Land bottom-up** onto the final target. Tell the user the merge order; a PR
+  whose base is still an unmerged member branch must not be merged — it would
+  land on that branch, not the final target. After a parent lands (this project
+  squash-merges), re-prompt its child to: read the branch the parent actually
+  landed on (`+"`gh pr view <parent> --json state,baseRefName`"+`) and its own
+  current base (`+"`gh pr view <n> --json state,baseRefName`"+`) rather than
+  assuming either; merge that landing branch into its own branch, resolving the
+  combined intent; push normally; retarget with
+  `+"`gh pr edit <n> --base <landing-branch>`"+`; and confirm `+"`gh pr diff <n>`"+`
+  shows only the child's change (its commit list may still show the old parent
+  commits — that is expected; never force-push to hide them).
+- **Never strand descendants.** Do not delete a parent branch while an open PR
+  still targets it (`+"`gh pr list --base <parent-branch>`"+`); retarget the
+  children first. If a child was closed because its base vanished, open a fresh
+  PR from the same head against the landing branch and link the old one.
+
+`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID, root.ID)
 	b.WriteString(goalSection(root))
 	b.WriteString("\n")
 	b.WriteString(memberArchiveSection(root))
