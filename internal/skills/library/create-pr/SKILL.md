@@ -193,6 +193,10 @@ each layer is its own branch and PR whose base is the layer below it. Use native
 `gh` and `git` only — no stacking tools — and the same merge-only, ordinary-push
 policy as any other PR:
 
+- **Start from a pushed predecessor.** Begin only once the predecessor branch
+  is pushed and fetchable from `origin` (`git ls-remote origin
+  <predecessor-branch>` prints it); if it is not, tell your coordinator rather
+  than building on the default branch.
 - **Base and head are explicit.** Head is your own assigned branch (you never
   switch branches); base is the predecessor's branch:
   `gh pr create --base <predecessor-branch> --head "$(git branch --show-current)" …`.
@@ -203,8 +207,9 @@ policy as any other PR:
 - **Propagate upstream changes by merging.** When the predecessor branch moves,
   fetch and merge it by name as in Phase 0, re-run checks, `git push`. Never
   rewrite pushed history or force-push.
-- **Land bottom-up onto the final target.** Never merge a PR whose base is still
-  an unmerged predecessor branch — it would land there, not on the final target.
+- **Land in dependency order, parent before child, onto the final target.**
+  Never merge a PR whose base is still an unmerged predecessor branch — it
+  would land there, not on the final target.
   After the parent lands, see babysit-pr "After a stacked parent lands".
 
 ## Phase 4 — See the PR through (babysit or hand off)

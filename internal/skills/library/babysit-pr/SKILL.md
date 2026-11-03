@@ -161,8 +161,8 @@ branch, and never merge your branch into an unmerged predecessor branch.
 
 #### After a stacked parent lands
 
-Stacks land bottom-up. Once the parent PR is merged (this project
-squash-merges), read the actual state rather than assuming the default branch or
+Stacks land in dependency order, parent before child. Once the parent PR is
+merged (this project squash-merges), read the actual state rather than assuming the default branch or
 an automatic retarget:
 
 ```sh
@@ -248,8 +248,8 @@ similar) into the PR body or your report.
   ```
 
   Never merge a stacked PR while its base is still an unmerged predecessor
-  branch: land the stack bottom-up onto the final target. If other open PRs are
-  based on this one (`gh pr list --base <your-branch>`), retarget them first or
+  branch: land the stack in dependency order, parent before child, onto the
+  final target. If other open PRs are based on this one (`gh pr list --base <your-branch>`), retarget them first or
   leave out `--delete-branch`, so deleting the branch does not strand them.
 
 - If you're **blocked** — feedback you can't resolve alone, a failing check you

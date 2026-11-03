@@ -129,8 +129,11 @@ ordinary-push policy:
   moves; it carries the landing branch's updates down to you.
 - Open with `+"`gh pr create --base <predecessor-branch> --head <your-branch>`"+` and
   start the body with `+"`Stacked on #<parent> — merge that first.`"+`
-- Stacks land bottom-up; never merge your branch into an unmerged predecessor
-  branch. After the parent lands, merge the branch it actually landed on into
+- Start only once the predecessor branch is pushed and fetchable from `+"`origin`"+`
+  (`+"`git ls-remote origin <predecessor-branch>`"+` prints it); if it is not yet,
+  tell your coordinator rather than building on the default branch.
+- Stacks land in dependency order, parent before child; never merge your branch
+  into an unmerged predecessor branch. After the parent lands, merge the branch it actually landed on into
   yours, retarget with `+"`gh pr edit <n> --base <landing-branch>`"+`, and check that
   `+"`gh pr diff <n>`"+` shows only your change. The create-pr and babysit-pr skills
   give the details.
@@ -360,7 +363,7 @@ of every PR your members open until it is **merged or closed**:
 - Keep a **PR ledger** in `+"`COORDINATION.md`"+`: one row per member PR — member,
   repo#PR, base branch (and the PR it is stacked on, if any), state
   (draft / ready / merged / closed, CI, mergeable, review) — and
-  update it from evidence (`+"`gh pr view <n> --json state,isDraft,mergeable,statusCheckRollup,reviewDecision`"+`
+  update it from evidence (`+"`gh pr view <n> --json state,isDraft,baseRefName,headRefName,mergeable,statusCheckRollup,reviewDecision`"+`
   and the member's events), not from the member's last word.
 - React to what you see by re-prompting the member
   (`+"`amux do steer <member> -f verb=prompt -f text=\"…\"`"+`): red CI, a merge
@@ -379,7 +382,11 @@ targets would change many of the same files, parallel PRs against the default
 branch conflict with each other on every merge; stack them instead, one member
 and one PR per layer, using native `+"`gh`"+` and `+"`git`"+` only (no stacking tools or
 extensions):
-- **Order the stack** bottom-up and dispatch the bottom layer first. Tell each
+- **Order the stack** in dependency order, from parent to child, and dispatch
+  the parent first. Start a child's implementation only once its predecessor
+  branch is pushed and fetchable from `+"`origin`"+`
+  (`+"`git ls-remote origin <predecessor-branch>`"+` prints it); never dispatch
+  overlapping work before the shared baseline it builds on exists. Tell each
   stacked member its explicit **base** — the predecessor member's branch
   (`+"`amux/%s-<predecessor>`"+`) — and **head** — its own branch — plus the
   predecessor PR number once it exists, and that it opens with
@@ -390,12 +397,14 @@ extensions):
 - **Record the stack** in the PR ledger: each PR's base, what it is stacked on,
   and the landing order. Add `+"`Followed by #<child>`"+` to each parent PR body
   (`+"`gh pr edit`"+`) so reviewers see the order on GitHub.
-- **Propagate upstream changes** top-down: when a lower layer changes (review
-  fixes, a merge of the landing branch), re-prompt each member above it, in
-  order, to merge its predecessor branch, re-run checks and push. The policy
+- **Propagate upstream changes** in dependency order, from parent to child:
+  when a parent changes (review fixes, a merge of the landing branch), re-prompt
+  each descendant, parent to child, to merge its predecessor branch, re-run
+  checks and push. The policy
   stays merge-only with ordinary pushes; no layer ever rewrites pushed history
   or force-pushes.
-- **Land bottom-up** onto the final target. Tell the user the merge order; a PR
+- **Land in dependency order**, parent before child, onto the final target.
+  Tell the user the merge order; a PR
   whose base is still an unmerged member branch must not be merged — it would
   land on that branch, not the final target. After a parent lands (this project
   squash-merges), re-prompt its child to: read the branch the parent actually
