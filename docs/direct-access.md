@@ -707,56 +707,6 @@ members). Incarnations live in the amux store, so a store restored from a
 backup taken after the creation still matches; a store from before it, or a
 new store, does not.
 
-**Client handling of `idem_key`.** Use a fresh random key for each user
-intent, and reuse it only to retry that same intent with the identical body.
-Treat `idem_expired`, like `idem_ambiguous`, as terminal for the key: show the
-user that the earlier attempt may have run, and only send the intent again
-under a new key after the user (or a check of the machine) confirms it is
-still wanted. It is never a transient error, and it never means "safe to
-resend".
-
-**Limitations.** A tombstone is keyed by 64-bit prefixes of
-`sha256(idem_key)` and of the body hash; a collision can only refuse a
-request, never run one twice. Protection ends with the grant record. It is not
-retroactive: a server before this change deleted completed records after 24
-hours, and those keys are unknown to it now, so a client must still never
-reuse a key it has used before. The registry moved to schema version 3 for the
-tombstones. An older binary cannot use a version-3 registry: it refuses to
-load it rather than silently dropping them, and direct access stays
-unavailable until a binary with this change runs again. Any other way back
-(an older registry, or enrolling clients again) loses the replay history, and
-clients must still not reuse keys. A version-1 or -2 registry migrates forward
-with one atomic file replace on open. If that write fails before the rename,
-the old file is left in place; if it fails after the rename (the directory
-sync), the complete version-3 file may be in place. Either way that open
-fails, and the next open loads whichever complete file is there; the registry
-is never partially written or reset.
-
-**Client handling of `idem_key`.** Use a fresh random key for each user
-intent, and reuse it only to retry that same intent with the identical body.
-Treat `idem_expired`, like `idem_ambiguous`, as terminal for the key: show the
-user that the earlier attempt may have run, and only send the intent again
-under a new key after the user (or a check of the machine) confirms it is
-still wanted. It is never a transient error, and it never means "safe to
-resend".
-
-**Limitations.** A tombstone is keyed by 64-bit prefixes of
-`sha256(idem_key)` and of the body hash; a collision can only refuse a
-request, never run one twice. Protection ends with the grant record. It is not
-retroactive: a server before this change deleted completed records after 24
-hours, and those keys are unknown to it now, so a client must still never
-reuse a key it has used before. The registry moved to schema version 3 for the
-tombstones. An older binary cannot use a version-3 registry: it refuses to
-load it rather than silently dropping them, and direct access stays
-unavailable until a binary with this change runs again. Any other way back
-(an older registry, or enrolling clients again) loses the replay history, and
-clients must still not reuse keys. A version-1 or -2 registry migrates forward
-with one atomic file replace on open. If that write fails before the rename,
-the old file is left in place; if it fails after the rename (the directory
-sync), the complete version-3 file may be in place. Either way that open
-fails, and the next open loads whichever complete file is there; the registry
-is never partially written or reset.
-
 **Transcripts.** They use amux's own sequence space and never reuse a relay
 cursor. The stream ends with a terminal SSE event:
 
