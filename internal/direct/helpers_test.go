@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/hostbackend"
+	amuxstore "amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -43,9 +45,128 @@ type fakeBackend struct {
 	newID         string // the id Apply reports (creation verbs)
 	// gate, when set, holds Apply (after it counts as dispatched) until a value
 	// is received or ctx ends: a slow creation the test releases explicitly.
-	gate         chan struct{}
+	gate chan struct{}
+
+	// Creation identity. incs holds each session's current incarnation; a
+	// session in rows or created by Apply without one gets "inc-"+id.
+	// noIdentity simulates a daemon without the protocol; identErr a failing
+	// identity read; identReads counts SessionIdentities calls.
+	incs       map[string]string
+	parents    map[string]string
+	noIdentity atomic.Bool
+	identErr   error
+	identReads atomic.Int64
+	lastExpect string
+	// revokeOnRead runs (once) inside SessionIdentities, then the read fails.
+	revokeOnRead func()
 	accounts     hp.AccountSnapshot
 	accountCalls atomic.Int64
+}
+
+// setInc replaces (or with "" deletes) a session's current incarnation.
+func (f *fakeBackend) setInc(id, inc string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.incs == nil {
+		f.incs = map[string]string{}
+	}
+	if inc == "" {
+		f.incs[id] = "-"
+		return
+	}
+	f.incs[id] = inc
+}
+
+func (f *fakeBackend) incLocked(id string) (string, bool) {
+	if inc, ok := f.incs[id]; ok {
+		return inc, inc != "-"
+	}
+	for _, r := range f.rows {
+		if r.ID == id {
+			return "inc-" + id, true
+		}
+	}
+	return "", false
+}
+
+func (f *fakeBackend) CreationIdentity(ctx context.Context) error {
+	if f.noIdentity.Load() {
+		return hostbackend.ErrUpgradeRequired
+	}
+	return ctx.Err()
+}
+
+func (f *fakeBackend) ApplyIdentity(ctx context.Context, a core.Action, expectRoot string) (amuxstore.Identity, error) {
+	if f.noIdentity.Load() {
+		return amuxstore.Identity{}, hostbackend.ErrUpgradeRequired
+	}
+	f.mu.Lock()
+	f.lastExpect = expectRoot
+	f.mu.Unlock()
+	id, err := f.Apply(ctx, a)
+	if err != nil || id == "" {
+		return amuxstore.Identity{ID: id}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.incs == nil {
+		f.incs = map[string]string{}
+	}
+	if f.parents == nil {
+		f.parents = map[string]string{}
+	}
+	inc := "inc-" + id
+	if cur, ok := f.incs[id]; ok && cur != "-" {
+		inc = cur
+	}
+	f.incs[id] = inc
+	if a.Action == core.ActionAddAgent {
+		f.parents[id] = a.ID
+		rootInc, _ := f.incLocked(a.ID)
+		return amuxstore.Identity{ID: id, Incarnation: inc, RootID: a.ID, RootIncarnation: rootInc}, nil
+	}
+	return amuxstore.Identity{ID: id, Incarnation: inc, RootID: id, RootIncarnation: inc}, nil
+}
+
+func (f *fakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
+	f.identReads.Add(1)
+	f.mu.Lock()
+	revoke := f.revokeOnRead
+	f.revokeOnRead = nil
+	f.mu.Unlock()
+	if revoke != nil {
+		revoke()
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if f.noIdentity.Load() {
+		return nil, hostbackend.ErrUpgradeRequired
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.identErr != nil {
+		return nil, f.identErr
+	}
+	out := map[string]amuxstore.SessionIdentity{}
+	for _, id := range ids {
+		inc, ok := f.incLocked(id)
+		if !ok {
+			continue
+		}
+		parent := f.parents[id]
+		if parent == "" {
+			for _, r := range f.rows {
+				if r.ID == id {
+					parent = r.RootID
+				}
+			}
+		}
+		out[id] = amuxstore.SessionIdentity{ID: id, Incarnation: inc, RootID: parent}
+	}
+	return out, nil
+
 }
 
 func (f *fakeBackend) Accounts(ctx context.Context) (hp.AccountSnapshot, error) {

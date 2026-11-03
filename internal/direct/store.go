@@ -66,6 +66,14 @@ type idemRecord struct {
 	Async        bool   `json:"async,omitempty"`
 	DispatchedAt int64  `json:"dispatchedAt,omitempty"`
 	EndedAt      int64  `json:"endedAt,omitempty"`
+	// Successful creations only: the store incarnations of NewID and RootID
+	// as the daemon created them, recorded once with the outcome. Every
+	// success replay checks them against the current store; a record without
+	// them (written before they existed, or by an older binary that dropped
+	// them) is never replayed with its ids. Host-side only: never sent to a
+	// client.
+	NewIncarnation  string `json:"newInc,omitempty"`
+	RootIncarnation string `json:"rootInc,omitempty"`
 }
 
 const (

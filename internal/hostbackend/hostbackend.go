@@ -27,6 +27,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/daemon"
+	"amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -259,4 +260,70 @@ func (p *Pane) Close() error {
 		}
 	})
 	return p.err
+}
+
+// IdentityConn is the creation identity surface of a connection
+// (daemon/creation_identity.go). *daemon.Client implements it. A Conn that
+// does not is treated as a daemon without the protocol.
+type IdentityConn interface {
+	NegotiateCreationIdentity() error
+	DispatchIdentity(core.Action, daemon.IdentityRequest) (store.Identity, error)
+	SessionIdentities([]string) (map[string]store.SessionIdentity, error)
+}
+
+// ErrUpgradeRequired means the daemon does not speak the creation identity
+// protocol. Nothing that could create anything was sent.
+var ErrUpgradeRequired = daemon.ErrDaemonUpgradeRequired
+
+// negotiate establishes the identity protocol on c before anything else is
+// sent on it. A transport failure while negotiating is ErrUnavailable: no
+// action was sent.
+func negotiate(c Conn) (IdentityConn, error) {
+	ic, ok := c.(IdentityConn)
+	if !ok {
+		return nil, ErrUpgradeRequired
+	}
+	if err := ic.NegotiateCreationIdentity(); err != nil {
+		if errors.Is(err, ErrUpgradeRequired) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	return ic, nil
+}
+
+// CreationIdentity reports whether the daemon speaks the creation identity
+// protocol: nil, ErrUpgradeRequired, or an ErrUnavailable-wrapped failure.
+func (h HostDaemon) CreationIdentity(ctx context.Context) error {
+	_, err := call(ctx, h, func(c Conn) (struct{}, error) {
+		_, err := negotiate(c)
+		return struct{}{}, err
+	})
+	return err
+}
+
+// ApplyIdentity runs one creation action and returns the created session's
+// identity. The protocol is negotiated on the same fresh connection before the
+// action is sent, so an older daemon is refused (ErrUpgradeRequired) before
+// any creation. expectRoot pins an add-agent to that root incarnation.
+func (h HostDaemon) ApplyIdentity(ctx context.Context, a core.Action, expectRoot string) (store.Identity, error) {
+	return call(ctx, h, func(c Conn) (store.Identity, error) {
+		ic, err := negotiate(c)
+		if err != nil {
+			return store.Identity{}, err
+		}
+		return ic.DispatchIdentity(a, daemon.IdentityRequest{ExpectRoot: expectRoot})
+	})
+}
+
+// SessionIdentities reads the current identities of ids (at most
+// store.MaxIdentityLookup); a missing session is absent from the map.
+func (h HostDaemon) SessionIdentities(ctx context.Context, ids []string) (map[string]store.SessionIdentity, error) {
+	return call(ctx, h, func(c Conn) (map[string]store.SessionIdentity, error) {
+		ic, err := negotiate(c)
+		if err != nil {
+			return nil, err
+		}
+		return ic.SessionIdentities(ids)
+	})
 }

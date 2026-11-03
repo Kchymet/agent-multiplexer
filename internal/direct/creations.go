@@ -109,7 +109,7 @@ func (j *creationJobs) pending() int {
 }
 
 // runCreationAsync is runAction for an async creation.
-func (s *Server) runCreationAsync(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func(*Lease) ([]string, error)) {
+func (s *Server) runCreationAsync(w http.ResponseWriter, l *Lease, req ActionRequest, bodyHash string, act core.Action, precheck func(*Lease) (admission, error)) {
 	if !core.DescriptorFor(act.Action).CreatesSession {
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "async applies only to creation verbs")
 		return
@@ -135,7 +135,8 @@ func (s *Server) runCreationAsync(w http.ResponseWriter, l *Lease, req ActionReq
 		s.answerExisting(w, l, req)
 		return
 	}
-	if _, err := precheck(l); err != nil {
+	adm, err := precheck(l)
+	if err != nil {
 		s.writePrecheckErr(w, l, req.Verb, err)
 		return
 	}
@@ -178,7 +179,7 @@ func (s *Server) runCreationAsync(w http.ResponseWriter, l *Lease, req ActionReq
 		return
 	}
 	launched = true
-	go s.creationJob(h, release, req.IdemKey, req.Verb, act, precheck)
+	go s.creationJob(h, release, req.IdemKey, req.Verb, act, adm, precheck)
 	s.awaitCreation(w, l, req.IdemKey, http.StatusAccepted)
 }
 
@@ -197,7 +198,7 @@ func (s *Server) answerExisting(w http.ResponseWriter, l *Lease, req ActionReque
 		writeErr(w, http.StatusServiceUnavailable, CodeUnavailable, "could not read the creation's record")
 		return
 	}
-	s.writeStatus(w, l, http.StatusAccepted, statusOf(v, s.cfg.Now()))
+	s.writeCreation(w, l, http.StatusAccepted, v)
 }
 
 // awaitCreation answers with the creation's status once it is terminal or
@@ -214,13 +215,13 @@ func (s *Server) awaitCreation(w http.ResponseWriter, l *Lease, key string, stat
 		}
 		st := statusOf(v, s.cfg.Now())
 		if st.Version >= 3 {
-			s.writeStatus(w, l, status, st)
+			s.writeCreation(w, l, status, v)
 			return
 		}
 		select {
 		case <-changed:
 		case <-deadline.C:
-			s.writeStatus(w, l, status, st)
+			s.writeCreation(w, l, status, v)
 			return
 		case <-l.Context().Done():
 			// The creation is recorded and continues; this reader is gone (or
@@ -245,7 +246,11 @@ func authCode(err error) string {
 
 // creationJob runs one admitted async creation on its worker lease h. Every
 // exit records an outcome and releases its reservation and lease.
-func (s *Server) creationJob(h *Lease, release func(), key, verb string, act core.Action, precheck func(*Lease) ([]string, error)) {
+//
+// pinned is the admission of the POST that recorded the key: an add-agent is
+// created only under the root incarnation admitted then, never under a root
+// that replaced it while the job was queued.
+func (s *Server) creationJob(h *Lease, release func(), key, verb string, act core.Action, pinned admission, precheck func(*Lease) (admission, error)) {
 	defer s.jobs.notify()
 	defer h.Done()
 	defer release()
@@ -268,8 +273,15 @@ func (s *Server) creationJob(h *Lease, release func(), key, verb string, act cor
 		notRun(authCode(err), "access ended while the creation was queued; it did not run")
 		return
 	}
-	if _, err := precheck(h); err != nil {
+	adm, err := precheck(h)
+	if err != nil {
 		_, code, msg := precheckCode(h, verb, err)
+		notRun(code, msg+"; it did not run")
+		return
+	}
+	if adm.rootInc != pinned.rootInc {
+		// The workgroup was deleted and its id reused while queued.
+		_, code, msg := precheckCode(h, verb, errNotFound)
 		notRun(code, msg+"; it did not run")
 		return
 	}
@@ -283,9 +295,9 @@ func (s *Server) creationJob(h *Lease, release func(), key, verb string, act cor
 	}
 	s.jobs.notify() // queued → preparing
 	exec, cancel := h.ExecContext(asyncCreateLimit)
-	newID, err := s.cfg.Backend.Apply(exec, act)
+	ident, err := s.applyCreation(exec, act, pinned)
 	cancel()
-	s.settle(h, key, verb, act, nil, newID, err)
+	s.settle(h, key, verb, act, nil, ident, err)
 }
 
 // creationStatus is GET PathCreations/{creation_id}[?wait=N&after=V]. With
@@ -336,13 +348,13 @@ func (s *Server) creationStatus(w http.ResponseWriter, r *http.Request) {
 			after = st.Version
 		}
 		if wait == 0 || st.Version > after || st.Version >= 3 {
-			s.writeStatus(w, l, http.StatusOK, st)
+			s.writeCreation(w, l, http.StatusOK, v)
 			return
 		}
 		select {
 		case <-changed:
 		case <-deadline.C:
-			s.writeStatus(w, l, http.StatusOK, st)
+			s.writeCreation(w, l, http.StatusOK, v)
 			return
 		case <-l.Context().Done():
 			if code := l.AuthEnded(); code != "" {

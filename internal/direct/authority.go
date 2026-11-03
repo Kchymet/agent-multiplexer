@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	amuxstore "amux/internal/store"
 )
 
 // Lifetimes. Configuration may only shorten them.
@@ -1004,23 +1006,25 @@ func (a *Authority) FinishAction(l *Lease, key string, ok bool, code, msg string
 	a.endAction(l, key, func(r *idemRecord) { r.State, r.OK, r.Code, r.Error = idemDone, ok, code, msg })
 }
 
-// Created reports whether this lease's grant created session id (a recorded,
-// successful creation verb returned it). It never grants access by itself; it
-// only lets the server wait for the daemon to publish the row it just minted.
-func (a *Authority) Created(l *Lease, id string) bool {
+// createdIncarnation reports whether this lease's grant recently created
+// session id (a recorded, successful creation verb returned it), and the
+// incarnation it was created with ("" for a record that predates them). It
+// never grants access by itself; it only lets the server wait for the daemon
+// to publish the exact row it just minted.
+func (a *Authority) createdIncarnation(l *Lease, id string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	g := a.state.Grants[l.ClientID]
 	if g == nil || g.RevokedAt != 0 || id == "" {
-		return false
+		return "", false
 	}
 	cutoff := a.now().Unix() - int64(createdRecent/time.Second)
 	for _, r := range g.Idem {
 		if r.State == idemDone && r.OK && r.NewID == id && r.At >= cutoff {
-			return true
+			return r.NewIncarnation, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // createdRecent bounds which creations Created considers: only a session made
@@ -1034,6 +1038,16 @@ const createdRecent = time.Minute
 func (a *Authority) FinishResult(l *Lease, key string, res ActionResponse) {
 	a.endAction(l, key, func(r *idemRecord) {
 		r.State, r.OK, r.NewID, r.RootID, r.Affected = idemDone, true, res.NewID, res.RootID, slices.Clone(res.Affected)
+	})
+}
+
+// FinishCreated is FinishResult for a creation: it records the created
+// session's and root's incarnations with the result, once, so every replay
+// can check that they still name the sessions that were created.
+func (a *Authority) FinishCreated(l *Lease, key string, res ActionResponse, ident amuxstore.Identity) {
+	a.endAction(l, key, func(r *idemRecord) {
+		r.State, r.OK, r.NewID, r.RootID, r.Affected = idemDone, true, res.NewID, res.RootID, nil
+		r.NewIncarnation, r.RootIncarnation = ident.Incarnation, ident.RootIncarnation
 	})
 }
 

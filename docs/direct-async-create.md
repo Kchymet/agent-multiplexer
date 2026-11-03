@@ -80,6 +80,23 @@ start over with a fresh `idem_key`:
   worktrees before failing. Never retry it automatically with a fresh
   `idem_key`; keep the key and check the machine's session list first.
 
+**Ran, but its result can no longer be confirmed** (only on a replay of a
+`ready` creation: an async POST of the same key, or the status GET; see
+[Replaying a creation](direct-access.md#replaying-a-creation)). No ids are
+returned, `uncertain` is `false`, and the creation **did run**: never retry
+it with a fresh `idem_key`:
+
+* `created_target_unavailable` — the created session or its workgroup no
+  longer exists as created (deleted, its id reused by another session, the
+  store replaced, or the member moved).
+* `created_identity_unverifiable` — recorded before the server kept session
+  identities.
+
+A status that cannot be checked right now answers `503
+created_identity_unavailable` instead of a status (both the POST and the
+GET): the record is unchanged, so poll again with the same key or id. It is
+never `unavailable`.
+
 **Unknown:**
 
 * `idem_ambiguous` with `uncertain: true` — sent, outcome unknown: the
@@ -97,7 +114,12 @@ even if a later retry is refused (`denied`, `not_found`, …). The refused codes
 are `400 bad_request`, `403 denied`,
 `404 not_found`, `409 archived`, `409 unsupported_verb`,
 `422 not_in_catalog`, `429 rate_limited`, `409 capacity_exhausted`,
-`503 unavailable`. Not proof of not-run: `422 rejected`, `409 idem_ambiguous`,
+`503 unavailable`, `503 daemon_upgrade_required` (the local daemon predates
+creation identities; the host upgrades and restarts amux — it is not in the
+zero-effect status list above, because it can also be recorded under a key in
+the rare case the daemon was swapped for an older one between the check and
+the creation). Not proof of not-run: `503 created_identity_unavailable` (a
+replay whose recorded creation ran), `422 rejected`, `409 idem_ambiguous`,
 `409 idem_in_progress` (it is running), `422 idem_conflict` (the key already
 names another request), and **any `401`**. A sync creation revoked after
 dispatch answers `401 auth.revoked` with an unknown outcome, and an async POST
@@ -131,6 +153,13 @@ machine's session list.
 * Every answer that carries a `CreationStatus` — the POST (fresh or replay)
   and the GET — is withheld with the reader's auth code if its own access
   ended meanwhile; the creation itself is unaffected.
+* A `ready` status is answered only after the created session's and root's
+  store incarnations are checked against the machine (access is checked
+  before and after that read). An add-agent job is pinned to the workgroup
+  root incarnation admitted by its POST: a root deleted and recreated under
+  the same id while the job is queued fails it with `not_found` before
+  dispatch, and the daemon refuses the creation atomically with its insert if
+  the root changes later still.
 
 ## Execution
 

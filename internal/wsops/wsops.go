@@ -6,6 +6,7 @@ package wsops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -56,7 +57,8 @@ func CreateWorkspace(ctx context.Context, name string, defaultAgent *AgentSpec) 
 	if defaultAgent != nil {
 		grants = &defaultAgent.Repos
 	}
-	return createWorkspace(ctx, name, Coordinator{}, task, defaultAgent, grants)
+	id, _, err := createWorkspace(ctx, name, Coordinator{}, task, defaultAgent, grants)
+	return id, err
 }
 
 // Coordinator selects a workgroup coordinator's runtime. Zero means the
@@ -99,31 +101,37 @@ func CoordinatorKind(requested string) string {
 	return agent.Canonical(requested)
 }
 
-func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, error) {
+// The returned identity is the new root's (store.CreateSession); it is set
+// whenever the root row was inserted, even if a later step failed.
+func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt string, defaultAgent *AgentSpec, selectedGrants *[]string) (string, store.Identity, error) {
 	kind := CoordinatorKind(coord.Kind)
 	if !agent.Known(kind) {
-		return "", fmt.Errorf("unknown coordinator kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
+		return "", store.Identity{}, fmt.Errorf("unknown coordinator kind %q\n  known kinds: %s", kind, strings.Join(agent.Kinds(), ", "))
 	}
 	db, err := store.Open()
 	if err != nil {
-		return "", err
+		return "", store.Identity{}, err
 	}
 	defer db.Close()
 
 	if defaultAgent != nil && !agent.Known(defaultAgent.Agent) {
-		return "", fmt.Errorf("unknown agent kind %q", defaultAgent.Agent)
+		return "", store.Identity{}, fmt.Errorf("unknown agent kind %q", defaultAgent.Agent)
 	}
 	if selectedGrants != nil {
 		for _, repo := range *selectedGrants {
 			if _, ok, err := db.Repo(repo); err != nil {
-				return "", err
+				return "", store.Identity{}, err
 			} else if !ok {
-				return "", fmt.Errorf("unknown repo %q", repo)
+				return "", store.Identity{}, fmt.Errorf("unknown repo %q", repo)
 			}
 		}
 	}
 
-	rootID := db.NewID()
+	rootID, release, err := reserveID(db)
+	if err != nil {
+		return "", store.Identity{}, err
+	}
+	defer release()
 	kind = agent.Canonical(kind)
 	root := store.Session{
 		ID: rootID, RootID: "", Name: strings.TrimSpace(name), Scope: store.ScopeWork,
@@ -136,10 +144,12 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 		root.Mode = store.ModeTask
 	}
 	if err := os.MkdirAll(root.Dir, 0o755); err != nil {
-		return "", err
+		return "", store.Identity{}, err
 	}
-	if err := db.PutSession(root); err != nil {
-		return "", err
+	// A plain INSERT: a new workgroup never overwrites an existing row.
+	ident, err := db.CreateSession(root, "")
+	if err != nil {
+		return "", store.Identity{}, err
 	}
 	// A workgroup that names repositories is limited to exactly those (that is
 	// what "a single-repo workgroup" means). One that names none — however it
@@ -149,21 +159,22 @@ func createWorkspace(ctx context.Context, name string, coord Coordinator, prompt
 	// narrows that afterwards (coordinator-set-repos).
 	if selectedGrants == nil || len(*selectedGrants) == 0 {
 		if err := db.SetCoordinatorRepoGrantsAllTracked(rootID); err != nil {
-			return rootID, err
+			return rootID, ident, err
 		}
 	} else if err := db.SetCoordinatorRepoGrants(rootID, *selectedGrants); err != nil {
-		return rootID, err
+		return rootID, ident, err
 	}
 	if defaultAgent != nil {
 		// The task belongs to the coordinator; a first member starts idle and is
-		// dispatched by it, so the same work is never run twice.
+		// dispatched by it, so the same work is never run twice. It joins the
+		// exact root just created.
 		spec := *defaultAgent
 		spec.Prompt = ""
-		if _, err := addAgent(ctx, db, rootID, spec); err != nil {
-			return rootID, err
+		if _, _, err := addAgent(ctx, db, rootID, spec, ident.Incarnation); err != nil {
+			return rootID, ident, err
 		}
 	}
-	return rootID, nil
+	return rootID, ident, nil
 }
 
 // actionNewRepoAgentLegacy is the retired verb that used to create a hidden
@@ -183,31 +194,43 @@ func AddAgent(ctx context.Context, rootID string, spec AgentSpec) (store.Session
 	if !ok || !root.IsRoot() {
 		return store.Session{}, fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", rootID)
 	}
-	return addAgent(ctx, db, rootID, spec)
+	s, _, err := addAgent(ctx, db, rootID, spec, "")
+	return s, err
 }
 
-func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) (store.Session, error) {
+// addAgent prepares and records one member. With expectRoot set the member
+// joins only that incarnation of rootID: it is checked before any preparation
+// and again atomically with the insert (store.CreateSession). A refusal after
+// preparation removes exactly what this call prepared.
+func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec, expectRoot string) (store.Session, store.Identity, error) {
 	// Reject unknown harness kinds before anything is persisted: no action can
 	// edit a session's kind after creation, so a typo'd --agent would otherwise
 	// mint a session that errors on every launch and can only be deleted.
 	if !agent.Known(spec.Agent) {
-		return store.Session{}, fmt.Errorf("unknown agent kind %q\n  known kinds: %s", spec.Agent, strings.Join(agent.Kinds(), ", "))
+		return store.Session{}, store.Identity{}, fmt.Errorf("unknown agent kind %q\n  known kinds: %s", spec.Agent, strings.Join(agent.Kinds(), ", "))
 	}
 	root, ok, err := db.GetSession(rootID)
 	if err != nil {
-		return store.Session{}, err
+		return store.Session{}, store.Identity{}, err
 	}
 	if !ok || !root.IsRoot() {
-		return store.Session{}, fmt.Errorf("no such workgroup %q", rootID)
+		return store.Session{}, store.Identity{}, fmt.Errorf("no such workgroup %q", rootID)
+	}
+	if expectRoot != "" {
+		// The early check: refuse before preparing anything. CreateSession
+		// checks again atomically with the insert.
+		if err := checkRootIdentity(db, rootID, expectRoot); err != nil {
+			return store.Session{}, store.Identity{}, err
+		}
 	}
 	if err := db.CheckCoordinatorRepos(rootID, spec.Repos); err != nil {
-		return store.Session{}, err
+		return store.Session{}, store.Identity{}, err
 	}
-	agentID := db.NewID()
-	dir := store.AgentDir(rootID, agentID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return store.Session{}, err
+	agentID, dir, release, err := reserveAgentDir(db, rootID)
+	if err != nil {
+		return store.Session{}, store.Identity{}, err
 	}
+	defer release()
 	// The branch scheme lives in one place (core.BranchFor); everything else — the
 	// worktree, the agent guide, the doctor reconciliation — derives it from there.
 	branch := core.BranchFor(rootID, agentID)
@@ -224,10 +247,10 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 		}
 		req, err := checkoutRequest(repo, agentID, filepath.Join(dir, repoName), branch, core.SessionsDir())
 		if err != nil {
-			return store.Session{}, err
+			return store.Session{}, store.Identity{}, err
 		}
 		if err := git.AddCheckout(ctx, req); err != nil {
-			return store.Session{}, err
+			return store.Session{}, store.Identity{}, err
 		}
 		repos = append(repos, repoName)
 	}
@@ -246,18 +269,143 @@ func addAgent(ctx context.Context, db *store.DB, rootID string, spec AgentSpec) 
 	// Write the guide from the session record so it's correct immediately; every
 	// launch rewrites it from the current record (see AgentCommand).
 	if err := optionalPreparation("prepare agent guide", writeAgentGuide(a)); err != nil {
-		return store.Session{}, err
+		return store.Session{}, store.Identity{}, err
 	}
 	// Seed the agent's private harness config from the user's (the template) now,
 	// so what the agent starts with is what the user had at creation — not
 	// whatever the template holds by the time it first launches.
 	if err := ensureConfigHome(a); err != nil {
-		return store.Session{}, err
+		return store.Session{}, store.Identity{}, err
 	}
-	if err := db.PutSession(a); err != nil {
-		return store.Session{}, err
+	beforeInsert(a)
+	ident, err := db.CreateSession(a, expectRoot)
+	if err != nil {
+		if errors.Is(err, store.ErrRootChanged) || errors.Is(err, store.ErrSessionExists) {
+			// A late refusal: nothing was recorded, so remove what this call
+			// prepared for the session that will never exist. The id is still
+			// reserved here; records keyed by it alone are removed only if no
+			// row has it (another writer that does not reserve could own them).
+			owned, removeTree := preparedOwnership(db, a)
+			if cleanupErr := removePreparedAgent(ctx, db, a, owned, removeTree); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("clean up prepared agent %s: %w", a.ID, cleanupErr))
+			}
+		}
+		return store.Session{}, store.Identity{}, err
 	}
-	return a, nil
+	return a, ident, nil
+}
+
+// newAgentID allocates a candidate member id; a test seam for deterministic
+// id collisions.
+var newAgentID = func(db *store.DB) string { return db.NewID() }
+
+// reserveAgentDir reserves a member id (reserveID) and creates its agent
+// directory with an exclusive mkdir: only a directory this call atomically
+// created is ever removed by a late refusal, and an occupied path (leftover
+// files) is never adopted — the id is released and another one tried.
+func reserveAgentDir(db *store.DB, rootID string) (string, string, func(), error) {
+	if err := os.MkdirAll(store.RootDir(rootID), 0o755); err != nil {
+		return "", "", nil, err
+	}
+	for range maxReserveAttempts {
+		id, release, err := reserveID(db)
+		if err != nil {
+			return "", "", nil, err
+		}
+		dir := store.AgentDir(rootID, id)
+		switch err := os.Mkdir(dir, 0o755); {
+		case err == nil:
+			return id, dir, release, nil
+		case errors.Is(err, os.ErrExist):
+			release()
+			continue
+		default:
+			release()
+			return "", "", nil, err
+		}
+	}
+	return "", "", nil, fmt.Errorf("could not reserve an agent directory under workgroup %q", rootID)
+}
+
+// beforeInsert is a test seam that runs after an agent is fully prepared and
+// immediately before its row is inserted.
+var beforeInsert = func(store.Session) {}
+
+// checkRootIdentity refuses unless rootID is an existing root whose
+// incarnation is exactly expect.
+func checkRootIdentity(db *store.DB, rootID, expect string) error {
+	ids, err := db.SessionIdentities([]string{rootID})
+	if err != nil {
+		return err
+	}
+	cur, ok := ids[rootID]
+	if !ok || cur.RootID != "" || cur.Incarnation == "" || cur.Incarnation != expect {
+		return store.ErrRootChanged
+	}
+	return nil
+}
+
+// removePreparedAgent undoes addAgent's preparation of a, which was never
+// recorded. The agent directory (with the checkouts and their private common
+// Git directories inside it, and the config home) was created exclusively by
+// this call and is always removed. The records keyed by the id alone — each
+// checkout's layout record and the config seed manifest — are removed only
+// when owned: the caller still holds the id's reservation and no row has the
+// id. Otherwise they are left in place, and RemoveCheckout (which follows a
+// layout record) is not used, so nothing another session owns is touched.
+func removePreparedAgent(ctx context.Context, db *store.DB, a store.Session, owned, removeTree bool) error {
+	managedRoot, err := sessionStorageRoot(a.Dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	if owned {
+		for _, repoName := range store.SplitRepos(a.Repo) {
+			repo, ok, repoErr := db.Repo(repoName)
+			if repoErr != nil || !ok {
+				errs = append(errs, fmt.Errorf("repository %q: %v", repoName, repoErr))
+				continue
+			}
+			wt := filepath.Join(a.Dir, repoName)
+			if err := git.RemoveCheckout(ctx, repo.GitDir, wt, a.Branch, managedRoot,
+				gitStagingDir(), gitLayoutPath(a.ID, repoName)); err != nil {
+				errs = append(errs, fmt.Errorf("remove repo %q: %w", repoName, err))
+			}
+		}
+		if spec, ok := agent.HarnessFor(a.Agent).Config(a); ok {
+			cfghome.Forget(spec)
+		}
+	}
+	if removeTree {
+		if err := git.RemoveManagedTree(a.Dir, managedRoot, gitStagingDir()); err != nil {
+			errs = append(errs, fmt.Errorf("remove agent directory: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// preparedOwnership decides what a refused creation of a may remove, from
+// the row (if any) that now has its id. The caller still holds the id's
+// reservation.
+//   - No row: everything prepared is this call's (owned, and the tree).
+//   - A row whose Dir is exactly a.Dir: a writer that does not reserve ids (an
+//     older binary's add-agent, whose MkdirAll adopts an existing directory)
+//     now owns the directory; nothing is removed.
+//   - A row elsewhere: only this call's exclusively created tree is removed;
+//     the id-keyed records may be that row's.
+//   - The row cannot be read: nothing is removed.
+func preparedOwnership(db *store.DB, a store.Session) (owned, removeTree bool) {
+	row, found, err := db.GetSession(a.ID)
+	switch {
+	case err != nil:
+		return false, false
+	case !found:
+		return true, true
+	case filepath.Clean(row.Dir) == filepath.Clean(a.Dir):
+		return false, false
+	default:
+		return false, true
+	}
 }
 
 // ensureConfigHome seeds the agent's private harness configuration — a copy of
@@ -469,7 +617,7 @@ func MoveAgent(ctx context.Context, agentID, targetRootID string) (string, error
 	created := ""
 	if strings.TrimSpace(targetRootID) == "" {
 		repos := store.SplitRepos(a.Repo)
-		newRoot, err := createWorkspace(ctx, defaultStr(a.Name, a.Repo), Coordinator{}, "", nil, &repos)
+		newRoot, _, err := createWorkspace(ctx, defaultStr(a.Name, a.Repo), Coordinator{}, "", nil, &repos)
 		if err != nil {
 			return "", err
 		}
@@ -865,25 +1013,101 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 		return "", fmt.Errorf("%q was removed: amux is workgroups-only — create a workgroup limited to the repo instead\n  amux do new-workgroup -f repos=%s -f prompt=\"…\"   (or: amux workgroup repo %s)",
 			actionNewRepoAgentLegacy, repo, repo)
 	case core.ActionAddAgent:
-		// Repos come straight from the fuzzy picker; zero is allowed (repo-less
-		// agent). A workgroup no longer carries repos of its own to fall back to.
-		s, err := AddAgent(ctx, a.ID, AgentSpec{
-			Agent:  agentOf(a.Fields),
-			Repos:  store.SplitRepos(a.Fields["repos"]),
-			Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
-		})
-		return s.ID, err
+		ident, err := applyAddAgent(ctx, a, "")
+		return ident.ID, err
 	case core.ActionAddRepo:
 		_, err := AddRepoSource(ctx, a.Fields["source"])
 		return "", err
-	case core.ActionNewWorkgroup:
-		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
-		repos := store.SplitRepos(a.Fields["repos"])
-		var grants *[]string
-		if _, explicit := a.Fields["repos"]; explicit {
-			grants = &repos
+	case core.ActionNewWorkgroup, core.ActionCreateWorkspace:
+		id, _, err := applyNewWorkgroup(ctx, a)
+		return id, err
+	}
+	// A verb that reaches here is one no dispatch path claims. The CLI screens
+	// these before they leave the machine, so this is the answer for anything
+	// else on the socket — teach the vocabulary rather than just rejecting it.
+	return "", fmt.Errorf("unknown action %q\n  valid actions: %s",
+		a.Action, strings.Join(core.ControlActions(), ", "))
+}
+
+// ApplyIdentity runs one creation verb (add-agent, new-workgroup,
+// create-workspace) like ApplyResult and returns the created session's
+// identity (store.Identity) instead of its bare id. With expectRoot set, an
+// add-agent creates the member only under exactly that incarnation of its
+// workgroup root, checked before preparation and again atomically with the
+// insert; any other verb, or a root creation, with expectRoot is refused.
+// expectRoot can only refuse a creation, never redirect or widen one.
+//
+// It is the host-only creation path: only the daemon's authenticated host
+// socket reaches it, on an explicit opt-in (see daemon.Client.DispatchIdentity).
+func ApplyIdentity(ctx context.Context, a core.Action, expectRoot string) (store.Identity, error) {
+	switch a.Action {
+	case core.ActionAddAgent:
+		return applyAddAgent(ctx, a, expectRoot)
+	case core.ActionNewWorkgroup, core.ActionCreateWorkspace:
+		if expectRoot != "" {
+			return store.Identity{}, store.ErrRootChanged
 		}
-		var def *AgentSpec
+		_, ident, err := applyNewWorkgroup(ctx, a)
+		if err != nil {
+			return store.Identity{}, err
+		}
+		return ident, nil
+	}
+	return store.Identity{}, fmt.Errorf("%q does not create a session; creation identity applies only to creation verbs", a.Action)
+}
+
+// DispatchIdentity is Dispatch for ApplyIdentity: the same open pull-request
+// guard and engine stop, then the creation, returning its identity.
+func DispatchIdentity(ctx context.Context, a core.Action, expectRoot string, stopEngine func(id string)) (store.Identity, error) {
+	if err := GuardOpenPRs(ctx, a); err != nil {
+		return store.Identity{}, err
+	}
+	if stopEngine != nil && core.DescriptorFor(a.Action).StopsEngine {
+		stopEngine(a.ID)
+	}
+	return ApplyIdentity(ctx, a, expectRoot)
+}
+
+// applyAddAgent is add-agent from its action fields. Repos come straight from
+// the fuzzy picker; zero is allowed (repo-less agent). A workgroup no longer
+// carries repos of its own to fall back to.
+func applyAddAgent(ctx context.Context, a core.Action, expectRoot string) (store.Identity, error) {
+	db, err := store.Open()
+	if err != nil {
+		return store.Identity{}, err
+	}
+	defer db.Close()
+	root, ok, err := db.GetSession(a.ID)
+	if err != nil {
+		// A read failure is not a replaced root.
+		return store.Identity{}, err
+	}
+	if !ok || !root.IsRoot() {
+		if expectRoot != "" {
+			return store.Identity{}, store.ErrRootChanged
+		}
+		return store.Identity{}, fmt.Errorf("no such workgroup %q\n  `amux workgroup ls` lists them", a.ID)
+	}
+	_, ident, err := addAgent(ctx, db, a.ID, AgentSpec{
+		Agent:  agentOf(a.Fields),
+		Repos:  store.SplitRepos(a.Fields["repos"]),
+		Prompt: a.Fields["prompt"], Mode: a.Fields["mode"], Model: a.Fields["model"],
+	}, expectRoot)
+	return ident, err
+}
+
+// applyNewWorkgroup is new-workgroup and create-workspace from their action
+// fields. The returned id is the root's even when a later step failed (as
+// ApplyResult always reported it); the identity is the root's.
+func applyNewWorkgroup(ctx context.Context, a core.Action) (string, store.Identity, error) {
+	repos := store.SplitRepos(a.Fields["repos"])
+	var grants *[]string
+	if _, explicit := a.Fields["repos"]; explicit {
+		grants = &repos
+	}
+	var def *AgentSpec
+	if a.Action == core.ActionNewWorkgroup {
+		prompt := baselinePrompt(a.Fields["prompt"], a.Fields["linear"])
 		// The workgroup root is its coordinator session: the prompt is its task
 		// (its goal, on the default runtime) and `coordinator`/`coordinator_model`
 		// select its runtime. `agent`/`model`/`mode` describe the first member
@@ -893,31 +1117,19 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 			def = &AgentSpec{Agent: agentOf(a.Fields), Repos: repos, Mode: a.Fields["mode"], Model: a.Fields["model"]}
 		}
 		return createWorkspace(ctx, a.Fields["name"], coordinatorOf(a.Fields), prompt, def, grants)
-	case core.ActionCreateWorkspace:
-		// The CLI's `workgroup create`/`new`: create a workgroup, optionally seeding
-		// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
-		// with an explicit mode/model. The prompt is the coordinator's task, exactly
-		// as for new-workgroup. When the interactive flow configures its own agents
-		// it passes defaultAgent="" and follows up with add-agent.
-		var def *AgentSpec
-		repos := store.SplitRepos(a.Fields["repos"])
-		var grants *[]string
-		if _, explicit := a.Fields["repos"]; explicit {
-			grants = &repos
-		}
-		if a.Fields["defaultAgent"] == "1" {
-			def = &AgentSpec{
-				Agent: agentOf(a.Fields), Repos: repos,
-				Mode: a.Fields["mode"], Model: a.Fields["model"],
-			}
-		}
-		return createWorkspace(ctx, a.Fields["name"], coordinatorOf(a.Fields), a.Fields["prompt"], def, grants)
 	}
-	// A verb that reaches here is one no dispatch path claims. The CLI screens
-	// these before they leave the machine, so this is the answer for anything
-	// else on the socket — teach the vocabulary rather than just rejecting it.
-	return "", fmt.Errorf("unknown action %q\n  valid actions: %s",
-		a.Action, strings.Join(core.ControlActions(), ", "))
+	// The CLI's `workgroup create`/`new`: create a workgroup, optionally seeding
+	// one default agent (Fields["defaultAgent"]=="1") scoped to the given repos
+	// with an explicit mode/model. The prompt is the coordinator's task, exactly
+	// as for new-workgroup. When the interactive flow configures its own agents
+	// it passes defaultAgent="" and follows up with add-agent.
+	if a.Fields["defaultAgent"] == "1" {
+		def = &AgentSpec{
+			Agent: agentOf(a.Fields), Repos: repos,
+			Mode: a.Fields["mode"], Model: a.Fields["model"],
+		}
+	}
+	return createWorkspace(ctx, a.Fields["name"], coordinatorOf(a.Fields), a.Fields["prompt"], def, grants)
 }
 
 // baselinePrompt weaves a Linear issue link and a description into one prompt for

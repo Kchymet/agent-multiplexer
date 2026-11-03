@@ -50,7 +50,7 @@ func TestSingleRepoWorkgroupCeilingAcrossAddRescopeAndMove(t *testing.T) {
 		t.Fatalf("denied rescope created worktree: %v", err)
 	}
 	web := []string{"web"}
-	target, err := createWorkspace(ctx, "web only", Coordinator{}, "", nil, &web)
+	target, _, err := createWorkspace(ctx, "web only", Coordinator{}, "", nil, &web)
 	if err != nil {
 		t.Fatal(err)
 	}
