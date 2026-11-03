@@ -41,7 +41,7 @@ user can already do these things from a direct client UI.
 | `session-action goal` | actions | respond | live (below) | backend parity. A Codex native goal is unit/daemon evidence only |
 | `session-action permission` | actions | approve | live (below) | backend parity after the #299 fix |
 | Acting on a just-created id before the next inventory | Any route naming a session the same grant created within the last minute | the verb's own | live `TestDirectLiveFollowUpOnNewIDBeforePoll` | **fixed in #299** (see below) |
-| Machine creation status (`daemon.create_status`: queued → preparing → ready \| failed) | none: direct creation is synchronous | — | — | **gap** (see below) |
+| Machine creation status (`daemon.create_status`: queued → preparing → ready \| failed) | `"async": true` on a creation, then `GET /direct/v1/creations/{creation_id}` | create | unit (acceptance matrix, fixtures); live `TestDirectLiveAsyncSlowCreation`, `TestDirectLiveAsyncRevokeAfterSendIsUncertain` | backend parity; outcome past the 10-minute bound or a restart after dispatch stays `uncertain` (see below) |
 | Harness/model/repo discovery | `GET /direct/v1/capabilities` catalog | read (the catalog needs create) | unit; live repos and ceilings | backend parity, and direct is wider: the relay advertises harnesses only. Models are plain names only |
 | `account-request` with `status` | `GET /direct/v1/accounts` | accounts, `all_sessions` | unit (gate on route, capabilities, list, watch, watch update; projection; attribution matrix); live `TestDirectLiveAccounts` | backend parity |
 | `account-ceremony`, `default`, `login`, `logout`, `rebind` | none | — | `provider/accounts.go` refuses all but status remotely | not a cloud function: local CLI/TUI only |
@@ -119,14 +119,17 @@ session reused the id, the replay points at the new session. A deterministic
 incarnation identity is being designed separately; #299 makes no protocol
 change for it.
 
-### Gap: machine creation status
+### Machine creation status
 
 Harness wraps machine creation asynchronously, because fetching repos and
 creating worktrees can be slow. Direct creation is synchronous under the
-60-second execution bound, so a creation slower than that ends
-`idem_ambiguous`. It never runs again under its key; the client re-reads the
-inventory. Matching the cloud would need an asynchronous creation-status
-route. That is not built.
+60-second execution bound by default; a client that sends `"async": true`
+gets the same queued → preparing → ready | failed flow from
+`GET /direct/v1/creations/{creation_id}`, with no Harness traffic
+([direct-async-create.md](direct-async-create.md)). Remaining limit: a creation
+that outlives the 10-minute bound, or whose server restarted after sending, is
+reported `uncertain` (it may exist) because the daemon has no creation request
+id to reconcile it.
 
 ### Panes: not a machine-session workflow
 

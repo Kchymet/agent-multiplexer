@@ -548,8 +548,9 @@ cookies.
 | 409 | `unsupported_verb` | — |
 | 409 | `idem_in_progress` | — |
 | 409 | `idem_ambiguous` | — |
+| 409 | `idem_expired` | The key was already used and its recorded result has expired. Terminal for this key: it will not run again, and this is **not** proof that it did not run. Never retry it automatically with the same or a fresh key; check the machine (session list, transcript) first ([fixture](direct/fixtures/idem-retention-v1/api-error-idem-expired.json)) |
 | 421 | `endpoint_not_bound` | — |
-| 422 | `rejected` | The daemon answered not-OK. This is not proof of no side effect (a stop can fail after the interrupt was delivered); repeating a stop is safe |
+| 422 | `rejected` | The daemon answered not-OK. This is a known reply, not proof of no side effect (a stop can fail after the interrupt was delivered; a creation may have made the session, then failed to start it, or left a partial workgroup or worktree). Repeating a stop is safe; never retry a rejected creation automatically with a fresh `idem_key` |
 | 422 | `idem_conflict` | — |
 | 422 | `not_in_catalog` | A creation names a harness or repo this machine or target workgroup does not offer ([fixture](direct/fixtures/workflow-v1/api-error-not-in-catalog.json)) |
 | 409 | `capacity_exhausted` | The grant holds too many unresolved or recent actions; retrying will not help. Enroll again ([fixture](direct/fixtures/v1/api-error-capacity.json)) |
@@ -602,10 +603,48 @@ body.
 - **Outcome unknown.** Cancellation, or a transport failure after dispatch,
   is recorded as ambiguous. That key never executes again, and its records are
   never pruned.
+- **Retention.** A completed record keeps its full result (replayed as
+  above) for 24 hours from admission. After that it is compacted to a
+  spent-key tombstone that lasts as long as the grant. The same key and body
+  then answer `409 idem_expired` and never run again; a different body under
+  that key is still `422 idem_conflict`. This holds for every action verb and
+  both creation routes, sync and async; an async creation's status `GET`
+  answers `404 not_found` once its retention has passed.
 - **Capacity.** A grant can hold 1,024 records at most. Unresolved ones count
   toward that, so at the limit new actions fail closed with `409
-  capacity_exhausted`, and the client enrolls again.
+  capacity_exhausted`, and the client enrolls again. It can also hold 16,384
+  tombstones (each two 16-hex-digit hash prefixes, 38 bytes of JSON). When
+  they are full, nothing is evicted: an expired record is kept whole instead
+  (and still answers `idem_expired`, never its old result), so the grant then
+  reaches the 1,024 limit and fails closed the same way. A full set is about
+  620 KB of `grants.json` per grant, rewritten with every commit; that is the
+  accepted cost of the bound.
 - **Crashes.** Exactly-once execution across a process crash is not claimed.
+
+**Client handling of `idem_key`.** Use a fresh random key for each user
+intent, and reuse it only to retry that same intent with the identical body.
+Treat `idem_expired`, like `idem_ambiguous`, as terminal for the key: show the
+user that the earlier attempt may have run, and only send the intent again
+under a new key after the user (or a check of the machine) confirms it is
+still wanted. It is never a transient error, and it never means "safe to
+resend".
+
+**Limitations.** A tombstone is keyed by 64-bit prefixes of
+`sha256(idem_key)` and of the body hash; a collision can only refuse a
+request, never run one twice. Protection ends with the grant record. It is not
+retroactive: a server before this change deleted completed records after 24
+hours, and those keys are unknown to it now, so a client must still never
+reuse a key it has used before. The registry moved to schema version 3 for the
+tombstones. An older binary cannot use a version-3 registry: it refuses to
+load it rather than silently dropping them, and direct access stays
+unavailable until a binary with this change runs again. Any other way back
+(an older registry, or enrolling clients again) loses the replay history, and
+clients must still not reuse keys. A version-1 or -2 registry migrates forward
+with one atomic file replace on open. If that write fails before the rename,
+the old file is left in place; if it fails after the rename (the directory
+sync), the complete version-3 file may be in place. Either way that open
+fails, and the next open loads whichever complete file is there; the registry
+is never partially written or reset.
 
 **Transcripts.** They use amux's own sequence space and never reuse a relay
 cursor. The stream ends with a terminal SSE event:
@@ -770,6 +809,14 @@ again under its key:
 - a daemon success with no usable id.
 
 All of these answer `idem_ambiguous`.
+
+**Asynchronous creation.** A creation that may outlive the 60-second
+synchronous bound (a large repo fetch or worktree preparation) can be sent
+with `"async": true`: it answers `202` with a `creation_id` at once and is
+followed with `GET /direct/v1/creations/{creation_id}` (queued → preparing →
+ready | failed, long-pollable). `async_create` in capabilities advertises it.
+Clients that do not send `async` are unaffected. See
+[direct-async-create.md](direct-async-create.md).
 
 **Per-session caps.** Inventory rows add `goal`, `permission`,
 `start`, `rename`, `archive`, `unarchive` and `add_agent`. Each is omitted

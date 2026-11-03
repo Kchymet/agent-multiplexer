@@ -41,8 +41,11 @@ type fakeBackend struct {
 	catalog       MachineCatalog
 	catalogs      atomic.Int64
 	newID         string // the id Apply reports (creation verbs)
-	accounts      hp.AccountSnapshot
-	accountCalls  atomic.Int64
+	// gate, when set, holds Apply (after it counts as dispatched) until a value
+	// is received or ctx ends: a slow creation the test releases explicitly.
+	gate         chan struct{}
+	accounts     hp.AccountSnapshot
+	accountCalls atomic.Int64
 }
 
 func (f *fakeBackend) Accounts(ctx context.Context) (hp.AccountSnapshot, error) {
@@ -113,6 +116,16 @@ func (f *fakeBackend) Apply(ctx context.Context, a core.Action) (string, error) 
 	if f.blockApply.Load() {
 		<-ctx.Done()
 		return "", ctx.Err()
+	}
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	f.applied <- a
 	f.mu.Lock()
