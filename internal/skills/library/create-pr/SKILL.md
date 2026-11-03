@@ -64,12 +64,23 @@ You are in an amux worktree. The rules from your workspace guide (`CLAUDE.md`, o
   merging only adds commits, so every push stays a fast-forward. This repo
   squash-merges, so the merge commits never land on the default branch. Resolve
   any conflicts now, on your branch, before you build a PR on a stale base.
+
+  **Stacked PR?** If your work is stacked on a predecessor branch (see
+  "Stacked PRs" below), merge that branch instead, fetched from `origin` by
+  name — never from a sibling's worktree:
+
+  ```sh
+  P=<predecessor-branch>
+  git fetch origin "+refs/heads/$P:refs/remotes/origin/$P"
+  git merge --no-edit "origin/$P"
+  ```
 - **Green before you open.** Build and run the project's checks. Read the repo's
   `Makefile`/CI config and run what it runs (e.g. `make check` / `go build ./...`
   / `go test ./...`). Do not open a PR on a red tree — a reviewer's first signal
   should be green, not your CI failure.
 - **Read your own diff** before committing: `git status` then
-  `git diff origin/HEAD...HEAD` (already-committed work) and `git diff` (unstaged).
+  `git diff origin/HEAD...HEAD` (already-committed work; for a stacked PR,
+  `git diff origin/<predecessor-branch>...HEAD`) and `git diff` (unstaged).
   Confirm every change is intentional and in scope. If you spot debug prints,
   stray files, or unrelated edits, clean them up.
 
@@ -137,6 +148,10 @@ is `master`, but don't hardcode it):
 gh repo view --json defaultBranchRef -q .defaultBranchRef.name
 ```
 
+**Stacked PR:** the base is your predecessor's branch instead (the one your
+coordinator named, e.g. `amux/<wg>-<predecessor>`), and the body starts with
+`Stacked on #<parent> — merge that first.` See "Stacked PRs" below.
+
 Create the PR against that base, head = your branch, with a HEREDOC body. This
 project's PRs use **What / Why / Change / Test** sections and a Claude Code
 footer:
@@ -170,6 +185,32 @@ You may add `--draft` while the work is genuinely still in progress (e.g. you wa
 CI to run before you're finished). If you do, you **must** mark it ready in
 Phase 4 once the work is done — a draft is a temporary state, not a way to keep a
 PR from being merged. Never put "keep this PR draft" or similar in the PR body.
+
+### Stacked PRs
+
+When related changes touch many of the same files, a coordinator may stack them:
+each layer is its own branch and PR whose base is the layer below it. Use native
+`gh` and `git` only — no stacking tools — and the same merge-only, ordinary-push
+policy as any other PR:
+
+- **Start from a pushed predecessor.** Begin only once the predecessor branch
+  is pushed and fetchable from `origin` (`git ls-remote origin
+  <predecessor-branch>` prints it); if it is not, tell your coordinator rather
+  than building on the default branch.
+- **Base and head are explicit.** Head is your own assigned branch (you never
+  switch branches); base is the predecessor's branch:
+  `gh pr create --base <predecessor-branch> --head "$(git branch --show-current)" …`.
+  Check with `gh pr view <n> --json baseRefName,headRefName`.
+- **Link the dependency.** Start your body with `Stacked on #<parent> — merge
+  that first.`; ask the parent's owner (or your coordinator) to add
+  `Followed by #<n>` to the parent PR.
+- **Propagate upstream changes by merging.** When the predecessor branch moves,
+  fetch and merge it by name as in Phase 0, re-run checks, `git push`. Never
+  rewrite pushed history or force-push.
+- **Land in dependency order, parent before child, onto the final target.**
+  Never merge a PR whose base is still an unmerged predecessor branch — it
+  would land there, not on the final target.
+  After the parent lands, see babysit-pr "After a stacked parent lands".
 
 ## Phase 4 — See the PR through (babysit or hand off)
 
