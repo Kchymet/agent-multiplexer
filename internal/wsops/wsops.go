@@ -784,6 +784,12 @@ func AgentEnv(s store.Session) []string {
 	if spec, ok := agent.HarnessFor(s.Agent).Config(s); ok {
 		env = append(env, spec.EnvEntries()...)
 	}
+	if agent.HarnessFor(s.Agent).Kind() == "claude" {
+		// amux owns the harness update lifecycle (internal/harnessbin): Claude
+		// Code must not replace itself under a running session, and a sandboxed
+		// pane cannot write the user's own install anyway.
+		env = append(env, "DISABLE_AUTOUPDATER=1")
+	}
 	return env
 }
 

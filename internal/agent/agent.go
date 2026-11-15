@@ -42,11 +42,12 @@ func CanonicalModel(kind, model string) string {
 	return strings.TrimSpace(model)
 }
 
-// finishArgv resolves bin to an absolute path and appends the harness args and
-// caller's trailing args. Shared by every harness's Argv so path resolution and
-// arg ordering stay identical across kinds.
-func finishArgv(bin string, args, extra []string) []string {
-	return append(append([]string{resolve(bin)}, args...), extra...)
+// finishArgv resolves kind's launch binary (ResolveBinary: override, managed
+// install, then PATH) and appends the harness args and caller's trailing args.
+// Shared by every harness's Argv so path resolution and arg ordering stay
+// identical across kinds.
+func finishArgv(kind string, args, extra []string) []string {
+	return append(append([]string{launchBin(kind)}, args...), extra...)
 }
 
 // resolve returns the best command to launch bin with. It tries, in order: the

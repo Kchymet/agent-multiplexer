@@ -97,6 +97,8 @@ var overlayNames = map[string]bool{
 	"AMUX_SESSION_ACCESS": true, "AMUX_GOAL_FILE": true, "TMPDIR": true, "CLAUDE_CODE_TMPDIR": true,
 	"CLAUDE_CONFIG_DIR": true, "CLAUDE_SECURESTORAGE_CONFIG_DIR": true,
 	"CODEX_HOME": true,
+	// amux owns harness updates; this only disables Claude Code's self-updater.
+	"DISABLE_AUTOUPDATER": true,
 	// Public CA bundles selected and granted by the native sandbox launcher.
 	"SSL_CERT_FILE": true, "CODEX_CA_CERTIFICATE": true,
 	// Protected native GitHub helper config, never ambient Git-control values.

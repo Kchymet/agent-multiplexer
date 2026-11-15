@@ -79,7 +79,6 @@ func (h codexHarness) CurrentModel(s store.Session) (string, bool) {
 // AMUX_CODEX_SANDBOX=none. Override the level with AMUX_CODEX_SANDBOX=
 // read-only|workspace-write|danger-full-access.
 func (codexHarness) Argv(model string, extra ...string) ([]string, error) {
-	bin := envOr("AMUX_CODEX_BIN", "codex")
 	var args []string
 	if sb := envOr("AMUX_CODEX_SANDBOX", "workspace-write"); sb != "none" {
 		args = append(args, "--sandbox", sb)
@@ -87,7 +86,7 @@ func (codexHarness) Argv(model string, extra ...string) ([]string, error) {
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	return codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(finishArgv(bin, args, extra))), nil
+	return codexcfg.NoSelfUpdate(codexcfg.FullscreenTUI(codexcfg.AutomaticApprovals(finishArgv("codex", args, extra)))), nil
 }
 
 // NewSessionID returns "" — Codex mints its own uuid on its first run and can't be

@@ -14,7 +14,9 @@ import (
 // establishes executable readiness, not authentication or model availability.
 type ProbeResult struct {
 	Kind, Path, Version string
-	Err                 error
+	// Binary is where Path came from (override, managed install, or PATH).
+	Binary Binary
+	Err    error
 }
 
 // Probe uses the launcher's resolver and binary override, in the calling
@@ -28,7 +30,8 @@ func Probe(ctx context.Context, kind string) ProbeResult {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	r.Path = resolveContext(ctx, envOr("AMUX_"+strings.ToUpper(kind)+"_BIN", kind))
+	r.Binary = ResolveBinary(ctx, kind)
+	r.Path = r.Binary.Path
 	if !installed(r.Path) {
 		r.Err = fmt.Errorf("%s: %w", r.Path, ErrNotInstalled)
 		return r

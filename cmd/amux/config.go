@@ -9,6 +9,7 @@ import (
 	"amux/internal/amuxcfg"
 	"amux/internal/core"
 	"amux/internal/directsvc"
+	"amux/internal/harnessbin"
 	"amux/internal/keymap"
 )
 
@@ -61,6 +62,14 @@ func cmdConfig(args []string) error {
 			fmt.Println(onOff(s.Enabled))
 			return nil
 		}
+		if harnessbin.IsSettingKey(args[1]) {
+			value, err := harnessbin.Get(args[1])
+			if err != nil {
+				return err
+			}
+			fmt.Println(harnessSettingLabel(args[1], value))
+			return nil
+		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
 			on, err := amuxcfg.ResolveGoalAutoResume()
 			if err != nil {
@@ -110,6 +119,16 @@ func cmdConfig(args []string) error {
 		if args[1] == directsvc.EnabledKey {
 			return fmt.Errorf("%s is changed with amux direct enable|disable, which validate the listener settings first", directsvc.EnabledKey)
 		}
+		if harnessbin.IsSettingKey(args[1]) {
+			if args[2] == "" {
+				return fmt.Errorf("%s needs a value (use unset to reset)", args[1])
+			}
+			if err := harnessbin.Set(args[1], args[2]); err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s  (saved; %s)\n", args[1], args[2], harnessSettingHint(args[1]))
+			return nil
+		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
 			on, err := amuxcfg.ParseGoalAutoResume(args[2])
 			if err != nil {
@@ -147,6 +166,13 @@ func cmdConfig(args []string) error {
 				return err
 			}
 			fmt.Println("codex.control = pty  (default; run amux daemon restart to apply; environment overrides still take precedence)")
+			return nil
+		}
+		if harnessbin.IsSettingKey(args[1]) {
+			if err := harnessbin.Set(args[1], ""); err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s  (default; %s)\n", args[1], harnessSettingLabel(args[1], ""), harnessSettingHint(args[1]))
 			return nil
 		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
@@ -189,6 +215,10 @@ usage: amux config <subcommand>
   get goal.auto_resume  print whether a restarted goal coordinator resumes its goal (on when unconfigured)
   set goal.auto_resume <on|off>  save the goal auto-resume switch (daemon restart required)
   unset goal.auto_resume  restore the default (on)
+  get|set|unset harnesses.update  daemon update check for amux-managed harnesses: off|notify|auto (off)
+  get|set|unset harnesses.check_interval  how often that check runs (24h; minimum 1h)
+  get|set|unset harnesses.<claude|codex>.channel  release channel to follow (claude: stable|latest)
+  get|set|unset harnesses.<claude|codex>.bin  explicit harness binary (beats the managed install)
   get|unset claude.auth      retired: every workload follows central auth
   get|unset codex.auth       retired: every workload follows central auth
   get direct.enabled  whether the daemon runs the direct listener (off by default);
@@ -269,7 +299,47 @@ func configList() error {
 	default:
 		fmt.Printf("%s %s  (saved; amux direct enable|disable — applied by the running daemon)\n", directsvc.EnabledKey, onOff(direct.Enabled))
 	}
-	return errors.Join(loadErr, authErr, controlErr, resumeErr, directErr)
+	var harnessErr error
+	for _, key := range harnessbin.SettingKeys() {
+		value, err := harnessbin.Get(key)
+		switch {
+		case err != nil:
+			fmt.Printf("%s INVALID\n", key)
+			harnessErr = err
+		case value == "":
+			fmt.Printf("%s %s  (default)\n", key, harnessSettingLabel(key, ""))
+		default:
+			fmt.Printf("%s %s  (saved)\n", key, value)
+		}
+	}
+	return errors.Join(loadErr, authErr, controlErr, resumeErr, directErr, harnessErr)
+}
+
+// harnessSettingLabel renders a harnesses.* value, naming the default when unset.
+func harnessSettingLabel(key, value string) string {
+	if value != "" {
+		return value
+	}
+	switch {
+	case key == harnessbin.KeyUpdate:
+		return harnessbin.UpdateOff
+	case key == harnessbin.KeyInterval:
+		return harnessbin.DefaultCheckInterval.String()
+	case strings.HasSuffix(key, ".channel"):
+		return "(release default)"
+	default:
+		return "(none: managed install, then PATH)"
+	}
+}
+
+func harnessSettingHint(key string) string {
+	if key == harnessbin.KeyUpdate || key == harnessbin.KeyInterval {
+		return "the running daemon re-reads it within 15 minutes"
+	}
+	if strings.HasSuffix(key, ".bin") {
+		return "applies to newly launched sessions"
+	}
+	return "used by amux harness update and the daemon's update check"
 }
 
 func onOff(on bool) string {

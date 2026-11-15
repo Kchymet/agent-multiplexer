@@ -87,7 +87,7 @@ type command struct {
 var commands = []command{
 	{names: []string{"daemon"}, run: cmdDaemon},
 	{names: []string{"serve"}, run: cmdServe, hidden: true},
-	{names: []string{"harness"}, run: func([]string) error { return cmdHarness() }, hidden: true},
+	{names: []string{"harness", "harnesses"}, run: cmdHarnessCLI},
 	{names: []string{"provide"}, run: cmdProvide},
 	{names: []string{"direct"}, run: cmdDirect},
 	// hidden: embedded-terminal fidelity check (Phase 0 spike)
@@ -154,6 +154,7 @@ usage: amux <command>
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: versions, compatibility, dependencies + runtime
   config [ls|get|set|unset|path]  show or change amux settings (keybindings, Codex control)
+  harness [ls|install|update|pin|unpin|rollback|check|gc|uninstall]  amux-managed Claude Code / Codex installs
   sandbox drift [<id>]  list edits agents made to their private copy of your harness config
   sandbox promote | reset <id> <path>  propagate an agent's config edit to yours / discard it
   auth login | status | restart  manage one shared Claude login for all agent sessions
