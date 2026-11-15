@@ -282,9 +282,11 @@ are left to the user. `amux config set goal.auto_resume off` disables this
 (daemon restart required). See
 [goal mode](default-sessions.md#claude-coordinators-goal-mode-through-amuxs-hooks).
 
-For supervised Codex sessions, amux observes the native goal state before
-shutdown. A previously active goal resumes automatically, preserving its
-objective, token budget and usage. A goal paused before restart stays paused;
+For supervised Codex sessions, amux durably records whether the native goal
+was last observed active, so a previously active goal resumes as active after a
+daemon restart, an agent restart or a disconnect — even if a client paused it
+while amux was not watching — preserving its objective, token budget and usage.
+A goal the user paused while amux was watching stays paused;
 blocked, completed and budget/usage-limited goals are never reactivated. Codex
 continues already-active goals itself, avoiding an extra model turn from amux.
 An ordinary running turn without a native goal receives the continuation prompt.

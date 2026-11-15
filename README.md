@@ -383,9 +383,10 @@ conversation. See [pane scrollback](docs/pane-scrollback.md) for the policy and
 previously live agent sessions with their saved conversations. `AMUX_RESTORE=0`
 disables that automatic restore. Editor/terminal tabs reopen when attached.
 Claude continues an existing conversation when its hooks reported running work.
-Codex App Server mode records native goal state: only a previously active goal
-is eligible for automatic resumption. Paused, blocked, completed and limited
-goals remain stopped; the native UI may offer to resume them. The first upgrade
+Codex App Server mode durably records native goal state: a goal last observed
+active resumes as active after a restart or disconnect. Goals the user paused,
+and blocked, completed and limited goals, remain stopped; the native UI may
+offer to resume them. The first upgrade
 from a daemon that did not record goal state cannot reconstruct that intent.
 See [restart behavior](docs/sandbox-config.md#macos-certificate-trust-and-restarting-a-session).
 

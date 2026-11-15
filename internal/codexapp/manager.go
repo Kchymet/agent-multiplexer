@@ -274,6 +274,9 @@ func (m *Manager) Ensure(ctx context.Context, sessionID, dir string, env, wrappe
 		Endpoint:      endpoint,
 		InitialPrompt: initialPrompt,
 		EventLogPath:  EventLogPathFor(sessionID),
+		// Every resume decides from the durable goal record, whatever path
+		// launched this runtime (goal_intent.go).
+		GoalIntentPath: GoalIntentPathFor(sessionID),
 	}
 	m.mu.Lock()
 	if accounts.Mode(sessionID, "codex") == "central" {
@@ -431,6 +434,7 @@ func (m *Manager) close(sessionID string, forget bool) {
 	}
 	if forget {
 		_ = RemoveIdentity(sessionID)
+		_ = RemoveGoalIntent(sessionID)
 	}
 }
 

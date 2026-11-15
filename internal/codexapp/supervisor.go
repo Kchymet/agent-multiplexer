@@ -75,6 +75,10 @@ type Config struct {
 	Endpoint       string
 	ResumeThreadID string       // non-empty ⇒ thread/resume instead of thread/start
 	RestartWork    *RestartWork // host-captured work state before restarting this thread
+	// GoalIntentPath, when set, is the durable record of whether the thread's
+	// goal was last observed active (goal_intent.go). The Manager sets it to
+	// GoalIntentPathFor(SessionID); empty disables it (tests, ad-hoc supervisors).
+	GoalIntentPath string
 	// Goals marks a goal session: every user task observed on the thread is
 	// established as its native goal (see goals.go). The launcher must have
 	// enabled the goals feature for this server (codexcfg.NativeGoals).
@@ -166,6 +170,14 @@ type Supervisor struct {
 	goalObserved bool
 	goalRevision uint64
 	restartWork  *RestartWork // frozen before shutdown clears active-turn state
+	// intentReady gates the durable goal-intent record: false from startup and
+	// from the start of a reconnect until restoreGoal has decided, so the
+	// resumed thread's own snapshot (possibly a pause amux never saw) cannot
+	// overwrite the evidence that decision reads. intent/intentWritten cache the
+	// last record written, so only real changes touch the disk.
+	intentReady   bool
+	intent        goalIntent
+	intentWritten bool
 	// beforeGoalRecord gates a parsed goal notification in reconnect tests.
 	beforeGoalRecord func()
 
@@ -622,7 +634,7 @@ func (s *Supervisor) handshake(ctx context.Context) error {
 	// Manager.Ensure can persist this identity for native attach and restarts.
 	s.resumable = true
 	s.mu.Unlock()
-	if err := s.restoreGoal(ctx, resumed); err != nil {
+	if err := s.restoreGoal(ctx, resumed, s.cfg.RestartWork); err != nil {
 		return err
 	}
 	if prompt := strings.TrimSpace(s.cfg.InitialPrompt); !resumed && prompt != "" {
@@ -698,6 +710,14 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 	// reconnect exits before that join (cancellation or process loss), clearing
 	// reconnecting must not re-expose a pre-gap observation as authoritative.
 	s.goalObserved = false
+	// The last live observation is the evidence the resumed goal is judged by.
+	// Stop recording until that decision is made: neither a retiring reader nor
+	// the replacement's resume snapshot may overwrite it.
+	preGap := RestartWork{ThreadID: threadID}
+	if s.goal != nil && s.goal.Status == GoalActive {
+		preGap.GoalKey = s.goal.key()
+	}
+	s.intentReady = false
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -772,6 +792,19 @@ func (s *Supervisor) reconnect(ctx context.Context) error {
 	s.mu.Lock()
 	s.cfg.Model = ""
 	s.mu.Unlock()
+	// A goal that was active before the gap and came back paused was paused
+	// while amux could not observe it; restore it as active (restoreGoal). With
+	// no active goal on either side of the gap, the goal is not read at all, so
+	// an ordinary session's reconnect stays exactly the transport recovery it was.
+	intent, recorded := loadGoalIntent(s.cfg.GoalIntentPath)
+	if preGap.GoalKey != "" || (recorded && intent.ThreadID == threadID && intent.ActiveGoalKey != "") {
+		if err := s.restoreGoal(ctx, true, &preGap); err != nil {
+			s.emit(notice("error", "goal: "+err.Error()))
+			s.armGoalIntent()
+		}
+		return nil
+	}
+	s.armGoalIntent()
 	return nil
 }
 
