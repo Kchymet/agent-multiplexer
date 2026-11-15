@@ -150,22 +150,37 @@ left in an older restart journal is ignored.
 
 ## Restart and goal continuation
 
-On an agent restart or daemon shutdown, amux records the pinned thread and the
-identity of a native goal observed as `active`. A restart may restore that same
-goal from `paused` to `active`, changing only status and preserving its objective,
-budget and usage. Already-active goals continue through Codex itself. Deliberate
-pauses observed before restart, blocked/completed/limited goals, different goals,
-and cleared goals are not reactivated. Ordinary running turns with no goal get
-one continuation prompt. Reattaching a dashboard does not submit another turn.
+Codex itself never pauses a goal on resume: `thread/resume` keeps an `active`
+goal active and continues it once the thread is idle. A goal comes back `paused`
+only because a client paused it — the native TUI pauses the active goal when the
+user interrupts a goal turn (Esc/Ctrl+C) or exits while it runs — possibly while
+amux was not watching (the daemon was down, or its transport was gone).
+
+amux keeps a durable per-session record of whether the thread's goal was last
+observed `active` while it supervised it (`<state>/codexapp/<session>.goal.json`,
+rewritten on every observed change, never after shutdown begins). Every resume
+decides from it, whatever launched the runtime — a daemon restart (journal
+restore, an attach, a prompt or `amux do start`), an agent restart, a relaunch
+after the App Server exited, or the on-demand reconnect to an App Server that
+outlived amux's transport. A goal last observed `active` that comes back
+`paused` is restored to `active`, changing only status and preserving its
+objective, budget and usage. A pause amux observed is the user's and stays a
+pause. Blocked, completed and usage/budget-limited goals (Codex's own stops),
+different goals and cleared goals are never reactivated, and amux starts no turn
+for a goal — Codex continues it. This changes only the status a resumed session
+ends up with; amux never reconnects or restarts a session on its own. Sessions
+with no record yet fall back to the restart journal's snapshot. Ordinary running
+turns with no goal get one continuation prompt on restart. Reattaching a
+dashboard does not submit another turn.
 
 The daemon journal includes headless supervisors. Old journal entries and the
 first transition from PTY mode have no native goal intent; amux cannot infer a
 past running state from a stopped goal. The native UI can therefore still offer
 to resume that goal. This is also expected for a goal that was already blocked.
 
-**A restart is not the same thing as a new task.** Restart restores only a goal
-that was observed `active` before shutdown, and only from `paused` back to
-`active`. A coordinator's *next user task* is a separate path
+**A restart is not the same thing as a new task.** A resume (restart, relaunch
+or reconnect) restores only a goal that was observed `active` before it, and
+only from `paused` back to `active`. A coordinator's *next user task* is a separate path
 (`codexapp.establishGoal`): a `blocked` or `usageLimited` goal is reactivated
 because that message is the input it was waiting for, keeping its objective,
 budget and usage. The two never overlap: a goal a user deliberately paused, or

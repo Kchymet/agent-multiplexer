@@ -172,6 +172,7 @@ func (s *Supervisor) recordGoalLocked(g *threadGoal) {
 	}
 	s.goal = g
 	s.goalRevision++
+	s.persistGoalIntentLocked()
 }
 
 func (s *Supervisor) observeGoal(method string, params json.RawMessage) {
@@ -241,26 +242,49 @@ func (s *Supervisor) readGoal(ctx context.Context) (*threadGoal, error) {
 	return goal, nil
 }
 
-func (s *Supervisor) restoreGoal(ctx context.Context, resumed bool) error {
+// restoreGoal settles the native goal of a just-resumed thread. w is the host's
+// restart evidence (the journal's snapshot on a restart, the pre-gap observation
+// on a reconnect), or nil.
+//
+// Codex itself keeps an active goal active across thread/resume and continues
+// it once the thread is idle; it never pauses one on its own. A goal comes back
+// paused only because a client paused it — the native TUI pauses the active goal
+// when the user interrupts a goal turn or exits with it running — so a pause is
+// honored exactly when amux observed it while supervising: that is the user's
+// decision. A pause amux did not observe (it landed while the daemon was down
+// or its transport was gone) does not override a goal last seen active, which is
+// restored to active with its objective, budget and usage intact.
+//
+// The guard stays minimal: only the same goal (thread, objective, creation),
+// only paused → active, never a blocked, usage- or budget-limited or complete
+// goal — those are Codex's own stops (a failing turn, an exhausted budget) and
+// reactivating them could loop on the same failure. No turn is started for a
+// goal: Codex continues an activated goal itself.
+func (s *Supervisor) restoreGoal(ctx context.Context, resumed bool, w *RestartWork) error {
+	intent, recorded := loadGoalIntent(s.cfg.GoalIntentPath)
 	goal, err := s.readGoal(ctx)
 	if err != nil {
 		return err
 	}
-	w := s.cfg.RestartWork
-	if !resumed || w == nil || w.ThreadID != s.ThreadID() {
+	threadID := s.ThreadID()
+	if !resumed {
+		s.armGoalIntent()
 		return nil
 	}
 	if goal != nil {
-		// A goal that finished after the last restart snapshot stays observable
-		// as complete; the workgroup remains open for the user's next task.
-		if w.GoalKey != "" && w.GoalKey == goal.key() && goal.Status == GoalPaused {
-			// Change status only: preserve the objective, budget and usage. Never
-			// reactivate blocked, completed or limited goals, or a different goal.
-			if _, err := s.rpc.call(ctx, "thread/goal/set", map[string]any{"threadId": w.ThreadID, "status": GoalActive}); err != nil {
+		if goal.Status == GoalPaused && goalWasActive(intent, recorded, w, threadID, goal.key()) {
+			// Change status only: preserve the objective, budget and usage.
+			params := map[string]any{"threadId": threadID, "status": GoalActive}
+			if err := s.setGoal(ctx, params, "goal resumed: it was active before the restart or disconnect", nil); err != nil {
 				return fmt.Errorf("codexapp resume interrupted goal: %w", err)
 			}
 		}
 		// Active goals are continued by Codex itself during thread/resume.
+		s.armGoalIntent()
+		return nil
+	}
+	s.armGoalIntent()
+	if w == nil || w.ThreadID != threadID {
 		return nil
 	}
 	if w.Continue && w.GoalKey == "" {
