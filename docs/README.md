@@ -11,6 +11,7 @@
 - [Codex App Server opt-in and rollback](codex-app-server-supervision.md#opt-in-and-fallback)
 - [Providing personal compute pool capacity: remote provider setup and trust model](remote-provider.md)
 - [Version compatibility and upgrades](versioning.md)
+- [amux-managed Claude Code / Codex installs and updates](harness-installs.md)
 - [Migrating older isolation/layout schemes](namespace-rollout.md)
 
 ## Integrating and developing

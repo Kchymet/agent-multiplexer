@@ -13,6 +13,7 @@ import (
 	"amux/internal/claudecfg"
 	"amux/internal/core"
 	"amux/internal/git"
+	"amux/internal/harnessbin"
 	"amux/internal/launchenv"
 	"amux/internal/store"
 
@@ -370,7 +371,11 @@ func scopeSeatbelt(dir string, tab int, s store.Session, grant access.SessionAcc
 		}
 	}
 	launchArgv := argv
-	if real, root := resolvedInstallRoot(home, argv[0]); root != "" {
+	if root, ok := harnessbin.ManagedVersionRoot(argv[0]); ok {
+		if err := policy.grant(root, false, false); err != nil {
+			return nil, err
+		}
+	} else if real, root := resolvedInstallRoot(home, argv[0]); root != "" {
 		if err := policy.grant(root, false, false); err != nil {
 			return nil, err
 		}

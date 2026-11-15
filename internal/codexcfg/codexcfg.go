@@ -101,6 +101,20 @@ func FullscreenTUI(argv []string) []string {
 	return append(out, argv[1:]...)
 }
 
+// NoSelfUpdate turns off Codex's startup update check for one process. amux
+// owns the update lifecycle of the Codex it launches (amux harness update, or
+// the daemon's scheduled check), so the TUI must not prompt the user to update
+// a binary amux manages, nor nag about a host install it cannot write from the
+// sandbox anyway.
+func NoSelfUpdate(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := make([]string, 0, len(argv)+2)
+	out = append(out, argv[0], "-c", "check_for_update_on_startup=false")
+	return append(out, argv[1:]...)
+}
+
 // NativeGoals enables Codex's thread-goal feature for one process only: the
 // App Server that supervises a goal session, and the native TUI attaching to
 // it (which renders the goal state and offers the resume-paused-goal dialog).

@@ -17,6 +17,7 @@ import (
 	"amux/internal/core"
 	"amux/internal/gh"
 	"amux/internal/git"
+	"amux/internal/harnessbin"
 	"amux/internal/panespec"
 	"amux/internal/provider"
 	"amux/internal/providercfg"
@@ -79,7 +80,12 @@ func cmdDoctor() error {
 				}
 				fmt.Printf("  ✗ %-8s %v\n", d.bin, r.Err)
 			} else {
-				fmt.Printf("  ✓ %-8s %-26s %s\n      %s\n", d.bin, r.Version, d.note, r.Path)
+				fmt.Printf("  ✓ %-8s %-26s %s\n      %s  (%s)\n", d.bin, r.Version, d.note, r.Path, r.Binary.Label())
+			}
+			if harnessbin.Supported(d.bin) {
+				if st := harnessManager().LoadState(d.bin); st.Available != "" {
+					fmt.Printf("      update %s available — amux harness update %s\n", st.Available, d.bin)
+				}
 			}
 			continue
 		}

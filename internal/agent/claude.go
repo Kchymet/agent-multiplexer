@@ -108,7 +108,6 @@ func (h claudeHarness) CurrentModel(s store.Session) (string, bool) {
 // --dangerously-skip-permissions); override with AMUX_PERMISSION_MODE=
 // default|acceptEdits|plan|… or "none" to omit.
 func (claudeHarness) Argv(model string, extra ...string) ([]string, error) {
-	bin := envOr("AMUX_CLAUDE_BIN", "claude")
 	var args []string
 	if pm := envOr("AMUX_PERMISSION_MODE", "auto"); pm != "" && pm != "none" {
 		args = append(args, "--permission-mode", pm)
@@ -118,7 +117,7 @@ func (claudeHarness) Argv(model string, extra ...string) ([]string, error) {
 	if model = CanonicalClaudeModel(model); model != "" {
 		args = append(args, "--model", model)
 	}
-	return finishArgv(bin, args, extra), nil
+	return finishArgv("claude", args, extra), nil
 }
 
 // NewSessionID pre-mints a uuid: Claude accepts a pre-minted --session-id, so

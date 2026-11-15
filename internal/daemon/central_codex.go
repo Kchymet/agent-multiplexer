@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"time"
 
@@ -47,15 +46,14 @@ type centralCodexProvider interface {
 	RateLimits(context.Context) (harnessproto.AccountLimits, error)
 }
 
-// codexExecutable is the host codex binary: AMUX_CODEX_BIN or codex on PATH.
-// It is the bare executable prefix; TUI flags from agent.Argv do not apply to
-// the host-only app server.
+// codexExecutable is the host codex binary, resolved like every launch
+// (agent.ResolveBinary: override, amux-managed install, then PATH). It is the
+// bare executable prefix; TUI flags from agent.Argv do not apply to the
+// host-only app server.
 func codexExecutable() (string, error) {
-	bin := os.Getenv("AMUX_CODEX_BIN")
-	if bin == "" {
-		bin = "codex"
-	}
-	return exec.LookPath(bin)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return exec.LookPath(agent.ResolveBinary(ctx, "codex").Path)
 }
 
 // startCentralCodex creates and warms the provider when codex.auth is central

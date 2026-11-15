@@ -26,6 +26,7 @@ import (
 	"amux/internal/codexsocket"
 	"amux/internal/core"
 	"amux/internal/git"
+	"amux/internal/harnessbin"
 	"amux/internal/launchenv"
 	"amux/internal/store"
 	"amux/internal/wsops"
@@ -193,7 +194,7 @@ func AttachCommand(spec LaunchSpec, endpoint, threadID string) (dir string, env,
 	}
 	// The existing server thread owns permissions. Codex rejects permission
 	// overrides on remote resume; only TUI presentation belongs on this client.
-	inner = codexcfg.FullscreenTUI(inner)
+	inner = codexcfg.NoSelfUpdate(codexcfg.FullscreenTUI(inner))
 	if agent.NativeGoals(s) {
 		inner = codexcfg.NativeGoals(inner) // render the goal state the server supervises
 	}
@@ -541,8 +542,13 @@ func scope(dir string, tab int, s store.Session, grant access.SessionAccess, git
 	// executable and run it directly, without exposing the launcher subtree too.
 	// Otherwise retain the normal runtime subtree bind, e.g. Claude under ~/.nvm.
 	// These mounts precede the writable data/worktree/git mounts.
+	// An amux-managed harness (internal/harnessbin) is already resolved to one
+	// concrete version directory; mount exactly that version, read-only, so the
+	// pane can run its bundled helpers but never sees or modifies other versions.
 	launchArgv := argv
-	if real, root := resolvedInstallRoot(home, argv[0]); root != "" {
+	if root, ok := harnessbin.ManagedVersionRoot(argv[0]); ok {
+		args = append(args, "--ro-bind", root, root)
+	} else if real, root := resolvedInstallRoot(home, argv[0]); root != "" {
 		args = append(args, "--ro-bind-try", root, root)
 		launchArgv = append([]string{real}, argv[1:]...)
 	} else if root := directInstallRoot(home, argv[0]); root != "" {

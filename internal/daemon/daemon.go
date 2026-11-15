@@ -553,6 +553,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	startRunWorker(d.importCodexHistories)
 	// Budgets refresh independently of clients and sessions of either harness.
 	startRunWorker(func() { d.accountLimitsLoop(ctx) })
+	// amux-managed Claude Code / Codex installs: optional scheduled update
+	// check (harnesses.update, off by default).
+	startRunWorker(func() { d.harnessUpdateLoop(ctx) })
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)
