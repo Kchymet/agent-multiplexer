@@ -87,7 +87,7 @@ See the [provider trust table](docs/remote-provider.md#trust-model--read-this-fi
 
 ## Builds, upgrades and local state
 
-Build the application with **Go 1.26.10 or a newer patched release** and run
+Build the application with **Go 1.26.11 or a newer patched release** and run
 `make vuln` for both Go modules. This minimum excludes older standard-library
 vulnerabilities in code paths amux uses, including
 [GO-2026-4970](https://pkg.go.dev/vuln/GO-2026-4970) and

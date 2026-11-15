@@ -8,7 +8,7 @@ import (
 )
 
 func TestVerifyBuildInfoAcceptsMatchingArtifact(t *testing.T) {
-	info := fixtureBuildInfo("go1.26.10")
+	info := fixtureBuildInfo("go1.26.11")
 	if err := VerifyBuildInfo(info, fixtureBundle()); err != nil {
 		t.Fatalf("VerifyBuildInfo: %v", err)
 	}
@@ -39,7 +39,7 @@ func fixtureBuildInfo(goVersion string) *buildinfo.BuildInfo {
 
 func fixtureBundle() string {
 	return "Supported targets: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64\n" +
-		"Go toolchain: go1.26.10\n" +
+		"Go toolchain: go1.26.11\n" +
 		"First-party module paths excluded: github.com/kchymet/agent-multiplexer/harnessproto\n" +
 		"example.test/dependency@v1.2.3\n" +
 		"  module checksum: h1:fixture=\n"
