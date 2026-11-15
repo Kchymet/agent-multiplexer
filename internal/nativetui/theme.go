@@ -316,6 +316,9 @@ var asciiFolds = strings.NewReplacer(
 	// keys and punctuation
 	"⌥ ", "M-", "⌥", "M", "↑", "^", "↓", "v", "←", "<", "→", ">", "↵", "E",
 	"·", ".", "…", ".", "—", "-", "–", "-", "×", "x", "•", "*", "≥", ">", "＋", "+ ",
+	// PR check markers the daemon writes into a session's status (prwatch):
+	// CI✓ / CI✗ / CI… read CI+ / CIx / CI. in ASCII.
+	"✓", "+", "✗", "x",
 )
 
 // foldASCII rewrites chrome for the ASCII fallback; a no-op otherwise.

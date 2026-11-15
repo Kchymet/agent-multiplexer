@@ -404,6 +404,40 @@ func TestASCIIFallback(t *testing.T) {
 }
 
 // The agent's own output is never rewritten, whatever amux does to its chrome.
+// The daemon's PR check markers (prwatch: CI✓ / CI✗ / CI…) arrive inside a
+// session's status text; ASCII mode must fold them too. The statuses are short
+// so the markers are not truncated away before the assertion can see them.
+func TestASCIIFallbackFoldsPRCheckMarkers(t *testing.T) {
+	asciiForTest(t)
+	m := switchboardRail(120, 30)
+	marks := map[string]string{"idempotency keys": "CI✓", "ledger migration": "CI✗", "refund webhooks": "CI…"}
+	for i := range m.sessions {
+		if mark, ok := marks[m.sessions[i].Title]; ok {
+			m.sessions[i].Status = mark
+			delete(marks, m.sessions[i].Title)
+		}
+	}
+	if len(marks) != 0 {
+		t.Fatalf("fixture rows missing: %v", marks)
+	}
+	out := ansi.Strip(m.view())
+	for _, want := range []string{"CI+", "CIx", "CI."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ASCII rail missing %q:\n%s", want, out)
+		}
+	}
+	for i, line := range strings.Split(out, "\n") {
+		for _, r := range line {
+			if r >= 0x80 && !strings.ContainsRune("決済フローの国際化対応", r) {
+				t.Fatalf("non-ASCII %q in ASCII mode, line %d: %q", r, i, line)
+			}
+		}
+		if w := ansi.StringWidth(line); w != m.w {
+			t.Errorf("line %d is %d cells, want %d: %q", i, w, m.w, line)
+		}
+	}
+}
+
 func TestASCIIFallbackLeavesPaneAlone(t *testing.T) {
 	asciiForTest(t)
 	m, term, _ := scrollModel(t, 30, 6)
