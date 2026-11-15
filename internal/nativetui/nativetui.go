@@ -49,6 +49,7 @@ func Run(focusID string) error {
 		byPane:  map[string]paneKey{},
 		dataCh:  make(chan struct{}, 1),
 		status:  "connecting…",
+		load:    loadConnecting,
 		pending: focusID,
 	}
 	m.frames.enabled = true
@@ -110,7 +111,9 @@ type model struct {
 	selection      *paneSelection
 	gesture        *paneGesture
 	client         daemonClient
-	reconnectPanes bool // rebuild connection-bound mirrors after the next inventory
+	reconnectPanes bool      // rebuild connection-bound mirrors after the next inventory
+	load           loadState // whether a daemon snapshot has arrived (loading.go)
+	loadErr        string    // the last connection error while loading or stale
 	sessions       []core.Session
 	keys           keymap.Keymap      // global hotkeys; zero value = built-in defaults
 	cursor         int                // index into the full snapshot when a session is selected
@@ -173,7 +176,7 @@ const (
 // ---- messages ----
 type connectedMsg struct{ c daemonClient }
 type frameMsg struct{ f daemon.Frame }
-type disconnectedMsg struct{}
+type disconnectedMsg struct{ err error }
 type termDataMsg struct{}
 type actionSentMsg struct{ err error }
 
@@ -182,7 +185,7 @@ func (m *model) Init() tea.Cmd { return tea.Batch(connectCmd, waitData(m.dataCh)
 func connectCmd() tea.Msg {
 	c, err := hostbackend.New().Connect()
 	if err != nil {
-		return disconnectedMsg{}
+		return disconnectedMsg{err}
 	}
 	return connectedMsg{c}
 }
@@ -191,7 +194,7 @@ func readCmd(c daemonClient) tea.Cmd {
 	return func() tea.Msg {
 		f, err := c.Next()
 		if err != nil {
-			return disconnectedMsg{}
+			return disconnectedMsg{err}
 		}
 		return frameMsg{f}
 	}
@@ -280,10 +283,12 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.client = msg.c
 		m.reconnectPanes = len(m.terms) > 0
 		m.status = ""
+		m.onConnected()
 		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview(), m.startResources())
 
 	case disconnectedMsg:
 		m.clearSelection()
+		m.onDisconnected(msg.err)
 		m.accountOverviewSerial++
 		m.accountOverviewStale = true
 		m.res.serial++ // stop the resources poll chain until reconnected
@@ -322,6 +327,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s := msg.f.Snapshot; s != nil {
+			m.onSnapshot()
 			m.refreshSessions(s.Sessions)
 			m.applyRailRestore()
 			if m.reconnectPanes {

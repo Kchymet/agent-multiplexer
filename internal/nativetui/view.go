@@ -211,7 +211,14 @@ func (m *model) renderSidebar() string {
 	var top []string
 	cursorEntry := -1 // index into top of the selected row, for scroll-follow
 
-	for _, e := range m.railEntries() {
+	entries := m.railEntries()
+	if m.loading() {
+		// No snapshot yet: an empty inventory is unknown, not empty, so the
+		// "no workgroups" hints would mislead.
+		entries = nil
+		top = m.loadingRail()
+	}
+	for _, e := range entries {
 		if e.section != "" {
 			top = append(top, "")
 			if m.railSelected(e) {
@@ -429,6 +436,9 @@ func (m *model) renderMain() string {
 	}
 	if t := m.cur(); t != nil {
 		return m.renderSelectedPane(t)
+	}
+	if m.load != loadReady {
+		return m.renderLoadingMain()
 	}
 	return lipgloss.NewStyle().
 		Width(m.mainWidth()).Height(m.paneRows()).

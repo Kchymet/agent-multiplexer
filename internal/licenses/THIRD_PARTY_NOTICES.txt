@@ -6,7 +6,7 @@ copies upstream legal-named files verbatim; it does not infer SPDX identifiers,
 ownership, compatibility, trademark rights, or legal/commercial clearance.
 
 Supported targets: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
-Go toolchain: go1.26.10
+Go toolchain: go1.26.11
 First-party module paths excluded from the third-party inventory: amux and
 github.com/kchymet/agent-multiplexer/harnessproto. The repository root license
 is reproduced separately below; source alone does not verify ownership facts.
