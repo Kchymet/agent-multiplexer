@@ -208,7 +208,11 @@ func accountResets(p accountProfile) string {
 }
 
 func (m *model) accountOverviewLines() []string {
-	lines := []string{sectionStyle.Render(cellPad(" Accounts · left", sidebarWidth-3)) + sectionKeyStyle.Render("s  ")}
+	title := " Accounts · left"
+	if m.compactRail() {
+		title = " Accounts"
+	}
+	lines := []string{sectionStyle.Render(cellPad(title, m.railWidth()-3)) + sectionKeyStyle.Render("s  ")}
 	now := time.Now()
 	for _, harness := range []string{"claude", "codex"} {
 		label, budget, detail := accountHarnessName(harness), "loading…", ""
@@ -237,9 +241,9 @@ func (m *model) accountOverviewLines() []string {
 				label = accountHarnessName(harness) + ": legacy default"
 			}
 		}
-		lines = append(lines, cellPad(" "+keyStyle.Render(label), sidebarWidth), cellPad("   "+budget, sidebarWidth))
+		lines = append(lines, cellPad(" "+keyStyle.Render(label), m.railWidth()), cellPad("   "+budget, m.railWidth()))
 		if detail != "" {
-			lines = append(lines, cellPad("   "+dimStyle.Render(detail), sidebarWidth))
+			lines = append(lines, cellPad("   "+dimStyle.Render(detail), m.railWidth()))
 		}
 	}
 	return lines

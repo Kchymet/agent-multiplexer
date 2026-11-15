@@ -1,0 +1,24 @@
+[1m amux [0m[1m──────────────[0m[1m ⌥ l [0m▸┬◂[1m ⌥ h [0m [1;7m 1 agent [0m  [1m2[0m editor  [1m3[0m term ──────────────────
+ ⚙ amux console           [1m│[0m                                                     
+  console · idle · amux-… [1m│[0m                                                     
+                          [1m│[0m                                                     
+[1m ▾ WORKGROUPS         [0m[1mw[0m[1m + [0m[1m│[0m                                                     
+ ▾[1m payments[0m               [1m│[0m                                                     
+  [1;7m ◆ 1 waiting [0m running … [1m│[0m                                                     
+[1;7m▎ ◆ idempotency keys[0m[7m      [0m[1m│[0m                                                     
+   a1f3 · [1;7m waiting [0m · api [1m│[0m                                                     
+[1m▌[0m ◐ ledger migration      [1m│[0m                                                     
+   b2c4 · running · api … [1m│[0m                                                     
+  ● refund webhooks       [1m│[0m             select an agent and press ↵             
+   c9d0 · ready · api     [1m│[0m                                                     
+[1;7m ◆ 2 waiting [0m ◐ 1  ● 0    [1m│[0m                                                     
+[1m Accounts · left       [0m[1ms  [0m[1m│[0m                                                     
+ [1mClaude[0m                   [1m│[0m                                                     
+   budget unknown         [1m│[0m                                                     
+ [1mCodex[0m                    [1m│[0m                                                     
+   budget unknown         [1m│[0m                                                     
+ [1m↵[0m open  [1m↑↓[0m move [1m─────────[0m[1m│[0m                                                     
+ [1mSpace[0m fold/unfold [1m───────[0m[1m│[0m                                                     
+ [1m/[0m search archived [1m───────[0m[1m│[0m                                                     
+[1m──────────────────────────[0m┴─────────────────────────────────────────────────────
+ [1mSpace[0m fold/unfold · [1m←/→[0m collapse/expand · [1m↵[0m open · [1ma[0m +agent · [1me[0m repos · [1mw[0m +grou[1m[0m[1m[0m[1m[0m[1m[0m[1m[0m[1m[0m[1m[0m

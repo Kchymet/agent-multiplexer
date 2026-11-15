@@ -12,20 +12,6 @@ import (
 	"amux/internal/store"
 )
 
-var (
-	accent       = lipgloss.Color("39") // cyan — amux's accent
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	sepStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	selStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("24"))
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(accent)
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252")).Background(lipgloss.Color("237"))
-	keyStyle     = lipgloss.NewStyle().Foreground(accent)
-	// sectionKeyStyle accents a hotkey inside a section bar, keeping the bar's
-	// background so the header reads as one solid strip.
-	sectionKeyStyle = keyStyle.Bold(true).Background(lipgloss.Color("237"))
-)
-
 func (m *model) View() string {
 	if m.frames.enabled && m.frames.viewValid {
 		if m.hw != nil {
@@ -46,15 +32,21 @@ func (m *model) view() string {
 	if m.w == 0 || m.h == 0 {
 		return "starting…"
 	}
-	body := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar(), m.renderDivider(), m.renderMain())
+	// Everything amux draws folds to ASCII when asked; the embedded pane is the
+	// agent's own output and passes through untouched.
+	main := m.renderMain()
+	if !m.mainIsPane() {
+		main = foldASCII(main)
+	}
+	body := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar(), foldASCII(m.renderDivider()), main)
 	view := strings.Join([]string{
-		m.renderTopBorder(),
+		foldASCII(m.renderTopBorder()),
 		body,
-		m.renderBottomBorder(),
-		cellPad(m.renderHelp(), m.w),
+		foldASCII(m.renderBottomBorder()),
+		foldASCII(cellPad(m.renderHelp(), m.w)),
 	}, "\n")
 	if m.accounts != nil {
-		box := m.renderAccounts()
+		box := foldASCII(m.renderAccounts())
 		return overlayCells(view, box, (m.w-lipgloss.Width(box))/2, (m.h-lipgloss.Height(box))/2, m.w, m.h)
 	}
 	return view
@@ -107,11 +99,11 @@ func cellPad(s string, width int) string {
 // color.
 func (m *model) renderTopBorder() string {
 	label := titleStyle.Render(" amux ")
-	if self := m.selfMetric(); self != "" {
+	if self := m.selfMetric(); self != "" && !m.compactRail() {
 		label += dimStyle.Render(self + " ") // amux's own CPU/RSS (resources.go)
 	}
 	railHint := keyStyle.Render(" "+keyLabel(m.keys.Chord(keymap.FocusAgent))+" ") + dimStyle.Render("▸")
-	left := borderSeg(sidebarWidth, m.borderStyle(focusSidebar), label, railHint)
+	left := borderSeg(m.railWidth(), m.borderStyle(focusSidebar), label, railHint)
 
 	workHint := ""
 	if m.attached != "" {
@@ -164,7 +156,7 @@ func (m *model) tabStrip() string {
 // renderBottomBorder closes the frame with a ┴ under the divider, each side in
 // its pane's focus color.
 func (m *model) renderBottomBorder() string {
-	left := m.borderStyle(focusSidebar).Render(strings.Repeat("─", sidebarWidth))
+	left := m.borderStyle(focusSidebar).Render(strings.Repeat("─", m.railWidth()))
 	right := m.borderStyle(focusAgent).Render(strings.Repeat("─", m.mainWidth()))
 	return left + sepStyle.Render("┴") + right
 }
@@ -184,10 +176,11 @@ func (m *model) renderDivider() string {
 	return strings.Join(rows, "\n")
 }
 
-// borderStyle is the accent color for the focused pane's border, grey otherwise.
+// borderStyle is the focus color for the focused pane's border, the rule color
+// otherwise.
 func (m *model) borderStyle(target focus) lipgloss.Style {
 	if m.focus == target {
-		return lipgloss.NewStyle().Foreground(accent)
+		return focusStyle
 	}
 	return sepStyle
 }
@@ -236,7 +229,7 @@ func (m *model) renderSidebar() string {
 				if !populated {
 					for _, sec := range railSections {
 						if sec.key == e.section && sec.empty != "" {
-							top = append(top, dimStyle.Render(" "+truncate(sec.empty, sidebarWidth-1)))
+							top = append(top, dimStyle.Render(" "+truncate(sec.empty, m.railWidth()-1)))
 						}
 					}
 				}
@@ -253,8 +246,13 @@ func (m *model) renderSidebar() string {
 	// space above them; when it overflows we scroll it (keeping the selected row
 	// visible) rather than dropping rows off the bottom. Rows can be two lines tall
 	// (title + status sub-line), so we work in rendered lines, not slots.
+	// The attention summary leads the footer: mouse hit-testing counts the
+	// account and hint rows up from the bottom, so nothing below it moves.
 	foot := append(m.accountOverviewLines(), m.railHints()...)
 	rows := m.paneRows()
+	if sum := m.attentionSummary(); rows-lineCount(foot)-len(sum) >= minRailListRows {
+		foot = append(sum, foot...) // a short rail keeps its list and hints instead
+	}
 	footLines := lineCount(foot)
 	avail := rows - footLines // lines available to the scrollable session list
 
@@ -299,9 +297,9 @@ func (m *model) renderSidebar() string {
 		visible = append(visible, "")
 	}
 	lines := append(visible, foot...)
-	return lipgloss.NewStyle().
-		Width(sidebarWidth).MaxHeight(rows).
-		Render(strings.Join(lines, "\n"))
+	return foldASCII(lipgloss.NewStyle().
+		Width(m.railWidth()).MaxWidth(m.railWidth()).MaxHeight(rows).
+		Render(strings.Join(lines, "\n")))
 }
 
 // railHints is the pinned command help inside the rail: the switcher's own
@@ -309,13 +307,16 @@ func (m *model) renderSidebar() string {
 // runs to the divider (focus-colored).
 func (m *model) railHints() []string {
 	fill := m.borderStyle(focusSidebar)
-	l1 := " " + keyStyle.Render("↵") + dimStyle.Render(" open  ") + keyStyle.Render("↑↓") + dimStyle.Render(" move ")
+	l1 := " " + keyStyle.Render(enterKey()) + dimStyle.Render(" open  ") + keyStyle.Render(upDownKeys()) + dimStyle.Render(" move ")
 	return []string{
-		borderSeg(sidebarWidth, fill, l1, ""),
-		borderSeg(sidebarWidth, fill, " "+keyStyle.Render("Space")+dimStyle.Render(" fold/unfold "), ""),
-		borderSeg(sidebarWidth, fill, " "+keyStyle.Render("/")+dimStyle.Render(" search archived "), ""),
+		borderSeg(m.railWidth(), fill, l1, ""),
+		borderSeg(m.railWidth(), fill, " "+keyStyle.Render("Space")+dimStyle.Render(" fold/unfold "), ""),
+		borderSeg(m.railWidth(), fill, " "+keyStyle.Render("/")+dimStyle.Render(" search archived "), ""),
 	}
 }
+
+// minRailListRows is the list height the attention summary must leave.
+const minRailListRows = 4
 
 // lineCount totals the rendered lines across entries, each of which may itself
 // span multiple lines (a row with a status sub-line).
@@ -328,15 +329,22 @@ func lineCount(entries []string) int {
 }
 
 func (m *model) renderRow(i int, s core.Session) string {
+	rw := m.railWidth()
+	selected := m.sectionCursor == "" && i == m.cursor
 	indent := ""
 	if s.RootID != "" {
 		indent = " "
 	}
+	// The first column is the row's leading edge: the open session's bar, else
+	// the selection's. Arrows stay with disclosure and discs with activity.
 	mark := " "
-	if s.ID == m.attached {
-		mark = "▌" // open session; keep arrows for disclosure and circles for activity
+	switch {
+	case s.ID == m.attached:
+		mark = glyphOpen
+	case selected:
+		mark = glyphCursor
 	}
-	icon := glyph(s)
+	icon, iconStyle := glyph(s), lipgloss.NewStyle()
 	switch {
 	case container(&s):
 		// Reserve disclosure arrows for workgroups that actually have children
@@ -350,25 +358,35 @@ func (m *model) renderRow(i int, s core.Session) string {
 		// A repo row never has children; keep the arrow column blank so its
 		// ⛁ glyph lines up with the workgroup titles' structural glyphs.
 		icon = "  " + glyph(s)
+	case icon == stateGlyph(s.State):
+		iconStyle = stateStyle(s.State)
 	}
-	label := fmt.Sprintf("%s%s%s %s", mark, indent, icon, s.Title)
+	lead := mark + indent + icon
+	label := lead + " " + s.Title
 	cell, cols := m.railMetric(&s) // fixed-width resource cell (resources.go)
+	w := rw
 	if cols {
-		// Pad so the cell sits flush right.
-		w := sidebarWidth - metricWidth
-		label = truncate(label, w)
+		w = rw - metricWidth // pad below so the cell sits flush right
+	}
+	label = truncate(label, w)
+	if cols {
 		label += strings.Repeat(" ", max(0, w-ansi.StringWidth(label)))
-	} else {
-		label = truncate(label, sidebarWidth)
 	}
 	var line string
 	switch {
-	case m.sectionCursor == "" && i == m.cursor:
-		line = selStyle.Width(sidebarWidth).Render(label + cell.plain)
-	case s.IsRoot:
-		line = titleStyle.Render(label) + cell.styled
+	case selected:
+		line = selStyle.Width(rw).Render(label + cell.plain)
+	case !strings.HasPrefix(label, lead):
+		line = label + cell.styled // too narrow to hold even the lead
 	default:
-		line = label + cell.styled
+		title := label[len(lead):]
+		if s.IsRoot {
+			title = titleStyle.Render(title)
+		}
+		if mark != " " {
+			mark = focusStyle.Render(mark)
+		}
+		line = mark + indent + iconStyle.Render(icon) + title + cell.styled
 	}
 	if sub := m.rowStatus(s, indent); sub != "" {
 		line += "\n" + sub
@@ -376,10 +394,11 @@ func (m *model) renderRow(i int, s core.Session) string {
 	return line
 }
 
-// rowStatus is the state-colored status sub-line shown beneath an agent row
-// (green working, purple awaiting you, blue ready, dim idle), or "" for rows
+// rowStatus is the status sub-line shown beneath an agent row, or "" for rows
 // with nothing to detail — bare containers, idle container sessions, and rows
-// without a status.
+// without a status. The state word leads it, styled by state (see statusLine);
+// a workgroup with members waiting on the user says so first, so a folded
+// group never hides them.
 func (m *model) rowStatus(s core.Session, indent string) string {
 	if s.Status == "" {
 		return ""
@@ -390,31 +409,125 @@ func (m *model) rowStatus(s core.Session, indent string) string {
 	if (s.Kind == "repo" || s.IsRoot) && (s.Role == "" || s.State == core.StateIdle) {
 		return ""
 	}
-	sub := s.Status
+	var segs []segment
+	waiting := m.waitingMembers(&s)
+	if waiting > 0 {
+		segs = append(segs, segment{fmt.Sprintf(" %s %d waiting ", glyphWaiting, waiting), attnStyle}, segment{" ", dimStyle})
+	}
 	// The title now carries the agent's task summary (or name); surface the id
 	// beneath it so the session stays identifiable. Skip it when the title is
-	// itself the id — a prompt-less agent whose title falls back to the short id.
-	if s.Title != s.ID && !strings.HasPrefix(s.ID, s.Title) && !strings.Contains(s.Status, s.ID) {
-		sub = s.ID + " · " + s.Status
+	// itself the id — a prompt-less agent whose title falls back to the short id
+	// — and under a workgroup's waiting chip, which needs the room more.
+	if waiting == 0 && s.Title != s.ID && !strings.HasPrefix(s.ID, s.Title) && !strings.Contains(s.Status, s.ID) {
+		segs = append(segs, segment{s.ID + " · ", dimStyle})
 	}
-	return stateColor(s.State).Render(indent + "  " + truncate(sub, sidebarWidth-3-len(indent)))
+	segs = append(segs, statusSegments(s.Status)...)
+	return indent + "  " + renderSegments(segs, m.railWidth()-3-len(indent))
 }
 
-// stateColor styles a status sub-line by activity: green working, purple blocked
-// on the user, blue ready, yellow live-but-unknown, dim idle.
-func stateColor(state string) lipgloss.Style {
-	switch state {
-	case core.StateRunning:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("114")) // green
-	case core.StateWaiting:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple
-	case core.StateReady:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")) // blue
-	case core.StateUnknown:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
-	default:
-		return dimStyle // idle
+// waitingMembers counts a workgroup's live members that are waiting on the
+// user; 0 for any other row.
+func (m *model) waitingMembers(s *core.Session) int {
+	if !container(s) {
+		return 0
 	}
+	n := 0
+	for i := range m.sessions {
+		c := &m.sessions[i]
+		if c.RootID == s.ID && c.Section == s.Section && c.State == core.StateWaiting && !archivedSession(*c) {
+			n++
+		}
+	}
+	return n
+}
+
+// segment is a run of text in one style, truncated as a unit of the line.
+type segment struct {
+	text  string
+	style lipgloss.Style
+}
+
+// statusSegments styles a daemon status ("running · 2 agents"): the state word
+// that leads it takes its state's color — waiting, the attention chip — and
+// the rest stays readable neutral metadata. The word is always present, so the
+// line reads the same with no color at all.
+func statusSegments(status string) []segment {
+	word, rest, _ := strings.Cut(status, " ")
+	switch word {
+	case core.StateWaiting:
+		return []segment{{" " + word + " ", attnStyle}, {" " + rest, dimStyle}}
+	case core.StateRunning, core.StateReady, core.StateUnknown, core.StateIdle:
+		if rest == "" {
+			return []segment{{word, stateStyle(word)}}
+		}
+		return []segment{{word, stateStyle(word)}, {" " + rest, dimStyle}}
+	}
+	return []segment{{status, dimStyle}}
+}
+
+// renderSegments renders segs within width cells, cutting (with an ellipsis)
+// in whichever segment crosses the edge.
+func renderSegments(segs []segment, width int) string {
+	var b strings.Builder
+	for _, sg := range segs {
+		if width <= 0 {
+			break
+		}
+		text := truncate(sg.text, width)
+		width -= ansi.StringWidth(text)
+		b.WriteString(sg.style.Render(text))
+		if text != sg.text {
+			break
+		}
+	}
+	return b.String()
+}
+
+// attentionSummary is the rail's one-line count of workgroups by their most
+// demanding state: how many wait on the user (the attention chip when any do),
+// how many are running, how many are ready. It counts workgroups, not agents —
+// the same aggregate each workgroup row already carries — and is omitted until
+// there is a workgroup to count.
+func (m *model) attentionSummary() []string {
+	if m.loading() {
+		return nil
+	}
+	var total, waiting, running, ready int
+	for i := range m.sessions {
+		s := &m.sessions[i]
+		if !s.IsRoot || s.Section != core.SectionWorkgroups || archivedSession(*s) {
+			continue
+		}
+		total++
+		switch s.State {
+		case core.StateWaiting:
+			waiting++
+		case core.StateRunning, core.StateUnknown:
+			running++
+		case core.StateReady:
+			ready++
+		}
+	}
+	if total == 0 {
+		return nil
+	}
+	return []string{summaryLine(waiting, running, ready, m.railWidth())}
+}
+
+// summaryLine lays the counts out for width. Attention is spelled out; running
+// and ready keep the glyph the rows above pair with their word, and the
+// compact rail sheds "waiting" before it sheds a number.
+func summaryLine(waiting, running, ready, width int) string {
+	wait := fmt.Sprintf(" %s %d waiting ", glyphWaiting, waiting)
+	rest := fmt.Sprintf(" %s %d  %s %d", glyphRunning, running, glyphReady, ready)
+	if ansi.StringWidth(wait+rest) > width {
+		wait = fmt.Sprintf(" %s %d ", glyphWaiting, waiting)
+	}
+	waitStyle := dimStyle
+	if waiting > 0 {
+		waitStyle = attnStyle
+	}
+	return cellPad(waitStyle.Render(wait)+dimStyle.Render(rest), width)
 }
 
 func (m *model) renderMain() string {
@@ -443,7 +556,7 @@ func (m *model) renderMain() string {
 	return lipgloss.NewStyle().
 		Width(m.mainWidth()).Height(m.paneRows()).
 		Align(lipgloss.Center, lipgloss.Center).
-		Render(dimStyle.Render("select an agent and press ↵"))
+		Render(dimStyle.Render("select an agent and press " + enterKey()))
 }
 
 // renderDialog draws a centered modal confirmation box in the main pane.
@@ -456,8 +569,7 @@ func (m *model) renderDialog() string {
 		w = 12
 	}
 	keys := keyStyle.Render("Enter") + dimStyle.Render(" confirm   ") + keyStyle.Render("Esc") + dimStyle.Render(" cancel")
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
+	box := boxStyle().
 		Padding(1, 2).Width(w).
 		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(m.confirm.message + "\n\n" + keys)
@@ -472,7 +584,7 @@ func (m *model) renderHelp() string {
 		if m.archiveSearch.details != "" {
 			return ansi.Truncate(hints("read only", []hint{{"Ctrl+R", "restore"}, {"Esc", "results"}}), m.w, "")
 		}
-		return ansi.Truncate(hints("archive", []hint{{"↑↓", "move"}, {"Enter", "details"}, {"Ctrl+R", "restore"}, {"Esc", "close"}}), m.w, "")
+		return ansi.Truncate(hints("archive", []hint{{upDownKeys(), "move"}, {"Enter", "details"}, {"Ctrl+R", "restore"}, {"Esc", "close"}}), m.w, "")
 	case m.accounts != nil:
 		if s := m.accounts; s.pending != "" {
 			return hints("accounts", []hint{{"Esc", "close and disconnect"}})
@@ -485,7 +597,7 @@ func (m *model) renderHelp() string {
 		}
 		return ansi.Truncate(hints("accounts", []hint{{"e", "subscription"}, {"a", "API key"}, {"x", "logout"}, {"r", "refresh"}, {"Esc", "close"}}), m.w, "")
 	case m.res.open:
-		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {"↑↓", "scroll"}, {"t/Esc", "close"}}), m.w, "")
+		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {upDownKeys(), "scroll"}, {"t/Esc", "close"}}), m.w, "")
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:
@@ -497,7 +609,7 @@ func (m *model) renderHelp() string {
 			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
 		})
 	default:
-		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {"←/→", "collapse/expand"}, {"↵", "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
+		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {leftRightKeys(), "collapse/expand"}, {enterKey(), "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
 	}
 }
 
@@ -584,12 +696,12 @@ func (m *model) sectionHeader(section string) string {
 		}
 	}
 	if hotkey == "" {
-		return style.Width(sidebarWidth).Render(label)
+		return style.Width(m.railWidth()).Render(label)
 	}
 	hint := keys.Render(hotkey) + style.Render(" + ")
-	gap := sidebarWidth - lipgloss.Width(label) - lipgloss.Width(hint)
+	gap := m.railWidth() - lipgloss.Width(label) - lipgloss.Width(hint)
 	if gap < 1 {
-		return style.Width(sidebarWidth).Render(label)
+		return style.Width(m.railWidth()).Render(label)
 	}
 	return style.Render(label+strings.Repeat(" ", gap)) + hint
 }
@@ -608,9 +720,9 @@ func sectionLabel(section string) string {
 	return ""
 }
 
-// glyph mirrors the rail: console ⚙, repo ⛁, root ▸, external ◇, otherwise the
-// activity state — running/waiting ●, ready ◐, idle ○. task and interactive
-// agents share the activity glyphs; the mode is surfaced in listings, not here.
+// glyph mirrors the rail: console ⚙, repo ⛁, root ▸, external ↗, otherwise the
+// activity state's own shape (see stateGlyph). task and interactive agents
+// share the activity glyphs; the mode is surfaced in listings, not here.
 // A container row keeps its structural glyph even when its own session (the
 // coordinator, the repo home) is live — its status sub-line carries the state.
 func glyph(s core.Session) string {
@@ -622,28 +734,20 @@ func glyph(s core.Session) string {
 	case s.IsRoot:
 		return "▸"
 	case s.Mode == "external":
-		return "◇"
+		return glyphExternal
 	}
-	switch s.State {
-	case core.StateRunning, core.StateWaiting, core.StateUnknown:
-		return "●"
-	case core.StateReady:
-		return "◐"
-	default:
-		return "○"
-	}
+	return stateGlyph(s.State)
 }
 
+// truncate cuts s to at most n terminal cells, ending in an ellipsis when it
+// had to cut. It measures cells, not runes, so wide (CJK, emoji) text cannot
+// overrun the column it was fitted to.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= n {
+	if ansi.StringWidth(s) <= n {
 		return s
 	}
-	if n == 1 {
-		return "…"
-	}
-	return string(r[:n-1]) + "…"
+	return ansi.Truncate(s, n, "…")
 }

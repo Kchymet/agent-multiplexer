@@ -562,7 +562,7 @@ func (m *model) renderAccounts() string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, dimStyle.Render("Tab/↑↓/jk: select · e: subscription · a: API key"), dimStyle.Render("x: logout · r: refresh"), "Workloads follow this login at their next launch.")
+	lines = append(lines, dimStyle.Render("Tab/"+upDownKeys()+"/jk: select · e: subscription · a: API key"), dimStyle.Render("x: logout · r: refresh"), "Workloads follow this login at their next launch.")
 	if p := s.profile(); p != nil {
 		identity, plan := accountText(p.account), accountText(p.plan)
 		if identity == "" {
@@ -653,12 +653,12 @@ func (m *model) renderAccounts() string {
 	body = lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(body)
 	footer := fmt.Sprintf("PgUp/PgDn scroll · Esc close  %d–%d/%d", s.scroll+1, end, len(wrapped))
 	if s.pending == "" && s.confirm == nil && !s.attempt.active() {
-		footer = fmt.Sprintf("↑↓/jk select · PgUp/PgDn scroll · Esc close  %d–%d/%d", s.scroll+1, end, len(wrapped))
+		footer = fmt.Sprintf(upDownKeys()+"/jk select · PgUp/PgDn scroll · Esc close  %d–%d/%d", s.scroll+1, end, len(wrapped))
 		if w < 60 {
-			footer = fmt.Sprintf("↑↓/jk select · PgUp/Dn · Esc  %d–%d/%d", s.scroll+1, end, len(wrapped))
+			footer = fmt.Sprintf(upDownKeys()+"/jk select · PgUp/Dn · Esc  %d–%d/%d", s.scroll+1, end, len(wrapped))
 		}
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accent).
+	return boxStyle().
 		Padding(0, 1).Render(cellPad(titleStyle.Render("Accounts · remaining budget"), w) + "\n" + body + "\n" + cellPad(dimStyle.Render(footer), w))
 }
 
@@ -750,7 +750,7 @@ func accountUsageSummary(l accountLimit, now time.Time, stale bool) string {
 	bar := strings.Repeat("━", filled) + strings.Repeat("─", 10-filled)
 	style := keyStyle
 	if remaining <= 20 {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+		style = attnTextStyle
 	}
 	freshness := "fresh"
 	if state == "stale" {

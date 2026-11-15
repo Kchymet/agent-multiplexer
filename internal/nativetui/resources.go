@@ -247,8 +247,8 @@ func memCell(b uint64, padded bool) string {
 // off.
 func (m *model) railMetric(s *core.Session) (metric, bool) {
 	r := &m.res
-	if !r.active() {
-		return metric{}, false
+	if !r.active() || m.compactRail() {
+		return metric{}, false // the compact rail spends its columns on titles
 	}
 	if s.IsRoot {
 		if c, ok := r.groups[s.ID]; ok {
@@ -308,10 +308,7 @@ func (m *model) handleResourcesKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-var (
-	resHotStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // ≥ 1 core
-	resBodyStyle = lipgloss.NewStyle()
-)
+var resBodyStyle = lipgloss.NewStyle()
 
 // renderResources draws the top-style panel into the main pane. The rendered
 // block is cached until the sample, sort, scroll or geometry changes.
@@ -408,7 +405,7 @@ func resourceSessionLine(u procstat.SessionUsage, titles map[string]string, w in
 	cols := fmt.Sprintf(" %6s %6s %6d  ", cpuCell(u.CPUPercent, false), memCell(u.RSSBytes, false), u.Processes)
 	style := resBodyStyle
 	if u.CPUPercent >= 100 {
-		style = resHotStyle
+		style = hotStyle // a full core or more: weight, not the attention color
 	}
 	return style.Render(cols) + keyStyle.Render(truncate(name, w-ansi.StringWidth(cols)))
 }

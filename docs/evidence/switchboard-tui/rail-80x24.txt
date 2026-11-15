@@ -1,0 +1,24 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h   1 agent   2 editor  3 term ──────────────────
+ ⚙ amux console           │                                                     
+  console · idle · amux-… │                                                     
+                          │                                                     
+ ▾ WORKGROUPS         w + │                                                     
+ ▾ payments               │                                                     
+   ◆ 1 waiting  running … │                                                     
+▎ ◆ idempotency keys      │                                                     
+   a1f3 ·  waiting  · api │                                                     
+▌ ◐ ledger migration      │                                                     
+   b2c4 · running · api … │                                                     
+  ● refund webhooks       │             select an agent and press ↵             
+   c9d0 · ready · api     │                                                     
+ ◆ 2 waiting  ◐ 1  ● 0    │                                                     
+ Accounts · left       s  │                                                     
+ Claude                   │                                                     
+   budget unknown         │                                                     
+ Codex                    │                                                     
+   budget unknown         │                                                     
+ ↵ open  ↑↓ move ─────────│                                                     
+ Space fold/unfold ───────│                                                     
+ / search archived ───────│                                                     
+──────────────────────────┴─────────────────────────────────────────────────────
+ Space fold/unfold · ←/→ collapse/expand · ↵ open · a +agent · e repos · w +grou

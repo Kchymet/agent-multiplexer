@@ -1,0 +1,24 @@
+ amux ────── ⌥ l ▸┬◂ ⌥ h   1 agent   2 editor  3 term ──────
+ ⚙ amux console   │                                         
+  console · idle… │                                         
+                  │                                         
+ ▾ WORKGROUPS w + │                                         
+ ▾ payments       │                                         
+   ◆ 1 waiting  … │                                         
+▎ ◆ idempotency k…│                                         
+   a1f3 ·  waiti… │                                         
+▌ ◐ ledger migrat…│                                         
+   b2c4 · running │                                         
+  ● refund webhoo…│       select an agent and press ↵       
+   c9d0 · ready … │                                         
+ ◆ 2  ◐ 1  ● 0    │                                         
+ Accounts      s  │                                         
+ Claude           │                                         
+   budget unknown │                                         
+ Codex            │                                         
+   budget unknown │                                         
+ ↵ open  ↑↓ move ─│                                         
+ Space fold/unfold│                                         
+ / search archived│                                         
+──────────────────┴─────────────────────────────────────────
+ Space fold/unfold · ←/→ collapse/expand · ↵ open · a +agent

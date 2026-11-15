@@ -62,7 +62,7 @@ func TestPastedMultilinePromptStaysInBox(t *testing.T) {
 	if w := lipgloss.Width(out); w > m.mainWidth() {
 		t.Errorf("form is %d cols wide, pane is %d", w, m.mainWidth())
 	}
-	if !strings.Contains(out, "╯") {
+	if !strings.Contains(out, "┘") {
 		t.Errorf("form lost its bottom border (cut off rather than laid out)")
 	}
 	if v := m.View(); lipgloss.Height(v) != m.h {
@@ -89,7 +89,7 @@ func TestFormFitsPaneAcrossSizes(t *testing.T) {
 		if w := lipgloss.Width(out); w > m.mainWidth() {
 			t.Errorf("%dx%d: form is %d cols wide, pane is %d", sz[0], sz[1], w, m.mainWidth())
 		}
-		if sz[1] >= 19 && !strings.Contains(out, "╯") {
+		if sz[1] >= 19 && !strings.Contains(out, "┘") {
 			t.Errorf("%dx%d: form lost its bottom border:\n%s", sz[0], sz[1], out)
 		}
 	}

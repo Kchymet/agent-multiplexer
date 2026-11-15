@@ -508,7 +508,7 @@ func subSuffix(s store.Session) string {
 //   - StateWaiting: blocked on a prompt awaiting the user
 //   - StateReady:   turn finished / freshly launched, ready for input
 //   - StateUnknown: live but no hook data yet (a pre-hook session, or one that
-//     hasn't fired its first event) — shown as a less certain "running".
+//     hasn't fired its first event) — shown as "unknown", with its own glyph.
 //
 // A harness with no hook stream (e.g. Codex) can't report those turn states, so
 // rather than showing a stale hook state that will never arrive we ask its Harness
@@ -524,14 +524,10 @@ func agentState(alive bool, s store.Session) string {
 	return agent.HarnessFor(s.Agent).RailState(s)
 }
 
-// stateLabel is the word shown to the user. Unknown reads as "running": the
-// agent is live, we just lack granular hook data (the rail tints it differently).
-func stateLabel(state string) string {
-	if state == core.StateUnknown {
-		return core.StateRunning
-	}
-	return state
-}
+// stateLabel is the word shown to the user: the state's own name. Unknown says
+// "unknown" — the agent is live but has reported no hook data yet — rather
+// than borrowing "running", which would claim a turn is in flight.
+func stateLabel(state string) string { return state }
 
 // stateRank orders states by how much they want the user's attention, highest
 // first, so a root can inherit its most demanding child's state.

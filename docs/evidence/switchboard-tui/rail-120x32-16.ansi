@@ -1,0 +1,32 @@
+[1;97m amux [0m[94m──────────────[0m[97m ⌥ l [0m[37m▸[0m[90m┬[0m[37m◂[0m[97m ⌥ h [0m [1;7m 1 agent [0m[37m  [0m[97m2[0m[37m editor[0m[37m  [0m[97m3[0m[37m term[0m [90m──────────────────────────────────────────────────────────[0m
+ ⚙ amux console           [94m│[0m                                                                                             
+  [37mconsole · [0m[37midle[0m[37m · amux-…[0m [94m│[0m                                                                                             
+                          [94m│[0m                                                                                             
+[1;37m ▾ WORKGROUPS         [0m[1;97mw[0m[1;37m + [0m[94m│[0m                                                                                             
+ ▾[1;97m payments[0m               [94m│[0m                                                                                             
+  [1;30;103m ◆ 1 waiting [0m[37m [0m[94mrunning[0m[37m …[0m [94m│[0m                                                                                             
+[1;7m▎ ◆ idempotency keys[0m[7m      [0m[94m│[0m                                                                                             
+   [37ma1f3 · [0m[1;30;103m waiting [0m[37m · api[0m [94m│[0m                                                                                             
+[94m▌[0m [94m◐[0m ledger migration      [94m│[0m                                                                                             
+   [37mb2c4 · [0m[94mrunning[0m[37m · api …[0m [94m│[0m                                                                                             
+  [92m●[0m refund webhooks       [94m│[0m                                                                                             
+   [37mc9d0 · [0m[92mready[0m[37m · api[0m     [94m│[0m                                                                                             
+  ◌ 決済フローの国際化対応[94m│[0m                                                                                             
+   [37md7e1 · [0munknown[37m · web[0m   [94m│[0m                                                                                             
+ ▸[1;97m docs refresh[0m           [94m│[0m                                 [37mselect an agent and press ↵[0m                                 
+  [1;30;103m ◆ 1 waiting [0m[37m [0m[92mready[0m[37m · …[0m [94m│[0m                                                                                             
+ ◦[1;97m infra[0m                  [94m│[0m                                                                                             
+  [37mwg-infra · [0m[94mrunning[0m[37m · 0…[0m [94m│[0m                                                                                             
+                          [94m│[0m                                                                                             
+[1;37m ▾ REPOS              [0m[1;97mR[0m[1;37m + [0m[94m│[0m                                                                                             
+[1;30;103m ◆ 2 waiting [0m[37m ◐ 1  ● 0[0m    [94m│[0m                                                                                             
+[1;37m Accounts · left       [0m[1;97ms  [0m[94m│[0m                                                                                             
+ [97mClaude[0m                   [94m│[0m                                                                                             
+   budget unknown         [94m│[0m                                                                                             
+ [97mCodex[0m                    [94m│[0m                                                                                             
+   budget unknown         [94m│[0m                                                                                             
+ [97m↵[0m[37m open  [0m[97m↑↓[0m[37m move [0m[94m─────────[0m[94m│[0m                                                                                             
+ [97mSpace[0m[37m fold/unfold [0m[94m───────[0m[94m│[0m                                                                                             
+ [97m/[0m[37m search archived [0m[94m───────[0m[94m│[0m                                                                                             
+[94m──────────────────────────[0m[90m┴[0m[90m─────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [97mSpace[0m[37m fold/unfold[0m[37m · [0m[97m←/→[0m[37m collapse/expand[0m[37m · [0m[97m↵[0m[37m open[0m[37m · [0m[97ma[0m[37m +agent[0m[37m · [0m[97me[0m[37m repos[0m[37m · [0m[97mw[0m[37m +group[0m[37m · [0m[97mR[0m[37m +repo[0m[37m · [0m[97mm[0m[37m move[0m[37m · [0m[97mr[0m[37m rename[0m[37m · [0m[97mt[0m[37m top[0m[37m [0m[97m[0m[37m[0m[37m[0m[97m[0m[37m[0m[37m[0m[97m[0m[37m[0m
