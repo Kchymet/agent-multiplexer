@@ -148,6 +148,32 @@ func TestAttentionSummary(t *testing.T) {
 	}
 }
 
+// An unknown workgroup is reported as unknown, never folded into running.
+func TestAttentionSummaryKeepsUnknownOutOfRunning(t *testing.T) {
+	m := switchboardRail(120, 40)
+	turned := false
+	for i := range m.sessions {
+		s := &m.sessions[i]
+		if s.IsRoot && s.Section == core.SectionWorkgroups && s.State == core.StateRunning {
+			s.State = core.StateUnknown
+			turned = true
+		}
+	}
+	if !turned {
+		t.Fatal("fixture has no running workgroup to turn unknown")
+	}
+	got := strings.TrimRight(ansi.Strip(m.attentionSummary()[0]), " ")
+	// The fourth figure does not fit 26 columns beside the word, so the line sheds "waiting"
+	// (the chip and its glyph still mark attention) rather than a number.
+	want := fmt.Sprintf(" %s 2  %s 0  %s 0  %s 1", glyphWaiting, glyphRunning, glyphReady, glyphUnknown)
+	if got != want {
+		t.Errorf("summary = %q, want %q", got, want)
+	}
+	if w := lipgloss.Width(m.attentionSummary()[0]); w != sidebarWidth {
+		t.Errorf("summary width = %d, want %d", w, sidebarWidth)
+	}
+}
+
 func TestTruncateMeasuresCells(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

@@ -487,12 +487,14 @@ func renderSegments(segs []segment, width int) string {
 // demanding state: how many wait on the user (the attention chip when any do),
 // how many are running, how many are ready. It counts workgroups, not agents —
 // the same aggregate each workgroup row already carries — and is omitted until
-// there is a workgroup to count.
+// there is a workgroup to count. A workgroup whose state is unknown is never
+// reported as running: it gets its own unknown mark, shown only when there is
+// one, so the running figure stays a statement about work known to be running.
 func (m *model) attentionSummary() []string {
 	if m.loading() {
 		return nil
 	}
-	var total, waiting, running, ready int
+	var total, waiting, running, ready, unknown int
 	for i := range m.sessions {
 		s := &m.sessions[i]
 		if !s.IsRoot || s.Section != core.SectionWorkgroups || archivedSession(*s) {
@@ -502,24 +504,29 @@ func (m *model) attentionSummary() []string {
 		switch s.State {
 		case core.StateWaiting:
 			waiting++
-		case core.StateRunning, core.StateUnknown:
+		case core.StateRunning:
 			running++
 		case core.StateReady:
 			ready++
+		case core.StateUnknown:
+			unknown++
 		}
 	}
 	if total == 0 {
 		return nil
 	}
-	return []string{summaryLine(waiting, running, ready, m.railWidth())}
+	return []string{summaryLine(waiting, running, ready, unknown, m.railWidth())}
 }
 
 // summaryLine lays the counts out for width. Attention is spelled out; running
 // and ready keep the glyph the rows above pair with their word, and the
 // compact rail sheds "waiting" before it sheds a number.
-func summaryLine(waiting, running, ready, width int) string {
+func summaryLine(waiting, running, ready, unknown, width int) string {
 	wait := fmt.Sprintf(" %s %d waiting ", glyphWaiting, waiting)
 	rest := fmt.Sprintf(" %s %d  %s %d", glyphRunning, running, glyphReady, ready)
+	if unknown > 0 {
+		rest += fmt.Sprintf("  %s %d", glyphUnknown, unknown)
+	}
 	if ansi.StringWidth(wait+rest) > width {
 		wait = fmt.Sprintf(" %s %d ", glyphWaiting, waiting)
 	}
