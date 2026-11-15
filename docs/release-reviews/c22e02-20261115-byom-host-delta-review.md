@@ -13,13 +13,32 @@ live-service proof.
   checked with `git diff c0e06c5 2d32526` against `git diff 0543932 95b109b`.
 - Master landed #275 and #277–#280 *before* #282, so none of them are in
   2d32526. The reviewed delta is the tree diff `2d32526..cb6b7b2`: #275 and
-  #277–#305 except #282. That is 140 files, +6696/−123.
+  #277–#305 except #282.
+- Whole-tree size of `git diff --stat 2d32526 cb6b7b2`: **325 files,
+  +31462/−622**.
+  - Correction: the first version of this report said "140 files,
+    +6696/−123". That figure was a measurement error, not a scope filter. It is
+    `2d32526..95b109b` (master only up to #282).
+  - The non-test, non-doc, non-fixture source outside the opt-in direct trees
+    (`internal/direct`, `internal/directsvc`, `internal/tailnet`,
+    `cmd/amux/direct*`) is 78 files, +5888/−330. The review focused on the
+    BYOM-relevant part of that.
 - Master `cb6b7b281bd9c6d3880c695054b7dd1ddc51f199` CI run `41570536223` is
   green.
 
 Out of scope as opt-in, except where noted: `internal/direct`, `directsvc`,
 `tailnet`, `cmd/amux/direct*`, procstat/top/nativetui, and CI scope scripts.
 The Harness-provider CI drift belongs to worker c60743.
+
+**This is not a complete review of the optional direct code.** Direct code was
+checked only at the points where it touches the normal cloud-brokered path:
+
+- the provider's direct-enroll gate;
+- the daemon creation-identity entry point;
+- the supervisor's default-off state.
+
+The rest of direct (server, authority, enrollment, tailnet, async creation) was
+not reviewed for correctness.
 
 ## Verdict
 
@@ -41,8 +60,13 @@ regression**, and is the better choice. Reasons:
    generation (`internal/daemon/session_permission.go:299`). So every
    cloud-relayed permission decision failed on old2d. cb6b7b2 forwards the
    field (`internal/provider/sessions.go:550`), and a test pins it
-   (`internal/provider/sessions_test.go:494`). Whether the service sends the
-   field is part of the root's service review.
+   (`internal/provider/sessions_test.go:494`).
+   - **Service side (evidence from the coordinator, not inspected here):** the
+     root reports that in service `fe48`, `actions/providers.go:268` copies
+     `runtime_generation` and `:295` requires it. The root also independently
+     confirmed that old2d drops the field and cb6b7b2 forwards it. So the
+     current host fixes a real defect in the old candidate.
+   - End to end over the live service it is still unverified (G2).
 3. **Store changes are additive inside schema v3,** so the old binary still
    opens the store. Downgrade caveat F2 below applies.
 
@@ -152,8 +176,10 @@ regression**, and is the better choice. Reasons:
   (WSL2/Mac, driven from S25), from zero prestarted sessions.
   `TestNativeClaudeSubmitsPromptSentRightAfterLaunch` skips without
   `AMUX_TEST_CLAUDE_BIN` (that fixture belongs to c60743).
-- **G2. Relayed permission allow/deny end to end.** Depends on the service
-  forwarding `runtime_generation`. old2d cannot pass this gate.
+- **G2. Relayed permission allow/deny end to end.** The coordinator reports
+  that the service source copies and requires `runtime_generation` (fe48
+  `actions/providers.go:268`, `:295`). The live round trip is still unproven.
+  old2d cannot pass this gate.
 - **G3. Owner echo and revoke against the live broker.** Owner echo against
   the live service. `provide revoke` against the live broker permanently
   revokes the registration, so run it only deliberately and with a disposable
