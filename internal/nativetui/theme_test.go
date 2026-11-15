@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -171,6 +172,40 @@ func TestAttentionSummaryKeepsUnknownOutOfRunning(t *testing.T) {
 	}
 	if w := lipgloss.Width(m.attentionSummary()[0]); w != sidebarWidth {
 		t.Errorf("summary width = %d, want %d", w, sidebarWidth)
+	}
+}
+
+// The summary gives up words, zero categories and spacing before it gives up a
+// number: every non-zero count survives whole at the full and the compact rail,
+// including multi-digit ones.
+func TestSummaryLineNeverClipsACount(t *testing.T) {
+	for _, tc := range []struct {
+		waiting, running, ready, unknown, width int
+		want                                    string
+	}{
+		{2, 1, 0, 0, sidebarWidth, " ◆ 2 waiting  ◐ 1  ● 0"},
+		{2, 0, 0, 1, sidebarWidth, " ◆ 2  ◐ 0  ● 0  ◌ 1"},
+		{12, 10, 11, 13, sidebarWidth, " ◆ 12  ◐ 10  ● 11  ◌ 13"},
+		{2, 1, 0, 0, compactRailWidth, " ◆ 2  ◐ 1  ● 0"},
+		{2, 0, 0, 1, compactRailWidth, " ◆ 2  ◌ 1"},
+		{2, 3, 4, 1, compactRailWidth, " ◆ 2 ◐ 3 ● 4 ◌ 1"},
+		{12, 10, 0, 13, compactRailWidth, " ◆ 12  ◐ 10  ◌ 13"},
+		{12, 10, 11, 13, compactRailWidth, " ◆12 ◐10 ●11 ◌13"},
+		{120, 100, 110, 130, compactRailWidth, " ◆120 ◐100●110◌130"},
+	} {
+		line := summaryLine(tc.waiting, tc.running, tc.ready, tc.unknown, tc.width)
+		got := strings.TrimRight(ansi.Strip(line), " ")
+		if got != tc.want {
+			t.Errorf("summaryLine(%d,%d,%d,%d,%d) = %q, want %q", tc.waiting, tc.running, tc.ready, tc.unknown, tc.width, got, tc.want)
+		}
+		if w := lipgloss.Width(line); w != tc.width {
+			t.Errorf("summaryLine(...,%d) is %d cells: %q", tc.width, w, got)
+		}
+		for _, n := range []int{tc.waiting, tc.running, tc.ready, tc.unknown} {
+			if n > 0 && !strings.Contains(got, strconv.Itoa(n)) {
+				t.Errorf("non-zero count %d missing from %q", n, got)
+			}
+		}
 	}
 }
 

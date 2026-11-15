@@ -2,6 +2,7 @@ package nativetui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -519,16 +520,54 @@ func (m *model) attentionSummary() []string {
 }
 
 // summaryLine lays the counts out for width. Attention is spelled out; running
-// and ready keep the glyph the rows above pair with their word, and the
-// compact rail sheds "waiting" before it sheds a number.
+// and ready keep the glyph the rows above pair with their word. When the line
+// does not fit it gives up, in order: the word "waiting", the categories whose
+// count is zero, the double spaces, the space inside each figure, and last the
+// space between figures. It never clips or drops a non-zero number.
 func summaryLine(waiting, running, ready, unknown, width int) string {
-	wait := fmt.Sprintf(" %s %d waiting ", glyphWaiting, waiting)
-	rest := fmt.Sprintf(" %s %d  %s %d", glyphRunning, running, glyphReady, ready)
-	if unknown > 0 {
-		rest += fmt.Sprintf("  %s %d", glyphUnknown, unknown)
+	type figure struct {
+		glyph string
+		n     int
 	}
-	if ansi.StringWidth(wait+rest) > width {
-		wait = fmt.Sprintf(" %s %d ", glyphWaiting, waiting)
+	all := []figure{{glyphRunning, running}, {glyphReady, ready}}
+	if unknown > 0 {
+		all = append(all, figure{glyphUnknown, unknown})
+	}
+	var nonZero []figure
+	for _, f := range all {
+		if f.n > 0 {
+			nonZero = append(nonZero, f)
+		}
+	}
+	layout := func(word string, figs []figure, sep, gap string) (string, string) {
+		wait := fmt.Sprintf(" %s%s%d%s", glyphWaiting, gap, waiting, word)
+		var rest strings.Builder
+		for _, f := range figs {
+			rest.WriteString(sep + f.glyph + gap + strconv.Itoa(f.n))
+		}
+		// The chip keeps one cell of its own padding out of the first separator.
+		if sep != "" && rest.Len() > 0 {
+			return wait + " ", rest.String()[1:]
+		}
+		return wait + " ", rest.String()
+	}
+	var wait, rest string
+	for _, try := range []struct {
+		word     string
+		figs     []figure
+		sep, gap string
+	}{
+		{" waiting", all, "  ", " "},
+		{"", all, "  ", " "},
+		{"", nonZero, "  ", " "},
+		{"", nonZero, " ", " "},
+		{"", nonZero, " ", ""},
+		{"", nonZero, "", ""},
+	} {
+		wait, rest = layout(try.word, try.figs, try.sep, try.gap)
+		if ansi.StringWidth(wait+rest) <= width {
+			break
+		}
 	}
 	waitStyle := dimStyle
 	if waiting > 0 {
