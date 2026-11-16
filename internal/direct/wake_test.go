@@ -32,6 +32,9 @@ type wakeBackend struct {
 	// identFail makes SessionIdentities fail; srcFail makes SourceEvents fail.
 	identFail bool
 	srcFail   int
+	// missing hides a source (sid+"/"+kind): it reads as absent, head 0 and
+	// no generation, as runtimeevents reports a file that does not exist.
+	missing map[string]bool
 	// onSourceRead, when set, runs inside SourceEvents (after the fetch-time
 	// visibility check): it simulates a replacement or an id reuse racing the
 	// event lookup.
@@ -39,7 +42,7 @@ type wakeBackend struct {
 }
 
 func newWakeBackend(rows ...core.Session) *wakeBackend {
-	return &wakeBackend{fakeBackend: newFake(rows...), logs: map[string]map[string][]hp.RuntimeEvent{}, gens: map[string]string{}}
+	return &wakeBackend{fakeBackend: newFake(rows...), logs: map[string]map[string][]hp.RuntimeEvent{}, gens: map[string]string{}, missing: map[string]bool{}}
 }
 
 func (b *wakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
@@ -86,6 +89,12 @@ func (b *wakeBackend) replaceSrc(sid, kind string, evs ...hp.RuntimeEvent) {
 	b.gens[sid+"/"+kind] += "'"
 }
 
+func (b *wakeBackend) setMissing(sid, kind string, missing bool) {
+	b.evMu.Lock()
+	defer b.evMu.Unlock()
+	b.missing[sid+"/"+kind] = missing
+}
+
 // truncateSrc shortens a source in place (same generation).
 func (b *wakeBackend) truncateSrc(sid, kind string, n int) {
 	b.evMu.Lock()
@@ -119,6 +128,10 @@ func (b *wakeBackend) SourceEvents(ctx context.Context, sid string, after map[st
 		g := b.gens[sid+"/"+k]
 		fileID, line := "f-"+sid+"-"+k+g, "l-"+sid+"-"+k+strings.ReplaceAll(g, "~", "")
 		src := runtimeevents.SourceEvents{Kind: k, Head: int64(len(evs)), Generation: fileID + "." + line}
+		if b.missing[sid+"/"+k] {
+			page.Sources = append(page.Sources, runtimeevents.SourceEvents{Kind: k})
+			continue
+		}
 		from := max(after[k], 0)
 		if from < src.Head {
 			to := min(src.Head, from+int64(limit))
@@ -1379,5 +1392,111 @@ func TestWakeBaselineRaces(t *testing.T) {
 		if it.RequestID == "old" {
 			t.Fatal("an old session entering scope replayed its history")
 		}
+	}
+}
+
+// A source that is absent for one or more ticks (between a restore's delete
+// and its copy) is unknown, not empty: when the copy (old prefix + one new
+// event) appears, old watched turn ends are not replayed and the new one is
+// delivered.
+func TestWakeMissingSourceKeepsMarks(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	if code, out := h.post(PathWakeWatch, tok.AccessToken, WakeWatchRequest{RouteID: route, SessionID: "a1", Incarnation: "inc-a1", Watch: true}); code != 200 {
+		t.Fatalf("watch %d %v", code, out)
+	}
+	h.b.add("a1", 1, textEv())
+	h.b.add("a1", 2, turnEndEv())
+	h.tick()
+	first := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(first.Items) != 1 || first.Items[0].Index != 2 {
+		t.Fatalf("first = %+v", first)
+	}
+	h.b.setMissing("a1", "claude", true)
+	h.tick()
+	h.tick()
+	h.b.copySrc("a1", "claude", textEv(), turnEndEv(), textEv(), turnEndEv())
+	h.b.setMissing("a1", "claude", false)
+	h.tick()
+	h.tick()
+	var idx []int64
+	for _, it := range h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items {
+		if it.Kind == WakeKindTurnEnd {
+			idx = append(idx, it.Index)
+		}
+	}
+	sort.Slice(idx, func(i, j int) bool { return idx[i] < idx[j] })
+	if len(idx) != 2 || idx[0] != 2 || idx[1] != 4 {
+		t.Fatalf("turn ends after missing ticks + restore = %v, want the original 2 and the new 4", idx)
+	}
+}
+
+// The eager pass decides "existed at subscribe time" by membership, never by
+// clock: a slow pass crossing seconds, an out-of-scope old session that later
+// enters scope, and a session whose head read failed during the pass all
+// baseline at their heads; a reused id observed under its old incarnation
+// starts a new file at 0.
+func TestWakeEagerMembership(t *testing.T) {
+	rows := testRows()
+	h := newWakeHarness(t, rows...)
+	tok := enroll(t, h.a, []string{PermRead}, ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"wg1"}})
+	route := testRouteID(1)
+	h.b.add("a1", 1, permEv("a-old", "a-old", "g"))
+	h.b.add("d1", 1, permEv("d-old", "d-old", "g")) // out of scope
+	// The first head read of the pass fails, and the pass is slow.
+	h.b.srcFail = 1
+	h.b.onSourceRead = func() { h.clk.add(5 * time.Second) }
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.clk.add(5 * time.Second)
+	h.tick()
+	h.tick()
+	for _, it := range h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items {
+		t.Fatalf("pre-subscribe history replayed: %+v", it)
+	}
+	// d1 enters scope: still history.
+	for i := range rows {
+		if rows[i].ID == "d1" {
+			rows[i].RootID = "wg1"
+		}
+	}
+	h.b.setRows(rows...)
+	h.tick()
+	h.tick()
+	for _, it := range h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items {
+		t.Fatalf("old session entering scope replayed: %+v", it)
+	}
+}
+
+// An id observed by the eager pass (out of scope) is reused by a new session
+// that is in scope. With no stored generation proving the transcript is a
+// new file, the reused id baselines at its heads: the old session's history
+// is never replayed (a new file is read from 0 only when proven new).
+func TestWakeEagerReusedID(t *testing.T) {
+	rows := testRows()
+	h := newWakeHarness(t, rows...)
+	tok := enroll(t, h.a, []string{PermRead}, ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"wg1"}})
+	route := testRouteID(1)
+	h.b.add("d1", 1, permEv("d-old", "d-old", "g")) // out of scope
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	// d1's id is reused by a new in-scope session with a new transcript.
+	h.b.setInc("d1", "inc-d1-new")
+	h.b.replaceSrc("d1", "claude", permEv("d-new", "d-new", "g"))
+	for i := range rows {
+		if rows[i].ID == "d1" {
+			rows[i].RootID = "wg1"
+		}
+	}
+	h.b.setRows(rows...)
+	h.tick()
+	h.tick()
+	got := map[string]bool{}
+	for _, it := range h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items {
+		got[it.RequestID] = true
+	}
+	if got["d-old"] {
+		t.Fatalf("reused id replayed the old session: %v", got)
 	}
 }

@@ -157,9 +157,7 @@ func (s *WakeService) Tick(ctx context.Context) {
 	byID := indexRows(rows)
 	// Which subscriptions cover which sessions now.
 	cover := map[string][]wakeTarget{}
-	created := map[wakeTarget]int64{}
 	for _, sub := range auth.Subs {
-		created[wakeTarget{ClientID: sub.ClientID, RouteID: sub.RouteID, Nonce: auth.Nonce}] = sub.CreatedAt
 		for _, row := range rows {
 			if !validSessionID(row.ID) || !inScope(sub.Grant, row, byID) || effectivelyArchived(row, byID) {
 				continue
@@ -195,13 +193,11 @@ func (s *WakeService) Tick(ctx context.Context) {
 				needBaseline = append(needBaseline, t)
 			}
 		}
-		// Was this incarnation already seen when each unbaselined
-		// subscription was created? (Decided before observing it now.)
-		seenBefore := map[wakeTarget]bool{}
+		// Did each unbaselined subscription's eager pass observe this
+		// session? (Decided before observing it now.)
+		origin := map[wakeTarget]int{}
 		for _, t := range needBaseline {
-			// Without a completed eager baseline nothing proves the session
-			// is new: baseline it at its heads (never replay).
-			seenBefore[t] = !s.store.eager(t.ClientID, t.RouteID, t.Nonce) || s.store.seenBy(sid, created[t])
+			origin[t] = s.store.origin(t.ClientID, t.RouteID, t.Nonce, sid, inc)
 		}
 		if !needIncarnation && len(needBaseline) == 0 {
 			continue
@@ -217,15 +213,17 @@ func (s *WakeService) Tick(ctx context.Context) {
 			s.store.observeIncarnation(sid, inc, heads, gens, nowMs)
 		}
 		for _, t := range needBaseline {
-			if seenBefore[t] {
-				s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, heads, gens)
-			} else {
-				// A session that appeared after the subscription: every event
+			start := heads
+			switch origin[t] {
+			case originNew:
+				// Created after the subscription's eager pass: every event
 				// of it is new to the subscription.
-				s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, zeroHeads(heads), gens)
+				start = zeroHeads(heads)
+			case originReused:
+				start = s.store.reusedStart(sid, heads, gens)
 			}
+			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, start, gens)
 		}
-		s.store.noteIncarnation(sid, inc, now.Unix())
 	}
 	// Read: sessions whose inventory state changed first, then round-robin.
 	s.mu.Lock()
@@ -333,21 +331,24 @@ func (s *WakeService) BaselineSubscription(ctx context.Context, g Grant, routeID
 		}
 	}
 	incs, complete := s.identitiesStrict(ctx, ids)
-	now := s.now().Unix()
+	seen := map[string]string{}
 	for _, r := range rows {
 		inc := incs[r.ID]
 		if inc == "" {
 			continue
 		}
+		// Every visible session is observed, in scope or not, whether or not
+		// its heads can be read now: a session that existed at subscribe
+		// time is never later mistaken for a new one.
+		seen[r.ID] = inc
 		if inScope(g, r, byID) && !effectivelyArchived(r, byID) {
 			if heads, gens, ok := s.sourceHeads(ctx, r.ID); ok {
 				s.store.baseline(g.ClientID, routeID, auth.Nonce, r.ID, heads, gens)
 			}
 		}
-		s.store.noteIncarnation(r.ID, inc, now)
 	}
 	if complete {
-		s.store.markEager(g.ClientID, routeID, auth.Nonce)
+		s.store.markEager(g.ClientID, routeID, auth.Nonce, seen)
 	}
 	_ = s.store.flush(true)
 }
@@ -383,6 +384,13 @@ func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeT
 		}
 		more := false
 		for _, src := range page.Sources {
+			if src.Generation == "" {
+				// An absent source (an existing file always has a
+				// generation) is unknown, not empty or truncated: its marks
+				// and last known generation stand, so a restored copy later
+				// continues instead of replaying history.
+				continue
+			}
 			if s.store.checkGeneration(sid, src.Kind, src.Generation) {
 				more = true // renewed source: re-read it from index 0
 				continue

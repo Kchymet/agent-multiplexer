@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.7 (consolidated)
+# Direct wake-ups: contract v4.8 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -100,7 +100,7 @@ Not wake-worthy:
 **No live `user_sessions` row is required.** Only an opaque wake is delivered. The cloud content/action gate (`ActivePushAuthority`, Android `PushGate`) is unchanged.
 
 **What terminates the binding:**
-- client-credential `wake-sign-out` (§10.2);
+- client-credential `client-sign-out` (§10.2);
 - `device.direct_wake.unregister`;
 - client revoke, revoke-all, a generation bump, or the account being disabled;
 - a provider owner change;
@@ -221,9 +221,11 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 - **Why marks are per source (source evidence).** A non-structured session's runtime events come from several append-only sources: the transcript, the permission journal and amux's journal (`runtimeevents/tailer.go` `sourcesFor`). History and Stream number them in **one joined ordinal space** by concatenating the sources at cumulative offsets (`history.go` `historyPage`). So an append to an earlier source **shifts** every later source's joined ordinals, and a joined ordinal is neither a durable cursor nor a stable identity.
 - **Marks.** Each (subscription, session, source kind) has a durable mark that only goes up: the last 1-based index read **within that source**. There is **no shared mark**.
 - **A new subscriber.** Only that subscription's marks are set; other subscriptions keep their backlog.
-  - **At subscribe time.** The subscribe request itself **eagerly** baselines every in-scope session at its current heads, from one per-source read (`runtimeevents.ReadSources`). It also records the first-seen time of every visible session's incarnation. An event raised right after subscribing is therefore never mistaken for history.
-  - **A session first seen later.** If its incarnation first appeared after the subscription was created, and the eager baseline completed, it is a **new session**: all its events are new, so it starts at 0. Any other later-covered session baselines at its heads, never replaying, for example an old session moving into scope.
-  - **An id reused by a new session.** Each source of the new session restarts at 0 if it is a new file. A file it shares with the old session, such as a journal keyed by the session id, restarts at its head.
+  - **At subscribe time.** The subscribe request itself **eagerly** baselines every in-scope session at its current heads, from one per-source read (`runtimeevents.ReadSources`). It also records, **per subscription**, the set of every visible session and its incarnation (in scope or not, whether or not its heads could be read). An event raised right after subscribing is therefore never mistaken for history. "Existed at subscribe time" is decided by this observed membership, never by clocks.
+  - **Incomplete eager pass.** If the identity lookup fails for any session, the pass is incomplete and no membership is recorded. Every later-covered session then baselines at its heads. This is conservative: events raised between subscribe and the first tick may be missed, but history is never replayed.
+  - **A session first seen later.** If the eager pass completed and did not observe the session, it is a **new session**: all its events are new, so it starts at 0. A session the pass observed with the same incarnation baselines at its heads, never replaying, for example an old session moving into scope or one whose head read failed during the pass.
+  - **An id reused by a new session.** If the pass observed the id under another incarnation, a source restarts at 0 only when its stored generation proves a new file. Any other source, including one whose previous generation is unknown, restarts at its head. An id reused after the session was baselined is re-baselined the same way on the incarnation change.
+  - **Absent source.** A source that does not exist (an existing file always has a generation) is **unknown**, not empty or truncated. Its marks and last known generation stand, so a restore that deletes and then copies the transcript continues it instead of replaying history.
   - A source kind that appears after the baseline (for example, a journal created later) starts at 0.
   - **Source generations.** Every source read carries an opaque `generation` = `<file identity>.<first-line digest>` (device and inode, plus SHA-256 of the first complete line; a JSONL file's first complete line never changes while it is only appended to). Marks and record addresses are meaningful only within one generation.
     - **A copy of the same transcript** (a new file whose first complete line is identical) **continues** the old marks. This is what amux's restore-before-resume writes: `agent.RestoreTranscript` → `restoreCapturedRooted` copies the captured backup over the transcript path, and only when the backup is at least as large. Indexes at or below the old head are copied history and are not replayed; later events are new. Recorded items keep their inline events, with exact ids still checked.
@@ -427,6 +429,10 @@ CREATE TABLE direct_wake_deliveries (
 | `device.direct_wake.list` | — | `{routes:[{route_id, server_id, provider_id, state:"pending"\|"active"\|"expired"\|"revoked", revoke_reason?, activation_expires_at, expires_at, created_at}]}`. Renews active, unexpired routes. |
 | `device.direct_wake.unregister` | `route_id` | `{removed}`. Owner- and client-scoped. Idempotent. |
 
+**Result envelope.** Each verb answers on `/api/ws` with the ordinary result frame:
+- Success: `{"type":"result","id":<id>,"ok":true,"created_id"?:<route_id>,"data":<result above>}`.
+- Refusal: `{"type":"result","id":<id>,"ok":false,"error":<code>,"code":<code>}`. `code` is the stable wake code: `wake_unavailable`, `wake_ambiguous`, `challenge_mismatch`, `superseded`, `activation_expired`, `no_device`, `capacity_exhausted`. A malformed request answers `bad_request`, a refused identity `denied`, anything else `internal`.
+
 **`register` behavior.**
 - **Provider resolution.** It resolves the provider from the live index and requires exactly one owned provider. Zero answers `wake_unavailable`; more than one answers `wake_ambiguous`.
 - **Requirements.** At least one device row for (U, C); the write runs under `lockActiveUserAuthority`; at most 8 active routes per client.
@@ -437,12 +443,13 @@ CREATE TABLE direct_wake_deliveries (
 - **Same `request_id` but activation expired unactivated.** `409 activation_expired`.
 
 **Renewal.**
-- Any authenticated `register`/`list`/`targets` call, or `device.register`, from client C with a live session sets `renewed_at = now()` and `expires_at = now() + 90 days`.
+- Any authenticated `register`/`list`/`targets` call from client C with a live session sets `renewed_at = now()` and `expires_at = now() + 90 days`.
 - This applies only to C's routes that are active, unrevoked and unexpired.
 
 **Explicit sign-out.**
-- Endpoint: `POST /api/auth/client/wake-sign-out`. It is authenticated by the **long-lived client credential** (`X-Harness-Client`) alone; no session or Google token is needed.
-- Body `{reason:"sign_out"|"server_change"}`. An absent reason means `sign_out`.
+- Endpoint: `POST /api/direct-wake/client-sign-out`. It is the single revoke-only path outside the auth bootstrap; the oauth2-proxy skips exactly this path and method. It is authenticated by the **long-lived client credential** (`X-Harness-Client`) alone; no session or Google token is needed.
+- Body `{reason:"sign_out"|"server_change"}`, or empty. An absent reason means `sign_out`. Unknown fields, another reason or a body over 1 KiB: `400 invalid_request`.
+- `204` for a known client (idempotent). `401 auth_client_required` for a missing, unknown or revoked client credential, and for any request carrying cookies.
 - It revokes all of C's routes (`revoke_reason` = reason). It is revoke-only and idempotent: `204` for a known client, including when there is nothing to revoke. An unknown or revoked client gets `401`.
 - On server change it is called before the client credential is cleared.
 - `DELETE /api/auth/session` is unchanged and never revokes routes.
@@ -496,7 +503,7 @@ The relay daemon `permission_request` push gains `session_incarnation`, taken fr
 
 | Event | Effect |
 |---|---|
-| Explicit sign-out or server change | local fence first (§13.3), then client-credential `wake-sign-out` revokes every route. A later login never revives them. |
+| Explicit sign-out or server change | local fence first (§13.3), then client-credential `client-sign-out` revokes every route. A later login never revives them. |
 | Cloud session expiry, interactive re-sign-in | no effect on delivery |
 | 90 days without renewal | route expired; shown truthfully as `expired` |
 | Client revoke, revoke-all, generation bump, user disabled | routes revoked in the same transaction, and checked again at send |
@@ -550,7 +557,7 @@ A wake is never posted through `PushGate`.
 ### 13.3 Sign-out and server change
 
 1. Persist the local fence and drop route mappings.
-2. Call client-credential `wake-sign-out(reason)`.
+2. Call client-credential `client-sign-out(reason)`.
 3. Call `DELETE /api/auth/session` and clear the client.
 
 If offline, persist a pending sign-out intent and replay it with the client credential at the next opportunity.
@@ -633,7 +640,7 @@ Re-login does not re-activate: the backend shows "Paused — signed out of Harne
   - A new request_id → the old route becomes `superseded`.
   - Expired → `activation_expired`.
 - **Sign-out and lifetime.**
-  - Client-credential `wake-sign-out` nine hours after login revokes all routes, and a re-login doesn't revive them.
+  - Client-credential `client-sign-out` nine hours after login revokes all routes, and a re-login doesn't revive them.
   - `RevokeUserSession` alone does nothing.
   - An expired session still delivers.
   - Client revoke, revoke-all, a generation bump or a disabled user stops delivery at send time.
