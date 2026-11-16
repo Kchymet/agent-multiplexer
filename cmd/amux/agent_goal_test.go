@@ -167,3 +167,35 @@ func lastActivity(t *testing.T, rpc *fakeRestrictedRPC) string {
 	t.Fatal("no activity reported")
 	return ""
 }
+
+// A Claude Code background-task notification reaches the prompt hook like any
+// prompt (the payload has no origin field); it must leave the user's goal as
+// it was, and a waiting goal resumes without losing its objective or budget.
+func TestAgentGoalPromptHookIgnoresTaskNotification(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "goal.json")
+	t.Setenv(claudegoal.EnvFile, path)
+	goal := claudegoal.State{Objective: "confirm coordinators work", Status: claudegoal.StatusWaiting, Note: "member 016d92", Continuations: 5, Created: 11, Updated: 12}
+	if err := writeGoal(path, goal); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      "s",
+		"prompt":          "<task-notification>\n<task-id>bvpzcl431</task-id>\n<status>completed</status>\n<summary>Background command \"Wait for member 016d92 to stop\" completed (exit code 0)</summary>\n</task-notification>",
+	})
+	withHookStdin(t, string(payload), func() {
+		if err := cmdAgentGoal([]string{"prompt", "--hook"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	s := readGoalFile(t, path)
+	if s.Objective != goal.Objective || s.Status != claudegoal.StatusActive || s.Created != 11 || s.Continuations != 5 {
+		t.Fatalf("goal after task notification: %+v", s)
+	}
+	withHookStdin(t, `{"hook_event_name":"UserPromptSubmit","prompt":"now ship the docs"}`, func() {
+		_ = cmdAgentGoal([]string{"prompt", "--hook"})
+	})
+	if s := readGoalFile(t, path); s.Objective != "now ship the docs" || s.Continuations != 0 {
+		t.Fatalf("user task after notification: %+v", s)
+	}
+}

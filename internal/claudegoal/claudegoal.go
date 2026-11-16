@@ -6,8 +6,9 @@
 //
 //   - UserPromptSubmit (`amux agent goal prompt --hook`): every user task becomes
 //     the active goal. A reply to a question the coordinator asked keeps the
-//     current objective and re-activates it; an amux continuation nudge
-//     (ResumePrompt) is never mistaken for a new task.
+//     current objective and re-activates it; a prompt that is not the user's —
+//     an amux wake-up (Marker) or a Claude Code harness notification such as a
+//     background <task-notification> — is never mistaken for a new task.
 //   - Stop (`amux agent goal stop --hook`): while the goal is active the hook
 //     blocks the stop and hands Claude a continuation prompt, so the coordinator
 //     keeps working across turns until it marks the goal complete, asks the user
@@ -75,11 +76,16 @@ const MaxContinuations = 100
 const MaxObjectiveBytes = 4 << 10
 
 // ResumePrompt is the text amux types into an idle coordinator when the user
-// resumes its goal. Its marker prefix tells the prompt hook it is a
-// continuation, not a new task.
-const ResumePrompt = resumeMarker + " The user resumed this goal. Continue working toward it."
+// resumes its goal (after Control has made it active). Its marker prefix tells
+// the prompt hook it is a continuation, not a new task.
+const ResumePrompt = Marker + " The user resumed this goal. Continue working toward it."
 
-const resumeMarker = "[amux goal]"
+// Marker opens every prompt amux itself types into a Claude goal coordinator
+// (ResumePrompt, RestartPrompt, the daemon's PR watcher wake-ups). OnPrompt
+// treats a prompt with this exact prefix as a wake-up, never as the user's
+// task, so every amux-generated prompt to a hook-goal coordinator must start
+// with it.
+const Marker = "[amux goal]"
 
 // RestartPrompt is the continuation a restarted coordinator is launched with
 // (the daemon's host-side restart intent, see daemon.restartIntent). It carries
@@ -88,7 +94,7 @@ const resumeMarker = "[amux goal]"
 // It is worded for both outcomes because the same launch argument is used
 // whether the goal is still eligible (OnRestart continues it) or the user had
 // paused or finished it (the state is left exactly as it was).
-const RestartPrompt = resumeMarker + " This session was restarted. If your goal is still active, continue working toward it from the existing conversation and current workspace state; any background wake-up you had armed died with the runtime, so re-check what you were waiting on and re-arm it if needed. Do not resume a goal the user paused or that is complete, blocked, or waiting for the user's input, and do not repeat work already completed."
+const RestartPrompt = Marker + " This session was restarted. If your goal is still active, continue working toward it from the existing conversation and current workspace state; any background wake-up you had armed died with the runtime, so re-check what you were waiting on and re-arm it if needed. Do not resume a goal the user paused or that is complete, blocked, or waiting for the user's input, and do not repeat work already completed."
 
 // EnvFile names the goal state file in a Claude goal coordinator's environment
 // (wsops.AgentEnv sets it). Its absence means the session is not in Claude goal
@@ -136,12 +142,25 @@ func Encode(s State) []byte {
 	return append(b, '\n')
 }
 
-// OnPrompt applies one user prompt. A continuation nudge keeps the objective,
-// and a reply to a pending question (status input) is appended to it; anything
-// else — including a prompt while the goal is waiting on members, which was not
-// waiting on the user — is a new task and becomes the goal, replacing whatever was there (a
-// completed, blocked or paused goal included — the user sending a task is the
-// user's instruction to work on it).
+// OnPrompt applies one submitted prompt. Claude Code's UserPromptSubmit hook
+// fires for every prompt it submits, not only the user's, and its payload
+// carries no origin field (hook_event_name, prompt, session_title and the
+// common session fields only), so the origin is read from the text itself
+// (Origin):
+//
+//   - The restart continuation (RestartPrompt) applies OnRestart.
+//   - Any other amux-originated prompt (the Marker prefix: the user's resume
+//     nudge, a PR watcher wake-up) and a prompt made only of Claude Code harness
+//     blocks (a background task notification, see HarnessTags) are wake-ups
+//     (OnWake): they never replace the objective, never reset Created or the
+//     continuation count, and only move a waiting goal back to active.
+//   - Anything else is the user's. A reply to a pending question (status
+//     input) is appended to the objective; any other user prompt — including
+//     one while the goal is waiting on members, which was not waiting on the
+//     user — is a new task and becomes the goal, replacing whatever was there
+//     (a completed, blocked or paused goal included — the user sending a task
+//     is the user's instruction to work on it). Harness blocks leading a user
+//     prompt are dropped from it.
 func OnPrompt(s State, prompt string, now time.Time) State {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -150,23 +169,109 @@ func OnPrompt(s State, prompt string, now time.Time) State {
 	if strings.HasPrefix(prompt, RestartPrompt) {
 		return OnRestart(s, now)
 	}
-	resume := strings.HasPrefix(prompt, resumeMarker)
-	if !s.None() && s.Objective != "" && (resume || s.Status == StatusInput) {
-		if !resume {
-			// The reply is input to the goal, not a new task: keep it beside the
-			// objective so continuation prompts restate both.
-			s.Objective = truncate(s.Objective + "\n\nUser reply: " + prompt)
-		}
+	user, origin := Origin(prompt)
+	if origin != OriginUser {
+		return OnWake(s, now)
+	}
+	if !s.None() && s.Objective != "" && s.Status == StatusInput {
+		// The reply is input to the goal, not a new task: keep it beside the
+		// objective so continuation prompts restate both.
+		s.Objective = truncate(s.Objective + "\n\nUser reply: " + user)
 		s.Status = StatusActive
 		s.Continuations = 0
 		s.Note = ""
 		s.Updated = now.Unix()
 		return s
 	}
-	if resume {
-		return s // a stray nudge with no goal to continue establishes nothing
+	return State{Objective: truncate(user), Status: StatusActive, Created: now.Unix(), Updated: now.Unix()}
+}
+
+// OnWake applies a prompt that is not the user's: an amux wake-up or a Claude
+// Code harness notification. It is the turn a background wake-up the
+// coordinator armed (goal wait) starts, so a waiting goal is active again with
+// its objective, creation time and continuation count kept — a wake-up is not
+// a user turn and earns no fresh budget. Every other state, and no goal at all,
+// is left exactly as it was: a wake-up never establishes, replaces, resumes a
+// paused goal, or answers a question the coordinator asked the user. (The
+// user's own resume goes through Control, which activates the goal before amux
+// types ResumePrompt.)
+func OnWake(s State, now time.Time) State {
+	if s.Status != StatusWaiting || s.Objective == "" {
+		return s
 	}
-	return State{Objective: truncate(prompt), Status: StatusActive, Created: now.Unix(), Updated: now.Unix()}
+	s.Status = StatusActive
+	s.Note = ""
+	s.Updated = now.Unix()
+	return s
+}
+
+// Prompt origins (Origin).
+const (
+	// OriginUser is a prompt the user submitted (typed in the terminal, or
+	// sent through the rail, web or a steer prompt).
+	OriginUser = "user"
+	// OriginAmux is a prompt amux typed: it opens with Marker.
+	OriginAmux = "amux"
+	// OriginHarness is a prompt Claude Code submitted on its own: nothing but
+	// HarnessTags blocks.
+	OriginHarness = "harness"
+)
+
+// HarnessTags are the XML-style blocks Claude Code submits as a prompt of its
+// own (pinned against Claude Code 2.1.x): a background task, Monitor or agent
+// notification, a system reminder, a local command's or `!` shell command's
+// echoed input and output, and a message from a teammate agent. None of them
+// is a task from the user. A slash command (<command-name>) is deliberately
+// absent: the user types it.
+var HarnessTags = []string{
+	"task-notification",
+	"system-reminder",
+	"local-command-stdout",
+	"local-command-stderr",
+	"local-command-caveat",
+	"bash-input",
+	"bash-stdout",
+	"bash-stderr",
+	"teammate-message",
+}
+
+// Origin classifies a submitted prompt and returns the user's text in it. The
+// match is strict and structural: an amux prompt must start with Marker
+// exactly, and harness blocks are recognised only as complete
+// `<tag>…</tag>` blocks from HarnessTags at the very start of the prompt. A
+// prompt that is nothing but such blocks (or an unterminated one) is the
+// harness's; text after them is the user's, with the blocks dropped.
+func Origin(prompt string) (user, origin string) {
+	prompt = strings.TrimSpace(prompt)
+	if strings.HasPrefix(prompt, Marker) {
+		return "", OriginAmux
+	}
+	rest, stripped := prompt, false
+	for {
+		tag, ok := leadingHarnessTag(rest)
+		if !ok {
+			break
+		}
+		end := strings.Index(rest, "</"+tag+">")
+		if end < 0 {
+			return "", OriginHarness // unterminated: everything is inside the block
+		}
+		rest = strings.TrimSpace(rest[end+len("</"+tag+">"):])
+		stripped = true
+	}
+	if rest == "" && stripped {
+		return "", OriginHarness
+	}
+	return rest, OriginUser
+}
+
+func leadingHarnessTag(s string) (string, bool) {
+	for _, tag := range HarnessTags {
+		if strings.HasPrefix(s, "<"+tag+">") {
+			return tag, true
+		}
+	}
+	return "", false
 }
 
 // ContinueOnRestart reports whether a restart of the coordinator's runtime

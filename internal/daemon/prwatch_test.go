@@ -24,9 +24,18 @@ func TestPRWakeContinuesClaudeGoal(t *testing.T) {
 	if !strings.HasPrefix(text, prWakeMarker) {
 		t.Fatalf("wake %q lacks the goal marker", text)
 	}
+	goal.Continuations = 3
 	next := claudegoal.OnPrompt(goal, text, now)
-	if next.Objective != goal.Objective || next.Status != claudegoal.StatusActive {
-		t.Fatalf("wake replaced the goal: %+v", next)
+	if next != goal {
+		t.Fatalf("wake moved an active goal: %+v", next)
+	}
+	// A goal waiting on this wake-up is active again, objective, creation time
+	// and continuation budget kept.
+	waiting := goal
+	waiting.Status = claudegoal.StatusWaiting
+	next = claudegoal.OnPrompt(waiting, text, now)
+	if next.Objective != goal.Objective || next.Status != claudegoal.StatusActive || next.Created != 1 || next.Continuations != 3 {
+		t.Fatalf("wake did not resume the waiting goal: %+v", next)
 	}
 	// With no goal, the wake-up establishes none.
 	if got := claudegoal.OnPrompt(claudegoal.State{}, text, now); !got.None() {
