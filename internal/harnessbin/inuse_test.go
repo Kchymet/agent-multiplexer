@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -34,6 +35,11 @@ func TestGCSparesVersionWithLiveProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(bin, "30")
+	// argv[0] stays "sleep": a multi-call coreutils (uutils on newer Ubuntu
+	// runners) dispatches on argv[0], and named "claude" it would exit at once
+	// — possibly after the readiness scan below but before GC. The kernel's
+	// exe is still 1.0.0's binary, which is what the scan must see.
+	cmd.Args[0] = "sleep"
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot exec copied sleep: %v", err)
 	}
@@ -58,6 +64,10 @@ func TestGCSparesVersionWithLiveProcess(t *testing.T) {
 			t.Skip("scan cannot see child executables here (e.g. macOS ps comm truncation)")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	// The child must still be running when GC scans (not merely seen once).
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("copied sleep exited before GC: %v", err)
 	}
 	// 1.2.0 current, 1.1.0 previous, 1.0.0 running.
 	removed, _, err := m.GC("claude")
