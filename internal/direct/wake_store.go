@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"amux/internal/runtimeevents"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -73,6 +75,9 @@ type wakeData struct {
 	// Inc is the last observed store incarnation per session id (shared:
 	// incarnation is a fact about the session, not about a subscription).
 	Inc map[string]string `json:"inc,omitempty"`
+	// Gen is the last observed generation per (session, source kind): marks
+	// and record addresses are meaningful only within one source generation.
+	Gen map[string]string `json:"gen,omitempty"`
 }
 
 type wakeSubData struct {
@@ -120,6 +125,7 @@ type wakeRecord struct {
 	// ordinal).
 	Source    string `json:"source"`
 	Index     int64  `json:"index"`
+	SourceGen string `json:"sourceGen,omitempty"`
 	CreatedAt int64  `json:"createdAt"` // unix millis
 	Delivered bool   `json:"delivered,omitempty"`
 }
@@ -151,7 +157,7 @@ func subKey(clientID, routeID, nonce string) string {
 }
 
 func newWakeData() *wakeData {
-	return &wakeData{V: wakeFileVersion, Subs: map[string]*wakeSubData{}, Inc: map[string]string{}}
+	return &wakeData{V: wakeFileVersion, Subs: map[string]*wakeSubData{}, Inc: map[string]string{}, Gen: map[string]string{}}
 }
 
 // openWakeStore loads wake.json. An unreadable or unknown-version file is
@@ -182,6 +188,9 @@ func openWakeStore(dir string, write func(string, string, []byte) error, now fun
 	}
 	if d.Inc == nil {
 		d.Inc = map[string]string{}
+	}
+	if d.Gen == nil {
+		d.Gen = map[string]string{}
 	}
 	ws.data = &d
 	for k, sub := range d.Subs {
@@ -361,7 +370,7 @@ func (ws *wakeStore) lowMarks(sid string, targets []wakeTarget) (map[string]int6
 
 // baseline sets ONLY this subscription's marks for sid to the sources' current
 // heads (a new subscriber never moves another subscription's read position).
-func (ws *wakeStore) baseline(clientID, routeID, nonce, sid string, heads map[string]int64) {
+func (ws *wakeStore) baseline(clientID, routeID, nonce, sid string, heads map[string]int64, gens map[string]string) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	s := ws.subLocked(clientID, routeID, nonce)
@@ -370,6 +379,11 @@ func (ws *wakeStore) baseline(clientID, routeID, nonce, sid string, heads map[st
 	}
 	for kind, h := range heads {
 		s.Marks[markKey(sid, kind)] = h
+	}
+	for kind, g := range gens {
+		if _, seen := ws.data.Gen[markKey(sid, kind)]; !seen {
+			ws.data.Gen[markKey(sid, kind)] = g
+		}
 	}
 	s.Based[sid] = true
 	ws.dirty = true
@@ -391,10 +405,43 @@ func (ws *wakeStore) resetSource(sid, kind string, head int64) {
 	}
 }
 
+// checkGeneration compares a source's observed generation with the stored
+// one. A changed generation (file replaced, or truncated and rewritten, even
+// to the same or a larger head) is a new source incarnation: every
+// subscription's mark for it restarts at 0, so nothing written to the new file
+// is skipped. It reports whether the source was renewed.
+func (ws *wakeStore) checkGeneration(sid, kind, gen string) bool {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	k := markKey(sid, kind)
+	prev, seen := ws.data.Gen[k]
+	if !seen || runtimeevents.SameGeneration(prev, gen) {
+		ws.data.Gen[k] = runtimeevents.MergeGeneration(prev, gen)
+		if ws.data.Gen[k] != prev {
+			ws.dirty = true
+		}
+		return false
+	}
+	ws.data.Gen[k] = gen
+	for _, s := range ws.data.Subs {
+		if s.Based[sid] {
+			s.Marks[k] = 0
+		}
+	}
+	ws.dirty = true
+	return true
+}
+
+func (ws *wakeStore) generation(sid, kind string) string {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.data.Gen[markKey(sid, kind)]
+}
+
 // observeIncarnation records sid's incarnation. On a change it re-baselines
 // every subscription's marks for sid at heads, deletes watches bound to
 // another incarnation, and makes open records of the old incarnation stale.
-func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64, nowMs int64) bool {
+func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64, gens map[string]string, nowMs int64) bool {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	prev, seen := ws.data.Inc[sid]
@@ -417,6 +464,9 @@ func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64,
 			for kind, h := range heads {
 				s.Marks[markKey(sid, kind)] = h
 			}
+		}
+		for kind, g := range gens {
+			ws.data.Gen[markKey(sid, kind)] = g
 		}
 		if w, ok := s.Watches[sid]; ok && w != inc {
 			delete(s.Watches, sid)
@@ -457,6 +507,7 @@ func (ws *wakeStore) reviseLocked(s *wakeSubData, r *wakeRecord, state string, n
 // wakeEvent is one runtime event with its index within its source.
 type wakeEvent struct {
 	Source string
+	Gen    string
 	Index  int64
 	Event  hp.RuntimeEvent
 }
@@ -470,7 +521,7 @@ type wakeTarget struct {
 // first..first+len-1) for every target that has baselined sid, skipping the
 // events at or below that target's mark for this source, then raises the
 // target's mark to the end of the run, all in one batch.
-func (ws *wakeStore) processSource(sid, inc, kind string, first int64, events []hp.RuntimeEvent, targets []wakeTarget, nowMs int64) bool {
+func (ws *wakeStore) processSource(sid, inc, kind, gen string, first int64, events []hp.RuntimeEvent, targets []wakeTarget, nowMs int64) bool {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	queued := false
@@ -487,7 +538,7 @@ func (ws *wakeStore) processSource(sid, inc, kind string, first int64, events []
 			if idx <= mark {
 				continue
 			}
-			if ws.evaluateLocked(s, sid, inc, wakeEvent{Source: kind, Index: idx, Event: ev}, nowMs) {
+			if ws.evaluateLocked(s, sid, inc, wakeEvent{Source: kind, Gen: gen, Index: idx, Event: ev}, nowMs) {
 				queued = true
 			}
 		}
@@ -526,7 +577,7 @@ func (ws *wakeStore) evaluateLocked(s *wakeSubData, sid, inc string, e wakeEvent
 		id := eventIdentity(sid, inc, WakeKindPermission, ev.ItemID, p.RequestID, p.RuntimeGeneration)
 		return ws.addRecordLocked(s, &wakeRecord{Identity: id, Kind: WakeKindPermission, State: WakeStateOpen, SessionID: sid,
 			Incarnation: inc, ItemID: ev.ItemID, RequestID: p.RequestID, RuntimeGeneration: p.RuntimeGeneration,
-			Source: e.Source, Index: e.Index}, nowMs)
+			Source: e.Source, Index: e.Index, SourceGen: e.Gen}, nowMs)
 	case hp.TypePermissionResolved:
 		for _, r := range s.Records {
 			if r.SessionID == sid && r.State == WakeStateOpen && r.RequestID == p.RequestID &&
@@ -538,9 +589,12 @@ func (ws *wakeStore) evaluateLocked(s *wakeSubData, sid, inc string, e wakeEvent
 		if w, ok := s.Watches[sid]; !ok || w != inc {
 			return false
 		}
-		id := eventIdentity(sid, inc, WakeKindTurnEnd, e.Source, fmt.Sprint(e.Index))
+		// The generation's file identity part is stable across first-line
+		// completion; identity uses it so a renewed file's turn ends are new.
+		genID, _, _ := strings.Cut(e.Gen, ".")
+		id := eventIdentity(sid, inc, WakeKindTurnEnd, e.Source, genID, fmt.Sprint(e.Index))
 		return ws.addRecordLocked(s, &wakeRecord{Identity: id, Kind: WakeKindTurnEnd, State: WakeStateDone, SessionID: sid,
-			Incarnation: inc, Source: e.Source, Index: e.Index}, nowMs)
+			Incarnation: inc, Source: e.Source, Index: e.Index, SourceGen: e.Gen}, nowMs)
 	}
 	return false
 }
@@ -704,6 +758,8 @@ type WakeItem struct {
 	// Source and Index locate the event within its append-only source.
 	Source string `json:"source,omitempty"`
 	Index  int64  `json:"index,omitempty"`
+	// Generation is the source file generation the index belongs to (opaque).
+	Generation string `json:"generation,omitempty"`
 	// Event is the runtime event itself, read from its source when fetched
 	// (pending items only), over this authenticated direct connection.
 	Event     *hp.RuntimeEvent `json:"event,omitempty"`
@@ -729,7 +785,7 @@ type wakeVisibility func(sid, inc string) (inScope, current bool)
 func itemOf(r *wakeRecord) WakeItem {
 	it := WakeItem{Seq: r.Seq, WakeID: r.WakeID, Kind: r.Kind, State: r.State, Acked: r.Acked, CreatedAt: r.CreatedAt}
 	if pendingRecord(r) {
-		it.SessionID, it.Incarnation, it.Source, it.Index = r.SessionID, r.Incarnation, r.Source, r.Index
+		it.SessionID, it.Incarnation, it.Source, it.Index, it.Generation = r.SessionID, r.Incarnation, r.Source, r.Index, r.SourceGen
 		if r.Kind == WakeKindPermission {
 			it.ItemID, it.RequestID, it.RuntimeGeneration = r.ItemID, r.RequestID, r.RuntimeGeneration
 		}

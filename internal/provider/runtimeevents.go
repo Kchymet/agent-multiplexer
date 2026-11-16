@@ -79,6 +79,11 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 		sub.cancel()
 		close(sub.done)
 	}()
+	// The stream is bound to the session incarnation it was opened for. Each
+	// batch re-checks it before emitting: a session id reused while old
+	// batches are still queued must never label them with the new
+	// incarnation, so a mismatch ends this subscription without emitting.
+	bound := p.sessionIncarnation(sub.ctx, sessionID)
 	for {
 		select {
 		case <-sub.ctx.Done():
@@ -90,9 +95,13 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 			if len(b.Events) == 0 {
 				continue
 			}
-			// The store incarnation is sampled per batch (outside the admission
-			// lock): a session id reused mid-subscription gets its new label.
-			inc := p.sessionIncarnation(sub.ctx, sessionID)
+			inc := bound
+			if bound != "" {
+				if cur := p.sessionIncarnation(sub.ctx, sessionID); cur != bound {
+					p.cfg.Logf("runtime-events: session %s changed incarnation; ending its stream", sessionID)
+					return
+				}
+			}
 			// Revalidate immediately before every emitted batch and hold the admission
 			// lock through the write. Revocation deletes/cancels the subscription, then
 			// waits for its done barrier; no queued batch can cross it.

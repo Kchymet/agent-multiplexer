@@ -107,3 +107,49 @@ func TestReadSourcesMissingSourceAndBounds(t *testing.T) {
 }
 
 func sprintf(format string, args ...any) string { return fmt.Sprintf(format, args...) }
+
+// Generations: stable across appends (including the first line completing),
+// new on replacement by another file and on truncate-and-rewrite, even when
+// the new head is the same or larger.
+func TestSourceGenerations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "j.jsonl")
+	rec := Record{Runtime: harnessproto.RuntimeClaude, Journal: path}
+	gen := func() string {
+		p, err := ReadSources(rec, nil, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source(p, PageSourceJournal).Generation
+	}
+	appendFile(t, path, `{"level":"info","text":"partial`)
+	g0 := gen()
+	appendFile(t, path, `"}`+"\n")
+	g1 := gen()
+	if !SameGeneration(g0, g1) {
+		t.Fatalf("first line completing changed generation: %q -> %q", g0, g1)
+	}
+	appendFile(t, path, `{"level":"info","text":"b"}`+"\n")
+	if g2 := gen(); g2 != g1 {
+		t.Fatalf("append changed generation: %q -> %q", g1, g2)
+	}
+	// Truncate and rewrite in place with a different first line, larger head.
+	if err := os.WriteFile(path, []byte(`{"level":"error","text":"x"}`+"\n"+`{"level":"info","text":"y"}`+"\n"+`{"level":"info","text":"z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if g3 := gen(); SameGeneration(g1, g3) {
+		t.Fatalf("truncate-and-rewrite kept generation %q", g3)
+	}
+	g3 := gen()
+	// Replace with a new file (new inode), same content shape.
+	tmp := filepath.Join(dir, "new.jsonl")
+	if err := os.WriteFile(tmp, []byte(`{"level":"error","text":"x"}`+"\n"+`{"level":"info","text":"y"}`+"\n"+`{"level":"info","text":"z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	if g4 := gen(); SameGeneration(g3, g4) {
+		t.Fatalf("replacement by a new file kept generation %q", g4)
+	}
+}

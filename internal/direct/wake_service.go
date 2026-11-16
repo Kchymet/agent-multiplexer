@@ -2,11 +2,13 @@ package direct
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"sync"
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/runtimeevents"
 	amuxstore "amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -197,15 +199,15 @@ func (s *WakeService) Tick(ctx context.Context) {
 		// A baseline or reset needs every source's real head, from one
 		// coherent per-source read. If the read fails, defer both rather than
 		// fabricating heads of 0 (which would replay old activity as new).
-		heads, ok := s.sourceHeads(ctx, sid)
+		heads, gens, ok := s.sourceHeads(ctx, sid)
 		if !ok {
 			continue
 		}
 		if needIncarnation {
-			s.store.observeIncarnation(sid, inc, heads, nowMs)
+			s.store.observeIncarnation(sid, inc, heads, gens, nowMs)
 		}
 		for _, t := range needBaseline {
-			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, heads)
+			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, heads, gens)
 		}
 	}
 	// Read: sessions whose inventory state changed first, then round-robin.
@@ -285,16 +287,16 @@ func (s *WakeService) identities(ctx context.Context, sids []string) map[string]
 }
 
 // sourceHeads reads the current head of each of sid's sources.
-func (s *WakeService) sourceHeads(ctx context.Context, sid string) (map[string]int64, bool) {
+func (s *WakeService) sourceHeads(ctx context.Context, sid string) (map[string]int64, map[string]string, bool) {
 	page, ok := s.backend.SourceEvents(ctx, sid, map[string]int64{}, 1)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	heads := map[string]int64{}
+	heads, gens := map[string]int64{}, map[string]string{}
 	for _, src := range page.Sources {
-		heads[src.Kind] = src.Head
+		heads[src.Kind], gens[src.Kind] = src.Head, src.Generation
 	}
-	return heads, true
+	return heads, gens, true
 }
 
 // read reads sid's sources forward, each from the lowest mark of its covering
@@ -315,6 +317,10 @@ func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeT
 		}
 		more := false
 		for _, src := range page.Sources {
+			if s.store.checkGeneration(sid, src.Kind, src.Generation) {
+				more = true // renewed source: re-read it from index 0
+				continue
+			}
 			if src.Head < low[src.Kind] {
 				s.store.resetSource(sid, src.Kind, src.Head)
 				continue
@@ -322,7 +328,7 @@ func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeT
 			if len(src.Events) == 0 {
 				continue
 			}
-			if s.store.processSource(sid, inc, src.Kind, src.First, src.Events, targets, nowMs) {
+			if s.store.processSource(sid, inc, src.Kind, src.Generation, src.First, src.Events, targets, nowMs) {
 				queued = true
 			}
 			if src.First+int64(len(src.Events))-1 < src.Head {
@@ -337,7 +343,7 @@ func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeT
 }
 
 // sourceEvent reads the event at index of source kind in sid, or nil.
-func (s *WakeService) sourceEvent(ctx context.Context, sid, kind string, index int64) *hp.RuntimeEvent {
+func (s *WakeService) sourceEvent(ctx context.Context, sid, kind, gen string, index int64) *hp.RuntimeEvent {
 	if index < 1 {
 		return nil
 	}
@@ -346,7 +352,9 @@ func (s *WakeService) sourceEvent(ctx context.Context, sid, kind string, index i
 		return nil
 	}
 	for _, src := range page.Sources {
-		if src.Kind == kind && src.First == index && len(src.Events) == 1 {
+		// The index is meaningful only in the generation it was recorded in:
+		// a replaced or rewritten file never yields unrelated content.
+		if src.Kind == kind && src.First == index && len(src.Events) == 1 && runtimeevents.SameGeneration(gen, src.Generation) {
 			ev := src.Events[0]
 			return &ev
 		}
@@ -587,6 +595,39 @@ func (s *WakeService) visibility(ctx context.Context, g Grant) (wakeVisibility, 
 		cur := incs[sid]
 		return in, cur == "" || cur == inc
 	}, nil
+}
+
+// verifiedEvent reads a pending item's event from its source and returns it
+// only if it is provably the recorded event: same source generation, the
+// recorded event type, and for a permission the exact item_id, request_id and
+// runtime_generation; and the session is still at the record's incarnation
+// AFTER the read (so a replacement or an id reuse between the fetch-time
+// visibility check and this lookup can never put unrelated content beside a
+// recorded permission). On any mismatch the event is omitted.
+func (s *WakeService) verifiedEvent(ctx context.Context, it WakeItem) *hp.RuntimeEvent {
+	ev := s.sourceEvent(ctx, it.SessionID, it.Source, it.Generation, it.Index)
+	if ev == nil {
+		return nil
+	}
+	switch it.Kind {
+	case WakeKindPermission:
+		var p permPayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		if ev.Type != hp.TypePermissionRequest || ev.ItemID != it.ItemID || p.RequestID != it.RequestID || p.RuntimeGeneration != it.RuntimeGeneration {
+			return nil
+		}
+	case WakeKindTurnEnd:
+		if ev.Type != hp.TypeTurnEnd {
+			return nil
+		}
+	default:
+		return nil
+	}
+	cur, ok := s.identitiesStrict(ctx, []string{it.SessionID})
+	if !ok || cur[it.SessionID] != it.Incarnation {
+		return nil
+	}
+	return ev
 }
 
 // uncovered lists the grant's in-scope sessions with no store identity.

@@ -29,11 +29,11 @@ func wakeFixtureFiles(t *testing.T) map[string][]byte {
 	f, tr := false, true
 	open := WakeItem{Seq: 41, WakeID: fxWake1, Kind: WakeKindPermission, State: WakeStateOpen, Acked: false,
 		SessionID: "e1deda", Incarnation: "inc-7f3a", ItemID: "item_9", RequestID: "call_7", RuntimeGeneration: "rg_01J9",
-		Source: "permission", Index: 7, CreatedAt: 1793000000000,
+		Source: "permission", Index: 7, Generation: "hX3k9qP2mA7c.Lw0dQe8sT1v", CreatedAt: 1793000000000,
 		Event: &hp.RuntimeEvent{Type: hp.TypePermissionRequest, ItemID: "item_9", Direction: hp.DirOut,
 			Payload: json.RawMessage(`{"request_id":"call_7","runtime_generation":"rg_01J9","tool":"Bash","action":"go test ./...","options":["allow","deny"]}`)}}
 	turn := WakeItem{Seq: 42, WakeID: fxWake2, Kind: WakeKindTurnEnd, State: WakeStateDone, SessionID: "e1deda",
-		Incarnation: "inc-7f3a", Source: "claude", Index: 130, CreatedAt: 1793000060000,
+		Incarnation: "inc-7f3a", Source: "claude", Index: 130, Generation: "Zp4r8YbN2kQe.Hc5vT0aW9mJ", CreatedAt: 1793000060000,
 		Event: &hp.RuntimeEvent{Type: hp.TypeTurnEnd, Direction: hp.DirOut, Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}}
 	resolved := WakeItem{Seq: 44, WakeID: fxWake1, Kind: WakeKindPermission, State: WakeStateResolved, CreatedAt: 1793000000000}
 	withdrawn := WakeItem{Seq: 45, WakeID: fxWake2, Kind: WakeKindTurnEnd, State: WakeStateWithdrawn, CreatedAt: 1793000060000}

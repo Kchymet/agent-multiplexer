@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.4 (consolidated)
+# Direct wake-ups: contract v4.5 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -222,7 +222,10 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 - **Marks.** Each (subscription, session, source kind) has a durable mark that only goes up: the last 1-based index read **within that source**. There is **no shared mark**.
 - **A new subscriber.** When a session enters a subscription's set, only that subscription's marks are set, to every source's current head, all taken from one per-source read (`runtimeevents.ReadSources`). Other subscriptions keep their backlog.
   - A source kind that appears after the baseline (for example, a journal created later) starts at 0.
-  - A source whose head falls below its mark was replaced or truncated. It is re-baselined at its new head and never replayed.
+  - **Source generations.** Every source read carries an opaque `generation` = `<file identity>.<first-line digest>` (device and inode, plus SHA-256 of the first complete line; a JSONL file's first complete line never changes while it is only appended to). Marks and record addresses are meaningful only within one generation.
+    - **A changed generation** is a **new source incarnation**: the file was replaced, or truncated and rewritten, even to the same or a larger head. It is read from index 0, so nothing written to the new file is skipped. Exact replays are deduped by event identity; turn-end identity includes the generation's file identity.
+    - **An empty first-line digest** (no complete first line yet) matches the same file identity, so a file whose first line completes is not mistaken for a replacement.
+  - A source whose head falls below its mark **within the same generation** was truncated in place. It is re-baselined at its new head and never replayed.
   - If the baseline read fails, the baseline is deferred, never fabricated.
 - **Reading.** Each source is read **by its own index** from the lowest mark of the covering subscriptions (`Backend.SourceEvents`, one call returning each source's head and events). No joined offset is involved, so growth in one source between reads cannot shift another source's positions.
   - **Round-robin.** Sessions are taken round-robin, 16 per 2 s tick, at most 8 pages each, continued next tick.
@@ -313,7 +316,13 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 ### 8.5 Display and actions
 
-- **Display.** Pending items (open permissions, un-acked turn ends) carry `source`, `index` and the **`event` itself**. The event is read from its source at fetch time and returned only over this authenticated direct connection, after the fetch-time scope and incarnation checks. Nothing is sent to the cloud. If the source no longer holds that index (replaced), `event` is absent. There is no joined-ordinal history lookup.
+- **Display.** Pending items (open permissions, un-acked turn ends) carry `source`, `index`, `generation` and the **`event` itself**. The event is read from its source at fetch time and returned only over this authenticated direct connection. Nothing is sent to the cloud. It is attached **only when it is provably the recorded event**:
+  - the source generation matches the record's;
+  - the event type matches;
+  - for a permission, `item_id`, `request_id` and `runtime_generation` are exactly equal;
+  - after the read, the session is still at the record's incarnation.
+
+  Otherwise `event` is omitted, so a replacement or id reuse racing the lookup never puts unrelated content beside a recorded permission. Clients must still validate it. There is no joined-ordinal history lookup.
 - **Uncovered sessions.** `POST /direct/v1/wake/subscriptions` also returns `uncovered_sessions`: in-scope sessions wake-ups cannot watch right now because the daemon store has no identity for them.
   - Identities exist exactly for rows of the store's `sessions` table (`internal/store/identity.go` `SessionIdentities`). Untracked rows, or rows with an empty incarnation, have none.
   - These sessions produce no wakes, and that is disclosed, never silent.
@@ -341,7 +350,7 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 | `direct-wake` | prov → orch | `{type, reqId, directWake:{serverId, wakes:[{routeId, wakeId, grantRef}] ≤16}}` |
 | `direct-wake-routes` | prov → orch | `{type, reqId, directWake:{serverId, epoch, routes:[{routeId, grantRef, state}] ≤512, part, final}}` |
 | `direct-wake-result` | orch → prov | one per reqId, within 15 s: `{type, reqId, directWakeResult:{results:[{routeId, wakeId?, status}], error?}}` |
-| `runtime-events` (existing) | prov → orch | additive `incarnation`: the provider stamps the session's store incarnation on each batch |
+| `runtime-events` (existing) | prov → orch | additive `incarnation`: the store incarnation the stream was **opened for**. The provider re-checks it before every batch and ends the stream on a mismatch, so a queued old batch is never labelled with a reused id's new incarnation |
 
 - **Statuses:** `accepted`, `no_recipient`, `route_gone`, `rate_limited`, `unavailable`, `busy`.
 - **Connection-level mismatch** answers the whole frame with `error:"unavailable"`, never `route_gone`.

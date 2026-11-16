@@ -431,3 +431,59 @@ func TestRetainedRuntimeStreamSurvivesUnrelatedSnapshotChange(t *testing.T) {
 		t.Fatalf("resolver calls = %d, want one retained subscription", calls)
 	}
 }
+
+// A runtime-events stream is bound to the incarnation it was opened for: when
+// the session id is reused while old batches are still queued, no old batch
+// is emitted with the new incarnation label (the stream ends instead).
+func TestRuntimeEventsNeverRelabelAfterIDReuse(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}})
+	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch, 4), ok: true}
+	var incMu sync.Mutex
+	inc := "inc-old"
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll,
+		RuntimeEvents: true, RuntimeEventStream: fs.stream,
+		SessionIncarnation: func(context.Context, string) string { incMu.Lock(); defer incMu.Unlock(); return inc },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
+	if err := oc.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ev := []harnessproto.RuntimeEvent{{Type: "text", Direction: "out", Payload: json.RawMessage(`{"text":"old"}`)}}
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 1, Runtime: harnessproto.RuntimeClaude, Events: ev}
+	if m := readRuntimeEvents(t, oc); m.Incarnation != "inc-old" {
+		t.Fatalf("first batch incarnation = %q", m.Incarnation)
+	}
+	// The id is reused while an old batch is still queued.
+	incMu.Lock()
+	inc = "inc-new"
+	incMu.Unlock()
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 2, Runtime: harnessproto.RuntimeClaude, Events: ev}
+	done := make(chan harnessproto.HarnessMsg, 1)
+	go func() {
+		for {
+			m, err := oc.ReadHarness()
+			if err != nil {
+				return
+			}
+			if m.Type == harnessproto.HRuntimeEvents {
+				done <- m
+				return
+			}
+		}
+	}()
+	select {
+	case m := <-done:
+		t.Fatalf("queued old batch emitted after id reuse with incarnation %q", m.Incarnation)
+	case <-time.After(300 * time.Millisecond):
+	}
+}

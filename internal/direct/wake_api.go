@@ -269,7 +269,7 @@ func (s *Server) wakeEvents(w http.ResponseWriter, r *http.Request) {
 	for i := range resp.Items {
 		it := &resp.Items[i]
 		if it.SessionID != "" && it.Source != "" {
-			it.Event = s.cfg.Wake.sourceEvent(l.Context(), it.SessionID, it.Source, it.Index)
+			it.Event = s.cfg.Wake.verifiedEvent(l.Context(), *it)
 		}
 	}
 	if code := l.AuthEnded(); code != "" {

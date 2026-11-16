@@ -14,6 +14,7 @@
       "runtime_generation": "rg_01J9",
       "source": "permission",
       "index": 7,
+      "generation": "hX3k9qP2mA7c.Lw0dQe8sT1v",
       "event": {
         "type": "permission_request",
         "item_id": "item_9",
@@ -41,6 +42,7 @@
       "incarnation": "inc-7f3a",
       "source": "claude",
       "index": 130,
+      "generation": "Zp4r8YbN2kQe.Hc5vT0aW9mJ",
       "event": {
         "type": "turn_end",
         "direction": "out",

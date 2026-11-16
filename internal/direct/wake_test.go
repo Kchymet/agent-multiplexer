@@ -28,13 +28,18 @@ type wakeBackend struct {
 	*fakeBackend
 	evMu sync.Mutex
 	logs map[string]map[string][]hp.RuntimeEvent // sid -> source kind -> events
+	gens map[string]string                       // sid+"/"+kind -> generation
 	// identFail makes SessionIdentities fail; srcFail makes SourceEvents fail.
 	identFail bool
 	srcFail   int
+	// onSourceRead, when set, runs inside SourceEvents (after the fetch-time
+	// visibility check): it simulates a replacement or an id reuse racing the
+	// event lookup.
+	onSourceRead func()
 }
 
 func newWakeBackend(rows ...core.Session) *wakeBackend {
-	return &wakeBackend{fakeBackend: newFake(rows...), logs: map[string]map[string][]hp.RuntimeEvent{}}
+	return &wakeBackend{fakeBackend: newFake(rows...), logs: map[string]map[string][]hp.RuntimeEvent{}, gens: map[string]string{}}
 }
 
 func (b *wakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
@@ -64,11 +69,19 @@ func (b *wakeBackend) addSrc(sid, kind string, index int64, ev hp.RuntimeEvent) 
 	b.logs[sid][kind] = append(b.logs[sid][kind], ev)
 }
 
-// replaceSrc replaces a source with fresh contents (rotation/truncation).
+// replaceSrc replaces a source with a NEW file (new generation).
 func (b *wakeBackend) replaceSrc(sid, kind string, evs ...hp.RuntimeEvent) {
 	b.evMu.Lock()
 	defer b.evMu.Unlock()
 	b.logs[sid][kind] = evs
+	b.gens[sid+"/"+kind] += "'"
+}
+
+// truncateSrc shortens a source in place (same generation).
+func (b *wakeBackend) truncateSrc(sid, kind string, n int) {
+	b.evMu.Lock()
+	defer b.evMu.Unlock()
+	b.logs[sid][kind] = b.logs[sid][kind][:n]
 }
 
 func (b *wakeBackend) SourceEvents(ctx context.Context, sid string, after map[string]int64, limit int) (runtimeevents.SourcesPage, bool) {
@@ -78,6 +91,12 @@ func (b *wakeBackend) SourceEvents(ctx context.Context, sid string, after map[st
 		b.srcFail--
 		return runtimeevents.SourcesPage{}, false
 	}
+	if hook := b.onSourceRead; hook != nil {
+		b.onSourceRead = nil
+		b.evMu.Unlock()
+		hook()
+		b.evMu.Lock()
+	}
 	var page runtimeevents.SourcesPage
 	kinds := make([]string, 0, len(b.logs[sid]))
 	for k := range b.logs[sid] {
@@ -86,7 +105,7 @@ func (b *wakeBackend) SourceEvents(ctx context.Context, sid string, after map[st
 	sort.Strings(kinds)
 	for _, k := range kinds {
 		evs := b.logs[sid][k]
-		src := runtimeevents.SourceEvents{Kind: k, Head: int64(len(evs))}
+		src := runtimeevents.SourceEvents{Kind: k, Head: int64(len(evs)), Generation: "gen-" + sid + "-" + k + b.gens[sid+"/"+k]}
 		from := max(after[k], 0)
 		if from < src.Head {
 			to := min(src.Head, from+int64(limit))
@@ -1118,9 +1137,9 @@ func TestWakeTwoSourceSessionStableIdentity(t *testing.T) {
 	}
 }
 
-// A replaced source (rotated or truncated: head below the cursor) is
+// A source truncated in place (same generation, head below the cursor) is
 // re-baselined; nothing in it is replayed as new.
-func TestWakeReplacedSourceIsRebaselined(t *testing.T) {
+func TestWakeTruncatedSourceIsRebaselined(t *testing.T) {
 	h := newWakeHarness(t)
 	tok := enroll(t, h.a, []string{PermRead}, allSessions)
 	route := testRouteID(1)
@@ -1129,16 +1148,74 @@ func TestWakeReplacedSourceIsRebaselined(t *testing.T) {
 	}
 	h.subscribe(tok.AccessToken, route, testSecretN(1))
 	h.tick() // claude=3
-	h.b.replaceSrc("a1", "claude", permEv("old", "old", "g"))
+	h.b.truncateSrc("a1", "claude", 1)
 	h.tick()
-	if n := len(h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items); n != 0 {
-		t.Fatalf("replaced source replayed %d events", n)
-	}
 	h.b.add("a1", 2, permEv("new", "new", "g"))
 	h.tick()
 	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
 	if len(f.Items) != 1 || f.Items[0].RequestID != "new" {
-		t.Fatalf("after replacement = %+v", f)
+		t.Fatalf("after truncation = %+v", f)
+	}
+}
+
+// A source replaced by a new file (new generation) to the SAME or a larger
+// head is a new source incarnation: it is read from index 0, so nothing in the
+// new file is skipped, and an older record's address (old generation) never
+// fetches the new file's content.
+func TestWakeReplacedSourceSameOrLargerHead(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	if code, out := h.post(PathWakeWatch, tok.AccessToken, WakeWatchRequest{RouteID: route, SessionID: "a1", Incarnation: "inc-a1", Watch: true}); code != 200 {
+		t.Fatalf("watch %d %v", code, out)
+	}
+	h.b.add("a1", 1, textEv())
+	h.b.add("a1", 2, turnEndEv())
+	h.tick()
+	before := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(before.Items) != 1 || before.Items[0].Index != 2 || before.Items[0].Event == nil {
+		t.Fatalf("first turn end = %+v", before)
+	}
+	// Replace with a new file whose head (3) is larger, holding a new turn end
+	// at index 2 and an open permission at index 3.
+	h.b.replaceSrc("a1", "claude", textEv(), turnEndEv(), permEv("p", "r", "g"))
+	h.tick()
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	var turnEnds, perms int
+	for _, it := range f.Items {
+		switch {
+		case it.Kind == WakeKindTurnEnd && it.WakeID == before.Items[0].WakeID:
+			if it.Event != nil {
+				t.Fatalf("old-generation record fetched new-file content: %+v", it.Event)
+			}
+		case it.Kind == WakeKindTurnEnd:
+			turnEnds++
+			if it.Event == nil || it.Index != 2 {
+				t.Fatalf("new-generation turn end = %+v", it)
+			}
+		case it.Kind == WakeKindPermission:
+			perms++
+		}
+	}
+	if turnEnds != 1 || perms != 1 {
+		t.Fatalf("replacement with a larger head skipped events: %+v", f)
+	}
+	// Same-head replacement too.
+	h.b.replaceSrc("a1", "claude", textEv(), textEv(), turnEndEv())
+	h.tick()
+	h.tick()
+	g := h.fetch(tok.AccessToken, route, WakeFetchRequest{AfterSeq: f.NextSeq})
+	n := 0
+	for _, it := range g.Items {
+		if it.Kind == WakeKindTurnEnd && it.State == WakeStateDone && it.Index == 3 {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("same-head replacement skipped the new turn end: %+v", g)
 	}
 }
 
@@ -1172,3 +1249,38 @@ func TestWakeSubscriptionsDiscloseUncoveredSessions(t *testing.T) {
 
 // noIdentityFor makes the store report no identity for sid.
 func (b *wakeBackend) noIdentityFor(sid string) { b.fakeBackend.setInc(sid, "-") }
+
+// Inline events are proven to be the recorded event: a different event at the
+// same index (same generation) and a session id reused between the
+// visibility check and the lookup both omit the event.
+func TestWakeInlineEventMustMatchRecord(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	h.b.add("a1", 1, permEv("item", "req", "gen"))
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(f.Items) != 1 || f.Items[0].Event == nil {
+		t.Fatalf("baseline fetch = %+v", f)
+	}
+	// Unrelated content at the recorded index (same generation).
+	h.b.evMu.Lock()
+	h.b.logs["a1"]["claude"][0] = permEv("other", "rm -rf", "gen")
+	h.b.evMu.Unlock()
+	if g := h.fetch(tok.AccessToken, route, WakeFetchRequest{}); len(g.Items) != 1 || g.Items[0].Event != nil {
+		t.Fatalf("mismatched event attached: %+v", g.Items)
+	}
+	// Restore, then reuse the session id between visibility and lookup.
+	h.b.evMu.Lock()
+	h.b.logs["a1"]["claude"][0] = permEv("item", "req", "gen")
+	h.b.evMu.Unlock()
+	h.b.onSourceRead = func() { h.b.setInc("a1", "inc-reused") }
+	g := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	for _, it := range g.Items {
+		if it.Event != nil {
+			t.Fatalf("event attached across a session id reuse: %+v", it)
+		}
+	}
+}
