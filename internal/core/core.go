@@ -30,8 +30,8 @@ const (
 	StateWaiting = harnessproto.StateWaiting // live, blocked on a prompt awaiting user input
 	StateRunning = harnessproto.StateRunning // live and the agent has an active turn
 	// StateUnknown is a live agent with no hook data yet (a session predating
-	// the hooks, or one that hasn't fired its first event). Shown as a less
-	// certain "running" so it reads as live without claiming granular knowledge.
+	// the hooks, or one that hasn't fired its first event). Shown as "unknown":
+	// live, without claiming a turn is in flight.
 	StateUnknown = harnessproto.StateUnknown
 )
 

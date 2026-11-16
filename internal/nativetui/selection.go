@@ -53,9 +53,9 @@ func (m *model) validateSelection() {
 	}
 }
 
-func panePoint(ev tea.MouseMsg, cols, rows int) termselect.Point {
+func (m *model) panePoint(ev tea.MouseMsg, cols, rows int) termselect.Point {
 	return termselect.Point{
-		X: min(max(ev.X-sidebarWidth-1, 0), cols-1),
+		X: min(max(ev.X-m.railWidth()-1, 0), cols-1),
 		Y: min(max(ev.Y-1, 0), rows-1),
 	}
 }
@@ -66,7 +66,7 @@ func (m *model) selectionMouse(ev tea.MouseMsg) (bool, tea.Cmd) {
 	m.validateSelection()
 	if g := m.gesture; g != nil {
 		v := g.term.Viewport()
-		p := panePoint(ev, min(g.cols, v.Cols), min(g.rows, v.Rows))
+		p := m.panePoint(ev, min(g.cols, v.Cols), min(g.rows, v.Rows))
 		if tea.MouseEvent(ev).IsWheel() {
 			// Wheel notches are independent scroll actions, not button
 			// releases. Shift still forces local scrolling during an app
@@ -152,9 +152,9 @@ func (m *model) selectionMouse(ev tea.MouseMsg) (bool, tea.Cmd) {
 	}
 	// Clip against the actual outer window as well as the layout's fallback
 	// dimensions; a very small window has no selectable pane content.
-	cols := min(m.mainWidth(), max(0, m.w-sidebarWidth-1))
+	cols := min(m.mainWidth(), max(0, m.w-m.railWidth()-1))
 	rows := min(m.paneRows(), max(0, m.h-3))
-	x, y := ev.X-sidebarWidth-1, ev.Y-1
+	x, y := ev.X-m.railWidth()-1, ev.Y-1
 	if x < 0 || y < 0 || x >= cols || y >= rows {
 		return false, nil
 	}

@@ -25,6 +25,7 @@ import (
 	"amux/internal/vterm"
 )
 
+// sidebarWidth is the rail at full width; see railWidthFor for the compact rail.
 const sidebarWidth = 26
 
 // Run starts the native TUI and blocks until the user quits. Quitting only tears
@@ -57,6 +58,7 @@ func Run(focusID string) error {
 		m.status = "keybindings: " + keysErr.Error()
 	}
 	m.openRailState(railStatePath())
+	initAppearance()
 	_, err := newProgram(m, tea.WithOutput(hw)).Run()
 	m.flushRailState()
 	if m.accounts != nil {
@@ -394,7 +396,7 @@ func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if ev.X < 0 || ev.X >= m.w || ev.Y < 1 || ev.Y > min(m.paneRows(), max(0, m.h-3)) {
 		return m, nil
 	}
-	if ev.Action == tea.MouseActionPress && ev.Button == tea.MouseButtonLeft && ev.X >= 0 && ev.X < sidebarWidth {
+	if ev.Action == tea.MouseActionPress && ev.Button == tea.MouseButtonLeft && ev.X >= 0 && ev.X < m.railWidth() {
 		barY := 1 + max(1, m.paneRows()-len(m.accountOverviewLines())-len(m.railHints()))
 		if ev.Y >= barY && ev.Y < barY+len(m.accountOverviewLines()) {
 			return m, m.openAccounts()
@@ -405,7 +407,7 @@ func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if tea.MouseEvent(ev).IsWheel() && ev.X >= 0 && ev.X < sidebarWidth && ev.Y >= 1 && ev.Y <= m.paneRows() {
+	if tea.MouseEvent(ev).IsWheel() && ev.X >= 0 && ev.X < m.railWidth() && ev.Y >= 1 && ev.Y <= m.paneRows() {
 		switch ev.Button {
 		case tea.MouseButtonWheelUp:
 			m.move(-1)
@@ -420,7 +422,7 @@ func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	// Strip the sidebar+divider (left) and the top border (above) to get the
 	// agent pane's own 0-based coordinates.
-	x, y := ev.X-(sidebarWidth+1), ev.Y-1
+	x, y := ev.X-(m.railWidth()+1), ev.Y-1
 	if x < 0 || y < 0 || x >= m.mainWidth() || y >= m.paneRows() {
 		return m, nil
 	}
@@ -1055,8 +1057,35 @@ func attachable(s *core.Session) bool {
 	return !s.IsRoot && s.RootID != "" && s.Kind != "repo"
 }
 
+// compactBelow is the terminal width under which the rail gives columns back
+// to the pane. An 80-column terminal keeps the full rail. It is a variable so
+// tests of pane mechanics in deliberately tiny terminals can pin the full rail.
+var compactBelow = 72
+
+const compactRailWidth = 18
+
+// railWidthFor is the rail's width in a w-column terminal. Every coordinate
+// that crosses the divider (pane size, mouse, hardware cursor) derives from
+// it, so the layout has one source of truth.
+func railWidthFor(w int) int {
+	if w > 0 && w < compactBelow {
+		return compactRailWidth
+	}
+	return sidebarWidth
+}
+
+func (m *model) railWidth() int    { return railWidthFor(m.w) }
+func (m *model) compactRail() bool { return m.railWidth() < sidebarWidth }
+
+// mainIsPane reports that the main area is showing an embedded terminal
+// rather than amux's own chrome (see renderMain's precedence).
+func (m *model) mainIsPane() bool {
+	return m.archiveSearch == nil && m.picker == nil && m.form == nil && m.confirm == nil &&
+		!m.res.open && m.cur() != nil
+}
+
 func (m *model) mainWidth() int {
-	w := m.w - sidebarWidth - 1
+	w := m.w - m.railWidth() - 1
 	if w < 1 {
 		return 1
 	}

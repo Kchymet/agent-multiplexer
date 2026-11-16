@@ -16,8 +16,6 @@ import (
 	"amux/internal/wsops"
 )
 
-var cursorStyle = lipgloss.NewStyle().Reverse(true)
-
 // openNewRepoWorkgroupForm opens the new-workgroup form for a repo header: a
 // normal workgroup whose repos are seeded with (and so limited to) that one
 // repo, with its first agent on it. There is no one-off agent on a repo.
@@ -148,7 +146,7 @@ func (f *formField) display(width int) string {
 	}
 	if f.isPicker() {
 		if f.value == "" {
-			return dimStyle.Render("(none — ↵ to pick)")
+			return dimStyle.Render("(none — " + enterKey() + " to pick)")
 		}
 		return fitList(store.SplitRepos(f.value), width)
 	}
@@ -963,8 +961,7 @@ func (m *model) renderForm() string {
 	// The layout above fits the pane; MaxWidth/MaxHeight guarantee it where
 	// even the trimmed chrome cannot, since a modal must never push the
 	// surrounding chrome around.
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
+	box := boxStyle().
 		Padding(pad, 2).Width(w).
 		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(strings.TrimSuffix(b.String(), "\n"))
@@ -975,7 +972,7 @@ func (m *model) renderForm() string {
 func (m *model) formHint() string {
 	fs := m.form
 	if f := fs.active(); f != nil && f.isPicker() {
-		return dimStyle.Render("↵ pick repos · j/k move · Esc cancel")
+		return dimStyle.Render(enterKey() + " pick repos · j/k move · Esc cancel")
 	}
 	if f := fs.active(); f != nil && !f.isSelect() {
 		if fs.insert {

@@ -164,7 +164,7 @@ func TestAccountsPopupPreservesPaneAndCapturesInput(t *testing.T) {
 			t.Fatal("popup replaced underlying pane")
 		}
 		view := ansi.Strip(m.View())
-		if !strings.Contains(view, "work 00") || !strings.Contains(view, "╭") || !strings.Contains(view, "Accounts · remaining budget") {
+		if !strings.Contains(view, "work 00") || !strings.Contains(view, "┌") || !strings.Contains(view, "Accounts · remaining budget") {
 			t.Fatal("missing overlay or live pane")
 		}
 		// A reporting terminal makes leaked mouse and keyboard input observable.

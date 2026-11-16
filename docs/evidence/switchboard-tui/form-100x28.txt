@@ -1,0 +1,28 @@
+ amux ────────────── ⌥ l ▸┬◂ ⌥ h   1 agent   2 editor  3 term ──────────────────────────────────────
+ ⚙ amux console           │                                                                         
+  console · idle · amux-… │                                                                         
+                          │                                                                         
+ ▾ WORKGROUPS         w + │                                                                         
+ ▾ payments               │                                                                         
+   ◆ 1 waiting  running … │      ┌──────────────────────────────────────────────────────────┐       
+▎ ◆ idempotency keys      │      │                                                          │       
+   a1f3 ·  waiting  · api │      │  New workgroup                                           │       
+▌ ◐ ledger migration      │      │                                                          │       
+   b2c4 · running · api … │      │  ▸ Name:                                                 │       
+  ● refund webhooks       │      │    Prompt: (empty)                                       │       
+   c9d0 · ready · api     │      │    Coordinator harness: ‹ codex ›                        │       
+  ◌ 決済フローの国際化対応│      │    Coordinator model: ‹ gpt-6-astra ›                    │       
+   d7e1 · unknown · web   │      │    Repos (optional): (none — ↵ to pick)                  │       
+ ▸ docs refresh           │      │                                                          │       
+   ◆ 1 waiting  ready · … │      │   Create workgroup                                       │       
+ ◆ 2 waiting  ◐ 1  ● 0    │      │  -- NORMAL --  i insert · j/k move · Esc cancel          │       
+ Accounts · left       s  │      │  Account: machine default at creation (rail: s)          │       
+ Claude                   │      │                                                          │       
+   budget unknown         │      └──────────────────────────────────────────────────────────┘       
+ Codex                    │                                                                         
+   budget unknown         │                                                                         
+ ↵ open  ↑↓ move ─────────│                                                                         
+ Space fold/unfold ───────│                                                                         
+ / search archived ───────│                                                                         
+──────────────────────────┴─────────────────────────────────────────────────────────────────────────
+ Space fold/unfold · ←/→ collapse/expand · ↵ open · a +agent · e repos · w +group · R +repo · m move

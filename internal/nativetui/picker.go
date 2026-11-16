@@ -358,17 +358,16 @@ func (m *model) renderPicker() string {
 	if p.searching {
 		b.WriteString(dimStyle.Render("-- SEARCH --  type to filter · "))
 		b.WriteString(keyStyle.Render("Esc") + dimStyle.Render(" back to nav · "))
-		b.WriteString(keyStyle.Render("↵") + dimStyle.Render(" done"))
+		b.WriteString(keyStyle.Render(enterKey()) + dimStyle.Render(" done"))
 	} else {
 		b.WriteString(keyStyle.Render("j/k") + dimStyle.Render(" move · "))
 		b.WriteString(keyStyle.Render("/") + dimStyle.Render(" search · "))
 		b.WriteString(keyStyle.Render("Space") + dimStyle.Render(" select · "))
-		b.WriteString(keyStyle.Render("↵") + dimStyle.Render(" done · "))
+		b.WriteString(keyStyle.Render(enterKey()) + dimStyle.Render(" done · "))
 		b.WriteString(keyStyle.Render("Esc") + dimStyle.Render(" cancel"))
 	}
 
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).BorderForeground(accent).
+	box := boxStyle().
 		Padding(1, 2).Width(w).
 		MaxWidth(m.mainWidth()).MaxHeight(m.paneRows()).
 		Render(b.String())

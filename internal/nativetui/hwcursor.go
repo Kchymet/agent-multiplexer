@@ -165,5 +165,5 @@ func (m *model) hardwareCursor() hwCursor {
 		return hwCursor{}
 	}
 	// The pane sits right of the rail and its divider, below the top border.
-	return hwCursor{visible: true, x: sidebarWidth + 1 + c.X, y: 1 + c.Y, style: c.Style}
+	return hwCursor{visible: true, x: m.railWidth() + 1 + c.X, y: 1 + c.Y, style: c.Style}
 }

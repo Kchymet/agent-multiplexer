@@ -76,9 +76,9 @@ func (m *model) loadingTitle() string {
 // loadingRail is the rail body shown in place of the session list while
 // loading: the headline, and the last connection error when there is one.
 func (m *model) loadingRail() []string {
-	lines := []string{"", dimStyle.Render(" " + truncate(m.loadingTitle(), sidebarWidth-1))}
+	lines := []string{"", dimStyle.Render(" " + truncate(m.loadingTitle(), m.railWidth()-1))}
 	if m.load == loadOffline && m.loadErr != "" {
-		lines = append(lines, dimStyle.Render(" "+truncate(m.loadErr, sidebarWidth-1)))
+		lines = append(lines, errStyle.Render(" "+truncate(m.loadErr, m.railWidth()-1)))
 	}
 	return lines
 }

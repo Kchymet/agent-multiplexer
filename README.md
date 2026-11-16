@@ -22,8 +22,8 @@ orchestrator; this is not a hostile multi-tenant boundary.
 │                           │ > implement the idempotency key on POST /charges   │
 │ WORKGROUPS                │                                                    │
 │ ▸ payments-fix            │   (worktrees: api/  web/)                          │
-│   ● idempotency           │                                                    │
-│   ◐ web-banner            │                                                    │
+│   ◐ idempotency           │                                                    │
+│   ◆ web-banner            │                                                    │
 │ REPOS                     │                                                    │
 │ ⛁ acme/api                │                                                    │
 │ ⛁ acme/web                │                                                    │
@@ -410,6 +410,48 @@ amux config unset keys.focus-rail       # back to the default
 A global chord must carry `ctrl` or `alt` (or be an f-key) — an unmodified key
 would be swallowed before it reaches the focused agent. Reopen the dashboard to
 apply changes.
+
+### Rail states, color and plain terminals
+
+Every session state has its own shape and its own word, so the rail never
+depends on color:
+
+| Glyph | State | Meaning | Color |
+|---|---|---|---|
+| `◆` | `waiting` | blocked on you (a prompt, a permission) | yellow; the word is a yellow chip with dark text |
+| `◐` | `running` | a turn is in flight | blue |
+| `●` | `ready` | turn finished or freshly launched | green |
+| `○` | `idle` | no live process | dim |
+| `◌` | `unknown` | live, but no state reported yet | neutral |
+
+Yellow is reserved for attention and blue for running and keyboard focus (the
+focused pane's border, the `▌` beside the open session). The selected row is
+bold on a graphite fill with a `▎` leading edge. A workgroup with members
+waiting on you says so under its title — `◆ 1 waiting` — even while folded, and
+the line above Accounts counts workgroups by their most demanding state
+(`◆ 2 waiting  ◐ 1  ● 0`, plus `◌ n` when any are unknown — unknown is never
+counted as running). On a narrow rail that line sheds the word, zero categories
+and spacing to keep every count whole; if the counts still cannot fit, or the
+rail is too short, the line is omitted rather than clipped, and each workgroup
+row still shows its own state. Rows keep the daemon's stable creation order;
+they do not re-sort on activity.
+
+The chrome adapts to the terminal; the embedded agent pane is the agent's own
+output and is never recolored or rewritten.
+
+- **Color depth** follows the terminal: 24-bit, 256 or the 16 ANSI colors. With
+  16 colors amux trusts no fill but the attention chip and selects by reverse
+  video. `AMUX_COLOR=truecolor|256|16|none` overrides detection.
+- **`NO_COLOR`** (any non-empty value) removes color but keeps bold and reverse
+  video, which then carry selection, focus and attention.
+- **ASCII**: `AMUX_ASCII=1` draws the chrome without Unicode (`!` waiting, `~`
+  running, `*` ready, `o` idle, `?` unknown, `>`/`v` folds). It is automatic on
+  the Linux console and under a non-UTF-8 locale; `AMUX_ASCII=0` forbids it.
+- **Narrow terminals**: below 72 columns the rail narrows from 26 to 18 columns
+  and drops its per-row CPU/memory cells, giving the pane the difference.
+
+Captures for each mode are in
+[docs/evidence/switchboard-tui](docs/evidence/switchboard-tui/README.md).
 
 ## Commands
 
