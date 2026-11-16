@@ -201,7 +201,15 @@ Claude coordinator; there is no opt-in.
 - **A task becomes the goal.** A `UserPromptSubmit` hook (`amux agent goal
   prompt --hook`) establishes every user prompt — rail, web, steer, typed — as
   the active goal. A reply while the coordinator waits for input (`input`) is
-  appended to the objective instead of replacing it.
+  appended to the objective instead of replacing it. The hook fires for every
+  prompt Claude Code submits and its payload names no origin, so prompts that
+  are not the user's are recognised by a strict prefix
+  (`claudegoal.Origin`): amux's own wake-ups (resume nudge, restart
+  continuation, PR watcher) start with `[amux goal]`, and Claude Code's own
+  submissions are nothing but harness blocks (`<task-notification>`,
+  `<system-reminder>`, `<bash-stdout>`, … — `claudegoal.HarnessTags`). Such a
+  wake-up never replaces the objective or resets its creation time or
+  continuation count; it only turns a `waiting` goal back to `active`.
 - **amux continues it.** The `Stop` hook (`amux agent goal stop --hook`) blocks
   the stop of an active goal and hands Claude a continuation prompt restating
   the objective and the honest ways out. It also reports the turn's activity

@@ -34,10 +34,15 @@ func TestReplyAndResumeKeepTheObjective(t *testing.T) {
 		!strings.HasPrefix(got.Objective, "migrate the db") || !strings.Contains(got.Objective, "User reply: eu-west-1") {
 		t.Fatalf("reply: %+v", got)
 	}
-	paused := State{Objective: "migrate the db", Status: StatusPaused, Continuations: 9}
-	got = OnPrompt(paused, ResumePrompt, t0)
-	if got.Status != StatusActive || got.Objective != "migrate the db" || got.Continuations != 0 {
-		t.Fatalf("resume: %+v", got)
+	// The user's resume goes through Control, which activates the goal and
+	// resets the budget; the ResumePrompt amux then types keeps that as is.
+	resumed, _, err := Control(State{Objective: "migrate the db", Status: StatusPaused, Continuations: 9}, ControlActive, "", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = OnPrompt(resumed, ResumePrompt, t0)
+	if got != resumed {
+		t.Fatalf("resume: %+v, want %+v", got, resumed)
 	}
 	if got := OnPrompt(State{}, ResumePrompt, t0); !got.None() {
 		t.Fatalf("resume nudge with no goal established one: %+v", got)
@@ -233,7 +238,7 @@ func TestRestartPromptIsNeverANewTask(t *testing.T) {
 	if _, _, cont := OnStop(spent, t0); cont {
 		t.Fatal("a restart past the budget continued")
 	}
-	if !strings.HasPrefix(RestartPrompt, resumeMarker) {
+	if !strings.HasPrefix(RestartPrompt, Marker) {
 		t.Fatal("the restart prompt lacks the continuation marker")
 	}
 }
@@ -255,5 +260,95 @@ func TestContinuationTracksMemberPRsToMergedOrClosed(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("continuation prompt missing %q", want)
 		}
+	}
+}
+
+// taskNotification is a Claude Code background-task notification as it
+// reaches the UserPromptSubmit hook (observed live on a coordinator).
+const taskNotification = `<task-notification>
+<task-id>bvpzcl431</task-id>
+<tool-use-id>toolu_01</tool-use-id>
+<output-file>/tmp/tasks/bvpzcl431.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for member 016d92 to stop" completed (exit code 0)</summary>
+</task-notification>`
+
+// Prompts that are not the user's — Claude Code harness notifications and
+// amux wake-ups — never replace the objective or reset Created or the
+// continuation budget, in any goal state.
+func TestNonUserPromptsNeverReplaceTheGoal(t *testing.T) {
+	wakes := map[string]string{
+		"task notification":  taskNotification,
+		"task notifications": taskNotification + "\n" + strings.Replace(taskNotification, "bvpzcl431", "other", -1),
+		"system reminder":    "<system-reminder>\nthe date changed\n</system-reminder>",
+		"unterminated block": "<task-notification>\n<task-id>x</task-id>",
+		"teammate message":   "<teammate-message>done with PR 7</teammate-message>",
+		"pr wake":            Marker + " PR update (amux PR watcher wake-up, not a new task):\n- member m1 PR o/r#7: CI failed",
+		"resume nudge":       ResumePrompt,
+	}
+	for name, prompt := range wakes {
+		if _, origin := Origin(prompt); origin == OriginUser {
+			t.Errorf("%s: classified as the user's", name)
+		}
+		for _, status := range []string{StatusActive, StatusPaused, StatusInput, StatusBlocked, StatusBudgetLimited, StatusComplete} {
+			s := State{Objective: "confirm coordinators work", Status: status, Note: "why", Continuations: 7, Created: 1, Updated: 2}
+			if got := OnPrompt(s, prompt, t0); got != s {
+				t.Errorf("%s moved a %s goal: %+v", name, status, got)
+			}
+		}
+		if got := OnPrompt(State{}, prompt, t0); !got.None() {
+			t.Errorf("%s established a goal: %+v", name, got)
+		}
+	}
+}
+
+// A wake-up for a goal waiting on a background wake-up resumes it as active,
+// keeping the objective, creation time and continuation count.
+func TestWakeResumesWaitingGoal(t *testing.T) {
+	for _, prompt := range []string{taskNotification, Marker + " PR update (amux PR watcher wake-up, not a new task):\n- x"} {
+		s := State{Objective: "confirm coordinators work", Status: StatusWaiting, Note: "member 016d92", Continuations: 4, Created: 1, Updated: 2}
+		got := OnPrompt(s, prompt, t0)
+		want := State{Objective: s.Objective, Status: StatusActive, Continuations: 4, Created: 1, Updated: t0.Unix()}
+		if got != want {
+			t.Errorf("wake %.20q: %+v, want %+v", prompt, got, want)
+		}
+	}
+}
+
+// A genuine user prompt still becomes the goal; harness blocks leading it are
+// dropped, and look-alike text that is not a strict match stays the user's.
+func TestUserPromptsStillBecomeTheGoal(t *testing.T) {
+	old := State{Objective: "old", Status: StatusWaiting, Continuations: 7, Created: 1}
+	cases := map[string]string{
+		"plain":                 "fix the flaky deploy",
+		"slash command":         "/review the PR",
+		"after a notification":  taskNotification + "\n\nfix the flaky deploy",
+		"mentions a tag":        "why did <task-notification> replace the goal?",
+		"unknown tag":           "<my-task>fix it</my-task>",
+		"amux without goal tag": "[amux] fix the flaky deploy",
+		"marker not at start":   "please read [amux goal] docs",
+	}
+	for name, prompt := range cases {
+		user, origin := Origin(prompt)
+		if origin != OriginUser {
+			t.Errorf("%s: origin %s", name, origin)
+			continue
+		}
+		got := OnPrompt(old, prompt, t0)
+		if got.Objective != user || got.Status != StatusActive || got.Continuations != 0 || got.Created != t0.Unix() {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	if user, _ := Origin(taskNotification + "\n\nfix the flaky deploy"); user != "fix the flaky deploy" {
+		t.Errorf("text after a notification = %q", user)
+	}
+	// A notification while the coordinator waits on the user's answer is not
+	// the answer; the user's reply after it is.
+	asked := State{Objective: "migrate the db", Status: StatusInput, Note: "which region?"}
+	if got := OnPrompt(asked, taskNotification, t0); got != asked {
+		t.Fatalf("notification answered the question: %+v", got)
+	}
+	if got := OnPrompt(asked, taskNotification+"\neu-west-1", t0); got.Status != StatusActive || !strings.HasSuffix(got.Objective, "User reply: eu-west-1") {
+		t.Fatalf("reply after a notification: %+v", got)
 	}
 }

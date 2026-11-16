@@ -39,7 +39,7 @@ const prPollIntervalEnv = "AMUX_PR_POLL_INTERVAL"
 // claudegoal's continuation marker, so the coordinator's UserPromptSubmit hook
 // treats the wake-up as continuing the current goal rather than as a new task
 // that would replace it (a test pins this against claudegoal.OnPrompt).
-const prWakeMarker = "[amux goal]"
+const prWakeMarker = claudegoal.Marker
 
 // prPollInterval resolves the configured interval; ok=false disables watching.
 func prPollInterval() (time.Duration, bool) {
