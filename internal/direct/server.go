@@ -38,6 +38,8 @@ type Config struct {
 	Revalidate   time.Duration // stream scope revalidation; default 5s
 	Keepalive    time.Duration // SSE keepalive; default 15s
 	Logf         func(format string, args ...any)
+	// Wake serves the direct wake routes; nil answers them wake_disabled.
+	Wake *WakeService
 }
 
 // Server is the direct HTTP surface.
@@ -109,6 +111,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET "+PathCapabilities, s.capabilities)
 	mux.HandleFunc("GET "+PathCreations+"/{cid}", s.creationStatus)
 	mux.HandleFunc("GET "+PathAccounts, s.accounts)
+	s.registerWakeRoutes(mux)
 	s.mux = mux
 	return s, nil
 }
@@ -472,7 +475,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		s.writeBackendErr(w, l, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, SessionsResponse{ServerID: s.cfg.Authority.ServerID(), Sessions: filtered(l.Grant, rows)})
+	writeJSON(w, http.StatusOK, SessionsResponse{ServerID: s.cfg.Authority.ServerID(), Sessions: s.withIncarnations(l, filtered(l.Grant, rows))})
 }
 
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
@@ -990,6 +993,11 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	accountStatus := mayReadAccounts(l.Grant)
 	resp.AccountStatus = &accountStatus
+	resp.Wake = &WakeCapabilities{V: 1}
+	if s.cfg.Wake != nil {
+		st := s.cfg.Wake.Status()
+		resp.Wake.Enabled, resp.Wake.Degraded = st.Enabled, st.Degraded
+	}
 	if l.Can(PermCreate) {
 		// A daemon without creation identities cannot create over direct
 		// access: say so up front rather than at the first creation.
@@ -1139,7 +1147,7 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil {
 			return true // the loop reports why; never send data after the lease ended
 		}
-		snap := WatchSnapshot{Type: "snapshot", Sessions: filtered(l.Grant, rows)}
+		snap := WatchSnapshot{Type: "snapshot", Sessions: s.withIncarnations(l, filtered(l.Grant, rows))}
 		data, _ := json.Marshal(snap)
 		if bytes.Equal(data, last) {
 			return true

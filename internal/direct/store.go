@@ -106,6 +106,10 @@ type grantRecord struct {
 	// redeemed code, never from client input, and survives any client_label.
 	Origin         string `json:"origin,omitempty"`
 	CloudRequester string `json:"cloudRequester,omitempty"`
+	// WakeSubs are this grant's wake subscriptions, keyed by Harness route id
+	// (wake_authority.go). An older binary drops the field on rewrite, which
+	// leaves wake off and wake.json inert (fail closed).
+	WakeSubs map[string]*wakeSub `json:"wakeSubs,omitempty"`
 }
 
 type codeRecord struct {
@@ -170,6 +174,8 @@ type storeState struct {
 	Grants             map[string]*grantRecord `json:"grants"` // key: client id
 	Cloud              *cloudPolicy            `json:"cloud,omitempty"`
 	CloudIssues        map[string]*cloudIssue  `json:"cloudIssues,omitempty"` // key: sha256(issue key)
+	// Wake is the direct wake-up policy (wake_authority.go); nil = never enabled.
+	Wake *wakePolicy `json:"wake,omitempty"`
 }
 
 // store is the on-disk registry. Exactly one process holds its lock; that

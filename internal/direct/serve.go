@@ -69,11 +69,12 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		return err
 	}
 	defer a.Close()
-	srv, err := NewServer(Config{Authority: a, Backend: cfg.Backend, Endpoints: cfg.Endpoints, AllowOrigins: cfg.AllowOrigins, Logf: cfg.Logf})
+	wake := NewWakeService(a, cfg.Root, cfg.Backend, cfg.Logf)
+	srv, err := NewServer(Config{Authority: a, Backend: cfg.Backend, Endpoints: cfg.Endpoints, AllowOrigins: cfg.AllowOrigins, Logf: cfg.Logf, Wake: wake})
 	if err != nil {
 		return err
 	}
-	admin := &AdminServer{Authority: a, Endpoints: srv.cfg.Endpoints, Verify: cfg.Verify, Logf: cfg.Logf}
+	admin := &AdminServer{Authority: a, Endpoints: srv.cfg.Endpoints, Verify: cfg.Verify, Logf: cfg.Logf, Wake: wake}
 	if err := admin.Listen(cfg.Root); err != nil {
 		return fmt.Errorf("admin socket: %w", err)
 	}
@@ -92,6 +93,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		MaxHeaderBytes:    16 << 10,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
+	go wake.Run(ctx)
 	adminErr := make(chan error, 1)
 	go func() { adminErr <- admin.Serve(ctx) }()
 	go func() {

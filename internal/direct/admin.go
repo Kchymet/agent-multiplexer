@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"amux/internal/access"
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Local administration. The channel is a Unix socket inside the 0700 direct
@@ -46,7 +47,35 @@ const (
 	OpCloudDisable   = "cloud_disable"
 	OpCloudStatus    = "cloud_status"
 	OpIssueCloudCode = "issue_cloud_code"
+	// Direct wake-ups. Enable/disable/status are the host operator's; status,
+	// lease, settle and routes are the only ones the provider's wake bridge
+	// (WakeRelay) can send.
+	OpWakeEnable  = "wake_enable"
+	OpWakeDisable = "wake_disable"
+	OpWakeStatus  = "wake_status"
+	OpWakeLease   = "wake_lease"
+	OpWakeSettle  = "wake_settle"
+	OpWakeRoutes  = "wake_routes"
 )
+
+// wakeLeaseMaxWait keeps a lease long-poll inside the admin deadline.
+const wakeLeaseMaxWait = 12 * time.Second
+
+// WakeAdminRequest is AdminRequest.Wake.
+type WakeAdminRequest struct {
+	OwnerPin    string             `json:"owner_pin,omitempty"`
+	ProviderPin string             `json:"provider_pin,omitempty"`
+	Max         int                `json:"max,omitempty"`
+	WaitMillis  int64              `json:"wait_ms,omitempty"`
+	Results     []WakeSettleResult `json:"results,omitempty"`
+}
+
+// WakeAdminResponse is AdminResponse.Wake.
+type WakeAdminResponse struct {
+	Status *WakeStatus             `json:"status,omitempty"`
+	Items  []WakeLeaseItem         `json:"items,omitempty"`
+	Routes []hp.DirectWakeRouteRef `json:"routes,omitempty"`
+}
 
 const adminDeadline = 20 * time.Second
 
@@ -69,6 +98,7 @@ type AdminRequest struct {
 	ClientID    string              `json:"client_id,omitempty"`
 	Cloud       *CloudPolicyRequest `json:"cloud,omitempty"`
 	Issue       *CloudIssueRequest  `json:"issue,omitempty"`
+	Wake        *WakeAdminRequest   `json:"wake,omitempty"`
 }
 
 // AdminResponse answers it.
@@ -81,8 +111,9 @@ type AdminResponse struct {
 	Endpoints []string     `json:"endpoints,omitempty"`
 	Clients   []ClientInfo `json:"clients,omitempty"`
 	// Code is a stable refusal code (cloud issuance); Error stays the message.
-	Code  string       `json:"code,omitempty"`
-	Cloud *CloudStatus `json:"cloud,omitempty"`
+	Code  string             `json:"code,omitempty"`
+	Cloud *CloudStatus       `json:"cloud,omitempty"`
+	Wake  *WakeAdminResponse `json:"wake,omitempty"`
 }
 
 // EncodeBundle renders a paste bundle.
@@ -145,7 +176,9 @@ type AdminServer struct {
 	Endpoints []string
 	Verify    HostVerifier
 	Logf      func(string, ...any)
-	ln        net.Listener
+	// Wake serves the wake lease/settle/routes operations; nil refuses them.
+	Wake *WakeService
+	ln   net.Listener
 }
 
 // AdminSocketPath is the admin socket inside root.
@@ -225,7 +258,12 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 	if err != nil || f.Type != "request" || f.Request == nil {
 		return
 	}
-	resp := Administer(s.Authority, s.Endpoints, *f.Request)
+	var resp AdminResponse
+	if isWakeOp(f.Request.Op) {
+		resp = AdministerWake(ctx, s.Authority, s.Wake, *f.Request)
+	} else {
+		resp = Administer(s.Authority, s.Endpoints, *f.Request)
+	}
 	_ = enc.Encode(adminFrame{Type: "response", Response: &resp})
 }
 
@@ -302,6 +340,75 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
 		}
 		return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: sid, Endpoints: endpoints}
+	}
+	return fail(fmt.Errorf("unknown admin operation %q", req.Op))
+}
+
+func isWakeOp(op string) bool {
+	switch op {
+	case OpWakeEnable, OpWakeDisable, OpWakeStatus, OpWakeLease, OpWakeSettle, OpWakeRoutes:
+		return true
+	}
+	return false
+}
+
+// AdministerWake executes one host-authenticated wake operation. ws may be nil
+// (offline administration): only the policy operations work then.
+func AdministerWake(ctx context.Context, a *Authority, ws *WakeService, req AdminRequest) AdminResponse {
+	fail := func(err error) AdminResponse { return AdminResponse{Error: err.Error()} }
+	status := func() AdminResponse {
+		st := a.WakeStatus()
+		if ws != nil {
+			st = ws.Status()
+		}
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Wake: &WakeAdminResponse{Status: &st}}
+	}
+	switch req.Op {
+	case OpWakeEnable:
+		if req.Wake == nil {
+			return fail(errors.New("wake enable needs owner and provider pins"))
+		}
+		if _, err := a.EnableWake(req.Wake.OwnerPin, req.Wake.ProviderPin); err != nil {
+			return fail(err)
+		}
+		if ws != nil {
+			ws.store.reconcile(a.wakeAuthSnapshot())
+			_ = ws.store.flush(true)
+		}
+		return status()
+	case OpWakeDisable:
+		if _, err := a.DisableWake("disabled by host"); err != nil {
+			return fail(err)
+		}
+		if ws != nil {
+			ws.store.reconcile(nil)
+			_ = ws.store.flush(true)
+		}
+		return status()
+	case OpWakeStatus:
+		return status()
+	}
+	if ws == nil {
+		return fail(errors.New("wake-ups need a running `amux direct serve`"))
+	}
+	switch req.Op {
+	case OpWakeLease:
+		max, wait := 0, time.Duration(0)
+		if req.Wake != nil {
+			max, wait = req.Wake.Max, time.Duration(req.Wake.WaitMillis)*time.Millisecond
+		}
+		if wait < 0 || wait > wakeLeaseMaxWait {
+			wait = wakeLeaseMaxWait
+		}
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Wake: &WakeAdminResponse{Items: ws.Lease(ctx, max, wait)}}
+	case OpWakeSettle:
+		if req.Wake == nil || len(req.Wake.Results) > 2*hp.MaxDirectWakeBatch {
+			return fail(errors.New("wake settle needs results"))
+		}
+		ws.Settle(req.Wake.Results)
+		return AdminResponse{OK: true}
+	case OpWakeRoutes:
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Wake: &WakeAdminResponse{Routes: ws.Routes()}}
 	}
 	return fail(fmt.Errorf("unknown admin operation %q", req.Op))
 }
@@ -396,7 +503,12 @@ func OfflineAdminister(ctx context.Context, root string, cred access.Credential,
 		return AdminResponse{}, err
 	}
 	defer a.Close()
-	resp := Administer(a, nil, req)
+	var resp AdminResponse
+	if isWakeOp(req.Op) {
+		resp = AdministerWake(ctx, a, nil, req)
+	} else {
+		resp = Administer(a, nil, req)
+	}
 	if !resp.OK {
 		return resp, errors.New(resp.Error)
 	}

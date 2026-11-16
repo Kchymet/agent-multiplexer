@@ -222,6 +222,13 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
 		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
 	}
+	if a.pruneWakeOnOpenLocked() {
+		// Activation secrets past their TTL, entries of a dead grant or another
+		// policy, and long-failed entries are erased before anything is served.
+		if err := st.saveState(state); err != nil {
+			return nil, fmt.Errorf("direct grants: prune wake subscriptions: %w", err)
+		}
+	}
 	if state.IdentityGeneration != id.Generation {
 		// A grant issued under another identity can never be valid again.
 		a.revokeAllLocked("identity changed")
@@ -664,6 +671,8 @@ func (a *Authority) revokeAllLocked(reason string) []*Lease {
 	// Cloud issuance stops with the identity: the operator re-enables it
 	// deliberately, under a new generation.
 	a.disableCloudLocked(reason, now)
+	// So do wake-ups (every subscription belonged to a revoked grant anyway).
+	a.disableWakeLocked(reason, now)
 	return all
 }
 
