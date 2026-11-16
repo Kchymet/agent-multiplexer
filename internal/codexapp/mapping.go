@@ -430,6 +430,16 @@ func notice(level, text string) harnessproto.RuntimeEvent {
 		Payload: mustMarshal(map[string]any{"level": level, "text": text})}
 }
 
+// authNotice is a notice about the session's central account binding (login
+// outcomes, token refresh failures, a thread continuing under another
+// account). It carries category "auth" so a transcript consumer can hide the
+// routine info-level ones by default while still showing errors
+// (harnessproto.NoticeCategoryAuth).
+func authNotice(level, text string) harnessproto.RuntimeEvent {
+	return harnessproto.RuntimeEvent{Type: harnessproto.TypeNotice, Direction: harnessproto.DirMeta,
+		Payload: mustMarshal(map[string]any{"level": level, "text": text, "category": harnessproto.NoticeCategoryAuth})}
+}
+
 // turnStartEvent / turnEndEvent carry the wire thread_id and turn_id so a consumer
 // on the producer→provider→browser path can correlate a bracketed turn to the exact
 // App Server thread and turn — a required shared-session invariant (a native-TUI and

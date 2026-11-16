@@ -75,7 +75,7 @@ const (
 	// `decision` is DecisionAllow, DecisionDeny, or DecisionCleared when the
 	// producer knows the prompt closed but not which way it went.
 	TypePermissionResolved = "permission_resolved" // out: {request_id, runtime_generation?, decision}
-	TypeNotice             = "notice"              // out: {level, text}
+	TypeNotice             = "notice"              // out: {level, text, category?}
 	TypeTurnEnd            = "turn_end"            // out: {stop_reason}
 	// TypePRState reports that a pull request the session owns changed state
 	// (amux's PR watcher, not the runtime): `changes` lists what moved since
@@ -83,6 +83,19 @@ const (
 	// sent a wake-up for it.
 	TypePRState = "pr_state" // meta: {session, pr: SessionPR, changes: [string], wake}
 	TypeRaw     = "raw"      // out: {runtime, native_type, body}  (never dropped)
+)
+
+// Notice categories (the optional `category` of a TypeNotice payload). A
+// category classifies a notice by what it is about, so a consumer can choose a
+// default visibility without matching on human-readable text. The set is open:
+// a consumer MUST render a notice with an unknown or absent category normally.
+const (
+	// NoticeCategoryAuth marks account/login lifecycle notices amux emits while
+	// binding a runtime to its central account (e.g. "codex: central ChatGPT
+	// login completed"). They are routine bookkeeping, so a transcript view
+	// SHOULD hide the non-error ones by default (behind an opt-in) and keep
+	// level "error" ones visible: those name a failure the user can act on.
+	NoticeCategoryAuth = "auth"
 )
 
 // Event directions (RuntimeEvent.Direction).

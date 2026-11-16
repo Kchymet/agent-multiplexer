@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 const (
@@ -231,7 +232,7 @@ func TestRefreshFailureIsTokenFree(t *testing.T) {
 		t.Fatalf("refresh response = %+v, want error", resp)
 	}
 	assertNoSecrets(t, sup, resp.Error.Message)
-	if !strings.Contains(eventLog(t, sup), "central ChatGPT auth refresh failed") {
+	if log := eventLog(t, sup); !strings.Contains(log, "central ChatGPT auth refresh failed") || !strings.Contains(log, `"category":"auth"`) {
 		t.Fatal("refresh failure not surfaced as a notice")
 	}
 }
@@ -753,5 +754,43 @@ func TestStragglerWindowNeitherHidesNorExtends(t *testing.T) {
 	}
 	if refreshDebounce > 30*time.Second || old > 30*time.Second {
 		t.Fatal("straggler window must stay short")
+	}
+}
+
+// Every token-login outcome is an auth-category notice, so a transcript view
+// can hide the routine completions by default; failures keep level "error"
+// and stay visible.
+func TestLoginCompletionNoticesCarryAuthCategory(t *testing.T) {
+	cases := []struct {
+		apiKey  bool
+		params  string
+		level   string
+		textHas string
+	}{
+		{false, `{"loginId":null,"success":true}`, "info", "central ChatGPT login completed"},
+		{false, `{"loginId":null,"success":false,"error":"nope"}`, "error", "central ChatGPT login failed: nope"},
+		{true, `{"loginId":null,"success":true}`, "info", "central API-key login completed"},
+		{true, `{"loginId":null,"success":false}`, "error", "central API-key login failed"},
+	}
+	for _, c := range cases {
+		a := newTokenAuth(newStubProvider(), "s", "", accounts.Launch{})
+		a.apiKey = c.apiKey
+		ev, ok := a.loginCompleted(json.RawMessage(c.params))
+		if !ok {
+			t.Fatalf("%s: completion not consumed", c.params)
+		}
+		var p struct{ Level, Text, Category string }
+		if ev.Type != harnessproto.TypeNotice || json.Unmarshal(ev.Payload, &p) != nil {
+			t.Fatalf("%s: event = %+v", c.params, ev)
+		}
+		if p.Category != harnessproto.NoticeCategoryAuth || p.Level != c.level || !strings.Contains(p.Text, c.textHas) {
+			t.Fatalf("apiKey=%v %s: payload = %+v", c.apiKey, c.params, p)
+		}
+	}
+	// Ordinary notices stay uncategorised.
+	var p map[string]any
+	_ = json.Unmarshal(notice("info", "session established").Payload, &p)
+	if _, has := p["category"]; has {
+		t.Fatalf("plain notice carries a category: %v", p)
 	}
 }
