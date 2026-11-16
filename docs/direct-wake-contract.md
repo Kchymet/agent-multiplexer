@@ -522,10 +522,32 @@ The relay daemon `permission_request` push gains `session_incarnation`, taken fr
   - the relay `id` equals the `provider_id` of the active route for this backend (a verified pairing);
   - the relay `session_incarnation` equals the direct item's `incarnation`, and both are non-empty;
   - `session_id`, `item_id`, `request_id` and `runtime_generation` are equal and non-empty.
-- **Turn ends never correlate.** No shared stable occurrence identity exists across the relay path and the direct path: relay ordinals are joined and live-counted. A relay turn-end card and a direct turn-end card are therefore separate cards. There is **no fuzzy matching** by session or time. A session watched only on the direct side always gets its direct turn end.
+- **Turn ends never correlate (interim, old peers).** No shared stable occurrence identity exists across the relay path and the direct path: relay ordinals are joined and live-counted. A relay turn-end card and a direct turn-end card are therefore separate cards. There is **no fuzzy matching** by session or time. A session watched only on the direct side always gets its direct turn end.
 - **A covered item is direct-owned.** If direct fetched it and it is in scope, the content comes from direct and actions go only through the direct `permission` verb. Without `approve`, a **view-only direct card replaces the relay card**. A direct card never routes an action through the relay.
 - **Relay cards stay** in every other case: out of scope, uncorrelated, fetch failed, no active route, or no incarnation.
 - **No zero-duplicate promise.** A duplicate stays visible for at most one direct fetch, or indefinitely if the peers are older.
+
+#### Proposed: shared turn-end occurrence key `dte1` (for review; not implemented)
+
+The interim rule above stays the fallback for any peer without the key. The proposal gives upgraded peers an exact, content-free key, the same on both paths:
+
+- **Key.** `turn_key = "dte1_" + base64url(first 16 bytes of SHA-256("amux-turn-end-v1\0" + sid + "\0" + incarnation + "\0" + kind + "\0" + line_digest + "\0" + decimal(index)))`.
+  - `kind` is the source kind the event was read from (`runtimeevents.PageSourceKind`).
+  - `index` is the 1-based position within that source: the index the direct detector already uses.
+  - `line_digest` is the first-line digest part of the source generation. A restore copy keeps it, and a different transcript changes it.
+- **No key** is produced when any input is unknown: the source has no complete first line yet, the batch is unlabeled (incarnation lookup failed), or the event is not a `turn_end`.
+- **Direct path.** The detector computes it from the record (sid, incarnation, source kind, generation, index) and returns it on the turn-end item as `turn_key`.
+- **Relay path.**
+  - The provider's tailer stamps the per-event source position (kind, index, line digest) on `turn_end` events only.
+  - The provider computes `turn_key` with the incarnation bound to the stream, and sends it as an additive `occurrence` field on that runtime event.
+  - Harness copies it, unchanged, into the turn-end relay push as `turn_key`. Old providers send nothing, and nothing changes for them.
+- **Phone.** It merges a relay card and a direct card only on an exactly equal `turn_key`, under the existing verified provider/server rule. Any missing key means separate cards, with no fuzzy matching.
+- **Tests.**
+  - Key fixtures shared by amux, Harness and Android.
+  - Identical keys from the relay stream and the direct detector for the same transcript.
+  - Stable across a restore copy; different after id reuse or a new transcript.
+  - Absent for unlabeled batches.
+  - An old provider emits no field.
 
 ## 13. Phone contract (Android)
 
