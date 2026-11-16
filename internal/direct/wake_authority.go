@@ -124,6 +124,7 @@ type wakeAuth struct {
 type wakeAuthSub struct {
 	ClientID  string
 	RouteID   string
+	CreatedAt int64 // unix seconds the subscription was created
 	State     string
 	GrantRef  string
 	Requester string
@@ -501,7 +502,7 @@ func (a *Authority) wakeAuthSnapshot() *wakeAuth {
 				continue
 			}
 			sub := wakeAuthSub{
-				ClientID: id, RouteID: r, State: s.State, GrantRef: p.grantRef(id), Requester: g.CloudRequester,
+				ClientID: id, RouteID: r, CreatedAt: s.CreatedAt, State: s.State, GrantRef: p.grantRef(id), Requester: g.CloudRequester,
 				Grant: Grant{ClientID: id, Perms: append([]string(nil), g.Perms...), Resource: g.Resource},
 			}
 			if s.State == wakeSubStateActivate {

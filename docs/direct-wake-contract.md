@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.6 (consolidated)
+# Direct wake-ups: contract v4.7 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -220,7 +220,10 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 - **Why marks are per source (source evidence).** A non-structured session's runtime events come from several append-only sources: the transcript, the permission journal and amux's journal (`runtimeevents/tailer.go` `sourcesFor`). History and Stream number them in **one joined ordinal space** by concatenating the sources at cumulative offsets (`history.go` `historyPage`). So an append to an earlier source **shifts** every later source's joined ordinals, and a joined ordinal is neither a durable cursor nor a stable identity.
 - **Marks.** Each (subscription, session, source kind) has a durable mark that only goes up: the last 1-based index read **within that source**. There is **no shared mark**.
-- **A new subscriber.** When a session enters a subscription's set, only that subscription's marks are set, to every source's current head, all taken from one per-source read (`runtimeevents.ReadSources`). Other subscriptions keep their backlog.
+- **A new subscriber.** Only that subscription's marks are set; other subscriptions keep their backlog.
+  - **At subscribe time.** The subscribe request itself **eagerly** baselines every in-scope session at its current heads, from one per-source read (`runtimeevents.ReadSources`). It also records the first-seen time of every visible session's incarnation. An event raised right after subscribing is therefore never mistaken for history.
+  - **A session first seen later.** If its incarnation first appeared after the subscription was created, and the eager baseline completed, it is a **new session**: all its events are new, so it starts at 0. Any other later-covered session baselines at its heads, never replaying, for example an old session moving into scope.
+  - **An id reused by a new session.** Each source of the new session restarts at 0 if it is a new file. A file it shares with the old session, such as a journal keyed by the session id, restarts at its head.
   - A source kind that appears after the baseline (for example, a journal created later) starts at 0.
   - **Source generations.** Every source read carries an opaque `generation` = `<file identity>.<first-line digest>` (device and inode, plus SHA-256 of the first complete line; a JSONL file's first complete line never changes while it is only appended to). Marks and record addresses are meaningful only within one generation.
     - **A copy of the same transcript** (a new file whose first complete line is identical) **continues** the old marks. This is what amux's restore-before-resume writes: `agent.RestoreTranscript` → `restoreCapturedRooted` copies the captured backup over the transcript path, and only when the backup is at least as large. Indexes at or below the old head are copied history and are not replayed; later events are new. Recorded items keep their inline events, with exact ids still checked.

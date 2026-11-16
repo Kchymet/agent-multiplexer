@@ -693,6 +693,7 @@ func TestWakeStoreFailureNeverDegradesDirect(t *testing.T) {
 	route := testRouteID(1)
 	h.subscribe(tok.AccessToken, route, testSecretN(1))
 	h.ws.store.write = func(string, string, []byte) error { return fmt.Errorf("%w: disk", errAmbiguousCommit) }
+	h.b.add("a1", 1, permEv("i", "r", "g")) // new wake data to write
 	h.tick()
 	_ = h.ws.store.flush(true)
 	if deg, _ := h.ws.Degraded(); !deg {
@@ -1335,5 +1336,48 @@ func TestWakeResumeCopyDoesNotReplayHistory(t *testing.T) {
 	sort.Slice(idx, func(i, j int) bool { return idx[i] < idx[j] })
 	if len(idx) != 2 || idx[0] != 2 || idx[1] != 4 {
 		t.Fatalf("turn ends after a resume copy = %v, want the original 2 and the new 4 only", idx)
+	}
+}
+
+// A permission raised right after subscribing (before any detector tick) is
+// woken: the subscription baselines eagerly. A session created after the
+// subscription, with events already written before the next tick, starts at
+// 0. An old session that later enters the grant's scope does not replay its
+// history.
+func TestWakeBaselineRaces(t *testing.T) {
+	rows := testRows()
+	h := newWakeHarness(t, rows...)
+	tok := enroll(t, h.a, []string{PermRead}, ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"wg1"}})
+	route := testRouteID(1)
+	h.b.add("a1", 1, textEv())
+	h.b.add("d1", 1, permEv("old", "old", "g")) // d1 is outside the grant's scope
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.b.add("a1", 2, permEv("fast", "fast", "g")) // before any tick
+	// A brand-new session in scope, already holding a permission.
+	rows = append(rows, core.Session{ID: "n1", Title: "new", RootID: "wg1", Runtime: "claude"})
+	h.b.setRows(rows...)
+	h.b.add("n1", 1, permEv("new", "new", "g"))
+	h.tick()
+	h.tick()
+	got := map[string]bool{}
+	for _, it := range h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items {
+		got[it.RequestID] = true
+	}
+	if !got["fast"] || !got["new"] || got["old"] {
+		t.Fatalf("after subscribe races: %v", got)
+	}
+	// d1 (old) moves into scope: its history is not replayed.
+	for i := range rows {
+		if rows[i].ID == "d1" {
+			rows[i].RootID = "wg1"
+		}
+	}
+	h.b.setRows(rows...)
+	h.tick()
+	h.tick()
+	for _, it := range h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items {
+		if it.RequestID == "old" {
+			t.Fatal("an old session entering scope replayed its history")
+		}
 	}
 }

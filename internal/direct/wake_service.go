@@ -157,7 +157,9 @@ func (s *WakeService) Tick(ctx context.Context) {
 	byID := indexRows(rows)
 	// Which subscriptions cover which sessions now.
 	cover := map[string][]wakeTarget{}
+	created := map[wakeTarget]int64{}
 	for _, sub := range auth.Subs {
+		created[wakeTarget{ClientID: sub.ClientID, RouteID: sub.RouteID, Nonce: auth.Nonce}] = sub.CreatedAt
 		for _, row := range rows {
 			if !validSessionID(row.ID) || !inScope(sub.Grant, row, byID) || effectivelyArchived(row, byID) {
 				continue
@@ -193,6 +195,14 @@ func (s *WakeService) Tick(ctx context.Context) {
 				needBaseline = append(needBaseline, t)
 			}
 		}
+		// Was this incarnation already seen when each unbaselined
+		// subscription was created? (Decided before observing it now.)
+		seenBefore := map[wakeTarget]bool{}
+		for _, t := range needBaseline {
+			// Without a completed eager baseline nothing proves the session
+			// is new: baseline it at its heads (never replay).
+			seenBefore[t] = !s.store.eager(t.ClientID, t.RouteID, t.Nonce) || s.store.seenBy(sid, created[t])
+		}
 		if !needIncarnation && len(needBaseline) == 0 {
 			continue
 		}
@@ -207,8 +217,15 @@ func (s *WakeService) Tick(ctx context.Context) {
 			s.store.observeIncarnation(sid, inc, heads, gens, nowMs)
 		}
 		for _, t := range needBaseline {
-			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, heads, gens)
+			if seenBefore[t] {
+				s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, heads, gens)
+			} else {
+				// A session that appeared after the subscription: every event
+				// of it is new to the subscription.
+				s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, zeroHeads(heads), gens)
+			}
 		}
+		s.store.noteIncarnation(sid, inc, now.Unix())
 	}
 	// Read: sessions whose inventory state changed first, then round-robin.
 	s.mu.Lock()
@@ -284,6 +301,55 @@ func (s *WakeService) identities(ctx context.Context, sids []string) map[string]
 		}
 	}
 	return out
+}
+
+func zeroHeads(heads map[string]int64) map[string]int64 {
+	out := make(map[string]int64, len(heads))
+	for k := range heads {
+		out[k] = 0
+	}
+	return out
+}
+
+// BaselineSubscription baselines a just-created subscription eagerly: every
+// session in its grant's scope is baselined at its current heads NOW (so an
+// event raised right after subscribing is never mistaken for history), and
+// every visible session's incarnation is recorded as seen (so a session that
+// existed before the subscription is never treated as new later).
+func (s *WakeService) BaselineSubscription(ctx context.Context, g Grant, routeID string) {
+	auth := s.a.wakeAuthSnapshot()
+	if auth == nil {
+		return
+	}
+	rows, err := s.backend.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	byID := indexRows(rows)
+	var ids []string
+	for _, r := range rows {
+		if validSessionID(r.ID) {
+			ids = append(ids, r.ID)
+		}
+	}
+	incs, complete := s.identitiesStrict(ctx, ids)
+	now := s.now().Unix()
+	for _, r := range rows {
+		inc := incs[r.ID]
+		if inc == "" {
+			continue
+		}
+		if inScope(g, r, byID) && !effectivelyArchived(r, byID) {
+			if heads, gens, ok := s.sourceHeads(ctx, r.ID); ok {
+				s.store.baseline(g.ClientID, routeID, auth.Nonce, r.ID, heads, gens)
+			}
+		}
+		s.store.noteIncarnation(r.ID, inc, now)
+	}
+	if complete {
+		s.store.markEager(g.ClientID, routeID, auth.Nonce)
+	}
+	_ = s.store.flush(true)
 }
 
 // sourceHeads reads the current head of each of sid's sources.

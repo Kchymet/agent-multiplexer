@@ -78,6 +78,10 @@ type wakeData struct {
 	// Gen is the last observed generation per (session, source kind): marks
 	// and record addresses are meaningful only within one source generation.
 	Gen map[string]string `json:"gen,omitempty"`
+	// IncAt is when the detector first saw sid's current incarnation (unix
+	// seconds): a session whose incarnation appeared after a subscription was
+	// created is new to it, so it starts at index 0.
+	IncAt map[string]int64 `json:"incAt,omitempty"`
 }
 
 type wakeSubData struct {
@@ -106,6 +110,10 @@ type wakeSubData struct {
 	// clears the loss.
 	LossThrough      int64 `json:"lossThrough,omitempty"`
 	RecoveredThrough int64 `json:"recoveredThrough,omitempty"`
+	// Eager is set when the subscription's eager baseline completed (every
+	// visible session's incarnation recorded at subscribe time). Only then
+	// may a later-seen incarnation be treated as a new session.
+	Eager bool `json:"eager,omitempty"`
 }
 
 type wakeRecord struct {
@@ -157,7 +165,7 @@ func subKey(clientID, routeID, nonce string) string {
 }
 
 func newWakeData() *wakeData {
-	return &wakeData{V: wakeFileVersion, Subs: map[string]*wakeSubData{}, Inc: map[string]string{}, Gen: map[string]string{}}
+	return &wakeData{V: wakeFileVersion, Subs: map[string]*wakeSubData{}, Inc: map[string]string{}, Gen: map[string]string{}, IncAt: map[string]int64{}}
 }
 
 // openWakeStore loads wake.json. An unreadable or unknown-version file is
@@ -192,6 +200,9 @@ func openWakeStore(dir string, write func(string, string, []byte) error, now fun
 	if d.Gen == nil {
 		d.Gen = map[string]string{}
 	}
+	if d.IncAt == nil {
+		d.IncAt = map[string]int64{}
+	}
 	ws.data = &d
 	for k, sub := range d.Subs {
 		if sub == nil {
@@ -221,7 +232,7 @@ func (ws *wakeStore) reconcile(auth *wakeAuth) {
 		}
 	}
 	if len(ws.data.Subs) == 0 && len(ws.data.Inc) > 0 {
-		ws.data.Inc = map[string]string{}
+		ws.data.Inc, ws.data.IncAt = map[string]string{}, map[string]int64{}
 		ws.dirty = true
 	}
 }
@@ -456,9 +467,22 @@ func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64,
 		return false
 	}
 	ws.data.Inc[sid] = inc
+	ws.data.IncAt[sid] = nowMs / 1000
 	ws.dirty = true
 	if !seen {
 		return false
+	}
+	// The id was reused by a new session. Per source: a new file (generation
+	// that does not continue the stored one) belongs to the new session and
+	// is read from 0; the same file (e.g. a journal keyed by session id) is
+	// re-baselined at its head, so the old session's history is not replayed.
+	start := map[string]int64{}
+	for kind, h := range heads {
+		if prev, ok := ws.data.Gen[markKey(sid, kind)]; ok && runtimeevents.ContinuesGeneration(prev, gens[kind]) {
+			start[kind] = h
+		} else {
+			start[kind] = 0
+		}
 	}
 	prefix := sid + "\x00"
 	for _, s := range ws.data.Subs {
@@ -468,7 +492,7 @@ func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64,
 					delete(s.Marks, k)
 				}
 			}
-			for kind, h := range heads {
+			for kind, h := range start {
 				s.Marks[markKey(sid, kind)] = h
 			}
 		}
@@ -485,6 +509,48 @@ func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64,
 		}
 	}
 	return true
+}
+
+// noteIncarnation records sid's incarnation and when it was first seen,
+// without touching any mark (a session observed before a subscription
+// existed is history to it, never new).
+func (ws *wakeStore) noteIncarnation(sid, inc string, now int64) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if prev, seen := ws.data.Inc[sid]; seen && prev == inc {
+		return
+	}
+	if _, seen := ws.data.Inc[sid]; !seen {
+		ws.data.Inc[sid], ws.data.IncAt[sid] = inc, now
+		ws.dirty = true
+	}
+}
+
+// markEager records that the subscription's eager baseline completed.
+func (ws *wakeStore) markEager(clientID, routeID, nonce string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	s := ws.subLocked(clientID, routeID, nonce)
+	if !s.Eager {
+		s.Eager = true
+		ws.dirty = true
+	}
+}
+
+func (ws *wakeStore) eager(clientID, routeID, nonce string) bool {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	s := ws.data.Subs[subKey(clientID, routeID, nonce)]
+	return s != nil && s.Eager
+}
+
+// seenSince reports whether sid's current incarnation was first seen at or
+// before t (unix seconds).
+func (ws *wakeStore) seenBy(sid string, t int64) bool {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	at, ok := ws.data.IncAt[sid]
+	return ok && at <= t
 }
 
 func (ws *wakeStore) incarnation(sid string) string {

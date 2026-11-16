@@ -137,6 +137,7 @@ func (s *Server) wakeSubscribe(w http.ResponseWriter, r *http.Request) {
 		s.writeWakeErr(w, l, err)
 		return
 	}
+	s.cfg.Wake.BaselineSubscription(l.Context(), l.Grant, req.RouteID)
 	s.cfg.Wake.poke()
 	writeJSON(w, http.StatusOK, v)
 }
