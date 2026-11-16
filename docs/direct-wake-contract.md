@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4 (consolidated)
+# Direct wake-ups: contract v4.1 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -66,13 +66,15 @@ Not wake-worthy:
 | `route_id` = `dwr_`+b64url(32) | Harness | metadata; **possession grants nothing** | Harness, FCM, phone, direct request **bodies** (never URLs) |
 | `wake_id` = `dwk_`+b64url(16) | host | metadata, unordered | host, Harness, FCM, phone |
 | `request_id` = b64url(16..32 random bytes) | phone | metadata | phone, Harness |
-| `activation_secret` = b64url(32 CSPRNG bytes) | **phone**, fresh per setup attempt | **secret** | sealed phone store, direct subscribe body, provider → Harness activation frame. **Never** in Harness storage, register, FCM, logs, URLs or browser storage. |
-| `activation_challenge` = b64url(SHA-256(activation_secret)) | phone | metadata (a commitment) | register request, Harness storage |
+| `activation_secret` = the unpadded base64url **string** of 32 CSPRNG bytes (43 characters) | **phone**, fresh per setup attempt | **secret** | sealed phone store, direct subscribe body, provider → Harness activation frame. **Never** in Harness storage, register, FCM, logs, URLs or browser storage. |
+| `activation_challenge` = unpadded b64url(SHA-256(the ASCII bytes of the `activation_secret` **string**)) — exactly PKCE S256 | phone | metadata (a commitment) | register request, Harness storage |
 | direct access/refresh tokens, verifier, bundles | direct server | **secret** | never on the wake path |
 
 **Logging.**
 - route_id and wake_id are logged only as an 8-character SHA-256 prefix.
 - Secrets, challenges, grant client ids and session ids are never logged on the wake path.
+
+**Shared fixture.** `harnessproto/testdata/direct-wake-v1-challenge.json` uses the RFC 7636 Appendix B vector: secret `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk`, challenge `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`. `harnessproto.DirectWakeChallenge` is the reference implementation.
 
 ## 5. Binding: route-bound wake authority
 
@@ -161,7 +163,7 @@ Not wake-worthy:
 | `POST /direct/v1/wake/subscriptions` | `{}` | `{"subscriptions":[{route_id, state, failure?, created_at, watches:[{session_id, incarnation}]}]}` |
 | `POST /direct/v1/wake/watch` | `{route_id, session_id, incarnation, watch}` | Adding requires the session in scope (`404 not_found`) and a current `incarnation` (otherwise `409 incarnation_changed`, with `incarnation` = the current one). Removing needs no access. At most 64. `200 {route_id, session_id, incarnation (current), watched}`. |
 | `POST /direct/v1/wake/events` | §8 | §8 |
-| `POST /direct/v1/wake/ack` | `{route_id, wake_ids:[≤64]}` | `200 {acked}` (§8.4) |
+| `POST /direct/v1/wake/ack` | `{route_id, items:[{wake_id, seq}] ≤64}` | `200 {acked}`: the count of items whose `seq` matched the record's **current** revision. Stale seqs are ignored (§8.4). |
 
 **Other additive changes.**
 - `GET /direct/v1/capabilities` gains `wake:{v:1, enabled, degraded}`.
@@ -279,11 +281,13 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 ### 8.4 Ack vs. pending state
 
-- **Ack means "seen":** posted, or deliberately dropped. It sets `acked:true` and **never** changes pending state.
-- **An acked `open` permission** stays in snapshots and still receives `resolved`/`stale` changes, with a new seq.
+- **Acks are versioned.** An ack names `{wake_id, seq}`. It applies only if `seq` equals the record's current revision. An ack carrying an older seq is ignored, so it can never delete a later `resolved`/`stale` revision the phone has not seen.
+- **Every state change resets the ack.** It assigns a new seq **and** sets `acked:false`.
+- **Ack means "seen":** posted, or deliberately dropped. It sets `acked:true` for that revision and **never** changes pending state.
+- **An acked `open` permission** stays pending (in snapshots), and still receives `resolved`/`stale` revisions.
 - **Removal.**
   - An acked turn end is removed and tombstoned.
-  - A permission is removed when it is no longer `open` **and** acked, or when retention ends.
+  - A `resolved`/`stale` permission is removed only once **its own** revision is acked, or when retention ends.
 - **Retention never evicts an open record.**
   - The 128-record cap evicts only non-open records, oldest first.
   - Open permissions have a separate cap of 256. Past it, the oldest are dropped with `open_overflow`.
@@ -546,6 +550,7 @@ Re-login does not re-activate: the backend shows "Paused — signed out of Harne
   - A settle after a revoke is ignored.
 - **Fetch.**
   - An acked open permission is still in the snapshot.
+  - **An old ack sent after a resolution** (stale seq) is ignored, and the resolved revision stays until it is acked itself.
   - An append during snapshot paging is not skipped.
   - A resolve or stale change gets a new seq.
   - The gap and `complete` flags.
@@ -607,6 +612,7 @@ Re-login does not re-activate: the backend shows "Paused — signed out of Harne
 | Root v3 1–6 | per-subscription marks; no global reservation; lease/accepted ledger, at-least-once; idempotent activation and register replay; view-only direct card; exact turn_end; Android fields |
 | Reviewer R1–R5 | activation first; pending → `unavailable`; epoch sync with grace; authority/wake-file split (seven rules, §6.2); explicit sign-out; route-bound authority |
 | Root v3.3 fetch | ack separate from pending; new seq on state change; snapshot includes acked open permissions; `snapshot_hw` |
+| Root v4 wire | versioned acks `{wake_id, seq}`; a state change resets the ack; secret = base64url string, challenge = S256 over its ASCII bytes, with a pinned RFC 7636 fixture |
 | Reviewer N1–N5 | client-credential sign-out; 90-day route lifetime with renewal; provider-stamped `incarnation`; send timeout < lease |
 | Register replay | phone-generated secret + SHA-256 challenge (enrollment pattern); no server secret, keyring or new setup |
 | P1–P4 evidence | idleness dependency removed; `Head` < mark defensive only; live-index test; re-sign-in keeps routes |
