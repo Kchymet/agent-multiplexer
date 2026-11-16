@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.1 (consolidated)
+# Direct wake-ups: contract v4.2 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -66,7 +66,7 @@ Not wake-worthy:
 | `route_id` = `dwr_`+b64url(32) | Harness | metadata; **possession grants nothing** | Harness, FCM, phone, direct request **bodies** (never URLs) |
 | `wake_id` = `dwk_`+b64url(16) | host | metadata, unordered | host, Harness, FCM, phone |
 | `request_id` = b64url(16..32 random bytes) | phone | metadata | phone, Harness |
-| `activation_secret` = the unpadded base64url **string** of 32 CSPRNG bytes (43 characters) | **phone**, fresh per setup attempt | **secret** | sealed phone store, direct subscribe body, provider → Harness activation frame. **Never** in Harness storage, register, FCM, logs, URLs or browser storage. |
+| `activation_secret` = the unpadded base64url **string** of 32 CSPRNG bytes (43 characters) | **phone**, fresh per setup attempt | **secret** | sealed phone store; direct subscribe body; the host's `grants.json` `WakeSubs` entry (C3: erased on every terminal activation transition, on TTL expiry, and by startup cleanup); the provider → Harness activation frame. **Never** in Harness storage, register, FCM, logs (Harness frame logging must redact `activationSecret`), URLs or browser storage. |
 | `activation_challenge` = unpadded b64url(SHA-256(the ASCII bytes of the `activation_secret` **string**)) — exactly PKCE S256 | phone | metadata (a commitment) | register request, Harness storage |
 | direct access/refresh tokens, verifier, bundles | direct server | **secret** | never on the wake path |
 
@@ -158,8 +158,8 @@ Not wake-worthy:
 
 | Route | Body | Result |
 |---|---|---|
-| `POST /direct/v1/wake/subscribe` | `{route_id, activation_secret}` | Creates or updates this grant's `WakeSubs` entry (`activating`) and queues an `activate` outbox item. `200 {route_id, state, failure?, created_at}`. Same grant + route + secret is idempotent. Same grant + route with a **new** secret replaces the pending activation and re-queues it (this cannot downgrade an `active` entry: `409 already_active`). **No global reservation:** several grants may hold `activating` entries for one route; only the proof Harness accepts becomes `active`, and the rest settle `failed:route_gone`. `409 wake_disabled`. `409 capacity_exhausted` (more than 4 per grant). |
-| `POST /direct/v1/wake/unsubscribe` | `{route_id}` | Removes the entry (authority commit) and queues `deactivate`. `200 {removed}`. Idempotent. |
+| `POST /direct/v1/wake/subscribe` | `{route_id, activation_secret}` | Creates or updates this grant's `WakeSubs` entry (`activating`) and queues an `activate` outbox item. `200 {route_id, state, failure?, created_at}`. Same grant + route + secret is idempotent. Same grant + route with a **new** secret replaces the pending activation and re-queues it (this cannot downgrade an `active` entry: `409 already_active`). **No global reservation:** several grants may hold `activating` entries for one route; only the proof Harness accepts becomes `active`, and the rest settle `failed:route_gone`. `409 wake_disabled`. `409 capacity_exhausted` (more than 4 **non-failed** subscriptions per grant; C4). Failed entries do not count toward the cap, remain readable with their `failure`, and are pruned 24 h after failing. |
+| `POST /direct/v1/wake/unsubscribe` | `{route_id}` | Removes the entry (authority commit). Harness learns of the removal through route sync (§6.5); there is no deactivate frame. `200 {removed}`. Idempotent. |
 | `POST /direct/v1/wake/subscriptions` | `{}` | `{"subscriptions":[{route_id, state, failure?, created_at, watches:[{session_id, incarnation}]}]}` |
 | `POST /direct/v1/wake/watch` | `{route_id, session_id, incarnation, watch}` | Adding requires the session in scope (`404 not_found`) and a current `incarnation` (otherwise `409 incarnation_changed`, with `incarnation` = the current one). Removing needs no access. At most 64. `200 {route_id, session_id, incarnation (current), watched}`. |
 | `POST /direct/v1/wake/events` | §8 | §8 |
@@ -177,7 +177,6 @@ Not wake-worthy:
 | Item | States | Deadline |
 |---|---|---|
 | `activate` | `pending` / `done` / `failed` | 10 min |
-| `deactivate` | `pending` / `done` | 24 h |
 | `wake` | `pending` / `delivered` / `gone` / `expired` | 900 s after creation |
 
 **Activation first.** A subscription's `wake` items become leasable only once `WakeSubs.state = active`, which happens after its `activate` item settled `accepted`.
@@ -217,8 +216,10 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 - **Marks.** Each (subscription, session) pair has a durable `mark[sub][sid]` that only goes up. There is **no shared mark**.
 - **A new subscriber.** When a session enters a subscription's set, only that subscription's mark is set, to the current `History` `Head`. Other subscriptions keep their backlog.
 - **Reading.** The detector reads each session from the minimum mark across subscriptions.
-  - Up to 64 live sessions are tailed with `Stream`.
-  - The rest are polled round-robin with `History` back to the minimum mark: at most 8 pages per turn, continued next turn, never skipped.
+  - **Forward reads.** Every in-set session is read **forward from its minimum mark** with `History(before = mark+1+limit)`. `before` is exclusive, so each page is the contiguous run `(mark, mark+limit]`. That gives catch-up with no gaps and no backfill skipping.
+  - **Round-robin.** Sessions are taken round-robin, 16 per 2 s tick, at most 8 pages each, continued next tick.
+  - **Inventory changes.** Sessions whose inventory `state` changed since the last tick are read first.
+  - **Stream tails.** `Stream` tails are an optional latency optimization and change no semantics.
 - **Check interval.** Each session is checked at least every `max(2 s, ⌈N/16⌉×2 s)`. Lag above 60 s sets `degraded`.
 - **Evaluation.** For each event at ordinal `o`, each subscription with `mark < o` evaluates it. Its records and its new mark go into the same `wake.json` batch. A crash before durability re-evaluates the event, and identity tombstones dedupe it.
 - **Incarnation (primary).** On a new incarnation, or when the session is gone:
@@ -232,7 +233,7 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 - **Permission identity:** `sha256(sid, incarnation, "permission_request", item_id, request_id, runtime_generation)`, length-prefixed.
 - **Turn-end identity:** `sha256(sid, incarnation, "turn_end", ordinal)`.
-- **Permission state** is `open`, `resolved` or `stale`, and is **separate from delivery ack** (§8.4).
+- **Permission state** is `open`, `resolved`, `stale` or `withdrawn` (left the grant's scope), and is **separate from delivery ack** (§8.4).
   - `resolved`: a matching `permission_resolved` was seen.
   - `stale`: a later event carries a different non-empty runtime generation, or the session was reset.
   - Idleness never stales a permission.
@@ -253,18 +254,18 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 {"route_id":"dwr_…","items":[
   {"seq":41,"wake_id":"dwk_…","kind":"permission_request","state":"open","acked":false,
    "session_id":"…","incarnation":"…","item_id":"…","request_id":"…","runtime_generation":"…","ordinal":123,"created_at":1731700000000},
-  {"seq":44,"wake_id":"dwk_…","kind":"permission_request","state":"resolved","acked":true,"session_id":"…","incarnation":"…","item_id":"…","request_id":"…","runtime_generation":"…","ordinal":118,"created_at":1731699990000}],
+  {"seq":44,"wake_id":"dwk_…","kind":"permission_request","state":"resolved","acked":false,"created_at":1731699990000}],
  "next_seq":44,"has_more":false,"gap":null}
 ```
 
 - **Contents.** Records whose current seq is greater than `after_seq`, ascending.
-- **Filtered at fetch time.** A record is returned only if all of these hold now:
-  - the grant is live with `read`;
-  - the nonce is current;
-  - the session is in scope and not console;
-  - the incarnation is current.
-
-  A record that fails is tombstoned.
+- **Grant and policy.** Every fetch requires the grant to be live with `read`, and the nonce to be current. Otherwise the answer is `401` or `wake_disabled`.
+- **Open records (C1).**
+  - An `open` record is returned in full only while its session is in scope, not console, and at its current incarnation.
+  - An `open` record that fails the scope or console check becomes a **`withdrawn`** revision, with a new seq and unacked.
+  - An `open` record whose incarnation changed becomes a **`stale`** revision.
+- **Clearing revisions.** `resolved`, `stale` and `withdrawn` revisions of the grant's **own** subscription are **always returned**, regardless of current scope or incarnation. They are a minimal clearing record, `{seq, wake_id, kind, state, acked, created_at}`, with no session id, incarnation or action ids. The phone clears the card it posted for that `wake_id`.
+- **Required test:** while a card is posted, the session's incarnation changes, or the session leaves scope. The card then clears.
 - **Unknown or foreign route.** It returns `200 {"items":[],"next_seq":after_seq,"has_more":false,"gap":null}`.
 - **Gap.** `gap:{through_seq, reason:"cap"|"expired"|"open_overflow"}` means the phone must take a snapshot.
 - **Cursor persistence.** The phone persists `next_seq` only after its post-or-drop decision on every item.
@@ -363,7 +364,11 @@ CREATE TABLE direct_wake_deliveries (
   PRIMARY KEY(device_id, wake_key));
 ```
 
-A live-connection index (in memory, per broker) maps each provider to its negotiated `serverId`. It is maintained on register and disconnect.
+**Live-connection index (C2).**
+- The **broker** role owns provider connections. It keeps an in-memory index from provider to negotiated `serverId`, maintained on register and disconnect.
+- The `/api/ws` verbs run in the separate **API** Deployment, which holds no hub. `targets`, `register` and the activation path therefore resolve live providers **through the existing authenticated private API→broker relay**: the relay direct enrollment and account status use (`directenroll/relay.go`, `engine/provider/directenroll_server.go`), answered by the broker that owns the connection.
+- Stored capabilities are never consulted.
+- **Required test:** an API-role request against a broker-held live connection, and against an offline provider whose stored capabilities still advertise wake.
 
 ### 10.2 Verbs and endpoint
 
@@ -613,6 +618,7 @@ Re-login does not re-activate: the backend shows "Paused — signed out of Harne
 | Reviewer R1–R5 | activation first; pending → `unavailable`; epoch sync with grace; authority/wake-file split (seven rules, §6.2); explicit sign-out; route-bound authority |
 | Root v3.3 fetch | ack separate from pending; new seq on state change; snapshot includes acked open permissions; `snapshot_hw` |
 | Root v4 wire | versioned acks `{wake_id, seq}`; a state change resets the ack; secret = base64url string, challenge = S256 over its ASCII bytes, with a pinned RFC 7636 fixture |
+| Reviewer C1–C4 | minimal clearing revisions (`withdrawn`) always returned; API→broker relay for live resolution; secret erasure on the host and log redaction; failed entries outside the cap |
 | Reviewer N1–N5 | client-credential sign-out; 90-day route lifetime with renewal; provider-stamped `incarnation`; send timeout < lease |
 | Register replay | phone-generated secret + SHA-256 challenge (enrollment pattern); no server secret, keyring or new setup |
 | P1–P4 evidence | idleness dependency removed; `Head` < mark defensive only; live-index test; re-sign-in keeps routes |
