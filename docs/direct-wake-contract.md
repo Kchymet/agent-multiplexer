@@ -443,7 +443,7 @@ CREATE TABLE direct_wake_deliveries (
 - **Same `request_id` but activation expired unactivated.** `409 activation_expired`.
 
 **Renewal.**
-- Any authenticated `register`/`list`/`targets` call from client C with a live session sets `renewed_at = now()` and `expires_at = now() + 90 days`.
+- Any authenticated `register`/`list`/`targets` call, or `device.register`, from client C with a live session sets `renewed_at = now()` and `expires_at = now() + 90 days`.
 - This applies only to C's routes that are active, unrevoked and unexpired.
 
 **Explicit sign-out.**
