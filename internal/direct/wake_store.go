@@ -829,7 +829,11 @@ func (ws *wakeStore) ack(clientID, routeID, nonce string, items []WakeAckItem, n
 		ws.dirty = true
 		if r.State != WakeStateOpen {
 			delete(s.Records, r.WakeID)
-			delete(s.Outbox, r.WakeID)
+			for id, o := range s.Outbox {
+				if id == r.WakeID || o.Record == r.WakeID {
+					delete(s.Outbox, id) // the phone already cleared this card
+				}
+			}
 			s.Tombs[r.Identity] = now + int64(wakeRetention/time.Second)
 		}
 	}

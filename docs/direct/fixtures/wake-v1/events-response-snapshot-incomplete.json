@@ -1,0 +1,26 @@
+{
+  "route_id": "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3",
+  "items": [
+    {
+      "seq": 41,
+      "wake_id": "dwk_AAECAwQFBgcICQoLDA0ODw",
+      "kind": "permission_request",
+      "state": "open",
+      "acked": false,
+      "session_id": "e1deda",
+      "incarnation": "inc-7f3a",
+      "item_id": "item_9",
+      "request_id": "call_7",
+      "runtime_generation": "rg_01J9",
+      "ordinal": 123,
+      "created_at": 1793000000000
+    }
+  ],
+  "next_seq": 45,
+  "has_more": false,
+  "gap": null,
+  "snapshot_hw": 45,
+  "complete": false,
+  "reason": "expired",
+  "loss_through": 39
+}

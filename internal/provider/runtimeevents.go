@@ -79,6 +79,7 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 		sub.cancel()
 		close(sub.done)
 	}()
+	inc := p.sessionIncarnation(sub.ctx, sessionID)
 	for {
 		select {
 		case <-sub.ctx.Done():
@@ -101,11 +102,12 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 				return
 			}
 			err := s.hc.WriteHarness(harnessproto.HarnessMsg{
-				Type:      harnessproto.HRuntimeEvents,
-				SessionID: sessionID,
-				Runtime:   b.Runtime,
-				Seq:       b.Seq,
-				Events:    b.Events,
+				Type:        harnessproto.HRuntimeEvents,
+				SessionID:   sessionID,
+				Runtime:     b.Runtime,
+				Incarnation: inc,
+				Seq:         b.Seq,
+				Events:      b.Events,
 			})
 			s.opMu.Unlock()
 			if err != nil {
@@ -173,6 +175,10 @@ func (p *Provider) onRuntimeEventsHistory(s *session, m harnessproto.MuxMsg) {
 	go func() {
 		defer s.rtWG.Done()
 		page, ok := p.cfg.RuntimeEventHistory(ctx, m.SessionID, m.BeforeSeq, m.Limit)
+		inc := ""
+		if ok {
+			inc = p.sessionIncarnation(ctx, m.SessionID)
+		}
 		cancelled := ctx.Err() != nil
 		cancel()
 		close(call.done)
@@ -188,6 +194,7 @@ func (p *Provider) onRuntimeEventsHistory(s *session, m harnessproto.MuxMsg) {
 		default:
 			reply.OK = true
 			reply.Runtime, reply.Seq, reply.HeadSeq, reply.HasMore, reply.Events = page.Runtime, page.Seq, page.Head, page.HasMore, page.Events
+			reply.Incarnation = inc
 		}
 		err := s.hc.WriteHarness(reply)
 		s.opMu.Unlock()
@@ -195,4 +202,12 @@ func (p *Provider) onRuntimeEventsHistory(s *session, m harnessproto.MuxMsg) {
 			s.cancel()
 		}
 	}()
+}
+
+// sessionIncarnation is the session's store incarnation, or "" when unknown.
+func (p *Provider) sessionIncarnation(ctx context.Context, sessionID string) string {
+	if p.cfg.SessionIncarnation == nil {
+		return ""
+	}
+	return p.cfg.SessionIncarnation(ctx, sessionID)
 }

@@ -362,12 +362,16 @@ func (a *Authority) countHostLiveSubsLocked(p *wakePolicy, now int64) int {
 			continue
 		}
 		for _, s := range g.WakeSubs {
-			if s.Nonce == p.Nonce && s.State != wakeSubStateFailed {
+			if s.Nonce == p.Nonce && s.State != wakeSubStateFailed && !activationExpired(s, now) {
 				n++
 			}
 		}
 	}
 	return n
+}
+
+func activationExpired(s *wakeSub, now int64) bool {
+	return s.State == wakeSubStateActivate && now >= s.ActivatingAt+int64(WakeActivationTTL/time.Second)
 }
 
 func countLiveSubs(g *grantRecord) int {
@@ -391,7 +395,7 @@ func (a *Authority) pruneWakeSubsLocked(g *grantRecord, p *wakePolicy, now int64
 		case p == nil || s.Nonce != p.Nonce:
 			delete(g.WakeSubs, r)
 			changed = true
-		case s.State == wakeSubStateActivate && now >= s.ActivatingAt+int64(WakeActivationTTL/time.Second):
+		case activationExpired(s, now):
 			s.State, s.Failure, s.FailedAt, s.Secret = wakeSubStateFailed, WakeFailActivationExpired, now, ""
 			changed = true
 		case s.State == wakeSubStateFailed && now >= s.FailedAt+int64(wakeFailedRetention/time.Second):
@@ -579,10 +583,17 @@ func (a *Authority) WakeFailRoute(clientID, routeID, nonce string) error {
 	return nil
 }
 
-// pruneWakeOnOpenLocked runs at startup: activation secrets past their TTL and
-// stale entries are erased before the server answers anything. It reports
-// whether the registry changed.
-func (a *Authority) pruneWakeOnOpenLocked() bool {
+// pruneWakeLocked erases activation secrets past their TTL, drops entries of
+// dead grants or another policy, and bounds failure records, in memory only.
+// It never writes: opening the authority runs it without a commit (so wake
+// cleanup can never stop direct from starting or degrade the authority), and
+// commitLocked runs it before every real commit, so the next ordinary
+// authority write persists the erasure. Disk erasure of an already expired
+// secret is therefore best-effort: it is unusable at once (wakeAuthSnapshot,
+// WakeSubscriptions and leasing skip it) and leaves the 0600 host-only file at
+// the next authority commit. Successful activation and revocation erase it in
+// their own commits.
+func (a *Authority) pruneWakeLocked() bool {
 	p := a.wakeEnabledLocked()
 	now := a.now().Unix()
 	changed := false

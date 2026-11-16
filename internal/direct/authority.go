@@ -126,6 +126,9 @@ var errDegraded = errors.New("direct store durability is uncertain after a faile
 // unless the directory entry is lost), returns failure without handing out
 // anything that depends on it, and the authority refuses further issuance.
 func (a *Authority) commitLocked() error {
+	if a.identity != nil {
+		a.pruneWakeLocked() // in memory; persisted by this very commit
+	}
 	err := a.st.saveState(a.state)
 	switch {
 	case err == nil:
@@ -222,13 +225,7 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
 		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
 	}
-	if a.pruneWakeOnOpenLocked() {
-		// Activation secrets past their TTL, entries of a dead grant or another
-		// policy, and long-failed entries are erased before anything is served.
-		if err := st.saveState(state); err != nil {
-			return nil, fmt.Errorf("direct grants: prune wake subscriptions: %w", err)
-		}
-	}
+	a.pruneWakeLocked() // in memory only: never a startup write
 	if state.IdentityGeneration != id.Generation {
 		// A grant issued under another identity can never be valid again.
 		a.revokeAllLocked("identity changed")

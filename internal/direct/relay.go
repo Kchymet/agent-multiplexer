@@ -2,6 +2,8 @@ package direct
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -70,4 +72,73 @@ func (r *RelayIssuer) Enroll(ctx context.Context, providerID string, req hp.Dire
 		return hp.DirectEnrollResult{Error: code}
 	}
 	return hp.DirectEnrollResult{Error: hp.DirectEnrollErrUnavailable}
+}
+
+// WakeRelay is the provider's only bridge to direct wake-ups. It can send
+// exactly four operations: OpWakeStatus (to decide whether to advertise
+// direct-wake-v1), OpWakeLease, OpWakeSettle and OpWakeRoutes. It never
+// reaches the policy operations.
+type WakeRelay struct{ call AdminCaller }
+
+// NewWakeRelay wraps an admin caller.
+func NewWakeRelay(call AdminCaller) *WakeRelay { return &WakeRelay{call: call} }
+
+// WakeOffer is what the provider advertises: the direct server identity and
+// the host's pins (the provider advertises only while they match its live
+// registration).
+type WakeOffer struct {
+	ServerID    string
+	OwnerPin    string
+	ProviderPin string
+	Degraded    bool
+}
+
+// Status reports the offer, or nil when wake-ups are off or the server is not
+// running.
+func (r *WakeRelay) Status(ctx context.Context) (*WakeOffer, error) {
+	resp, err := r.call(ctx, AdminRequest{Op: OpWakeStatus})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK || resp.Wake == nil || resp.Wake.Status == nil || !resp.Wake.Status.Enabled || resp.ServerID == "" {
+		return nil, nil
+	}
+	st := resp.Wake.Status
+	return &WakeOffer{ServerID: resp.ServerID, OwnerPin: st.OwnerPin, ProviderPin: st.ProviderPin, Degraded: st.Degraded}, nil
+}
+
+// Lease long-polls for leasable items.
+func (r *WakeRelay) Lease(ctx context.Context, max int, wait time.Duration) ([]WakeLeaseItem, error) {
+	resp, err := r.call(ctx, AdminRequest{Op: OpWakeLease, Wake: &WakeAdminRequest{Max: max, WaitMillis: wait.Milliseconds()}})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK || resp.Wake == nil {
+		return nil, errors.New("wake lease refused")
+	}
+	return resp.Wake.Items, nil
+}
+
+// Settle reports Harness's answers.
+func (r *WakeRelay) Settle(ctx context.Context, results []WakeSettleResult) error {
+	resp, err := r.call(ctx, AdminRequest{Op: OpWakeSettle, Wake: &WakeAdminRequest{Results: results}})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return errors.New("wake settle refused")
+	}
+	return nil
+}
+
+// Routes returns the complete route-sync snapshot.
+func (r *WakeRelay) Routes(ctx context.Context) ([]hp.DirectWakeRouteRef, error) {
+	resp, err := r.call(ctx, AdminRequest{Op: OpWakeRoutes})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK || resp.Wake == nil {
+		return nil, errors.New("wake routes refused")
+	}
+	return resp.Wake.Routes, nil
 }

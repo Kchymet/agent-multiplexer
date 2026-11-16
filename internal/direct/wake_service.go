@@ -35,6 +35,13 @@ type WakeService struct {
 	checked   map[string]time.Time // sid -> last detector read
 	lastState map[string]string    // sid -> inventory state
 	lagging   bool
+	// actBackoff delays re-leasing an activation after a retryable answer.
+	actBackoff map[string]wakeRetry
+}
+
+type wakeRetry struct {
+	attempts int
+	nextAt   time.Time
 }
 
 type wakeLease struct {
@@ -82,8 +89,9 @@ func NewWakeService(a *Authority, root string, backend Backend, logf func(string
 		a: a, store: ws, backend: backend, now: a.now, logf: logf,
 		tick: 2 * time.Second, perTick: 16, pageLimit: 128, maxPages: 8,
 		leases: map[string]*wakeLease{}, leasedIDs: map[string]string{}, notify: make(chan struct{}, 1),
-		checked: map[string]time.Time{}, lastState: map[string]string{},
+		checked: map[string]time.Time{}, lastState: map[string]string{}, actBackoff: map[string]wakeRetry{},
 	}
+
 	// Startup reconciliation: drop data the authority no longer vouches for.
 	s.store.reconcile(a.wakeAuthSnapshot())
 	_ = s.store.flush(true)
@@ -161,6 +169,16 @@ func (s *WakeService) Tick(ctx context.Context) {
 	}
 	sort.Strings(sids)
 	incs := s.identities(ctx, sids)
+	// A session whose identity is unknown this tick (lookup failed, or the
+	// store has none) is not read at all: reading it with an empty
+	// incarnation would lose watched turn ends and stale permissions.
+	known := sids[:0:0]
+	for _, sid := range sids {
+		if incs[sid] != "" {
+			known = append(known, sid)
+		}
+	}
+	sids = known
 	now := s.now()
 	nowMs := now.UnixMilli()
 	// Baselines and incarnation changes come first, for every covered session.
@@ -270,6 +288,7 @@ func (s *WakeService) identities(ctx context.Context, sids []string) map[string]
 // at most maxPages pages, processing each page atomically for the targets.
 func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeTarget, nowMs int64) bool {
 	queued := false
+	limit := s.pageLimit
 	for p := 0; p < s.maxPages; p++ {
 		low, any := int64(-1), false
 		for _, t := range targets {
@@ -280,19 +299,27 @@ func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeT
 		if !any {
 			return queued
 		}
-		before := low + 1 + int64(s.pageLimit)
-		page, ok := s.backend.History(ctx, sid, before, s.pageLimit)
-		if !ok {
+		before := low + 1 + int64(limit)
+		page, ok := s.backend.History(ctx, sid, before, limit)
+		if !ok || len(page.Events) == 0 {
 			return queued
 		}
-		// The page is the newest events with ordinal < before. Everything in
-		// (low, proven] has therefore been examined, even when ordinals have a
-		// gap wider than the page (the page then holds only older events).
-		proven := before - 1
-		if page.Head < proven {
-			proven = page.Head
-		}
+		// Ordinals are dense (runtimeevents.historyPage: one per event; the
+		// page is the run ending at page.Seq = min(before-1, head)). The reader
+		// may trim the run's oldest events to fit its payload budget; then the
+		// page starts above low+1 and processing it would skip the trimmed
+		// events. Re-read with a smaller limit until the page starts at low+1
+		// (one event always fits).
 		first := page.Seq - int64(len(page.Events)) + 1
+		if first > low+1 {
+			if len(page.Events) <= 1 {
+				return queued // cannot happen with a dense reader; never skip
+			}
+			limit = len(page.Events) - 1
+			continue
+		}
+		limit = s.pageLimit
+		proven := page.Seq
 		events := make([]wakeEvent, 0, len(page.Events))
 		for i, ev := range page.Events {
 			if o := first + int64(i); o > low {
@@ -371,7 +398,7 @@ func (s *WakeService) leaseOnce(max int) []WakeLeaseItem {
 			active[k] = true
 		case wakeSubStateActivate:
 			key := activateKey(sub.ClientID, sub.RouteID, sub.SecretDigest)
-			if _, leased := s.leasedIDs[key]; leased || len(out) == max {
+			if _, leased := s.leasedIDs[key]; leased || len(out) == max || now.Before(s.actBackoff[key].nextAt) {
 				continue
 			}
 			out = append(out, WakeLeaseItem{ID: key, Kind: "activate", RouteID: sub.RouteID, GrantRef: sub.GrantRef, Requester: sub.Requester, Secret: sub.Secret})
@@ -436,11 +463,25 @@ func (s *WakeService) Settle(results []WakeSettleResult) {
 	}
 	s.mu.Unlock()
 	for i, e := range acts {
+		key := activateKey(e.ClientID, e.RouteID, e.Digest)
 		switch actStatus[i] {
 		case hp.DirectWakeAccepted:
 			_ = s.a.WakeSettleActivation(e.ClientID, e.RouteID, e.Nonce, e.Digest, true, "")
+			s.clearActBackoff(key)
 		case hp.DirectWakeRouteGone:
 			_ = s.a.WakeSettleActivation(e.ClientID, e.RouteID, e.Nonce, e.Digest, false, WakeFailRouteGone)
+			s.clearActBackoff(key)
+		default:
+			s.mu.Lock()
+			r := s.actBackoff[key]
+			r.attempts++
+			d := wakeBackoffMin << min(r.attempts-1, 5)
+			if d > wakeBackoffMax {
+				d = wakeBackoffMax
+			}
+			r.nextAt = now.Add(d)
+			s.actBackoff[key] = r
+			s.mu.Unlock()
 		}
 	}
 	auth := s.a.wakeAuthSnapshot()
@@ -461,6 +502,12 @@ func (s *WakeService) Settle(results []WakeSettleResult) {
 	}
 	_ = s.store.flush(true)
 	s.poke()
+}
+
+func (s *WakeService) clearActBackoff(key string) {
+	s.mu.Lock()
+	delete(s.actBackoff, key)
+	s.mu.Unlock()
 }
 
 func cutNUL(s string) (string, string, bool) {

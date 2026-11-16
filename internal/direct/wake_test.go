@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"amux/internal/core"
+	amuxstore "amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -25,44 +27,63 @@ type wakeBackend struct {
 	*fakeBackend
 	evMu sync.Mutex
 	log  map[string][]wakeEvent
+	// trim, when set, keeps at most this many of the newest events of a page
+	// (the real reader trims a page's oldest events to a payload budget).
+	trim int
+	// identFail makes SessionIdentities fail.
+	identFail bool
+}
+
+func (b *wakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
+	b.evMu.Lock()
+	fail := b.identFail
+	b.evMu.Unlock()
+	if fail {
+		return nil, errors.New("daemon busy")
+	}
+	return b.fakeBackend.SessionIdentities(ctx, ids)
 }
 
 func newWakeBackend(rows ...core.Session) *wakeBackend {
 	return &wakeBackend{fakeBackend: newFake(rows...), log: map[string][]wakeEvent{}}
 }
 
+// add appends ev; ordinals are dense, so ordinal must be the next one.
 func (b *wakeBackend) add(sid string, ordinal int64, ev hp.RuntimeEvent) {
 	b.evMu.Lock()
 	defer b.evMu.Unlock()
+	if want := int64(len(b.log[sid])) + 1; ordinal != want {
+		panic(fmt.Sprintf("non-dense ordinal %d for %s (want %d)", ordinal, sid, want))
+	}
 	b.log[sid] = append(b.log[sid], wakeEvent{Ordinal: ordinal, Event: ev})
 }
 
+// History mirrors runtimeevents.historyPage: ordinals are dense (event i has
+// ordinal i+1), the page is the run (lo, hi] with hi = min(before-1, head),
+// Seq = hi, and an optional trim drops the run's oldest events.
 func (b *wakeBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
 	b.evMu.Lock()
 	defer b.evMu.Unlock()
 	evs := b.log[sid]
-	var head int64
-	if len(evs) > 0 {
-		head = evs[len(evs)-1].Ordinal
-	}
-	var sel []wakeEvent
-	for _, e := range evs {
-		if before <= 0 || e.Ordinal < before {
-			sel = append(sel, e)
-		}
-	}
-	if len(sel) > limit {
-		sel = sel[len(sel)-limit:]
+	head := int64(len(evs))
+	hi := head
+	if before > 0 && before-1 < hi {
+		hi = before - 1
 	}
 	page := hp.RuntimeEventHistory{Head: head, Runtime: "codex"}
+	if hi < 1 {
+		return page, true
+	}
+	lo := max(1, hi-int64(limit)+1)
+	sel := evs[lo-1 : hi]
+	if b.trim > 0 && len(sel) > b.trim {
+		sel = sel[len(sel)-b.trim:]
+	}
 	for _, e := range sel {
 		page.Events = append(page.Events, e.Event)
 	}
-	if len(sel) > 0 {
-		// Seq is the ordinal of the last event; contiguous ordinals are what
-		// the reader assumes inside one page, so gappy pages hold one event.
-		page.Seq = sel[len(sel)-1].Ordinal
-	}
+	page.Seq = hi
+	page.HasMore = hi-int64(len(sel)) >= 1
 	return page, true
 }
 
@@ -202,6 +223,7 @@ func TestWakePermissionFlowAndVersionedAck(t *testing.T) {
 		}
 		h.ws.Settle([]WakeSettleResult{{ID: it.ID, Status: hp.DirectWakeUnavailable}})
 	}
+	h.clk.add(wakeBackoffMax) // past the activation's retry backoff
 	h.activate(route, hp.DirectWakeAccepted)
 	items := h.ws.Lease(context.Background(), 16, 0)
 	if len(items) != 1 || items[0].Kind != "wake" || items[0].Secret != "" {
@@ -289,21 +311,172 @@ func TestWakeNewSubscriptionDoesNotSkipBacklog(t *testing.T) {
 	}
 }
 
-func TestWakeOrdinalGapWiderThanPage(t *testing.T) {
+// The reader trims a page's oldest events to its payload budget; the
+// detector must re-read rather than skip the trimmed events.
+func TestWakeTrimmedPagesNeverSkipEvents(t *testing.T) {
 	h := newWakeHarness(t)
-	h.ws.pageLimit, h.ws.maxPages = 4, 2
+	h.ws.pageLimit, h.ws.maxPages = 8, 4
+	h.b.trim = 3
 	tok := enroll(t, h.a, []string{PermRead}, allSessions)
 	route := testRouteID(1)
 	h.b.add("a1", 1, textEv())
 	h.subscribe(tok.AccessToken, route, testSecretN(1))
 	h.tick() // baseline 1
-	h.b.add("a1", 100, permEv("i", "r", "g"))
+	for o := int64(2); o <= 30; o++ {
+		ev := textEv()
+		if o == 3 || o == 29 {
+			ev = permEv(fmt.Sprint("i", o), fmt.Sprint("r", o), "g")
+		}
+		h.b.add("a1", o, ev)
+	}
 	for i := 0; i < 40; i++ {
 		h.tick()
 	}
 	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
-	if len(f.Items) != 1 || f.Items[0].Ordinal != 100 {
-		t.Fatalf("event past an ordinal gap was not reached: %+v", f)
+	var ords []int64
+	for _, it := range f.Items {
+		ords = append(ords, it.Ordinal)
+	}
+	if len(ords) != 2 || ords[0] != 3 || ords[1] != 29 {
+		t.Fatalf("trimmed pages skipped events: got ordinals %v", ords)
+	}
+}
+
+// An identity lookup failure defers the session; it is never read with an
+// empty incarnation (which would lose a watched turn end).
+func TestWakeIdentityFailureDefersRead(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	if code, out := h.post(PathWakeWatch, tok.AccessToken, WakeWatchRequest{RouteID: route, SessionID: "a1", Incarnation: "inc-a1", Watch: true}); code != 200 {
+		t.Fatalf("watch %d %v", code, out)
+	}
+	h.b.add("a1", 1, turnEndEv())
+	h.b.identFail = true
+	h.tick()
+	h.tick()
+	h.b.identFail = false
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(f.Items) != 1 || f.Items[0].Kind != WakeKindTurnEnd || f.Items[0].Incarnation != "inc-a1" {
+		t.Fatalf("watched turn end lost across an identity failure: %+v", f)
+	}
+}
+
+func TestWakeActivationRetryBacksOff(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	items := h.ws.Lease(context.Background(), 16, 0)
+	if len(items) != 1 || items[0].Kind != "activate" {
+		t.Fatalf("lease %+v", items)
+	}
+	h.ws.Settle([]WakeSettleResult{{ID: items[0].ID, Status: hp.DirectWakeUnavailable}})
+	if again := h.ws.Lease(context.Background(), 16, 0); len(again) != 0 {
+		t.Fatalf("activation re-leased without backoff: %+v", again)
+	}
+	h.clk.add(wakeBackoffMin + time.Millisecond)
+	if again := h.ws.Lease(context.Background(), 16, 0); len(again) != 1 {
+		t.Fatalf("activation not retried after backoff: %+v", again)
+	}
+}
+
+// Opening the authority never writes wake cleanup (so a failing disk cannot
+// keep direct from starting); the expired secret is unusable at once and
+// leaves the file at the next real authority commit, whose failure semantics
+// are the existing ones.
+func TestWakeExpiredSecretErasedByNextRealCommitOnly(t *testing.T) {
+	root := t.TempDir()
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	a, _ := OpenAuthority(root, Lifetimes{}, clk.now)
+	_, _ = a.EnableWake("usr", "prov")
+	tok := enroll(t, a, []string{PermRead}, allSessions)
+	l, _ := a.Admit(context.Background(), tok.AccessToken, PermRead)
+	_, _ = a.WakeSubscribe(l, testRouteID(1), testSecretN(1))
+	l.Done()
+	a.Close()
+	clk.add(WakeActivationTTL + time.Minute)
+	life := Lifetimes{}
+	life, _ = life.resolve()
+	onDisk := func() bool {
+		raw, _ := os.ReadFile(filepath.Join(root, grantsFile))
+		return strings.Contains(string(raw), testSecretN(1))
+	}
+
+	// 1. Startup with a failing store: opens, writes nothing, secret unusable.
+	st, _ := openStore(root)
+	writes := 0
+	st.write = func(string, string, []byte) error { writes++; return fmt.Errorf("%w: disk", errNotCommitted) }
+	a2, err := loadAuthority(st, life, clk.now)
+	if err != nil {
+		t.Fatalf("authority open must not depend on wake cleanup: %v", err)
+	}
+	if writes != 0 {
+		t.Fatalf("startup wrote %d times", writes)
+	}
+	if subs := a2.wakeAuthSnapshot().Subs; len(subs) != 0 {
+		t.Fatalf("expired activation still vouched for: %+v", subs)
+	}
+	if !onDisk() {
+		t.Fatal("test setup: secret should still be on disk")
+	}
+
+	// 2. An ambiguous real commit keeps the existing fail-closed behavior.
+	st.write = func(string, string, []byte) error { return fmt.Errorf("%w: dir sync", errAmbiguousCommit) }
+	if _, _, err := a2.NewCode("x", []string{PermRead}, allSessions, 0); err == nil {
+		t.Fatal("ambiguous commit reported success")
+	}
+	if a2.degraded == nil {
+		t.Fatal("an ambiguous real commit must degrade the authority as before")
+	}
+	a2.Close()
+
+	// 3. A later successful real commit persists the erasure.
+	a3, err := OpenAuthority(root, Lifetimes{}, clk.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a3.Close()
+	if _, _, err := a3.NewCode("y", []string{PermRead}, allSessions, 0); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk() {
+		t.Fatal("expired secret still on disk after a real commit")
+	}
+}
+
+func TestWakeHostCapIgnoresExpiredActivations(t *testing.T) {
+	saved := maxWakeSubsPerHost
+	maxWakeSubsPerHost = 1
+	defer func() { maxWakeSubsPerHost = saved }()
+	h := newWakeHarness(t)
+	a := enroll(t, h.a, []string{PermRead}, allSessions)
+	h.subscribe(a.AccessToken, testRouteID(1), testSecretN(1))
+	h.clk.add(WakeActivationTTL + time.Second)
+	b := enroll(t, h.a, []string{PermRead}, allSessions)
+	h.subscribe(b.AccessToken, testRouteID(2), testSecretN(2))
+}
+
+func TestWakeAckDropsPendingResolutionDelivery(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	h.activate(route, hp.DirectWakeAccepted)
+	h.b.add("a1", 1, permEv("i", "r", "g"))
+	h.tick()
+	items := h.ws.Lease(context.Background(), 16, 0)
+	h.ws.Settle([]WakeSettleResult{{ID: items[0].ID, Status: hp.DirectWakeAccepted}})
+	h.b.add("a1", 2, resolvedEv("r", "g"))
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	h.ack(tok.AccessToken, route, WakeAckItem{WakeID: f.Items[0].WakeID, Seq: f.Items[0].Seq})
+	if again := h.ws.Lease(context.Background(), 16, 0); len(again) != 0 {
+		t.Fatalf("resolution push still queued after the phone cleared the card: %+v", again)
 	}
 }
 
@@ -883,5 +1056,120 @@ func TestWakeHistoryFailureDefersBaseline(t *testing.T) {
 	sub := ws.store.data.Subs[subKey(tok.ClientID, testRouteID(1), nonce)]
 	if len(sub.Records) != 0 {
 		t.Fatalf("old activity replayed: %+v", sub.Records)
+	}
+}
+
+// Constructing, starting and ticking the wake service with an expired
+// activation pending and a failing grants.json write: the wake path makes no
+// authority write at all, direct stays fully usable, and a real authority
+// mutation still fails closed.
+func TestWakeServiceNeverWritesTheAuthorityForCleanup(t *testing.T) {
+	root := t.TempDir()
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	a, _ := OpenAuthority(root, Lifetimes{}, clk.now)
+	_, _ = a.EnableWake("usr", "prov")
+	tok := enroll(t, a, []string{PermRead}, allSessions)
+	l, _ := a.Admit(context.Background(), tok.AccessToken, PermRead)
+	_, _ = a.WakeSubscribe(l, testRouteID(1), testSecretN(1))
+	l.Done()
+	// Age the activation past its TTL in memory (the access token stays valid).
+	a.mu.Lock()
+	a.state.Grants[tok.ClientID].WakeSubs[testRouteID(1)].ActivatingAt -= int64((WakeActivationTTL + time.Minute) / time.Second)
+	a.mu.Unlock()
+	writes := 0
+	a.st.write = func(string, string, []byte) error { writes++; return fmt.Errorf("%w: dir sync", errAmbiguousCommit) }
+	b := newWakeBackend(testRows()...)
+	ws := NewWakeService(a, root, b, nil)
+	for i := 0; i < 3; i++ {
+		ws.Tick(context.Background())
+	}
+	if items := ws.Lease(context.Background(), 16, 0); len(items) != 0 {
+		t.Fatalf("expired activation leased: %+v", items)
+	}
+	if writes != 0 || a.degraded != nil {
+		t.Fatalf("wake path wrote the authority %d times (degraded=%v)", writes, a.degraded)
+	}
+	srv, _ := NewServer(Config{Authority: a, Backend: b, Endpoints: []string{testEndpoint}, Now: clk.now, Wake: ws})
+	if w := do(srv, http.MethodGet, PathSession, tok.AccessToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("direct read after wake cleanup with a failing disk = %d", w.Code)
+	}
+	// A real authority mutation keeps the existing fail-closed semantics.
+	if _, _, err := a.NewCode("x", []string{PermRead}, allSessions, 0); err == nil || a.degraded == nil {
+		t.Fatalf("an uncertain real commit must fail closed (err=%v degraded=%v)", err, a.degraded)
+	}
+	a.Close()
+}
+
+// sparseBackend is a deliberately non-dense reader (the real one is dense:
+// runtimeevents.historyPage assigns one ordinal per event). The detector must
+// never skip an unread event even then: it may stall, never advance past it.
+type sparseBackend struct {
+	*wakeBackend
+	evs []wakeEvent
+}
+
+func (b *sparseBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
+	var sel []wakeEvent
+	head := int64(0)
+	if len(b.evs) > 0 {
+		head = b.evs[len(b.evs)-1].Ordinal
+	}
+	for _, e := range b.evs {
+		if before <= 0 || e.Ordinal < before {
+			sel = append(sel, e)
+		}
+	}
+	if len(sel) > limit {
+		sel = sel[len(sel)-limit:]
+	}
+	page := hp.RuntimeEventHistory{Head: head}
+	for _, e := range sel {
+		page.Events = append(page.Events, e.Event)
+	}
+	if len(sel) > 0 {
+		page.Seq = sel[len(sel)-1].Ordinal
+	}
+	return page, true
+}
+
+func TestWakeSparseReaderNeverSkipsUnreadEvents(t *testing.T) {
+	root := t.TempDir()
+	clk := &clock{t: time.Unix(1_800_000_000, 0)}
+	a := openTestAuthority(t, root, Lifetimes{}, clk.now)
+	_, _ = a.EnableWake("usr", "prov")
+	sb := &sparseBackend{wakeBackend: newWakeBackend(core.Session{ID: "s1", Title: "x", Runtime: "claude"})}
+	sb.evs = []wakeEvent{{Ordinal: 1, Event: textEv()}}
+	ws := NewWakeService(a, root, sb, nil)
+	ws.pageLimit, ws.maxPages = 4, 4
+	tok := enroll(t, a, []string{PermRead}, allSessions)
+	l, _ := a.Admit(context.Background(), tok.AccessToken, PermRead)
+	_, _ = a.WakeSubscribe(l, testRouteID(1), testSecretN(1))
+	l.Done()
+	nonce := a.wakeAuthSnapshot().Nonce
+	ws.Tick(context.Background()) // baseline 1
+	// Ordinals jump: 2, then 50 (a gap far wider than a page).
+	sb.evs = append(sb.evs, wakeEvent{Ordinal: 2, Event: permEv("i2", "r2", "g")}, wakeEvent{Ordinal: 50, Event: permEv("i50", "r50", "g")})
+	for i := 0; i < 10; i++ {
+		ws.Tick(context.Background())
+	}
+	m, _ := ws.store.mark(tok.ClientID, testRouteID(1), nonce, "s1")
+	sub := ws.store.data.Subs[subKey(tok.ClientID, testRouteID(1), nonce)]
+	for _, r := range sub.Records {
+		if r.Ordinal > m {
+			t.Fatalf("record past the mark: %+v (mark %d)", r, m)
+		}
+	}
+	// Whatever it read, it never claimed an event it did not process: every
+	// ordinal <= mark that holds a permission has a record.
+	for _, e := range sb.evs {
+		if e.Ordinal <= m && e.Event.Type == hp.TypePermissionRequest {
+			found := false
+			for _, r := range sub.Records {
+				found = found || r.Ordinal == e.Ordinal
+			}
+			if !found {
+				t.Fatalf("event %d skipped (mark %d)", e.Ordinal, m)
+			}
+		}
 	}
 }

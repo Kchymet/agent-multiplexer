@@ -1,0 +1,4 @@
+{
+  "code": "wake_disabled",
+  "error": "wake-ups are not enabled on this host"
+}

@@ -1,0 +1,22 @@
+{
+  "subscriptions": [
+    {
+      "route_id": "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3",
+      "state": "active",
+      "created_at": 1793000000,
+      "watches": [
+        {
+          "session_id": "e1deda",
+          "incarnation": "inc-7f3a"
+        }
+      ]
+    },
+    {
+      "route_id": "dwr_AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "state": "failed",
+      "failure": "activation_expired",
+      "created_at": 1792990000,
+      "watches": []
+    }
+  ]
+}

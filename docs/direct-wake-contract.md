@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.2 (consolidated)
+# Direct wake-ups: contract v4.3 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -66,7 +66,7 @@ Not wake-worthy:
 | `route_id` = `dwr_`+b64url(32) | Harness | metadata; **possession grants nothing** | Harness, FCM, phone, direct request **bodies** (never URLs) |
 | `wake_id` = `dwk_`+b64url(16) | host | metadata, unordered | host, Harness, FCM, phone |
 | `request_id` = b64url(16..32 random bytes) | phone | metadata | phone, Harness |
-| `activation_secret` = the unpadded base64url **string** of 32 CSPRNG bytes (43 characters) | **phone**, fresh per setup attempt | **secret** | sealed phone store; direct subscribe body; the host's `grants.json` `WakeSubs` entry (C3: erased on every terminal activation transition, on TTL expiry, and by startup cleanup); the provider → Harness activation frame. **Never** in Harness storage, register, FCM, logs (Harness frame logging must redact `activationSecret`), URLs or browser storage. |
+| `activation_secret` = the unpadded base64url **string** of 32 CSPRNG bytes (43 characters) | **phone**, fresh per setup attempt | **secret** | sealed phone store; direct subscribe body; the host's `grants.json` `WakeSubs` entry (C3: erased in the commit of every terminal activation transition; after TTL expiry it is unusable at once and erased best-effort at the next real authority commit, see §6.2); the provider → Harness activation frame. **Never** in Harness storage, register, FCM, logs (Harness frame logging must redact `activationSecret`), URLs or browser storage. |
 | `activation_challenge` = unpadded b64url(SHA-256(the ASCII bytes of the `activation_secret` **string**)) — exactly PKCE S256 | phone | metadata (a commitment) | register request, Harness storage |
 | direct access/refresh tokens, verifier, bundles | direct server | **secret** | never on the wake path |
 
@@ -150,6 +150,11 @@ Not wake-worthy:
 7. **Locks.** Authority checks are a brief read under the authority lock, taken before the wake lock. Wake writes never run under the authority lock.
 
 **Old-binary rewrite.** It drops `WakePolicy`/`WakeSubs`, so wake is off and `wake.json` is inert. Re-enable mints a new nonce.
+
+**Activation-secret lifecycle (truthful).**
+- **Terminal transitions erase it in their own commit.** A successful activation, `route_gone`, revocation, disable and re-pin each remove the secret from `grants.json` in the same commit.
+- **Expiry makes it unusable at once.** An activation past its 10-minute TTL is never leased, listed as active, or relayed.
+- **Disk erasure after expiry is best-effort.** It happens at the **next real authority commit**, which prunes wake state before saving. Opening the authority prunes in memory only and never writes, so wake cleanup can never keep direct from starting or degrade the authority. Until that next commit, an expired, unusable secret may remain in the 0600 host-only file.
 
 ### 6.3 Direct API (GET/POST only; bearer access token; `read`; no new permission)
 
@@ -268,6 +273,7 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 - **Required test:** while a card is posted, the session's incarnation changes, or the session leaves scope. The card then clears.
 - **Unknown or foreign route.** It returns `200 {"items":[],"next_seq":after_seq,"has_more":false,"gap":null}`.
 - **Gap.** `gap:{through_seq, reason:"cap"|"expired"|"open_overflow"}` means the phone must take a snapshot.
+- **Reset.** `gap.reason:"reset"` (with `next_seq` = the host's current sequence) answers an `after_seq` beyond the host's sequence, which happens when an older `wake.json` was restored. The phone sets its cursor to `next_seq` and takes a snapshot. The host never jumps a cursor forward.
 - **Cursor persistence.** The phone persists `next_seq` only after its post-or-drop decision on every item.
 
 ### 8.3 Snapshot (bounded, high-water-captured)
@@ -276,9 +282,17 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 2. **Later pages.** `{route_id, snapshot:true, snapshot_hw, after_seq, limit}` return only records with seq ≤ `snapshot_hw`.
 3. **What is included.** **Every `open` permission**, acked or not, plus un-acked turn ends.
 4. **Final page.** `has_more:false`, `next_seq = snapshot_hw`. Records appended or resolved during paging have seq > `snapshot_hw`, so the next incremental fetch returns them.
-5. **Completeness.**
-   - `complete:true` only if no open permission or un-acked turn end was dropped since the phone's last complete snapshot.
-   - Otherwise `complete:false, reason`. The phone then reconciles open permissions from `history`, reading bounded backward pages (≤ 512 events per session), and shows "may be incomplete" if it hits the bound.
+5. **Completeness (monotonic loss watermark).**
+   - **The watermark.** The host keeps `loss_through`, the highest seq of any pending record (open permission, un-acked turn end) ever dropped by retention. It only goes up.
+   - **What a snapshot reports.**
+     - A final page answers `complete:true` only when the phone has confirmed recovery through the current watermark.
+     - Otherwise it answers `complete:false, reason, loss_through`.
+     - A retry, or a lost final response, keeps answering `complete:false`. An incomplete snapshot never clears the loss.
+   - **Recovery.**
+     - **The bounded read.** The phone reconciles open permissions from `history` for every in-scope session it shows, reading bounded backward pages (≤ 512 events per session). It shows "may be incomplete" if it hits the bound.
+     - **Confirming it.** Only after it **completes** that read does it send `recovered_through = loss_through` on a later snapshot request. `recovered_through` means "I finished the bounded recovery read through this watermark". It is not an echo to be sent unconditionally.
+     - **Bounds.** A value above the host's watermark is `400`.
+6. **Bounds.** `snapshot_hw` above the subscription's current sequence, or `after_seq` above `snapshot_hw`, is `400 bad_request`. A snapshot never returns a future high-water mark.
 
 ### 8.4 Ack vs. pending state
 
@@ -298,6 +312,17 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 - **Display lookup.** One event: `GET /direct/v1/sessions/{sid}/history?before_seq={ordinal+1}&limit=1`.
 - **Answering.** The existing `POST /direct/v1/sessions/{sid}/actions {"verb":"permission", request_id, runtime_generation, decision, idem_key}`, which requires `approve`.
+
+## 8.6 Shared fixtures
+
+- **Location.** `docs/direct/fixtures/wake-v1/` holds the direct wake API fixtures, generated from the server types by `TestWakeFixtures` and pinned with their own `SHA256SUMS`:
+  - subscribe, unsubscribe, subscriptions and watch, including `incarnation_changed`;
+  - incremental, clearing, `gap` and `reset` fetches;
+  - snapshot first/next, incomplete (`loss_through`), recovered request and complete;
+  - versioned ack;
+  - capabilities `wake`;
+  - the activation challenge vector.
+- **Wire frames.** The harnessproto frame goldens are in `harnessproto/testdata/direct-wake-v1-*.json`.
 
 ## 9. Wire
 
