@@ -112,7 +112,8 @@ type Config struct {
 	// SessionIncarnation, when set, returns a session's daemon store
 	// incarnation; it is stamped on runtime-events batches and pages so the
 	// orchestrator can tell a reused session id apart. Optional.
-	SessionIncarnation func(ctx context.Context, sessionID string) string
+	// ok=false means the lookup failed (unknown, not "no identity").
+	SessionIncarnation func(ctx context.Context, sessionID string) (incarnation string, ok bool)
 
 	// OnStatus, when set, receives a snapshot every time the connection state
 	// changes (dial, register, disconnect, heartbeat, stop). The CLI wires it to

@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.5 (consolidated)
+# Direct wake-ups: contract v4.6 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -223,7 +223,10 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 - **A new subscriber.** When a session enters a subscription's set, only that subscription's marks are set, to every source's current head, all taken from one per-source read (`runtimeevents.ReadSources`). Other subscriptions keep their backlog.
   - A source kind that appears after the baseline (for example, a journal created later) starts at 0.
   - **Source generations.** Every source read carries an opaque `generation` = `<file identity>.<first-line digest>` (device and inode, plus SHA-256 of the first complete line; a JSONL file's first complete line never changes while it is only appended to). Marks and record addresses are meaningful only within one generation.
-    - **A changed generation** is a **new source incarnation**: the file was replaced, or truncated and rewritten, even to the same or a larger head. It is read from index 0, so nothing written to the new file is skipped. Exact replays are deduped by event identity; turn-end identity includes the generation's file identity.
+    - **A copy of the same transcript** (a new file whose first complete line is identical) **continues** the old marks. This is what amux's restore-before-resume writes: `agent.RestoreTranscript` → `restoreCapturedRooted` copies the captured backup over the transcript path, and only when the backup is at least as large. Indexes at or below the old head are copied history and are not replayed; later events are new. Recorded items keep their inline events, with exact ids still checked.
+    - **A different transcript** (different first line) is a **new source incarnation**, even at the same or a larger head. It is read from index 0, so nothing written to the new file is skipped. Turn-end identity includes the generation's file identity.
+    - **First lines over 64 KiB.** A first line longer than 64 KiB is identified by its first 64 KiB, which are immutable under append.
+    - **Supported boundary: append-only writers.** Supported writers are append-only: amux's own journals use `O_APPEND`, runtime transcripts are appended to, and resume uses the restore copy above. An **in-place rewrite that preserves the file, its first line and a head at or above the mark is not detected** and is unsupported.
     - **An empty first-line digest** (no complete first line yet) matches the same file identity, so a file whose first line completes is not mistaken for a replacement.
   - A source whose head falls below its mark **within the same generation** was truncated in place. It is re-baselined at its new head and never replayed.
   - If the baseline read fails, the baseline is deferred, never fabricated.
@@ -350,7 +353,7 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 | `direct-wake` | prov → orch | `{type, reqId, directWake:{serverId, wakes:[{routeId, wakeId, grantRef}] ≤16}}` |
 | `direct-wake-routes` | prov → orch | `{type, reqId, directWake:{serverId, epoch, routes:[{routeId, grantRef, state}] ≤512, part, final}}` |
 | `direct-wake-result` | orch → prov | one per reqId, within 15 s: `{type, reqId, directWakeResult:{results:[{routeId, wakeId?, status}], error?}}` |
-| `runtime-events` (existing) | prov → orch | additive `incarnation`: the store incarnation the stream was **opened for**. The provider re-checks it before every batch and ends the stream on a mismatch, so a queued old batch is never labelled with a reused id's new incarnation |
+| `runtime-events` (existing) | prov → orch | additive `incarnation`: the store incarnation the stream was **opened for**, re-checked before every batch. A **failed lookup** emits the batch with an empty `incarnation`: no label, so the phone cannot correlate it and shows both cards. A **confirmed id reuse** cancels the old record's producer (its own child context), drops its queued batches (never relabelled) and re-opens from the start of the new record, retrying a failed open with bounded backoff while the session is still published. The pre-existing Harness ordinal dedup across a reused session id is unchanged and out of scope |
 
 - **Statuses:** `accepted`, `no_recipient`, `route_gone`, `rate_limited`, `unavailable`, `busy`.
 - **Connection-level mismatch** answers the whole frame with `error:"unavailable"`, never `route_gone`.

@@ -145,11 +145,11 @@ func wireDirectWake(cfg *provider.Config) {
 
 // wireSessionIncarnation stamps runtime-events with the store incarnation.
 func wireSessionIncarnation(cfg *provider.Config, h hostbackend.HostDaemon) {
-	cfg.SessionIncarnation = func(ctx context.Context, sid string) string {
+	cfg.SessionIncarnation = func(ctx context.Context, sid string) (string, bool) {
 		got, err := h.SessionIdentities(ctx, []string{sid})
 		if err != nil {
-			return ""
+			return "", false // transient: unknown, never "changed"
 		}
-		return got[sid].Incarnation
+		return got[sid].Incarnation, true
 	}
 }

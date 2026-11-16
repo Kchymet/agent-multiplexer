@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -36,7 +37,10 @@ func (p *Provider) onRuntimeEventsSubscribe(s *session, m harnessproto.MuxMsg) {
 	opening := &runtimeOpening{cancel: cancel, done: make(chan struct{})}
 	s.rtOpening[m.SessionID] = opening
 	s.opMu.Unlock()
-	batches, ok := p.cfg.RuntimeEventStream(ctx, m.SessionID, m.AfterSeq)
+	// The producer runs under its own child context so a pump that replaces
+	// it (session id reuse) can stop it without ending the subscription.
+	prodCtx, prodCancel := context.WithCancel(ctx)
+	batches, ok := p.cfg.RuntimeEventStream(prodCtx, m.SessionID, m.AfterSeq)
 	close(opening.done)
 	s.opMu.Lock()
 	active := s.rtOpening[m.SessionID] == opening
@@ -45,6 +49,7 @@ func (p *Provider) onRuntimeEventsSubscribe(s *session, m harnessproto.MuxMsg) {
 	}
 	if !active || !ok || ctx.Err() != nil {
 		s.opMu.Unlock()
+		prodCancel()
 		cancel()
 		return
 	}
@@ -54,7 +59,7 @@ func (p *Provider) onRuntimeEventsSubscribe(s *session, m harnessproto.MuxMsg) {
 	s.opMu.Unlock()
 	go func() {
 		defer s.rtWG.Done()
-		p.pumpRuntimeEvents(s, m.SessionID, sub, batches)
+		p.pumpRuntimeEvents(s, m.SessionID, sub, batches, prodCancel)
 	}()
 }
 
@@ -69,7 +74,8 @@ func validRuntimeSessionID(id string) bool {
 // pumpRuntimeEvents forwards event batches for one session as runtime-events
 // frames until the source channel closes (rtCtx cancelled) or a write fails
 // (which tears the session down, mirroring the pane sender and publish loop).
-func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeSubscription, batches <-chan harnessproto.RuntimeEventBatch) {
+func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeSubscription, batches <-chan harnessproto.RuntimeEventBatch, stopProducer context.CancelFunc) {
+	defer func() { stopProducer() }()
 	defer func() {
 		s.opMu.Lock()
 		if s.rtSubs[sessionID] == sub {
@@ -79,11 +85,17 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 		sub.cancel()
 		close(sub.done)
 	}()
-	// The stream is bound to the session incarnation it was opened for. Each
-	// batch re-checks it before emitting: a session id reused while old
-	// batches are still queued must never label them with the new
-	// incarnation, so a mismatch ends this subscription without emitting.
-	bound := p.sessionIncarnation(sub.ctx, sessionID)
+	// The stream is bound to the session incarnation it was opened for, and
+	// every batch re-checks it before emitting:
+	//   - lookup failed (unknown): the batch is emitted WITHOUT a label (never
+	//     relabelled, never dropped) and the subscription continues;
+	//   - confirmed equal: the batch carries the bound label;
+	//   - confirmed different (the id was reused): queued batches of the old
+	//     record are dropped and the stream is re-opened from the start of the
+	//     new record under the new label, so the orchestrator's subscription
+	//     stays live with no resubscribe needed.
+	// A stream whose incarnation was unknown when it opened is never labelled.
+	bound, boundOK := p.sessionIncarnation(sub.ctx, sessionID)
 	for {
 		select {
 		case <-sub.ctx.Done():
@@ -95,12 +107,22 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 			if len(b.Events) == 0 {
 				continue
 			}
-			inc := bound
-			if bound != "" {
-				if cur := p.sessionIncarnation(sub.ctx, sessionID); cur != bound {
-					p.cfg.Logf("runtime-events: session %s changed incarnation; ending its stream", sessionID)
-					return
+			inc := ""
+			if cur, ok := p.sessionIncarnation(sub.ctx, sessionID); ok && boundOK {
+				if cur != bound {
+					// Confirmed reuse: stop the old record's producer (its
+					// queued batches are dropped, never relabelled) and re-open
+					// from the start of the new record.
+					p.cfg.Logf("runtime-events: session %s was reused; re-opening its stream", sessionID)
+					stopProducer()
+					next, cancelNext, ok := p.reopenRuntimeStream(s, sessionID, sub)
+					if !ok {
+						return
+					}
+					batches, bound, stopProducer = next, cur, cancelNext
+					continue
 				}
+				inc = bound
 			}
 			// Revalidate immediately before every emitted batch and hold the admission
 			// lock through the write. Revocation deletes/cancels the subscription, then
@@ -126,6 +148,38 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 				return
 			}
 		}
+	}
+}
+
+// runtimeReopenBackoff bounds the retry delay of a failed re-open.
+var runtimeReopenBackoff = struct{ min, max time.Duration }{100 * time.Millisecond, 5 * time.Second}
+
+// reopenRuntimeStream re-opens sessionID's stream from the start under a new
+// child producer context, retrying a failed open with bounded backoff for as
+// long as the session is still published and this subscription is current
+// (so the orchestrator's subscription never silently goes dead). ok=false
+// only when the subscription ended.
+func (p *Provider) reopenRuntimeStream(s *session, sessionID string, sub *runtimeSubscription) (<-chan harnessproto.RuntimeEventBatch, context.CancelFunc, bool) {
+	delay := runtimeReopenBackoff.min
+	for {
+		s.opMu.Lock()
+		_, published := s.published[sessionID]
+		current := s.rtSubs[sessionID] == sub
+		s.opMu.Unlock()
+		if !published || !current || sub.ctx.Err() != nil {
+			return nil, nil, false
+		}
+		prodCtx, prodCancel := context.WithCancel(sub.ctx)
+		if next, ok := p.cfg.RuntimeEventStream(prodCtx, sessionID, 0); ok {
+			return next, prodCancel, true
+		}
+		prodCancel()
+		select {
+		case <-sub.ctx.Done():
+			return nil, nil, false
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, runtimeReopenBackoff.max)
 	}
 }
 
@@ -188,7 +242,7 @@ func (p *Provider) onRuntimeEventsHistory(s *session, m harnessproto.MuxMsg) {
 		page, ok := p.cfg.RuntimeEventHistory(ctx, m.SessionID, m.BeforeSeq, m.Limit)
 		inc := ""
 		if ok {
-			inc = p.sessionIncarnation(ctx, m.SessionID)
+			inc, _ = p.sessionIncarnation(ctx, m.SessionID) // "" when unknown
 		}
 		cancelled := ctx.Err() != nil
 		cancel()
@@ -215,10 +269,11 @@ func (p *Provider) onRuntimeEventsHistory(s *session, m harnessproto.MuxMsg) {
 	}()
 }
 
-// sessionIncarnation is the session's store incarnation, or "" when unknown.
-func (p *Provider) sessionIncarnation(ctx context.Context, sessionID string) string {
+// sessionIncarnation is the session's store incarnation; ok=false when it is
+// unknown (no lookup configured, or the lookup failed).
+func (p *Provider) sessionIncarnation(ctx context.Context, sessionID string) (string, bool) {
 	if p.cfg.SessionIncarnation == nil {
-		return ""
+		return "", false
 	}
 	return p.cfg.SessionIncarnation(ctx, sessionID)
 }

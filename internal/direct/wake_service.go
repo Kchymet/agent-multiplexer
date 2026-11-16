@@ -354,7 +354,7 @@ func (s *WakeService) sourceEvent(ctx context.Context, sid, kind, gen string, in
 	for _, src := range page.Sources {
 		// The index is meaningful only in the generation it was recorded in:
 		// a replaced or rewritten file never yields unrelated content.
-		if src.Kind == kind && src.First == index && len(src.Events) == 1 && runtimeevents.SameGeneration(gen, src.Generation) {
+		if src.Kind == kind && src.First == index && len(src.Events) == 1 && runtimeevents.ContinuesGeneration(gen, src.Generation) {
 			ev := src.Events[0]
 			return &ev
 		}

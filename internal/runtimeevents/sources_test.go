@@ -153,3 +153,43 @@ func TestSourceGenerations(t *testing.T) {
 		t.Fatalf("replacement by a new file kept generation %q", g4)
 	}
 }
+
+// A copy of the same transcript over the path (restore-before-resume: a new
+// inode, same first line, possibly longer) continues the old generation; a
+// different transcript does not.
+func TestContinuesGenerationOnSameTranscriptCopy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	rec := Record{Runtime: harnessproto.RuntimeClaude, Journal: path}
+	gen := func() string {
+		p, err := ReadSources(rec, nil, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source(p, PageSourceJournal).Generation
+	}
+	history := `{"level":"info","text":"a"}` + "\n" + `{"level":"info","text":"b"}` + "\n"
+	appendFile(t, path, history)
+	g1 := gen()
+	copyPath := filepath.Join(dir, "copy.jsonl")
+	if err := os.WriteFile(copyPath, []byte(history+`{"level":"info","text":"c"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(copyPath, path); err != nil {
+		t.Fatal(err)
+	}
+	g2 := gen()
+	if SameGeneration(g1, g2) || !ContinuesGeneration(g1, g2) {
+		t.Fatalf("same-transcript copy: same=%v continues=%v", SameGeneration(g1, g2), ContinuesGeneration(g1, g2))
+	}
+	other := filepath.Join(dir, "other.jsonl")
+	if err := os.WriteFile(other, []byte(`{"level":"error","text":"z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, path); err != nil {
+		t.Fatal(err)
+	}
+	if ContinuesGeneration(g2, gen()) {
+		t.Fatal("a different transcript continued the old generation")
+	}
+}

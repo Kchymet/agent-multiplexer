@@ -415,6 +415,13 @@ func (ws *wakeStore) checkGeneration(sid, kind, gen string) bool {
 	defer ws.mu.Unlock()
 	k := markKey(sid, kind)
 	prev, seen := ws.data.Gen[k]
+	if seen && !runtimeevents.SameGeneration(prev, gen) && runtimeevents.ContinuesGeneration(prev, gen) {
+		// A copy of the same transcript (restore-before-resume): indexes keep
+		// their meaning, so marks stand and copied history is not replayed.
+		ws.data.Gen[k] = gen
+		ws.dirty = true
+		return false
+	}
 	if !seen || runtimeevents.SameGeneration(prev, gen) {
 		ws.data.Gen[k] = runtimeevents.MergeGeneration(prev, gen)
 		if ws.data.Gen[k] != prev {

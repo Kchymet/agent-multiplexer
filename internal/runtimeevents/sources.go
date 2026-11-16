@@ -54,6 +54,21 @@ func SameGeneration(a, b string) bool {
 	return ai == bi && ai != "" && (al == "" || bl == "")
 }
 
+// ContinuesGeneration reports whether next continues prev's content: the
+// same file incarnation (SameGeneration), or a different file whose first
+// complete line is identical — a copy of the same transcript, as amux's
+// restore-before-resume writes (agent.RestoreTranscript copies the captured
+// backup over the transcript path; the backup is never shorter). Indexes then
+// keep their meaning: what lay at or below the old head is copied history.
+func ContinuesGeneration(prev, next string) bool {
+	if SameGeneration(prev, next) {
+		return true
+	}
+	_, pl, _ := strings.Cut(prev, ".")
+	_, nl, _ := strings.Cut(next, ".")
+	return pl != "" && pl == nl
+}
+
 // MergeGeneration returns the more specific of two generations that
 // SameGeneration accepts (the one with a first-line digest).
 func MergeGeneration(a, b string) string {
@@ -76,6 +91,12 @@ func sourceGeneration(f *os.File, fi os.FileInfo) string {
 	if i := bytes.IndexByte(buf[:n], '\n'); i >= 0 {
 		line := sha256.Sum256(buf[:i])
 		return gen + "." + base64.RawURLEncoding.EncodeToString(line[:9])
+	}
+	if n == len(buf) {
+		// A first line longer than 64 KiB: its first 64 KiB are already
+		// immutable under append, so they identify the content just as well.
+		prefix := sha256.Sum256(buf)
+		return gen + "." + base64.RawURLEncoding.EncodeToString(prefix[:9])
 	}
 	return gen + "."
 }

@@ -69,6 +69,15 @@ func (b *wakeBackend) addSrc(sid, kind string, index int64, ev hp.RuntimeEvent) 
 	b.logs[sid][kind] = append(b.logs[sid][kind], ev)
 }
 
+// copySrc replaces a source with a new file (new inode) that copies the same
+// transcript (same first line), as restore-before-resume writes it.
+func (b *wakeBackend) copySrc(sid, kind string, evs ...hp.RuntimeEvent) {
+	b.evMu.Lock()
+	defer b.evMu.Unlock()
+	b.logs[sid][kind] = evs
+	b.gens[sid+"/"+kind] += "~"
+}
+
 // replaceSrc replaces a source with a NEW file (new generation).
 func (b *wakeBackend) replaceSrc(sid, kind string, evs ...hp.RuntimeEvent) {
 	b.evMu.Lock()
@@ -105,7 +114,11 @@ func (b *wakeBackend) SourceEvents(ctx context.Context, sid string, after map[st
 	sort.Strings(kinds)
 	for _, k := range kinds {
 		evs := b.logs[sid][k]
-		src := runtimeevents.SourceEvents{Kind: k, Head: int64(len(evs)), Generation: "gen-" + sid + "-" + k + b.gens[sid+"/"+k]}
+		// Generation "<file id>.<first line>": replaceSrc changes both (a new
+		// transcript), copySrc only the file id (a copy of the same one).
+		g := b.gens[sid+"/"+k]
+		fileID, line := "f-"+sid+"-"+k+g, "l-"+sid+"-"+k+strings.ReplaceAll(g, "~", "")
+		src := runtimeevents.SourceEvents{Kind: k, Head: int64(len(evs)), Generation: fileID + "." + line}
 		from := max(after[k], 0)
 		if from < src.Head {
 			to := min(src.Head, from+int64(limit))
@@ -1282,5 +1295,45 @@ func TestWakeInlineEventMustMatchRecord(t *testing.T) {
 		if it.Event != nil {
 			t.Fatalf("event attached across a session id reuse: %+v", it)
 		}
+	}
+}
+
+// Restore-before-resume copies the captured transcript over the path (a new
+// file, same first line, with the historical turn ends): the copied history
+// is not replayed, a genuine new turn end after it is woken exactly once, and
+// a recorded item's inline event survives the copy (exact ids still checked).
+func TestWakeResumeCopyDoesNotReplayHistory(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	if code, out := h.post(PathWakeWatch, tok.AccessToken, WakeWatchRequest{RouteID: route, SessionID: "a1", Incarnation: "inc-a1", Watch: true}); code != 200 {
+		t.Fatalf("watch %d %v", code, out)
+	}
+	h.b.add("a1", 1, textEv())
+	h.b.add("a1", 2, turnEndEv())
+	h.tick()
+	first := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(first.Items) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	// Copy: same history (indexes 1-2) plus one new turn end at 4.
+	h.b.copySrc("a1", "claude", textEv(), turnEndEv(), textEv(), turnEndEv())
+	h.tick()
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	var idx []int64
+	for _, it := range f.Items {
+		if it.Kind == WakeKindTurnEnd {
+			idx = append(idx, it.Index)
+			if it.Event == nil {
+				t.Fatalf("inline event lost across a same-transcript copy: %+v", it)
+			}
+		}
+	}
+	sort.Slice(idx, func(i, j int) bool { return idx[i] < idx[j] })
+	if len(idx) != 2 || idx[0] != 2 || idx[1] != 4 {
+		t.Fatalf("turn ends after a resume copy = %v, want the original 2 and the new 4 only", idx)
 	}
 }
