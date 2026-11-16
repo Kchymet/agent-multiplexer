@@ -51,7 +51,7 @@ func turnKeyCases() []turnKeyCase {
 
 func TestTurnKeyFixtures(t *testing.T) {
 	want := turnKeyFixtures{
-		Doc: "dte1 shared turn-end occurrence key fixtures (amux docs/direct-wake-contract.md). key = \"dte1_\" + base64url(first 16 bytes of SHA-256(join(\"\\x00\", \"amux-turn-end-v1\", session_id, incarnation, kind, line_digest, decimal(index))))); line_digest = generation after its last '.'; empty key when any input is unknown.",
+		Doc:          "dte1 shared turn-end occurrence key fixtures (amux docs/direct-wake-contract.md). key = \"dte1_\" + base64url(first 16 bytes of SHA-256(join(\"\\x00\", \"amux-turn-end-v1\", session_id, incarnation, kind, line_digest, decimal(index))))); line_digest = generation after its last '.'; empty key when any input is unknown.",
 		SourceKinds:  TurnKeySourceKinds,
 		SameKey:      [][2]string{{"base", "restore_copy"}},
 		DifferentKey: [][2]string{{"base", "next_turn_end"}, {"base", "reused_id"}, {"base", "new_transcript"}, {"base", "other_source"}},
