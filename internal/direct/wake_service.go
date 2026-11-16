@@ -187,25 +187,25 @@ func (s *WakeService) Tick(ctx context.Context) {
 		needIncarnation := inc != "" && s.store.incarnation(sid) != inc
 		var needBaseline []wakeTarget
 		for _, t := range cover[sid] {
-			if _, ok := s.store.mark(t.ClientID, t.RouteID, t.Nonce, sid); !ok {
+			if !s.store.based(t.ClientID, t.RouteID, t.Nonce, sid) {
 				needBaseline = append(needBaseline, t)
 			}
 		}
 		if !needIncarnation && len(needBaseline) == 0 {
 			continue
 		}
-		// A baseline or reset needs the real head. If History cannot answer,
-		// defer both to a later tick rather than fabricating head 0 (which
-		// would replay old activity as new).
-		page, ok := s.backend.History(ctx, sid, 0, 1)
+		// A baseline or reset needs every source's real head, from one
+		// coherent per-source read. If the read fails, defer both rather than
+		// fabricating heads of 0 (which would replay old activity as new).
+		heads, ok := s.sourceHeads(ctx, sid)
 		if !ok {
 			continue
 		}
 		if needIncarnation {
-			s.store.observeIncarnation(sid, inc, page.Head, nowMs)
+			s.store.observeIncarnation(sid, inc, heads, nowMs)
 		}
 		for _, t := range needBaseline {
-			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, page.Head)
+			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, heads)
 		}
 	}
 	// Read: sessions whose inventory state changed first, then round-robin.
@@ -284,60 +284,74 @@ func (s *WakeService) identities(ctx context.Context, sids []string) map[string]
 	return out
 }
 
-// read reads sid forward from the lowest mark of its covering subscriptions,
-// at most maxPages pages, processing each page atomically for the targets.
+// sourceHeads reads the current head of each of sid's sources.
+func (s *WakeService) sourceHeads(ctx context.Context, sid string) (map[string]int64, bool) {
+	page, ok := s.backend.SourceEvents(ctx, sid, map[string]int64{}, 1)
+	if !ok {
+		return nil, false
+	}
+	heads := map[string]int64{}
+	for _, src := range page.Sources {
+		heads[src.Kind] = src.Head
+	}
+	return heads, true
+}
+
+// read reads sid's sources forward, each from the lowest mark of its covering
+// subscriptions for that source, at most maxPages rounds. Each source is read
+// by its own stable index (runtimeevents.ReadSources), never by a joined
+// ordinal: an append to one source cannot shift another's positions. A
+// source whose head fell below the cursor was replaced and is re-baselined.
 func (s *WakeService) read(ctx context.Context, sid, inc string, targets []wakeTarget, nowMs int64) bool {
 	queued := false
-	limit := s.pageLimit
 	for p := 0; p < s.maxPages; p++ {
-		low, any := int64(-1), false
-		for _, t := range targets {
-			if m, ok := s.store.mark(t.ClientID, t.RouteID, t.Nonce, sid); ok && (!any || m < low) {
-				low, any = m, true
-			}
-		}
-		if !any {
+		low, ok := s.store.lowMarks(sid, targets)
+		if !ok {
 			return queued
 		}
-		before := low + 1 + int64(limit)
-		page, ok := s.backend.History(ctx, sid, before, limit)
-		if !ok || len(page.Events) == 0 {
+		page, ok := s.backend.SourceEvents(ctx, sid, low, s.pageLimit)
+		if !ok {
 			return queued
 		}
-		// Ordinals are dense (runtimeevents.historyPage: one per event; the
-		// page is the run ending at page.Seq = min(before-1, head)). The reader
-		// may trim the run's oldest events to fit its payload budget; then the
-		// page starts above low+1 and processing it would skip the trimmed
-		// events. Re-read with a smaller limit until the page starts at low+1
-		// (one event always fits).
-		first := page.Seq - int64(len(page.Events)) + 1
-		if first > low+1 {
-			if len(page.Events) <= 1 {
-				return queued // cannot happen with a dense reader; never skip
+		more := false
+		for _, src := range page.Sources {
+			if src.Head < low[src.Kind] {
+				s.store.resetSource(sid, src.Kind, src.Head)
+				continue
 			}
-			limit = len(page.Events) - 1
-			continue
-		}
-		limit = s.pageLimit
-		proven := page.Seq
-		events := make([]wakeEvent, 0, len(page.Events))
-		for i, ev := range page.Events {
-			if o := first + int64(i); o > low {
-				events = append(events, wakeEvent{Ordinal: o, Event: ev})
+			if len(src.Events) == 0 {
+				continue
+			}
+			if s.store.processSource(sid, inc, src.Kind, src.First, src.Events, targets, nowMs) {
+				queued = true
+			}
+			if src.First+int64(len(src.Events))-1 < src.Head {
+				more = true
 			}
 		}
-		if len(events) > 0 && s.store.process(sid, inc, targets, events, nowMs) {
-			queued = true
-		}
-		if proven <= low {
-			return queued
-		}
-		s.store.advance(sid, targets, proven)
-		if proven >= page.Head {
+		if !more {
 			return queued
 		}
 	}
 	return queued
+}
+
+// sourceEvent reads the event at index of source kind in sid, or nil.
+func (s *WakeService) sourceEvent(ctx context.Context, sid, kind string, index int64) *hp.RuntimeEvent {
+	if index < 1 {
+		return nil
+	}
+	page, ok := s.backend.SourceEvents(ctx, sid, map[string]int64{kind: index - 1}, 1)
+	if !ok {
+		return nil
+	}
+	for _, src := range page.Sources {
+		if src.Kind == kind && src.First == index && len(src.Events) == 1 {
+			ev := src.Events[0]
+			return &ev
+		}
+	}
+	return nil
 }
 
 // ---- outbox (provider bridge) ----
@@ -573,6 +587,50 @@ func (s *WakeService) visibility(ctx context.Context, g Grant) (wakeVisibility, 
 		cur := incs[sid]
 		return in, cur == "" || cur == inc
 	}, nil
+}
+
+// uncovered lists the grant's in-scope sessions with no store identity.
+func (s *WakeService) uncovered(ctx context.Context, g Grant) []string {
+	out := []string{}
+	rows, err := s.backend.Snapshot(ctx)
+	if err != nil {
+		return out
+	}
+	byID := indexRows(rows)
+	var ids []string
+	for _, r := range rows {
+		if validSessionID(r.ID) && inScope(g, r, byID) && !effectivelyArchived(r, byID) {
+			ids = append(ids, r.ID)
+		}
+	}
+	got, ok := s.identitiesStrict(ctx, ids)
+	if !ok {
+		return out // unknown right now: claim nothing either way
+	}
+	for _, id := range ids {
+		if got[id] == "" {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// identitiesStrict is identities that also reports whether every lookup
+// succeeded.
+func (s *WakeService) identitiesStrict(ctx context.Context, sids []string) (map[string]string, bool) {
+	out := map[string]string{}
+	for i := 0; i < len(sids); i += amuxstore.MaxIdentityLookup {
+		j := min(i+amuxstore.MaxIdentityLookup, len(sids))
+		got, err := s.backend.SessionIdentities(ctx, sids[i:j])
+		if err != nil {
+			return nil, false
+		}
+		for id, v := range got {
+			out[id] = v.Incarnation
+		}
+	}
+	return out, true
 }
 
 // sessionIncarnation returns sid's current store incarnation if sid is in the

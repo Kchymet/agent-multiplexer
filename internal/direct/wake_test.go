@@ -16,22 +16,25 @@ import (
 	"time"
 
 	"amux/internal/core"
+	"amux/internal/runtimeevents"
 	amuxstore "amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// wakeBackend is fakeBackend with a scripted per-session event log whose
-// ordinals may have gaps. History returns the newest `limit` events with an
-// ordinal below `before` (all when before <= 0), like the real reader.
+// wakeBackend is fakeBackend with scripted per-source event logs, read the
+// way runtimeevents.ReadSources reads them: each source by its own 1-based
+// index.
 type wakeBackend struct {
 	*fakeBackend
 	evMu sync.Mutex
-	log  map[string][]wakeEvent
-	// trim, when set, keeps at most this many of the newest events of a page
-	// (the real reader trims a page's oldest events to a payload budget).
-	trim int
-	// identFail makes SessionIdentities fail.
+	logs map[string]map[string][]hp.RuntimeEvent // sid -> source kind -> events
+	// identFail makes SessionIdentities fail; srcFail makes SourceEvents fail.
 	identFail bool
+	srcFail   int
+}
+
+func newWakeBackend(rows ...core.Session) *wakeBackend {
+	return &wakeBackend{fakeBackend: newFake(rows...), logs: map[string]map[string][]hp.RuntimeEvent{}}
 }
 
 func (b *wakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[string]amuxstore.SessionIdentity, error) {
@@ -44,46 +47,53 @@ func (b *wakeBackend) SessionIdentities(ctx context.Context, ids []string) (map[
 	return b.fakeBackend.SessionIdentities(ctx, ids)
 }
 
-func newWakeBackend(rows ...core.Session) *wakeBackend {
-	return &wakeBackend{fakeBackend: newFake(rows...), log: map[string][]wakeEvent{}}
+// add appends ev to sid's transcript source; index must be the next one.
+func (b *wakeBackend) add(sid string, index int64, ev hp.RuntimeEvent) {
+	b.addSrc(sid, "claude", index, ev)
 }
 
-// add appends ev; ordinals are dense, so ordinal must be the next one.
-func (b *wakeBackend) add(sid string, ordinal int64, ev hp.RuntimeEvent) {
+func (b *wakeBackend) addSrc(sid, kind string, index int64, ev hp.RuntimeEvent) {
 	b.evMu.Lock()
 	defer b.evMu.Unlock()
-	if want := int64(len(b.log[sid])) + 1; ordinal != want {
-		panic(fmt.Sprintf("non-dense ordinal %d for %s (want %d)", ordinal, sid, want))
+	if b.logs[sid] == nil {
+		b.logs[sid] = map[string][]hp.RuntimeEvent{}
 	}
-	b.log[sid] = append(b.log[sid], wakeEvent{Ordinal: ordinal, Event: ev})
+	if want := int64(len(b.logs[sid][kind])) + 1; index != want {
+		panic(fmt.Sprintf("non-dense index %d for %s/%s (want %d)", index, sid, kind, want))
+	}
+	b.logs[sid][kind] = append(b.logs[sid][kind], ev)
 }
 
-// History mirrors runtimeevents.historyPage: ordinals are dense (event i has
-// ordinal i+1), the page is the run (lo, hi] with hi = min(before-1, head),
-// Seq = hi, and an optional trim drops the run's oldest events.
-func (b *wakeBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
+// replaceSrc replaces a source with fresh contents (rotation/truncation).
+func (b *wakeBackend) replaceSrc(sid, kind string, evs ...hp.RuntimeEvent) {
 	b.evMu.Lock()
 	defer b.evMu.Unlock()
-	evs := b.log[sid]
-	head := int64(len(evs))
-	hi := head
-	if before > 0 && before-1 < hi {
-		hi = before - 1
+	b.logs[sid][kind] = evs
+}
+
+func (b *wakeBackend) SourceEvents(ctx context.Context, sid string, after map[string]int64, limit int) (runtimeevents.SourcesPage, bool) {
+	b.evMu.Lock()
+	defer b.evMu.Unlock()
+	if b.srcFail > 0 {
+		b.srcFail--
+		return runtimeevents.SourcesPage{}, false
 	}
-	page := hp.RuntimeEventHistory{Head: head, Runtime: "codex"}
-	if hi < 1 {
-		return page, true
+	var page runtimeevents.SourcesPage
+	kinds := make([]string, 0, len(b.logs[sid]))
+	for k := range b.logs[sid] {
+		kinds = append(kinds, k)
 	}
-	lo := max(1, hi-int64(limit)+1)
-	sel := evs[lo-1 : hi]
-	if b.trim > 0 && len(sel) > b.trim {
-		sel = sel[len(sel)-b.trim:]
+	sort.Strings(kinds)
+	for _, k := range kinds {
+		evs := b.logs[sid][k]
+		src := runtimeevents.SourceEvents{Kind: k, Head: int64(len(evs))}
+		from := max(after[k], 0)
+		if from < src.Head {
+			to := min(src.Head, from+int64(limit))
+			src.First, src.Events = from+1, append([]hp.RuntimeEvent(nil), evs[from:to]...)
+		}
+		page.Sources = append(page.Sources, src)
 	}
-	for _, e := range sel {
-		page.Events = append(page.Events, e.Event)
-	}
-	page.Seq = hi
-	page.HasMore = hi-int64(len(sel)) >= 1
 	return page, true
 }
 
@@ -238,7 +248,7 @@ func TestWakePermissionFlowAndVersionedAck(t *testing.T) {
 	}
 	it := f.Items[0]
 	if it.WakeID != recordWake || it.State != WakeStateOpen || it.RequestID != "req-1" || it.RuntimeGeneration != "gen-1" ||
-		it.ItemID != "it-1" || it.SessionID != "a1" || it.Incarnation != "inc-a1" || it.Ordinal != 2 {
+		it.ItemID != "it-1" || it.SessionID != "a1" || it.Incarnation != "inc-a1" || it.Index != 2 {
 		t.Fatalf("item = %+v", it)
 	}
 	// Acked open stays pending (in snapshots).
@@ -308,37 +318,6 @@ func TestWakeNewSubscriptionDoesNotSkipBacklog(t *testing.T) {
 	h.tick()
 	if n := len(h.fetch(b.AccessToken, rb, WakeFetchRequest{}).Items); n != 1 {
 		t.Fatalf("new subscription got %d new events, want 1", n)
-	}
-}
-
-// The reader trims a page's oldest events to its payload budget; the
-// detector must re-read rather than skip the trimmed events.
-func TestWakeTrimmedPagesNeverSkipEvents(t *testing.T) {
-	h := newWakeHarness(t)
-	h.ws.pageLimit, h.ws.maxPages = 8, 4
-	h.b.trim = 3
-	tok := enroll(t, h.a, []string{PermRead}, allSessions)
-	route := testRouteID(1)
-	h.b.add("a1", 1, textEv())
-	h.subscribe(tok.AccessToken, route, testSecretN(1))
-	h.tick() // baseline 1
-	for o := int64(2); o <= 30; o++ {
-		ev := textEv()
-		if o == 3 || o == 29 {
-			ev = permEv(fmt.Sprint("i", o), fmt.Sprint("r", o), "g")
-		}
-		h.b.add("a1", o, ev)
-	}
-	for i := 0; i < 40; i++ {
-		h.tick()
-	}
-	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
-	var ords []int64
-	for _, it := range f.Items {
-		ords = append(ords, it.Ordinal)
-	}
-	if len(ords) != 2 || ords[0] != 3 || ords[1] != 29 {
-		t.Fatalf("trimmed pages skipped events: got ordinals %v", ords)
 	}
 }
 
@@ -527,7 +506,7 @@ func TestWakeTurnEndOnlyForWatchedInstance(t *testing.T) {
 	h.b.add("a1", 2, turnEndEv())
 	h.tick()
 	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
-	if len(f.Items) != 1 || f.Items[0].Kind != WakeKindTurnEnd || f.Items[0].Ordinal != 2 {
+	if len(f.Items) != 1 || f.Items[0].Kind != WakeKindTurnEnd || f.Items[0].Index != 2 {
 		t.Fatalf("watched turn end = %+v", f)
 	}
 	// A new instance under the same id drops the watch.
@@ -537,7 +516,7 @@ func TestWakeTurnEndOnlyForWatchedInstance(t *testing.T) {
 	h.tick()
 	f = h.fetch(tok.AccessToken, route, WakeFetchRequest{})
 	for _, it := range f.Items {
-		if it.Kind == WakeKindTurnEnd && it.State == WakeStateDone && it.Ordinal == 3 {
+		if it.Kind == WakeKindTurnEnd && it.State == WakeStateDone && it.Index == 3 {
 			t.Fatalf("watch survived a new incarnation: %+v", f)
 		}
 	}
@@ -1013,21 +992,8 @@ func TestWakeCursorBounds(t *testing.T) {
 	}
 }
 
-type flakyHistory struct {
-	*wakeBackend
-	fail int
-}
-
-func (f *flakyHistory) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
-	if f.fail > 0 {
-		f.fail--
-		return hp.RuntimeEventHistory{}, false
-	}
-	return f.wakeBackend.History(ctx, sid, before, limit)
-}
-
-// A History failure on the first read defers the baseline; it never becomes
-// head 0, which would replay old activity as new.
+// A source-read failure on the first read defers the baseline; it never
+// becomes head 0, which would replay old activity as new.
 func TestWakeHistoryFailureDefersBaseline(t *testing.T) {
 	root := t.TempDir()
 	clk := &clock{t: time.Unix(1_800_000_000, 0)}
@@ -1036,21 +1002,23 @@ func TestWakeHistoryFailureDefersBaseline(t *testing.T) {
 	wb := newWakeBackend(core.Session{ID: "s1", Title: "x", Runtime: "claude"})
 	wb.add("s1", 1, permEv("old", "old", "g"))
 	wb.add("s1", 2, permEv("old2", "old2", "g"))
-	fb := &flakyHistory{wakeBackend: wb, fail: 1000}
-	ws := NewWakeService(a, root, fb, nil)
+	wb.srcFail = 1000
+	ws := NewWakeService(a, root, wb, nil)
 	tok := enroll(t, a, []string{PermRead}, allSessions)
 	l, _ := a.Admit(context.Background(), tok.AccessToken, PermRead)
 	_, _ = a.WakeSubscribe(l, testRouteID(1), testSecretN(1))
 	l.Done()
 	nonce := a.wakeAuthSnapshot().Nonce
 	ws.Tick(context.Background())
-	if _, ok := ws.store.mark(tok.ClientID, testRouteID(1), nonce, "s1"); ok {
-		t.Fatal("baseline set from a failed History read")
+	if ws.store.based(tok.ClientID, testRouteID(1), nonce, "s1") {
+		t.Fatal("baseline set from a failed source read")
 	}
-	fb.fail = 0
+	wb.evMu.Lock()
+	wb.srcFail = 0
+	wb.evMu.Unlock()
 	ws.Tick(context.Background())
-	if m, ok := ws.store.mark(tok.ClientID, testRouteID(1), nonce, "s1"); !ok || m != 2 {
-		t.Fatalf("baseline after recovery = %d %v, want 2", m, ok)
+	if low, ok := ws.store.lowMarks("s1", []wakeTarget{{tok.ClientID, testRouteID(1), nonce}}); !ok || low["claude"] != 2 {
+		t.Fatalf("baseline after recovery = %v %v, want claude=2", low, ok)
 	}
 	ws.Tick(context.Background())
 	sub := ws.store.data.Subs[subKey(tok.ClientID, testRouteID(1), nonce)]
@@ -1100,76 +1068,107 @@ func TestWakeServiceNeverWritesTheAuthorityForCleanup(t *testing.T) {
 	a.Close()
 }
 
-// sparseBackend is a deliberately non-dense reader (the real one is dense:
-// runtimeevents.historyPage assigns one ordinal per event). The detector must
-// never skip an unread event even then: it may stall, never advance past it.
-type sparseBackend struct {
-	*wakeBackend
-	evs []wakeEvent
+// A real two-source session (transcript + amux journal): the journal already
+// has events, then the transcript grows. A watched turn end appended to the
+// transcript is woken exactly once, journal events are not replayed, and the
+// record's identity and inline event stay stable across further appends to
+// either source and across a restart.
+func TestWakeTwoSourceSessionStableIdentity(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.b.addSrc("a1", "claude", 1, textEv())
+	h.b.addSrc("a1", "journal", 1, textEv())
+	h.b.addSrc("a1", "journal", 2, textEv())
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick() // baseline claude=1, journal=2
+	if code, out := h.post(PathWakeWatch, tok.AccessToken, WakeWatchRequest{RouteID: route, SessionID: "a1", Incarnation: "inc-a1", Watch: true}); code != 200 {
+		t.Fatalf("watch %d %v", code, out)
+	}
+	// Growth between the baseline read and the next read, in both sources.
+	h.b.addSrc("a1", "journal", 3, textEv())
+	h.b.addSrc("a1", "claude", 2, turnEndEv())
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(f.Items) != 1 || f.Items[0].Kind != WakeKindTurnEnd || f.Items[0].Source != "claude" || f.Items[0].Index != 2 {
+		t.Fatalf("two-source turn end = %+v", f)
+	}
+	if f.Items[0].Event == nil || f.Items[0].Event.Type != hp.TypeTurnEnd {
+		t.Fatalf("inline event = %+v", f.Items[0].Event)
+	}
+	first := f.Items[0]
+	// Further appends to the EARLIER source (the transcript) and the journal:
+	// no duplicate, same identity.
+	h.b.addSrc("a1", "claude", 3, textEv())
+	h.b.addSrc("a1", "journal", 4, textEv())
+	h.tick()
+	// Clean restart (Run flushes on shutdown): a new service over the same files.
+	if err := h.ws.store.flush(true); err != nil {
+		t.Fatal(err)
+	}
+	h.ws = NewWakeService(h.a, h.root, h.b, nil)
+	h.srv.cfg.Wake = h.ws
+	h.tick()
+	again := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(again.Items) != 1 || again.Items[0].WakeID != first.WakeID || again.Items[0].Index != 2 || again.Items[0].Source != "claude" {
+		t.Fatalf("after appends and restart = %+v", again)
+	}
+	if again.Items[0].Event == nil || again.Items[0].Event.Type != hp.TypeTurnEnd {
+		t.Fatal("inline event moved after appends to another source")
+	}
 }
 
-func (b *sparseBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
-	var sel []wakeEvent
-	head := int64(0)
-	if len(b.evs) > 0 {
-		head = b.evs[len(b.evs)-1].Ordinal
+// A replaced source (rotated or truncated: head below the cursor) is
+// re-baselined; nothing in it is replayed as new.
+func TestWakeReplacedSourceIsRebaselined(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	for i := int64(1); i <= 3; i++ {
+		h.b.add("a1", i, textEv())
 	}
-	for _, e := range b.evs {
-		if before <= 0 || e.Ordinal < before {
-			sel = append(sel, e)
-		}
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick() // claude=3
+	h.b.replaceSrc("a1", "claude", permEv("old", "old", "g"))
+	h.tick()
+	if n := len(h.fetch(tok.AccessToken, route, WakeFetchRequest{}).Items); n != 0 {
+		t.Fatalf("replaced source replayed %d events", n)
 	}
-	if len(sel) > limit {
-		sel = sel[len(sel)-limit:]
+	h.b.add("a1", 2, permEv("new", "new", "g"))
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(f.Items) != 1 || f.Items[0].RequestID != "new" {
+		t.Fatalf("after replacement = %+v", f)
 	}
-	page := hp.RuntimeEventHistory{Head: head}
-	for _, e := range sel {
-		page.Events = append(page.Events, e.Event)
-	}
-	if len(sel) > 0 {
-		page.Seq = sel[len(sel)-1].Ordinal
-	}
-	return page, true
 }
 
-func TestWakeSparseReaderNeverSkipsUnreadEvents(t *testing.T) {
-	root := t.TempDir()
-	clk := &clock{t: time.Unix(1_800_000_000, 0)}
-	a := openTestAuthority(t, root, Lifetimes{}, clk.now)
-	_, _ = a.EnableWake("usr", "prov")
-	sb := &sparseBackend{wakeBackend: newWakeBackend(core.Session{ID: "s1", Title: "x", Runtime: "claude"})}
-	sb.evs = []wakeEvent{{Ordinal: 1, Event: textEv()}}
-	ws := NewWakeService(a, root, sb, nil)
-	ws.pageLimit, ws.maxPages = 4, 4
-	tok := enroll(t, a, []string{PermRead}, allSessions)
-	l, _ := a.Admit(context.Background(), tok.AccessToken, PermRead)
-	_, _ = a.WakeSubscribe(l, testRouteID(1), testSecretN(1))
-	l.Done()
-	nonce := a.wakeAuthSnapshot().Nonce
-	ws.Tick(context.Background()) // baseline 1
-	// Ordinals jump: 2, then 50 (a gap far wider than a page).
-	sb.evs = append(sb.evs, wakeEvent{Ordinal: 2, Event: permEv("i2", "r2", "g")}, wakeEvent{Ordinal: 50, Event: permEv("i50", "r50", "g")})
-	for i := 0; i < 10; i++ {
-		ws.Tick(context.Background())
-	}
-	m, _ := ws.store.mark(tok.ClientID, testRouteID(1), nonce, "s1")
-	sub := ws.store.data.Subs[subKey(tok.ClientID, testRouteID(1), nonce)]
-	for _, r := range sub.Records {
-		if r.Ordinal > m {
-			t.Fatalf("record past the mark: %+v (mark %d)", r, m)
-		}
-	}
-	// Whatever it read, it never claimed an event it did not process: every
-	// ordinal <= mark that holds a permission has a record.
-	for _, e := range sb.evs {
-		if e.Ordinal <= m && e.Event.Type == hp.TypePermissionRequest {
-			found := false
-			for _, r := range sub.Records {
-				found = found || r.Ordinal == e.Ordinal
-			}
-			if !found {
-				t.Fatalf("event %d skipped (mark %d)", e.Ordinal, m)
-			}
-		}
+// A source that appears after the baseline (a journal created later) starts
+// at 0: its first event is wake-worthy.
+func TestWakeLateSourceStartsAtZero(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	route := testRouteID(1)
+	h.b.add("a1", 1, textEv())
+	h.subscribe(tok.AccessToken, route, testSecretN(1))
+	h.tick()
+	h.b.addSrc("a1", "permission", 1, permEv("p1", "r1", "g"))
+	h.tick()
+	f := h.fetch(tok.AccessToken, route, WakeFetchRequest{})
+	if len(f.Items) != 1 || f.Items[0].Source != "permission" || f.Items[0].Index != 1 {
+		t.Fatalf("late source event = %+v", f)
 	}
 }
+
+func TestWakeSubscriptionsDiscloseUncoveredSessions(t *testing.T) {
+	h := newWakeHarness(t)
+	tok := enroll(t, h.a, []string{PermRead}, allSessions)
+	h.subscribe(tok.AccessToken, testRouteID(1), testSecretN(1))
+	h.b.noIdentityFor("d1")
+	code, out := h.post(PathWakeSubscriptions, tok.AccessToken, struct{}{})
+	if code != 200 || fmt.Sprint(out["uncovered_sessions"]) != "[d1]" {
+		t.Fatalf("subscriptions = %d %v", code, out)
+	}
+}
+
+// noIdentityFor makes the store report no identity for sid.
+func (b *wakeBackend) noIdentityFor(sid string) { b.fakeBackend.setInc(sid, "-") }

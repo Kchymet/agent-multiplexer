@@ -12,7 +12,23 @@
       "item_id": "item_9",
       "request_id": "call_7",
       "runtime_generation": "rg_01J9",
-      "ordinal": 123,
+      "source": "permission",
+      "index": 7,
+      "event": {
+        "type": "permission_request",
+        "item_id": "item_9",
+        "direction": "out",
+        "payload": {
+          "request_id": "call_7",
+          "runtime_generation": "rg_01J9",
+          "tool": "Bash",
+          "action": "go test ./...",
+          "options": [
+            "allow",
+            "deny"
+          ]
+        }
+      },
       "created_at": 1793000000000
     },
     {
@@ -23,7 +39,15 @@
       "acked": false,
       "session_id": "e1deda",
       "incarnation": "inc-7f3a",
-      "ordinal": 130,
+      "source": "claude",
+      "index": 130,
+      "event": {
+        "type": "turn_end",
+        "direction": "out",
+        "payload": {
+          "stop_reason": "end_turn"
+        }
+      },
       "created_at": 1793000060000
     }
   ],

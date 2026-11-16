@@ -79,7 +79,6 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 		sub.cancel()
 		close(sub.done)
 	}()
-	inc := p.sessionIncarnation(sub.ctx, sessionID)
 	for {
 		select {
 		case <-sub.ctx.Done():
@@ -91,6 +90,9 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 			if len(b.Events) == 0 {
 				continue
 			}
+			// The store incarnation is sampled per batch (outside the admission
+			// lock): a session id reused mid-subscription gets its new label.
+			inc := p.sessionIncarnation(sub.ctx, sessionID)
 			// Revalidate immediately before every emitted batch and hold the admission
 			// lock through the write. Revocation deletes/cancels the subscription, then
 			// waits for its done barrier; no queued batch can cross it.

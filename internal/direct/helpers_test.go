@@ -14,6 +14,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/hostbackend"
+	"amux/internal/runtimeevents"
 	amuxstore "amux/internal/store"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -258,6 +259,10 @@ func (f *fakeBackend) Apply(ctx context.Context, a core.Action) (string, error) 
 func (f *fakeBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
 	f.histories.Add(1)
 	return hp.RuntimeEventHistory{Seq: 2, Head: 2, Runtime: "claude", Events: []hp.RuntimeEvent{{Type: hp.TypeText}}}, true
+}
+
+func (f *fakeBackend) SourceEvents(ctx context.Context, sid string, after map[string]int64, limit int) (runtimeevents.SourcesPage, bool) {
+	return runtimeevents.SourcesPage{}, true
 }
 
 func (f *fakeBackend) Stream(ctx context.Context, sid string, after int64) (<-chan hp.RuntimeEventBatch, bool) {

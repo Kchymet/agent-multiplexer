@@ -32,6 +32,10 @@ type Backend interface {
 	// History and Stream read one already-authorized session's transcript.
 	History(ctx context.Context, sessionID string, beforeSeq int64, limit int) (hp.RuntimeEventHistory, bool)
 	Stream(ctx context.Context, sessionID string, afterSeq int64) (<-chan hp.RuntimeEventBatch, bool)
+	// SourceEvents reads each of a session's runtime sources by its own stable
+	// index (after: per-source cursor, absent = 0). Used by direct wake-ups,
+	// which need positions that an append to another source cannot shift.
+	SourceEvents(ctx context.Context, sessionID string, after map[string]int64, limit int) (runtimeevents.SourcesPage, bool)
 	// Accounts is the machine's read-only account status (ManagedOnly).
 	Accounts(ctx context.Context) (hp.AccountSnapshot, error)
 	// Catalog is the machine's creation input space, read fresh (harness
@@ -213,6 +217,10 @@ func (b HostBackend) resolver() runtimeevents.ContextResolver {
 
 func (b HostBackend) History(ctx context.Context, sid string, before int64, limit int) (hp.RuntimeEventHistory, bool) {
 	return runtimeevents.HistoryContext(b.resolver())(ctx, sid, before, limit)
+}
+
+func (b HostBackend) SourceEvents(ctx context.Context, sid string, after map[string]int64, limit int) (runtimeevents.SourcesPage, bool) {
+	return runtimeevents.ReadSourcesContext(b.resolver())(ctx, sid, after, limit)
 }
 
 func (b HostBackend) Stream(ctx context.Context, sid string, after int64) (<-chan hp.RuntimeEventBatch, bool) {

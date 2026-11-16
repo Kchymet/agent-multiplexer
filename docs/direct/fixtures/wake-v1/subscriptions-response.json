@@ -18,5 +18,8 @@
       "created_at": 1792990000,
       "watches": []
     }
+  ],
+  "uncovered_sessions": [
+    "d1"
   ]
 }

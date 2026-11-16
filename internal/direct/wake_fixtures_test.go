@@ -29,9 +29,12 @@ func wakeFixtureFiles(t *testing.T) map[string][]byte {
 	f, tr := false, true
 	open := WakeItem{Seq: 41, WakeID: fxWake1, Kind: WakeKindPermission, State: WakeStateOpen, Acked: false,
 		SessionID: "e1deda", Incarnation: "inc-7f3a", ItemID: "item_9", RequestID: "call_7", RuntimeGeneration: "rg_01J9",
-		Ordinal: 123, CreatedAt: 1793000000000}
+		Source: "permission", Index: 7, CreatedAt: 1793000000000,
+		Event: &hp.RuntimeEvent{Type: hp.TypePermissionRequest, ItemID: "item_9", Direction: hp.DirOut,
+			Payload: json.RawMessage(`{"request_id":"call_7","runtime_generation":"rg_01J9","tool":"Bash","action":"go test ./...","options":["allow","deny"]}`)}}
 	turn := WakeItem{Seq: 42, WakeID: fxWake2, Kind: WakeKindTurnEnd, State: WakeStateDone, SessionID: "e1deda",
-		Incarnation: "inc-7f3a", Ordinal: 130, CreatedAt: 1793000060000}
+		Incarnation: "inc-7f3a", Source: "claude", Index: 130, CreatedAt: 1793000060000,
+		Event: &hp.RuntimeEvent{Type: hp.TypeTurnEnd, Direction: hp.DirOut, Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}}
 	resolved := WakeItem{Seq: 44, WakeID: fxWake1, Kind: WakeKindPermission, State: WakeStateResolved, CreatedAt: 1793000000000}
 	withdrawn := WakeItem{Seq: 45, WakeID: fxWake2, Kind: WakeKindTurnEnd, State: WakeStateWithdrawn, CreatedAt: 1793000060000}
 	return map[string][]byte{
@@ -45,7 +48,7 @@ func wakeFixtureFiles(t *testing.T) map[string][]byte {
 		"unsubscribe-request.json":      js(WakeRouteRequest{RouteID: fxRoute}),
 		"unsubscribe-response.json":     js(WakeUnsubscribeResponse{Removed: true}),
 		"subscriptions-request.json":    js(WakeSubscriptionsRequest{}),
-		"subscriptions-response.json": js(WakeSubscriptionsResponse{Subscriptions: []WakeSubscription{
+		"subscriptions-response.json": js(WakeSubscriptionsResponse{UncoveredSessions: []string{"d1"}, Subscriptions: []WakeSubscription{
 			{WakeSubView: WakeSubView{RouteID: fxRoute, State: wakeSubStateActive, CreatedAt: 1793000000},
 				Watches: []WakeWatch{{SessionID: "e1deda", Incarnation: "inc-7f3a"}}},
 			{WakeSubView: WakeSubView{RouteID: "dwr_AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", State: wakeSubStateFailed,

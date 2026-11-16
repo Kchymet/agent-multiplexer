@@ -37,6 +37,10 @@ type (
 	WakeSubscriptionsRequest  struct{}
 	WakeSubscriptionsResponse struct {
 		Subscriptions []WakeSubscription `json:"subscriptions"`
+		// UncoveredSessions are in-scope sessions wake-ups cannot watch
+		// because the daemon store has no identity for them right now; they
+		// produce no wakes (disclosed, never silent).
+		UncoveredSessions []string `json:"uncovered_sessions"`
 	}
 	WakeSubscription struct {
 		WakeSubView
@@ -163,7 +167,7 @@ func (s *Server) wakeSubscriptions(w http.ResponseWriter, r *http.Request) {
 	if auth := s.cfg.Authority.wakeAuthSnapshot(); auth != nil {
 		nonce = auth.Nonce
 	}
-	out := WakeSubscriptionsResponse{Subscriptions: []WakeSubscription{}}
+	out := WakeSubscriptionsResponse{Subscriptions: []WakeSubscription{}, UncoveredSessions: s.cfg.Wake.uncovered(l.Context(), l.Grant)}
 	for _, v := range s.cfg.Authority.WakeSubscriptions(l) {
 		out.Subscriptions = append(out.Subscriptions, WakeSubscription{WakeSubView: v, Watches: s.cfg.Wake.store.watches(l.ClientID, v.RouteID, nonce)})
 	}
@@ -260,6 +264,14 @@ func (s *Server) wakeEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.cfg.Wake.store.flush(false)
+	// Pending items carry their event, read from its source now (these
+	// sessions passed the fetch-time scope and incarnation checks).
+	for i := range resp.Items {
+		it := &resp.Items[i]
+		if it.SessionID != "" && it.Source != "" {
+			it.Event = s.cfg.Wake.sourceEvent(l.Context(), it.SessionID, it.Source, it.Index)
+		}
+	}
 	if code := l.AuthEnded(); code != "" {
 		writeErr(w, http.StatusUnauthorized, code, "access ended")
 		return

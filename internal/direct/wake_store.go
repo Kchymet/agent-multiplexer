@@ -76,15 +76,19 @@ type wakeData struct {
 }
 
 type wakeSubData struct {
-	ClientID string                 `json:"clientId"`
-	RouteID  string                 `json:"routeId"`
-	Nonce    string                 `json:"nonce"`
-	Seq      int64                  `json:"seq"`
-	Marks    map[string]int64       `json:"marks,omitempty"`
-	Watches  map[string]string      `json:"watches,omitempty"` // sid -> incarnation
-	Records  map[string]*wakeRecord `json:"records,omitempty"` // wake id ->
-	Tombs    map[string]int64       `json:"tombs,omitempty"`   // event identity -> expiry (unix)
-	Outbox   map[string]*wakeOut    `json:"outbox,omitempty"`  // wake id ->
+	ClientID string `json:"clientId"`
+	RouteID  string `json:"routeId"`
+	Nonce    string `json:"nonce"`
+	Seq      int64  `json:"seq"`
+	// Marks are per (session, source kind): key sid+"\x00"+kind. Based marks
+	// the sessions this subscription has baselined; a source kind absent from
+	// Marks for a based session is a source that appeared later (starts at 0).
+	Marks   map[string]int64       `json:"marks,omitempty"`
+	Based   map[string]bool        `json:"based,omitempty"`
+	Watches map[string]string      `json:"watches,omitempty"` // sid -> incarnation
+	Records map[string]*wakeRecord `json:"records,omitempty"` // wake id ->
+	Tombs   map[string]int64       `json:"tombs,omitempty"`   // event identity -> expiry (unix)
+	Outbox  map[string]*wakeOut    `json:"outbox,omitempty"`  // wake id ->
 	// GapThrough/GapReason: the highest seq of a record that was dropped
 	// without the phone acknowledging it, and why.
 	GapThrough int64  `json:"gapThrough,omitempty"`
@@ -111,9 +115,13 @@ type wakeRecord struct {
 	ItemID            string `json:"itemId,omitempty"`
 	RequestID         string `json:"requestId,omitempty"`
 	RuntimeGeneration string `json:"runtimeGeneration,omitempty"`
-	Ordinal           int64  `json:"ordinal"`
-	CreatedAt         int64  `json:"createdAt"` // unix millis
-	Delivered         bool   `json:"delivered,omitempty"`
+	// Source and Index locate the event: the source kind and the event's
+	// 1-based index within that append-only source (stable, unlike a joined
+	// ordinal).
+	Source    string `json:"source"`
+	Index     int64  `json:"index"`
+	CreatedAt int64  `json:"createdAt"` // unix millis
+	Delivered bool   `json:"delivered,omitempty"`
 }
 
 type wakeOut struct {
@@ -176,6 +184,13 @@ func openWakeStore(dir string, write func(string, string, []byte) error, now fun
 		d.Inc = map[string]string{}
 	}
 	ws.data = &d
+	for k, sub := range d.Subs {
+		if sub == nil {
+			delete(d.Subs, k)
+			continue
+		}
+		ws.subLocked(sub.ClientID, sub.RouteID, sub.Nonce) // nil maps from omitempty fields
+	}
 	return ws, ""
 }
 
@@ -207,13 +222,16 @@ func (ws *wakeStore) subLocked(clientID, routeID, nonce string) *wakeSubData {
 	k := subKey(clientID, routeID, nonce)
 	s := ws.data.Subs[k]
 	if s == nil {
-		s = &wakeSubData{ClientID: clientID, RouteID: routeID, Nonce: nonce, Marks: map[string]int64{},
+		s = &wakeSubData{ClientID: clientID, RouteID: routeID, Nonce: nonce, Marks: map[string]int64{}, Based: map[string]bool{},
 			Watches: map[string]string{}, Records: map[string]*wakeRecord{}, Tombs: map[string]int64{}, Outbox: map[string]*wakeOut{}}
 		ws.data.Subs[k] = s
 		ws.dirty = true
 	}
 	if s.Marks == nil {
 		s.Marks = map[string]int64{}
+	}
+	if s.Based == nil {
+		s.Based = map[string]bool{}
 	}
 	if s.Watches == nil {
 		s.Watches = map[string]string{}
@@ -294,34 +312,89 @@ func newWakeID() string {
 
 // ---- detector side ----
 
-// marks returns the subscription's mark for sid and whether it is set.
-func (ws *wakeStore) mark(clientID, routeID, nonce, sid string) (int64, bool) {
+func markKey(sid, kind string) string { return sid + "\x00" + kind }
+
+// based reports whether the subscription has baselined sid.
+func (ws *wakeStore) based(clientID, routeID, nonce, sid string) bool {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	s := ws.data.Subs[subKey(clientID, routeID, nonce)]
-	if s == nil {
-		return 0, false
-	}
-	m, ok := s.Marks[sid]
-	return m, ok
+	return s != nil && s.Based[sid]
 }
 
-// baseline sets ONLY this subscription's mark for sid (a new subscriber never
-// moves another subscription's read position).
-func (ws *wakeStore) baseline(clientID, routeID, nonce, sid string, head int64) {
+// lowMarks is, per source kind, the lowest mark among the targets that have
+// baselined sid (a kind a target lacks counts as 0: a source that appeared
+// after its baseline). ok is false when no target has baselined sid.
+func (ws *wakeStore) lowMarks(sid string, targets []wakeTarget) (map[string]int64, bool) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	low := map[string]int64{}
+	var subs []*wakeSubData
+	for _, t := range targets {
+		if s := ws.data.Subs[subKey(t.ClientID, t.RouteID, t.Nonce)]; s != nil && s.Based[sid] {
+			subs = append(subs, s)
+		}
+	}
+	if len(subs) == 0 {
+		return nil, false
+	}
+	kinds := map[string]bool{}
+	prefix := sid + "\x00"
+	for _, s := range subs {
+		for k := range s.Marks {
+			if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+				kinds[k[len(prefix):]] = true
+			}
+		}
+	}
+	for kind := range kinds {
+		first := true
+		for _, s := range subs {
+			m := s.Marks[markKey(sid, kind)] // absent = 0
+			if first || m < low[kind] {
+				low[kind], first = m, false
+			}
+		}
+	}
+	return low, true
+}
+
+// baseline sets ONLY this subscription's marks for sid to the sources' current
+// heads (a new subscriber never moves another subscription's read position).
+func (ws *wakeStore) baseline(clientID, routeID, nonce, sid string, heads map[string]int64) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	s := ws.subLocked(clientID, routeID, nonce)
-	if _, ok := s.Marks[sid]; !ok {
-		s.Marks[sid] = head
-		ws.dirty = true
+	if s.Based[sid] {
+		return
+	}
+	for kind, h := range heads {
+		s.Marks[markKey(sid, kind)] = h
+	}
+	s.Based[sid] = true
+	ws.dirty = true
+}
+
+// resetSource re-baselines one source of sid at head for every subscription
+// (the source was replaced or truncated: its old indexes mean nothing now, and
+// nothing in it is replayed as new).
+func (ws *wakeStore) resetSource(sid, kind string, head int64) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	for _, s := range ws.data.Subs {
+		if s.Based[sid] {
+			if m, ok := s.Marks[markKey(sid, kind)]; !ok || m != head {
+				s.Marks[markKey(sid, kind)] = head
+				ws.dirty = true
+			}
+		}
 	}
 }
 
-// observeIncarnation records sid's incarnation. On a change it resets every
-// subscription's mark for sid to head, deletes watches bound to another
-// incarnation, and makes open records of the old incarnation stale.
-func (ws *wakeStore) observeIncarnation(sid, inc string, head int64, nowMs int64) bool {
+// observeIncarnation records sid's incarnation. On a change it re-baselines
+// every subscription's marks for sid at heads, deletes watches bound to
+// another incarnation, and makes open records of the old incarnation stale.
+func (ws *wakeStore) observeIncarnation(sid, inc string, heads map[string]int64, nowMs int64) bool {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	prev, seen := ws.data.Inc[sid]
@@ -333,9 +406,17 @@ func (ws *wakeStore) observeIncarnation(sid, inc string, head int64, nowMs int64
 	if !seen {
 		return false
 	}
+	prefix := sid + "\x00"
 	for _, s := range ws.data.Subs {
-		if _, ok := s.Marks[sid]; ok {
-			s.Marks[sid] = head
+		if s.Based[sid] {
+			for k := range s.Marks {
+				if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+					delete(s.Marks, k)
+				}
+			}
+			for kind, h := range heads {
+				s.Marks[markKey(sid, kind)] = h
+			}
 		}
 		if w, ok := s.Watches[sid]; ok && w != inc {
 			delete(s.Watches, sid)
@@ -373,27 +454,11 @@ func (ws *wakeStore) reviseLocked(s *wakeSubData, r *wakeRecord, state string, n
 	}
 }
 
-// advance raises every target's mark for sid to proven (a range the detector
-// has fully examined). Marks only go up.
-func (ws *wakeStore) advance(sid string, targets []wakeTarget, proven int64) {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	for _, t := range targets {
-		s := ws.data.Subs[subKey(t.ClientID, t.RouteID, t.Nonce)]
-		if s == nil {
-			continue
-		}
-		if m, ok := s.Marks[sid]; ok && m < proven {
-			s.Marks[sid] = proven
-			ws.dirty = true
-		}
-	}
-}
-
-// wakeEvent is one runtime event with its ordinal.
+// wakeEvent is one runtime event with its index within its source.
 type wakeEvent struct {
-	Ordinal int64
-	Event   hp.RuntimeEvent
+	Source string
+	Index  int64
+	Event  hp.RuntimeEvent
 }
 
 // wakeTarget is one subscription evaluating a session's events.
@@ -401,34 +466,36 @@ type wakeTarget struct {
 	ClientID, RouteID, Nonce string
 }
 
-// process evaluates events of sid (ascending, contiguous) for every target
-// whose mark is below each event, then advances those marks, all in one
-// batch. It returns whether any outbox item was queued.
-func (ws *wakeStore) process(sid, inc string, targets []wakeTarget, events []wakeEvent, nowMs int64) bool {
+// processSource evaluates one source's contiguous run of events (indexes
+// first..first+len-1) for every target that has baselined sid, skipping the
+// events at or below that target's mark for this source, then raises the
+// target's mark to the end of the run, all in one batch.
+func (ws *wakeStore) processSource(sid, inc, kind string, first int64, events []hp.RuntimeEvent, targets []wakeTarget, nowMs int64) bool {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	queued := false
-	now := nowMs / 1000
+	last := first + int64(len(events)) - 1
 	for _, t := range targets {
-		s := ws.subLocked(t.ClientID, t.RouteID, t.Nonce)
-		mark, ok := s.Marks[sid]
-		if !ok {
-			continue // not baselined yet: nothing is wake-worthy for it
+		if s := ws.data.Subs[subKey(t.ClientID, t.RouteID, t.Nonce)]; s == nil || !s.Based[sid] {
+			continue
 		}
-		for _, e := range events {
-			if e.Ordinal <= mark {
+		s := ws.subLocked(t.ClientID, t.RouteID, t.Nonce) // normalizes maps decoded as nil
+		mk := markKey(sid, kind)
+		mark := s.Marks[mk]
+		for i, ev := range events {
+			idx := first + int64(i)
+			if idx <= mark {
 				continue
 			}
-			if ws.evaluateLocked(s, sid, inc, e, nowMs) {
+			if ws.evaluateLocked(s, sid, inc, wakeEvent{Source: kind, Index: idx, Event: ev}, nowMs) {
 				queued = true
 			}
-			mark = e.Ordinal
 		}
-		if mark != s.Marks[sid] {
-			s.Marks[sid] = mark
+		if last > mark {
+			s.Marks[mk] = last
 			ws.dirty = true
 		}
-		ws.retainLocked(s, now)
+		ws.retainLocked(s, nowMs/1000)
 	}
 	return queued
 }
@@ -458,7 +525,8 @@ func (ws *wakeStore) evaluateLocked(s *wakeSubData, sid, inc string, e wakeEvent
 		}
 		id := eventIdentity(sid, inc, WakeKindPermission, ev.ItemID, p.RequestID, p.RuntimeGeneration)
 		return ws.addRecordLocked(s, &wakeRecord{Identity: id, Kind: WakeKindPermission, State: WakeStateOpen, SessionID: sid,
-			Incarnation: inc, ItemID: ev.ItemID, RequestID: p.RequestID, RuntimeGeneration: p.RuntimeGeneration, Ordinal: e.Ordinal}, nowMs)
+			Incarnation: inc, ItemID: ev.ItemID, RequestID: p.RequestID, RuntimeGeneration: p.RuntimeGeneration,
+			Source: e.Source, Index: e.Index}, nowMs)
 	case hp.TypePermissionResolved:
 		for _, r := range s.Records {
 			if r.SessionID == sid && r.State == WakeStateOpen && r.RequestID == p.RequestID &&
@@ -470,9 +538,9 @@ func (ws *wakeStore) evaluateLocked(s *wakeSubData, sid, inc string, e wakeEvent
 		if w, ok := s.Watches[sid]; !ok || w != inc {
 			return false
 		}
-		id := eventIdentity(sid, inc, WakeKindTurnEnd, fmt.Sprint(e.Ordinal))
+		id := eventIdentity(sid, inc, WakeKindTurnEnd, e.Source, fmt.Sprint(e.Index))
 		return ws.addRecordLocked(s, &wakeRecord{Identity: id, Kind: WakeKindTurnEnd, State: WakeStateDone, SessionID: sid,
-			Incarnation: inc, Ordinal: e.Ordinal}, nowMs)
+			Incarnation: inc, Source: e.Source, Index: e.Index}, nowMs)
 	}
 	return false
 }
@@ -633,8 +701,13 @@ type WakeItem struct {
 	ItemID            string `json:"item_id,omitempty"`
 	RequestID         string `json:"request_id,omitempty"`
 	RuntimeGeneration string `json:"runtime_generation,omitempty"`
-	Ordinal           int64  `json:"ordinal,omitempty"`
-	CreatedAt         int64  `json:"created_at"`
+	// Source and Index locate the event within its append-only source.
+	Source string `json:"source,omitempty"`
+	Index  int64  `json:"index,omitempty"`
+	// Event is the runtime event itself, read from its source when fetched
+	// (pending items only), over this authenticated direct connection.
+	Event     *hp.RuntimeEvent `json:"event,omitempty"`
+	CreatedAt int64            `json:"created_at"`
 }
 
 // WakeGap reports dropped records.
@@ -656,7 +729,7 @@ type wakeVisibility func(sid, inc string) (inScope, current bool)
 func itemOf(r *wakeRecord) WakeItem {
 	it := WakeItem{Seq: r.Seq, WakeID: r.WakeID, Kind: r.Kind, State: r.State, Acked: r.Acked, CreatedAt: r.CreatedAt}
 	if pendingRecord(r) {
-		it.SessionID, it.Incarnation, it.Ordinal = r.SessionID, r.Incarnation, r.Ordinal
+		it.SessionID, it.Incarnation, it.Source, it.Index = r.SessionID, r.Incarnation, r.Source, r.Index
 		if r.Kind == WakeKindPermission {
 			it.ItemID, it.RequestID, it.RuntimeGeneration = r.ItemID, r.RequestID, r.RuntimeGeneration
 		}

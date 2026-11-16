@@ -1,4 +1,4 @@
-# Direct wake-ups: contract v4.3 (consolidated)
+# Direct wake-ups: contract v4.4 (consolidated)
 
 **Status: converged.**
 - **Implementation is authorized.** Backend implementation, including wire and API, is authorized on this branch and the harness branch.
@@ -218,15 +218,18 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 ### 7.2 Per-subscription marks
 
-- **Marks.** Each (subscription, session) pair has a durable `mark[sub][sid]` that only goes up. There is **no shared mark**.
-- **A new subscriber.** When a session enters a subscription's set, only that subscription's mark is set, to the current `History` `Head`. Other subscriptions keep their backlog.
-- **Reading.** The detector reads each session from the minimum mark across subscriptions.
-  - **Forward reads.** Every in-set session is read **forward from its minimum mark** with `History(before = mark+1+limit)`. `before` is exclusive, so each page is the contiguous run `(mark, mark+limit]`. That gives catch-up with no gaps and no backfill skipping.
+- **Why marks are per source (source evidence).** A non-structured session's runtime events come from several append-only sources: the transcript, the permission journal and amux's journal (`runtimeevents/tailer.go` `sourcesFor`). History and Stream number them in **one joined ordinal space** by concatenating the sources at cumulative offsets (`history.go` `historyPage`). So an append to an earlier source **shifts** every later source's joined ordinals, and a joined ordinal is neither a durable cursor nor a stable identity.
+- **Marks.** Each (subscription, session, source kind) has a durable mark that only goes up: the last 1-based index read **within that source**. There is **no shared mark**.
+- **A new subscriber.** When a session enters a subscription's set, only that subscription's marks are set, to every source's current head, all taken from one per-source read (`runtimeevents.ReadSources`). Other subscriptions keep their backlog.
+  - A source kind that appears after the baseline (for example, a journal created later) starts at 0.
+  - A source whose head falls below its mark was replaced or truncated. It is re-baselined at its new head and never replayed.
+  - If the baseline read fails, the baseline is deferred, never fabricated.
+- **Reading.** Each source is read **by its own index** from the lowest mark of the covering subscriptions (`Backend.SourceEvents`, one call returning each source's head and events). No joined offset is involved, so growth in one source between reads cannot shift another source's positions.
   - **Round-robin.** Sessions are taken round-robin, 16 per 2 s tick, at most 8 pages each, continued next tick.
   - **Inventory changes.** Sessions whose inventory `state` changed since the last tick are read first.
   - **Stream tails.** `Stream` tails are an optional latency optimization and change no semantics.
 - **Check interval.** Each session is checked at least every `max(2 s, ⌈N/16⌉×2 s)`. Lag above 60 s sets `degraded`.
-- **Evaluation.** For each event at ordinal `o`, each subscription with `mark < o` evaluates it. Its records and its new mark go into the same `wake.json` batch. A crash before durability re-evaluates the event, and identity tombstones dedupe it.
+- **Evaluation.** For each event at index `i` of source `k`, each subscription whose mark for `k` is below `i` evaluates it. Its records and its new mark go into the same `wake.json` batch. A crash before durability re-evaluates the event, and identity tombstones dedupe it.
 - **Incarnation (primary).** On a new incarnation, or when the session is gone:
   - all marks for that session reset to the new `Head`;
   - the old incarnation's watches are deleted;
@@ -237,7 +240,7 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 ### 7.3 Identities and permission state
 
 - **Permission identity:** `sha256(sid, incarnation, "permission_request", item_id, request_id, runtime_generation)`, length-prefixed.
-- **Turn-end identity:** `sha256(sid, incarnation, "turn_end", ordinal)`.
+- **Turn-end identity:** `sha256(sid, incarnation, "turn_end", source kind, index within source)`.
 - **Permission state** is `open`, `resolved`, `stale` or `withdrawn` (left the grant's scope), and is **separate from delivery ack** (§8.4).
   - `resolved`: a matching `permission_resolved` was seen.
   - `stale`: a later event carries a different non-empty runtime generation, or the session was reset.
@@ -258,7 +261,7 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 ```json
 {"route_id":"dwr_…","items":[
   {"seq":41,"wake_id":"dwk_…","kind":"permission_request","state":"open","acked":false,
-   "session_id":"…","incarnation":"…","item_id":"…","request_id":"…","runtime_generation":"…","ordinal":123,"created_at":1731700000000},
+   "session_id":"…","incarnation":"…","item_id":"…","request_id":"…","runtime_generation":"…","source":"permission","index":7,"event":{"type":"permission_request","item_id":"…","payload":{…}},"created_at":1731700000000},
   {"seq":44,"wake_id":"dwk_…","kind":"permission_request","state":"resolved","acked":false,"created_at":1731699990000}],
  "next_seq":44,"has_more":false,"gap":null}
 ```
@@ -310,7 +313,10 @@ The union of in-scope sessions over subscriptions: valid id, not console, not ef
 
 ### 8.5 Display and actions
 
-- **Display lookup.** One event: `GET /direct/v1/sessions/{sid}/history?before_seq={ordinal+1}&limit=1`.
+- **Display.** Pending items (open permissions, un-acked turn ends) carry `source`, `index` and the **`event` itself**. The event is read from its source at fetch time and returned only over this authenticated direct connection, after the fetch-time scope and incarnation checks. Nothing is sent to the cloud. If the source no longer holds that index (replaced), `event` is absent. There is no joined-ordinal history lookup.
+- **Uncovered sessions.** `POST /direct/v1/wake/subscriptions` also returns `uncovered_sessions`: in-scope sessions wake-ups cannot watch right now because the daemon store has no identity for them.
+  - Identities exist exactly for rows of the store's `sessions` table (`internal/store/identity.go` `SessionIdentities`). Untracked rows, or rows with an empty incarnation, have none.
+  - These sessions produce no wakes, and that is disclosed, never silent.
 - **Answering.** The existing `POST /direct/v1/sessions/{sid}/actions {"verb":"permission", request_id, runtime_generation, decision, idem_key}`, which requires `approve`.
 
 ## 8.6 Shared fixtures
@@ -467,7 +473,9 @@ The provider is always `conn.providerID`. Foreign and nonexistent routes get **i
 
 ### 10.5 Relay additive fields (coexistence)
 
-The relay daemon pushes gain `session_incarnation` (from the ingested batch's `incarnation`, §9.1) and, for `turn_end`, `ordinal`. Each is present only when the provider supplied it. Relay semantics are otherwise unchanged.
+The relay daemon `permission_request` push gains `session_incarnation`, taken from the ingested batch's `incarnation` (§9.1; the provider samples it per batch). It is present only when the provider supplied it.
+- **No turn-end key.** No turn-end correlation key is added. The relay's live ordinal counter and the joined History ordinal can collide, and neither is a stable occurrence identity.
+- Relay semantics are otherwise unchanged.
 
 ## 11. Fences
 
@@ -492,7 +500,7 @@ The relay daemon pushes gain `session_incarnation` (from the ingested batch's `i
   - the relay `id` equals the `provider_id` of the active route for this backend (a verified pairing);
   - the relay `session_incarnation` equals the direct item's `incarnation`, and both are non-empty;
   - `session_id`, `item_id`, `request_id` and `runtime_generation` are equal and non-empty.
-- **Turn-end correlation.** The same pairing, plus session, incarnation and `ordinal`. **No fuzzy windows.**
+- **Turn ends never correlate.** No shared stable occurrence identity exists across the relay path and the direct path: relay ordinals are joined and live-counted. A relay turn-end card and a direct turn-end card are therefore separate cards. There is **no fuzzy matching** by session or time. A session watched only on the direct side always gets its direct turn end.
 - **A covered item is direct-owned.** If direct fetched it and it is in scope, the content comes from direct and actions go only through the direct `permission` verb. Without `approve`, a **view-only direct card replaces the relay card**. A direct card never routes an action through the relay.
 - **Relay cards stay** in every other case: out of scope, uncorrelated, fetch failed, no active route, or no incarnation.
 - **No zero-duplicate promise.** A duplicate stays visible for at most one direct fetch, or indefinitely if the peers are older.
@@ -625,7 +633,7 @@ Re-login does not re-activate: the backend shows "Paused — signed out of Harne
   - The send timeout is shorter than the lease.
 - **Payload.** The keys equal the allowlist, with no session or expiry.
 - **Sync.** Epoch completeness, scope and grace.
-- **Relay.** Existing tests unchanged; the additive `session_incarnation` and `ordinal` are present when supplied.
+- **Relay.** Existing tests unchanged; the additive `session_incarnation` on permission pushes is present when supplied, and no turn-end correlation field is emitted.
 
 ## 16. Landing order
 
