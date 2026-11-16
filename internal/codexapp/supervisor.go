@@ -678,7 +678,7 @@ func (s *Supervisor) initialize(ctx context.Context) error {
 			return err
 		}
 		if n := len(s.cfg.PriorChatGPTAccounts); n > 0 && s.cfg.ResumeThreadID != "" && s.cfg.PriorChatGPTAccounts[n-1] != s.auth.boundAccount() {
-			s.emit(notice("info", "codex: this thread continues under the current central account"))
+			s.emit(authNotice("info", "codex: this thread continues under the current central account"))
 		}
 	}
 	return nil

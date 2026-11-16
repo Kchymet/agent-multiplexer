@@ -310,14 +310,14 @@ func (a *tokenAuth) loginCompleted(params json.RawMessage) (ev harnessproto.Runt
 	}
 	if apiKey {
 		if out.success {
-			return notice("info", "codex: central API-key login completed"), true
+			return authNotice("info", "codex: central API-key login completed"), true
 		}
-		return notice("error", "codex: central API-key login failed"), true
+		return authNotice("error", "codex: central API-key login failed"), true
 	}
 	if out.success {
-		return notice("info", "codex: central ChatGPT login completed"), true
+		return authNotice("info", "codex: central ChatGPT login completed"), true
 	}
-	return notice("error", "codex: central ChatGPT login failed: "+safeServerText(out.err, pending)), true
+	return authNotice("error", "codex: central ChatGPT login failed: "+safeServerText(out.err, pending)), true
 }
 
 // safeServerText bounds a server-supplied login error for amux's own error
@@ -433,7 +433,7 @@ func (s *Supervisor) handleTokenRefresh(id json.RawMessage, _ json.RawMessage) {
 			case errors.Is(err, context.DeadlineExceeded):
 				reason = "central ChatGPT auth refresh timed out"
 			}
-			s.emit(notice("error", "codex: "+reason+"; the request that needed it will fail"))
+			s.emit(authNotice("error", "codex: "+reason+"; the request that needed it will fail"))
 			_ = rpc.respondErr(rawID, -32000, reason)
 			return
 		}

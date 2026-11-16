@@ -499,6 +499,15 @@ nothing for it (honest degradation) — the feature stays advertised.
   `turn_end`, and `raw`. `raw` carries
   `{runtime, native_type, body}` and is the passthrough for any record entry the
   reader has no mapping for — **never dropped**.
+- `notice` carries `{level, text, category?}`. `category` is optional, open
+  ended and absent on most notices. A consumer renders an unknown or absent
+  category normally. `auth` marks account/login lifecycle notices amux
+  emits while binding a runtime to its central account: "codex: central
+  ChatGPT login completed", the API-key equivalent, token refresh failures, and
+  "this thread continues under the current central account". The `info` ones
+  are routine, so a transcript view SHOULD hide them by default behind an
+  opt-in. It SHOULD keep `error`-level ones visible, because those name a
+  failure the user can act on.
 - `permission_request` carries
   `{request_id, runtime_generation?, tool, action, options}` and says the
   session asked for permission; `permission_resolved` carries
