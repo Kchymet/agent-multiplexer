@@ -1,4 +1,4 @@
-# Direct wake-ups — contract proposal **v3.3** (for review)
+# Direct wake-ups — contract proposal **v3.4** (for review)
 
 > Published as the docs-only review baseline (authorized: contract publication, not implementation). The eventual backend PR carries this file.
 
@@ -18,7 +18,7 @@ Audited at agent-multiplexer `origin/master` and harness `origin/master` (2026-1
 An Android client connected **directly** to a machine (`amux direct`, its own grant) may opt in, per direct backend, to **content-free cloud wake-ups**.
 
 1. **Detection on the host.** The machine's direct server detects the same events the relay notifies on: `permission_request`, and `turn_end` for sessions watched per subscription on the machine.
-2. **Durable outbox on the host.** It records each wake atomically in `grants.json` and queues an opaque `(route_id, wake_id)` in a leased, retriable outbox.
+2. **Durable outbox on the host.** It records each wake in its wake store (`wake.json`), under authority fenced in `grants.json` (§4.4), and queues an opaque `(route_id, wake_id)` in a leased, retriable outbox.
 3. **Forwarding through the provider.** `amux provide` forwards the wake over its authenticated connection and settles it only on a terminal Harness answer.
 4. **Delivery to one client.** Harness checks, from server state only, that the route was **activated by proof** through this very provider. It then sends to the devices of **exactly one client**, through its own delivery path, claiming dedupe only after FCM acceptance. The payload is routing-only.
 5. **Direct fetch, actions and ack.** The phone fetches details directly with its own credential (paginated, filtered at fetch time, gap-marked), acts with the existing direct `permission` verb, and acks.
@@ -120,7 +120,7 @@ The cloud payload has no kind.
   - State lives in `storeState.Wake.Policy {enabled, nonce, owner, provider, changed_at, key}`.
   - `nonce` is 16 random bytes, new on every change. It is not a counter, so an old-binary drop followed by re-enable can never collide with earlier records.
   - `key` is a fresh 32-byte HMAC key per nonce.
-  - Disable, re-pin and `reset-identity` clear **all** wake state in the same commit.
+  - Disable, re-pin and `reset-identity` commit the authority fence (policy nonce, subscriptions) in `grants.json` first. The wake data then becomes inert and is cleaned up best-effort (§4.4).
 - **Provider opt-in:** `amux provide --direct-wake` (`AMUX_PROVIDER_DIRECT_WAKE=1` / `direct-wake = true`). It advertises only while the policy is enabled with matching pins; same 30 s recheck.
 - **No other provider features are needed.** `sessions`, `runtime-events` and `direct-enroll-v1` are **not** required. Wake-only discovery and registration work without them (§6.1, tested in §8).
 
@@ -163,21 +163,50 @@ JSON bodies. Unknown fields and query parameters answer `400`. route_id is never
   - A turn end's identity is `sha256(sid, incarnation, "turn_end", ordinal)`.
 - **Permission state.**
   - `open` → `resolved` when a matching `permission_resolved` (same request_id + runtime_generation) is seen.
-  - `open` → `stale` when a later event in the session carries a different non-empty `runtime_generation`, the session goes idle, or the session is re-baselined.
+  - `open` → `stale` when a later event in the session carries a different non-empty `runtime_generation`, or the session is re-baselined (incarnation change).
+  - **v3.4:** the "session goes idle" trigger is removed. Evidence that a session waiting on a permission is never reported idle, for both Claude and Codex, is not established (review P1), so idleness never stales a permission.
+  - **Re-baseline on `Head` < mark** is a defensive trigger. Its occurrence is not claimed (P2). The primary trigger is the incarnation change, and both are tested with a scripted backend.
   - Answering is still validated by the runtime.
 - **No starvation.** Up to 64 live sessions are tailed with `Stream(mark)`.
   - All others are polled round-robin with `History`, paging back to the mark (≤ 8 pages per turn; continued next turn, never skipping).
   - Each in-set session is checked at least every `max(2 s, ⌈N/16⌉×2 s)`.
   - If any session's lag exceeds 60 s, `degraded:true` appears in `wake status` and capabilities.
 
-### 4.4 Atomic durability and fetch
+### 4.4 Durability: authority in `grants.json`, wake data in a separate file
 
-**Atomic durability (decision: option (a)).**
-- Policy, subscriptions, watches, records, marks, baselines, incarnations, tombstones and outbox state all live in `storeState.Wake` in `grants.json`. Every change is one `commitLocked`.
-- Grant revoke or expiry deletes the grant's wake state in the same commit as the revocation or prune.
-- `errNotCommitted` reverts every wake mutation of that operation in memory.
-- An ambiguous commit degrades the authority (wake ops refuse until restart).
-- **Old-binary rewrite.** It drops `Wake`. The new binary then sees no policy, so wake is **off** with no subscriptions. Re-enable gets a fresh nonce and key, so no earlier record, grant_ref or outbox item can match.
+**Decision (v3.4, coordinator after review R3).** v3's single-file choice is **replaced**. Putting high-frequency wake writes in `grants.json` couples an optional transport to core direct availability: an ambiguous commit blocks all token issuance and actions (`internal/direct/authority.go` `commitLocked`/`issuableLocked`, `degraded`).
+
+- **Authority, in `grants.json`, under the existing commit semantics.**
+  - `storeState.WakePolicy {enabled, nonce (16 random bytes), owner, provider, key, changed_at}`.
+  - `grantRecord.WakeSubs[route_id] = {created_at, nonce, state: activating|active|failed, failure?, activation_digest}`.
+  - These change only on low-frequency authority actions: enable, disable, re-pin, subscribe, unsubscribe, activation settle, grant revoke or expiry, and `reset-identity`.
+  - **Revoke, disable and re-pin commit this fence first.** Wake data cleanup follows, best-effort.
+- **Wake data, in `wake.json`** (mode 0600, sibling, `writeAtomic`, its own lock and its own store object).
+  - It holds marks, baselines, incarnations, watches, records, tombstones and outbox state.
+  - Each entry is keyed by `(grant client_id, route_id, policy nonce)`.
+  - Writes are **batched**: at most one fsync per 250 ms, plus one immediately after a settle.
+  - **No two-file atomicity is claimed.**
+- **Every wake operation re-checks authority.** Detection, record creation, lease, settle, fetch, ack and watch each confirm, under a short read of the authority:
+  - the grant is live;
+  - the policy is enabled with the same nonce;
+  - the `WakeSubs` entry exists, and is `active` (for lease of a wake item; activate items need `activating`).
+
+  A wake entry that fails the check is **inert** and is deleted lazily.
+- **Wake-file failures never touch core authority.**
+  - A rolled-back `wake.json` write reverts in memory.
+  - An **ambiguous** `wake.json` write sets **wake-degraded** only: wake ops pause and `wake status` reports it. A restart reconciles. It never sets the authority's `degraded`.
+  - Direct issuance and actions are unaffected.
+- **Startup reconciliation.** Load `wake.json`, then drop every entry whose grant is absent, revoked or expired, whose nonce ≠ current, or whose `WakeSubs` entry is gone. The cleaned file is written only if something changed.
+- **Old-binary rewrite.** It drops `WakePolicy` and `WakeSubs`, so wake is **off** and `wake.json` is fully inert (no nonce matches). Re-enable mints a new nonce, so nothing earlier can match.
+- **Locks.** The wake lock is never held while taking the authority lock for a write. Authority checks are a brief read under the authority lock, done before the wake lock is taken, and the wake operation then re-checks the nonce. Wake writes never run under the authority lock.
+- **Required failure-order tests.**
+  1. Revoke commits in `grants.json` while the `wake.json` delete fails → no lease, fetch or wake for that grant.
+  2. Disable commits, then a crash before the `wake.json` cleanup → after restart, reconciliation drops all entries.
+  3. Re-pin → old-nonce entries inert.
+  4. An ambiguous `wake.json` write → wake-degraded, while direct tokens, actions and history keep working.
+  5. An ambiguous `grants.json` commit during subscribe → the existing authority degradation, unchanged.
+  6. Old-binary rewrite of `grants.json`, then re-enable → no stale match.
+  7. A crash between record creation (`wake.json`) and the mark advance → the event is re-evaluated, and identity tombstones dedupe it.
 
 **Fetch.** `POST /direct/v1/wake/events {route_id, after_seq, limit}` returns:
 
@@ -196,7 +225,7 @@ JSON bodies. Unknown fields and query parameters answer `400`. route_id is never
   - the policy nonce is current;
   - the session is in scope and not console;
   - the incarnation is current.
-  Items that fail are tombstoned in the same commit.
+  Items that fail are tombstoned in the wake store.
 - **Unknown routes.** An unknown route, or another grant's, returns `200 {"items":[]}`.
 - **Content and actions.**
   - **Content** comes only from `history`/`stream`.
@@ -208,6 +237,8 @@ JSON bodies. Unknown fields and query parameters answer `400`. route_id is never
 
 Item kinds: `wake`, `activate`, `deactivate`. Durable states: `pending | delivered | gone | expired`.
 
+- **Activation first (R1).** A subscription's `wake` items are leasable **only after** its `activate` item settled `accepted`, so `WakeSubs.state = active`. Until then they wait, and their 900 s deadline still runs. Harness also answers a wake for a **pending** route with **`unavailable`** (retryable), never `route_gone`, as defense in depth.
+
 - **Leasing.** `wake_lease {max≤16}` is a long-poll under 15 s. It gives `lease_id` + items. Leases are in memory only, 30 s.
 - **Settling.** `wake_settle {lease_id, results}` is called **after** the Harness answer.
   - `accepted` / `no_recipient` → `delivered`.
@@ -218,13 +249,16 @@ Item kinds: `wake`, `activate`, `deactivate`. Durable states: `pending | deliver
   - A wake stops retrying 900 s after creation (`expired`); the record stays fetchable.
   - `activate` expires with the code TTL (10 min) → `failed:activation_expired`.
   - `deactivate` retries up to 24 h; route sync converges it anyway.
-- **Revocation race.** Revoke, unsubscribe or a policy change deletes items in the same commit. A later settle for a missing item is ignored. At most one wake that was already submitted can be delivered; its fetch answers 401 or is empty.
+- **Revocation race.** Revoke, unsubscribe or a policy change commits the authority fence first (§4.4). Items become inert immediately and are deleted afterwards. A later settle for a missing item is ignored. At most one wake that was already submitted can be delivered; its fetch answers 401 or is empty.
 
 ### 4.6 Route sync
 
-On every registration and every 30 s, the provider sends `direct-wake-routes {serverId, routes:[{routeId, grantRef}], part, final}` (≤ 512 per part). It is the complete set of this host's active subscriptions. Harness applies it **only to routes with `provider_id = conn.providerID` and `server_id = serverId`**:
+On every registration and every 30 s, the provider sends `direct-wake-routes {serverId, epoch, routes:[{routeId, grantRef, state:"activating"|"active"}], part, final}` (≤ 512 per part).
 
-- An active route absent from two consecutive complete syncs → revoked (`deactivated`).
+- **What a sync lists (R2).** Every `activating` **and** `active` subscription. That covers every route a grant on this host has authenticated a subscribe for.
+- **Epochs.** `epoch` is a random id per snapshot. Harness applies a sync **only after it holds every part of one epoch** (parts 0..n with `final` on n, same epoch, same connection). Mixed or incomplete epochs are discarded.
+- **Scope.** Harness applies it **only to routes with `provider_id = conn.providerID` and `server_id = serverId`**.
+- **Misses.** An active route absent from two consecutive complete epochs → revoked (`deactivated`). Misses count only for routes activated **more than 60 s** before the epoch was received, which is the grace period.
 - A `grantRef` mismatch → ignored for that route.
 - Unknown or foreign ids → ignored, with no mutation.
 
@@ -237,7 +271,7 @@ On every registration and every 30 s, the provider sends `direct-wake-routes {se
 | `registered.features` | orch → prov | accepted features echoed. Wake frames are sent only after the echo. |
 | `direct-wake-activate` | prov → orch | `{reqId, directWake:{serverId, routeId, activationCode, grantRef, requester?}}` |
 | `direct-wake` | prov → orch | `{reqId, directWake:{serverId, wakes:[{routeId, wakeId, grantRef}] ≤16}}` |
-| `direct-wake-routes` | prov → orch | `{reqId, directWake:{serverId, routes:[…] ≤512, part, final}}` |
+| `direct-wake-routes` | prov → orch | `{reqId, directWake:{serverId, epoch, routes:[{routeId, grantRef, state}] ≤512, part, final}}` |
 | `direct-wake-result` | orch → prov | one per reqId, within 15 s: `{reqId, directWakeResult:{results:[{routeId, wakeId?, status}], error?}}` |
 
 - **Statuses:** `accepted`, `no_recipient`, `route_gone`, `rate_limited`, `unavailable`, `busy`.
@@ -301,7 +335,10 @@ CREATE UNIQUE INDEX direct_wake_routes_active ON direct_wake_routes(user_id,clie
     - if that route was **replaced or revoked** by a newer request, the answer is `409 superseded`. A stale retry can never revoke or undo a newer setup.
   - **Result:** `{route_id, provider_id, activation_code, expires_at}`.
 - **`device.direct_wake.unregister`** (`route_id`): owner- and client-scoped, idempotent.
-- **`device.direct_wake.sign_out`** (no fields): revokes **all** of the caller client's routes (`signed_out`). It is idempotent and needs a live session. Android calls it as the first step of explicit sign-out or server change, before `DELETE /api/auth/session` (§14).
+- **`device.direct_wake.sign_out`** (`reason: "sign_out"|"server_change"`; an absent reason is treated as `sign_out`, the safe default): revokes **all** of the caller client's routes, recording `revoke_reason` = the reason. It is idempotent and needs a live session.
+  - **Order on the phone (R4).** Android first drops its route mappings and sets the local fence (§14), then calls this verb, then `DELETE /api/auth/session`.
+  - **Interactive re-sign-in** (including the same account, `AuthRepository.kt` L242–251) does **not** call this verb, so wake routes survive it.
+  - **`DELETE /api/auth/session` is unchanged and never revokes routes.**
 - **`device.direct_wake.list`**: the caller client's routes `{route_id, server_id, provider_id, state:"pending"|"active", created_at}`. Codes are never returned.
 
 ### 6.2 Validating provider input: no cross-tenant mutation
@@ -312,7 +349,8 @@ The provider is always `conn.providerID`. Answers for foreign and nonexistent ro
 |---|---|---|
 | Frame `serverId` ≠ the connection's current negotiated serverId, or the connection is not in the live index | frame `error:"unavailable"` | none |
 | Route unknown, or `provider_id ≠ conn.providerID`, or `server_id ≠ serverId` | `route_gone` | **none** |
-| Route pending (wake), or `grantRef ≠ route.grant_ref` | `route_gone` | none |
+| Route pending (wake) | **`unavailable`** (retryable, R1) | none |
+| `grantRef ≠ route.grant_ref` | `route_gone` | none |
 | The route's own binding is invalid from server state: provider owner ≠ `route.user_id`; user inactive; generation ≠ route's; client revoked | `route_gone` | revoke **this** route. Allowed because it belongs to `conn.providerID` and the reason is server state, never frame data. |
 | Activation: hash mismatch | `route_gone` | none (a forged code never burns the real one) |
 | Activation: hash match, route already active with the **same** `grant_ref` and provider (lost-ack retry) | **`accepted`**, idempotent | none. The proof hash is kept after consumption for exactly this check. |
@@ -611,6 +649,15 @@ This is a separate **notification registration lifetime** for content-free wakes
   - `user_clients` rows have no expiry and are revoked only explicitly (`RevokeUserClient`, `RevokeAllUserAuthority`; `store/user_identity.go`), so keeping a client active after session expiry is the existing model, not a new one.
   - Reviewer: please flag a blocker if you find a source path where an expired-session client should be considered inactive.
 
+## 15. Evidence status (review P1–P4)
+
+| Item | Status |
+|---|---|
+| **P1:** a waiting session is never reported idle | **not established**, so the dependency is removed (§4.3): idleness never stales a permission |
+| **P2:** ordinal survival / truncation | **not claimed**. `Head` < mark is defensive; incarnation change is primary; both are tested with a scripted backend |
+| **P3:** live connection index | new code. A required test: a disconnected provider with stored `capabilities.directWake` is **not** resolvable by `register`/`targets`/activation (`hub.go` today keeps only the enroll advert per connection, L283–288) |
+| **P4:** re-sign-in to the same account | does **not** revoke routes (§6.1 `sign_out` is explicit only). A required test: interactive re-sign-in, same user and client, keeps the routes deliverable |
+
 ## 12. Review findings → v3
 
 | Source | Finding | v3 |
@@ -631,3 +678,4 @@ This is a separate **notification registration lifetime** for content-free wakes
 | b9731f | v2 bound routes to the registering session, but sessions renew every ≤ 8 h | bind to client + generation; explicit sign-out revokes; expiry only pauses (§6.5) |
 | Root (v3.2) | Shared mark skips backlog; subscribe squatting; ledger claimed before send; lost activation ack; approve and turn_end fuzziness; Android fields | per-subscription marks advanced atomically (§4.3); no global reservation (§4.2); pending-lease/accepted ledger and at-least-once (§6.3); idempotent activation + register `request_id` replay/`superseded` (§6.1, §6.2); view-only direct card and exact turn_end with relay `ordinal` + `session_incarnation` (§6.4); provider_id in register/list/targets, watch incarnation response, no title/body (§5.2, §13) |
 | Root + reviewer (v3.3) | `RevokeUserSession` is not sign-out intent; session TTL must not cap wakes | route-bound wake authority without a live-session requirement; explicit `device.direct_wake.sign_out` + local fence + pending-intent replay; snapshot paging with truthful `complete`; open permissions never evicted silently; one-event display lookup (§13.5, §14) |
+| Reviewer (v3.4) | R1 wake before activation; R2 sync revokes fresh route; R3 shared-file coupling; R4 sign-out intent; R5 session gap | activation-first leasing + `unavailable` for pending (§4.5, §6.2); epoch-complete sync including activating, with a 60 s grace (§4.6); authority in `grants.json` + separate `wake.json`, failure-order tests (§4.4); `sign_out` with a reason, local drop first, re-sign-in keeps routes (§6.1); R5 superseded by route-bound authority (§14) |
