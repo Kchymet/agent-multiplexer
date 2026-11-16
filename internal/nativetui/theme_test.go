@@ -176,8 +176,8 @@ func TestAttentionSummaryKeepsUnknownOutOfRunning(t *testing.T) {
 }
 
 // The summary gives up words, zero categories and spacing before it gives up a
-// number: every non-zero count survives whole at the full and the compact rail,
-// including multi-digit ones.
+// number: every non-zero count it shows is whole, at the full and the compact
+// rail, including multi-digit ones.
 func TestSummaryLineNeverClipsACount(t *testing.T) {
 	for _, tc := range []struct {
 		waiting, running, ready, unknown, width int
@@ -193,7 +193,11 @@ func TestSummaryLineNeverClipsACount(t *testing.T) {
 		{12, 10, 11, 13, compactRailWidth, " ◆12 ◐10 ●11 ◌13"},
 		{120, 100, 110, 130, compactRailWidth, " ◆120 ◐100●110◌130"},
 	} {
-		line := summaryLine(tc.waiting, tc.running, tc.ready, tc.unknown, tc.width)
+		line, ok := summaryLine(tc.waiting, tc.running, tc.ready, tc.unknown, tc.width)
+		if !ok {
+			t.Errorf("summaryLine(%d,%d,%d,%d,%d) did not fit", tc.waiting, tc.running, tc.ready, tc.unknown, tc.width)
+			continue
+		}
 		got := strings.TrimRight(ansi.Strip(line), " ")
 		if got != tc.want {
 			t.Errorf("summaryLine(%d,%d,%d,%d,%d) = %q, want %q", tc.waiting, tc.running, tc.ready, tc.unknown, tc.width, got, tc.want)
@@ -574,4 +578,47 @@ func TestSwitchboardEvidence(t *testing.T) {
 	form.openNewWorkgroupForm()
 	save("form-100x28-256.ansi", form.view())
 	save("form-100x28.txt", ansi.Strip(form.view()))
+}
+
+// When no packing fits, the summary is omitted rather than clipped: a count cut
+// to fit (1000 shown as 100) would misstate the fleet.
+func TestSummaryOmittedWhenCountsCannotFit(t *testing.T) {
+	if line, ok := summaryLine(120, 100, 110, 1000, compactRailWidth); ok {
+		t.Errorf("19-cell summary reported as fitting 18: %q", ansi.Strip(line))
+	}
+	if _, ok := summaryLine(120, 100, 110, 1000, sidebarWidth); !ok {
+		t.Error("the same counts fit the full rail and should be shown")
+	}
+
+	compactRailForTest(t)
+	m := switchboardRail(60, 40)
+	if m.railWidth() != compactRailWidth {
+		t.Fatalf("rail = %d, want compact", m.railWidth())
+	}
+	// Enough workgroups in every state that even the tightest line is 19 cells.
+	m.sessions = nil
+	add := func(n int, mk func(i int) core.Session) {
+		for i := 0; i < n; i++ {
+			m.sessions = append(m.sessions, mk(i))
+		}
+	}
+	root := func(prefix string) core.Session {
+		return core.Session{ID: prefix, Title: "wg", IsRoot: true, Section: core.SectionWorkgroups}
+	}
+	add(120, func(i int) core.Session { s := root(fmt.Sprintf("w%04d", i)); s.State = core.StateWaiting; return s })
+	add(100, func(i int) core.Session { s := root(fmt.Sprintf("r%04d", i)); s.State = core.StateRunning; return s })
+	add(110, func(i int) core.Session { s := root(fmt.Sprintf("d%04d", i)); s.State = core.StateReady; return s })
+	add(1000, func(i int) core.Session { s := root(fmt.Sprintf("u%04d", i)); s.State = core.StateUnknown; return s })
+	if sum := m.attentionSummary(); sum != nil {
+		t.Errorf("summary shown although it cannot fit: %q", ansi.Strip(sum[0]))
+	}
+	out := ansi.Strip(m.renderSidebar())
+	if strings.Contains(out, glyphUnknown+"100") || strings.Contains(out, glyphWaiting+"120") {
+		t.Errorf("rail shows a clipped summary:\n%s", out)
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if w := ansi.StringWidth(line); w != compactRailWidth {
+			t.Errorf("rail line %d is %d cells", i, w)
+		}
+	}
 }

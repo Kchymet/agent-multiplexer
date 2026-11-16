@@ -429,8 +429,12 @@ focused pane's border, the `▌` beside the open session). The selected row is
 bold on a graphite fill with a `▎` leading edge. A workgroup with members
 waiting on you says so under its title — `◆ 1 waiting` — even while folded, and
 the line above Accounts counts workgroups by their most demanding state
-(`◆ 2 waiting  ◐ 1  ● 0`). Rows keep the daemon's stable creation order; they
-do not re-sort on activity.
+(`◆ 2 waiting  ◐ 1  ● 0`, plus `◌ n` when any are unknown — unknown is never
+counted as running). On a narrow rail that line sheds the word, zero categories
+and spacing to keep every count whole; if the counts still cannot fit, or the
+rail is too short, the line is omitted rather than clipped, and each workgroup
+row still shows its own state. Rows keep the daemon's stable creation order;
+they do not re-sort on activity.
 
 The chrome adapts to the terminal; the embedded agent pane is the agent's own
 output and is never recolored or rewritten.

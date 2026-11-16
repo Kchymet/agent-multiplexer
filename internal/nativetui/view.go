@@ -488,7 +488,8 @@ func renderSegments(segs []segment, width int) string {
 // demanding state: how many wait on the user (the attention chip when any do),
 // how many are running, how many are ready. It counts workgroups, not agents —
 // the same aggregate each workgroup row already carries — and is omitted until
-// there is a workgroup to count. A workgroup whose state is unknown is never
+// there is a workgroup to count, and whenever the counts cannot be shown whole
+// in the rail's width. A workgroup whose state is unknown is never
 // reported as running: it gets its own unknown mark, shown only when there is
 // one, so the running figure stays a statement about work known to be running.
 func (m *model) attentionSummary() []string {
@@ -516,15 +517,21 @@ func (m *model) attentionSummary() []string {
 	if total == 0 {
 		return nil
 	}
-	return []string{summaryLine(waiting, running, ready, unknown, m.railWidth())}
+	line, ok := summaryLine(waiting, running, ready, unknown, m.railWidth())
+	if !ok {
+		return nil
+	}
+	return []string{line}
 }
 
 // summaryLine lays the counts out for width. Attention is spelled out; running
 // and ready keep the glyph the rows above pair with their word. When the line
 // does not fit it gives up, in order: the word "waiting", the categories whose
 // count is zero, the double spaces, the space inside each figure, and last the
-// space between figures. It never clips or drops a non-zero number.
-func summaryLine(waiting, running, ready, unknown, width int) string {
+// space between figures. If even the tightest packing is wider than the rail it
+// reports false and the caller omits the summary: a clipped count would misstate
+// the fleet, and each workgroup row still carries its own state.
+func summaryLine(waiting, running, ready, unknown, width int) (string, bool) {
 	type figure struct {
 		glyph string
 		n     int
@@ -569,11 +576,14 @@ func summaryLine(waiting, running, ready, unknown, width int) string {
 			break
 		}
 	}
+	if ansi.StringWidth(wait+rest) > width {
+		return "", false
+	}
 	waitStyle := dimStyle
 	if waiting > 0 {
 		waitStyle = attnStyle
 	}
-	return cellPad(waitStyle.Render(wait)+dimStyle.Render(rest), width)
+	return cellPad(waitStyle.Render(wait)+dimStyle.Render(rest), width), true
 }
 
 func (m *model) renderMain() string {
