@@ -13,6 +13,10 @@ type RuntimeEvent struct {
 	ItemID    string          `json:"item_id,omitempty"`
 	Direction string          `json:"direction,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+	// Occurrence is the dte1 turn key (DirectTurnKey) of a turn_end event on a
+	// runtime-events frame labelled with an incarnation; absent otherwise and
+	// from older providers. Consumers pass it through unchanged.
+	Occurrence string `json:"occurrence,omitempty"`
 }
 
 // RuntimeEventBatch groups a seq-ordered slice of RuntimeEvents with the ordinal
@@ -26,6 +30,10 @@ type RuntimeEventBatch struct {
 	// consumer never has to assume a runtime.
 	Runtime string
 	Events  []RuntimeEvent
+	// Positions maps an index into Events to that event's exact source
+	// position, for turn_end events only (the dte1 turn key's input). Internal
+	// handoff to the provider; never on the wire.
+	Positions map[int]TurnSourcePos
 }
 
 // RuntimeEventHistory is one page of a session's past events, the internal

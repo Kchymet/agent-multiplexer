@@ -140,7 +140,7 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 				Runtime:     b.Runtime,
 				Incarnation: inc,
 				Seq:         b.Seq,
-				Events:      b.Events,
+				Events:      withTurnKeys(sessionID, inc, b),
 			})
 			s.opMu.Unlock()
 			if err != nil {
@@ -153,6 +153,25 @@ func (p *Provider) pumpRuntimeEvents(s *session, sessionID string, sub *runtimeS
 
 // runtimeReopenBackoff bounds the retry delay of a failed re-open.
 var runtimeReopenBackoff = struct{ min, max time.Duration }{100 * time.Millisecond, 5 * time.Second}
+
+// withTurnKeys stamps each turn_end of a batch labelled with incarnation inc
+// with its dte1 occurrence key, from the exact source position the reader
+// recorded. An unlabelled batch (inc unknown) or an event without a complete
+// position gets no key; other events are untouched.
+func withTurnKeys(sessionID, inc string, b harnessproto.RuntimeEventBatch) []harnessproto.RuntimeEvent {
+	if inc == "" || len(b.Positions) == 0 {
+		return b.Events
+	}
+	out := make([]harnessproto.RuntimeEvent, len(b.Events))
+	copy(out, b.Events)
+	for i, pos := range b.Positions {
+		if i < 0 || i >= len(out) || out[i].Type != harnessproto.TypeTurnEnd {
+			continue
+		}
+		out[i].Occurrence = harnessproto.DirectTurnKey(sessionID, inc, pos.Kind, pos.LineDigest, pos.Index)
+	}
+	return out
+}
 
 // reopenRuntimeStream re-opens sessionID's stream from the start under a new
 // child producer context, retrying a failed open with bounded backoff for as

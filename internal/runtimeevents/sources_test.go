@@ -1,10 +1,12 @@
 package runtimeevents
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -191,5 +193,82 @@ func TestContinuesGenerationOnSameTranscriptCopy(t *testing.T) {
 	}
 	if ContinuesGeneration(g2, gen()) {
 		t.Fatal("a different transcript continued the old generation")
+	}
+}
+
+// The relay stream stamps each turn_end with the exact per-source position
+// ReadSources reports (dte1): the source kind, the 1-based index among the
+// source's PARSED events (not the joined ordinal, not the line number: a
+// Claude assistant line yields several events), and the first-line digest of
+// the source generation. It holds when the stream starts from 0, resumes
+// mid-stream (index positioning), and when another source (the journal)
+// shares the joined ordinal space.
+func TestStreamTurnPositionsMatchReadSources(t *testing.T) {
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "t.jsonl")
+	journal := filepath.Join(dir, "j.jsonl")
+	appendFile(t, journal, `{"level":"info","text":"starting agent"}`+"\n")
+	appendFile(t, transcript, sprintf(claudeTurnEnd, "1"))
+	appendFile(t, transcript, sprintf(claudeTurnEnd, "2"))
+	appendFile(t, journal, `{"level":"info","text":"ready"}`+"\n")
+	appendFile(t, transcript, sprintf(claudeTurnEnd, "3"))
+	rec := Record{Runtime: harnessproto.RuntimeClaude, Path: transcript, Journal: journal}
+
+	all, err := ReadSources(rec, nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := source(all, PageSourceClaude)
+	want := turnEndIndexes(tr)
+	digest := harnessproto.TurnLineDigest(tr.Generation)
+	if len(want) != 3 || digest == "" {
+		t.Fatalf("setup: turn ends %v digest %q", want, digest)
+	}
+	if want[1]-want[0] < 2 {
+		t.Fatalf("setup: a transcript line must yield several events (indexes %v)", want)
+	}
+	stream := Stream(func(string) (Record, bool) { return rec, true }, 10*time.Millisecond)
+	collect := func(after int64, n int) []harnessproto.TurnSourcePos {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ch, ok := stream(ctx, "s", after)
+		if !ok {
+			t.Fatal("stream refused")
+		}
+		var got []harnessproto.TurnSourcePos
+		for b := range ch {
+			for i, ev := range b.Events {
+				if ev.Type == harnessproto.TypeTurnEnd {
+					p, ok := b.Positions[i]
+					if !ok {
+						t.Fatalf("turn_end without a position: %+v", b)
+					}
+					got = append(got, p)
+				}
+			}
+			if len(got) >= n {
+				return got
+			}
+		}
+		return got
+	}
+	got := collect(0, 3)
+	for i, p := range got {
+		if p.Kind != string(PageSourceClaude) || p.Index != want[i] || p.LineDigest != digest {
+			t.Fatalf("turn_end %d position %+v, want claude/%d/%s", i, p, want[i], digest)
+		}
+	}
+	// Resume after the first turn end's joined ordinal: positions unchanged.
+	h, _ := History(rec, 0, 100)
+	var firstOrdinal int64
+	for i, ev := range h.Events {
+		if ev.Type == harnessproto.TypeTurnEnd {
+			firstOrdinal = h.Seq - int64(len(h.Events)) + int64(i) + 1
+			break
+		}
+	}
+	resumed := collect(firstOrdinal, 2)
+	if len(resumed) != 2 || resumed[0].Index != want[1] || resumed[1].Index != want[2] {
+		t.Fatalf("resumed positions %+v, want %v", resumed, want[1:])
 	}
 }

@@ -527,26 +527,30 @@ The relay daemon `permission_request` push gains `session_incarnation`, taken fr
 - **Relay cards stay** in every other case: out of scope, uncorrelated, fetch failed, no active route, or no incarnation.
 - **No zero-duplicate promise.** A duplicate stays visible for at most one direct fetch, or indefinitely if the peers are older.
 
-#### Proposed: shared turn-end occurrence key `dte1` (for review; not implemented)
+#### Shared turn-end occurrence key `dte1` (implemented)
 
-The interim rule above stays the fallback for any peer without the key. The proposal gives upgraded peers an exact, content-free key, the same on both paths:
+The interim rule above stays the fallback for any peer without the key. Upgraded peers get an exact, content-free key, the same on both paths. The function is `harnessproto.DirectTurnKey`, and the shared fixtures are `harnessproto/testdata/dte1-turnkey.json`, which pin the source kinds and cover these cases:
+- a restore copy keeps the key;
+- a reused id or a new transcript changes it;
+- an unknown input produces no key.
 
 - **Key.** `turn_key = "dte1_" + base64url(first 16 bytes of SHA-256("amux-turn-end-v1\0" + sid + "\0" + incarnation + "\0" + kind + "\0" + line_digest + "\0" + decimal(index)))`.
   - `kind` is the source kind the event was read from (`runtimeevents.PageSourceKind`).
-  - `index` is the 1-based position within that source: the index the direct detector already uses.
-  - `line_digest` is the first-line digest part of the source generation. A restore copy keeps it, and a different transcript changes it.
+  - `index` is the 1-based position among the source's **parsed events**, the index `runtimeevents.ReadSources` reports. It is not the joined ordinal, not a line number (one transcript line can yield several events), and not a resync count. The relay reader counts it per source, positioned from the same file index.
+  - `line_digest` is the first-line digest part of the source generation, from the same helper (`sourceGeneration`, with its 64 KiB first-line prefix rule). A restore copy keeps it, and a different transcript changes it.
 - **No key** is produced when any input is unknown: the source has no complete first line yet, the batch is unlabeled (incarnation lookup failed), or the event is not a `turn_end`.
 - **Direct path.** The detector computes it from the record (sid, incarnation, source kind, generation, index) and returns it on the turn-end item as `turn_key`.
 - **Relay path.**
-  - The provider's tailer stamps the per-event source position (kind, index, line digest) on `turn_end` events only.
+  - The tailer records the per-event source position (kind, index, line digest) for `turn_end` events only, on the internal batch (`RuntimeEventBatch.Positions`, never on the wire).
   - The provider computes `turn_key` with the incarnation bound to the stream, and sends it as an additive `occurrence` field on that runtime event.
   - Harness copies it, unchanged, into the turn-end relay push as `turn_key`. Old providers send nothing, and nothing changes for them.
 - **Phone.** It merges a relay card and a direct card only on an exactly equal `turn_key`, under the existing verified provider/server rule. Any missing key means separate cards, with no fuzzy matching.
+- **Residual (unsupported, as before).** A transcript replaced by different content with an identical first line, under the same incarnation, is outside the existing append-only boundary. Its keys are not guaranteed distinct.
 - **Tests.**
-  - Key fixtures shared by amux, Harness and Android.
-  - Identical keys from the relay stream and the direct detector for the same transcript.
-  - Stable across a restore copy; different after id reuse or a new transcript.
-  - Absent for unlabeled batches.
+  - The fixtures above, shared by amux, Harness and Android.
+  - The relay stream's positions equal the `ReadSources` indexes and digest, including several events per line, the journal source and a mid-stream resume.
+  - Direct turn-end items carry the key, stable across a restore copy.
+  - The provider stamps only `turn_end` events of labelled batches; unlabelled batches get no key.
   - An old provider emits no field.
 
 ## 13. Phone contract (Android)

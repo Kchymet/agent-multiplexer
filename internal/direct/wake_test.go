@@ -1350,6 +1350,21 @@ func TestWakeResumeCopyDoesNotReplayHistory(t *testing.T) {
 	if len(idx) != 2 || idx[0] != 2 || idx[1] != 4 {
 		t.Fatalf("turn ends after a resume copy = %v, want the original 2 and the new 4 only", idx)
 	}
+	// dte1: each turn end carries the shared occurrence key from its exact
+	// source position; the copy keeps the first-line digest, so the original
+	// turn end keeps its key, and the new one has its own.
+	for _, it := range f.Items {
+		if it.Kind != WakeKindTurnEnd {
+			continue
+		}
+		want := hp.DirectTurnKey("a1", "inc-a1", "claude", "l-a1-claude", it.Index)
+		if want == "" || it.TurnKey != want {
+			t.Fatalf("turn end %d key %q, want %q", it.Index, it.TurnKey, want)
+		}
+	}
+	if first.Items[0].TurnKey == "" || first.Items[0].TurnKey != hp.DirectTurnKey("a1", "inc-a1", "claude", "l-a1-claude", 2) {
+		t.Fatalf("pre-copy key %q", first.Items[0].TurnKey)
+	}
 }
 
 // A permission raised right after subscribing (before any detector tick) is

@@ -850,6 +850,10 @@ type WakeItem struct {
 	Index  int64  `json:"index,omitempty"`
 	// Generation is the source file generation the index belongs to (opaque).
 	Generation string `json:"generation,omitempty"`
+	// TurnKey is the dte1 occurrence key of a pending turn_end (the same key
+	// an upgraded relay provider stamps as the event's occurrence); empty
+	// when any input is unknown.
+	TurnKey string `json:"turn_key,omitempty"`
 	// Event is the runtime event itself, read from its source when fetched
 	// (pending items only), over this authenticated direct connection.
 	Event     *hp.RuntimeEvent `json:"event,omitempty"`
@@ -878,6 +882,9 @@ func itemOf(r *wakeRecord) WakeItem {
 		it.SessionID, it.Incarnation, it.Source, it.Index, it.Generation = r.SessionID, r.Incarnation, r.Source, r.Index, r.SourceGen
 		if r.Kind == WakeKindPermission {
 			it.ItemID, it.RequestID, it.RuntimeGeneration = r.ItemID, r.RequestID, r.RuntimeGeneration
+		}
+		if r.Kind == WakeKindTurnEnd {
+			it.TurnKey = hp.DirectTurnKey(r.SessionID, r.Incarnation, r.Source, hp.TurnLineDigest(r.SourceGen), r.Index)
 		}
 	}
 	return it

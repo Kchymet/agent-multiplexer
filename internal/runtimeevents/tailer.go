@@ -33,10 +33,32 @@ type tailSource struct {
 	dec    *sourceDecoder
 	offset int64
 	info   os.FileInfo
+	// events is the number of parsed events consumed from this file: the
+	// 1-based index ReadSources gives the next event is events+1.
+	events int64
+	// lineDigest is the file's first-line digest (dte1), computed lazily.
+	lineDigest string
 }
 
 func (s *tailSource) reset() {
-	s.offset, s.dec, s.info = 0, s.newDecoder(), nil
+	s.offset, s.dec, s.info, s.events, s.lineDigest = 0, s.newDecoder(), nil, 0, ""
+}
+
+// turnPos returns ev's exact source position when it is a turn_end, after
+// s.events was advanced past it; nil otherwise.
+func (s *tailSource) turnPos(ev harnessproto.RuntimeEvent) *harnessproto.TurnSourcePos {
+	if ev.Type != harnessproto.TypeTurnEnd {
+		return nil
+	}
+	if s.lineDigest == "" {
+		if f, err := os.Open(s.path); err == nil {
+			if fi, err := f.Stat(); err == nil {
+				s.lineDigest = harnessproto.TurnLineDigest(sourceGeneration(f, fi))
+			}
+			_ = f.Close()
+		}
+	}
+	return &harnessproto.TurnSourcePos{Kind: string(s.kind), Index: s.events, LineDigest: s.lineDigest}
 }
 
 // positionSources places every source where a fresh replay would be once it had
@@ -58,14 +80,16 @@ func positionSources(sources []*tailSource, afterSeq int64) (ordinal int64, firs
 		}
 		_ = f.Close()
 		if base+snap.events <= afterSeq {
-			s.offset, _, s.dec = ix.position(snap.events)
+			s.offset, s.events, s.dec = ix.position(snap.events)
 			s.info = snap.identity
+			s.lineDigest = ""
 			base += snap.events
 			continue
 		}
 		var before int64
 		s.offset, before, s.dec = ix.position(afterSeq - base)
 		s.info = snap.identity
+		s.events, s.lineDigest = before, ""
 		for _, later := range sources[i+1:] {
 			later.reset()
 		}
@@ -215,15 +239,27 @@ func splitBatch(b harnessproto.RuntimeEventBatch) []harnessproto.RuntimeEventBat
 	firstSeq := b.Seq - int64(len(b.Events)) + 1
 	var out []harnessproto.RuntimeEventBatch
 	start, bytes := 0, 0
+	frame := func(seq int64, from, to int) harnessproto.RuntimeEventBatch {
+		f := harnessproto.RuntimeEventBatch{Seq: seq, Events: b.Events[from:to]}
+		for i, p := range b.Positions {
+			if i >= from && i < to {
+				if f.Positions == nil {
+					f.Positions = map[int]harnessproto.TurnSourcePos{}
+				}
+				f.Positions[i-from] = p
+			}
+		}
+		return f
+	}
 	for i, ev := range b.Events {
 		size := eventSize(ev)
 		if i > start && (i-start >= maxBatchEvents || bytes+size > maxBatchPayloadBytes) {
-			out = append(out, harnessproto.RuntimeEventBatch{Seq: firstSeq + int64(i) - 1, Events: b.Events[start:i]})
+			out = append(out, frame(firstSeq+int64(i)-1, start, i))
 			start, bytes = i, 0
 		}
 		bytes += size
 	}
-	return append(out, harnessproto.RuntimeEventBatch{Seq: b.Seq, Events: b.Events[start:]})
+	return append(out, frame(b.Seq, start, len(b.Events)))
 }
 
 // sweep reads each source once, in order, accumulating new events into batch
@@ -257,7 +293,11 @@ func sweep(sources []*tailSource, ordinal *int64, afterSeq int64, batch *harness
 			resyncAll()
 			return false
 		}
-		s.offset = readFrom(s.path, s.offset, s.dec.mapLine, ordinal, afterSeq, batch)
+		src := s
+		s.offset = readFrom(s.path, s.offset, s.dec.mapLine, ordinal, afterSeq, batch, func(ev harnessproto.RuntimeEvent) *harnessproto.TurnSourcePos {
+			src.events++
+			return src.turnPos(ev)
+		})
 	}
 	return true
 }
@@ -267,7 +307,7 @@ func sweep(sources []*tailSource, ordinal *int64, afterSeq int64, batch *harness
 // afterSeq to batch, and returns the new offset (past the last complete line). A
 // partial trailing line is not consumed. batch is passed in rather than returned
 // so one poll's sources accumulate into a single batch under one ordinal space.
-func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch) int64 {
+func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afterSeq int64, batch *harnessproto.RuntimeEventBatch, onEvent func(harnessproto.RuntimeEvent) *harnessproto.TurnSourcePos) int64 {
 	f, err := os.Open(path)
 	if err != nil {
 		return offset
@@ -289,7 +329,17 @@ func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afte
 		consumed += int64(len(line))
 		for _, ev := range mapper(line) {
 			*ordinal++
+			var pos *harnessproto.TurnSourcePos
+			if onEvent != nil {
+				pos = onEvent(ev)
+			}
 			if *ordinal > afterSeq {
+				if pos != nil {
+					if batch.Positions == nil {
+						batch.Positions = map[int]harnessproto.TurnSourcePos{}
+					}
+					batch.Positions[len(batch.Events)] = *pos
+				}
 				batch.Events = append(batch.Events, ev)
 				batch.Seq = *ordinal
 			}
@@ -304,7 +354,7 @@ func readFrom(path string, offset int64, mapper LineMapper, ordinal *int64, afte
 func mapEachLine(path string, mapper LineMapper) []harnessproto.RuntimeEvent {
 	var ordinal int64
 	var batch harnessproto.RuntimeEventBatch
-	readFrom(path, 0, mapper, &ordinal, 0, &batch)
+	readFrom(path, 0, mapper, &ordinal, 0, &batch, nil)
 	return batch.Events
 }
 
