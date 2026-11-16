@@ -187,19 +187,19 @@ var goldenFrames = []struct {
 			ServerID:         "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U",
 			RouteID:          "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3",
 			ActivationSecret: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
-			GrantRef:         "c2VjcmV0LWdyYW50LXJlZg", Requester: "usr_01HZXK5Q8M",
+			GrantRef:         "b3BhcXVlLWdyYW50LXJlZg", Requester: "usr_01HZXK5Q8M",
 		},
 	}},
 	{"direct-wake-v1-wake", HarnessMsg{
 		Type: HDirectWake, ReqID: "dw2", DirectWake: &DirectWake{
 			ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U",
-			Wakes:    []DirectWakeRef{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", WakeID: "dwk_AAECAwQFBgcICQoLDA0ODw", GrantRef: "c2VjcmV0LWdyYW50LXJlZg"}},
+			Wakes:    []DirectWakeRef{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", WakeID: "dwk_AAECAwQFBgcICQoLDA0ODw", GrantRef: "b3BhcXVlLWdyYW50LXJlZg"}},
 		},
 	}},
 	{"direct-wake-v1-routes", HarnessMsg{
 		Type: HDirectWakeRoutes, ReqID: "dw3", DirectWake: &DirectWake{
 			ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U", Epoch: "ep-3f9a", Part: 0, Final: true,
-			Routes: []DirectWakeRouteRef{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", GrantRef: "c2VjcmV0LWdyYW50LXJlZg", State: DirectWakeStateActive}},
+			Routes: []DirectWakeRouteRef{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", GrantRef: "b3BhcXVlLWdyYW50LXJlZg", State: DirectWakeStateActive}},
 		},
 	}},
 	{"direct-wake-v1-result", MuxMsg{

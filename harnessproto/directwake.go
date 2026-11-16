@@ -158,6 +158,24 @@ func validHandle(s, prefix string, n int) bool {
 	return err == nil && len(b) == n
 }
 
+// validServerID admits the direct server identity shape: the RFC 7638 SHA-256
+// JWK thumbprint, unpadded base64url of 32 bytes (docs/direct-access.md).
+func validServerID(s string) bool { return validHandle(s, "", 32) }
+
+// validRequester admits an empty requester or a Harness user id of 1-128
+// printable bytes (the direct authority's principal rule).
+func validRequester(s string) bool {
+	if len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		if r <= 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func validGrantRef(s string) bool { return len(s) == 22 && validB64(s) }
 
 func validB64(s string) bool {
@@ -173,7 +191,7 @@ const MaxDirectWakeRouteParts = 8
 // another frame type makes the frame invalid, so a secret can never ride on a
 // wake or routes frame and a wake can never smuggle activation fields.
 func ValidDirectWakeFrame(typ string, w *DirectWake) bool {
-	if w == nil || w.ServerID == "" || len(w.ServerID) > 64 {
+	if w == nil || !validServerID(w.ServerID) || !validRequester(w.Requester) {
 		return false
 	}
 	activation := w.RouteID != "" || w.ActivationSecret != "" || w.GrantRef != "" || w.Requester != ""
@@ -182,7 +200,7 @@ func ValidDirectWakeFrame(typ string, w *DirectWake) bool {
 	switch typ {
 	case HDirectWakeActivate:
 		return !wakes && !sync && ValidDirectWakeRouteID(w.RouteID) && ValidDirectWakeSecret(w.ActivationSecret) &&
-			validGrantRef(w.GrantRef) && len(w.Requester) <= 128
+			validGrantRef(w.GrantRef)
 	case HDirectWake:
 		if activation || sync || len(w.Wakes) > MaxDirectWakeBatch || !wakes {
 			return false
