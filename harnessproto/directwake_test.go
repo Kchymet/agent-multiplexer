@@ -91,6 +91,35 @@ func TestValidDirectWakeFrame(t *testing.T) {
 	if ValidDirectWakeFrame(HDirectWakeRoutes, &DirectWake{ServerID: "s", Routes: routes.Routes}) {
 		t.Error("routes without an epoch accepted")
 	}
+	// Cross-kind fields are refused in every direction.
+	crossKind := []struct {
+		typ string
+		w   DirectWake
+	}{
+		{HDirectWakeActivate, DirectWake{ServerID: "s", RouteID: testRoute, ActivationSecret: testSecret, GrantRef: testGrant, Epoch: "e"}},
+		{HDirectWakeActivate, DirectWake{ServerID: "s", RouteID: testRoute, ActivationSecret: testSecret, GrantRef: testGrant, Final: true}},
+		{HDirectWakeActivate, DirectWake{ServerID: "s", RouteID: testRoute, ActivationSecret: testSecret, GrantRef: testGrant, Part: 1}},
+		{HDirectWakeActivate, DirectWake{ServerID: "s", RouteID: testRoute, ActivationSecret: testSecret, GrantRef: testGrant, Wakes: wake.Wakes}},
+		{HDirectWake, DirectWake{ServerID: "s", Wakes: wake.Wakes, RouteID: testRoute}},
+		{HDirectWake, DirectWake{ServerID: "s", Wakes: wake.Wakes, Requester: "u"}},
+		{HDirectWake, DirectWake{ServerID: "s", Wakes: wake.Wakes, GrantRef: testGrant}},
+		{HDirectWake, DirectWake{ServerID: "s", Wakes: wake.Wakes, Epoch: "e"}},
+		{HDirectWakeRoutes, DirectWake{ServerID: "s", Epoch: "e", Routes: routes.Routes, ActivationSecret: testSecret}},
+		{HDirectWakeRoutes, DirectWake{ServerID: "s", Epoch: "e", Routes: routes.Routes, RouteID: testRoute}},
+		{HDirectWakeRoutes, DirectWake{ServerID: "s", Epoch: "e", Routes: routes.Routes, Requester: "u"}},
+		{HDirectWakeRoutes, DirectWake{ServerID: "s", Epoch: "e", Part: MaxDirectWakeRouteParts}},
+		{HDirectWakeRoutes, DirectWake{ServerID: "s", Epoch: "e", Routes: []DirectWakeRouteRef{{RouteID: testRoute, GrantRef: testGrant, State: "failed"}}}},
+	}
+	for i, c := range crossKind {
+		if ValidDirectWakeFrame(c.typ, &c.w) {
+			t.Errorf("cross-kind case %d (%s) accepted", i, c.typ)
+		}
+	}
+	// An empty routes snapshot (no subscriptions) is valid: it is how a host
+	// says "none".
+	if !ValidDirectWakeFrame(HDirectWakeRoutes, &DirectWake{ServerID: "s", Epoch: "e", Final: true}) {
+		t.Error("empty final snapshot rejected")
+	}
 	if ValidDirectWakeFrame("nope", act) || ValidDirectWakeFrame(HDirectWake, nil) {
 		t.Error("unknown type or nil body accepted")
 	}

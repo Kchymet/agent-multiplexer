@@ -165,18 +165,26 @@ func validB64(s string) bool {
 	return err == nil
 }
 
+// MaxDirectWakeRouteParts bounds one route-sync epoch (parts 0..n).
+const MaxDirectWakeRouteParts = 8
+
 // ValidDirectWakeFrame checks a provider frame's shape for its type (not its
-// authority).
+// authority). Each frame type admits only its own fields: a field belonging to
+// another frame type makes the frame invalid, so a secret can never ride on a
+// wake or routes frame and a wake can never smuggle activation fields.
 func ValidDirectWakeFrame(typ string, w *DirectWake) bool {
 	if w == nil || w.ServerID == "" || len(w.ServerID) > 64 {
 		return false
 	}
+	activation := w.RouteID != "" || w.ActivationSecret != "" || w.GrantRef != "" || w.Requester != ""
+	wakes := len(w.Wakes) != 0
+	sync := w.Epoch != "" || len(w.Routes) != 0 || w.Part != 0 || w.Final
 	switch typ {
 	case HDirectWakeActivate:
-		return ValidDirectWakeRouteID(w.RouteID) && ValidDirectWakeSecret(w.ActivationSecret) &&
-			validGrantRef(w.GrantRef) && len(w.Requester) <= 128 && len(w.Wakes) == 0 && len(w.Routes) == 0
+		return !wakes && !sync && ValidDirectWakeRouteID(w.RouteID) && ValidDirectWakeSecret(w.ActivationSecret) &&
+			validGrantRef(w.GrantRef) && len(w.Requester) <= 128
 	case HDirectWake:
-		if len(w.Wakes) == 0 || len(w.Wakes) > MaxDirectWakeBatch || w.ActivationSecret != "" || len(w.Routes) != 0 {
+		if activation || sync || len(w.Wakes) > MaxDirectWakeBatch || !wakes {
 			return false
 		}
 		for _, r := range w.Wakes {
@@ -186,8 +194,8 @@ func ValidDirectWakeFrame(typ string, w *DirectWake) bool {
 		}
 		return true
 	case HDirectWakeRoutes:
-		if w.Epoch == "" || len(w.Epoch) > 64 || len(w.Routes) > MaxDirectWakeRoutes || w.Part < 0 ||
-			w.ActivationSecret != "" || len(w.Wakes) != 0 {
+		if activation || wakes || w.Epoch == "" || len(w.Epoch) > 64 || len(w.Routes) > MaxDirectWakeRoutes ||
+			w.Part < 0 || w.Part >= MaxDirectWakeRouteParts {
 			return false
 		}
 		for _, r := range w.Routes {
