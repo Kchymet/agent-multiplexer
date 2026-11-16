@@ -1500,3 +1500,63 @@ func TestWakeEagerReusedID(t *testing.T) {
 		t.Fatalf("reused id replayed the old session: %v", got)
 	}
 }
+
+// Two subscriptions and a reused id: A (all sessions) has d1 baselined, so
+// the store knows d1's transcript generation; B (wg1) observed d1 out of
+// scope. d1 is reused by a new in-scope session with a NEW transcript: both
+// get the new permission and neither replays the old one. With a shared
+// (same-file) source instead, neither replays and the next event wakes both.
+func TestWakeReusedIDTwoSubscribers(t *testing.T) {
+	for _, sameFile := range []bool{false, true} {
+		rows := testRows()
+		h := newWakeHarness(t, rows...)
+		tokA := enroll(t, h.a, []string{PermRead}, allSessions)
+		tokB := enroll(t, h.a, []string{PermRead}, ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"wg1"}})
+		rA, rB := testRouteID(1), testRouteID(2)
+		h.b.add("d1", 1, permEv("d-old", "d-old", "g"))
+		h.subscribe(tokA.AccessToken, rA, testSecretN(1))
+		h.tick()
+		h.subscribe(tokB.AccessToken, rB, testSecretN(2))
+		h.tick()
+		seqA := h.fetch(tokA.AccessToken, rA, WakeFetchRequest{}).NextSeq
+		h.b.setInc("d1", "inc-d1-new")
+		if sameFile {
+			h.b.add("d1", 2, permEv("d-new", "d-new", "g2"))
+		} else {
+			h.b.replaceSrc("d1", "claude", permEv("d-new", "d-new", "g2"))
+		}
+		for i := range rows {
+			if rows[i].ID == "d1" {
+				rows[i].RootID = "wg1"
+			}
+		}
+		h.b.setRows(rows...)
+		h.tick()
+		h.tick()
+		if sameFile {
+			// Same file: the reused id restarts at its head (never replays);
+			// the next event wakes both.
+			h.b.add("d1", 3, permEv("d-next", "d-next", "g2"))
+			h.tick()
+			h.tick()
+		}
+		want := "d-new"
+		if sameFile {
+			want = "d-next"
+		}
+		for _, c := range []struct {
+			name, tok, route string
+			after            int64
+		}{{"A", tokA.AccessToken, rA, seqA}, {"B", tokB.AccessToken, rB, 0}} {
+			got := map[string]bool{}
+			for _, it := range h.fetch(c.tok, c.route, WakeFetchRequest{AfterSeq: c.after}).Items {
+				if it.Kind == WakeKindPermission {
+					got[it.RequestID] = true
+				}
+			}
+			if got["d-old"] || !got[want] {
+				t.Fatalf("sameFile=%v %s: %v (want %s, no d-old)", sameFile, c.name, got, want)
+			}
+		}
+	}
+}

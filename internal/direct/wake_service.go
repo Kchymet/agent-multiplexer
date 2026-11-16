@@ -209,20 +209,28 @@ func (s *WakeService) Tick(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		if needIncarnation {
-			s.store.observeIncarnation(sid, inc, heads, gens, nowMs)
-		}
+		// Start positions are decided from the generations stored BEFORE this
+		// tick observes the new incarnation (observeIncarnation records the
+		// new files' generations, which would erase the proof that a reused
+		// id's transcript is a new file).
+		starts := map[wakeTarget]map[string]int64{}
 		for _, t := range needBaseline {
-			start := heads
 			switch origin[t] {
 			case originNew:
 				// Created after the subscription's eager pass: every event
 				// of it is new to the subscription.
-				start = zeroHeads(heads)
+				starts[t] = zeroHeads(heads)
 			case originReused:
-				start = s.store.reusedStart(sid, heads, gens)
+				starts[t] = s.store.reusedStart(sid, heads, gens)
+			default:
+				starts[t] = heads
 			}
-			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, start, gens)
+		}
+		if needIncarnation {
+			s.store.observeIncarnation(sid, inc, heads, gens, nowMs)
+		}
+		for _, t := range needBaseline {
+			s.store.baseline(t.ClientID, t.RouteID, t.Nonce, sid, starts[t], gens)
 		}
 	}
 	// Read: sessions whose inventory state changed first, then round-robin.
