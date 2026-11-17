@@ -173,6 +173,47 @@ var goldenFrames = []struct {
 	{"direct-enroll-v1-refused", HarnessMsg{
 		Type: HDirectEnrollResult, ReqID: "de2", DirectEnroll: &DirectEnrollResult{Error: DirectEnrollErrOwnerMismatch},
 	}},
+	{"direct-wake-v1-register", HarnessMsg{
+		Type: HRegister, Versions: []int{2}, Token: "hp_token", Name: "mybox",
+		Capabilities: &Capabilities{OS: "linux", Arch: "amd64", Features: []string{DirectWakeV1},
+			DirectWake: &DirectWakeCapabilities{ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U"}},
+	}},
+	{"direct-wake-v1-registered", MuxMsg{
+		Type: MRegistered, OK: true, Version: 2, ProviderID: "prov-7", HeartbeatSeconds: 15, GraceSeconds: 60,
+		Features: []string{DirectWakeV1},
+	}},
+	{"direct-wake-v1-activate", HarnessMsg{
+		Type: HDirectWakeActivate, ReqID: "dw1", DirectWake: &DirectWake{
+			ServerID:         "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U",
+			RouteID:          "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3",
+			ActivationSecret: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+			GrantRef:         "b3BhcXVlLWdyYW50LXJlZg", Requester: "usr_01HZXK5Q8M",
+		},
+	}},
+	{"direct-wake-v1-wake", HarnessMsg{
+		Type: HDirectWake, ReqID: "dw2", DirectWake: &DirectWake{
+			ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U",
+			Wakes:    []DirectWakeRef{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", WakeID: "dwk_AAECAwQFBgcICQoLDA0ODw", GrantRef: "b3BhcXVlLWdyYW50LXJlZg"}},
+		},
+	}},
+	{"direct-wake-v1-routes", HarnessMsg{
+		Type: HDirectWakeRoutes, ReqID: "dw3", DirectWake: &DirectWake{
+			ServerID: "AhW5GL1YTk5AXr4e0pvQx2pVoFpY6M3WC9uWFRvUw2U", Epoch: "ep-3f9a", Part: 0, Final: true,
+			Routes: []DirectWakeRouteRef{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", GrantRef: "b3BhcXVlLWdyYW50LXJlZg", State: DirectWakeStateActive}},
+		},
+	}},
+	{"direct-wake-v1-result", MuxMsg{
+		Type: MDirectWakeResult, ReqID: "dw2", DirectWakeResult: &DirectWakeResult{
+			Results: []DirectWakeResultItem{{RouteID: "dwr_q8Hq0xV0y3Yb2mJ1wQ7p4uZr9tN6cD5eF8gH1iJ2kL3", WakeID: "dwk_AAECAwQFBgcICQoLDA0ODw", Status: DirectWakeAccepted}},
+		},
+	}},
+	{"direct-wake-v1-refused", MuxMsg{
+		Type: MDirectWakeResult, ReqID: "dw4", DirectWakeResult: &DirectWakeResult{Error: DirectWakeUnavailable},
+	}},
+	{"runtime_events_incarnation", HarnessMsg{
+		Type: HRuntimeEvents, SessionID: "s1", Runtime: RuntimeCodex, Incarnation: "inc-7f3a", Seq: 9,
+		Events: []RuntimeEvent{{Type: TypeTurnEnd, Direction: DirOut, Payload: json.RawMessage(`{"stop_reason":"end_turn"}`)}},
+	}},
 }
 
 func TestGoldenFrames(t *testing.T) {

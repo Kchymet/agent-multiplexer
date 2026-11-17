@@ -301,7 +301,11 @@ type SessionCaps struct {
 // Host paths, process ids, account bindings and local attach affordances are
 // never sent.
 type Session struct {
-	ID          string                   `json:"id"`
+	ID string `json:"id"`
+	// Incarnation is the session's daemon store incarnation: it changes when
+	// the id is reused by another session. Additive; absent when the store
+	// has no identity for the row or the server predates it.
+	Incarnation string                   `json:"incarnation,omitempty"`
 	Title       string                   `json:"title"`
 	Kind        string                   `json:"kind,omitempty"`
 	Mode        string                   `json:"mode,omitempty"`
@@ -471,6 +475,9 @@ type CapabilitiesResponse struct {
 	// AsyncCreate are false and every creation answers
 	// daemon_upgrade_required until the host upgrades and restarts it.
 	DaemonUpgradeRequired bool `json:"daemon_upgrade_required,omitempty"`
+	// Wake is always set by a server that serves the wake routes
+	// (docs/direct-wake-contract.md). Absent means the server predates them.
+	Wake *WakeCapabilities `json:"wake,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the

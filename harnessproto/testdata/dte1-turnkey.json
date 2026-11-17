@@ -1,0 +1,144 @@
+{
+  "doc": "dte1 shared turn-end occurrence key fixtures (amux docs/direct-wake-contract.md). key = \"dte1_\" + base64url(first 16 bytes of SHA-256(join(\"\\x00\", \"amux-turn-end-v1\", session_id, incarnation, kind, line_digest, decimal(index))))); line_digest = generation after its last '.'; empty key when any input is unknown.",
+  "source_kinds": [
+    "structured",
+    "claude",
+    "codex",
+    "permission",
+    "journal"
+  ],
+  "cases": [
+    {
+      "name": "base",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 12,
+      "key": "dte1_BGyGVaFCLj2TH0HFZPXyYw"
+    },
+    {
+      "name": "restore_copy",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "TmV3RmlsZUlkZW50.bGluZTFkaWdl",
+      "index": 12,
+      "key": "dte1_BGyGVaFCLj2TH0HFZPXyYw"
+    },
+    {
+      "name": "next_turn_end",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 13,
+      "key": "dte1_2TouWdl0FVBZ2T1xtG44AA"
+    },
+    {
+      "name": "reused_id",
+      "session_id": "agent-7",
+      "incarnation": "inc-77c1",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 12,
+      "key": "dte1_PfSYHdO9raVd9DiT2YC51A"
+    },
+    {
+      "name": "new_transcript",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.b3RoZXJmaXJz",
+      "index": 12,
+      "key": "dte1_wvGEx43bBUx74uySM-i-nA"
+    },
+    {
+      "name": "other_source",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "journal",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 12,
+      "key": "dte1_tIMzpk6DP-2bzpYaRk4wJg"
+    },
+    {
+      "name": "structured_source",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "structured",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 12,
+      "key": "dte1_641MfIk7Fbnqz8JVVVn8OA"
+    },
+    {
+      "name": "claude_source",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "claude",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 12,
+      "key": "dte1_r7s_Zwpz8tklatiO_nBCBw"
+    },
+    {
+      "name": "no_first_line",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.",
+      "index": 12,
+      "key": ""
+    },
+    {
+      "name": "unknown_generation",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "",
+      "index": 12,
+      "key": ""
+    },
+    {
+      "name": "unlabeled_batch",
+      "session_id": "agent-7",
+      "incarnation": "",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 12,
+      "key": ""
+    },
+    {
+      "name": "no_index",
+      "session_id": "agent-7",
+      "incarnation": "inc-3f9a",
+      "kind": "codex",
+      "generation": "Q2F0Zm9vZGJhcg.bGluZTFkaWdl",
+      "index": 0,
+      "key": ""
+    }
+  ],
+  "same_key": [
+    [
+      "base",
+      "restore_copy"
+    ]
+  ],
+  "different_key": [
+    [
+      "base",
+      "next_turn_end"
+    ],
+    [
+      "base",
+      "reused_id"
+    ],
+    [
+      "base",
+      "new_transcript"
+    ],
+    [
+      "base",
+      "other_source"
+    ]
+  ]
+}

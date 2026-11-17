@@ -53,6 +53,7 @@ var directSubcommands = map[string]func([]string) error{
 	"clients":        cmdDirectClients,
 	"reset-identity": cmdDirectResetIdentity,
 	"cloud":          cmdDirectCloud,
+	"wake":           cmdDirectWake,
 	"enable":         cmdDirectEnable,
 	"disable":        cmdDirectDisable,
 	"status":         cmdDirectStatus,

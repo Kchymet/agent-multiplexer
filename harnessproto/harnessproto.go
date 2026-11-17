@@ -316,6 +316,8 @@ type Capabilities struct {
 	Features []string `json:"features,omitempty"`
 	// Direct is present only with DirectEnrollV1 (see directenroll.go).
 	Direct *DirectCapabilities `json:"direct,omitempty"`
+	// DirectWake is present only with DirectWakeV1 (see directwake.go).
+	DirectWake *DirectWakeCapabilities `json:"directWake,omitempty"`
 }
 
 // PaneOffer is a still-running pane a reconnecting provider offers for resume.
@@ -360,6 +362,11 @@ type MuxMsg struct {
 	// orchestrator). The host uses it to default `amux direct cloud enable`
 	// pins; it never authorizes anything by itself.
 	Owner *RegisteredOwner `json:"owner,omitempty"`
+	// Features are the registration features the orchestrator accepted
+	// (registered only). A provider uses only echoed features that need an
+	// orchestrator-side handler (DirectWakeV1); absent means none, which is
+	// what an older orchestrator sends.
+	Features []string `json:"features,omitempty"`
 
 	// v2 pong.
 	T int64 `json:"t,omitempty"` // pong: echoes the ping timestamp
@@ -384,6 +391,9 @@ type MuxMsg struct {
 
 	// direct-enroll-v1 (direct-enroll; also uses ReqID).
 	DirectEnroll *DirectEnrollRequest `json:"directEnroll,omitempty"`
+
+	// direct-wake-v1 (direct-wake-result; also uses ReqID).
+	DirectWakeResult *DirectWakeResult `json:"directWakeResult,omitempty"`
 }
 
 // RegisteredOwner identifies the account that owns a provider registration.
@@ -441,9 +451,14 @@ type HarnessMsg struct {
 	// produced the batch (Runtime* — "claude", "codex", …); it is additive and
 	// omitted by a producer that predates it, so a consumer that needs a runtime
 	// falls back to its own default when the field is absent.
-	SessionID string         `json:"sessionId,omitempty"`
-	Runtime   string         `json:"runtime,omitempty"`
-	Events    []RuntimeEvent `json:"events,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Runtime   string `json:"runtime,omitempty"`
+	// Incarnation is the daemon store incarnation of SessionID when the batch
+	// was read (runtime-events, runtime-events-page). It distinguishes a reused
+	// session id from the session that produced these events. Additive: absent
+	// from a provider that predates it or when the store has no identity.
+	Incarnation string         `json:"incarnation,omitempty"`
+	Events      []RuntimeEvent `json:"events,omitempty"`
 
 	// v2 "runtime-events-history" feature (runtime-events-page; also uses ReqID,
 	// OK, Error, SessionID, Runtime, Seq and Events). Events are ascending and Seq
@@ -456,6 +471,9 @@ type HarnessMsg struct {
 
 	// direct-enroll-v1 (direct-enroll-result; also uses ReqID).
 	DirectEnroll *DirectEnrollResult `json:"directEnroll,omitempty"`
+
+	// direct-wake-v1 (direct-wake; also uses ReqID).
+	DirectWake *DirectWake `json:"directWake,omitempty"`
 }
 
 // Conn is a typed harnessproto connection: one JSON object per line over any byte

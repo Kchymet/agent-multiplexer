@@ -144,6 +144,7 @@ type provideFlags struct {
 	readOnly                                 bool
 	rtEvents                                 bool
 	directEnroll                             bool
+	directWake                               bool
 	labels                                   multiFlag
 	features                                 multiFlag
 	harnesses                                multiFlag
@@ -164,6 +165,7 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
 	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
 	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
+	fs.BoolVar(&f.directWake, "direct-wake", false, "forward content-free direct wake-ups (direct-wake-v1) while `amux direct wake enable` is in effect on this host (default $AMUX_PROVIDER_DIRECT_WAKE; off by default)")
 	fs.BoolVar(&f.directEnroll, "direct-enroll", false, "offer cloud-assisted direct enrollment (direct-enroll-v1) while `amux direct cloud enable` is in effect on this host (default $AMUX_PROVIDER_DIRECT_ENROLL; off by default)")
 	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
 	fs.Var(&f.harnesses, "harness", "restrict automatic discovery to this harness (repeatable; auto resets the restriction)")
@@ -272,7 +274,12 @@ func provideRun(args []string) error {
 		// inferring it from a log tail.
 		OnStatus: func(st provider.Status) { _ = provider.WriteStatus(provider.StatusPath(), st) },
 	}
-	wireHostBackend(&cfg, hostbackend.New(), publish, readonly, runtimeEvents)
+	host := hostbackend.New()
+	wireHostBackend(&cfg, host, publish, readonly, runtimeEvents)
+	wireSessionIncarnation(&cfg, host)
+	if resolvedBool(fs, "direct-wake", f.directWake, "AMUX_PROVIDER_DIRECT_WAKE", file.DirectWake) {
+		wireDirectWake(&cfg)
+	}
 	if resolvedBool(fs, "direct-enroll", f.directEnroll, "AMUX_PROVIDER_DIRECT_ENROLL", file.DirectEnroll) {
 		wireDirectEnroll(&cfg)
 	}

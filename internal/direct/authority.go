@@ -126,6 +126,9 @@ var errDegraded = errors.New("direct store durability is uncertain after a faile
 // unless the directory entry is lost), returns failure without handing out
 // anything that depends on it, and the authority refuses further issuance.
 func (a *Authority) commitLocked() error {
+	if a.identity != nil {
+		a.pruneWakeLocked() // in memory; persisted by this very commit
+	}
 	err := a.st.saveState(a.state)
 	switch {
 	case err == nil:
@@ -222,6 +225,7 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
 		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
 	}
+	a.pruneWakeLocked() // in memory only: never a startup write
 	if state.IdentityGeneration != id.Generation {
 		// A grant issued under another identity can never be valid again.
 		a.revokeAllLocked("identity changed")
@@ -664,6 +668,8 @@ func (a *Authority) revokeAllLocked(reason string) []*Lease {
 	// Cloud issuance stops with the identity: the operator re-enables it
 	// deliberately, under a new generation.
 	a.disableCloudLocked(reason, now)
+	// So do wake-ups (every subscription belonged to a revoked grant anyway).
+	a.disableWakeLocked(reason, now)
 	return all
 }
 

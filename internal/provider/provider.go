@@ -102,6 +102,19 @@ type Config struct {
 	// (the default) disables the feature entirely.
 	DirectEnroll DirectEnroller
 
+	// DirectWake offers direct-wake-v1 (docs/direct-wake-contract.md). Before
+	// each dial the provider asks whether this host's direct server has
+	// wake-ups enabled with pins matching this registration; only then does it
+	// advertise the feature, and only after the orchestrator echoes it does it
+	// forward wakes. Nil (the default) disables the feature entirely.
+	DirectWake DirectWaker
+
+	// SessionIncarnation, when set, returns a session's daemon store
+	// incarnation; it is stamped on runtime-events batches and pages so the
+	// orchestrator can tell a reused session id apart. Optional.
+	// ok=false means the lookup failed (unknown, not "no identity").
+	SessionIncarnation func(ctx context.Context, sessionID string) (incarnation string, ok bool)
+
 	// OnStatus, when set, receives a snapshot every time the connection state
 	// changes (dial, register, disconnect, heartbeat, stop). The CLI wires it to
 	// the status file doctor reads; nil reports nothing. It is called from the
@@ -131,8 +144,9 @@ type Provider struct {
 	wake  chan struct{} // active session's send-loop wake; nil while disconnected
 	grace *time.Timer   // pane-survival deadline while disconnected
 
-	graceDur time.Duration                    // grace window from the last registered (seconds → duration)
-	direct   *harnessproto.DirectCapabilities // direct-enroll-v1 offer for the next/current registration (mu)
+	graceDur   time.Duration                    // grace window from the last registered (seconds → duration)
+	direct     *harnessproto.DirectCapabilities // direct-enroll-v1 offer for the next/current registration (mu)
+	directWake *WakeOffer                       // current direct-wake-v1 offer (nil: not advertised)
 
 	// Tunables; defaulted by New, overridable by tests.
 	backoffMin time.Duration
@@ -186,6 +200,7 @@ func (p *Provider) Run(ctx context.Context) error {
 			p.cfg.Execution = p.cfg.DiscoverExecution(ctx)
 		}
 		p.discoverDirect(ctx)
+		p.discoverDirectWake(ctx)
 		p.setStatus(func(s *Status) { s.State = StateDialing })
 		conn, err := p.dial(ctx)
 		if err != nil {
@@ -243,6 +258,7 @@ func (p *Provider) dial(ctx context.Context) (net.Conn, error) {
 type session struct {
 	accountChannel AccountChannel
 	directInFlight atomic.Int32 // direct-enroll requests awaiting the host
+	dwake          wakeState    // direct-wake-v1 frames awaiting the orchestrator
 	providerID     string       // this connection's registered id (MRegistered.ProviderID)
 	hc             *harnessproto.Conn
 	done           chan struct{}
@@ -369,6 +385,7 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	now := time.Now()
 	panes := p.paneCount()
 	advertised := p.directOffer()
+	wakeOffer := p.directWakeOffer()
 	p.setStatus(func(s *Status) {
 		s.State, s.ProviderID, s.RegisteredAt, s.LastError, s.Panes = StateRegistered, m.ProviderID, now, "", panes
 		s.OwnerUserID, s.OwnerEmail = "", ""
@@ -419,6 +436,21 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	if p.cfg.DirectEnroll != nil {
 		wg.Add(1)
 		go func() { defer wg.Done(); p.watchDirect(s, advertised) }()
+	}
+	if p.cfg.DirectWake != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); p.watchDirectWake(s, wakeOffer) }()
+		switch {
+		case wakeOffer == nil:
+		case !p.wakePinsMatch(wakeOffer, m.ProviderID, m.Owner):
+			// Advertised before this process knew its registration: the host's
+			// pins name another provider or owner. Re-register without it.
+			p.cfg.Logf("direct-wake pins do not match this registration; withdrawing the offer")
+			s.cancel()
+		case echoed(m.Features, harnessproto.DirectWakeV1):
+			wg.Add(1)
+			go func() { defer wg.Done(); p.runDirectWake(s, wakeOffer) }()
+		}
 	}
 
 	select {
@@ -480,6 +512,12 @@ func (p *Provider) capabilities() *harnessproto.Capabilities {
 		Arch:      runtime.GOARCH,
 		Features:  p.features(),
 		Direct:    p.directOffer(),
+		DirectWake: func() *harnessproto.DirectWakeCapabilities {
+			if o := p.directWakeOffer(); o != nil {
+				return &harnessproto.DirectWakeCapabilities{ServerID: o.ServerID}
+			}
+			return nil
+		}(),
 	}
 }
 
@@ -490,12 +528,15 @@ func (p *Provider) features() []string {
 	out := []string{}
 	for _, f := range p.cfg.Features {
 		// Granted features are never taken from opaque config strings.
-		if f != harnessproto.AccountsV1 && f != harnessproto.DirectEnrollV1 {
+		if f != harnessproto.AccountsV1 && f != harnessproto.DirectEnrollV1 && f != harnessproto.DirectWakeV1 {
 			out = append(out, f)
 		}
 	}
 	if p.directOffer() != nil {
 		out = appendUnique(out, harnessproto.DirectEnrollV1)
+	}
+	if p.directWakeOffer() != nil {
+		out = appendUnique(out, harnessproto.DirectWakeV1)
 	}
 	if p.cfg.OpenAccounts != nil && (p.cfg.AccountStatus || p.cfg.AccountUse) {
 		out = appendUnique(out, harnessproto.AccountsV1)
@@ -635,6 +676,8 @@ func (p *Provider) readLoop(s *session) {
 			p.handleAccount(s, m)
 		case harnessproto.MDirectEnroll:
 			p.handleDirectEnroll(s, m)
+		case harnessproto.MDirectWakeResult:
+			p.onDirectWakeResult(s, m)
 		case harnessproto.MSessionAction:
 			p.handleSessionAction(s, m)
 		case harnessproto.MRuntimeEventsSubscribe:

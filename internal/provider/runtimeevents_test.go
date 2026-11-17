@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,13 +23,20 @@ type fakeStream struct {
 	gotSess  string
 	gotAfter int64
 	calls    int
+	ctxs     []context.Context // each producer's context, in open order
+	failNext int               // fail this many opens before succeeding
 }
 
-func (f *fakeStream) stream(_ context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
+func (f *fakeStream) stream(ctx context.Context, sessionID string, afterSeq int64) (<-chan harnessproto.RuntimeEventBatch, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gotSess, f.gotAfter = sessionID, afterSeq
 	f.calls++
+	f.ctxs = append(f.ctxs, ctx)
+	if f.failNext > 0 {
+		f.failNext--
+		return nil, false
+	}
 	return f.ch, f.ok
 }
 
@@ -429,5 +437,83 @@ func TestRetainedRuntimeStreamSurvivesUnrelatedSnapshotChange(t *testing.T) {
 	}
 	if _, _, calls := fs.observed(); calls != 1 {
 		t.Fatalf("resolver calls = %d, want one retained subscription", calls)
+	}
+}
+
+// A runtime-events stream is bound to the incarnation it was opened for. A
+// transient lookup failure emits the batch unlabelled and keeps the stream; a
+// confirmed id reuse drops queued old batches (never relabelled) and re-opens
+// the stream from the start of the new record under the new label.
+func TestRuntimeEventsIncarnationBinding(t *testing.T) {
+	conns := make(chan net.Conn, 1)
+	src := &mutableSource{}
+	src.set([]core.Session{{ID: "sess-1"}})
+	fs := &fakeStream{ch: make(chan harnessproto.RuntimeEventBatch, 4), ok: true}
+	var incMu sync.Mutex
+	inc, incOK := "inc-old", true
+	set := func(v string, ok bool) { incMu.Lock(); inc, incOK = v, ok; incMu.Unlock() }
+	p := newFast(Config{
+		Orchestrator: "pipe", Dial: pipeDialer(conns),
+		PublishSessions: true, Sessions: src.poll,
+		RuntimeEvents: true, RuntimeEventStream: fs.stream,
+		SessionIncarnation: func(context.Context, string) (string, bool) {
+			incMu.Lock()
+			defer incMu.Unlock()
+			return inc, incOK
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	oc := harnessproto.NewConn(<-conns)
+	accept(t, oc, 2, nil, 60)
+	subscribe(t, oc)
+	readSessions(t, oc)
+	if err := oc.WriteMux(harnessproto.MuxMsg{Type: harnessproto.MRuntimeEventsSubscribe, SessionID: "sess-1"}); err != nil {
+		t.Fatal(err)
+	}
+	ev := func(text string) []harnessproto.RuntimeEvent {
+		return []harnessproto.RuntimeEvent{{Type: "text", Direction: "out", Payload: json.RawMessage(`{"text":"` + text + `"}`)}}
+	}
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 1, Runtime: harnessproto.RuntimeClaude, Events: ev("a")}
+	if m := readRuntimeEvents(t, oc); m.Incarnation != "inc-old" {
+		t.Fatalf("first batch incarnation = %q", m.Incarnation)
+	}
+	// Transient lookup failure: emitted, unlabelled, stream continues.
+	set("", false)
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 2, Runtime: harnessproto.RuntimeClaude, Events: ev("b")}
+	if m := readRuntimeEvents(t, oc); m.Incarnation != "" || m.Seq != 2 {
+		t.Fatalf("batch during a failed lookup = %+v", m)
+	}
+	set("inc-old", true)
+	fs.ch <- harnessproto.RuntimeEventBatch{Seq: 3, Runtime: harnessproto.RuntimeClaude, Events: ev("c")}
+	if m := readRuntimeEvents(t, oc); m.Incarnation != "inc-old" || m.Seq != 3 {
+		t.Fatalf("stream did not recover after a transient failure: %+v", m)
+	}
+	// Confirmed reuse while an old batch is queued: the old batch is dropped,
+	// the old producer is cancelled, and after one failed re-open the stream
+	// re-opens on a new channel from the start of the new record.
+	oldCh := fs.ch
+	newCh := make(chan harnessproto.RuntimeEventBatch, 4)
+	fs.mu.Lock()
+	fs.ch, fs.failNext = newCh, 1
+	fs.mu.Unlock()
+	set("inc-new", true)
+	oldCh <- harnessproto.RuntimeEventBatch{Seq: 4, Runtime: harnessproto.RuntimeClaude, Events: ev("old-queued")}
+	newCh <- harnessproto.RuntimeEventBatch{Seq: 1, Runtime: harnessproto.RuntimeClaude, Events: ev("new")}
+	m := readRuntimeEvents(t, oc)
+	if m.Incarnation != "inc-new" || m.Seq != 1 || !strings.Contains(string(m.Events[0].Payload), "new") {
+		t.Fatalf("after reuse got %+v (an old batch must never carry the new label)", m)
+	}
+	if _, after, calls := fs.observed(); calls != 3 || after != 0 {
+		t.Fatalf("stream opened %d times (last from %d), want 3: initial, one failed re-open, one good re-open from 0", calls, after)
+	}
+	fs.mu.Lock()
+	first := fs.ctxs[0]
+	fs.mu.Unlock()
+	select {
+	case <-first.Done():
+	case <-time.After(time.Second):
+		t.Fatal("the abandoned old producer was not cancelled")
 	}
 }

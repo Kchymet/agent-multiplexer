@@ -1,0 +1,1 @@
+{"type":"runtime-events","seq":9,"sessionId":"s1","runtime":"codex","incarnation":"inc-7f3a","events":[{"type":"turn_end","direction":"out","payload":{"stop_reason":"end_turn"}}]}
