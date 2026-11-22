@@ -73,6 +73,13 @@ type State struct {
 	CheckedAt time.Time `json:"checked_at,omitempty"`
 	// CheckError is the last update check's failure, if any.
 	CheckError string `json:"check_error,omitempty"`
+	// Declined records that the user uninstalled the managed copy: automatic
+	// adoption never reinstalls it. amux harness install clears it.
+	Declined bool `json:"declined,omitempty"`
+	// AdoptAttemptAt and AdoptError are the last automatic adoption attempt
+	// and its failure (rate-limits retries; see AdoptRetry).
+	AdoptAttemptAt time.Time `json:"adopt_attempt_at,omitempty"`
+	AdoptError     string    `json:"adopt_error,omitempty"`
 }
 
 // Manager performs installs and lifecycle operations under one root. The zero
@@ -238,6 +245,13 @@ func (m *Manager) Install(ctx context.Context, kind, request string, activate bo
 		if err := m.activateLocked(kind, version); err != nil {
 			return "", err
 		}
+		// An explicit install opts back in to a kind the user had uninstalled.
+		if st := m.LoadState(kind); st.Declined {
+			st.Declined = false
+			if err := m.saveState(kind, st); err != nil {
+				return "", err
+			}
+		}
 	}
 	return version, nil
 }
@@ -366,6 +380,7 @@ func (m *Manager) Pin(ctx context.Context, kind, request string) (string, error)
 	}
 	st := m.LoadState(kind)
 	st.Pinned = version
+	st.Declined = false
 	return version, m.saveState(kind, st)
 }
 
@@ -438,7 +453,7 @@ func (m *Manager) Uninstall(kind string) (removed, kept []string, err error) {
 	if err := os.Remove(m.currentLink(kind)); err != nil && !os.IsNotExist(err) {
 		return nil, nil, err
 	}
-	if err := m.saveState(kind, State{}); err != nil {
+	if err := m.saveState(kind, State{Declined: true}); err != nil {
 		return nil, nil, err
 	}
 	return m.gcLocked(kind, map[string]bool{})

@@ -306,6 +306,20 @@ type VersionInfo struct {
 	// loaded yet, with the reason it is waiting.
 	UpdatePending       string `json:"updatePending,omitempty"`
 	UpdatePendingReason string `json:"updatePendingReason,omitempty"`
+	// HarnessRestarts are running sessions waiting to move onto a newer
+	// amux-managed harness version, with why each is waiting. Additive.
+	HarnessRestarts []HarnessRestart `json:"harnessRestarts,omitempty"`
+}
+
+// HarnessRestart is one running session whose harness has a newer managed
+// version active: the daemon restarts it onto that version (resuming its
+// conversation) once it is idle between turns.
+type HarnessRestart struct {
+	Session string `json:"session"`
+	Kind    string `json:"kind"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // RuntimeRecord is the QueryRuntimeRecord read model: a session's on-disk runtime

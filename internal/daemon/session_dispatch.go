@@ -342,6 +342,7 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 		info.DatabaseError = ""
 		info.LiveAgents = nil
 		info.UpdatePending, info.UpdatePendingReason = "", ""
+		info.HarnessRestarts = nil
 		value = info
 	case core.QueryCodexControl:
 		rows, err := r.d.readModel(action)

@@ -3,6 +3,7 @@ package harnessbin
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"amux/internal/amuxcfg"
@@ -11,15 +12,20 @@ import (
 // Settings is the "harnesses" section of amux's config.json:
 //
 //	"harnesses": {
-//	  "update": "off" | "notify" | "auto",
+//	  "update": "off" | "notify" | "auto",   (default auto)
 //	  "check_interval": "24h",
+//	  "restart_sessions": "on" | "off",      (default on)
 //	  "claude": {"bin": "/explicit/claude", "channel": "stable"},
 //	  "codex":  {"bin": "/explicit/codex"}
 //	}
 type Settings struct {
-	Update        string                  `json:"update,omitempty"`
-	CheckInterval string                  `json:"check_interval,omitempty"`
-	Kinds         map[string]KindSettings `json:"-"`
+	Update        string `json:"update,omitempty"`
+	CheckInterval string `json:"check_interval,omitempty"`
+	// RestartSessions controls whether the daemon moves running sessions onto
+	// a newly activated managed version at a safe point (idle between turns),
+	// resuming their conversations. Unset means on.
+	RestartSessions string                  `json:"restart_sessions,omitempty"`
+	Kinds           map[string]KindSettings `json:"-"`
 }
 
 // KindSettings are one harness's settings.
@@ -37,6 +43,25 @@ const (
 	UpdateNotify = "notify"
 	UpdateAuto   = "auto"
 )
+
+// DefaultUpdateMode applies when harnesses.update is unset: the daemon adopts a
+// managed install for each harness the user already uses and keeps it current.
+const DefaultUpdateMode = UpdateAuto
+
+// DisableEnv turns automatic harness updates (and adoption) off for the process
+// that sees it, whatever harnesses.update says. The daemon reads its own
+// environment, so set it where the daemon starts, then restart the daemon.
+const DisableEnv = "AMUX_NO_HARNESS_AUTO_UPDATE"
+
+// EnvDisabled reports whether DisableEnv is set to anything other than an
+// explicit false.
+func EnvDisabled(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv(DisableEnv))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
 
 // DefaultCheckInterval is how often the daemon checks when update != off.
 const DefaultCheckInterval = 24 * time.Hour
@@ -61,14 +86,15 @@ func parseSettings(raw json.RawMessage) (Settings, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return s, fmt.Errorf("config harnesses: %w", err)
 	}
-	if b, ok := m["update"]; ok {
-		if err := json.Unmarshal(b, &s.Update); err != nil {
-			return s, fmt.Errorf("config harnesses.update: %w", err)
-		}
-	}
-	if b, ok := m["check_interval"]; ok {
-		if err := json.Unmarshal(b, &s.CheckInterval); err != nil {
-			return s, fmt.Errorf("config harnesses.check_interval: %w", err)
+	for field, dst := range map[string]*string{
+		"update":           &s.Update,
+		"check_interval":   &s.CheckInterval,
+		"restart_sessions": &s.RestartSessions,
+	} {
+		if b, ok := m[field]; ok {
+			if err := json.Unmarshal(b, dst); err != nil {
+				return s, fmt.Errorf("config harnesses.%s: %w", field, err)
+			}
 		}
 	}
 	for _, k := range Kinds {
@@ -83,13 +109,35 @@ func parseSettings(raw json.RawMessage) (Settings, error) {
 	return s, nil
 }
 
-// UpdateMode is the validated update mode (off when unset or invalid).
+// UpdateMode is the validated update mode: DefaultUpdateMode (auto) when
+// unset, and off when the saved value is not one amux knows (a hand edit), so
+// an unreadable intent never turns downloads on.
 func (s Settings) UpdateMode() string {
 	switch s.Update {
-	case UpdateNotify, UpdateAuto:
+	case "":
+		return DefaultUpdateMode
+	case UpdateOff, UpdateNotify, UpdateAuto:
 		return s.Update
 	}
 	return UpdateOff
+}
+
+// EffectiveUpdateMode is UpdateMode with the DisableEnv opt-out applied.
+func (s Settings) EffectiveUpdateMode(getenv func(string) string) string {
+	if EnvDisabled(getenv) {
+		return UpdateOff
+	}
+	return s.UpdateMode()
+}
+
+// RestartSessionsEnabled reports whether running sessions move onto a newly
+// activated managed version at a safe point (on unless set to off).
+func (s Settings) RestartSessionsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(s.RestartSessions)) {
+	case "off", "false", "no", "0":
+		return false
+	}
+	return true
 }
 
 // Interval is the validated check interval (at least an hour).
@@ -109,13 +157,21 @@ func (s Settings) Kind(kind string) KindSettings { return s.Kinds[kind] }
 
 // Setting keys accepted by Set/Get, besides harnesses.<kind>.{bin,channel}.
 const (
-	KeyUpdate   = "harnesses.update"
-	KeyInterval = "harnesses.check_interval"
+	KeyUpdate          = "harnesses.update"
+	KeyInterval        = "harnesses.check_interval"
+	KeyRestartSessions = "harnesses.restart_sessions"
 )
+
+// topFields maps the top-level keys to their JSON field names.
+var topFields = map[string]string{
+	KeyUpdate:          "update",
+	KeyInterval:        "check_interval",
+	KeyRestartSessions: "restart_sessions",
+}
 
 // SettingKeys are every configurable key, for help and listing.
 func SettingKeys() []string {
-	keys := []string{KeyUpdate, KeyInterval}
+	keys := []string{KeyUpdate, KeyInterval, KeyRestartSessions}
 	for _, k := range Kinds {
 		keys = append(keys, section+"."+k+".bin", section+"."+k+".channel")
 	}
@@ -143,6 +199,8 @@ func Get(key string) (string, error) {
 		return s.Update, nil
 	case KeyInterval:
 		return s.CheckInterval, nil
+	case KeyRestartSessions:
+		return s.RestartSessions, nil
 	}
 	for _, k := range Kinds {
 		switch key {
@@ -168,6 +226,10 @@ func Set(key, value string) error {
 				return fmt.Errorf("%s must be a duration of at least 1h (e.g. 24h)", key)
 			}
 		}
+	case KeyRestartSessions:
+		if value != "" && value != "on" && value != "off" {
+			return fmt.Errorf("%s must be on or off", key)
+		}
 	default:
 		if !IsSettingKey(key) {
 			return fmt.Errorf("unknown setting %q", key)
@@ -191,12 +253,9 @@ func Set(key, value string) error {
 		b, _ := json.Marshal(value)
 		obj[field] = b
 	}
-	switch key {
-	case KeyUpdate:
-		setField(m, "update")
-	case KeyInterval:
-		setField(m, "check_interval")
-	default:
+	if field, ok := topFields[key]; ok {
+		setField(m, field)
+	} else {
 		for _, k := range Kinds {
 			for _, field := range []string{"bin", "channel"} {
 				if key != section+"."+k+"."+field {

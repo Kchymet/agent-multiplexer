@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/core"
+	"amux/internal/engine"
+	"amux/internal/panespec"
 	"amux/internal/selfupdate"
 	"amux/internal/selfupdate/releasetest"
 )
@@ -230,4 +233,102 @@ func countRequests(r *releasetest.Repo, suffix string) int {
 		}
 	}
 	return n
+}
+
+// selfUpdateWithAgents gives the fixture a fake engine and a store, and drops
+// the live-count seam so the real safe-point check (daemonRestartBlockers) runs.
+func (f *selfUpdateFixture) withAgents(t *testing.T) *fakeEngine {
+	t.Helper()
+	home := os.Getenv("HOME")
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("AMUX_JAIL", "off")
+	e := newFakeEngine()
+	f.d.engine = e
+	f.d.selfUpdate.live = nil
+	f.d.harnessRestart.resumable = func(string) (bool, string) { return true, "" }
+	return e
+}
+
+// The daemon restarts into an update while agents run, once every one is idle
+// between turns; a busy agent or an open terminal pane holds it back.
+func TestSelfUpdateRestartsWhenEveryAgentIsIdle(t *testing.T) {
+	f := newSelfUpdateFixture(t, "0.1.300")
+	e := f.withAgents(t)
+	putSession(t, "a1", "claude")
+	putSession(t, "a2", "codex")
+	e.running("a1")
+	e.running("a2")
+	markBusy(t, "a1")
+	if err := core.WriteSessionHookState("a2", convID("a2"), core.StateReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.publish("0.1.301", 2)
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		f.d.selfUpdateTick(t.Context(), now.Add(time.Duration(i)*time.Minute))
+	}
+	if f.restarted() {
+		t.Fatal("restarted while an agent was mid-turn")
+	}
+	if _, reason := f.d.updatePending(); !strings.Contains(reason, "a1: mid-turn") || strings.Contains(reason, "a2") {
+		t.Fatalf("reason = %q", reason)
+	}
+	if err := core.WriteSessionHookState("a1", convID("a1"), core.StateIdle, ""); err != nil {
+		t.Fatal(err)
+	}
+	terminal := engine.Key{AgentID: "a1", Tab: panespec.TabTerminal}
+	e.insts[terminal] = &fakeInstance{key: terminal}
+	f.d.selfUpdateTick(t.Context(), now.Add(5*time.Minute))
+	f.d.selfUpdateTick(t.Context(), now.Add(10*time.Minute))
+	if f.restarted() {
+		t.Fatal("restarted with a terminal pane open")
+	}
+	e.Kill(terminal)
+	f.d.selfUpdateTick(t.Context(), now.Add(15*time.Minute))
+	if f.restarted() {
+		t.Fatal("one idle poll must not restart")
+	}
+	f.d.selfUpdateTick(t.Context(), now.Add(20*time.Minute))
+	if !f.restarted() {
+		t.Fatal("did not restart with every agent idle between turns")
+	}
+	// From now on a prompt is refused rather than typed into a process that
+	// is about to stop.
+	r := f.d.handle(context.Background(), core.Action{Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
+		core.SteerVerb: core.SteerPrompt, core.SteerText: "hello",
+	}})
+	if r.OK || !strings.Contains(r.Error, "restarting to load an amux update") {
+		t.Fatalf("steer during update restart = %+v", r)
+	}
+}
+
+// The final safe-point check runs under the agents' session locks: an agent
+// that turned busy after the poll's observation stops the restart.
+func TestSelfUpdateRechecksSafePointBeforeRestart(t *testing.T) {
+	f := newSelfUpdateFixture(t, "0.1.300")
+	f.d.selfUpdate.live = nil
+	calls := 0
+	f.d.selfUpdate.blockers = func() ([]string, []string) {
+		calls++
+		if calls == 3 { // the locked re-check of the second (deciding) poll
+			return []string{"a1"}, []string{"a1: a prompt was just delivered"}
+		}
+		return []string{"a1"}, nil
+	}
+	f.publish("0.1.301", 2)
+	now := time.Now()
+	f.d.selfUpdateTick(t.Context(), now)
+	f.d.selfUpdateTick(t.Context(), now.Add(5*time.Minute))
+	if f.restarted() {
+		t.Fatal("restarted although the agent turned busy before the restart")
+	}
+	if _, reason := f.d.updatePending(); !strings.Contains(reason, "prompt was just delivered") {
+		t.Fatalf("reason = %q", reason)
+	}
+	f.d.selfUpdateTick(t.Context(), now.Add(10*time.Minute))
+	f.d.selfUpdateTick(t.Context(), now.Add(15*time.Minute))
+	if !f.restarted() {
+		t.Fatal("did not restart once idle again")
+	}
 }

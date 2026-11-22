@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"log"
+	"os"
 	"strings"
 	"time"
 
+	"amux/internal/agent"
 	"amux/internal/harnessbin"
 )
 
@@ -15,10 +17,14 @@ import (
 // last recorded check, so daemon restarts do not re-query release servers.
 const harnessUpdatePoll = 15 * time.Minute
 
-// harnessUpdateLoop is the daemon-scheduled update check for amux-managed
-// harness installs (harnesses.update: off | notify | auto). It never touches a
-// harness that has no managed install, and never a running session: an
-// activation only moves the current link that future launches resolve.
+// harnessUpdateLoop is the daemon-scheduled lifecycle for amux-managed harness
+// installs (harnesses.update: auto by default, notify, or off; the
+// AMUX_NO_HARNESS_AUTO_UPDATE environment variable forces off). In auto mode it
+// first adopts a managed install for each harness the user already uses (see
+// harnessbin.AdoptDecision), then installs and activates new releases. It
+// never touches a running session itself: an activation only moves the
+// current link, and harnessRestartLoop moves running sessions onto the new
+// version at a safe point.
 func (d *Daemon) harnessUpdateLoop(ctx context.Context) {
 	m := harnessbin.New()
 	t := time.NewTimer(2 * time.Minute) // let startup settle before network I/O
@@ -30,9 +36,13 @@ func (d *Daemon) harnessUpdateLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		runHarnessUpdateCheck(ctx, m, time.Now())
+		d.kickHarnessRestart()
 		t.Reset(harnessUpdatePoll)
 	}
 }
+
+// harnessAdoptInput is a seam for tests.
+var harnessAdoptInput = agent.AdoptInput
 
 func runHarnessUpdateCheck(ctx context.Context, m *harnessbin.Manager, now time.Time) []harnessbin.CheckResult {
 	settings, err := harnessbin.LoadSettings()
@@ -40,7 +50,21 @@ func runHarnessUpdateCheck(ctx context.Context, m *harnessbin.Manager, now time.
 		log.Printf("harness updates: %v", err)
 		return nil
 	}
-	if settings.UpdateMode() == harnessbin.UpdateOff || !harnessCheckDue(m, settings.Interval(), now) {
+	mode := settings.EffectiveUpdateMode(os.Getenv)
+	if mode == harnessbin.UpdateOff {
+		return nil
+	}
+	if mode == harnessbin.UpdateAuto {
+		for _, r := range m.Adopt(ctx, settings, func(kind string) harnessbin.AdoptInput { return harnessAdoptInput(ctx, kind) }) {
+			switch {
+			case r.Err != nil:
+				log.Printf("harness updates: adopting %s (%s): %v", r.Kind, r.Reason, r.Err)
+			case r.Adopted:
+				log.Printf("harness updates: adopted an amux-managed %s %s (%s); new sessions launch it (opt out: amux config set harnesses.update off)", r.Kind, r.Version, r.Reason)
+			}
+		}
+	}
+	if !harnessCheckDue(m, settings.Interval(), now) {
 		return nil
 	}
 	results := m.Check(ctx, settings)
@@ -49,7 +73,7 @@ func runHarnessUpdateCheck(ctx context.Context, m *harnessbin.Manager, now time.
 		case r.Err != nil:
 			log.Printf("harness updates: %s: %v", r.Kind, r.Err)
 		case r.Updated:
-			log.Printf("harness updates: %s updated to %s (running sessions keep their version; removed %s)", r.Kind, r.Current, strings.Join(r.Removed, ", "))
+			log.Printf("harness updates: %s updated to %s (running sessions move onto it when idle unless harnesses.restart_sessions is off; removed %s)", r.Kind, r.Current, strings.Join(r.Removed, ", "))
 		case harnessbin.CompareVersions(r.Available, r.Current) > 0:
 			log.Printf("harness updates: %s %s available (current %s); run amux harness update %s", r.Kind, r.Available, r.Current, r.Kind)
 		}

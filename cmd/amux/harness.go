@@ -33,6 +33,7 @@ var harnessSubcommands = map[string]func([]string) error{
 	"check":     harnessCheck,
 	"gc":        harnessGC,
 	"uninstall": harnessUninstall,
+	"adopt":     harnessAdopt,
 }
 
 // cmdHarnessCLI manages amux-owned standalone installs of Claude Code / Codex.
@@ -47,7 +48,7 @@ func cmdHarnessCLI(args []string) error {
 	}
 	run, ok := harnessSubcommands[sub]
 	if !ok {
-		return fmt.Errorf("unknown harness subcommand %q (want ls|install|update|pin|unpin|rollback|check|gc|uninstall)", sub)
+		return fmt.Errorf("unknown harness subcommand %q (want ls|install|update|pin|unpin|rollback|check|gc|uninstall|adopt)", sub)
 	}
 	return run(args)
 }
@@ -66,17 +67,23 @@ usage: amux harness <subcommand>
   check [<kind>...]  look for a newer release without installing it
   gc [<kind>...]     delete versions not current, previous, pinned or running
   uninstall <kind>   remove amux's install; launches fall back to your PATH
+                     (and stop automatic adoption of it until the next install)
+  adopt [--dry-run]  install a managed copy of each harness you already use
+                     (binary on PATH or logged in) — what the daemon does
 
 <kind> is claude or codex. amux downloads the official native builds (Claude
 Code's release bucket, Codex's GitHub release package), verifies their SHA-256,
 and keeps each version in its own directory under
 ~/.local/share/amux/harnesses/<kind>/<version>, with a "current" link that
-update/pin/rollback swap atomically. Sessions already running keep the version
-they launched with; new sessions get the current one.
+update/pin/rollback swap atomically. New sessions get the current version;
+running sessions are restarted onto it when idle between turns, resuming their
+conversations (harnesses.restart_sessions off keeps them on their version).
 
 Binary resolution: AMUX_<KIND>_BIN, then config harnesses.<kind>.bin, then the
 amux-managed install, then your own install on PATH. Settings (amux config):
-  harnesses.update off|notify|auto  daemon-scheduled update check (default off)
+  harnesses.update off|notify|auto  daemon-scheduled adoption + updates (default auto;
+                                    AMUX_NO_HARNESS_AUTO_UPDATE=1 turns it off)
+  harnesses.restart_sessions on|off restart idle running sessions onto a new version (default on)
   harnesses.check_interval <dur>    how often it runs (default 24h, min 1h)
   harnesses.<kind>.channel <ch>     release channel to follow (claude: stable|latest)
   harnesses.<kind>.bin <path>       explicit binary override
@@ -151,14 +158,28 @@ func harnessList(args []string) error {
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(map[string]any{"update": settings.UpdateMode(), "check_interval": settings.Interval().String(), "harnesses": entries})
+		return enc.Encode(map[string]any{"update": settings.EffectiveUpdateMode(os.Getenv), "restart_sessions": settings.RestartSessionsEnabled(), "check_interval": settings.Interval().String(), "harnesses": entries})
 	}
-	fmt.Printf("automatic updates: %s (every %s; amux config set harnesses.update off|notify|auto)\n\n", settings.UpdateMode(), settings.Interval())
+	mode := settings.EffectiveUpdateMode(os.Getenv)
+	if harnessbin.EnvDisabled(os.Getenv) {
+		mode += " (" + harnessbin.DisableEnv + ")"
+	}
+	restart := "running sessions restart onto a new version when idle"
+	if !settings.RestartSessionsEnabled() {
+		restart = "running sessions keep their version until restarted"
+	}
+	fmt.Printf("automatic updates: %s (every %s; amux config set harnesses.update off|notify|auto); %s\n\n", mode, settings.Interval(), restart)
 	for _, e := range entries {
 		fmt.Printf("%s\n", e.Kind)
 		fmt.Printf("  launches  %s  (%s)\n", e.Binary.Path, e.Binary.Label())
 		if len(e.Installed) == 0 {
-			fmt.Printf("  managed   not installed (amux harness install %s)\n", e.Kind)
+			note := "amux harness install " + e.Kind
+			if e.State.Declined {
+				note = "uninstalled; not adopted automatically — " + note
+			} else if e.State.AdoptError != "" {
+				note = "automatic adoption failed: " + e.State.AdoptError
+			}
+			fmt.Printf("  managed   not installed (%s)\n", note)
 		}
 		for _, v := range e.Installed {
 			var marks []string
@@ -339,6 +360,60 @@ func harnessCheck(args []string) error {
 			fmt.Printf("%s: %s available (current %s)\n", k, v, cur)
 		default:
 			fmt.Printf("%s: %s is up to date\n", k, cur)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// harnessAdopt applies the daemon's adoption rules once, now: a managed copy
+// for each harness the user already uses, never one they don't, never over
+// an explicit AMUX_<KIND>_BIN / harnesses.<kind>.bin, never a kind already
+// managed or uninstalled. scripts/install.sh runs it.
+func harnessAdopt(args []string) error {
+	fs := flag.NewFlagSet("harness adopt", flag.ContinueOnError)
+	dry := fs.Bool("dry-run", false, "report what would be adopted without installing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: amux harness adopt [--dry-run]")
+	}
+	settings, err := harnessbin.LoadSettings()
+	if err != nil {
+		return err
+	}
+	if mode := settings.EffectiveUpdateMode(os.Getenv); mode != harnessbin.UpdateAuto {
+		why := "harnesses.update is " + mode
+		if harnessbin.EnvDisabled(os.Getenv) {
+			why = harnessbin.DisableEnv + " is set"
+		}
+		fmt.Printf("not adopting: %s (amux harness install <kind> installs one explicitly)\n", why)
+		return nil
+	}
+	m := harnessManager()
+	ctx, cancel := harnessCtx()
+	defer cancel()
+	input := func(kind string) harnessbin.AdoptInput { return agent.AdoptInput(ctx, kind) }
+	if *dry {
+		for _, k := range harnessbin.Kinds {
+			ok, why := m.AdoptDecision(k, input(k))
+			verb := "skip"
+			if ok {
+				verb = "adopt"
+			}
+			fmt.Printf("%s: %s — %s\n", k, verb, why)
+		}
+		return nil
+	}
+	var errs []error
+	for _, r := range m.Adopt(ctx, settings, input) {
+		switch {
+		case r.Err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", r.Kind, r.Err))
+		case r.Adopted:
+			fmt.Printf("%s: installed amux-managed %s (%s); new sessions launch it and amux keeps it updated\n", r.Kind, r.Version, r.Reason)
+		default:
+			fmt.Printf("%s: skipped — %s\n", r.Kind, r.Reason)
 		}
 	}
 	return errors.Join(errs...)

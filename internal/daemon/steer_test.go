@@ -125,6 +125,10 @@ type fakeEngine struct {
 	killObserved    func(engine.Instance)
 	killRefuses     bool
 	ensured         []engine.Key
+	// specs records every Ensure request; ensureFail, when set, fails the
+	// requests it returns an error for.
+	specs      []engine.Spec
+	ensureFail func(engine.Spec) error
 }
 
 func newFakeEngine() *fakeEngine {
@@ -442,9 +446,16 @@ func (e *fakeEngine) Ensure(_ context.Context, spec engine.Spec) (engine.Instanc
 	}
 	e.mu.Lock()
 	e.ensured = append(e.ensured, spec.Key)
+	e.specs = append(e.specs, spec)
 	if e.ensureErr != nil {
 		e.mu.Unlock()
 		return nil, e.ensureErr
+	}
+	if e.ensureFail != nil {
+		if err := e.ensureFail(spec); err != nil {
+			e.mu.Unlock()
+			return nil, err
+		}
 	}
 	in, ok := e.insts[spec.Key]
 	if !ok {

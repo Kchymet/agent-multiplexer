@@ -9,6 +9,12 @@
 # After that, amux keeps itself current: the daemon installs new releases on
 # its own (opt out with `amux config set update.auto off` or
 # AMUX_NO_AUTO_UPDATE=1), and `amux update` installs one on demand.
+#
+# It also sets up amux-managed installs of the agent CLIs you already use
+# (`amux harness adopt`): Claude Code and/or Codex, each only if its binary is
+# on your PATH or you are logged in to it, and never over an explicit
+# AMUX_<KIND>_BIN or harnesses.<kind>.bin. Skip that with
+# AMUX_NO_HARNESS_AUTO_UPDATE=1 (which also keeps the daemon from doing it).
 set -eu
 
 REPO_URL=${AMUX_UPDATE_REPO_URL:-https://github.com/Kchymet/agent-multiplexer}
@@ -85,6 +91,18 @@ mv -f "$CONFDIR/.amux.sh.install.$$" "$CONFDIR/amux.sh"
 
 say ""
 say "Installed amux $version -> $BINDIR/amux"
+
+# Managed harness installs for the agent CLIs already in use. Best effort: a
+# failure (offline, unsupported platform) leaves your own installs in use and
+# the daemon retries later.
+case ${AMUX_NO_HARNESS_AUTO_UPDATE:-} in
+	"" | 0 | false | no | off)
+		say ""
+		say "Setting up amux-managed agent CLIs for the harnesses you use…"
+		"$BINDIR/amux" harness adopt ||
+			say "(could not set up managed agent CLIs now; amux keeps using your own and retries in the background)"
+		;;
+esac
 case ":$PATH:" in
 	*":$BINDIR:"*) ;;
 	*) say "Add $BINDIR to your PATH." ;;

@@ -343,8 +343,23 @@ func TestSettingsDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("settings %+v interval %v", s, s.Interval())
 	}
 	s, _ = parseSettings(nil)
-	if s.UpdateMode() != UpdateOff || s.Interval() != DefaultCheckInterval {
+	// Unset: automatic updates and session restarts are on by default.
+	if s.UpdateMode() != UpdateAuto || s.Interval() != DefaultCheckInterval || !s.RestartSessionsEnabled() {
 		t.Fatalf("defaults %+v", s)
+	}
+	if got := s.EffectiveUpdateMode(func(k string) string {
+		if k == DisableEnv {
+			return "1"
+		}
+		return ""
+	}); got != UpdateOff {
+		t.Fatalf("%s=1 left mode %q", DisableEnv, got)
+	}
+	if got := s.EffectiveUpdateMode(func(string) string { return "false" }); got != UpdateAuto {
+		t.Fatalf("explicit false opt-out = %q", got)
+	}
+	if s, _ := parseSettings([]byte(`{"update":"off","restart_sessions":"off"}`)); s.UpdateMode() != UpdateOff || s.RestartSessionsEnabled() {
+		t.Fatalf("explicit off ignored: %+v", s)
 	}
 	if s, _ := parseSettings([]byte(`{"update":"bogus"}`)); s.UpdateMode() != UpdateOff {
 		t.Fatal("invalid mode not treated as off")
@@ -360,7 +375,10 @@ func TestSetGetRoundTrip(t *testing.T) {
 	if err := Set(KeyInterval, "5m"); err == nil {
 		t.Fatal("sub-hour interval accepted")
 	}
-	for key, val := range map[string]string{KeyUpdate: "notify", KeyInterval: "12h", "harnesses.codex.bin": "/opt/codex", "harnesses.claude.channel": "latest"} {
+	if err := Set(KeyRestartSessions, "maybe"); err == nil {
+		t.Fatal("invalid restart_sessions accepted")
+	}
+	for key, val := range map[string]string{KeyUpdate: "notify", KeyInterval: "12h", KeyRestartSessions: "off", "harnesses.codex.bin": "/opt/codex", "harnesses.claude.channel": "latest"} {
 		if err := Set(key, val); err != nil {
 			t.Fatalf("Set(%s): %v", key, err)
 		}

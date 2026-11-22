@@ -288,9 +288,26 @@ func applyStagedBeforeStart() {
 // printPendingUpdate notes on stderr that an installed or staged release has
 // not been loaded by the daemon yet (used by amux status).
 func printPendingUpdate() {
-	if line, pending := updateStatusLine(collectVersionReport()); pending {
+	r := collectVersionReport()
+	if line, pending := updateStatusLine(r); pending {
 		fmt.Fprintln(os.Stderr, "update: "+line)
 	}
+	for _, line := range harnessRestartLines(r) {
+		fmt.Fprintln(os.Stderr, "harness: "+line)
+	}
+}
+
+// harnessRestartLines describes running sessions the daemon will restart onto
+// a newer amux-managed harness version once they are idle between turns.
+func harnessRestartLines(r versionReport) []string {
+	if !r.Connected || r.QueryErr != nil {
+		return nil
+	}
+	var out []string
+	for _, h := range r.Runtime.HarnessRestarts {
+		out = append(out, fmt.Sprintf("%s restart pending for harness update (%s %s → %s): %s", h.Session, h.Kind, h.From, h.To, h.Reason))
+	}
+	return out
 }
 
 // updateStatusLine summarizes self-update state for version/doctor/status
