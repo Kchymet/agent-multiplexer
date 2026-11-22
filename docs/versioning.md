@@ -22,6 +22,93 @@ patch release does not become incompatible merely because its label differs,
 while a protocol or schema break cannot hide behind an unchanged executable
 name.
 
+## Product versions
+
+The product version comes from git (`scripts/version.sh`; `make version` prints
+it):
+
+| Build | Version | Example |
+|---|---|---|
+| Release (CI, `make … RELEASE=1`) | `0.1.<first-parent commit count>` | `0.1.342` |
+| Checkout (`make build`/`install`) | `0.1.<count>-dev+<sha12>[.dirty]` | `0.1.342-dev+2922c179ad56.dirty` |
+| Plain `go build` | `0.0.0-dev[+<sha12>[.dirty]]` | `0.0.0-dev+2922c179ad56` |
+
+`master` is squash-merged and linear, so the commit count increases with every
+push and every release is newer than the one before. The `-dev` prerelease sorts
+a checkout build below the release of the same count and marks it as a
+development build. `amux version` prints it; `amux version --short` prints only
+the version (and never contacts the daemon); `amux version --manifest` prints
+the build's version, commit, daemon protocol and schema range as JSON.
+
+## Releases
+
+`.github/workflows/release.yml` runs after CI passes on every push to `master`.
+It builds `make release-assets RELEASE=1` — one binary per platform
+(`amux-darwin-amd64`, `amux-darwin-arm64`, `amux-linux-amd64`,
+`amux-linux-arm64`), each with the same notices-check and license-verify
+provenance as `make build` — plus `amux.sh`, `amux-release.json` (the manifest
+above, printed by the built binary) and `SHA256SUMS`, and publishes them as
+release `v0.1.<count>` with the built-in `GITHUB_TOKEN`. A delayed run for an
+older commit never moves "latest" backwards.
+
+## Upgrading
+
+Install the latest release with `scripts/install.sh` (see the README), or from
+an existing install:
+
+    amux update --check          # report installed vs latest; changes nothing
+    amux update                  # install the latest release
+    amux update --force          # also replace a checkout build / reinstall
+    amux update --restart-daemon # restart the daemon even while agents run
+
+`amux update` reads `/releases/latest/download/amux-release.json`, downloads
+this platform's binary from that exact tag, verifies it against the release's
+`SHA256SUMS`, runs it (`version --short`) to confirm it executes here, and then
+renames it over the running executable (symlinks resolved; same directory, so
+the replace is atomic and processes running the old binary keep its inode). It
+refreshes `~/.config/amux/amux.sh` from the same release. Update state lives in
+`~/.local/state/amux/update/` and is serialized by a lock, so the CLI and the
+daemon never update at once.
+
+### The daemon and running agents
+
+The daemon hosts every agent's process, and stopping it stops them (the restart
+journal relaunches them with their conversations afterwards, but in-flight work
+is interrupted). An update therefore never restarts the daemon while it hosts an
+agent:
+
+- No daemon running: the binary is replaced; the next start uses it.
+- Daemon idle (no agents): `amux update` replaces the binary and restarts it.
+- Agents running, same protocol and schema: the binary on disk is replaced at
+  once (new CLI processes use it and still speak the running daemon's
+  protocol); the daemon keeps its old code and restarts itself into the new
+  binary once it has observed no agents on consecutive polls.
+- Agents running, protocol or schema changes: swapping the binary would leave
+  new CLIs unable to talk to the old daemon, so the release is *staged*
+  (downloaded and verified, binary untouched). It is installed when no agents
+  run, by the next `amux daemon restart`/`start`, or now with
+  `amux update --restart-daemon`.
+- A release whose schema range does not include this database's schema is
+  refused; amux never lowers `user_version`.
+
+`amux version`, `amux doctor` (Versions → update) and `amux status` (on stderr)
+report a pending update and why it is waiting.
+
+### Automatic updates
+
+On by default. A release daemon checks at most every 6 hours (measured from the
+persisted last check, so restarts do not re-query) and installs new releases
+following the rules above. It never replaces a development build: neither a
+dev daemon nor a checkout build installed at the binary's path. To opt out, run
+`amux config set update.auto off` (read at each check; no restart needed) or set
+`AMUX_NO_AUTO_UPDATE=1` in the environment the daemon starts from, then restart
+it. A checkout build switches to releases (and from then on to automatic
+updates) with `amux update --force`. `AMUX_UPDATE_REPO_URL` points updates at a
+fork or mirror with the same release layout.
+
+SHA256SUMS protects against truncated or corrupted downloads; authenticity
+rests on HTTPS to GitHub and the repository's release permissions.
+
 ## Upgrade behavior
 
 Build with Go 1.26.11 or a newer patched release. The Go standard library is part

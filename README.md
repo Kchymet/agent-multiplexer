@@ -618,12 +618,39 @@ See [sandbox configuration](docs/sandbox-config.md),
 
 ## Install
 
-Requires Go **1.26.11 or a newer patched release**, Git, and a supported isolation backend: macOS
+Requires Git and a supported isolation backend: macOS
 `/usr/bin/sandbox-exec`, or Linux/WSL2 `bwrap` ≥ 0.12.0 with usable user/PID
 namespaces. Install and authenticate at least one supported harness (Claude Code
 or Codex) in a normal host terminal first. `gh` is needed for GitHub discovery
 and authentication; the editor tab uses `nvim` unless `AMUX_EDITOR` is set.
 Run `amux doctor` to check local dependencies.
+
+### From a release (recommended)
+
+Every push to `master` that passes CI is published as a GitHub Release
+(`v0.1.<n>`, macOS/Linux × amd64/arm64, with SHA256SUMS). The installer
+downloads the latest one, verifies its checksum and installs
+`~/.local/bin/amux` plus the shell shim:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kchymet/agent-multiplexer/master/scripts/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+amux doctor
+amux repo add OWNER/REPO       # replace with a repo you can access
+amux                         # select a repo and press a to create an agent
+```
+
+amux then keeps itself current: the daemon checks for a new release every few
+hours and installs it. A daemon restart stops the agents it hosts, so the
+daemon only restarts into a new release once no agents are running; until then
+`amux version`, `amux doctor` and `amux status` report the update as pending.
+`amux update` installs the latest release on demand (`--check` only reports).
+Opt out with `amux config set update.auto off` or `AMUX_NO_AUTO_UPDATE=1`. See
+[upgrading](docs/versioning.md#upgrading) for the details.
+
+### From source
+
+Requires Go **1.26.11 or a newer patched release**.
 
 ```sh
 git clone https://github.com/Kchymet/agent-multiplexer.git
@@ -636,7 +663,10 @@ amux                         # select a repo and press a to create an agent
 ```
 
 Builds `~/.local/bin/amux`. Run `amux` from a normal terminal to launch the TUI —
-that is the standard way to invoke it.
+that is the standard way to invoke it. A checkout build reports a development
+version (`0.1.<n>-dev+<sha>`, `.dirty` with local edits) and is never replaced
+automatically; `amux update --force` switches it to the latest release, after
+which it updates itself.
 
 The supported `make build` / `make install` artifact path uses the exact Go
 version declared by `go.mod`, `CGO_ENABLED=0`, and no custom build tags. Those

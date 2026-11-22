@@ -298,6 +298,14 @@ type VersionInfo struct {
 	DatabaseMinSchema int    `json:"databaseMinSchema"`
 	DatabaseMaxSchema int    `json:"databaseMaxSchema"`
 	DatabaseError     string `json:"databaseError,omitempty"`
+	// LiveAgents is how many agents the daemon hosts right now (a restart stops
+	// them). Additive: nil from a daemon that predates it, and unknown is
+	// treated as "agents may be running".
+	LiveAgents *int `json:"liveAgents,omitempty"`
+	// UpdatePending is a release the daemon has installed or staged but not
+	// loaded yet, with the reason it is waiting.
+	UpdatePending       string `json:"updatePending,omitempty"`
+	UpdatePendingReason string `json:"updatePendingReason,omitempty"`
 }
 
 // RuntimeRecord is the QueryRuntimeRecord read model: a session's on-disk runtime

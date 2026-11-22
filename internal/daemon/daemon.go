@@ -193,6 +193,9 @@ type Daemon struct {
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 
+	// selfUpdate tracks automatic self-update and the restart it may request.
+	selfUpdate selfUpdateState
+
 	// serving tracks every accepted host transport. Run closes and joins these
 	// handlers before it closes the session RPC servers or releases authority
 	// ownership. That ordering matters for blocked TLS writes and for handlers
@@ -299,6 +302,8 @@ func Default(self string) *Daemon {
 	ws := source.NewWorkspace()
 	d := New(self, []source.Source{ws}, 2*time.Second)
 	d.engine = eng
+	// Only the real host daemon updates itself; test daemons built with New never do.
+	d.selfUpdate.enabled = true
 	// Liveness is an agent running in the engine (a PTY pane) OR under the App
 	// Server supervisor (a structured session has no pane). Both are read at call
 	// time, so the probe works once Run installs the manager.
@@ -556,6 +561,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// amux-managed Claude Code / Codex installs: optional scheduled update
 	// check (harnesses.update, off by default).
 	startRunWorker(func() { d.harnessUpdateLoop(ctx) })
+	// amux itself: automatic release install (update.auto, on by default). It
+	// restarts this daemon only when no agents are hosted.
+	if d.selfUpdate.enabled {
+		startRunWorker(func() { d.selfUpdateLoop(ctx) })
+	}
 	// The engine's agents live in this process; stop them cleanly on shutdown.
 	// (Agents survive a UI restart — the daemon stays up — but not a daemon
 	// restart, e.g. `amux daemon restart`; out-of-process hosting would lift that.)

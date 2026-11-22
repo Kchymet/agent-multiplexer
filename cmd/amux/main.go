@@ -107,7 +107,8 @@ var commands = []command{
 	// deprecated top-level alias for "amux agent name"
 	{names: []string{"name"}, run: cmdName, hidden: true},
 	{names: []string{"do"}, run: cmdDo},
-	{names: []string{"version", "--version", "-v"}, run: func([]string) error { return cmdVersion() }},
+	{names: []string{"version", "--version", "-v"}, run: cmdVersionArgs},
+	{names: []string{"update", "upgrade"}, run: cmdUpdate},
 	{names: []string{"licenses", "notices"}, run: cmdLicenses},
 	// hidden: help is what prints usage(), so it doesn't list itself
 	{names: []string{"help", "-h", "--help"}, run: func([]string) error { usage(); return nil }, hidden: true},
@@ -164,6 +165,7 @@ usage: amux <command>
   direct serve | enroll | clients  direct web/Android access over your LAN or VPN (opt-in)
   daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
   version            print CLI, daemon and database versions + compatibility
+  update [--check] [--force] [--restart-daemon]  install the latest release
   licenses           print bundled dependency licenses and notices
 
 amux do <action> drives the daemon's control API from scripts (no direct store
@@ -357,7 +359,17 @@ func daemonRun() error {
 		Path: core.LogPath(), MaxBytes: logrotate.DefaultMaxBytes, Keep: logrotate.DefaultKeep,
 		FDs: []int{1, 2},
 	}, logrotate.DefaultInterval, log.Printf)
-	return daemon.Default(self).Run(ctx)
+	d := daemon.Default(self)
+	if err := d.Run(ctx); err != nil || !d.RestartForUpdate() || ctx.Err() != nil {
+		return err
+	}
+	// The daemon stopped itself, with no agents hosted, to load an update that
+	// is now installed at self. Teardown released the socket and singleton
+	// lock; re-executing in place keeps the PID, detached session and log fds.
+	stop()
+	_ = os.Remove(core.PidPath())
+	log.Printf("self-update: re-executing %s", self)
+	return syscall.Exec(self, []string{self, "daemon"}, os.Environ())
 }
 
 // daemonStop turns the running daemon down through the authenticated host
@@ -591,6 +603,9 @@ func startDaemonAfterDial(self string, initialErr error, explicitBootstrap bool)
 	if _, err := amuxcfg.ResolveCodexControl(); err != nil {
 		return fmt.Errorf("initial daemon connection failed (%w); startup configuration invalid: %w", initialErr, err)
 	}
+	// No daemon answers, so a staged protocol-changing release can be installed
+	// before one starts.
+	applyStagedBeforeStart()
 	_ = os.MkdirAll(core.StateDir(), 0o755)
 	logf, _ := os.OpenFile(core.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if logf != nil {
@@ -740,6 +755,8 @@ func cmdStatus(args []string) error {
 			fmt.Println(string(b))
 			return nil
 		}
+		// stderr, so the plain table stays parseable.
+		defer printPendingUpdate()
 		if len(f.Snapshot.Sessions) == 0 {
 			fmt.Println("(no workgroups — `amux workgroup new`)")
 			return nil
