@@ -692,7 +692,7 @@ func TestCatalogModelsAreSanitized(t *testing.T) {
 		"model@deployment", "custom-123456789012",
 	}
 	want := []string{"claude-opus-5-5", "claude-sonnet-4-5[1m]", "gpt-6", "gpt-4o-2024-08-06", "o4-mini"}
-	if got := catalogModels(in); !slices.Equal(got, want) {
+	if got := CatalogModels(in); !slices.Equal(got, want) {
 		t.Fatalf("models %v", got)
 	}
 	// Submission stays wider: a client may still create with a provider model.

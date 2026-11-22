@@ -30,7 +30,7 @@ func (claudeHarness) Kind() string { return "claude" }
 // claudeModels is the built-in Claude model catalog: detailed model IDs, with
 // Opus first (the default). amux passes these IDs to Claude Code verbatim so a
 // launch names exactly the model the picker showed.
-var claudeModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}
+var claudeModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"}
 
 // claudeModelAliases maps Claude Code's short model aliases — which older amux
 // releases offered and so may already be stored on a session, set in a user's
@@ -40,7 +40,7 @@ var claudeModelAliases = map[string]string{
 	"opus":   "claude-opus-5-5",
 	"sonnet": "claude-sonnet-5-5",
 	"haiku":  "claude-haiku-5-5",
-	"fable":  "claude-fable-5-1",
+	"fable":  "claude-fable-5-2",
 }
 
 // CanonicalClaudeModel resolves a short Claude alias to its detailed model ID,

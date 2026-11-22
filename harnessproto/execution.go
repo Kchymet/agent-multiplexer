@@ -12,6 +12,12 @@ type ExecutionCapabilities struct {
 type HarnessCapability struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
+	// Models is the harness's selectable model list on this provider, the
+	// first entry its default. It carries only plain public model names
+	// (provider paths that may embed account or project identifiers are
+	// filtered out). Absent means the provider did not advertise one, not that
+	// the harness has no models.
+	Models []string `json:"models,omitempty"`
 }
 
 const (
