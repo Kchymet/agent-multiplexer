@@ -54,6 +54,16 @@ type Keys struct {
 	// keep alive. The daemon refuses to send such a key unless the harness reports
 	// the agent mid-turn. A key that is merely inert when idle leaves this false.
 	InterruptOnlyWhileBusy bool
+	// DismissQuestion closes a structured question the runtime has open in
+	// place of its composer (Claude Code's AskUserQuestion selector). While one
+	// is up, typed steering text never reaches the composer: printable keys
+	// drive the selector and the trailing Submit picks whichever option is
+	// focused, so a remote client's typed answer is lost or misread. The daemon
+	// sends this first when it sees such a question open, then waits
+	// DismissDelay for the composer to come back before typing. Empty means the
+	// runtime has no such selector (or amux does not detect one).
+	DismissQuestion []byte
+	DismissDelay    time.Duration
 }
 
 // Control bytes the harnesses' key mappings are built from. Named so a reader
@@ -122,6 +132,11 @@ func claudeKeys() Keys {
 		TypedNewline:           []byte("\\\r"), TypeChunk: 256, TypeDelay: 5 * time.Millisecond,
 		TypedTriggers: "/!",
 		SubmitDelay:   100 * time.Millisecond,
+		// AskUserQuestion's selector reads "Esc to cancel", like the permission
+		// prompt it shares a frame with (see Deny); cancelling records the
+		// question as declined and returns the composer, where the typed reply
+		// then lands as the user's answer.
+		DismissQuestion: keyEsc, DismissDelay: 300 * time.Millisecond,
 	}
 }
 

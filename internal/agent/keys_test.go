@@ -27,6 +27,7 @@ func TestKeysPerKind(t *testing.T) {
 			Submit: []byte("\r"), Interrupt: []byte("\x03"), Allow: []byte("\r"), Deny: []byte("\x1b"),
 			InterruptOnlyWhileBusy: true,
 			TypedNewline:           []byte("\\\r"), TypeChunk: 256, TypeDelay: 5 * time.Millisecond, TypedTriggers: "/!", SubmitDelay: 100 * time.Millisecond,
+			DismissQuestion: []byte("\x1b"), DismissDelay: 300 * time.Millisecond,
 		}},
 		{"codex", Keys{
 			Submit: []byte("\r"), Interrupt: []byte("\x1b"), Allow: []byte("y"), Deny: []byte("n"),

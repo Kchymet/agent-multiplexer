@@ -176,6 +176,14 @@ func (d *Daemon) steerUnconsumed(ctx context.Context, a core.Action, verb string
 			})
 		}
 		if verb == core.SteerPrompt || verb == core.SteerInterject {
+			// A question selector (Claude's AskUserQuestion) owns the keyboard
+			// while it is up: typed text would drive the selector and Submit
+			// would pick its focused option, so a remote client's typed answer
+			// never reached the agent. Dismiss it first; the text then lands in
+			// the composer as the user's reply.
+			if len(keys.DismissQuestion) > 0 && d.questionOpen(h, sess) {
+				payload = dismissingQuestion(keys, payload)
+			}
 			// "Up" is not "booted". Creation auto-starts the agent, so a remote
 			// client's prompt that follows its add-agent/new-workgroup finds a
 			// runtime launched milliseconds ago, and a Claude Code that is still

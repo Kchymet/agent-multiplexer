@@ -147,6 +147,10 @@ type Daemon struct {
 	// tests set it small so they don't sleep.
 	steerSettle time.Duration
 
+	// questionOpenFn, when non-nil, replaces the transcript read that decides
+	// whether typed steering must first dismiss an open question (tests).
+	questionOpenFn func(agent.Harness, store.Session) bool
+
 	// steerStarted, when non-nil, receives the session id of each deferred start
 	// behind an accepted `prompt` once it has finished, successfully or not.
 	// Production leaves it nil — the session journal is the report — and tests set
