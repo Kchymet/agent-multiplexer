@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"amux/internal/agent"
+	"amux/internal/direct"
 	"amux/internal/providercfg"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -63,6 +64,13 @@ func executionDiscovery(c providercfg.Config, logf func(string, ...any)) func(co
 	}
 }
 
+// discoveredModels is a verified harness's advertised model list: its host
+// catalog under the same public-name filter the direct-session catalog applies.
+// A variable so tests can stub the host configuration it reads.
+var discoveredModels = func(kind string) []string {
+	return direct.CatalogModels(agent.HarnessFor(kind).Models())
+}
+
 // summarizeDiscovery folds probe results into the advertisement and a one-line
 // operator report. Not-installed harnesses are listed as skipped when discovery
 // is automatic and as a problem when the operator allowlisted them; an
@@ -78,7 +86,7 @@ func summarizeDiscovery(results []agent.ProbeResult, explicit bool) (*harnesspro
 		switch {
 		case r.Err == nil:
 			if !seen[r.Kind] {
-				caps.Harnesses = append(caps.Harnesses, harnessproto.HarnessCapability{Name: r.Kind, Version: r.Version})
+				caps.Harnesses = append(caps.Harnesses, harnessproto.HarnessCapability{Name: r.Kind, Version: r.Version, Models: discoveredModels(r.Kind)})
 				advertised = append(advertised, fmt.Sprintf("%s (%s)", r.Kind, r.Version))
 				seen[r.Kind] = true
 			}

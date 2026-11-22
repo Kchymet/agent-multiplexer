@@ -87,6 +87,35 @@ func TestExecutionCapabilitiesEmptyVsAbsent(t *testing.T) {
 	}
 }
 
+// TestHarnessCapabilityModelsAdditive pins the per-harness model list as an
+// additive, omitempty field: a provider that advertises models round-trips them
+// in order, and one that does not (an older provider) emits no "models" key, so
+// a consumer must treat absence as "not advertised".
+func TestHarnessCapabilityModelsAdditive(t *testing.T) {
+	in := HarnessCapability{Name: "claude", Version: "2.1.0", Models: []string{"claude-opus-5-5", "claude-sonnet-5-5"}}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"name":"claude","version":"2.1.0","models":["claude-opus-5-5","claude-sonnet-5-5"]}`; string(b) != want {
+		t.Fatalf("wire = %s, want %s", b, want)
+	}
+	var out HarnessCapability
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Models) != 2 || out.Models[0] != "claude-opus-5-5" || out.Models[1] != "claude-sonnet-5-5" {
+		t.Fatalf("decoded models = %v", out.Models)
+	}
+	legacy, err := json.Marshal(HarnessCapability{Name: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(legacy) != `{"name":"codex"}` {
+		t.Fatalf("legacy wire = %s, want no models key", legacy)
+	}
+}
+
 // TestComputeCapabilityIsExplicit pins the fail-closed compatibility rule:
 // older providers omit the additive field and therefore do not grant compute.
 // Only a literal true value authorizes placement and pane control.

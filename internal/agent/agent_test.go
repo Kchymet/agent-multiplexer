@@ -110,9 +110,9 @@ func TestArgvClaudeAliasesResolveToDetailedIDs(t *testing.T) {
 		"opus":             "claude-opus-5-5",
 		" Sonnet ":         "claude-sonnet-5-5",
 		"haiku":            "claude-haiku-5-5",
-		"fable":            "claude-fable-5-1",
+		"fable":            "claude-fable-5-2",
 		"opus[1m]":         "claude-opus-5-5[1m]",
-		"claude-fable-5-1": "claude-fable-5-1",
+		"claude-fable-5-2": "claude-fable-5-2",
 		"claude-opus-4-8":  "claude-opus-4-8",
 		"my-custom-model":  "my-custom-model",
 	} {

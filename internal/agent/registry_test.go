@@ -73,7 +73,7 @@ func TestHarnessDoctor(t *testing.T) {
 func TestHarnessModelCatalog(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
-	if got, want := HarnessFor("claude").Models(), []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}; !reflect.DeepEqual(got, want) {
+	if got, want := HarnessFor("claude").Models(), []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("claude Models() = %v, want %v", got, want)
 	}
 	if got := HarnessFor("claude").DefaultModel(); got != "claude-opus-5-5" {
@@ -103,7 +103,7 @@ func TestClaudePreferredModelAlias(t *testing.T) {
 	if got := HarnessFor("claude").PreferredModel(); got != "claude-sonnet-5-5" {
 		t.Errorf("claude PreferredModel() = %q, want claude-sonnet-5-5", got)
 	}
-	want := []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}
+	want := []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"}
 	if got := HarnessFor("claude").Models(); !reflect.DeepEqual(got, want) {
 		t.Errorf("claude Models() = %v, want %v", got, want)
 	}
@@ -196,13 +196,13 @@ func TestHarnessModelsDiscovered(t *testing.T) {
 	claudeHome := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
 	cfg := `{"model":"claude-opus-5","additionalModelOptionsCache":[
-		{"label":"Fable","value":"claude-fable-5-1[1m]"},
+		{"label":"Fable","value":"claude-fable-5-2[1m]"},
 		{"label":"Opus","value":"opus"},
 		{"label":"Opus 5.5","value":"claude-opus-5-5"}]}`
 	if err := os.WriteFile(filepath.Join(claudeHome, ".claude.json"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	want = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5"}
+	want = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-opus-5"}
 	if got := HarnessFor("claude").Models(); !reflect.DeepEqual(got, want) {
 		t.Errorf("claude Models() = %v, want %v", got, want)
 	}

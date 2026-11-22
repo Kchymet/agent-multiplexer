@@ -96,7 +96,7 @@ func probeHarnesses(ctx context.Context) []CatalogHarness {
 	out := []CatalogHarness{}
 	for _, kind := range agent.Kinds() {
 		if r := agent.Probe(ctx, kind); r.Err == nil {
-			out = append(out, CatalogHarness{Name: r.Kind, Version: r.Version, Models: catalogModels(agent.HarnessFor(kind).Models())})
+			out = append(out, CatalogHarness{Name: r.Kind, Version: r.Version, Models: CatalogModels(agent.HarnessFor(kind).Models())})
 		}
 	}
 	if ctx.Err() == nil {
@@ -124,8 +124,8 @@ func publicModel(m string) bool {
 	return publicModelRE.MatchString(m) && !longDigitsRE.MatchString(m)
 }
 
-// catalogModels keeps only public model names, de-duplicated and bounded.
-func catalogModels(in []string) []string {
+// CatalogModels keeps only public model names, de-duplicated and bounded.
+func CatalogModels(in []string) []string {
 	out := []string{}
 	for _, m := range in {
 		if publicModel(m) && !slices.Contains(out, m) && len(out) < maxCatalogModels {

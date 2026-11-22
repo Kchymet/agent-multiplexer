@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/direct"
 	"amux/internal/provider"
 	"amux/internal/providercfg"
 	"github.com/kchymet/agent-multiplexer/harnessproto"
@@ -58,11 +59,14 @@ func (l *logSink) all() string {
 
 // TestProviderRegistersWithoutHermesInstalled is the regression for "machines
 // without hermes can't register": a Claude+Codex machine runs the real
-// discovery, sends a register frame advertising exactly those two harnesses,
-// completes the handshake, and never reports the absent optional Hermes as a
-// failure — not on the first dial and not on a reconnect.
+// discovery, sends a register frame advertising exactly those two harnesses
+// (each with its model list), completes the handshake, and never reports the
+// absent optional Hermes as a failure — not on the first dial and not on a reconnect.
 func TestProviderRegistersWithoutHermesInstalled(t *testing.T) {
 	noHermesHost(t)
+	origModels := discoveredModels
+	t.Cleanup(func() { discoveredModels = origModels })
+	discoveredModels = func(kind string) []string { return []string{kind + "-default"} }
 	logs := &logSink{}
 	conns := make(chan net.Conn, 2)
 	registered := make(chan provider.Status, 4)
@@ -95,8 +99,8 @@ func TestProviderRegistersWithoutHermesInstalled(t *testing.T) {
 	go func() { _ = p.Run(ctx) }()
 
 	want := []harnessproto.HarnessCapability{
-		{Name: "claude", Version: "2.1.0 (Claude Code)"},
-		{Name: "codex", Version: "codex-cli 0.9.0"},
+		{Name: "claude", Version: "2.1.0 (Claude Code)", Models: []string{"claude-default"}},
+		{Name: "codex", Version: "codex-cli 0.9.0", Models: []string{"codex-default"}},
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
 		var raw net.Conn
@@ -146,6 +150,42 @@ func TestProviderRegistersWithoutHermesInstalled(t *testing.T) {
 	}
 	if !strings.Contains(out, "not installed (optional, skipped): hermes") {
 		t.Fatalf("summary does not name hermes as skipped:\n%s", out)
+	}
+}
+
+// TestDiscoveryAdvertisesHarnessModels: each verified harness carries its
+// model list (via discoveredModels) so the harness backend can offer per-harness
+// models; a harness that failed verification is not advertised at all.
+func TestDiscoveryAdvertisesHarnessModels(t *testing.T) {
+	orig := discoveredModels
+	t.Cleanup(func() { discoveredModels = orig })
+	discoveredModels = func(kind string) []string {
+		return map[string][]string{"claude": {"claude-opus-5-5", "claude-sonnet-5-5"}, "codex": {"gpt-5.5"}}[kind]
+	}
+	caps, _ := summarizeDiscovery([]agent.ProbeResult{
+		{Kind: "claude", Version: "2.1.0"},
+		{Kind: "codex", Version: "0.9.0"},
+		{Kind: "hermes", Err: fmt.Errorf("version check failed")},
+	}, false)
+	want := []harnessproto.HarnessCapability{
+		{Name: "claude", Version: "2.1.0", Models: []string{"claude-opus-5-5", "claude-sonnet-5-5"}},
+		{Name: "codex", Version: "0.9.0", Models: []string{"gpt-5.5"}},
+	}
+	if !reflect.DeepEqual(caps.Harnesses, want) {
+		t.Fatalf("advertised %+v, want %+v", caps.Harnesses, want)
+	}
+}
+
+// TestDiscoveredModelsFiltersPrivateNames: the real discoveredModels applies the
+// direct catalog's public-name filter, so a provider path embedding an account
+// identifier never reaches the advertisement.
+func TestDiscoveredModelsFiltersPrivateNames(t *testing.T) {
+	got := direct.CatalogModels([]string{"claude-opus-5-5", "arn:aws:bedrock:us-east-1:123456789012:x", "claude-opus-5-5"})
+	if !reflect.DeepEqual(got, []string{"claude-opus-5-5"}) {
+		t.Fatalf("CatalogModels = %v", got)
+	}
+	if models := discoveredModels("claude"); len(models) == 0 || models[0] != "claude-opus-5-5" {
+		t.Fatalf("discoveredModels(claude) = %v, want claude-opus-5-5 first", models)
 	}
 }
 
