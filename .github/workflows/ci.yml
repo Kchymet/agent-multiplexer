@@ -67,6 +67,15 @@ jobs:
         run: make test
       - name: reachable dependency vulnerabilities
         run: make vuln
+      # The release workflow publishes exactly these assets on every master
+      # push; building them here keeps a broken release target off master.
+      - name: release assets build
+        if: runner.os == 'Linux'
+        run: |
+          make release-assets
+          (cd dist && sha256sum -c SHA256SUMS)
+          ./dist/amux-linux-amd64 version --short
+          sh -n scripts/install.sh
 
   namespace-runtime:
     needs: changes

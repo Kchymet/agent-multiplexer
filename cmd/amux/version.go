@@ -141,6 +141,9 @@ func cmdVersion() error {
 	for _, line := range lines {
 		fmt.Println(line)
 	}
+	if line, _ := updateStatusLine(r); line != "" {
+		fmt.Printf("%-9s %s\n", "update", line)
+	}
 	if err := versionStateError(r); err != nil {
 		return fmt.Errorf("daemon state unknown: %w", err)
 	}

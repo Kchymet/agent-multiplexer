@@ -11,6 +11,7 @@ import (
 	"amux/internal/directsvc"
 	"amux/internal/harnessbin"
 	"amux/internal/keymap"
+	"amux/internal/selfupdate"
 )
 
 // cmdConfig is amux's own scriptable settings surface for native TUI
@@ -68,6 +69,14 @@ func cmdConfig(args []string) error {
 				return err
 			}
 			fmt.Println(harnessSettingLabel(args[1], value))
+			return nil
+		}
+		if args[1] == amuxcfg.AutoUpdateKey {
+			on, err := amuxcfg.ResolveAutoUpdate()
+			if err != nil {
+				return err
+			}
+			fmt.Println(onOff(on))
 			return nil
 		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
@@ -129,6 +138,17 @@ func cmdConfig(args []string) error {
 			fmt.Printf("%s = %s  (saved; %s)\n", args[1], args[2], harnessSettingHint(args[1]))
 			return nil
 		}
+		if args[1] == amuxcfg.AutoUpdateKey {
+			on, err := amuxcfg.ParseOnOff(amuxcfg.AutoUpdateKey, args[2])
+			if err != nil {
+				return err
+			}
+			if err := amuxcfg.SetAutoUpdate(&on); err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s  (saved; the daemon reads it at its next check)\n", amuxcfg.AutoUpdateKey, onOff(on))
+			return nil
+		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
 			on, err := amuxcfg.ParseGoalAutoResume(args[2])
 			if err != nil {
@@ -175,6 +195,13 @@ func cmdConfig(args []string) error {
 			fmt.Printf("%s = %s  (default; %s)\n", args[1], harnessSettingLabel(args[1], ""), harnessSettingHint(args[1]))
 			return nil
 		}
+		if args[1] == amuxcfg.AutoUpdateKey {
+			if err := amuxcfg.SetAutoUpdate(nil); err != nil {
+				return err
+			}
+			fmt.Printf("%s = on  (default)\n", amuxcfg.AutoUpdateKey)
+			return nil
+		}
 		if args[1] == amuxcfg.GoalAutoResumeKey {
 			if err := amuxcfg.SetGoalAutoResume(nil); err != nil {
 				return err
@@ -215,6 +242,7 @@ usage: amux config <subcommand>
   get goal.auto_resume  print whether a restarted goal coordinator resumes its goal (on when unconfigured)
   set goal.auto_resume <on|off>  save the goal auto-resume switch (daemon restart required)
   unset goal.auto_resume  restore the default (on)
+  get|set|unset update.auto <on|off>  automatic amux self-update (on; AMUX_NO_AUTO_UPDATE=1 also disables)
   get|set|unset harnesses.update  daemon update check for amux-managed harnesses: off|notify|auto (off)
   get|set|unset harnesses.check_interval  how often that check runs (24h; minimum 1h)
   get|set|unset harnesses.<claude|codex>.channel  release channel to follow (claude: stable|latest)
@@ -290,6 +318,15 @@ func configList() error {
 	default:
 		fmt.Printf("%s %s  (saved; daemon restart required after changes)\n", amuxcfg.GoalAutoResumeKey, onOff(on))
 	}
+	autoUpdate, autoSet, autoErr := amuxcfg.AutoUpdate()
+	switch {
+	case autoErr != nil:
+		fmt.Printf("%s INVALID\n", amuxcfg.AutoUpdateKey)
+	case !autoSet:
+		fmt.Printf("%s on  (default; %s=1 also disables)\n", amuxcfg.AutoUpdateKey, selfupdate.DisableEnv)
+	default:
+		fmt.Printf("%s %s  (saved)\n", amuxcfg.AutoUpdateKey, onOff(autoUpdate))
+	}
 	direct, directSet, directErr := directsvc.Load()
 	switch {
 	case directErr != nil:
@@ -312,7 +349,7 @@ func configList() error {
 			fmt.Printf("%s %s  (saved)\n", key, value)
 		}
 	}
-	return errors.Join(loadErr, authErr, controlErr, resumeErr, directErr, harnessErr)
+	return errors.Join(loadErr, authErr, controlErr, resumeErr, autoErr, directErr, harnessErr)
 }
 
 // harnessSettingLabel renders a harnesses.* value, naming the default when unset.

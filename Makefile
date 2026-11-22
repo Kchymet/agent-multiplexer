@@ -2,10 +2,17 @@ BINDIR  ?= $(HOME)/.local/bin
 CONFDIR ?= $(HOME)/.config/amux
 GOFLAGS ?=
 GOVULNCHECK_VERSION := v1.8.0
-VERSION ?= 0.1.0
+# Product version derived from git (scripts/version.sh): a checkout build is
+# 0.1.<count>-dev+<sha>[.dirty]; RELEASE=1 (the release workflow) produces the
+# plain 0.1.<count> it publishes. Override VERSION only for local experiments.
+RELEASE ?=
+VERSION ?= $(shell AMUX_RELEASE=$(RELEASE) sh scripts/version.sh)
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null)
 GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
 NOTICE_TOOLCHAIN := go$(GO_VERSION)
-LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
+LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION) -X amux/internal/buildinfo.Commit=$(COMMIT)
+DIST := dist
+RELEASE_PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
 
 # Go modules in this repo. harnessproto is a nested, independently-published
 # module (the wire protocol harness imports), so it is NOT covered by the root
@@ -13,7 +20,7 @@ LDFLAGS := -s -w -X amux/internal/buildinfo.Version=$(VERSION)
 # there would merge green.
 GO_MODULES := . ./harnessproto
 
-.PHONY: all build install uninstall test test-live fmt vet vuln notices notices-check clean cross run
+.PHONY: all build install uninstall test test-live fmt vet vuln notices notices-check clean cross run version release-assets
 
 all: build
 
@@ -21,6 +28,29 @@ build: notices-check
 	@if [ -n "$(strip $(GOFLAGS))" ]; then echo "custom GOFLAGS are outside the supported notice-provenance build; run go build directly and regenerate/review notices for that artifact"; exit 1; fi
 	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= go build -ldflags '$(LDFLAGS)' -o bin/amux ./cmd/amux
 	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go run ./internal/licenses/cmd/verify -binary bin/amux
+
+version:
+	@echo $(VERSION)
+
+# Release assets: one binary per supported platform, each built and
+# provenance-verified exactly like `make build`, plus the shell shim, a
+# manifest (version, daemon protocol, schema range — printed by the
+# host-platform binary so it cannot drift from the code) and SHA256SUMS. The
+# release workflow runs this with RELEASE=1 and uploads dist/*.
+release-assets: notices-check
+	@if [ -n "$(strip $(GOFLAGS))" ]; then echo "custom GOFLAGS are outside the supported notice-provenance build"; exit 1; fi
+	mkdir -p $(DIST)
+	find $(DIST) -mindepth 1 -maxdepth 1 -type f -delete
+	@set -e; for p in $(RELEASE_PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; out=$(DIST)/amux-$$os-$$arch; \
+		echo "== $$out =="; \
+		GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) CGO_ENABLED=0 GOFLAGS= GOOS=$$os GOARCH=$$arch go build -ldflags '$(LDFLAGS)' -o $$out ./cmd/amux; \
+		GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go run ./internal/licenses/cmd/verify -binary $$out; \
+	done
+	cp scripts/amux.sh $(DIST)/amux.sh
+	$(DIST)/amux-$$(go env GOHOSTOS)-$$(go env GOHOSTARCH) version --manifest > $(DIST)/amux-release.json
+	cd $(DIST) && if command -v sha256sum >/dev/null 2>&1; then sha256sum amux-* amux.sh > SHA256SUMS; else shasum -a 256 amux-* amux.sh > SHA256SUMS; fi
+	@cat $(DIST)/amux-release.json $(DIST)/SHA256SUMS
 
 notices:
 	GOTOOLCHAIN=$(NOTICE_TOOLCHAIN) go generate ./internal/licenses

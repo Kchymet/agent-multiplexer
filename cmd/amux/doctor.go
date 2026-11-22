@@ -37,6 +37,13 @@ func cmdDoctor() error {
 	for _, line := range versionOutput {
 		fmt.Println(line)
 	}
+	if line, pending := updateStatusLine(versions); line != "" {
+		mark := "·"
+		if pending {
+			mark = "⚠"
+		}
+		fmt.Printf("  %s %-9s %s\n", mark, "update", line)
+	}
 
 	type dep struct {
 		bin, verArg, note string

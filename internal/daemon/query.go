@@ -82,6 +82,9 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 			DatabaseMinSchema: store.MinSchemaVersion,
 			DatabaseMaxSchema: store.CurrentSchemaVersion,
 		}
+		live := d.hostedAgentCount()
+		info.LiveAgents = &live
+		info.UpdatePending, info.UpdatePendingReason = d.updatePending()
 		db, err := store.Open()
 		if err != nil {
 			info.DatabaseError = err.Error()

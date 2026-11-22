@@ -1,0 +1,95 @@
+# Publishes a GitHub Release for every push to master that passes CI.
+#
+# Each release is tagged v0.1.<first-parent commit count> (scripts/version.sh)
+# and carries one binary per supported platform (amux-<os>-<arch>), the shell
+# shim (amux.sh), the release manifest (amux-release.json: version, daemon
+# protocol, database schema range — printed by the built binary itself) and a
+# SHA256SUMS covering them. `make release-assets` builds every binary with the
+# same notices-check / license-verify provenance as `make build`.
+#
+# `amux update`, the daemon's automatic updater and scripts/install.sh read
+# these assets through /releases/latest/download/amux-release.json and then
+# /releases/download/<tag>/<asset>. Only the built-in GITHUB_TOKEN is used.
+name: release
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: write
+
+# Serialize releases so two quick pushes cannot race on "latest".
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Only CI runs triggered by a push to master (not PRs) that succeeded.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # The release version is the first-parent commit count.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: release version
+        id: version
+        run: |
+          version=$(AMUX_RELEASE=1 sh scripts/version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "release v$version already published; nothing to do"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: build release assets
+        if: steps.version.outputs.exists == 'false'
+        run: make release-assets RELEASE=1
+      - name: check manifest
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          got=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' dist/amux-release.json)
+          test "$got" = "${{ steps.version.outputs.version }}"
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: publish
+        if: steps.version.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Mark latest only when this is newer than the current latest, so a
+          # delayed run for an older commit never moves "latest" backwards.
+          latest=true
+          current=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)
+          if [ -n "$current" ]; then
+            newest=$(printf '%s\n%s\n' "${current#v}" "$VERSION" | sort -V | tail -n 1)
+            if [ "$newest" != "$VERSION" ]; then latest=false; fi
+          fi
+          subject=$(git log -1 --format=%s "$HEAD_SHA")
+          {
+            echo "amux $VERSION — built from $HEAD_SHA"
+            echo
+            echo "$subject"
+            echo
+            echo 'Install: `curl -fsSL https://raw.githubusercontent.com/'"$GITHUB_REPOSITORY"'/master/scripts/install.sh | sh`'
+            echo 'Update an existing install: `amux update` (the daemon also updates itself; see docs/versioning.md).'
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$HEAD_SHA" \
+            --title "amux $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest="$latest"

@@ -340,6 +340,8 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 			return nil, fmt.Errorf("unexpected version projection %T", rows)
 		}
 		info.DatabaseError = ""
+		info.LiveAgents = nil
+		info.UpdatePending, info.UpdatePendingReason = "", ""
 		value = info
 	case core.QueryCodexControl:
 		rows, err := r.d.readModel(action)
