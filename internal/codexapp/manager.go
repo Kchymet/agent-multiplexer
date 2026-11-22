@@ -394,6 +394,13 @@ func resumeThreadFor(sessionID, legacyThreadID string) string {
 	}
 }
 
+// CanResume reports whether the next launch of sessionID would resume an
+// existing thread (the decision Ensure makes through resumeThreadFor), rather
+// than start a new one.
+func CanResume(sessionID, legacyThreadID string) bool {
+	return resumeThreadFor(sessionID, legacyThreadID) != ""
+}
+
 // priorAccountsFor returns the ChatGPT accounts a resumed thread ran under,
 // oldest first. A new process may continue the thread under the current
 // central account; these remain in its identity as evidence.

@@ -630,12 +630,42 @@ func (d *Daemon) restoreDormantAccess(ctx context.Context, session store.Session
 // conversation identity, sibling sessions and terminal/editor processes.
 // Compatibility recreation also stops tabs retaining obsolete access mounts.
 func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) error {
+	_, err := d.replaceSessionWith(ctx, id, replaceOptions{allTabs: allTabs})
+	return err
+}
+
+// replaceOptions tune replaceSessionWith.
+type replaceOptions struct {
+	allTabs bool
+	// retarget, when set, rewrites the resolved launch argv before the first
+	// attempt (a crash fallback relaunches the version a session ran before).
+	retarget func(argv []string) ([]string, error)
+	// fallback, when set, rewrites a freshly resolved launch argv for a second
+	// attempt when launching the replacement fails after the old runtime was
+	// stopped, so the session is not left dead (a harness update falls back to
+	// the version the session ran before).
+	fallback func(argv []string) ([]string, error)
+}
+
+// fallbackLaunchError reports that the replacement failed to launch but the
+// fallback launch succeeded: the session runs, on the fallback argv.
+type fallbackLaunchError struct{ err error }
+
+func (e *fallbackLaunchError) Error() string {
+	return fmt.Sprintf("replacement failed to launch (%v); relaunched with the fallback", e.err)
+}
+func (e *fallbackLaunchError) Unwrap() error { return e.err }
+
+// replaceSessionWith is replaceSession returning the published runtime
+// (engine.Instance or *codexapp.Supervisor).
+func (d *Daemon) replaceSessionWith(ctx context.Context, id string, opts replaceOptions) (any, error) {
+	allTabs := opts.allTabs
 	spec, err := d.launchSpec(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if spec.Session.Archived {
-		return fmt.Errorf("session %s is archived; restore it before restarting", id)
+		return nil, fmt.Errorf("session %s is archived; restore it before restarting", id)
 	}
 	record := d.captureRestart(engine.Key{AgentID: id, Tab: panespec.TabAgent})
 	work := d.restartIntent(startIntent{record: &record, resumeGoal: true}, &spec)
@@ -656,52 +686,104 @@ func (d *Daemon) replaceSession(ctx context.Context, id string, allTabs bool) er
 		})
 	}
 	if d.structuredControl(spec.Session) {
+		session := spec.Session
+		launch := func(dir string, env, argv []string, endpoint string) (any, error) {
+			published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
+				return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work, Goals: agent.NativeGoals(session)})
+			})
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := published.(*codexapp.Supervisor); !ok {
+				return nil, fmt.Errorf("App Server returned no runtime")
+			}
+			d.noteHarnessLaunch(id, published, argv)
+			return published, nil
+		}
 		dir, env, argv, endpoint, err := panespec.AppServerCommand(spec)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if opts.retarget != nil {
+			if argv, err = opts.retarget(argv); err != nil {
+				return nil, err
+			}
 		}
 		if err := revalidateDeferred(ctx); err != nil {
-			return err
+			return nil, err
 		}
 		kill()
-		session := spec.Session
-		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-			return d.codex.Ensure(ctx, id, dir, env, argv, endpoint, session.Model, session.Prompt, session.ClaudeID, codexapp.LaunchOptions{Sandbox: panespec.CodexSandboxForLaunch(), RestartWork: work, Goals: agent.NativeGoals(session)})
-		})
-		if err != nil {
-			return err
+		published, err := launch(dir, env, argv, endpoint)
+		if err == nil || opts.fallback == nil {
+			return published, err
 		}
-		if _, ok := published.(*codexapp.Supervisor); !ok {
-			return fmt.Errorf("App Server returned no runtime")
+		dir, env, argv, endpoint, ferr := panespec.AppServerCommand(spec)
+		if ferr == nil {
+			argv, ferr = opts.fallback(argv)
 		}
-		return nil
+		if ferr == nil {
+			published, ferr = launch(dir, env, argv, endpoint)
+		}
+		if ferr != nil {
+			return nil, fmt.Errorf("%w (fallback: %v)", err, ferr)
+		}
+		return published, &fallbackLaunchError{err: err}
 	}
 	if d.engine == nil {
-		return fmt.Errorf("engine unavailable")
+		return nil, fmt.Errorf("engine unavailable")
+	}
+	launch := func(dir string, env, argv []string) (any, error) {
+		published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
+			return d.ensurePane(ctx, engine.Spec{
+				Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
+				ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
+			})
+		})
+		if err != nil {
+			retireUnstarted(id, argv)
+			return nil, err
+		}
+		if _, ok := published.(engine.Instance); !ok {
+			return nil, fmt.Errorf("engine returned no runtime")
+		}
+		return published, nil
 	}
 	dir, env, argv, err := d.resolve(spec, panespec.TabAgent)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if opts.retarget != nil {
+		retargeted, err := opts.retarget(argv)
+		if err != nil {
+			retireUnstarted(id, argv)
+			return nil, err
+		}
+		argv = retargeted
 	}
 	if err := revalidateDeferred(ctx); err != nil {
 		retireUnstarted(id, argv)
-		return err
+		return nil, err
 	}
 	kill()
-	published, _, err := d.publishPermissionRuntime(id, func() (any, error) {
-		return d.ensurePane(ctx, engine.Spec{
-			Key: engine.Key{AgentID: id, Tab: panespec.TabAgent}, Dir: dir, Env: env,
-			ModelAccess: launchenv.ForRuntime(spec.Session.Agent), Argv: argv,
-		})
-	})
-	if err != nil {
-		retireUnstarted(id, argv)
-		return err
+	published, err := launch(dir, env, argv)
+	if err == nil || opts.fallback == nil {
+		return published, err
 	}
-	if _, ok := published.(engine.Instance); !ok {
-		return fmt.Errorf("engine returned no runtime")
+	// Resolve afresh (a resolved argv carries a single-use account launch) and
+	// retarget it.
+	dir, env, argv, ferr := d.resolve(spec, panespec.TabAgent)
+	if ferr == nil {
+		var retargeted []string
+		if retargeted, ferr = opts.fallback(argv); ferr != nil {
+			retireUnstarted(id, argv)
+		} else {
+			published, ferr = launch(dir, env, retargeted)
+		}
 	}
-	return nil
+	if ferr != nil {
+		return nil, fmt.Errorf("%w (fallback: %v)", err, ferr)
+	}
+	return published, &fallbackLaunchError{err: err}
 }
 
 func ok() core.Result { return core.Result{Type: "result", OK: true} }

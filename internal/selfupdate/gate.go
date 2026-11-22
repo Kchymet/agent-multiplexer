@@ -103,18 +103,20 @@ func PlanInstall(candidate, running Manifest, installed string) (Action, string)
 }
 
 // SafePoint decides when the daemon may restart itself to load an update: only
-// after it has observed no hosted agents (PTY panes or App Server sessions) on
-// RequiredIdle consecutive polls. A daemon restart stops every agent it hosts,
-// so it never restarts while one runs.
+// after it has observed no blocking runtime on RequiredIdle consecutive polls.
+// A runtime blocks while a restart would interrupt it (an agent mid-turn,
+// waiting on a permission prompt or with a prompt in flight; an editor or
+// terminal pane) or could not resume it; idle agents are relaunched with
+// their conversations by the restart journal.
 type SafePoint struct {
 	RequiredIdle int
 	idle         int
 }
 
-// Observe records one poll's live-agent count and reports whether restarting
-// now is safe.
-func (s *SafePoint) Observe(live int) bool {
-	if live > 0 {
+// Observe records one poll's count of blocking runtimes and reports whether
+// restarting now is safe.
+func (s *SafePoint) Observe(blocking int) bool {
+	if blocking > 0 {
 		s.idle = 0
 		return false
 	}

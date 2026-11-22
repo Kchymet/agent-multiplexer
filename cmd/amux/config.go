@@ -359,7 +359,9 @@ func harnessSettingLabel(key, value string) string {
 	}
 	switch {
 	case key == harnessbin.KeyUpdate:
-		return harnessbin.UpdateOff
+		return harnessbin.DefaultUpdateMode
+	case key == harnessbin.KeyRestartSessions:
+		return "on"
 	case key == harnessbin.KeyInterval:
 		return harnessbin.DefaultCheckInterval.String()
 	case strings.HasSuffix(key, ".channel"):
@@ -372,6 +374,9 @@ func harnessSettingLabel(key, value string) string {
 func harnessSettingHint(key string) string {
 	if key == harnessbin.KeyUpdate || key == harnessbin.KeyInterval {
 		return "the running daemon re-reads it within 15 minutes"
+	}
+	if key == harnessbin.KeyRestartSessions {
+		return "the running daemon re-reads it within a minute"
 	}
 	if strings.HasSuffix(key, ".bin") {
 		return "applies to newly launched sessions"

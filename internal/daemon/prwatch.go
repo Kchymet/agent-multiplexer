@@ -364,6 +364,7 @@ func (d *Daemon) beginPRWake(ctx context.Context, sess store.Session, text strin
 }
 
 func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter structuredPromptStarter, text string) (prwatch.Delivery, error) {
+	d.noteSteer(id)
 	if err := ctx.Err(); err != nil {
 		return prwatch.Deferred, err
 	}

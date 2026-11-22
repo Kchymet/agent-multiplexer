@@ -1158,6 +1158,29 @@ func decisionToResult(decision string) string {
 // correlation guard), reading the live App Server state rather than a file.
 func (s *Supervisor) OpenApprovals() []string { return s.approvals.open() }
 
+// AtSafePoint reports whether the runtime is idle between turns, so replacing
+// its process now interrupts nothing: no turn is active (whoever started it),
+// no prompt of ours is between turn/start and its completion, and no approval
+// is open. why explains a false. It reads live supervisor state only.
+func (s *Supervisor) AtSafePoint() (ok bool, why string) {
+	s.mu.Lock()
+	closed, thread, turn, pending := s.closed, s.threadID, s.curTurn, s.turnDone != nil
+	s.mu.Unlock()
+	switch {
+	case closed:
+		return false, "runtime closed"
+	case thread == "":
+		return false, "no thread yet"
+	case turn != "":
+		return false, "mid-turn"
+	case pending:
+		return false, "a prompt is starting a turn"
+	case len(s.approvals.open()) > 0:
+		return false, "waiting on an approval"
+	}
+	return true, ""
+}
+
 // Subscribe joins the runtime-event stream at afterSeq (see eventHub.subscribe).
 // This is the exact shape the provider's RuntimeEventStream hook consumes.
 func (s *Supervisor) Subscribe(ctx context.Context, afterSeq int64) <-chan harnessproto.RuntimeEventBatch {

@@ -61,6 +61,14 @@ func (d *Daemon) steer(ctx context.Context, a core.Action) error {
 	if a.ID == "" {
 		return fmt.Errorf("steer: need a session id")
 	}
+	// Whatever the verb, the session is not at a safe point for a harness
+	// restart or a daemon self-update until its effect has settled.
+	d.noteSteer(a.ID)
+	if d.selfUpdate.restart.Load() {
+		// The daemon committed to restarting into an update with every agent
+		// idle; typed input now could be lost with the old process.
+		return fmt.Errorf("the daemon is restarting to load an amux update; agents resume their conversations in a few seconds, retry then")
+	}
 	if d.engine == nil {
 		return fmt.Errorf("engine unavailable")
 	}

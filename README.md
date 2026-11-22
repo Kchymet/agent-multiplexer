@@ -248,9 +248,13 @@ universal autonomous loop. Launch metadata includes:
 | `AMUX_SESSION_ID`  | the harness conversation id (see *Identity* above)   |
 | `CLAUDE_CONFIG_DIR` / `CODEX_HOME` | the agent's private copy of your harness config (`<agent dir>/.amux/claude|codex`) |
 
-amux can install and update its own copies of Claude Code and Codex, separate
-from your global install: `amux harness install claude|codex`, then
-`amux harness update | pin | rollback` (see
+amux installs and updates its own copies of Claude Code and Codex, separate
+from your global install. By default the daemon adopts a managed copy of each
+harness you already use (binary on PATH or logged in), keeps it updated, and
+restarts idle running sessions onto a new version with their conversations
+resumed; `amux harness install | update | pin | rollback | uninstall` manage it
+by hand, and `amux config set harnesses.update off` (or
+`AMUX_NO_HARNESS_AUTO_UPDATE=1`) opts out (see
 [docs/harness-installs.md](docs/harness-installs.md)). Without a managed install
 amux launches the one on your PATH. Override the launch binary per harness with
 `AMUX_CLAUDE_BIN` / `AMUX_CODEX_BIN` or `amux config set harnesses.<kind>.bin`

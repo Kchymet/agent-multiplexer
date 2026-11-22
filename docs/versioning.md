@@ -72,27 +72,53 @@ daemon never update at once.
 
 ### The daemon and running agents
 
-The daemon hosts every agent's process, and stopping it stops them (the restart
-journal relaunches them with their conversations afterwards, but in-flight work
-is interrupted). An update therefore never restarts the daemon while it hosts an
-agent:
+The daemon hosts every agent's process, and stopping it stops them. The
+restart journal relaunches each agent with its conversation afterwards
+(`claude --resume`, `codex resume`, or the App Server's `thread/resume` from
+the session's thread identity), so a restart while an agent is idle between
+turns loses nothing; a restart mid-turn would interrupt the turn. An update
+therefore restarts the daemon only at a **safe point**: every hosted agent is
+idle between turns.
 
 - No daemon running: the binary is replaced; the next start uses it.
 - Daemon idle (no agents): `amux update` replaces the binary and restarts it.
 - Agents running, same protocol and schema: the binary on disk is replaced at
   once (new CLI processes use it and still speak the running daemon's
   protocol); the daemon keeps its old code and restarts itself into the new
-  binary once it has observed no agents on consecutive polls.
+  binary at the safe point.
 - Agents running, protocol or schema changes: swapping the binary would leave
   new CLIs unable to talk to the old daemon, so the release is *staged*
-  (downloaded and verified, binary untouched). It is installed when no agents
-  run, by the next `amux daemon restart`/`start`, or now with
+  (downloaded and verified, binary untouched). It is installed at the safe
+  point, by the next `amux daemon restart`/`start`, or now with
   `amux update --restart-daemon`.
 - A release whose schema range does not include this database's schema is
   refused; amux never lowers `user_version`.
 
+The safe point is the one harness updates use (see
+[harness-installs.md](harness-installs.md#running-sessions-move-to-the-new-version)),
+observed on two consecutive polls (5 minutes apart) for every hosted runtime:
+
+- each agent is idle between turns: not mid-turn, not waiting on a permission
+  prompt, approval or question, no prompt of amux's starting a turn on an App
+  Server, and no prompt, steer or permission answer delivered in the last 30
+  seconds;
+- each agent has a saved conversation the relaunch resumes. An agent that has
+  not run a turn yet (no Claude transcript, no Codex rollout, an App Server
+  thread known not to have run) would come back as a new conversation, so it
+  holds the restart back like a busy agent;
+- no editor or terminal pane is open: a shell or editor process cannot be
+  resumed, so one blocks the restart.
+
+Right before restarting, the daemon takes every hosted agent's admission lock
+(the lock each prompt, start and restart of that agent holds), checks all of
+this again, and only then commits. From that moment a prompt to any agent is
+refused with "the daemon is restarting to load an amux update" instead of
+being typed into a process about to stop; the agents come back within seconds.
+
 `amux version`, `amux doctor` (Versions → update) and `amux status` (on stderr)
-report a pending update and why it is waiting.
+report a pending update and why it is waiting, naming the agents that hold it
+back (for example `waiting for 1 running agent(s) to be idle between turns
+(a1b2c3: mid-turn or waiting on a permission prompt)`).
 
 ### Automatic updates
 

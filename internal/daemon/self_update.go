@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"amux/internal/amuxcfg"
 	"amux/internal/buildinfo"
 	"amux/internal/core"
+	"amux/internal/panespec"
 	"amux/internal/selfupdate"
 	"amux/internal/store"
 )
@@ -37,6 +40,7 @@ type selfUpdateState struct {
 	// newUpdater and live are seams for tests.
 	newUpdater func() (*selfupdate.Updater, error)
 	live       func() int
+	blockers   func() (ids, blocking []string)
 }
 
 // CurrentManifest is this build's version and compatibility contracts — what
@@ -110,8 +114,8 @@ func (d *Daemon) setUpdatePending(version, reason string) {
 // release at a bounded rate and installs it without ever stopping a running
 // agent: a protocol-compatible release replaces the binary on disk at once
 // (new CLI invocations use it; this daemon keeps its code), an incompatible one
-// is staged, and the daemon restarts itself into the new binary only once it
-// has hosted no agents for consecutive polls. Until then the pending update is
+// is staged, and the daemon restarts itself into the new binary only once every
+// hosted agent has been idle between turns for consecutive polls. Until then the pending update is
 // reported by `amux version`, `amux doctor` and `amux status`.
 func (d *Daemon) selfUpdateLoop(ctx context.Context) {
 	t := time.NewTimer(3 * time.Minute) // let startup and agent restore settle
@@ -227,7 +231,7 @@ func (d *Daemon) autoInstall(ctx context.Context, u *selfupdate.Updater, now tim
 			return
 		}
 		st.Staged = nil
-		log.Printf("self-update: installed amux %s at %s; this daemon (%s) restarts into it once no agents are running", m.Version, u.Target, u.Running.Version)
+		log.Printf("self-update: installed amux %s at %s; this daemon (%s) restarts into it once every agent is idle between turns", m.Version, u.Target, u.Running.Version)
 	case selfupdate.ActionStage:
 		st.Staged = staged
 		log.Printf("self-update: staged amux %s: %s", m.Version, why)
@@ -236,8 +240,11 @@ func (d *Daemon) autoInstall(ctx context.Context, u *selfupdate.Updater, now tim
 }
 
 // loadPendingAtSafePoint restarts the daemon into an installed or staged
-// release once it has observed no hosted agents on consecutive polls. It never
-// restarts while an agent runs: a daemon restart stops the agents it hosts.
+// release once, on consecutive polls, every hosted agent is idle between turns
+// with a conversation the restart journal resumes (daemonRestartBlockers). It
+// never restarts while an agent is mid-turn, waiting on a permission prompt or
+// has a prompt in flight: a daemon restart stops the agents it hosts, and the
+// journal relaunches them with their conversations.
 func (d *Daemon) loadPendingAtSafePoint(ctx context.Context, u *selfupdate.Updater) {
 	st, err := u.Store.Load()
 	if err != nil {
@@ -261,13 +268,24 @@ func (d *Daemon) loadPendingAtSafePoint(ctx context.Context, u *selfupdate.Updat
 			return
 		}
 	}
-	live := d.hostedAgentCount()
-	if !d.selfUpdate.safe.Observe(live) {
-		reason := "confirming no agents are running"
-		if live > 0 {
-			reason = fmt.Sprintf("waiting for %d running agent(s) to stop; or run amux daemon restart (stops and resumes them)", live)
+	ids, blocking := d.daemonRestartBlockers()
+	if !d.selfUpdate.safe.Observe(len(blocking)) {
+		d.recordPending(u, pending, safePointReason(blocking))
+		return
+	}
+	// Final check under the admission lock of every hosted agent: no steer,
+	// start or restart of one can begin between this check and the shutdown,
+	// and the restart flag set below refuses steers from then on, so the
+	// restart journal captures every agent idle and each relaunches with its
+	// conversation.
+	release := d.admitSessions(ids...)
+	defer release()
+	if again, blocking := d.daemonRestartBlockers(); len(blocking) > 0 || !sameMembers(ids, again) {
+		d.selfUpdate.safe.Observe(1)
+		if len(blocking) == 0 {
+			blocking = []string{"the set of running agents changed"}
 		}
-		d.recordPending(u, pending, reason)
+		d.recordPending(u, pending, safePointReason(blocking))
 		return
 	}
 	if st.Staged != nil {
@@ -282,10 +300,73 @@ func (d *Daemon) loadPendingAtSafePoint(ctx context.Context, u *selfupdate.Updat
 			return
 		}
 	}
-	log.Printf("self-update: no agents running; restarting daemon %s into amux %s", u.Running.Version, pending)
+	log.Printf("self-update: %d agent(s) hosted, all idle between turns; restarting daemon %s into amux %s (agents resume their conversations)", len(ids), u.Running.Version, pending)
 	d.recordPending(u, pending, "restarting now")
 	d.selfUpdate.restart.Store(true)
 	d.requestShutdown()
+}
+
+func safePointReason(blocking []string) string {
+	if len(blocking) == 0 {
+		return "confirming every agent is idle between turns"
+	}
+	shown := blocking
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	more := ""
+	if len(blocking) > len(shown) {
+		more = fmt.Sprintf(" and %d more", len(blocking)-len(shown))
+	}
+	return fmt.Sprintf("waiting for %d running agent(s) to be idle between turns (%s%s); or run amux daemon restart (stops and resumes them)",
+		len(blocking), strings.Join(shown, "; "), more)
+}
+
+// daemonRestartBlockers lists the hosted agents (ids, sorted) and, for each
+// hosted runtime a daemon restart would interrupt or could not bring back,
+// why. The restart journal relaunches every agent with its conversation (see
+// restartRecord): Claude Code with --resume, Codex with `codex resume`, App
+// Server sessions with thread/resume. So an agent blocks only while it is not
+// idle between turns (sessionAtSafePoint) or has no saved conversation a
+// relaunch would resume (harnessResumable). Editor and terminal panes always
+// block: their processes (a shell, an editor buffer) cannot be resumed.
+func (d *Daemon) daemonRestartBlockers() (ids, blocking []string) {
+	if f := d.selfUpdate.blockers; f != nil {
+		return f()
+	}
+	if d.selfUpdate.live != nil {
+		for i := d.selfUpdate.live(); i > 0; i-- {
+			blocking = append(blocking, "busy")
+		}
+		return nil, blocking
+	}
+	seen := map[string]bool{}
+	if d.engine != nil {
+		for _, k := range d.engine.Live() {
+			if k.Tab != panespec.TabAgent {
+				blocking = append(blocking, k.AgentID+": an editor or terminal pane is open")
+				continue
+			}
+			seen[k.AgentID] = true
+		}
+	}
+	if d.codex != nil {
+		for id := range d.codex.Live() {
+			seen[id] = true
+		}
+	}
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if ok, why := d.harnessResumable(id); !ok {
+			blocking = append(blocking, id+": "+why)
+		} else if ok, why := d.sessionAtSafePoint(id); !ok {
+			blocking = append(blocking, id+": "+why)
+		}
+	}
+	return ids, blocking
 }
 
 func (d *Daemon) recordPending(u *selfupdate.Updater, version, reason string) {

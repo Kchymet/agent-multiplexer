@@ -199,6 +199,9 @@ type Daemon struct {
 
 	// selfUpdate tracks automatic self-update and the restart it may request.
 	selfUpdate selfUpdateState
+	// harnessRestart moves running sessions onto a newly activated managed
+	// harness version at a safe point (harness_restart.go).
+	harnessRestart harnessRestartState
 
 	// serving tracks every accepted host transport. Run closes and joins these
 	// handlers before it closes the session RPC servers or releases authority
@@ -291,6 +294,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	d.listen = listenOwnedUnix
 	d.prs = d.newPRWatcher()
 	d.permissionBaseline = d.loadPermissionBaseline
+	d.harnessRestart.kick = make(chan struct{}, 1)
 	return d
 }
 
@@ -565,6 +569,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// amux-managed Claude Code / Codex installs: optional scheduled update
 	// check (harnesses.update, off by default).
 	startRunWorker(func() { d.harnessUpdateLoop(ctx) })
+	// Running sessions move onto a newly activated managed harness version
+	// when idle between turns (harnesses.restart_sessions, on by default).
+	startRunWorker(func() { d.harnessRestartLoop(ctx) })
 	// amux itself: automatic release install (update.auto, on by default). It
 	// restarts this daemon only when no agents are hosted.
 	if d.selfUpdate.enabled {
@@ -1551,6 +1558,7 @@ func (d *Daemon) ensureSupervisorSpec(ctx context.Context, spec panespec.LaunchS
 	if !ok {
 		return nil, fmt.Errorf("App Server returned no runtime")
 	}
+	d.noteHarnessLaunch(agentID, sup, argv)
 	return sup, nil
 }
 
@@ -1741,6 +1749,9 @@ func (d *Daemon) ensurePane(ctx context.Context, spec engine.Spec) (engine.Insta
 		if rerr := accounts.RetireLaunch(spec.Key.AgentID, launch); rerr != nil {
 			log.Printf("amux: retire unused account launch for %s: %v", spec.Key.AgentID, rerr)
 		}
+	}
+	if err == nil && spec.Key.Tab == panespec.TabAgent && !(alive && in == before) {
+		d.noteHarnessLaunch(spec.Key.AgentID, in, spec.Argv)
 	}
 	return in, err
 }

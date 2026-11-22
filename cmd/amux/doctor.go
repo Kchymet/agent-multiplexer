@@ -44,6 +44,9 @@ func cmdDoctor() error {
 		}
 		fmt.Printf("  %s %-9s %s\n", mark, "update", line)
 	}
+	for _, line := range harnessRestartLines(versions) {
+		fmt.Printf("  · %-9s %s\n", "harness", line)
+	}
 
 	type dep struct {
 		bin, verArg, note string
