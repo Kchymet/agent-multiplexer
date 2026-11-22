@@ -493,29 +493,41 @@ func claudeIdleAfterTurn(h agent.Harness, sess store.Session) bool {
 	return lastTurnEnded(rec.Path)
 }
 
-// transcriptTailBytes bounds how much of a transcript lastTurnEnded reads.
+// transcriptTailBytes bounds how much of a transcript lastTurnEnded and
+// claudeQuestionOpenIn read.
 const transcriptTailBytes = 256 << 10
 
-// lastTurnEnded reports whether the last substantive event in a Claude
-// transcript's tail is a turn_end.
-func lastTurnEnded(path string) bool {
+// transcriptTail reads the last transcriptTailBytes of a transcript as lines,
+// dropping a first line the cut probably split. ok is false when the file
+// cannot be read.
+func transcriptTail(path string) (lines []string, ok bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	defer f.Close()
 	if info, err := f.Stat(); err == nil && info.Size() > transcriptTailBytes {
 		if _, err := f.Seek(info.Size()-transcriptTailBytes, io.SeekStart); err != nil {
-			return false
+			return nil, false
 		}
 	}
 	b, err := io.ReadAll(io.LimitReader(f, transcriptTailBytes))
 	if err != nil {
-		return false
+		return nil, false
 	}
-	lines := strings.Split(string(b), "\n")
+	lines = strings.Split(string(b), "\n")
 	if len(lines) > 0 && len(b) == transcriptTailBytes {
 		lines = lines[1:] // the first line is probably partial
+	}
+	return lines, true
+}
+
+// lastTurnEnded reports whether the last substantive event in a Claude
+// transcript's tail is a turn_end.
+func lastTurnEnded(path string) bool {
+	lines, ok := transcriptTail(path)
+	if !ok {
+		return false
 	}
 	st := &runtimeevents.ClaudeState{}
 	last := ""
