@@ -551,6 +551,11 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 // (harnessproto.Delivery*). Without a structured channel or a verified key
 // path for this prompt it is DeliveryPane: a v2 answer is refused with
 // answer_in_pane, while a legacy answer keeps the legacy typed reply.
+//
+// Driving Claude's drawn dialog by keys (DeliveryKeys, §4.2) stays gated off
+// until its screens are captured from a real Claude Code and the dialog
+// reader is verified against them: a released or unheld Claude question is
+// answered in the pane (a legacy answer keeps the #316 typed reply).
 func (d *Daemon) formDelivery(h agent.Harness, sess store.Session, toolUseID string, f harnessproto.Form) string {
 	if f.Source == harnessproto.FormSourceClaudeAsk && d.holds.isHeld(sess.ID, toolUseID) {
 		return harnessproto.DeliveryStructured

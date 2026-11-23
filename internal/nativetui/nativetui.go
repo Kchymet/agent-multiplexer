@@ -150,6 +150,7 @@ type model struct {
 	accountCall           accountCaller  // nil uses the authenticated host account service
 	res                   resourcesState // daemon resource samples and the top panel (resources.go)
 	qp                    queuePanel     // the question queue and its panel (queue.go)
+	qf                    *questionForm  // an open question form (question_form.go), or nil
 	prPanel               prPanelState   // the PR list in the main pane (prs.go)
 
 	// clip queues local selections and pane OSC 52 writes through one Copier.
@@ -241,6 +242,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	if save := m.persistRailState(); save != nil {
 		cmd = tea.Batch(cmd, save)
+	}
+	if rel := m.releaseFocusedQuestion(); rel != nil {
+		cmd = tea.Batch(cmd, rel)
 	}
 	return next, cmd
 }
@@ -512,7 +516,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.res.open {
 		return m.handleResourcesKey(k)
 	}
-	// So does the question queue panel.
+	// So does an open question form, then the question queue panel.
+	if m.qf != nil {
+		return m.handleQuestionFormKey(k)
+	}
 	if m.qp.open {
 		return m.handleQueueKey(k)
 	}

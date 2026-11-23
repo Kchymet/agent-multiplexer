@@ -267,3 +267,36 @@ func TestTypedSteerToHeldQuestion(t *testing.T) {
 		}
 	}
 }
+
+// TestReleasedQuestionIsAnsweredInPane pins the key-fallback gate: once a
+// held question is released (and the transcript shows it), its delivery is
+// pane — a v2 answer is refused, never typed — while a legacy answer keeps
+// the #316 typed reply.
+func TestReleasedQuestionIsAnsweredInPane(t *testing.T) {
+	rows := []core.Session{{ID: "m1", RootID: "wg1", State: core.StateWaiting}}
+	f, _ := queue.ClaudeForm(json.RawMessage(holdInput))
+	qs := map[string][]openQuestion{"m1": {{ToolUseID: "tu1", Questions: queue.LegacyQuestions(f), Form: &f}}}
+	d := fakeQueueDaemon(t, rows, nil, qs, nil, nil)
+	d.lastHumanInputFn = (&holdClock{}).at
+	d.holdEnabledFn = func() bool { return true }
+	rec := &promptRecorder{}
+	d.queuePromptFn = rec.fn
+	res := startHold(d, "5")
+	waitHeld(t, d)
+	if e := d.queueOverview(nil).Entries[0]; e.Form.Delivery != harnessproto.DeliveryStructured {
+		t.Fatalf("held delivery = %s", e.Form.Delivery)
+	}
+	d.releaseHold("m1", "tu1")
+	<-res
+	e := d.queueOverview(nil).Entries[0]
+	if e.Form.Delivery != harnessproto.DeliveryPane || e.Form.Deadline != 0 {
+		t.Fatalf("released delivery = %+v", e.Form)
+	}
+	a := harnessproto.FormAnswer{Version: 2, Action: harnessproto.FormActionAnswer, Answers: []harnessproto.QuestionAnswer{{ID: "q0", Selected: []int{0}}, {ID: "q1", Selected: []int{1}}}}
+	if r := d.handle(context.Background(), core.Action{Action: core.ActionQueueAnswer, Fields: map[string]string{core.QueueEntryField: e.ID, core.QueueFormField: formJSON(t, a)}}); r.OK || r.Code != harnessproto.CodeAnswerInPane {
+		t.Fatalf("v2 answer after release = %+v", r)
+	}
+	if r := d.handle(context.Background(), core.Action{Action: core.ActionQueueAnswer, Fields: map[string]string{core.QueueEntryField: e.ID, core.QueueChoiceField: "Tabs\nDark"}}); !r.OK || len(rec.sent) != 1 {
+		t.Fatalf("legacy answer after release = %+v, typed %q", r, rec.sent)
+	}
+}

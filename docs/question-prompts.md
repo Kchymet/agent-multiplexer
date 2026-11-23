@@ -1,6 +1,6 @@
 # Question prompts v2: parity with Claude Code and Codex (design)
 
-Status: approved design (0caeb5f); phase 2 implementation in progress.
+Status: approved design (0caeb5f); implemented in agent-multiplexer (items 1-4); the key fallback (§4.2) is gated off pending captures (it-cc447d56).
 Workgroup "question prompt parity". **This document is the cross-repo
 contract** for harness and harness-android. Every schema change lands here in
 the same commit; see "Contract changelog" at the end.
@@ -1125,3 +1125,24 @@ Members pin to these.
     `cleared` as "closed".
   - `request_id` equals the queue entry id, so a transcript card and a queue
     row collapse together.
+- **TUI and CLI** (item 4; no wire change):
+  - **TUI.** In the queue panel, Enter on a question with a v2 form opens
+    the form view (`internal/nativetui/question_form.go`):
+    - tabs per question with ✔ when answered, plus Review;
+    - ↑/↓, 1-9 and Space pick; multi-select toggles `[ ]`/`[✔]`;
+    - `o` edits Other (masked when secret), `n` edits the note;
+    - `x` dismisses, `m` replies instead, `p` answers in the pane;
+    - the cursor option's preview sits beside the list at ≥100 columns and
+      under it otherwise;
+    - a lone single-select question without notes answers on one key.
+
+    Text wraps with the shared helpers from #349 (`wrap.go`). Focusing an
+    agent pane releases that session's held questions.
+  - **CLI.** `amux question list|show|answer|cancel|release` (§5.4).
+    Refusals exit 3 (`answered`), 4 (gone), 5 (`delivery_failed` /
+    `answer_in_pane`) or 6 (`needs_newer_client`).
+    `amux config set questions.claude_hold on|off` is the opt-out.
+- **Key fallback** (item 5): gated off. A released or unheld Claude question
+  is `delivery: pane`; a v2 answer gets `answer_in_pane`, and a legacy answer
+  keeps the #316 typed reply. The sandbox could not run Claude or Codex to
+  capture dialogs; the needed captures are listed in it-cc447d56.
