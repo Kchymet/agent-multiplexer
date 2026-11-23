@@ -54,6 +54,8 @@ func validateSessionQuery(req access.Request) error {
 		}
 		_, err := decodeDiscoveryCursor(req.Fields["cursor"])
 		return err
+	case core.QueryWait:
+		return validateWaitQuery(req)
 	case core.QueryRuntimeEvents:
 		if strings.TrimSpace(req.ID) == "" {
 			return fmt.Errorf("query %q requires an id", req.Verb)

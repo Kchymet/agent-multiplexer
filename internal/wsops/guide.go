@@ -320,6 +320,10 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   normalized state (idle | ready | waiting | running), title, and repos.
 - `+"`amux agent events <member> --json`"+` — a member's normalized history: the
   evidence for what it did (continue with `+"`--cursor`"+`).
+- `+"`amux agent wait <member>... [--until ready,idle] [--timeout 30m]`"+` — block
+  until a member's state or PRs change (or it reaches one of the given states),
+  then print it. It waits on the daemon's own events, so use it instead of a
+  sleep loop over `+"`amux agent events`"+`, `+"`amux status`"+` or `+"`gh pr view`"+`.
 - `+"`amux repo ls`"+` — every repository tracked on this host, each marked
   `+"`granted`"+` or `+"`not granted`"+` for this workgroup. You may give members
   worktrees of granted repos only. Unless the host limited this workgroup, every

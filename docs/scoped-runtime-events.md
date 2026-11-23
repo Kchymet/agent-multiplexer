@@ -18,6 +18,19 @@ amux agent events <member-id> --json
 amux agent events <member-id> --cursor <next-cursor> --json
 ```
 
+To block until something changes rather than re-reading pages in a loop, wait
+on the daemon's state broadcast instead (same scope as `events`):
+
+```sh
+amux agent wait <member-id>...                     # first change in state, archive flag or PRs
+amux agent wait <member-id> --until ready,idle     # until the member's turn is over
+amux agent wait <member-id> --timeout 30m --json   # bounded; nonzero exit on timeout
+```
+
+Each call parks in the daemon (at most 25 s per round trip, re-armed with an
+opaque token so no change between round trips is missed) and returns the
+moment the session moves. Nothing sleeps or polls on either side.
+
 Use `amux status --json` for the scope-filtered session inventory (see
 [control-API scopes](agent-cli-sandbox.md#control-api-scopes)). Ordinary
 workers are self-only; repo-home and coordinator reads are checked against the

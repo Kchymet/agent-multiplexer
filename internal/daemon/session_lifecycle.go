@@ -397,7 +397,7 @@ func (r *sessionRuntime) open(ctx context.Context, session store.Session) error 
 	}
 	server, err := sessionrpc.OpenServerMailbox(session.ID, spec.Access.MailboxHostDir, r.d.authority, r.d.authority,
 		sessionrpc.Callbacks{Authorize: r.authorizeCallback, Dispatch: r.dispatchCallback},
-		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow,
+		sessionrpc.ServerOptions{ResponseBudget: r.responseBudget, RequestNotify: r.notifier(session.ID), Slow: sessionCallSlow, Parallel: sessionCallParallel,
 			SlowRequest: r.slowRequests.report})
 	if err != nil {
 		return err

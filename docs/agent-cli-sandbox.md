@@ -108,6 +108,7 @@ flags, and environment variables only ever name a target.
 | query `agent-sessions` | session | yes | yes | Read-only discovery (see above). |
 | query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members (its own row carries its grants); every tracked repo, names only, each marked granted or not | Seeing a repo is not authority to fork it. |
 | query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
+| query `wait` (`amux agent wait`) | workgroup | itself | itself, members (incl. archived members) | |
 | `rename` (`amux agent name`) | workgroup | itself | itself, members | |
 | `start` | workgroup | itself | workgroup (cascades), members | |
 | `steer` prompt / interject / stop | workgroup | itself | itself, members | |

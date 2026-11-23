@@ -32,6 +32,11 @@ Within one mailbox, calls are split by `sessionCallSlow`
 | --- | --- | --- |
 | fast | report context; activity, model, limits and permission reports; version, sessions, repos, snapshot and other store queries; central credential; native credential broker | inline by the pass that claims them, in arrival order |
 | slow | actions (create, start, restart, archive, steer, rename, git and worktree work, and any unknown verb); agent-session discovery; runtime-event pages; transcript capture | by one worker per mailbox, in arrival order, at most `sessionrpc.MaxSlowRequests` claimed at once |
+| parallel | `wait` (`amux agent wait`), a long-poll that blocks by design | each on its own goroutine, at most `sessionrpc.MaxParallelRequests` per mailbox; `Close` cancels them |
+
+A parallel call never holds either lane, so a coordinator blocked in
+`amux agent wait` on a member can still steer that member. It is classified
+by `sessionCallParallel` before the slow-lane check.
 
 Receipts and releases are transport records and are always handled inline.
 
