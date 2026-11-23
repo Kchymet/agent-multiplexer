@@ -79,13 +79,15 @@ const MaxObjectiveBytes = 4 << 10
 // ResumePrompt is the text amux types into an idle coordinator when the user
 // resumes its goal (after Control has made it active). Its marker prefix tells
 // the prompt hook it is a continuation, not a new task.
-const ResumePrompt = Marker + " The user resumed this goal. Continue working toward it."
+const ResumePrompt = Marker + "\nThe user resumed this goal. Continue working toward it."
 
 // Marker opens every prompt amux itself types into a Claude goal coordinator
 // (ResumePrompt, RestartPrompt, the daemon's PR watcher wake-ups). OnPrompt
 // treats a prompt with this exact prefix as a wake-up, never as the user's
 // task, so every amux-generated prompt to a hook-goal coordinator must start
-// with it.
+// with it. Typed prompts put it on a line of its own, and amux types only into
+// an empty composer (daemon/typed_delivery.go), so the marker is never appended
+// to text someone else wrote.
 const Marker = "[amux goal]"
 
 // RestartPrompt is the continuation a restarted coordinator is launched with

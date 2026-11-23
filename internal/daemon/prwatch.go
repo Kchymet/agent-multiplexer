@@ -581,7 +581,7 @@ func (d *Daemon) beginPRWake(ctx context.Context, sess store.Session, text strin
 		}
 	}
 	res := d.handle(withEffectAdmission(ctx), core.Action{Action: core.ActionSteer, ID: sess.ID, Fields: map[string]string{
-		core.SteerVerb: core.SteerPrompt, core.SteerText: text,
+		core.SteerVerb: core.SteerPrompt, core.SteerText: text, steerOriginField: steerOriginAmux,
 	}})
 	if !res.OK {
 		return prwatch.Deferred, fmt.Errorf("%s", res.Error)
@@ -641,7 +641,7 @@ func prWakeText(hookGoal bool, lines []string, kinds wakeKinds) string {
 		prefix = prWakeMarker
 	}
 	var b strings.Builder
-	b.WriteString(prefix + " " + head + " (" + what + ", not a new task):")
+	b.WriteString(prefix + "\n" + head + " (" + what + ", not a new task):")
 	for _, l := range lines {
 		b.WriteString("\n- ")
 		b.WriteString(l)

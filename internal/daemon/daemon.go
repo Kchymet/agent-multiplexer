@@ -149,6 +149,9 @@ type Daemon struct {
 	// tests set it small so they don't sleep.
 	steerSettle time.Duration
 
+	// typedTiming overrides deliverTyped's waits (tests); zero uses the defaults.
+	typedTiming typedTiming
+
 	// questionOpenFn, when non-nil, replaces the transcript read that decides
 	// whether typed steering must first dismiss an open question (tests).
 	questionOpenFn func(agent.Harness, store.Session) bool
