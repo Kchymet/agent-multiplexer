@@ -74,9 +74,10 @@ func TestInstallLeavesForeignFilesAlone(t *testing.T) {
 	}
 }
 
-// Installed coordinator guidance must separate archive confirmation from task
-// completion, even when the same skill lets task-mode members retire themselves.
-func TestInstalledCreatePRRequiresCoordinatorArchiveConfirmation(t *testing.T) {
+// Installed coordinator guidance must wrap up the workgroup by its own rules —
+// archive only when every PR is verified MERGED and nothing is pending, ask
+// otherwise — even when the same skill lets task-mode members retire themselves.
+func TestInstalledCreatePRCoordinatorWrapUp(t *testing.T) {
 	dest := t.TempDir()
 	if err := Install(dest); err != nil {
 		t.Fatal(err)
@@ -87,8 +88,12 @@ func TestInstalledCreatePRRequiresCoordinatorArchiveConfirmation(t *testing.T) {
 	}
 	text := strings.Join(strings.Fields(string(b)), " ")
 	for _, want := range []string{
-		"after explicit user confirmation",
-		"goal completion and a merged PR are not confirmation",
+		"wraps up its own workgroup with `amux agent done`",
+		"every PR the workgroup produced is MERGED, checked on GitHub by the coordinator itself (`gh pr view <n> --json state,mergedAt`)",
+		"a PR was closed without merging",
+		"When in doubt, ask; never guess.",
+		"Never pass `--force` to archive yourself",
+		"run `amux agent done` as the last tool call",
 		"`amux agent done`",
 		"archives its own workgroup and all its direct members",
 		"Restoration is host-only",

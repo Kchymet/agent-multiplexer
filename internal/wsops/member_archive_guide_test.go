@@ -9,8 +9,8 @@ import (
 )
 
 // Every coordinator guide, whatever its goal runtime, makes archiving its own
-// finished members an expected step, while self/workgroup archive still waits
-// for the user.
+// finished members an expected step; archiving the workgroup itself follows the
+// wrap-up rules (goal_guide_test.go).
 func TestCoordinatorGuideExpectsArchivingFinishedMembers(t *testing.T) {
 	for _, root := range []store.Session{
 		{ID: "wg1", Name: "codex", Agent: agent.GoalRuntime, Dir: "/sandbox/wg1"},
@@ -29,7 +29,7 @@ func TestCoordinatorGuideExpectsArchivingFinishedMembers(t *testing.T) {
 			"Before you report a task complete (and before marking a goal complete), archive every finished member",
 			"Keep a finished member only if you expect to reuse it",
 			"with the reason",
-			"(`amux agent done`) still needs explicit user confirmation",
+			"(`amux agent done`) follows \"Wrapping up this workgroup\"",
 		} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s coordinator guide lacks %q", root.Agent, want)
