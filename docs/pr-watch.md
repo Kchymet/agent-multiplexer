@@ -10,7 +10,7 @@ pushes the change to it (`internal/prwatch`, wired in
 ## Ownership
 
 A member owns the PRs whose head branch is its branch (`amux/<broker>/<wg>-<member>`)
-or that branch plus a `-suffix` (`amux/<broker>/<wg>-<member>-b`), in the GitHub
+or that branch plus a `-suffix` or `/suffix` (`amux/<broker>/<wg>-<member>-b`), in the GitHub
 repositories it works in (a tracked repo whose source is a GitHub URL or
 `owner/name`; other repos are skipped). Only active members of active
 workgroups are watched.
@@ -43,8 +43,17 @@ transitions are reported exactly once across daemon restarts.
 - `amux status --json` gives each member row a `prs` list
   (`harnessproto.SessionPR`: repo, number, url, branch, state
   `open|merged|closed`, draft, mergeable, mergeState, checks
-  `pass|fail|pending`, failedChecks, reviewDecision, lastReview, updated). The
-  rail/status text gains a short suffix, e.g. `· PR #247 CI✗ conflict`.
+  `pass|fail|pending`, failedChecks, reviewDecision, lastReview, updated, and
+  additively title, baseBranch, githubUpdatedAt, mergedAt, closedAt, reviews,
+  requestedReviewers — all from the same `gh pr list` call). The rail/status
+  text gains a short suffix, e.g. `· PR #247 CI✗ conflict`. Merged and closed
+  PRs stay listed for 3 days after they ended (at most 10 per session). `prs`
+  is kept for older consumers; new ones read `enrichments` (see
+  [Session enrichments](session-enrichments.md)).
+- With `AMUX_PR_NOTIFY=ready_to_merge,needs_attention` (or `all`; unset means
+  none) a transition into "ready to merge" or "needs attention" also sets
+  `notify` on its `pr_state` payload, once per entry into that phase and never
+  for a PR seen for the first time.
 - Every change is a `pr_state` event on the member's own event stream
   (`amux agent events <member>`), payload
   `{session, pr, changes: [...], wake}`. It is written to the member's amux
@@ -110,6 +119,17 @@ either side:
 - With PR polling disabled (`AMUX_PR_POLL_INTERVAL=off`), member wake-ups
   still run.
 
+## Item wake-ups
+
+Upward items ([Items](items.md)) share this queue too. A raise, an escalation
+or an archive carry-over that leaves items unnotified queues one `items` wake
+per recipient (a coordinator, or the global inbox owner); at delivery the daemon reads the
+recipient's unnotified items, lists them (`Items raised (amux wake-up, not a
+new task): …`) alongside any member and PR lines, and marks them notified. An
+items wake with nothing left unnotified is dropped. The global inbox owner is woken under
+the same gating when it is live and idle. Undelivered notices stay recorded on
+the items and are offered again on the next change or daemon restart.
+
 ## Goal status
 
 A goal coordinator's rail/status line shows its goal status — `goal active`,
@@ -117,25 +137,40 @@ A goal coordinator's rail/status line shows its goal status — `goal active`,
 `goal input`, `goal complete`, … or `goal mode (no goal)` — so waiting on a goal
 is distinguishable from idle.
 
-## Coordinator status: waiting, running, supervising
+## Coordinator status: the workgroup rollup
 
 `waiting` is the attention chip and means one thing everywhere — the rail,
 `amux status`, the snapshot web and Android read: **someone is blocked on the
 user**. An idle agent is never waiting. A coordinator's row reflects the work
-it dispatched, not only its own turn (`internal/source/supervision.go`):
+it dispatched, not only its own turn. Its state is `enrich.Rollup`
+(`internal/enrich/rollup.go`), one pure function of the coordinator's own
+state, its goal, its members' states and their PRs, used by the rail,
+`amux status`, the direct API and the provider alike. First match wins:
 
-- It is `waiting` only when the coordinator has a prompt or question of its
-  own, its goal needs the user while it is between turns (`input`, `blocked`,
-  `budgetLimited`), or a member is waiting. The status line names how many:
-  `waiting · 1 agent needs you · needs you: m2; supervising m1 running`.
-- Otherwise it is `running` when the coordinator or any member is. A
-  coordinator between turns (ready, idle or unknown) while a member is
-  running, waiting or unknown — or, with its goal `waiting`, a member still
-  owns an open PR — is **supervising**: `state` `running`, `subState`
-  `supervising`, e.g.
-  `running · 2 agents · goal waiting · supervising m1 running, m2 PR #12 CI pending`.
-  An idle coordinator with a running member is running.
-- It reads `ready`/`idle` only when it and every member are.
+1. **waiting on the user** — the coordinator has a prompt or question of its
+   own, its goal needs the user while it is between turns (`input`, `blocked`,
+   `budgetLimited`), or a member is waiting: `state` `waiting`. The status line
+   names how many: `waiting · 1 agent needs you · needs you: m2; supervising m1 running`.
+2. **running** — the coordinator or any member is running (or live and
+   unknown). A coordinator between turns (ready, idle or unknown) while a
+   member runs is **supervising**: `state` `running`, `subState`
+   `supervising`, e.g. `running · 2 agents · supervising m1 running, m2 PR #12 CI running`.
+   An idle coordinator with a running member is running.
+3. **pr_attention** — an open PR needs work (draft, CI red, conflict, changes
+   requested, behind). It is the coordinator's job — prwatch wakes it — not the
+   user's: `state` `running`, `subState` `pr_attention`; `ready` with reason
+   "coordinator stopped" when the coordinator is not running.
+4. **waiting_review / waiting_merge** — open PRs waiting on a review, or on a
+   merge (approved or no review needed, CI possibly still running), are all
+   that is outstanding: `state` `ready`, `subState` the rollup state, status
+   e.g. `waiting for merge · 2 PRs · 2 agents · m1 PR #79 approved, …`. Not
+   the attention `waiting` badge. (Before rollups, a goal coordinator waiting
+   on open PRs read as supervising.)
+5. `ready` / `idle` otherwise.
+
+The rollup itself is the row's `rollup` object (see
+[Session enrichments](session-enrichments.md)); `state` always stays on the
+attention ladder.
 
 `amux status --json` adds a `supervision` object to each active coordinator
 row: `ownState` (its own turn activity), `goal` and `goalNote`, `members`

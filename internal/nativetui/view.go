@@ -422,7 +422,7 @@ func (m *model) rowStatus(s core.Session, indent string) string {
 	if waiting == 0 && s.Title != s.ID && !strings.HasPrefix(s.ID, s.Title) && !strings.Contains(s.Status, s.ID) {
 		segs = append(segs, segment{s.ID + " · ", dimStyle})
 	}
-	segs = append(segs, statusSegments(s.Status)...)
+	segs = append(segs, m.sessionStatusSegments(s)...)
 	return indent + "  " + renderSegments(segs, m.railWidth()-3-len(indent))
 }
 
@@ -611,6 +611,9 @@ func (m *model) renderMain() string {
 	if m.res.open {
 		return m.renderResources()
 	}
+	if m.prPanel.open {
+		return m.renderPRs()
+	}
 	if t := m.cur(); t != nil {
 		return m.renderSelectedPane(t)
 	}
@@ -660,6 +663,8 @@ func (m *model) renderHelp() string {
 			return ansi.Truncate(hints("login", []hint{{"c", "cancel"}, {"PgUp/PgDn", "scroll"}, {"Esc", "cancel and close"}}), m.w, "")
 		}
 		return ansi.Truncate(hints("accounts", []hint{{"e", "subscription"}, {"a", "API key"}, {"x", "logout"}, {"r", "refresh"}, {"Esc", "close"}}), m.w, "")
+	case m.prPanel.open:
+		return ansi.Truncate(hints("pull requests", []hint{{upDownKeys(), "move"}, {"Enter/o", "open in browser"}, {"p/Esc", "close"}}), m.w, "")
 	case m.res.open:
 		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {upDownKeys(), "scroll"}, {"t/Esc", "close"}}), m.w, "")
 	case m.status != "":
@@ -673,7 +678,7 @@ func (m *model) renderHelp() string {
 			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
 		})
 	default:
-		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {leftRightKeys(), "collapse/expand"}, {enterKey(), "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
+		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {leftRightKeys(), "collapse/expand"}, {enterKey(), "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"p", "PRs"}, {"o", "open PR"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
 	}
 }
 

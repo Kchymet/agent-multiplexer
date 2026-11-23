@@ -333,6 +333,16 @@ func (r *Root) readWalkFile(base, name string) ([]byte, error) {
 // WalkFiles walks verified, unlinked regular files without reading their
 // contents. Symlinks and special files are skipped.
 func (r *Root) WalkFiles(rel string, fn func(name string, info fs.FileInfo) error) error {
+	return r.WalkOpen(rel, func(name string, info fs.FileInfo, _ *os.File) error {
+		return fn(name, info)
+	})
+}
+
+// WalkOpen walks verified, unlinked regular files like WalkFiles, handing fn
+// the file already opened for reading. info is the fstat of that descriptor,
+// so a caller deciding from it whether to read never races a path swap. The
+// file is closed after fn returns; fn must not retain it.
+func (r *Root) WalkOpen(rel string, fn func(name string, info fs.FileInfo, f *os.File) error) error {
 	rel, err := r.Rel(rel)
 	if err != nil {
 		return err
@@ -354,7 +364,7 @@ func (r *Root) WalkFiles(rel string, fn func(name string, info fs.FileInfo) erro
 	return err
 }
 
-func (r *Root) walkFiles(prefix string, fn func(name string, info fs.FileInfo) error) error {
+func (r *Root) walkFiles(prefix string, fn func(name string, info fs.FileInfo, f *os.File) error) error {
 	entries, err := fs.ReadDir(r.dir.FS(), ".")
 	if err != nil {
 		return err
@@ -392,14 +402,12 @@ func (r *Root) walkFiles(prefix string, fn func(name string, info fs.FileInfo) e
 		}
 		info, err := f.Stat()
 		if err == nil {
-			err = f.Close()
-		} else {
-			_ = f.Close()
+			err = fn(path, info, f)
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
 		}
 		if err != nil {
-			return err
-		}
-		if err := fn(path, info); err != nil {
 			return err
 		}
 	}

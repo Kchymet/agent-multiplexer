@@ -52,6 +52,9 @@ func (d *Daemon) readModel(a core.Action) (any, error) {
 }
 
 func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, error) {
+	if a.Query == core.QueryItems {
+		return d.hostItemQuery(ctx, a)
+	}
 	if a.Query == core.QueryAccounts || a.Query == core.QueryAccountManage || a.Query == core.QueryAccountCeremony {
 		r, err := accountRequest(a)
 		if a.Query == core.QueryAccounts && len(a.Fields) == 0 {
@@ -67,7 +70,7 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 		return d.codexControl, d.configErr
 	}
 	if a.Query == QueryHostCapabilities {
-		return HostCapabilities{CreationIdentity: CreationIdentityVersion}, nil
+		return HostCapabilities{CreationIdentity: CreationIdentityVersion, Enrichments: d.enrichmentKinds(), EnrichmentSources: d.enrichmentSources()}, nil
 	}
 	if a.Query == QuerySessionIdentities {
 		return sessionIdentities(a)

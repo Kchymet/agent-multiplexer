@@ -7,6 +7,7 @@
 - [Sandbox configuration, shared accounts and restarting sessions](sandbox-config.md)
 - [Default sessions: console, coordinators and repo homes](default-sessions.md)
 - [PR watch: member PR state and coordinator wake-ups](pr-watch.md)
+- [Items: upward signals from sessions to coordinators and the console](items.md)
 - [Workgroup permissions: host, coordinator and members](workgroup-permissions.md)
 - [Codex App Server opt-in and rollback](codex-app-server-supervision.md#opt-in-and-fallback)
 - [Providing personal compute pool capacity: remote provider setup and trust model](remote-provider.md)

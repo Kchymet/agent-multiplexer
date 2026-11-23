@@ -994,6 +994,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	accountStatus := mayReadAccounts(l.Grant)
 	resp.AccountStatus = &accountStatus
 	resp.Wake = &WakeCapabilities{V: 1}
+	resp.Enrichments = enrichmentCaps(l.Context(), s.cfg.Backend)
 	if s.cfg.Wake != nil {
 		st := s.cfg.Wake.Status()
 		resp.Wake.Enabled, resp.Wake.Degraded = st.Enabled, st.Degraded
