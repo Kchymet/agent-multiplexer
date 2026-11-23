@@ -255,6 +255,15 @@ func cmdDoctor() error {
 		}
 	}
 
+	// Hyperlinks: a tmux around the TUI strips agents' OSC 8 links unless its
+	// terminal-features enable them (doctor_hyperlinks.go). Silent outside tmux.
+	if lines := checkHyperlinks(os.Getenv, tmuxClientFeatures); len(lines) != 0 {
+		fmt.Println("\nLinks")
+		for _, l := range lines {
+			fmt.Println(l)
+		}
+	}
+
 	fmt.Println("\nPaths")
 	fmt.Printf("  data     %s\n", core.DataDir())
 	fmt.Printf("  state    %s\n", core.StateDir())
