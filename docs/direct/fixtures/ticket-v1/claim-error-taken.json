@@ -1,4 +1,5 @@
 {
   "error": "invalid_grant",
-  "error_description": "the ticket is invalid, expired, used or claimed by another device"
+  "error_description": "the ticket is invalid, expired, used or claimed by another device",
+  "reason": "ticket_used"
 }

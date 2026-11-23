@@ -25,7 +25,10 @@ type SessionCaps = harnessproto.SessionCaps
 // Agent activity states, surfaced in Session.State. They form an attention
 // ladder: a blocked agent (waiting) wants the user more than a working one.
 const (
-	StateIdle    = harnessproto.StateIdle    // no live agent process
+	StateStopped = harnessproto.StateStopped // no live runtime (a prompt starts it)
+	// StateIdle is the hook token for "runtime exited" (Claude SessionEnd) and the
+	// legacy wire spelling of StateStopped; rows never publish it.
+	StateIdle    = harnessproto.StateIdle
 	StateReady   = harnessproto.StateReady   // live, turn finished, ready for the next message
 	StateWaiting = harnessproto.StateWaiting // live, blocked on a prompt awaiting user input
 	StateRunning = harnessproto.StateRunning // live and the agent has an active turn
@@ -37,6 +40,10 @@ const (
 	// between turns while the members it dispatched are working.
 	SubStateSupervising = harnessproto.SubStateSupervising
 )
+
+// IsStopped reports whether a state means no live runtime ("stopped", or the
+// legacy "idle").
+func IsStopped(state string) bool { return harnessproto.IsStopped(state) }
 
 // Rail sections, top to bottom (Session.Section). The console is sectionless and
 // pinned above them all.

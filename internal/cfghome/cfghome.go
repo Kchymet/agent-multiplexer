@@ -108,6 +108,15 @@ type Entry struct {
 	// instead of overwriting it wholesale — for a file the template holds state
 	// in that must survive (Claude's .claude.json). Only for a file entry.
 	Merge func(spec Spec, template, copy []byte) ([]byte, error)
+	// Sync, when set, keeps an already-seeded copy current with the template at
+	// every launch (Seed on an existing home). A copy the agent never edited is
+	// simply refreshed from the template, exactly as Reset would. A copy with
+	// local edits is passed to Sync with the (Seed-transformed) template, and
+	// Sync returns the copy with only what must flow down folded in — Claude's
+	// user-level permissions.allow rules — or ok=false to leave it unchanged.
+	// Its drift status is left as it was: the local edit is still the agent's.
+	// Only for a file entry.
+	Sync func(spec Spec, copy, template []byte) (out []byte, ok bool)
 }
 
 // Status classifies one path's divergence between the agent's copy and the
@@ -350,8 +359,8 @@ func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
 		if err := retireLinks(d, sp); err != nil {
 			return false, err
 		}
-		if _, err := readManifest(sp); err == nil {
-			return false, nil
+		if m, err := readManifest(sp); err == nil {
+			return false, syncEntries(d, sp, m)
 		}
 		// The copy exists but its baseline is gone (pre-manifest copy, or a wiped
 		// state dir): adopt the copy's current content as the baseline rather than
@@ -380,6 +389,57 @@ func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
 		return false, err
 	}
 	return true, writeManifest(sp, snapshot)
+}
+
+// syncEntries applies each Sync entry to an already-seeded copy (see
+// Entry.Sync). A copy without the file (the agent removed it) is left alone.
+func syncEntries(d *destination, sp Spec, m *manifest) error {
+	changed := false
+	for _, e := range sp.Entries {
+		if e.Sync == nil {
+			continue
+		}
+		tmpl, err := os.ReadFile(e.src(sp))
+		if err != nil {
+			continue // no template file: nothing to flow down
+		}
+		if e.Seed != nil {
+			tmpl = e.Seed(sp, tmpl)
+		}
+		cur, err := d.read(e.Rel)
+		if err != nil {
+			if hostprep.IsUnsafe(err) {
+				return err
+			}
+			continue
+		}
+		curH, tmplH := hashDestinationBytes(sp, e.Rel, cur), hashDestinationBytes(sp, e.Rel, tmpl)
+		if curH == tmplH {
+			continue
+		}
+		mode := fs.FileMode(0o644)
+		if fi, err := d.lstat(e.Rel); err == nil {
+			mode = fi.Mode().Perm()
+		}
+		if base, ok := m.Files[e.Rel]; ok && base == curH {
+			// Unedited copy: refresh it wholesale and settle the baseline.
+			if err := d.write(e.Rel, tmpl, mode); err != nil {
+				return err
+			}
+			m.Files[e.Rel] = tmplH
+			changed = true
+			continue
+		}
+		if out, ok := e.Sync(sp, cur, tmpl); ok {
+			if err := d.write(e.Rel, out, mode); err != nil {
+				return err
+			}
+		}
+	}
+	if changed {
+		return writeManifest(sp, m.Files)
+	}
+	return nil
 }
 
 // seedEntry copies one entry (file or tree) from the template into the copy,

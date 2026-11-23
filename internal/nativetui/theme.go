@@ -151,7 +151,8 @@ func applyTheme(mode themeMode) {
 		core.StateRunning: st().Foreground(p.focus),
 		core.StateReady:   st().Foreground(p.ready),
 		core.StateUnknown: st().Foreground(p.ink2),
-		core.StateIdle:    dimStyle,
+		core.StateStopped: dimStyle,
+		core.StateIdle:    dimStyle, // legacy spelling of stopped from an older provider
 	}
 }
 

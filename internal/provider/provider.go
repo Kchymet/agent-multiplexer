@@ -112,6 +112,10 @@ type Config struct {
 	// advertise the feature, and only after the orchestrator echoes it does it
 	// forward wakes. Nil (the default) disables the feature entirely.
 	DirectWake DirectWaker
+	// DirectApprove serves direct-approval-v1 (docs/direct-tailnet-enroll.md)
+	// alongside DirectEnroll: the provider carries the direct server's parked
+	// approval verifies to Harness. Nil: approvals are never advertised.
+	DirectApprove DirectApprover
 
 	// SessionIncarnation, when set, returns a session's daemon store
 	// incarnation; it is stamped on runtime-events batches and pages so the
@@ -169,7 +173,7 @@ func New(cfg Config) *Provider {
 	}
 	return &Provider{
 		cfg:        cfg,
-		status:     Status{PID: os.Getpid(), Name: cfg.Name, Orchestrator: cfg.Orchestrator},
+		status:     Status{PID: os.Getpid(), Name: cfg.Name, Orchestrator: cfg.Orchestrator, StartedAt: time.Now()},
 		versions:   []int{harnessproto.Version, harnessproto.Version2},
 		panes:      map[string]*pane{},
 		backoffMin: time.Second,
@@ -261,9 +265,10 @@ func (p *Provider) dial(ctx context.Context) (net.Conn, error) {
 // send-loop wake, and the last-pong clock for liveness.
 type session struct {
 	accountChannel AccountChannel
-	directInFlight atomic.Int32 // direct-enroll requests awaiting the host
-	dwake          wakeState    // direct-wake-v1 frames awaiting the orchestrator
-	providerID     string       // this connection's registered id (MRegistered.ProviderID)
+	directInFlight atomic.Int32  // direct-enroll requests awaiting the host
+	dwake          wakeState     // direct-wake-v1 frames awaiting the orchestrator
+	approval       approvalState // direct-approval-v1 verifies awaiting the orchestrator
+	providerID     string        // this connection's registered id (MRegistered.ProviderID)
 	hc             *harnessproto.Conn
 	done           chan struct{}
 	once           sync.Once
@@ -400,6 +405,7 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 		if m.Owner != nil {
 			s.OwnerUserID, s.OwnerEmail = m.Owner.UserID, m.Owner.Email
 		}
+		s.WebOrigin = m.WebOrigin
 	})
 
 	sent := p.applyDirectives(m.Adopt, m.Kill)
@@ -440,6 +446,10 @@ func (p *Provider) runSession(ctx context.Context, conn net.Conn) (registered bo
 	if p.cfg.DirectEnroll != nil {
 		wg.Add(1)
 		go func() { defer wg.Done(); p.watchDirect(s, advertised) }()
+	}
+	if p.cfg.DirectApprove != nil && approvalAdvertised(advertised) {
+		wg.Add(1)
+		go func() { defer wg.Done(); p.runDirectApproval(s) }()
 	}
 	if p.cfg.DirectWake != nil {
 		wg.Add(1)
@@ -532,12 +542,15 @@ func (p *Provider) features() []string {
 	out := []string{}
 	for _, f := range p.cfg.Features {
 		// Granted features are never taken from opaque config strings.
-		if f != harnessproto.AccountsV1 && f != harnessproto.DirectEnrollV1 && f != harnessproto.DirectWakeV1 {
+		if f != harnessproto.AccountsV1 && f != harnessproto.DirectEnrollV1 && f != harnessproto.DirectWakeV1 && f != harnessproto.DirectApprovalV1 {
 			out = append(out, f)
 		}
 	}
-	if p.directOffer() != nil {
+	if d := p.directOffer(); d != nil {
 		out = appendUnique(out, harnessproto.DirectEnrollV1)
+		if approvalAdvertised(d) {
+			out = appendUnique(out, harnessproto.DirectApprovalV1)
+		}
 	}
 	if p.directWakeOffer() != nil {
 		out = appendUnique(out, harnessproto.DirectWakeV1)
@@ -699,6 +712,8 @@ func (p *Provider) readLoop(s *session) {
 			p.handleDirectEnroll(s, m)
 		case harnessproto.MDirectWakeResult:
 			p.onDirectWakeResult(s, m)
+		case harnessproto.MDirectApprovalResult:
+			p.onDirectApprovalResult(s, m)
 		case harnessproto.MSessionAction:
 			p.handleSessionAction(s, m)
 		case harnessproto.MRuntimeEventsSubscribe:

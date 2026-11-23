@@ -117,6 +117,13 @@ func (k Keys) Steerable() bool {
 // words; typed in 256-byte pieces with newlines as backslash+Enter, Claude's
 // newline escape, it arrives verbatim as the user's own prompt).
 //
+// Typing is paced: 64-byte pieces 100ms apart. Claude Code's paste detection
+// also applies to input that arrives in fast bursts, and a long multi-line
+// steer typed in 256-byte pieces 5ms apart was seen collapsed into a
+// "[Pasted text #N +M lines]" placeholder (delivered as pasted content after
+// all). TestNativeClaudeTypedDelivery types a long multi-line steer into the
+// pinned CLI and requires it to arrive verbatim, never collapsed.
+//
 // Typing reaches the composer's own key handling, which a paste bypassed: a
 // message whose first character is "/" runs a slash command and one starting
 // with "!" enters bash mode and runs the rest as a shell command (both verified
@@ -135,7 +142,7 @@ func claudeKeys() Keys {
 	return Keys{
 		Submit: keyEnter, Interrupt: keyCtrlC, Allow: keyEnter, Deny: keyEsc,
 		InterruptOnlyWhileBusy: true,
-		TypedNewline:           []byte("\\\r"), TypeChunk: 256, TypeDelay: 5 * time.Millisecond,
+		TypedNewline:           []byte("\\\r"), TypeChunk: 64, TypeDelay: 100 * time.Millisecond,
 		TypedTriggers: "/!",
 		SubmitDelay:   100 * time.Millisecond,
 		// AskUserQuestion's selector reads "Esc to cancel", like the permission

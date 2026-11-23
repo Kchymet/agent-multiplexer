@@ -285,8 +285,8 @@ func idleMemberReminder(sessions []core.Session) string {
 }
 
 func memberState(s core.Session) string {
-	if s.State == "" {
-		return core.StateIdle
+	if s.State == "" || s.State == core.StateIdle {
+		return core.StateStopped
 	}
 	return s.State
 }

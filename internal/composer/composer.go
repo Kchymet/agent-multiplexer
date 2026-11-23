@@ -18,6 +18,7 @@ package composer
 
 import (
 	"image/color"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -198,6 +199,9 @@ const (
 // someone's words. The caller must establish separately that nobody else
 // typed; this only says what the screen shows.
 func MatchTyped(composerText, typed string) Echo {
+	if HasCollapsed(composerText) {
+		return matchCollapsed(composerText, typed)
+	}
 	a, t := denoise(squash(unescape(composerText))), denoise(squash(unescape(typed)))
 	switch {
 	case a == "":
@@ -208,6 +212,79 @@ func MatchTyped(composerText, typed string) Echo {
 		return EchoPartial
 	}
 	return EchoForeign
+}
+
+// collapsed matches the token a runtime shows in its input box in place of
+// input it took for a paste: Claude Code's "[Pasted text #1]" / "[Pasted text
+// #2 +12 lines]", Codex's "[Pasted Content 1234 chars]". amux never pastes
+// into Claude Code (docs/steering.md rule 1), but Claude's paste detection can
+// still take a fast burst of typed chunks for a paste and collapse it (seen
+// live on a long multi-line steer). Typing is paced to avoid that
+// (agent.claudeKeys); this lets delivery recognize it when it happens anyway.
+var collapsed = regexp.MustCompile(`\[Pasted (?:text #\d+(?: \+\d+ lines?)?|Content \d+ chars)\]`)
+
+// HasCollapsed reports composer text showing a collapsed-paste token.
+func HasCollapsed(text string) bool { return collapsed.MatchString(text) }
+
+// matchCollapsed compares a composer showing collapsed-paste tokens with the
+// text amux typed: every literal run between the tokens must be amux's text,
+// in order (the first as its start, the last as its end), with the tokens
+// standing for the runs between them. A token can hide anything, so this is
+// only meaningful right after amux typed into a composer it saw empty, with no
+// human input since — which deliverTyped requires before acting on it.
+func matchCollapsed(composerText, typed string) Echo {
+	t := denoise(squash(unescape(typed)))
+	parts := collapsed.Split(composerText, -1)
+	at := 0
+	for i, part := range parts {
+		p := denoise(squash(unescape(part)))
+		if p == "" {
+			continue
+		}
+		switch {
+		case i == 0:
+			if !strings.HasPrefix(t, p) {
+				return EchoForeign
+			}
+			at = len(p)
+		case i == len(parts)-1:
+			if !strings.HasSuffix(t, p) || len(t)-len(p) < at {
+				return EchoForeign
+			}
+			at = len(t)
+		default:
+			k := strings.Index(t[at:], p)
+			if k < 0 {
+				return EchoForeign
+			}
+			at += k + len(p)
+		}
+	}
+	return EchoExact
+}
+
+// collapsedCells marks the cells of a row (from x) that belong to a
+// collapsed-paste token, so content keeps them even when drawn dim.
+func collapsedCells(r row, x int) map[int]bool {
+	var b strings.Builder
+	var cellAt []int // byte offset in b -> cell index
+	for i := x; i < len(r); i++ {
+		for range len(r[i].text) {
+			cellAt = append(cellAt, i)
+		}
+		b.WriteString(r[i].text)
+	}
+	s := b.String()
+	if !strings.Contains(s, "[Pasted ") {
+		return nil
+	}
+	keep := map[int]bool{}
+	for _, m := range collapsed.FindAllStringIndex(s, -1) {
+		for o := m[0]; o < m[1]; o++ {
+			keep[cellAt[o]] = true
+		}
+	}
+	return keep
 }
 
 // noiseGlyphs are status/spinner glyphs a runtime may paint into the input
@@ -315,10 +392,11 @@ func grayish(c color.Color) bool {
 // Code's empty composer renders `> ▮ry "…"`: the first hint character in
 // reverse video, the rest gray). A cursor cell over real text is kept.
 func content(r row, x int) string {
+	keep := collapsedCells(r, x)
 	var b strings.Builder
 	for i := x; i < len(r); i++ {
 		c := r[i]
-		if c.hint {
+		if c.hint && !keep[i] {
 			continue
 		}
 		if c.cursor && i+1 < len(r) && r[i+1].hint {

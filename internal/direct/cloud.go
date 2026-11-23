@@ -97,6 +97,155 @@ type CloudStatus struct {
 	IssuedLastHour int           `json:"issued_last_hour"`
 	ChangedAt      int64         `json:"changed_at,omitempty"`
 	DisableReason  string        `json:"disable_reason,omitempty"`
+	// LastAttempt is the latest relayed issuance request that reached this
+	// direct server (nil: none since AttemptsSince, when this server started),
+	// and Attempts counts them. They let an operator tell "Harness never
+	// reached this host" from "it reached this host and was refused".
+	// Memory only, so a refused request still writes nothing.
+	LastAttempt   *CloudAttempt `json:"last_attempt,omitempty"`
+	Attempts      int           `json:"attempts"`
+	AttemptsSince int64         `json:"attempts_since,omitempty"`
+}
+
+// CloudAttempt is one relayed issuance request as this host saw it: when, of
+// which kind, and how it ended. It deliberately carries no requester, issue
+// key, challenge, label or code.
+type CloudAttempt struct {
+	At      int64  `json:"at"`
+	Kind    string `json:"kind"`             // CloudKindCode | CloudKindDeviceTicket | CloudKindOther
+	Outcome string `json:"outcome"`          // CloudOutcomeIssued | CloudOutcomeRefused
+	Code    string `json:"code,omitempty"`   // the refusal code (CloudErr*) when refused
+	Reason  string `json:"reason,omitempty"` // CloudReason(Code) when refused
+}
+
+// CloudReason maps an issuance refusal code to its host_refused reason.
+func CloudReason(code string) string {
+	switch code {
+	case CloudErrScope:
+		return ReasonCeiling
+	case CloudErrIssueExpired:
+		return ReasonTicketExpired
+	}
+	return ReasonOther
+}
+
+// CloudAttempt kinds and outcomes.
+const (
+	CloudKindCode         = "pkce_code"
+	CloudKindDeviceTicket = "device_ticket"
+	CloudKindOther        = "other"
+	CloudOutcomeIssued    = "issued"
+	CloudOutcomeRefused   = "refused"
+)
+
+func (c CloudAttempt) String() string {
+	at := time.Unix(c.At, 0).Format(time.RFC3339)
+	if c.Outcome == CloudOutcomeIssued {
+		return fmt.Sprintf("%s issued (%s)", at, c.Kind)
+	}
+	return fmt.Sprintf("%s refused: %s (%s)", at, c.Code, c.Kind)
+}
+
+// EnrollAttempt is one enrollment exchange a client made directly with this
+// server: claiming a device ticket, or redeeming an enrollment code at the
+// token endpoint. With the tailnet design this is the request that proves a
+// client reached the host. It carries no code, verifier, challenge, label,
+// token or client address.
+type EnrollAttempt struct {
+	At         int64  `json:"at"`
+	Step       string `json:"step"`                  // EnrollStepClaim | EnrollStepRedeem
+	ClientKind string `json:"client_kind,omitempty"` // web | android | other (redeem only)
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`  // the OAuth error code when refused
+	Reason     string `json:"reason,omitempty"` // Reason* when refused
+}
+
+// Enrollment exchange steps.
+const (
+	EnrollStepClaim  = "claim"
+	EnrollStepRedeem = "redeem"
+)
+
+func (e EnrollAttempt) String() string {
+	at := time.Unix(e.At, 0).Format(time.RFC3339)
+	step := e.Step
+	if e.ClientKind != "" {
+		step += " (" + e.ClientKind + ")"
+	}
+	if e.OK {
+		return fmt.Sprintf("%s %s succeeded", at, step)
+	}
+	return fmt.Sprintf("%s %s refused: %s, reason %s", at, step, e.Error, e.Reason)
+}
+
+// EnrollActivity is the operator's view of enrollment exchanges since Since
+// (when this server started): the latest one and how many there were.
+type EnrollActivity struct {
+	Last  *EnrollAttempt `json:"last,omitempty"`
+	Count int            `json:"count"`
+	Since int64          `json:"since"`
+}
+
+// clientKindClass reduces a client-supplied client_kind to a fixed set
+// before it is recorded or logged.
+func clientKindClass(kind string) string {
+	switch kind {
+	case ClientWeb, ClientAndroid:
+		return kind
+	}
+	return "other"
+}
+
+func (a *Authority) noteEnroll(at EnrollAttempt) EnrollAttempt {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	at.At = a.now().Unix()
+	a.enrollLast = &at
+	a.enrollCount++
+	return at
+}
+
+// EnrollActivity reports enrollment exchanges since this server started.
+func (a *Authority) EnrollActivity() EnrollActivity {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	act := EnrollActivity{Count: a.enrollCount, Since: a.enrollSince}
+	if a.enrollLast != nil {
+		last := *a.enrollLast
+		act.Last = &last
+	}
+	return act
+}
+
+// noteCloudAttempt records the outcome of one relayed issuance request (the
+// admin answer resp to req) and returns it. Known refusal codes are kept as
+// they are; anything else is reported as unavailable, like the relay does.
+func (a *Authority) noteCloudAttempt(req *CloudIssueRequest, resp AdminResponse) CloudAttempt {
+	at := CloudAttempt{Kind: CloudKindOther, Outcome: CloudOutcomeRefused}
+	if req != nil {
+		switch req.Handoff {
+		case "":
+			at.Kind = CloudKindCode
+		case HandoffDeviceTicket:
+			at.Kind = CloudKindDeviceTicket
+		}
+	}
+	if resp.OK && resp.Bundle != "" {
+		at.Outcome = CloudOutcomeIssued
+	} else if _, known := relayCodes[resp.Code]; known {
+		at.Code = resp.Code
+	} else {
+		at.Code = CloudErrUnavailable
+	}
+	if at.Outcome == CloudOutcomeRefused {
+		at.Reason = CloudReason(at.Code)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	at.At = a.now().Unix()
+	a.cloudLast = &at
+	a.cloudAttempts++
+	return at
 }
 
 // CloudIssueRequest is one relayed issuance. Requester is the authenticated
@@ -162,6 +311,11 @@ func normalizePolicy(req CloudPolicyRequest) (*cloudPolicy, error) {
 	perms, err := ValidatePerms(req.Permissions)
 	if err != nil {
 		return nil, err
+	}
+	if req.Resource.Kind == "" && len(req.Resource.Workgroups) == 0 {
+		// The default ceiling is every ordinary session; the console is in
+		// no scope (ValidateResource refuses it by id).
+		req.Resource = ResourceScope{Kind: ResourceAllSessions}
 	}
 	res, err := ValidateResource(req.Resource)
 	if err != nil {
@@ -279,7 +433,9 @@ func (a *Authority) disableCloudLocked(reason string, now int64) {
 func (a *Authority) cloudStatusLocked(now int64) CloudStatus {
 	c := a.state.Cloud
 	if c == nil {
-		return CloudStatus{}
+		st := CloudStatus{}
+		a.cloudAttemptsLocked(&st)
+		return st
 	}
 	st := CloudStatus{
 		Enabled: c.Enabled, Generation: c.Generation, Permissions: slices.Clone(c.Perms), Resource: c.Resource,
@@ -290,7 +446,16 @@ func (a *Authority) cloudStatusLocked(now int64) CloudStatus {
 	if !c.Enabled {
 		st.Outstanding = 0
 	}
+	a.cloudAttemptsLocked(&st)
 	return st
+}
+
+func (a *Authority) cloudAttemptsLocked(st *CloudStatus) {
+	st.Attempts, st.AttemptsSince = a.cloudAttempts, a.cloudSince
+	if a.cloudLast != nil {
+		last := *a.cloudLast
+		st.LastAttempt = &last
+	}
 }
 
 func issuedSince(issued []int64, now int64) int {
@@ -415,6 +580,15 @@ func (a *Authority) IssueCloudCode(req CloudIssueRequest) (string, int64, error)
 	default:
 		return "", 0, cloudErr(CloudErrInvalidRequest, "unknown handoff")
 	}
+	if len(req.Permissions) == 0 {
+		// A request that names no permissions asks for the default: read, and
+		// steer when this host's ceiling allows it ("Allow steer" on by
+		// default). Nothing else is ever implied.
+		req.Permissions = []string{PermRead}
+		if slices.Contains(c.Perms, PermSteer) {
+			req.Permissions = append(req.Permissions, PermSteer)
+		}
+	}
 	perms, err := ValidatePerms(req.Permissions)
 	if err != nil {
 		return "", 0, cloudErr(CloudErrInvalidRequest, err.Error())
@@ -423,6 +597,11 @@ func (a *Authority) IssueCloudCode(req CloudIssueRequest) (string, int64, error)
 		if !slices.Contains(c.Perms, p) {
 			return "", 0, cloudErr(CloudErrScope, "permissions exceed this host's cloud ceiling")
 		}
+	}
+	if req.Resource.Kind == "" && len(req.Resource.Workgroups) == 0 {
+		// A request that names no resource asks for the host's ceiling, which
+		// defaults to every ordinary session and never includes the console.
+		req.Resource = ResourceScope{Kind: c.Resource.Kind, Workgroups: slices.Clone(c.Resource.Workgroups)}
 	}
 	res, err := ValidateResource(req.Resource)
 	if err != nil {
@@ -509,9 +688,12 @@ func (a *Authority) checkVerifierLocked(key string, rec *codeRecord, verifier st
 		return &requestError{"code_verifier must be 43-128 characters of [A-Za-z0-9-._~]"}
 	}
 	ok := rec.Challenge != "" && subtle.ConstantTimeCompare([]byte(S256Challenge(verifier)), []byte(rec.Challenge)) == 1
+	reason := ReasonOther
 	if rec.Origin == OriginCloud {
 		c := a.state.Cloud
-		ok = ok && c != nil && c.Enabled && c.Generation == rec.PolicyGen
+		if c == nil || !c.Enabled || c.Generation != rec.PolicyGen {
+			ok, reason = false, ReasonTicketExpired
+		}
 	}
 	if ok {
 		return nil
@@ -519,7 +701,7 @@ func (a *Authority) checkVerifierLocked(key string, rec *codeRecord, verifier st
 	rec.ConsumedAt = now
 	a.takeReplayLocked(rec)
 	_ = a.commitLocked()
-	return errInvalidCode
+	return invalidCode(reason)
 }
 
 // takeReplayLocked clears a cloud code's replay material and returns it.
@@ -598,14 +780,17 @@ func (a *Authority) ClaimTicket(code, challenge, method string) (int64, error) {
 	}
 	now := a.now().Unix()
 	rec := a.state.Codes[hashToken(code)]
-	if rec == nil || !rec.Ticket || rec.ConsumedAt != 0 || now >= rec.ExpiresAt {
-		return 0, errInvalidCode
+	if rec == nil || !rec.Ticket {
+		return 0, invalidCode(ReasonOther)
+	}
+	if rec.ConsumedAt != 0 || now >= rec.ExpiresAt {
+		return 0, invalidCode(codeStateReason(rec, now))
 	}
 	switch rec.Origin {
 	case OriginCloud:
 		// A cloud ticket lives only as long as the policy it was issued under.
 		if c := a.state.Cloud; c == nil || !c.Enabled || c.Generation != rec.PolicyGen {
-			return 0, errInvalidCode
+			return 0, invalidCode(ReasonTicketExpired)
 		}
 	case "":
 		// A local ticket (NewLocalTicket) was minted by the host operator
@@ -617,7 +802,7 @@ func (a *Authority) ClaimTicket(code, challenge, method string) (int64, error) {
 		if subtle.ConstantTimeCompare([]byte(rec.Challenge), []byte(challenge)) == 1 {
 			return rec.ExpiresAt, nil
 		}
-		return 0, errInvalidCode
+		return 0, invalidCode(ReasonTicketUsed) // claimed by another device
 	}
 	rec.Challenge = challenge
 	if err := a.commitLocked(); err != nil {

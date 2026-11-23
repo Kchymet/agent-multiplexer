@@ -409,12 +409,13 @@ func doActionSpecs() map[string]*cmdSpec {
 	return map[string]*cmdSpec{
 		core.ActionRefresh: {Summary: "re-poll the daemon's sources now"},
 		core.ActionStart: {Args: "<id>", Summary: "start an agent's (or a whole workgroup's) process",
-			Detail: "id is an agent id, or a workgroup id to start all of its agents."},
+			Detail: "id is an agent id, or a workgroup id to start its coordinator and every non-archived member (archived members are skipped)."},
 		core.ActionRestart: {Args: "<agent-id>", Summary: "restart one agent and resume its conversation (host only)",
 			Detail: "Interrupts its current turn."},
 		core.ActionAuthReload: {Summary: "queue Claude agents to restart with current credentials",
 			Fields: []fieldSpec{{Name: "force", Arg: "true", Usage: "also interrupt busy or unknown-state agents"}}},
-		core.ActionSteer: {Args: "<agent-id>", Summary: "drive a running agent: prompt, interject, stop, permission, goal",
+		core.ActionSteer: {Args: "<agent-id>", Summary: "drive an agent: prompt, interject, stop, permission, goal",
+			Detail: "A prompt starts a stopped agent and answers ok only once the runtime took the prompt;\nany other verb needs a running agent.",
 			Fields: []fieldSpec{
 				{Name: core.SteerVerb, Arg: "<verb>", Required: true, Usage: "prompt (a new user turn) | interject (text while a turn runs) |\nstop (interrupt the turn) | permission (answer a prompt) | goal (host only)"},
 				{Name: core.SteerText, Arg: "<text>", Usage: "prompt/interject: the text to deliver"},
@@ -471,7 +472,7 @@ func doActionSpecs() map[string]*cmdSpec {
 				`amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"`,
 				`amux do new-workgroup -f name=triage -f coordinator=claude -f coordinator_model=opus`,
 			}},
-		core.ActionCreateWorkspace: {Summary: "alias of new-workgroup (kept for older scripts)",
+		core.ActionCreateWorkspace: {Summary: "create a workgroup whose coordinator gets the prompt; repos only limit it (the TUI form)",
 			Fields: append(append([]fieldSpec{}, workgroupFields...),
 				fieldSpec{Name: "defaultAgent", Arg: "1", Usage: "create the first agent (otherwise repos only set the ceiling)"})},
 		core.ActionRaiseItem: {Args: "<session-id>", Summary: "raise an item as a session (agents: amux agent raise)",
@@ -746,7 +747,7 @@ func directSpec() *cmdSpec {
 		flagSpec{Name: "tailnet", Usage: "derive listen, endpoint and certificate from this machine's tailnet\n(--tailnet=false leaves tailnet mode)"},
 		flagSpec{Name: "port", Arg: "<n>", Usage: "tailnet: port for the derived listen address and endpoint (default 8443)"},
 		flagSpec{Name: "tailscale-socket", Arg: "<path>", Usage: "tailnet: tailscaled socket (default: the platform's)"},
-		flagSpec{Name: "no-default-origin", Usage: "tailnet: do not allow the orchestrator's web origin by default"},
+		flagSpec{Name: "no-default-origin", Usage: "tailnet: do not allow the Harness web origin by default (registered.webOrigin;\nwithout it, pass --allow-origin <Harness web origin>)"},
 		flagSpec{Name: "no-wait", Usage: "do not wait for the listener to become ready"},
 	)
 	return &cmdSpec{
@@ -791,8 +792,8 @@ enroll prints the effective label, permissions and scope on stderr. Without QR
 flags it prints a v1 bundle (amux-direct:1:...) alone on stdout, to paste into
 a client.
 
-The scope never defaults: without --all-sessions or --workgroup, enroll asks on
-a terminal (all sessions, a workgroup, or cancel) and fails otherwise.
+The scope defaults to every ordinary session (--all-sessions); --workgroup
+narrows it. The amux console is never in any scope.
 
 QR enrollment (--qr, --qr-png): the code is a device ticket (amux-direct:2:...),
 minted locally with no cloud involved: the phone verifies the server identity,
@@ -805,8 +806,8 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 				Flags: []flagSpec{
 					{Name: "label", Arg: "<text>", Default: "<hostname>-<YYYYMMDD-HHMM>", Usage: "name for the client, shown in clients list"},
 					{Name: "permissions", Arg: "<list>", Default: "read", Usage: directPermissionsHelp},
-					{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "grant every session on this host"},
-					{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "grant one workgroup and its members"},
+					{Name: "all-sessions", Usage: "grant every ordinary session on this host (the default)"},
+					{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "grant only this workgroup and its members (not with --all-sessions)"},
 					{Name: "ttl", Arg: "<dur>", Default: "10m", Usage: "code lifetime (maximum 1h)"},
 					{Name: "json", Usage: "print the full response as JSON on stdout"},
 					{Name: "qr", Usage: "also draw the enrollment as a QR code for the Harness Android app\n(Backends > Connect a machine from a QR code)"},
@@ -815,7 +816,7 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 				},
 				Examples: []string{
 					directEnrollExample,
-					"amux direct enroll --qr --all-sessions",
+					"amux direct enroll --qr",
 					"amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr",
 				}},
 			{Name: "clients", Args: "<command>", Summary: "list or revoke enrolled clients",
@@ -839,16 +840,17 @@ client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
 invalidates outstanding cloud codes; grants already redeemed stay until revoked
 (amux direct clients revoke).`,
 				Sub: []*cmdSpec{
-					{Name: "enable", Args: "--permissions <list> (--all-sessions | --workgroup <id>...) [flags]", FlagSet: true,
+					{Name: "enable", Args: "--permissions <list> [--all-sessions | --workgroup <id>...] [flags]", FlagSet: true,
 						Summary: "allow Harness to mint enrollment codes up to a ceiling",
-						Detail: `The ceiling is required; all-sessions covers ordinary sessions, never the amux
-console. --owner and --provider default to the owner and provider Harness
+						Detail: `The resource ceiling defaults to all ordinary sessions, never the amux console;
+--workgroup narrows it. A request naming no permissions gets read, plus steer
+when the ceiling includes it. --owner and --provider default to the owner and provider Harness
 reported at this host's latest amux provide registration (shown by amux
 doctor); a flag that disagrees with it is refused unless both are given.`,
 						Flags: []flagSpec{
 							{Name: "permissions", Arg: "<list>", Required: true, Usage: "ceiling (see amux direct enroll --help); codes never exceed it"},
-							{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "ceiling: any ordinary session"},
-							{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "ceiling: these workgroups"},
+							{Name: "all-sessions", Usage: "ceiling: any ordinary session (the default)"},
+							{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "ceiling: only these workgroups (not with --all-sessions)"},
 							{Name: "owner", Arg: "<user-id>", Usage: "advanced: the Harness user id allowed to request codes"},
 							{Name: "provider", Arg: "<id>", Usage: "advanced: this host's Harness provider id"},
 							{Name: "max-outstanding", Arg: "<n>", Usage: "unredeemed cloud codes at once (default 3)"},

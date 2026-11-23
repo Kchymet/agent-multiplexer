@@ -29,7 +29,10 @@ type fixturePane struct {
 	echo                bool
 	// shows, when set, is the text whose presence paints typed (a runtime
 	// that collapses it shows a token instead of the words).
-	shows     string
+	shows string
+	// draftAs, when set, is composer content that paints draft (a draft
+	// fixture whose shown text is a collapsed token, not words).
+	draftAs   string
 	composer  string
 	submitted []string
 	erased    int
@@ -67,7 +70,7 @@ func (p *fixturePane) screen() vterm.Snapshot {
 	case p.composer == "":
 	case p.typed != nil && p.echo && composer.Same(p.composer, p.showText()):
 		f = p.typed
-	case p.draft != nil && composer.Same(p.composer, p.draft.WantText):
+	case p.draft != nil && (p.composer == p.draftAs || p.draft.WantText != "" && composer.Same(p.composer, p.draft.WantText)):
 		f = p.draft
 	case p.typed != nil && !p.echo && composer.Same(p.composer, p.showText()):
 		// The runtime has not painted amux's text (yet): the empty screen.
@@ -88,8 +91,20 @@ func (p *fixturePane) showText() string {
 	if p.shows != "" {
 		return p.shows
 	}
+	if p.typed.WantTyped != "" {
+		return p.typed.WantTyped
+	}
 	return p.typed.WantText
 }
+
+// longSteer is the long multi-line interject the *-long-* fixtures render
+// (their want-typed): a coordinator's usual shape.
+// collapsedLeft is the composer content behind claude-busy-long-collapsed.
+const collapsedLeft = "[amux] interject: PR 7 is red; stop and fix it first.[Pasted text #1 +6 lines]"
+
+var longSteer = "[amux] interject: PR 7 is red; stop and fix it first.\n" +
+	strings.Repeat("- check the failing job, read its log end to end, find the root cause, fix it, push the fix, and confirm CI is green before moving on\n", 6) +
+	"Then continue with the queue."
 
 func (p *fixturePane) state() (string, []string, int) {
 	p.mu.Lock()
@@ -131,6 +146,7 @@ func TestTypedDeliveryAgainstPaneFixtures(t *testing.T) {
 		start               string // composer content before delivery
 		leftover            bool   // amux remembers start as its own text
 		leftText            string // the remembered leftover's text, when it is not start
+		untouched           bool   // the leftover was left with nobody else typing
 		text                string // the steer text, when not the runtime default
 		noEcho              bool   // the typed text never shows on screen
 		want                string
@@ -154,6 +170,23 @@ func TestTypedDeliveryAgainstPaneFixtures(t *testing.T) {
 		{name: "codex mid-turn draft", runtime: "codex", empty: "codex-real-busy-empty", draft: "codex-busy-draft", start: codexText, want: refuseDraft},
 		{name: "codex approval dialog", runtime: "codex", empty: "codex-approval-dialog", want: refuseDialog},
 		{name: "codex text never shows", runtime: "codex", empty: "codex-real-busy-empty", typed: "codex-busy-draft", noEcho: true, want: takeBack},
+		// vim mode and the dialogs of docs/steering.md rule 9.
+		{name: "claude idle, vim insert mode", runtime: "claude", empty: "claude-idle-vim-insert", typed: "claude-busy-amux-typed", want: submit},
+		{name: "claude mid-turn, vim insert mode", runtime: "claude", empty: "claude-busy-vim-insert", typed: "claude-busy-amux-typed", want: submit},
+		{name: "claude teach-auto-mode dialog", runtime: "claude", empty: "claude-teach-auto-mode-dialog", want: refuseDialog},
+		{name: "claude AskUserQuestion selector", runtime: "claude", empty: "claude-ask-user-question", want: refuseDialog},
+		// A long multi-line TYPED steer, rendered with backslash continuations
+		// and soft wraps — what #334's exact compare could never match.
+		{name: "claude idle, long typed steer", runtime: "claude", empty: "claude-idle-empty", typed: "claude-idle-long-typed", text: longSteer, want: submit},
+		{name: "claude mid-turn, long typed steer", runtime: "claude", empty: "claude-busy-spinner-empty", typed: "claude-busy-long-typed", text: longSteer, want: submit},
+		// Claude took the typed burst for a paste: right after amux typed into an
+		// empty box with nobody else typing, the placeholder is amux's own text.
+		{name: "claude mid-turn, typed steer collapsed into a placeholder", runtime: "claude", empty: "claude-busy-spinner-empty", typed: "claude-busy-long-collapsed", text: longSteer, want: submit},
+		{name: "claude user's own collapsed paste", runtime: "claude", empty: "claude-idle-empty", draft: "claude-idle-paste-collapsed", start: "[Pasted text #1 +12 lines]", text: longSteer, want: refuseDraft},
+		{name: "claude collapsed amux leftover, provably amux's", runtime: "claude", empty: "claude-busy-spinner-empty", draft: "claude-busy-long-collapsed", typed: "claude-busy-long-typed",
+			start: collapsedLeft, leftover: true, leftText: longSteer, untouched: true, text: longSteer, want: submit},
+		{name: "claude collapsed leftover left after someone typed is not provable", runtime: "claude", empty: "claude-busy-spinner-empty", draft: "claude-busy-long-collapsed",
+			start: collapsedLeft, leftover: true, leftText: longSteer, text: longSteer, want: refuseDraft},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, eng := steerDaemon(t)
@@ -170,12 +203,15 @@ func TestTypedDeliveryAgainstPaneFixtures(t *testing.T) {
 			if tc.text != "" {
 				text, pane.shows = tc.text, tc.text
 			}
+			if tc.start == collapsedLeft {
+				pane.draftAs = collapsedLeft
+			}
 			if tc.leftover {
 				left := tc.start
 				if tc.leftText != "" {
 					left = tc.leftText
 				}
-				d.rememberLeftover("a1", typedLeftover{instance: in, text: left, runes: len([]rune(left))})
+				d.rememberLeftover("a1", typedLeftover{instance: in, text: left, runes: len([]rune(left)), untouched: tc.untouched})
 			}
 
 			res := d.handle(context.Background(), core.Action{Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
@@ -341,6 +377,55 @@ func TestBusySteerSequenceDeliversOnceWithNoResidue(t *testing.T) {
 	}
 }
 
+// The live failure: a long multi-line steer to a busy Claude Code never showed
+// as exactly amux's text, was left in the box, and blocked the next steer. Now
+// the failed long steer is taken back (box exactly as before), the second
+// steer is delivered once, the box ends empty, and the queued copy of the first
+// is never delivered again.
+func TestFailedLongSteerThenSecondSteerDeliveredOnce(t *testing.T) {
+	d, eng := steerDaemon(t)
+	fastTyped(d)
+	putSession(t, "a1", "claude")
+	in := eng.running("a1")
+	pane := &fixturePane{empty: mustFixture(t, "claude-busy-spinner-empty"), typed: mustFixture(t, "claude-busy-long-typed")}
+	in.fx = pane
+	steer := func() core.Result {
+		return d.handle(context.Background(), core.Action{Action: core.ActionSteer, ID: "a1", Fields: map[string]string{
+			core.SteerVerb: core.SteerInterject, core.SteerText: longSteer,
+		}})
+	}
+	was := paneSnapshot(pane, "claude")
+
+	// 1. The long steer never shows as amux's text (pane.echo is false).
+	res := steer()
+	if res.OK || res.Code != codeComposerBusy || !strings.Contains(res.Error, "took it back") || !strings.Contains(res.Error, "queued") {
+		t.Fatalf("failed long steer = %+v, want taken back and queued", res)
+	}
+	if now := paneSnapshot(pane, "claude"); now != was {
+		t.Fatalf("failed long steer left residue:\n before %s\n after  %s", was, now)
+	}
+	if _, submitted, erased := pane.state(); len(submitted) != 0 || erased != len([]rune(longSteer)) {
+		t.Fatalf("submitted=%q erased=%d, want nothing submitted and exactly %d characters taken back", submitted, erased, len([]rune(longSteer)))
+	}
+
+	// 2. A second steer once the text renders: delivered once, box empty.
+	pane.mu.Lock()
+	pane.echo = true
+	pane.mu.Unlock()
+	if res := steer(); !res.OK {
+		t.Fatalf("second steer = %+v", res)
+	}
+	// 3. The queue's copy of the first attempt must not go out again.
+	wake := prwatch.Wake{Kind: prwatch.KindSteer, Workgroup: steerQueueGroup("a1"), SessionID: "a1", State: core.SteerInterject, Text: longSteer}
+	if got := d.deliverPRWake(context.Background(), steerQueueGroup("a1"), []prwatch.Wake{wake})[0]; got != prwatch.Dropped {
+		t.Fatalf("queued copy after a direct delivery = %v, want Dropped", got)
+	}
+	c, submitted, _ := pane.state()
+	if len(submitted) != 1 || !composer.Same(submitted[0], longSteer) || c != "" {
+		t.Fatalf("submitted=%q composer=%q, want the long steer exactly once and an empty box", submitted, c)
+	}
+}
+
 // Someone types into the box while amux's text is in it: amux leaves the box
 // alone (it never deletes from a composer someone touched) and remembers its
 // text. Once the person deletes their own addition, the box holds exactly
@@ -373,7 +458,7 @@ func TestLeftoverTextNeverBlocksTheNextSteer(t *testing.T) {
 	if !errors.As(err, &busy) || !busy.typed {
 		t.Fatalf("raced delivery = %v, want composer busy with amux's text left", err)
 	}
-	if c, s, erased := pane.state(); len(s) != 0 || erased != 0 || !strings.HasSuffix(c, " and mine") {
+	if c, s, erased := pane.state(); len(s) != 0 || erased != 0 || !strings.Contains(c, " and mine") {
 		t.Fatalf("composer=%q submitted=%q erased=%d, want the person's words untouched", c, s, erased)
 	}
 	if _, ok := d.leftover("a1", in); !ok {
@@ -388,7 +473,7 @@ func TestLeftoverTextNeverBlocksTheNextSteer(t *testing.T) {
 
 	// 3. The person deletes their addition: the box holds exactly amux's text.
 	pane.mu.Lock()
-	pane.composer = strings.TrimSuffix(pane.composer, " and mine")
+	pane.composer = strings.Replace(pane.composer, " and mine", "", 1)
 	pane.mu.Unlock()
 	if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerInterject, core.SteerText: text}}); err != nil {
 		t.Fatalf("delivery over amux's own leftover: %v", err)

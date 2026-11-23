@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,15 +119,62 @@ func TestNativeClaudeTypedDelivery(t *testing.T) {
 		t.Fatalf("delivery into an empty composer: %v; screen:\n%s", err, screen())
 	}
 	transcript := filepath.Join(cfg, "projects", strings.NewReplacer("/", "-", ".", "-").Replace(dir), conversation+".jsonl")
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(transcript); err == nil && strings.Contains(string(b), marker+" status") {
-			if strings.Contains(string(b), draft) {
-				t.Fatalf("the draft reached the transcript: %s", b)
+	awaitTranscript := func(what, needle string) string {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if b, err := os.ReadFile(transcript); err == nil && strings.Contains(string(b), needle) {
+				return string(b)
 			}
-			return
+			time.Sleep(250 * time.Millisecond)
 		}
-		time.Sleep(250 * time.Millisecond)
+		t.Fatalf("%s never became a user turn in %s; screen:\n%s", what, transcript, screen())
+		return ""
 	}
-	t.Fatalf("delivered text never became a user turn in %s; screen:\n%s", transcript, screen())
+	if b := awaitTranscript("delivered text", marker+" status"); strings.Contains(b, draft) {
+		t.Fatalf("the draft reached the transcript: %s", b)
+	}
+
+	// A long multi-line steer, the coordinator's usual shape: typed (never
+	// pasted), it must reach the model verbatim as the user's own words.
+	// Claude's paste detection collapsed such a steer into "[Pasted text #N +M
+	// lines]" when it was typed in fast bursts; paced typing must not trigger it.
+	await("emptied after the first delivery", composer.Reading.Empty)
+	var long strings.Builder
+	long.WriteString(marker + " long steer")
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&long, "\n- step %02d: check the failing job, read its log, find the root cause, fix it, push", i)
+	}
+	var collapsedSeen atomic.Bool
+	stop, watched := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watched)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if snap, ok := obs.Screen(); ok && composer.HasCollapsed(composer.Read(composer.RuntimeClaude, snap).Text) {
+				collapsedSeen.Store(true)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	err = deliver(long.String(), false)
+	close(stop)
+	<-watched
+	if err != nil {
+		t.Fatalf("long multi-line delivery: %v; screen:\n%s", err, screen())
+	}
+	if collapsedSeen.Load() {
+		t.Fatalf("Claude collapsed amux's paced typed steer into a paste placeholder")
+	}
+	b := awaitTranscript("the long steer", marker+" long steer")
+	if strings.Contains(b, "pasted_content") || strings.Contains(b, "[Pasted text") {
+		t.Fatalf("the long steer reached the model as pasted content: %s", b)
+	}
+	if !strings.Contains(b, "step 12: check the failing job, read its log, find the root cause, fix it, push") {
+		t.Fatalf("the long steer's lines did not arrive verbatim: %s", b)
+	}
 }

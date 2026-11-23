@@ -163,8 +163,8 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 		t.Fatalf("container dir missing: %v", err)
 	}
 	ids, err := AgentIDsUnder(rootID)
-	if err != nil || len(ids) != 1 || ids[0] != kids[0].ID {
-		t.Fatalf("AgentIDsUnder(root) = %v, %v; want the member only", ids, err)
+	if err != nil || len(ids) != 2 || ids[0] != rootID || ids[1] != kids[0].ID {
+		t.Fatalf("AgentIDsUnder(root) = %v, %v; want the coordinator then its member", ids, err)
 	}
 	// Every pane of the coordinator runs in the container dir (it has no worktree,
 	// whatever repos its members work on).

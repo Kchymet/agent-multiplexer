@@ -25,7 +25,11 @@ type Fixture struct {
 	WantState  string
 	WantBusy   bool
 	WantText   string
-	Stream     []byte
+	// WantTyped, when set, is the text amux typed that the composer shows as
+	// typing renders it (backslash continuations, soft wraps, collapsed
+	// tokens): the classified text must match it via composer.MatchTyped.
+	WantTyped string
+	Stream    []byte
 }
 
 // Snapshot replays the fixture through the production emulator.
@@ -95,6 +99,10 @@ func load(path string) (Fixture, error) {
 		case "want-text":
 			if f.WantText, err = strconv.Unquote(value); err != nil {
 				return Fixture{}, fmt.Errorf("%s: want-text: %v", path, err)
+			}
+		case "want-typed":
+			if f.WantTyped, err = strconv.Unquote(value); err != nil {
+				return Fixture{}, fmt.Errorf("%s: want-typed: %v", path, err)
 			}
 		case "encoding":
 			encoding = value

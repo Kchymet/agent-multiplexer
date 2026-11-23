@@ -56,7 +56,7 @@ func newEnrollHarness(t *testing.T) *enrollHarness {
 	h := &enrollHarness{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, tty: &bytes.Buffer{}}
 	now := time.Date(2026, 11, 22, 15, 30, 0, 0, time.UTC)
 	h.env = enrollEnv{
-		stdin: strings.NewReader(""), stdout: h.stdout, stderr: h.stderr,
+		stdout: h.stdout, stderr: h.stderr,
 		openTTY:  func() (io.WriteCloser, error) { return nopWriteCloser{h.tty}, nil },
 		getenv:   func(string) string { return "" },
 		hostname: func() (string, error) { return "studio.local", nil },
@@ -118,25 +118,53 @@ func TestEnrollHelpDocumentsEveryFlag(t *testing.T) {
 	if len(h.requests) != 0 {
 		t.Fatal("help minted a code")
 	}
-	if !strings.Contains(h.stdout.String(), "(default: read)") || !strings.Contains(h.stdout.String(), "The scope never defaults") {
+	if out := h.stdout.String(); !strings.Contains(out, "(default: read)") || !strings.Contains(out, "every ordinary session") ||
+		!strings.Contains(out, "console is never in any scope") {
 		t.Fatal("help does not state the defaults")
 	}
 }
 
-func TestEnrollWithoutScopeOffTerminalShowsWorkingExample(t *testing.T) {
-	h := newEnrollHarness(t)
-	h.env.stdinTTY, h.env.stderrTTY = false, true
-	err := runDirectEnroll([]string{"--qr"}, h.env)
-	if err == nil || !strings.Contains(err.Error(), directEnrollExample) {
-		t.Fatalf("err = %v", err)
-	}
-	if len(h.requests) != 0 {
-		t.Fatal("minted without a scope")
-	}
-	// The example itself parses and needs no prompt.
+func TestEnrollExampleParses(t *testing.T) {
 	f, err := parseEnrollFlags(strings.Fields(directEnrollExample)[3:])
-	if err != nil || !f.all || f.label != "phone" || f.perms != "read" {
+	if err != nil || f.all || len(f.groups) != 0 || f.label != "phone" || f.perms != "read" {
 		t.Fatalf("example does not parse: %+v %v", f, err)
+	}
+}
+
+// With no scope flag, enroll grants every ordinary session, on or off a
+// terminal and with or without --qr, and says the scope was defaulted. The
+// console is never named: all_sessions excludes it.
+func TestEnrollScopeDefaultsToAllSessions(t *testing.T) {
+	for _, args := range [][]string{nil, {"--permissions", "read,steer"}, {"--qr-png", filepath.Join(t.TempDir(), "code.png")}} {
+		h := newEnrollHarness(t)
+		if err := runDirectEnroll(args, h.env); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if len(h.requests) != 1 {
+			t.Fatalf("%v: %d requests", args, len(h.requests))
+		}
+		got := h.requests[0].Resource
+		if got.Kind != direct.ResourceAllSessions || len(got.Workgroups) != 0 {
+			t.Errorf("%v: resource %+v", args, got)
+		}
+		if !strings.Contains(h.stderr.String(), "scope all sessions on this host (default)") {
+			t.Errorf("%v: defaulted scope not shown: %q", args, h.stderr.String())
+		}
+	}
+	// An explicit --all-sessions is not marked as a default.
+	h := newEnrollHarness(t)
+	if err := runDirectEnroll([]string{"--all-sessions"}, h.env); err != nil {
+		t.Fatal(err)
+	}
+	if out := h.stderr.String(); strings.Contains(out, "scope all sessions on this host (default)") || !strings.Contains(out, "scope all sessions on this host") {
+		t.Fatalf("explicit scope output %q", out)
+	}
+}
+
+func TestEnrollScopeFlagsConflict(t *testing.T) {
+	h := newEnrollHarness(t)
+	if err := runDirectEnroll([]string{"--all-sessions", "--workgroup", "wg1"}, h.env); err == nil || len(h.requests) != 0 {
+		t.Fatalf("both scope flags accepted (%v)", err)
 	}
 }
 
@@ -155,56 +183,6 @@ func TestEnrollDefaultsAreLeastPrivilege(t *testing.T) {
 	}
 	if strings.TrimSpace(h.stdout.String()) != fakeBundle(t, 1) {
 		t.Fatal("stdout is not the v1 bundle alone")
-	}
-}
-
-func TestEnrollScopePrompt(t *testing.T) {
-	for _, tc := range []struct {
-		input string
-		want  direct.ResourceScope
-		ok    bool
-	}{
-		{"1\n", direct.ResourceScope{Kind: direct.ResourceAllSessions}, true},
-		{"2\nroot42\n", direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: []string{"root42"}}, true},
-		{"2\n\n", direct.ResourceScope{}, false},
-		{"3\n", direct.ResourceScope{}, false},
-		{"\n", direct.ResourceScope{}, false}, // nothing is preselected
-		{"", direct.ResourceScope{}, false},   // EOF
-		{"all\n", direct.ResourceScope{}, false},
-	} {
-		h := newEnrollHarness(t)
-		h.env.stdinTTY, h.env.stderrTTY = true, true
-		h.env.stdin = strings.NewReader(tc.input)
-		err := runDirectEnroll([]string{"--permissions", "read,steer"}, h.env)
-		if !tc.ok {
-			if err == nil || !strings.Contains(err.Error(), "cancelled") || len(h.requests) != 0 {
-				t.Errorf("%q: err %v, %d requests", tc.input, err, len(h.requests))
-			}
-			continue
-		}
-		if err != nil || len(h.requests) != 1 {
-			t.Fatalf("%q: %v", tc.input, err)
-		}
-		got := h.requests[0]
-		if got.Resource.Kind != tc.want.Kind || strings.Join(got.Resource.Workgroups, ",") != strings.Join(tc.want.Workgroups, ",") ||
-			strings.Join(got.Permissions, ",") != "read,steer" {
-			t.Errorf("%q: request %+v", tc.input, got)
-		}
-		out := h.stderr.String()
-		if !strings.Contains(out, "No scope given") || !strings.Contains(out, "(chosen above)") || !strings.Contains(out, "permissions read,steer ·") {
-			t.Errorf("%q: prompt/grant output %q", tc.input, out)
-		}
-	}
-}
-
-func TestEnrollPromptNeedsBothTerminals(t *testing.T) {
-	for _, tty := range [][2]bool{{true, false}, {false, true}, {false, false}} {
-		h := newEnrollHarness(t)
-		h.env.stdinTTY, h.env.stderrTTY = tty[0], tty[1]
-		h.env.stdin = strings.NewReader("1\n")
-		if err := runDirectEnroll(nil, h.env); err == nil || len(h.requests) != 0 {
-			t.Errorf("tty %v: minted without an explicit scope (%v)", tty, err)
-		}
 	}
 }
 

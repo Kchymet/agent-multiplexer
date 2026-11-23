@@ -382,6 +382,10 @@ type MuxMsg struct {
 	// orchestrator-side handler (DirectWakeV1); absent means none, which is
 	// what an older orchestrator sends.
 	Features []string `json:"features,omitempty"`
+	// WebOrigin is the orchestrator web app's exact origin (registered only;
+	// Harness's HARNESS_PUBLIC_ORIGIN). A host serving direct access allows it
+	// as a browser origin. Absent from an older orchestrator.
+	WebOrigin string `json:"webOrigin,omitempty"`
 
 	// v2 pong.
 	T int64 `json:"t,omitempty"` // pong: echoes the ping timestamp
@@ -409,6 +413,9 @@ type MuxMsg struct {
 
 	// direct-wake-v1 (direct-wake-result; also uses ReqID).
 	DirectWakeResult *DirectWakeResult `json:"directWakeResult,omitempty"`
+
+	// direct-approval-v1 (direct-approval-result; also uses ReqID).
+	DirectApprovalResult *DirectApprovalResult `json:"directApprovalResult,omitempty"`
 }
 
 // RegisteredOwner identifies the account that owns a provider registration.
@@ -494,6 +501,9 @@ type HarnessMsg struct {
 
 	// direct-wake-v1 (direct-wake; also uses ReqID).
 	DirectWake *DirectWake `json:"directWake,omitempty"`
+
+	// direct-approval-v1 (direct-approval-verify; also uses ReqID).
+	DirectApproval *DirectApprovalVerify `json:"directApproval,omitempty"`
 }
 
 // Conn is a typed harnessproto connection: one JSON object per line over any byte
