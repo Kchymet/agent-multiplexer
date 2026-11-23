@@ -7,6 +7,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/claudegoal"
+	"amux/internal/core"
 	"amux/internal/hostprep"
 	"amux/internal/store"
 )
@@ -351,7 +352,7 @@ current direct members (`+"`<member>`"+` is a member id from the roster below).
   deliberately orphan it.
 - After explicit user confirmation, `+"`amux agent done`"+` archives your own
   workgroup, including its direct members. It cannot archive a foreign workgroup.
-- Every member commits on its own branch (`+"`amux/%s-<member>`"+`) and ships through a
+- Every member commits on its own branch (`+"`%s`"+`) and ships through a
   pull request; review its authenticated session view and PR evidence, not only
   the member's summary. A member marks its PR ready for review
   (`+"`gh pr ready <n>`"+`) once the code is complete and CI is green, then keeps
@@ -393,7 +394,7 @@ extensions):
   (`+"`git ls-remote origin <predecessor-branch>`"+` prints it); never dispatch
   overlapping work before the shared baseline it builds on exists. Tell each
   stacked member its explicit **base** — the predecessor member's branch
-  (`+"`amux/%s-<predecessor>`"+`) — and **head** — its own branch — plus the
+  (`+"`%s`"+`) — and **head** — its own branch — plus the
   predecessor PR number once it exists, and that it opens with
   `+"`gh pr create --base <predecessor-branch>`"+`, starts the PR body with
   `+"`Stacked on #<parent> — merge that first.`"+`, and keeps current by fetching the
@@ -425,7 +426,7 @@ extensions):
   children first. If a child was closed because its base vanished, open a fresh
   PR from the same head against the landing branch and link the old one.
 
-`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, root.ID, root.ID)
+`, name, name, root.ID, root.Dir, guideRegenNote, root.ID, core.BranchFor(root.ID, "<member>"), core.BranchFor(root.ID, "<predecessor>"))
 	b.WriteString(goalSection(root))
 	b.WriteString("\n")
 	b.WriteString(memberArchiveSection(root))

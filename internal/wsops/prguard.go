@@ -81,8 +81,9 @@ func guardedVerb(a core.Action) string {
 }
 
 // GuardOpenPRs refuses to archive or delete a session that still owns an open
-// pull request: an agent whose branch (amux/<wg>-<member>, or a suffixed sibling
-// such as amux/<wg>-<member>-b) heads one, or a workgroup any of whose members
+// pull request: an agent whose branch (amux/<broker>/<wg>-<member>, the pre-broker
+// amux/<wg>-<member>, or a suffixed sibling
+// such as amux/<broker>/<wg>-<member>-b) heads one, or a workgroup any of whose members
 // does. It fails open: an unreadable store row, an untracked or non-GitHub repo,
 // and any gh failure or timeout are logged and allowed, so a GitHub outage
 // never blocks archival.
