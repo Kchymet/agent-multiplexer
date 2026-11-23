@@ -35,6 +35,28 @@ import (
 // "off" or "0" disables PR watching).
 const prPollIntervalEnv = "AMUX_PR_POLL_INTERVAL"
 
+// prNotifyEnv opts into user notifications for PR transitions: a comma list of
+// "ready_to_merge" and "needs_attention" (or "all"). Unset: none. The
+// notification rides the member's pr_state event (payload "notify").
+const prNotifyEnv = "AMUX_PR_NOTIFY"
+
+// prNotifyKinds parses prNotifyEnv.
+func prNotifyKinds() map[string]bool {
+	out := map[string]bool{}
+	for _, k := range strings.Split(os.Getenv(prNotifyEnv), ",") {
+		switch k = strings.TrimSpace(strings.ToLower(k)); k {
+		case "all":
+			out[prwatch.NotifyReadyToMerge], out[prwatch.NotifyNeedsAttention] = true, true
+		case prwatch.NotifyReadyToMerge, prwatch.NotifyNeedsAttention:
+			out[k] = true
+		case "":
+		default:
+			log.Printf("prwatch: ignoring %s entry %q (want ready_to_merge, needs_attention or all)", prNotifyEnv, k)
+		}
+	}
+	return out
+}
+
 // prWakeMarker opens every wake-up typed into a Claude goal coordinator. It is
 // claudegoal's continuation marker, so the coordinator's UserPromptSubmit hook
 // treats the wake-up as continuing the current goal rather than as a new task
@@ -72,7 +94,26 @@ func (d *Daemon) newPRWatcher() *prwatch.Watcher {
 		Deliver:  d.deliverPRWake,
 		Interval: interval,
 		NoPoll:   !enabled,
+		Notify:   prNotifyKinds(),
 	})
+}
+
+// prHealth is the workspace source's view of the watcher's freshness. With
+// no watcher it reports PR watching off, so rows carry no enrichments.
+func (d *Daemon) prHealth() prwatch.Health {
+	if d.prs == nil {
+		return prwatch.Health{}
+	}
+	return d.prs.Health()
+}
+
+// enrichmentKinds lists the enrichment kinds this daemon publishes
+// (HostCapabilities.Enrichments): pull_request while PR watching is on.
+func (d *Daemon) enrichmentKinds() []string {
+	if d.prs == nil || !d.prs.Health().Enabled {
+		return nil
+	}
+	return []string{harnessproto.EnrichmentPullRequest}
 }
 
 // prWatchLoop runs the PR watcher until ctx ends. With PR polling disabled it
@@ -168,12 +209,15 @@ type prStatePayload struct {
 	PR      harnessproto.SessionPR `json:"pr"`
 	Changes []string               `json:"changes"`
 	Wake    bool                   `json:"wake"`
+	// Notify is the user notification this transition warrants
+	// (prwatch.Notify*), set only for kinds enabled by AMUX_PR_NOTIFY.
+	Notify string `json:"notify,omitempty"`
 }
 
 // emitPRState records a PR transition on the member's own event stream (its
 // amux journal, plus its structured log when that is the stream's source).
 func (d *Daemon) emitPRState(c prwatch.Change) {
-	payload, err := json.Marshal(prStatePayload{Session: c.SessionID, PR: c.PR, Changes: c.Changes, Wake: len(c.Wake) > 0})
+	payload, err := json.Marshal(prStatePayload{Session: c.SessionID, PR: c.PR, Changes: c.Changes, Wake: len(c.Wake) > 0, Notify: c.Notify})
 	if err != nil {
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/enrich"
 	"amux/internal/prwatch"
 	"amux/internal/store"
 
@@ -51,6 +52,9 @@ type Workspace struct {
 	// prs, if set, reports the PRs a session owns (the daemon's PR watcher);
 	// rows carry them and their status gains a short PR suffix.
 	prs func(id string) []harnessproto.SessionPR
+	// prHealth, if set, reports the PR watcher's freshness; with it (and PR
+	// watching on) rows carry enrichments and coordinators a PR rollup.
+	prHealth func() prwatch.Health
 	// goalStatus, if set, reports a goal coordinator's goal status word
 	// ("none" with no goal, "" when unknown) for its status line.
 	goalStatus func(store.Session) string
@@ -69,6 +73,19 @@ func (w *Workspace) SetControlMode(f func(id string) string) { w.controlMode = f
 
 // SetPRs installs the PR probe (see Workspace.prs).
 func (w *Workspace) SetPRs(f func(id string) []harnessproto.SessionPR) { w.prs = f }
+
+// SetPRHealth installs the PR watcher's freshness probe (see Workspace.prHealth).
+func (w *Workspace) SetPRHealth(f func() prwatch.Health) { w.prHealth = f }
+
+// prContext reads the PR watcher's state once per snapshot.
+func (w *Workspace) prContext() prContext {
+	pc := prContext{now: time.Now()}
+	if w.prHealth != nil {
+		pc.health = w.prHealth()
+		pc.observed = pc.health.Enabled
+	}
+	return pc
+}
 
 // SetGoalStatus installs the goal-status probe (see Workspace.goalStatus).
 func (w *Workspace) SetGoalStatus(f func(store.Session) string) { w.goalStatus = f }
@@ -94,6 +111,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		engineLive = w.engineLive()
 	}
 	liveOf := func(id string) bool { return engineLive[id] }
+	pc := w.prContext()
 	var out []core.Session
 
 	// Claude sessions amux manages, by id and by dir, so untracked enumeration
@@ -193,12 +211,16 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			views[i] = memberView{session: s, state: subStates[i], prs: memberPRs[i]}
 		}
 		goal, goalNote := w.goal(r)
-		view := superviseCoordinator(ownState, goal, goalNote, views)
+		view := superviseCoordinator(ownState, goal, goalNote, views, pc)
 		status := fmt.Sprintf("%s · %d agent%s%s", stateLabel(view.lead), len(active), plural(len(active)), w.goalSuffix(r, ownState, goal))
 		if view.supervision.Reason != "" {
 			status += " · " + view.supervision.Reason
 		}
+		if view.rollup.Stale {
+			status += " · PR data stale"
+		}
 		supervision := view.supervision
+		rollup := view.rollup
 		out = append(out, w.withCaps(core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
 			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode), Model: r.Model,
@@ -206,6 +228,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			State:       view.state,
 			SubState:    view.subState,
 			Supervision: &supervision,
+			Rollup:      &rollup,
 			Status:      status,
 			Cwd:         containerDir(r),
 			CanAttach:   true, // opens the coordinator
@@ -216,13 +239,14 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			out = append(out, w.withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
-				Model:     s.Model,
-				State:     subStates[i],
-				PRs:       prList(prs),
-				Status:    stateLabel(subStates[i]) + subSuffix(s) + prSuffix(prs) + noticeSuffix(s) + configSuffix(s),
-				Cwd:       s.Dir,
-				CanAttach: true,
-				CanKill:   true,
+				Model:       s.Model,
+				State:       subStates[i],
+				PRs:         prList(prs),
+				Enrichments: pc.enrichments(prs),
+				Status:      stateLabel(subStates[i]) + subSuffix(s) + prSuffix(prs) + noticeSuffix(s) + configSuffix(s),
+				Cwd:         s.Dir,
+				CanAttach:   true,
+				CanKill:     true,
 			}, true)) // tracked, active workgroup agent — steerable
 		}
 	}
@@ -575,6 +599,15 @@ func (w *Workspace) sessionPRs(id string) []harnessproto.SessionPR {
 		return nil
 	}
 	return w.prs(id)
+}
+
+// enrichments is a member row's Enrichments field: nil unless the daemon
+// watches PRs and the session owns a retained one.
+func (pc prContext) enrichments(prs []harnessproto.SessionPR) *harnessproto.Enrichments {
+	if !pc.observed {
+		return nil
+	}
+	return enrich.Session(prs, pc.now, pc.stale)
 }
 
 // prList is the row's PRs field (nil when there are none).

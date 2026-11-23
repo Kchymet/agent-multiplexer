@@ -367,6 +367,7 @@ func wireHostBackend(cfg *provider.Config, h hostbackend.HostDaemon, publish, re
 	cfg.PublishSessions = true
 	cfg.ReadOnlySessions = readOnly
 	cfg.Sessions = h.Snapshot
+	cfg.EnrichmentKinds = h.EnrichmentKinds
 	if !readOnly {
 		cfg.ApplyAction = h.Apply
 	}

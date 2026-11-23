@@ -63,6 +63,10 @@ type Config struct {
 	// return when ctx is cancelled so a dropped connection cannot retain a poll
 	// goroutine or block reconnect.
 	Sessions func(context.Context) ([]core.Session, error)
+	// EnrichmentKinds reports the session enrichment kinds the daemon
+	// publishes; with any (and published sessions) the provider advertises
+	// harnessproto.SessionEnrichmentsFeature. nil: never advertised.
+	EnrichmentKinds func(context.Context) ([]string, error)
 	// ApplyAction executes one session lifecycle verb against the daemon's store,
 	// returning the id of any session it created (see wsops.ApplyResult). Nil
 	// rejects every verb (read-only). The provider validates the verb set and maps
@@ -548,6 +552,14 @@ func (p *Provider) features() []string {
 	if p.runtimeEventsActive() {
 		out = appendUnique(out, harnessproto.RuntimeEventsFeature)
 	}
+	if p.publishing() && p.cfg.EnrichmentKinds != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), enrichmentProbeTimeout)
+		kinds, err := p.cfg.EnrichmentKinds(ctx)
+		cancel()
+		if err == nil && len(kinds) > 0 {
+			out = appendUnique(out, harnessproto.SessionEnrichmentsFeature)
+		}
+	}
 	if p.runtimeHistoryActive() {
 		out = appendUnique(out, harnessproto.RuntimeEventsHistoryFeature)
 	}
@@ -563,6 +575,10 @@ func appendUnique(list []string, f string) []string {
 	}
 	return append(list, f)
 }
+
+// enrichmentProbeTimeout bounds the daemon query behind the enrichments
+// feature at registration.
+const enrichmentProbeTimeout = 3 * time.Second
 
 // publishing reports whether the "sessions" feature is active: opted in and with
 // an inventory source to publish.

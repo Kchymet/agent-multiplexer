@@ -95,6 +95,18 @@ func (HostDaemon) ConnectContext(ctx context.Context) (*daemon.Client, error) {
 	return daemon.DialContext(ctx)
 }
 
+// EnrichmentKinds lists the session enrichment kinds the daemon publishes
+// (nil from a daemon that predates them, or a test connection that cannot
+// answer).
+func (h HostDaemon) EnrichmentKinds(ctx context.Context) ([]string, error) {
+	return call(ctx, h, func(c Conn) ([]string, error) {
+		if ec, ok := c.(interface{ EnrichmentKinds() ([]string, error) }); ok {
+			return ec.EnrichmentKinds()
+		}
+		return nil, nil
+	})
+}
+
 // Snapshot returns the daemon's current session inventory.
 func (h HostDaemon) Snapshot(ctx context.Context) ([]core.Session, error) {
 	return call(ctx, h, func(c Conn) ([]core.Session, error) { return c.Snapshot() })

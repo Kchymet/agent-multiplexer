@@ -46,6 +46,8 @@ import (
 	"sync"
 	"time"
 
+	"amux/internal/enrich"
+
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -62,8 +64,9 @@ const (
 	// long: by then it is stale, and a coordinator that restarts is told to
 	// re-check what it was waiting on anyway.
 	MaxPendingAge = 2 * time.Hour
-	// maxTerminal bounds how many merged/closed PRs are remembered per session.
-	maxTerminal = 5
+	// maxTerminal bounds how many merged/closed PRs are remembered per session
+	// (they are also dropped enrich.Retention after they ended).
+	maxTerminal = enrich.MaxTerminal
 	// maxWakeLines bounds one coalesced wake-up prompt.
 	maxWakeLines = 8
 	// maxRecentKeys bounds the delivered-wake memory used for de-duplication.
@@ -104,6 +107,69 @@ type Change struct {
 	// Wake is the subset meaningful enough to wake the coordinator.
 	Changes []string
 	Wake    []string
+	// Notify is a user notification this transition warrants (a Notify*
+	// value), or "": set only for the kinds Config.Notify enables. Each is
+	// reported once per entry into the phase (transitions are reported once).
+	Notify string
+}
+
+// User notification kinds (Change.Notify). Both are off unless enabled.
+const (
+	// NotifyReadyToMerge: a PR entered the merge phase with CI green and
+	// nothing blocking.
+	NotifyReadyToMerge = "ready_to_merge"
+	// NotifyNeedsAttention: a PR entered the attention phase. It is the
+	// coordinator's job, so it is never on by default.
+	NotifyNeedsAttention = "needs_attention"
+)
+
+// Health is the watcher's freshness, for staleness flags.
+type Health struct {
+	// Enabled: the watcher polls GitHub (PR watching is on).
+	Enabled bool
+	// Reason is the watcher-wide failure of the last poll (a harnessproto
+	// Stale* value), or "".
+	Reason string
+	// Started is when the watcher was created: the freshness baseline before
+	// a repo's first successful listing.
+	Started time.Time
+	// LastOK is the last poll with no failure (zero: none yet).
+	LastOK time.Time
+	// Interval is the current poll delay (backoff included).
+	Interval time.Duration
+	// Repos is per GitHub repo (owner/name).
+	Repos map[string]RepoHealth
+}
+
+// RepoHealth is one repo's listing freshness.
+type RepoHealth struct {
+	LastOK time.Time
+	Failed bool   // its last listing failed
+	Reason string // why (a Stale* value)
+}
+
+// Stale reports whether a PR's data is stale at now, and when it was last
+// observed: its repo's listing failed last time, gh is unavailable, or the
+// repo has not been listed for over twice the poll interval.
+func (h Health) Stale(pr harnessproto.SessionPR, now time.Time) enrich.Staleness {
+	rh := h.Repos[pr.Repo]
+	observed := rh.LastOK
+	if !enrich.IsOpen(pr) || observed.IsZero() {
+		if pr.Updated > 0 {
+			observed = time.UnixMilli(pr.Updated)
+		}
+	}
+	st := enrich.Staleness{ObservedAt: observed}
+	if !h.Enabled || !enrich.IsOpen(pr) {
+		return st
+	}
+	base := rh.LastOK
+	if base.IsZero() {
+		base = h.Started
+	}
+	st.Stale = h.Reason == harnessproto.StaleGHUnavailable || rh.Failed ||
+		(h.Interval > 0 && now.Sub(base) > 2*h.Interval)
+	return st
 }
 
 // Delivery is Deliver's verdict on a queued wake-up.
@@ -163,6 +229,9 @@ type Config struct {
 	// NoPoll disables the GitHub poll while Run still serves Notify/Kick, so
 	// member wake-ups work with PR watching turned off.
 	NoPoll bool
+	// Notify enables user notification kinds (Notify* values) on Change;
+	// empty: none (the default).
+	Notify map[string]bool
 }
 
 // record is the persisted per-PR state: the published summary plus what
@@ -196,6 +265,13 @@ type Watcher struct {
 	failures   int
 	setupError bool
 
+	// Freshness, guarded by mu (Health may be read from any goroutine).
+	started    time.Time
+	lastOK     time.Time
+	lastReason string
+	repoHealth map[string]RepoHealth
+	interval   time.Duration // the current poll delay, as Run last scheduled it
+
 	inbox chan Wake
 	kick  chan struct{}
 }
@@ -215,12 +291,15 @@ func New(cfg Config) *Watcher {
 		cfg.Window = NotifyWindow
 	}
 	return &Watcher{
-		cfg:     cfg,
-		state:   map[string][]record{},
-		pending: map[string][]pendingWake{},
-		recent:  map[string]struct{}{},
-		inbox:   make(chan Wake, inboxSize),
-		kick:    make(chan struct{}, 1),
+		cfg:        cfg,
+		started:    cfg.Now(),
+		interval:   cfg.Interval,
+		repoHealth: map[string]RepoHealth{},
+		state:      map[string][]record{},
+		pending:    map[string][]pendingWake{},
+		recent:     map[string]struct{}{},
+		inbox:      make(chan Wake, inboxSize),
+		kick:       make(chan struct{}, 1),
 	}
 }
 
@@ -265,11 +344,12 @@ func (w *Watcher) enqueueNotified(wake Wake, now time.Time) {
 	w.pending[wake.Workgroup] = append(queue, pendingWake{key: key, wake: wake, at: now})
 }
 
-// PRs returns the last-known PRs a session owns, newest first.
+// PRs returns the last-known PRs a session owns, newest first: every open PR
+// and the merged/closed ones still within enrich.Retention.
 func (w *Watcher) PRs(sessionID string) []harnessproto.SessionPR {
 	w.mu.RLock()
-	defer w.mu.RUnlock()
 	recs := w.state[sessionID]
+	w.mu.RUnlock()
 	if len(recs) == 0 {
 		return nil
 	}
@@ -277,7 +357,36 @@ func (w *Watcher) PRs(sessionID string) []harnessproto.SessionPR {
 	for i, r := range recs {
 		out[i] = r.PR
 	}
+	out = enrich.Retain(out, w.cfg.Now())
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+// Health reports the watcher's freshness for staleness flags.
+func (w *Watcher) Health() Health {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	h := Health{
+		Enabled: !w.cfg.NoPoll, Reason: w.lastReason, Started: w.started,
+		LastOK: w.lastOK, Interval: w.interval, Repos: make(map[string]RepoHealth, len(w.repoHealth)),
+	}
+	for repo, rh := range w.repoHealth {
+		h.Repos[repo] = rh
+	}
+	return h
+}
+
+// staleReason maps a gh failure to its wire staleness reason.
+func staleReason(err error) string {
+	switch classify(err) {
+	case errSetup:
+		return harnessproto.StaleGHUnavailable
+	case errRateLimit:
+		return harnessproto.StaleRateLimited
+	}
+	return harnessproto.StaleError
 }
 
 // Run polls every interval (backed off on failures; never with NoPoll),
@@ -316,7 +425,11 @@ func (w *Watcher) Run(ctx context.Context) {
 			w.Flush(ctx)
 		case <-next.C:
 			w.Poll(ctx)
-			next.Reset(w.delay())
+			d := w.delay()
+			w.mu.Lock()
+			w.interval = d
+			w.mu.Unlock()
+			next.Reset(d)
 		}
 	}
 }
@@ -425,6 +538,11 @@ func (w *Watcher) Poll(ctx context.Context) {
 		}
 		open[q.repo] = append(open[q.repo], prs...)
 	}
+	repos := make([]string, 0, len(keys))
+	for _, q := range keys {
+		repos = append(repos, q.repo)
+	}
+	w.noteHealth(repos, failed, firstErr)
 	if firstErr != nil && w.noteFailure(firstErr) {
 		return
 	}
@@ -437,6 +555,34 @@ func (w *Watcher) Poll(ctx context.Context) {
 		w.observe(ctx, m, open, failed, now)
 	}
 	w.Flush(ctx)
+}
+
+// noteHealth records this tick's per-repo outcome for staleness flags.
+func (w *Watcher) noteHealth(repos []string, failed map[string]bool, firstErr error) {
+	now := w.cfg.Now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	reason := ""
+	if firstErr != nil {
+		reason = staleReason(firstErr)
+	}
+	w.lastReason = reason
+	if firstErr == nil {
+		w.lastOK = now
+	}
+	for repo := range failed {
+		rh := w.repoHealth[repo]
+		rh.Failed, rh.Reason = true, reason
+		w.repoHealth[repo] = rh
+	}
+	if reason == harnessproto.StaleGHUnavailable {
+		return // gh is unusable: no repo was really listed
+	}
+	for _, repo := range repos {
+		if !failed[repo] {
+			w.repoHealth[repo] = RepoHealth{LastOK: now}
+		}
+	}
 }
 
 // noteFailure records a failed tick; it reports whether the whole tick should
@@ -474,10 +620,9 @@ func (w *Watcher) noteSuccess() {
 }
 
 // Owns reports whether a PR head branch belongs to a member branch: the branch
-// itself or the branch plus a "-suffix".
-func Owns(branch, head string) bool {
-	return head == branch || strings.HasPrefix(head, branch+"-")
-}
+// itself or the branch plus a "-suffix" or "/suffix" (enrich.Owns, which is
+// ghpr's rule, so the archive guard and the coordinator agree).
+func Owns(branch, head string) bool { return enrich.Owns(branch, head) }
 
 func prKey(pr harnessproto.SessionPR) string { return fmt.Sprintf("%s#%d", pr.Repo, pr.Number) }
 
@@ -503,7 +648,13 @@ func (w *Watcher) observe(ctx context.Context, m Member, open map[string][]harne
 		next = append(next, rec)
 		seen[prKey(cur)] = true
 		if len(ch) > 0 {
-			changes = append(changes, Change{SessionID: m.SessionID, Workgroup: m.Workgroup, PR: rec.PR, Changes: ch, Wake: wake})
+			c := Change{SessionID: m.SessionID, Workgroup: m.Workgroup, PR: rec.PR, Changes: ch, Wake: wake}
+			if prior != nil {
+				if kind := notifyKind(prior.PR, rec.PR); w.cfg.Notify[kind] {
+					c.Notify = kind
+				}
+			}
+			changes = append(changes, c)
 		}
 	}
 	for _, repo := range m.Repos {
@@ -539,7 +690,7 @@ func (w *Watcher) observe(ctx context.Context, m Member, open map[string][]harne
 		r := r
 		add(&r, cur)
 	}
-	next = trimTerminal(next)
+	next = trimTerminal(next, now)
 
 	if !sameRecords(prev, next) {
 		w.mu.Lock()
@@ -567,8 +718,9 @@ func (w *Watcher) observe(ctx context.Context, m Member, open map[string][]harne
 }
 
 // trimTerminal orders records newest first and keeps every open PR but only
-// the most recent maxTerminal merged/closed ones.
-func trimTerminal(recs []record) []record {
+// the most recent maxTerminal merged/closed ones, each for enrich.Retention
+// after it ended.
+func trimTerminal(recs []record, now time.Time) []record {
 	sort.SliceStable(recs, func(i, j int) bool {
 		if recs[i].PR.Repo != recs[j].PR.Repo {
 			return recs[i].PR.Repo < recs[j].PR.Repo
@@ -579,7 +731,7 @@ func trimTerminal(recs []record) []record {
 	terminal := 0
 	for _, r := range recs {
 		if r.PR.State != "open" {
-			if terminal >= maxTerminal {
+			if terminal >= maxTerminal || !enrich.Retained(r.PR, now) {
 				continue
 			}
 			terminal++
@@ -598,9 +750,35 @@ func sameRecords(a, b []record) bool {
 	return string(ab) == string(bb)
 }
 
-// Hash is a PR summary's state hash: every field except Updated.
+// readyToMerge: in the merge phase with CI settled (green or none) and
+// nothing blocking.
+func readyToMerge(pr harnessproto.SessionPR) bool {
+	phase, _ := enrich.Phase(pr)
+	return phase == harnessproto.PRPhaseMerge && enrich.CI(pr).Status != harnessproto.CIPending &&
+		!enrich.Mergeable(pr).BlockedByChecks
+}
+
+// notifyKind is the user notification a transition from prev to cur warrants
+// ("" for none): a PR becoming ready to merge, or entering the attention
+// phase. A PR seen for the first time never notifies (no page on startup).
+func notifyKind(prev, cur harnessproto.SessionPR) string {
+	if readyToMerge(cur) && !readyToMerge(prev) {
+		return NotifyReadyToMerge
+	}
+	was, _ := enrich.Phase(prev)
+	now, _ := enrich.Phase(cur)
+	if now == harnessproto.PRPhaseAttention && was != harnessproto.PRPhaseAttention {
+		return NotifyNeedsAttention
+	}
+	return ""
+}
+
+// Hash is a PR summary's state hash: every field except when amux and GitHub
+// last saw it change (Updated, GitHubUpdatedAt), which move without a state
+// change.
 func Hash(pr harnessproto.SessionPR) string {
 	pr.Updated = 0
+	pr.GitHubUpdatedAt = ""
 	b, _ := json.Marshal(pr)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])

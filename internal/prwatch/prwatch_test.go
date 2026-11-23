@@ -80,6 +80,9 @@ func (f *fakeGH) run(_ context.Context, args ...string) ([]byte, error) {
 			if !ok || pr["state"] != "OPEN" {
 				continue
 			}
+			if r, ok := pr["_repo"]; ok && r != arg("--repo") {
+				continue // a PR of another repo (cross-repo tests set _repo)
+			}
 			b := pr["headRefName"].(string)
 			if (head != "" && b == head) || (head == "" && strings.HasPrefix(b, prefix)) {
 				out = append(out, pr)

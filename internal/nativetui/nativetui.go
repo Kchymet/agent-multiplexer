@@ -147,6 +147,7 @@ type model struct {
 	accounts              *accountsState
 	accountCall           accountCaller  // nil uses the authenticated host account service
 	res                   resourcesState // daemon resource samples and the top panel (resources.go)
+	prPanel               prPanelState   // the PR list in the main pane (prs.go)
 
 	// clip queues local selections and pane OSC 52 writes through one Copier.
 	// Nil disables copying.
@@ -499,6 +500,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.res.open {
 		return m.handleResourcesKey(k)
 	}
+	// So does the PR list.
+	if m.prPanel.open {
+		return m.handlePRKey(k)
+	}
 
 	// Global jumps work everywhere — even with the agent focused — so you can
 	// always move between the rail and the agent without a prefix. The chords
@@ -582,6 +587,12 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openAccounts()
 	case "t": // top-style resources panel
 		m.toggleResources()
+		return m, nil
+	case "p": // the selected row's pull requests, in the main pane
+		m.togglePRs()
+		return m, nil
+	case "o": // open the selected row's most relevant pull request in the browser
+		m.openSelectedPR()
 		return m, nil
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -1081,7 +1092,7 @@ func (m *model) compactRail() bool { return m.railWidth() < sidebarWidth }
 // rather than amux's own chrome (see renderMain's precedence).
 func (m *model) mainIsPane() bool {
 	return m.archiveSearch == nil && m.picker == nil && m.form == nil && m.confirm == nil &&
-		!m.res.open && m.cur() != nil
+		!m.res.open && !m.prPanel.open && m.cur() != nil
 }
 
 func (m *model) mainWidth() int {

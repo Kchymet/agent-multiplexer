@@ -338,6 +338,7 @@ func Default(self string) *Daemon {
 		return ""
 	})
 	ws.SetPRs(d.sessionPRs)
+	ws.SetPRHealth(d.prHealth)
 	ws.SetGoalStatus(d.coordinatorGoalStatus)
 	ws.SetGoalInfo(d.coordinatorGoalInfo)
 	ws.SetModelObserved(func(id, kind, model string) {

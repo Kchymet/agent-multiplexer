@@ -47,6 +47,10 @@ const CreationIdentityVersion = 1
 // HostCapabilities is QueryHostCapabilities' answer.
 type HostCapabilities struct {
 	CreationIdentity int `json:"creationIdentity"`
+	// Enrichments lists the session enrichment kinds the daemon publishes
+	// (harnessproto.Enrichment*): ["pull_request"] while PR watching is on.
+	// Absent from a daemon that predates enrichments or has them off.
+	Enrichments []string `json:"enrichments,omitempty"`
 }
 
 // IdentityRequest is the opt-in a host client attaches to a creation action.
@@ -167,6 +171,20 @@ func (c *Client) NegotiateCreationIdentity() error {
 		return ErrDaemonUpgradeRequired
 	}
 	return nil
+}
+
+// EnrichmentKinds asks this connection's daemon which session enrichment
+// kinds it publishes; none (nil) from a daemon that predates them.
+func (c *Client) EnrichmentKinds() ([]string, error) {
+	raw, err := c.queryActionData(core.Action{Action: core.ActionQuery, Query: QueryHostCapabilities})
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	var caps HostCapabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		return nil, err
+	}
+	return caps.Enrichments, nil
 }
 
 // DispatchIdentity runs one creation action and returns the created session's

@@ -724,7 +724,7 @@ func cmdStatus(args []string) error {
 			if state == "" {
 				state = core.StateIdle
 			}
-			fmt.Printf("%-20s %-8s %-8s %s\n", s.Title, s.Kind, state, s.Cwd)
+			fmt.Printf("%-20s %-8s %-8s %s%s\n", s.Title, s.Kind, state, s.Cwd, statusEnrichment(s))
 		}
 		return nil
 	}
@@ -766,7 +766,7 @@ func cmdStatus(args []string) error {
 			if state == "" {
 				state = core.StateIdle
 			}
-			fmt.Printf("%-20s %-8s %-8s %s\n", s.Title, s.Kind, state, s.Cwd)
+			fmt.Printf("%-20s %-8s %-8s %s%s\n", s.Title, s.Kind, state, s.Cwd, statusEnrichment(s))
 		}
 		return nil
 	}

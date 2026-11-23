@@ -105,14 +105,38 @@ type Session struct {
 	// coordinator row; nil on every other row and from a daemon that predates
 	// it. A pointer, like PRs, so Session stays comparable.
 	Supervision *Supervision `json:"supervision,omitempty"`
+
+	// Enrichments is related data attached to this session — its pull
+	// requests first (see enrichment.go for the wire contract). Additive/
+	// omitempty: absent when there is none or the daemon predates it (or has
+	// PR watching off). A pointer so Session stays comparable.
+	Enrichments *Enrichments `json:"enrichments,omitempty"`
+
+	// Rollup is a workgroup coordinator row's derived state over its members
+	// and their enrichments (waiting_review, waiting_merge, pr_attention, ...).
+	// Set on every active coordinator row by a daemon that emits enrichments;
+	// nil elsewhere. Its state is mirrored into SubState; State keeps the
+	// attention ladder.
+	Rollup *Rollup `json:"rollup,omitempty"`
 }
 
-// Session sub-states (Session.SubState).
+// Session sub-states (Session.SubState). The set is open: a consumer ignores a
+// value it does not know.
 const (
 	// SubStateSupervising: a coordinator that is not itself mid-turn while the
 	// work it dispatched is in flight. State is then running (or waiting, when
 	// a member needs the user), never ready/idle.
 	SubStateSupervising = "supervising"
+	// SubStatePRAttention: open PRs need work (CI red, conflict, changes
+	// requested, behind, draft) and nothing else is in flight. It is the
+	// coordinator's job, not the user's: State is running (ready when the
+	// coordinator is stopped).
+	SubStatePRAttention = RollupPRAttention
+	// SubStateWaitingReview / SubStateWaitingMerge: open PRs waiting on review
+	// or on a merge are all that is outstanding. State is ready — these are not
+	// the attention `waiting` badge.
+	SubStateWaitingReview = RollupWaitingReview
+	SubStateWaitingMerge  = RollupWaitingMerge
 )
 
 // Supervision is a coordinator row's view of its own work (Session.Supervision).
@@ -171,6 +195,17 @@ type SessionPR struct {
 	LastReview     *PRReview `json:"lastReview,omitempty"`
 	// Updated is when amux last observed this PR change (unix millis).
 	Updated int64 `json:"updated,omitempty"`
+
+	// The fields below are additive (session enrichments): the PR's title and
+	// base branch, GitHub's own timestamps (RFC 3339), the latest review per
+	// reviewer and the reviewers still requested.
+	Title              string     `json:"title,omitempty"`
+	BaseBranch         string     `json:"baseBranch,omitempty"`
+	GitHubUpdatedAt    string     `json:"githubUpdatedAt,omitempty"`
+	MergedAt           string     `json:"mergedAt,omitempty"`
+	ClosedAt           string     `json:"closedAt,omitempty"`
+	Reviews            []PRReview `json:"reviews,omitempty"`
+	RequestedReviewers []string   `json:"requestedReviewers,omitempty"`
 }
 
 // PRReview is the most recently submitted review on a PR.

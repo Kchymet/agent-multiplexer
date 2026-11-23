@@ -323,6 +323,12 @@ type Session struct {
 	Role        string                   `json:"role,omitempty"`
 	Caps        SessionCaps              `json:"caps"`
 	PRs         []harnessproto.SessionPR `json:"prs,omitempty"`
+	// SubState, Enrichments and Rollup are the session enrichment fields
+	// (harnessproto/enrichment.go): additive, omitted when empty, and gated by
+	// CapabilitiesResponse.Enrichments.
+	SubState    string                    `json:"sub_state,omitempty"`
+	Enrichments []harnessproto.Enrichment `json:"enrichments,omitempty"`
+	Rollup      *harnessproto.Rollup      `json:"rollup,omitempty"`
 	// AccountBinding is set only for a grant that may read machine accounts
 	// (accounts + all_sessions); see mayReadAccounts.
 	AccountBinding *SessionAccountBinding `json:"account_binding,omitempty"`
@@ -451,6 +457,12 @@ type ActionResponse struct {
 // VerbNewWorkgroupEmpty with an exact field allowlist.
 type CreateRequest = ActionRequest
 
+// EnrichmentCapabilities says which session enrichments rows carry.
+type EnrichmentCapabilities struct {
+	Version int      `json:"version"` // harnessproto.EnrichmentsVersion
+	Kinds   []string `json:"kinds"`   // harnessproto.Enrichment* values
+}
+
 // CapabilitiesResponse is GET /direct/v1/capabilities: what this grant may do
 // on this machine. Verbs are the session verbs the grant's permissions admit
 // (each row's caps still decide per session). CreateWorkgroup reports whether
@@ -478,6 +490,9 @@ type CapabilitiesResponse struct {
 	// Wake is always set by a server that serves the wake routes
 	// (docs/direct-wake-contract.md). Absent means the server predates them.
 	Wake *WakeCapabilities `json:"wake,omitempty"`
+	// Enrichments is set when the daemon publishes session enrichments (PR
+	// watching on); absent from a server that predates them or has them off.
+	Enrichments *EnrichmentCapabilities `json:"enrichments,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the

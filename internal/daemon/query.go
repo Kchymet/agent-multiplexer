@@ -67,7 +67,7 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 		return d.codexControl, d.configErr
 	}
 	if a.Query == QueryHostCapabilities {
-		return HostCapabilities{CreationIdentity: CreationIdentityVersion}, nil
+		return HostCapabilities{CreationIdentity: CreationIdentityVersion, Enrichments: d.enrichmentKinds()}, nil
 	}
 	if a.Query == QuerySessionIdentities {
 		return sessionIdentities(a)
