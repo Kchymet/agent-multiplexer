@@ -747,7 +747,7 @@ func directSpec() *cmdSpec {
 		flagSpec{Name: "tailnet", Usage: "derive listen, endpoint and certificate from this machine's tailnet\n(--tailnet=false leaves tailnet mode)"},
 		flagSpec{Name: "port", Arg: "<n>", Usage: "tailnet: port for the derived listen address and endpoint (default 8443)"},
 		flagSpec{Name: "tailscale-socket", Arg: "<path>", Usage: "tailnet: tailscaled socket (default: the platform's)"},
-		flagSpec{Name: "no-default-origin", Usage: "tailnet: do not allow the orchestrator's web origin by default"},
+		flagSpec{Name: "no-default-origin", Usage: "tailnet: do not allow the Harness web origin by default (registered.webOrigin;\nwithout it, pass --allow-origin <Harness web origin>)"},
 		flagSpec{Name: "no-wait", Usage: "do not wait for the listener to become ready"},
 	)
 	return &cmdSpec{
@@ -792,8 +792,8 @@ enroll prints the effective label, permissions and scope on stderr. Without QR
 flags it prints a v1 bundle (amux-direct:1:...) alone on stdout, to paste into
 a client.
 
-The scope never defaults: without --all-sessions or --workgroup, enroll asks on
-a terminal (all sessions, a workgroup, or cancel) and fails otherwise.
+The scope defaults to every ordinary session (--all-sessions); --workgroup
+narrows it. The amux console is never in any scope.
 
 QR enrollment (--qr, --qr-png): the code is a device ticket (amux-direct:2:...),
 minted locally with no cloud involved: the phone verifies the server identity,
@@ -806,8 +806,8 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 				Flags: []flagSpec{
 					{Name: "label", Arg: "<text>", Default: "<hostname>-<YYYYMMDD-HHMM>", Usage: "name for the client, shown in clients list"},
 					{Name: "permissions", Arg: "<list>", Default: "read", Usage: directPermissionsHelp},
-					{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "grant every session on this host"},
-					{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "grant one workgroup and its members"},
+					{Name: "all-sessions", Usage: "grant every ordinary session on this host (the default)"},
+					{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "grant only this workgroup and its members (not with --all-sessions)"},
 					{Name: "ttl", Arg: "<dur>", Default: "10m", Usage: "code lifetime (maximum 1h)"},
 					{Name: "json", Usage: "print the full response as JSON on stdout"},
 					{Name: "qr", Usage: "also draw the enrollment as a QR code for the Harness Android app\n(Backends > Connect a machine from a QR code)"},
@@ -816,7 +816,7 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 				},
 				Examples: []string{
 					directEnrollExample,
-					"amux direct enroll --qr --all-sessions",
+					"amux direct enroll --qr",
 					"amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr",
 				}},
 			{Name: "clients", Args: "<command>", Summary: "list or revoke enrolled clients",
@@ -840,16 +840,17 @@ client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
 invalidates outstanding cloud codes; grants already redeemed stay until revoked
 (amux direct clients revoke).`,
 				Sub: []*cmdSpec{
-					{Name: "enable", Args: "--permissions <list> (--all-sessions | --workgroup <id>...) [flags]", FlagSet: true,
+					{Name: "enable", Args: "--permissions <list> [--all-sessions | --workgroup <id>...] [flags]", FlagSet: true,
 						Summary: "allow Harness to mint enrollment codes up to a ceiling",
-						Detail: `The ceiling is required; all-sessions covers ordinary sessions, never the amux
-console. --owner and --provider default to the owner and provider Harness
+						Detail: `The resource ceiling defaults to all ordinary sessions, never the amux console;
+--workgroup narrows it. A request naming no permissions gets read, plus steer
+when the ceiling includes it. --owner and --provider default to the owner and provider Harness
 reported at this host's latest amux provide registration (shown by amux
 doctor); a flag that disagrees with it is refused unless both are given.`,
 						Flags: []flagSpec{
 							{Name: "permissions", Arg: "<list>", Required: true, Usage: "ceiling (see amux direct enroll --help); codes never exceed it"},
-							{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "ceiling: any ordinary session"},
-							{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "ceiling: these workgroups"},
+							{Name: "all-sessions", Usage: "ceiling: any ordinary session (the default)"},
+							{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "ceiling: only these workgroups (not with --all-sessions)"},
 							{Name: "owner", Arg: "<user-id>", Usage: "advanced: the Harness user id allowed to request codes"},
 							{Name: "provider", Arg: "<id>", Usage: "advanced: this host's Harness provider id"},
 							{Name: "max-outstanding", Arg: "<n>", Usage: "unredeemed cloud codes at once (default 3)"},

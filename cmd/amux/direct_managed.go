@@ -375,6 +375,9 @@ type directStatusReport struct {
 	Ready    *directsvc.Ready    `json:"ready,omitempty"`
 	Server   *directServerStatus `json:"server,omitempty"`
 	Provider directProviderView  `json:"provider"`
+	// Enroll says whether and when an enrollment request last
+	// reached this host, and how it ended.
+	Enroll directEnrollView `json:"enrollment"`
 	// Clients counts active enrolled clients (only when a server answers).
 	Clients *int `json:"enrolled_clients,omitempty"`
 	// Tailnet is tailnet mode's effective address, certificate and origin
@@ -383,9 +386,10 @@ type directStatusReport struct {
 }
 
 type directServerStatus struct {
-	ServerID  string              `json:"server_id"`
-	Endpoints []string            `json:"endpoints"`
-	Cloud     *direct.CloudStatus `json:"cloud,omitempty"`
+	ServerID  string                 `json:"server_id"`
+	Endpoints []string               `json:"endpoints"`
+	Cloud     *direct.CloudStatus    `json:"cloud,omitempty"`
+	Enroll    *direct.EnrollActivity `json:"enroll,omitempty"`
 }
 
 // directProviderView separates what the provider actually advertised (its
@@ -423,7 +427,9 @@ func cmdDirectStatus(args []string) error {
 	r.Phase, r.Reason = directPhase(r.Setting, r.Set, r.Managed, r.Ready, daemonUp, r.Server)
 	cfg, cfgErr := providercfg.Load()
 	pst, pstErr := provider.ReadStatus(provider.StatusPath())
-	r.Provider = directProviderCoherence(r.Server, cfg.DirectEnroll && cfgErr == nil, pst, pstErr == nil && processAlive(pst.PID))
+	pLive := pstErr == nil && processAlive(pst.PID)
+	r.Provider = directProviderCoherence(r.Server, cfg.DirectEnroll && cfgErr == nil, pst, pLive)
+	r.Enroll = directEnrollment(r.Server, pst, pLive)
 	if r.Server != nil {
 		if n, ok := directClientCount(); ok {
 			r.Clients = &n
@@ -455,7 +461,7 @@ func probeDirectServer() *directServerStatus {
 	if err != nil || resp.ServerID == "" {
 		return nil
 	}
-	return &directServerStatus{ServerID: resp.ServerID, Endpoints: resp.Endpoints, Cloud: resp.Cloud}
+	return &directServerStatus{ServerID: resp.ServerID, Endpoints: resp.Endpoints, Cloud: resp.Cloud, Enroll: resp.Enroll}
 }
 
 // directProviderCoherence compares the offer the provider registered with
@@ -545,6 +551,7 @@ func printDirectStatus(r directStatusReport) {
 	if r.Provider.Observed {
 		fmt.Printf("          registered offer: server_id %s · %s\n", r.Provider.ObservedServerID, strings.Join(r.Provider.ObservedEndpoints, ", "))
 	}
+	printDirectEnroll(r.Enroll)
 	fmt.Printf("logs      %s (amux direct logs)\n", directsvc.LogPath())
 }
 
