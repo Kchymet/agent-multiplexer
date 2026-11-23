@@ -6,9 +6,10 @@ import (
 	"strings"
 
 	"amux/internal/access"
-	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/items"
 	"amux/internal/store"
+	"amux/internal/wsops"
 )
 
 // policyStore is the read-only store surface needed to resolve session
@@ -46,6 +47,8 @@ func openPolicyStore() (policyStoreHandle, error) {
 type daemonAccessResolver struct {
 	open           policyStoreOpen
 	providerAllows func(context.Context, string, access.Request) (bool, error)
+	// itemLookup reads one item for HostAcknowledged (nil: the store).
+	itemLookup func(string) (items.Item, bool, error)
 }
 
 func newDaemonAccessResolver() *daemonAccessResolver {
@@ -108,7 +111,9 @@ func (r *daemonAccessResolver) RepoGranted(ctx context.Context, subjectID, repo 
 			granted = initialized && containsString(grants, repo)
 		case store.RoleRepo:
 			granted = subject.Repo == repo
-		case store.RoleConsole:
+		case store.RoleConsole, store.RoleOverseer:
+			// The overseer creates workgroups (from user-acknowledged items) on
+			// any tracked repo; it can never track or grant one.
 			granted = true
 		}
 		return nil
@@ -127,10 +132,11 @@ func lookupPolicySession(db policyStore, id string) (store.Session, bool, error)
 	if id == "" {
 		return store.Session{}, false, nil
 	}
-	if id == console.ID {
-		// console.Session is a pure projection. Do not call console.Ensure or
-		// wsops.ResolveSession from authorization: a read must not create/migrate.
-		return console.Session(), true, nil
+	if s, ok := wsops.SyntheticSession(id); ok {
+		// The console and overseer sessions are pure projections. Do not call
+		// Ensure or wsops.ResolveSession from authorization: a read must not
+		// create/migrate.
+		return s, true, nil
 	}
 	s, found, err := db.GetSession(id)
 	if err != nil || !found {
@@ -268,7 +274,7 @@ func (r *daemonAccessResolver) scopedRepoRows(ctx context.Context, principal acc
 			row := core.RepoRow{Name: repo.Name}
 			visible := false
 			switch subject.Role() {
-			case store.RoleConsole:
+			case store.RoleConsole, store.RoleOverseer:
 				visible = true
 			case store.RoleCoordinator:
 				// Visibility is not authority: a coordinator always sees every

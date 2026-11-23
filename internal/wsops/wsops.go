@@ -16,7 +16,6 @@ import (
 	"amux/internal/agent"
 	"amux/internal/cfghome"
 	"amux/internal/claudegoal"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/git"
 	"amux/internal/hostprep"
@@ -765,8 +764,8 @@ func AgentEnv(s store.Session) []string {
 		"AMUX_WORKSPACE=" + s.ID, // back-compat alias for AMUX_WORKGROUP
 		"AMUX_ROOT=" + s.RootID,
 		"AMUX_SCOPE=" + ScopeOf(s),
-		// The session's role: empty for an ordinary agent; console | coordinator
-		// | repo for the built-in default sessions (store.Role*).
+		// The session's role: empty for an ordinary agent; console | overseer
+		// | coordinator | repo for the built-in default sessions (store.Role*).
 		"AMUX_ROLE=" + s.Role(),
 		"AMUX_MODE=" + store.NormalizeMode(s.Mode),
 		"AMUX_AGENT=" + agent.Canonical(s.Agent),
@@ -845,11 +844,11 @@ func agentScope(rootID string) string {
 	return ""
 }
 
-// DeleteByID deletes a session. The console can't be deleted (it's built in); a
+// DeleteByID deletes a session. The console and the overseer can't be deleted (it's built in); a
 // workgroup removes all its agents; an agent removes just itself. The daemon
 // stops any live engine instance before calling this (see killEngineFor).
 func DeleteByID(ctx context.Context, id string) error {
-	if id == console.ID {
+	if IsSyntheticID(id) {
 		return nil
 	}
 	db, err := store.Open()
@@ -1027,8 +1026,8 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	case core.ActionNewWorkgroup, core.ActionCreateWorkspace:
 		id, _, err := applyNewWorkgroup(ctx, a)
 		return id, err
-	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem:
-		// Item verbs touch only the item store; daemon.handle serves them
+	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem, core.ActionQueueAnswer, core.ActionQueueDismiss:
+		// Item and queue verbs touch only the item store and live runtimes; daemon.handle serves them
 		// (internal/daemon/items.go) before any workspace dispatch.
 		return "", fmt.Errorf("%s is served by the amux daemon", a.Action)
 	}

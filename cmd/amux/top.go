@@ -13,6 +13,7 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/procstat"
+	"amux/internal/queue"
 )
 
 // cmdTop prints the daemon's latest resource sample: amux's own overhead, then
@@ -230,6 +231,27 @@ type statusJSON struct {
 	Sessions  []statusSession  `json:"sessions"`
 	UpdatedAt int64            `json:"updatedAt"`
 	Resources *statusResources `json:"resources,omitempty"`
+	// Overview is the question queue counts, the global inbox counts and the
+	// workgroup summary (internal/queue); omitted when the daemon predates it
+	// or the caller may not read the queue.
+	Overview *statusOverview `json:"overview,omitempty"`
+}
+
+// statusOverview is status --json's compact queue section (the entries
+// themselves are `amux queue list --json`).
+type statusOverview struct {
+	Queue   queue.Counts      `json:"queue"`
+	Inbox   queue.InboxCounts `json:"inbox"`
+	Summary queue.Summary     `json:"summary"`
+}
+
+// readStatusOverview fetches the overview best effort.
+func readStatusOverview() *statusOverview {
+	o, err := readQueue(false)
+	if err != nil {
+		return nil
+	}
+	return &statusOverview{Queue: o.Counts, Inbox: o.Inbox, Summary: o.Summary}
 }
 
 // statusResources is the top-level resources section of status --json. The

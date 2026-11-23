@@ -109,7 +109,7 @@ ids, fields and environment variables only ever name a target
   coordinator for its member, nor the console for anyone. Routing is decided
   by the daemon, never the caller: a member's item goes to its own
   coordinator, every other session's to the global inbox (`access.ItemRecipient`;
-  its owner is resolved once, in `items.GlobalInbox()` — today the console).
+  its owner is resolved once, in `items.GlobalInbox()` — the overseer).
   Per item (`internal/access/items.go`): the source and recipient see it, a
   coordinator also sees its workgroup's items, the global inbox owner and the
   admin console see all; the recipient (or those two) triages it, the source may only withdraw it;
@@ -163,12 +163,43 @@ open items. What the
 daemon does enforce is that none is lost — the archive transaction moves every
 active item in the coordinator's inbox to the global inbox.
 
-## Console and repo homes
+## Console, overseer and repo homes
 
-The **console** is the operator's delegated view: it passes any rule marked
+The **admin console** is the operator's delegated view: it passes any rule marked
 `Console` on any target, and is still refused pure host operations such as
-auth reload or restart. It is today's global inbox owner
-(`items.GlobalInbox()`): it sees and triages every item, acting as itself. A **repo home** is self-only like a member, cannot
+auth reload or restart. It keeps an all-items operator view, but nothing
+escalates to it, and it is never reachable over direct access
+([direct-console.md](direct-console.md)).
+
+The **overseer** (role `overseer`) is the coordinator of coordinators and the
+global inbox owner (`items.GlobalInbox()`). It holds exactly the rules marked
+`Overseer` in `internal/access/scope.go`, narrowed per verb by `allowOverseer`
+(`internal/access/overseer.go`); there is no blanket shortcut, so every unmarked
+rule is denied to it whatever its scope. Its scope is every session except the
+console. `TestOverseerAccessMatrix` pins each cell:
+
+| Operation | Overseer | Admin console |
+| --- | --- | --- |
+| read sessions, snapshot, repos, events, `wait` | every session but the console | everything |
+| query `queue` (the user question queue) | read | read |
+| `start` | coordinator rows only (starts the workgroup) | yes |
+| `steer` prompt / interject / stop | coordinators only; members go through their coordinator | yes |
+| `steer` permission, goal | never (only the user answers, through the queue) | permission yes |
+| `set-archived` | `archived=true`, never `force`, a workgroup root or a member | yes |
+| `new-workgroup` | only `-f from_item=<item>` naming an item the **host** acknowledged; tracked repos only | yes |
+| `raise-item`, `item-state`, query `items` | as itself (it sees and triages every item) | as itself |
+| `refresh` | yes | yes |
+| `rename`, `add-agent`, `escalate-item`, `move`, `delete`, `kill`, `add-repo`, `rm-repo`, `agent-set-repos`, `create-workspace` | never | yes (escalate: never) |
+| `queue-answer`, `queue-dismiss`, and every host-only operation | never | never |
+
+No coordinator, member or repo home can steer the overseer; they reach it by
+raising items. When the overseer needs an admin action it raises a
+`decision_needed` item naming the command for the user to run at the admin
+console — never escalation by proxy. The host-acknowledgment rule makes a
+prompt-injected overseer unable to spawn work on its own say-so
+(`access.ItemApprover`, `itemsvc.HostAcknowledged`).
+
+A **repo home** is self-only like a member, cannot
 archive itself, and holds one host-scope exception: it may create a new
 workgroup limited to exactly its own repo. Sharing a repo with a workgroup
 grants a repo home nothing inside that workgroup. Details are in

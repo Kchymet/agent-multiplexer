@@ -1,4 +1,4 @@
-# Default sessions: the console, workgroup coordinators, repo homes
+# Default sessions: the console, the overseer, workgroup coordinators, repo homes
 
 Every container the rail shows hosts one long-lived agent session scoped to it.
 These are amux's **default sessions**: they exist without being created, they
@@ -9,6 +9,7 @@ orchestrator over the provider protocol.
 | container | role (`AMUX_ROLE`) | session id | sandbox (cwd) | scope (`AMUX_SCOPE`) |
 |-----------|--------------------|------------|---------------|----------------------|
 | the machine | `console` | `console` | `~/.local/share/amux/console/` | `global` |
+| the machine | `overseer` | `overseer` | `~/.local/share/amux/overseer/` | `global` |
 | a workgroup | `coordinator` | the workgroup id | `sessions/<workgroup>/coordinator/` — a dedicated own directory | `work` |
 | a tracked repo | `repo` | the repo name | `sessions/<repo>/` | `repo` |
 
@@ -17,12 +18,24 @@ coordinator, including workgroups limited to a single repo.
 
 ## What each one is for
 
-- **The console** has an explicit machine coordination view: every granted
-  workgroup, agent, and repo, plus bounded normalized event queries for their
-  history and the CLI to operate them. Other sessions' filesystem transcripts
-  are not mounted. Its guide carries a launch-time
-  inventory and the `amux do` vocabulary. It coordinates *across* workgroups;
-  it does not write code.
+- **The admin console** administers amux: health (`amux doctor`), updates,
+  accounts and auth, direct clients and enrollment, repo tracking and grants,
+  archive sweeps, cost and usage (`amux top`). It runs locally only and is never
+  reachable over direct access ([direct-console.md](direct-console.md)). It keeps
+  its operator powers and an all-items view, but nothing escalates to it any more.
+- **The overseer** is the coordinator of coordinators. It supervises every
+  workgroup coordinator, owns the cross-workgroup item inbox (the global
+  inbox, [items.md](items.md)) and curates the user question queue
+  (`amux queue`). It can read every workgroup, steer and start coordinators,
+  archive finished workgroups (never forced), create a workgroup from an item the
+  user acknowledged, and triage items — and nothing administrative (see
+  [workgroup-permissions.md](workgroup-permissions.md)). When it needs an admin
+  action it raises a decision for the user to run at the admin console.
+- Both machine-wide sessions have an explicit machine view: every granted
+  workgroup, agent, and repo (the overseer: never the console), plus bounded
+  normalized event queries for their history. Other sessions' filesystem
+  transcripts are not mounted. Their guides carry a launch-time inventory.
+  Neither writes code.
 - **A workgroup coordinator** supervises that workgroup's agents: scopes the
   work, dispatches (`amux do add-agent <workgroup> …`), steers (`amux do steer
   <agent> …`), verifies what agents produce against evidence, and keeps notes in
@@ -87,7 +100,12 @@ memory (`.amux/claude/CLAUDE.md`), which survives regeneration.
 
 ## Lifecycle
 
-- The console is synthetic (never a store row) and cannot be deleted.
+- The console and the overseer are synthetic (never store rows) and cannot be
+  deleted, renamed or archived.
+- The overseer starts lazily: the first wake-up for it (new items in its inbox,
+  or a coordinator that asked the user, reported itself blocked or completed its
+  goal) is a prompt that starts it, and it runs in goal mode like a coordinator.
+  Its guide (`internal/wsops/overseer_guide.go`) is regenerated at every launch.
 - A workgroup's coordinator is the root row itself: creating the workgroup
   creates it (sandbox dir + pinned conversation) and starts its runtime, even
   in its dedicated `coordinator/` directory, even for an empty workgroup or a

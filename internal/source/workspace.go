@@ -12,6 +12,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/core"
+	"amux/internal/overseer"
 	"amux/internal/prwatch"
 	"amux/internal/store"
 
@@ -110,6 +111,18 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		State: consoleState, Status: stateLabel(consoleState) + " · amux-wide",
 		Cwd: console.Dir(), CanAttach: true, CanKill: false,
 	}, true)) // console resolves in steer.go — steerable
+
+	// The overseer, pinned under the console: the coordinator of coordinators.
+	tracked[overseer.SessionID] = true
+	trackedDirs[overseer.Dir()] = true
+	overseerSession := overseer.Session()
+	overseerState := agentState(liveOf(overseer.ID), overseerSession)
+	out = append(out, w.withCaps(core.Session{
+		ID: overseer.ID, Title: "amux overseer", Source: "workspace", Kind: agent.DefaultKind(),
+		Mode: store.ModeOverseer, Model: overseerSession.Model, Role: store.RoleOverseer,
+		State: overseerState, Status: stateLabel(overseerState) + " · all workgroups",
+		Cwd: overseer.Dir(), CanAttach: true, CanKill: false,
+	}, true))
 
 	roots, err := db.Roots()
 	if err != nil {

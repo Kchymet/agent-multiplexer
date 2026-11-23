@@ -60,7 +60,7 @@ func CapsForRole(kind, role string) harnessproto.SessionCaps {
 // role and kind a published row carries; a test pins the two together, so the
 // advertisement cannot drift from what the daemon and the launcher do.
 func goalCapability(kind, role string) bool {
-	return role == harnessproto.RoleCoordinator && goalKind(kind)
+	return (role == harnessproto.RoleCoordinator || role == harnessproto.RoleOverseer) && goalKind(kind)
 }
 
 // correlatesPermissions reports whether a runtime raises permission_request

@@ -10,6 +10,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/console"
 	"amux/internal/hostprep"
+	"amux/internal/overseer"
 	"amux/internal/store"
 )
 
@@ -244,9 +245,39 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = cr.Close()
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux console", "payments", rootID, gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events"} {
+	for _, want := range []string{"amux admin console", "payments", rootID, gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events",
+		"amux doctor", "amux direct clients list", "amux top", "amux repo add", "overseer", "amux queue list"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
+		}
+	}
+
+	// Overseer: supervision vocabulary only — never an admin or host command.
+	o, ok, _ := ResolveSession(overseer.ID)
+	if !ok || o.Role() != store.RoleOverseer || o.Dir != overseer.Dir() {
+		t.Fatalf("overseer resolves to %+v (ok=%v)", o, ok)
+	}
+	if err := overseer.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	or, err := hostprep.OpenSession(o.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGuide(or, o); err != nil {
+		t.Fatal(err)
+	}
+	_ = or.Close()
+	b, _ = os.ReadFile(filepath.Join(o.Dir, "CLAUDE.md"))
+	for _, want := range []string{"amux overseer", "payments", rootID, "amux queue list", "amux agent items --inbox",
+		"from_item=", "set-archived", "Never answer for the user", "admin console"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("overseer guide missing %q", want)
+		}
+	}
+	for _, never := range []string{"amux direct enroll", "amux auth login", "amux do delete", "amux do move", "verb=permission", "amux do add-agent"} {
+		if strings.Contains(string(b), never) {
+			t.Errorf("overseer guide advertises %q", never)
 		}
 	}
 

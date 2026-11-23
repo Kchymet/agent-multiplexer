@@ -273,6 +273,10 @@ const (
 	// stored): the one session that is neither a task nor a plain interactive
 	// agent. It doubles as the console's role marker (see Session.Role).
 	ModeConsole = "console"
+	// ModeOverseer marks the built-in overseer session (synthetic, never stored),
+	// the coordinator of coordinators. Like ModeConsole it doubles as the role
+	// marker (see Session.Role).
+	ModeOverseer = "overseer"
 )
 
 // modeLoopLegacy is the retired "loop" mode value. It predates the
@@ -309,6 +313,10 @@ const (
 // source of truth and a test pins the two in step).
 //
 //   - RoleConsole: the machine-wide amux console (Mode == ModeConsole; synthetic).
+//   - RoleOverseer: the machine-wide coordinator of coordinators (Mode ==
+//     ModeOverseer; synthetic). It supervises every workgroup coordinator, owns
+//     the global item inbox and curates the user question queue; it holds no
+//     admin powers (docs/direct-console.md).
 //   - RoleCoordinator: a workgroup root's own session — the coordinator of its
 //     agents, whether the workgroup is granted one repo or several. Its id is
 //     the workgroup id and its sandbox is a dedicated coordinator dir beside
@@ -322,6 +330,7 @@ const (
 const (
 	RoleAgent       = ""
 	RoleConsole     = "console"
+	RoleOverseer    = "overseer"
 	RoleCoordinator = "coordinator"
 	RoleRepo        = "repo"
 )
@@ -340,6 +349,8 @@ func (s Session) Role() string {
 	switch {
 	case s.Mode == ModeConsole:
 		return RoleConsole
+	case s.Mode == ModeOverseer:
+		return RoleOverseer
 	case !s.IsRoot():
 		return RoleAgent
 	case s.Scope == ScopeRepo:
@@ -353,5 +364,5 @@ func (s Session) Role() string {
 }
 
 // IsContainerSession reports whether s is one of the built-in default sessions
-// (console, coordinator, repo home) rather than an ordinary agent.
+// (console, overseer, coordinator, repo home) rather than an ordinary agent.
 func (s Session) IsContainerSession() bool { return s.Role() != RoleAgent }

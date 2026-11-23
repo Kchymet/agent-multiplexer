@@ -21,10 +21,17 @@ coordinator archived/deleted ──carry-over──▶ global inbox
   global inbox directly — so do the items of repo homes, agents outside a
   coordinated workgroup, and the owner's own.
 - The **global inbox** spans every workgroup. Its owner is one session,
-  resolved in exactly one place (`items.GlobalInbox()`); today that is the
-  console session (`console`), and it can be repointed there without touching
-  routing, authorization, carry-over or delivery. The owner — and the admin
-  console — see every item.
+  resolved in exactly one place (`items.GlobalInbox()`): the **overseer**
+  (`overseer`, [default-sessions.md](default-sessions.md)), the coordinator of
+  coordinators. Routing, authorization, carry-over and delivery all go through
+  that one resolution. The owner — and the admin console, as an operator view —
+  see every item. A delivery to a stopped overseer starts it.
+- `decision_needed` items in the global inbox also appear in the user's
+  **question queue** (`amux queue`, [direct-console.md](direct-console.md) §4).
+  The user answers one there (the answer is recorded on the item and delivered
+  to its source) or acknowledges it (`amux queue ack <item>`); only a
+  **host** acknowledgment lets the overseer create a workgroup from the item
+  (`history[].host`).
 
 ## Item
 
@@ -37,7 +44,7 @@ coordinator archived/deleted ──carry-over──▶ global inbox
 | `suggested_action` | what the source recommends doing (≤ 1000 chars) |
 | `state` | `open` · `acknowledged` (active) · `dismissed` · `done` (closed) |
 | `source`, `workgroup` | the raising session; its coordinator when raised |
-| `recipient` | whose inbox it is in now: a coordinator id or the global inbox owner (`items.GlobalInbox()`, today `console`) |
+| `recipient` | whose inbox it is in now: a coordinator id or the global inbox owner (`items.GlobalInbox()`, the overseer) |
 | `raised` | how many times the source raised it (de-duplicated raises) |
 | `created`, `updated`, `closed` | Unix milliseconds |
 | `history` | every raise, update, state change, escalation and carry-over: who, from → to, note |
@@ -65,7 +72,7 @@ amux agent escalate <id>... [--note "…"]          # coordinator → global inb
 
 The host may act as any session through the control socket:
 `amux do raise-item <session> -f kind=… -f title=…`,
-`amux do item-state console -f item=it-… -f state=done` (acting as today's global inbox owner),
+`amux do item-state overseer -f item=it-… -f state=done` (acting as the global inbox owner),
 `amux do escalate-item <coordinator> -f item=it-…`. A host `query items`
 without an id reads as the global inbox owner (every item).
 

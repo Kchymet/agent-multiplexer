@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"amux/internal/access"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/items"
 	"amux/internal/itemsvc"
@@ -78,7 +77,7 @@ func TestItemsOverSessionRPC(t *testing.T) {
 		t.Fatalf("coordinator inbox = %+v %s", res, res.Body)
 	}
 	res = call(root.ID, access.RouteAction, core.ActionEscalateItem, root.ID, map[string]string{core.ItemIDField: it.ID, core.ItemNoteField: "needs the user"})
-	if res.Status != sessionrpc.StatusOK || json.Unmarshal(res.Body, &result) != nil || json.Unmarshal(result.Item, &it) != nil || it.Recipient != console.ID {
+	if res.Status != sessionrpc.StatusOK || json.Unmarshal(res.Body, &result) != nil || json.Unmarshal(result.Item, &it) != nil || it.Recipient != items.GlobalInbox() {
 		t.Fatalf("escalation = %+v %s", res, res.Body)
 	}
 }
@@ -122,10 +121,10 @@ func TestItemWakeReachesCoordinator(t *testing.T) {
 	}
 }
 
-// Archiving a coordinator carries its active items to the console's inbox,
-// and the console is offered them; a console that is not live defers the
-// wake-up and the items stay unnotified for the next offer.
-func TestArchivedCoordinatorItemsReachConsoleInbox(t *testing.T) {
+// Archiving a coordinator carries its active items to the global inbox (the
+// overseer), and the overseer is offered them; a wake-up that cannot be
+// delivered is deferred and the items stay unnotified for the next offer.
+func TestArchivedCoordinatorItemsReachGlobalInbox(t *testing.T) {
 	d, _, root, member, _ := prWakeFixture(t)
 	ctx := context.Background()
 	it, _, err := d.items.Raise(ctx, member.ID, items.Raise{Kind: items.KindDecisionNeeded, Title: "Pick a name"})
@@ -140,26 +139,42 @@ func TestArchivedCoordinatorItemsReachConsoleInbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	inbox, err := d.items.List(ctx, console.ID, itemsQueryInbox())
+	inbox, err := d.items.List(ctx, items.GlobalInbox(), itemsQueryInbox())
 	if err != nil || len(inbox.Items) != 1 || inbox.Items[0].ID != it.ID {
-		t.Fatalf("console inbox = %+v, %v", inbox, err)
+		t.Fatalf("global inbox = %+v, %v", inbox, err)
 	}
-	if recipients, _ := d.items.UnnotifiedRecipients(); len(recipients) != 1 || recipients[0] != console.ID {
-		t.Fatalf("unnotified recipients = %v, want the console", recipients)
+	if recipients, _ := d.items.UnnotifiedRecipients(); len(recipients) != 1 || recipients[0] != items.GlobalInbox() {
+		t.Fatalf("unnotified recipients = %v, want the global inbox owner", recipients)
 	}
-	// The console runtime is not up in this fixture: deferred, never lost.
-	if got := d.deliverPRWake(ctx, console.ID, []prwatch.Wake{itemsWake(console.ID)}); len(got) != 1 || got[0] != prwatch.Deferred {
-		t.Fatalf("console wake = %v, want Deferred", got)
+	// Without a runtime engine the overseer cannot be started: deferred, never lost.
+	eng := d.engine
+	d.engine = nil
+	if got := d.deliverPRWake(ctx, items.GlobalInbox(), []prwatch.Wake{itemsWake(items.GlobalInbox())}); len(got) != 1 || got[0] != prwatch.Deferred {
+		t.Fatalf("global inbox wake = %v, want Deferred", got)
 	}
-	if pending, _ := d.items.Unnotified(console.ID, 0); len(pending) != 1 {
+	if pending, _ := d.items.Unnotified(items.GlobalInbox(), 0); len(pending) != 1 {
 		t.Fatalf("deferred wake marked items notified: %+v", pending)
 	}
-	// Once triaged, there is nothing left to announce.
-	if _, err := d.items.Transition(ctx, console.ID, it.ID, items.VerbAck, ""); err != nil {
+	// The overseer starts lazily: a wake-up for a stopped overseer is the
+	// prompt that starts it, and the items are then notified.
+	d.engine = eng
+	if got := d.deliverPRWake(ctx, items.GlobalInbox(), []prwatch.Wake{itemsWake(items.GlobalInbox())}); len(got) != 1 || got[0] != prwatch.Delivered {
+		t.Fatalf("global inbox wake to a stopped overseer = %v, want Delivered", got)
+	}
+	if pending, _ := d.items.Unnotified(items.GlobalInbox(), 0); len(pending) != 0 {
+		t.Fatalf("delivered wake left items unnotified: %+v", pending)
+	}
+	// Nothing new to announce: an items wake is dropped.
+	if _, err := d.items.Transition(ctx, items.GlobalInbox(), it.ID, items.VerbAck, ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := d.deliverPRWake(ctx, console.ID, []prwatch.Wake{itemsWake(console.ID)}); got[0] != prwatch.Dropped {
-		t.Fatalf("console wake after triage = %v, want Dropped", got)
+	if got := d.deliverPRWake(ctx, items.GlobalInbox(), []prwatch.Wake{itemsWake(items.GlobalInbox())}); got[0] != prwatch.Dropped {
+		t.Fatalf("global inbox wake after triage = %v, want Dropped", got)
+	}
+	// A coordinator update is delivered on its own, without items.
+	update := prwatch.Wake{Kind: prwatch.KindOverseer, Workgroup: items.GlobalInbox(), SessionID: root.ID, Text: "coordinator wg asked the user: which?"}
+	if got := d.deliverPRWake(ctx, items.GlobalInbox(), []prwatch.Wake{update}); got[0] != prwatch.Delivered {
+		t.Fatalf("coordinator update = %v, want Delivered", got)
 	}
 }
 
@@ -223,8 +238,8 @@ func TestHostItemActionsActAsTheNamedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var list items.List
-	if err := json.Unmarshal(rows.(json.RawMessage), &list); err != nil || len(list.Items) != 1 || list.Items[0].Recipient != console.ID {
-		t.Fatalf("host (console) view = %+v, %v", list, err)
+	if err := json.Unmarshal(rows.(json.RawMessage), &list); err != nil || len(list.Items) != 1 || list.Items[0].Recipient != items.GlobalInbox() {
+		t.Fatalf("host (global inbox) view = %+v, %v", list, err)
 	}
 }
 

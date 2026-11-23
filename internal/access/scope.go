@@ -33,6 +33,10 @@ type Rule struct {
 	// Console marks an operation the operator console holds as a delegated grant
 	// on any target. Every other restricted role is still held to Scope.
 	Console bool
+	// Overseer marks an operation the overseer may use, narrowed per verb by
+	// allowOverseer / allowOverseerHost (overseer.go). Every unmarked rule is
+	// denied to the overseer whatever its scope.
+	Overseer bool
 	// Allow further narrows a workgroup rule once the target is known to be
 	// in scope. self reports whether the target is the caller.
 	Allow func(req Request, self bool, target Resource) bool
@@ -43,26 +47,26 @@ type Rule struct {
 // anything absent is denied to every restricted principal.
 var rules = map[Route]map[string]Rule{
 	RouteAction: {
-		core.ActionStart:       {Scope: ScopeWorkgroup},
-		core.ActionSteer:       {Scope: ScopeWorkgroup, Allow: allowSteer},
+		core.ActionStart:       {Scope: ScopeWorkgroup, Overseer: true},
+		core.ActionSteer:       {Scope: ScopeWorkgroup, Overseer: true, Allow: allowSteer},
 		core.ActionRename:      {Scope: ScopeWorkgroup},
-		core.ActionSetArchived: {Scope: ScopeWorkgroup, Console: true, Allow: allowArchive},
+		core.ActionSetArchived: {Scope: ScopeWorkgroup, Console: true, Overseer: true, Allow: allowArchive},
 		core.ActionAddAgent:    {Scope: ScopeWorkgroup, Console: true, Allow: allowAddAgent},
 		// Items are acted on as the caller itself (ID = caller); which item it
 		// may move is decided per item (items.go). No Console flag: the console
 		// too acts only as itself, where it sees every item.
-		core.ActionRaiseItem:    {Scope: ScopeWorkgroup, Allow: allowSelfItem},
-		core.ActionItemState:    {Scope: ScopeWorkgroup, Allow: allowSelfItem},
+		core.ActionRaiseItem:    {Scope: ScopeWorkgroup, Overseer: true, Allow: allowSelfItem},
+		core.ActionItemState:    {Scope: ScopeWorkgroup, Overseer: true, Allow: allowSelfItem},
 		core.ActionEscalateItem: {Scope: ScopeWorkgroup, Allow: allowEscalateItem},
 
-		core.ActionRefresh:         {Scope: ScopeHost, Console: true},
+		core.ActionRefresh:         {Scope: ScopeHost, Console: true, Overseer: true},
 		core.ActionMove:            {Scope: ScopeHost, Console: true},
 		core.ActionDelete:          {Scope: ScopeHost, Console: true},
 		core.ActionKill:            {Scope: ScopeHost, Console: true},
 		core.ActionAddRepo:         {Scope: ScopeHost, Console: true},
 		core.ActionRmRepo:          {Scope: ScopeHost, Console: true},
 		core.ActionAgentSetRepos:   {Scope: ScopeHost, Console: true},
-		core.ActionNewWorkgroup:    {Scope: ScopeHost, Console: true}, // repo homes: own repo only
+		core.ActionNewWorkgroup:    {Scope: ScopeHost, Console: true, Overseer: true}, // repo homes: own repo only; overseer: from a user-acknowledged item
 		core.ActionCreateWorkspace: {Scope: ScopeHost, Console: true},
 
 		core.ActionArchive:             {Scope: ScopeHost}, // toggle can restore
@@ -73,6 +77,9 @@ var rules = map[Route]map[string]Rule{
 		core.ActionCoordinatorSetRepos: {Scope: ScopeHost},
 		core.ActionSubscribe:           {Scope: ScopeHost},
 		core.ActionQuery:               {Scope: ScopeHost}, // restricted reads use RouteQuery
+		// The user answers and dismisses queue entries; no session ever does.
+		core.ActionQueueAnswer:  {Scope: ScopeHost},
+		core.ActionQueueDismiss: {Scope: ScopeHost},
 	},
 	RoutePane: {
 		// Restricted principals use one-shot mailbox RPC only.
@@ -82,21 +89,21 @@ var rules = map[Route]map[string]Rule{
 		core.ActionPaneClose:  {Scope: ScopeHost},
 	},
 	RouteQuery: {
-		core.QueryVersion:       {Scope: ScopeSession},
-		core.QueryCodexControl:  {Scope: ScopeSession},
-		core.QueryAgentSessions: {Scope: ScopeSession},
+		core.QueryVersion:       {Scope: ScopeSession, Overseer: true},
+		core.QueryCodexControl:  {Scope: ScopeSession, Overseer: true},
+		core.QueryAgentSessions: {Scope: ScopeSession, Overseer: true},
 
-		core.QuerySessions: {Scope: ScopeFiltered},
-		core.QuerySnapshot: {Scope: ScopeFiltered},
-		core.QueryRepos:    {Scope: ScopeFiltered},
+		core.QuerySessions: {Scope: ScopeFiltered, Overseer: true},
+		core.QuerySnapshot: {Scope: ScopeFiltered, Overseer: true},
+		core.QueryRepos:    {Scope: ScopeFiltered, Overseer: true},
 
-		core.QueryRuntimeEvents: {Scope: ScopeWorkgroup},
+		core.QueryRuntimeEvents: {Scope: ScopeWorkgroup, Overseer: true},
 		// A long-poll on one session's rail view: the same state and PRs the
 		// caller's scoped status already shows it, for what it may read.
-		core.QueryWait: {Scope: ScopeWorkgroup},
+		core.QueryWait: {Scope: ScopeWorkgroup, Overseer: true},
 		// The caller's own item inbox and outbox (ID = caller), projected per
 		// item by ItemVisible.
-		core.QueryItems: {Scope: ScopeWorkgroup, Allow: allowSelfItem},
+		core.QueryItems: {Scope: ScopeWorkgroup, Overseer: true, Allow: allowSelfItem},
 
 		// Raw runtime paths/records and untracked-conversation fallback are never
 		// exposed to restricted principals.
@@ -108,6 +115,8 @@ var rules = map[Route]map[string]Rule{
 		core.QueryCodexAuth:       {Scope: ScopeHost},
 		// Host-wide process data (other sessions' commands and usage).
 		core.QueryResources: {Scope: ScopeHost},
+		// The user question queue, read-only: the admin console and the overseer.
+		core.QueryQueue: {Scope: ScopeHost, Console: true, Overseer: true},
 	},
 }
 

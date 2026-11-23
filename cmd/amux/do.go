@@ -85,6 +85,8 @@ var actionGlosses = map[string]string{
 	core.ActionRaiseItem:           "raise an item as session <id>  -f kind=follow_up|outstanding|decision_needed|risk|fyi -f title=… [-f detail=… -f prs=r#1,r#2 -f suggest=…] (agents: amux agent raise)",
 	core.ActionItemState:           "move an item as session <id>   -f item=it-… -f state=ack|dismiss|done|reopen [-f note=…] (the global inbox owner today is the console)",
 	core.ActionEscalateItem:        "escalate an item to the global inbox as coordinator <id> -f item=it-… [-f note=…]",
+	core.ActionQueueAnswer:         "answer a question-queue entry (host only)  -f entry=… [-f text=… | -f choice=… | -f decision=allow|deny]; amux queue answer",
+	core.ActionQueueDismiss:        "hide a question-queue entry (host only)    -f entry=…; amux queue dismiss",
 }
 
 // actionList renders the vocabulary an unknown-action error teaches: every verb

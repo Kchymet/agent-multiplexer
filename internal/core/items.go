@@ -9,14 +9,14 @@ const (
 	// ActionRaiseItem raises an item from Action.ID. Fields: ItemKindField,
 	// ItemTitleField (required), ItemDetailField, ItemPRsField,
 	// ItemLinksField, ItemSuggestField. The daemon routes it (a member to its
-	// coordinator, anyone else to the console) and de-duplicates it against
+	// coordinator, anyone else to the global inbox — the overseer) and de-duplicates it against
 	// the source's active items. Result.NewID is the item id and Result.Item
 	// the stored item.
 	ActionRaiseItem = "raise-item"
 	// ActionItemState moves an item. Fields: ItemIDField, ItemStateField
 	// (ack | dismiss | done | reopen, or the state name), ItemNoteField.
 	ActionItemState = "item-state"
-	// ActionEscalateItem hands an item a coordinator holds to the console.
+	// ActionEscalateItem hands an item a coordinator holds to the global inbox (the overseer).
 	// Fields: ItemIDField, ItemNoteField.
 	ActionEscalateItem = "escalate-item"
 )

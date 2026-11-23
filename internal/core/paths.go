@@ -209,6 +209,10 @@ func DBPath() string { return filepath.Join(DataDir(), "amux.db") }
 // code lives here — just the console's CLAUDE.md).
 func ConsoleDir() string { return filepath.Join(DataDir(), "console") }
 
+// OverseerDir is the neutral root for the overseer agent, the coordinator of
+// coordinators (no repo code lives here — just its guide and notes).
+func OverseerDir() string { return filepath.Join(DataDir(), "overseer") }
+
 // RegistryPath is the JSON file tracking repos and workspaces.
 func RegistryPath() string { return filepath.Join(DataDir(), "registry.json") }
 

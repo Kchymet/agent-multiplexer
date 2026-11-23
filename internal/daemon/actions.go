@@ -34,6 +34,11 @@ func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
 		// Items touch only the item store, under the acting session's lock.
 		return d.handleItemAction(ctx, a)
 	}
+	if isQueueVerb(a.Action) && !effectAdmissionHeld(ctx) {
+		// A queue answer re-derives its entry, then runs an existing guarded
+		// verb (a steer, an item state change) under that verb's own locks.
+		return d.handleQueueAction(ctx, a)
+	}
 	if (a.Action == "" || a.Action == core.ActionRefresh) && !effectAdmissionHeld(ctx) {
 		// A refresh only wakes the poller; it reads and changes nothing.
 		if err := revalidateDeferred(ctx); err != nil {
@@ -400,7 +405,7 @@ func (d *Daemon) restoreSessionAccess(ctx context.Context, action core.Action) (
 	if !found {
 		return "", fmt.Errorf("session %s not found", action.ID)
 	}
-	if session.Mode == store.ModeConsole {
+	if session.Mode == store.ModeConsole || session.Mode == store.ModeOverseer {
 		return "", d.restoreConsoleAccess(ctx, session)
 	}
 	if !session.IsRoot() {

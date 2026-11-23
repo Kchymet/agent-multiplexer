@@ -10,6 +10,7 @@ import (
 	"amux/internal/cfghome"
 	"amux/internal/console"
 	"amux/internal/git"
+	"amux/internal/overseer"
 	"amux/internal/store"
 )
 
@@ -19,7 +20,8 @@ import (
 // resolved and materialized, so the daemon's pane, steer, and transcript
 // lookups, the rail, and the CLI all see the same inventory:
 //
-//   - The console is synthetic (console.Session; never a store row).
+//   - The console and the overseer are synthetic (console.Session,
+//     overseer.Session; never store rows).
 //   - A workgroup root IS its coordinator. New roots have a dedicated own
 //     directory beside (never above) member sandboxes.
 //   - A repo home is a repo-scoped root whose id is the repo name
@@ -28,15 +30,34 @@ import (
 //
 // Writable store opening promotes legacy hidden repo wrappers before resolution.
 
+// SyntheticSession returns a built-in synthetic session (the console or the
+// overseer) by id: pure projections, never store rows, never materialized by a
+// lookup.
+func SyntheticSession(id string) (store.Session, bool) {
+	switch id {
+	case console.ID:
+		return console.Session(), true
+	case overseer.ID:
+		return overseer.Session(), true
+	}
+	return store.Session{}, false
+}
+
+// IsSyntheticID reports whether id names a built-in synthetic session.
+func IsSyntheticID(id string) bool {
+	_, ok := SyntheticSession(id)
+	return ok
+}
+
 // ResolveSession resolves an id the way every daemon-side lookup must: the
-// console or an existing store row (agent, coordinator root, or repo home).
+// console, the overseer, or an existing store row (agent, coordinator root, or repo home).
 // Resolution is read-only for stored sessions. Legacy roots are never silently
 // relocated or provisioned while answering a lookup; they fail with explicit
 // host-authorized recovery guidance and all existing files remain untouched.
 // ok=false means no such session or repo.
 func ResolveSession(id string) (store.Session, bool, error) {
-	if id == console.ID {
-		return console.Session(), true, nil
+	if s, ok := SyntheticSession(id); ok {
+		return s, true, nil
 	}
 	db, err := store.Open()
 	if err != nil {
@@ -189,12 +210,12 @@ func describeRole(s store.Session) string {
 	}
 }
 
-// ScopeOf is the AMUX_SCOPE a session runs under: "global" for the console,
+// ScopeOf is the AMUX_SCOPE a session runs under: "global" for the console and the overseer,
 // its workgroup's scope (work | repo) for a member agent, "work" for a
 // coordinator, "repo" for a repo home.
 func ScopeOf(s store.Session) string {
 	switch s.Role() {
-	case store.RoleConsole:
+	case store.RoleConsole, store.RoleOverseer:
 		return "global"
 	case store.RoleCoordinator:
 		return store.ScopeWork
