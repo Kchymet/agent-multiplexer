@@ -113,8 +113,11 @@ direct HTTPS access for Harness web and Android clients.
 - **Workgroup** — a coordinator and any number of member agents, shown under
   **WORKGROUPS**. A workgroup can be limited to one repo or granted several.
   Create with `w`, `amux workgroup new`, or `amux workgroup repo <repo>`.
-  Repository selection sets the coordinator's explicit grant ceiling and seeds
-  an idle first member; the task belongs to the coordinator. Without a repository
+  The creation prompt is the coordinator's task: the TUI form (`w`, or `a` on a
+  repo) sends it straight to the coordinator, which decides which members to
+  start, and any repos picked there only limit the workgroup. (The CLI's
+  `workgroup repo`/`create` and the `new-workgroup` verb also seed an idle
+  first member on the selected repos.) Without a repository
   selection — including an empty `repos` field, as remote clients send — the
   coordinator may assign every repo tracked on the host, live (repos tracked
   later included). The host narrows or seals that with
@@ -341,8 +344,8 @@ Global navigation uses configurable chords (no prefix):
 | `Alt+PgUp` / `Alt+PgDown` | scroll the active pane's history up / down one page |
 | `Alt+End` | return the active pane to live output |
 | `Ctrl+U` / `Ctrl+D` | scroll focused pane history toward older / newer text, or page the focused rail, by half its height |
-| `a` | add an agent — on a repo, a normal workgroup limited to that repo; on a workgroup, another member (settings form) |
-| `w` | new workgroup (coordinator settings; optional repos limit it and seed a first agent) |
+| `a` | add an agent — on a repo, a new workgroup limited to that repo (prompt goes to its coordinator); on a workgroup, another member (settings form) |
+| `w` | new workgroup: type a prompt for its coordinator, which starts the agents it needs (optional repo limit, coordinator harness/model) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
 | `m` | move the selected agent into a new workgroup of its own (confirm); `amux workgroup move` targets an existing one |
 | `r` | rename the selected agent/workgroup (display name) |
