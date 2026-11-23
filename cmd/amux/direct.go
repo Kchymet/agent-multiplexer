@@ -65,8 +65,9 @@ func directUsage() {
 	fmt.Fprint(w, `amux direct — direct client access (web, Android) over your LAN or VPN
 
 The direct server is an opt-in HTTPS listener on a private address. Clients
-enroll with a one-time code you paste, then reach this host's sessions with
-destination-issued credentials. No cloud service is in the path.
+enroll with a one-time code you paste or scan (enroll --qr), then reach this
+host's sessions with destination-issued credentials. No cloud service is in
+the path.
 
 usage: amux direct <command>
 
@@ -81,7 +82,9 @@ usage: amux direct <command>
   status [--json]             setting, managed listener, server, provider offer
   logs [-n lines]             the managed listener's log
   serve                       run the direct server in the foreground (manual)
-  enroll                      print a one-time enrollment bundle to paste into a client
+  enroll [flags]              mint a one-time enrollment: a bundle to paste, or
+                              with --qr a QR code to scan (see enroll flags;
+                              amux direct enroll --help)
   clients list                list enrolled clients
   clients revoke <client-id>  revoke a client now (closes its streams first)
   reset-identity --yes        replace the server identity; revokes every client
@@ -111,23 +114,7 @@ derives, and an empty value returns that setting to derivation):
   Plain amux direct serve runs the saved tailnet configuration in the
   foreground only while the managed listener is disabled.
 
-enroll flags (the running server publishes its endpoints into the bundle):
-  --label <text>          name for the client, shown in clients list
-  --permissions <list>    comma list, read required (required):
-                            read     inventory, history, live stream
-                            steer    prompt, interject, stop
-                            respond  goal control
-                            approve  answer permission requests (allow/deny)
-                            manage   start, rename, archive, unarchive
-                            create   add-agent; new workgroups (--all-sessions only)
-                            accounts read machine account status (--all-sessions only)
-                          e.g. read,steer or read,steer,respond,manage
-                          Nothing implies anything else; there is no "all".
-  --all-sessions          grant every session on this host, or
-  --workgroup <root-id>   grant one workgroup and its members (repeatable)
-  --ttl <dur>             code lifetime (default 10m, maximum 1h)
-  --json                  print the full response as JSON
-
+`+directEnrollHelp+`
 cloud enable flags (the ceiling is required; all-sessions covers ordinary
 sessions, never the amux console):
   --permissions <list>    ceiling: read plus any of steer, respond, approve,
@@ -336,43 +323,6 @@ func adminRun(req direct.AdminRequest) (direct.AdminResponse, error) {
 		return resp, errors.New("the direct store is owned by a running server whose admin socket is unreachable")
 	}
 	return resp, err
-}
-
-func cmdDirectEnroll(args []string) error {
-	fs := flag.NewFlagSet("amux direct enroll", flag.ContinueOnError)
-	var groups multiFlag
-	label := fs.String("label", "", "")
-	perms := fs.String("permissions", "", "")
-	all := fs.Bool("all-sessions", false, "")
-	ttl := fs.Duration("ttl", 0, "")
-	asJSON := fs.Bool("json", false, "")
-	fs.Var(&groups, "workgroup", "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		directUsage()
-		return err
-	}
-	if *label == "" || *perms == "" {
-		return errors.New("--label and --permissions are required")
-	}
-	resource, err := directResourceFlags(*all, groups)
-	if err != nil {
-		return err
-	}
-	resp, err := adminRun(direct.AdminRequest{
-		Op: direct.OpEnroll, Label: *label, Permissions: strings.Split(*perms, ","), Resource: resource,
-		TTLSeconds: int64(*ttl / time.Second),
-	})
-	if err != nil {
-		return err
-	}
-	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(resp)
-	}
-	fmt.Fprintf(os.Stderr, "Paste this into the client within %s (single use; server_id %s):\n\n",
-		time.Until(time.Unix(resp.ExpiresAt, 0)).Round(time.Second), resp.ServerID)
-	fmt.Println(resp.Bundle)
-	return nil
 }
 
 func cmdDirectClients(args []string) error {
