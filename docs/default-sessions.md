@@ -222,15 +222,15 @@ Claude coordinator; there is no opt-in.
   `amux agent goal ask "<question>"` (stop and wait for the user — also
   `AskUserQuestion` for concrete choices), `amux agent goal wait "<on what>"`
   and `amux agent goal blocked "<reason>"`. `wait` is how a coordinator idles
-  on a member or CI without busy-polling: it arms a background wake-up
-  (`Monitor` or a `run_in_background` until-loop) and runs `goal wait`, which
-  lets exactly the next Stop through; the goal is active again after it, so the
-  turn the wake-up starts continues under goal pressure. The wait spends no
-  continuation budget and refunds none. amux itself is one such wake-up
-  source: it prompts the coordinator when a member's PR changes state (see
-  [PR watch](pr-watch.md)), but the coordinator still arms its own. The
-  wake-up must cover every open member PR, and the `wait` note names what is
-  awaited (member, repo#PR) and the wake-up armed. A goal is complete only when
+  on a member or CI without busy-polling: it runs `goal wait`, which lets
+  exactly the next Stop through, and ends its turn; the goal is active again
+  after it, so the turn the next wake-up starts continues under goal pressure.
+  The wait spends no continuation budget and refunds none. amux is the wake-up
+  source: it prompts the coordinator the moment a member finishes its turn,
+  needs the user, or stops, and when a member's PR changes state (see
+  [PR watch](pr-watch.md)), so the coordinator arms no polling loop of its
+  own; it arms a wake-up only for something amux does not watch. The `wait`
+  note names what is awaited (member, repo#PR). A goal is complete only when
   every member PR is merged or closed, or explicitly handed to the user with
   what needs a human. Its guide tells it to ask for genuinely user-owned information
   rather than guess, and to pick a sensible default for anything optional.

@@ -245,6 +245,9 @@ type Daemon struct {
 	// prs watches workgroup members' GitHub PRs and wakes their coordinators
 	// (internal/prwatch, prwatch.go). Built in New, started by Run.
 	prs *prwatch.Watcher
+	// memberWatch remembers workgroup member states between rail polls so a
+	// member's transition wakes its coordinator (memberwake.go).
+	memberWatch memberWatch
 	// prWakeAdmission runs after a watcher delivery holds its final membership,
 	// repo, and coordinator admission. Production leaves it nil; tests use it to
 	// prove mutations cannot cross the authority recheck and prompt boundary.
@@ -858,6 +861,7 @@ func (d *Daemon) pollOnce(ctx context.Context) {
 	d.sessions = all
 	d.mu.Unlock()
 	d.broadcast()
+	d.observeWorkgroups(all)
 
 	// Snapshot the live engine set each poll so a crash leaves a recent record;
 	// then release restore, which waited for sessions/specs to resolve.

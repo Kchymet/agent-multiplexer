@@ -278,8 +278,17 @@ func (r *sessionRuntime) dispatchSessionReport(ctx context.Context, principal ac
 func (r *sessionRuntime) applySessionReport(session store.Session, generation string, req access.Request) error {
 	switch req.Verb {
 	case sessionreport.Activity:
-		return core.WriteSessionHookState(session.ID, session.ClaudeID,
-			req.Fields[sessionreport.FieldState], session.Dir)
+		if err := core.WriteSessionHookState(session.ID, session.ClaudeID,
+			req.Fields[sessionreport.FieldState], session.Dir); err != nil {
+			return err
+		}
+		// Publish the new state now rather than at the next poll tick: the
+		// rail, status subscribers and a coordinator waiting on this member
+		// (memberwake.go) all hear about it in real time.
+		if r.d != nil {
+			r.d.triggerPoll()
+		}
+		return nil
 	case sessionreport.Limits:
 		return accounts.ObserveClaude(session.ID, generation, []byte(req.Fields[sessionreport.FieldLimits]))
 	case sessionreport.Model:

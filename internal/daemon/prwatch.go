@@ -62,7 +62,7 @@ func prPollInterval() (time.Duration, bool) {
 }
 
 func (d *Daemon) newPRWatcher() *prwatch.Watcher {
-	interval, _ := prPollInterval()
+	interval, enabled := prPollInterval()
 	return prwatch.New(prwatch.Config{
 		Run:      prwatch.ExecRunner,
 		Members:  prWatchMembers,
@@ -71,17 +71,18 @@ func (d *Daemon) newPRWatcher() *prwatch.Watcher {
 		Emit:     d.emitPRState,
 		Deliver:  d.deliverPRWake,
 		Interval: interval,
+		NoPoll:   !enabled,
 	})
 }
 
-// prWatchLoop runs the PR watcher until ctx ends (unless disabled).
+// prWatchLoop runs the PR watcher until ctx ends. With PR polling disabled it
+// still runs, without polling GitHub, to deliver member wake-ups.
 func (d *Daemon) prWatchLoop(ctx context.Context) {
 	if d.prs == nil {
 		return
 	}
 	if _, ok := prPollInterval(); !ok {
-		log.Printf("prwatch: disabled by %s", prPollIntervalEnv)
-		return
+		log.Printf("prwatch: PR polling disabled by %s; member wake-ups stay on", prPollIntervalEnv)
 	}
 	d.prs.Run(ctx)
 }
@@ -234,7 +235,7 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 		d.prWakeAdmission()
 	}
 
-	sess, eligible, dropped, err := resolvePRWakes(workgroup, wakes)
+	sess, eligible, dropped, err := resolvePRWakes(workgroup, wakes, d.sessionStateNow)
 	if err != nil {
 		log.Printf("prwatch: revalidate wake-up for %s: %v", workgroup, err)
 		return results
@@ -251,11 +252,27 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 		}
 		return results
 	}
+	// A member's activity change is not worth starting a turn for a goal
+	// coordinator with no goal to continue (memberWakesWanted). A PR update
+	// keeps its own rule.
+	memberWakes := memberWakesWanted(d.coordinatorGoalStatus(sess))
+	kept := eligible[:0]
+	for _, i := range eligible {
+		if wakes[i].Kind == prwatch.KindMember && !memberWakes {
+			results[i] = prwatch.Dropped
+			continue
+		}
+		kept = append(kept, i)
+	}
+	eligible = kept
+	if len(eligible) == 0 {
+		return results
+	}
 	authorized := make([]prwatch.Wake, 0, len(eligible))
 	for _, i := range eligible {
 		authorized = append(authorized, wakes[i])
 	}
-	text := prWakeText(agent.HookGoals(sess), prwatch.WakeLines(authorized))
+	text := prWakeText(agent.HookGoals(sess), prwatch.WakeLines(authorized), hasMemberWake(authorized))
 	outcome, err := d.beginPRWake(ctx, sess, text)
 	if err != nil {
 		if outcome == prwatch.Indeterminate {
@@ -275,15 +292,38 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 	for _, i := range eligible {
 		results[i] = prwatch.Delivered
 	}
-	log.Printf("prwatch: woke coordinator %s (%d PR update(s))", workgroup, len(eligible))
+	log.Printf("prwatch: woke coordinator %s (%d update(s))", workgroup, len(eligible))
 	return results
+}
+
+// memberWakesWanted reports whether a coordinator with this goal status takes
+// member activity wake-ups: a goal being worked (active) or waiting on a
+// wake-up, or a coordinator outside goal mode (""), which takes PR wake-ups on
+// the same terms. A goal coordinator with no goal ("none") has nothing to
+// continue and is not started on a turn for a member.
+func memberWakesWanted(goal string) bool {
+	return goal == "" || goal == claudegoal.StatusActive || goal == claudegoal.StatusWaiting
+}
+
+func hasMemberWake(wakes []prwatch.Wake) bool {
+	for _, w := range wakes {
+		if w.Kind == prwatch.KindMember {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePRWakes re-reads every authority-bearing identity from the store.
 // Archived members remain eligible while their current RootID and repository
 // binding remain in scope; missing, moved, deleted, rebranched, ungranted, or
 // rebound entries are definitive drops and are never rerouted.
-func resolvePRWakes(workgroup string, wakes []prwatch.Wake) (root store.Session, eligible, dropped []int, err error) {
+//
+// A member wake (prwatch.KindMember) carries no repository: it is eligible
+// while the member is still an active member of this workgroup and is still in
+// the state it reports (stateNow) — a member that moved on since (steered
+// again, restarted) is a definitive drop, not stale news for the coordinator.
+func resolvePRWakes(workgroup string, wakes []prwatch.Wake, stateNow func(id string) string) (root store.Session, eligible, dropped []int, err error) {
 	db, err := store.OpenReadOnly()
 	if err != nil {
 		return store.Session{}, nil, nil, err
@@ -308,6 +348,22 @@ func resolvePRWakes(workgroup string, wakes []prwatch.Wake) (root store.Session,
 		granted[repo] = true
 	}
 	for i, wake := range wakes {
+		if wake.Kind == prwatch.KindMember {
+			if wake.Workgroup != workgroup || wake.SessionID == "" || stateNow == nil || stateNow(wake.SessionID) != wake.State {
+				dropped = append(dropped, i)
+				continue
+			}
+			member, found, err := db.GetSession(wake.SessionID)
+			if err != nil {
+				return store.Session{}, nil, nil, err
+			}
+			if !found || member.IsRoot() || member.Archived || member.RootID != workgroup {
+				dropped = append(dropped, i)
+				continue
+			}
+			eligible = append(eligible, i)
+			continue
+		}
 		if wake.Workgroup != workgroup || wake.SessionID == "" || wake.Repo == "" ||
 			wake.Branch == "" || !prwatch.Owns(wake.Branch, wake.PRBranch) {
 			dropped = append(dropped, i)
@@ -399,20 +455,25 @@ func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter s
 	return prwatch.Delivered, nil
 }
 
-// prWakeText renders the wake-up prompt.
-func prWakeText(hookGoal bool, lines []string) string {
-	head := "[amux] PR update"
+// prWakeText renders the wake-up prompt. A batch with a member activity
+// change is a workgroup update; one of PR transitions only keeps the PR
+// watcher's wording.
+func prWakeText(hookGoal bool, lines []string, members bool) string {
+	head, what, check := "PR update", "amux PR watcher wake-up", "these PRs"
+	if members {
+		head, what, check = "Workgroup update", "amux wake-up", "these members and PRs"
+	}
+	prefix := "[amux]"
 	if hookGoal {
-		head = prWakeMarker + " PR update"
+		prefix = prWakeMarker
 	}
 	var b strings.Builder
-	b.WriteString(head)
-	b.WriteString(" (amux PR watcher wake-up, not a new task):")
+	b.WriteString(prefix + " " + head + " (" + what + ", not a new task):")
 	for _, l := range lines {
 		b.WriteString("\n- ")
 		b.WriteString(l)
 	}
-	b.WriteString("\nCheck these PRs and act on them as your task requires.")
+	b.WriteString("\nCheck " + check + " and act on them as your task requires.")
 	return b.String()
 }
 

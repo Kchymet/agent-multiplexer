@@ -161,7 +161,7 @@ func TestWaitLetsOneStopThrough(t *testing.T) {
 	}
 	// The continuation prompt teaches the idiomatic wait, not busy-polling.
 	// ...and that a done goal means member PRs marked ready, never left draft.
-	for _, want := range []string{"amux agent goal wait", "run_in_background", "Monitor", "never busy-poll", "gh pr ready", "\"do not merge\" never means draft"} {
+	for _, want := range []string{"amux agent goal wait", "amux wakes you", "do not arm a Monitor or run_in_background loop", "never busy-poll", "gh pr ready", "\"do not merge\" never means draft"} {
 		if !strings.Contains(ContinuationPrompt(active), want) {
 			t.Errorf("continuation prompt missing %q", want)
 		}
@@ -254,8 +254,9 @@ func TestContinuationTracksMemberPRsToMergedOrClosed(t *testing.T) {
 		"Never archive a member that still owns an open PR.",
 		"every member PR is merged or closed, or green, marked ready for review",
 		"explicitly handed to the user with what needs a human",
-		"covers every open member PR",
-		"naming the member/PR awaited and the wake-up armed",
+		"naming the member/PR awaited",
+		"when a member finishes its turn",
+		"when a member PR's CI, mergeability, review or state changes",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("continuation prompt missing %q", want)
