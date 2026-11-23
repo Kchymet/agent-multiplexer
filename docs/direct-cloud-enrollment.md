@@ -139,6 +139,11 @@ amux direct cloud disable
   (`--all-sessions`), never the amux console; `--workgroup` narrows it, and
   `--workgroup console` is refused. A relayed request that names no resource
   asks for the whole ceiling. The permission ceiling is always explicit.
+  The question queue and the overseer add no permission name and change no
+  ceiling: a cloud-enrolled grant reaches them exactly as its permissions
+  allow (steering the overseer needs `--all-sessions` with `steer,manage,create`
+  in the ceiling; see [direct-access.md](direct-access.md#question-queue-and-overseer)).
+  `--workgroup overseer` is refused like `--workgroup console`.
 - **Default permissions.** A relayed request that names no permissions gets
   `read`, plus `steer` when the ceiling includes `steer`, so "Allow steer"
   is on by default exactly when it is allowed. Nothing else is implied.

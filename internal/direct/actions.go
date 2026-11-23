@@ -330,7 +330,7 @@ func archivedAncestor(row core.Session, byID map[string]core.Session) bool {
 // lifecycleRow reports a row amux manages as a workgroup session (a coordinator
 // root or a member): not the console, not a repo home, not a detached session.
 func lifecycleRow(row core.Session) bool {
-	if isConsole(row) || row.Role == hp.RoleRepo || row.Source != "workspace" {
+	if isConsole(row) || isOverseer(row) || row.Role == hp.RoleRepo || row.Source != "workspace" {
 		return false
 	}
 	return row.Section == hp.SectionWorkgroups || row.Section == hp.SectionArchived
@@ -384,6 +384,9 @@ func admissible(row core.Session, byID map[string]core.Session, verb string) err
 // rowCaps is the grant's per-row control surface for a fresh inventory row.
 func rowCaps(g Grant, row core.Session, byID map[string]core.Session) SessionCaps {
 	can := func(verb string) bool {
+		if isOverseer(row) && !overseerVerbAllowed(g, verb) {
+			return false
+		}
 		return g.Can(VerbPermissions[verb]) && admissible(row, byID, verb) == nil
 	}
 	return SessionCaps{

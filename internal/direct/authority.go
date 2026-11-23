@@ -159,6 +159,7 @@ type Authority struct {
 	closed   bool
 	degraded error                 // set after an ambiguous commit; blocks issuance until restart
 	onRevoke func(clientID string) // test hook, called after the barrier
+	audit    *auditLog             // direct-audit.jsonl (audit.go)
 }
 
 // errDegraded refuses issuance after a commit whose durability is unknown.
@@ -266,6 +267,7 @@ func loadAuthority(st *store, life Lifetimes, now func() time.Time) (*Authority,
 	}
 	a := &Authority{
 		st: st, state: state, identity: id, life: life, now: now, boot: hex.EncodeToString(boot),
+		audit:  newAuditLog(st.root),
 		access: map[string]accessRec{}, tomb: map[string]int64{}, running: map[string]bool{}, leases: map[string]map[*Lease]struct{}{},
 	}
 	a.cloudSince = a.now().Unix()

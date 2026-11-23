@@ -33,6 +33,11 @@ The server serves exactly:
 | `POST /direct/v1/workgroups` | create, `all_sessions` only | `new-workgroup` or `new-workgroup-empty` |
 | `GET /direct/v1/capabilities` | read | The grant's verbs and the machine's creation catalog |
 | `GET /direct/v1/accounts` | accounts, `all_sessions` only | Machine account status, read-only ([below](#machine-accounts)) |
+| `GET /direct/v1/queue` | read | The question queue and the global inbox, in scope ([below](#question-queue-and-overseer)) |
+| `GET /direct/v1/queue/watch` (WebSocket) | read | The same, plus the summary, pushed on change |
+| `POST /direct/v1/queue/{entry_id}/answer` | steer (approve for `permission`) | Answer one entry |
+| `GET /direct/v1/summary` | read | Workgroup summary: needs you / running / waiting for review / done |
+| `POST /direct/v1/items/{item_id}/state` | steer (`ack`: steer + create, `all_sessions`) | Triage one global-inbox item |
 
 Everything else fails closed:
 
@@ -44,10 +49,13 @@ Everything else fails closed:
 Inventory rows are an allowlisted projection. Working directories, process ids,
 account bindings and local attach affordances are never sent.
 
-**The console is never exposed.** The machine-wide amux console carries operator
+**The console is never exposed.** The machine-wide admin console carries operator
 and account powers. No grant can reach it, `all_sessions` included:
 `all_sessions` means every ordinary session, and `--workgroup console` is
-refused. An explicit console grant would be a separately reviewed feature.
+refused. Nothing the console raises appears in the queue either. This is
+permanent (`TestConsoleNeverExposedAnywhere`). Workgroup supervision lives in
+the **overseer**, which has no admin power and is reachable as described in
+[Question queue and overseer](#question-queue-and-overseer).
 
 ## Operator guide
 
@@ -1074,6 +1082,152 @@ and direct has no account-use switch: the explicit steer, manage and create
 permissions are the consent to use the machine's accounts.
 
 The full cloud-relay comparison is in [direct-cloud-parity.md](direct-cloud-parity.md).
+
+## Question queue and overseer
+
+The user question queue and the overseer (the coordinator of coordinators) are
+described in [direct-console.md](direct-console.md). Over direct access they are
+additive and need no new permission name: everything is derived from the
+permissions that already exist. The canonical shapes are pinned by
+[`direct/fixtures/queue-v1`](direct/fixtures/queue-v1); text fields come from
+agents and repositories and are rendered as plain text.
+
+### Scope
+
+| Grant | Sees |
+| --- | --- |
+| `all_sessions` | every entry and global-inbox item, except what the admin console raised |
+| `workgroups` | entries and items whose source session is in its workgroups (or, for a source that is gone, whose recorded workgroup is) |
+
+### Reads
+
+**`GET /direct/v1/queue`** (read, no query parameters) returns
+`{server_id, entries[], items[]}`. This is one consistent read of the open
+entries and the active global-inbox items.
+
+- **Entries** (`QueueEntry`):
+  - Common fields: `id`, `kind` (`question` · `permission` · `goal_input` ·
+    `decision_needed`), `state` (always `open`), `session_id`, `session_title`,
+    `workgroup`, `title`, `body`, `created_at` (Unix ms, when known).
+  - `question`: `questions[]`, each `{header, question, options[{label, description}], multi_select}`.
+  - `permission`: `tool`, `action`, `request_id`, `runtime_generation` (a
+    string; echo it back unchanged).
+  - `decision_needed`: `item_id`, `suggested_action`, `prs`, `links`.
+- **Ids are deterministic.** The prefix carries the kind (`q-`, `p-`, `g-`,
+  `d-`). An answered or stale question leaves the list rather than changing
+  state.
+- **Items** (`InboxItem`) have these fields: `id`, `kind`, `title`, `detail`,
+  `prs`, `links`, `suggested_action`, `state` (`open` · `acknowledged`),
+  `source`, `workgroup`, `raised`, `created`, `updated`.
+  - `prs` are `owner/repo#n` or `repo#n` strings, and `links` are URL
+    strings.
+  - Timestamps are Unix milliseconds.
+  - A `decision_needed` item also appears as a `decision_needed` entry, whose
+    `item_id` names it. An inbox view may leave such items out.
+
+**`GET /direct/v1/summary`** (read) returns
+`{server_id, buckets, workgroups}`.
+- `buckets` holds the counts `{needs_you, running, waiting_review, done}`.
+- Each `workgroups[]` entry is `{id, title, bucket, state, goal, needs_you[], open_prs[], members, queue}`.
+- Only the grant's active workgroups count.
+
+**`GET /direct/v1/queue/watch`** is a WebSocket with the sessions-watch
+handshake:
+1. The client sends the auth frame first.
+2. The server answers `welcome`.
+3. The server sends `{type:"snapshot", entries, items, summary}` on connect
+   and whenever any part changes.
+
+It closes with the same codes as the sessions watch.
+
+### Answering
+
+**`POST /direct/v1/queue/{entry_id}/answer`** takes
+`{idem_key, answer?, choice?, decision?, runtime_generation?}`, with an exact
+allowlist per kind:
+
+| Kind | Permission | Fields |
+| --- | --- | --- |
+| `question` | steer | `answer` (free text) **or** `choice` (option labels). `choice` applies only to an entry with exactly one question, and takes several labels only when that question is `multi_select`. Answer a multi-question entry with formatted text. `runtime_generation` is accepted and ignored |
+| `permission` | approve | `decision` (`allow` · `deny`) and `runtime_generation` (the entry's) |
+| `goal_input` | steer | `answer` |
+| `decision_needed` | steer | `answer` (recorded on the item and delivered to its source) |
+
+**Checks, in order:**
+1. The credential and the kind's permission, read from the id prefix. A
+   refusal answers 403 with `scope=`, and no backend call is made.
+2. The strict body and the idem key.
+3. The field rules (400).
+4. A fresh read:
+   - an entry open but outside the grant's scope answers 404 `not_found`;
+   - a mismatched `runtime_generation` answers 409 `asker_gone`.
+5. The audit record.
+6. The daemon's own host verb, which re-checks the question against live
+   runtime state and answers 409 `asker_gone` (the question went away) or 409
+   `answered` (someone answered first).
+
+**On success** the route returns `{ok: true}`. A replayed `idem_key` returns
+the recorded result, 409s included.
+
+### Triage
+
+**`POST /direct/v1/items/{item_id}/state`** takes `{state, idem_key}`, where
+`state` is `ack` · `dismiss` · `done` · `reopen`; `acknowledge` is accepted for
+`ack`. It returns `{ok: true, state}` with the item's new state: `acknowledged`,
+`dismissed`, `done` or `open`.
+
+**Permissions.**
+- `dismiss`, `done` and `reopen` need steer, on an item in scope.
+- `ack` needs steer **and** create **and** `all_sessions`, because a user
+  acknowledgment authorizes the overseer to create a workgroup from the item.
+
+Only global-inbox items can be triaged.
+
+### The overseer
+
+**Inventory.** The overseer row (`role: "overseer"`, id `overseer`) appears in
+`GET /direct/v1/sessions` and `/sessions/watch` only with `?include=overseer`,
+and only for an `all_sessions` grant. Without the parameter an older client's
+inventory is byte-identical. `include` is the only query parameter these routes
+read; others are ignored, as before.
+
+**History and stream** are readable by an `all_sessions` grant.
+
+**Steering.**
+- **Verbs.** Only `prompt`, `interject` and `stop`, through the ordinary
+  actions route.
+- **Permissions.** They need `all_sessions` + steer + manage + create:
+  everything the overseer could do itself, so steering it never widens a grant.
+- **Refusals.** A partial grant is refused with 403 `denied`
+  (`scope="steer manage create"`). Any other verb answers 409
+  `unsupported_verb`.
+- **Row caps** advertise exactly this.
+
+### Capabilities
+
+`capabilities.queue` is `{read, answer_kinds[], triage, acknowledge}`.
+`capabilities.overseer` is `{read, steer}`. Both are absent from a server that
+predates them; that server also answers 404 (without a JSON code) on the new
+routes.
+
+A daemon that predates the queue answers 503 `daemon_upgrade_required`.
+
+### Audit
+
+Every answer, item triage and overseer steer made over direct is appended to
+`direct-audit.jsonl` in the direct state directory (0600).
+
+- **Rotation.** At 10 MiB the log rotates to `.1`, keeping one generation.
+- **Records.**
+  - **Contents:** `{at, client_id, label, route, verb, target, text, outcome}`.
+  - **Text** is capped at 4 KiB.
+  - **Two records per action.** One is written before the daemon is asked
+    (`admitted`) and one with the outcome. If the first cannot be written, the
+    request answers 503 and nothing runs.
+- **Reading it.** `amux direct audit [--client <id>] [--limit N] [--json]`
+  reads it, host-only, the same way `clients list` does.
+
+**Revocation** is the existing `amux direct clients revoke`.
 
 ## S1 limits
 

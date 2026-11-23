@@ -44,6 +44,9 @@ const (
 	OpList          = "list"
 	OpRevoke        = "revoke"
 	OpResetIdentity = "reset_identity"
+	// OpAudit reads the direct audit log (audit.go), newest last; ClientID
+	// filters to one client and Limit bounds the count.
+	OpAudit = "audit"
 	// Cloud-assisted enrollment. Policy operations are for the host operator's
 	// CLI. OpCloudStatus and OpIssueCloudCode are the only operations the
 	// provider's relay bridge (RelayIssuer) can send.
@@ -103,6 +106,7 @@ type AdminRequest struct {
 	Cloud       *CloudPolicyRequest `json:"cloud,omitempty"`
 	Issue       *CloudIssueRequest  `json:"issue,omitempty"`
 	Wake        *WakeAdminRequest   `json:"wake,omitempty"`
+	Limit       int                 `json:"limit,omitempty"`
 }
 
 // AdminResponse answers it.
@@ -118,6 +122,7 @@ type AdminResponse struct {
 	Code  string             `json:"code,omitempty"`
 	Cloud *CloudStatus       `json:"cloud,omitempty"`
 	Wake  *WakeAdminResponse `json:"wake,omitempty"`
+	Audit []AuditRecord      `json:"audit,omitempty"`
 	// Enroll is the direct enrollment exchange activity (OpCloudStatus).
 	Enroll *EnrollActivity `json:"enroll,omitempty"`
 }
@@ -303,6 +308,12 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 		return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: a.ServerID(), Endpoints: endpoints}
 	case OpList:
 		return AdminResponse{OK: true, ServerID: a.ServerID(), Clients: a.List()}
+	case OpAudit:
+		recs, err := a.AuditRecords(req.ClientID, req.Limit)
+		if err != nil {
+			return fail(err)
+		}
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Audit: recs}
 	case OpRevoke:
 		if err := a.Revoke(req.ClientID, "revoked by host"); err != nil {
 			return fail(err)
