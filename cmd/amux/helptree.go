@@ -290,7 +290,7 @@ func doActionSpecs() map[string]*cmdSpec {
 				`amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"`,
 				`amux do new-workgroup -f name=triage -f coordinator=claude -f coordinator_model=opus`,
 			}},
-		core.ActionCreateWorkspace: {Summary: "alias of new-workgroup (kept for older scripts)",
+		core.ActionCreateWorkspace: {Summary: "create a workgroup whose coordinator gets the prompt; repos only limit it (the TUI form)",
 			Fields: append(append([]fieldSpec{}, workgroupFields...),
 				fieldSpec{Name: "defaultAgent", Arg: "1", Usage: "create the first agent (otherwise repos only set the ceiling)"})},
 		core.ActionRaiseItem: {Args: "<session-id>", Summary: "raise an item as a session (agents: amux agent raise)",
