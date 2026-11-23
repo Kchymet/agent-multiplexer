@@ -85,8 +85,10 @@ func runUntrustedRepo(ctx context.Context, dir string, args ...string) (string, 
 	return runEnv(ctx, dir, env, safe...)
 }
 
-// ListBranchesE returns the local branch names in gitDir matching the glob
-// pattern under refs/heads (e.g. "amux/*"), for reconciliation. The error form
+// ListBranchesE returns the local branch names in gitDir matching the for-each-ref
+// pattern under refs/heads (a glob such as "amux/*", whose "*" stops at "/", or a
+// "dir/" prefix such as "amux/" matching everything below it), for
+// reconciliation. The error form
 // distinguishes an empty repository from a hostile or unreadable legacy one.
 func ListBranchesE(ctx context.Context, gitDir, pattern string) ([]string, error) {
 	out, err := runUntrustedRepo(ctx, gitDir, "for-each-ref", "--format=%(refname:short)", "refs/heads/"+pattern)

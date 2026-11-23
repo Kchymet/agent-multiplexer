@@ -84,6 +84,11 @@ const (
 	// KindMember is a member's activity change the daemon observed and handed
 	// in with Notify: it finished its turn, is waiting on the user, stopped.
 	KindMember = "member"
+	// KindItems announces upward-signal items (internal/items) a recipient has not
+	// been told about. Workgroup and SessionID both name the recipient — a
+	// coordinator, or the console — so a burst coalesces to one wake per
+	// recipient; Deliver reads the items themselves at delivery time.
+	KindItems = "items"
 )
 
 // Member is one active workgroup member whose PRs are watched.
@@ -91,7 +96,7 @@ type Member struct {
 	SessionID string
 	Workgroup string // the workgroup (= its coordinator's session) id
 	Label     string // display label for wake-ups (name or id)
-	Branch    string // the member's branch, e.g. amux/<wg>-<member>
+	Branch    string // the member's branch, e.g. amux/<broker>/<wg>-<member>
 	Repos     []string
 }
 
@@ -132,7 +137,7 @@ type Wake struct {
 	Branch    string // the member branch that owned the PR
 	PRBranch  string // the observed PR head (Branch or a permitted suffix)
 	Text      string
-	// Kind is KindPR or KindMember. A member wake carries the member State it
+	// Kind is KindPR, KindMember or KindItems. A member wake carries the member State it
 	// reports instead of Repo/Branch/PRBranch, and Deliver drops it when the
 	// member has moved on by delivery time.
 	Kind  string
@@ -368,8 +373,10 @@ func (w *Watcher) Poll(ctx context.Context) {
 		w.cfg.Logf("prwatch: list members: %v", err)
 		return
 	}
-	// One query per (repo, branch prefix): members of every workgroup in a repo
-	// share the "amux/" prefix, so this is normally one gh call per repo.
+	// One query per (repo, branch namespace): this broker's members share the
+	// "amux/<broker>/" prefix (pre-broker members share "amux/"), so this is
+	// normally one gh call per repo, and it never lists another broker's
+	// branches. Ownership is still decided per member by Owns below.
 	type query struct{ repo, prefix, head string }
 	queries := map[query]bool{}
 	for _, m := range members {
@@ -377,7 +384,7 @@ func (w *Watcher) Poll(ctx context.Context) {
 			continue
 		}
 		for _, repo := range m.Repos {
-			if i := strings.Index(m.Branch, "/"); i > 0 {
+			if i := strings.LastIndex(m.Branch, "/"); i > 0 {
 				queries[query{repo: repo, prefix: m.Branch[:i+1]}] = true
 			} else {
 				queries[query{repo: repo, head: m.Branch}] = true

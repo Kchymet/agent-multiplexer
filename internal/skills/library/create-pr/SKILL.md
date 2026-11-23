@@ -149,7 +149,7 @@ gh repo view --json defaultBranchRef -q .defaultBranchRef.name
 ```
 
 **Stacked PR:** the base is your predecessor's branch instead (the one your
-coordinator named, e.g. `amux/<wg>-<predecessor>`), and the body starts with
+coordinator named, e.g. `amux/<broker>/<wg>-<predecessor>`), and the body starts with
 `Stacked on #<parent> — merge that first.` See "Stacked PRs" below.
 
 Create the PR against that base, head = your branch, with a HEREDOC body. This
@@ -276,10 +276,8 @@ final message must say who owns the merge.
 
 **Only do this when all four hold:**
 
-- `$AMUX_ROLE` is not `coordinator`. A coordinator reports the outcome and asks
-  the user whether to archive the workgroup or give it another task. It must wait
-  for explicit user confirmation before self/workgroup archive; goal completion
-  and a merged PR are not confirmation.
+- `$AMUX_ROLE` is not `coordinator`. A coordinator wraps up its workgroup by the
+  rules below and in its guide ("Wrapping up this workgroup"), not by this check.
 - `$AMUX_MODE` is `task` — **never** archive an `interactive` session. The human
   drives an interactive session and owns when it ends; archiving it out from under
   them defeats its purpose.
@@ -305,11 +303,25 @@ fi
 failure as a real incomplete lifecycle step and report it; do not claim the
 session was marked done. Ordinary member completion archives only that member.
 
-A coordinator may run `amux agent done` **after explicit user confirmation**.
-The authenticated command archives its own workgroup and all its direct members,
-then stops their runtimes and revokes their credentials. It cannot archive a
-foreign workgroup. Do not delegate this to a member: member completion archives
-only that member. If confirmation has not arrived, leave the workgroup open.
+A coordinator wraps up its own workgroup with `amux agent done` instead of idling
+on the rail forever. The authenticated command archives its own workgroup and all
+its direct members, then stops their runtimes and revokes their credentials. It
+cannot archive a foreign workgroup. Do not delegate this to a member: member
+completion archives only that member.
+
+- **Archive without asking only when ALL hold:** every PR the workgroup produced
+  is MERGED, checked on GitHub by the coordinator itself
+  (`gh pr view <n> --json state,mergedAt`), never on "opened", "ready" or a
+  member's word; and nothing is outstanding: no follow-up pending or offered, no
+  open decision, no member running, no unanswered user message.
+- **Otherwise ask** whether to archive (Claude Code: `AskUserQuestion`; Codex: a
+  plain-text question), offering "Archive now", "Keep open: waiting on my PR
+  merge" and "Keep open: I have more work". Ask whenever any PR is not merged,
+  the set of PRs is unclear, a PR was closed without merging, or anything at all
+  is uncertain. When in doubt, ask; never guess.
+- Never pass `--force` to archive yourself, never archive while a member is
+  running, and run `amux agent done` as the last tool call, after the final
+  summary in `COORDINATION.md` and the final message.
 
 Restoration is host-only: `amux workgroup unarchive <workgroup-id>` restores the
 workgroup and its previously active members together. Members already completed

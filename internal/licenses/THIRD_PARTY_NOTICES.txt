@@ -11,7 +11,7 @@ First-party module paths excluded from the third-party inventory: amux and
 github.com/kchymet/agent-multiplexer/harnessproto. The repository root license
 is reproduced separately below; source alone does not verify ownership facts.
 
-=== RESOLVED THIRD-PARTY GO MODULES (39) ===
+=== RESOLVED THIRD-PARTY GO MODULES (40) ===
 
 github.com/aymanbagabas/go-osc52/v2@v2.0.1
   module checksum: h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
@@ -19,6 +19,13 @@ github.com/aymanbagabas/go-osc52/v2@v2.0.1
   targets: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
   linked packages: github.com/aymanbagabas/go-osc52/v2
   legal files: LICENSE (SHA-256 11319e34d9dac2f45392f14f4f62e28b24173cfa13d39b32e7b7b66c2f3bdccd)
+
+github.com/boombuler/barcode@v1.1.0
+  module checksum: h1:ChaYjBR63fr4LFyGn8E8nt7dBSt3MiU3zMOZqFvVkHo=
+  go.mod checksum: h1:paBWMcWSl3LHKBqUq+rly7CNSldXjb2rDl3JlRe0mD8=
+  targets: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
+  linked packages: github.com/boombuler/barcode, github.com/boombuler/barcode/qr, github.com/boombuler/barcode/utils
+  legal files: LICENSE (SHA-256 36d2e94c565d51a5146d729e6be6a3d26168d473d97c94011b13700e82c622e4)
 
 github.com/charmbracelet/bubbletea@v1.3.10
   module checksum: h1:otUDHWMMzQSB0Pkc87rm691KZ3SWa4KUlvF9nRvCICw=
@@ -83,8 +90,8 @@ github.com/charmbracelet/x/termios@v0.1.1
   linked packages: github.com/charmbracelet/x/termios
   legal files: LICENSE (SHA-256 0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b)
 
-github.com/charmbracelet/x/vt@v0.0.0-20260621010513-945fab64fd3e
-  module checksum: h1:iMde8FSEL9e9LQ7UgtGDRukteF35wRFGWeoB1gxKDDk=
+github.com/charmbracelet/x/vt@v0.1.0
+  module checksum: h1:oVueL3dwH/DlY/z6R6XHA9PQ/w3LdCCq99600Vs48vA=
   go.mod checksum: h1:u1LOIABor9JqY54oZdktK3TCRrgzP6tzHrDYx1nd3wY=
   targets: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
   linked packages: github.com/charmbracelet/x/vt
@@ -311,6 +318,29 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+--- github.com/boombuler/barcode@v1.1.0 :: LICENSE (SHA-256 36d2e94c565d51a5146d729e6be6a3d26168d473d97c94011b13700e82c622e4) ---
+The MIT License (MIT)
+
+Copyright (c) 2014 Florian Sundermann
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 --- github.com/charmbracelet/bubbletea@v1.3.10 :: LICENSE (SHA-256 69793670485e4ae8bf28fcbe5639141f604256d5bb6c1862571f3a32823fa221) ---
 MIT License
 
@@ -518,7 +548,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
---- github.com/charmbracelet/x/vt@v0.0.0-20260621010513-945fab64fd3e :: LICENSE (SHA-256 0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b) ---
+--- github.com/charmbracelet/x/vt@v0.1.0 :: LICENSE (SHA-256 0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b) ---
 MIT License
 
 Copyright (c) 2023 Charmbracelet, Inc.

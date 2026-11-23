@@ -82,6 +82,9 @@ var actionGlosses = map[string]string{
 	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
 	core.ActionNewWorkgroup:        "create a workgroup            -f name=… [-f prompt=…] [-f repos=a,b (its repos; one = single-repo) -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
 	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",
+	core.ActionRaiseItem:           "raise an item as session <id>  -f kind=follow_up|outstanding|decision_needed|risk|fyi -f title=… [-f detail=… -f prs=r#1,r#2 -f suggest=…] (agents: amux agent raise)",
+	core.ActionItemState:           "move an item as session <id>   -f item=it-… -f state=ack|dismiss|done|reopen [-f note=…] (the global inbox owner today is the console)",
+	core.ActionEscalateItem:        "escalate an item to the global inbox as coordinator <id> -f item=it-… [-f note=…]",
 }
 
 // actionList renders the vocabulary an unknown-action error teaches: every verb

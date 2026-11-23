@@ -30,6 +30,10 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	if isItemVerb(a.Action) && !effectAdmissionHeld(ctx) {
+		// Items touch only the item store, under the acting session's lock.
+		return d.handleItemAction(ctx, a)
+	}
 	if (a.Action == "" || a.Action == core.ActionRefresh) && !effectAdmissionHeld(ctx) {
 		// A refresh only wakes the poller; it reads and changes nothing.
 		if err := revalidateDeferred(ctx); err != nil {

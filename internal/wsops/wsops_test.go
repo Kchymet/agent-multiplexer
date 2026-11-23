@@ -1453,7 +1453,7 @@ func TestDeleteLegacyRootFailsClosedWithoutDataLoss(t *testing.T) {
 				t.Fatalf("DeleteByID legacy root error = %v, want explicit recovery refusal", err)
 			}
 
-			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix+"*"); len(got) != 1 || got[0] != core.LegacyBranchFor(rootID) {
+			if got := git.ListBranches(ctx, gitDir, core.BranchPrefix); len(got) != 1 || got[0] != core.LegacyBranchFor(rootID) {
 				t.Errorf("legacy branch changed during refused delete: %v", got)
 			}
 			if _, err := os.Stat(dir); tt.dirGone != os.IsNotExist(err) {

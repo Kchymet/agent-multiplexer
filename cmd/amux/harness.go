@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"amux/internal/agent"
+	"amux/internal/core"
 	"amux/internal/harnessbin"
 )
 
@@ -176,10 +177,11 @@ func harnessList(args []string) error {
 			note := "amux harness install " + e.Kind
 			if e.State.Declined {
 				note = "uninstalled; not adopted automatically — " + note
-			} else if e.State.AdoptError != "" {
-				note = "automatic adoption failed: " + e.State.AdoptError
 			}
 			fmt.Printf("  managed   not installed (%s)\n", note)
+		}
+		if e.Current == "" {
+			fmt.Printf("  adoption  %s\n", adoptionStatus(e.State))
 		}
 		for _, v := range e.Installed {
 			var marks []string
@@ -476,6 +478,24 @@ func reorderFlags(args []string) []string {
 		}
 	}
 	return append(flags, pos...)
+}
+
+// adoptionStatus describes a harness's last automatic-adoption decision and
+// its outcome, as recorded by the daemon (or amux harness adopt), for
+// `amux harness ls` and `amux doctor`.
+func adoptionStatus(st harnessbin.State) string {
+	at := func(t time.Time) string { return t.Local().Format(time.RFC3339) }
+	switch {
+	case !st.AdoptStartedAt.IsZero():
+		return fmt.Sprintf("installing since %s (%s); not finished — if this persists, see `harness updates` in %s", at(st.AdoptStartedAt), st.AdoptReason, core.LogPath())
+	case st.AdoptDecision == harnessbin.AdoptDecisionSkip:
+		return fmt.Sprintf("skipped at %s: %s", at(st.AdoptCheckedAt), st.AdoptReason)
+	case st.AdoptError != "" && !st.AdoptAttemptAt.IsZero():
+		return fmt.Sprintf("failed at %s: %s (retried after %s)", at(st.AdoptAttemptAt), st.AdoptError, harnessbin.AdoptRetry)
+	case st.AdoptDecision == harnessbin.AdoptDecisionAdopt:
+		return fmt.Sprintf("adopted at %s (%s)", at(st.AdoptAttemptAt), st.AdoptReason)
+	}
+	return "no decision recorded yet (the daemon decides about 2 minutes after it starts, then every 15 minutes; amux harness adopt --dry-run previews it)"
 }
 
 func orElse(s, def string) string {

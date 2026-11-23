@@ -185,6 +185,36 @@ func (h *harness) takeWakes() [][]string {
 	return w
 }
 
+// TestBrokerScopedBranches pins that a member on the broker scheme
+// (amux/<broker>/<wg>-<member>) claims only its own broker's PRs — another
+// broker's member with the same workgroup and member ids is not it — and that a
+// pre-broker member (amux/<wg>-<member>) keeps being watched alongside it.
+func TestBrokerScopedBranches(t *testing.T) {
+	h := newHarness(t)
+	h.members = []Member{
+		{SessionID: "m1", Workgroup: "wg", Branch: "amux/wg-m1", Repos: []string{"o/r"}},
+		{SessionID: "m3", Workgroup: "wg", Branch: "amux/b1/wg-m3", Repos: []string{"o/r"}},
+	}
+	h.gh.set(7, "amux/wg-m1", "OPEN", nil)
+	h.gh.set(11, "amux/b1/wg-m3-topic", "OPEN", nil)
+	h.gh.set(12, "amux/b2/wg-m3", "OPEN", nil) // same ids, another broker
+	h.gh.set(13, "amux/b2/wg-m1", "OPEN", nil) // not the legacy member's either
+	h.poll()
+	got := map[string]int{}
+	for _, e := range h.takeEvents() {
+		got[e.SessionID] = e.PR.Number
+	}
+	if want := map[string]int{"m1": 7, "m3": 11}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("claimed PRs = %v, want %v", got, want)
+	}
+	calls := strings.Join(h.gh.calls, "\n")
+	for _, q := range []string{"head:amux/b1/ ", "head:amux/ "} {
+		if !strings.Contains(calls+" ", q) {
+			t.Errorf("gh calls missing %q search:\n%s", q, calls)
+		}
+	}
+}
+
 func TestFirstObservationTracksWithoutWaking(t *testing.T) {
 	h := newHarness(t)
 	h.gh.set(7, "amux/wg-m1", "OPEN", nil)
