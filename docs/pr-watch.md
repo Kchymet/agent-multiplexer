@@ -66,7 +66,8 @@ A meaningful transition — CI turned red, CI green again after red, merge
 conflicts appeared, a review was submitted, merged, closed, draft → ready —
 queues a short line for the workgroup's coordinator, e.g.
 
-    [amux goal] PR update (amux PR watcher wake-up, not a new task):
+    [amux goal]
+    PR update (amux PR watcher wake-up, not a new task):
     - member 5671a7 PR Kchymet/agent-multiplexer#247: CI failed (check build) — https://…
 
 The first sighting of a PR, CI going pending, and other routine moves are
@@ -82,11 +83,15 @@ when that is safe:
   and its transcript's last turn ended, for sessions on older hooks;
 - its goal may be continued: active, waiting, or no goal. A paused, complete,
   blocked, budget-limited or input-waiting goal is the user's to move.
+- its composer is free: amux types only into an input box it can see is empty,
+  never while someone typed into the pane in the last 15 seconds, and submits
+  only once the box shows exactly the wake-up (see `internal/daemon/typed_delivery.go`).
+  A draft the user has not sent is never joined with a wake-up or cleared.
 
 Undeliverable lines wait for up to 2 hours, then are dropped. They are retried
 the moment the coordinator's own row changes (its turn ended, its goal moved),
 and every 20 seconds as a backstop. For a Claude goal coordinator the prompt starts with the
-`[amux goal]` continuation marker, so it continues the current goal rather than
+`[amux goal]` continuation marker on a line of its own, so it continues the current goal rather than
 replacing it as a new task would.
 
 ## Member wake-ups
