@@ -210,7 +210,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			out = append(out, w.withCaps(core.Session{
 				ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionArchived,
 				IsRoot: true, Role: store.RoleCoordinator, Kind: agent.Canonical(r.Agent), Mode: r.Mode,
-				Model: r.Model, State: core.StateIdle, Status: "archived workgroup", Archived: true,
+				Model: r.Model, State: core.StateStopped, Status: "archived workgroup", Archived: true,
 				Cwd: r.Dir, CanAttach: true, CanKill: true,
 			}, false))
 			continue
@@ -302,7 +302,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 			ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionArchived,
 			RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode,
 			Model: s.Model,
-			State: core.StateIdle, Status: "archived" + subSuffix(s), Archived: true,
+			State: core.StateStopped, Status: "archived" + subSuffix(s), Archived: true,
 			Cwd: s.Dir, CanAttach: true, CanKill: true,
 		}, false)) // archived / observe-only — not steerable
 	}
@@ -560,7 +560,7 @@ func subSuffix(s store.Session) string {
 // agentState classifies a session's activity. Claude's fine-grained states come
 // from its hooks (see claudecfg.InstallHooksIn), which write the current state per
 // session as the agent's turn lifecycle fires:
-//   - StateIdle:    not running (no engine instance)
+//   - StateStopped: no live runtime (no engine instance); never "idle"
 //   - StateRunning: a turn is in flight
 //   - StateWaiting: blocked on a prompt awaiting the user
 //   - StateReady:   turn finished / freshly launched, ready for input
@@ -573,7 +573,7 @@ func subSuffix(s store.Session) string {
 // it onto running/ready — degrading honestly to "the engine has a live instance".
 func agentState(alive bool, s store.Session) string {
 	if !alive {
-		return core.StateIdle
+		return core.StateStopped
 	}
 	// The rail state word is the harness's call: Claude reports its fine-grained
 	// hook states directly; a harness with no hook stream degrades honestly to

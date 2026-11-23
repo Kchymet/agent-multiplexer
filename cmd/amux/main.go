@@ -576,8 +576,8 @@ func cmdStatus(args []string) error {
 		}
 		for _, s := range sessions {
 			state := s.State
-			if state == "" {
-				state = core.StateIdle
+			if state == "" || state == core.StateIdle {
+				state = core.StateStopped
 			}
 			fmt.Printf("%-20s %-8s %-8s %s%s\n", s.Title, s.Kind, state, s.Cwd, statusEnrichment(s))
 		}
@@ -620,8 +620,8 @@ func cmdStatus(args []string) error {
 		}
 		for _, s := range f.Snapshot.Sessions {
 			state := s.State
-			if state == "" {
-				state = core.StateIdle
+			if state == "" || state == core.StateIdle {
+				state = core.StateStopped
 			}
 			fmt.Printf("%-20s %-8s %-8s %s%s\n", s.Title, s.Kind, state, s.Cwd, statusEnrichment(s))
 		}

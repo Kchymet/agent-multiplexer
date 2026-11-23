@@ -409,12 +409,13 @@ func doActionSpecs() map[string]*cmdSpec {
 	return map[string]*cmdSpec{
 		core.ActionRefresh: {Summary: "re-poll the daemon's sources now"},
 		core.ActionStart: {Args: "<id>", Summary: "start an agent's (or a whole workgroup's) process",
-			Detail: "id is an agent id, or a workgroup id to start all of its agents."},
+			Detail: "id is an agent id, or a workgroup id to start its coordinator and every non-archived member (archived members are skipped)."},
 		core.ActionRestart: {Args: "<agent-id>", Summary: "restart one agent and resume its conversation (host only)",
 			Detail: "Interrupts its current turn."},
 		core.ActionAuthReload: {Summary: "queue Claude agents to restart with current credentials",
 			Fields: []fieldSpec{{Name: "force", Arg: "true", Usage: "also interrupt busy or unknown-state agents"}}},
-		core.ActionSteer: {Args: "<agent-id>", Summary: "drive a running agent: prompt, interject, stop, permission, goal",
+		core.ActionSteer: {Args: "<agent-id>", Summary: "drive an agent: prompt, interject, stop, permission, goal",
+			Detail: "A prompt starts a stopped agent and answers ok only once the runtime took the prompt;\nany other verb needs a running agent.",
 			Fields: []fieldSpec{
 				{Name: core.SteerVerb, Arg: "<verb>", Required: true, Usage: "prompt (a new user turn) | interject (text while a turn runs) |\nstop (interrupt the turn) | permission (answer a prompt) | goal (host only)"},
 				{Name: core.SteerText, Arg: "<text>", Usage: "prompt/interject: the text to deliver"},

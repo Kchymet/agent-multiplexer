@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -143,11 +144,20 @@ type Daemon struct {
 	// pendingRestore holds the live set read from disk at startup, relaunched
 	// once after the first poll resolves sessions/specs.
 	pendingRestore []restartRecord
+	// restorePending is set while pendingRestore has not been attempted yet.
+	// Until then the persisted live set is left alone: the first poll runs
+	// before restore with nothing live, and persisting then would erase every
+	// session a failed or interrupted restore never brought back.
+	restorePending atomic.Bool
 
 	// steerSettle is how old a runtime must be before typed steering text reaches
 	// it, so its TUI has painted a composer. Zero means steerStartSettle;
 	// tests set it small so they don't sleep.
 	steerSettle time.Duration
+
+	// steerVerify bounds how long a cold-start `prompt` waits for its runtime
+	// to take the prompt (steer_verify.go). Zero means steerVerifyTimeout.
+	steerVerify time.Duration
 
 	// typedTiming overrides deliverTyped's waits (tests); zero uses the defaults.
 	typedTiming typedTiming
@@ -614,6 +624,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Read the previously-live set BEFORE any poll persists over the file, then
 	// relaunch it once sessions/specs are resolvable (after the first poll).
 	d.pendingRestore = d.readLiveAgents()
+	d.restorePending.Store(len(d.pendingRestore) > 0)
 	persistLiveOnReturn = d.engine != nil
 	startRunWorker(func() {
 		select {
@@ -1610,7 +1621,7 @@ func (d *Daemon) structuredControl(s store.Session) bool {
 // the set is unchanged from the last one, so the per-poll call is cheap. Failures
 // are logged, never fatal — persistence is best-effort.
 func (d *Daemon) persistLiveAgents() {
-	if d.liveAgentsPath == "" {
+	if d.liveAgentsPath == "" || d.restorePending.Load() {
 		return
 	}
 	var keys []engine.Key
@@ -1690,6 +1701,9 @@ func (d *Daemon) readLiveAgents() []restartRecord {
 // $AMUX_RESTORE (default on). Ensure is idempotent, so a race with any other
 // starter is harmless.
 func (d *Daemon) restoreLiveAgents(ctx context.Context) {
+	// Persisting resumes once every pending record was attempted; the next poll
+	// then records exactly what came back.
+	defer d.restorePending.Store(false)
 	if v := os.Getenv("AMUX_RESTORE"); v == "0" || v == "false" {
 		return
 	}
@@ -1702,7 +1716,11 @@ func (d *Daemon) restoreLiveAgents(ctx context.Context) {
 			continue // deleted or archived while the daemon was down
 		}
 		if err := d.startAgent(ctx, k.AgentID, k); err != nil {
+			// The session stays stopped. Say so where its owner looks (the
+			// session journal and `amux status` reading "stopped"), not only in
+			// the daemon log, so a stopped coordinator is not mistaken for idle.
 			log.Printf("restore agent %s: %v", k.AgentID, err)
+			journal(k.AgentID, core.JournalError, fmt.Sprintf("not restored after the daemon restart (%v); it is stopped, and a prompt starts it", err))
 			continue
 		}
 		restored++

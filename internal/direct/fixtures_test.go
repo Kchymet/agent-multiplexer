@@ -70,7 +70,7 @@ func fixtureFiles(t *testing.T, id *Identity, proof string) map[string][]byte {
 		{ID: "771951", Title: "Direct access", Kind: "claude", RootID: "", IsRoot: true, Section: hp.SectionWorkgroups,
 			State: hp.StateRunning, Status: "running", Runtime: "claude", Role: hp.RoleCoordinator, Caps: SessionCaps{Prompt: true, Interject: true, Stop: true}},
 		{ID: "e1deda", Title: "Backend implementation", Kind: "claude", Mode: "task", Model: "claude-opus-5-5", RootID: "771951",
-			Repos: "agent-multiplexer", Section: hp.SectionWorkgroups, State: hp.StateIdle, Status: "idle", StartedAt: 1792999000,
+			Repos: "agent-multiplexer", Section: hp.SectionWorkgroups, State: hp.StateStopped, Status: "stopped", StartedAt: 1792999000,
 			Runtime: "claude", Caps: SessionCaps{Prompt: true, Interject: true, Stop: false},
 			PRs: []hp.SessionPR{{Repo: "owner/agent-multiplexer", Number: 273, URL: "https://github.com/owner/agent-multiplexer/pull/273", Branch: "amux/771951-e1deda", State: "open"}}},
 	}}

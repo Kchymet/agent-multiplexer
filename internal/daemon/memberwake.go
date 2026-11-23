@@ -57,7 +57,7 @@ func memberTransition(prev, cur string) (what string, wake bool) {
 		// idle reminder no longer reports waiting; see
 		// claudecfg.NotificationNeedsUser.)
 		return "is waiting on a permission prompt or question", true
-	case core.StateIdle:
+	case core.StateStopped, core.StateIdle:
 		return "stopped (its runtime exited)", true
 	}
 	return "", false

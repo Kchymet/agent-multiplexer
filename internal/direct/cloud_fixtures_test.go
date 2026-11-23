@@ -94,7 +94,7 @@ func TestS1FixtureManifestPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := hexSum(raw); got != "94c07c67c3b16d7adeae10e7dc5639b5bb2c76325b0086a6a5a3fb92b8319d36" {
+	if got := hexSum(raw); got != "e3e7ae81f38da29337539047697a52d35ec62cecf59b4b0da8b4ca1966c4d868" {
 		t.Fatalf("docs/direct/fixtures/v1/SHA256SUMS changed: %s", got)
 	}
 	if n := bytes.Count(raw, []byte("\n")); n != 23 {

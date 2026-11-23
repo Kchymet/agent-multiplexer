@@ -30,6 +30,26 @@ const shutdownResponseGrace = 250 * time.Millisecond
 // share wsops.Apply with the multiplexer server and CLI; refresh just re-polls;
 // start and steer are engine-only (no store change) and served here.
 func (d *Daemon) handle(ctx context.Context, a core.Action) core.Result {
+	// A steering verb may hand back a wait (a cold-start prompt's delivery,
+	// steer_verify.go) that must run only after handleAction has released the
+	// admission it took. A caller already holding admission cannot wait for
+	// work that needs that admission, so it gets no slot.
+	if a.Action != core.ActionSteer || effectAdmissionHeld(ctx) || postActionFrom(ctx) != nil {
+		return d.handleAction(ctx, a)
+	}
+	ctx, slot := withPostActionSlot(ctx)
+	res := d.handleAction(ctx, a)
+	if !res.OK || slot.wait == nil {
+		return res
+	}
+	if err := slot.wait(ctx); err != nil {
+		return fail("%v", err)
+	}
+	return res
+}
+
+// handleAction is handle without the post-admission wait.
+func (d *Daemon) handleAction(ctx context.Context, a core.Action) core.Result {
 	if isItemVerb(a.Action) && !effectAdmissionHeld(ctx) {
 		// Items touch only the item store, under the acting session's lock.
 		return d.handleItemAction(ctx, a)

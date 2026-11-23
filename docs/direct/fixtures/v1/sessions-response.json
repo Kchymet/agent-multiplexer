@@ -26,8 +26,8 @@
       "root_id": "771951",
       "repos": "agent-multiplexer",
       "section": "workgroups",
-      "state": "idle",
-      "status": "idle",
+      "state": "stopped",
+      "status": "stopped",
       "started_at": 1792999000,
       "runtime": "claude",
       "caps": {

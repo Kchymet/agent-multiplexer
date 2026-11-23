@@ -86,7 +86,10 @@ One JSON object per line, same `wire` framing as all provider traffic.
   wire carries the full field set — the illustrative example above shows the
   load-bearing subset. Field vocabulary: `section` ∈
   `workgroups | repos | detached | archived`; `state` ∈
-  `idle | ready | waiting | running | unknown` (the attention ladder). `archived`
+  `stopped | ready | waiting | running | unknown` (the attention ladder).
+  `stopped` means no live runtime: only a `prompt` is accepted, and it starts
+  the session. Providers before 2026-11 sent `idle` for the same thing; a
+  consumer must read `idle` as `stopped`. `archived`
   is emitted only when true (JSON `omitempty`); an archived session also carries
   `section:"archived"`. `model`, when present, is the runtime's currently
   observed selection, including an in-session model switch (not merely the
@@ -141,7 +144,7 @@ and the row carries a `role` naming which:
 {"id":"wg1","title":"payments","isRoot":true,"section":"workgroups",
  "role":"coordinator","runtime":"claude","state":"running","status":"running · 2 agents","caps":{...}}
 {"id":"api","title":"octo/api","kind":"repo","section":"repos",
- "role":"repo","runtime":"claude","state":"idle","caps":{...}}
+ "role":"repo","runtime":"claude","state":"stopped","caps":{...}}
 ```
 
 - `role` ∈ `console | coordinator | repo` (the `Role*` set); absent on an
@@ -359,21 +362,21 @@ verb rejected before delivery (no such session, agent not running, unparseable
 `decision`, no pending request for that `request_id`) returns `ok:false` with a
 human-readable `error`.
 
-**A `prompt` that starts a stopped agent acks first.** Everything that can refuse
-the verb is decided synchronously — the session exists, its kind is steerable,
-the verb is allowed, the `request_id` names an open prompt — and the reply goes
-out as soon as those hold. Only then does the daemon start the runtime and type
-the text in. This matters because a runtime cold start takes seconds (a Claude
-Code boot is the common case, since an idle session is the ordinary thing to
-prompt), which is longer than the dispatch timeouts sitting in front of this
-relay: a daemon that answered only once the agent was up would fail the request
-at the client while succeeding on the machine.
-
-The consequence is that a failure *after* the ack has nowhere to go in the reply.
-It is reported instead as an `error`-level `notice` on the session's
-`runtime-events` stream (§4.6), alongside the `notice` that says the start began.
-A consumer that acts on `accepted` must therefore watch that stream — the ack
-means "this will be attempted", not "this worked".
+**A `prompt` that starts a stopped agent answers once the prompt was taken.**
+Everything that can refuse the verb is still decided synchronously. The daemon
+then starts the runtime, types the text, and replies only when it has evidence
+that the runtime took the prompt. For Claude, that is a turn reported by the
+status hooks, or the transcript written after the submit. For a Codex App Server,
+it is `turn/start` being accepted. For a runtime with no turn signal, it is
+staying alive past the submit. If the start fails, the runtime exits while
+booting, or there is no acknowledgement within 90 seconds, the reply is
+`ok:false` with the reason. Before 2026-11 the daemon acked first and reported
+these failures only on the event stream, so `prompt` answered "ok" for a
+coordinator that never came up. A cold start typically takes a few seconds (a
+Claude Code boot), so a relay in front of this must allow for that. The same
+outcome is still written as a `notice` on the session's `runtime-events` stream
+(§4.6). A `prompt` to a runtime that is already live, and the other verbs, keep
+the `accepted` semantics above.
 
 Delivery mechanism is the daemon's business, and v1 of this extension delivers by
 writing to the agent's PTY: `prompt`/`interject` queue an atomic text-and-submit

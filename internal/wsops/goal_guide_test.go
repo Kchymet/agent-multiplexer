@@ -114,6 +114,15 @@ func assertCoordinatorWrapsUp(t *testing.T, kind, guide, id string) {
 		"never trust \"opened\", \"ready\", or a member's word",
 		"A PR **closed without merging is not done**: ask.",
 		"no follow-up pending or offered, no open decision, no member running (`amux status --json`), no unanswered user message, and nothing left open in the PR ledger",
+		// Archive-once-merged is the default; a user instruction is standing permission.
+		"**\"Archive once every PR is merged\" is the default.**",
+		"archive without asking for fresh confirmation",
+		"is **standing permission** for exactly that",
+		"Standing permission never overrides the rules below",
+		// The command must match the user's allow rule.
+		"Run it as a **standalone** command: exactly `amux agent done`, never chained with `&&`, `;`, `|` or anything else",
+		"`Bash(amux agent done)`",
+		"do not retry, rephrase or work around it",
 		// Ask on any doubt.
 		"**Ask instead — do not auto-archive — when ANY of these is true:**",
 		"trailing questions, offered follow-ups, or open decisions",

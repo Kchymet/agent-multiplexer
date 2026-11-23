@@ -128,7 +128,7 @@ var goldenFrames = []struct {
 			Caps: &SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true},
 		}, {
 			ID: "api", Title: "octo/api", Source: "workspace", Kind: "repo", Mode: "interactive",
-			Section: SectionRepos, State: StateIdle, Status: "idle · repo home",
+			Section: SectionRepos, State: StateStopped, Status: "stopped · repo home",
 			Cwd: "/home/u/.local/share/amux/sessions/api", CanAttach: true,
 			Runtime: RuntimeClaude, Role: RoleRepo,
 			Caps: &SessionCaps{Prompt: true, Interject: true, Cancel: true, Permission: true},
