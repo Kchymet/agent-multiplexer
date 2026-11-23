@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/access"
 	"amux/internal/claudegoal"
 	"amux/internal/core"
 	"amux/internal/prwatch"
+	"amux/internal/sessionreport"
 	"amux/internal/store"
 )
 
@@ -91,6 +93,41 @@ func TestMemberFinishWakesCoordinator(t *testing.T) {
 	goal := claudegoal.State{Objective: "ship", Status: claudegoal.StatusWaiting, Note: "m1", Created: 1}
 	if next := claudegoal.OnPrompt(goal, strings.TrimSpace(text), time.Now()); next.Objective != "ship" || next.Status != claudegoal.StatusActive {
 		t.Fatalf("wake did not continue the goal: %+v", next)
+	}
+}
+
+// An activity report publishes a new state at once (a rail poll), but a repeat
+// of the same state — running after every tool call — triggers nothing.
+func TestActivityReportPollsOnlyOnChange(t *testing.T) {
+	isolateHome(t)
+	r := &sessionRuntime{d: New("", nil, time.Hour)}
+	sess := store.Session{ID: "m", ClaudeID: convID("m"), Dir: t.TempDir()}
+	report := func(state string) bool {
+		t.Helper()
+		req := access.Request{Route: access.RouteAction, Verb: sessionreport.Activity, Fields: map[string]string{sessionreport.FieldState: state}}
+		if err := r.applySessionReport(sess, "gen", req); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-r.d.pollNow:
+			return true
+		default:
+			return false
+		}
+	}
+	for i, tc := range []struct {
+		state string
+		poll  bool
+	}{
+		{core.StateRunning, true}, // first report
+		{core.StateRunning, false},
+		{core.StateRunning, false},
+		{core.StateReady, true},
+		{core.StateReady, false},
+	} {
+		if got := report(tc.state); got != tc.poll {
+			t.Fatalf("report %d (%s): poll triggered = %v, want %v", i, tc.state, got, tc.poll)
+		}
 	}
 }
 
