@@ -13,7 +13,7 @@ import (
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// A member row carries its PRs (the `prs` field of `amux status --json`) and a
+// A member row carries its PRs (the `prs` field of `amux ls --json`) and a
 // short PR suffix; a goal coordinator's status names its goal status.
 func TestPollSurfacesPRsAndGoalStatus(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))

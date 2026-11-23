@@ -184,7 +184,7 @@ func waitFor(t *testing.T, cond func() bool) {
 
 // TestStatusRecordsRegisteredOwner: the owner the orchestrator reports at an
 // accepted registration lands in the status file (it defaults the pins of
-// `amux direct cloud enable`), and a later registration without one clears it
+// `amux cloud enroll enable`), and a later registration without one clears it
 // rather than leaving a stale owner beside a possibly different provider row.
 func TestStatusRecordsRegisteredOwner(t *testing.T) {
 	var mu sync.Mutex

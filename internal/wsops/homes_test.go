@@ -188,7 +188,7 @@ func TestCreateWorkspaceIsCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 	guide := string(b)
-	for _, want := range []string{"coordinator", "payments", kids[0].ID, "amux do add-agent " + rootID, "outside this filesystem namespace"} {
+	for _, want := range []string{"coordinator", "payments", kids[0].ID, "amux add " + rootID, "outside this filesystem namespace"} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("coordinator guide missing %q", want)
 		}
@@ -245,8 +245,8 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = cr.Close()
 	b, _ := os.ReadFile(filepath.Join(c.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux admin console", "payments", rootID, gitDir, oneOff.ID, "amux do steer", "amux do new-workgroup", "amux agent events",
-		"amux doctor", "amux direct clients list", "amux top", "amux repo add", "overseer", "amux queue list"} {
+	for _, want := range []string{"amux admin console", "payments", rootID, gitDir, oneOff.ID, "amux send overseer", "amux new", "amux add", "amux agent events",
+		"amux doctor", "amux device ls", "amux top", "amux repo add", "overseer", "amux inbox ls"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("console guide missing %q", want)
 		}
@@ -269,13 +269,13 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = or.Close()
 	b, _ = os.ReadFile(filepath.Join(o.Dir, "CLAUDE.md"))
-	for _, want := range []string{"amux overseer", "payments", rootID, "amux queue list", "amux agent items --inbox",
-		"from_item=", "set-archived", "Never answer for the user", "admin console"} {
+	for _, want := range []string{"amux overseer", "payments", rootID, "amux inbox ls", "amux agent items --inbox",
+		"from_item=", "amux archive <workgroup>", "Never answer for the user", "admin console"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("overseer guide missing %q", want)
 		}
 	}
-	for _, never := range []string{"amux direct enroll", "amux auth login", "amux do delete", "amux do move", "verb=permission", "amux do add-agent"} {
+	for _, never := range []string{"amux device connect", "amux harness login", "amux do delete", "amux do move", "verb=permission", "amux do add-agent", "amux add ", "amux move "} {
 		if strings.Contains(string(b), never) {
 			t.Errorf("overseer guide advertises %q", never)
 		}
@@ -292,7 +292,7 @@ func TestGuidesByRole(t *testing.T) {
 	}
 	_ = hr.Close()
 	b, _ = os.ReadFile(filepath.Join(home.Dir, "CLAUDE.md"))
-	for _, want := range []string{"home session", gitDir, "amux do new-workgroup -f repos=api", "linked worktree"} {
+	for _, want := range []string{"home session", gitDir, "amux new \"…\" --repo api", "linked worktree"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("repo guide missing %q", want)
 		}

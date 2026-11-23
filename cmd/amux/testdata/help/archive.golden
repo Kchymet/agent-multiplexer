@@ -1,0 +1,10 @@
+amux archive — finish a workgroup (refuses while PRs are open)
+
+usage: amux archive <id> [--force]
+
+Drops a workgroup (and its agents) or a single agent off the active rail.
+Refuses while an open pull request remains; --force overrides. amux unarchive
+puts it back.
+
+flags:
+  -f, --force  archive even with an open pull request

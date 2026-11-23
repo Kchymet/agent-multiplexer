@@ -1,6 +1,6 @@
 # Direct access (S1)
 
-`amux direct` lets the Harness web client and the Android app reach this host's
+`amux device` lets the Harness web client and the Android app reach this host's
 sessions over a route you already have (your LAN, or a VPN/tailnet you already
 run), with no cloud service in the data path. It is opt-in and off by default.
 
@@ -11,7 +11,7 @@ depends on any of them.
 
 ## What it is
 
-`amux direct serve` is a separate process: an HTTPS listener on a private
+`amux device serve` is a separate process: an HTTPS listener on a private
 address. It is the **remote authorization boundary**. Every request passes a
 destination-issued grant check before the process makes any elevated call to
 the local daemon (through `internal/hostbackend`, as the Harness relay provider
@@ -66,7 +66,7 @@ the **overseer**, which has no admin power and is reachable as described in
 2. **Run the server.**
 
    ```sh
-   amux direct serve --listen 192.168.1.20:8443 \
+   amux device serve --listen 192.168.1.20:8443 \
      --endpoint https://amux.home.example:8443 \
      --allow-origin https://harness.example \
      --tls-cert ~/certs/amux.pem --tls-key ~/certs/amux.key
@@ -83,7 +83,7 @@ the **overseer**, which has no admin power and is reachable as described in
 3. **Enroll a client.**
 
    ```sh
-   amux direct enroll --label "Pixel" --permissions read,steer --workgroup 771951
+   amux device connect --label "Pixel" --permissions read,steer --workgroup 771951
    ```
 
    The scope defaults to every ordinary session (`--all-sessions`); give one
@@ -96,15 +96,15 @@ the **overseer**, which has no admin power and is reachable as described in
    minting, the command prints the effective label, permissions and scope on
    stderr. It then prints one line on stdout, `amux-direct:1:<base64url
    JSON>`. Paste it into the client within its lifetime (default 10 minutes,
-   at most 1 hour). It works once. `amux direct enroll --help` lists every flag.
+   at most 1 hour). It works once. `amux device connect --help` lists every flag.
 
-   **Scan instead of paste.** `amux direct enroll --qr` draws the enrollment as
+   **Scan instead of paste.** `amux device connect --qr` draws the enrollment as
    a QR code for the Harness Android app (Backends → Connect a machine from a
    QR code):
 
    ```sh
-   amux direct enroll --qr                      # asks for the scope; read-only
-   amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr
+   amux device connect --qr                      # asks for the scope; read-only
+   amux device connect --label pixel --permissions read,steer --workgroup 771951 --qr
    ```
 
    - The code is a **local device ticket** (`amux-direct:2:`, see
@@ -118,7 +118,7 @@ the **overseer**, which has no admin power and is reachable as described in
      piped or pasted into the app's ticket box. There is no v1 bundle in this
      mode: a ticket cannot be redeemed as one.
    - The QR code and its instructions go to stderr when stderr is a terminal,
-     else to `/dev/tty`, so `amux direct enroll --qr | …` still shows it; with
+     else to `/dev/tty`, so `amux device connect --qr | …` still shows it; with
      no terminal at all `--qr` fails before minting.
    - The QR pins black-on-white colors (fixed xterm-256 entries), so it scans
      on dark and light themes. With `NO_COLOR` or `TERM=dumb` it uses the
@@ -130,21 +130,21 @@ the **overseer**, which has no admin power and is reachable as described in
      untouched). It is a live credential until used or expired: delete it
      after enrolling.
 4. **Manage clients.**
-   - `amux direct clients list` shows the enrolled clients.
-   - `amux direct clients revoke <client-id>` revokes one. It returns only
+   - `amux device ls` shows the enrolled clients.
+   - `amux device revoke <client-id>` revokes one. It returns only
      after that client's open streams have closed and its in-flight calls have
      finished or been cancelled.
-   - `amux direct reset-identity --yes` replaces the server identity and
+   - `amux device reset-identity --yes` replaces the server identity and
      revokes every client.
 
 ### Run it with the daemon
 
-Running `amux direct serve` by hand means keeping a terminal open and
+Running `amux device serve` by hand means keeping a terminal open and
 restarting it yourself. Instead, the daemon can run the listener for you. This
 is off by default and starts only after you turn it on:
 
 ```sh
-amux direct enable --listen 192.168.1.20:8443 \
+amux device enable --listen 192.168.1.20:8443 \
   --endpoint https://amux.home.example:8443 \
   --allow-origin https://harness.example \
   --tls-cert ~/certs/amux.pem --tls-key ~/certs/amux.key
@@ -173,7 +173,7 @@ identity, enrolled clients and cloud policy stay in the protected direct
 store, exactly as with a manual `serve`.
 
 **Lifecycle.** While `direct.enabled` is on, the daemon runs
-`amux direct serve --managed` as a child process. The child reads only the
+`amux device serve --managed` as a child process. The child reads only the
 saved settings, so its command line never changes and holds nothing
 sensitive. The daemon:
 
@@ -199,29 +199,29 @@ server id and configuration fingerprint. The daemon removes the marker before
 every start and after every exit, so a marker left by an earlier child cannot
 match a new one that reuses its pid. `enable` and `status` call the
 listener running only when that marker matches the daemon's current child and
-configuration. A manual `amux direct serve` answering the same admin socket
+configuration. A manual `amux device serve` answering the same admin socket
 never counts as the managed listener being ready.
 
 **Commands.**
 
-- `amux direct status [--json]` shows the listener's phase (`off`,
+- `amux device status [--json]` shows the listener's phase (`off`,
   `configured`, `starting`, `running` or `failed`, with the reason), the saved
   settings, the daemon supervisor's record (child pid, restarts, last error),
   the live server identity and cloud policy, and whether the provider is
   advertising enrollment.
-- `amux direct logs [-n lines]` shows the listener's log
+- `amux device logs [-n lines]` shows the listener's log
   (`~/.local/state/amux/direct.log`, rotated at 8 MiB).
-- `amux direct disable` turns the listener off and keeps its settings for the
+- `amux device disable` turns the listener off and keeps its settings for the
   next `enable`.
 - `amux config ls` and `amux config get direct.enabled` show the setting.
 
 **Disabling is not revocation.** `disable` stops the listener. Enrolled
 clients and the cloud enrollment policy stay as they are, so they cannot
 connect while it is off and work again after the next `enable`. To end access,
-use `amux direct clients revoke <client-id>`, `amux direct cloud disable` or
-`amux direct reset-identity --yes`.
+use `amux device revoke <client-id>`, `amux cloud enroll disable` or
+`amux device reset-identity --yes`.
 
-**Provider advertisement.** `amux provide --direct-enroll` still has a single
+**Provider advertisement.** `amux cloud run --direct-enroll` still has a single
 provider identity. Instead of reading the direct server's offer only when it
 registers, the running provider now re-checks it every 30 seconds. When the
 offer changes, the provider registers again with the same token and name:
@@ -233,12 +233,12 @@ offer changes, the provider registers again with the same token and name:
 Running panes and relay sessions carry over within the grace window. One
 failed check is treated as the listener restarting and ignored. Two in a row
 change the offer. A disabled listener therefore stops being advertised within
-about a minute. `amux direct status` reports the offer the provider actually
+about a minute. `amux device status` reports the offer the provider actually
 registered with (from its status file). An expected offer that is not yet
 registered is labelled as inferred, and a mismatch is flagged as stale.
 
 **Existing manual setups.** Nothing changes until you run `enable`. A manual
-`amux direct serve` keeps working. If one is running when you enable, it keeps
+`amux device serve` keeps working. If one is running when you enable, it keeps
 owning the store. The daemon's child then fails with "already owns the direct
 store", shown in `status`, and retries with backoff until you stop the manual
 server. To move over, stop the manual server and run `enable` with the same
@@ -251,7 +251,7 @@ On a machine in a Tailscale tailnet, one command configures the
 daemon-managed listener from the machine's tailnet identity:
 
 ```sh
-amux direct enable --tailnet
+amux device enable --tailnet
 ```
 
 This is the same managed listener as above, configured differently. It adds
@@ -371,7 +371,7 @@ source). For listen, endpoint and certificate, amux uses:
 3. a value derived from tailscaled
 
 An empty value (`--listen=`, `--endpoint=`) returns that setting to
-derivation. A plain `amux direct enable` keeps tailnet mode, and
+derivation. A plain `amux device enable` keeps tailnet mode, and
 `--tailnet=false` leaves it.
 
 **Re-derived at every start.** Each time the managed child starts, it reads
@@ -387,11 +387,11 @@ direct offer and the readiness marker all carry them.
 - While serving, the child re-reads its identity every 5 minutes. A changed
   name or address is reported in the log, `status` and `doctor` instead of
   being served silently. Re-deriving means a restart through the supervisor:
-  `amux direct disable && amux direct enable`, or the daemon's next start.
+  `amux device disable && amux device enable`, or the daemon's next start.
 
-**Plain `amux direct serve`.** With tailnet mode saved and `direct.enabled`
+**Plain `amux device serve`.** With tailnet mode saved and `direct.enabled`
 on, plain `serve` refuses, because the daemon owns that configuration. With it
-off (after `amux direct disable`), plain `serve` runs the saved tailnet
+off (after `amux device disable`), plain `serve` runs the saved tailnet
 configuration in the foreground. It re-derives and renews the same way, and the
 store lock still refuses to run beside another server. `serve` with flags is
 unchanged.
@@ -419,7 +419,7 @@ conflict, but only when all of these hold:
 
 Nothing is stopped or probed to decide this.
 
-**Status.** `amux direct status` and `amux doctor` add:
+**Status.** `amux device status` and `amux doctor` add:
 
 - name, port and certificate source
 - the *effective* listen address and endpoints, and the saved ones when they
@@ -447,7 +447,7 @@ depends on the control server: when it offers no certificate names, `enable
   and `--tailnet` cannot work there even with your own certificate, because it
   still needs LocalAPI for the name and address. Use the manual mode instead,
   with values from `tailscale status` and your certificate:
-  `amux direct enable --listen <100.x.y.z>:8443 --endpoint https://<name>:8443 --tls-cert … --tls-key …`.
+  `amux device enable --listen <100.x.y.z>:8443 --endpoint https://<name>:8443 --tls-cert … --tls-key …`.
   There is no re-derivation or renewal in that mode.
 - Windows is not supported.
 - Certificates from tailscaled are published in Certificate Transparency logs,
@@ -476,7 +476,7 @@ direct-client credentials are refused, and a refused caller writes nothing.
 **When no server is running,** `list`, `revoke` and `reset-identity` take the
 store's exclusive lock and require the same host proof. They never create a
 store. `enroll` (with or without `--qr`) needs a running server, because it
-publishes the server's endpoints into the bundle. All of `amux direct` refuses to run inside an agent
+publishes the server's endpoints into the bundle. All of `amux device` refuses to run inside an agent
 session.
 
 ## Wire contract
@@ -822,8 +822,8 @@ A permission is stored on the code, on the grant it becomes, and in the cloud
 ceiling, and it is copied unchanged on refresh. So every grant, refresh
 token, pending code, device ticket, bundle and cloud policy that exists before
 this change keeps exactly the powers it has on master. A new permission takes
-effect only when the operator names it in `amux direct enroll --permissions`
-or in the `amux direct cloud enable --permissions` ceiling. There is no `all`
+effect only when the operator names it in `amux device connect --permissions`
+or in the `amux cloud enroll enable --permissions` ceiling. There is no `all`
 alias.
 
 **Compatibility.**
@@ -1075,7 +1075,7 @@ check units should use realistic values.
 `"account_binding":{"profile_id":"claude:central","source":"central"}`. A row
 bound to a non-central profile carries its `source` only.
 
-**Consent.** Issuing an `accounts` grant (`amux direct enroll --permissions
+**Consent.** Issuing an `accounts` grant (`amux device connect --permissions
 read,accounts --all-sessions`), or a cloud ceiling that includes it, is the
 host's consent. The relay's `--account-status` flag does not apply to direct,
 and direct has no account-use switch: the explicit steer, manage and create
@@ -1224,10 +1224,10 @@ Every answer, item triage and overseer steer made over direct is appended to
   - **Two records per action.** One is written before the daemon is asked
     (`admitted`) and one with the outcome. If the first cannot be written, the
     request answers 503 and nothing runs.
-- **Reading it.** `amux direct audit [--client <id>] [--limit N] [--json]`
+- **Reading it.** `amux device audit [--client <id>] [--limit N] [--json]`
   reads it, host-only, the same way `clients list` does.
 
-**Revocation** is the existing `amux direct clients revoke`.
+**Revocation** is the existing `amux device revoke`.
 
 ## S1 limits
 

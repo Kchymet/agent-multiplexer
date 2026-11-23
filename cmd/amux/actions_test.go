@@ -13,7 +13,7 @@ import (
 // never comes. Each is refused with where to go instead.
 func TestCmdDoRejectsUnscriptableActions(t *testing.T) {
 	tests := []struct{ action, want string }{
-		{core.ActionQuery, "amux workgroup ls"},
+		{core.ActionQuery, "amux ls"},
 		{core.ActionPaneOpen, "dashboard"},
 	}
 	for _, tt := range tests {
@@ -52,12 +52,12 @@ func TestCmdDoUnknownActionTeaches(t *testing.T) {
 // outside an agent: naming the unset variable is not enough — it has to say
 // where the command does work, and how to name the target from anywhere else.
 func TestNotInsideAgentExplainsWhere(t *testing.T) {
-	msg := notInsideAgent("amux agent done", "amux workgroup archive <id>")
+	msg := notInsideAgent("amux agent done", "amux archive <id>")
 	for _, want := range []string{
 		"fixed session context unavailable",
 		"terminal tab",
-		"amux workgroup archive <id>",
-		"amux workgroup ls",
+		"amux archive <id>",
+		"amux ls",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("notInsideAgent() = %q, missing %q", msg, want)

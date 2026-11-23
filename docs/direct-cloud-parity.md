@@ -1,9 +1,9 @@
 # Cloud relay → direct parity matrix
 
 This audits every operation the Harness cloud relay carries to a machine
-(`amux provide` ↔ Harness): the `MuxMsg` types handled in
+(`amux cloud` ↔ Harness): the `MuxMsg` types handled in
 `internal/provider/provider.go`, plus the Harness routes and client payloads
-that reach them. For each it gives the direct (`amux direct`) equivalent, its
+that reach them. For each it gives the direct (`amux device`) equivalent, its
 permission and endpoint, the evidence, and what is still open. It was written
 against master 7fe4ed9 plus PR #299.
 
@@ -46,7 +46,7 @@ user can already do these things from a direct client UI.
 | `account-request` with `status` | `GET /direct/v1/accounts` | accounts, `all_sessions` | unit (gate on route, capabilities, list, watch, watch update; projection; attribution matrix); live `TestDirectLiveAccounts` | backend parity |
 | `account-ceremony`, `default`, `login`, `logout`, `rebind` | none | — | `provider/accounts.go` refuses all but status remotely | not a cloud function: local CLI/TUI only |
 | `spawn`/`input`/`resize`/`kill` panes (provider `--allow-compute`) | none | — | — | not a machine-session workflow (see below) |
-| `direct-enroll` | `amux direct enroll`, ticket claim | host | cloud fixtures | Harness brokers direct enrollment |
+| `direct-enroll` | `amux device connect`, ticket claim | host | cloud fixtures | Harness brokers direct enrollment |
 | `register`, `ping`, `pong`, `reset`, `provider-revoke` | `hello`, `token`, `revoke` | — | S1 | transport equivalent |
 | Session-event push (FCM on `permission_request` and watched `turn_end`) | none | — | — | **gap**: design pending the user's decision (see below) |
 

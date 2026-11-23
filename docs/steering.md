@@ -2,8 +2,8 @@
 
 amux has exactly one way to put text into an interactive agent (Claude Code,
 Codex): it types keys into the agent's terminal pane. Every sender goes through
-that path: steering `prompt` and `interject` (console, CLI, direct and Android
-clients), PR-watcher and member wake-ups, the Claude goal resume and restart
+that path: steering `prompt` and `interject` (console, CLI — `amux send` and `amux do
+steer` — direct and Android clients), PR-watcher and member wake-ups, the Claude goal resume and restart
 nudges, and question replies. The single implementation is
 `internal/daemon/typed_delivery.go` (`deliverTyped`). The per-harness key maps
 are in `internal/agent/keys.go`. **Read both before changing steering.** Most

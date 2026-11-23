@@ -15,7 +15,7 @@ import (
 // overseer steer a direct client makes, in direct-audit.jsonl in the direct
 // state directory (0600). A record is written before the daemon is asked to
 // act (outcome "admitted") and again with the outcome; if the first write
-// fails the request is refused and nothing runs. `amux direct audit` reads it
+// fails the request is refused and nothing runs. `amux device audit` reads it
 // (host-only, over the admin socket or offline under host proof).
 
 // AuditFileName is the log's file name in the direct state directory.

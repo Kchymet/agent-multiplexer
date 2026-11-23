@@ -21,19 +21,19 @@ import (
 
 func cmdAuth(args []string) error {
 	if len(args) == 0 || (len(args) == 1 && isHelpFlag(args[0])) {
-		return showHelp("auth")
+		return showHelp("harness auth")
 	}
 	run, ok := authSubcommands[args[0]]
 	if !ok {
-		return usagef("unknown auth subcommand %q", args[0])
+		return usagef("unknown harness auth subcommand %q", args[0])
 	}
 	return run(args[1:])
 }
 
 var authSubcommands = map[string]func([]string) error{
 	"login":    authLogin,
-	"accounts": authAccounts,
 	"logout":   func(a []string) error { return authAccountMutation("logout", a) },
+	"accounts": authAccounts,
 	"default":  func(a []string) error { return authAccountMutation("default", a) },
 	"rebind":   func(a []string) error { return authAccountMutation("rebind", a) },
 	"status":   authStatus,
@@ -42,7 +42,7 @@ var authSubcommands = map[string]func([]string) error{
 
 func authRestart(args []string) error {
 	if len(args) > 1 || (len(args) == 1 && args[0] != "--force") {
-		return fmt.Errorf("usage: amux auth restart [--force]")
+		return fmt.Errorf("usage: amux harness auth restart [--force]")
 	}
 	return reloadClaudeAuth(len(args) == 1)
 }
@@ -59,13 +59,13 @@ func authStatus(args []string) error {
 	if sessionContextRestricted() {
 		harness, rest := authHarness(args)
 		if len(rest) != 0 {
-			return fmt.Errorf("usage: amux auth status [claude|codex]")
+			return fmt.Errorf("usage: amux harness auth status [claude|codex]")
 		}
 		return authMachineStatus(harness)
 	}
 	harness, rest := authHarness(args)
 	if len(rest) != 0 {
-		return fmt.Errorf("usage: amux auth status [claude|codex]")
+		return fmt.Errorf("usage: amux harness auth status [claude|codex]")
 	}
 	if c, err := startupDial(); err == nil {
 		c.Close()
@@ -92,7 +92,7 @@ func authLogin(args []string) error {
 		case "--token-stdin":
 			stdin = true
 		default:
-			return fmt.Errorf("usage: amux auth login <claude|codex> [--api-key] [--token-stdin]")
+			return fmt.Errorf("usage: amux harness login <claude|codex> [--api-key] [--token-stdin]")
 		}
 	}
 	if harness == "codex" && mode == "subscription" && stdin {
@@ -115,7 +115,7 @@ func claudeAuthStatus() error {
 		return fmt.Errorf("central Claude credential unusable: %w", err)
 	}
 	if !st.Configured {
-		fmt.Println("central login: none — run `amux auth login claude` to create one for all sessions")
+		fmt.Println("central login: none — run `amux harness login claude` to create one for all sessions")
 		return nil
 	}
 	fmt.Printf("central login: setup-token %s, stored %s, generation %d\n",
@@ -208,9 +208,9 @@ func codexAuthStatus() error {
 		}
 		fmt.Printf("central login: ChatGPT %s%s\n", st.Account.Email, plan)
 	case st.Account.Type == "":
-		fmt.Println("central login: none — run `amux auth login codex`")
+		fmt.Println("central login: none — run `amux harness login codex`")
 	default:
-		fmt.Printf("central login: %s (central mode needs a ChatGPT login; run `amux auth login codex`)\n", st.Account.Type)
+		fmt.Printf("central login: %s (central mode needs a ChatGPT login; run `amux harness login codex`)\n", st.Account.Type)
 	}
 	return nil
 }

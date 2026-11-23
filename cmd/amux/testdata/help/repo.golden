@@ -1,0 +1,13 @@
+amux repo — track the repositories agents get worktrees of
+
+usage: amux repo <command>
+
+commands:
+  add [<src>]            track a repo: a gh owner/name slug, a git URL, or a local path
+  ls                     list tracked repositories
+  rm <name>              stop tracking a repository
+  set <agent> <repo>...  re-scope an agent to exactly these tracked repos
+  grant <coordinator> [--all | --none | repo...]
+                         set a workgroup's repo ceiling (host only)
+
+Run 'amux repo <command> --help' for details.

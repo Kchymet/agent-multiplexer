@@ -9,11 +9,11 @@ Owner: b9731f (backend: agent-multiplexer + harness). Android: ba9a3a. Reviewer:
 
 ## 1. Summary
 
-An Android client that talks to a machine **directly** (`amux direct`, its own grant) may opt in, per direct backend, to **content-free cloud wake-ups**.
+An Android client that talks to a machine **directly** (`amux device`, its own grant) may opt in, per direct backend, to **content-free cloud wake-ups**.
 
 - **Detection.** The host's direct server watches the events the cloud relay already notifies on: `permission_request`, and `turn_end` for session instances watched per subscription.
 - **Host wake store.** The host writes a wake record and an outbox item to its own wake store. Wake authority lives in `grants.json` (§6.2).
-- **Forwarding.** `amux provide` forwards an opaque `(route_id, wake_id)` to Harness over its authenticated connection.
+- **Forwarding.** `amux cloud` forwards an opaque `(route_id, wake_id)` to Harness over its authenticated connection.
 - **Delivery.** Harness checks route-bound authority from server state only, then sends a data-only FCM message to the devices of **one** Android client.
 - **Fetch and actions.** The phone fetches details directly with its own direct credential, and answers with the existing direct `permission` verb.
 
@@ -121,8 +121,8 @@ Not wake-worthy:
 
 ### 6.1 Opt-in (off by default)
 
-- **Host policy.** Admin ops `wake_enable`, `wake_disable`, `wake_status` (SubjectHost only). CLI: `amux direct wake enable [--owner --provider]`, `disable`, `status [--json]`. Pins default from the live provider registration through the cloud resolver.
-- **Provider.** `amux provide --direct-wake` (`AMUX_PROVIDER_DIRECT_WAKE=1` / `direct-wake = true`). The provider advertises `direct-wake-v1` + `capabilities.directWake.serverId` only while the policy is enabled with matching pins. It re-checks every 30 s and re-registers after two consecutive changes.
+- **Host policy.** Admin ops `wake_enable`, `wake_disable`, `wake_status` (SubjectHost only). CLI: `amux cloud wake enable [--owner --provider]`, `disable`, `status [--json]`. Pins default from the live provider registration through the cloud resolver.
+- **Provider.** `amux cloud run --direct-wake` (`AMUX_PROVIDER_DIRECT_WAKE=1` / `direct-wake = true`). The provider advertises `direct-wake-v1` + `capabilities.directWake.serverId` only while the policy is enabled with matching pins. It re-checks every 30 s and re-registers after two consecutive changes.
 - **Not required:** `sessions`, `runtime-events`, `direct-enroll-v1`.
 
 ### 6.2 Durability: authority in `grants.json`, wake data in `wake.json`

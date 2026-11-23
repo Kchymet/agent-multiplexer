@@ -6,7 +6,7 @@
 // clock reads (callers pass now), no GitHub calls. The Registry (registry.go)
 // runs the Sources (source.go) that produce the items. That keeps one definition of "open",
 // "settled" and "what a workgroup is waiting on" for every consumer — the rail,
-// `amux status`, the direct API, the coordinator's own done check (MemberSettled)
+// `amux ls`, the direct API, the coordinator's own done check (MemberSettled)
 // and the archive guard (ghpr.MatchesBranch for attribution).
 package enrich
 

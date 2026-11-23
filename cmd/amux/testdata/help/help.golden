@@ -1,0 +1,15 @@
+amux help — help for amux or a command (help agent, help api, help --all)
+
+usage: amux help [<command>...] [--all]
+
+amux help <command> is the same as amux <command> --help. Two topics cover
+the commands that are not on the main page:
+  amux help agent   commands an agent runs about itself (amux agent ...)
+  amux help api     the scripting API: one daemon action per call (amux do ...)
+amux help --all prints every command, flag, action and example in one page,
+then the table of old spellings and what they are now.
+
+examples:
+  amux help new
+  amux help api
+  amux help --all

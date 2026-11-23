@@ -95,7 +95,7 @@ direct HTTPS access for Harness web and Android clients.
 | **Control console** | `internal/console` | The built-in `⚙` agent with machine-wide context (one of the default sessions; the others are resolved in `wsops`). |
 | **Git / GitHub** | `internal/git`, `internal/gh` | Bare clones + worktrees; `gh`-driven repo discovery/clone. |
 | **Claude config** | `internal/claudecfg` | A Claude Code home (`Home`): transcript lookups, pre-trust, status hooks, model defaults — and what of it is config vs state vs auth (`Template`). |
-| **Config templates** | `internal/cfghome` | Seeds each agent's private copy of your harness config, scans it for the agent's edits, and promotes/resets them (`amux sandbox`). See `docs/sandbox-config.md`. |
+| **Config templates** | `internal/cfghome` | Seeds each agent's private copy of your harness config, scans it for the agent's edits, and promotes/resets them (`amux harness sandbox`). See `docs/sandbox-config.md`. |
 | **Codex config** | `internal/codexcfg` | The Codex-CLI counterpart: `$CODEX_HOME` layout, rollout-session discovery/resume, project trust in `config.toml`, model defaults. |
 | **Daemon** | `internal/daemon` | Owns agent processes in an engine and polls sources so UIs can attach/detach without stopping agents. |
 
@@ -112,18 +112,18 @@ direct HTTPS access for Harness web and Android clients.
   or no-arg to fuzzy-find from your GitHub remotes via `gh`.
 - **Workgroup** — a coordinator and any number of member agents, shown under
   **WORKGROUPS**. A workgroup can be limited to one repo or granted several.
-  Create with `w`, `amux workgroup new`, or `amux workgroup repo <repo>`.
+  Create with `w`, `amux new`, or `amux new --repo <repo>`.
   Repository selection sets the coordinator's explicit grant ceiling and seeds
   an idle first member; the task belongs to the coordinator. Without a repository
   selection — including an empty `repos` field, as remote clients send — the
   coordinator may assign every repo tracked on the host, live (repos tracked
   later included). The host narrows or seals that with
-  `amux workgroup grants <id> [--all | --none | repo...]`.
+  `amux repo grant <id> [--all | --none | repo...]`.
 - **Agent** — one agent (Claude Code or Codex, picked per agent by its **harness**)
   with its own subdirectory and a git **worktree per repo** it works on. An agent
   always belongs to exactly one workgroup and appears under it; there is no
   agent outside a workgroup. `m` moves one into a new workgroup of its own
-  (limited to its repos, with a confirmation dialog) and `amux workgroup move`
+  (limited to its repos, with a confirmation dialog) and `amux move`
   into an existing workgroup whose repos cover the agent's. Older one-off agents
   on a repo become workgroups limited to that repo when the upgraded daemon
   first opens the database (see [Versioning](docs/versioning.md)).
@@ -152,10 +152,10 @@ direct HTTPS access for Harness web and Android clients.
   (settings, memory, commands, skills, plugins, MCP servers — not your transcripts
   or history) under its own dir, and `CLAUDE_CONFIG_DIR` / `CODEX_HOME` point the
   harness at it. The agent may edit its copy. Authentication is central by
-  default: `amux auth login` (Claude `setup-token`) and `amux auth login codex`
+  default: `amux harness login` (Claude `setup-token`) and `amux harness login codex`
   (ChatGPT) sign in once on the host, and the daemon delivers only a session
   credential, never a refresh token, to each authorized session. TUI/web Accounts
-  and `amux auth accounts` show one Claude and one Codex configuration and limits;
+  and `amux harness auth accounts` show one Claude and one Codex configuration and limits;
   configuration is through amux CLI/TUI only; web Accounts is read-only. Every
   workload follows the central configuration: each new harness process uses the
   newest successfully configured login (another account, subscription or API key
@@ -166,7 +166,7 @@ direct HTTPS access for Harness web and Android clients.
   receiving session. See [machine accounts](docs/machine-accounts.md) and
   [central authentication](docs/sandbox-config.md#central-authentication).
   amux compares each copy with the template and flags an agent's edits on the rail
-  (`⚙ N config edits`); `amux sandbox drift` lists them and `amux sandbox promote |
+  (`⚙ N config edits`); `amux harness sandbox drift` lists them and `amux harness sandbox promote |
   reset <id> <path>` propagates or discards each one — nothing propagates on its
   own. See `docs/sandbox-config.md`.
 - **Archive** — `x` marks an agent (or workgroup) done/archived: it drops into a
@@ -216,12 +216,12 @@ interchangeable, and the names are older than the vocabulary above — so:
 | id | set by | what it actually names |
 |----|--------|------------------------|
 | `AMUX_WORKGROUP` | amux, into every pane it launches | The **store id of the agent** whose pane you are in. Despite the name it is the *agent's* id, not its workgroup's — self-scoped commands (`amux agent name`, `amux agent done`) read it to find their caller. `AMUX_WORKSPACE` is a back-compat alias holding the same value. |
-| `AMUX_ROOT` | amux, alongside it | The **workgroup id** that agent belongs to — the container `amux workgroup ls` lists. |
+| `AMUX_ROOT` | amux, alongside it | The **workgroup id** that agent belongs to — the container `amux ls` lists. |
 | `AMUX_SESSION_ID` | amux (pinned at create), adopted from the harness for kinds that mint their own | The **conversation id**: the Claude Code / Codex session uuid. It keys activity reports (`amux agent status`) and names the transcript file `amux agent sessions` prints. Empty until a self-minting harness (Codex) has adopted one. |
 
 - **The db id** is what the first two hold: a short hex id (e.g. `3f7a9c`) that
   the store mints for *every* session row — workgroup roots and agents alike.
-  It is what every CLI `<id>` argument takes, and what `amux workgroup ls` prints
+  It is what every CLI `<id>` argument takes, and what `amux ls` prints
   in its first column (workgroups flush left, their agents indented).
 - **The conversation id** is a uuid and belongs to the harness, not to amux. It
   never appears as a CLI `<id>`; it appears in transcript paths.
@@ -232,7 +232,7 @@ interchangeable, and the names are older than the vocabulary above — so:
   never collide and each one's PR watcher claims only its own PRs. See
   [branch names](docs/branches.md).
 
-So: an id from `amux workgroup ls` addresses something in the rail — pass it to
+So: an id from `amux ls` addresses something in the rail — pass it to
 `amux workgroup …` or `amux do …`. A uuid addresses a transcript. If a command
 says `$AMUX_WORKGROUP unset`, it is a self-scoped command asking to be run from
 inside an agent's own terminal tab; from anywhere else, name the target by id.
@@ -344,7 +344,7 @@ Global navigation uses configurable chords (no prefix):
 | `a` | add an agent — on a repo, a normal workgroup limited to that repo; on a workgroup, another member (settings form) |
 | `w` | new workgroup (coordinator settings; optional repos limit it and seed a first agent) |
 | `R` | track a new repo — GitHub `owner/name`, a git URL, or a local path (form) |
-| `m` | move the selected agent into a new workgroup of its own (confirm); `amux workgroup move` targets an existing one |
+| `m` | move the selected agent into a new workgroup of its own (confirm); `amux move` targets an existing one |
 | `r` | rename the selected agent/workgroup (display name) |
 | `x` | archive / restore the selected agent |
 | `D` | permanently delete the selected agent/workgroup — worktrees + branch (confirm) |
@@ -471,37 +471,45 @@ Captures for each mode are in
 
 Help is hierarchical: `amux --help` lists the top-level commands, `amux <command>
 [<subcommand>...] --help` details any level (flags, defaults, `amux do` action
-fields, examples), and `amux --help --all` (also `-h -a`, `--all-help`) prints the
-entire tree as one plain-text page — the form to hand an agent. The tree lives in
+fields, examples), and `amux help --all` (also `amux --help --all`, `-h -a`,
+`--all-help`) prints the entire tree as one plain-text page — the form to hand an
+agent — ending with the table of old spellings. The tree lives in
 `cmd/amux/helptree.go`; every view, and the top-level dispatch, comes from it.
 
+Plain verbs cover everyday work; a few nouns cover occasional management:
+
 ```
-amux                       # native TUI
-amux serve [listen...]     # legacy relay (TLS unix + optional tls: specs)
-amux harness               # standalone raw-stdio mode is disabled
-amux repo add <src>        # track a repo: git URL | local path | OWNER/REPO (gh)
-amux repo ls | rm <name>   # list / untrack repos (rm refuses if agents use it)
-amux workgroup new         # workgroup config page (short form: wg)
-amux workgroup repo <repo> # workgroup limited to one repo, with a first agent
-amux workgroup create <repo>...  # workgroup limited to those repos, with a first agent
-amux workgroup move <agent> [<root>|--new]  # into another workgroup, or a new one of its own
-amux workgroup archive | unarchive <id>
-amux workgroup rm|rename|ls
-#   archive/rm (and `amux agent done`) refuse while the session's amux/<broker>/<wg>-<member>*
-#   branches still head an open PR; finish or close it, or pass --force (host).
-#   If gh is unavailable or errors, the check is skipped with a warning.
-amux status [--json]       # print rail state as text (--json for the raw snapshot)
-amux refresh               # ask the daemon to re-poll its sources now
-amux config [ls|get|set|unset|path]  # TUI keybindings and Codex control mode
-amux auth status|login|restart     # shared Claude account selection / reload
-amux sandbox drift [<id>]  # config edits agents made to their private copy of your harness config
-amux sandbox promote | reset <id> <path>  # propagate an agent's config edit to yours / discard it
-amux do <action> ...       # drive any daemon action from scripts (see below)
-amux provide [<addr>] [flags]     # provider mode: serve panes to a remote orchestrator
-amux provide install | uninstall  # run provider mode as a user service
-amux version                # CLI + connected daemon/database versions and compatibility
-amux doctor                 # versions/compatibility plus dependencies and runtime health
+amux                        # open the dashboard (native TUI)
+amux new ["task"]           # start a workgroup (no args: the create form)
+amux ls [--all] [--json]    # workgroups and agents (state, PRs)
+amux open <id>              # open the dashboard on a workgroup or agent
+amux send <id> "text"       # message an agent or workgroup (queued if busy; --now / --stop)
+amux add <wg> "task"        # add an agent to a workgroup
+amux archive <id>           # finish a workgroup (refuses while PRs are open)
+
+amux inbox [ls|answer|dismiss|ack]          # questions and follow-ups waiting for you
+amux repo add|ls|rm|set|grant               # tracked repos; an agent's repos; a workgroup's ceiling
+amux device connect|ls|revoke|status|enable # phones and browsers that reach this machine directly
+amux cloud connect|status|disconnect        # reach this machine through Harness cloud
+amux harness ls|install|update|login        # Claude Code / Codex installs and logins
+amux config | daemon | doctor | update | version | help
 ```
+
+Less frequent: `amux rename`, `unarchive`, `rm`, `move`, `recreate`, `top`,
+`refresh`, `licenses`. Agents use `amux agent ...` about themselves (`amux help
+agent`); scripts use `amux do <action>` (`amux help api`).
+
+- `amux new "task"` hands the task to a new workgroup's coordinator, which starts
+  the member agents it needs. `--repo` limits the workgroup (and seeds a first
+  member); detailed options (`--harness`, `--model`, `--coordinator-model`,
+  `--interactive`) are on `amux new --help`.
+- `archive`, `rm` (and `amux agent done`) refuse while the session's
+  `amux/<broker>/<wg>-<member>*` branches still head an open PR; finish or close it,
+  or pass `--force` (host). If gh is unavailable or errors, the check is skipped
+  with a warning.
+- Old spellings (`amux status`, `amux workgroup ...`, `amux queue`, `amux direct
+  ...`, `amux provide`, `amux auth`, `amux sandbox`, `-f agent=`) keep working;
+  on a terminal they print the new spelling on stderr.
 
 Version compatibility is based on the CLI↔daemon protocol and the
 daemon↔database schema, not equality of release strings. See
@@ -533,28 +541,28 @@ mkdir -p ~/.config/amux
 chmod 600 ~/.config/amux/provider.token
 # Save the orchestrator-issued token in this file; do not overwrite an existing token.
 # Keep the token itself out of shell history.
-amux provide install --orchestrator orch.example.com:7443 \
+amux cloud connect --orchestrator orch.example.com:7443 \
                      --token-file ~/.config/amux/provider.token --name laptop \
                      --allow-compute=false --publish-sessions=false \
                      --runtime-events=false --read-only-sessions=false
 amux doctor   # Provider: config, token mode, service state, last heartbeat
 ```
 
-`install` writes `~/.config/amux/provider.toml` and a user service — a systemd
+`amux cloud connect` writes `~/.config/amux/provider.toml` and a user service — a systemd
 user unit on Linux/WSL2, a launchd agent on macOS — that runs a bare
-`amux provide` from that config. The bearer token never enters the config file or
+`amux cloud run` from that config. The bearer token never enters the config file or
 the command line: it stays in the 0600 file the config points at, so rotating it
 is one write. On Linux/WSL2 run `loginctl enable-linger $USER` so the service
-outlives your terminal; install and doctor both remind you. `amux provide
-uninstall` reverses it.
+outlives your terminal; install and doctor both remind you. `amux cloud
+disconnect` reverses it.
 
-To run it in the foreground instead, hand `amux provide` the address itself.
+To run it in the foreground instead, hand `amux cloud run` the address itself.
 Flags read the same before or after it:
 
 ```sh
-amux provide orch.example.com:7443 --token-file ~/.config/amux/provider.token \
+amux cloud run orch.example.com:7443 --token-file ~/.config/amux/provider.token \
              --ca private-ca.pem --label zone=home --publish-sessions
-amux provide --token-file ~/.config/amux/provider.token --ca private-ca.pem \
+amux cloud run --token-file ~/.config/amux/provider.token --ca private-ca.pem \
              --label zone=home --publish-sessions orch.example.com:7443
 ```
 
@@ -614,7 +622,7 @@ sessions are not available in protected panes. IP networking remains shared.
 Protected WSL sessions omit Windows drives and interop paths, so `wslview` and a
 Windows `.exe` are not agent-side browser solutions. Protected macOS sessions
 deny LaunchServices and `lsopen` rather than granting a URL-unsafe host opener.
-Run `amux auth login` / `amux auth login codex` in a host terminal and copy any
+Run `amux harness login` / `amux harness login codex` in a host terminal and copy any
 printed authorization URL into the host browser. Already enrolled sessions keep
 their selected model identity. Claude receives its scoped central credential;
 general Keychain access remains blocked. GitHub CLI and Git HTTPS authentication
@@ -663,7 +671,7 @@ amux                         # select a repo and press a to create an agent
 amux then keeps itself current: the daemon checks for a new release every few
 hours and installs it. A daemon restart stops the agents it hosts, so the
 daemon only restarts into a new release once no agents are running; until then
-`amux version`, `amux doctor` and `amux status` report the update as pending.
+`amux version`, `amux doctor` and `amux ls` report the update as pending.
 `amux update` installs the latest release on demand (`--check` only reports).
 Opt out with `amux config set update.auto off` or `AMUX_NO_AUTO_UPDATE=1`. See
 [upgrading](docs/versioning.md#upgrading) for the details.
@@ -746,7 +754,7 @@ at daemon start). See [goal mode](docs/default-sessions.md#goal-mode).
 The daemon tracks the GitHub PRs each workgroup member owns (head branch
 `amux/<broker>/<wg>-<member>[-suffix]`; see [branch names](docs/branches.md)) with the host's `gh` login, one `gh pr list` per
 repository every 3 minutes (`AMUX_PR_POLL_INTERVAL`, `off` to disable). Members'
-rows in `amux status --json` carry a `prs` list, every change is a `pr_state`
+rows in `amux ls --json` carry a `prs` list, every change is a `pr_state`
 event in `amux agent events <member>`, and a meaningful transition (CI red, CI
 green after red, merge conflict, review, merged, closed, draft → ready) wakes
 the coordinator with one short de-duplicated prompt once it is idle. A goal

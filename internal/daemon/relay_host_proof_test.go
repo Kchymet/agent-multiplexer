@@ -61,7 +61,7 @@ func TestDirectAdminThroughRealHostListener(t *testing.T) {
 		t.Fatal("session proof admitted by the host listener")
 	}
 
-	// Through the direct admin channel, exactly as `amux direct` runs it.
+	// Through the direct admin channel, exactly as `amux device` runs it.
 	root := filepath.Join(tmp, "direct")
 	a, err := direct.OpenAuthority(root, direct.Lifetimes{}, nil)
 	if err != nil {

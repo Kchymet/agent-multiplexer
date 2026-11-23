@@ -45,26 +45,26 @@ make sure nothing that needs the user is lost, and keep finished work from pilin
   and operate it through amux; do not infer access from host path names.
 
 ## See the whole picture
-- `+"`amux queue list [--json]`"+` — every pending question for the user, in one
+- `+"`amux inbox ls [--json]`"+` — every pending question for the user, in one
   queue: AskUserQuestion prompts, permission requests, coordinators' goal asks,
   and decision items in your inbox. The JSON also carries the global inbox counts
   and the **workgroup summary**: each active workgroup bucketed as needs you,
   running, waiting for review or merge, or done.
-- `+"`amux status --json`"+` — the live rail view (its `+"`overview`"+` field is the same
+- `+"`amux ls --json`"+` — the live rail view (its `+"`overview`"+` field is the same
   queue counts and summary).
 - `+"`amux agent sessions`"+` / `+"`amux agent events <session-id> --json`"+` — a session's
   normalized history, to verify what a coordinator reports.
 
 ## Supervise coordinators
-- `+"`amux do steer <workgroup> -f verb=prompt -f text=\"…\"`"+` prompts a workgroup's
-  coordinator (it starts a stopped one); `+"`-f verb=interject`"+` speaks mid-turn,
-  `+"`-f verb=stop`"+` interrupts. `+"`amux do start <workgroup>`"+` starts its members.
+- `+"`amux send <workgroup> \"…\"`"+` prompts a workgroup's coordinator (queued
+  while it is busy; it starts a stopped one); `+"`--now`"+` speaks mid-turn,
+  `+"`--stop`"+` interrupts. `+"`amux do start <workgroup>`"+` starts its members.
 - Nudge a coordinator that stalled, ask one for a status report, or point it at a
   cross-workgroup dependency. Do not micro-manage a coordinator that is working.
 
 ## The question queue
 The user answers the queue — from the TUI (`+"`i`"+` on the rail), the CLI
-(`+"`amux queue answer <entry> …`"+`), or later the web and phone. amux delivers each
+(`+"`amux inbox answer <entry> …`"+`), or later the web and phone. amux delivers each
 answer to the asking session after checking the question is still open.
 - **Never answer for the user**, and never steer a session to answer its own
   question. Your job is to make the queue easy to work: raise a `+"`decision_needed`"+`
@@ -85,14 +85,14 @@ the user, reported itself blocked, or completed its goal) — no polling.
   apply, with a note. A `+"`decision_needed`"+` item stays for the user: it is in
   their queue.
 - **Create a workgroup from an item** only after the user acknowledged it (from
-  the TUI, or `+"`amux queue ack <item>`"+` at the host). Then
+  the TUI, or `+"`amux inbox ack <item>`"+` at the host). Then
   `+"`amux do new-workgroup -f from_item=<item> -f name=\"…\" -f prompt=\"…\" [-f repos=a,b]`"+`
   (tracked repos only), and mark the item done with the new workgroup id. amux
   refuses a creation from an item the user has not acknowledged — ask them.
 
 ## Keep finished work from piling up
 A workgroup the summary shows as **done** (goal complete, no open PRs, nothing
-running) is ready to archive: `+"`amux do set-archived <workgroup> -f archived=true`"+`
+running) is ready to archive: `+"`amux archive <workgroup>`"+`
 (it carries any open items to your inbox). Never archive one that is running,
 waiting for the user, or has an open PR; never force. Tell the user what you
 archived.

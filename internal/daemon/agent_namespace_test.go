@@ -113,7 +113,7 @@ func testAgentCommandSurface(t *testing.T, mode string) {
 	cancel, stopped := start()
 	defer func() { cancel(); <-stopped; r.close() }()
 	script := `set -eux
-if AMUX_ROLE=console amux auth accounts; then exit 33; fi
+if AMUX_ROLE=console amux harness auth accounts; then exit 33; fi
 test -e /amux-session-access/context.json
 # The authenticated context must remain read-only in every launch mode.
 if touch /amux-session-access/tamper 2>/dev/null; then exit 30; fi
@@ -160,7 +160,7 @@ amux agent events --cursor="$cursor" --json > continued.json
 amux agent events own --cursor "$cursor" > continued.txt
 if amux do rename peer bad; then exit 21; fi
 if amux do delete own; then exit 22; fi
-if amux workgroup archive peer; then exit 23; fi
+if amux archive peer; then exit 23; fi
 if amux agent done peer; then exit 24; fi
 if amux agent status invalid; then exit 25; fi
 if amux agent events peer --json; then exit 26; fi

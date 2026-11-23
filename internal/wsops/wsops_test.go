@@ -544,7 +544,7 @@ func writeTranscript(t *testing.T, home, munged, uuid string) {
 }
 
 // TestRenameWorkgroup verifies a workgroup root can be renamed through the same
-// "rename" action the CLI (`amux workgroup rename`) and TUI (the `r` key) send:
+// "rename" action the CLI (`amux rename`) and TUI (the `r` key) send:
 // the new name lands on the root and surfaces via Display(), which is what the
 // rail title and `session ls` render. An empty name clears back to the id, and
 // renaming an unknown id is an error rather than a silent no-op.
@@ -1612,8 +1612,8 @@ func TestHostGrantChangesApplyLiveToWorktreePaths(t *testing.T) {
 	}
 	refused := func(what, repo, wg string, err error) {
 		t.Helper()
-		if err == nil || !strings.Contains(err.Error(), `"`+repo+`"`) || !strings.Contains(err.Error(), "amux workgroup grants "+wg) {
-			t.Fatalf("%s: err = %v, want refusal naming %q and `amux workgroup grants %s`", what, err, repo, wg)
+		if err == nil || !strings.Contains(err.Error(), `"`+repo+`"`) || !strings.Contains(err.Error(), "amux repo grant "+wg) {
+			t.Fatalf("%s: err = %v, want refusal naming %q and `amux repo grant %s`", what, err, repo, wg)
 		}
 	}
 	a, b := newWG("a"), newWG("b")

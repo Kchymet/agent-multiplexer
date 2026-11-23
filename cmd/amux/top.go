@@ -215,7 +215,7 @@ func humanBytes(b uint64) string {
 	return fmt.Sprintf("%dB", b)
 }
 
-// statusSession is one `amux status --json` row: the session plus its
+// statusSession is one `amux ls --json` row: the session plus its
 // resource usage from the daemon's latest sample.
 type statusSession struct {
 	core.Session
@@ -227,7 +227,7 @@ type statusSession struct {
 	WorkgroupResources *procstat.Usage `json:"workgroupResources,omitempty"`
 }
 
-// statusJSON is `amux status --json`: the snapshot, with per-session
+// statusJSON is `amux ls --json`: the snapshot, with per-session
 // resources and a top-level resources section (amux self-overhead, host
 // totals, sampler cost). Resources is omitted when the daemon cannot provide
 // it (an older daemon, or a restricted session context).
@@ -243,7 +243,7 @@ type statusJSON struct {
 }
 
 // statusOverview is status --json's compact queue section (the entries
-// themselves are `amux queue list --json`).
+// themselves are `amux inbox ls --json`).
 type statusOverview struct {
 	Queue   queue.Counts      `json:"queue"`
 	Inbox   queue.InboxCounts `json:"inbox"`

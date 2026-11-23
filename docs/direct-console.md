@@ -3,7 +3,7 @@
 Status: revision 2. **Phase A (§6: the overseer role, the question queue, local
 CLI/TUI) is implemented** — see [default-sessions.md](default-sessions.md),
 [workgroup-permissions.md](workgroup-permissions.md#console-overseer-and-repo-homes)
-and `amux queue`. Phase B1 (direct exposure, §5) is implemented: see [direct-access.md](direct-access.md#question-queue-and-overseer) and the `queue-v1` fixtures. Phase C (step-up) is deferred.
+and `amux inbox`. Phase B1 (direct exposure, §5) is implemented: see [direct-access.md](direct-access.md#question-queue-and-overseer) and the `queue-v1` fixtures. Phase C (step-up) is deferred.
 
 Revision 2 splits today's console into two sessions:
 
@@ -11,7 +11,7 @@ Revision 2 splits today's console into two sessions:
 - a new **overseer**, which supervises the coordinators and owns the single
   question queue.
 
-Only the overseer and its queue are reachable over `amux direct`. Anything
+Only the overseer and its queue are reachable over `amux device`. Anything
 with admin power never is.
 
 ## 1. Why the console is excluded today
@@ -187,7 +187,7 @@ valid only while its runtime is blocked; an item survives restarts.
 | `goal_input` | `amux agent goal ask` (`claudegoal.StatusInput` + its question) | hash(session, goal id, ask sequence) | `steer prompt`; the goal prompt hook resumes the goal |
 | `decision_needed` | Part 1 item | item id | The answer is recorded on the item, delivered as a prompt to the source session, and the item is marked done |
 
-**Who answers.** The user does: at the host (`amux queue`, the TUI queue
+**Who answers.** The user does: at the host (`amux inbox`, the TUI queue
 pane) or through a direct client. The daemon delivers the answer on the
 answerer's own authority and records who answered.
 
@@ -263,9 +263,9 @@ everything the overseer can do, so it never launders.
     4 KiB, outcome.
   - The entry is written before the response, and a failed write fails
     closed.
-  - `amux direct audit [--client] [--json]` reads it. Delivered answers
+  - `amux device audit [--client] [--json]` reads it. Delivered answers
     carry `via: direct` provenance in event metadata.
-- **Revocation.** The existing `amux direct clients revoke`, unchanged.
+- **Revocation.** The existing `amux device revoke`, unchanged.
 - **Backward compatibility.**
   - `capabilities.queue {read, answer_kinds}` and `capabilities.overseer
     {steer}`. When absent, the host predates them.
@@ -319,7 +319,7 @@ owner"). Part 2 points it at the overseer.
   - A daemon queue derived from the signals in §4.
   - `QueryQueue`, `ActionQueueAnswer` (stale and answered checks),
     `ActionItemRaise`, `ActionItemUpdate`.
-- **Local interfaces.** `amux queue [list|answer|dismiss]` and the TUI queue
+- **Local interfaces.** `amux inbox [list|answer|dismiss]` and the TUI queue
   pane.
 - **Docs.** Update `default-sessions.md` and `workgroup-permissions.md`.
 - **Tests.**
@@ -337,7 +337,7 @@ owner"). Part 2 points it at the overseer.
 1. **agent-multiplexer.**
    - Queue, summary and watch routes; the answer route; item triage.
    - `include=overseer` with derived steer gating.
-   - Audit plus `amux direct audit`; capabilities; `queue-v1` fixtures.
+   - Audit plus `amux device audit`; capabilities; `queue-v1` fixtures.
    - A permanent-exclusion test suite for the console.
    - Doc updates.
    - Tests:

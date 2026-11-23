@@ -1,195 +1,11 @@
 package main
 
-import (
-	"amux/internal/core"
-	"amux/internal/vtdemo"
-)
-
-// buildCLITree is the CLI's single source of truth: every command, subcommand,
-// flag, `amux do` action and field, with what it means and how to call it. The
-// top-level page, each level's --help and the --all reference are all rendered
-// from it (help.go), and the top-level dispatch is its run functions.
-//
-// Keep summaries to one line; put everything else in Detail, Flags, Fields and
-// Examples. A command parsed by a flag.FlagSet sets FlagSet and calls
-// parseCmdFlags with its path, which refuses a flag missing from here.
-func buildCLITree() *cmdSpec {
-	return &cmdSpec{
-		Name:    "amux",
-		Summary: "AI-native terminal control plane",
-		Flags: []flagSpec{
-			{Name: "help", Short: "h", Usage: "show help for amux or for the command it follows"},
-			{Name: "all", Short: "a", Usage: "with --help (and no command): print the entire help tree"},
-			{Name: "all-help", Usage: "print the entire help tree: every command, flag, action and example"},
-			{Name: "version", Short: "v", Usage: "print CLI, daemon and database versions (same as amux version)"},
-		},
-		Detail: "Set AMUX_SKIP=1 in your shell to bypass auto-launch.",
-		Sub: []*cmdSpec{
-			repoSpec(),
-			workgroupSpec(),
-			agentSpec(),
-			{
-				Name: "status", Args: "[--json]", run: cmdStatus,
-				Summary: "print workgroups and their agents, then exit",
-				Detail: `Reads the daemon's canonical state. From inside an agent session the view is
-scoped to the session itself (a coordinator also sees its workgroup's current
-direct members).`,
-				Flags:    []flagSpec{{Name: "json", Short: "j", Usage: "print the raw snapshot (every session field) as JSON"}},
-				Examples: []string{"amux status", "amux status --json"},
-			},
-			{
-				Name: "top", run: cmdTop, FlagSet: true,
-				Summary: "per-session CPU/memory, top processes and amux's own overhead",
-				Flags: []flagSpec{
-					{Name: "json", Usage: "print the raw resource snapshot as JSON"},
-					{Name: "mem", Usage: "sort by resident memory instead of CPU"},
-					{Name: "m", Usage: "shorthand for --mem"},
-					{Name: "n", Arg: "<count>", Default: "3", Usage: "top processes to show per session (0 hides them)"},
-				},
-				Examples: []string{"amux top", "amux top --mem -n 0"},
-			},
-			queueSpec(),
-			doSpec(),
-			{
-				Name: "refresh", run: func([]string) error { return cmdRefresh() },
-				Summary: "ask the daemon to re-poll its sources now",
-			},
-			{
-				Name: "doctor", Aliases: []string{"health", "check"}, run: func([]string) error { return cmdDoctor() },
-				Summary: "health check: versions, compatibility, dependencies and runtime",
-				Detail: `Reports the CLI, daemon and database versions and their compatibility, the
-dependencies amux launches, saved settings versus environment overrides, the
-provider registration (amux provide) and the direct listener (amux direct).`,
-			},
-			configSpec(),
-			harnessSpec(),
-			sandboxSpec(),
-			authSpec(),
-			provideSpec(),
-			directSpec(),
-			daemonSpec(),
-			{
-				Name: "version", Aliases: []string{"--version", "-v"}, Args: "[--short | --manifest]", run: cmdVersionArgs,
-				Summary: "print CLI, daemon and database versions and compatibility",
-				Flags: []flagSpec{
-					{Name: "short", Short: "s", Usage: "print only this binary's version"},
-					{Name: "manifest", Usage: "print this build's compatibility contracts as release-manifest JSON"},
-				},
-			},
-			{
-				Name: "update", Aliases: []string{"upgrade"}, Args: "[--check] [--force] [--restart-daemon]", run: cmdUpdate,
-				Summary: "install the latest amux release",
-				Detail: `Bare: download the latest release for this OS/arch, verify its SHA256,
-atomically replace this binary, refresh the shell shim, then restart the daemon
-if no agents are running.
-
-The daemon also installs releases on its own every few hours (update.auto, on
-by default; AMUX_NO_AUTO_UPDATE=1 or amux config set update.auto off disables
-it). A daemon restart stops the agents it hosts, so an update that arrives
-while agents run waits: amux version, doctor and status report it as pending,
-and the daemon restarts into it once no agents are running.`,
-				Flags: []flagSpec{
-					{Name: "check", Short: "n", Usage: "only report the installed and latest versions"},
-					{Name: "force", Short: "f", Usage: "also replace a development (checkout) build, or reinstall the latest release"},
-					{Name: "restart-daemon", Usage: "restart the daemon even while agents run (they are stopped and resumed,\nas with amux daemon restart)"},
-				},
-				Examples: []string{"amux update --check", "amux update"},
-			},
-			{
-				Name: "licenses", Aliases: []string{"notices"}, run: cmdLicenses,
-				Summary: "print bundled dependency licenses and notices",
-			},
-			// Internal and deprecated surfaces: dispatched, never listed.
-			{Name: "serve", Hidden: true, run: cmdServe, Summary: "internal: serve panes over the mux protocol"},
-			{Name: "_vtdemo", Hidden: true, run: vtdemo.Run, Summary: "internal: embedded-terminal fidelity check"},
-			{Name: "hook", Hidden: true, Args: "<state>", run: func(args []string) error { return cmdAgentStatus(args, true) },
-				Summary: "deprecated alias of amux agent hook"},
-			{Name: "name", Hidden: true, Args: "<display name>", run: cmdName, Summary: "deprecated alias of amux agent name"},
-		},
-	}
-}
-
-func repoSpec() *cmdSpec {
-	return &cmdSpec{
-		Name: "repo", run: cmdRepo,
-		Summary: "track the repositories agents get worktrees of",
-		Sub: []*cmdSpec{
-			{Name: "add", Args: "[<src>]", Summary: "track a repo: a gh owner/name slug, a git URL, or a local path",
-				Detail:   "With no <src>, browse your GitHub owners and pick (needs a terminal).",
-				Examples: []string{"amux repo add Kchymet/agent-multiplexer", "amux repo add ~/src/api"}},
-			{Name: "ls", Aliases: []string{"list"}, Summary: "list tracked repositories"},
-			{Name: "rm", Aliases: []string{"remove"}, Args: "<name>", Summary: "stop tracking a repository"},
-		},
-	}
-}
-
-// createFlags are workgroup create/repo's flags.
-var createFlags = []flagSpec{
-	{Name: "name", Arg: "<name>", Usage: "workgroup display name"},
-	{Name: "prompt", Arg: "<text>", Usage: "the coordinator's task (its goal on the default coordinator);\nthe first agent starts idle for it"},
-	{Name: "agent", Arg: "<harness>", Default: "claude", Usage: "first agent's harness (claude | codex)"},
-	{Name: "mode", Arg: "<mode>", Default: "task", Usage: "first agent's mode (task | interactive)"},
-	{Name: "model", Arg: "<model>", Usage: "first agent's model (default: the harness's default)"},
-	{Name: "coordinator", Arg: "<harness>", Default: "codex", Usage: "coordinator harness (claude | codex)"},
-	{Name: "coordinator-model", Arg: "<model>", Usage: "coordinator model"},
-}
-
-func workgroupSpec() *cmdSpec {
-	return &cmdSpec{
-		Name: "workgroup", Aliases: []string{"wg", "session", "ses", "workspace", "ws"}, Args: "[<command>]", run: cmdSession,
-		Summary: "create, open and manage workgroups and their agents",
-		Detail:  "Bare amux workgroup is the interactive create page (same as new).",
-		Sub: []*cmdSpec{
-			{Name: "new", Args: "[repo...]", Summary: "interactive create page: coordinator harness/model and optional repos",
-				Detail: `Selected repos limit the workgroup to them and seed a first agent (one repo =
-a single-repo workgroup). Needs a terminal.`},
-			{Name: "create", Args: "<repo>... [flags]", Summary: "non-interactive: a workgroup limited to those repos, with one agent on them",
-				Flags:    createFlags,
-				Examples: []string{`amux workgroup create api web --name auth --prompt "port the auth flow"`}},
-			{Name: "repo", Args: "<repo> [flags]", Summary: "non-interactive: a workgroup limited to one repo, with one agent on it",
-				Detail:   "This is how work on a single repo is started; there is no agent outside a workgroup.",
-				Flags:    createFlags,
-				Examples: []string{`amux workgroup repo api --prompt "fix the flaky test"`}},
-			{Name: "add", Args: "<root> [repo...] [--agent a] [--mode m] [--model M] [--prompt t]",
-				Summary: "add another agent to an existing workgroup (within its repos)",
-				Detail:  "With only <root>, pick the agent's repos interactively (needs a terminal).",
-				Flags: []flagSpec{
-					{Name: "agent", Arg: "<harness>", Default: "claude", Usage: "the agent's harness (claude | codex)"},
-					{Name: "mode", Arg: "<mode>", Default: "task", Usage: "task | interactive"},
-					{Name: "model", Arg: "<model>", Usage: "the agent's model"},
-					{Name: "prompt", Arg: "<text>", Usage: "the agent's first prompt"},
-				},
-				Examples: []string{`amux workgroup add 9c1b api --prompt "write the migration"`}},
-			{Name: "open", Aliases: []string{"switch"}, Args: "<id>", Summary: "open the dashboard on a workgroup or agent"},
-			{Name: "ls", Aliases: []string{"list"}, Summary: "list workgroups (with the repos each is limited to) and their agents"},
-			{Name: "move", Args: "<agent> [<root> | --new]", Summary: "move an agent into another workgroup, or a new one of its own",
-				Detail: `The agent's repos must be within the target workgroup's. With --new or no
-target it moves into a new workgroup of its own limited to its repos.`,
-				Flags: []flagSpec{{Name: "new", Usage: "move into a new workgroup of its own"}}},
-			{Name: "repos", Args: "<agent> <repo>...", Summary: "re-scope an agent to exactly these tracked repos"},
-			{Name: "grants", Args: "<coordinator> [--all | --none | repo...]", Summary: "set a coordinator's host-managed repo ceiling",
-				Flags: []flagSpec{
-					{Name: "all", Usage: "every tracked repo, live (repos tracked later are included)"},
-					{Name: "none", Usage: "no repos (also the meaning of no arguments)"},
-				}},
-			{Name: "rename", Args: "<id> <name>", Summary: "set a display name (the id is unchanged)"},
-			{Name: "archive", Aliases: []string{"done"}, Args: "<id> [--force]", Summary: "drop a session off the active rail",
-				Detail: "Refuses while an open pull request remains; --force overrides.",
-				Flags:  []flagSpec{{Name: "force", Short: "f", Usage: "archive even with an open pull request"}}},
-			{Name: "unarchive", Aliases: []string{"restore"}, Args: "<id>", Summary: "put an archived session back"},
-			{Name: "recreate", Args: "<id>", Summary: "replace one runtime with current access mounts (host only)",
-				Detail: "Stored worktree, config and transcript files are preserved."},
-			{Name: "rm", Aliases: []string{"delete"}, Args: "<id> [--force]", Summary: "delete a session, its worktrees and branches",
-				Detail: "Refuses while an open pull request remains; --force overrides.",
-				Flags:  []flagSpec{{Name: "force", Short: "f", Usage: "delete even with an open pull request"}}},
-		},
-	}
-}
+import "amux/internal/core"
 
 func agentSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "agent", run: cmdAgent,
-		Summary: "commands an agent runs about itself (status, name, raise, wait, done, ...)",
+		Name: "agent", Group: groupMore, run: cmdAgent,
+		Summary: "commands an agent runs about itself (amux help agent)",
 		Detail: `Scoped to the calling agent by the fixed authenticated session context. Stdin,
 environment variables, UUIDs and paths never select identity or storage.
 Generated hook forms are best-effort so telemetry never disrupts the agent;
@@ -198,7 +14,7 @@ confirm the requested operation.
 
 Commands use the private file mailbox from the ordinary sandboxed shell. Keep
 both sandboxes enabled. Discovery grants no cross-session write access. amux
-status and amux do from a session are scoped the same way: to the session
+ls, amux send and amux do from a session are scoped the same way: to the session
 itself, or for a coordinator to its workgroup and current direct members.`,
 		Sub: []*cmdSpec{
 			{Name: "status", Args: "<state>", Summary: "strictly report activity: idle | ready | waiting | running"},
@@ -226,7 +42,7 @@ status-line command.`,
 				Examples: []string{`amux agent name "auth refactor"`}},
 			{Name: "done", Summary: "archive this member; a coordinator archives its workgroup (after user confirmation)",
 				Detail: `Identity comes only from the fixed session context. Restoration requires the
-host (amux workgroup unarchive <id>). Run it only once your PR is merged or
+host (amux unarchive <id>). Run it only once your PR is merged or
 closed.`},
 			goalSpec(),
 			{Name: "sessions", Args: "[--json]", Summary: "discover all host agent conversations, Claude and Codex (read-only)",
@@ -315,16 +131,16 @@ member/PR awaited and the wake-up; it must cover every open member PR.`},
 	}
 }
 
-func queueSpec() *cmdSpec {
+func inboxSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "queue", Aliases: []string{"q"}, Args: "[<command>]", run: cmdQueue,
-		Summary: "the user question queue: list, answer, dismiss, acknowledge",
+		Name: "inbox", Group: groupManage, Args: "[<command>]", run: cmdQueue,
+		Summary: "questions and follow-ups waiting for you",
 		Detail: `Every pending question for the user, from any session, in one place, with
 answers routed back to the asking session. Reading works from a host terminal,
 the admin console and the overseer; answering, dismissing and acknowledging
 are the user's alone (host terminal).`,
 		Sub: []*cmdSpec{
-			{Name: "list", Aliases: []string{"ls"}, Args: "[--all] [--json]", Summary: "pending questions, global inbox counts and the workgroup summary (the default)",
+			{Name: "ls", Aliases: []string{"list"}, Args: "[--all] [--json]", Summary: "pending questions, global inbox counts and the workgroup summary (the default)",
 				Detail: `Lists permission requests, AskUserQuestion prompts, coordinators' goal asks
 and decision items, plus the workgroup summary (needs you / running / review /
 done).`,
@@ -343,7 +159,7 @@ goal ask or decision item takes text.`,
 					{Name: "allow", Usage: "allow a permission request"},
 					{Name: "deny", Usage: "deny a permission request"},
 				},
-				Examples: []string{"amux queue answer q-12 --choice Yes", "amux queue answer q-13 --allow"}},
+				Examples: []string{"amux inbox answer q-12 --choice Yes", "amux inbox answer q-13 --allow"}},
 			{Name: "dismiss", Args: "<entry>", Summary: "hide an entry (a live question is hidden until it changes)"},
 			{Name: "ack", Args: "<item>", Summary: "acknowledge a global-inbox item as the user (lets the overseer act on it)"},
 		},
@@ -352,11 +168,13 @@ goal ask or decision item takes text.`,
 
 func doSpec() *cmdSpec {
 	n := &cmdSpec{
-		Name: "do", Args: "<action> [id] [flags]", run: cmdDo,
-		Summary: "drive one daemon control action (the scripting entrypoint)",
+		Name: "do", Group: groupMore, Args: "<action> [id] [flags]", run: cmdDo,
+		Summary: "the scripting API: one daemon control action per call (amux help api)",
 		Detail: `Sends a single action to the daemon's control API (the same dispatch the
 dashboard drives) and prints "ok". The positional [id] and [kind] forms still
-work; flags reach the rest. Reads go through amux repo ls / amux workgroup ls.
+work; flags reach the rest. Reads go through amux repo ls / amux ls. The
+everyday commands (amux new, add, send, archive, rename, move) wrap these
+actions.
 
 From an agent session the request is authorized by that session's fixed
 authenticated grant, never by an id, flag or environment variable: a member may
@@ -397,7 +215,7 @@ func doActionSpecs() map[string]*cmdSpec {
 		{Name: "name", Arg: "<text>", Usage: "workgroup display name"},
 		{Name: "prompt", Arg: "<text>", Usage: "the coordinator's task (its goal on the default runtime); never copied to a member"},
 		{Name: "repos", Arg: "<a,b>", Usage: "repos the workgroup is limited to (its grant ceiling); naming any also creates\na first member agent on them (one repo = a single-repo workgroup)"},
-		{Name: "agent", Arg: "<harness>", Usage: "first member's harness: claude | codex (default claude)"},
+		{Name: "harness", Arg: "<harness>", Usage: "first member's harness: claude | codex (default claude; agent= is the old key)"},
 		{Name: "model", Arg: "<model>", Usage: "first member's model (default: its harness's default)"},
 		{Name: "mode", Arg: "<mode>", Usage: "first member's mode: task | interactive (default task)"},
 		{Name: "coordinator", Arg: "<harness>", Usage: "coordinator runtime: claude | codex (default codex, the native goal runtime;\nclaude runs in goal mode through amux's goal hooks)"},
@@ -459,7 +277,7 @@ func doActionSpecs() map[string]*cmdSpec {
 		core.ActionAddAgent: {Args: "<workgroup-id>", Summary: "add an agent to a workgroup",
 			Fields: []fieldSpec{
 				{Name: "repos", Arg: "<a,b>", Usage: "the agent's repos (within the workgroup's); none is allowed"},
-				{Name: "agent", Arg: "<harness>", Usage: "claude | codex (default claude)"},
+				{Name: "harness", Arg: "<harness>", Usage: "claude | codex (default claude; agent= is the old key)"},
 				{Name: "model", Arg: "<model>", Usage: "the agent's model"},
 				{Name: "mode", Arg: "<mode>", Usage: "task | interactive (default task)"},
 				{Name: "prompt", Arg: "<text>", Usage: "the agent's first prompt"},
@@ -491,21 +309,21 @@ func doActionSpecs() map[string]*cmdSpec {
 		core.ActionEscalateItem: {Args: "<coordinator-id>", Summary: "escalate an item to the global inbox as a coordinator",
 			Fields: append(append([]fieldSpec{}, itemFields...),
 				fieldSpec{Name: core.ItemNoteField, Arg: "<text>", Usage: "why"})},
-		core.ActionQueueAnswer: {Summary: "answer a question-queue entry (host only; amux queue answer)",
+		core.ActionQueueAnswer: {Summary: "answer a question-queue entry (host only; amux inbox answer)",
 			Fields: []fieldSpec{
 				{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"},
 				{Name: core.QueueTextField, Arg: "<text>", Usage: "free-text answer"},
 				{Name: core.QueueChoiceField, Arg: "<label>", Usage: "option label(s), one line per question"},
 				{Name: core.SteerDecision, Arg: "allow|deny", Usage: "a permission request's answer"},
 			}},
-		core.ActionQueueDismiss: {Summary: "hide a question-queue entry (host only; amux queue dismiss)",
+		core.ActionQueueDismiss: {Summary: "hide a question-queue entry (host only; amux inbox dismiss)",
 			Fields: []fieldSpec{{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"}}},
 	}
 }
 
 func configSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "config", Aliases: []string{"conf", "cfg"}, Args: "[<command>]", run: cmdConfig,
+		Name: "config", Group: groupManage, Aliases: []string{"conf", "cfg"}, Args: "[<command>]", run: cmdConfig,
 		Summary: "show or change amux settings (keybindings, Codex control, updates, ...)",
 		Detail: `Settings:
   keys.<action> <chord>                 dashboard keybinding (chords like ctrl+g, alt+p, f5);
@@ -523,7 +341,7 @@ func configSpec() *cmdSpec {
   claude.auth, codex.auth               retired: every workload follows central auth
                                         (get and unset only)
   direct.enabled                        whether the daemon runs the direct listener (get
-                                        only; change it with amux direct enable|disable)
+                                        only; change it with amux device enable|disable)
 
 Run amux doctor to compare saved settings, this shell's overrides, and the
 running daemon's selection.`,
@@ -540,8 +358,8 @@ running daemon's selection.`,
 
 func harnessSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "harness", Aliases: []string{"harnesses"}, Args: "[<command>]", run: cmdHarnessCLI,
-		Summary: "amux-managed Claude Code / Codex installs",
+		Name: "harness", Group: groupManage, Aliases: []string{"harnesses"}, Args: "[<command>]", run: cmdHarnessCLI,
+		Summary: "Claude Code / Codex installs and logins",
 		Detail: `<kind> is claude or codex. amux downloads the official native builds (Claude
 Code's release bucket, Codex's GitHub release package), verifies their SHA-256,
 and keeps each version in its own directory under
@@ -576,13 +394,27 @@ amux disables the harnesses' own self-updaters in sessions it launches.`,
 			{Name: "adopt", Args: "[--dry-run]", FlagSet: true, Summary: "install a managed copy of each harness you already use (what the daemon does)",
 				Detail: "A harness counts as used when its binary is on PATH or it is logged in.",
 				Flags:  []flagSpec{{Name: "dry-run", Usage: "report what would be adopted without installing"}}},
+			{Name: "login", Args: "[claude|codex] [--api-key] [--token-stdin]", Summary: "create or replace a harness's central login",
+				Detail: `Claude: runs claude setup-token (browser sign-in), then asks you to paste the
+token it prints, with input hidden. Codex: signs the central Codex home in to
+ChatGPT (prints a browser URL; the daemon owns that login). --api-key replaces
+either with an API key. Run it in a host terminal or the amux console terminal;
+see amux harness auth --help for how logins reach sessions.`,
+				Flags: []flagSpec{
+					{Name: "api-key", Usage: "configure an API key instead of a subscription login"},
+					{Name: "token-stdin", Usage: "read the token or key from stdin instead of a hidden prompt"},
+				},
+				Examples: []string{"amux harness login", "amux harness login codex", "printf %s \"$KEY\" | amux harness login claude --api-key --token-stdin"}},
+			{Name: "logout", Args: "<claude|codex>", Summary: "fence delivery and clear a harness's central login"},
+			harnessAuthSpec(),
+			sandboxSpec(),
 		},
 	}
 }
 
 func sandboxSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "sandbox", Aliases: []string{"sb"}, Args: "[<command>]", run: cmdSandbox,
+		Name: "sandbox", Args: "[<command>]",
 		Summary: "each agent's private copy of your harness config: drift, promote, reset",
 		Detail: `Every agent runs Claude Code / Codex against a private copy of your own config
 dir (~/.claude, $CODEX_HOME), seeded from it as a template and pointed at via
@@ -590,7 +422,7 @@ CLAUDE_CONFIG_DIR / CODEX_HOME. The agent may edit its copy. amux compares each
 copy with the template and reports what diverged, so you decide whether an
 agent's change should propagate to your config (and so to every new agent) or
 be discarded. Nothing propagates on its own. Credentials are shared, never
-copied. <id> is the agent's store id (from amux workgroup ls), or "console".`,
+copied. <id> is the agent's store id (from amux ls), or "console".`,
 		Sub: []*cmdSpec{
 			{Name: "drift", Aliases: []string{"changes", "ls", "list"}, Args: "[<id>] [--json]",
 				Summary: "list config paths that diverged from the template, per agent (the default)",
@@ -608,10 +440,10 @@ copied. <id> is the agent's store id (from amux workgroup ls), or "console".`,
 	}
 }
 
-func authSpec() *cmdSpec {
+func harnessAuthSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "auth", run: cmdAuth,
-		Summary: "central harness logins, delivered to sessions by the daemon",
+		Name: "auth", Args: "<command>",
+		Summary: "central logins: status, accounts, default, rebind, restart",
 		Detail: `Run logins in a host terminal or the trusted amux console terminal. Other agent
 sessions cannot configure accounts. Sessions never hold a refresh token: Claude
 receives the setup-token through CLAUDE_CODE_OAUTH_TOKEN, and Codex receives
@@ -625,22 +457,13 @@ configuration. Each new harness process uses the newest successfully
 configured login; running processes keep what they received and are never
 stopped by login.`,
 		Sub: []*cmdSpec{
-			{Name: "login", Args: "[claude|codex] [--api-key] [--token-stdin]", Summary: "create or replace a central login",
-				Detail: `Claude: runs claude setup-token (browser sign-in), then asks you to paste the
-token it prints, with input hidden. Codex: signs the central Codex home in to
-ChatGPT (prints a browser URL; the daemon owns that login). --api-key replaces
-either with an API key.`,
-				Flags: []flagSpec{
-					{Name: "api-key", Usage: "configure an API key instead of a subscription login"},
-					{Name: "token-stdin", Usage: "read the token or key from stdin instead of a hidden prompt"},
-				},
-				Examples: []string{"amux auth login", "amux auth login codex", "printf %s \"$KEY\" | amux auth login claude --api-key --token-stdin"}},
 			{Name: "status", Args: "[claude|codex]", Summary: "show the amux-owned configuration and limits"},
 			{Name: "accounts", Args: "[--json]", Summary: "view Claude/Codex configuration and limits",
 				Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
-			{Name: "logout", Args: "<claude|codex>", Summary: "fence delivery and clear the central login"},
 			{Name: "default", Args: "<claude|codex>", Summary: "confirm the central configuration (always the default)"},
 			{Name: "rebind", Args: "<claude|codex> <id>", Summary: "stop one workload so it relaunches on the current login now"},
+			{Name: "login", Hidden: true, Args: "[claude|codex] [--api-key] [--token-stdin]", Summary: "same as amux harness login"},
+			{Name: "logout", Hidden: true, Args: "<claude|codex>", Summary: "same as amux harness logout"},
 			{Name: "restart", Args: "[--force]", Summary: "restart idle Claude agents with current credentials (conversations resume)",
 				Flags: []flagSpec{{Name: "force", Usage: "also interrupt busy or unknown-state agents"}}},
 		},
@@ -664,53 +487,107 @@ var provideFlagSpecs = []flagSpec{
 	{Name: "publish-sessions", Usage: "publish this daemon's session inventory and accept lifecycle verbs"},
 	{Name: "read-only-sessions", Usage: "publish inventory but reject every lifecycle verb"},
 	{Name: "runtime-events", Usage: "stream read-only transcript events (needs --publish-sessions)"},
-	{Name: "direct-wake", Usage: "forward content-free direct wake-ups while amux direct wake enable is in effect"},
-	{Name: "direct-enroll", Usage: "offer cloud-assisted direct enrollment while amux direct cloud enable is in effect"},
+	{Name: "direct-wake", Usage: "forward content-free direct wake-ups while amux cloud wake enable is in effect"},
+	{Name: "direct-enroll", Usage: "offer cloud-assisted direct enrollment while amux cloud enroll enable is in effect"},
 	{Name: "account-status", Usage: "allow safe machine login and subscription-limit status (off by default)"},
 	{Name: "account-manage", Usage: "retired; configure accounts through amux CLI/TUI"},
 	{Name: "account-use", Usage: "allow machine-account use (defaults to writable session publishing)"},
 }
 
-func provideSpec() *cmdSpec {
+func cloudSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "provide", Args: "[<orchestrator-addr>] [flags] | <command>", run: cmdProvide, FlagSet: true,
-		Summary: "provide this machine as remote compute (provider mode)",
-		Detail: `Provider mode dials out to a remote orchestrator over TLS, registers this
-machine, and serves agent panes over that one connection. With Harness as the
-orchestrator, a registration owned by your account is your personal compute
-pool of kind "machine", and its pool id is the providerId the orchestrator
-assigns (amux doctor prints it). See docs/remote-provider.md.
-
-Bare amux provide runs in the foreground. Settings resolve flags first, then
-the AMUX_PROVIDER_* / AMUX_TLS_* env vars, then the config file amux provide
-install wrote. The bearer token is never taken from argv: use --token-file or
-AMUX_PROVIDER_TOKEN. Flags may come before or after the address.`,
-		Flags: provideFlagSpecs,
+		Name: "cloud", Group: groupManage, Args: "<command>", run: cmdCloud,
+		Summary: "reach this machine through Harness cloud",
+		Detail: `The cloud connection (provider mode) dials out to Harness over TLS, registers
+this machine and serves agent panes over that one connection, so the Harness
+web dashboard and phone app reach it from anywhere. A registration owned by
+your account is your personal compute pool of kind "machine"; amux cloud
+status and amux doctor print its provider id. See docs/remote-provider.md.`,
 		Examples: []string{
-			"amux provide install --orchestrator orch.example.com:7443 --token-file ~/.config/amux/provider.token",
-			"amux doctor",
+			"amux cloud connect --orchestrator orch.example.com:7443 --token-file ~/.config/amux/provider.token",
+			"amux cloud status",
 		},
 		Sub: []*cmdSpec{
-			{Name: "install", Args: "[flags]", FlagSet: true, Summary: "write the config file and install the user service (survives reboot)",
+			{Name: "connect", Args: "[flags]", FlagSet: true, Summary: "connect this machine to Harness cloud: config file plus a user service (survives reboot)",
 				Detail: `Writes ~/.config/amux/provider.toml and a user service (a systemd user unit on
 Linux/WSL2, a launchd agent on macOS). The token stays in the 0600 file named
 by --token-file, so rotating it is one write and no reinstall.`,
 				Flags: append(append([]flagSpec{}, provideFlagSpecs...),
 					flagSpec{Name: "dry-run", Usage: "print the config file and service unit that would be written, then stop"},
 					flagSpec{Name: "exec", Arg: "<path>", Usage: "amux binary the service runs (default: the installed binary, else this one)"}),
-				Examples: []string{"amux provide install --orchestrator orch.example.com:7443 --token-file ~/.config/amux/provider.token"}},
-			{Name: "uninstall", Summary: "stop and remove the user service (the config file is kept)"},
+				Examples: []string{"amux cloud connect --orchestrator orch.example.com:7443 --token-file ~/.config/amux/provider.token"}},
+			{Name: "status", Summary: "the cloud connection: config, token, service, last registration and heartbeat"},
+			{Name: "disconnect", Summary: "stop and remove the user service (the config file is kept)"},
+			{
+				Name: "run", Args: "[<orchestrator-addr>] [flags]", FlagSet: true,
+				Summary: "run the cloud connection in the foreground (provider mode)",
+				Detail: `Provider mode dials out to a remote orchestrator over TLS, registers this
+machine, and serves agent panes over that one connection. With Harness as the
+orchestrator, a registration owned by your account is your personal compute
+pool of kind "machine", and its pool id is the providerId the orchestrator
+assigns (amux doctor prints it). See docs/remote-provider.md.
+
+amux cloud run runs in the foreground. Settings resolve flags first, then
+the AMUX_PROVIDER_* / AMUX_TLS_* env vars, then the config file amux cloud
+connect wrote. The bearer token is never taken from argv: use --token-file or
+AMUX_PROVIDER_TOKEN. Flags may come before or after the address.`,
+				Flags: provideFlagSpecs,
+				Examples: []string{
+					"amux cloud connect --orchestrator orch.example.com:7443 --token-file ~/.config/amux/provider.token",
+					"amux doctor",
+				},
+			},
 			{Name: "revoke", Args: "--yes [flags]", FlagSet: true, Summary: "permanently revoke this provider's broker registration and relay access",
 				Detail: `Host-only and requires broker support. Uses the saved transport settings unless
 flags override them, and waits at most 15 seconds. An unconfirmed result can
 be retried with the same token. Direct-client grants remain valid (revoke them
-with amux direct clients revoke); config, token file and service are kept.`,
+with amux device revoke); config, token file and service are kept.`,
 				Flags: []flagSpec{
 					{Name: "yes", Required: true, Usage: "confirm the revocation"},
 					{Name: "orchestrator", Arg: "<host:port>", Usage: "orchestrator address"},
 					{Name: "token-file", Arg: "<path>", Usage: "file holding the provider bearer token"},
 					{Name: "ca", Arg: "<pem>", Usage: "PEM CA file"},
 					{Name: "server-name", Arg: "<name>", Usage: "TLS server name"},
+				}},
+			{Name: "enroll", Args: "<command>", Summary: "let Harness cloud connect devices, up to a ceiling (off by default)",
+				Detail: `Enabling cloud enrollment trusts the pinned Harness owner, through Harness, to
+mint enrollment codes up to the ceiling. Codes are bound to the requesting
+client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
+invalidates outstanding cloud codes; grants already redeemed stay until revoked
+(amux device revoke).`,
+				Sub: []*cmdSpec{
+					{Name: "enable", Args: "--permissions <list> [--all-sessions | --workgroup <id>...] [flags]", FlagSet: true,
+						Summary: "allow Harness to mint enrollment codes up to a ceiling",
+						Detail: `The resource ceiling defaults to all ordinary sessions, never the amux console;
+--workgroup narrows it. A request naming no permissions gets read, plus steer
+when the ceiling includes it. --owner and --provider default to the owner and provider Harness
+reported at this host's latest Harness cloud registration (shown by amux
+doctor); a flag that disagrees with it is refused unless both are given.`,
+						Flags: []flagSpec{
+							{Name: "permissions", Arg: "<list>", Required: true, Usage: "ceiling (see amux device connect --help); codes never exceed it"},
+							{Name: "all-sessions", Usage: "ceiling: any ordinary session (the default)"},
+							{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "ceiling: only these workgroups (not with --all-sessions)"},
+							{Name: "owner", Arg: "<user-id>", Usage: "advanced: the Harness user id allowed to request codes"},
+							{Name: "provider", Arg: "<id>", Usage: "advanced: this host's Harness provider id"},
+							{Name: "max-outstanding", Arg: "<n>", Usage: "unredeemed cloud codes at once (default 3)"},
+							{Name: "max-per-hour", Arg: "<n>", Usage: "cloud codes per hour (default 10)"},
+						},
+						Examples: []string{"amux cloud enroll enable --permissions read,steer --all-sessions"}},
+					{Name: "disable", Summary: "turn cloud enrollment off (invalidates outstanding codes)"},
+					{Name: "status", Args: "[--json]", Summary: "show the cloud enrollment policy",
+						Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
+				}},
+			{Name: "wake", Args: "<command>", Summary: "content-free cloud wake-ups for connected devices (opt-in)",
+				Detail: "See docs/direct-wake-contract.md. Pins default from this host's live provider registration.",
+				Sub: []*cmdSpec{
+					{Name: "enable", Args: "[--owner <id> --provider <id>]", FlagSet: true, Summary: "allow wake-ups, then restart amux cloud run with --direct-wake",
+						Flags: []flagSpec{
+							{Name: "owner", Arg: "<harness-user-id>", Usage: "advanced: pin the Harness owner"},
+							{Name: "provider", Arg: "<provider-id>", Usage: "advanced: pin this host's provider id"},
+						}},
+					{Name: "disable", Summary: "turn wake-ups off"},
+					{Name: "status", Args: "[--json]", Summary: "show the wake-up policy",
+						Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
 				}},
 		},
 	}
@@ -740,7 +617,7 @@ const directPermissionsHelp = `comma list; read is always required:
 e.g. read,steer or read,steer,respond,manage
 Nothing implies anything else; there is no "all".`
 
-func directSpec() *cmdSpec {
+func deviceSpec() *cmdSpec {
 	serveFlags := append(append([]flagSpec{}, directServeFlags...),
 		flagSpec{Name: "managed", Usage: "internal: the daemon's child; runs the saved settings and takes no other flag"})
 	enableFlags := append(append([]flagSpec{}, directServeFlags...),
@@ -751,43 +628,20 @@ func directSpec() *cmdSpec {
 		flagSpec{Name: "no-wait", Usage: "do not wait for the listener to become ready"},
 	)
 	return &cmdSpec{
-		Name: "direct", run: cmdDirect,
-		Summary: "direct client access (web, Android) over your LAN or VPN (opt-in, host only)",
-		Detail: `The direct server is an opt-in HTTPS listener on a private address. Clients
-enroll with a one-time code you paste or scan (enroll --qr), then reach this
-host's sessions with destination-issued credentials. No cloud service is in
+		Name: "device", Group: groupManage, run: cmdDevice,
+		Summary: "phones and browsers that reach this machine directly (host only)",
+		Detail: `The device listener (the direct server) is an opt-in HTTPS listener on a
+private address. A phone or browser connects with a one-time code you paste or
+scan (connect --qr), then reaches this host's sessions with destination-issued
+credentials. No cloud service is in
 the path. See docs/direct-access.md.
 
 Disabling the managed listener is not revocation: clients stay enrolled and
-the cloud policy stays as it is. Use amux direct clients revoke and amux
-direct cloud disable for those.`,
+the cloud policy stays as it is. Use amux device revoke and amux cloud
+enroll disable for those.`,
 		Sub: []*cmdSpec{
-			{Name: "enable", Args: "[flags]", FlagSet: true, Summary: "save the listener settings and turn it on (the daemon runs it from now on)",
-				Detail: `Off by default. Starts the daemon if it is stopped. Typed flags merge over the
-saved settings; a repeatable flag replaces its saved list. With --tailnet the
-listen address, endpoint and certificate come from tailscaled's LocalAPI; typed
-serve flags override what it derives, and an empty value returns that setting
-to derivation. The tailnet certificate is reused from amux's store or
-~/.config/amux/tls when it has over 30 days left, else obtained from
-tailscaled, and renewed in place while serving.`,
-				Flags: enableFlags,
-				Examples: []string{
-					"amux direct enable --tailnet",
-					"amux direct enable --listen 192.168.1.10:8443 --endpoint https://amux.home.example:8443 --tls-cert cert.pem --tls-key key.pem",
-				}},
-			{Name: "disable", Args: "[--no-wait]", FlagSet: true, Summary: "turn the managed listener off (settings, clients and cloud policy are kept)",
-				Flags: []flagSpec{{Name: "no-wait", Usage: "do not wait for the listener to stop"}}},
-			{Name: "status", Args: "[--json]", Summary: "setting, managed listener, server and provider offer",
-				Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
-			{Name: "logs", Args: "[-n lines]", FlagSet: true, Summary: "the managed listener's log",
-				Flags: []flagSpec{{Name: "n", Arg: "<lines>", Default: "50", Usage: "lines to show"}}},
-			{Name: "serve", Args: "[flags]", FlagSet: true, Summary: "run the direct server in the foreground (manual)",
-				Detail: `Plain amux direct serve runs the saved tailnet configuration in the foreground
-only while the managed listener is disabled. --tls-cert/--tls-key default to
-$AMUX_TLS_CERT/$AMUX_TLS_KEY.`,
-				Flags: serveFlags},
-			{Name: "enroll", Args: "[flags]", FlagSet: true, Summary: "mint a one-time enrollment code: a bundle to paste, or a QR code to scan",
-				Detail: `The running server publishes its endpoints into the bundle. Before minting,
+			{Name: "connect", Args: "[flags]", FlagSet: true, Summary: "connect a phone or browser: a one-time code to paste, or a QR code to scan",
+				Detail: `Needs the listener (amux device enable). The running server publishes its endpoints into the bundle. Before minting,
 enroll prints the effective label, permissions and scope on stderr. Without QR
 flags it prints a v1 bundle (amux-direct:1:...) alone on stdout, to paste into
 a client.
@@ -804,7 +658,7 @@ be piped or pasted into the app's ticket box. The QR code and instructions go
 to stderr when stderr is a terminal, otherwise to the controlling terminal
 (/dev/tty); with no terminal at all, --qr fails before minting (use --qr-png).`,
 				Flags: []flagSpec{
-					{Name: "label", Arg: "<text>", Default: "<hostname>-<YYYYMMDD-HHMM>", Usage: "name for the client, shown in clients list"},
+					{Name: "label", Arg: "<text>", Default: "<hostname>-<YYYYMMDD-HHMM>", Usage: "name for the device, shown by amux device ls"},
 					{Name: "permissions", Arg: "<list>", Default: "read", Usage: directPermissionsHelp},
 					{Name: "all-sessions", Usage: "grant every ordinary session on this host (the default)"},
 					{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "grant only this workgroup and its members (not with --all-sessions)"},
@@ -816,14 +670,31 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 				},
 				Examples: []string{
 					directEnrollExample,
-					"amux direct enroll --qr",
-					"amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr",
+					"amux device connect --qr",
+					"amux device connect --label pixel --permissions read,steer --workgroup 771951 --qr",
 				}},
-			{Name: "clients", Args: "<command>", Summary: "list or revoke enrolled clients",
-				Sub: []*cmdSpec{
-					{Name: "list", Summary: "list enrolled clients"},
-					{Name: "revoke", Args: "<client-id>", Summary: "revoke a client now (closes its streams first)"},
+			{Name: "ls", Aliases: []string{"list"}, Args: "[--json]", Summary: "list connected devices (enrolled clients)",
+				Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
+			{Name: "revoke", Args: "<client-id>", Summary: "disconnect a device now (closes its streams first)"},
+			{Name: "status", Args: "[--json]", Summary: "setting, managed listener, server and provider offer",
+				Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
+			{Name: "enable", Args: "[flags]", FlagSet: true, Summary: "save the listener settings and turn it on (the daemon runs it from now on)",
+				Detail: `Off by default. Starts the daemon if it is stopped. Typed flags merge over the
+saved settings; a repeatable flag replaces its saved list. With --tailnet the
+listen address, endpoint and certificate come from tailscaled's LocalAPI; typed
+serve flags override what it derives, and an empty value returns that setting
+to derivation. The tailnet certificate is reused from amux's store or
+~/.config/amux/tls when it has over 30 days left, else obtained from
+tailscaled, and renewed in place while serving.`,
+				Flags: enableFlags,
+				Examples: []string{
+					"amux device enable --tailnet",
+					"amux device enable --listen 192.168.1.10:8443 --endpoint https://amux.home.example:8443 --tls-cert cert.pem --tls-key key.pem",
 				}},
+			{Name: "disable", Args: "[--no-wait]", FlagSet: true, Summary: "turn the managed listener off (settings, clients and cloud policy are kept)",
+				Flags: []flagSpec{{Name: "no-wait", Usage: "do not wait for the listener to stop"}}},
+			{Name: "logs", Args: "[-n lines]", FlagSet: true, Summary: "the managed listener's log",
+				Flags: []flagSpec{{Name: "n", Arg: "<lines>", Default: "50", Usage: "lines to show"}}},
 			{Name: "audit", Args: "[--client <id>] [--limit N] [--json]",
 				Summary: "answers, item triage and overseer steers made by direct clients (newest last)",
 				Flags: []flagSpec{
@@ -831,55 +702,20 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 					{Name: "limit", Arg: "<n>", Usage: "at most n records"},
 					{Name: "json", Usage: "print as JSON"},
 				}},
+			{Name: "serve", Args: "[flags]", FlagSet: true, Summary: "run the device listener in the foreground (manual)",
+				Detail: `Plain amux device serve runs the saved tailnet configuration in the foreground
+only while the managed listener is disabled. --tls-cert/--tls-key default to
+$AMUX_TLS_CERT/$AMUX_TLS_KEY.`,
+				Flags: serveFlags},
 			{Name: "reset-identity", Args: "--yes", Summary: "replace the server identity; revokes every client and disables cloud enrollment",
 				Flags: []flagSpec{{Name: "yes", Required: true, Usage: "confirm"}}},
-			{Name: "cloud", Args: "<command>", Summary: "cloud-assisted enrollment policy (off by default)",
-				Detail: `Enabling cloud enrollment trusts the pinned Harness owner, through Harness, to
-mint enrollment codes up to the ceiling. Codes are bound to the requesting
-client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
-invalidates outstanding cloud codes; grants already redeemed stay until revoked
-(amux direct clients revoke).`,
-				Sub: []*cmdSpec{
-					{Name: "enable", Args: "--permissions <list> [--all-sessions | --workgroup <id>...] [flags]", FlagSet: true,
-						Summary: "allow Harness to mint enrollment codes up to a ceiling",
-						Detail: `The resource ceiling defaults to all ordinary sessions, never the amux console;
---workgroup narrows it. A request naming no permissions gets read, plus steer
-when the ceiling includes it. --owner and --provider default to the owner and provider Harness
-reported at this host's latest amux provide registration (shown by amux
-doctor); a flag that disagrees with it is refused unless both are given.`,
-						Flags: []flagSpec{
-							{Name: "permissions", Arg: "<list>", Required: true, Usage: "ceiling (see amux direct enroll --help); codes never exceed it"},
-							{Name: "all-sessions", Usage: "ceiling: any ordinary session (the default)"},
-							{Name: "workgroup", Arg: "<root-id>", Repeat: true, Usage: "ceiling: only these workgroups (not with --all-sessions)"},
-							{Name: "owner", Arg: "<user-id>", Usage: "advanced: the Harness user id allowed to request codes"},
-							{Name: "provider", Arg: "<id>", Usage: "advanced: this host's Harness provider id"},
-							{Name: "max-outstanding", Arg: "<n>", Usage: "unredeemed cloud codes at once (default 3)"},
-							{Name: "max-per-hour", Arg: "<n>", Usage: "cloud codes per hour (default 10)"},
-						},
-						Examples: []string{"amux direct cloud enable --permissions read,steer --all-sessions"}},
-					{Name: "disable", Summary: "turn cloud enrollment off (invalidates outstanding codes)"},
-					{Name: "status", Args: "[--json]", Summary: "show the cloud enrollment policy",
-						Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
-				}},
-			{Name: "wake", Args: "<command>", Summary: "content-free cloud wake-ups for direct clients (opt-in)",
-				Detail: "See docs/direct-wake-contract.md. Pins default from this host's live provider registration.",
-				Sub: []*cmdSpec{
-					{Name: "enable", Args: "[--owner <id> --provider <id>]", FlagSet: true, Summary: "allow wake-ups, then restart amux provide with --direct-wake",
-						Flags: []flagSpec{
-							{Name: "owner", Arg: "<harness-user-id>", Usage: "advanced: pin the Harness owner"},
-							{Name: "provider", Arg: "<provider-id>", Usage: "advanced: pin this host's provider id"},
-						}},
-					{Name: "disable", Summary: "turn wake-ups off"},
-					{Name: "status", Args: "[--json]", Summary: "show the wake-up policy",
-						Flags: []flagSpec{{Name: "json", Usage: "print as JSON"}}},
-				}},
 		},
 	}
 }
 
 func daemonSpec() *cmdSpec {
 	return &cmdSpec{
-		Name: "daemon", Args: "[<command>]", run: cmdDaemon,
+		Name: "daemon", Group: groupManage, Args: "[<command>]", run: cmdDaemon,
 		Summary: "run or control the local daemon (restart loads a new binary)",
 		Detail: `The daemon owns the store and the agent engine: it hosts every running agent,
 so stopping or restarting it stops the agents it hosts. Bare amux daemon runs

@@ -241,10 +241,10 @@ func cmdDoctor() error {
 	} else if edits == 0 {
 		fmt.Printf("  ✓ agents    no agent-side config differences awaiting review\n")
 	} else {
-		fmt.Printf("  ⚠ agents    %d config file difference%s across %d agent%s — review: amux sandbox drift\n",
+		fmt.Printf("  ⚠ agents    %d config file difference%s across %d agent%s — review: amux harness sandbox drift\n",
 			edits, plural(edits), agents, plural(agents))
 		fmt.Println("              Counts files per agent, not editing actions; harnesses can update their own config.")
-		fmt.Println("              Nothing is promoted automatically. Use `amux sandbox promote/reset <id> <path>` after review.")
+		fmt.Println("              Nothing is promoted automatically. Use `amux harness sandbox promote/reset <id> <path>` after review.")
 	}
 
 	// Browser: agents open links (gh --web, Claude's login) through $BROWSER, and
@@ -266,7 +266,7 @@ func cmdDoctor() error {
 	fmt.Println("\nProvider")
 	reportProvider()
 
-	// Direct listener: off unless `amux direct enable` saved it on, in which
+	// Direct listener: off unless `amux device enable` saved it on, in which
 	// case the daemon supervises it. Quiet and never fatal when off.
 	fmt.Println("\nDirect")
 	reportDirect()
@@ -361,7 +361,7 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 	printCapped("tracked session missing its directory", res.MissingDirs, func(s string) string { return s })
 	printCapped("branch not linked to a tracked agent", res.OrphanBranches, func(s string) string { return s })
 	if len(res.MissingDirs) > 0 {
-		fmt.Println("  Missing directories can prevent agents from resuming. Check moved/deleted paths with: amux workgroup ls")
+		fmt.Println("  Missing directories can prevent agents from resuming. Check moved/deleted paths with: amux ls")
 	}
 	if len(res.OrphanDirs)+len(res.OrphanBranches) > 0 {
 		fmt.Println("  Untracked items may contain work you want to keep. Inspect files and unmerged commits before removing them.")
@@ -691,14 +691,14 @@ func firstLine(s string) string {
 	return s
 }
 
-// reportProvider prints doctor's Provider section: the config `amux provide
+// reportProvider prints doctor's Provider section: the config `amux cloud
 // install` wrote, the token file's mode, the user service, and the provider
 // loop's own last registration and heartbeat. Never fatal — provider mode is
 // opt-in, so "not configured" is a normal, healthy state.
 func reportProvider() {
 	cfg, err := providercfg.Load()
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Printf("  · config    not configured — `amux provide install --orchestrator host:port --token-file <path>`\n")
+		fmt.Printf("  · config    not configured — `amux cloud connect --orchestrator host:port --token-file <path>`\n")
 		return
 	}
 	if err != nil {
@@ -750,13 +750,13 @@ func reportProviderToken(path string) {
 func reportProviderService() {
 	svc, err := providercfg.Service()
 	if err != nil {
-		fmt.Printf("  · service   %v — run `amux provide <addr>` in the foreground\n", err)
+		fmt.Printf("  · service   %v — run `amux cloud run <addr>` in the foreground\n", err)
 		return
 	}
 	p := svc.Probe()
 	switch {
 	case !p.Installed:
-		fmt.Printf("  · service   no %s unit installed — run: amux provide install\n", svc.Kind())
+		fmt.Printf("  · service   no %s unit installed — run: amux cloud connect\n", svc.Kind())
 		return
 	case p.Active:
 		fmt.Printf("  ✓ service   %s · %s\n", svc.Kind(), p.Detail)

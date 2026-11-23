@@ -184,7 +184,7 @@ func TestReportProviderNotConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "not configured") || !strings.Contains(out, "amux provide install") {
+	if !strings.Contains(out, "not configured") || !strings.Contains(out, "amux cloud connect") {
 		t.Errorf("Provider section = %q, want it to name the install command", out)
 	}
 	if strings.Contains(out, "✗") {
@@ -220,7 +220,7 @@ func TestReportProviderReportsTheChain(t *testing.T) {
 		"runtime-events",
 		token,
 		"mode 0600",
-		"amux provide install", // the service is the missing step
+		"amux cloud connect", // the service is the missing step
 		"the provider has not run yet",
 	} {
 		if !strings.Contains(out, want) {

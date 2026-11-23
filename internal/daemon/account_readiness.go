@@ -40,7 +40,7 @@ func checkAccountReadiness(snapshot hp.AccountSnapshot, harnesses []string) erro
 			}
 			found = true
 			if p.State != "ready" || p.Error != "" {
-				return fmt.Errorf("%s machine login is not ready (%s); configure Accounts or amux auth login %s", h, p.State, h)
+				return fmt.Errorf("%s machine login is not ready (%s); configure Accounts or amux harness login %s", h, p.State, h)
 			}
 		}
 		if !found {

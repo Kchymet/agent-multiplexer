@@ -23,7 +23,7 @@ const (
 	StateStopped = "stopped"
 )
 
-// Status is what the supervisor publishes for `amux direct status` and doctor.
+// Status is what the supervisor publishes for `amux device status` and doctor.
 // It carries no secret: the listen address and endpoints are already in
 // config.json, and nothing else here identifies a credential.
 type Status struct {
@@ -89,7 +89,7 @@ func writeFileAtomic(path string, b []byte) error {
 
 // Ready is written by the managed child once its listener and admin socket
 // are up. It is what ties "a direct server answers" to "the daemon's child is
-// that server": a manual `amux direct serve` can answer the same admin socket,
+// that server": a manual `amux device serve` can answer the same admin socket,
 // and readiness must not be borrowed from it.
 type Ready struct {
 	PID         int       `json:"pid"`

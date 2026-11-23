@@ -45,7 +45,7 @@ func cmdDo(args []string) error {
 	// making the caller go read the source.
 	switch {
 	case a.Action == core.ActionQuery:
-		return fmt.Errorf("%q is a read action; use `amux repo ls` / `amux workgroup ls`", a.Action)
+		return fmt.Errorf("%q is a read action; use `amux repo ls` / `amux ls`", a.Action)
 	case strings.HasPrefix(a.Action, "pane."):
 		return fmt.Errorf("%q is a streaming action, not scriptable; open the workgroup in the dashboard (`amux`)", a.Action)
 	case !core.KnownAction(a.Action):
@@ -75,7 +75,7 @@ func actionList() string {
 }
 
 // cmdRefresh asks the daemon to re-poll its sources now, rather than waiting for
-// the next tick. Handy after an out-of-band change so `amux status` reflects it.
+// the next tick. Handy after an out-of-band change so `amux ls` reflects it.
 func cmdRefresh() error {
 	if err := sendAction(core.Action{Action: core.ActionRefresh}); err != nil {
 		return err
@@ -173,6 +173,14 @@ func parseDoArgs(args []string) (core.Action, error) {
 	}
 	if len(positional) > 3 {
 		return core.Action{}, fmt.Errorf("too many arguments: %s", strings.Join(positional[3:], " "))
+	}
+	// harness= is the current key for the harness field; agent= (what the
+	// daemon reads) stays accepted, and wins when a caller sends both.
+	if h, ok := a.Fields["harness"]; ok {
+		if _, set := a.Fields["agent"]; !set {
+			a.Fields["agent"] = h
+		}
+		delete(a.Fields, "harness")
 	}
 	if strings.TrimSpace(a.Action) == "" {
 		return core.Action{}, fmt.Errorf("usage: amux do <action> [id] [kind] [--target r] [--field k=v]...")

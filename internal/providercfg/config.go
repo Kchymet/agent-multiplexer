@@ -108,8 +108,8 @@ func SaveTo(path string, c Config) error {
 // and a diff shows only what the user actually changed.
 func (c Config) Marshal() []byte {
 	var b strings.Builder
-	b.WriteString("# amux provider configuration — written by `amux provide install`.\n")
-	b.WriteString("# Keys are the `amux provide` flag names; bare `amux provide` reads this file.\n")
+	b.WriteString("# amux provider configuration — written by `amux cloud connect`.\n")
+	b.WriteString("# Keys are the `amux cloud run` flag names; bare `amux cloud run` reads this file.\n")
 	b.WriteString("# The bearer token is NOT here: it stays in the 0600 file named by token-file.\n\n")
 
 	str := func(key, v string) {

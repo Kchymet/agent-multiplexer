@@ -138,7 +138,7 @@ stays on the active rail, and its coordinator and members keep running; the
 coordinator's guide tells it to finish with a summary and ask the user whether
 to archive the workgroup or hand it another task. After explicit user confirmation,
 the coordinator can use `amux agent done` to archive its own workgroup. The host
-can also archive it (`x` on the rail, `amux workgroup archive <id>`). Both archive
+can also archive it (`x` on the rail, `amux archive <id>`). Both archive
 the coordinator and its members, stop runtimes, and revoke credentials while
 retaining transcripts and worktrees. Restore remains host-only: restoring the
 workgroup restores its previously active members; completed members stay archived.

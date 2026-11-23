@@ -18,7 +18,7 @@ The relayed issuance below remains for older clients.
 2. Harness authenticates the user and checks that they own this provider (from
    its live database, never from the request body). It then sends a typed
    `direct-enroll` frame over the existing provider connection.
-3. `amux provide` adds its own registered provider id and passes the request to
+3. `amux cloud` adds its own registered provider id and passes the request to
    the direct server's host-only admin socket as one typed `issue_cloud_code`
    call.
 4. The direct server checks the operator's policy and mints a 5-minute,
@@ -60,7 +60,7 @@ cloud code TTL (5 minutes), is bound to this host (`server_id`), to the
 owner/provider pins and to the policy generation, and can never reach an
 existing grant or refresh token.
 
-**Local tickets.** `amux direct enroll --qr` (admin operation
+**Local tickets.** `amux device connect --qr` (admin operation
 `enroll_ticket`) mints the same v2 ticket on the host operator's own
 authority, with no cloud request: the host's own scope flags, the manual code
 lifetime (default 10 minutes, at most 1 hour) and single use, and no cloud
@@ -107,10 +107,10 @@ Fixtures: `docs/direct/fixtures/ticket-v1` (own `SHA256SUMS`; the `v1` and
 ceiling, then opt the provider in:
 
 ```
-amux provide ...                        # running, until `amux doctor` shows "registered" and an owner
-amux direct cloud enable --permissions read,steer --all-sessions
+amux cloud run ...                        # running, until `amux doctor` shows "registered" and an owner
+amux cloud enroll enable --permissions read,steer --all-sessions
 # restart the provider opted in (stop the running one first: one provider per host):
-amux provide --direct-enroll            # or AMUX_PROVIDER_DIRECT_ENROLL=1, or direct-enroll = true
+amux cloud run --direct-enroll            # or AMUX_PROVIDER_DIRECT_ENROLL=1, or direct-enroll = true
 ```
 
 The feature is advertised at a registration, so after `enable` the provider
@@ -131,11 +131,11 @@ cloud enrollment: enabled (generation 3)
 **Full syntax:**
 
 ```
-amux direct cloud enable --permissions read[,steer] [--all-sessions | --workgroup <root-id>...] \
+amux cloud enroll enable --permissions read[,steer] [--all-sessions | --workgroup <root-id>...] \
     [--owner <harness-user-id>] [--provider <provider-id>] \
     [--max-outstanding 3] [--max-per-hour 10]
-amux direct cloud status [--json]
-amux direct cloud disable
+amux cloud enroll status [--json]
+amux cloud enroll disable
 ```
 
 **The flags:**
@@ -155,13 +155,13 @@ amux direct cloud disable
 - **`--owner` and `--provider` are optional.** An omitted pin comes from this
   host's **current** provider registration. That is the `owner` and
   `providerId` Harness returned in `registered` to this host's
-  token-authenticated registration, as recorded in the `amux provide` status
+  token-authenticated registration, as recorded in the `amux cloud` status
   file and shown by `amux doctor`. It is used only while that provider is
   registered right now: state `registered` and its process alive, the same
   liveness `amux doctor` checks. A dialing, disconnected, stopped or dead
   provider's last snapshot is refused rather than trusted for some period.
-  `amux provide` holds a lock on the status file, so a second provider on the
-  host fails at startup (`another amux provide is already running on this host
+  `amux cloud run` holds a lock on the status file, so a second provider on the
+  host fails at startup (`another amux cloud run (provider) is already running on this host
   (pid N)`) instead of making the registration ambiguous.
   Harness fills `owner` from its live provider row, so the defaults are exactly
   the requester and provider it will vouch for. The email is shown only so you
@@ -177,15 +177,15 @@ amux direct cloud disable
 
 | Message starts with | Cause | Fix |
 | --- | --- | --- |
-| `no Harness provider registration on this host` | `amux provide` has never run here | Run `amux provide` against Harness |
+| `no Harness provider registration on this host` | `amux cloud run` has never run here | Run `amux cloud run` against Harness |
 | `the provider's last registration … was rejected` | Token revoked or invalid | Fix the provider registration (`amux doctor`) |
-| `the provider is not registered with Harness right now (state …)` | Dialing, reconnecting after a drop (`disconnected`), or stopped | Start `amux provide` and wait for `amux doctor` to show `registered` |
-| `the provider recorded as registered (pid N) is no longer running` | The provider died without recording a stop (SIGKILL, reboot) | Start `amux provide` again |
-| `Harness reported no owner for provider …` | Shared or unowned provider, or a Harness that predates owner reporting | Register the provider to your own account, or upgrade Harness and restart `amux provide` |
+| `the provider is not registered with Harness right now (state …)` | Dialing, reconnecting after a drop (`disconnected`), or stopped | Start `amux cloud run` and wait for `amux doctor` to show `registered` |
+| `the provider recorded as registered (pid N) is no longer running` | The provider died without recording a stop (SIGKILL, reboot) | Start `amux cloud run` again |
+| `Harness reported no owner for provider …` | Shared or unowned provider, or a Harness that predates owner reporting | Register the provider to your own account, or upgrade Harness and restart `amux cloud run` |
 | `--provider X is not this host's registered provider` | Only `--provider` given, for a different provider | Give both `--owner` and `--provider`, or drop the flag |
 | `--owner X is not the registered owner` | Only `--owner` given, for a different account | Give both flags, or drop the flag |
 
-`amux direct cloud status` warns when enabled pins no longer match the latest
+`amux cloud enroll status` warns when enabled pins no longer match the latest
 registration (Harness reassigned or recreated the provider). Re-run `enable` to
 re-pin.
 
@@ -198,7 +198,7 @@ in.
 through Harness, to mint enrollment codes up to the ceiling. PKCE does not
 protect against a compromised but authorized issuer that requests codes for a
 verifier it holds itself. Every cloud grant records its provenance:
-`amux direct clients list` shows `cloud:<requester>` whatever `client_label` the
+`amux device ls` shows `cloud:<requester>` whatever `client_label` the
 client chose.
 
 **Lifecycle:**
@@ -207,22 +207,22 @@ client chose.
   re-pin, a lowered ceiling and disable, and every outstanding cloud code
   becomes unredeemable.
 - **Grants already redeemed are not revoked by a policy change.** Revoke them
-  explicitly with `amux direct clients revoke`.
-- **`amux direct reset-identity` disables cloud issuance.** Re-enable it
+  explicitly with `amux device revoke`.
+- **`amux device reset-identity` disables cloud issuance.** Re-enable it
   deliberately.
 
 | Event | Effect |
 | --- | --- |
-| Harness reassigns the provider's owner | Issuance returns `owner_mismatch`; `cloud status` warns. Re-run `amux direct cloud enable` to re-pin (voids earlier codes) |
+| Harness reassigns the provider's owner | Issuance returns `owner_mismatch`; `cloud status` warns. Re-run `amux cloud enroll enable` to re-pin (voids earlier codes) |
 | Provider recreated in Harness (new id) | `provider_mismatch` until you re-pin |
-| Endpoint change | Restart `amux direct serve` (or re-run `amux direct enable --endpoint …`, which the daemon applies); bundles carry the running endpoints, and the provider re-registers with them within about a minute |
-| Direct server not running (or `amux direct disable`) | The running provider withdraws the offer by re-registering within about a minute; until then requests answer `unavailable` |
+| Endpoint change | Restart `amux device serve` (or re-run `amux device enable --endpoint …`, which the daemon applies); bundles carry the running endpoints, and the provider re-registers with them within about a minute |
+| Direct server not running (or `amux device disable`) | The running provider withdraws the offer by re-registering within about a minute; until then requests answer `unavailable` |
 
-**Did an enrollment reach this host?** With tailnet endpoints (`amux direct
+**Did an enrollment reach this host?** With tailnet endpoints (`amux device
 enable --tailnet`), the client (web or Android, on the tailnet) claims and
 redeems its code directly at this host, pinned to the advertised server id.
 No enrollment payload goes through Harness. When a client says it cannot
-reach this machine, `amux direct status` (`enrollment` in `--json`) says
+reach this machine, `amux device status` (`enrollment` in `--json`) says
 whether anything arrived. Three places record their latest request:
 
 - `exchange_last`: a claim, an approval exchange (`enroll_cloud`, see
@@ -237,7 +237,7 @@ A record holds the time, the step or kind, the outcome, the refusal code and
 the reason. It never holds the requester, issue key, challenge, verifier,
 code, token or client address. Each request is also logged:
 `direct: enrollment …` and `direct: cloud enrollment request reached this
-host: …` in `amux direct logs`, and `direct-enroll request from Harness
+host: …` in `amux device logs`, and `direct-enroll request from Harness
 reached this host: …` in the provider log.
 
 What the records mean:

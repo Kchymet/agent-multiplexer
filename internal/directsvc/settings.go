@@ -1,9 +1,9 @@
-// Package directsvc is the daemon-managed half of `amux direct`: the persisted
+// Package directsvc is the daemon-managed half of `amux device`: the persisted
 // setting that opts this host into a direct listener, and the supervisor the
-// daemon runs to keep `amux direct serve --managed` alive while that setting is
+// daemon runs to keep `amux device serve --managed` alive while that setting is
 // on. See docs/direct-access.md ("Run it with the daemon").
 //
-// The listener is off by default. Only an explicit `amux direct enable` writes
+// The listener is off by default. Only an explicit `amux device enable` writes
 // enabled=true; the daemon then starts the listener at its own startup and stops
 // it when the setting is turned off or the daemon stops.
 //
@@ -35,7 +35,7 @@ const EnabledKey = "direct.enabled"
 // Settings is the persisted direct-listener configuration. It holds no secret:
 // the TLS key is referenced by path and stays wherever the operator keeps it,
 // and the server identity and grants stay in the protected direct store. The
-// JSON keys mirror the `amux direct serve` flags.
+// JSON keys mirror the `amux device serve` flags.
 type Settings struct {
 	Enabled         bool     `json:"enabled"`
 	Listen          string   `json:"listen,omitempty"`
@@ -47,7 +47,7 @@ type Settings struct {
 	AccessTTL       string   `json:"access_ttl,omitempty"`
 	IdleTTL         string   `json:"idle_ttl,omitempty"`
 	AbsoluteTTL     string   `json:"absolute_ttl,omitempty"`
-	// Tailnet, when set, is tailnet mode (amux direct enable --tailnet): the
+	// Tailnet, when set, is tailnet mode (amux device enable --tailnet): the
 	// listener re-derives its address and endpoint from tailscaled each time
 	// it starts, and its certificate is reloaded in place rather than by a
 	// restart. See TailnetSettings.
@@ -104,7 +104,7 @@ func Save(s Settings) error {
 	return amuxcfg.Write(top)
 }
 
-// Args renders the settings as `amux direct serve` flags. It is what the
+// Args renders the settings as `amux device serve` flags. It is what the
 // managed child would have been run with by hand, for status and docs; the
 // child itself reads the settings file, so nothing here reaches a process
 // table. (There is no secret in it either way.)
@@ -143,7 +143,7 @@ func (s Settings) Args() []string {
 // Fingerprint identifies the configuration a child was started with. It covers
 // the settings and, outside tailnet mode, the size and modification time of
 // the certificate and key files, so renewing a certificate in place restarts
-// the listener onto the new one, the same way restarting a manual `amux direct
+// the listener onto the new one, the same way restarting a manual `amux device
 // serve` would.
 //
 // In tailnet mode the running child reloads the certificate itself (a renewal

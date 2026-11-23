@@ -32,21 +32,21 @@ profile, not stable machine ids.
 | Path | Access | Owner in amux |
 | --- | --- | --- |
 | Native TUI → local daemon | internal native path (not a descriptor route) | `internal/hostbackend` → `daemon.DialContext` |
-| Harness web and Android → this host's sessions | `harness-relay`, through Harness | `amux provide`: `provider.HarnessRelay` transport + `internal/hostbackend` operations |
+| Harness web and Android → this host's sessions | `harness-relay`, through Harness | `amux cloud`: `provider.HarnessRelay` transport + `internal/hostbackend` operations |
 | Legacy compatibility relay (`amux serve`) | legacy shared-token mux | `internal/mux` → `internal/hostbackend` |
-| `direct` to amux (S1) | opt-in `amux direct serve`: destination-issued grants, paste enrollment, read + prompt/interject/stop | `internal/direct` → `internal/hostbackend` (see [direct-access.md](direct-access.md)) |
+| `direct` to amux (S1) | opt-in `amux device serve`: destination-issued grants, paste enrollment, read + prompt/interject/stop | `internal/direct` → `internal/hostbackend` (see [direct-access.md](direct-access.md)) |
 
 The provider's outbound link is a **provider transport**, not a client direct
-route. `amux provide` dials the broker over TLS, registers with its bearer
+route. `amux cloud` dials the broker over TLS, registers with its bearer
 token, and serves harnessproto v2 on that link (see
 [remote-provider.md](remote-provider.md)). Optional
 [cloud-assisted discovery/enrollment](direct-cloud-enrollment.md) advertises
 the direct server's `server_id` and HTTPS endpoints over that provider link;
-direct session traffic goes from the client to `amux direct serve`.
+direct session traffic goes from the client to `amux device serve`.
 The `providerId` the broker assigns is the broker's
 alias for this registration, not a global machine id.
 
-`amux provide revoke --yes` revokes that token's broker registration and relay
+`amux cloud revoke --yes` revokes that token's broker registration and relay
 access through a standalone authenticated TLS exchange. **Existing direct-client
 grants remain valid**, and agent-session credentials are separate. See
 [provider revocation](remote-provider.md#revoke-this-machines-registration-and-relay-access)

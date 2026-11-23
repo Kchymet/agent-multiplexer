@@ -1,7 +1,7 @@
 // Package hostbackend is the session-facing operation set of the local amux
 // backend: the authenticated primary daemon that owns the store, the engine and
 // every pane. It is the one seam through which transports reach those
-// operations: the Harness relay provider (`amux provide`), the legacy
+// operations: the Harness relay provider (`amux cloud`), the legacy
 // compatibility mux (`amux serve`), and the native TUI's own connection.
 //
 // It deliberately knows nothing about how a remote peer reached amux. Provider

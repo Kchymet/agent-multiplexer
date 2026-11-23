@@ -323,7 +323,7 @@ completion archives only that member.
   running, and run `amux agent done` as the last tool call, after the final
   summary in `COORDINATION.md` and the final message.
 
-Restoration is host-only: `amux workgroup unarchive <workgroup-id>` restores the
+Restoration is host-only: `amux unarchive <workgroup-id>` restores the
 workgroup and its previously active members together. Members already completed
 before the group archive stay archived.
 

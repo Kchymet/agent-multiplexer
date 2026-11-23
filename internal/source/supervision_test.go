@@ -159,7 +159,7 @@ func TestSuperviseCoordinatorBoundsReason(t *testing.T) {
 	}
 }
 
-// The coordinator row of `amux status --json`: with only an open member PR
+// The coordinator row of `amux ls --json`: with only an open member PR
 // outstanding it is calm (waiting for merge, state ready), with its goal and
 // the awaited members in `supervision`, the rollup in `rollup`, and the
 // member row's PR in `enrichments`.

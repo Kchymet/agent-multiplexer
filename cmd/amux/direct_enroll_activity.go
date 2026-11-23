@@ -41,9 +41,9 @@ type directEnrollView struct {
 
 // directIssueHints explain a cloud issuance refusal code to the operator.
 var directIssueHints = map[string]string{
-	hp.DirectEnrollErrDisabled:         "cloud enrollment is off or no direct server answered (amux direct cloud enable)",
-	hp.DirectEnrollErrOwnerMismatch:    "the requesting Harness user is not the owner this host pinned (amux direct cloud status)",
-	hp.DirectEnrollErrProviderMismatch: "this provider is not the one this host pinned (amux direct cloud status)",
+	hp.DirectEnrollErrDisabled:         "cloud enrollment is off or no direct server answered (amux cloud enroll enable)",
+	hp.DirectEnrollErrOwnerMismatch:    "the requesting Harness user is not the owner this host pinned (amux cloud enroll status)",
+	hp.DirectEnrollErrProviderMismatch: "this provider is not the one this host pinned (amux cloud enroll status)",
 	hp.DirectEnrollErrInvalidRequest:   "Harness sent a malformed request",
 	hp.DirectEnrollErrInvalidChallenge: "the client's PKCE challenge was not S256",
 	hp.DirectEnrollErrScope:            "the requested permissions or scope exceed this host's cloud ceiling",
@@ -52,7 +52,7 @@ var directIssueHints = map[string]string{
 	hp.DirectEnrollErrCapacity:         "too many unredeemed cloud codes; redeem or wait for one to expire",
 	hp.DirectEnrollErrRateLimited:      "the hourly cloud enrollment limit is reached",
 	hp.DirectEnrollErrBusy:             "the provider had too many enrollment requests in flight",
-	hp.DirectEnrollErrUnavailable:      "the direct server did not answer in time or failed (amux direct logs)",
+	hp.DirectEnrollErrUnavailable:      "the direct server did not answer in time or failed (amux device logs)",
 }
 
 // directReasonHints explain a direct exchange refusal reason.
@@ -60,16 +60,16 @@ var directReasonHints = map[string]string{
 	direct.ReasonCeiling:       "the request asks for more than this host allows",
 	direct.ReasonTicketExpired: "the code or ticket expired; mint a new one",
 	direct.ReasonTicketUsed:    "the code or ticket was already used or claimed by another device; mint a new one",
-	direct.ReasonOther:         "see amux direct logs",
+	direct.ReasonOther:         "see amux device logs",
 	// Approval exchanges (POST /direct/v1/enroll/cloud).
 	direct.ReasonMalformed:               "the client sent a malformed request",
-	direct.ReasonOwnerMismatch:           "the approving Harness user is not the owner this host pinned (amux direct cloud status)",
-	direct.ReasonProviderMismatch:        "the verifying provider is not the one this host pinned (amux direct cloud status)",
+	direct.ReasonOwnerMismatch:           "the approving Harness user is not the owner this host pinned (amux cloud enroll status)",
+	direct.ReasonProviderMismatch:        "the verifying provider is not the one this host pinned (amux cloud enroll status)",
 	direct.ReasonApprovalUnknown:         "Harness does not know this approval (voided by a retry?); start over in Harness",
 	direct.ReasonApprovalMismatch:        "the approval was issued for another machine, server or device",
-	direct.ReasonCloudDisabled:           "cloud enrollment is off on this host (amux direct cloud enable)",
+	direct.ReasonCloudDisabled:           "cloud enrollment is off on this host (amux cloud enroll enable)",
 	direct.ReasonRateLimited:             "too many attempts or codes; wait and retry",
-	direct.ReasonOrchestratorUnreachable: "this host could not reach Harness to verify the approval: is amux provide running and registered?",
+	direct.ReasonOrchestratorUnreachable: "this host could not reach Harness to verify the approval: is amux cloud running and registered?",
 	direct.ReasonUnavailable:             "a transient failure; retry with the same approval",
 }
 
@@ -99,7 +99,7 @@ func directEnrollment(srv *directServerStatus, st provider.Status, live bool) di
 	ts := func(unix int64) string { return time.Unix(unix, 0).Local().Format(time.RFC3339) }
 	switch {
 	case !v.ReachedHost && srv == nil:
-		v.Note = "no direct server is answering, so no client can enroll (amux direct enable --tailnet)"
+		v.Note = "no direct server is answering, so no client can enroll (amux device enable --tailnet)"
 	case !v.ReachedHost:
 		v.Note = "no enrollment request has reached this host since the direct server started (" + ts(v.ExchangeSince) + "); " +
 			"if a client reports it cannot reach this machine, the failure is between that device and this host " +

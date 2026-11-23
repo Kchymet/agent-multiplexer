@@ -35,7 +35,7 @@ type Status struct {
 	// OwnerUserID and OwnerEmail are the registered owner the orchestrator
 	// reported for ProviderID at the latest accepted registration (empty for a
 	// shared/unowned provider or an older orchestrator). They default the pins
-	// of `amux direct cloud enable`; OwnerEmail is display-only.
+	// of `amux cloud enroll enable`; OwnerEmail is display-only.
 	OwnerUserID string `json:"owner_user_id,omitempty"`
 	OwnerEmail  string `json:"owner_email,omitempty"`
 	Panes       int    `json:"panes"`
@@ -49,7 +49,7 @@ type Status struct {
 	// DirectServerID and DirectEndpoints are the direct-enroll-v1 offer the
 	// provider sent in its latest accepted registration (empty when it
 	// advertised none). They are what the orchestrator was actually told, not
-	// what this host would like it to know; `amux direct status` reports them
+	// what this host would like it to know; `amux device status` reports them
 	// as observed.
 	DirectServerID  string   `json:"direct_server_id,omitempty"`
 	DirectEndpoints []string `json:"direct_endpoints,omitempty"`

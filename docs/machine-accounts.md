@@ -7,15 +7,15 @@ The daemon owns one central Claude profile and one central Codex profile per amu
 Open **Accounts** from the TUI rail (`s`). The initial screen shows Claude and Codex together, including reported usage, resets and freshness; Tab selects the harness for actions. `e` starts subscription login and `a` starts API-key login. Each existing central profile has one explicit `subscription` or `api` mode. In a host terminal, the equivalent commands are:
 
 ```sh
-amux auth login claude
-amux auth login codex
-amux auth login claude --api-key
-amux auth login codex --api-key
-amux auth accounts --json
-amux auth status codex
-amux auth default claude:central
-amux auth default codex:central
-amux auth logout claude
+amux harness login claude
+amux harness login codex
+amux harness login claude --api-key
+amux harness login codex --api-key
+amux harness auth accounts --json
+amux harness auth status codex
+amux harness auth default claude:central
+amux harness auth default codex:central
+amux harness logout claude
 ```
 
 Claude uses `claude setup-token`. The CLI runs that command and reads the resulting token with terminal echo disabled; `--token-stdin` also works. TUI completion is a protected, write-only token field: run `claude setup-token` in a trusted host terminal and paste its output there. Do not paste credentials into an agent conversation. There is no automated Claude browser issuance API in this adapter. Its token is opaque: account email, plan, expiry, and same-account identity cannot be inferred from it. It has no refresh token; renewal requires another setup-token ceremony.
@@ -63,7 +63,7 @@ Starting replacement login pauses **new credential delivery** for that central p
 
 ## Trusted console CLI
 
-The existing amux console terminal may run the same `amux auth` commands. Its fixed, read-only session context selects a dedicated socket in its daemon-owned access directory. The socket authenticates the console's session credential with pinned TLS, resolves its live console role, rechecks generation/authority at effect admission, and binds login attempts to that connection. It accepts account queries only; ordinary agents, provider principals, generic actions and general inventory queries are denied. The host socket and regular-file session RPC do not gain account privileges. Reopen an existing console terminal after upgrading so its sandbox includes the exact socket grant.
+The existing amux console terminal may run the same `amux harness auth` commands. Its fixed, read-only session context selects a dedicated socket in its daemon-owned access directory. The socket authenticates the console's session credential with pinned TLS, resolves its live console role, rechecks generation/authority at effect admission, and binds login attempts to that connection. It accepts account queries only; ordinary agents, provider principals, generic actions and general inventory queries are denied. The host socket and regular-file session RPC do not gain account privileges. Reopen an existing console terminal after upgrading so its sandbox includes the exact socket grant.
 
 Console Claude login **does not run native `claude setup-token`**, whose output contains the credential. Obtain the token in a trusted host terminal, then use the console terminal's hidden prompt or a protected stdin source. amux does not print the supplied token. Do not paste tokens into console agent chat or command arguments. Codex browser authorization URLs must be shown for interaction and may be captured by terminal/tool recording; the console is not a secret-free output channel. Account requests, completion tokens and ceremony responses themselves remain transient and never enter mailbox files, session actions/events, or durable account relay.
 
@@ -123,7 +123,7 @@ unknown or malformed metadata is refused without being rewritten. No credential
 is copied: host and shared logins hold rotating refresh tokens (a copy would
 fork the refresh chain) and environment credentials are not amux's to move. A
 harness that had no central login is reported as *migrated — central login
-required* in Accounts and `amux auth status` until its first central login;
+required* in Accounts and `amux harness auth status` until its first central login;
 launches meanwhile use the normal central login flow. Saved `claude.auth` /
 `codex.auth` legacy values only record this evidence; `amux config set` accepts
 only `central`. Central Codex auth requires App Server control, so
@@ -137,7 +137,7 @@ is retried. The import runs once per session, inside that launch: a launch
 admitted under the daemon-wide gate holds it while a large rollout is mapped
 (each line is bounded at 16 MiB; the rollout is read once).
 
-`amux auth rebind <claude|codex> WORKLOAD_ID` is optional: it stops one workload
+`amux harness auth rebind <claude|codex> WORKLOAD_ID` is optional: it stops one workload
 so its next start uses the current login now rather than at its next launch.
 All remote account mutations, including rebind, are denied; use the amux CLI/TUI locally.
 
@@ -156,14 +156,14 @@ Both UIs use `AccountLimitsTTLMillis = 300000`: observations older than five min
 Account grants are independent of session/compute permissions:
 
 ```sh
-amux provide install --account-status
+amux cloud connect --account-status
 # Explicitly deny account use while preserving other configured grants:
-amux provide install --account-use=false
+amux cloud connect --account-use=false
 ```
 
 `--account-status` permits safe account/limits projections and defaults off. `--account-use` controls remote workload creation/start/prompt; it defaults on for writable session publication and can be explicitly disabled. These grants remain independent. They persist in `provider.toml`; corresponding environment variables are `AMUX_PROVIDER_ACCOUNT_STATUS` and `AMUX_PROVIDER_ACCOUNT_USE`.
 
-`--account-manage=true` is retired and returns a message directing users to amux CLI/TUI. Old persisted or environment manage grants are ignored; reinstalling the provider clears the saved grant. Providers always advertise `capabilities.accounts.manage=false` and reject login, completion, polling, cancellation, default, logout and rebind requests, even from old clients with stale grants. The Harness server also rejects web account writes. The trusted amux console terminal can run `amux auth` through a dedicated local account socket; account status grants do not confer console access. Ordinary agents and provider principals cannot authenticate to this socket.
+`--account-manage=true` is retired and returns a message directing users to amux CLI/TUI. Old persisted or environment manage grants are ignored; reinstalling the provider clears the saved grant. Providers always advertise `capabilities.accounts.manage=false` and reject login, completion, polling, cancellation, default, logout and rebind requests, even from old clients with stale grants. The Harness server also rejects web account writes. The trusted amux console terminal can run `amux harness auth` through a dedicated local account socket; account status grants do not confer console access. Ordinary agents and provider principals cannot authenticate to this socket.
 
 `accounts-v1` and its wire types remain compatible. Remote `account-request` / `account-result` frames support only `status`. Local daemon APIs retain safe default (central only)/logout/rebind and protected login/poll/cancel/complete/disconnect ceremonies. Local ceremonies never enter durable relay queues, replay, session actions, or event logs. Safe status rejects secret/attempt/initiator fields and never returns a ceremony URL.
 
@@ -181,4 +181,4 @@ V1 exposes one stable amux-owned central configuration per harness that every wo
 
 A central Claude pane obtains its token after entering the sandbox, through its signed session mailbox. It does not connect to the host management socket. The mailbox request waits up to ten seconds and the launcher retries after five seconds. A running daemon or a copied Claude configuration does not by itself prove that this separate credential request was answered. On a new session, the child can run before reconciliation publishes the mailbox service record; this immediate failure also retries. It is not a connection timeout or evidence of a missing login.
 
-Only a confirmed absent central credential recommends `amux auth login claude`. A mailbox timeout leaves credential status unknown; check daemon status from a trusted host terminal. Access denial, paused delivery (login pending, logged out, blocked), a superseded process (the login changed after launch: restart the workload), conflicting settings, and an unreadable credential have separate guidance. Login does not restore revoked session authority and never switches a running process; a launcher started without a daemon-allocated launch exits immediately. Repeated failures in the same category print once; a changed category updates the guidance. Older daemons that return the ambiguous `central_credential_unavailable` code are treated as unknown, not as proof that login is missing.
+Only a confirmed absent central credential recommends `amux harness login claude`. A mailbox timeout leaves credential status unknown; check daemon status from a trusted host terminal. Access denial, paused delivery (login pending, logged out, blocked), a superseded process (the login changed after launch: restart the workload), conflicting settings, and an unreadable credential have separate guidance. Login does not restore revoked session authority and never switches a running process; a launcher started without a daemon-allocated launch exits immediately. Repeated failures in the same category print once; a changed category updates the guidance. Older daemons that return the ambiguous `central_credential_unavailable` code are treated as unknown, not as proof that login is missing.

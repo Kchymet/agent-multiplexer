@@ -1,4 +1,4 @@
-// Package tailnet is the small slice of tailscaled's LocalAPI that `amux direct
+// Package tailnet is the small slice of tailscaled's LocalAPI that `amux device
 // enable --tailnet` needs: this node's MagicDNS name and Tailscale addresses
 // (to derive the listen address and endpoint), the control server it is
 // logged in to, and a TLS certificate for its MagicDNS name.

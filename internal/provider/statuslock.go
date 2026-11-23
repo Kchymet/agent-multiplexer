@@ -10,14 +10,14 @@ import (
 	"syscall"
 )
 
-// ErrStatusHeld means another `amux provide` on this host already owns the
+// ErrStatusHeld means another `amux cloud run` on this host already owns the
 // status file.
-var ErrStatusHeld = errors.New("another amux provide is already running on this host")
+var ErrStatusHeld = errors.New("another amux cloud run (provider) is already running on this host")
 
 // LockStatus makes the calling process the only provider writing the status
 // file at path. The status file is single-writer state: two providers would
 // overwrite each other's registration (and with it the owner and provider id
-// that `amux direct cloud enable` defaults its pins to, and what `amux doctor`
+// that `amux cloud enroll enable` defaults its pins to, and what `amux doctor`
 // reports). The flock is released when the process exits, however it exits, so
 // a crashed provider never blocks its successor. A second caller fails with
 // ErrStatusHeld naming the holder's pid.

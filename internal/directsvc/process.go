@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// ManagedFlag is the `amux direct serve` flag the daemon starts its child with.
+// ManagedFlag is the `amux device serve` flag the daemon starts its child with.
 // The child then reads its whole configuration from the saved setting, so the
 // command line is constant and carries nothing worth reading.
 const ManagedFlag = "--managed"
@@ -133,7 +133,7 @@ func SupervisorPID(getenv func(string) string) (int, error) {
 	v := getenv(SupervisorPIDEnv)
 	pid, err := strconv.Atoi(v)
 	if err != nil || pid <= 1 {
-		return 0, fmt.Errorf("%s=%q: the managed listener runs only under the daemon (amux direct enable)", SupervisorPIDEnv, v)
+		return 0, fmt.Errorf("%s=%q: the managed listener runs only under the daemon (amux device enable)", SupervisorPIDEnv, v)
 	}
 	return pid, nil
 }

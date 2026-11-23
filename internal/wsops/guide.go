@@ -96,8 +96,8 @@ ordinary sandboxed shell through a private file mailbox. Keep amux’s OS sandbo
 and the configured approval controls enabled. Name and done target the launched session even if environment IDs change;
 explicit commands report failure when the daemon cannot confirm the operation.
 
-Other command families such as `+"`amux do`"+`, `+"`amux workgroup`"+`, `+"`amux repo`"+`,
-`+"`amux config`"+`, and `+"`amux sandbox`"+` operate the wider control plane. Do not use
+Other command families such as `+"`amux do`"+`, `+"`amux new`"+`, `+"`amux repo`"+`,
+`+"`amux config`"+`, and `+"`amux harness`"+` operate the wider control plane. Do not use
 them during ordinary agent work unless the user explicitly asks you to administer
 amux itself.
 
@@ -204,7 +204,7 @@ Your harness's configuration (Claude Code's ` + "`~/.claude`" + `, Codex's ` + "
 as a template; ` + "`CLAUDE_CONFIG_DIR`" + ` / ` + "`CODEX_HOME`" + ` point at it. You may edit it —
 settings, memory, skills, MCP servers — it is yours. amux compares your copy with
 the template and reports what you changed, so the user can decide whether a change
-should propagate to their config and to other agents (` + "`amux sandbox drift`" + `). Nothing
+should propagate to their config and to other agents (` + "`amux harness sandbox drift`" + `). Nothing
 you change there propagates on its own. The credentials file is shared and not yours
 to edit.
 `
@@ -221,7 +221,7 @@ are descriptive metadata; discovery does not grant filesystem or write access.
 For normalized history, list the sessions your current role may read and query a
 bounded event page:
 
-    amux status --json
+    amux ls --json
     amux agent events <session-id> --json
 
 Omit ` + "`<session-id>`" + ` to read yourself. Continue with the returned opaque cursor:
@@ -241,13 +241,14 @@ are lost; durable instructions for yourself belong in your private config home's
 memory (` + "`.amux/claude/CLAUDE.md`" + ` for Claude Code) or in notes you keep in this
 directory.`
 	// steeringVerbs is the operating vocabulary every container session shares.
-	steeringVerbs = `- ` + "`amux status --json`" + ` — the scope-filtered live view for this role,
+	steeringVerbs = `- ` + "`amux ls --json`" + ` — the scope-filtered live view for this role,
   with normalized session state (stopped | ready | waiting | running; stopped = no live runtime, only a prompt starts it), title, and repos.
-- ` + "`amux do steer <id> -f verb=prompt -f text=\"…\"`" + ` — send an agent a prompt
-  (this starts a stopped agent); ` + "`-f verb=interject`" + ` speaks mid-turn,
-  ` + "`-f verb=stop`" + ` interrupts the turn, ` + "`-f verb=permission -f decision=allow|deny`" + `
-  answers a pending permission prompt.
-- ` + "`amux do archive <id>`" + ` marks an agent done (reversible); ` + "`amux do rename <id> -f name=\"…\"`" + `;
+- ` + "`amux send <id> \"…\"`" + ` — send an agent a prompt (queued while it is busy;
+  this starts a stopped agent); ` + "`amux send <id> --now \"…\"`" + ` speaks mid-turn,
+  ` + "`amux send <id> --stop`" + ` interrupts the turn, and
+  ` + "`amux do steer <id> -f verb=permission -f decision=allow|deny`" + ` answers a pending
+  permission prompt.
+- ` + "`amux archive <id>`" + ` marks an agent done (reversible: ` + "`amux unarchive`" + `); ` + "`amux rename <id> \"…\"`" + `;
   ` + "`amux do start <id>`" + ` brings a stopped agent up without prompting it.`
 )
 
@@ -268,25 +269,25 @@ reachable from the web or the phone.
 
 ## Your role: administration
 - **Health:** `+"`amux doctor`"+` checks the install and the daemon and reconciles
-  sessions; `+"`amux sandbox drift`"+` reviews config edits agents made;
+  sessions; `+"`amux harness sandbox drift`"+` reviews config edits agents made;
   `+"`amux config`"+` shows and changes amux settings.
 - **Updates:** `+"`amux version`"+` and `+"`amux update`"+`; `+"`amux harness`"+` for the
   managed Claude Code / Codex installs.
-- **Accounts and auth:** `+"`amux auth accounts --json`"+`, `+"`amux auth status <harness>`"+`;
-  logins and defaults (`+"`amux auth login …`"+`, `+"`amux auth default …`"+`).
-- **Direct clients (web, phone):** `+"`amux direct status`"+`,
-  `+"`amux direct clients list`"+`, `+"`amux direct enroll …`"+`,
-  `+"`amux direct clients revoke <id>`"+`.
+- **Accounts and auth:** `+"`amux harness auth accounts --json`"+`, `+"`amux harness auth status <harness>`"+`;
+  logins and defaults (`+"`amux harness login …`"+`, `+"`amux harness auth default …`"+`).
+- **Direct clients (web, phone):** `+"`amux device status`"+`,
+  `+"`amux device ls`"+`, `+"`amux device connect …`"+`,
+  `+"`amux device revoke <id>`"+`.
 - **Repos and grants:** `+"`amux repo add <OWNER/REPO|url|path>`"+`, `+"`amux repo ls`"+`,
   `+"`amux repo rm`"+`; a workgroup's repo ceiling.
-- **Housekeeping:** archive sweeps of finished workgroups (`+"`amux workgroup ls`"+`,
-  `+"`amux do set-archived <workgroup> -f archived=true`"+` once its work is merged or
+- **Housekeeping:** archive sweeps of finished workgroups (`+"`amux ls`"+`,
+  `+"`amux archive <workgroup>`"+` once its work is merged or
   closed), deleting what the user asks to delete, moving agents
-  (`+"`amux do move <agent> --target <workgroup>`"+`).
+  (`+"`amux move <agent> <workgroup>`"+`).
 - **Cost and usage:** `+"`amux top`"+` (CPU and memory per session and workgroup) and the
-  account budgets in `+"`amux auth accounts --json`"+`.
+  account budgets in `+"`amux harness auth accounts --json`"+`.
 
-Some of these commands refuse to run inside an agent session (`+"`amux direct`"+`,
+Some of these commands refuse to run inside an agent session (`+"`amux device`"+`,
 logins): when one does, give the user the exact command to run in their own
 terminal instead of looking for a way around it.
 
@@ -296,10 +297,10 @@ every workgroup coordinator, owns the cross-workgroup item inbox, and keeps the
 user's **question queue**: every pending AskUserQuestion, permission request,
 coordinator goal ask and decision item, in one place. For "what needs me?" or
 "how is my work going?":
-- `+"`amux queue list`"+` shows the queue and the workgroup summary (needs you,
+- `+"`amux inbox ls`"+` shows the queue and the workgroup summary (needs you,
   running, waiting for review or merge, done); the user answers with
-  `+"`amux queue answer <entry> …`"+` or `+"`i`"+` in the TUI.
-- Send supervision work to the overseer (`+"`amux do steer overseer -f verb=prompt -f text=\"…\"`"+`),
+  `+"`amux inbox answer <entry> …`"+` or `+"`i`"+` in the TUI.
+- Send supervision work to the overseer (`+"`amux send overseer \"…\"`"+`),
   and in-workgroup work to that workgroup's coordinator. Do not run workgroups
   from here.
 - Items (`+"`amux agent items`"+`) still show you everything as an operator view, but
@@ -314,10 +315,9 @@ coordinator goal ask and decision item, in one place. For "what needs me?" or
 
 ## Operate amux
 %s
-- `+"`amux do new-workgroup -f name=\"…\" -f prompt=\"…\" [-f repos=a,b]`"+` creates a
-  workgroup when the user asks you to (`+"`-f coordinator=claude|codex`"+`,
-  `+"`-f coordinator_model=…`"+`); `+"`amux do add-agent <workgroup> -f repos=… -f prompt=\"…\"`"+`
-  adds an agent.
+- `+"`amux new \"<task>\" [--repo a] [--name …]`"+` creates a workgroup when the
+  user asks you to (`+"`--coordinator claude|codex`"+`, `+"`--coordinator-model …`"+`);
+  `+"`amux add <workgroup> \"<task>\" [--repo a]`"+` adds an agent.
 
 ## Rules
 - Never edit a worktree, another session's sandbox, a bare clone, or the store.
@@ -371,35 +371,35 @@ decisions, and acceptance criteria is the record that survives your context). %s
 ## Operate this workgroup
 These are the commands your grant authorizes; they act on this workgroup and its
 current direct members (`+"`<member>`"+` is a member id from the roster below).
-- `+"`amux status --json`"+` — the live view of this workgroup's members, with
+- `+"`amux ls --json`"+` — the live view of this workgroup's members, with
   normalized state (stopped | ready | waiting | running; stopped = no live runtime), title, and repos.
 - `+"`amux agent events <member> --json`"+` — a member's normalized history: the
   evidence for what it did (continue with `+"`--cursor`"+`).
 - `+"`amux agent wait <member>... [--until ready,idle] [--timeout 30m]`"+` — block
   until a member's state or PRs change (or it reaches one of the given states),
   then print it. It waits on the daemon's own events, so use it instead of a
-  sleep loop over `+"`amux agent events`"+`, `+"`amux status`"+` or `+"`gh pr view`"+`.
+  sleep loop over `+"`amux agent events`"+`, `+"`amux ls`"+` or `+"`gh pr view`"+`.
 - `+"`amux repo ls`"+` — every repository tracked on this host, each marked
   `+"`granted`"+` or `+"`not granted`"+` for this workgroup. You may give members
   worktrees of granted repos only. Unless the host limited this workgroup, every
   tracked repo is granted, including ones tracked after it was created.
-- `+"`amux do add-agent %s -f repos=a,b -f prompt=\"…\"`"+` — add a member to this
+- `+"`amux add %s \"<task>\" --repo a --repo b`"+` — add a member to this
   workgroup (`+"`-f agent=claude|codex -f model=… -f mode=task|interactive`"+` are
   optional). Each repo in `+"`repos`"+` gives the member its own amux linked worktree on
   its own branch — never have a member clone a tracked repo by hand. A repo marked
   `+"`not granted`"+` (or not listed, i.e. not tracked) is refused: tracking a repo and
-  widening a workgroup's grants (`+"`amux workgroup grants <id> …`"+`) are the host's
+  widening a workgroup's grants (`+"`amux repo grant <id> …`"+`) are the host's
   (the user's) decision, so ask the user when the task needs one. Pass
   `+"`-f model=…`"+` explicitly when a task calls for a specific model; otherwise the
   member gets its harness's default.
-- `+"`amux do steer <member> -f verb=prompt -f text=\"…\"`"+` — send a member a prompt
+- `+"`amux send <member> \"…\"`"+` — send a member a prompt
   (this starts a stopped member); `+"`-f verb=interject`"+` speaks mid-turn,
   `+"`-f verb=stop`"+` interrupts its turn, and `+"`-f verb=permission`"+`
   `+"`-f decision=allow|deny -f request_id=… -f runtime_generation=…`"+` answers a
   permission request (both ids come from the member's `+"`permission_request`"+` event).
 - `+"`amux do start <member>`"+` — bring a stopped member up without prompting it;
-  `+"`amux do rename <member> -f name=\"…\"`"+` labels it.
-- `+"`amux do set-archived <member> -f archived=true`"+` — archive a finished member.
+  `+"`amux rename <member> \"…\"`"+` labels it.
+- `+"`amux archive <member>`"+` — archive a finished member.
   This is an expected step, not an option: see "Archiving finished members".
   Restoring an archived member or this workgroup requires the host. It is refused
   while the member still owns an open PR; add `+"`-f force=true`"+` only to
@@ -426,7 +426,7 @@ of every PR your members open until it is **merged or closed**:
   update it from evidence (`+"`gh pr view <n> --json state,isDraft,baseRefName,headRefName,mergeable,statusCheckRollup,reviewDecision`"+`
   and the member's events), not from the member's last word.
 - React to what you see by re-prompting the member
-  (`+"`amux do steer <member> -f verb=prompt -f text=\"…\"`"+`): red CI, a merge
+  (`+"`amux send <member> \"…\"`"+`): red CI, a merge
   conflict, new review comments or changes requested, a PR left draft, or a
   member that went quiet with its PR still open. Tell it what changed and to
   resume babysitting.
@@ -520,7 +520,7 @@ Keep repository notes here. All implementation work belongs to normal workgroups
 - Your sandbox is %s. Other sessions' sandboxes are not mounted. %s
 
 ## Dispatch work
-- Use `+"`amux do new-workgroup -f repos=%s -f prompt=\"…\"`"+` to create a normal
+- Use `+"`amux new \"…\" --repo %s`"+` to create a normal
   coordinator workgroup limited to this repo. The returned id is the coordinator.
 - The coordinator receives the task and manages its members. Creating a workgroup
   does not grant this home access to its member histories or control operations.
@@ -565,7 +565,7 @@ func inventorySection() string {
 	}
 	defer db.Close()
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Inventory (at launch, %s — `amux status --json` for the live view)\n", launchStamp())
+	fmt.Fprintf(&b, "## Inventory (at launch, %s — `amux ls --json` for the live view)\n", launchStamp())
 	roots, _ := db.Roots()
 	wrote := false
 	for _, r := range roots {
@@ -663,7 +663,7 @@ Archive each member as soon as it is finished; do not leave it on the rail:
   will not give it more work. A member that still owns an open PR is not
   finished: never archive it.
 - Archive it then, during the task, not only at the end:
-  ` + "`amux do set-archived <member> -f archived=true`" + `. Check ` + "`amux status --json`" + `
+  ` + "`amux archive <member>`" + `. Check ` + "`amux ls --json`" + `
   first: never archive a member while it is running.
 - Before you report a task complete (and before marking a goal complete),
   archive every finished member. The members left unarchived should be exactly
@@ -728,7 +728,7 @@ Raise the task's remaining follow-ups, risks and open decisions as items and
 triage your inbox (see "Triage upward items"); the summary lists the item ids
 you raised, escalated or left open.
 Archiving finished members (PR merged or closed) with
-` + "`amux do set-archived <member> -f archived=true`" + ` needs no confirmation; a
+` + "`amux archive <member>`" + ` needs no confirmation; a
 member whose PR is still open keeps babysitting it. Then wrap up the workgroup.
 
 ` + wrapUpSection(root)
@@ -751,7 +751,7 @@ Your workgroup's root id is `+"`%s`"+` (`+"`$AMUX_WORKGROUP`"+` in your environm
   state MERGED and a mergedAt time); never trust "opened", "ready", or a
   member's word. A PR **closed without merging is not done**: ask.
 - No outstanding work: no follow-up pending or offered, no open decision, no
-  member running (`+"`amux status --json`"+`), no unanswered user message, and
+  member running (`+"`amux ls --json`"+`), no unanswered user message, and
   nothing left open in the PR ledger.
 - No open item in your inbox: `+"`amux agent items --inbox`"+` lists none (each
   was resolved, dismissed or escalated to the global inbox).
@@ -783,7 +783,7 @@ while a member PR is open, and only the user may override that from the host.
 `+"`amux agent done`"+` is the command: it archives this workgroup (%s) and its
 direct members, and your authenticated identity selects the workgroup, so it
 takes no id and cannot reach another workgroup. (It is the self-scoped form of
-the host's `+"`amux workgroup archive %s`"+`; use `+"`amux agent done`"+`.) Do it in
+the host's `+"`amux archive %s`"+`; use `+"`amux agent done`"+`.) Do it in
 this order, because the runtime is stopped shortly after the archive commits:
 1. Write the final summary to `+"`COORDINATION.md`"+`: outcome, PR ledger with
    each PR's verified final state, and anything left for the user.
@@ -886,7 +886,7 @@ goal instead; this session was created with an explicit harness choice.
 	}
 	return fmt.Sprintf(`## Goal mode (native)
 This session runs under a native Codex thread goal. Every task this workgroup
-receives — from the rail, the web dashboard, `+"`amux do steer %s -f verb=prompt`"+`,
+receives — from the rail, the web dashboard, `+"`amux send %s`"+`,
 or typed into this terminal — is established as your active goal by amux, and
 Codex itself continues that goal on every idle turn until it is complete. You
 never need `+"`create_goal`"+`; `+"`get_goal`"+` shows the objective, status, budget and usage.
@@ -929,7 +929,7 @@ func hookGoalSection(root store.Session) string {
 This coordinator runs in goal mode by default, through amux's goal hooks (not
 Claude Code's own `+"`/goal`"+` — never run it here; two goal loops would fight).
 Your launch task is already your active goal, and every task this workgroup receives — from
-the rail, the web dashboard, `+"`amux do steer %s -f verb=prompt`"+`, or typed
+the rail, the web dashboard, `+"`amux send %s`"+`, or typed
 into this terminal — becomes your active goal, and when you end a turn while the
 goal is still active, amux continues it with a goal-continuation message
 instead of letting the turn stop. `+"`amux agent goal`"+` shows the objective and
@@ -963,7 +963,7 @@ they have not authorized — ask instead of guessing:
   user's reply resumes it with the answer attached to the objective.
 - Batch your questions into one ask, and keep doing any work that does not
   depend on the answer before you stop.
-- Every question reaches the user's one queue (`+"`amux queue list`"+`), including your
+- Every question reaches the user's one queue (`+"`amux inbox ls`"+`), including your
   members' own questions and permission prompts. Do not re-ask what a member is
   already asking the user; ask only what is yours to ask.
 Do not ask about what you can find out yourself (the code, the repos, the

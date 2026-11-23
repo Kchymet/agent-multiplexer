@@ -135,7 +135,7 @@ func TestLaunchAuthErrorGuidesMigrationAndNamesConflictsWithoutValues(t *testing
 		t.Fatal(err)
 	}
 	err := LaunchAuthError(sp, "", nil)
-	if !errors.Is(err, ErrCentralLoginRequired) || !strings.Contains(err.Error(), "amux auth login claude") ||
+	if !errors.Is(err, ErrCentralLoginRequired) || !strings.Contains(err.Error(), "amux harness login claude") ||
 		strings.Contains(err.Error(), "claude.auth") {
 		t.Fatalf("missing login error = %v", err)
 	}

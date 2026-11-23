@@ -22,43 +22,8 @@ import (
 	"amux/internal/provider"
 )
 
-// cmdDirect is `amux direct`: opt-in direct client access over an existing LAN
+// cmdDirect is `amux device`: opt-in direct client access over an existing LAN
 // or VPN, with no cloud in the data path. See docs/direct-access.md.
-func cmdDirect(args []string) error {
-	sub := ""
-	if len(args) > 0 {
-		sub = args[0]
-	}
-	if sub == "" || isHelpFlag(sub) {
-		return showHelp("direct")
-	}
-	run, ok := directSubcommands[sub]
-	if !ok {
-		return usagef("unknown direct command %q", sub)
-	}
-	// The direct server and its administration act with host authority. A
-	// restricted agent session must never start or administer it, whatever
-	// credential files it can name.
-	if sessionContextRestricted() {
-		return errors.New("amux direct is host-only and is not available inside an agent session")
-	}
-	return run(args[1:])
-}
-
-var directSubcommands = map[string]func([]string) error{
-	"serve":          cmdDirectServe,
-	"enroll":         cmdDirectEnroll,
-	"clients":        cmdDirectClients,
-	"audit":          cmdDirectAudit,
-	"reset-identity": cmdDirectResetIdentity,
-	"cloud":          cmdDirectCloud,
-	"wake":           cmdDirectWake,
-	"enable":         cmdDirectEnable,
-	"disable":        cmdDirectDisable,
-	"status":         cmdDirectStatus,
-	"logs":           cmdDirectLogs,
-}
-
 func directRoot() (string, error) { return direct.DefaultRoot() }
 
 // hostCredential loads the host credential from the protected directory, which
@@ -83,7 +48,7 @@ func relayHostProof(ctx context.Context, prove direct.ProveFunc) error {
 }
 
 func cmdDirectServe(args []string) error {
-	fs := newCmdFlagSet("direct serve")
+	fs := newCmdFlagSet("device serve")
 	var endpoints, origins multiFlag
 	listen := fs.String("listen", "", "")
 	cert := fs.String("tls-cert", os.Getenv("AMUX_TLS_CERT"), "")
@@ -95,7 +60,7 @@ func cmdDirectServe(args []string) error {
 	fs.Var(&endpoints, "endpoint", "")
 	fs.Var(&origins, "allow-origin", "")
 	managed := fs.Bool("managed", false, "")
-	if err := parseCmdFlags(fs, "direct serve", args); err != nil {
+	if err := parseCmdFlags(fs, "device serve", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -113,7 +78,7 @@ func cmdDirectServe(args []string) error {
 		typed := 0
 		fs.Visit(func(*flag.Flag) { typed++ })
 		if typed != 1 {
-			return errors.New("--managed takes its configuration from the saved setting (amux direct enable), not flags")
+			return errors.New("--managed takes its configuration from the saved setting (amux device enable), not flags")
 		}
 		// Ownership first: the daemon named itself before exec, so a daemon
 		// that died before this point is caught here, before anything binds.
@@ -122,7 +87,7 @@ func cmdDirectServe(args []string) error {
 			return err
 		}
 		if err := directsvc.CheckParent(supervisor); err != nil {
-			return fmt.Errorf("amux direct: %w; not starting", err)
+			return fmt.Errorf("amux device: %w; not starting", err)
 		}
 		s, set, err := directsvc.Load()
 		if err != nil {
@@ -146,7 +111,7 @@ func cmdDirectServe(args []string) error {
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
 		go directsvc.WatchParent(supervisor, 2*time.Second, ctx.Done(), func() {
-			fmt.Fprintln(os.Stderr, "amux direct: supervising daemon exited; stopping")
+			fmt.Fprintln(os.Stderr, "amux device: supervising daemon exited; stopping")
 			cancel()
 		})
 		fp := directsvc.Fingerprint(s)
@@ -156,11 +121,11 @@ func cmdDirectServe(args []string) error {
 			if err := directsvc.WriteReady(directsvc.ReadyPath(), directsvc.Ready{
 				PID: os.Getpid(), ServerID: serverID, Addr: addr.String(), Fingerprint: fp, At: time.Now(),
 			}); err != nil {
-				fmt.Fprintf(os.Stderr, "amux direct: write readiness marker: %v\n", err)
+				fmt.Fprintf(os.Stderr, "amux device: write readiness marker: %v\n", err)
 			}
 		}
 	} else if typed := visited(fs, "listen", "tls-cert", "tls-key", "allow-public-bind", "access-ttl", "idle-ttl", "absolute-ttl", "endpoint", "allow-origin"); !typed && *listen == "" {
-		// Plain `amux direct serve`: run the saved tailnet configuration in
+		// Plain `amux device serve`: run the saved tailnet configuration in
 		// the foreground, but only while the daemon is not managing it.
 		s, err := savedTailnetManualConfig()
 		if err != nil {
@@ -198,14 +163,14 @@ func cmdDirectServe(args []string) error {
 		defer func() { rcancel(); <-done }()
 	}
 	cfg.Ready = func(addr net.Addr, serverID string) {
-		fmt.Fprintf(os.Stderr, "amux direct: listening on %s (server_id %s)\n", addr, serverID)
+		fmt.Fprintf(os.Stderr, "amux device: listening on %s (server_id %s)\n", addr, serverID)
 		if managedReady != nil {
 			managedReady(addr, serverID)
 		}
 	}
 	err = direct.Serve(ctx, cfg)
 	if err != nil && !*managed && strings.Contains(err.Error(), "already owns the direct store") {
-		err = fmt.Errorf("%w (if the daemon manages it, see amux direct status; amux direct disable turns it off)", err)
+		err = fmt.Errorf("%w (if the daemon manages it, see amux device status; amux device disable turns it off)", err)
 	}
 	return err
 }
@@ -242,7 +207,7 @@ func adminRun(req direct.AdminRequest) (direct.AdminResponse, error) {
 
 func cmdDirectClients(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: amux direct clients list | revoke <client-id>")
+		return errors.New("usage: amux device ls | revoke <client-id>")
 	}
 	switch args[0] {
 	case "list", "ls":
@@ -273,7 +238,7 @@ func cmdDirectClients(args []string) error {
 		return nil
 	case "revoke":
 		if len(args) != 2 {
-			return errors.New("usage: amux direct clients revoke <client-id>")
+			return errors.New("usage: amux device revoke <client-id>")
 		}
 		if _, err := adminRun(direct.AdminRequest{Op: direct.OpRevoke, ClientID: args[1]}); err != nil {
 			return err
@@ -351,19 +316,19 @@ func cmdDirectResetIdentity(args []string) error {
 
 func cmdDirectCloud(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: amux direct cloud enable|disable|status")
+		return errors.New("usage: amux cloud enroll enable|disable|status")
 	}
 	switch args[0] {
 	case "enable":
 		return cmdDirectCloudEnable(args[1:])
 	case "disable":
 		if len(args) != 1 {
-			return errors.New("usage: amux direct cloud disable")
+			return errors.New("usage: amux cloud enroll disable")
 		}
 		if _, err := adminRun(direct.AdminRequest{Op: direct.OpCloudDisable}); err != nil {
 			return err
 		}
-		fmt.Println("cloud enrollment disabled; outstanding cloud codes are void. Grants already redeemed stay until `amux direct clients revoke`.")
+		fmt.Println("cloud enrollment disabled; outstanding cloud codes are void. Grants already redeemed stay until `amux device revoke`.")
 		return nil
 	case "status":
 		asJSON := len(args) > 1 && args[1] == "--json"
@@ -388,7 +353,7 @@ func cmdDirectCloud(args []string) error {
 }
 
 func cmdDirectCloudEnable(args []string) error {
-	fs := newCmdFlagSet("direct cloud enable")
+	fs := newCmdFlagSet("cloud enroll enable")
 	var groups multiFlag
 	owner := fs.String("owner", "", "")
 	prov := fs.String("provider", "", "")
@@ -397,7 +362,7 @@ func cmdDirectCloudEnable(args []string) error {
 	maxOut := fs.Int("max-outstanding", 0, "")
 	perHour := fs.Int("max-per-hour", 0, "")
 	fs.Var(&groups, "workgroup", "")
-	if err := parseCmdFlags(fs, "direct cloud enable", args); err != nil {
+	if err := parseCmdFlags(fs, "cloud enroll enable", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {

@@ -163,7 +163,7 @@ type Authority struct {
 }
 
 // errDegraded refuses issuance after a commit whose durability is unknown.
-var errDegraded = errors.New("direct store durability is uncertain after a failed sync; restart `amux direct serve` to re-read it")
+var errDegraded = errors.New("direct store durability is uncertain after a failed sync; restart `amux device serve` to re-read it")
 
 // commitLocked persists the registry. On errNotCommitted the caller rolls its
 // change back; on errAmbiguousCommit the caller keeps the change (it is on disk
@@ -386,7 +386,7 @@ func (a *Authority) NewCode(label string, perms []string, resource ResourceScope
 }
 
 // NewLocalTicket mints a single-use device ticket on the host operator's own
-// authority (amux direct enroll --qr), with no cloud policy involved. It has
+// authority (amux device connect --qr), with no cloud policy involved. It has
 // the scope, lifetime and single use of a NewCode code, and is redeemed like a
 // cloud device ticket: the redeeming device first binds its own S256 challenge
 // through ClaimTicket, then redeems with the matching verifier. Before the

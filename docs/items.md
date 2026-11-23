@@ -27,9 +27,9 @@ coordinator archived/deleted ──carry-over──▶ global inbox
   that one resolution. The owner — and the admin console, as an operator view —
   see every item. A delivery to a stopped overseer starts it.
 - `decision_needed` items in the global inbox also appear in the user's
-  **question queue** (`amux queue`, [direct-console.md](direct-console.md) §4).
+  **question queue** (`amux inbox`, [direct-console.md](direct-console.md) §4).
   The user answers one there (the answer is recorded on the item and delivered
-  to its source) or acknowledges it (`amux queue ack <item>`); only a
+  to its source) or acknowledges it (`amux inbox ack <item>`); only a
   **host** acknowledgment lets the overseer create a workgroup from the item
   (`history[].host`).
 

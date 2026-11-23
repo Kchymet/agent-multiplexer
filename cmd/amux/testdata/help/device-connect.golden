@@ -1,8 +1,8 @@
-amux direct enroll — mint a one-time enrollment code: a bundle to paste, or a QR code to scan
+amux device connect — connect a phone or browser: a one-time code to paste, or a QR code to scan
 
-usage: amux direct enroll [flags]
+usage: amux device connect [flags]
 
-The running server publishes its endpoints into the bundle. Before minting,
+Needs the listener (amux device enable). The running server publishes its endpoints into the bundle. Before minting,
 enroll prints the effective label, permissions and scope on stderr. Without QR
 flags it prints a v1 bundle (amux-direct:1:...) alone on stdout, to paste into
 a client.
@@ -20,7 +20,7 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 (/dev/tty); with no terminal at all, --qr fails before minting (use --qr-png).
 
 flags:
-  --label <text>         name for the client, shown in clients list (default: <hostname>-<YYYYMMDD-HHMM>)
+  --label <text>         name for the device, shown by amux device ls (default: <hostname>-<YYYYMMDD-HHMM>)
   --permissions <list>   comma list; read is always required:
                            read     inventory, history, live stream
                            steer    prompt, interject, stop
@@ -44,6 +44,6 @@ flags:
                          file is refused); delete it after enrolling
 
 examples:
-  amux direct enroll --label phone --permissions read
-  amux direct enroll --qr
-  amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr
+  amux device connect --label phone --permissions read
+  amux device connect --qr
+  amux device connect --label pixel --permissions read,steer --workgroup 771951 --qr

@@ -5,7 +5,7 @@ import "github.com/kchymet/agent-multiplexer/harnessproto"
 // QueryWait blocks until the session named by Action.ID changes — its state,
 // its archived flag, or its PRs — or a bounded timeout passes, then returns a
 // WaitResult. It is the event-driven alternative to polling `amux agent
-// events` or `amux status` in a loop: the daemon parks the call on its own
+// events` or `amux ls` in a loop: the daemon parks the call on its own
 // snapshot broadcast and answers the moment the session moves. A restricted
 // principal may wait on what it may read (itself; a coordinator its direct
 // members).

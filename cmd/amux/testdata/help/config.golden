@@ -1,0 +1,33 @@
+amux config — show or change amux settings (keybindings, Codex control, updates, ...)
+
+usage: amux config [<command>]
+
+Settings:
+  keys.<action> <chord>                 dashboard keybinding (chords like ctrl+g, alt+p, f5);
+                                        applies the next time the dashboard opens
+  codex.control app-server|pty          the daemon's Codex rollout selection (default pty;
+                                        daemon restart required; AMUX_CODEX_CONTROL overrides)
+  goal.auto_resume on|off               a restarted goal coordinator resumes an active or
+                                        waiting goal (default on; read at daemon start)
+  update.auto on|off                    automatic amux self-update (default on;
+                                        AMUX_NO_AUTO_UPDATE=1 also disables)
+  harnesses.update off|notify|auto      daemon update check for managed harnesses
+  harnesses.check_interval <dur>        how often that check runs (24h; minimum 1h)
+  harnesses.<claude|codex>.channel <c>  release channel to follow (claude: stable|latest)
+  harnesses.<claude|codex>.bin <path>   explicit harness binary (beats the managed install)
+  claude.auth, codex.auth               retired: every workload follows central auth
+                                        (get and unset only)
+  direct.enabled                        whether the daemon runs the direct listener (get
+                                        only; change it with amux device enable|disable)
+
+Run amux doctor to compare saved settings, this shell's overrides, and the
+running daemon's selection.
+
+commands:
+  ls                     saved settings and defaults (ignores environment overrides; the default)
+  get <setting>          print one setting's effective value
+  set <setting> <value>  save a setting
+  unset <setting>        restore a setting's default
+  path                   print the config file path
+
+Run 'amux config <command> --help' for details.

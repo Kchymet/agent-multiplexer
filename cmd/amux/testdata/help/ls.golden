@@ -1,0 +1,17 @@
+amux ls — workgroups and agents (state, PRs)
+
+usage: amux ls [--all] [--json]
+
+Each workgroup (its id is its coordinator's) with its agents indented below
+it: id, name, harness, state, and open pull requests or review state. Reads
+the daemon's canonical state. From inside an agent session the view is scoped
+to the session itself (a coordinator also sees its workgroup's current direct
+members).
+
+flags:
+  -a, --all   also list archived workgroups and agents
+  -j, --json  print the raw snapshot (every session field) as JSON
+
+examples:
+  amux ls
+  amux ls --json

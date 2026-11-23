@@ -1,0 +1,15 @@
+amux daemon — run or control the local daemon (restart loads a new binary)
+
+usage: amux daemon [<command>]
+
+The daemon owns the store and the agent engine: it hosts every running agent,
+so stopping or restarting it stops the agents it hosts. Bare amux daemon runs
+one in the foreground until signalled (what auto-launch spawns); the commands
+below control a detached one.
+
+commands:
+  stop     stop the running daemon cleanly
+  start    start a detached daemon if none is answering
+  restart  stop, then start: how a newly installed binary is loaded
+
+Run 'amux daemon <command> --help' for details.

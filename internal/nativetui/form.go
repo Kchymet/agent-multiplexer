@@ -27,7 +27,6 @@ func (m *model) openNewRepoWorkgroupForm(repoID, repoTitle string) {
 		submit:        "Create workgroup",
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 			{key: wsops.FieldCoordinator, label: "Coordinator harness", value: agent.GoalRuntime, options: agent.Kinds()},
@@ -51,7 +50,6 @@ func (m *model) openAddAgentForm(rootID, rootTitle string) {
 		fields: []*formField{
 			{key: "prompt", label: "Prompt"},
 			{key: "repos", label: "Repos", picker: true},
-			{key: "mode", label: "Mode", value: store.ModeTask, options: []string{store.ModeTask, store.ModeInteractive}},
 			harnessField(),
 			modelField(agent.DefaultKind()),
 		},

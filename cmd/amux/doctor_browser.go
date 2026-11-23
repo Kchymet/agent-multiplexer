@@ -71,7 +71,7 @@ func checkBrowser(p browserProbe) []string {
 		} else {
 			say("⚠", "$BROWSER=%s cannot launch a host browser from protected %s sessions (%s)", value, platform, reason)
 		}
-		note("run `amux auth login` (Claude) or `amux auth login codex` from a host terminal; copy any printed URL into the host browser")
+		note("run `amux harness login` (Claude) or `amux harness login codex` from a host terminal; copy any printed URL into the host browser")
 		return lines
 	}
 	wslview := p.lookup("wslview") != ""

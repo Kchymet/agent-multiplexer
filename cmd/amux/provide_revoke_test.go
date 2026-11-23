@@ -15,7 +15,7 @@ func TestProvideRevokeIsHostOnly(t *testing.T) {
 	old := sessionContextRestricted
 	sessionContextRestricted = func() bool { return true }
 	t.Cleanup(func() { sessionContextRestricted = old })
-	if err := cmdProvide([]string{"revoke", "--yes"}); err == nil || !strings.Contains(err.Error(), "host-only") {
+	if err := cmdCloud([]string{"revoke", "--yes"}); err == nil || !strings.Contains(err.Error(), "host-only") {
 		t.Fatalf("restricted revoke = %v", err)
 	}
 }

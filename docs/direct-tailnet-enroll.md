@@ -9,7 +9,7 @@ amux implements and how to run it.
 
 1. **The offer.** The provider advertises the host's direct server in its
    registration. When the direct server is running with cloud enrollment
-   enabled (`amux direct cloud enable`), the provider sends:
+   enabled (`amux cloud enroll enable`), the provider sends:
    - `features` += `direct-approval-v1`;
    - `capabilities.direct.approval: true`;
    - `capabilities.direct.ceiling`: `{permissions, resource:"all_sessions"|"workgroups", workgroups?}`.
@@ -104,7 +104,7 @@ The server allows exact origins, never credentials, and allows
 `/direct/v1/hello`, `/direct/v1/enroll/cloud`, `/direct/v1/token` and the
 resource API.
 
-With `amux direct enable --tailnet`, two things make the Harness web origin
+With `amux device enable --tailnet`, two things make the Harness web origin
 allowed:
 
 - the provider records the registration ack's `webOrigin` (Harness's
@@ -118,7 +118,7 @@ Harness sends `webOrigin`, the default falls back to deriving an origin from
 endpoint, not the web app's origin. The fallback fix is:
 
 ```sh
-amux direct enable --tailnet --allow-origin https://harness.gcp.chynoweth.dev
+amux device enable --tailnet --allow-origin https://harness.gcp.chynoweth.dev
 ```
 
 `--no-default-origin` turns off both the default origin and the live
@@ -126,8 +126,8 @@ amux direct enable --tailnet --allow-origin https://harness.gcp.chynoweth.dev
 
 ## Operator checks
 
-`amux direct status` shows the latest enrollment exchange, including
-`enroll_cloud` attempts with their reason. `amux direct logs` shows a line per
+`amux device status` shows the latest enrollment exchange, including
+`enroll_cloud` attempts with their reason. `amux device logs` shows a line per
 exchange (`direct: enrollment …`), and the provider log shows
 `direct-approval verify: <outcome> in <n>ms`. A request that never shows up
 here did not reach the host: check the device's tailnet membership, ACLs and

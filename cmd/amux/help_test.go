@@ -64,10 +64,10 @@ func TestHelpAfterOperands(t *testing.T) {
 		want string
 	}{
 		{[]string{"do", "new-workgroup", "-f", "name=x", "--help"}, "amux do new-workgroup — "},
-		{[]string{"workgroup", "rename", "3f7a", "-h"}, "amux workgroup rename — "},
+		{[]string{"workgroup", "rename", "3f7a", "-h"}, "amux rename — "},
 		{[]string{"agent", "items", "--all", "--help"}, "amux agent items — "},
-		{[]string{"help", "direct", "enroll"}, "amux direct enroll — "},
-		{[]string{"direct", "help"}, "amux direct — "},
+		{[]string{"help", "direct", "enroll"}, "amux device connect — "},
+		{[]string{"direct", "help"}, "amux device — "},
 	} {
 		code, out, _ := runHelp(t, tc.args...)
 		if code != 0 || !strings.HasPrefix(out, tc.want) {
@@ -97,9 +97,34 @@ func TestTopLevelIsShort(t *testing.T) {
 			t.Errorf("top-level help mentions %q; it should list top-level commands only", sub)
 		}
 	}
+	// Every visible top-level command is reachable from the page: work and
+	// manage commands as rows, the rest named on the more: line or as the
+	// help agent / help api topics.
+	more, _, _ := strings.Cut(want[strings.Index(want, "\nmore: "):], "\n\n")
 	for _, c := range cliRoot().visible() {
-		if !strings.Contains(want, "\n  "+c.Name+" ") {
-			t.Errorf("top-level help does not list %s", c.Name)
+		switch {
+		case c.Group == groupWork || c.Group == groupManage:
+			if !strings.Contains(want, "\n  "+c.Name+" ") {
+				t.Errorf("top-level help does not list %s", c.Name)
+			}
+		case c.Name == "agent" || c.Name == "do":
+		case c.Group == groupMore:
+			if !strings.Contains(more, " "+c.Name) {
+				t.Errorf("top-level more: line does not name %s", c.Name)
+			}
+		default:
+			t.Errorf("top-level %s has no group", c.Name)
+		}
+	}
+	for _, w := range []string{"amux help agent", "amux help api"} {
+		if !strings.Contains(want, w) {
+			t.Errorf("top-level help does not point at %s", w)
+		}
+	}
+	// The detailed options live on each command's own page.
+	for _, f := range []string{"--harness", "--model", "--repo", "--prompt", "--interactive", "mode"} {
+		if strings.Contains(want, f) {
+			t.Errorf("top-level help mentions %q", f)
 		}
 	}
 }
@@ -281,17 +306,30 @@ func TestUsageErrorsShowTheirLevel(t *testing.T) {
 	}
 }
 
-// TestHelpGolden pins the rendered pages most often read: the top level, a
+// TestHelpGolden pins the rendered pages: the top level, every everyday verb and
 // FlagSet leaf and a do action. Regenerate with go test ./cmd/amux -run
 // TestHelpGolden -update.
 func TestHelpGolden(t *testing.T) {
 	for name, args := range map[string][]string{
 		"top":              {"--help"},
-		"direct-enroll":    {"direct", "enroll", "--help"},
+		"new":              {"new", "--help"},
+		"ls":               {"ls", "--help"},
+		"open":             {"open", "--help"},
+		"send":             {"send", "--help"},
+		"add":              {"add", "--help"},
+		"archive":          {"archive", "--help"},
+		"inbox":            {"inbox", "--help"},
+		"repo":             {"repo", "--help"},
+		"device":           {"device", "--help"},
+		"device-connect":   {"device", "connect", "--help"},
+		"cloud":            {"cloud", "--help"},
+		"harness":          {"harness", "--help"},
+		"harness-auth":     {"harness", "auth", "--help"},
+		"config":           {"config", "--help"},
+		"daemon":           {"daemon", "--help"},
+		"help":             {"help", "--help"},
 		"do-new-workgroup": {"do", "new-workgroup", "--help"},
-		"workgroup":        {"workgroup", "--help"},
 		"agent-raise":      {"agent", "raise", "-h"},
-		"direct":           {"direct", "-h"},
 	} {
 		_, out, _ := runHelp(t, args...)
 		path := filepath.Join("testdata", "help", name+".golden")

@@ -47,6 +47,9 @@ type cmdSpec struct {
 	// Hidden nodes dispatch and answer --help, but are left out of their
 	// parent's list and the --all tree (internal or deprecated surfaces).
 	Hidden bool
+	// Group places a top-level command on the short top-level page (groupWork,
+	// groupManage, groupMore); unused below the top level.
+	Group string
 	// FlagSet marks a node whose flags are parsed by a flag.FlagSet registered
 	// through parseCmdFlags; the contract test checks the two agree.
 	FlagSet bool
@@ -78,7 +81,7 @@ type fieldSpec struct {
 }
 
 // helpFooter ends the top-level page; tests pin it verbatim.
-const helpFooter = "Run 'amux <command> --help' for details. 'amux --help --all' prints everything."
+const helpFooter = "Run 'amux <command> --help' for details. 'amux help --all' prints everything."
 
 // treeBuilder is buildCLITree, assigned in init so the tree (whose run
 // functions reach parseCmdFlags, which reads the tree) is no package-level
@@ -120,7 +123,7 @@ func (n *cmdSpec) child(name string) *cmdSpec {
 	return nil
 }
 
-// path is the node's full invocation prefix ("amux direct enroll").
+// path is the node's full invocation prefix ("amux device connect").
 func (n *cmdSpec) path() string {
 	if n.parent == nil {
 		return n.Name
@@ -189,15 +192,22 @@ func isHelpToken(a string) bool { return a == "-h" || a == "--help" || a == "-he
 // parseHelpRequest reports whether argv (os.Args[1:]) asks for help, and for
 // which node. Help is requested by -h/--help anywhere before a "--", by
 // --all-help, by a leading `help` word (`amux help direct enroll`), or by the
-// word `help` in a namespace's subcommand position (`amux direct help`). The
+// word `help` in a namespace's subcommand position (`amux device help`). The
 // whole tree is requested by --all-help, or by -a/--all next to -h/--help when
 // no command is named (`amux --help --all`, `amux -h -a`); after a command,
 // --all keeps its own meaning (`amux agent items --all --help` is items' help).
 func parseHelpRequest(args []string) (helpRequest, bool) {
 	if len(args) > 0 && args[0] == "help" {
 		rest := args[1:]
+		if t, ok := helpTopics[leadWord(rest)]; ok {
+			rest = append([]string{t}, rest[1:]...)
+		}
 		all := slices.Contains(rest, "--all") || slices.Contains(rest, "-a") || slices.Contains(rest, "--all-help")
-		return helpRequest{node: resolveWords(rest), all: all && leadingWords(rest) == 0}, true
+		node := resolveWords(rest)
+		if node == cliRoot() && !all && len(rest) > 0 && isHelpToken(rest[0]) {
+			node = cliRoot().child("help") // amux help --help
+		}
+		return helpRequest{node: node, all: all && leadingWords(rest) == 0}, true
 	}
 	help, allFlag, allHelp := false, false, false
 	for _, a := range args {
@@ -225,6 +235,29 @@ func parseHelpRequest(args []string) (helpRequest, bool) {
 		return helpRequest{node: node}, true
 	}
 	return helpRequest{}, false
+}
+
+// helpTopics are `amux help <topic>` words that name a command by another
+// name: the scripting API is amux do.
+var helpTopics = map[string]string{"api": "do"}
+
+func leadWord(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+// cmdHelp is `amux help` reached through dispatch (runCLI answers it before
+// dispatch; this keeps a direct call of the run function honest).
+func cmdHelp(args []string) error {
+	req, _ := parseHelpRequest(append([]string{"help"}, args...))
+	if req.all {
+		renderAll(os.Stdout)
+		return nil
+	}
+	printHelp(os.Stdout, req.node)
+	return nil
 }
 
 // leadingWords counts the leading args that name tree nodes.
@@ -261,6 +294,14 @@ func printHelp(w io.Writer, n *cmdSpec) {
 func renderTopHelp(w io.Writer, root *cmdSpec) {
 	fmt.Fprintf(w, "%s — %s\n\nusage: amux [command] [flags]\n\n", root.Name, root.Summary)
 	renderCommandList(w, root, false)
+	var more []string
+	for _, c := range root.visible() {
+		if c.Group == groupMore && c.Name != "agent" && c.Name != "do" {
+			more = append(more, c.Name)
+		}
+	}
+	fmt.Fprintf(w, "\nmore: %s\n", strings.Join(more, " · "))
+	fmt.Fprintln(w, "agents: amux help agent   scripting: amux help api")
 	if len(root.Flags) > 0 {
 		fmt.Fprintln(w)
 		renderFlags(w, "flags:", root.Flags)
@@ -278,20 +319,32 @@ func renderCommandList(w io.Writer, n *cmdSpec, withArgs bool) {
 	if len(subs) == 0 {
 		return
 	}
-	var rows [][2]string
-	if n.parent == nil {
-		rows = append(rows, [2]string{"(bare)", bareSummary})
-	}
-	for _, c := range subs {
+	row := func(c *cmdSpec) [2]string {
 		left := c.Name
 		if withArgs && c.Args != "" {
 			left += " " + c.Args
 		}
-		right := c.Summary
-		if len(c.Aliases) > 0 {
-			right += "  (alias: " + strings.Join(c.Aliases, ", ") + ")"
+		return [2]string{left, c.Summary}
+	}
+	if n.parent == nil {
+		// The top level: everyday verbs, then management nouns, one aligned
+		// table; groupMore is named on a line of its own by renderTopHelp.
+		work := [][2]string{{"(bare)", bareSummary}}
+		var manage [][2]string
+		for _, c := range subs {
+			switch c.Group {
+			case groupWork:
+				work = append(work, row(c))
+			case groupManage:
+				manage = append(manage, row(c))
+			}
 		}
-		rows = append(rows, [2]string{left, right})
+		renderSections(w, []string{"work:", "manage:"}, [][][2]string{work, manage})
+		return
+	}
+	var rows [][2]string
+	for _, c := range subs {
+		rows = append(rows, row(c))
 	}
 	label := "commands:"
 	if n.Name == "do" && n.parent != nil && n.parent.parent == nil {
@@ -301,17 +354,30 @@ func renderCommandList(w io.Writer, n *cmdSpec, withArgs bool) {
 	renderRows(w, rows)
 }
 
+// renderSections prints titled row blocks with one shared left column.
+func renderSections(w io.Writer, titles []string, sections [][][2]string) {
+	var all [][2]string
+	for _, s := range sections {
+		all = append(all, s...)
+	}
+	width := rowsWidth(all)
+	for i, s := range sections {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w, titles[i])
+		renderRowsWidth(w, s, width)
+	}
+}
+
 // bareSummary is the top-level page's "(bare)" row.
-const bareSummary = "open the workgroup dashboard (native TUI); without a terminal, print this help"
+const bareSummary = "open the dashboard (without a terminal, print this help)"
 
 // renderNode is one node's detailed page. footer adds the "Run … --help" hint
 // for a namespace (left out of the --all tree, where every page follows).
 func renderNode(w io.Writer, n *cmdSpec, footer bool) {
 	fmt.Fprintf(w, "%s — %s\n\n", n.path(), n.Summary)
 	fmt.Fprintf(w, "usage: %s\n", synopsis(n))
-	if len(n.Aliases) > 0 {
-		fmt.Fprintf(w, "aliases: %s\n", strings.Join(n.Aliases, ", "))
-	}
 	if n.Detail != "" {
 		fmt.Fprintf(w, "\n%s\n", strings.TrimRight(n.Detail, "\n"))
 	}
@@ -371,6 +437,8 @@ func renderAll(w io.Writer) {
 		}
 	}
 	walk(root)
+	fmt.Fprintf(w, "\n==== old spellings ====\n\n")
+	renderLegacyTable(w)
 }
 
 // flagLabel is "-t, --target <root>".
@@ -438,13 +506,20 @@ const helpColumn = 28
 
 // renderRows prints two-column rows: "  left  right", continuation lines of a
 // multi-line right side indented under it.
-func renderRows(w io.Writer, rows [][2]string) {
+func renderRows(w io.Writer, rows [][2]string) { renderRowsWidth(w, rows, rowsWidth(rows)) }
+
+// rowsWidth is the left column width for rows: the longest label up to helpColumn.
+func rowsWidth(rows [][2]string) int {
 	width := 0
 	for _, r := range rows {
 		if l := len([]rune(r[0])); l > width && l <= helpColumn {
 			width = l
 		}
 	}
+	return width
+}
+
+func renderRowsWidth(w io.Writer, rows [][2]string, width int) {
 	indent := strings.Repeat(" ", 2+width+2)
 	for _, r := range rows {
 		lines := strings.Split(strings.TrimRight(r[1], "\n"), "\n")
@@ -604,6 +679,12 @@ func parseCmdFlagsAnyOrder(fs *flag.FlagSet, path string, args []string) ([]stri
 
 // runCLI is main's body, returning the process exit code.
 func runCLI(args []string, stdout, stderr io.Writer, isTTY func() bool) int {
+	args, now := rewriteLegacy(args)
+	if now != "" && stderrIsTerminal() {
+		// A person typing an old spelling learns the new one; a pipe, a script
+		// or an agent's tool call (no terminal on stderr) sees nothing extra.
+		fmt.Fprintf(stderr, "now: %s\n", now)
+	}
 	if req, ok := parseHelpRequest(args); ok {
 		if req.all {
 			renderAll(stdout)

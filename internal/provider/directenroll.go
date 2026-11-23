@@ -242,7 +242,7 @@ func (p *Provider) handleDirectEnroll(s *session, m hp.MuxMsg) {
 }
 
 // noteDirectEnroll records and logs how one relayed direct-enroll request was
-// answered, so `amux direct status` and the daemon log show whether (and
+// answered, so `amux device status` and the daemon log show whether (and
 // when) a cloud enrollment reached this host and how it ended. It records the
 // request's kind and the result's code only: never the requester, issue key,
 // challenge, label or bundle.

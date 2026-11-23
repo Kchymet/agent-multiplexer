@@ -1,0 +1,18 @@
+amux add — add an agent to a workgroup
+
+usage: amux add <workgroup> ["<task>"] [flags]
+
+Adds a member agent within the workgroup's repos and gives it <task> as its
+first prompt. With only <workgroup>, pick the agent's settings interactively
+(needs a terminal). Members run as tasks; --interactive makes this one
+interactive (driven turn by turn, closed by you).
+
+flags:
+  --repo <name>        (repeatable) the agent's repos, within the workgroup's (repeat, or give a comma list)
+  --harness <harness>  the agent's harness: claude | codex (default: claude)
+  --model <model>      the agent's model (default: the harness's default)
+  --interactive        advanced: an interactive agent instead of a task
+
+examples:
+  amux add 9c1b "write the migration" --repo api
+  amux add 9c1b
