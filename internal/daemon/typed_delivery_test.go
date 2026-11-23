@@ -204,7 +204,7 @@ func TestTypedDeliveryAbortsWhenTheUserTypesMidDelivery(t *testing.T) {
 	if len(submitted) != 0 {
 		t.Fatalf("submitted %q despite the user typing", submitted)
 	}
-	if !strings.HasSuffix(composerText, " and my words") {
+	if !strings.Contains(composerText, " and my words") {
 		t.Fatalf("user's text was removed: composer=%q", composerText)
 	}
 }

@@ -38,6 +38,13 @@ type Config struct {
 	Logf         func(format string, args ...any)
 	// Wake serves the direct wake routes; nil answers them wake_disabled.
 	Wake *WakeService
+	// Approvals bridges POST /direct/v1/enroll/cloud verifies to the provider
+	// (direct-approval-v1); nil answers them orchestrator_unreachable.
+	Approvals *ApprovalQueue
+	// ExtraOrigins, when set, supplies further exact browser origins at
+	// request time (the Harness web origin the provider learned from its
+	// registration, registered.webOrigin). Invalid values are ignored.
+	ExtraOrigins func() []string
 }
 
 // Server is the direct HTTP surface.
@@ -100,6 +107,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST "+PathToken, s.token)
 	mux.HandleFunc("POST "+PathRevoke, s.revoke)
 	mux.HandleFunc("POST "+PathClaim, s.claim)
+	mux.HandleFunc("POST "+PathEnrollCloud, s.enrollCloud)
 	mux.HandleFunc("GET "+PathSession, s.sessions)
 	mux.HandleFunc("GET "+PathWatch, s.watch)
 	mux.HandleFunc("GET "+PathSession+"/{sid}/history", s.history)
@@ -132,7 +140,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(context.WithValue(r.Context(), endpointKey{}, endpoint))
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if !s.origins[origin] {
+		if !s.originAllowed(origin) {
 			writeErr(w, http.StatusForbidden, CodeOriginNotAllowed, "origin not allowed")
 			return
 		}
@@ -150,6 +158,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// originAllowed reports whether origin is an exact allowed browser origin:
+// configured, or supplied by ExtraOrigins (canonical values only). No
+// credentials are ever allowed: the API authenticates with bearer tokens.
+func (s *Server) originAllowed(origin string) bool {
+	if s.origins[origin] {
+		return true
+	}
+	if s.cfg.ExtraOrigins == nil {
+		return false
+	}
+	for _, o := range s.cfg.ExtraOrigins() {
+		if o == origin {
+			if c, err := CanonicalOrigin(o, true); err == nil && c == o {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type endpointKey struct{}
@@ -182,6 +210,33 @@ func writeDenied(w http.ResponseWriter, perm, msg string) {
 
 func writeOAuth(w http.ResponseWriter, status int, code, desc string) {
 	writeJSON(w, status, OAuthError{Error: code, Description: desc})
+}
+
+// exchangeNote collects how one enrollment exchange (claim, or a token
+// request redeeming an enrollment code) ended, for the attempt record and the
+// server log. It holds no code, verifier, challenge, label or token.
+type exchangeNote struct {
+	step, kind  string
+	ok          bool
+	err, reason string
+}
+
+// refuse writes an OAuth refusal and notes it. reason is set for an
+// invalid_grant (OAuthError.Reason) and noted as ReasonOther otherwise.
+func (n *exchangeNote) refuse(w http.ResponseWriter, status int, code, desc, reason string) {
+	writeJSON(w, status, OAuthError{Error: code, Description: desc, Reason: reason})
+	n.err, n.reason = code, reason
+	if n.reason == "" {
+		n.reason = ReasonOther
+	}
+}
+
+func (s *Server) noteExchange(n *exchangeNote) {
+	if n.step == "" {
+		return // not an enrollment exchange (a refresh, or no grant type)
+	}
+	at := s.cfg.Authority.noteEnroll(EnrollAttempt{Step: n.step, ClientKind: n.kind, OK: n.ok, Error: n.err, Reason: n.reason})
+	s.cfg.Logf("direct: enrollment %s", at)
 }
 
 func decodeJSON(r *http.Request, w http.ResponseWriter, v any) error {
@@ -313,6 +368,8 @@ func parseForm(w http.ResponseWriter, r *http.Request) (url.Values, error) {
 
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	src := source(r)
+	n := &exchangeNote{}
+	defer s.noteExchange(n)
 	if s.limited(src) {
 		w.Header().Set("Retry-After", "60")
 		writeOAuth(w, http.StatusTooManyRequests, OAuthTemporarilyUnavail, "too many failed attempts; retry later")
@@ -326,9 +383,10 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	var resp TokenResponse
 	switch vals.Get("grant_type") {
 	case GrantTypeEnrollmentCode:
+		n.step, n.kind = EnrollStepRedeem, clientKindClass(vals.Get("client_kind"))
 		code := vals.Get("code")
 		if code == "" {
-			writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, "code is required")
+			n.refuse(w, http.StatusBadRequest, OAuthInvalidRequest, "code is required", "")
 			return
 		}
 		resp, err = s.cfg.Authority.RedeemDevice(code, vals.Get("client_label"), vals.Get("client_kind"), vals.Get("code_verifier"), vals.Get("device_id"))
@@ -346,20 +404,25 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	var reqErr *requestError
 	switch {
 	case errors.As(err, &reqErr):
-		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, reqErr.Error())
+		n.refuse(w, http.StatusBadRequest, OAuthInvalidRequest, reqErr.Error(), "")
 	case errors.Is(err, errInvalidCode):
 		s.recordFailure(src)
-		writeOAuth(w, http.StatusBadRequest, OAuthInvalidGrant, "the code or refresh token is invalid, expired, used or revoked")
+		reason := ""
+		if n.step != "" {
+			reason = codeReason(err) // enrollment codes only; refresh refusals stay unclassified
+		}
+		n.refuse(w, http.StatusBadRequest, OAuthInvalidGrant, "the code or refresh token is invalid, expired, used or revoked", reason)
 	case err != nil && strings.Contains(err.Error(), "client_kind"), err != nil && strings.Contains(err.Error(), "label"):
-		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, err.Error())
+		n.refuse(w, http.StatusBadRequest, OAuthInvalidRequest, err.Error(), "")
 	case err != nil:
 		// The store write failed. Whether the presented code or refresh token
 		// was consumed is unknown (a write can fail after its rename). Clients
 		// must not assume the old token is still usable; see docs/direct-access.md.
 		s.cfg.Logf("direct: token endpoint: %v", err)
-		writeOAuth(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail,
-			"the grant store did not confirm the write; no token was returned, and the presented code or refresh token may already be consumed")
+		n.refuse(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail,
+			"the grant store did not confirm the write; no token was returned, and the presented code or refresh token may already be consumed", "")
 	default:
+		n.ok = true
 		w.Header().Set("Pragma", "no-cache")
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -371,29 +434,32 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 // counts failed attempts toward the same per-source limit.
 func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 	src := source(r)
+	n := &exchangeNote{step: EnrollStepClaim}
+	defer s.noteExchange(n)
 	if s.limited(src) {
 		w.Header().Set("Retry-After", "60")
-		writeOAuth(w, http.StatusTooManyRequests, OAuthTemporarilyUnavail, "too many failed attempts; retry later")
+		n.refuse(w, http.StatusTooManyRequests, OAuthTemporarilyUnavail, "too many failed attempts; retry later", "")
 		return
 	}
 	vals, err := parseForm(w, r)
 	if err != nil {
-		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, err.Error())
+		n.refuse(w, http.StatusBadRequest, OAuthInvalidRequest, err.Error(), "")
 		return
 	}
 	exp, err := s.cfg.Authority.ClaimTicket(vals.Get("code"), vals.Get("code_challenge"), vals.Get("code_challenge_method"))
 	var reqErr *requestError
 	switch {
 	case errors.As(err, &reqErr):
-		writeOAuth(w, http.StatusBadRequest, OAuthInvalidRequest, reqErr.Error())
+		n.refuse(w, http.StatusBadRequest, OAuthInvalidRequest, reqErr.Error(), "")
 	case errors.Is(err, errInvalidCode):
 		s.recordFailure(src)
-		writeOAuth(w, http.StatusBadRequest, OAuthInvalidGrant, "the ticket is invalid, expired, used or claimed by another device")
+		n.refuse(w, http.StatusBadRequest, OAuthInvalidGrant, "the ticket is invalid, expired, used or claimed by another device", codeReason(err))
 	case err != nil:
 		s.cfg.Logf("direct: claim endpoint: %v", err)
-		writeOAuth(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail,
-			"the grant store did not confirm the claim; retry with the same code_challenge")
+		n.refuse(w, http.StatusServiceUnavailable, OAuthTemporarilyUnavail,
+			"the grant store did not confirm the claim; retry with the same code_challenge", "")
 	default:
+		n.ok = true
 		w.Header().Set("Pragma", "no-cache")
 		writeJSON(w, http.StatusOK, ClaimResponse{Claimed: true, ExpiresAt: exp})
 	}

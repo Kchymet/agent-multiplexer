@@ -301,13 +301,19 @@ func (claudeHarness) Activity(s store.Session) engine.Activity {
 }
 
 // RailState returns Claude's fine-grained hook state directly (running/waiting/
-// ready/idle), or Unknown when no hook data has arrived yet — a granularity the
+// ready; a live runtime whose SessionEnd fired reads as ready), or Unknown when no hook data has arrived yet — a granularity the
 // coarse Activity signal can't preserve.
 func (claudeHarness) RailState(s store.Session) string {
 	if rec, ok := core.SessionHookState(s.ID, s.ClaudeID); ok {
 		switch rec.State {
-		case core.StateRunning, core.StateWaiting, core.StateReady, core.StateIdle:
+		case core.StateRunning, core.StateWaiting, core.StateReady:
 			return rec.State
+		case core.StateIdle:
+			// SessionEnd fired but the process is still live (RailState is asked
+			// only about a live runtime): it is between sessions — e.g. /clear,
+			// whose SessionStart follows — and takes input, so it is ready.
+			// "stopped" is reserved for no runtime at all.
+			return core.StateReady
 		}
 	}
 	return core.StateUnknown

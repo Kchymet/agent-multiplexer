@@ -7,8 +7,8 @@ enroll prints the effective label, permissions and scope on stderr. Without QR
 flags it prints a v1 bundle (amux-direct:1:...) alone on stdout, to paste into
 a client.
 
-The scope never defaults: without --all-sessions or --workgroup, enroll asks on
-a terminal (all sessions, a workgroup, or cancel) and fails otherwise.
+The scope defaults to every ordinary session (--all-sessions); --workgroup
+narrows it. The amux console is never in any scope.
 
 QR enrollment (--qr, --qr-png): the code is a device ticket (amux-direct:2:...),
 minted locally with no cloud involved: the phone verifies the server identity,
@@ -33,8 +33,8 @@ flags:
                          e.g. read,steer or read,steer,execute,manage
                          Nothing implies anything else; there is no "all".
                          (default: read,steer,approve)
-  --all-sessions         (required: one of --all-sessions | --workgroup) grant every session on this host
-  --workgroup <root-id>  (required: one of --workgroup | --all-sessions; repeatable) grant one workgroup and its members
+  --all-sessions         grant every ordinary session on this host (the default)
+  --workgroup <root-id>  (repeatable) grant only this workgroup and its members (not with --all-sessions)
   --ttl <dur>            code lifetime (maximum 1h) (default: 10m)
   --json                 print the full response as JSON on stdout
   --qr                   also draw the enrollment as a QR code for the Harness Android app
@@ -47,6 +47,6 @@ flags:
                          device (re-enrolling a phone without piling up duplicates)
 
 examples:
-  amux direct enroll --label phone --permissions read --all-sessions
-  amux direct enroll --qr --all-sessions
+  amux direct enroll --label phone --permissions read
+  amux direct enroll --qr
   amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr

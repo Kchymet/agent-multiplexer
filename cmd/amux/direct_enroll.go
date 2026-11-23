@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,15 +15,13 @@ import (
 
 // directEnrollExample is a complete, working enroll command line, quoted in
 // errors so a refused invocation always shows one that would work.
-const directEnrollExample = "amux direct enroll --label phone --permissions read --all-sessions"
+const directEnrollExample = "amux direct enroll --label phone --permissions read"
 
 // enrollEnv is everything enroll touches outside its arguments, so tests can
 // drive it without a terminal, a daemon or a direct server.
 type enrollEnv struct {
-	stdin     io.Reader
 	stdout    io.Writer
 	stderr    io.Writer
-	stdinTTY  bool
 	stderrTTY bool
 	// openTTY opens the controlling terminal for the QR when stderr is not one.
 	openTTY  func() (io.WriteCloser, error)
@@ -36,8 +33,7 @@ type enrollEnv struct {
 
 func osEnrollEnv() enrollEnv {
 	return enrollEnv{
-		stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr,
-		stdinTTY: isTerminal(os.Stdin), stderrTTY: isTerminal(os.Stderr),
+		stdout: os.Stdout, stderr: os.Stderr, stderrTTY: isTerminal(os.Stderr),
 		openTTY:  func() (io.WriteCloser, error) { return os.OpenFile("/dev/tty", os.O_WRONLY, 0) },
 		getenv:   os.Getenv,
 		hostname: os.Hostname,
@@ -91,12 +87,12 @@ func parseEnrollFlags(args []string) (enrollFlags, error) {
 
 // enrollGrant is what one enrollment will grant, with which parts defaulted.
 type enrollGrant struct {
-	label          string
-	labelDefault   bool
-	perms          []string
-	permsDefault   bool
-	resource       direct.ResourceScope
-	resourcePrompt bool
+	label           string
+	labelDefault    bool
+	perms           []string
+	permsDefault    bool
+	resource        direct.ResourceScope
+	resourceDefault bool
 }
 
 func (g enrollGrant) describe() string {
@@ -110,11 +106,8 @@ func (g enrollGrant) describe() string {
 	if g.resource.Kind == direct.ResourceWorkgroups {
 		scope = "workgroup " + strings.Join(g.resource.Workgroups, ", ")
 	}
-	if g.resourcePrompt {
-		scope += " (chosen above)"
-	}
-	return fmt.Sprintf("Granting: label %q%s · permissions %s%s · scope %s",
-		g.label, note(g.labelDefault), strings.Join(g.perms, ","), note(g.permsDefault), scope)
+	return fmt.Sprintf("Granting: label %q%s · permissions %s%s · scope %s%s",
+		g.label, note(g.labelDefault), strings.Join(g.perms, ","), note(g.permsDefault), scope, note(g.resourceDefault))
 }
 
 // defaultEnrollLabel names a client after this host and the current minute.
@@ -142,10 +135,10 @@ func defaultEnrollLabel(hostname func() (string, error), now time.Time) string {
 
 // resolveEnrollGrant applies the defaults: label from the host and time,
 // permissions read, steer and the execute set (direct.DefaultPermissions;
-// manage, create and accounts stay opt-in). Aliases such as execute are
-// expanded here, so the grant printed before minting shows concrete names.
-// The scope is never defaulted: without a
-// flag it is asked for on a terminal, and refused otherwise.
+// manage, create and accounts stay opt-in; aliases such as execute are
+// expanded here, so the grant printed before minting shows concrete names),
+// and scope every ordinary session (never the console, which no scope can
+// name). --workgroup narrows the scope.
 func resolveEnrollGrant(f enrollFlags, env enrollEnv) (enrollGrant, error) {
 	g := enrollGrant{label: f.label, perms: nil}
 	if g.label == "" {
@@ -159,49 +152,12 @@ func resolveEnrollGrant(f enrollFlags, env enrollEnv) (enrollGrant, error) {
 		}
 		g.perms = direct.ExpandPermAliases(g.perms)
 	}
-	if f.all || len(f.groups) > 0 {
-		res, err := directResourceFlags(f.all, f.groups)
-		if err != nil {
-			return g, err
-		}
-		g.resource = res
-		return g, nil
-	}
-	if !env.stdinTTY || !env.stderrTTY {
-		return g, fmt.Errorf("choose the resource scope explicitly with --all-sessions or --workgroup <root-id>, e.g.\n  %s", directEnrollExample)
-	}
-	res, err := promptEnrollScope(env.stdin, env.stderr, strings.Join(g.perms, ","))
+	res, err := directResourceFlags(f.all, f.groups)
 	if err != nil {
 		return g, err
 	}
-	g.resource, g.resourcePrompt = res, true
+	g.resource, g.resourceDefault = res, !f.all && len(f.groups) == 0
 	return g, nil
-}
-
-// promptEnrollScope asks which sessions the client may reach. Nothing is
-// preselected: an empty or unrecognized answer cancels.
-func promptEnrollScope(in io.Reader, out io.Writer, perms string) (direct.ResourceScope, error) {
-	cancelled := fmt.Errorf("enrollment cancelled; nothing was minted. Non-interactively:\n  %s", directEnrollExample)
-	r := bufio.NewReader(in)
-	fmt.Fprintf(out, "No scope given. Which sessions may this client reach (permissions: %s)?\n", perms)
-	fmt.Fprintln(out, "  1) all sessions on this host")
-	fmt.Fprintln(out, "  2) one workgroup (you enter its root id)")
-	fmt.Fprintln(out, "  3) cancel")
-	fmt.Fprint(out, "Choose 1, 2 or 3: ")
-	line, _ := r.ReadString('\n')
-	switch strings.TrimSpace(line) {
-	case "1":
-		return direct.ResourceScope{Kind: direct.ResourceAllSessions}, nil
-	case "2":
-		fmt.Fprint(out, "Workgroup root id: ")
-		id, _ := r.ReadString('\n')
-		id = strings.TrimSpace(id)
-		if id == "" {
-			return direct.ResourceScope{}, cancelled
-		}
-		return direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: []string{id}}, nil
-	}
-	return direct.ResourceScope{}, cancelled
 }
 
 func runDirectEnroll(args []string, env enrollEnv) error {

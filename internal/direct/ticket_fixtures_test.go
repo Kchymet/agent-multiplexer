@@ -46,7 +46,7 @@ func ticketFixtureFiles(t *testing.T) map[string][]byte {
 		"claim-request.txt": form(url.Values{"code": {fixtureCode}, "code_challenge": {S256Challenge(fixtureVerifier)},
 			"code_challenge_method": {CodeChallengeMethodS256}}),
 		"claim-response.json":    js(ClaimResponse{Claimed: true, ExpiresAt: exp}),
-		"claim-error-taken.json": js(OAuthError{Error: OAuthInvalidGrant, Description: "the ticket is invalid, expired, used or claimed by another device"}),
+		"claim-error-taken.json": js(OAuthError{Error: OAuthInvalidGrant, Description: "the ticket is invalid, expired, used or claimed by another device", Reason: ReasonTicketUsed}),
 		"token-error-unclaimed.json": js(OAuthError{Error: OAuthInvalidRequest,
 			Description: "this device ticket must be claimed with a code_challenge before it is redeemed"}),
 		// Redemption after a claim is the unchanged cloud PKCE grant

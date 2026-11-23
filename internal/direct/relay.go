@@ -13,9 +13,11 @@ import (
 type AdminCaller func(context.Context, AdminRequest) (AdminResponse, error)
 
 // RelayIssuer is the provider's only bridge from relay frames to direct
-// administration. It can send exactly two operations: OpCloudStatus, when the
-// provider registers, to decide whether to advertise direct-enroll-v1; and
-// OpIssueCloudCode, built field by field from a typed relay request. There is
+// administration. It can send exactly four operations: OpCloudStatus, when the
+// provider registers, to decide whether to advertise direct-enroll-v1 and
+// direct-approval-v1; OpIssueCloudCode, built field by field from a typed
+// relay request; and OpApprovalLease / OpApprovalSettle, which carry approval
+// verifies to Harness and its answers back. There is
 // no way to reach any other admin operation through it, and refusal messages
 // from the server are reduced to their stable code.
 type RelayIssuer struct{ call AdminCaller }
@@ -33,7 +35,43 @@ func (r *RelayIssuer) Capabilities(ctx context.Context) (*hp.DirectCapabilities,
 	if resp.Cloud == nil || !resp.Cloud.Enabled || resp.ServerID == "" || len(resp.Endpoints) == 0 {
 		return nil, nil
 	}
-	return &hp.DirectCapabilities{ServerID: resp.ServerID, Endpoints: append([]string(nil), resp.Endpoints...), Issuance: true, Handoff: true}, nil
+	caps := &hp.DirectCapabilities{ServerID: resp.ServerID, Endpoints: append([]string(nil), resp.Endpoints...), Issuance: true, Handoff: true}
+	if resp.ApprovalServed {
+		caps.Approval = true
+		caps.Ceiling = &hp.DirectCeiling{Permissions: append([]string(nil), resp.Cloud.Permissions...), Resource: resp.Cloud.Resource.Kind}
+		if resp.Cloud.Resource.Kind == ResourceWorkgroups {
+			caps.Ceiling.Workgroups = append([]string(nil), resp.Cloud.Resource.Workgroups...)
+		}
+	}
+	return caps, nil
+}
+
+// LeaseApprovals long-polls the direct server for parked approval verifies
+// (direct-approval-v1).
+func (r *RelayIssuer) LeaseApprovals(ctx context.Context, max int, wait time.Duration) ([]ApprovalItem, error) {
+	resp, err := r.call(ctx, AdminRequest{Op: OpApprovalLease, Approval: &ApprovalAdminRequest{Max: max, WaitMillis: wait.Milliseconds()}})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, errors.New("approval lease refused")
+	}
+	if resp.Approval == nil {
+		return nil, nil
+	}
+	return resp.Approval.Items, nil
+}
+
+// SettleApprovals reports Harness's answers for leased verifies.
+func (r *RelayIssuer) SettleApprovals(ctx context.Context, verdicts []ApprovalVerdict) error {
+	resp, err := r.call(ctx, AdminRequest{Op: OpApprovalSettle, Approval: &ApprovalAdminRequest{Verdicts: verdicts}})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return errors.New("approval settle refused")
+	}
+	return nil
 }
 
 // relayCodes are the refusal codes passed back over the relay. Anything else
@@ -69,7 +107,7 @@ func (r *RelayIssuer) Enroll(ctx context.Context, providerID string, req hp.Dire
 		return hp.DirectEnrollResult{Bundle: resp.Bundle, ExpiresAt: resp.ExpiresAt, ServerID: resp.ServerID}
 	}
 	if code, ok := relayCodes[resp.Code]; ok {
-		return hp.DirectEnrollResult{Error: code}
+		return hp.DirectEnrollResult{Error: code, Reason: CloudReason(resp.Code)}
 	}
 	return hp.DirectEnrollResult{Error: hp.DirectEnrollErrUnavailable}
 }

@@ -453,17 +453,18 @@ func optionalPreparation(action string, err error) error {
 	return nil
 }
 
-// AgentIDsUnder returns the agent (sub-session) ids to run for id: if id is a
-// workgroup root, all its agent children; otherwise id itself. It lets a caller
+// AgentIDsUnder returns the agent ids to run for id: for a workgroup root, its
+// coordinator (the root session itself) and every non-archived member; for
+// anything else, id itself. It lets a caller
 // start the process(es) for a freshly-created session — root or agent — the same
 // way the TUI starts an agent when it's opened.
 func AgentIDsUnder(id string) ([]string, error) {
 	// The console and a repo home are single sessions (the console has no store
 	// row; a home is a root with no members), so each resolves to itself: `start`
 	// and a `prompt` to a stopped one both come through here. A workgroup root
-	// still resolves to its member agents — "start the workgroup" brings the
-	// workers up; its coordinator starts at creation, when opened, or prompted (see
-	// daemon.startForSteer, which starts exactly the steered session).
+	// resolves to its coordinator plus its live members — "start the workgroup"
+	// brings all of it up — while a `prompt` starts exactly the steered session
+	// (daemon.startForSteer), never depending on its siblings.
 	s, ok, err := ResolveSession(id)
 	if err != nil {
 		return nil, err
@@ -483,9 +484,29 @@ func AgentIDsUnder(id string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(kids))
+	if s.Archived {
+		return nil, fmt.Errorf("workgroup %q is archived; restore it before starting it", id)
+	}
+	ids := make([]string, 0, len(kids)+1)
+	// A workgroup root IS its coordinator session: "start the workgroup" starts
+	// the coordinator first, then its live members. (A hidden single-member repo
+	// root has no session of its own and resolves to its members only.)
+	if s.Role() == store.RoleCoordinator {
+		ids = append(ids, s.ID)
+	}
+	var skipped []string
 	for _, k := range kids {
+		// An archived member has no runtime to start; refusing it would make
+		// the whole root (coordinator included) unstartable once any member
+		// finished — `amux do start <root>` failed with "session … is archived".
+		if k.Archived {
+			skipped = append(skipped, k.ID)
+			continue
+		}
 		ids = append(ids, k.ID)
+	}
+	if len(skipped) > 0 {
+		log.Printf("amux: start %s: skipping archived member(s) %s", id, strings.Join(skipped, ", "))
 	}
 	return ids, nil
 }

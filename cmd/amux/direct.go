@@ -379,12 +379,9 @@ func cmdDirectCloudEnable(args []string) error {
 	if *perms != "" {
 		permList = direct.ExpandPermAliases(strings.Split(*perms, ","))
 	}
-	resource := direct.ResourceScope{Kind: direct.ResourceAllSessions}
-	if *all || len(groups) > 0 {
-		var err error
-		if resource, err = directResourceFlags(*all, groups); err != nil {
-			return err
-		}
+	resource, err := directResourceFlags(*all, groups) // defaults to all ordinary sessions
+	if err != nil {
+		return err
 	}
 	st, stErr := provider.ReadStatus(provider.StatusPath())
 	pins, err := resolveCloudPins(*owner, *prov, st, stErr, processAlive)
@@ -417,7 +414,10 @@ func directResourceFlags(all bool, groups []string) (direct.ResourceScope, error
 	case len(groups) > 0:
 		return direct.ResourceScope{Kind: direct.ResourceWorkgroups, Workgroups: groups}, nil
 	}
-	return direct.ResourceScope{}, errors.New("choose the resource scope explicitly: --all-sessions or --workgroup <root-id>")
+	// The default scope is every ordinary session. The console is not a
+	// session any scope covers (ValidateResource refuses it by id, and
+	// all_sessions excludes it), so the default never reaches it.
+	return direct.ResourceScope{Kind: direct.ResourceAllSessions}, nil
 }
 
 func printCloudStatus(c direct.CloudStatus) {

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -52,6 +53,35 @@ type Status struct {
 	// as observed.
 	DirectServerID  string   `json:"direct_server_id,omitempty"`
 	DirectEndpoints []string `json:"direct_endpoints,omitempty"`
+	// StartedAt is when this provider process started. DirectEnrollLast is the
+	// latest direct-enroll request Harness relayed to it since then (nil:
+	// none reached this host), and DirectEnrollCount counts them. They tell an
+	// operator whether a cloud enrollment ever reached this machine.
+	StartedAt time.Time `json:"started_at"`
+	// WebOrigin is the orchestrator web app's origin from the latest accepted
+	// registration (registered.webOrigin; empty from an older orchestrator).
+	// A tailnet direct server allows it as a browser origin.
+	WebOrigin         string               `json:"web_origin,omitempty"`
+	DirectEnrollLast  *DirectEnrollAttempt `json:"direct_enroll_last,omitempty"`
+	DirectEnrollCount int                  `json:"direct_enroll_count,omitempty"`
+}
+
+// DirectEnrollAttempt is one relayed direct-enroll request as the provider
+// answered it: when, of which kind, how it ended and how long it took. It
+// deliberately carries no requester, issue key, challenge, label or bundle.
+type DirectEnrollAttempt struct {
+	At      time.Time `json:"at"`
+	Kind    string    `json:"kind"`           // pkce_code | device_ticket | other
+	Outcome string    `json:"outcome"`        // issued | refused
+	Code    string    `json:"code,omitempty"` // the refusal code (harnessproto.DirectEnrollErr*) when refused
+	Millis  int64     `json:"millis"`
+}
+
+func (a DirectEnrollAttempt) String() string {
+	if a.Outcome == "issued" {
+		return fmt.Sprintf("%s issued (%s) in %dms", a.At.Format(time.RFC3339), a.Kind, a.Millis)
+	}
+	return fmt.Sprintf("%s refused: %s (%s) in %dms", a.At.Format(time.RFC3339), a.Code, a.Kind, a.Millis)
 }
 
 // StatusPath is the file the provider loop writes its state to. It lives with

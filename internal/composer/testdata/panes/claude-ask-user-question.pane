@@ -1,0 +1,24 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): an AskUserQuestion selector, which
+#   replaces the input box; option descriptions sit between numbered options.
+# shows: question selector open, no composer
+# want-state: dialog
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H⏺ I need a decision before continuing.
+
+\x1b[38;5;75m{{RULE}}\x1b[0m
+ \x1b[48;5;24m ☐ Approach \x1b[0m
+
+ How should amux learn about PR changes?
+
+ \x1b[38;5;75m❯\x1b[0m \x1b[38;5;75m1. Polling\x1b[0m
+     Check GitHub every 20 seconds.
+   2. Webhooks
+     Receive pushes from GitHub; needs a public endpoint.
+   3. Type something.
+
+\x1b[2m Enter to select · ↑/↓ to navigate · Esc to cancel\x1b[0m

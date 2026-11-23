@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"amux/internal/direct"
 	"amux/internal/hostbackend"
@@ -406,7 +407,7 @@ func mergeFeatures(env string, flags multiFlag) []string {
 // operations (status for advertisement, cloud-code issuance), and the direct
 // server enforces the operator's policy, pins, ceiling, PKCE and caps.
 func wireDirectEnroll(cfg *provider.Config) {
-	cfg.DirectEnroll = direct.NewRelayIssuer(func(ctx context.Context, req direct.AdminRequest) (direct.AdminResponse, error) {
+	issuer := direct.NewRelayIssuer(func(ctx context.Context, req direct.AdminRequest) (direct.AdminResponse, error) {
 		cred, err := hostCredential()
 		if err != nil {
 			return direct.AdminResponse{}, err
@@ -417,4 +418,27 @@ func wireDirectEnroll(cfg *provider.Config) {
 		}
 		return direct.AdminCall(ctx, root, cred, req)
 	})
+	cfg.DirectEnroll = issuer
+	cfg.DirectApprove = approveAdapter{issuer}
+}
+
+// approveAdapter adapts direct.RelayIssuer's approval bridge to
+// provider.DirectApprover (direct-approval-v1).
+type approveAdapter struct{ r *direct.RelayIssuer }
+
+func (a approveAdapter) LeaseApprovals(ctx context.Context, max int, wait time.Duration) ([]provider.ApprovalItem, error) {
+	items, err := a.r.LeaseApprovals(ctx, max, wait)
+	out := make([]provider.ApprovalItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, provider.ApprovalItem{ID: it.ID, Verify: it.Verify})
+	}
+	return out, err
+}
+
+func (a approveAdapter) SettleApprovals(ctx context.Context, verdicts []provider.ApprovalVerdict) error {
+	out := make([]direct.ApprovalVerdict, 0, len(verdicts))
+	for _, v := range verdicts {
+		out = append(out, direct.ApprovalVerdict{ID: v.ID, ProviderID: v.ProviderID, Result: v.Result})
+	}
+	return a.r.SettleApprovals(ctx, out)
 }

@@ -95,10 +95,9 @@ func TestCloudIssuanceIsOffByDefault(t *testing.T) {
 	}
 }
 
-func TestCloudPolicyRequiresExplicitCeilingAndPins(t *testing.T) {
+func TestCloudPolicyRequiresValidCeilingAndPins(t *testing.T) {
 	a := openTestAuthority(t, t.TempDir(), Lifetimes{}, nil)
 	bad := []CloudPolicyRequest{
-		{Permissions: []string{PermRead}, OwnerPin: testOwner, ProviderPin: testProvider},                                                                                     // no resource
 		{Permissions: []string{PermRead}, Resource: ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{ConsoleID}}, OwnerPin: testOwner, ProviderPin: testProvider}, // console
 		{Permissions: []string{"admin"}, Resource: allSessions, OwnerPin: testOwner, ProviderPin: testProvider},
 		{Permissions: []string{PermRead}, Resource: allSessions, ProviderPin: testProvider},
@@ -139,7 +138,6 @@ func TestCloudIssuanceRefusalsWriteNothing(t *testing.T) {
 		"console": {func(r *CloudIssueRequest) {
 			r.Resource = ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{ConsoleID}}
 		}, CloudErrInvalidRequest},
-		"no resource":         {func(r *CloudIssueRequest) { r.Resource = ResourceScope{} }, CloudErrInvalidRequest},
 		"no issue key":        {func(r *CloudIssueRequest) { r.IssueKey = "" }, CloudErrInvalidRequest},
 		"no requester":        {func(r *CloudIssueRequest) { r.Requester = "" }, CloudErrInvalidRequest},
 		"control in label":    {func(r *CloudIssueRequest) { r.Label = "a\nb" }, CloudErrInvalidRequest},

@@ -86,15 +86,16 @@ the **overseer**, which has no admin power and is reachable as described in
    amux direct enroll --label "Pixel" --permissions read,steer --workgroup 771951
    ```
 
-   The scope never defaults: give `--all-sessions` or one or more
-   `--workgroup <root-id>`. Without either, `enroll` asks on a terminal (all
-   sessions, a workgroup, or cancel; nothing is preselected) and otherwise
-   fails with a working example. Permissions default to `read,steer,approve`
-   (read, steer and the execute set); `--permissions` replaces the default
-   with an explicit list of `read` plus any of `steer`, `respond`, `approve`,
-   `manage`, `create` and `accounts` (see [Permissions](#permissions)).
-   `manage`, `create` and `accounts` are always opt-in. Each is explicit and
-   none implies another; `execute` is an alias for `approve`. The label defaults to `<hostname>-<YYYYMMDD-HHMM>`. Before
+   The scope defaults to every ordinary session (`--all-sessions`); give one
+   or more `--workgroup <root-id>` to narrow it. The amux console is never in
+   any scope, defaulted or not, and the effective scope is printed (marked
+   "(default)") before anything is minted. Permissions default to
+   `read,steer,approve` (read, steer and the execute set); `--permissions`
+   replaces the default with an explicit list of `read` plus any of `steer`,
+   `respond`, `approve`, `manage`, `create` and `accounts` (see
+   [Permissions](#permissions)). `manage`, `create` and `accounts` are always
+   opt-in. Each is explicit and none implies another; `execute` is an alias for
+   `approve`. The label defaults to `<hostname>-<YYYYMMDD-HHMM>`. Before
    minting, the command prints the effective label, permissions and scope on
    stderr. It then prints one line on stdout, `amux-direct:1:<base64url
    JSON>`. Paste it into the client within its lifetime (default 10 minutes,

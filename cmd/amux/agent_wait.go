@@ -76,9 +76,9 @@ func cmdAgentWait(args []string) error {
 	}
 	for _, s := range until {
 		switch s {
-		case core.StateIdle, core.StateReady, core.StateWaiting, core.StateRunning, core.StateUnknown:
+		case core.StateStopped, core.StateReady, core.StateWaiting, core.StateRunning, core.StateUnknown:
 		default:
-			return fmt.Errorf("--until: unknown state %q (idle | ready | waiting | running | unknown)", s)
+			return fmt.Errorf("--until: unknown state %q (stopped | ready | waiting | running | unknown)", s)
 		}
 	}
 	ctx := context.Background()
@@ -104,6 +104,9 @@ func splitStates(s string) []string {
 	var out []string
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
+			if p == core.StateIdle {
+				p = core.StateStopped // the legacy name for a session with no runtime
+			}
 			out = append(out, p)
 		}
 	}

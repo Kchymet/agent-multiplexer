@@ -69,6 +69,11 @@ const (
 	OpWakeLease   = "wake_lease"
 	OpWakeSettle  = "wake_settle"
 	OpWakeRoutes  = "wake_routes"
+	// Tailnet cloud approvals: the provider's approval bridge
+	// (direct-approval-v1) long-polls parked verifies and settles Harness's
+	// answers. They never reach any other operation.
+	OpApprovalLease  = "approval_lease"
+	OpApprovalSettle = "approval_settle"
 )
 
 // wakeLeaseMaxWait keeps a lease long-poll inside the admin deadline.
@@ -103,16 +108,17 @@ type adminFrame struct {
 
 // AdminRequest is one administration call.
 type AdminRequest struct {
-	Op          string              `json:"op"`
-	Label       string              `json:"label,omitempty"`
-	Permissions []string            `json:"permissions,omitempty"`
-	Resource    ResourceScope       `json:"resource,omitempty"`
-	TTLSeconds  int64               `json:"ttl_seconds,omitempty"`
-	ClientID    string              `json:"client_id,omitempty"`
-	Cloud       *CloudPolicyRequest `json:"cloud,omitempty"`
-	Issue       *CloudIssueRequest  `json:"issue,omitempty"`
-	Wake        *WakeAdminRequest   `json:"wake,omitempty"`
-	Limit       int                 `json:"limit,omitempty"`
+	Op          string                `json:"op"`
+	Label       string                `json:"label,omitempty"`
+	Permissions []string              `json:"permissions,omitempty"`
+	Resource    ResourceScope         `json:"resource,omitempty"`
+	TTLSeconds  int64                 `json:"ttl_seconds,omitempty"`
+	ClientID    string                `json:"client_id,omitempty"`
+	Cloud       *CloudPolicyRequest   `json:"cloud,omitempty"`
+	Issue       *CloudIssueRequest    `json:"issue,omitempty"`
+	Wake        *WakeAdminRequest     `json:"wake,omitempty"`
+	Limit       int                   `json:"limit,omitempty"`
+	Approval    *ApprovalAdminRequest `json:"approval,omitempty"`
 	// Update is OpUpdate's change; Actor names the host-side caller ("cli",
 	// "tui", "console", optionally with the OS user) in the grant's record.
 	Update *GrantUpdate `json:"update,omitempty"`
@@ -140,6 +146,13 @@ type AdminResponse struct {
 	Cloud *CloudStatus       `json:"cloud,omitempty"`
 	Wake  *WakeAdminResponse `json:"wake,omitempty"`
 	Audit []AuditRecord      `json:"audit,omitempty"`
+	// Enroll is the direct enrollment exchange activity (OpCloudStatus).
+	Enroll *EnrollActivity `json:"enroll,omitempty"`
+	// ApprovalServed says this direct server accepts cloud approvals at
+	// POST /direct/v1/enroll/cloud (OpCloudStatus); Approval carries leased
+	// verifies (OpApprovalLease).
+	ApprovalServed bool                   `json:"approval_served,omitempty"`
+	Approval       *ApprovalAdminResponse `json:"approval,omitempty"`
 	// Update is OpUpdate's result.
 	Update *GrantUpdateResult `json:"update,omitempty"`
 }
@@ -206,7 +219,9 @@ type AdminServer struct {
 	Logf      func(string, ...any)
 	// Wake serves the wake lease/settle/routes operations; nil refuses them.
 	Wake *WakeService
-	ln   net.Listener
+	// Approvals serves the approval lease/settle operations; nil refuses them.
+	Approvals *ApprovalQueue
+	ln        net.Listener
 }
 
 // AdminSocketPath is the admin socket inside root.
@@ -287,10 +302,21 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 		return
 	}
 	var resp AdminResponse
-	if isWakeOp(f.Request.Op) {
+	switch {
+	case isWakeOp(f.Request.Op):
 		resp = AdministerWake(ctx, s.Authority, s.Wake, *f.Request)
-	} else {
+	case isApprovalOp(f.Request.Op):
+		resp = AdministerApproval(ctx, s.Approvals, *f.Request)
+	case f.Request.Op == OpIssueCloudCode:
+		var at CloudAttempt
+		resp, at = AdministerCloudIssue(s.Authority, s.Endpoints, *f.Request)
+		// Kind and outcome only: never the requester, issue key or code.
+		s.Logf("direct: cloud enrollment request reached this host: %s", at)
+	default:
 		resp = Administer(s.Authority, s.Endpoints, *f.Request)
+		if f.Request.Op == OpCloudStatus && resp.OK {
+			resp.ApprovalServed = s.Approvals != nil
+		}
 	}
 	_ = enc.Encode(adminFrame{Type: "response", Response: &resp})
 }
@@ -369,35 +395,47 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 		}
 		return AdminResponse{OK: true, ServerID: a.ServerID(), Cloud: &st}
 	case OpCloudStatus:
-		st := a.CloudStatus()
-		return AdminResponse{OK: true, ServerID: a.ServerID(), Endpoints: endpoints, Cloud: &st}
+		st, act := a.CloudStatus(), a.EnrollActivity()
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Endpoints: endpoints, Cloud: &st, Enroll: &act}
 	case OpIssueCloudCode:
-		if req.Issue == nil {
-			return AdminResponse{Code: CloudErrInvalidRequest, Error: "issuance needs a request"}
-		}
-		if len(endpoints) == 0 {
-			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux direct serve` with configured endpoints"}
-		}
-		code, exp, err := a.IssueCloudCode(*req.Issue)
-		if err != nil {
-			var ce *CloudError
-			if errors.As(err, &ce) {
-				return AdminResponse{Code: ce.Code, Error: ce.Msg}
-			}
-			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
-		}
-		sid := a.ServerID()
-		b := Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp}
-		if req.Issue.Handoff == HandoffDeviceTicket {
-			b.V, b.Claim = 2, BundleClaimPKCE
-		}
-		bundle, err := EncodeBundle(b)
-		if err != nil {
-			return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
-		}
-		return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: sid, Endpoints: endpoints}
+		resp, _ := AdministerCloudIssue(a, endpoints, req)
+		return resp
 	}
 	return fail(fmt.Errorf("unknown admin operation %q", req.Op))
+}
+
+// AdministerCloudIssue answers one OpIssueCloudCode and records its outcome
+// as the latest cloud attempt, which it also returns (for the server log).
+func AdministerCloudIssue(a *Authority, endpoints []string, req AdminRequest) (AdminResponse, CloudAttempt) {
+	resp := issueCloudCode(a, endpoints, req)
+	return resp, a.noteCloudAttempt(req.Issue, resp)
+}
+
+func issueCloudCode(a *Authority, endpoints []string, req AdminRequest) AdminResponse {
+	if req.Issue == nil {
+		return AdminResponse{Code: CloudErrInvalidRequest, Error: "issuance needs a request"}
+	}
+	if len(endpoints) == 0 {
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance needs a running `amux direct serve` with configured endpoints"}
+	}
+	code, exp, err := a.IssueCloudCode(*req.Issue)
+	if err != nil {
+		var ce *CloudError
+		if errors.As(err, &ce) {
+			return AdminResponse{Code: ce.Code, Error: ce.Msg}
+		}
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
+	}
+	sid := a.ServerID()
+	b := Bundle{V: 1, ServerID: sid, Endpoints: endpoints, Code: code, ExpiresAt: exp}
+	if req.Issue.Handoff == HandoffDeviceTicket {
+		b.V, b.Claim = 2, BundleClaimPKCE
+	}
+	bundle, err := EncodeBundle(b)
+	if err != nil {
+		return AdminResponse{Code: CloudErrUnavailable, Error: "cloud issuance failed"}
+	}
+	return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: sid, Endpoints: endpoints}
 }
 
 func isWakeOp(op string) bool {

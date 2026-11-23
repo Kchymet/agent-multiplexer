@@ -28,6 +28,9 @@ type ServeConfig struct {
 	// swapped in while existing connections keep theirs. HTTPS stays
 	// mandatory: there is no way to serve without a certificate.
 	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	// ExtraOrigins, when set, supplies further exact browser origins at
+	// request time (Config.ExtraOrigins).
+	ExtraOrigins func() []string
 	// Ready, when set, is called once the listener and admin socket are up.
 	Ready func(addr net.Addr, serverID string)
 }
@@ -70,11 +73,13 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 	defer a.Close()
 	wake := NewWakeService(a, cfg.Root, cfg.Backend, cfg.Logf)
-	srv, err := NewServer(Config{Authority: a, Backend: cfg.Backend, Endpoints: cfg.Endpoints, AllowOrigins: cfg.AllowOrigins, Logf: cfg.Logf, Wake: wake})
+	approvals := NewApprovalQueue()
+	srv, err := NewServer(Config{Authority: a, Backend: cfg.Backend, Endpoints: cfg.Endpoints, AllowOrigins: cfg.AllowOrigins, Logf: cfg.Logf, Wake: wake,
+		Approvals: approvals, ExtraOrigins: cfg.ExtraOrigins})
 	if err != nil {
 		return err
 	}
-	admin := &AdminServer{Authority: a, Endpoints: srv.cfg.Endpoints, Verify: cfg.Verify, Logf: cfg.Logf, Wake: wake}
+	admin := &AdminServer{Authority: a, Endpoints: srv.cfg.Endpoints, Verify: cfg.Verify, Logf: cfg.Logf, Wake: wake, Approvals: approvals}
 	if err := admin.Listen(cfg.Root); err != nil {
 		return fmt.Errorf("admin socket: %w", err)
 	}

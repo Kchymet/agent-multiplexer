@@ -666,6 +666,14 @@ func (in *instance) closePtmx() {
 	in.inOnce.Do(func() { close(in.inDone) })
 }
 
+// ExitMessage is the process's exit status once it has exited ("" while it
+// runs or when it exited cleanly), so a caller can say why a runtime died.
+func (in *instance) ExitMessage() string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.exitErr
+}
+
 func (in *instance) Alive() bool {
 	in.mu.Lock()
 	defer in.mu.Unlock()

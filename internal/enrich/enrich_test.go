@@ -145,7 +145,7 @@ func mem(id, state string, prs ...hp.SessionPR) Member {
 // waiting_review / waiting_merge > ready / idle, with the legacy state and
 // sub-state each maps to.
 func TestRollupPrecedence(t *testing.T) {
-	ready, idle, running, waiting, unknown := hp.StateReady, hp.StateIdle, hp.StateRunning, hp.StateWaiting, hp.StateUnknown
+	ready, idle, running, waiting, unknown := hp.StateReady, hp.StateStopped, hp.StateRunning, hp.StateWaiting, hp.StateUnknown
 	for _, tc := range []struct {
 		name          string
 		own, goal     string
@@ -175,7 +175,9 @@ func TestRollupPrecedence(t *testing.T) {
 		{"merge only", ready, "waiting", []Member{mem("a", ready, open(1, approved)), mem("b", idle, open(2, pending))},
 			hp.RollupWaitingMerge, ready, hp.SubStateWaitingMerge, 2, "waiting for merge · 2 PRs", "a PR #1 approved, b PR #2 ready to merge, CI running"},
 		{"merged PRs do not count", ready, "", []Member{mem("a", ready, open(1, mergedAgo(time.Hour)))}, hp.RollupReady, ready, "", 0, "ready", ""},
-		{"idle", idle, "", []Member{mem("a", idle)}, hp.RollupIdle, idle, "", 0, "idle", ""},
+		{"stopped", idle, "", []Member{mem("a", idle)}, hp.RollupIdle, idle, "", 0, "stopped", ""},
+		// A legacy "idle" (an older provider) is read as stopped.
+		{"legacy idle", hp.StateIdle, "", []Member{mem("a", hp.StateIdle)}, hp.RollupIdle, idle, "", 0, "stopped", ""},
 		{"unknown coordinator alone", unknown, "", nil, hp.RollupReady, unknown, "", 0, "ready", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
