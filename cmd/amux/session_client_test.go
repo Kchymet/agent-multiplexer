@@ -47,6 +47,9 @@ func installRestrictedRPC(t *testing.T, client restrictedSessionRPC) {
 	cursorDir := t.TempDir()
 	eventCursorDir = func() string { return cursorDir }
 	oldStatusLine := startStatusLineReport
+	oldStateDir := statusLineStateDir
+	stateDir := t.TempDir()
+	statusLineStateDir = func() string { return stateDir }
 	sessionContextRestricted = func() bool { return true }
 	openRestrictedSessionRPC = func() (restrictedSessionRPC, error) { return client, nil }
 	// Run handed-off status-line reports inline so tests observe them.
@@ -55,6 +58,7 @@ func installRestrictedRPC(t *testing.T, client restrictedSessionRPC) {
 		sessionContextRestricted = oldRestricted
 		openRestrictedSessionRPC = oldOpen
 		startStatusLineReport = oldStatusLine
+		statusLineStateDir = oldStateDir
 		eventCursorDir = oldCursorDir
 	})
 }
