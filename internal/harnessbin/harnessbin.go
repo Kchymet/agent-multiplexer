@@ -80,6 +80,17 @@ type State struct {
 	// and its failure (rate-limits retries; see AdoptRetry).
 	AdoptAttemptAt time.Time `json:"adopt_attempt_at,omitempty"`
 	AdoptError     string    `json:"adopt_error,omitempty"`
+	// AdoptCheckedAt, AdoptDecision ("adopt" or "skip") and AdoptReason are
+	// the last time the adoption rules ran for this kind, in the daemon or in
+	// `amux harness adopt`, and what they decided and why. Declines are
+	// recorded too, so a harness that is never adopted says why.
+	AdoptCheckedAt time.Time `json:"adopt_checked_at,omitempty"`
+	AdoptDecision  string    `json:"adopt_decision,omitempty"`
+	AdoptReason    string    `json:"adopt_reason,omitempty"`
+	// AdoptStartedAt is set while an allowed adoption installs and cleared
+	// when it finishes, successfully or not, so an attempt that never finished
+	// (a stalled download, a daemon stopped mid-install) shows.
+	AdoptStartedAt time.Time `json:"adopt_started_at,omitempty"`
 }
 
 // Manager performs installs and lifecycle operations under one root. The zero
@@ -295,8 +306,12 @@ func (m *Manager) verify(ctx context.Context, bin string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "--version")
 	cmd.Env = append(os.Environ(), "DISABLE_AUTOUPDATER=1")
+	// Without a WaitDelay, Output keeps waiting for stdout to reach EOF after
+	// the timeout kills bin, so a helper process that inherited the pipe would
+	// hang the install (and the daemon's adoption) indefinitely.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
-	if err != nil {
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) { // ErrWaitDelay: it exited 0
 		return "", err
 	}
 	return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0]), nil

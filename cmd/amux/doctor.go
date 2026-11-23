@@ -94,8 +94,13 @@ func cmdDoctor() error {
 				fmt.Printf("  ✓ %-8s %-26s %s\n      %s  (%s)\n", d.bin, r.Version, d.note, r.Path, r.Binary.Label())
 			}
 			if harnessbin.Supported(d.bin) {
-				if st := harnessManager().LoadState(d.bin); st.Available != "" {
+				m := harnessManager()
+				st := m.LoadState(d.bin)
+				if st.Available != "" {
 					fmt.Printf("      update %s available — amux harness update %s\n", st.Available, d.bin)
+				}
+				if m.Current(d.bin) == "" {
+					fmt.Printf("      managed install: %s\n", adoptionStatus(st))
 				}
 			}
 			continue
