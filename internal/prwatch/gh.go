@@ -38,18 +38,29 @@ func ExecRunner(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // prFields is the gh --json field list: everything the PR summary needs.
-const prFields = "number,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,latestReviews"
+const prFields = "number,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,latestReviews,title,baseRefName,updatedAt,mergedAt,closedAt,reviewRequests,createdAt"
 
 // ghPR is gh's JSON for one PR (the prFields subset).
 type ghPR struct {
-	Number            int    `json:"number"`
-	URL               string `json:"url"`
-	State             string `json:"state"`
-	IsDraft           bool   `json:"isDraft"`
-	Mergeable         string `json:"mergeable"`
-	MergeStateStatus  string `json:"mergeStateStatus"`
-	HeadRefName       string `json:"headRefName"`
-	ReviewDecision    string `json:"reviewDecision"`
+	Number           int    `json:"number"`
+	URL              string `json:"url"`
+	State            string `json:"state"`
+	IsDraft          bool   `json:"isDraft"`
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+	HeadRefName      string `json:"headRefName"`
+	ReviewDecision   string `json:"reviewDecision"`
+	Title            string `json:"title"`
+	BaseRefName      string `json:"baseRefName"`
+	UpdatedAt        string `json:"updatedAt"`
+	MergedAt         string `json:"mergedAt"`
+	ClosedAt         string `json:"closedAt"`
+	CreatedAt        string `json:"createdAt"`
+	ReviewRequests   []struct {
+		Login string `json:"login"` // a user
+		Name  string `json:"name"`  // a team
+		Slug  string `json:"slug"`
+	} `json:"reviewRequests"`
 	StatusCheckRollup []struct {
 		Typename   string `json:"__typename"`
 		Name       string `json:"name"`       // CheckRun
@@ -70,16 +81,35 @@ type ghPR struct {
 // summarize converts gh's PR JSON into the published summary.
 func summarize(repo string, g ghPR) harnessproto.SessionPR {
 	pr := harnessproto.SessionPR{
-		Repo:           repo,
-		Number:         g.Number,
-		URL:            g.URL,
-		Branch:         g.HeadRefName,
-		State:          strings.ToLower(g.State),
-		Draft:          g.IsDraft,
-		Mergeable:      strings.ToLower(g.Mergeable),
-		MergeState:     strings.ToLower(g.MergeStateStatus),
-		ReviewDecision: strings.ToLower(g.ReviewDecision),
+		Repo:            repo,
+		Number:          g.Number,
+		URL:             g.URL,
+		Branch:          g.HeadRefName,
+		State:           strings.ToLower(g.State),
+		Draft:           g.IsDraft,
+		Mergeable:       strings.ToLower(g.Mergeable),
+		MergeState:      strings.ToLower(g.MergeStateStatus),
+		ReviewDecision:  strings.ToLower(g.ReviewDecision),
+		Title:           g.Title,
+		BaseBranch:      g.BaseRefName,
+		GitHubUpdatedAt: ghTime(g.UpdatedAt),
+		MergedAt:        ghTime(g.MergedAt),
+		ClosedAt:        ghTime(g.ClosedAt),
+		CreatedAt:       ghTime(g.CreatedAt),
 	}
+	for _, r := range g.ReviewRequests {
+		who := r.Login
+		if who == "" {
+			who = r.Slug
+		}
+		if who == "" {
+			who = r.Name
+		}
+		if who != "" {
+			pr.RequestedReviewers = append(pr.RequestedReviewers, who)
+		}
+	}
+	sort.Strings(pr.RequestedReviewers)
 	pending, passed := false, false
 	for _, c := range g.StatusCheckRollup {
 		name, failed, done := c.Name, false, true
@@ -118,12 +148,31 @@ func summarize(repo string, g ghPR) harnessproto.SessionPR {
 	case passed:
 		pr.Checks = "pass"
 	}
+	latest := map[string]harnessproto.PRReview{}
 	for _, r := range g.LatestReviews {
+		rv := harnessproto.PRReview{Author: r.Author.Login, State: strings.ToLower(r.State), At: r.SubmittedAt}
 		if pr.LastReview == nil || r.SubmittedAt > pr.LastReview.At {
-			pr.LastReview = &harnessproto.PRReview{Author: r.Author.Login, State: strings.ToLower(r.State), At: r.SubmittedAt}
+			last := rv
+			pr.LastReview = &last
+		}
+		if prev, ok := latest[rv.Author]; !ok || rv.At > prev.At {
+			latest[rv.Author] = rv
 		}
 	}
+	for _, rv := range latest {
+		pr.Reviews = append(pr.Reviews, rv)
+	}
+	sort.Slice(pr.Reviews, func(i, j int) bool { return pr.Reviews[i].Author < pr.Reviews[j].Author })
 	return pr
+}
+
+// ghTime normalizes a GitHub timestamp: "" for the zero time gh prints for an
+// unset field.
+func ghTime(s string) string {
+	if s == "" || strings.HasPrefix(s, "0001-01-01") {
+		return ""
+	}
+	return s
 }
 
 // listOpen lists a repo's open PRs whose head branch starts with prefix: one

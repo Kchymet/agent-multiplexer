@@ -15,6 +15,7 @@ import (
 	"amux/internal/codexapp"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/enrich"
 	"amux/internal/items"
 	"amux/internal/panespec"
 	"amux/internal/prwatch"
@@ -35,6 +36,28 @@ import (
 // prPollIntervalEnv overrides the PR poll interval (a Go duration, e.g. "90s";
 // "off" or "0" disables PR watching).
 const prPollIntervalEnv = "AMUX_PR_POLL_INTERVAL"
+
+// prNotifyEnv opts into user notifications for PR transitions: a comma list of
+// "ready_to_merge" and "needs_attention" (or "all"). Unset: none. The
+// notification rides the member's pr_state event (payload "notify").
+const prNotifyEnv = "AMUX_PR_NOTIFY"
+
+// prNotifyKinds parses prNotifyEnv.
+func prNotifyKinds() map[string]bool {
+	out := map[string]bool{}
+	for _, k := range strings.Split(os.Getenv(prNotifyEnv), ",") {
+		switch k = strings.TrimSpace(strings.ToLower(k)); k {
+		case "all":
+			out[prwatch.NotifyReadyToMerge], out[prwatch.NotifyNeedsAttention] = true, true
+		case prwatch.NotifyReadyToMerge, prwatch.NotifyNeedsAttention:
+			out[k] = true
+		case "":
+		default:
+			log.Printf("prwatch: ignoring %s entry %q (want ready_to_merge, needs_attention or all)", prNotifyEnv, k)
+		}
+	}
+	return out
+}
 
 // prWakeMarker opens every wake-up typed into a Claude goal coordinator. It is
 // claudegoal's continuation marker, so the coordinator's UserPromptSubmit hook
@@ -63,21 +86,53 @@ func prPollInterval() (time.Duration, bool) {
 }
 
 func (d *Daemon) newPRWatcher() *prwatch.Watcher {
-	interval, enabled := prPollInterval()
-	return prwatch.New(prwatch.Config{
-		Run:      prwatch.ExecRunner,
-		Members:  prWatchMembers,
-		Load:     loadPRStates,
-		Save:     savePRState,
-		Emit:     d.emitPRState,
-		Deliver:  d.deliverPRWake,
-		Interval: interval,
-		NoPoll:   !enabled,
-	})
+	return prwatch.New(prwatch.Config{Deliver: d.deliverPRWake})
 }
 
-// prWatchLoop runs the PR watcher until ctx ends. With PR polling disabled it
-// still runs, without polling GitHub, to deliver member wake-ups.
+// newEnrichments builds the enrichment registry: the pull_request source
+// while PR watching is on (more kinds register here later). Its observations
+// persist in the store's per-session PR state documents.
+func (d *Daemon) newEnrichments() *enrich.Registry {
+	reg := enrich.NewRegistry(enrich.RegistryConfig{
+		Scope:  enrichScope,
+		Load:   loadPRStates,
+		Save:   savePRState,
+		Emit:   d.emitEnrichment,
+		Legacy: prwatch.DecodeLegacy,
+	})
+	if interval, enabled := prPollInterval(); enabled {
+		reg.Register(prwatch.NewSource(prwatch.SourceConfig{
+			Run: prwatch.ExecRunner, Interval: interval, Notify: prNotifyKinds(),
+		}))
+	}
+	return reg
+}
+
+// enrichmentKinds lists the enrichment kinds this daemon publishes
+// (HostCapabilities.Enrichments): pull_request while PR watching is on.
+func (d *Daemon) enrichmentKinds() []string {
+	if d.enrich == nil {
+		return nil
+	}
+	return d.enrich.Kinds()
+}
+
+// enrichmentSources is each registered source's freshness
+// (HostCapabilities.EnrichmentSources).
+func (d *Daemon) enrichmentSources() []harnessproto.EnrichmentSource {
+	if d.enrich == nil {
+		return nil
+	}
+	var out []harnessproto.EnrichmentSource
+	for _, s := range d.enrich.Sources() {
+		out = append(out, s.Wire())
+	}
+	return out
+}
+
+// prWatchLoop runs the coordinator wake-up queue and the enrichment sources
+// until ctx ends. With PR polling disabled the queue still runs, to deliver
+// member wake-ups.
 func (d *Daemon) prWatchLoop(ctx context.Context) {
 	if d.prs == nil {
 		return
@@ -85,20 +140,77 @@ func (d *Daemon) prWatchLoop(ctx context.Context) {
 	if _, ok := prPollInterval(); !ok {
 		log.Printf("prwatch: PR polling disabled by %s; member wake-ups stay on", prPollIntervalEnv)
 	}
+	if d.enrich != nil {
+		go d.enrich.Run(ctx)
+	}
 	d.prs.Run(ctx)
 }
 
-// sessionPRs is the workspace source's view of the watcher's state.
+// sessionPRs is the workspace source's view of a session's PRs (the legacy
+// `prs` field and the rail's PR suffix).
 func (d *Daemon) sessionPRs(id string) []harnessproto.SessionPR {
-	if d.prs == nil {
+	if d.enrich == nil {
 		return nil
 	}
-	return d.prs.PRs(id)
+	return prwatch.PRs(d.enrich.Entries(id, harnessproto.EnrichmentPullRequest))
 }
 
-// prWatchMembers lists the active members of active workgroups, with their
-// branch and the GitHub repositories they work in.
-func prWatchMembers() ([]prwatch.Member, error) {
+// emitEnrichment records an enrichment transition on the member's event
+// stream: a PR's as pr_state (and its coordinator wake-up, when it warrants
+// one), any other kind's as enrichment_state.
+func (d *Daemon) emitEnrichment(c enrich.Change) {
+	if pc, ok := c.Payload.(prwatch.Change); ok {
+		d.emitPRState(pc)
+		if d.prs != nil {
+			d.prs.QueuePR(pc)
+		}
+		return
+	}
+	var e *harnessproto.Enrichment
+	if d.enrich != nil {
+		if list := d.enrich.Enrichments(c.SessionID); list != nil {
+			for _, it := range *list {
+				if it.Kind == c.Kind && it.ID == c.Key {
+					it := it
+					e = &it
+				}
+			}
+		}
+	}
+	payload, err := json.Marshal(enrichmentStatePayload{Session: c.SessionID, Kind: c.Kind, ID: c.Key, Changes: c.Changes, Enrichment: e})
+	if err != nil {
+		return
+	}
+	text := fmt.Sprintf("%s %s: %s", c.Kind, c.Key, strings.Join(c.Changes, "; "))
+	if err := core.AppendJournalRecord(c.SessionID, core.JournalRecord{
+		Level: core.JournalInfo, Text: text, Type: harnessproto.TypeEnrichmentState, Payload: payload,
+	}); err != nil {
+		log.Printf("enrich: journal %s: %v", c.SessionID, err)
+	}
+	d.triggerPoll()
+}
+
+// enrichmentStatePayload is the enrichment_state event payload.
+type enrichmentStatePayload struct {
+	Session    string                   `json:"session"`
+	Kind       string                   `json:"kind"`
+	ID         string                   `json:"id"`
+	Changes    []string                 `json:"changes"`
+	Enrichment *harnessproto.Enrichment `json:"enrichment,omitempty"`
+}
+
+// enrichScope lists the active members of active workgroups, with their
+// branch and the GitHub repositories they work in: what the enrichment
+// sources observe.
+func enrichScope() (enrich.Scope, error) {
+	ms, err := prWatchMembers()
+	if err != nil {
+		return enrich.Scope{}, err
+	}
+	return enrich.Scope{Sessions: ms}, nil
+}
+
+func prWatchMembers() ([]enrich.ScopeSession, error) {
 	db, err := store.OpenReadOnly()
 	if err != nil {
 		return nil, err
@@ -122,7 +234,7 @@ func prWatchMembers() ([]prwatch.Member, error) {
 			roots[s.ID] = s
 		}
 	}
-	var out []prwatch.Member
+	var out []enrich.ScopeSession
 	for _, s := range all {
 		if s.IsRoot() || s.Archived || s.Branch == "" {
 			continue
@@ -140,7 +252,7 @@ func prWatchMembers() ([]prwatch.Member, error) {
 		if len(gh) == 0 {
 			continue
 		}
-		out = append(out, prwatch.Member{SessionID: s.ID, Workgroup: s.RootID, Label: s.Name, Branch: s.Branch, Repos: gh})
+		out = append(out, enrich.ScopeSession{ID: s.ID, Workgroup: s.RootID, Label: s.Name, Branch: s.Branch, Repos: gh})
 	}
 	return out, nil
 }
@@ -169,12 +281,15 @@ type prStatePayload struct {
 	PR      harnessproto.SessionPR `json:"pr"`
 	Changes []string               `json:"changes"`
 	Wake    bool                   `json:"wake"`
+	// Notify is the user notification this transition warrants
+	// (prwatch.Notify*), set only for kinds enabled by AMUX_PR_NOTIFY.
+	Notify string `json:"notify,omitempty"`
 }
 
 // emitPRState records a PR transition on the member's own event stream (its
 // amux journal, plus its structured log when that is the stream's source).
 func (d *Daemon) emitPRState(c prwatch.Change) {
-	payload, err := json.Marshal(prStatePayload{Session: c.SessionID, PR: c.PR, Changes: c.Changes, Wake: len(c.Wake) > 0})
+	payload, err := json.Marshal(prStatePayload{Session: c.SessionID, PR: c.PR, Changes: c.Changes, Wake: len(c.Wake) > 0, Notify: c.Notify})
 	if err != nil {
 		return
 	}

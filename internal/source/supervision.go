@@ -5,15 +5,12 @@ import (
 	"strings"
 
 	"amux/internal/core"
+	"amux/internal/enrich"
 	"amux/internal/prwatch"
 	"amux/internal/store"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
-
-// maxReasonItems bounds how many members/PRs a coordinator's reason names
-// before it collapses the rest into "+N more".
-const maxReasonItems = 3
 
 // maxGoalNoteBytes bounds Supervision.GoalNote.
 const maxGoalNoteBytes = 240
@@ -23,20 +20,41 @@ type memberView struct {
 	session store.Session
 	state   string
 	prs     []harnessproto.SessionPR
+	items   []harnessproto.Enrichment // its rendered enrichments, every kind
 }
 
 // coordinatorView is how a workgroup coordinator row presents: the state it
-// publishes, its sub-state, the word that leads its status line, and its
-// supervision detail.
+// publishes, its sub-state, the word(s) that lead its status line, its
+// supervision detail and its rollup.
 type coordinatorView struct {
 	state       string
 	subState    string
 	lead        string
 	supervision harnessproto.Supervision
+	rollup      harnessproto.Rollup
+}
+
+// prContext is what the rollup needs to know about the enrichment sources,
+// read once per snapshot.
+type prContext struct {
+	sources []enrich.SourceStatus // registered sources' freshness (none: not observed)
+	probe   EnrichmentProbe
+}
+
+// enrichments is a row's Enrichments field (nil when there is none or no
+// source is registered).
+func (pc prContext) enrichments(id string) *harnessproto.Enrichments {
+	if pc.probe == nil || len(pc.sources) == 0 {
+		return nil
+	}
+	return pc.probe.Enrichments(id)
 }
 
 // superviseCoordinator decides how a coordinator row presents from its own
-// activity, its goal and its members.
+// activity, its goal and its members. The state itself is enrich.Rollup — the
+// one shared rollup — whose precedence is waiting on the user > running >
+// pr_attention > waiting_review / waiting_merge > ready / idle; this adds the
+// supervision detail (the members still in flight).
 //
 // "waiting" is the attention chip and means one thing everywhere: someone in
 // the workgroup is blocked on the user. Idle is never waiting. So:
@@ -47,85 +65,36 @@ type coordinatorView struct {
 //     budgetLimited — or a member is waiting. Supervision.NeedsYou names who,
 //     and the status line leads "waiting · N agents need you".
 //   - Otherwise it is running when the coordinator or any member is: a
-//     coordinator that is not itself mid-turn (ready, idle or unknown) while
-//     work it dispatched is in flight is "supervising" — state running,
-//     SubState supervising, status "running · N agents". In flight means a
-//     member running, waiting or unknown — or, while its goal is waiting on a
-//     wake-up, a member owning an open PR (CI, review and merge are what it
-//     waits on then). An idle coordinator with a running member is running.
+//     coordinator that is not itself mid-turn (ready, idle or unknown) while a
+//     member runs is "supervising" — state running, SubState supervising,
+//     status "running · N agents". An idle coordinator with a running member
+//     is running.
+//   - With only open PRs outstanding the row is calm: pr_attention (state
+//     running — the coordinator's job; ready when it is stopped), or
+//     waiting_review / waiting_merge (state ready, not the attention badge).
 //   - It is idle/ready only when it and all its members are.
-func superviseCoordinator(ownState, goal, goalNote string, members []memberView) coordinatorView {
-	v := coordinatorView{state: ownState, lead: ownState}
-	v.supervision = harnessproto.Supervision{OwnState: ownState, Goal: goal, GoalNote: boundNote(goalNote)}
-
-	between := ownState == core.StateReady || ownState == core.StateIdle || ownState == core.StateUnknown
-	goalNeedsUser := between && (goal == "input" || goal == "blocked" || goal == "budgetLimited")
-	if ownState == core.StateWaiting || goalNeedsUser {
-		v.supervision.NeedsYou = append(v.supervision.NeedsYou, CoordinatorLabel)
-	}
-
-	var active, prItems []string
-	inflight := false
+func superviseCoordinator(ownState, goal, goalNote string, members []memberView, pc prContext) coordinatorView {
+	in := enrich.Input{OwnState: ownState, Goal: goal, GoalNote: goalNote, Sources: pc.sources}
+	sup := harnessproto.Supervision{OwnState: ownState, Goal: goal, GoalNote: boundNote(goalNote)}
 	for _, m := range members {
-		if stateRank(m.state) > stateRank(v.state) {
-			v.state = m.state
-		}
+		in.Members = append(in.Members, enrich.Member{ID: m.session.ID, Label: memberLabel(m.session), State: m.state, Enrichments: m.items})
 		open := openPRs(m.prs)
 		busy := m.state == core.StateRunning || m.state == core.StateWaiting || m.state == core.StateUnknown
 		if !busy && len(open) == 0 {
 			continue
 		}
-		v.supervision.Members = append(v.supervision.Members, harnessproto.SupervisedMember{
+		sup.Members = append(sup.Members, harnessproto.SupervisedMember{
 			ID: m.session.ID, Title: agentLabel(m.session), State: m.state, PRs: prwatch.Summary(open),
 		})
-		label := memberLabel(m.session)
-		if m.state == core.StateWaiting {
-			v.supervision.NeedsYou = append(v.supervision.NeedsYou, label)
-		}
-		if busy {
-			inflight = true
-			if m.state != core.StateWaiting {
-				active = append(active, fmt.Sprintf("%s %s", label, m.state))
-			}
-		}
-		for _, pr := range open {
-			prItems = append(prItems, prItem(label, pr))
-		}
 	}
-
-	if between && (inflight || (goal == "waiting" && len(prItems) > 0)) {
-		v.subState = harnessproto.SubStateSupervising
-		if stateRank(v.state) < stateRank(core.StateRunning) {
-			v.state = core.StateRunning
-		}
-		v.lead = core.StateRunning
-	}
-	if len(v.supervision.NeedsYou) > 0 {
-		v.state = core.StateWaiting
-		v.lead = core.StateWaiting
-	}
-
-	var reason []string
-	if len(v.supervision.NeedsYou) > 0 {
-		reason = append(reason, "needs you: "+listItems(v.supervision.NeedsYou))
-	}
-	if goalNeedsUser && goalNote != "" {
-		reason = append(reason, "goal "+goal+": "+oneLine(goalNote))
-	}
-	if v.subState != "" {
-		if items := append(active, prItems...); len(items) > 0 {
-			reason = append(reason, "supervising "+listItems(items))
-		}
-		if ownState == core.StateIdle {
-			reason = append(reason, "coordinator stopped: wake-ups wait until it starts")
-		}
-	}
-	v.supervision.Reason = strings.Join(reason, "; ")
-	return v
+	r := enrich.Rollup(in)
+	sup.NeedsYou = r.NeedsYou
+	sup.Reason = r.Rollup.Reason
+	return coordinatorView{state: r.State, subState: r.SubState, lead: r.Lead, supervision: sup, rollup: r.Rollup}
 }
 
 // CoordinatorLabel names the coordinator itself in Supervision.NeedsYou.
-const CoordinatorLabel = "coordinator"
+const CoordinatorLabel = enrich.CoordinatorLabel
 
 // coordinatorStatus is a coordinator row's status line: "waiting · 1 agent
 // needs you" when someone is blocked on the user, else "<lead> · N agents"
@@ -165,35 +134,6 @@ func memberLabel(s store.Session) string {
 		return n
 	}
 	return shortID(s.ID)
-}
-
-// prItem is one open PR in a reason, e.g. "m1 PR #12 CI pending".
-func prItem(member string, pr harnessproto.SessionPR) string {
-	what := "open"
-	switch {
-	case pr.Draft:
-		what = "draft"
-	case pr.Mergeable == "conflicting":
-		what = "conflict"
-	case pr.Checks == "fail":
-		what = "CI failed"
-	case pr.Checks == "pending":
-		what = "CI pending"
-	case pr.ReviewDecision == "changes_requested":
-		what = "changes requested"
-	case pr.ReviewDecision == "approved":
-		what = "approved"
-	case pr.Checks == "pass":
-		what = "awaiting review"
-	}
-	return fmt.Sprintf("%s PR #%d %s", member, pr.Number, what)
-}
-
-func listItems(items []string) string {
-	if len(items) <= maxReasonItems {
-		return strings.Join(items, ", ")
-	}
-	return strings.Join(items[:maxReasonItems], ", ") + fmt.Sprintf(", +%d more", len(items)-maxReasonItems)
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
