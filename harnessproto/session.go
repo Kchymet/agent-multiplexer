@@ -4,7 +4,7 @@ package harnessproto
 // the v2 "sessions" inventory snapshot (docs/remote-provider-sessions.md §2). It
 // is the published subset of amux's internal core.Session (amux aliases core.
 // Session to this type), so a provider's inventory frame decodes losslessly in
-// any consumer. State ∈ StateIdle|StateReady|StateWaiting|StateRunning|
+// any consumer. State ∈ StateStopped|StateReady|StateWaiting|StateRunning|
 // StateUnknown (the attention ladder); Section ∈ SectionWorkgroups|SectionRepos|
 // SectionDetached|SectionArchived. Archived is emitted only when true.
 type Session struct {
@@ -21,7 +21,7 @@ type Session struct {
 	IsRoot         bool            `json:"isRoot,omitempty"`   // true => a root container row
 	Repos          string          `json:"repos,omitempty"`    // agent rows: comma-joined repo names in scope
 	Section        string          `json:"section,omitempty"`  // rail grouping: workgroups | repos | detached | archived
-	State          string          `json:"state,omitempty"`    // idle | ready | waiting | running | unknown
+	State          string          `json:"state,omitempty"`    // stopped | ready | waiting | running | unknown
 	Status         string          `json:"status"`             // human label, e.g. "ready · main"
 	Archived       bool            `json:"archived,omitempty"` // set on rows in the archived section
 	Cwd            string          `json:"cwd"`
@@ -288,7 +288,16 @@ const (
 // is the published enum; amux's internal core re-exports these values and the
 // harness orchestrator imports them instead of re-declaring the strings.
 const (
-	StateIdle    = "idle"    // no live agent process
+	// StateStopped is a session with no live runtime: steering verbs other
+	// than prompt are refused, and a prompt starts it. It is the bottom of the
+	// ladder and replaces "idle" on the wire, which read as "live, between
+	// turns" and hid a stopped coordinator behind a calm word.
+	StateStopped = "stopped"
+	// StateIdle is the legacy spelling of StateStopped. Current providers never
+	// publish it as Session.State; it remains the token Claude's SessionEnd
+	// status hook reports ("runtime exited"). A consumer reading an older
+	// provider must treat "idle" exactly like "stopped" (see IsStopped).
+	StateIdle    = "idle"
 	StateReady   = "ready"   // live, turn finished, ready for the next message
 	StateWaiting = "waiting" // live, blocked on a prompt awaiting user input
 	StateRunning = "running" // live and the agent has an active turn
@@ -297,6 +306,10 @@ const (
 	// without claiming a turn is in flight.
 	StateUnknown = "unknown"
 )
+
+// IsStopped reports whether a published state means "no live runtime": the
+// current "stopped" or the legacy "idle" an older provider sends.
+func IsStopped(state string) bool { return state == StateStopped || state == StateIdle }
 
 // Rail sections, top to bottom (Session.Section). The console is sectionless and
 // pinned above them all.

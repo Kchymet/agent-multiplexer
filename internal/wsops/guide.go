@@ -241,7 +241,7 @@ memory (` + "`.amux/claude/CLAUDE.md`" + ` for Claude Code) or in notes you keep
 directory.`
 	// steeringVerbs is the operating vocabulary every container session shares.
 	steeringVerbs = `- ` + "`amux status --json`" + ` — the scope-filtered live view for this role,
-  with normalized session state (idle | ready | waiting | running), title, and repos.
+  with normalized session state (stopped | ready | waiting | running; stopped = no live runtime, only a prompt starts it), title, and repos.
 - ` + "`amux do steer <id> -f verb=prompt -f text=\"…\"`" + ` — send an agent a prompt
   (this starts a stopped agent); ` + "`-f verb=interject`" + ` speaks mid-turn,
   ` + "`-f verb=stop`" + ` interrupts the turn, ` + "`-f verb=permission -f decision=allow|deny`" + `
@@ -371,7 +371,7 @@ decisions, and acceptance criteria is the record that survives your context). %s
 These are the commands your grant authorizes; they act on this workgroup and its
 current direct members (`+"`<member>`"+` is a member id from the roster below).
 - `+"`amux status --json`"+` — the live view of this workgroup's members, with
-  normalized state (idle | ready | waiting | running), title, and repos.
+  normalized state (stopped | ready | waiting | running; stopped = no live runtime), title, and repos.
 - `+"`amux agent events <member> --json`"+` — a member's normalized history: the
   evidence for what it did (continue with `+"`--cursor`"+`).
 - `+"`amux agent wait <member>... [--until ready,idle] [--timeout 30m]`"+` — block
@@ -755,6 +755,14 @@ Your workgroup's root id is `+"`%s`"+` (`+"`$AMUX_WORKGROUP`"+` in your environm
 - No open item in your inbox: `+"`amux agent items --inbox`"+` lists none (each
   was resolved, dismissed or escalated to the global inbox).
 
+**"Archive once every PR is merged" is the default.** When all of the above
+hold, archive without asking for fresh confirmation. A user instruction such as
+"archive once merged" or "archive when you're done" is **standing permission**
+for exactly that: note it in `+"`COORDINATION.md`"+`, and on the wake where every
+PR is MERGED and nothing is outstanding, archive without asking again. Standing
+permission never overrides the rules below: if any "Ask instead" case applies,
+ask anyway.
+
 **Ask instead — do not auto-archive — when ANY of these is true:**
 - trailing questions, offered follow-ups, or open decisions;
 - any item still open or acknowledged in your inbox — name each in the
@@ -786,6 +794,11 @@ this order, because the runtime is stopped shortly after the archive commits:
    answer first and stops your runtime only once the turn has ended (or after a
    short grace), so nothing after it is guaranteed to be delivered; at most add
    one line confirming the archive.
+Run it as a **standalone** command: exactly `+"`amux agent done`"+`, never chained
+with `+"`&&`"+`, `+"`;`"+`, `+"`|`"+` or anything else, so the user's permission rule
+`+"`Bash(amux agent done)`"+` matches it. If your harness refuses it (a permission
+prompt or a safety classifier), do not retry, rephrase or work around it: tell
+the user it was blocked and ask them to run it or allow `+"`Bash(amux agent done)`"+`.
 If it fails (for example an open PR), the workgroup stays open: report the
 error and ask the user instead. Report success only when the command confirms
 it. Do not delegate self-archive to a member: a member's `+"`amux agent done`"+`

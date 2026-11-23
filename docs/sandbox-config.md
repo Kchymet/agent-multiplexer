@@ -416,6 +416,17 @@ hook command under `~/.claude` runs the copy's file inside the scope (where
 (your trust and history for your own directories); amux trusts the agent's own dir
 in the copy at launch.
 
+Your Claude `settings.json` also flows down to **existing** agents, at each
+launch or resume. An agent that never edited its copy gets the template's current
+file (as `amux sandbox reset <id> settings.json` would). An agent that edited its
+copy keeps those edits and gains only the `permissions.allow` rules it is
+missing. Its drift entry stays, because the edit is still the agent's to promote
+or reset. This is how a rule such as `Bash(amux agent done)` reaches every
+coordinator: agents cannot add allow rules for themselves, so add it to
+`~/.claude/settings.json` and relaunch (or wait for the next restart). Other
+template changes still need `amux sandbox reset` or a decision in
+`amux sandbox drift`.
+
 Transcripts therefore live in the agent's private home. Host-side resume and
 runtime readers operate on that explicitly selected home; restricted sessions
 receive only role-filtered context through authenticated amux requests, never a

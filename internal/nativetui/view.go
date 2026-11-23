@@ -404,10 +404,11 @@ func (m *model) rowStatus(s core.Session, indent string) string {
 	if s.Status == "" {
 		return ""
 	}
-	// A bare container (no session of its own) has nothing to detail; a container
-	// that is a default session (a coordinator, a repo home) shows its status only
-	// while it is live, so an idle rail isn't a column of "idle" under every header.
-	if (s.Kind == "repo" || s.IsRoot) && (s.Role == "" || s.State == core.StateIdle) {
+	// A bare container (no session of its own) has nothing to detail; a repo home
+	// shows its status only while it is live, so a quiet rail isn't a column of
+	// "stopped" under every repo header. A coordinator always shows its status:
+	// a stopped coordinator must read as stopped, not blend into a calm rail.
+	if (s.Kind == "repo" || s.IsRoot) && (s.Role == "" || (s.Kind == "repo" && core.IsStopped(s.State))) {
 		return ""
 	}
 	var segs []segment
@@ -465,7 +466,7 @@ func statusSegments(status string) []segment {
 	case core.SubStateSupervising:
 		// A coordinator whose members are working reads as running.
 		return []segment{{word, stateStyle(core.StateRunning)}, {" " + rest, dimStyle}}
-	case core.StateRunning, core.StateReady, core.StateUnknown, core.StateIdle:
+	case core.StateRunning, core.StateReady, core.StateUnknown, core.StateStopped, core.StateIdle:
 		if rest == "" {
 			return []segment{{word, stateStyle(word)}}
 		}

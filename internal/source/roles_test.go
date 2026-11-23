@@ -87,7 +87,7 @@ func TestPollDefaultSessions(t *testing.T) {
 	// invent or materialize a cwd that would imply migration succeeded.
 	check("legacy", store.RoleCoordinator, "claude", "")
 	api := check("api", store.RoleRepo, "claude", store.RootDir("api"))
-	if api.Kind != "repo" || api.Section != core.SectionRepos || api.State != core.StateIdle {
+	if api.Kind != "repo" || api.Section != core.SectionRepos || api.State != core.StateStopped {
 		t.Errorf("repo home row = %+v", api)
 	}
 	// A repo tracked before default sessions has no home row yet. A read does not

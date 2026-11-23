@@ -54,6 +54,11 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 			e.Seed = rewriteTemplatePaths
 			e.Normalize = restoreTemplatePaths
 		}
+		if rel == "settings.json" {
+			// User-level allow rules (e.g. "Bash(amux agent done)") must reach
+			// existing agents too, not only ones seeded after the rule was added.
+			e.Sync = mergeAllowRules
+		}
 		entries = append(entries, e)
 	}
 	sp := cfghome.Spec{
@@ -142,6 +147,76 @@ func rewriteTemplatePaths(sp cfghome.Spec, b []byte) []byte {
 // comparison so the rewrite itself is never reported as an edit.
 func restoreTemplatePaths(sp cfghome.Spec, b []byte) []byte {
 	return bytes.ReplaceAll(b, []byte(sp.Dir), []byte(sp.Template))
+}
+
+// mergeAllowRules folds the template's permissions.allow rules that the copy
+// lacks into the copy, keeping every other setting — and every rule the copy
+// already has, in its order — as the agent left them. Agents cannot add allow
+// rules for themselves (a coordinator's `amux agent done` was blocked by Claude
+// Code's auto-mode classifier), so a rule the user adds to ~/.claude must reach
+// existing sandboxes at their next launch. ok is false when nothing is missing
+// or either side is not a JSON object (left for drift review instead).
+func mergeAllowRules(_ cfghome.Spec, cp, tmpl []byte) ([]byte, bool) {
+	want := allowRules(tmpl)
+	if len(want) == 0 {
+		return nil, false
+	}
+	root, ok := decodeObject(cp)
+	if !ok {
+		return nil, false
+	}
+	perms, _ := root["permissions"].(map[string]any)
+	if perms == nil {
+		if _, present := root["permissions"]; present {
+			return nil, false // not an object: do not clobber what the agent wrote
+		}
+		perms = map[string]any{}
+	}
+	have, _ := perms["allow"].([]any)
+	if _, present := perms["allow"]; present && have == nil {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	for _, r := range have {
+		if s, ok := r.(string); ok {
+			seen[s] = true
+		}
+	}
+	added := false
+	for _, r := range want {
+		if !seen[r] {
+			have = append(have, r)
+			seen[r] = true
+			added = true
+		}
+	}
+	if !added {
+		return nil, false
+	}
+	perms["allow"] = have
+	root["permissions"] = perms
+	out := encodeObject(root)
+	if out == nil {
+		return nil, false
+	}
+	return append(out, '\n'), true
+}
+
+// allowRules is a settings file's permissions.allow, as strings.
+func allowRules(b []byte) []string {
+	root, ok := decodeObject(b)
+	if !ok {
+		return nil
+	}
+	perms, _ := root["permissions"].(map[string]any)
+	list, _ := perms["allow"].([]any)
+	var out []string
+	for _, r := range list {
+		if s, ok := r.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func decodeObject(b []byte) (map[string]any, bool) {

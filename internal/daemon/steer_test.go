@@ -282,7 +282,7 @@ func TestDeferredStructuredPromptSerializesAdmissionButNotModelTurn(t *testing.T
 // and revalidates the same principal/policy immediately before Engine.Ensure.
 func TestSessionDispatchAcceptedPromptOutlivesCallbackContext(t *testing.T) {
 	root := store.Session{ID: "callback-root", Scope: store.ScopeWork, Agent: "claude", Dir: t.TempDir()}
-	member := store.Session{ID: "callback-member", RootID: root.ID, Agent: "claude", Dir: t.TempDir()}
+	member := store.Session{ID: "callback-member", RootID: root.ID, Agent: "claude", Dir: t.TempDir(), ClaudeID: convID("callback-member")}
 	d, runtime, principals := sessionRuntimeFixture(t, root, member)
 	defer runtime.close()
 	d.sessionRPC = runtime
@@ -295,6 +295,9 @@ func TestSessionDispatchAcceptedPromptOutlivesCallbackContext(t *testing.T) {
 	d.resolve = func(panespec.LaunchSpec, int) (string, []string, []string, error) {
 		return member.Dir, nil, []string{"agent"}, nil
 	}
+	// The started runtime takes the prompt (its UserPromptSubmit hook reports a
+	// turn): the callback answers only once delivery is verified.
+	ackOnInput(t, eng, member.ID)
 	d.steerStarted = make(chan string, 1)
 
 	call := sessionrpc.Call{
