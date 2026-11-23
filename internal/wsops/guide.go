@@ -165,8 +165,33 @@ End every turn's final message with your PR's URL and state: draft or ready, CI
 (green / red / pending), mergeable or conflicting, and review status (approved /
 changes requested / awaiting review). Your coordinator tracks your PR from that
 report and its own checks.
-`, repos, s.Branch)
+
+`+raiseItemsSection, repos, s.Branch)
 }
+
+// raiseItemsSection teaches a session to emit upward signals as structured
+// items (internal/items) rather than prose in its final message. Members raise
+// to their coordinator; everyone else's reach the global inbox.
+const raiseItemsSection = `## Raise follow-ups as items
+When you finish a turn or your work and something should be acted on or known
+upstream — a **follow-up** worth doing, **outstanding** work you did not finish,
+a **decision** you need, a **risk**, or something you deliberately left out of
+scope (**fyi**) — raise it as a structured item; do not bury it in prose:
+
+    amux agent raise --kind follow_up|outstanding|decision_needed|risk|fyi \
+      --title "<one line>" [--detail "<context>"] [--pr <repo#n>] [--link <url>] \
+      [--suggest "<the next step you recommend>"]
+
+A workgroup member's item goes to its coordinator, anyone else's to the
+global inbox (the cross-workgroup inbox the user works from), and amux wakes the recipient with it — no message
+or polling of your own. Raise one item per distinct thing. Raising the same kind
+and title again while it is open updates that item instead of adding a
+duplicate, so re-raising after new findings is safe. ` + "`amux agent items`" + ` lists
+what you raised and its state; ` + "`amux agent items done <id>`" + ` or
+` + "`amux agent items dismiss <id> --note \"…\"`" + ` withdraws one that no longer
+applies. Name the item ids in your final message; the message alone is not the
+record. Raise nothing when there is nothing to raise.
+`
 
 // Sections shared by every guide.
 const (
@@ -432,6 +457,8 @@ extensions):
 	b.WriteString("\n")
 	b.WriteString(memberArchiveSection(root))
 	b.WriteString("\n")
+	b.WriteString(itemsTriageSection(root))
+	b.WriteString("\n")
 	b.WriteString(completionSection(root))
 	b.WriteString("\n")
 	b.WriteString(membersSection(root))
@@ -473,6 +500,8 @@ Keep repository notes here. All implementation work belongs to normal workgroups
   your own management context remain available through authenticated commands.
 
 `, home.Repo, home.Repo, source, home.Dir, guideRegenNote, home.Repo)
+	b.WriteString(raiseItemsSection)
+	b.WriteString("\n")
 	b.WriteString(configHomeSection)
 	return b.String()
 }
@@ -618,6 +647,39 @@ Archive each member as soon as it is finished; do not leave it on the rail:
 `
 }
 
+// itemsTriageSection makes the coordinator the triage point for upward items
+// (internal/items): its members' items arrive in its inbox; it resolves what
+// it can, escalates what needs the user or crosses workgroups, and raises its
+// own end-of-task follow-ups to the global inbox.
+func itemsTriageSection(root store.Session) string {
+	return `## Triage upward items
+Members raise structured items to you with ` + "`amux agent raise`" + `: follow-ups,
+outstanding work, decisions they need, risks, deliberately out-of-scope notes.
+amux wakes you with an "Items raised" notice listing them (no polling).
+` + "`amux agent items`" + ` lists your inbox and your workgroup's items (` + "`--inbox`" + `
+for only what you hold, ` + "`--all`" + ` to include closed ones);
+` + "`amux agent items show <id>`" + ` prints one with its detail and history.
+- **Resolve what you can.** Dispatch the follow-up (re-prompt the member or add
+  one), make the decision that is yours to make, then
+  ` + "`amux agent items done <id> --note \"…\"`" + `. ` + "`ack`" + ` an item you are working on;
+  ` + "`dismiss`" + ` one that does not apply, with a note saying why.
+- **Escalate what needs the user or crosses workgroups:**
+  ` + "`amux agent escalate <id> --note \"<why>\"`" + ` moves it to the global inbox
+  (the cross-workgroup inbox the user works from), recording the hand-off.
+  Do not escalate what you can resolve.
+- **Raise your own.** At the end of a task, anything the user should act on or
+  know after you finish — follow-ups, deliberately out-of-scope work, risks,
+  decisions — goes up as items from you (yours go to the global inbox):
+  ` + "`amux agent raise --kind … --title \"…\" [--pr repo#n] [--suggest \"…\"]`" + `.
+  Same kind and title updates the open item. List the item ids in your final
+  report instead of burying the substance in prose.
+- **Never leave your inbox untriaged at the end of a task.** Archiving this
+  workgroup carries every item still open or acknowledged in your inbox to the
+  global inbox, so nothing is lost — but triage first (see "Wrapping up this
+  workgroup").
+`
+}
+
 // completionSection is what a coordinator does when a task is finished: hand
 // off, summarize, then wrap up its own workgroup (wrapUpSection) instead of
 // idling on the rail forever.
@@ -632,6 +694,9 @@ task authorizes merging. Before you call a task finished, archive every finished
 member (see "Archiving finished members"). End each finished task with your
 final summary: the PR ledger (each member PR's URL and state), and for every PR
 still open, exactly what needs a human (e.g. merge approval, a design decision).
+Raise the task's remaining follow-ups, risks and open decisions as items and
+triage your inbox (see "Triage upward items"); the summary lists the item ids
+you raised, escalated or left open.
 Archiving finished members (PR merged or closed) with
 ` + "`amux do set-archived <member> -f archived=true`" + ` needs no confirmation; a
 member whose PR is still open keeps babysitting it. Then wrap up the workgroup.
@@ -658,9 +723,13 @@ Your workgroup's root id is `+"`%s`"+` (`+"`$AMUX_WORKGROUP`"+` in your environm
 - No outstanding work: no follow-up pending or offered, no open decision, no
   member running (`+"`amux status --json`"+`), no unanswered user message, and
   nothing left open in the PR ledger.
+- No open item in your inbox: `+"`amux agent items --inbox`"+` lists none (each
+  was resolved, dismissed or escalated to the global inbox).
 
 **Ask instead — do not auto-archive — when ANY of these is true:**
 - trailing questions, offered follow-ups, or open decisions;
+- any item still open or acknowledged in your inbox — name each in the
+  question, and say that archiving hands it to the global inbox;
 - several PRs and any one is not merged, or the set of PRs is unclear;
 - any uncertainty at all about being done: partial results, skipped steps,
   failing CI that was merged anyway, work handed to another workgroup, a member
@@ -680,6 +749,8 @@ the host's `+"`amux workgroup archive %s`"+`; use `+"`amux agent done`"+`.) Do i
 this order, because the runtime is stopped shortly after the archive commits:
 1. Write the final summary to `+"`COORDINATION.md`"+`: outcome, PR ledger with
    each PR's verified final state, and anything left for the user.
+   Anything left for the user is raised as an item (or escalated); archiving
+   moves every item still open in your inbox to the global inbox, so none is lost.
 2. Archive every finished member; complete your goal if you are in goal mode.
 3. Write your final message (the summary and the PR ledger with URLs), then
    run `+"`amux agent done`"+` as the **last** tool call of the turn. amux returns its
@@ -696,7 +767,8 @@ archived.
 ### Asking whether to archive
 %s
 Offer exactly these options:
-- **Archive now** — archive as above. While a member PR is still open amux
+- **Archive now** — archive as above. Items still open in your inbox move to the
+  global inbox. While a member PR is still open amux
   refuses; say so and leave the override to the user.
 - **Keep open: waiting on my PR merge** — %s On each wake, re-verify the ledger
   from GitHub: once every PR is MERGED and nothing else is pending, archive

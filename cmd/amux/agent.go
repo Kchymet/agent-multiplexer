@@ -59,6 +59,14 @@ func cmdAgent(args []string) error {
 		// Block on the daemon's state broadcast until a session (a member, for
 		// a coordinator) changes: the event-driven alternative to polling.
 		return cmdAgentWait(args[1:])
+	case "raise":
+		// Upward signals: a structured follow-up / outstanding / decision /
+		// risk / fyi item to the caller's coordinator (or the global inbox).
+		return cmdAgentRaise(args[1:])
+	case "items":
+		return cmdAgentItems(args[1:])
+	case "escalate":
+		return cmdAgentEscalate(args[1:])
 	case "name", "label":
 		return cmdName(args[1:])
 	case "goal":
@@ -118,6 +126,14 @@ usage: amux agent <command>
                      changes state or PRs, then print it; no polling. --until
                      ready,idle,waiting waits for one of those states; --timeout
                      bounds the wait (nonzero exit); --json
+  raise              raise a structured item upward (a member to its coordinator,
+                     anyone else to the global inbox): --kind follow_up|outstanding|
+                     decision_needed|risk|fyi --title "…" [--detail "…"]
+                     [--pr repo#n] [--link url] [--suggest "…"] [--json]
+  items              list the items you raised or receive (--raised, --inbox,
+                     --all, --json); show <id>; ack|dismiss|done|reopen <id>...
+  escalate <id>...   coordinator: hand a received item to the global inbox
+                     [--note "…"]
 
 Commands use the private file mailbox from the ordinary sandboxed shell.
 Keep both sandboxes enabled. Discovery grants no cross-session write access.

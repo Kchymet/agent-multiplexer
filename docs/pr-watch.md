@@ -110,6 +110,17 @@ either side:
 - With PR polling disabled (`AMUX_PR_POLL_INTERVAL=off`), member wake-ups
   still run.
 
+## Item wake-ups
+
+Upward items ([Items](items.md)) share this queue too. A raise, an escalation
+or an archive carry-over that leaves items unnotified queues one `items` wake
+per recipient (a coordinator, or the global inbox owner); at delivery the daemon reads the
+recipient's unnotified items, lists them (`Items raised (amux wake-up, not a
+new task): …`) alongside any member and PR lines, and marks them notified. An
+items wake with nothing left unnotified is dropped. The global inbox owner is woken under
+the same gating when it is live and idle. Undelivered notices stay recorded on
+the items and are offered again on the next change or daemon restart.
+
 ## Goal status
 
 A goal coordinator's rail/status line shows its goal status — `goal active`,
