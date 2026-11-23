@@ -81,11 +81,13 @@ func Active(state string) bool { return state == StateOpen || state == StateAckn
 // GlobalInbox is the recipient id of the global inbox: the one owner of the
 // cross-workgroup inbox that escalations and archive carry-overs go to, and
 // that receives the items of sessions outside a coordinated workgroup. It is
-// resolved here and only here, so the owner can be repointed in one place;
-// today it is the console session (internal/console.ID).
+// resolved here and only here, so the owner can be repointed in one place: it
+// is the overseer (internal/overseer.ID), the coordinator of coordinators. The
+// admin console keeps an all-items read and triage view as an operator
+// override, but is no longer escalated to.
 func GlobalInbox() string { return globalInboxOwner }
 
-const globalInboxOwner = "console"
+const globalInboxOwner = "overseer"
 
 // IsGlobalInbox reports whether id is the global inbox owner.
 func IsGlobalInbox(id string) bool { return id != "" && id == GlobalInbox() }
@@ -113,6 +115,10 @@ type Event struct {
 	From   string `json:"from,omitempty"`
 	To     string `json:"to,omitempty"`
 	Note   string `json:"note,omitempty"`
+	// Host marks a change the host (the user, at the CLI, TUI or a future
+	// direct client) made rather than a session: a user acknowledgment is what
+	// lets the overseer create a workgroup from an item.
+	Host bool `json:"host,omitempty"`
 }
 
 // MaxHistory bounds an item's history; the oldest entries after the first

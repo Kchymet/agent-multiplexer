@@ -230,6 +230,10 @@ const (
 	// RoleConsole is the machine-wide amux console: one per daemon, with context
 	// over every workgroup, agent, and repo it runs (id "console").
 	RoleConsole = "console"
+	// RoleOverseer is the machine-wide coordinator of coordinators: it supervises
+	// every workgroup coordinator, owns the global item inbox and curates the
+	// user question queue, with no admin powers (id "overseer").
+	RoleOverseer = "overseer"
 	// RoleCoordinator is a workgroup root's own session — the coordinator or
 	// supervisor of that workgroup's agents. Its id is the workgroup id.
 	RoleCoordinator = "coordinator"

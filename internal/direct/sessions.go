@@ -239,7 +239,19 @@ func validSessionID(id string) bool {
 // history, streams or actions, under any grant, including all_sessions.
 const ConsoleID = "console"
 
-func isConsole(row core.Session) bool { return row.ID == ConsoleID || row.Role == hp.RoleConsole }
+// OverseerID is the machine-wide overseer session (the coordinator of
+// coordinators, docs/direct-console.md). Until its direct exposure is designed
+// and signed off (Phase B: derived steer gating, an opt-in inventory row),
+// direct access treats it exactly like the console: never in scope. Otherwise
+// a plain steer grant could prompt it into archiving or creating workgroups,
+// which the grant itself may not do.
+const OverseerID = "overseer"
+
+// isConsole reports a machine-wide session direct access never exposes: the
+// console and (until Phase B) the overseer.
+func isConsole(row core.Session) bool {
+	return row.ID == ConsoleID || row.Role == hp.RoleConsole || row.ID == OverseerID || row.Role == hp.RoleOverseer
+}
 
 // inScope reports whether row is inside the grant's resource scope, judged from
 // the fresh inventory rows only. For a workgroup grant that is the workgroup's

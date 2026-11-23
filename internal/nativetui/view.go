@@ -529,6 +529,9 @@ func (m *model) attentionSummary() []string {
 	if !ok {
 		return nil
 	}
+	if q := m.queueSummaryLine(); q != "" {
+		return []string{line, ansi.Truncate(q, m.railWidth(), "")}
+	}
 	return []string{line}
 }
 
@@ -611,6 +614,9 @@ func (m *model) renderMain() string {
 	if m.res.open {
 		return m.renderResources()
 	}
+	if m.qp.open {
+		return m.renderQueue()
+	}
 	if m.prPanel.open {
 		return m.renderPRs()
 	}
@@ -667,6 +673,8 @@ func (m *model) renderHelp() string {
 		return ansi.Truncate(hints("pull requests", []hint{{upDownKeys(), "move"}, {"Enter/o", "open in browser"}, {"p/Esc", "close"}}), m.w, "")
 	case m.res.open:
 		return ansi.Truncate(hints("resources", []hint{{"s", "sort CPU/mem"}, {upDownKeys(), "scroll"}, {"t/Esc", "close"}}), m.w, "")
+	case m.qp.open:
+		return ansi.Truncate(hints("questions", []hint{{upDownKeys(), "select"}, {"y/n", "allow/deny"}, {"1-9", "choose"}, {"r", "reply"}, {"a", "ack item"}, {"d", "hide"}, {"i/Esc", "close"}}), m.w, "")
 	case m.status != "":
 		return dimStyle.Render(truncate(m.status, m.w))
 	case m.focus == focusAgent:
@@ -678,7 +686,7 @@ func (m *model) renderHelp() string {
 			{keyLabel(m.keys.Chord(keymap.Quit)), "quit"},
 		})
 	default:
-		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {leftRightKeys(), "collapse/expand"}, {enterKey(), "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"p", "PRs"}, {"o", "open PR"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
+		return ansi.Truncate(hints("", []hint{{"Space", "fold/unfold"}, {leftRightKeys(), "collapse/expand"}, {enterKey(), "open"}, {"a", "+agent"}, {"e", "repos"}, {"w", "+group"}, {"R", "+repo"}, {"m", "move"}, {"r", "rename"}, {"t", "top"}, {"p", "PRs"}, {"o", "open PR"}, {"i", "questions"}, {"x", "done"}, {"D", "del"}, {"q", "quit"}}), m.w, "")
 	}
 }
 
@@ -789,7 +797,7 @@ func sectionLabel(section string) string {
 	return ""
 }
 
-// glyph mirrors the rail: console ⚙, repo ⛁, root ▸, external ↗, otherwise the
+// glyph mirrors the rail: console ⚙, overseer ◉, repo ⛁, root ▸, external ↗, otherwise the
 // activity state's own shape (see stateGlyph). task and interactive agents
 // share the activity glyphs; the mode is surfaced in listings, not here.
 // A container row keeps its structural glyph even when its own session (the
@@ -800,6 +808,8 @@ func glyph(s core.Session) string {
 		return "⛁"
 	case s.Mode == store.ModeConsole:
 		return "⚙"
+	case s.Mode == store.ModeOverseer:
+		return "◉"
 	case s.IsRoot:
 		return "▸"
 	case s.Mode == "external":

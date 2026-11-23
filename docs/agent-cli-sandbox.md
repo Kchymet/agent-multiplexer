@@ -102,6 +102,8 @@ flags, and environment variables only ever name a target.
   the scope immediately. Effects never target an archived session; reads may
   page an archived member that still belongs to the workgroup.
 
+The overseer's column is in [Workgroup permissions](workgroup-permissions.md#console-overseer-and-repo-homes).
+
 | Operation | Scope | Member (self) | Coordinator (workgroup) | Notes |
 | --- | --- | --- | --- | --- |
 | query `version`, `codex-control` | session | yes | yes | Host paths and overrides stripped. |
@@ -109,8 +111,8 @@ flags, and environment variables only ever name a target.
 | query `sessions`, `snapshot` (`amux status`), `repos` | filtered | itself; its own repos | workgroup + members (its own row carries its grants); every tracked repo, names only, each marked granted or not | Seeing a repo is not authority to fork it. |
 | query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
 | query `wait` (`amux agent wait`) | workgroup | itself | itself, members (incl. archived members) | |
-| query `items` (`amux agent items`) | workgroup | itself | itself | Acts as the caller only; per-item visibility in `access/items.go` (a coordinator sees its workgroup's items). Console: as itself, every item. See [Items](items.md). |
-| `raise-item`, `item-state` (`amux agent raise`, `amux agent items ack\|dismiss\|done\|reopen`) | workgroup | itself | itself | Acts as the caller only. A member raises to its coordinator, everyone else to the global inbox (today the console session); per-item triage rules in [Items](items.md). |
+| query `items` (`amux agent items`) | workgroup | itself | itself | Acts as the caller only; per-item visibility in `access/items.go` (a coordinator sees its workgroup's items). Console and overseer (the global inbox owner): as itself, every item. See [Items](items.md). |
+| `raise-item`, `item-state` (`amux agent raise`, `amux agent items ack\|dismiss\|done\|reopen`) | workgroup | itself | itself | Acts as the caller only. A member raises to its coordinator, everyone else to the global inbox (the overseer); per-item triage rules in [Items](items.md). |
 | `escalate-item` (`amux agent escalate`) | workgroup | no | itself, on items it holds | Moves the item to the global inbox. |
 | `rename` (`amux agent name`) | workgroup | itself | itself, members | |
 | `start` | workgroup | itself | workgroup (cascades), members | |
@@ -121,8 +123,10 @@ flags, and environment variables only ever name a target.
 | `set-archived archived=false`, `archive` toggle | host | no | no | Restore needs host regrant. |
 | `add-agent` | workgroup | no | its own workgroup, granted repos only | Console: any. An ungranted repo is denied `repo_not_granted` with a message naming it and `amux workgroup grants`. |
 | `delete`, `kill`, `move`, `agent-set-repos` | host | no | no | Console. `delete`/`kill` refuse while an open PR remains unless `force=true`. |
-| `new-workgroup`, `create-workspace`, `refresh` | host | no | no | Console; a repo home may create a workgroup limited to its own repo. |
+| `new-workgroup`, `create-workspace`, `refresh` | host | no | no | Console; a repo home may create a workgroup limited to its own repo. The overseer: `refresh`, and `new-workgroup -f from_item=<item>` for an item the host acknowledged. |
 | `add-repo`, `rm-repo` | host | no | no | Console. |
+| query `queue` (`amux queue list`) | host | no | no | Read-only for the admin console and the overseer. |
+| `queue-answer`, `queue-dismiss` (`amux queue answer\|dismiss`) | host | no | no | Only the user answers the question queue. |
 | `coordinator-set-repos`, `restart`, `auth-reload`, `account-manage`, `codex-login`, `subscribe`, `query` | host | no | no | |
 | `pane.*` | host | no | no | Restricted principals use one-shot mailbox RPC only. |
 | query `runtime-path`, `runtime-record`, `accounts`, `account-manage`, `account-ceremony`, `codex-auth` | host | no | no | Raw host paths and credentials. |

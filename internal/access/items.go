@@ -9,7 +9,7 @@ import "amux/internal/items"
 // the stored item's parties. Clients never supply either.
 //
 // The routing rule — a member raises to its own coordinator, everyone else to
-// the global inbox (items.GlobalInbox, today the console) — and the triage
+// the global inbox (items.GlobalInbox, the overseer) — and the triage
 // rules are:
 //
 //   - a session sees what it raised and what it receives; a coordinator also

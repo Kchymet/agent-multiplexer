@@ -11,6 +11,7 @@ import (
 	"amux/internal/access"
 	"amux/internal/console"
 	"amux/internal/engine"
+	"amux/internal/overseer"
 	"amux/internal/store"
 )
 
@@ -55,7 +56,7 @@ func (r *sessionRuntime) reconcilePass(ctx context.Context, wait bool) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	sessions = append(sessions, console.Session())
+	sessions = append(sessions, console.Session(), overseer.Session())
 	current := make(map[string]store.Session, len(sessions))
 	for _, session := range sessions {
 		current[session.ID] = session

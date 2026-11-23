@@ -22,7 +22,7 @@ import (
 // items — follow-ups, outstanding work, decisions it needs, risks, things left
 // out of scope — at the end of a turn or of its work, instead of burying them
 // in prose. A member's items go to its coordinator, everyone else's to the
-// console; the coordinator triages and escalates. Every command acts as the
+// global inbox (the overseer); the coordinator triages and escalates. Every command acts as the
 // caller (identity comes only from the fixed session context).
 
 const agentRaiseUsage = `usage: amux agent raise --kind <kind> --title "<title>" [--detail "<text>" | --detail -]

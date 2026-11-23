@@ -256,6 +256,11 @@ type Daemon struct {
 	memberWatch memberWatch
 	// items is the upward-signal API (internal/itemsvc, items.go). Built in New.
 	items *itemsvc.Service
+	// queue remembers the user's dismissals and recent answers of question
+	// queue entries (queue.go); queueSourcesFn replaces what deriving it reads
+	// (tests only).
+	queue          queueState
+	queueSourcesFn func() queueSources
 	// prWakeAdmission runs after a watcher delivery holds its final membership,
 	// repo, and coordinator admission. Production leaves it nil; tests use it to
 	// prove mutations cannot cross the authority recheck and prompt boundary.

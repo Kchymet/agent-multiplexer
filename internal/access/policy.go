@@ -96,12 +96,27 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 	if !ok || subject.Archived || !knownRole(subject.Role) {
 		return ErrDenied
 	}
+	// The overseer holds exactly its marked rules (overseer.go): no blanket
+	// shortcut, whatever the scope.
+	overseerSubject := subject.Role == RoleOverseer
+	if overseerSubject && !rule.Overseer {
+		return ErrDenied
+	}
 
 	switch rule.Scope {
 	case ScopeSession, ScopeFiltered:
 		// ScopeFiltered handlers project the result to InWorkgroupScope(subject).
 		return nil
 	case ScopeHost:
+		if overseerSubject {
+			if !allowOverseerHost(req) {
+				return ErrDenied
+			}
+			if req.Verb == core.ActionNewWorkgroup {
+				return p.authorizeFromItem(ctx, req)
+			}
+			return nil
+		}
 		if subject.Role == "console" && rule.Console {
 			return nil
 		}
@@ -139,6 +154,13 @@ func (p Policy) Authorize(ctx context.Context, principal Principal, req Request)
 	if req.Route == RouteAction && target.Archived {
 		return ErrDenied
 	}
+	if overseerSubject {
+		// allowOverseer replaces the coordinator-shaped Allow predicates.
+		if !allowOverseer(req, self, target) {
+			return ErrDenied
+		}
+		return nil
+	}
 	if rule.Allow != nil && !rule.Allow(req, self, target) {
 		return ErrDenied
 	}
@@ -159,6 +181,9 @@ func InWorkgroupScope(subject, target Resource) bool {
 	switch subject.Role {
 	case "console":
 		return true
+	case RoleOverseer:
+		// Every workgroup, member and repo home — never the console.
+		return target.Role != "console" && target.ID != "console"
 	case "coordinator":
 		return target.ID == subject.ID || target.RootID == subject.ID
 	case "repo", "":
@@ -170,7 +195,7 @@ func InWorkgroupScope(subject, target Resource) bool {
 
 func knownRole(role string) bool {
 	switch role {
-	case "", "console", "coordinator", "repo":
+	case "", "console", RoleOverseer, "coordinator", "repo":
 		return true
 	}
 	return false

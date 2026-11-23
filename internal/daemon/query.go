@@ -55,6 +55,9 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 	if a.Query == core.QueryItems {
 		return d.hostItemQuery(ctx, a)
 	}
+	if a.Query == core.QueryQueue {
+		return d.queueOverview(a.Fields), nil
+	}
 	if a.Query == core.QueryAccounts || a.Query == core.QueryAccountManage || a.Query == core.QueryAccountCeremony {
 		r, err := accountRequest(a)
 		if a.Query == core.QueryAccounts && len(a.Fields) == 0 {

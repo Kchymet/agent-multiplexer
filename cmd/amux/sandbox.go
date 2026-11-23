@@ -9,6 +9,7 @@ import (
 	"amux/internal/agent"
 	"amux/internal/cfghome"
 	"amux/internal/console"
+	"amux/internal/overseer"
 	"amux/internal/store"
 )
 
@@ -89,7 +90,10 @@ func sandboxAgents(id string) ([]sandboxAgent, error) {
 	if id == "" || id == console.ID {
 		sessions = append(sessions, console.Session())
 	}
-	if id != console.ID {
+	if id == "" || id == overseer.ID {
+		sessions = append(sessions, overseer.Session())
+	}
+	if id != console.ID && id != overseer.ID {
 		roots, err := querySessions()
 		if err != nil {
 			return nil, fmt.Errorf("%v\n  the daemon resolves agents; start it with `amux` or `amux daemon start`", err)

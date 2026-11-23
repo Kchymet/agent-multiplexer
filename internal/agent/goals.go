@@ -30,19 +30,25 @@ const HookGoalRuntime = harnessproto.RuntimeClaude
 // harness without a native goal engine may still run in goal mode through
 // amux's hooks (HookGoals); GoalMode covers both.
 func NativeGoals(s store.Session) bool {
-	return s.Role() == store.RoleCoordinator && Canonical(s.Agent) == GoalRuntime
+	return goalRole(s.Role()) && Canonical(s.Agent) == GoalRuntime
 }
 
 // HookGoals reports whether a session runs in goal mode through amux's Claude
 // hooks: a workgroup coordinator on HookGoalRuntime. It is on by default for
 // every such coordinator — there is no opt-in.
 func HookGoals(s store.Session) bool {
-	return s.Role() == store.RoleCoordinator && Canonical(s.Agent) == HookGoalRuntime
+	return goalRole(s.Role()) && Canonical(s.Agent) == HookGoalRuntime
 }
 
 // GoalMode reports whether a session runs every user task as a goal, by either
 // mechanism: a native Codex thread goal or amux's Claude goal hooks.
 func GoalMode(s store.Session) bool { return NativeGoals(s) || HookGoals(s) }
+
+// goalRole reports whether a session of this role runs every task as a goal:
+// a workgroup coordinator, and the overseer (the coordinator of coordinators).
+func goalRole(role string) bool {
+	return role == store.RoleCoordinator || role == store.RoleOverseer
+}
 
 // goalKind reports whether a coordinator of this kind runs in goal mode.
 func goalKind(kind string) bool {

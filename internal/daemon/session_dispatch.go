@@ -358,6 +358,9 @@ func (r *sessionRuntime) restrictedQuery(ctx context.Context, principal access.P
 		info.UpdatePending, info.UpdatePendingReason = "", ""
 		info.HarnessRestarts = nil
 		value = info
+	case core.QueryQueue:
+		// Read-only for the admin console and the overseer (policy-gated).
+		value = boundedOverview(r.d.queueOverview(action.Fields))
 	case core.QueryCodexControl:
 		rows, err := r.d.readModel(action)
 		if err != nil {

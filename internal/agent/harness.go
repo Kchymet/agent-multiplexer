@@ -353,8 +353,8 @@ func (e *unknownKindError) Error() string { return "unknown agent kind " + `"` +
 // an unreadable store yields none.
 func agentDirs(kind string) []string {
 	var out []string
-	if consoleDir != nil {
-		if d := consoleDir(); d != "" {
+	for _, dir := range builtinDirs {
+		if d := dir(); d != "" {
 			out = append(out, d)
 		}
 	}
@@ -381,13 +381,15 @@ func agentDirs(kind string) []string {
 	return out
 }
 
-// consoleDir, when set, returns the built-in console agent's dir so its private
-// home is included in listings. The console package registers it (it imports
+// builtinDirs return the built-in synthetic agents' dirs (the console, the
+// overseer) so their private homes are included in listings. Their packages
+// register them (it imports
 // this package, so the dependency can't point the other way).
-var consoleDir func() string
+var builtinDirs []func() string
 
-// RegisterConsoleDir installs the console dir provider (see consoleDir).
-func RegisterConsoleDir(f func() string) { consoleDir = f }
+// RegisterConsoleDir installs a built-in session dir provider (the console's,
+// the overseer's; see builtinDirs).
+func RegisterConsoleDir(f func() string) { builtinDirs = append(builtinDirs, f) }
 
 // sortSessions orders a merged listing most-recently-modified first.
 func sortSessions(s []SessionInfo) {

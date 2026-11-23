@@ -9,6 +9,7 @@
 //	agent    self-reporting run by an agent about itself (status/hook/name/done)
 //	status   print current workgroups as text and exit
 //	top      per-session CPU/memory and amux's own overhead
+//	queue    the user question queue: list, answer, dismiss, acknowledge
 //	version  print CLI, daemon, and database versions
 package main
 
@@ -97,6 +98,7 @@ var commands = []command{
 	{names: []string{"hook"}, run: func(args []string) error { return cmdAgentStatus(args, true) }, hidden: true},
 	{names: []string{"status"}, run: cmdStatus},
 	{names: []string{"top"}, run: cmdTop},
+	{names: []string{"queue", "q"}, run: cmdQueue},
 	{names: []string{"refresh"}, run: func([]string) error { return cmdRefresh() }},
 	{names: []string{"doctor", "health", "check"}, run: func([]string) error { return cmdDoctor() }},
 	{names: []string{"config", "conf", "cfg"}, run: cmdConfig},
@@ -151,6 +153,7 @@ usage: amux <command>
   agent name <text>  set the calling agent's display name (from its own tab)
   status [--json]    print workgroups and exit (--json for the raw snapshot)
   top [--json] [--mem] [-n N]  per-session CPU/memory, top processes, amux overhead
+  queue [list|answer|dismiss|ack]  the user question queue and workgroup summary
   do <action> ...    drive a daemon action (see "amux do" actions below)
   refresh            ask the daemon to re-poll its sources now
   doctor             health check: versions, compatibility, dependencies + runtime
@@ -708,7 +711,17 @@ func cmdStatus(args []string) error {
 		}
 		snapshot := core.Snapshot{Type: "snapshot", Sessions: sessions}
 		if asJSON {
-			b, err := json.MarshalIndent(snapshot, "", "  ")
+			// The overview is present only for a session that may read the queue
+			// (the overseer, the admin console); every other caller keeps the
+			// exact snapshot shape.
+			var out any = snapshot
+			if ov := readStatusOverview(); ov != nil {
+				out = struct {
+					core.Snapshot
+					Overview *statusOverview `json:"overview"`
+				}{snapshot, ov}
+			}
+			b, err := json.MarshalIndent(out, "", "  ")
 			if err != nil {
 				return err
 			}
@@ -748,7 +761,9 @@ func cmdStatus(args []string) error {
 			if r, err := queryResources(); err == nil {
 				res = &r
 			}
-			b, err := json.MarshalIndent(statusWithResources(*f.Snapshot, res), "", "  ")
+			out := statusWithResources(*f.Snapshot, res)
+			out.Overview = readStatusOverview()
+			b, err := json.MarshalIndent(out, "", "  ")
 			if err != nil {
 				return err
 			}

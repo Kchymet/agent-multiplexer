@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"amux/internal/core"
+	"amux/internal/items"
 	"amux/internal/prwatch"
 	"amux/internal/store"
 )
@@ -31,6 +32,9 @@ type memberWatch struct {
 	members map[string]string
 	// roots is each active coordinator row's last observed state+status.
 	roots map[string]string
+	// goals is each active coordinator's last observed goal status; a move to
+	// input, blocked or complete tells the overseer (overseerGoalUpdate).
+	goals map[string]string
 	// primed is false until the first poll: a daemon (re)start observes the
 	// current states as a baseline and wakes nobody for them.
 	primed bool
@@ -70,10 +74,21 @@ func (d *Daemon) observeWorkgroups(rows []core.Session) {
 	defer w.mu.Unlock()
 	coordinators := map[string]bool{}
 	roots := make(map[string]string, len(w.roots))
+	goals := make(map[string]string, len(w.goals))
 	for _, r := range rows {
 		if r.IsRoot && r.Role == store.RoleCoordinator && r.Section == core.SectionWorkgroups && !r.Archived {
 			coordinators[r.ID] = true
 			roots[r.ID] = r.State + "|" + r.Status
+			if sup := r.Supervision; sup != nil && sup.Goal != "" {
+				goals[r.ID] = sup.Goal
+				if w.primed {
+					if what, wake := overseerGoalUpdate(w.goals[r.ID], sup.Goal, sup.GoalNote); wake {
+						owner := items.GlobalInbox()
+						d.prs.Notify(prwatch.Wake{Kind: prwatch.KindOverseer, Workgroup: owner, SessionID: r.ID,
+							Text: fmt.Sprintf("coordinator %s %s", memberWakeLabel(r), what)})
+					}
+				}
+			}
 		}
 	}
 	members := make(map[string]string, len(w.members))
@@ -109,7 +124,7 @@ func (d *Daemon) observeWorkgroups(rows []core.Session) {
 			offerItems = true
 		}
 	}
-	w.members, w.roots, w.primed = members, roots, true
+	w.members, w.roots, w.goals, w.primed = members, roots, goals, true
 	if offerItems {
 		d.offerItemWakes()
 	}

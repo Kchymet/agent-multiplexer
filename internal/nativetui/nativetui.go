@@ -22,6 +22,8 @@ import (
 	"amux/internal/daemon"
 	"amux/internal/hostbackend"
 	"amux/internal/keymap"
+	"amux/internal/overseer"
+	"amux/internal/store"
 	"amux/internal/vterm"
 )
 
@@ -147,6 +149,7 @@ type model struct {
 	accounts              *accountsState
 	accountCall           accountCaller  // nil uses the authenticated host account service
 	res                   resourcesState // daemon resource samples and the top panel (resources.go)
+	qp                    queuePanel     // the question queue and its panel (queue.go)
 	prPanel               prPanelState   // the PR list in the main pane (prs.go)
 
 	// clip queues local selections and pane OSC 52 writes through one Copier.
@@ -255,6 +258,11 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.refreshAccountOverview()
 		}
 		return m, nil
+	case queueTickMsg:
+		if msg.serial == m.qp.serial {
+			return m, m.pollQueue()
+		}
+		return m, nil
 	case resourcesTickMsg:
 		if msg.serial == m.res.serial {
 			return m, m.pollResources()
@@ -287,7 +295,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconnectPanes = len(m.terms) > 0
 		m.status = ""
 		m.onConnected()
-		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview(), m.startResources())
+		return m, tea.Batch(readCmd(msg.c), m.refreshAccountOverview(), m.startResources(), m.startQueue())
 
 	case disconnectedMsg:
 		m.clearSelection()
@@ -295,6 +303,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.accountOverviewSerial++
 		m.accountOverviewStale = true
 		m.res.serial++ // stop the resources poll chain until reconnected
+		m.qp.serial++
 		if s := m.accounts; s != nil {
 			s.dispose()
 			s.serial++ // fence callbacks from the retired connection
@@ -340,6 +349,9 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if p := msg.f.Pane; p != nil {
 			m.handlePaneFrame(p)
+		}
+		if d := msg.f.Data; d != nil && d.Query == core.QueryQueue {
+			m.applyQueue(d)
 		}
 		if d := msg.f.Data; d != nil && d.Query == core.QueryResources {
 			m.applyResources(d)
@@ -500,6 +512,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.res.open {
 		return m.handleResourcesKey(k)
 	}
+	// So does the question queue panel.
+	if m.qp.open {
+		return m.handleQueueKey(k)
+	}
 	// So does the PR list.
 	if m.prPanel.open {
 		return m.handlePRKey(k)
@@ -588,6 +604,8 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t": // top-style resources panel
 		m.toggleResources()
 		return m, nil
+	case "i": // the question queue: everything waiting on the user
+		return m, m.toggleQueue()
 	case "p": // the selected row's pull requests, in the main pane
 		m.togglePRs()
 		return m, nil
@@ -653,7 +671,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select an agent to move"
 	case "x": // mark the selected agent done/archived (or restore an archived one)
-		if s := m.selected(); s != nil && s.ID != console.ID && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
+		if s := m.selected(); s != nil && !builtinRow(s) && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
 			if s.Section == core.SectionArchived {
 				m.status = "restoring " + s.Title + "…"
 			} else {
@@ -663,7 +681,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select an agent to archive"
 	case "D": // permanently delete the selected agent/workgroup (worktrees + branch), with a confirm
-		if s := m.selected(); s != nil && s.ID != console.ID && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
+		if s := m.selected(); s != nil && !builtinRow(s) && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
 			what := "agent"
 			if s.IsRoot {
 				what = "workgroup"
@@ -676,7 +694,7 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "select an agent or workgroup to delete"
 	case "r": // rename the selected agent/workgroup (set a display name; id is unchanged)
-		if s := m.selected(); s != nil && s.ID != console.ID && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
+		if s := m.selected(); s != nil && !builtinRow(s) && s.Kind != "repo" && (attachable(s) || s.IsRoot) {
 			m.openRenameForm(s.ID, s.Title)
 			return m, nil
 		}
@@ -1044,8 +1062,14 @@ func (m *model) handlePaneFrame(p *core.PaneFrame) {
 // that can be moved between workgroups or re-scoped to other repos. The console
 // and the container sessions (a coordinator, a repo home) are pinned to their
 // containers and can be neither.
+// builtinRow reports whether a row is a built-in synthetic session (the
+// console or the overseer): never archived, renamed, moved or deleted.
+func builtinRow(s *core.Session) bool {
+	return s.ID == console.ID || s.ID == overseer.ID || s.Role == store.RoleConsole || s.Role == store.RoleOverseer
+}
+
 func isAgent(s *core.Session) bool {
-	return attachable(s) && s.ID != console.ID && s.Role == "" && !s.IsRoot && s.Kind != "repo"
+	return attachable(s) && !builtinRow(s) && s.Role == "" && !s.IsRoot && s.Kind != "repo"
 }
 
 // paneIDOf is the per-(agent,tab) stream id the daemon echoes on pane frames.
@@ -1059,7 +1083,7 @@ func paneIDOf(id string, tab int) string { return id + "\x1f" + strconv.Itoa(tab
 // or a detached row. (An agent nested under a repo header, as a daemon from
 // before workgroups-only publishes, still opens.)
 func attachable(s *core.Session) bool {
-	if s.ID == console.ID || s.Role != "" {
+	if builtinRow(s) || s.Role != "" {
 		return true
 	}
 	if s.Section == core.SectionArchived {
