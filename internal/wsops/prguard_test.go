@@ -78,7 +78,7 @@ func archive(id string, extra ...string) core.Action {
 func TestOpenPRGuardRefusesArchiveAndKeepsEngine(t *testing.T) {
 	prGuardFixture(t)
 	useLister(t, &fakeLister{prs: map[string][]ghpr.PR{
-		"o/api": {{Number: 7, URL: "https://github.com/o/api/pull/7", HeadRefName: "amux/wg-m1-b"}},
+		"o/api": {{Number: 7, URL: "https://github.com/o/api/pull/7", HeadRefName: core.BranchFor("wg", "m1") + "-b"}},
 	}})
 	stopped := false
 	_, err := Dispatch(context.Background(), archive("m1"), func(string) { stopped = true })
@@ -103,10 +103,40 @@ func TestOpenPRGuardRefusesArchiveAndKeepsEngine(t *testing.T) {
 	}
 }
 
+// TestOpenPRGuardPreBrokerBranch pins backward compatibility: a member created
+// before the broker segment keeps its stored amux/<wg>-<member> branch, and its
+// open PR still blocks archival, while another broker's same-id branch does not
+// count as the broker-scheme member's.
+func TestOpenPRGuardPreBrokerBranch(t *testing.T) {
+	prGuardFixture(t)
+	db, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSession(store.Session{ID: "m3", RootID: "wg", Repo: "api", Branch: core.FlatBranchFor("wg", "m3"), Dir: "/x/m3"}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	useLister(t, &fakeLister{prs: map[string][]ghpr.PR{
+		"o/api": {
+			{Number: 4, URL: "u4", HeadRefName: "amux/wg-m3"},
+			{Number: 5, URL: "u5", HeadRefName: "amux/otherbroker/wg-m1"},
+		},
+	}})
+	_, err = Dispatch(context.Background(), archive("m3"), nil)
+	var open *OpenPRError
+	if !errors.As(err, &open) || len(open.PRs) != 1 || open.PRs[0].SessionID != "m3" {
+		t.Fatalf("archive of pre-broker member with open PR: %v", err)
+	}
+	if _, err := Dispatch(context.Background(), archive("m1"), nil); err != nil {
+		t.Fatalf("another broker's PR blocked archive: %v", err)
+	}
+}
+
 func TestOpenPRGuardForceBypasses(t *testing.T) {
 	prGuardFixture(t)
 	l := &fakeLister{prs: map[string][]ghpr.PR{
-		"o/api": {{Number: 7, URL: "u7", HeadRefName: "amux/wg-m1"}},
+		"o/api": {{Number: 7, URL: "u7", HeadRefName: core.BranchFor("wg", "m1")}},
 	}}
 	useLister(t, l)
 	if _, err := Dispatch(context.Background(), archive("m1", FieldForce, "true"), nil); err != nil {
@@ -134,7 +164,7 @@ func TestOpenPRGuardFailsOpen(t *testing.T) {
 func TestOpenPRGuardWorkgroupCascade(t *testing.T) {
 	prGuardFixture(t)
 	l := &fakeLister{prs: map[string][]ghpr.PR{
-		"o/web": {{Number: 3, URL: "https://github.com/o/web/pull/3", HeadRefName: "amux/wg-m2"}},
+		"o/web": {{Number: 3, URL: "https://github.com/o/web/pull/3", HeadRefName: core.BranchFor("wg", "m2")}},
 		"o/api": {{Number: 9, URL: "https://github.com/o/api/pull/9", HeadRefName: "amux/other-m9"}},
 	}}
 	useLister(t, l)
@@ -148,7 +178,7 @@ func TestOpenPRGuardWorkgroupCascade(t *testing.T) {
 	}
 	// Both members' GitHub repos were checked; the local-only repo never was.
 	got := strings.Join(l.calls, ";")
-	for _, want := range []string{"o/api amux/wg-m1", "o/web amux/wg-m2"} {
+	for _, want := range []string{"o/api " + core.BranchFor("wg", "m1"), "o/web " + core.BranchFor("wg", "m2")} {
 		if !strings.Contains(got, want) {
 			t.Errorf("calls %q lack %q", got, want)
 		}
@@ -167,7 +197,7 @@ func TestOpenPRGuardNoPRsAllowsAndUnguardedVerbs(t *testing.T) {
 	}
 	// Restore and rename never consult GitHub.
 	l.calls = nil
-	l.prs = map[string][]ghpr.PR{"o/api": {{Number: 1, URL: "u", HeadRefName: "amux/wg-m1"}}}
+	l.prs = map[string][]ghpr.PR{"o/api": {{Number: 1, URL: "u", HeadRefName: core.BranchFor("wg", "m1")}}}
 	if _, err := Dispatch(context.Background(), core.Action{Action: core.ActionSetArchived, ID: "m1", Fields: map[string]string{"archived": "false"}}, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -182,7 +212,7 @@ func TestOpenPRGuardNoPRsAllowsAndUnguardedVerbs(t *testing.T) {
 func TestOpenPRGuardRefusesDelete(t *testing.T) {
 	prGuardFixture(t)
 	useLister(t, &fakeLister{prs: map[string][]ghpr.PR{
-		"o/api": {{Number: 7, URL: "https://github.com/o/api/pull/7", HeadRefName: "amux/wg-m1"}},
+		"o/api": {{Number: 7, URL: "https://github.com/o/api/pull/7", HeadRefName: core.BranchFor("wg", "m1")}},
 	}})
 	for _, verb := range []string{core.ActionDelete, core.ActionKill} {
 		stopped := false

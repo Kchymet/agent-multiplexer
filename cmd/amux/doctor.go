@@ -297,7 +297,9 @@ func reconcileSessions(ctx context.Context, repos []core.RepoRow, roots []core.W
 	var inventoryErrs []error
 	for _, repo := range repos {
 		gitDir := filepath.Join(core.ReposDir(), repo.Name+".git")
-		branches, err := git.ListBranchesE(ctx, gitDir, core.BranchPrefix+"*")
+		// A prefix, not the glob "amux/*": a glob stops at "/" and would miss
+		// amux/<broker>/… branches.
+		branches, err := git.ListBranchesE(ctx, gitDir, core.BranchPrefix)
 		if err != nil {
 			fmt.Printf("  ✗ agents    could not inspect branch inventory for %s: %v\n", repo.Name, err)
 			inventoryErrs = append(inventoryErrs, fmt.Errorf("inspect %s branch inventory: %w", repo.Name, err))
@@ -405,20 +407,14 @@ func reconcile(sessionsDir string, roots []core.WorkgroupRow, disk []branchRef) 
 	return orphanDirs, missingDirs, orphanBranches
 }
 
-// agentIDFromBranch extracts the agent id from an amux branch (amux/<root>-<agent>[-<description>]
-// → <agent>), or "" for a legacy amux/<root> branch that names no agent. This lets
-// reconciliation match a branch to a live agent by id even when the session's
-// stored branch is blank.
+// agentIDFromBranch extracts the agent id from an amux branch of any scheme
+// (amux/<broker>/<root>-<agent>[-<description>] or the pre-broker
+// amux/<root>-<agent>[-<description>] → <agent>), or "" for a legacy amux/<root>
+// branch that names no agent. This lets reconciliation match a branch to a live
+// agent by id even when the session's stored branch is blank.
 func agentIDFromBranch(branch string) string {
-	b, ok := strings.CutPrefix(branch, core.BranchPrefix)
-	if !ok {
-		return ""
-	}
-	if _, tail, ok := strings.Cut(b, "-"); ok {
-		id, _, _ := strings.Cut(tail, "-")
-		return id
-	}
-	return ""
+	p, _ := core.ParseBranch(branch)
+	return p.Agent
 }
 
 // iTerm2's per-profile "Option Key Sends" setting: 0 Normal (Option types

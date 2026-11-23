@@ -47,6 +47,8 @@ func TestReconcile(t *testing.T) {
 		{Repo: "acme/api", Branch: "amux/r9-a4"},             // known via agent id (blank stored branch)
 		{Repo: "acme/api", Branch: "amux/r2-a3-cold-attach"}, // descriptive branch of a moved agent
 		{Repo: "acme/api", Branch: "amux/gone-x"},            // orphan (deleted agent)
+		{Repo: "acme/api", Branch: "amux/testbroker/r1-a2"},  // known via agent id, broker scheme
+		{Repo: "acme/api", Branch: "amux/testbroker/gone-y"}, // orphan, broker scheme
 	}
 
 	orphanDirs, missingDirs, orphanBranches := reconcile(sessions, roots, disk)
@@ -57,7 +59,7 @@ func TestReconcile(t *testing.T) {
 	if want := []string{"a2"}; !reflect.DeepEqual(missingDirs, want) {
 		t.Errorf("missingDirs = %v, want %v", missingDirs, want)
 	}
-	if want := []string{"acme/api · amux/gone-x"}; !reflect.DeepEqual(orphanBranches, want) {
+	if want := []string{"acme/api · amux/gone-x", "acme/api · amux/testbroker/gone-y"}; !reflect.DeepEqual(orphanBranches, want) {
 		t.Errorf("orphanBranches = %v, want %v", orphanBranches, want)
 	}
 }
@@ -84,6 +86,9 @@ func TestAgentIDFromBranchRoundTrips(t *testing.T) {
 		"amux/418eea-e5d6da-cold-attach":      "e5d6da",
 		"feature/418eea-e5d6da":               "",
 		"amux/root-":                          "",
+		"amux/host-1/418eea-e5d6da":           "e5d6da",
+		"amux/host-1/418eea-e5d6da-b":         "e5d6da",
+		"amux/418eea-e5d6da/wip":              "e5d6da",
 	} {
 		if got := agentIDFromBranch(branch); got != want {
 			t.Errorf("agentIDFromBranch(%q) = %q, want %q", branch, got, want)

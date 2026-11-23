@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 )
 
 // StateDir is where amux keeps runtime state (pidfile, logs, fallback socket).
@@ -113,17 +114,85 @@ func SessionsDir() string { return filepath.Join(DataDir(), "sessions") }
 // branch under it, and doctor's reconciliation only ever looks under it.
 const BranchPrefix = "amux/"
 
-// BranchFor is the git branch an agent commits on: amux/<root>-<agent>. This is
+// BranchFor is the git branch an agent commits on:
+// amux/<broker>/<root>-<agent>, where <broker> is this host's BrokerID. This is
 // the single source of the branch scheme — every worktree, the agent guide, and
-// the doctor reconciliation derive the branch from here, so changing the scheme is
-// a one-line change (plus a doctor migration note for already-created branches).
+// the doctor reconciliation derive the branch from here. A session stores the
+// branch it was created with, so changing the scheme never renames an existing
+// session's branch.
 //
-// The name is flat (a hyphen, not a slash) so it never collides with a legacy
-// per-workspace branch amux/<root>: git refs can't have both amux/<root> and
-// amux/<root>/<agent> (a file/directory conflict), which broke adding a second
-// agent to older workspaces.
+// The broker segment keeps brokers (machines running amux against the same
+// remote) from colliding and lets each one recognise its own PRs. The root and
+// agent stay joined by a hyphen, not a slash, so a branch never collides with a
+// legacy per-workspace branch amux/<root>; SanitizeBrokerID likewise keeps the
+// broker segment disjoint from every legacy amux/<root>[-<agent>] name, since
+// git refs can't have both amux/X and amux/X/… (a file/directory conflict).
 func BranchFor(rootID, agentID string) string {
+	return BrokerBranchPrefix(BrokerID()) + rootID + "-" + agentID
+}
+
+// BrokerBranchPrefix is the namespace of one broker's branches: amux/<broker>/.
+func BrokerBranchPrefix(broker string) string { return BranchPrefix + broker + "/" }
+
+// FlatBranchFor is the previous scheme, amux/<root>-<agent>, which carries no
+// broker. Sessions created before the broker segment keep these branches.
+func FlatBranchFor(rootID, agentID string) string {
 	return BranchPrefix + rootID + "-" + agentID
+}
+
+// ParsedBranch is an amux branch decoded by ParseBranch.
+type ParsedBranch struct {
+	Broker string // "" for the broker-less flat and legacy schemes
+	Root   string
+	Agent  string // "" for a legacy amux/<root> branch
+	Suffix string // anything an agent appended after the agent id ("-b", "/x")
+}
+
+// ParseBranch decodes any amux branch scheme:
+//
+//	amux/<broker>/<root>-<agent>[<suffix>]  current
+//	amux/<root>-<agent>[<suffix>]           flat (pre-broker)
+//	amux/<root>                             legacy (pre-hierarchy)
+//
+// A suffix is a "-…" or "/…" an agent appended to push a sibling branch. Session
+// ids never contain '-' or '/', which is what makes the split unambiguous; a
+// broker id never looks like a session id followed by '-' (SanitizeBrokerID).
+func ParseBranch(branch string) (ParsedBranch, bool) {
+	rest, ok := strings.CutPrefix(branch, BranchPrefix)
+	if !ok || rest == "" {
+		return ParsedBranch{}, false
+	}
+	var p ParsedBranch
+	if head, tail, ok := strings.Cut(rest, "/"); ok && !looksLikeLegacyRoot(head) {
+		// A first segment that can't be a session id is a broker.
+		p.Broker, rest = head, tail
+	}
+	end := strings.IndexAny(rest, "-/")
+	if end < 0 {
+		if p.Broker != "" {
+			return ParsedBranch{}, false // amux/<broker>/<root> is never created
+		}
+		p.Root = rest
+		return p, rest != ""
+	}
+	p.Root, rest = rest[:end], rest[end:]
+	if p.Root == "" {
+		return ParsedBranch{}, false
+	}
+	if rest[0] == '/' {
+		p.Suffix = rest // legacy amux/<root>/<x>
+		return p, true
+	}
+	rest = rest[1:]
+	end = strings.IndexAny(rest, "-/")
+	if end < 0 {
+		end = len(rest)
+	}
+	p.Agent, p.Suffix = rest[:end], rest[end:]
+	if p.Agent == "" {
+		return ParsedBranch{}, false
+	}
+	return p, true
 }
 
 // LegacyBranchFor is the pre-hierarchy scheme, amux/<root>: one branch per

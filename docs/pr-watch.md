@@ -9,19 +9,27 @@ pushes the change to it (`internal/prwatch`, wired in
 
 ## Ownership
 
-A member owns the PRs whose head branch is its branch (`amux/<wg>-<member>`) or
-that branch plus a `-suffix` (`amux/<wg>-<member>-b`), in the GitHub
+A member owns the PRs whose head branch is its branch (`amux/<broker>/<wg>-<member>`)
+or that branch plus a `-suffix` (`amux/<broker>/<wg>-<member>-b`), in the GitHub
 repositories it works in (a tracked repo whose source is a GitHub URL or
 `owner/name`; other repos are skipped). Only active members of active
 workgroups are watched.
+
+The `<broker>` segment names the amux host that created the member (see
+[Branch names and broker id](branches.md)), so a broker only ever claims PRs
+from its own branches: another machine running amux against the same repos, even
+with colliding workgroup and member ids, pushes under a different
+`amux/<other-broker>/` namespace. Members created before the broker segment keep
+their stored `amux/<wg>-<member>` branch and are watched exactly as before.
 
 ## Polling
 
 The daemon polls on the host with the host user's own `gh` login (agents hold no
 GitHub authority for it). Every 3 minutes (`AMUX_PR_POLL_INTERVAL`, a Go
 duration such as `90s`, minimum 30s; `off` disables) it runs one
-`gh pr list --state open --search head:amux/ --json …` per repository — whatever
-the number of members — and a single `gh pr view` only for a tracked PR that
+`gh pr list --state open --search head:amux/<broker>/ --json …` per repository —
+whatever the number of members (plus one `head:amux/` listing while pre-broker
+members remain) — and a single `gh pr view` only for a tracked PR that
 left the open list, to learn whether it merged or closed. A missing or
 unauthenticated `gh` is logged once and retried every 30 minutes; other
 failures (rate limits included) back the interval off exponentially up to 30
