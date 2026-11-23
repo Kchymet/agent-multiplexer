@@ -66,7 +66,7 @@ func TestQueuePanel(t *testing.T) {
 	if e, _ := m.qp.selectedEntry(); e.ID != "q-1" {
 		t.Fatalf("selected %q, want q-1", e.ID)
 	}
-	if out := ansi.Strip(m.renderQueue()); !strings.Contains(out, "2 pg") || !strings.Contains(out, "1-9") {
+	if out := ansi.Strip(m.renderQueue()); !strings.Contains(out, "2. pg") || !strings.Contains(out, "1-9") {
 		t.Errorf("question options not shown:\n%s", out)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})

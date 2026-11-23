@@ -1,0 +1,13 @@
+▸ question · m3 · q-opts
+    [Database] Which database should the billing service use in production?
+      1. PostgreSQL with logical replication to the analytics warehouse
+         A managed server; the team already runs two clusters, so on-call knows it, but it adds a network hop to every
+         request.
+      2. SQLite
+         Embedded, zero-ops, one file per tenant; replication would need Litestream or similar tooling.
+    [Extras] Which extras?
+      1. Backups
+      2. Read replicas
+         two regions
+    r reply  d hide
+

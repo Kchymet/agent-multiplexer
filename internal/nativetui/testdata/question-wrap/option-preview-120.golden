@@ -1,0 +1,6 @@
+  [ ] 1. Tabs, one per area of the settings page (Recommended)
+         Each tab holds one area; deep links open a tab directly.
+         │ ┌Tabs┐
+         │ │ General │ Account │ Notifications │ Billing │ Advanced │
+         │     see
+         │ https://github.com/Kchymet/agent-multiplexer/blob/master/internal/nativetui/queue.go#L280-L320?plain=1
