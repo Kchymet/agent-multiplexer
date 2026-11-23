@@ -1,0 +1,6 @@
+{
+  "prompt": true,
+  "interject": true,
+  "stop": true,
+  "question": true
+}

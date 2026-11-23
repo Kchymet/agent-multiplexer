@@ -1,0 +1,4 @@
+{
+  "code": "answer_in_pane",
+  "error": "amux cannot deliver an answer to this question; answer it in the agent's pane"
+}

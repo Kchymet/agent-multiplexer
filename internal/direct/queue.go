@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"amux/internal/queue"
 
 	"github.com/gorilla/websocket"
+	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // The user question queue and the overseer over direct access
@@ -49,8 +51,30 @@ const (
 // Queue error codes (409).
 const (
 	CodeAskerGone = "asker_gone" // the question is no longer open: answered elsewhere, replaced, or its session went away
-	CodeAnswered  = "answered"   // someone already answered it
+	CodeAnswered  = "answered"   // someone already answered it (or is answering it: first answer wins)
+	// Question prompts v2 (docs/question-prompts.md).
+	CodeNeedsNewerClient = hp.CodeNeedsNewerClient // the legacy answer fields cannot answer this form
+	CodeDeliveryFailed   = hp.CodeDeliveryFailed   // amux could not deliver; nothing reached the agent, the entry is open again
+	CodeAnswerInPane     = hp.CodeAnswerInPane     // amux cannot deliver this form; answer it in the agent's pane
 )
+
+// queueConflict is the client message for a 409 queue code, or "" when code
+// is not one.
+func queueConflict(code string) string {
+	switch code {
+	case CodeAskerGone:
+		return "the question is no longer open: it was answered elsewhere, replaced, or its session went away"
+	case CodeAnswered:
+		return "this question was already answered"
+	case CodeNeedsNewerClient:
+		return "this question needs a newer amux client to answer"
+	case CodeDeliveryFailed:
+		return "amux could not deliver the answer; nothing reached the agent and the question is open again"
+	case CodeAnswerInPane:
+		return "amux cannot deliver an answer to this question; answer it in the agent's pane"
+	}
+	return ""
+}
 
 // Entry states. A listed entry is always open: an answered or stale question
 // leaves the list, and answering it reports 409 answered or asker_gone.
@@ -94,6 +118,11 @@ type QueueEntry struct {
 	CreatedAt int64 `json:"created_at,omitempty"`
 	// Questions: kind question.
 	Questions []QueueQuestion `json:"questions,omitempty"`
+	// Form is the question prompt v2 envelope (docs/question-prompts.md):
+	// every feature of the question and how amux delivers an answer. A client
+	// that understands it answers with QueueAnswerRequest.Form; Questions is
+	// the legacy view (absent when a legacy client cannot answer correctly).
+	Form *hp.Form `json:"form,omitempty"`
 	// Tool, Action, RequestID, RuntimeGeneration: kind permission. Echo
 	// runtime_generation back unchanged (a string) when answering.
 	Tool              string `json:"tool,omitempty"`
@@ -199,6 +228,10 @@ type QueueAnswerRequest struct {
 	Choice            []string `json:"choice,omitempty"`
 	Decision          string   `json:"decision,omitempty"`
 	RuntimeGeneration string   `json:"runtime_generation,omitempty"`
+	// Form answers a question entry with every feature of its form (send it
+	// only when capabilities.queue.form says the server takes it; an older
+	// server refuses the unknown key). Exclusive with answer and choice.
+	Form *hp.FormAnswer `json:"form,omitempty"`
 }
 
 // ItemStateRequest is POST /direct/v1/items/{item_id}/state.
@@ -225,6 +258,20 @@ type QueueCapabilities struct {
 	// Acknowledge: ack, the user's go-ahead that lets the overseer create a
 	// workgroup from an item (steer + create on an all_sessions grant).
 	Acknowledge bool `json:"acknowledge"`
+	// Form: question entries carry a v2 form and answers may be one. Absent:
+	// the server predates question prompts v2.
+	Form *FormCapabilities `json:"form,omitempty"`
+}
+
+// FormCapabilities is QueueCapabilities.Form.
+type FormCapabilities struct {
+	Version int      `json:"version"` // hp.FormVersion
+	Sources []string `json:"sources"` // form sources this server emits
+}
+
+// formCaps is what this server offers for question forms.
+func formCaps() *FormCapabilities {
+	return &FormCapabilities{Version: hp.FormVersion, Sources: []string{hp.FormSourceClaudeAsk, hp.FormSourceCodexUserInput}}
 }
 
 // OverseerCapabilities is CapabilitiesResponse.Overseer.
@@ -294,7 +341,7 @@ func mayAcknowledge(g Grant) bool {
 }
 
 func queueCaps(g Grant) (*QueueCapabilities, *OverseerCapabilities) {
-	return &QueueCapabilities{Read: true, AnswerKinds: answerKinds(g), Triage: g.Can(PermSteer), Acknowledge: mayAcknowledge(g)},
+	return &QueueCapabilities{Read: true, AnswerKinds: answerKinds(g), Triage: g.Can(PermSteer), Acknowledge: mayAcknowledge(g), Form: formCaps()},
 		&OverseerCapabilities{Read: g.Resource.Kind == ResourceAllSessions, Steer: mayDriveOverseer(g)}
 }
 
@@ -342,7 +389,7 @@ func projectEntry(e queue.Entry) QueueEntry {
 		ID: e.ID, Kind: e.Kind, State: EntryStateOpen, SessionID: e.Session, SessionTitle: e.SessionTitle,
 		Workgroup: e.Workgroup, Title: e.Title, Body: e.Body, CreatedAt: e.Created,
 		Tool: e.Tool, Action: e.Action, RequestID: e.RequestID, RuntimeGeneration: e.RuntimeGeneration,
-		ItemID: e.Item, SuggestedAction: e.Suggest, PRs: e.PRs, Links: e.Links,
+		ItemID: e.Item, SuggestedAction: e.Suggest, PRs: e.PRs, Links: e.Links, Form: e.Form,
 	}
 	for _, q := range e.Questions {
 		qq := QueueQuestion{Header: q.Header, Question: q.Question, MultiSelect: q.MultiSelect, Options: []QueueOption{}}
@@ -561,6 +608,25 @@ func answerFields(kind string, req QueueAnswerRequest, e *queue.Entry) (map[stri
 		}
 		f[core.SteerDecision] = req.Decision
 	case queue.KindQuestion:
+		if req.Form != nil {
+			if req.Decision != "" || req.Answer != "" || len(req.Choice) > 0 {
+				return nil, bad
+			}
+			if e != nil {
+				if e.Form == nil {
+					return nil, bad
+				}
+				if err := hp.ValidateAnswer(*e.Form, *req.Form); err != nil {
+					return nil, fmt.Errorf("%w: %v", bad, err)
+				}
+			}
+			b, err := json.Marshal(req.Form)
+			if err != nil {
+				return nil, bad
+			}
+			f[core.QueueFormField] = string(b)
+			break
+		}
 		if req.Decision != "" || (text == "") == (len(req.Choice) == 0) {
 			return nil, bad
 		}
@@ -589,9 +655,10 @@ func answerFields(kind string, req QueueAnswerRequest, e *queue.Entry) (map[stri
 }
 
 var (
-	errAskerGone      = errors.New(CodeAskerGone)
-	errOverseerDenied = errors.New("overseer steer denied")
-	errAnswered       = errors.New(CodeAnswered)
+	errAskerGone        = errors.New(CodeAskerGone)
+	errOverseerDenied   = errors.New("overseer steer denied")
+	errAnswered         = errors.New(CodeAnswered)
+	errNeedsNewerClient = errors.New(CodeNeedsNewerClient)
 )
 
 // answerRoute is POST /direct/v1/queue/{entry_id}/answer. Order: credential
@@ -629,6 +696,8 @@ func (s *Server) answerRoute(w http.ResponseWriter, r *http.Request) {
 		text = strings.Join(req.Choice, ", ")
 	} else if req.Decision != "" {
 		text = req.Decision
+	} else if req.Form != nil {
+		text = formAuditText(*req.Form)
 	}
 	var act core.Action
 	s.runQueueOp(w, l, req.IdemKey, answerHash("answer", id, req), auditRecord{Route: "queue.answer", Verb: kind, Target: id, Text: text},
@@ -655,7 +724,11 @@ func (s *Server) answerRoute(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
+			if live != nil && live.Form != nil && req.Form == nil && !hp.LegacyAnswerable(*live.Form) {
+				return errNeedsNewerClient
+			}
 			fields[core.QueueEntryField] = id
+			fields[core.QueueByField] = "direct:" + l.ClientID
 			act = core.Action{Action: core.ActionQueueAnswer, Fields: fields}
 			return nil
 		},
@@ -804,11 +877,8 @@ func (s *Server) runQueueOp(w http.ResponseWriter, l *Lease, key, bodyHash strin
 	switch {
 	case err == nil:
 		s.cfg.Authority.FinishResult(l, key, ActionResponse{OK: true})
-	case errors.As(err, &rejected) && (rejected.Code == CodeAskerGone || rejected.Code == CodeAnswered):
-		msg := "the question is no longer open: it was answered elsewhere, replaced, or its session went away"
-		if rejected.Code == CodeAnswered {
-			msg = "this question was already answered"
-		}
+	case errors.As(err, &rejected) && queueConflict(rejected.Code) != "":
+		msg := queueConflict(rejected.Code)
 		s.cfg.Authority.FinishAction(l, key, false, rejected.Code, msg)
 		status, outcome, resp = http.StatusConflict, rejected.Code, APIError{Code: rejected.Code, Error: msg}
 	case errors.As(err, &rejected):
@@ -830,6 +900,8 @@ func (s *Server) runQueueOp(w http.ResponseWriter, l *Lease, key, bodyHash strin
 
 func (s *Server) writeQueuePrecheckErr(w http.ResponseWriter, l *Lease, err error) {
 	switch {
+	case errors.Is(err, errNeedsNewerClient):
+		writeErr(w, http.StatusConflict, CodeNeedsNewerClient, queueConflict(CodeNeedsNewerClient))
 	case errors.Is(err, errAskerGone):
 		writeErr(w, http.StatusConflict, CodeAskerGone, "the question is no longer open (its runtime generation changed)")
 	case errors.Is(err, errNotFound):
@@ -950,4 +1022,28 @@ func includeOverseer(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// formAuditText records a form answer in the audit log without its free text
+// (which may be a secret): the selected option indices and whether free text
+// or a note was given.
+func formAuditText(a hp.FormAnswer) string {
+	if a.Action == hp.FormActionCancel {
+		if a.Message != "" {
+			return "form: dismissed with a reply"
+		}
+		return "form: dismissed"
+	}
+	parts := make([]string, 0, len(a.Answers))
+	for _, qa := range a.Answers {
+		p := qa.ID + "=" + strings.Trim(strings.Join(strings.Fields(fmt.Sprint(qa.Selected)), ","), "[]")
+		if qa.Other != nil {
+			p += "+other"
+		}
+		if qa.Note != "" {
+			p += "+note"
+		}
+		parts = append(parts, p)
+	}
+	return "form: " + strings.Join(parts, " ")
 }

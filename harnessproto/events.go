@@ -83,8 +83,14 @@ const (
 	// `decision` is DecisionAllow, DecisionDeny, or DecisionCleared when the
 	// producer knows the prompt closed but not which way it went.
 	TypePermissionResolved = "permission_resolved" // out: {request_id, runtime_generation?, decision}
-	TypeNotice             = "notice"              // out: {level, text, category?}
-	TypeTurnEnd            = "turn_end"            // out: {stop_reason}
+	// TypeQuestionRequest opens a question form (question.go): payload
+	// QuestionRequestPayload {request_id, runtime_generation?, form}.
+	// TypeQuestionResolved closes it: QuestionResolvedPayload {request_id,
+	// runtime_generation?, outcome, via?}, never the answer's content.
+	TypeQuestionRequest  = "question_request"
+	TypeQuestionResolved = "question_resolved"
+	TypeNotice           = "notice"   // out: {level, text, category?}
+	TypeTurnEnd          = "turn_end" // out: {stop_reason}
 	// TypePRState reports that a pull request the session owns changed state
 	// (amux's PR watcher, not the runtime): `changes` lists what moved since
 	// the last observation in human words, `wake` whether the coordinator was

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -51,6 +52,38 @@ type queueState struct {
 	mu        sync.Mutex
 	dismissed map[string]time.Time
 	answered  map[string]time.Time
+	// claims are entries whose first accepted answer is being delivered: a
+	// second answer meanwhile is "answered" (first answer wins), and a failed
+	// delivery releases the claim so the entry is open again.
+	claims map[string]harnessproto.FormClaim
+}
+
+// claim takes id for by, or reports the claim already held.
+func (q *queueState) claim(id, by string, now time.Time) (harnessproto.FormClaim, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if c, held := q.claims[id]; held {
+		return c, false
+	}
+	if q.claims == nil {
+		q.claims = map[string]harnessproto.FormClaim{}
+	}
+	c := harnessproto.FormClaim{By: by, At: now.UnixMilli()}
+	q.claims[id] = c
+	return c, true
+}
+
+func (q *queueState) unclaim(id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.claims, id)
+}
+
+func (q *queueState) claimOf(id string) (harnessproto.FormClaim, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	c, ok := q.claims[id]
+	return c, ok
 }
 
 func (q *queueState) isDismissed(id string) bool {
@@ -102,6 +135,18 @@ func (q *queueState) prune(live map[string]bool) {
 	}
 }
 
+// steerAnswerAction maps a SteerAnswer steer (harnessproto.VerbAnswer) onto
+// the queue answer it is: the request id names the entry, the answer is its
+// form answer, and the steered session binds it.
+func steerAnswerAction(a core.Action) core.Action {
+	return core.Action{Action: core.ActionQueueAnswer, Fields: map[string]string{
+		core.QueueEntryField:   a.Fields[core.SteerRequestID],
+		core.QueueFormField:    a.Fields[core.SteerAnswerField],
+		core.QueueSessionField: firstNonEmpty(a.ID, "-"),
+		core.QueueByField:      "cloud",
+	}}
+}
+
 // isQueueVerb reports whether an action is a queue verb.
 func isQueueVerb(verb string) bool {
 	return verb == core.ActionQueueAnswer || verb == core.ActionQueueDismiss
@@ -117,10 +162,25 @@ type queueSources struct {
 	inbox     func() ([]items.Item, error)
 }
 
-// openQuestion is one unanswered AskUserQuestion call.
+// openQuestion is one unanswered AskUserQuestion call: its legacy questions
+// and, when its input parsed as one, the full v2 form (previews included).
 type openQuestion struct {
 	ToolUseID string
 	Questions []queue.Question
+	Form      *harnessproto.Form
+}
+
+// form is the question's v2 form, built from the legacy questions when the
+// source did not provide one.
+func (q openQuestion) form() harnessproto.Form {
+	if q.Form != nil {
+		return *q.Form
+	}
+	raw, _ := json.Marshal(struct {
+		Questions []queue.Question `json:"questions"`
+	}{q.Questions})
+	f, _ := queue.ClaudeForm(raw)
+	return f
 }
 
 // queuePermission is one open permission request with its bound generation.
@@ -228,7 +288,11 @@ func claudeOpenQuestionsIn(path string) []openQuestion {
 				if !ok {
 					continue
 				}
-				open = append(open, openQuestion{ToolUseID: ev.ItemID, Questions: qs})
+				oq := openQuestion{ToolUseID: ev.ItemID, Questions: qs}
+				if f, ok := queue.ClaudeForm(p.RawInput); ok {
+					oq.Form = &f
+				}
+				open = append(open, oq)
 			case harnessproto.TypeToolResult:
 				for i := range open {
 					if open[i].ToolUseID == ev.ItemID {
@@ -293,6 +357,11 @@ func (d *Daemon) deriveQueue(src queueSources) (entries []queue.Entry, inbox que
 				if len(q.Questions) > 1 {
 					e.Title += fmt.Sprintf(" (+%d more)", len(q.Questions)-1)
 				}
+				if f := q.form(); len(f.Questions) > 0 {
+					f.Delivery = d.formDelivery(h, sess, e.ID, f)
+					e.Form = &f
+					queue.ProjectLegacy(&e)
+				}
 				entries = append(entries, e)
 			}
 		}
@@ -347,7 +416,15 @@ func (d *Daemon) queueOverview(fields map[string]string) queue.Overview {
 	out := entries[:0]
 	for _, e := range entries {
 		live[e.ID] = true
+		if d.queue.wasAnswered(e.ID, time.Now()) {
+			continue // answered; gone once the runtime records it
+		}
 		e.Dismissed = d.queue.isDismissed(e.ID)
+		if c, held := d.queue.claimOf(e.ID); held && e.Form != nil {
+			f := *e.Form
+			f.Claim = &c
+			e.Form = &f
+		}
 		if e.Dismissed && !all {
 			continue
 		}
@@ -383,7 +460,12 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 	}
 	now := time.Now()
 	e, found := d.findQueueEntry(id)
-	if !found {
+	if found && a.Fields[core.QueueSessionField] != "" && a.Fields[core.QueueSessionField] != e.Session {
+		found = false // not this session's question: never answer across sessions
+	}
+	if !found || d.queue.wasAnswered(id, now) {
+		// Answered by amux: the runtime may not have recorded the answer yet,
+		// so the entry can still derive, but it must not be answered twice.
 		if d.queue.wasAnswered(id, now) {
 			return core.Result{Type: "result", Code: codeAnswered, Error: fmt.Sprintf("queue entry %s was already answered", id)}
 		}
@@ -396,11 +478,128 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 		d.queue.dismiss(id, now)
 		return ok()
 	}
+	// First answer wins: the claim is taken before anything is delivered, so
+	// two concurrent answers cannot both reach the agent.
+	by := firstNonEmpty(a.Fields[core.QueueByField], "host")
+	if c, ok := d.queue.claim(id, by, now); !ok {
+		return core.Result{Type: "result", Code: codeAnswered, Error: fmt.Sprintf("queue entry %s is already being answered (by %s at %s)",
+			id, c.By, time.UnixMilli(c.At).Format(time.Kitchen))}
+	}
+	defer d.queue.unclaim(id)
 	res := d.answerQueueEntry(ctx, e, a.Fields)
 	if res.OK {
 		d.queue.markAnswered(id, now)
 	}
 	return res
+}
+
+// formDelivery is how amux delivers an answer to an open form right now
+// (harnessproto.Delivery*). Without a structured channel or a verified key
+// path for this prompt it is DeliveryPane: a v2 answer is refused with
+// answer_in_pane, while a legacy answer keeps the legacy typed reply.
+func (d *Daemon) formDelivery(h agent.Harness, sess store.Session, entryID string, f harnessproto.Form) string {
+	return harnessproto.DeliveryPane
+}
+
+// questionAnswer reads a question entry's answer: a v2 FormAnswer (form
+// field), or a legacy one (choice/text) mapped onto the form. legacy reports
+// the latter.
+func questionAnswer(e queue.Entry, f map[string]string) (a harnessproto.FormAnswer, legacy bool, res core.Result) {
+	if raw := strings.TrimSpace(f[core.QueueFormField]); raw != "" {
+		if e.Form == nil {
+			return a, false, fail("queue entry %s has no question form", e.ID)
+		}
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&a); err != nil {
+			return a, false, fail("invalid form answer: %v", err)
+		}
+		if err := harnessproto.ValidateAnswer(*e.Form, a); err != nil {
+			return a, false, fail("%v", err)
+		}
+		return a, false, core.Result{OK: true}
+	}
+	text := strings.TrimSpace(f[core.QueueTextField])
+	choices := queue.ParseChoices(f[core.QueueChoiceField])
+	if e.Form == nil {
+		return a, true, core.Result{OK: true} // no form: the legacy path alone
+	}
+	a, err := queue.LegacyAnswer(*e.Form, choices, text)
+	switch {
+	case errors.Is(err, queue.ErrNeedsNewerClient):
+		return a, true, core.Result{Type: "result", Code: harnessproto.CodeNeedsNewerClient,
+			Error: fmt.Sprintf("queue entry %s needs a newer amux client to answer (amux question answer, or the latest web/Android app)", e.ID)}
+	case err != nil:
+		if len(choices) == 0 && text == "" {
+			return a, true, fail("an answer needs -f %s=<label> or -f %s=<text>", core.QueueChoiceField, core.QueueTextField)
+		}
+		return a, true, fail("%v (choice must name the question's option labels, one line per question, | between labels of a multi-select)", err)
+	}
+	return a, true, core.Result{OK: true}
+}
+
+// deliverQuestion delivers a question entry's answer. Without a structured or
+// key channel, a legacy answer keeps the legacy typed reply (#316: Esc on the
+// selector, then the reply as the user's prompt), which is exactly what legacy
+// clients have always done; a v2 answer is refused rather than flattened.
+func (d *Daemon) deliverQuestion(ctx context.Context, e queue.Entry, f map[string]string) core.Result {
+	a, legacy, res := questionAnswer(e, f)
+	if !res.OK {
+		return res
+	}
+	if e.Form == nil {
+		choices := queue.ParseChoices(f[core.QueueChoiceField])
+		if !queue.ValidChoices(e.Questions, choices) {
+			return fail("choice must name the question's option labels, one line per question (| between labels of a multi-select)")
+		}
+		reply := queue.FormatAnswer(e.Questions, choices, strings.TrimSpace(f[core.QueueTextField]))
+		if reply == "" {
+			return fail("an answer needs -f %s=<label> or -f %s=<text>", core.QueueChoiceField, core.QueueTextField)
+		}
+		return d.queuePrompt(ctx, e.Session, reply)
+	}
+	switch e.Form.Delivery {
+	case harnessproto.DeliveryStructured, harnessproto.DeliveryKeys:
+		return d.deliverForm(ctx, e, a)
+	}
+	if !legacy {
+		return core.Result{Type: "result", Code: harnessproto.CodeAnswerInPane,
+			Error: fmt.Sprintf("amux cannot deliver an answer to queue entry %s right now; answer it in the agent's pane", e.ID)}
+	}
+	return d.queuePrompt(ctx, e.Session, typedReply(*e.Form, a))
+}
+
+// deliverForm delivers a v2 answer through the form's channel.
+func (d *Daemon) deliverForm(ctx context.Context, e queue.Entry, a harnessproto.FormAnswer) core.Result {
+	return core.Result{Type: "result", Code: harnessproto.CodeDeliveryFailed, Error: "no delivery channel for this question"}
+}
+
+// typedReply renders an answer as the legacy typed reply: the chosen labels
+// (FormatAnswer), the free text, or a dismissal's message.
+func typedReply(f harnessproto.Form, a harnessproto.FormAnswer) string {
+	if a.Action == harnessproto.FormActionCancel {
+		return a.Message
+	}
+	qs := queue.LegacyQuestions(f)
+	choices := make([][]string, len(f.Questions))
+	text := ""
+	for _, qa := range a.Answers {
+		for i, q := range f.Questions {
+			if q.ID != qa.ID {
+				continue
+			}
+			for _, idx := range qa.Selected {
+				choices[i] = append(choices[i], q.Options[idx].Label)
+			}
+			if qa.Other != nil {
+				choices[i] = append(choices[i], strings.TrimSpace(*qa.Other))
+				if len(f.Questions) == 1 && len(qa.Selected) == 0 {
+					choices[i], text = nil, strings.TrimSpace(*qa.Other)
+				}
+			}
+		}
+	}
+	return queue.FormatAnswer(qs, choices, text)
 }
 
 // answerQueueEntry delivers one answer per the entry's kind.
@@ -420,15 +619,7 @@ func (d *Daemon) answerQueueEntry(ctx context.Context, e queue.Entry, f map[stri
 			core.SteerRequestID: e.RequestID, access.RuntimeGenerationField: e.RuntimeGeneration,
 		}})
 	case queue.KindQuestion:
-		choices := queue.ParseChoices(f[core.QueueChoiceField])
-		if !queue.ValidChoices(e.Questions, choices) {
-			return fail("choice must name the question's option labels, one line per question (| between labels of a multi-select)")
-		}
-		reply := queue.FormatAnswer(e.Questions, choices, text)
-		if reply == "" {
-			return fail("an answer needs -f %s=<label> or -f %s=<text>", core.QueueChoiceField, core.QueueTextField)
-		}
-		return d.queuePrompt(ctx, e.Session, reply)
+		return d.deliverQuestion(ctx, e, f)
 	case queue.KindGoalInput:
 		if text == "" {
 			return fail("an answer needs -f %s=<text>", core.QueueTextField)
@@ -459,6 +650,9 @@ func (d *Daemon) answerQueueEntry(ctx context.Context, e queue.Entry, f map[stri
 // to a Claude session sitting on an AskUserQuestion selector first dismisses it
 // (#316), so the text lands as the answer; a stopped session is started by it.
 func (d *Daemon) queuePrompt(ctx context.Context, id, text string) core.Result {
+	if d.queuePromptFn != nil {
+		return d.queuePromptFn(ctx, id, text)
+	}
 	return d.handle(ctx, core.Action{Action: core.ActionSteer, ID: id, Fields: map[string]string{
 		core.SteerVerb: core.SteerPrompt, core.SteerText: text,
 	}})

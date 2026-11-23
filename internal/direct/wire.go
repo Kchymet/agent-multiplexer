@@ -295,6 +295,10 @@ type SessionCaps struct {
 	Archive    bool `json:"archive,omitempty"`
 	Unarchive  bool `json:"unarchive,omitempty"`
 	AddAgent   bool `json:"add_agent,omitempty"`
+	// Question: this grant can answer the session's question forms through
+	// the queue (steer permission, and the daemon can deliver v2 answers for
+	// the session: harnessproto.SessionCaps.Question).
+	Question bool `json:"question,omitempty"`
 }
 
 // Session is one inventory row, an allowlisted projection of core.Session.

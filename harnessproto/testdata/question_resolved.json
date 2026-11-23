@@ -1,0 +1,1 @@
+{"type":"runtime-events","seq":10,"sessionId":"s1","runtime":"claude","events":[{"type":"question_resolved","item_id":"q-k3v9x2m4pa","direction":"out","payload":{"request_id":"q-k3v9x2m4pa","runtime_generation":"gen-7","outcome":"answered","via":"pane"}}]}

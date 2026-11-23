@@ -1,6 +1,9 @@
 # Question prompts v2: parity with Claude Code and Codex (design)
 
-Status: design (phase 1). Workgroup "question prompt parity".
+Status: approved design (0caeb5f); phase 2 implementation in progress.
+Workgroup "question prompt parity". **This document is the cross-repo
+contract** for harness and harness-android. Every schema change lands here in
+the same commit; see "Contract changelog" at the end.
 Scope: agent-multiplexer (daemon, TUI, CLI, direct), harness (web and cloud
 relay), harness-android.
 
@@ -211,7 +214,15 @@ There is no structured channel for questions.
    ignore what they do not understand. The daemon therefore decides which
    legacy fields to fill (§2.5) and which legacy answers to accept (§3.5).
 
-### 2.2 Go types (`internal/queue`, re-exported for wires)
+### 2.2 Go types
+
+The types live in `harnessproto/question.go`: stdlib only, importable by
+harness. `internal/queue/form.go` builds forms, projects them onto the legacy
+fields and maps legacy answers. The block below is the design sketch; the
+exact code is in `harnessproto/question.go`, which names the types `Form`,
+`FormQuestion`, `FormOption`, `FormClaim`, `FormAnswer`, `QuestionAnswer`,
+`QuestionRequestPayload`, `QuestionResolvedPayload` and
+`ValidateAnswer`/`LegacyAnswerable`.
 
 ```go
 // FormVersion is the question-form wire version; it changes only for a
@@ -339,11 +350,16 @@ The same `form` object appears in four places:
 ### 2.4 harnessproto additions (the published contract)
 
 - `const QuestionPromptsFeature = "question-prompts-v2"`.
-- `SessionCaps.Question bool \`json:"question"\``. This is an honest cap, true
-  only when the daemon can deliver a v2 answer for this session now:
-  - a Claude session whose hold hook is installed, or whose dialog the keys
-    path supports;
+- `SessionCaps.Question bool \`json:"question,omitempty"\``. It is true when
+  the daemon can deliver v2 answers for this session's runtime under its
+  default configuration:
+  - a Claude session with the hold hook enabled;
   - a Codex session in structured mode.
+
+  The cap is static per session, like the other caps. **The open form's
+  `delivery` is authoritative per prompt**: it reads `pane` when amux cannot
+  deliver that particular prompt. `omitempty` keeps every existing caps
+  fixture byte-identical.
 - Event `TypeQuestionRequest = "question_request"` with payload
   `{request_id, runtime_generation, form}`. `request_id` is the queue entry
   id (`q-…`), which is deterministic, so the transcript card and the queue
@@ -354,12 +370,25 @@ The same `form` object appears in four places:
   - `via` ∈ `amux | pane | unknown`.
   - It never carries the answer's content: secrets and audit stay in the
     daemon.
-- Verb `VerbAnswer = "answer"` with fields `request_id`,
-  `runtime_generation` and `answer`. `answer` is the JSON-encoded
-  `FormAnswer` (§3.1); the fields stay `map[string]string`, as every hop
-  requires. `SessionVerbs` lists it, so an old daemon returns
-  `ErrUnsupportedVerb` and the web hides the control
+- Verb `VerbAnswer = "answer"` (in `SessionVerbs` and `SteeringVerbs`) with
+  fields:
+  - `request_id`: the queue entry id;
+  - `runtime_generation`: accepted; the entry id already binds the
+    generation;
+  - `answer` (`FieldAnswer`): the JSON-encoded `FormAnswer` (§3.1).
+
+  The fields stay `map[string]string`, as every hop requires. An old daemon
+  returns `ErrUnsupportedVerb`, and the web hides the control
   (`harness/backend/actions/providers.go:184-187`).
+  - The daemon serves the verb as a queue answer **bound to the steered
+    session**. An entry of another session is `asker_gone`.
+  - Only the host (the user, or the cloud relay acting for the user) may
+    send it. `access.allowSteer` admits no restricted session principal for
+    it, so a coordinator or the overseer can never answer for the user.
+  - The relay's claim is recorded as `by: "cloud"`.
+- The 409 codes are `asker_gone`, `answered`, `needs_newer_client`,
+  `delivery_failed` and `answer_in_pane` (`harnessproto.Code*`). On the
+  relay they arrive as the action result's `code`.
 - `harnessproto.Version` and `EnrichmentsVersion` do not change. Consumers
   MUST pass the two new event types through as unknown (already required,
   `events.go:60-64`).
@@ -371,8 +400,30 @@ Direct gains:
   server predates v2.
 - `QueueAnswerRequest.Form *FormAnswer \`json:"form,omitempty"\``. An old
   server's strict decoder returns 400 for it, so a client sends it only
-  after seeing `capabilities.queue.form.version == 2`.
-- A per-session `DirectSessionCaps.question`.
+  after seeing `capabilities.queue.form.version == 2`. It cannot be combined
+  with `answer`, `choice` or `decision`.
+- `QueueEntry.Form *Form \`json:"form,omitempty"\``.
+- A per-session `SessionCaps.question` (`omitempty`). It is true when the
+  grant has `steer` and the row's caps say `question`; for the overseer row
+  the grant must also be one that may drive it.
+- 409 `needs_newer_client`, `delivery_failed` and `answer_in_pane` join
+  `asker_gone` and `answered`.
+- The audit record of a form answer never holds its free text. It reads
+  `form: q0=0 q1=0,1+other+note` or `form: dismissed[ with a reply]`.
+- **Fixtures.**
+  - `docs/direct/fixtures/questions-v2/` (with `SHA256SUMS`) is the
+    byte-exact contract. It holds entries with forms and their legacy
+    projection, the four answer shapes, the conflict errors, the
+    capabilities with `queue.form`, session caps, and the two runtime
+    events.
+  - `queue-v1` is frozen: it describes a server before v2, so existing
+    copies stay valid.
+  - The harnessproto goldens are `question_request.json`,
+    `question_resolved.json`, `session_action_answer.json` and
+    `session_caps_question.json`.
+
+The cloud feature: the provider advertises `question-prompts-v2` whenever it
+publishes sessions with session verbs enabled.
 
 ### 2.5 Backward compatibility rule
 
@@ -450,6 +501,9 @@ fetched (§5.4).
   answerer gets 409 `delivery_failed` with the reason, and the entry
   reappears for everyone. A failure after submit is never retried; that
   case is `cleared` with `via: unknown`.
+- Once amux has delivered an answer, the entry leaves every list and refuses
+  further answers (`answered`), even before the runtime records it.
+  Previously a second answer in that window was delivered again.
 - `resolved` is kept for `queueAnsweredTTL` (10 min, as today). A later
   answer gets `answered` (with outcome); after the TTL it gets `asker_gone`.
 - The overseer still never answers (`docs/direct-console.md` §4).
@@ -959,3 +1013,28 @@ shared fixtures `docs/direct/fixtures/questions-v2/`:
 7. **Annotations are not in the official hook docs**; they are in the tool
    schema. If Claude drops them, notes are lost silently. The fixture must
    confirm that the model sees them.
+
+---
+
+## Contract changelog
+
+Each entry names the agent-multiplexer branch commit that carries it.
+Members pin to these.
+
+- **Layer 1, model and wire** (branch `amux/macstrosity/923958-7bead5`):
+  - `harnessproto/question.go`: Form/answer types, `ValidateAnswer`,
+    `LegacyAnswerable`, the `question-prompts-v2` feature, and codes.
+  - `VerbAnswer`/`FieldAnswer`, `TypeQuestionRequest`/`TypeQuestionResolved`
+    and `SessionCaps.Question` (`omitempty`).
+  - direct `queue.form` caps, `QueueEntry.form`, `QueueAnswerRequest.form`,
+    `SessionCaps.question` and the new 409 codes.
+  - fixtures `docs/direct/fixtures/questions-v2/`.
+  - Deviations from the approved design:
+    - the cap means "deliverable under the default configuration", and the
+      form's `delivery` is authoritative (§2.4);
+    - `answer_in_pane` is added;
+    - `runtime_generation` on `VerbAnswer` is accepted but not required;
+    - partial legacy labels on a several-question entry are refused (§3.5).
+
+  At this layer every Claude form reports `delivery: pane` (no channel yet),
+  and legacy answers keep the typed reply.

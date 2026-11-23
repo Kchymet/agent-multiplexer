@@ -1,0 +1,57 @@
+{
+  "type": "question_request",
+  "item_id": "q-eeeeeeeeee",
+  "direction": "out",
+  "payload": {
+    "request_id": "q-eeeeeeeeee",
+    "runtime_generation": "gen-7",
+    "form": {
+      "version": 2,
+      "source": "claude_ask_user_question",
+      "questions": [
+        {
+          "id": "q0",
+          "header": "Layout",
+          "question": "Which layout should the settings page use?",
+          "options": [
+            {
+              "label": "Tabs (Recommended)",
+              "description": "One tab per area",
+              "preview": "┌ General │ Account │ Billing ┐\n│ …                          │"
+            },
+            {
+              "label": "Single page",
+              "description": "One long scroll",
+              "preview": "General\n───────\nAccount\n───────"
+            }
+          ],
+          "other": true,
+          "notes": true
+        },
+        {
+          "id": "q1",
+          "header": "Extras",
+          "question": "Which extras do you want?",
+          "options": [
+            {
+              "label": "Search",
+              "description": "Filter settings"
+            },
+            {
+              "label": "Dark mode"
+            },
+            {
+              "label": "Export"
+            }
+          ],
+          "multi_select": true,
+          "other": true,
+          "notes": true
+        }
+      ],
+      "cancel": true,
+      "reply": true,
+      "delivery": "structured"
+    }
+  }
+}

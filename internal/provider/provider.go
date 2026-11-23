@@ -563,6 +563,11 @@ func (p *Provider) features() []string {
 	if p.runtimeHistoryActive() {
 		out = appendUnique(out, harnessproto.RuntimeEventsHistoryFeature)
 	}
+	if p.publishing() && !p.cfg.ReadOnlySessions && p.cfg.ApplyAction != nil {
+		// Question forms ride the published rows' queue and runtime events;
+		// answering them is VerbAnswer, a steering verb.
+		out = appendUnique(out, harnessproto.QuestionPromptsFeature)
+	}
 	return out
 }
 

@@ -1100,7 +1100,7 @@ func (s *Server) idemReply(w http.ResponseWriter, l *Lease, out idemOutcome, rec
 			status := http.StatusUnprocessableEntity
 			if rec.Code == CodeUnavailable || rec.Code == CodeDaemonUpgradeRequired {
 				status = http.StatusServiceUnavailable
-			} else if rec.Code == CodeAskerGone || rec.Code == CodeAnswered {
+			} else if queueConflict(rec.Code) != "" {
 				status = http.StatusConflict
 			}
 			writeErr(w, status, rec.Code, rec.Error)

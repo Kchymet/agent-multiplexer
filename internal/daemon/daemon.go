@@ -271,6 +271,9 @@ type Daemon struct {
 	// (tests only).
 	queue          queueState
 	queueSourcesFn func() queueSources
+	// queuePromptFn, when non-nil, replaces the typed delivery of a queue
+	// answer (tests).
+	queuePromptFn func(ctx context.Context, id, text string) core.Result
 	// prWakeAdmission runs after a watcher delivery holds its final membership,
 	// repo, and coordinator admission. Production leaves it nil; tests use it to
 	// prove mutations cannot cross the authority recheck and prompt boundary.

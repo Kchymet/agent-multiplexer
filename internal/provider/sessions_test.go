@@ -495,6 +495,21 @@ func TestSteeringVerbsRouteToSteer(t *testing.T) {
 				core.SteerDecision:                  core.SteerDeny,
 				core.SteerReason:                    "writes outside the worktree",
 			}},
+		{harnessproto.VerbAnswer,
+			map[string]string{
+				harnessproto.FieldRequestID:         "q-aaaaaaaaaa",
+				harnessproto.FieldRuntimeGeneration: "gen-3",
+				harnessproto.FieldAnswer:            `{"version":2,"action":"cancel"}`,
+				harnessproto.FieldText:              "carried, unused",
+				"nosuchfield":                       "dropped",
+			},
+			map[string]string{
+				core.SteerVerb:                      core.SteerAnswer,
+				core.SteerRequestID:                 "q-aaaaaaaaaa",
+				harnessproto.FieldRuntimeGeneration: "gen-3",
+				core.SteerAnswerField:               `{"version":2,"action":"cancel"}`,
+				core.SteerText:                      "carried, unused",
+			}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.verb, func(t *testing.T) {

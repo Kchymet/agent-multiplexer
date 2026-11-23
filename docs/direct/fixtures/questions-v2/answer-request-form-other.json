@@ -1,0 +1,19 @@
+{
+  "idem_key": "5c1e9d2a-other",
+  "form": {
+    "version": 2,
+    "action": "answer",
+    "answers": [
+      {
+        "id": "q0",
+        "other": "a two-column grid"
+      },
+      {
+        "id": "q1",
+        "selected": [
+          2
+        ]
+      }
+    ]
+  }
+}

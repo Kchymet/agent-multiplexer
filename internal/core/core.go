@@ -112,6 +112,12 @@ const (
 	// SteerGoalObjective and SteerGoalBudget. Pausing and resuming here are the
 	// user's decisions; ordinary prompts never override them.
 	SteerGoal = "goal"
+	// SteerAnswer answers a question form (harnessproto.VerbAnswer):
+	// SteerRequestID names the queue entry, SteerAnswerField carries the
+	// JSON-encoded harnessproto.FormAnswer. The daemon serves it as a queue
+	// answer bound to this session.
+	SteerAnswer      = "answer"
+	SteerAnswerField = "answer"
 
 	SteerAllow = "allow"
 	SteerDeny  = "deny"

@@ -1,0 +1,61 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "permissions": [
+    "read",
+    "steer",
+    "approve",
+    "manage",
+    "create"
+  ],
+  "resource_scope": {
+    "kind": "all_sessions"
+  },
+  "server_verbs": [
+    "prompt",
+    "stop",
+    "interject",
+    "goal",
+    "permission",
+    "start",
+    "rename",
+    "archive",
+    "unarchive",
+    "add-agent",
+    "new-workgroup",
+    "new-workgroup-empty"
+  ],
+  "verbs": [
+    "prompt",
+    "stop",
+    "interject",
+    "permission",
+    "start",
+    "rename",
+    "archive",
+    "unarchive",
+    "add-agent"
+  ],
+  "create_workgroup": true,
+  "queue": {
+    "read": true,
+    "answer_kinds": [
+      "question",
+      "permission",
+      "goal_input",
+      "decision_needed"
+    ],
+    "triage": true,
+    "acknowledge": true,
+    "form": {
+      "version": 2,
+      "sources": [
+        "claude_ask_user_question",
+        "codex_request_user_input"
+      ]
+    }
+  },
+  "overseer": {
+    "read": true,
+    "steer": true
+  }
+}

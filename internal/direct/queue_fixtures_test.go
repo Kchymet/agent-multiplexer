@@ -38,6 +38,10 @@ func queueFixtureFiles(t *testing.T) map[string][]byte {
 	sum := summarize(g, v)
 	qc, oc := queueCaps(g)
 	rc, ro := queueCaps(Grant{Resource: ResourceScope{Kind: ResourceWorkgroups, Workgroups: []string{"771951"}}, Perms: []string{PermRead, PermSteer}})
+	// queue-v1 is frozen: it describes a server before question prompts v2
+	// (their capabilities live in questions-v2), so the copies other repos
+	// pin stay valid.
+	qc.Form, rc.Form = nil, nil
 	overseerRow := project(g, rows[4], v.byID)
 	return map[string][]byte{
 		"queue-response.json":                 js(QueueResponse{ServerID: id.ServerID, Entries: v.entries, Items: v.items}),

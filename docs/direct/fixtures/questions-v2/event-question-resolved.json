@@ -1,0 +1,11 @@
+{
+  "type": "question_resolved",
+  "item_id": "q-eeeeeeeeee",
+  "direction": "out",
+  "payload": {
+    "request_id": "q-eeeeeeeeee",
+    "runtime_generation": "gen-7",
+    "outcome": "answered",
+    "via": "pane"
+  }
+}

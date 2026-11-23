@@ -167,6 +167,13 @@ const (
 	VerbStop       = "stop"
 	VerbPermission = "permission"
 	VerbGoal       = "goal"
+	// VerbAnswer answers (or dismisses) a question form the runtime surfaced as
+	// a TypeQuestionRequest event (question.go): FieldRequestID echoes its
+	// request_id, FieldRuntimeGeneration its runtime_generation, and
+	// FieldAnswer carries the JSON-encoded FormAnswer. Like VerbPermission it is
+	// correlated: a daemon MUST refuse a request_id that does not name an open
+	// form ("asker_gone") and a second answer to one ("answered").
+	VerbAnswer = "answer"
 )
 
 // SessionVerbs is the closed set of accepted session-action verbs. A consumer
@@ -188,6 +195,7 @@ var SessionVerbs = map[string]bool{
 	VerbStop:              true,
 	VerbPermission:        true,
 	VerbGoal:              true,
+	VerbAnswer:            true,
 }
 
 // SteeringVerbs is the subset of SessionVerbs that steers the agent inside a
@@ -200,6 +208,7 @@ var SteeringVerbs = map[string]bool{
 	VerbStop:       true,
 	VerbPermission: true,
 	VerbGoal:       true,
+	VerbAnswer:     true,
 }
 
 // session-action field keys (MuxMsg.Fields) for the steering verbs. Lifecycle
@@ -210,6 +219,7 @@ const (
 	FieldRequestID = "request_id" // permission: the request_id from the permission_request event
 	FieldDecision  = "decision"   // permission: DecisionAllow | DecisionDeny
 	FieldReason    = "reason"     // permission: optional free-text rationale
+	FieldAnswer    = "answer"     // answer: the JSON-encoded FormAnswer
 	// FieldRuntimeGeneration is the daemon-issued opaque identity of the live
 	// runtime that published a permission request. A permission decision must
 	// echo it so a request id cannot be replayed against a replacement runtime;

@@ -1,0 +1,24 @@
+{
+  "idem_key": "5c1e9d2a-answer",
+  "form": {
+    "version": 2,
+    "action": "answer",
+    "answers": [
+      {
+        "id": "q0",
+        "selected": [
+          0
+        ],
+        "note": "keep the icons"
+      },
+      {
+        "id": "q1",
+        "selected": [
+          0,
+          1
+        ],
+        "other": "keyboard shortcuts"
+      }
+    ]
+  }
+}
