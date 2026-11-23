@@ -746,7 +746,7 @@ func directSpec() *cmdSpec {
 		flagSpec{Name: "tailnet", Usage: "derive listen, endpoint and certificate from this machine's tailnet\n(--tailnet=false leaves tailnet mode)"},
 		flagSpec{Name: "port", Arg: "<n>", Usage: "tailnet: port for the derived listen address and endpoint (default 8443)"},
 		flagSpec{Name: "tailscale-socket", Arg: "<path>", Usage: "tailnet: tailscaled socket (default: the platform's)"},
-		flagSpec{Name: "no-default-origin", Usage: "tailnet: do not allow the orchestrator's web origin by default"},
+		flagSpec{Name: "no-default-origin", Usage: "tailnet: do not allow the Harness web origin by default (registered.webOrigin;\nwithout it, pass --allow-origin <Harness web origin>)"},
 		flagSpec{Name: "no-wait", Usage: "do not wait for the listener to become ready"},
 	)
 	return &cmdSpec{

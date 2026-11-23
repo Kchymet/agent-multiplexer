@@ -68,6 +68,11 @@ type DirectCapabilities struct {
 	// Handoff is set by hosts that also mint device tickets
 	// (DirectEnrollRequest.Handoff). Absent on older hosts.
 	Handoff bool `json:"handoff,omitempty"`
+	// Approval is set by hosts whose direct server accepts cloud approvals at
+	// POST /direct/v1/enroll/cloud (DirectApprovalV1), and Ceiling is their
+	// cloud-issuance ceiling (absent: unknown, an older host).
+	Approval bool           `json:"approval,omitempty"`
+	Ceiling  *DirectCeiling `json:"ceiling,omitempty"`
 }
 
 // DirectResource is a requested resource scope (all_sessions, or workgroups by

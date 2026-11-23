@@ -63,6 +63,11 @@ const (
 	OpWakeLease   = "wake_lease"
 	OpWakeSettle  = "wake_settle"
 	OpWakeRoutes  = "wake_routes"
+	// Tailnet cloud approvals: the provider's approval bridge
+	// (direct-approval-v1) long-polls parked verifies and settles Harness's
+	// answers. They never reach any other operation.
+	OpApprovalLease  = "approval_lease"
+	OpApprovalSettle = "approval_settle"
 )
 
 // wakeLeaseMaxWait keeps a lease long-poll inside the admin deadline.
@@ -97,16 +102,17 @@ type adminFrame struct {
 
 // AdminRequest is one administration call.
 type AdminRequest struct {
-	Op          string              `json:"op"`
-	Label       string              `json:"label,omitempty"`
-	Permissions []string            `json:"permissions,omitempty"`
-	Resource    ResourceScope       `json:"resource,omitempty"`
-	TTLSeconds  int64               `json:"ttl_seconds,omitempty"`
-	ClientID    string              `json:"client_id,omitempty"`
-	Cloud       *CloudPolicyRequest `json:"cloud,omitempty"`
-	Issue       *CloudIssueRequest  `json:"issue,omitempty"`
-	Wake        *WakeAdminRequest   `json:"wake,omitempty"`
-	Limit       int                 `json:"limit,omitempty"`
+	Op          string                `json:"op"`
+	Label       string                `json:"label,omitempty"`
+	Permissions []string              `json:"permissions,omitempty"`
+	Resource    ResourceScope         `json:"resource,omitempty"`
+	TTLSeconds  int64                 `json:"ttl_seconds,omitempty"`
+	ClientID    string                `json:"client_id,omitempty"`
+	Cloud       *CloudPolicyRequest   `json:"cloud,omitempty"`
+	Issue       *CloudIssueRequest    `json:"issue,omitempty"`
+	Wake        *WakeAdminRequest     `json:"wake,omitempty"`
+	Limit       int                   `json:"limit,omitempty"`
+	Approval    *ApprovalAdminRequest `json:"approval,omitempty"`
 }
 
 // AdminResponse answers it.
@@ -125,6 +131,11 @@ type AdminResponse struct {
 	Audit []AuditRecord      `json:"audit,omitempty"`
 	// Enroll is the direct enrollment exchange activity (OpCloudStatus).
 	Enroll *EnrollActivity `json:"enroll,omitempty"`
+	// ApprovalServed says this direct server accepts cloud approvals at
+	// POST /direct/v1/enroll/cloud (OpCloudStatus); Approval carries leased
+	// verifies (OpApprovalLease).
+	ApprovalServed bool                   `json:"approval_served,omitempty"`
+	Approval       *ApprovalAdminResponse `json:"approval,omitempty"`
 }
 
 // EncodeBundle renders a paste bundle.
@@ -189,7 +200,9 @@ type AdminServer struct {
 	Logf      func(string, ...any)
 	// Wake serves the wake lease/settle/routes operations; nil refuses them.
 	Wake *WakeService
-	ln   net.Listener
+	// Approvals serves the approval lease/settle operations; nil refuses them.
+	Approvals *ApprovalQueue
+	ln        net.Listener
 }
 
 // AdminSocketPath is the admin socket inside root.
@@ -273,6 +286,8 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 	switch {
 	case isWakeOp(f.Request.Op):
 		resp = AdministerWake(ctx, s.Authority, s.Wake, *f.Request)
+	case isApprovalOp(f.Request.Op):
+		resp = AdministerApproval(ctx, s.Approvals, *f.Request)
 	case f.Request.Op == OpIssueCloudCode:
 		var at CloudAttempt
 		resp, at = AdministerCloudIssue(s.Authority, s.Endpoints, *f.Request)
@@ -280,6 +295,9 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 		s.Logf("direct: cloud enrollment request reached this host: %s", at)
 	default:
 		resp = Administer(s.Authority, s.Endpoints, *f.Request)
+		if f.Request.Op == OpCloudStatus && resp.OK {
+			resp.ApprovalServed = s.Approvals != nil
+		}
 	}
 	_ = enc.Encode(adminFrame{Type: "response", Response: &resp})
 }

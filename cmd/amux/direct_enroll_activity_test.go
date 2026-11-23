@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/directsvc"
+
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 
 	"amux/internal/direct"
@@ -81,5 +83,39 @@ func TestDirectResourceFlagsDefaultAllSessions(t *testing.T) {
 	}
 	if _, err := directResourceFlags(true, []string{"wg1"}); err == nil {
 		t.Fatal("both accepted")
+	}
+}
+
+// --tailnet prefers the Harness web origin from the provider's registration
+// (registered.webOrigin) over deriving one from provider.toml, and a running
+// tailnet server allows the live webOrigin unless --no-default-origin.
+func TestTailnetWebOriginFromRegistration(t *testing.T) {
+	sandboxCLI(t)
+	if o := providerWebOrigin(); o != "" {
+		t.Fatalf("origin before any registration: %q", o)
+	}
+	if err := provider.WriteStatus(provider.StatusPath(), provider.Status{WebOrigin: "https://harness.example.dev"}); err != nil {
+		t.Fatal(err)
+	}
+	origin, source, err := defaultOrchestratorOrigin()
+	if err != nil || origin != "https://harness.example.dev" || !strings.Contains(source, "registered.webOrigin") {
+		t.Fatalf("default origin %q from %q: %v", origin, source, err)
+	}
+	cfg, err := settingsServeConfig(directsvc.Settings{Tailnet: &directsvc.TailnetSettings{}})
+	if err != nil || cfg.ExtraOrigins == nil || strings.Join(cfg.ExtraOrigins(), ",") != "https://harness.example.dev" {
+		t.Fatalf("tailnet serve config extra origins: %v", err)
+	}
+	if cfg, _ := settingsServeConfig(directsvc.Settings{Tailnet: &directsvc.TailnetSettings{OriginSource: originDefaultDisabled}}); cfg.ExtraOrigins != nil {
+		t.Fatal("--no-default-origin still allows the live webOrigin")
+	}
+	if cfg, _ := settingsServeConfig(directsvc.Settings{}); cfg.ExtraOrigins != nil {
+		t.Fatal("a non-tailnet server allows the live webOrigin")
+	}
+	// A non-canonical value is never allowed.
+	if err := provider.WriteStatus(provider.StatusPath(), provider.Status{WebOrigin: "https://harness.example.dev/app"}); err != nil {
+		t.Fatal(err)
+	}
+	if o := providerWebOrigin(); o != "" {
+		t.Fatalf("non-canonical origin accepted: %q", o)
 	}
 }

@@ -38,6 +38,13 @@ type Config struct {
 	Logf         func(format string, args ...any)
 	// Wake serves the direct wake routes; nil answers them wake_disabled.
 	Wake *WakeService
+	// Approvals bridges POST /direct/v1/enroll/cloud verifies to the provider
+	// (direct-approval-v1); nil answers them orchestrator_unreachable.
+	Approvals *ApprovalQueue
+	// ExtraOrigins, when set, supplies further exact browser origins at
+	// request time (the Harness web origin the provider learned from its
+	// registration, registered.webOrigin). Invalid values are ignored.
+	ExtraOrigins func() []string
 }
 
 // Server is the direct HTTP surface.
@@ -100,6 +107,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST "+PathToken, s.token)
 	mux.HandleFunc("POST "+PathRevoke, s.revoke)
 	mux.HandleFunc("POST "+PathClaim, s.claim)
+	mux.HandleFunc("POST "+PathEnrollCloud, s.enrollCloud)
 	mux.HandleFunc("GET "+PathSession, s.sessions)
 	mux.HandleFunc("GET "+PathWatch, s.watch)
 	mux.HandleFunc("GET "+PathSession+"/{sid}/history", s.history)
@@ -132,7 +140,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(context.WithValue(r.Context(), endpointKey{}, endpoint))
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if !s.origins[origin] {
+		if !s.originAllowed(origin) {
 			writeErr(w, http.StatusForbidden, CodeOriginNotAllowed, "origin not allowed")
 			return
 		}
@@ -150,6 +158,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// originAllowed reports whether origin is an exact allowed browser origin:
+// configured, or supplied by ExtraOrigins (canonical values only). No
+// credentials are ever allowed: the API authenticates with bearer tokens.
+func (s *Server) originAllowed(origin string) bool {
+	if s.origins[origin] {
+		return true
+	}
+	if s.cfg.ExtraOrigins == nil {
+		return false
+	}
+	for _, o := range s.cfg.ExtraOrigins() {
+		if o == origin {
+			if c, err := CanonicalOrigin(o, true); err == nil && c == o {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type endpointKey struct{}

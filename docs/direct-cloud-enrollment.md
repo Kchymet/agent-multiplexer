@@ -6,6 +6,11 @@ its own credentials, and the cloud stays out of the data path. It is **off by
 default**. Turning it on takes two operator choices: enable the policy on the
 direct server, and opt the provider in.
 
+With tailnet endpoints, Harness approves an enrollment and the client posts
+that approval to this host directly; no enrollment payload is relayed. See
+[direct-tailnet-enroll.md](direct-tailnet-enroll.md) (`direct-approval-v1`).
+The relayed issuance below remains for older clients.
+
 ## How it works
 
 1. The client generates an RFC 7636 verifier and sends only its S256 challenge
@@ -220,8 +225,9 @@ No enrollment payload goes through Harness. When a client says it cannot
 reach this machine, `amux direct status` (`enrollment` in `--json`) says
 whether anything arrived. Three places record their latest request:
 
-- `exchange_last`: a claim or a code redemption at the direct server's
-  claim and token endpoints, since the server started. This is the request
+- `exchange_last`: a claim, an approval exchange (`enroll_cloud`, see
+  [direct-tailnet-enroll.md](direct-tailnet-enroll.md)) or a code redemption
+  at the direct server, since the server started. This is the request
   that proves a client reached this host.
 - `provider_last`: Harness's direct-enroll request for a cloud code or
   ticket, at the provider, since the provider started.

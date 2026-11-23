@@ -61,6 +61,16 @@ var directReasonHints = map[string]string{
 	direct.ReasonTicketExpired: "the code or ticket expired; mint a new one",
 	direct.ReasonTicketUsed:    "the code or ticket was already used or claimed by another device; mint a new one",
 	direct.ReasonOther:         "see amux direct logs",
+	// Approval exchanges (POST /direct/v1/enroll/cloud).
+	direct.ReasonMalformed:               "the client sent a malformed request",
+	direct.ReasonOwnerMismatch:           "the approving Harness user is not the owner this host pinned (amux direct cloud status)",
+	direct.ReasonProviderMismatch:        "the verifying provider is not the one this host pinned (amux direct cloud status)",
+	direct.ReasonApprovalUnknown:         "Harness does not know this approval (voided by a retry?); start over in Harness",
+	direct.ReasonApprovalMismatch:        "the approval was issued for another machine, server or device",
+	direct.ReasonCloudDisabled:           "cloud enrollment is off on this host (amux direct cloud enable)",
+	direct.ReasonRateLimited:             "too many attempts or codes; wait and retry",
+	direct.ReasonOrchestratorUnreachable: "this host could not reach Harness to verify the approval: is amux provide running and registered?",
+	direct.ReasonUnavailable:             "a transient failure; retry with the same approval",
 }
 
 func hintFor(code string) string {

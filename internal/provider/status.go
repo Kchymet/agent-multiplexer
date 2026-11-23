@@ -57,7 +57,11 @@ type Status struct {
 	// latest direct-enroll request Harness relayed to it since then (nil:
 	// none reached this host), and DirectEnrollCount counts them. They tell an
 	// operator whether a cloud enrollment ever reached this machine.
-	StartedAt         time.Time            `json:"started_at"`
+	StartedAt time.Time `json:"started_at"`
+	// WebOrigin is the orchestrator web app's origin from the latest accepted
+	// registration (registered.webOrigin; empty from an older orchestrator).
+	// A tailnet direct server allows it as a browser origin.
+	WebOrigin         string               `json:"web_origin,omitempty"`
 	DirectEnrollLast  *DirectEnrollAttempt `json:"direct_enroll_last,omitempty"`
 	DirectEnrollCount int                  `json:"direct_enroll_count,omitempty"`
 }

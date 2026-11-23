@@ -51,6 +51,13 @@ func (p *Provider) probeDirect(ctx context.Context) *hp.DirectCapabilities {
 	caps, err := p.cfg.DirectEnroll.Capabilities(dctx)
 	cancel()
 	if err == nil && caps != nil && caps.Issuance && caps.ServerID != "" && len(caps.Endpoints) > 0 {
+		if p.cfg.DirectApprove == nil && (caps.Approval || caps.Ceiling != nil) {
+			// Approvals need the verify bridge; without it they are never
+			// offered. Copy: the enroller's value is not ours to change.
+			c := *caps
+			c.Approval, c.Ceiling = false, nil
+			return &c
+		}
 		return caps
 	}
 	return nil
@@ -106,7 +113,8 @@ func sameDirectOffer(a, b *hp.DirectCapabilities) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	if a.ServerID != b.ServerID || a.Issuance != b.Issuance || a.Handoff != b.Handoff || len(a.Endpoints) != len(b.Endpoints) {
+	if a.ServerID != b.ServerID || a.Issuance != b.Issuance || a.Handoff != b.Handoff || len(a.Endpoints) != len(b.Endpoints) ||
+		a.Approval != b.Approval || !sameCeiling(a.Ceiling, b.Ceiling) {
 		return false
 	}
 	for i := range a.Endpoints {
@@ -132,6 +140,12 @@ func (p *Provider) directOffer() *hp.DirectCapabilities {
 	}
 	c := *p.direct
 	c.Endpoints = append([]string(nil), c.Endpoints...)
+	if c.Ceiling != nil {
+		ceil := *c.Ceiling
+		ceil.Permissions = append([]string(nil), ceil.Permissions...)
+		ceil.Workgroups = append([]string(nil), ceil.Workgroups...)
+		c.Ceiling = &ceil
+	}
 	return &c
 }
 
