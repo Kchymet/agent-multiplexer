@@ -37,21 +37,21 @@ func TestSuperviseCoordinator(t *testing.T) {
 			name: "ready coordinator with a running member supervises",
 			own:  core.StateReady, goal: "waiting", note: "m1 build",
 			members: []memberView{member("m1", "builder", core.StateRunning), member("m2", "", core.StateReady)},
-			state:   core.StateRunning, sub: core.SubStateSupervising, lead: core.SubStateSupervising,
-			reason: "waiting on builder running", supervisedMemberID: []string{"m1"},
+			state:   core.StateRunning, sub: core.SubStateSupervising, lead: core.StateRunning,
+			reason: "supervising builder running", supervisedMemberID: []string{"m1"},
 		},
 		{
 			name: "a member waiting on the user keeps the attention chip",
 			own:  core.StateReady, members: []memberView{member("m1", "a", core.StateRunning), member("m2", "b", core.StateWaiting)},
-			state: core.StateWaiting, sub: core.SubStateSupervising, lead: core.SubStateSupervising,
-			reason: "a running, b waiting", supervisedMemberID: []string{"m1", "m2"},
+			state: core.StateWaiting, sub: core.SubStateSupervising, lead: core.StateWaiting,
+			reason: "needs you: b; supervising a running", supervisedMemberID: []string{"m1", "m2"},
 		},
 		{
 			name: "goal waiting on an open PR supervises with idle members",
 			own:  core.StateReady, goal: "waiting",
 			members: []memberView{member("m1", "a", core.StateReady, openPending)},
-			state:   core.StateRunning, sub: core.SubStateSupervising, lead: core.SubStateSupervising,
-			reason: "a PR #12 CI pending", supervisedMemberID: []string{"m1"},
+			state:   core.StateRunning, sub: core.SubStateSupervising, lead: core.StateRunning,
+			reason: "supervising a PR #12 CI pending", supervisedMemberID: []string{"m1"},
 		},
 		{
 			name: "an open PR alone does not make a non-waiting coordinator work",
@@ -68,13 +68,14 @@ func TestSuperviseCoordinator(t *testing.T) {
 			name: "goal input needs the user",
 			own:  core.StateReady, goal: "input", note: "which repo?",
 			members: []memberView{member("m1", "a", core.StateRunning)},
-			state:   core.StateWaiting, lead: core.StateWaiting, reason: "goal input: which repo?",
+			state:   core.StateWaiting, sub: core.SubStateSupervising, lead: core.StateWaiting,
+			reason:             "needs you: coordinator; goal input: which repo?",
 			supervisedMemberID: []string{"m1"},
 		},
 		{
 			name: "a stopped coordinator with working members says wake-ups wait",
 			own:  core.StateIdle, members: []memberView{member("m1", "a", core.StateRunning)},
-			state: core.StateRunning, sub: core.SubStateSupervising, lead: core.SubStateSupervising,
+			state: core.StateRunning, sub: core.SubStateSupervising, lead: core.StateRunning,
 			reason: "coordinator stopped", supervisedMemberID: []string{"m1"},
 		},
 	}
@@ -161,7 +162,7 @@ func TestPollCoordinatorSupervising(t *testing.T) {
 	if root.State != core.StateRunning || root.SubState != core.SubStateSupervising {
 		t.Fatalf("root state/sub = %q/%q (status %q)", root.State, root.SubState, root.Status)
 	}
-	if !strings.HasPrefix(root.Status, "supervising · 1 agent · goal waiting · waiting on builder PR #3 CI pending") {
+	if !strings.HasPrefix(root.Status, "running · 1 agent · goal waiting · supervising builder PR #3 CI pending") {
 		t.Errorf("root status = %q", root.Status)
 	}
 	if root.Supervision == nil || root.Supervision.Goal != "waiting" || root.Supervision.GoalNote != "m1 PR #3 CI" ||

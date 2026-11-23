@@ -38,23 +38,31 @@ type coordinatorView struct {
 // superviseCoordinator decides how a coordinator row presents from its own
 // activity, its goal and its members.
 //
-// The rules extend the attention ladder (stateRank) rather than replacing it:
+// "waiting" is the attention chip and means one thing everywhere: someone in
+// the workgroup is blocked on the user. Idle is never waiting. So:
 //
-//   - The row's state starts as the most demanding of its own and its
-//     members' states, exactly as before.
-//   - A coordinator that is not itself mid-turn (ready, idle or unknown) while
-//     work it dispatched is in flight is "supervising": state running (or
-//     waiting, when a member needs the user) and SubState supervising. In
-//     flight means a member running, waiting or unknown — or, while its goal
-//     is waiting on a wake-up, a member owning an open PR (CI, review and merge
-//     are what it waits on then).
-//   - A goal that needs the user — input (it asked a question), blocked,
-//     budgetLimited — makes an otherwise between-turns coordinator waiting, so
-//     the rail's attention chip shows it.
+//   - The row is waiting only when the coordinator itself is waiting (a
+//     permission prompt or question of its own), its goal needs the user while
+//     it is between turns — input (it asked a question), blocked,
+//     budgetLimited — or a member is waiting. Supervision.NeedsYou names who,
+//     and the status line leads "waiting · N agents need you".
+//   - Otherwise it is running when the coordinator or any member is: a
+//     coordinator that is not itself mid-turn (ready, idle or unknown) while
+//     work it dispatched is in flight is "supervising" — state running,
+//     SubState supervising, status "running · N agents". In flight means a
+//     member running, waiting or unknown — or, while its goal is waiting on a
+//     wake-up, a member owning an open PR (CI, review and merge are what it
+//     waits on then). An idle coordinator with a running member is running.
 //   - It is idle/ready only when it and all its members are.
 func superviseCoordinator(ownState, goal, goalNote string, members []memberView) coordinatorView {
 	v := coordinatorView{state: ownState, lead: ownState}
 	v.supervision = harnessproto.Supervision{OwnState: ownState, Goal: goal, GoalNote: boundNote(goalNote)}
+
+	between := ownState == core.StateReady || ownState == core.StateIdle || ownState == core.StateUnknown
+	goalNeedsUser := between && (goal == "input" || goal == "blocked" || goal == "budgetLimited")
+	if ownState == core.StateWaiting || goalNeedsUser {
+		v.supervision.NeedsYou = append(v.supervision.NeedsYou, CoordinatorLabel)
+	}
 
 	var active, prItems []string
 	inflight := false
@@ -71,44 +79,74 @@ func superviseCoordinator(ownState, goal, goalNote string, members []memberView)
 			ID: m.session.ID, Title: agentLabel(m.session), State: m.state, PRs: prwatch.Summary(open),
 		})
 		label := memberLabel(m.session)
+		if m.state == core.StateWaiting {
+			v.supervision.NeedsYou = append(v.supervision.NeedsYou, label)
+		}
 		if busy {
 			inflight = true
-			active = append(active, fmt.Sprintf("%s %s", label, m.state))
+			if m.state != core.StateWaiting {
+				active = append(active, fmt.Sprintf("%s %s", label, m.state))
+			}
 		}
 		for _, pr := range open {
 			prItems = append(prItems, prItem(label, pr))
 		}
 	}
 
-	between := ownState == core.StateReady || ownState == core.StateIdle || ownState == core.StateUnknown
-	goalWaiting := goal == "waiting"
-	needsUser := goal == "input" || goal == "blocked" || goal == "budgetLimited"
-
-	switch {
-	case between && needsUser:
-		v.state = core.StateWaiting
-		v.lead = core.StateWaiting
-	case between && (inflight || (goalWaiting && len(prItems) > 0)):
+	if between && (inflight || (goal == "waiting" && len(prItems) > 0)) {
 		v.subState = harnessproto.SubStateSupervising
-		v.lead = harnessproto.SubStateSupervising
 		if stateRank(v.state) < stateRank(core.StateRunning) {
 			v.state = core.StateRunning
 		}
+		v.lead = core.StateRunning
+	}
+	if len(v.supervision.NeedsYou) > 0 {
+		v.state = core.StateWaiting
+		v.lead = core.StateWaiting
 	}
 
 	var reason []string
-	switch {
-	case needsUser && goalNote != "":
+	if len(v.supervision.NeedsYou) > 0 {
+		reason = append(reason, "needs you: "+listItems(v.supervision.NeedsYou))
+	}
+	if goalNeedsUser && goalNote != "" {
 		reason = append(reason, "goal "+goal+": "+oneLine(goalNote))
-	case v.subState != "":
-		items := append(active, prItems...)
-		reason = append(reason, "waiting on "+listItems(items))
+	}
+	if v.subState != "" {
+		if items := append(active, prItems...); len(items) > 0 {
+			reason = append(reason, "supervising "+listItems(items))
+		}
 		if ownState == core.StateIdle {
 			reason = append(reason, "coordinator stopped: wake-ups wait until it starts")
 		}
 	}
 	v.supervision.Reason = strings.Join(reason, "; ")
 	return v
+}
+
+// CoordinatorLabel names the coordinator itself in Supervision.NeedsYou.
+const CoordinatorLabel = "coordinator"
+
+// coordinatorStatus is a coordinator row's status line: "waiting · 1 agent
+// needs you" when someone is blocked on the user, else "<lead> · N agents"
+// (running while any work is in flight, else ready/idle), then the goal
+// suffix and the reason.
+func coordinatorStatus(v coordinatorView, members int, goalSuffix string) string {
+	var status string
+	if n := len(v.supervision.NeedsYou); n > 0 {
+		verb := "need"
+		if n == 1 {
+			verb = "needs"
+		}
+		status = fmt.Sprintf("%s · %d agent%s %s you", core.StateWaiting, n, plural(n), verb)
+	} else {
+		status = fmt.Sprintf("%s · %d agent%s", stateLabel(v.lead), members, plural(members))
+	}
+	status += goalSuffix
+	if v.supervision.Reason != "" {
+		status += " · " + v.supervision.Reason
+	}
+	return status
 }
 
 func openPRs(prs []harnessproto.SessionPR) []harnessproto.SessionPR {

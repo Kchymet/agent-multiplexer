@@ -87,6 +87,9 @@ func validateSessionReport(req access.Request) error {
 	case sessionreport.Capture:
 		allowed = append(allowed, sessionreport.FieldEvent)
 		required = append(required, sessionreport.FieldEvent)
+	case sessionreport.Notice:
+		allowed = append(allowed, sessionreport.FieldNotice)
+		required = append(required, sessionreport.FieldNotice)
 	}
 	if err := exactReportFields(req.Fields, allowed, required); err != nil {
 		return err
@@ -156,6 +159,8 @@ func validateSessionReport(req access.Request) error {
 			return errors.New("unknown capture hook event")
 		}
 		return nil
+	case sessionreport.Notice:
+		return boundedReportField(req.Fields, sessionreport.FieldNotice, sessionreport.MaxNoticeBytes, true)
 	}
 	return errors.New("unknown self report operation")
 }
@@ -305,6 +310,9 @@ func (r *sessionRuntime) applySessionReport(session store.Session, generation st
 		return appendPermissionResolutionObservation(session, generation, req.Fields, true)
 	case sessionreport.Capture:
 		return errors.New("capture requires two-phase dispatch")
+	case sessionreport.Notice:
+		logNotice(session.ID, req.Fields[sessionreport.FieldNotice])
+		return nil
 	default:
 		return errors.New("invalid report operation")
 	}
