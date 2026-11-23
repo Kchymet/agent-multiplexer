@@ -131,7 +131,7 @@ cloud enrollment: enabled (generation 3)
 **Full syntax:**
 
 ```
-amux direct cloud enable --permissions read[,steer] [--all-sessions | --workgroup <root-id>...] \
+amux direct cloud enable [--permissions read[,steer][,approve|execute]] [--all-sessions | --workgroup <root-id>...] \
     [--owner <harness-user-id>] [--provider <provider-id>] \
     [--max-outstanding 3] [--max-per-hour 10]
 amux direct cloud status [--json]
@@ -150,8 +150,11 @@ amux direct cloud disable
   in the ceiling; see [direct-access.md](direct-access.md#question-queue-and-overseer)).
   `--workgroup overseer` is refused like `--workgroup console`.
 - **Default permissions.** A relayed request that names no permissions gets
-  `read`, plus `steer` when the ceiling includes `steer`, so "Allow steer"
-  is on by default exactly when it is allowed. Nothing else is implied.
+  `read`, plus `steer` and `approve` (the execute set) each when the ceiling
+  includes it, so steer and approve are on by default exactly when they are
+  allowed. The default ceiling (`cloud enable` without `--permissions`) is
+  `read,steer,approve` over all ordinary sessions. Nothing else is implied;
+  `manage`, `create` and `accounts` are always opt-in.
 - **`--owner` and `--provider` are optional.** An omitted pin comes from this
   host's **current** provider registration. That is the `owner` and
   `providerId` Harness returned in `registered` to this host's

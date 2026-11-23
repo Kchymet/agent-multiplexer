@@ -169,9 +169,10 @@ func TestEnrollEndpointsCORSForAllowedOriginOnly(t *testing.T) {
 	}
 }
 
-// A cloud request naming no permissions gets read, plus steer only when the
-// host's ceiling includes steer ("Allow steer" defaults on). Nothing else is
-// implied, and explicit permissions are unchanged.
+// A cloud request naming no permissions gets the default (read, steer and the
+// execute set) limited to the host's ceiling: read, plus steer and approve
+// only when the ceiling includes them. Nothing else is implied, and explicit
+// permissions are unchanged.
 func TestCloudIssueDefaultPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		ceiling []string
@@ -181,6 +182,9 @@ func TestCloudIssueDefaultPermissions(t *testing.T) {
 		{[]string{PermRead, PermSteer}, "read,steer"},
 		{[]string{PermRead, PermSteer, PermRespond, PermManage}, "read,steer"},
 		{[]string{PermRead, PermManage}, "read"},
+		{[]string{PermRead, PermSteer, PermApprove}, "read,steer,approve"},
+		{[]string{PermRead, PermApprove, PermCreate}, "read,approve"},
+		{nil, "read,steer,approve"}, // the default ceiling
 	} {
 		a := openTestAuthority(t, t.TempDir(), Lifetimes{}, nil)
 		if _, err := a.EnableCloud(cloudPolicyReq(tc.ceiling, allSessions)); err != nil {

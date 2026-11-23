@@ -110,6 +110,23 @@ type grantRecord struct {
 	// (wake_authority.go). An older binary drops the field on rewrite, which
 	// leaves wake off and wake.json inert (fail closed).
 	WakeSubs map[string]*wakeSub `json:"wakeSubs,omitempty"`
+	// EnrollLabel is the host operator's --label on the code this grant was
+	// redeemed from (Label is the client's own client_label). DeviceHash is
+	// sha256 of the optional client-supplied device_id: a stable per-install
+	// identifier used only to recognize a superseded grant from the same
+	// device (clients list --stale, enroll --replace). Both are host-side
+	// bookkeeping, never authority, and an older binary drops them harmlessly.
+	EnrollLabel string `json:"enrollLabel,omitempty"`
+	DeviceHash  string `json:"deviceHash,omitempty"`
+	// Grant updates in place (grant_update.go). UpdatedAt is the latest
+	// change; Changes keeps the newest maxGrantChanges records (the audit log
+	// keeps every one). An older binary drops them on rewrite and keeps the
+	// current Perms/Resource, which are what authorize.
+	UpdatedAt int64          `json:"updatedAt,omitempty"`
+	Changes   []*grantChange `json:"changes,omitempty"`
+	// ReplacedBy names the newer grant that superseded this one (enroll
+	// --replace); it is set with the revocation.
+	ReplacedBy string `json:"replacedBy,omitempty"`
 }
 
 type codeRecord struct {
@@ -133,6 +150,10 @@ type codeRecord struct {
 	// Challenge, which the redeeming device sets once through ClaimTicket.
 	// Until then it cannot be redeemed.
 	Ticket bool `json:"ticket,omitempty"`
+	// Replace (enroll --replace): once redeemed, revoke the prior active
+	// grants with this code's label from the same device (grant_update.go).
+	// An older binary drops it, which only skips the replacement.
+	Replace bool `json:"replace,omitempty"`
 }
 
 // cloudPolicy is the host operator's cloud issuance policy. Only host-proven

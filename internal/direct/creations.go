@@ -260,8 +260,11 @@ func (s *Server) creationJob(h *Lease, release func(), key, verb string, act cor
 		defer func() { <-s.jobs.slots }()
 	case <-h.Context().Done():
 		code := CodeAuthRevoked
-		if errors.Is(context.Cause(h.Context()), errGrantEnded) {
+		switch cause := context.Cause(h.Context()); {
+		case errors.Is(cause, errGrantEnded):
 			code = CodeAuthExpired
+		case errors.Is(cause, errGrantChanged):
+			code = CodeDenied
 		}
 		notRun(code, "access ended while the creation was queued; it did not run")
 		return

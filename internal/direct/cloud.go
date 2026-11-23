@@ -308,6 +308,10 @@ func S256Challenge(verifier string) string {
 }
 
 func normalizePolicy(req CloudPolicyRequest) (*cloudPolicy, error) {
+	if len(req.Permissions) == 0 {
+		// The default ceiling: read, steer and the execute set (approve).
+		req.Permissions = slices.Clone(DefaultPermissions)
+	}
 	perms, err := ValidatePerms(req.Permissions)
 	if err != nil {
 		return nil, err
@@ -581,12 +585,15 @@ func (a *Authority) IssueCloudCode(req CloudIssueRequest) (string, int64, error)
 		return "", 0, cloudErr(CloudErrInvalidRequest, "unknown handoff")
 	}
 	if len(req.Permissions) == 0 {
-		// A request that names no permissions asks for the default: read, and
-		// steer when this host's ceiling allows it ("Allow steer" on by
-		// default). Nothing else is ever implied.
+		// A request that names no permissions asks for the default
+		// (DefaultPermissions: read, steer and the execute set), limited to
+		// what this host's ceiling allows: read always, steer and approve when
+		// the ceiling has them. manage, create and accounts are never implied.
 		req.Permissions = []string{PermRead}
-		if slices.Contains(c.Perms, PermSteer) {
-			req.Permissions = append(req.Permissions, PermSteer)
+		for _, p := range DefaultPermissions {
+			if p != PermRead && slices.Contains(c.Perms, p) {
+				req.Permissions = append(req.Permissions, p)
+			}
 		}
 	}
 	perms, err := ValidatePerms(req.Permissions)
