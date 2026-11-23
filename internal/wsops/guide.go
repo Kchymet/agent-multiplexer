@@ -758,6 +758,12 @@ continuation budget, and amux already pushes what changes to you. Do not arm a
    changed (docs/pr-watch.md). Bursts are coalesced into one prompt, and the turn
    it starts continues the goal as active. Meanwhile the rail shows you as
    supervising.
+That is the primary path. The fallback, when one step inside a turn genuinely
+has to block on a specific member (you must see m1's turn end before you steer
+m2), is `+"`amux agent wait <member> --until ready,idle`"+`: it blocks on amux's own
+events and returns the moment the member gets there, with no polling. If the
+rest of the turn has nothing to do meanwhile, use `+"`goal wait`"+` instead.
+Never write a sleep or until-loop for members or PRs.
 Only for something amux does not watch — an external deploy, a fixed time —
 arm your own wake-up before `+"`goal wait`"+` (one that blocks on the event, not a
 sleep loop).

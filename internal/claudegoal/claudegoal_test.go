@@ -257,6 +257,7 @@ func TestContinuationTracksMemberPRsToMergedOrClosed(t *testing.T) {
 		"naming the member/PR awaited",
 		"when a member finishes its turn",
 		"when a member PR's CI, mergeability, review or state changes",
+		"To block on one member inside a turn, use `amux agent wait <member> --until ready,idle`, never a sleep loop.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("continuation prompt missing %q", want)

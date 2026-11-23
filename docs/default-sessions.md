@@ -229,7 +229,11 @@ Claude coordinator; there is no opt-in.
   source: it prompts the coordinator the moment a member finishes its turn,
   needs the user, or stops, and when a member's PR changes state (see
   [PR watch](pr-watch.md)), so the coordinator arms no polling loop of its
-  own; it arms a wake-up only for something amux does not watch. The `wait`
+  own; it arms a wake-up only for something amux does not watch. To block
+  on one member inside a turn it runs `amux agent wait <member> --until
+  ready,idle`, which blocks on amux's own events (see
+  [scoped runtime events](scoped-runtime-events.md)); it never writes a sleep
+  or until-loop. The `wait`
   note names what is awaited (member, repo#PR). A goal is complete only when
   every member PR is merged or closed, or explicitly handed to the user with
   what needs a human. Its guide tells it to ask for genuinely user-owned information

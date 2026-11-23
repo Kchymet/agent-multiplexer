@@ -253,6 +253,9 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 		"The note names what is awaited (member, repo#PR)",
 		"the moment a member finishes its turn, waits on a permission prompt or question, or stops",
 		"Only for something amux does not watch",
+		"The fallback, when one step inside a turn genuinely has to block on a specific member",
+		"`amux agent wait <member> --until ready,idle`",
+		"Never write a sleep or until-loop for members or PRs.",
 		"amux's wake-ups count",
 	} {
 		if !strings.Contains(hooked, want) {
