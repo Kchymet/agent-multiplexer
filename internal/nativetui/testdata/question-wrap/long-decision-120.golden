@@ -1,0 +1,8 @@
+▸ decision_needed · wg1 · d-long
+    Rewrite the billing service before the Q3 launch or ship the patch?
+    The billing service has accumulated three years of special cases. A rewrite takes about six weeks; the patch takes
+    one but leaves the double-charge race open.
+    See https://github.com/Kchymet/agent-multiplexer/blob/master/internal/nativetui/queue.go#L280-L320?plain=1
+    suggested: ship the patch now, start the rewrite in a new workgroup after launch
+    r answer  a acknowledge  d dismiss
+
