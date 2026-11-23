@@ -110,7 +110,8 @@ func rowsOf(snap vterm.Snapshot) []row {
 				continue // the trailing half of a wide character
 			}
 			text := c.Content
-			if text == "" {
+			if text == "" || text == "\u00a0" {
+				// Claude Code 2.1 draws its prompt as "❯" + NO-BREAK SPACE.
 				text = " "
 			}
 			r = append(r, cell{
@@ -170,7 +171,8 @@ func promptAt(r row, glyphs string) (int, bool) {
 			i++
 		}
 	}
-	if i >= len(r) || r[i].hint || !strings.Contains(glyphs, r[i].text) {
+	// The glyph itself may be drawn gray; only its shape matters.
+	if i >= len(r) || !strings.Contains(glyphs, r[i].text) {
 		return 0, false
 	}
 	i++

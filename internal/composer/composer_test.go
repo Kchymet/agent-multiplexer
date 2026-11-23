@@ -150,6 +150,53 @@ func TestSameAcrossWrapping(t *testing.T) {
 	}
 }
 
+// claude2263Screen reproduces the screen the real Claude Code 2.1.263 painted
+// in CI (TestNativeClaudeTypedDelivery, 100 columns): the banner, a rule, the
+// prompt drawn as "❯" + NO-BREAK SPACE, a rule, and two footer rows. styled
+// adds plausible colors (gray glyph and rules, dim footer); unstyled is exactly
+// the text the log showed. composer rows after the first are pre-indented.
+func claude2263Screen(styled bool, composer ...string) string {
+	g, d, r := "", "", ""
+	if styled {
+		g, d, r = gray, dim, reset
+	}
+	rule100 := strings.Repeat("─", 100)
+	var b strings.Builder
+	b.WriteString(esc + "[2J" + esc + "[H")
+	b.WriteString(" ▐▛███▜▌   Claude Code v2.1.263\r\n")
+	b.WriteString("▝▜█████▛▘  Opus 5 (1M context) · API Usage Billing\r\n")
+	b.WriteString("  ▘▘ ▝▝    /tmp/TestNativeClaudeTypedDelivery2525201704/002\r\n\r\n\r\n")
+	b.WriteString(g + rule100 + r)
+	b.WriteString(g + "❯" + r + " " + composer[0] + "\r\n")
+	for _, row := range composer[1:] {
+		b.WriteString(row + "\r\n")
+	}
+	b.WriteString(g + rule100 + r)
+	b.WriteString(d + "  ⏸ manual mode on · ? for shortcuts · ← for agents                     Not logged in · Run /login" + r + "\r\n")
+	b.WriteString(d + "                                                                    ✔ Update installed · Restart to update" + r)
+	return b.String()
+}
+
+func TestReadClaude2263Composer(t *testing.T) {
+	for _, styled := range []bool{false, true} {
+		for _, tc := range []struct {
+			name     string
+			composer []string
+			text     string
+		}{
+			{"empty", []string{" "}, ""},
+			{"empty with cursor cell", []string{inverse + " " + reset}, ""},
+			{"draft", []string{"half a thought about polling" + inverse + " " + reset}, "half a thought about polling"},
+			{"typed multi-line", []string{"TYPED-DELIVERY-MARKER status", "  second line" + inverse + " " + reset}, "TYPED-DELIVERY-MARKER status\nsecond line"},
+		} {
+			got := Read(RuntimeClaude, vterm.Capture([]byte(claude2263Screen(styled, tc.composer...)), 100, 30))
+			if !got.Found || got.Text != tc.text {
+				t.Errorf("styled=%v %s: Read = %+v, want text %q", styled, tc.name, got, tc.text)
+			}
+		}
+	}
+}
+
 // The genuine Codex 0.157.1 terminal stream captured for the embedded-scroll
 // evidence (docs/evidence/embedded-scroll, 100x28): a person typed a draft into
 // the composer, submitted it, and the composer went back to its dim
