@@ -1,0 +1,23 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): Claude Code's auto-mode onboarding
+#   prompt (docs/steering.md rule 9), which replaces the input box.
+# shows: "Teach auto mode about your environment?" dialog, no composer
+# want-state: dialog
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H⏺ Done. The tests pass.
+
+\x1b[38;5;214m{{RULE}}\x1b[0m
+ \x1b[1mTeach auto mode about your environment?\x1b[0m
+
+ Auto mode decides which actions are safe to run without asking. Telling it
+ about your repos, tools and services makes those decisions better.
+
+ \x1b[38;5;214m❯\x1b[0m 1. Yes
+   2. Not now
+   3. Don't show again
+
+\x1b[2m Enter to confirm · Esc to cancel\x1b[0m

@@ -1018,7 +1018,7 @@ func TestSteerTypesClaudeText(t *testing.T) {
 	d, eng := steerDaemon(t)
 	putSession(t, "a1", "claude")
 	in := eng.running("a1")
-	long := strings.Repeat("é", 200) // 400 bytes: two pieces at 256
+	long := strings.Repeat("é", 200) // 400 bytes: seven paced pieces at 64
 	for _, text := range []string{"first\nsecond\ttabbed", long} {
 		if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{core.SteerVerb: core.SteerPrompt, core.SteerText: text}}); err != nil {
 			t.Fatal(err)
@@ -1035,12 +1035,12 @@ func TestSteerTypesClaudeText(t *testing.T) {
 	second := in.sequences[1]
 	var typed []byte
 	for i, step := range second[:len(second)-1] {
-		if !utf8.Valid(step.Bytes) || len(step.Bytes) > 257 || (i > 0 && step.DelayBefore != 5*time.Millisecond) {
+		if !utf8.Valid(step.Bytes) || len(step.Bytes) > 65 || (i > 0 && step.DelayBefore != 100*time.Millisecond) {
 			t.Fatalf("piece %d = %d bytes, delay %v", i, len(step.Bytes), step.DelayBefore)
 		}
 		typed = append(typed, step.Bytes...)
 	}
-	if len(second) != 3 || string(typed) != long || strings.Contains(string(typed), "\x1b[200~") {
+	if len(second) != 8 || string(typed) != long || strings.Contains(string(typed), "\x1b[200~") {
 		t.Fatalf("long prompt pieces: %d, typed %q", len(second), typed)
 	}
 	for _, text := range []string{"x\x1b[201~y", "x\x1by", "x\x03y", "x\ry"} {

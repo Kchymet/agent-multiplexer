@@ -1,0 +1,19 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): Claude Code with "editorMode": "vim"
+#   draws its mode ("-- INSERT --") on the status line under the input box,
+#   next to the auto-mode indicator; neither is composer text.
+# shows: idle, vim insert mode, empty composer
+# want-state: free
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ check the build\x1b[0m
+
+⏺ Done. The tests pass.
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m \x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)\x1b[0m

@@ -9,6 +9,7 @@ import (
 
 	"amux/internal/agent"
 	"amux/internal/composer"
+	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/store"
 	"amux/internal/vterm"
@@ -128,6 +129,23 @@ type typedLeftover struct {
 	instance engine.Instance // the runtime it was typed into
 	text     string          // the steer text, as compared with composer.Same
 	runes    int             // characters it occupies in the composer
+	// mark is the pane's last human input when amux left the text, and
+	// untouched that nobody else had typed by then. Only such a leftover may be
+	// recognized behind a collapsed-paste token, which could otherwise hide
+	// someone's own paste; text left because someone typed must match exactly.
+	mark      time.Time
+	untouched bool
+}
+
+// typingTime is how long the input loop takes to send steps (their paced
+// delays): the echo wait starts after it, so a long, paced steer is not
+// given up on while it is still being typed.
+func typingTime(steps []engine.InputStep) time.Duration {
+	var d time.Duration
+	for _, s := range steps {
+		d += s.DelayBefore
+	}
+	return d
 }
 
 // typedTiming overrides deliverTyped's waits (tests); zero fields use the
@@ -212,7 +230,7 @@ func (d *Daemon) deliverTyped(ctx context.Context, req typedRequest) error {
 
 	// amux's own text from an earlier delivery is not the user's draft.
 	if pane.State == composer.Draft {
-		if left, ok := d.leftover(id, req.instance); ok && left.holds(pane.Text) {
+		if left, ok := d.leftover(id, req.instance); ok && left.holds(pane.Text, obs.LastHumanInput()) {
 			if !d.eraseTyped(ctx, obs, req, runtime, left.runes, timing) {
 				return &composerBusyError{reason: "this agent's input box holds text amux typed earlier and amux could not clear it yet", typed: true}
 			}
@@ -243,8 +261,9 @@ func (d *Daemon) deliverTyped(ctx context.Context, req typedRequest) error {
 	wctx := context.WithoutCancel(ctx)
 	touched := func() bool { return !obs.LastHumanInput().Equal(mark) }
 	echo := composer.EchoNone
-	d.awaitPane(wctx, obs, runtime, boot+timing.echo, timing.poll, func(p composer.Pane) bool {
-		echo = composer.EchoNone
+	shown := ""
+	d.awaitPane(wctx, obs, runtime, boot+typingTime(text)+timing.echo, timing.poll, func(p composer.Pane) bool {
+		echo, shown = composer.EchoNone, p.Text
 		if readable(p) {
 			echo = composer.MatchTyped(p.Text, req.text)
 		}
@@ -252,6 +271,11 @@ func (d *Daemon) deliverTyped(ctx context.Context, req typedRequest) error {
 	})
 	if !touched() && echo == composer.EchoExact {
 		submit.DelayBefore, submit.NotBeforeAge = 0, 0
+		if composer.HasCollapsed(shown) {
+			// Claude took the typed burst for a paste. It is amux's (the box was
+			// empty and nobody else typed), and Enter still sends the full text.
+			journal(id, core.JournalInfo, "the runtime collapsed amux's typed text into a paste placeholder; submitted it as amux's own")
+		}
 		req.instance.InputSequence([]engine.InputStep{submit})
 		d.forgetLeftover(id)
 		return nil
@@ -259,7 +283,7 @@ func (d *Daemon) deliverTyped(ctx context.Context, req typedRequest) error {
 
 	// Not submitted: take amux's text back, never anyone else's.
 	now := d.readPane(obs, runtime)
-	left := typedLeftover{instance: req.instance, text: req.text, runes: runes}
+	left := typedLeftover{instance: req.instance, text: req.text, runes: runes, mark: obs.LastHumanInput(), untouched: !touched()}
 	switch {
 	case touched():
 		// Someone typed: erase only if the box still holds exactly amux's text.
@@ -319,7 +343,12 @@ func typedRunes(keys agent.Keys, steps []engine.InputStep) int {
 
 // holds reports whether a composer showing text still holds exactly this
 // leftover (its words as typing renders them).
-func (l typedLeftover) holds(text string) bool { return composer.Same(text, l.text) }
+func (l typedLeftover) holds(text string, lastHuman time.Time) bool {
+	if composer.Same(text, l.text) {
+		return true
+	}
+	return l.untouched && lastHuman.Equal(l.mark) && composer.HasCollapsed(text) && composer.MatchTyped(text, l.text) == composer.EchoExact
+}
 
 // leftover returns amux text left unsent in this session's current runtime.
 func (d *Daemon) leftover(id string, in engine.Instance) (typedLeftover, bool) {
