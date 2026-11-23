@@ -420,6 +420,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 	}
 	overflow = overflow || more
 	sort.Strings(processingNames)
+	s.byPriority(s.processing, processingNames)
 	for _, name := range processingNames {
 		if processed >= MaxQueuedRequests {
 			overflow = true
@@ -460,6 +461,7 @@ func (s *Server) ServeOnce(ctx context.Context) (int, error) {
 			goto cleanup
 		}
 		sort.Strings(requestNames)
+		s.byPriority(s.requests, requestNames)
 		for _, name := range requestNames {
 			if processed >= MaxQueuedRequests {
 				overflow = true
@@ -1416,6 +1418,47 @@ func (g *admissionGate) allows(p Priority) bool {
 func (g *admissionGate) block(p Priority) {
 	if g != nil && (!g.blocked || p > g.floor) {
 		g.blocked, g.floor = true, p
+	}
+}
+
+// byPriority stably reorders names (already in arrival order) so higher
+// priority calls are served first: a credential read or steer no longer waits
+// behind its own session's backlog of hook reports, and arrival order holds
+// within each class. Without a Priority classifier it changes nothing. The
+// peek is unauthenticated and only orders; unreadable entries keep their
+// place as PriorityNormal and are rejected when processed.
+func (s *Server) byPriority(dir *os.File, names []string) {
+	if s.priority == nil || len(names) < 2 {
+		return
+	}
+	priorities := make(map[string]Priority, len(names))
+	for _, name := range names {
+		priorities[name] = s.peekPriority(dir, name)
+	}
+	sort.SliceStable(names, func(i, j int) bool { return priorities[names[i]] > priorities[names[j]] })
+}
+
+func (s *Server) peekPriority(dir *os.File, name string) Priority {
+	raw, err := readRegularAt(dir, name, maxEnvelopeFileBytes)
+	if err != nil {
+		return PriorityNormal
+	}
+	var envelope access.SignedRequest
+	if unmarshalBounded(raw, maxEnvelopeFileBytes, &envelope) != nil {
+		return PriorityNormal
+	}
+	var call Call
+	if unmarshalBounded(envelope.Body, access.MaxBodyBytes, &call) != nil {
+		return PriorityNormal
+	}
+	switch call.Kind {
+	case CallOperation:
+		return s.priorityOf(call)
+	case CallRelease, CallReceipt:
+		// They free capacity and settle completions: serve them first.
+		return PriorityControl + 1
+	default:
+		return PriorityNormal
 	}
 }
 
