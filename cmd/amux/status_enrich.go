@@ -8,9 +8,9 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// statusEnrichment is the `amux status` table's trailing PR note for a row
-// ("" for none): a workgroup's rollup when PRs are what it waits on (or its PR
-// data is stale), a member's PR chips.
+// statusEnrichment is the `amux status` table's trailing note for a row (""
+// for none): a workgroup's rollup when enrichments are what it waits on (or
+// their data is stale), a member's open enrichments of every kind.
 func statusEnrichment(s core.Session) string {
 	var parts []string
 	if r := s.Rollup; r != nil {
@@ -26,16 +26,16 @@ func statusEnrichment(s core.Session) string {
 		var chips []string
 		stale := false
 		for _, e := range *s.Enrichments {
-			if e.PullRequest != nil && (e.PullRequest.State == hp.PRStateOpen || e.PullRequest.State == hp.PRStateDraft) {
-				chips = append(chips, e.Label)
+			if e.Status.State != hp.StatusDone {
+				chips = append(chips, enrichmentChip(e))
 				stale = stale || e.Stale
 			}
 		}
 		if len(chips) == 0 && len(*s.Enrichments) > 0 {
-			chips = append(chips, (*s.Enrichments)[0].Label)
+			chips = append(chips, enrichmentChip((*s.Enrichments)[0]))
 		}
 		if len(chips) > 0 {
-			parts = append(parts, "PR "+strings.Join(chips, ", "))
+			parts = append(parts, strings.Join(chips, ", "))
 		}
 		if stale {
 			parts = append(parts, "PR data stale")
@@ -45,4 +45,18 @@ func statusEnrichment(s core.Session) string {
 		return ""
 	}
 	return "  · " + strings.Join(parts, " · ")
+}
+
+// enrichmentChip is one item in plain text: "PR #79 ✓ approved",
+// "deploy prod failed".
+func enrichmentChip(e hp.Enrichment) string {
+	noun := e.Kind
+	if e.Kind == hp.EnrichmentPullRequest {
+		noun = "PR"
+	}
+	label := e.Label
+	if label == "" {
+		label = e.Title
+	}
+	return noun + " " + label
 }

@@ -3,7 +3,6 @@ package source
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"amux/internal/core"
 	"amux/internal/enrich"
@@ -21,6 +20,7 @@ type memberView struct {
 	session store.Session
 	state   string
 	prs     []harnessproto.SessionPR
+	items   []harnessproto.Enrichment // its rendered enrichments, every kind
 }
 
 // coordinatorView is how a workgroup coordinator row presents: the state it
@@ -34,15 +34,20 @@ type coordinatorView struct {
 	rollup      harnessproto.Rollup
 }
 
-// prContext is what the rollup needs to know about PR watching.
+// prContext is what the rollup needs to know about the enrichment sources,
+// read once per snapshot.
 type prContext struct {
-	observed bool // the daemon watches PRs
-	now      time.Time
-	health   prwatch.Health
+	sources []enrich.SourceStatus // registered sources' freshness (none: not observed)
+	probe   EnrichmentProbe
 }
 
-func (pc prContext) stale(pr harnessproto.SessionPR) enrich.Staleness {
-	return pc.health.Stale(pr, pc.now)
+// enrichments is a row's Enrichments field (nil when there is none or no
+// source is registered).
+func (pc prContext) enrichments(id string) *harnessproto.Enrichments {
+	if pc.probe == nil || len(pc.sources) == 0 {
+		return nil
+	}
+	return pc.probe.Enrichments(id)
 }
 
 // superviseCoordinator decides how a coordinator row presents from its own
@@ -69,13 +74,10 @@ func (pc prContext) stale(pr harnessproto.SessionPR) enrich.Staleness {
 //     waiting_review / waiting_merge (state ready, not the attention badge).
 //   - It is idle/ready only when it and all its members are.
 func superviseCoordinator(ownState, goal, goalNote string, members []memberView, pc prContext) coordinatorView {
-	in := enrich.Input{
-		OwnState: ownState, Goal: goal, GoalNote: goalNote, Now: pc.now,
-		PRsObserved: pc.observed, Stale: pc.stale, StaleReason: pc.health.Reason, ObservedAt: pc.health.LastOK,
-	}
+	in := enrich.Input{OwnState: ownState, Goal: goal, GoalNote: goalNote, Sources: pc.sources}
 	sup := harnessproto.Supervision{OwnState: ownState, Goal: goal, GoalNote: boundNote(goalNote)}
 	for _, m := range members {
-		in.Members = append(in.Members, enrich.Member{ID: m.session.ID, Label: memberLabel(m.session), State: m.state, PRs: m.prs})
+		in.Members = append(in.Members, enrich.Member{ID: m.session.ID, Label: memberLabel(m.session), State: m.state, Enrichments: m.items})
 		open := openPRs(m.prs)
 		busy := m.state == core.StateRunning || m.state == core.StateWaiting || m.state == core.StateUnknown
 		if !busy && len(open) == 0 {

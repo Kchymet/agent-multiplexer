@@ -9,21 +9,43 @@ import (
 	"time"
 
 	"amux/internal/core"
-	"amux/internal/prwatch"
+	"amux/internal/enrich"
 	"amux/internal/store"
 
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 func member(id, name, state string, prs ...harnessproto.SessionPR) memberView {
-	return memberView{session: store.Session{ID: id, Name: name}, state: state, prs: prs}
+	v := memberView{session: store.Session{ID: id, Name: name}, state: state, prs: prs}
+	for _, pr := range prs {
+		v.items = append(v.items, enrich.PullRequest(pr))
+	}
+	return v
 }
 
-// watching is a prContext with PR watching on and fresh data.
-func watching() prContext {
-	now := time.Now()
-	return prContext{observed: true, now: now, health: prwatch.Health{Enabled: true, Started: now, LastOK: now, Interval: time.Minute}}
+// prSources is a fresh pull_request source.
+func prSources() []enrich.SourceStatus {
+	return []enrich.SourceStatus{{Kind: harnessproto.EnrichmentPullRequest, Interval: 3 * time.Minute, LastOK: time.Now()}}
 }
+
+// watching is a prContext with the PR source registered and fresh.
+func watching() prContext { return prContext{sources: prSources()} }
+
+// fakeProbe renders a fixed set of PRs per session, as the registry would.
+type fakeProbe map[string][]harnessproto.SessionPR
+
+func (f fakeProbe) Enrichments(id string) *harnessproto.Enrichments {
+	var list harnessproto.Enrichments
+	for _, pr := range f[id] {
+		list = append(list, enrich.PullRequest(pr))
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	return &list
+}
+
+func (f fakeProbe) Sources() []enrich.SourceStatus { return prSources() }
 
 func TestSuperviseCoordinator(t *testing.T) {
 	openPending := harnessproto.SessionPR{Repo: "o/r", Number: 12, State: "open", Checks: "pending"}
@@ -60,14 +82,14 @@ func TestSuperviseCoordinator(t *testing.T) {
 			own:  core.StateReady, goal: "waiting",
 			members: []memberView{member("m1", "a", core.StateReady, openPending)},
 			state:   core.StateReady, sub: harnessproto.SubStateWaitingMerge, lead: "waiting for merge · 1 PR",
-			reason: "a PR #12 CI running", supervisedMemberID: []string{"m1"},
+			reason: "a PR #12 ready to merge, CI running", supervisedMemberID: []string{"m1"},
 		},
 		{
 			name:    "a red PR is the coordinator's attention, not the user's",
 			own:     core.StateReady,
 			members: []memberView{member("m1", "a", core.StateReady, openRed)},
 			state:   core.StateRunning, sub: harnessproto.SubStatePRAttention, lead: "PR attention · 1 PR",
-			reason: "a PR #13 CI failed", supervisedMemberID: []string{"m1"},
+			reason: "a PR #13 CI red: test", supervisedMemberID: []string{"m1"},
 		},
 		{
 			name:    "a stopped coordinator with a red PR is ready and says so",
@@ -160,7 +182,7 @@ func TestPollCoordinatorSupervising(t *testing.T) {
 
 	w := NewWorkspace()
 	w.SetGoalInfo(func(store.Session) (string, string) { return "waiting", "m1 PR #3 CI" })
-	w.SetPRHealth(func() prwatch.Health { return watching().health })
+	w.SetEnrichments(fakeProbe{"m1": {{Repo: "o/r", Number: 3, State: "open", Checks: "pending"}}})
 	w.SetPRs(func(id string) []harnessproto.SessionPR {
 		if id == "m1" {
 			return []harnessproto.SessionPR{{Repo: "o/r", Number: 3, State: "open", Checks: "pending"}}
@@ -185,7 +207,7 @@ func TestPollCoordinatorSupervising(t *testing.T) {
 	if root.State != core.StateReady || root.SubState != harnessproto.SubStateWaitingMerge {
 		t.Fatalf("root state/sub = %q/%q (status %q)", root.State, root.SubState, root.Status)
 	}
-	if !strings.HasPrefix(root.Status, "waiting for merge · 1 PR · 1 agent · goal waiting · builder PR #3 CI running") {
+	if !strings.HasPrefix(root.Status, "waiting for merge · 1 PR · 1 agent · goal waiting · builder PR #3 ready to merge, CI running") {
 		t.Errorf("root status = %q", root.Status)
 	}
 	if root.Rollup == nil || root.Rollup.State != harnessproto.RollupWaitingMerge || root.Rollup.Count != 1 ||

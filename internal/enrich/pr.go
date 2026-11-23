@@ -2,8 +2,9 @@
 // runtime — pull requests first — into the published session enrichments, and
 // derives a workgroup's rollup state from its members and their enrichments.
 //
-// Everything here is a pure function of its inputs: no I/O, no clock reads
-// (callers pass now), no GitHub calls. That keeps one definition of "open",
+// The helpers and the rollup are pure functions of their inputs: no I/O, no
+// clock reads (callers pass now), no GitHub calls. The Registry (registry.go)
+// runs the Sources (source.go) that produce the items. That keeps one definition of "open",
 // "settled" and "what a workgroup is waiting on" for every consumer — the rail,
 // `amux status`, the direct API, the coordinator's own done check (MemberSettled)
 // and the archive guard (ghpr.MatchesBranch for attribution).
@@ -20,8 +21,9 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// Retention is how long a merged or closed PR stays listed after it ended.
-const Retention = 3 * 24 * time.Hour
+// PRRetention keeps a merged or closed PR listed for 3 days after it ended,
+// at most MaxTerminal of them per session.
+var PRRetention = Retention{Window: Retention3Days, Max: MaxTerminal}
 
 // MaxTerminal caps the merged/closed PRs kept per session.
 const MaxTerminal = 10
@@ -74,46 +76,6 @@ func EndedAt(pr hp.SessionPR) time.Time {
 		return time.UnixMilli(pr.Updated)
 	}
 	return time.Time{}
-}
-
-// Retained reports whether a PR is still listed at now: every open PR, and a
-// merged/closed one until Retention after it ended (kept when the end is
-// unknown).
-func Retained(pr hp.SessionPR, now time.Time) bool {
-	end := EndedAt(pr)
-	return end.IsZero() || now.Sub(end) <= Retention
-}
-
-// Retain filters prs to those Retained at now, keeping at most MaxTerminal
-// merged/closed ones (the most recently ended).
-func Retain(prs []hp.SessionPR, now time.Time) []hp.SessionPR {
-	var open, done []hp.SessionPR
-	for _, pr := range prs {
-		switch {
-		case IsOpen(pr):
-			open = append(open, pr)
-		case Retained(pr, now):
-			done = append(done, pr)
-		}
-	}
-	if len(done) > MaxTerminal {
-		sort.SliceStable(done, func(i, j int) bool { return EndedAt(done[i]).After(EndedAt(done[j])) })
-		done = done[:MaxTerminal]
-	}
-	if len(open)+len(done) == len(prs) {
-		return prs
-	}
-	out := make([]hp.SessionPR, 0, len(open)+len(done))
-	keep := map[string]bool{}
-	for _, pr := range append(open, done...) {
-		keep[Key(pr)] = true
-	}
-	for _, pr := range prs { // preserve the caller's order
-		if keep[Key(pr)] {
-			out = append(out, pr)
-		}
-	}
-	return out
 }
 
 // Key is a PR's identity: owner/repo#number.
@@ -223,25 +185,63 @@ func Phase(pr hp.SessionPR) (phase string, attention []string) {
 	}
 }
 
-// Tone is the generic coloring of a PR.
-func Tone(pr hp.SessionPR) string {
-	phase, _ := Phase(pr)
+// Status is a PR's normalized status: phase attention → attention, review →
+// awaiting_review, merge → awaiting_merge, merged → done, closed → done
+// (reason "closed"). Detail is short text such as "CI red: lint".
+func Status(pr hp.SessionPR) hp.EnrichmentStatus {
+	phase, attention := Phase(pr)
+	ci := CI(pr)
 	switch phase {
 	case hp.PRPhaseAttention:
-		return hp.ToneAttention
+		return hp.EnrichmentStatus{State: hp.StatusAttention, Detail: attentionDetail(attention, ci), Reasons: attention}
 	case hp.PRPhaseReview:
-		return hp.TonePending
-	case hp.PRPhaseMerge:
-		if CI(pr).Status == hp.CIPending {
-			return hp.TonePending
+		st := hp.EnrichmentStatus{State: hp.StatusAwaitingReview, Detail: "awaiting review", Reasons: []string{}}
+		if ci.Status == hp.CIPending {
+			st.Detail, st.Reasons = "awaiting review, CI running", []string{"ci_pending"}
 		}
-		return hp.ToneOK
+		return st
+	case hp.PRPhaseMerge:
+		st := hp.EnrichmentStatus{State: hp.StatusAwaitingMerge, Detail: "ready to merge", Reasons: []string{}}
+		if Review(pr).State == hp.ReviewApproved {
+			st.Detail = "approved"
+		}
+		if ci.Status == hp.CIPending {
+			st.Detail, st.Reasons = st.Detail+", CI running", []string{"ci_pending"}
+		}
+		return st
+	}
+	if pr.State == "closed" {
+		return hp.EnrichmentStatus{State: hp.StatusDone, Detail: "closed", Reasons: []string{"closed"}}
 	}
 	if pr.State == "merged" {
-		return hp.ToneDone
+		return hp.EnrichmentStatus{State: hp.StatusDone, Detail: "merged", Reasons: []string{"merged"}}
 	}
-	return hp.ToneNeutral
+	return hp.EnrichmentStatus{State: hp.StatusUnknown, Detail: pr.State, Reasons: []string{}}
 }
+
+func attentionDetail(reasons []string, ci hp.PRCI) string {
+	has := map[string]bool{}
+	for _, r := range reasons {
+		has[r] = true
+	}
+	switch {
+	case has[hp.PRAttentionCIRed]:
+		if ci.FailingCheck != "" {
+			return "CI red: " + ci.FailingCheck
+		}
+		return "CI red"
+	case has[hp.PRAttentionConflict]:
+		return "conflict"
+	case has[hp.PRAttentionChangesRequested]:
+		return "changes requested"
+	case has[hp.PRAttentionBehind]:
+		return "behind"
+	}
+	return "draft"
+}
+
+// Tone is the generic coloring of a PR (hp.ToneFor its status).
+func Tone(pr hp.SessionPR) string { return hp.ToneFor(Status(pr).State) }
 
 // Label is a PR's short chip, e.g. "#79 ✓ approved", "#245 ✗ CI".
 func Label(pr hp.SessionPR) string {
@@ -284,23 +284,23 @@ func chip(pr hp.SessionPR) string {
 	return "✓ ready"
 }
 
-// Staleness says how fresh a PR's data is.
-type Staleness struct {
-	Stale      bool
-	ObservedAt time.Time // zero: unknown
-}
-
-// PullRequest builds a PR's published enrichment.
-func PullRequest(pr hp.SessionPR, st Staleness) hp.Enrichment {
+// PullRequest builds a PR's published envelope (observed_at and stale are the
+// Registry's to fill).
+func PullRequest(pr hp.SessionPR) hp.Enrichment {
 	phase, attention := Phase(pr)
 	title := pr.Title
 	if title == "" {
 		title = Key(pr)
 	}
+	st := Status(pr)
+	finished := ""
+	if !IsOpen(pr) {
+		finished = rfc3339(EndedAt(pr))
+	}
 	return hp.Enrichment{
 		Kind: hp.EnrichmentPullRequest, ID: Key(pr), Title: title, URL: pr.URL,
-		Tone: Tone(pr), Label: Label(pr), ObservedAt: rfc3339(st.ObservedAt),
-		Stale: st.Stale && IsOpen(pr), // an ended PR's state is final
+		Status: st, Tone: hp.ToneFor(st.State), Label: Label(pr),
+		UpdatedAt: pr.GitHubUpdatedAt, CreatedAt: pr.CreatedAt, FinishedAt: finished,
 		PullRequest: &hp.PullRequestEnrichment{
 			Repo: pr.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
 			State: State(pr), HeadBranch: pr.Branch, BaseBranch: pr.BaseBranch,
@@ -311,35 +311,8 @@ func PullRequest(pr hp.SessionPR, st Staleness) hp.Enrichment {
 	}
 }
 
-// Session builds a session's enrichment list from its PRs: retained ones only,
-// open first, then the most recently updated. stale reports each PR's
-// freshness. Nil when there is nothing to list.
-func Session(prs []hp.SessionPR, now time.Time, stale func(hp.SessionPR) Staleness) *hp.Enrichments {
-	prs = Retain(prs, now)
-	if len(prs) == 0 {
-		return nil
-	}
-	sorted := append([]hp.SessionPR(nil), prs...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		a, b := sorted[i], sorted[j]
-		if IsOpen(a) != IsOpen(b) {
-			return IsOpen(a)
-		}
-		return recency(a).After(recency(b))
-	})
-	out := make(hp.Enrichments, 0, len(sorted))
-	for _, pr := range sorted {
-		var st Staleness
-		if stale != nil {
-			st = stale(pr)
-		}
-		out = append(out, PullRequest(pr, st))
-	}
-	return &out
-}
-
-// recency orders PRs: GitHub's updatedAt, else when amux saw them change.
-func recency(pr hp.SessionPR) time.Time {
+// Recency orders PRs: GitHub's updatedAt, else when amux saw them change.
+func Recency(pr hp.SessionPR) time.Time {
 	if t, err := time.Parse(time.RFC3339, pr.GitHubUpdatedAt); err == nil {
 		return t
 	}

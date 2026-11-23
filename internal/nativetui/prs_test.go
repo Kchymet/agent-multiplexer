@@ -12,16 +12,16 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-func prEnrichment(n int, tone, label, state string) hp.Enrichment {
+func prEnrichment(n int, status, label, state string) hp.Enrichment {
 	return hp.Enrichment{Kind: hp.EnrichmentPullRequest, ID: "o/r#" + label, Title: "PR title " + label,
-		URL: "https://github.com/o/r/pull/1", Tone: tone, Label: label,
+		URL: "https://github.com/o/r/pull/1", Status: hp.EnrichmentStatus{State: status}, Tone: hp.ToneFor(status), Label: label,
 		PullRequest: &hp.PullRequestEnrichment{Repo: "o/r", Number: n, State: state,
 			CI: hp.PRCI{Status: hp.CIRed, FailingCheck: "test"}, Review: hp.PRReviewSummary{State: hp.ReviewApproved, By: []string{"octocat"}}}}
 }
 
 func prModel() *model {
-	ok := hp.Enrichments{prEnrichment(79, hp.ToneOK, "#79 ✓ approved", hp.PRStateOpen)}
-	bad := hp.Enrichments{prEnrichment(245, hp.ToneAttention, "#245 ✗ CI", hp.PRStateOpen), prEnrichment(9, hp.ToneDone, "#9 merged", hp.PRStateMerged)}
+	ok := hp.Enrichments{prEnrichment(79, hp.StatusAwaitingMerge, "#79 ✓ approved", hp.PRStateOpen)}
+	bad := hp.Enrichments{prEnrichment(245, hp.StatusAttention, "#245 ✗ CI", hp.PRStateOpen), prEnrichment(9, hp.StatusDone, "#9 merged", hp.PRStateMerged)}
 	return &model{w: 140, h: 40, sessions: []core.Session{
 		{ID: "wg1", Title: "wg", IsRoot: true, Role: "coordinator", Section: core.SectionWorkgroups, State: core.StateRunning,
 			SubState: hp.SubStatePRAttention, Status: "PR attention · 1 PR · 2 agents · b PR #245 CI failed",
@@ -45,14 +45,14 @@ func TestPRChipsOnRows(t *testing.T) {
 		return b.String()
 	}
 	member := text(m.sessionStatusSegments(m.sessions[1]))
-	if member != "ready #79 ✓ approved · note" {
+	if member != "ready ⑂ #79 ✓ approved · note" {
 		t.Fatalf("member status = %q", member)
 	}
 	if got := ansi.Strip(m.rowStatus(m.sessions[1], " ")); !strings.Contains(got, "#79") {
 		t.Fatalf("member sub-line = %q", got)
 	}
 	header := text(m.sessionStatusSegments(m.sessions[0]))
-	if !strings.HasPrefix(header, "PR attention · 1 PR #245 ✗ CI #79 ✓ approved · 2 agents") {
+	if !strings.HasPrefix(header, "PR attention · 1 PR ⑂ #245 ✗ CI ⑂ #79 ✓ approved · 2 agents") {
 		t.Fatalf("header status = %q", header)
 	}
 	segs := m.sessionStatusSegments(m.sessions[0])
@@ -87,14 +87,14 @@ func TestCalmRollupIsNotAttention(t *testing.T) {
 }
 
 func TestMemberChipsStale(t *testing.T) {
-	e := prEnrichment(1, hp.TonePending, "#1 CI…", hp.PRStateOpen)
+	e := prEnrichment(1, hp.StatusAwaitingReview, "#1 CI…", hp.PRStateOpen)
 	e.Stale = true
 	enr := hp.Enrichments{e}
 	got := ""
 	for _, sg := range memberChips(&core.Session{Enrichments: &enr}) {
 		got += sg.text
 	}
-	if got != " #1 CI… · PR data stale" {
+	if got != " ⑂ #1 CI… · PR data stale" {
 		t.Fatalf("chips = %q", got)
 	}
 }
@@ -167,5 +167,33 @@ func TestOpenPRRefusesNonHTTPS(t *testing.T) {
 	m.openPR(hp.Enrichment{Label: "#1", URL: "file:///etc/passwd"})
 	if called {
 		t.Fatal("opened a non-https URL")
+	}
+}
+
+// Any kind renders through the same path: its icon, its label, a color from
+// its normalized status; an unknown kind gets the generic icon and an unknown
+// state the neutral color. A failed deploy outranks an approved PR.
+func TestGenericKindChips(t *testing.T) {
+	deploy := hp.Enrichment{Kind: "deploy", ID: "prod", Title: "deploy prod", Label: "prod failed",
+		Status: hp.EnrichmentStatus{State: hp.StatusFailed, Detail: "rollout failed"}}
+	odd := hp.Enrichment{Kind: "space_probe", ID: "x", Title: "probe x", Label: "x", Status: hp.EnrichmentStatus{State: "orbiting"}}
+	pr := prEnrichment(79, hp.StatusAwaitingMerge, "#79 ✓ approved", hp.PRStateOpen)
+	if c := chip(deploy); c.text != " ⇪ prod failed" || c.style.GetForeground() != errStyle.GetForeground() {
+		t.Fatalf("deploy chip = %+v", c)
+	}
+	if c := chip(odd); c.text != " • x" || c.style.GetForeground() != dimStyle.GetForeground() {
+		t.Fatalf("unknown kind/state chip = %+v", c)
+	}
+	enr := hp.Enrichments{pr, deploy}
+	m := &model{sessions: []core.Session{
+		{ID: "wg1", Title: "wg", IsRoot: true, Role: "coordinator", State: core.StateRunning, Status: "running · 1 agent"},
+		{ID: "m1", Title: "a", RootID: "wg1", State: core.StateReady, Status: "ready", Enrichments: &enr},
+	}}
+	segs := m.headerChips(&m.sessions[0])
+	if len(segs) != 2 || segs[0].text != " ⇪ prod failed" || segs[1].text != " ⑂ #79 ✓ approved" {
+		t.Fatalf("header chips = %+v", segs)
+	}
+	if got := prDetail(deploy); got != "deploy · failed · rollout failed" {
+		t.Fatalf("deploy detail = %q", got)
 	}
 }

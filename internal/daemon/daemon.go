@@ -34,6 +34,7 @@ import (
 	"amux/internal/directsvc"
 	"amux/internal/engine"
 	"amux/internal/engine/local"
+	"amux/internal/enrich"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/procstat"
@@ -244,7 +245,8 @@ type Daemon struct {
 	sessionRPC *sessionRuntime
 	// prs watches workgroup members' GitHub PRs and wakes their coordinators
 	// (internal/prwatch, prwatch.go). Built in New, started by Run.
-	prs *prwatch.Watcher
+	prs    *prwatch.Watcher
+	enrich *enrich.Registry
 	// memberWatch remembers workgroup member states between rail polls so a
 	// member's transition wakes its coordinator (memberwake.go).
 	memberWatch memberWatch
@@ -296,6 +298,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	d.launchSpec = d.launchSpecFor
 	d.listen = listenOwnedUnix
 	d.prs = d.newPRWatcher()
+	d.enrich = d.newEnrichments()
 	d.permissionBaseline = d.loadPermissionBaseline
 	d.harnessRestart.kick = make(chan struct{}, 1)
 	return d
@@ -338,7 +341,7 @@ func Default(self string) *Daemon {
 		return ""
 	})
 	ws.SetPRs(d.sessionPRs)
-	ws.SetPRHealth(d.prHealth)
+	ws.SetEnrichments(d.enrich)
 	ws.SetGoalStatus(d.coordinatorGoalStatus)
 	ws.SetGoalInfo(d.coordinatorGoalInfo)
 	ws.SetModelObserved(func(id, kind, model string) {

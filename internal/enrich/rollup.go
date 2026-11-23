@@ -13,7 +13,8 @@ type Member struct {
 	ID    string
 	Label string // compact display name for reasons
 	State string // its activity (a hp.State* value), as the daemon presents it
-	PRs   []hp.SessionPR
+	// Enrichments are its rendered enrichments of every kind.
+	Enrichments []hp.Enrichment
 }
 
 // Input is everything a workgroup's rollup depends on.
@@ -24,17 +25,9 @@ type Input struct {
 	Goal     string
 	GoalNote string
 	Members  []Member
-	Now      time.Time
-	// PRsObserved: the daemon watches PRs. Without it PRs neither count nor
-	// drive a state, and the rollup carries no pull_request counts.
-	PRsObserved bool
-	// Stale reports one PR's freshness (nil: fresh, observed time unknown).
-	Stale func(hp.SessionPR) Staleness
-	// StaleReason is the watcher-wide failure (a hp.Stale* value, or ""); a
-	// gh_unavailable one marks every rollup stale.
-	StaleReason string
-	// ObservedAt is the watcher's last fully successful poll (zero: none yet).
-	ObservedAt time.Time
+	// Sources is each registered source's freshness. With none, enrichments
+	// are not observed: items neither count nor drive a state.
+	Sources []SourceStatus
 }
 
 // Result is a workgroup's rollup plus its legacy presentation.
@@ -74,8 +67,53 @@ func rank(state string) int {
 	return 0
 }
 
-// maxReasonItems bounds how many members/PRs a reason names.
+// maxReasonItems bounds how many members/items a reason names.
 const maxReasonItems = 3
+
+// Item tiers: which rollup state an item's normalized status drives. The
+// rollup reads nothing else of an item, so any kind contributes by mapping its
+// own states onto the normalized set.
+const (
+	tierNone      = ""
+	tierAttention = "attention" // attention, failed → pr_attention
+	tierReview    = "review"    // awaiting_review → waiting_review
+	tierMerge     = "merge"     // awaiting_merge → waiting_merge
+)
+
+func tierOf(state string) string {
+	switch state {
+	case hp.StatusAttention, hp.StatusFailed:
+		return tierAttention
+	case hp.StatusAwaitingReview:
+		return tierReview
+	case hp.StatusAwaitingMerge:
+		return tierMerge
+	}
+	return tierNone
+}
+
+// tierItems collects one tier's items for its label and reason.
+type tierItems struct {
+	items  []string
+	allPRs bool
+}
+
+func (t *tierItems) add(kind, item string) {
+	if len(t.items) == 0 {
+		t.allPRs = true
+	}
+	t.items = append(t.items, item)
+	t.allPRs = t.allPRs && kind == hp.EnrichmentPullRequest
+}
+
+// label is "<word> · N PRs" when only PRs contribute, else "<generic> · N".
+func (t tierItems) label(prWord, generic string) string {
+	n := len(t.items)
+	if t.allPRs {
+		return prWord + " · " + prs(n)
+	}
+	return fmt.Sprintf("%s · %d", generic, n)
+}
 
 // Rollup derives a workgroup's state, first match wins:
 //
@@ -84,13 +122,16 @@ const maxReasonItems = 3
 //	               between turns, or a waiting member (NeedsYou names who)
 //	running        the coordinator or a member is running (or live, unknown);
 //	               a between-turns coordinator then is "supervising"
-//	pr_attention   an open PR needs work: the coordinator's job, not the user's
-//	waiting_review an open PR waits on review
-//	waiting_merge  an open PR waits on a merge
+//	pr_attention   an item needs work (status attention or failed): the
+//	               coordinator's job, not the user's
+//	waiting_review an item awaits review
+//	waiting_merge  an item awaits a merge
 //	ready / idle   otherwise
 //
-// It is a pure function of member states and PRs: whatever decides a member's
-// state (e.g. honest waiting detection) feeds straight into it.
+// It is a pure function of member states and the items' normalized statuses:
+// whatever decides a member's state (e.g. honest waiting detection) feeds
+// straight into it, and a new enrichment kind changes it only through the
+// statuses its items carry.
 func Rollup(in Input) Result {
 	own := in.OwnState
 	if own == "" {
@@ -99,15 +140,22 @@ func Rollup(in Input) Result {
 	between := own == hp.StateReady || own == hp.StateIdle || own == hp.StateUnknown
 	goalNeeds := between && goalNeedsUser(in.Goal)
 	maxState := own
-	var needs, busy, prItems []string
+	var needs, busy, openItems []string
 	if own == hp.StateWaiting || goalNeeds {
 		needs = append(needs, CoordinatorLabel)
 	}
 	nRunning := 0
 	inflight := false
-	counts := hp.PullRequestCounts{}
-	tier := map[string][]string{} // phase -> reason items
-	stale := false
+	observed := len(in.Sources) > 0
+	kinds := map[string]bool{}
+	for _, s := range in.Sources {
+		kinds[s.Kind] = true
+	}
+	totals := zeroStates()
+	other := map[string]map[string]int{}
+	var prItems []hp.Enrichment
+	tiers := map[string]*tierItems{tierAttention: {}, tierReview: {}, tierMerge: {}}
+	staleItem := false
 	for _, m := range in.Members {
 		if rank(m.State) > rank(maxState) {
 			maxState = m.State
@@ -121,76 +169,84 @@ func Rollup(in Input) Result {
 			nRunning++
 			busy = append(busy, m.Label+" "+m.State)
 		}
-		if !in.PRsObserved {
+		if !observed {
 			continue
 		}
-		for _, pr := range Retain(m.PRs, in.Now) {
-			switch pr.State {
-			case "merged":
-				counts.Merged++
-				continue
-			case "closed":
-				counts.Closed++
+		for _, e := range m.Enrichments {
+			if !kinds[e.Kind] {
 				continue
 			}
-			if !IsOpen(pr) {
+			state := normalizeStatus(e.Status.State)
+			totals[state]++
+			if e.Kind == hp.EnrichmentPullRequest {
+				prItems = append(prItems, e)
+			} else {
+				if other[e.Kind] == nil {
+					other[e.Kind] = zeroStates()
+				}
+				other[e.Kind][state]++
+			}
+			if state == hp.StatusDone {
 				continue
 			}
-			counts.Open++
-			if pr.Draft {
-				counts.Draft++
+			text := itemText(m.Label, e)
+			openItems = append(openItems, text)
+			if t := tierOf(state); t != tierNone {
+				tiers[t].add(e.Kind, text)
 			}
-			if CI(pr).Status == hp.CIPending {
-				counts.CIPending++
-			}
-			phase, _ := Phase(pr)
-			switch phase {
-			case hp.PRPhaseAttention:
-				counts.Attention++
-			case hp.PRPhaseReview:
-				counts.WaitingReview++
-			case hp.PRPhaseMerge:
-				counts.WaitingMerge++
-			}
-			item := prItem(m.Label, pr)
-			prItems = append(prItems, item)
-			tier[phase] = append(tier[phase], item)
-			if in.Stale != nil && in.Stale(pr).Stale {
-				stale = true
+			if e.Stale {
+				staleItem = true
 			}
 		}
 	}
 
 	r := Result{}
-	ro := hp.Rollup{ObservedAt: rfc3339(in.ObservedAt)}
-	if in.PRsObserved {
-		c := counts
-		ro.Enrichments.PullRequest = &c
-		switch {
-		case in.StaleReason == hp.StaleGHUnavailable:
-			ro.Stale, ro.StaleReason = true, hp.StaleGHUnavailable
-		case stale:
-			ro.Stale, ro.StaleReason = true, in.StaleReason
-			if ro.StaleReason == "" {
-				ro.StaleReason = hp.StaleError
+	ro := hp.Rollup{Totals: totals, Sources: []hp.EnrichmentSource{}}
+	if observed {
+		if kinds[hp.EnrichmentPullRequest] {
+			c := pullRequestCounts(prItems)
+			ro.Enrichments.PullRequest = &c
+		}
+		if len(other) > 0 {
+			ro.Enrichments.Other = other
+		}
+		var newest time.Time
+		for _, s := range in.Sources {
+			ro.Sources = append(ro.Sources, s.Wire())
+			if s.LastOK.After(newest) {
+				newest = s.LastOK
+			}
+			if s.Stale && !ro.Stale {
+				ro.Stale, ro.StaleReason = true, s.StaleReason
+			}
+		}
+		ro.ObservedAt = rfc3339(newest)
+		if !ro.Stale && staleItem {
+			ro.Stale, ro.StaleReason = true, hp.StaleError
+			for _, s := range in.Sources {
+				if s.LastReason != "" {
+					ro.StaleReason = s.LastReason
+					break
+				}
 			}
 		}
 	}
+
 	var reason []string
 	stopped := own == hp.StateIdle
-	supervising := between && inflight
 	supervise := func() {
-		if !supervising {
+		if !(between && inflight) {
 			return
 		}
 		r.SubState = hp.SubStateSupervising
-		if items := append(append([]string(nil), busy...), prItems...); len(items) > 0 {
+		if items := append(append([]string(nil), busy...), openItems...); len(items) > 0 {
 			reason = append(reason, "supervising "+list(items))
 		}
 		if stopped {
 			reason = append(reason, "coordinator stopped: wake-ups wait until it starts")
 		}
 	}
+	att, rev, mer := tiers[tierAttention], tiers[tierReview], tiers[tierMerge]
 	switch {
 	case len(needs) > 0:
 		ro.State, ro.Count, ro.Label = hp.RollupWaitingUser, len(needs), "waiting on you"
@@ -208,28 +264,25 @@ func Rollup(in Input) Result {
 			r.State = hp.StateRunning
 		}
 		supervise()
-	case len(tier[hp.PRPhaseAttention]) > 0:
-		n := len(tier[hp.PRPhaseAttention])
-		ro.State, ro.Count, ro.Label = hp.RollupPRAttention, n, "PR attention · "+prs(n)
+	case len(att.items) > 0:
+		ro.State, ro.Count, ro.Label = hp.RollupPRAttention, len(att.items), att.label("PR attention", "needs attention")
 		r.State, r.SubState = hp.StateRunning, hp.SubStatePRAttention
-		reason = append(reason, list(tier[hp.PRPhaseAttention]))
+		reason = append(reason, list(att.items))
 		if stopped {
 			r.State = hp.StateReady
 			reason = append(reason, "coordinator stopped")
 		}
-	case len(tier[hp.PRPhaseReview]) > 0:
-		n := len(tier[hp.PRPhaseReview])
-		ro.State, ro.Count, ro.Label = hp.RollupWaitingReview, n, "waiting for review · "+prs(n)
-		if m := len(tier[hp.PRPhaseMerge]); m > 0 {
+	case len(rev.items) > 0:
+		ro.State, ro.Count, ro.Label = hp.RollupWaitingReview, len(rev.items), rev.label("waiting for review", "waiting for review")
+		if m := len(mer.items); m > 0 {
 			ro.Label += fmt.Sprintf(" · %d ready to merge", m)
 		}
 		r.State, r.SubState = hp.StateReady, hp.SubStateWaitingReview
-		reason = append(reason, list(append(tier[hp.PRPhaseReview], tier[hp.PRPhaseMerge]...)))
-	case len(tier[hp.PRPhaseMerge]) > 0:
-		n := len(tier[hp.PRPhaseMerge])
-		ro.State, ro.Count, ro.Label = hp.RollupWaitingMerge, n, "waiting for merge · "+prs(n)
+		reason = append(reason, list(append(append([]string(nil), rev.items...), mer.items...)))
+	case len(mer.items) > 0:
+		ro.State, ro.Count, ro.Label = hp.RollupWaitingMerge, len(mer.items), mer.label("waiting for merge", "waiting for merge")
 		r.State, r.SubState = hp.StateReady, hp.SubStateWaitingMerge
-		reason = append(reason, list(tier[hp.PRPhaseMerge]))
+		reason = append(reason, list(mer.items))
 	default:
 		r.State, r.Lead = maxState, own
 		ro.State, ro.Label = hp.RollupIdle, "idle"
@@ -245,30 +298,73 @@ func Rollup(in Input) Result {
 	return r
 }
 
-// prItem is one PR in a reason, e.g. "m1 PR #12 CI failed".
-func prItem(member string, pr hp.SessionPR) string {
-	what := "open"
-	switch {
-	case pr.Draft:
-		what = "draft"
-	case pr.Mergeable == "conflicting":
-		what = "conflict"
-	case pr.Checks == "fail":
-		what = "CI failed"
-	case pr.ReviewDecision == "changes_requested":
-		what = "changes requested"
-	case pr.MergeState == "behind":
-		what = "behind"
-	case pr.Checks == "pending":
-		what = "CI running"
-	case pr.ReviewDecision == "approved":
-		what = "approved"
-	case pr.ReviewDecision == "review_required":
-		what = "awaiting review"
-	case pr.Checks == "pass":
-		what = "ready"
+func zeroStates() map[string]int {
+	m := make(map[string]int, len(hp.EnrichmentStates))
+	for _, s := range hp.EnrichmentStates {
+		m[s] = 0
 	}
-	return fmt.Sprintf("%s PR #%d %s", member, pr.Number, what)
+	return m
+}
+
+// normalizeStatus maps an item state onto the known set (unknown → unknown).
+func normalizeStatus(state string) string {
+	for _, s := range hp.EnrichmentStates {
+		if s == state {
+			return s
+		}
+	}
+	return hp.StatusUnknown
+}
+
+// itemText is one item in a reason, e.g. "m1 PR #12 CI red: test" or
+// "m1 deploy staging failed": the member, the item's reference and its
+// status detail.
+func itemText(member string, e hp.Enrichment) string {
+	ref := e.Kind + " " + e.Title
+	if e.Kind == hp.EnrichmentPullRequest {
+		if i := strings.LastIndex(e.ID, "#"); i >= 0 {
+			ref = "PR " + e.ID[i:]
+		}
+	}
+	detail := e.Status.Detail
+	if detail == "" {
+		detail = strings.ReplaceAll(e.Status.State, "_", " ")
+	}
+	return fmt.Sprintf("%s %s %s", member, ref, detail)
+}
+
+// pullRequestCounts is the pull_request kind's v1 counts.
+func pullRequestCounts(items []hp.Enrichment) hp.PullRequestCounts {
+	var c hp.PullRequestCounts
+	for _, e := range items {
+		pr := e.PullRequest
+		switch {
+		case pr == nil:
+			continue
+		case pr.State == hp.PRStateMerged:
+			c.Merged++
+			continue
+		case pr.State == hp.PRStateClosed:
+			c.Closed++
+			continue
+		}
+		c.Open++
+		if pr.State == hp.PRStateDraft {
+			c.Draft++
+		}
+		if pr.CI.Status == hp.CIPending {
+			c.CIPending++
+		}
+		switch tierOf(e.Status.State) {
+		case tierAttention:
+			c.Attention++
+		case tierReview:
+			c.WaitingReview++
+		case tierMerge:
+			c.WaitingMerge++
+		}
+	}
+	return c
 }
 
 func list(items []string) string {

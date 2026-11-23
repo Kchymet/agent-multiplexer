@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"amux/internal/enrich"
+
 	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
@@ -21,6 +23,8 @@ type fakeGH struct {
 	err       error
 	calls     []string
 	beforeRun func()
+	// rateLimitReset is what `gh api rate_limit` reports (0: it fails).
+	rateLimitReset int64
 }
 
 func newFakeGH() *fakeGH { return &fakeGH{prs: map[int]map[string]any{}} }
@@ -59,6 +63,12 @@ func (f *fakeGH) run(_ context.Context, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, strings.Join(args, " "))
+	if len(args) == 2 && args[0] == "api" && args[1] == "rate_limit" {
+		if f.rateLimitReset == 0 {
+			return nil, errors.New("no rate limit info")
+		}
+		return json.Marshal(map[string]any{"resources": map[string]any{"graphql": map[string]any{"reset": f.rateLimitReset}}})
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -111,6 +121,8 @@ type harness struct {
 	t         *testing.T
 	gh        *fakeGH
 	w         *Watcher
+	reg       *enrich.Registry
+	notify    map[string]bool
 	saved     map[string]string
 	events    []Change
 	wakes     [][]string
@@ -131,28 +143,11 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-// build makes a watcher over the harness's persisted state (a "daemon restart"
-// when called again).
+// build makes the wake-up queue and the enrichment registry running the PR
+// source over the harness's persisted state (a "daemon restart" when called
+// again), wired as the daemon wires them.
 func (h *harness) build() *Watcher {
-	return New(Config{
-		Run:     h.gh.run,
-		Members: func() ([]Member, error) { return append([]Member(nil), h.members...), nil },
-		Load: func() (map[string]string, error) {
-			out := map[string]string{}
-			for k, v := range h.saved {
-				out[k] = v
-			}
-			return out, nil
-		},
-		Save: func(id, state string) error {
-			if state == "" {
-				delete(h.saved, id)
-			} else {
-				h.saved[id] = state
-			}
-			return nil
-		},
-		Emit: func(c Change) { h.events = append(h.events, c) },
+	w := New(Config{
 		Deliver: func(_ context.Context, wg string, wakes []Wake) []Delivery {
 			if h.deliverFn != nil {
 				return h.deliverFn(wg, wakes)
@@ -169,12 +164,56 @@ func (h *harness) build() *Watcher {
 		Logf: func(format string, args ...any) { h.logs = append(h.logs, fmt.Sprintf(format, args...)) },
 		Now:  func() time.Time { return h.now },
 	})
+	h.reg = enrich.NewRegistry(enrich.RegistryConfig{
+		Scope: func() (enrich.Scope, error) {
+			var sc enrich.Scope
+			for _, m := range h.members {
+				sc.Sessions = append(sc.Sessions, enrich.ScopeSession{ID: m.SessionID, Workgroup: m.Workgroup, Label: m.Label, Branch: m.Branch, Repos: m.Repos})
+			}
+			return sc, nil
+		},
+		Load: func() (map[string]string, error) {
+			out := map[string]string{}
+			for k, v := range h.saved {
+				out[k] = v
+			}
+			return out, nil
+		},
+		Save: func(id, state string) error {
+			if state == "" {
+				delete(h.saved, id)
+			} else {
+				h.saved[id] = state
+			}
+			return nil
+		},
+		Emit: func(c enrich.Change) {
+			pc := c.Payload.(Change)
+			h.events = append(h.events, pc)
+			w.QueuePR(pc)
+		},
+		Legacy: DecodeLegacy,
+		Logf:   func(format string, args ...any) { h.logs = append(h.logs, fmt.Sprintf(format, args...)) },
+		Now:    func() time.Time { return h.now },
+	})
+	h.reg.Register(NewSource(SourceConfig{Run: h.gh.run, Now: func() time.Time { return h.now }, Notify: h.notify}))
+	return w
 }
 
+// poll is one PR poll tick, its wake-ups queued and offered.
 func (h *harness) poll() {
 	h.now = h.now.Add(3 * time.Minute)
-	h.w.Poll(context.Background())
+	h.reg.PollKind(context.Background(), harnessproto.EnrichmentPullRequest)
+	h.w.drainPR(context.Background())
 }
+
+// prs is a session's last-known PRs.
+func (h *harness) prs(id string) []harnessproto.SessionPR {
+	return PRs(h.reg.Entries(id, harnessproto.EnrichmentPullRequest))
+}
+
+// delay is the PR source's next poll delay.
+func (h *harness) delay() time.Duration { return h.reg.Delay(harnessproto.EnrichmentPullRequest) }
 
 func (h *harness) takeEvents() []Change {
 	ev := h.events
@@ -236,7 +275,7 @@ func TestFirstObservationTracksWithoutWaking(t *testing.T) {
 	if w := h.takeWakes(); len(w) != 0 {
 		t.Fatalf("first observation woke the coordinator: %v", w)
 	}
-	if got := h.w.PRs("m1"); len(got) != 2 || got[0].Number != 8 || got[1].Number != 7 {
+	if got := h.prs("m1"); len(got) != 2 || got[0].Number != 8 || got[1].Number != 7 {
 		t.Fatalf("PRs(m1) = %+v", got)
 	}
 	if h.gh.callCount() != 1 {
@@ -300,7 +339,7 @@ func TestTransitionsWakeExactlyOnce(t *testing.T) {
 			t.Fatalf("%s: unchanged poll produced events %+v wakes %v", step.name, ev, w)
 		}
 	}
-	if got := h.w.PRs("m1"); len(got) != 1 || got[0].State != "merged" {
+	if got := h.prs("m1"); len(got) != 1 || got[0].State != "merged" {
 		t.Fatalf("PRs(m1) after merge = %+v", got)
 	}
 	// A merged PR is no longer queried.
@@ -547,13 +586,13 @@ func TestGHFailureIsQuiet(t *testing.T) {
 	if ev, w := h.takeEvents(), h.takeWakes(); len(ev) != 0 || len(w) != 0 {
 		t.Fatalf("gh failure produced events %+v wakes %v", ev, w)
 	}
-	if len(h.logs) != 1 || !strings.Contains(h.logs[0], "gh unavailable") {
+	if len(h.logs) != 1 || !strings.Contains(h.logs[0], "unavailable (gh_unavailable)") {
 		t.Fatalf("logs = %q, want one setup message", h.logs)
 	}
-	if h.w.delay() != MaxBackoff {
-		t.Fatalf("delay = %v, want %v", h.w.delay(), MaxBackoff)
+	if h.delay() != MaxBackoff {
+		t.Fatalf("delay = %v, want %v", h.delay(), MaxBackoff)
 	}
-	if got := h.w.PRs("m1"); len(got) != 1 || got[0].State != "open" {
+	if got := h.prs("m1"); len(got) != 1 || got[0].State != "open" {
 		t.Fatalf("PRs lost on failure: %+v", got)
 	}
 
@@ -561,7 +600,7 @@ func TestGHFailureIsQuiet(t *testing.T) {
 	h.gh.err = errors.New("HTTP 502: bad gateway")
 	h.poll()
 	h.poll()
-	if d := h.w.delay(); d != 4*DefaultInterval {
+	if d := h.delay(); d != 4*DefaultInterval {
 		t.Fatalf("delay after 2 failures = %v, want %v", d, 4*DefaultInterval)
 	}
 	if ev := h.takeEvents(); len(ev) != 0 {
@@ -570,8 +609,8 @@ func TestGHFailureIsQuiet(t *testing.T) {
 
 	h.gh.err = nil
 	h.poll()
-	if h.w.delay() != DefaultInterval {
-		t.Fatalf("delay after recovery = %v", h.w.delay())
+	if h.delay() != DefaultInterval {
+		t.Fatalf("delay after recovery = %v", h.delay())
 	}
 	if ev := h.takeEvents(); len(ev) != 0 {
 		t.Fatalf("recovery produced events %+v", ev)

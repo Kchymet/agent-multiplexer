@@ -52,9 +52,10 @@ type Workspace struct {
 	// prs, if set, reports the PRs a session owns (the daemon's PR watcher);
 	// rows carry them and their status gains a short PR suffix.
 	prs func(id string) []harnessproto.SessionPR
-	// prHealth, if set, reports the PR watcher's freshness; with it (and PR
-	// watching on) rows carry enrichments and coordinators a PR rollup.
-	prHealth func() prwatch.Health
+	// enrichments, if set, reports each session's enrichments and the
+	// sources' freshness; with a registered source rows carry enrichments
+	// and coordinators count them in their rollup.
+	enrichments EnrichmentProbe
 	// goalStatus, if set, reports a goal coordinator's goal status word
 	// ("none" with no goal, "" when unknown) for its status line.
 	goalStatus func(store.Session) string
@@ -74,15 +75,20 @@ func (w *Workspace) SetControlMode(f func(id string) string) { w.controlMode = f
 // SetPRs installs the PR probe (see Workspace.prs).
 func (w *Workspace) SetPRs(f func(id string) []harnessproto.SessionPR) { w.prs = f }
 
-// SetPRHealth installs the PR watcher's freshness probe (see Workspace.prHealth).
-func (w *Workspace) SetPRHealth(f func() prwatch.Health) { w.prHealth = f }
+// EnrichmentProbe is the daemon's enrichment registry as the workspace reads it.
+type EnrichmentProbe interface {
+	Enrichments(sessionID string) *harnessproto.Enrichments
+	Sources() []enrich.SourceStatus
+}
 
-// prContext reads the PR watcher's state once per snapshot.
+// SetEnrichments installs the enrichment probe (see Workspace.enrichments).
+func (w *Workspace) SetEnrichments(p EnrichmentProbe) { w.enrichments = p }
+
+// prContext reads the sources' freshness once per snapshot.
 func (w *Workspace) prContext() prContext {
-	pc := prContext{now: time.Now()}
-	if w.prHealth != nil {
-		pc.health = w.prHealth()
-		pc.observed = pc.health.Enabled
+	pc := prContext{probe: w.enrichments}
+	if w.enrichments != nil {
+		pc.sources = w.enrichments.Sources()
 	}
 	return pc
 }
@@ -208,7 +214,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		for i, s := range active {
 			subStates[i] = agentState(liveOf(s.ID), s)
 			memberPRs[i] = w.sessionPRs(s.ID)
-			views[i] = memberView{session: s, state: subStates[i], prs: memberPRs[i]}
+			views[i] = memberView{session: s, state: subStates[i], prs: memberPRs[i], items: enrichmentList(pc.enrichments(s.ID))}
 		}
 		goal, goalNote := w.goal(r)
 		view := superviseCoordinator(ownState, goal, goalNote, views, pc)
@@ -239,7 +245,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 				Model:       s.Model,
 				State:       subStates[i],
 				PRs:         prList(prs),
-				Enrichments: pc.enrichments(prs),
+				Enrichments: enrichmentPtr(views[i].items),
 				Status:      stateLabel(subStates[i]) + subSuffix(s) + prSuffix(prs) + noticeSuffix(s) + configSuffix(s),
 				Cwd:         s.Dir,
 				CanAttach:   true,
@@ -598,13 +604,19 @@ func (w *Workspace) sessionPRs(id string) []harnessproto.SessionPR {
 	return w.prs(id)
 }
 
-// enrichments is a member row's Enrichments field: nil unless the daemon
-// watches PRs and the session owns a retained one.
-func (pc prContext) enrichments(prs []harnessproto.SessionPR) *harnessproto.Enrichments {
-	if !pc.observed {
+func enrichmentList(p *harnessproto.Enrichments) []harnessproto.Enrichment {
+	if p == nil {
 		return nil
 	}
-	return enrich.Session(prs, pc.now, pc.stale)
+	return *p
+}
+
+func enrichmentPtr(items []harnessproto.Enrichment) *harnessproto.Enrichments {
+	if len(items) == 0 {
+		return nil
+	}
+	list := harnessproto.Enrichments(items)
+	return &list
 }
 
 // prList is the row's PRs field (nil when there are none).

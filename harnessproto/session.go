@@ -210,6 +210,7 @@ type SessionPR struct {
 	Title              string     `json:"title,omitempty"`
 	BaseBranch         string     `json:"baseBranch,omitempty"`
 	GitHubUpdatedAt    string     `json:"githubUpdatedAt,omitempty"`
+	CreatedAt          string     `json:"createdAt,omitempty"`
 	MergedAt           string     `json:"mergedAt,omitempty"`
 	ClosedAt           string     `json:"closedAt,omitempty"`
 	Reviews            []PRReview `json:"reviews,omitempty"`

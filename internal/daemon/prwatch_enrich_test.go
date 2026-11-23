@@ -21,18 +21,24 @@ func TestPRNotifyKinds(t *testing.T) {
 	}
 }
 
-// The host capability lists pull_request only while PR watching is on.
+// The host capability lists pull_request (and its freshness) only while PR
+// watching is on: the source is registered only then.
 func TestEnrichmentKinds(t *testing.T) {
 	d := &Daemon{}
 	if got := d.enrichmentKinds(); got != nil {
-		t.Fatalf("no watcher: %v", got)
+		t.Fatalf("no registry: %v", got)
 	}
-	d.prs = prwatch.New(prwatch.Config{NoPoll: true})
-	if got := d.enrichmentKinds(); got != nil {
+	t.Setenv(prPollIntervalEnv, "off")
+	d.enrich = d.newEnrichments()
+	if got := d.enrichmentKinds(); got != nil || d.enrichmentSources() != nil {
 		t.Fatalf("polling off: %v", got)
 	}
-	d.prs = prwatch.New(prwatch.Config{})
+	t.Setenv(prPollIntervalEnv, "")
+	d.enrich = d.newEnrichments()
 	if got := d.enrichmentKinds(); len(got) != 1 || got[0] != harnessproto.EnrichmentPullRequest {
 		t.Fatalf("polling on: %v", got)
+	}
+	if src := d.enrichmentSources(); len(src) != 1 || src[0].Kind != harnessproto.EnrichmentPullRequest || src[0].IntervalS != 180 {
+		t.Fatalf("sources = %+v", src)
 	}
 }

@@ -9,6 +9,8 @@ import (
 
 	"amux/internal/core"
 	"amux/internal/store"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // creation_identity.go is the host-only creation identity protocol: a host
@@ -51,6 +53,8 @@ type HostCapabilities struct {
 	// (harnessproto.Enrichment*): ["pull_request"] while PR watching is on.
 	// Absent from a daemon that predates enrichments or has them off.
 	Enrichments []string `json:"enrichments,omitempty"`
+	// EnrichmentSources is each source's freshness, beside Enrichments.
+	EnrichmentSources []harnessproto.EnrichmentSource `json:"enrichmentSources,omitempty"`
 }
 
 // IdentityRequest is the opt-in a host client attaches to a creation action.
@@ -173,18 +177,19 @@ func (c *Client) NegotiateCreationIdentity() error {
 	return nil
 }
 
-// EnrichmentKinds asks this connection's daemon which session enrichment
-// kinds it publishes; none (nil) from a daemon that predates them.
-func (c *Client) EnrichmentKinds() ([]string, error) {
+// Enrichments asks this connection's daemon which session enrichment kinds
+// it publishes and how fresh each source is; none from a daemon that predates
+// them.
+func (c *Client) Enrichments() ([]string, []harnessproto.EnrichmentSource, error) {
 	raw, err := c.queryActionData(core.Action{Action: core.ActionQuery, Query: QueryHostCapabilities})
 	if err != nil || raw == nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var caps HostCapabilities
 	if err := json.Unmarshal(raw, &caps); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return caps.Enrichments, nil
+	return caps.Enrichments, caps.EnrichmentSources, nil
 }
 
 // DispatchIdentity runs one creation action and returns the created session's

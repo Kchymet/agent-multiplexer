@@ -1,23 +1,25 @@
 // Package prwatch teaches amux which pull requests each workgroup member owns
 // and wakes the member's coordinator when one of them changes state.
 //
-// The daemon runs one Watcher. Every Interval (default 3 minutes) it lists the
-// open PRs of each GitHub repository that active (non-archived) workgroup
-// members work in — one `gh pr list --search head:<prefix>` per repository and
-// branch prefix, so a tick costs one gh call per repo however many members and
-// PRs there are — and attributes each PR to the member whose branch is its head
-// (or that branch plus a "-suffix": members may push several branches). A PR it
-// was tracking that leaves the open list is read once with `gh pr view` to learn
-// whether it merged or closed.
+// Source (source.go) is the pull_request enrichment source the daemon's
+// enrich.Registry runs: every interval (default 3 minutes) it lists the open
+// PRs of each GitHub repository that active (non-archived) workgroup members
+// work in — one `gh pr list --search head:<prefix>` per repository and branch
+// prefix, so a tick costs one gh call per repo however many members and PRs
+// there are — and attributes each PR to the member whose branch is its head
+// (or that branch plus a "-suffix" or "/suffix": members may push several
+// branches). A PR it was tracking that leaves the open list is read once with
+// `gh pr view` to learn whether it merged or closed.
 //
-// Each observation is compared with the last one, which the store persists per
-// session, so transitions survive daemon restarts and are reported exactly
+// Each observation is compared with the last one, which the registry persists
+// per session, so transitions survive daemon restarts and are reported exactly
 // once:
 //
 //   - every change is a `pr_state` event on the member's event stream;
 //   - a meaningful one (CI turned red, CI green again after red, merge conflict,
 //     review submitted, merged, closed, draft → ready) also queues a short
-//     wake-up for the workgroup's coordinator. Wake-ups are de-duplicated by the
+//     wake-up (QueuePR) on the daemon's one Watcher for the workgroup's
+//     coordinator. Wake-ups are de-duplicated by the
 //     PR's state hash, coalesced per coordinator, and handed to Deliver, which
 //     decides whether the coordinator can take a prompt now (the daemon only
 //     delivers to a live, idle coordinator) — undeliverable ones stay queued,
@@ -29,9 +31,10 @@
 // daemon Kicks the queue when a coordinator's own state moves, so a deferred
 // wake-up is offered the moment the coordinator can take it.
 //
-// gh being absent or unauthenticated is a setup condition, logged once; other
-// failures back the poll interval off exponentially. Nothing here ever fails
-// the daemon.
+// gh being absent or unauthenticated is the gh_unavailable setup condition
+// (Source.Classify), which the registry logs once and retries slowly; other
+// failures back the poll interval off exponentially, never before a rate limit
+// resets. Nothing here ever fails the daemon.
 package prwatch
 
 import (
@@ -43,7 +46,6 @@ import (
 	"log"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"amux/internal/enrich"
@@ -55,7 +57,7 @@ import (
 const (
 	DefaultInterval = 3 * time.Minute
 	// MaxBackoff caps the poll interval after repeated gh failures.
-	MaxBackoff = 30 * time.Minute
+	MaxBackoff = enrich.DefaultMaxBackoff
 	// FlushInterval is how often queued wake-ups are retried between polls, so
 	// a coordinator that finishes its turn hears about a PR within seconds
 	// rather than at the next poll.
@@ -64,9 +66,6 @@ const (
 	// long: by then it is stale, and a coordinator that restarts is told to
 	// re-check what it was waiting on anyway.
 	MaxPendingAge = 2 * time.Hour
-	// maxTerminal bounds how many merged/closed PRs are remembered per session
-	// (they are also dropped enrich.Retention after they ended).
-	maxTerminal = enrich.MaxTerminal
 	// maxWakeLines bounds one coalesced wake-up prompt.
 	maxWakeLines = 8
 	// maxRecentKeys bounds the delivered-wake memory used for de-duplication.
@@ -102,6 +101,8 @@ type Member struct {
 type Change struct {
 	SessionID string
 	Workgroup string
+	Label     string // the member's display label (name or id)
+	Branch    string // the member branch that owns the PR
 	PR        harnessproto.SessionPR
 	// Changes describes everything that moved since the last observation;
 	// Wake is the subset meaningful enough to wake the coordinator.
@@ -122,55 +123,6 @@ const (
 	// coordinator's job, so it is never on by default.
 	NotifyNeedsAttention = "needs_attention"
 )
-
-// Health is the watcher's freshness, for staleness flags.
-type Health struct {
-	// Enabled: the watcher polls GitHub (PR watching is on).
-	Enabled bool
-	// Reason is the watcher-wide failure of the last poll (a harnessproto
-	// Stale* value), or "".
-	Reason string
-	// Started is when the watcher was created: the freshness baseline before
-	// a repo's first successful listing.
-	Started time.Time
-	// LastOK is the last poll with no failure (zero: none yet).
-	LastOK time.Time
-	// Interval is the current poll delay (backoff included).
-	Interval time.Duration
-	// Repos is per GitHub repo (owner/name).
-	Repos map[string]RepoHealth
-}
-
-// RepoHealth is one repo's listing freshness.
-type RepoHealth struct {
-	LastOK time.Time
-	Failed bool   // its last listing failed
-	Reason string // why (a Stale* value)
-}
-
-// Stale reports whether a PR's data is stale at now, and when it was last
-// observed: its repo's listing failed last time, gh is unavailable, or the
-// repo has not been listed for over twice the poll interval.
-func (h Health) Stale(pr harnessproto.SessionPR, now time.Time) enrich.Staleness {
-	rh := h.Repos[pr.Repo]
-	observed := rh.LastOK
-	if !enrich.IsOpen(pr) || observed.IsZero() {
-		if pr.Updated > 0 {
-			observed = time.UnixMilli(pr.Updated)
-		}
-	}
-	st := enrich.Staleness{ObservedAt: observed}
-	if !h.Enabled || !enrich.IsOpen(pr) {
-		return st
-	}
-	base := rh.LastOK
-	if base.IsZero() {
-		base = h.Started
-	}
-	st.Stale = h.Reason == harnessproto.StaleGHUnavailable || rh.Failed ||
-		(h.Interval > 0 && now.Sub(base) > 2*h.Interval)
-	return st
-}
 
 // Delivery is Deliver's verdict on a queued wake-up.
 type Delivery int
@@ -205,33 +157,18 @@ type Wake struct {
 	State string
 }
 
-// Config wires a Watcher to its environment. Every function is required
-// except Logf, Now and Interval.
+// Config wires a Watcher (the coordinator wake-up queue) to its environment.
+// Deliver is required.
 type Config struct {
-	Run     Runner
-	Members func() ([]Member, error)
-	// Load returns the persisted state documents by session id; Save stores
-	// one ("" deletes it).
-	Load func() (map[string]string, error)
-	Save func(sessionID, state string) error
-	// Emit records a change on the member's event stream.
-	Emit func(Change)
 	// Deliver revalidates and prompts a workgroup's coordinator. Its result is
 	// per wake so a mixed batch can drop stale relationships without withholding
 	// independent eligible notifications. Indeterminate suppresses retry without
 	// claiming delivery. A missing/misaligned result is treated as Deferred.
-	Deliver  func(ctx context.Context, workgroup string, wakes []Wake) []Delivery
-	Logf     func(format string, args ...any)
-	Now      func() time.Time
-	Interval time.Duration
+	Deliver func(ctx context.Context, workgroup string, wakes []Wake) []Delivery
+	Logf    func(format string, args ...any)
+	Now     func() time.Time
 	// Window overrides NotifyWindow (tests).
 	Window time.Duration
-	// NoPoll disables the GitHub poll while Run still serves Notify/Kick, so
-	// member wake-ups work with PR watching turned off.
-	NoPoll bool
-	// Notify enables user notification kinds (Notify* values) on Change;
-	// empty: none (the default).
-	Notify map[string]bool
 }
 
 // record is the persisted per-PR state: the published summary plus what
@@ -249,31 +186,19 @@ type pendingWake struct {
 	at   time.Time
 }
 
-// Watcher polls member PRs. Poll and Flush must not run concurrently (Run
-// serializes them); PRs may be called from any goroutine.
+// Watcher is the coordinator wake-up queue: PR transitions (QueuePR) and
+// member activity (Notify), coalesced and delivered by Run. The queue is only
+// touched on Run's goroutine; QueuePR, Notify and Kick are safe from any.
 type Watcher struct {
 	cfg Config
 
-	mu    sync.RWMutex
-	state map[string][]record // by session id; guarded by mu for PRs()
-
-	loaded  bool
 	pending map[string][]pendingWake // by workgroup
 	recent  map[string]struct{}
 	order   []string
 
-	failures   int
-	setupError bool
-
-	// Freshness, guarded by mu (Health may be read from any goroutine).
-	started    time.Time
-	lastOK     time.Time
-	lastReason string
-	repoHealth map[string]RepoHealth
-	interval   time.Duration // the current poll delay, as Run last scheduled it
-
-	inbox chan Wake
-	kick  chan struct{}
+	inbox   chan Wake
+	prInbox chan Change
+	kick    chan struct{}
 }
 
 // New builds a Watcher.
@@ -284,22 +209,16 @@ func New(cfg Config) *Watcher {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	if cfg.Interval <= 0 {
-		cfg.Interval = DefaultInterval
-	}
 	if cfg.Window <= 0 {
 		cfg.Window = NotifyWindow
 	}
 	return &Watcher{
-		cfg:        cfg,
-		started:    cfg.Now(),
-		interval:   cfg.Interval,
-		repoHealth: map[string]RepoHealth{},
-		state:      map[string][]record{},
-		pending:    map[string][]pendingWake{},
-		recent:     map[string]struct{}{},
-		inbox:      make(chan Wake, inboxSize),
-		kick:       make(chan struct{}, 1),
+		cfg:     cfg,
+		pending: map[string][]pendingWake{},
+		recent:  map[string]struct{}{},
+		inbox:   make(chan Wake, inboxSize),
+		prInbox: make(chan Change, inboxSize),
+		kick:    make(chan struct{}, 1),
 	}
 }
 
@@ -344,62 +263,39 @@ func (w *Watcher) enqueueNotified(wake Wake, now time.Time) {
 	w.pending[wake.Workgroup] = append(queue, pendingWake{key: key, wake: wake, at: now})
 }
 
-// PRs returns the last-known PRs a session owns, newest first: every open PR
-// and the merged/closed ones still within enrich.Retention.
-func (w *Watcher) PRs(sessionID string) []harnessproto.SessionPR {
-	w.mu.RLock()
-	recs := w.state[sessionID]
-	w.mu.RUnlock()
-	if len(recs) == 0 {
-		return nil
+// QueuePR hands a PR transition that warrants a wake-up (Change.Wake) to Run,
+// which queues it for the member's coordinator, de-duplicated by the PR's
+// state hash, and offers it at once. Never blocks; safe from any goroutine.
+func (w *Watcher) QueuePR(c Change) {
+	if c.Workgroup == "" || len(c.Wake) == 0 {
+		return
 	}
-	out := make([]harnessproto.SessionPR, len(recs))
-	for i, r := range recs {
-		out[i] = r.PR
+	select {
+	case w.prInbox <- c:
+	default:
+		w.cfg.Logf("prwatch: wake inbox full; dropping PR wake-up for %s member %s", c.Workgroup, c.SessionID)
 	}
-	out = enrich.Retain(out, w.cfg.Now())
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
-// Health reports the watcher's freshness for staleness flags.
-func (w *Watcher) Health() Health {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	h := Health{
-		Enabled: !w.cfg.NoPoll, Reason: w.lastReason, Started: w.started,
-		LastOK: w.lastOK, Interval: w.interval, Repos: make(map[string]RepoHealth, len(w.repoHealth)),
+// drainPR queues every PR wake-up handed in so far and offers the queue
+// (Run does this as they arrive; tests call it directly).
+func (w *Watcher) drainPR(ctx context.Context) {
+	for {
+		select {
+		case c := <-w.prInbox:
+			w.enqueue(c, w.cfg.Now())
+		default:
+			w.Flush(ctx)
+			return
+		}
 	}
-	for repo, rh := range w.repoHealth {
-		h.Repos[repo] = rh
-	}
-	return h
 }
 
-// staleReason maps a gh failure to its wire staleness reason.
-func staleReason(err error) string {
-	switch classify(err) {
-	case errSetup:
-		return harnessproto.StaleGHUnavailable
-	case errRateLimit:
-		return harnessproto.StaleRateLimited
-	}
-	return harnessproto.StaleError
-}
-
-// Run polls every interval (backed off on failures; never with NoPoll),
-// serves Notify and Kick, and retries queued wake-ups every FlushInterval
-// until ctx ends. Poll, Flush and the queue are only touched here.
+// Run serves QueuePR, Notify and Kick, and retries queued wake-ups every
+// FlushInterval until ctx ends. The queue is only touched here.
 func (w *Watcher) Run(ctx context.Context) {
 	flush := time.NewTicker(FlushInterval)
 	defer flush.Stop()
-	next := time.NewTimer(0)
-	defer next.Stop()
-	if w.cfg.NoPoll {
-		next.Stop()
-	}
 	window := time.NewTimer(time.Hour)
 	window.Stop()
 	defer window.Stop()
@@ -408,6 +304,9 @@ func (w *Watcher) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case c := <-w.prInbox:
+			w.enqueue(c, w.cfg.Now())
+			w.drainPR(ctx)
 		case wake := <-w.inbox:
 			w.enqueueNotified(wake, w.cfg.Now())
 			if !windowOpen {
@@ -423,200 +322,8 @@ func (w *Watcher) Run(ctx context.Context) {
 			}
 		case <-flush.C:
 			w.Flush(ctx)
-		case <-next.C:
-			w.Poll(ctx)
-			d := w.delay()
-			w.mu.Lock()
-			w.interval = d
-			w.mu.Unlock()
-			next.Reset(d)
 		}
 	}
-}
-
-// delay is the wait before the next poll: the interval, doubled per
-// consecutive failure up to MaxBackoff; a setup error waits MaxBackoff.
-func (w *Watcher) delay() time.Duration {
-	if w.setupError {
-		return MaxBackoff
-	}
-	d := w.cfg.Interval
-	for i := 0; i < w.failures && d < MaxBackoff; i++ {
-		d *= 2
-	}
-	if d > MaxBackoff {
-		d = MaxBackoff
-	}
-	return d
-}
-
-func (w *Watcher) load() {
-	if w.loaded {
-		return
-	}
-	docs, err := w.cfg.Load()
-	if err != nil {
-		w.cfg.Logf("prwatch: load state: %v", err)
-		return
-	}
-	w.loaded = true
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for id, doc := range docs {
-		var recs []record
-		if json.Unmarshal([]byte(doc), &recs) == nil {
-			w.state[id] = recs
-		}
-	}
-}
-
-// Poll runs one observation pass and then tries to deliver queued wake-ups.
-func (w *Watcher) Poll(ctx context.Context) {
-	w.load()
-	if !w.loaded {
-		return
-	}
-	members, err := w.cfg.Members()
-	if err != nil {
-		w.cfg.Logf("prwatch: list members: %v", err)
-		return
-	}
-	// One query per (repo, branch namespace): this broker's members share the
-	// "amux/<broker>/" prefix (pre-broker members share "amux/"), so this is
-	// normally one gh call per repo, and it never lists another broker's
-	// branches. Ownership is still decided per member by Owns below.
-	type query struct{ repo, prefix, head string }
-	queries := map[query]bool{}
-	for _, m := range members {
-		if m.Branch == "" {
-			continue
-		}
-		for _, repo := range m.Repos {
-			if i := strings.LastIndex(m.Branch, "/"); i > 0 {
-				queries[query{repo: repo, prefix: m.Branch[:i+1]}] = true
-			} else {
-				queries[query{repo: repo, head: m.Branch}] = true
-			}
-		}
-	}
-	keys := make([]query, 0, len(queries))
-	for q := range queries {
-		keys = append(keys, q)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].repo != keys[j].repo {
-			return keys[i].repo < keys[j].repo
-		}
-		return keys[i].prefix+keys[i].head < keys[j].prefix+keys[j].head
-	})
-	open := map[string][]harnessproto.SessionPR{} // by repo
-	failed := map[string]bool{}                   // repos whose listing failed this tick
-	var firstErr error
-	for _, q := range keys {
-		if failed[q.repo] {
-			continue
-		}
-		var prs []harnessproto.SessionPR
-		var err error
-		if q.head != "" {
-			prs, err = listHead(ctx, w.cfg.Run, q.repo, q.head)
-		} else {
-			prs, err = listOpen(ctx, w.cfg.Run, q.repo, q.prefix)
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			failed[q.repo] = true
-			if firstErr == nil {
-				firstErr = err
-			}
-			if classify(err) == errSetup {
-				break // gh itself is unusable: every other call would fail the same way
-			}
-			continue
-		}
-		open[q.repo] = append(open[q.repo], prs...)
-	}
-	repos := make([]string, 0, len(keys))
-	for _, q := range keys {
-		repos = append(repos, q.repo)
-	}
-	w.noteHealth(repos, failed, firstErr)
-	if firstErr != nil && w.noteFailure(firstErr) {
-		return
-	}
-	if firstErr == nil {
-		w.noteSuccess()
-	}
-
-	now := w.cfg.Now()
-	for _, m := range members {
-		w.observe(ctx, m, open, failed, now)
-	}
-	w.Flush(ctx)
-}
-
-// noteHealth records this tick's per-repo outcome for staleness flags.
-func (w *Watcher) noteHealth(repos []string, failed map[string]bool, firstErr error) {
-	now := w.cfg.Now()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	reason := ""
-	if firstErr != nil {
-		reason = staleReason(firstErr)
-	}
-	w.lastReason = reason
-	if firstErr == nil {
-		w.lastOK = now
-	}
-	for repo := range failed {
-		rh := w.repoHealth[repo]
-		rh.Failed, rh.Reason = true, reason
-		w.repoHealth[repo] = rh
-	}
-	if reason == harnessproto.StaleGHUnavailable {
-		return // gh is unusable: no repo was really listed
-	}
-	for _, repo := range repos {
-		if !failed[repo] {
-			w.repoHealth[repo] = RepoHealth{LastOK: now}
-		}
-	}
-}
-
-// noteFailure records a failed tick; it reports whether the whole tick should
-// be abandoned (gh unusable).
-func (w *Watcher) noteFailure(err error) bool {
-	switch classify(err) {
-	case errSetup:
-		if !w.setupError {
-			w.cfg.Logf("prwatch: gh unavailable, PR watching paused (retrying every %v): %v", MaxBackoff, err)
-		}
-		w.setupError = true
-		return true
-	}
-	// gh ran and reached GitHub, so it is set up; this failure is transient.
-	w.setupError = false
-	switch classify(err) {
-	case errRateLimit:
-		w.failures++
-		w.cfg.Logf("prwatch: GitHub rate limit, backing off to %v: %v", w.delay(), err)
-	default:
-		w.failures++
-		if w.failures == 1 || w.failures%5 == 0 {
-			w.cfg.Logf("prwatch: gh failed (%d in a row, next poll in %v): %v", w.failures, w.delay(), err)
-		}
-	}
-	return false
-}
-
-func (w *Watcher) noteSuccess() {
-	if w.setupError {
-		w.cfg.Logf("prwatch: gh available again, PR watching resumed")
-	}
-	w.setupError = false
-	w.failures = 0
 }
 
 // Owns reports whether a PR head branch belongs to a member branch: the branch
@@ -625,130 +332,6 @@ func (w *Watcher) noteSuccess() {
 func Owns(branch, head string) bool { return enrich.Owns(branch, head) }
 
 func prKey(pr harnessproto.SessionPR) string { return fmt.Sprintf("%s#%d", pr.Repo, pr.Number) }
-
-// observe folds this tick's observation into one member's records.
-func (w *Watcher) observe(ctx context.Context, m Member, open map[string][]harnessproto.SessionPR, failed map[string]bool, now time.Time) {
-	w.mu.RLock()
-	prev := w.state[m.SessionID]
-	w.mu.RUnlock()
-	prevBy := map[string]record{}
-	for _, r := range prev {
-		prevBy[prKey(r.PR)] = r
-	}
-	inRepo := map[string]bool{}
-	for _, r := range m.Repos {
-		inRepo[r] = true
-	}
-
-	var next []record
-	var changes []Change
-	seen := map[string]bool{}
-	add := func(prior *record, cur harnessproto.SessionPR) {
-		rec, ch, wake := transition(prior, cur, now)
-		next = append(next, rec)
-		seen[prKey(cur)] = true
-		if len(ch) > 0 {
-			c := Change{SessionID: m.SessionID, Workgroup: m.Workgroup, PR: rec.PR, Changes: ch, Wake: wake}
-			if prior != nil {
-				if kind := notifyKind(prior.PR, rec.PR); w.cfg.Notify[kind] {
-					c.Notify = kind
-				}
-			}
-			changes = append(changes, c)
-		}
-	}
-	for _, repo := range m.Repos {
-		for _, pr := range open[repo] {
-			if !Owns(m.Branch, pr.Branch) || seen[prKey(pr)] {
-				continue
-			}
-			if p, ok := prevBy[prKey(pr)]; ok {
-				add(&p, pr)
-			} else {
-				add(nil, pr)
-			}
-		}
-	}
-	for _, r := range prev {
-		k := prKey(r.PR)
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		// A tracked PR in a repo the member no longer works in, or whose listing
-		// failed this tick, or one already merged/closed: keep it as it was.
-		if r.PR.State != "open" || !inRepo[r.PR.Repo] || failed[r.PR.Repo] {
-			next = append(next, r)
-			continue
-		}
-		// It left the open list: learn how.
-		cur, err := view(ctx, w.cfg.Run, r.PR.Repo, r.PR.Number)
-		if err != nil || cur.State == "" {
-			next = append(next, r)
-			continue
-		}
-		r := r
-		add(&r, cur)
-	}
-	next = trimTerminal(next, now)
-
-	if !sameRecords(prev, next) {
-		w.mu.Lock()
-		if len(next) == 0 {
-			delete(w.state, m.SessionID)
-		} else {
-			w.state[m.SessionID] = next
-		}
-		w.mu.Unlock()
-		doc := ""
-		if len(next) > 0 {
-			b, _ := json.Marshal(next)
-			doc = string(b)
-		}
-		if err := w.cfg.Save(m.SessionID, doc); err != nil {
-			w.cfg.Logf("prwatch: save %s: %v", m.SessionID, err)
-		}
-	}
-	for _, c := range changes {
-		w.cfg.Emit(c)
-		if len(c.Wake) > 0 {
-			w.enqueue(m, c, now)
-		}
-	}
-}
-
-// trimTerminal orders records newest first and keeps every open PR but only
-// the most recent maxTerminal merged/closed ones, each for enrich.Retention
-// after it ended.
-func trimTerminal(recs []record, now time.Time) []record {
-	sort.SliceStable(recs, func(i, j int) bool {
-		if recs[i].PR.Repo != recs[j].PR.Repo {
-			return recs[i].PR.Repo < recs[j].PR.Repo
-		}
-		return recs[i].PR.Number > recs[j].PR.Number
-	})
-	out := recs[:0]
-	terminal := 0
-	for _, r := range recs {
-		if r.PR.State != "open" {
-			if terminal >= maxTerminal || !enrich.Retained(r.PR, now) {
-				continue
-			}
-			terminal++
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
-func sameRecords(a, b []record) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return string(ab) == string(bb)
-}
 
 // readyToMerge: in the merge phase with CI settled (green or none) and
 // nothing blocking.
@@ -963,7 +546,7 @@ func Summary(prs []harnessproto.SessionPR) string {
 
 // enqueue queues a wake-up for the member's coordinator, de-duplicated by the
 // PR's state hash: the same transition is never queued or delivered twice.
-func (w *Watcher) enqueue(m Member, c Change, now time.Time) {
+func (w *Watcher) enqueue(c Change, now time.Time) {
 	if c.Workgroup == "" {
 		return
 	}
@@ -976,17 +559,17 @@ func (w *Watcher) enqueue(m Member, c Change, now time.Time) {
 			return
 		}
 	}
-	label := m.Label
+	label := c.Label
 	if label == "" {
-		label = m.SessionID
+		label = c.SessionID
 	}
-	if label != m.SessionID {
-		label = m.SessionID + " (" + label + ")"
+	if label != c.SessionID {
+		label = c.SessionID + " (" + label + ")"
 	}
 	line := fmt.Sprintf("member %s PR %s: %s — %s", label, prKey(c.PR), strings.Join(c.Wake, "; "), c.PR.URL)
 	w.pending[c.Workgroup] = append(w.pending[c.Workgroup], pendingWake{key: key, wake: Wake{
 		SessionID: c.SessionID, Workgroup: c.Workgroup, Repo: c.PR.Repo,
-		Branch: m.Branch, PRBranch: c.PR.Branch, Text: line,
+		Branch: c.Branch, PRBranch: c.PR.Branch, Text: line,
 	}, at: now})
 }
 

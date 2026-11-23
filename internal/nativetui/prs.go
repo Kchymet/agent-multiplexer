@@ -14,9 +14,11 @@ import (
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
-// Session enrichments on the rail: a PR chip on each member row and on the
-// workgroup header ("#79 ✓ approved", "#245 ✗ CI"), a PR list in the main
-// pane (p), and a key to open a PR in the browser (o, or Enter in the list).
+// Session enrichments on the rail, for every kind: a chip on each member row
+// and on the workgroup header — the kind's icon and the item's label, colored
+// by its normalized status ("⑂ #79 ✓ approved", "⑂ #245 ✗ CI") — a list in
+// the main pane (p), and a key to open an item in the browser (o, or Enter in
+// the list). Unknown kinds get a generic icon, unknown states a neutral color.
 
 // maxHeaderChips bounds the PR chips on a workgroup header.
 const maxHeaderChips = 2
@@ -41,10 +43,32 @@ var openURL = func(url string) error {
 	return nil
 }
 
-// toneStyle colors an enrichment by its tone. Attention uses the danger color,
-// never the attention chip: a PR that needs work is the coordinator's job.
-func toneStyle(tone string) lipgloss.Style {
-	switch tone {
+// kindIcons is each enrichment kind's rail icon; an unknown kind gets
+// genericIcon.
+var kindIcons = map[string]string{
+	hp.EnrichmentPullRequest: "⑂",
+	"issue":                  "◇",
+	"ci_run":                 "⚙",
+	"build":                  "⚒",
+	"deploy":                 "⇪",
+	"preview_url":            "↗",
+	"firebase_release":       "▲",
+}
+
+const genericIcon = "•"
+
+func kindIcon(kind string) string {
+	if icon, ok := kindIcons[kind]; ok {
+		return icon
+	}
+	return genericIcon
+}
+
+// statusStyle colors an item by its normalized status. Attention uses the
+// danger color, never the attention chip: an item that needs work is the
+// coordinator's job.
+func statusStyle(state string) lipgloss.Style {
+	switch hp.ToneFor(state) {
 	case hp.ToneAttention:
 		return errStyle
 	case hp.TonePending:
@@ -55,18 +79,23 @@ func toneStyle(tone string) lipgloss.Style {
 	return dimStyle
 }
 
-func toneRank(tone string) int {
-	switch tone {
-	case hp.ToneAttention:
-		return 0
-	case hp.TonePending:
-		return 1
-	case hp.ToneOK:
-		return 2
-	case hp.ToneDone:
-		return 3
+// statusRank orders items most demanding first.
+func statusRank(state string) int {
+	for i, s := range hp.EnrichmentStates {
+		if s == state {
+			return i
+		}
 	}
-	return 4
+	return len(hp.EnrichmentStates)
+}
+
+// chip is an item's rail chip: its kind's icon and its label.
+func chip(e hp.Enrichment) segment {
+	label := e.Label
+	if label == "" {
+		label = e.Title
+	}
+	return segment{" " + kindIcon(e.Kind) + " " + label, statusStyle(e.Status.State)}
 }
 
 // enrichmentsOf is a row's own enrichment list.
@@ -77,11 +106,8 @@ func enrichmentsOf(s *core.Session) []hp.Enrichment {
 	return *s.Enrichments
 }
 
-// isOpenPR reports an open (or draft) pull request enrichment.
-func isOpenPR(e hp.Enrichment) bool {
-	return e.Kind == hp.EnrichmentPullRequest && e.PullRequest != nil &&
-		(e.PullRequest.State == hp.PRStateOpen || e.PullRequest.State == hp.PRStateDraft)
-}
+// isOpen reports an item still in play (anything but done).
+func isOpen(e hp.Enrichment) bool { return e.Status.State != hp.StatusDone }
 
 // memberEnrichment is one enrichment with the member row that owns it.
 type memberEnrichment struct {
@@ -114,41 +140,41 @@ func (m *model) prEntries(s *core.Session) []memberEnrichment {
 	return out
 }
 
-// headerChips are a workgroup header's chips: its members' open PRs, the most
-// demanding first, at most maxHeaderChips then "+N".
+// headerChips are a workgroup header's chips: its members' open items of
+// every kind, the most demanding first, at most maxHeaderChips then "+N".
 func (m *model) headerChips(s *core.Session) []segment {
 	var open []hp.Enrichment
 	for _, me := range m.prEntries(s) {
-		if isOpenPR(me.e) {
+		if isOpen(me.e) {
 			open = append(open, me.e)
 		}
 	}
-	sort.SliceStable(open, func(i, j int) bool { return toneRank(open[i].Tone) < toneRank(open[j].Tone) })
+	sort.SliceStable(open, func(i, j int) bool { return statusRank(open[i].Status.State) < statusRank(open[j].Status.State) })
 	var segs []segment
 	for i, e := range open {
 		if i == maxHeaderChips {
 			segs = append(segs, segment{fmt.Sprintf(" +%d", len(open)-maxHeaderChips), dimStyle})
 			break
 		}
-		segs = append(segs, segment{" " + e.Label, toneStyle(e.Tone)})
+		segs = append(segs, chip(e))
 	}
 	return segs
 }
 
-// memberChips are a member row's chips: its open PRs, else its most recent
-// merged/closed one, plus "PR data stale" when any is stale.
+// memberChips are a member row's chips: its open items, else its most recent
+// finished one, plus "PR data stale" when any is stale.
 func memberChips(s *core.Session) []segment {
 	var segs []segment
 	stale := false
 	es := enrichmentsOf(s)
 	for _, e := range es {
-		if isOpenPR(e) {
-			segs = append(segs, segment{" " + e.Label, toneStyle(e.Tone)})
+		if isOpen(e) {
+			segs = append(segs, chip(e))
 			stale = stale || e.Stale
 		}
 	}
 	if len(segs) == 0 && len(es) > 0 {
-		segs = append(segs, segment{" " + es[0].Label, toneStyle(es[0].Tone)})
+		segs = append(segs, chip(es[0]))
 	}
 	if stale {
 		segs = append(segs, segment{" · PR data stale", dimStyle})
@@ -234,7 +260,7 @@ func (m *model) openSelectedPR() {
 	}
 	best := entries[0]
 	for _, me := range entries[1:] {
-		if isOpenPR(me.e) && (!isOpenPR(best.e) || toneRank(me.e.Tone) < toneRank(best.e.Tone)) {
+		if isOpen(me.e) && (!isOpen(best.e) || statusRank(me.e.Status.State) < statusRank(best.e.Status.State)) {
 			best = me
 		}
 	}
@@ -309,18 +335,27 @@ func (m *model) prLines(w int) []string {
 		if i == m.prPanel.cursor {
 			mark = focusStyle.Render(glyphCursor) + " "
 		}
-		head := mark + toneStyle(me.e.Tone).Render(me.e.Label) + " " + truncate(me.e.Title, max(0, w-len(me.e.Label)-4))
+		c := chip(me.e)
+		head := mark + c.style.Render(strings.TrimPrefix(c.text, " ")) + " " + truncate(me.e.Title, max(0, w-len(c.text)-4))
 		lines = append(lines, truncate(head, w))
 		lines = append(lines, dimStyle.Render(truncate("    "+prDetail(me.e), w)))
 	}
 	return lines
 }
 
-// prDetail is one PR's second line: repo, state, CI, review, blockers.
+// prDetail is one item's second line: for a PR its repo, state, CI, review
+// and blockers; for any other kind its normalized status and detail.
 func prDetail(e hp.Enrichment) string {
 	pr := e.PullRequest
 	if pr == nil {
-		return e.URL
+		parts := []string{e.Kind, strings.ReplaceAll(e.Status.State, "_", " ")}
+		if e.Status.Detail != "" && e.Status.Detail != e.Status.State {
+			parts = append(parts, e.Status.Detail)
+		}
+		if e.Stale {
+			parts = append(parts, "stale")
+		}
+		return strings.Join(parts, " · ")
 	}
 	parts := []string{fmt.Sprintf("%s#%d", pr.Repo, pr.Number), pr.State}
 	ci := "CI " + pr.CI.Status

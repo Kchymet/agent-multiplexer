@@ -1,5 +1,7 @@
 package harnessproto
 
+import "encoding/json"
+
 // Session enrichments: data amux attaches to a session from outside the
 // runtime (pull requests first), and the workgroup rollup derived from them.
 //
@@ -31,12 +33,68 @@ const SessionEnrichmentsFeature = "session-enrichments-v1"
 const EnrichmentsVersion = 1
 
 // Enrichment kinds (Enrichment.Kind). Reserved for later, not emitted yet:
-// issue (Linear/GitHub), ci_run, build, deploy, preview_url, firebase_release.
+// issue (Linear/GitHub issues), ci_run (CI runs), build and deploy
+// (pipeline-engine builds/deploys), preview_url (preview deployments),
+// firebase_release (Firebase App Distribution releases).
 const (
 	EnrichmentPullRequest = "pull_request"
 )
 
-// Enrichment tones (Enrichment.Tone): generic coloring for any kind.
+// Normalized item states (EnrichmentStatus.State), the same for every kind. The
+// rollup reads only these, never a kind's payload, so a new kind contributes
+// to a workgroup's state by mapping its own states onto them:
+//
+//	attention        needs work from the agents (CI red, conflict, a failed check)
+//	awaiting_review  waiting on a human review
+//	awaiting_merge   waiting on a human to merge/ship
+//	pending          machines are working on it (CI running, a build queued)
+//	active           live and current (a running deploy, a preview URL that is up)
+//	ok               settled and fine, nothing to do (a passing CI run)
+//	done             finished (merged, closed, released)
+//	failed           finished unsuccessfully (a failed deploy)
+//	unknown          the source cannot say
+//
+// Consumers read an unknown value as unknown (neutral).
+const (
+	StatusAttention      = "attention"
+	StatusAwaitingReview = "awaiting_review"
+	StatusAwaitingMerge  = "awaiting_merge"
+	StatusPending        = "pending"
+	StatusActive         = "active"
+	StatusOK             = "ok"
+	StatusDone           = "done"
+	StatusFailed         = "failed"
+	StatusUnknown        = "unknown"
+)
+
+// EnrichmentStates lists the normalized states in rollup order (Rollup.Totals).
+var EnrichmentStates = []string{StatusAttention, StatusFailed, StatusAwaitingReview, StatusAwaitingMerge,
+	StatusPending, StatusActive, StatusOK, StatusDone, StatusUnknown}
+
+// EnrichmentStatus is an item's normalized status (Enrichment.Status).
+type EnrichmentStatus struct {
+	State   string   `json:"state"`   // a Status* value
+	Detail  string   `json:"detail"`  // short kind-specific text, e.g. "CI red: lint"
+	Reasons []string `json:"reasons"` // machine-readable reasons, kind-specific (e.g. ci_red, closed)
+}
+
+// ToneFor is the tone a normalized state implies (Enrichment.Tone).
+func ToneFor(state string) string {
+	switch state {
+	case StatusAttention, StatusFailed:
+		return ToneAttention
+	case StatusAwaitingReview, StatusPending, StatusActive:
+		return TonePending
+	case StatusAwaitingMerge, StatusOK:
+		return ToneOK
+	case StatusDone:
+		return ToneDone
+	}
+	return ToneNeutral
+}
+
+// Enrichment tones (Enrichment.Tone): generic coloring for any kind, derived
+// from Status.State (ToneFor). Kept for consumers that predate Status.
 const (
 	ToneAttention = "attention"
 	TonePending   = "pending"
@@ -93,14 +151,21 @@ type Enrichments []Enrichment
 // is the same for every kind; the kind's payload sits under a key named after
 // the kind.
 type Enrichment struct {
-	Kind  string `json:"kind"`
-	ID    string `json:"id"` // stable within its kind, e.g. owner/repo#79
-	Title string `json:"title"`
-	URL   string `json:"url"`
-	Tone  string `json:"tone"`  // a Tone* value
-	Label string `json:"label"` // a short ready-made chip, e.g. "#245 ✗ CI"
+	Kind   string           `json:"kind"`
+	ID     string           `json:"id"` // stable within its kind, e.g. owner/repo#79
+	Title  string           `json:"title"`
+	URL    string           `json:"url"`
+	Status EnrichmentStatus `json:"status"` // normalized status (spec v1.1)
+	Tone   string           `json:"tone"`   // a Tone* value, ToneFor(Status.State)
+	Label  string           `json:"label"`  // a short ready-made chip, e.g. "#245 ✗ CI"
 	// ObservedAt is the last successful observation (RFC 3339).
 	ObservedAt string `json:"observed_at"`
+	// UpdatedAt is when the item itself last changed at its source;
+	// CreatedAt and FinishedAt (done/failed items: merged, closed, finished)
+	// are set when known. RFC 3339; spec v1.1.
+	UpdatedAt  string `json:"updated_at"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
 	// Stale: the item's data source failed on its last poll (or has not
 	// answered for over twice its poll interval); the data is last-known.
 	Stale       bool                   `json:"stale"`
@@ -177,12 +242,72 @@ type Rollup struct {
 	Stale       bool              `json:"stale"`
 	StaleReason string            `json:"stale_reason"` // a Stale* value, or ""
 	ObservedAt  string            `json:"observed_at"`
+	// Totals counts the workgroup's retained items of every kind by
+	// normalized state (every EnrichmentStates key present). Spec v1.1.
+	Totals map[string]int `json:"totals"`
+	// Sources is each enrichment source's freshness. Spec v1.1.
+	Sources []EnrichmentSource `json:"sources"`
+}
+
+// EnrichmentSource is one enrichment source's freshness (Rollup.Sources and
+// the direct capabilities' enrichments.sources).
+type EnrichmentSource struct {
+	Kind        string `json:"kind"`
+	Stale       bool   `json:"stale"`        // no successful poll within twice its interval, or a setup condition
+	StaleReason string `json:"stale_reason"` // a Stale* value (a source may add its own setup reason), or ""
+	ObservedAt  string `json:"observed_at"`  // its last successful poll (RFC 3339), or ""
+	IntervalS   int    `json:"interval_s"`   // its poll interval in seconds
 }
 
 // RollupEnrichments counts a workgroup's enrichments by kind; a kind is absent
-// when the daemon does not observe it (PR watching off).
+// when the daemon does not observe it (PR watching off). pull_request keeps its
+// v1 counts; every other kind is counted by normalized state (Other, encoded
+// beside it under the kind's own key).
 type RollupEnrichments struct {
 	PullRequest *PullRequestCounts `json:"pull_request,omitempty"`
+	// Other is per kind (not pull_request): count by normalized state.
+	Other map[string]map[string]int `json:"-"`
+}
+
+// MarshalJSON encodes pull_request and every Other kind as sibling keys.
+func (r RollupEnrichments) MarshalJSON() ([]byte, error) {
+	m := map[string]any{}
+	for k, v := range r.Other {
+		if k != EnrichmentPullRequest {
+			m[k] = v
+		}
+	}
+	if r.PullRequest != nil {
+		m[EnrichmentPullRequest] = r.PullRequest
+	}
+	return json.Marshal(m)
+}
+
+// UnmarshalJSON is MarshalJSON's inverse.
+func (r *RollupEnrichments) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*r = RollupEnrichments{}
+	for k, v := range raw {
+		if k == EnrichmentPullRequest {
+			var c PullRequestCounts
+			if err := json.Unmarshal(v, &c); err != nil {
+				return err
+			}
+			r.PullRequest = &c
+			continue
+		}
+		var c map[string]int
+		if json.Unmarshal(v, &c) == nil {
+			if r.Other == nil {
+				r.Other = map[string]map[string]int{}
+			}
+			r.Other[k] = c
+		}
+	}
+	return nil
 }
 
 // PullRequestCounts counts a workgroup's PRs. Open counts every open PR,

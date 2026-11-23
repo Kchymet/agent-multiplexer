@@ -461,6 +461,8 @@ type CreateRequest = ActionRequest
 type EnrichmentCapabilities struct {
 	Version int      `json:"version"` // harnessproto.EnrichmentsVersion
 	Kinds   []string `json:"kinds"`   // harnessproto.Enrichment* values
+	// Sources is each source's freshness (spec v1.1; absent from older servers).
+	Sources []harnessproto.EnrichmentSource `json:"sources,omitempty"`
 }
 
 // CapabilitiesResponse is GET /direct/v1/capabilities: what this grant may do

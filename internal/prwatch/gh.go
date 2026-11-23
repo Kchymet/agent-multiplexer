@@ -38,7 +38,7 @@ func ExecRunner(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // prFields is the gh --json field list: everything the PR summary needs.
-const prFields = "number,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,latestReviews,title,baseRefName,updatedAt,mergedAt,closedAt,reviewRequests"
+const prFields = "number,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,latestReviews,title,baseRefName,updatedAt,mergedAt,closedAt,reviewRequests,createdAt"
 
 // ghPR is gh's JSON for one PR (the prFields subset).
 type ghPR struct {
@@ -55,6 +55,7 @@ type ghPR struct {
 	UpdatedAt        string `json:"updatedAt"`
 	MergedAt         string `json:"mergedAt"`
 	ClosedAt         string `json:"closedAt"`
+	CreatedAt        string `json:"createdAt"`
 	ReviewRequests   []struct {
 		Login string `json:"login"` // a user
 		Name  string `json:"name"`  // a team
@@ -94,6 +95,7 @@ func summarize(repo string, g ghPR) harnessproto.SessionPR {
 		GitHubUpdatedAt: ghTime(g.UpdatedAt),
 		MergedAt:        ghTime(g.MergedAt),
 		ClosedAt:        ghTime(g.ClosedAt),
+		CreatedAt:       ghTime(g.CreatedAt),
 	}
 	for _, r := range g.ReviewRequests {
 		who := r.Login

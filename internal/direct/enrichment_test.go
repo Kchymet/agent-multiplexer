@@ -17,7 +17,13 @@ type enrichedBackend struct {
 	kinds []string
 }
 
-func (b enrichedBackend) EnrichmentKinds(context.Context) ([]string, error) { return b.kinds, nil }
+func (b enrichedBackend) Enrichments(context.Context) ([]string, []hp.EnrichmentSource, error) {
+	var sources []hp.EnrichmentSource
+	for _, k := range b.kinds {
+		sources = append(sources, hp.EnrichmentSource{Kind: k, ObservedAt: "2026-11-22T18:00:00Z", IntervalS: 180})
+	}
+	return b.kinds, sources, nil
+}
 
 func enrichedRows() []core.Session {
 	enr := hp.Enrichments{{Kind: hp.EnrichmentPullRequest, ID: "o/r#79", Title: "chips", URL: "https://github.com/o/r/pull/79",
@@ -58,7 +64,7 @@ func TestDirectEnrichments(t *testing.T) {
 	}
 
 	w = do(s, "GET", PathCapabilities, tok.AccessToken, "")
-	if !strings.Contains(w.Body.String(), `"enrichments":{"version":1,"kinds":["pull_request"]}`) {
+	if !strings.Contains(w.Body.String(), `"enrichments":{"version":1,"kinds":["pull_request"],"sources":[{"kind":"pull_request","stale":false,"stale_reason":"","observed_at":"2026-11-22T18:00:00Z","interval_s":180}]}`) {
 		t.Fatalf("capabilities: %s", w.Body)
 	}
 

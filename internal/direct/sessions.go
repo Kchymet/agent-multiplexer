@@ -324,14 +324,15 @@ func project(g Grant, row core.Session, byID map[string]core.Session) Session {
 }
 
 // EnrichmentSource is the optional Backend surface that reports which session
-// enrichment kinds the daemon publishes.
+// enrichment kinds the daemon publishes, and each source's freshness.
 type EnrichmentSource interface {
-	EnrichmentKinds(ctx context.Context) ([]string, error)
+	Enrichments(ctx context.Context) ([]string, []hp.EnrichmentSource, error)
 }
 
-// EnrichmentKinds asks the daemon which session enrichment kinds it publishes.
-func (b HostBackend) EnrichmentKinds(ctx context.Context) ([]string, error) {
-	return b.H.EnrichmentKinds(ctx)
+// Enrichments asks the daemon which session enrichment kinds it publishes.
+func (b HostBackend) Enrichments(ctx context.Context) ([]string, []hp.EnrichmentSource, error) {
+	e, err := b.H.Enrichments(ctx)
+	return e.Kinds, e.Sources, err
 }
 
 // enrichmentCaps is the capabilities' enrichments block (nil: none).
@@ -340,11 +341,11 @@ func enrichmentCaps(ctx context.Context, b Backend) *EnrichmentCapabilities {
 	if !ok {
 		return nil
 	}
-	kinds, err := src.EnrichmentKinds(ctx)
+	kinds, sources, err := src.Enrichments(ctx)
 	if err != nil || len(kinds) == 0 {
 		return nil
 	}
-	return &EnrichmentCapabilities{Version: hp.EnrichmentsVersion, Kinds: slices.Clone(kinds)}
+	return &EnrichmentCapabilities{Version: hp.EnrichmentsVersion, Kinds: slices.Clone(kinds), Sources: slices.Clone(sources)}
 }
 
 // filtered returns the grant's view of a fresh snapshot.
