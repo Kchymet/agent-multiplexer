@@ -79,70 +79,10 @@ func cmdAgent(args []string) error {
 		// verb `amux workgroup archive <id>`, resolving the caller's own identity.
 		return cmdAgentDone(args[1:])
 	case "", "help", "-h", "--help":
-		agentUsage()
-		return nil
+		return showHelp("agent")
 	default:
-		agentUsage()
 		return fmt.Errorf("unknown agent subcommand %q", sub)
 	}
-}
-
-func agentUsage() {
-	fmt.Fprint(os.Stderr, `amux agent — commands an agent runs to describe itself to the harness
-
-Scoped to the calling agent by the fixed authenticated session context. Stdin,
-environment variables, UUIDs, and paths never select identity or storage.
-Generated hook forms are best-effort so telemetry never disrupts the agent;
-explicit report and control commands return nonzero when the daemon did not
-confirm the requested operation.
-
-usage: amux agent <command>
-
-  status <state>     strictly report activity: idle | ready | waiting | running
-  hook <state>       nondisruptive Claude-hook activity binding
-  permission <verb>  report a diagnostic permission observation:
-                     request | allow | deny | clear. Generated hooks add --hook.
-                     These reports never create answerable approval rights.
-  capture <event>    request a daemon-owned transcript snapshot; generated
-                     Claude hooks use capture --hook and supply only the event
-  model <model>      strictly report the runtime's current model
-  model --statusline  report the model from Claude's status-line JSON. Claude's
-                     installed status-line wrapper invokes this automatically
-                     and preserves any pre-existing status-line command.
-  name <text>        set this agent's display name  (alias: label)
-  label <text>       alias of "name"
-  done               archive this member; a coordinator archives its workgroup
-                     and members, only after explicit user confirmation.
-                     Restoration requires the host (workgroup unarchive <id>).
-                     identity comes only from the fixed session context
-  goal [show]        Claude coordinator goal mode: show the goal, or mark it
-                     complete "<summary>" | ask "<question>" |
-                     wait "<waiting on>" | blocked "<reason>"
-                     (amux agent goal --help)
-  sessions [--json]  discover all host agent conversations (read-only)
-  events [<id>]      read one bounded normalized event page through authenticated
-                     session RPC (--after/--cursor, --json)
-  wait <id>...       block until a session (yours, or a member for a coordinator)
-                     changes state or PRs, then print it; no polling. --until
-                     ready,idle,waiting waits for one of those states; --timeout
-                     bounds the wait (nonzero exit); --json
-  raise              raise a structured item upward (a member to its coordinator,
-                     anyone else to the global inbox): --kind follow_up|outstanding|
-                     decision_needed|risk|fyi --title "…" [--detail "…"]
-                     [--pr repo#n] [--link url] [--suggest "…"] [--json]
-  items              list the items you raised or receive (--raised, --inbox,
-                     --all, --json); show <id>; ack|dismiss|done|reopen <id>...
-  escalate <id>...   coordinator: hand a received item to the global inbox
-                     [--note "…"]
-
-Commands use the private file mailbox from the ordinary sandboxed shell.
-Keep both sandboxes enabled. Discovery grants no cross-session write access.
-`+"`amux status`"+` and `+"`amux do`"+` from a session are scoped the same way: to the
-session itself, or for a coordinator to its workgroup and current direct members.
-
-Further self-reporting channels (topic, progress, attention, fields) are
-specified in docs/agent-protocol.md and planned.
-`)
 }
 
 // cmdAgentModel consumes Claude Code's status-line JSON, records its current

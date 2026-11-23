@@ -29,8 +29,7 @@ func cmdSandbox(args []string) error {
 		args = args[1:]
 	}
 	if isHelpFlag(sub) {
-		sandboxUsage()
-		return nil
+		return showHelp("sandbox")
 	}
 	switch sub {
 	case "drift", "changes", "ls", "list":
@@ -42,38 +41,8 @@ func cmdSandbox(args []string) error {
 	case "path":
 		return sandboxPath(args)
 	default:
-		sandboxUsage()
-		return fmt.Errorf("unknown sandbox subcommand %q", sub)
+		return usagef("unknown sandbox subcommand %q", sub)
 	}
-}
-
-func sandboxUsage() {
-	fmt.Fprint(os.Stderr, `amux sandbox — each agent's private copy of your harness configuration
-
-Every agent runs Claude Code / Codex against a private copy of your own config
-dir (~/.claude, $CODEX_HOME), seeded from it as a template and pointed at via
-CLAUDE_CONFIG_DIR / CODEX_HOME. The agent may edit its copy. amux compares each
-copy with the template and reports what diverged, so you decide whether an
-agent's change should propagate to your config (and so to every new agent) or
-be discarded. Nothing propagates on its own. Credentials are shared, never copied.
-
-usage: amux sandbox <command>
-
-  drift [<id>] [--json]     list config paths that diverged from the template, per
-                            agent (all agents when no id). Statuses:
-                              agent-changed | agent-added | agent-removed
-                                — the agent's edit; promote or reset it
-                              template-changed — you changed the template since the
-                                copy was seeded; reset pulls the new version in
-                              conflict — both sides changed; pick with promote/reset
-                              shared-detached — the agent's auth file became a private
-                                copy; reset re-links it to yours
-  promote <id> <path>       propagate the agent's version of <path> into your config
-  reset <id> <path>         discard the agent's version; re-copy the template's
-  path <id>                 print the agent's private config dir(s) and env
-
-<id> is the agent's store id (from amux workgroup ls), or "console".
-`)
 }
 
 // sandboxAgent is one agent whose config copies the CLI can inspect.

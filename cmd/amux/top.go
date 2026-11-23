@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -21,12 +20,12 @@ import (
 // heaviest processes. It reads the daemon's cached sample; it never walks
 // /proc itself.
 func cmdTop(args []string) error {
-	fs := flag.NewFlagSet("top", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the raw resource snapshot as JSON")
-	byMem := fs.Bool("mem", false, "sort by resident memory instead of CPU")
-	fs.BoolVar(byMem, "m", false, "shorthand for --mem")
-	procs := fs.Int("n", 3, "top processes to show per session (0 hides them)")
-	if err := fs.Parse(args); err != nil {
+	fs := newCmdFlagSet("top")
+	asJSON := fs.Bool("json", false, "")
+	byMem := fs.Bool("mem", false, "")
+	fs.BoolVar(byMem, "m", false, "")
+	procs := fs.Int("n", 3, "")
+	if err := parseCmdFlags(fs, "top", args); err != nil {
 		return err
 	}
 	snap, err := queryResources()

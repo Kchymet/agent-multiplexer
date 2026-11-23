@@ -1,0 +1,35 @@
+amux — AI-native terminal control plane
+
+usage: amux [command] [flags]
+
+commands:
+  (bare)     open the workgroup dashboard (native TUI); without a terminal, print this help
+  repo       track the repositories agents get worktrees of
+  workgroup  create, open and manage workgroups and their agents  (alias: wg, session, ses, workspace, ws)
+  agent      commands an agent runs about itself (status, name, raise, wait, done, ...)
+  status     print workgroups and their agents, then exit
+  top        per-session CPU/memory, top processes and amux's own overhead
+  queue      the user question queue: list, answer, dismiss, acknowledge  (alias: q)
+  do         drive one daemon control action (the scripting entrypoint)
+  refresh    ask the daemon to re-poll its sources now
+  doctor     health check: versions, compatibility, dependencies and runtime  (alias: health, check)
+  config     show or change amux settings (keybindings, Codex control, updates, ...)  (alias: conf, cfg)
+  harness    amux-managed Claude Code / Codex installs  (alias: harnesses)
+  sandbox    each agent's private copy of your harness config: drift, promote, reset  (alias: sb)
+  auth       central harness logins, delivered to sessions by the daemon
+  provide    provide this machine as remote compute (provider mode)
+  direct     direct client access (web, Android) over your LAN or VPN (opt-in, host only)
+  daemon     run or control the local daemon (restart loads a new binary)
+  version    print CLI, daemon and database versions and compatibility  (alias: --version, -v)
+  update     install the latest amux release  (alias: upgrade)
+  licenses   print bundled dependency licenses and notices  (alias: notices)
+
+flags:
+  -h, --help     show help for amux or for the command it follows
+  -a, --all      with --help (and no command): print the entire help tree
+  --all-help     print the entire help tree: every command, flag, action and example
+  -v, --version  print CLI, daemon and database versions (same as amux version)
+
+Set AMUX_SKIP=1 in your shell to bypass auto-launch.
+
+Run 'amux <command> --help' for details. 'amux --help --all' prints everything.

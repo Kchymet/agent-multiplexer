@@ -21,12 +21,11 @@ import (
 
 func cmdAuth(args []string) error {
 	if len(args) == 0 || (len(args) == 1 && isHelpFlag(args[0])) {
-		authUsage()
-		return nil
+		return showHelp("auth")
 	}
 	run, ok := authSubcommands[args[0]]
 	if !ok {
-		return fmt.Errorf("unknown auth subcommand %q; want login, status, accounts, default, logout, rebind, or restart", args[0])
+		return usagef("unknown auth subcommand %q", args[0])
 	}
 	return run(args[1:])
 }
@@ -39,51 +38,6 @@ var authSubcommands = map[string]func([]string) error{
 	"rebind":   func(a []string) error { return authAccountMutation("rebind", a) },
 	"status":   authStatus,
 	"restart":  authRestart,
-}
-
-func authUsage() {
-	fmt.Fprint(os.Stderr, `amux auth — central harness logins, delivered to sessions by the daemon
-
-usage: amux auth <command>
-
-  login [claude] [--token-stdin]  create or replace the central Claude token
-  login <claude|codex> --api-key [--token-stdin]  replace with an API key
-  login codex                     sign the central Codex home in to ChatGPT
-  status [claude|codex]           show the amux-owned configuration and limits
-  accounts [--json]             view Claude/Codex configuration and limits
-  logout <claude|codex>          fence delivery and clear the central login
-  default <claude|codex>         confirm the central configuration (always the default)
-  rebind <claude|codex> <id>      stop one workload so it relaunches on the current login now
-  restart [--force]               restart idle Claude agents with current credentials
-
-login runs `+"`claude setup-token`"+` (browser sign-in) and then asks you to paste
-the token it prints, with input hidden; --token-stdin reads it from stdin
-instead. Codex sign-in prints a browser URL; the daemon owns that login.
-restart --force also interrupts busy or unknown-state agents. Conversations
-resume after a restart.
-
-Run logins in a host terminal or the trusted amux console terminal. Console
-Claude login accepts a token through hidden input; obtain it with setup-token
-in a host terminal. Other agent sessions cannot configure accounts.
-Sessions never hold a refresh token: Claude
-receives the setup-token through CLAUDE_CODE_OAUTH_TOKEN, and Codex receives
-short-lived ChatGPT tokens from the daemon. A setup-token is valid for one
-year and is not refreshed; run login again to reissue it before then.
-Reissuing does not revoke the previous token. Status never prints a secret.
-
-One amux-owned configuration is available for each harness. Configuration
-uses amux CLI/TUI; Harness web account views are read-only.
-
-Every workload, including existing and archived ones, follows its harness's
-central configuration. Each new harness process uses the newest successfully
-configured login, including a different account, subscription or API key;
-running processes keep what they received and are never stopped by login.
-Older host, shared and environment selections were migrated to central once,
-automatically; no credential is copied, so a harness without a central login
-needs one "amux auth login" before its workloads launch again (status reports
-the migration as pending). Login pauses new credential delivery until
-completion or cancellation.
-`)
 }
 
 func authRestart(args []string) error {
