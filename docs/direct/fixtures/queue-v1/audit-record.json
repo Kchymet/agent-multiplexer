@@ -1,0 +1,10 @@
+{
+  "at": 1795400000000,
+  "client_id": "cl_8b1f",
+  "label": "Pixel",
+  "route": "queue.answer",
+  "verb": "permission",
+  "target": "p-aaaaaaaaaa",
+  "text": "allow",
+  "outcome": "ok"
+}

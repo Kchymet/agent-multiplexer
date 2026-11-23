@@ -823,6 +823,13 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 					{Name: "list", Summary: "list enrolled clients"},
 					{Name: "revoke", Args: "<client-id>", Summary: "revoke a client now (closes its streams first)"},
 				}},
+			{Name: "audit", Args: "[--client <id>] [--limit N] [--json]",
+				Summary: "answers, item triage and overseer steers made by direct clients (newest last)",
+				Flags: []flagSpec{
+					{Name: "client", Arg: "<id>", Usage: "only this client's actions"},
+					{Name: "limit", Arg: "<n>", Usage: "at most n records"},
+					{Name: "json", Usage: "print as JSON"},
+				}},
 			{Name: "reset-identity", Args: "--yes", Summary: "replace the server identity; revokes every client and disables cloud enrollment",
 				Flags: []flagSpec{{Name: "yes", Required: true, Usage: "confirm"}}},
 			{Name: "cloud", Args: "<command>", Summary: "cloud-assisted enrollment policy (off by default)",

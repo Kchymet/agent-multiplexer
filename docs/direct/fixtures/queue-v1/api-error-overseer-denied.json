@@ -1,0 +1,4 @@
+{
+  "code": "denied",
+  "error": "steering the overseer needs an all-sessions client with steer, manage and create"
+}

@@ -1,0 +1,157 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "entries": [
+    {
+      "id": "p-aaaaaaaaaa",
+      "kind": "permission",
+      "state": "open",
+      "session_id": "a1",
+      "session_title": "api work",
+      "workgroup": "wg1",
+      "title": "permission: Bash",
+      "body": "rm -rf build/",
+      "tool": "Bash",
+      "action": "rm -rf build/",
+      "request_id": "toolu_01",
+      "runtime_generation": "gen-7"
+    },
+    {
+      "id": "q-bbbbbbbbbb",
+      "kind": "question",
+      "state": "open",
+      "session_id": "a1",
+      "session_title": "api work",
+      "workgroup": "wg1",
+      "title": "Which database?",
+      "questions": [
+        {
+          "header": "Database",
+          "question": "Which database?",
+          "options": [
+            {
+              "label": "sqlite",
+              "description": "embedded"
+            },
+            {
+              "label": "postgres"
+            }
+          ],
+          "multi_select": false
+        }
+      ]
+    },
+    {
+      "id": "q-cccccccccc",
+      "kind": "question",
+      "state": "open",
+      "session_id": "a1",
+      "session_title": "api work",
+      "workgroup": "wg1",
+      "title": "Scope? (+1 more)",
+      "questions": [
+        {
+          "header": "Scope",
+          "question": "Scope?",
+          "options": [
+            {
+              "label": "api"
+            },
+            {
+              "label": "web"
+            }
+          ],
+          "multi_select": true
+        },
+        {
+          "header": "Ship",
+          "question": "Ship today?",
+          "options": [
+            {
+              "label": "yes"
+            },
+            {
+              "label": "no"
+            }
+          ],
+          "multi_select": false
+        }
+      ]
+    },
+    {
+      "id": "g-dddddddddd",
+      "kind": "goal_input",
+      "state": "open",
+      "session_id": "wg1",
+      "session_title": "Billing",
+      "workgroup": "wg1",
+      "title": "Which region?",
+      "body": "Which region should the rollout start in?",
+      "created_at": 1795400000000
+    },
+    {
+      "id": "d-eeeeeeeeee",
+      "kind": "decision_needed",
+      "state": "open",
+      "session_id": "wg1",
+      "workgroup": "wg1",
+      "title": "Rewrite billing?",
+      "body": "The old billing module blocks the migration.",
+      "created_at": 1795300000000,
+      "item_id": "it-0000000a",
+      "suggested_action": "new workgroup for the rewrite",
+      "prs": [
+        "acme/api#12"
+      ]
+    },
+    {
+      "id": "g-gggggggggg",
+      "kind": "goal_input",
+      "state": "open",
+      "session_id": "wg3",
+      "workgroup": "wg3",
+      "title": "Docs tone?"
+    }
+  ],
+  "items": [
+    {
+      "id": "it-0000000a",
+      "kind": "decision_needed",
+      "title": "Rewrite billing?",
+      "detail": "The old billing module blocks the migration.",
+      "prs": [
+        "acme/api#12"
+      ],
+      "suggested_action": "new workgroup for the rewrite",
+      "state": "open",
+      "source": "wg1",
+      "workgroup": "wg1",
+      "raised": 1,
+      "created": 1795300000000,
+      "updated": 1795300000000
+    },
+    {
+      "id": "it-0000000b",
+      "kind": "risk",
+      "title": "Flaky CI on macOS",
+      "links": [
+        "https://github.com/acme/api/actions/runs/1"
+      ],
+      "state": "acknowledged",
+      "source": "a1",
+      "workgroup": "wg1",
+      "raised": 2,
+      "created": 1795200000000,
+      "updated": 1795250000000
+    },
+    {
+      "id": "it-0000000d",
+      "kind": "follow_up",
+      "title": "Docs follow-up",
+      "state": "open",
+      "source": "c1",
+      "workgroup": "wg3",
+      "created": 2,
+      "updated": 2
+    }
+  ]
+}
