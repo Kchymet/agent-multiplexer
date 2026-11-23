@@ -77,3 +77,10 @@ func (l *rateLog) pruneLocked(now time.Time) {
 // stallLog rate-limits the daemon's own stall lines (actions holding locks,
 // slow reconcile passes).
 var stallLog = newRateLog(stallLogInterval)
+
+// capacityLog rate-limits "response capacity exceeded" per session: a
+// saturated mailbox reports it on every wake.
+var capacityLog = newRateLog(capacityLogInterval)
+
+// capacityLogInterval bounds each session's capacity line to one a minute.
+const capacityLogInterval = time.Minute

@@ -61,6 +61,12 @@ const (
 	// waiting for an unclaimed request and withdraws it: no daemon can accept
 	// it any more.
 	requestCancelAfter = requestClockSkew + time.Second
+	// DefaultResponseTTL is how long a published response that awaits no
+	// receipt is kept for its client to collect. A live client is woken by the
+	// publication and reads it at once (within WatchFallbackInterval when it
+	// cannot watch); one that timed out or was killed never will, and its
+	// response must not hold daemon response capacity for MaxResponseAge.
+	DefaultResponseTTL = 10 * time.Second
 	// expiredDropAfter is how long after expiry the daemon discards an
 	// unclaimed request unanswered. It is later than requestCancelAfter, so a
 	// client still waiting withdraws its own request first and learns that it
@@ -305,6 +311,38 @@ type ResponseReservation struct {
 	MaxBytes    int64
 	Existing    bool
 	ReceiptSlot bool
+	// Priority is the admission class ServerOptions.Priority chose for the
+	// call. A budget may shed lower classes first; adoption ignores it.
+	Priority Priority
+	// Verb names the call for budget accounting only. It is read before
+	// authentication, so it must never grant anything.
+	Verb string
+}
+
+// Priority is a call's response-admission class. Best-effort telemetry is
+// shed first so it can never starve credential reads or control actions.
+type Priority int
+
+const (
+	// PriorityTelemetry is a best-effort observation: hook state, model,
+	// status-line limits, the report context.
+	PriorityTelemetry Priority = -1
+	// PriorityNormal is the default for queries and anything unclassified.
+	PriorityNormal Priority = 0
+	// PriorityControl is a credential read or a control action someone is
+	// blocked on (steer, prompt, add-agent).
+	PriorityControl Priority = 1
+)
+
+func (p Priority) String() string {
+	switch {
+	case p < PriorityNormal:
+		return "telemetry"
+	case p > PriorityNormal:
+		return "control"
+	default:
+		return "normal"
+	}
 }
 
 type ResponseLease interface {

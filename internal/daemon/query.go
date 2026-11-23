@@ -118,6 +118,16 @@ func (d *Daemon) readModelContext(ctx context.Context, a core.Action) (any, erro
 	if a.Query == core.QueryResources {
 		return d.resourceSnapshot(), nil
 	}
+	// QueryRPCBudget reads the session RPC response budget's live counters.
+	if a.Query == core.QueryRPCBudget {
+		if d.sessionRPC == nil || d.sessionRPC.responseBudget == nil {
+			return core.RPCBudget{}, nil
+		}
+		if b, ok := d.sessionRPC.responseBudget.(*sessionResponseBudget); ok {
+			return b.snapshot(), nil
+		}
+		return core.RPCBudget{}, nil
+	}
 
 	db, err := store.Open()
 	if err != nil {

@@ -51,13 +51,176 @@ func (r Reading) Empty() bool { return r.Found && strings.TrimSpace(r.Text) == "
 // Read parses the composer of the given runtime off a screen snapshot. An
 // unsupported runtime reads as not found.
 func Read(runtime string, snap vterm.Snapshot) Reading {
+	r, _ := readAt(runtime, rowsOf(snap))
+	return r
+}
+
+// readAt parses the composer and also returns its prompt row (-1 when none).
+func readAt(runtime string, rows []row) (Reading, int) {
 	switch runtime {
 	case RuntimeClaude:
-		return readClaude(rowsOf(snap))
+		return readClaude(rows)
 	case RuntimeCodex:
-		return readCodex(rowsOf(snap))
+		return readCodex(rows)
 	}
-	return Reading{}
+	return Reading{}, -1
+}
+
+// State is what the input region of a pane says about whether amux may type.
+type State int
+
+const (
+	// Unknown: no composer is recognized (booting, a repaint, a layout amux
+	// does not know). Nothing may be typed: amux cannot tell what holds focus.
+	Unknown State = iota
+	// Free: the composer is recognized and holds no text.
+	Free
+	// Draft: the composer holds text (someone's unsent draft — or amux's own
+	// earlier text, which only the caller can recognize).
+	Draft
+	// Dialog: a numbered selector (a permission prompt, Claude Code's auto-mode
+	// opt-in, an AskUserQuestion, a Codex approval) owns the keyboard in place of
+	// the composer. Typed text would answer it.
+	Dialog
+)
+
+func (s State) String() string {
+	switch s {
+	case Free:
+		return "free"
+	case Draft:
+		return "draft"
+	case Dialog:
+		return "dialog"
+	}
+	return "unknown"
+}
+
+// Pane is a pane's classification for typed delivery.
+type Pane struct {
+	State State
+	// Text is the composer's content (Draft only).
+	Text string
+	// Busy reports a turn in progress ("esc to interrupt" on screen). It is
+	// informational: a busy runtime takes typed text (Claude Code queues it,
+	// Codex steers with it), so busy alone never refuses delivery.
+	Busy bool
+}
+
+// Classify reads only the pane's input region: the composer block the reader
+// recognizes (Claude Code's rule-framed prompt, Codex's "›" block), plus a
+// selector drawn below or in place of it. Everything else on screen —
+// transcript, tool output, spinner and status lines, queued-message previews,
+// footers — is never read as composer content, so a busy pane classifies the
+// same as an idle one.
+func Classify(runtime string, snap vterm.Snapshot) Pane {
+	rows := rowsOf(snap)
+	r, y := readAt(runtime, rows)
+	p := Pane{Busy: busy(rows), Text: r.Text}
+	sel := selectorRow(rows)
+	switch {
+	case sel >= 0 && (y < 0 || sel > y):
+		// A selector below the lowest composer, or with no composer at all:
+		// the dialog has replaced (or covers) the input box.
+		return Pane{State: Dialog, Busy: p.Busy}
+	case sel >= 0 && sel == y && runtime == RuntimeCodex:
+		// Codex draws its approval choices with the composer's own "›" glyph.
+		return Pane{State: Dialog, Busy: p.Busy}
+	case !r.Found:
+		return Pane{State: Unknown, Busy: p.Busy}
+	case r.Empty():
+		p.State, p.Text = Free, ""
+		return p
+	}
+	p.State = Draft
+	return p
+}
+
+// busy reports a running-turn status line: both runtimes print "esc to
+// interrupt" in their spinner/status row while a turn runs.
+func busy(rows []row) bool {
+	for _, r := range rows {
+		if strings.Contains(strings.ToLower(r.plain()), "esc to interrupt") {
+			return true
+		}
+	}
+	return false
+}
+
+// selectorRow finds the lowest numbered selector — a focus glyph on an option
+// "1." … "9." with another numbered option within the next rows — and returns
+// its focused row, or -1. Both runtimes draw permission/approval prompts,
+// Claude Code's auto-mode opt-in and AskUserQuestion this way.
+func selectorRow(rows []row) int {
+	for y := len(rows) - 1; y >= 0; y-- {
+		x, ok := promptAt(rows[y], ">❯›")
+		if !ok || !numbered(content(rows[y], x)) {
+			continue
+		}
+		for k := y - 3; k <= y+3; k++ {
+			if k == y || k < 0 || k >= len(rows) {
+				continue
+			}
+			if numbered(strings.TrimLeft(rows[k].plain(), " │")) {
+				return y
+			}
+		}
+	}
+	return -1
+}
+
+// numbered reports option text such as "2. No, and tell Claude what to do".
+func numbered(s string) bool {
+	s = strings.TrimLeft(s, " ")
+	return len(s) >= 3 && s[0] >= '1' && s[0] <= '9' && s[1] == '.' && s[2] == ' '
+}
+
+// Echo is how a composer read after typing compares with what amux typed.
+type Echo int
+
+const (
+	// EchoNone: the composer shows nothing (yet).
+	EchoNone Echo = iota
+	// EchoPartial: the composer shows a beginning of amux's text — the runtime
+	// is still painting it.
+	EchoPartial
+	// EchoExact: the composer shows amux's text and nothing else but rendering
+	// noise.
+	EchoExact
+	// EchoForeign: the composer shows something amux did not type.
+	EchoForeign
+)
+
+// MatchTyped compares a composer's text, read after amux typed, with the text
+// amux typed. Whitespace is ignored (wrapping, continuation indents), and so
+// are glyphs a busy runtime repaints in and around its input box — spinner
+// frames, ellipses, return-key hints — which are rendering noise, never
+// someone's words. The caller must establish separately that nobody else
+// typed; this only says what the screen shows.
+func MatchTyped(composerText, typed string) Echo {
+	a, t := denoise(squash(unescape(composerText))), denoise(squash(unescape(typed)))
+	switch {
+	case a == "":
+		return EchoNone
+	case a == t:
+		return EchoExact
+	case strings.HasPrefix(t, a):
+		return EchoPartial
+	}
+	return EchoForeign
+}
+
+// noiseGlyphs are status/spinner glyphs a runtime may paint into the input
+// region while a turn runs.
+const noiseGlyphs = "✻✶✳✢✽✺·•…↵⏎⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+func denoise(s string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(noiseGlyphs, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // Same reports whether the composer text equals want, ignoring whitespace:
@@ -65,7 +228,16 @@ func Read(runtime string, snap vterm.Snapshot) Reading {
 // tabs as spaces and may neutralize a leading command character with a space,
 // so only the non-blank characters are comparable.
 func Same(composerText, want string) bool {
-	return squash(composerText) == squash(want)
+	return squash(unescape(composerText)) == squash(unescape(want))
+}
+
+// unescape removes the backslash Claude Code renders at the end of a line
+// typed as backslash+Enter (amux's TypedNewline; docs/steering.md rule 9), on
+// either side of a comparison, so a multi-line typed steer compares equal to
+// the text amux sent.
+func unescape(s string) string {
+	s = strings.ReplaceAll(s, "\\\n", "\n")
+	return strings.TrimSuffix(s, "\\")
 }
 
 func squash(s string) string {
@@ -189,17 +361,19 @@ func promptAt(r row, glyphs string) (int, bool) {
 // characters (at least a few of them), as Claude Code draws above and below its
 // composer.
 func isRule(r row) bool {
-	n := 0
+	n, other := 0, 0
 	for _, c := range r {
 		switch c.text {
 		case " ":
 		case "─", "━", "═", "╭", "╮", "╰", "╯", "┌", "┐", "└", "┘":
 			n++
 		default:
-			return false
+			other++
 		}
 	}
-	return n >= 4
+	// A long rule may carry a short label (a mode or session name drawn into
+	// the frame); text with a few dashes in it is not a rule.
+	return (other == 0 && n >= 4) || (n >= 20 && other*4 <= n)
 }
 
 // trimBorder drops a box's right border from row text.
@@ -213,7 +387,7 @@ func trimBorder(s string) string {
 // below a rule or box top, followed by continuation rows up to the next rule
 // or box bottom. The lowest such block on the screen is the composer — earlier
 // user messages in the transcript also start with ">" but are not framed.
-func readClaude(rows []row) Reading {
+func readClaude(rows []row) (Reading, int) {
 	for y := len(rows) - 1; y >= 1; y-- {
 		x, ok := promptAt(rows[y], ">❯")
 		if !ok || !isRule(rows[y-1]) {
@@ -236,16 +410,16 @@ func readClaude(rows []row) Reading {
 			line = strings.TrimPrefix(line, "│")
 			lines = append(lines, trimBorder(line))
 		}
-		return Reading{Found: true, Text: strings.TrimRight(strings.Join(lines, "\n"), "\n ")}
+		return Reading{Found: true, Text: strings.TrimRight(strings.Join(lines, "\n"), "\n ")}, y
 	}
-	return Reading{}
+	return Reading{}, -1
 }
 
 // readCodex finds Codex's composer: the lowest row starting with its prompt
 // glyph ("›", or "▌" in older releases), followed by continuation rows indented
 // under it, up to the first blank (or all-placeholder) row — the footer below
 // the composer is dim, so it reads as blank here.
-func readCodex(rows []row) Reading {
+func readCodex(rows []row) (Reading, int) {
 	for y := len(rows) - 1; y >= 0; y-- {
 		x, ok := promptAt(rows[y], "›▌")
 		if !ok {
@@ -259,7 +433,7 @@ func readCodex(rows []row) Reading {
 			}
 			lines = append(lines, strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(line, " "), "▌"), " "))
 		}
-		return Reading{Found: true, Text: strings.TrimRight(strings.Join(lines, "\n"), "\n ")}
+		return Reading{Found: true, Text: strings.TrimRight(strings.Join(lines, "\n"), "\n ")}, y
 	}
-	return Reading{}
+	return Reading{}, -1
 }

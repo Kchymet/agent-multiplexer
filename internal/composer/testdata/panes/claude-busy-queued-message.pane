@@ -1,0 +1,23 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): a message submitted mid-turn waits
+#   queued; 2.1 previews it (gray, prompt glyph) above the input box and hints
+#   how to edit it in the footer.
+# shows: mid-turn, one queued message preview, empty composer
+# want-state: free
+# want-busy: true
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ review the open PRs and keep going\x1b[0m
+
+⏺ Working on it — reading the PR list first.
+
+\x1b[38;5;174m✻\x1b[0m \x1b[38;5;174mWrangling…\x1b[0m \x1b[2m(21s · ↓ 610 tokens · esc to interrupt)\x1b[0m
+
+\x1b[38;5;244m❯ interject: PR 7 is red, look at it first\x1b[0m
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m \x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  Press up to edit queued messages\x1b[0m

@@ -97,6 +97,9 @@ func (p *fakePane) screen() vterm.Snapshot {
 }
 
 func (f *fakeInstance) Screen() (vterm.Snapshot, bool) {
+	if f.fx != nil {
+		return f.fx.screen(), true
+	}
 	if f.pane == nil {
 		return vterm.Snapshot{}, false
 	}
@@ -104,6 +107,11 @@ func (f *fakeInstance) Screen() (vterm.Snapshot, bool) {
 }
 
 func (f *fakeInstance) LastHumanInput() time.Time {
+	if f.fx != nil {
+		f.fx.mu.Lock()
+		defer f.fx.mu.Unlock()
+		return f.fx.human
+	}
 	if f.pane == nil {
 		return time.Time{}
 	}
@@ -256,9 +264,11 @@ func TestQuestionReplyDismissesThenDeliversSafely(t *testing.T) {
 	}
 }
 
-// A screen amux cannot read: automatic text is held, while a person's own
-// steer is typed as before (they chose to send it).
-func TestUnreadableComposerHoldsOnlyAutomaticText(t *testing.T) {
+// A screen amux cannot read (booting, a repaint, an unknown layout): nothing
+// is typed — automatic text waits for its own retry, and a person's steer is
+// refused with a clear error and queued for automatic delivery, since typed
+// blind it could land in a draft or answer whatever holds the keyboard.
+func TestUnreadableComposerTypesNothing(t *testing.T) {
 	d, eng := steerDaemon(t)
 	fastTyped(d)
 	putSession(t, "a1", "claude")
@@ -273,13 +283,14 @@ func TestUnreadableComposerHoldsOnlyAutomaticText(t *testing.T) {
 	if in.written() != "" {
 		t.Fatalf("typed %q into an unreadable pane", in.written())
 	}
-	if err := d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{
+	err = d.steer(context.Background(), core.Action{ID: "a1", Fields: map[string]string{
 		core.SteerVerb: core.SteerPrompt, core.SteerText: "user text",
-	}}); err != nil {
-		t.Fatalf("user steer: %v", err)
+	}})
+	if err == nil || !strings.Contains(err.Error(), "cannot see") || !strings.Contains(err.Error(), "queued") {
+		t.Fatalf("user steer to an unreadable pane: err=%v, want refused and queued", err)
 	}
-	if !strings.Contains(in.written(), "user text") {
-		t.Fatalf("user steer not typed: %q", in.written())
+	if in.written() != "" {
+		t.Fatalf("typed %q into an unreadable pane", in.written())
 	}
 }
 

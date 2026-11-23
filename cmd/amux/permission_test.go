@@ -70,8 +70,8 @@ func TestAgentPermissionReportsObservationWithoutAuthority(t *testing.T) {
 	if fields[sessionreport.FieldTool] != "Bash" || fields[sessionreport.FieldAction] != "rm -rf build/" {
 		t.Errorf("fields = %+v, want tool/action observation", fields)
 	}
-	if fields[sessionreport.FieldRequestID] == "" || fields[sessionreport.FieldRuntimeGeneration] != "gen-1" {
-		t.Errorf("fields = %+v, want random request correlation and daemon-issued generation", fields)
+	if _, named := fields[sessionreport.FieldRuntimeGeneration]; fields[sessionreport.FieldRequestID] == "" || named {
+		t.Errorf("fields = %+v, want random request correlation and no generation (the daemon resolves it)", fields)
 	}
 	if got := core.PendingPermissions(session); len(got) != 0 {
 		t.Fatalf("self observation entered answerable permission journal: %+v", got)
@@ -152,7 +152,7 @@ func TestCaptureHookDoesNotForwardUUIDOrPath(t *testing.T) {
 		t.Fatalf("capture actions = %+v", rpc.actions)
 	}
 	fields := rpc.actions[0].Fields
-	if len(fields) != 2 || fields[sessionreport.FieldEvent] != "Stop" || fields[sessionreport.FieldRuntimeGeneration] != "gen-1" {
+	if len(fields) != 1 || fields[sessionreport.FieldEvent] != "Stop" {
 		t.Fatalf("capture forwarded untrusted identity/path fields: %+v", fields)
 	}
 }

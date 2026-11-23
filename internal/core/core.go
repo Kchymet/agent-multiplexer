@@ -270,7 +270,41 @@ const (
 	// own overhead. The sampler runs in the background; the query never samples.
 	// Host only.
 	QueryResources = "resources"
+	// QueryRPCBudget returns the daemon's session RPC response budget: usage
+	// against its ceilings and what it refused (-> RPCBudget). Host only.
+	QueryRPCBudget = "rpc-budget"
 )
+
+// RPCBudget is the QueryRPCBudget read model: the daemon-wide response budget
+// every session mailbox draws on, and the admissions it refused since start.
+type RPCBudget struct {
+	Files           int   `json:"files"`
+	MaxFiles        int   `json:"maxFiles"`
+	Bytes           int64 `json:"bytes"`
+	MaxBytes        int64 `json:"maxBytes"`
+	Receipts        int   `json:"receipts"`
+	MaxReceipts     int   `json:"maxReceipts"`
+	SessionMaxFiles int   `json:"sessionMaxFiles"`
+	// Sessions counts sessions holding any response capacity.
+	Sessions int `json:"sessions"`
+	// ByPriority counts live leases per class (telemetry, normal, control).
+	ByPriority         map[string]int    `json:"byPriority,omitempty"`
+	Admitted           uint64            `json:"admitted"`
+	Rejected           uint64            `json:"rejected"`
+	RejectedByPriority map[string]uint64 `json:"rejectedByPriority,omitempty"`
+	RejectedByVerb     map[string]uint64 `json:"rejectedByVerb,omitempty"`
+	RejectedBySession  map[string]uint64 `json:"rejectedBySession,omitempty"`
+	LastRejectedAt     int64             `json:"lastRejectedAt,omitempty"`
+	// Top is the sessions holding the most capacity, heaviest first.
+	Top []RPCBudgetSession `json:"top,omitempty"`
+}
+
+// RPCBudgetSession is one session's share of the response budget.
+type RPCBudgetSession struct {
+	ID    string `json:"id"`
+	Files int    `json:"files"`
+	Bytes int64  `json:"bytes"`
+}
 
 // CodexAuthStatus is the QueryCodexAuth read model. It never carries a token.
 type CodexAuthStatus struct {

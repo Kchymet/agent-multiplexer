@@ -1,0 +1,24 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): the auto-mode opt-in dialog shown
+#   when the permission mode cycles to auto the first time; it owns the
+#   keyboard in place of the input box.
+# shows: auto-mode dialog open, no composer
+# want-state: dialog
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H⏺ Done. The tests pass.
+
+\x1b[38;5;214m{{RULE}}\x1b[0m
+ \x1b[1;38;5;214mEnable auto mode?\x1b[0m
+
+ In auto mode Claude runs tools without asking each time; a classifier
+ blocks risky actions. You can switch modes any time with shift+tab.
+
+ \x1b[38;5;214m❯\x1b[0m 1. Yes, and make it my default mode
+   2. Yes, enable auto mode
+   3. No, go back
+
+\x1b[2m Enter to confirm · Esc to cancel\x1b[0m
