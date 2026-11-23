@@ -297,7 +297,13 @@ func (d *Daemon) handleItemAction(ctx context.Context, a core.Action) core.Resul
 	if err := validateItemAction(req); err != nil {
 		return fail("%v", err)
 	}
-	release := d.admitSessions(a.ID)
+	locks := []string{a.ID}
+	if a.Action == core.ActionRaiseItem && d.items != nil && d.items.Resolver != nil {
+		if actor, ok, err := d.items.Resolver.Lookup(ctx, a.ID); err == nil && ok && actor.RootID != "" {
+			locks = append(locks, actor.RootID)
+		}
+	}
+	release := d.admitSessions(locks...)
 	defer release()
 	out := d.runItemOperation(ctx, a)
 	if out.body == nil {
