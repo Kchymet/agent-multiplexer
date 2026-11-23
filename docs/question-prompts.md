@@ -1038,3 +1038,12 @@ Members pin to these.
 
   At this layer every Claude form reports `delivery: pane` (no channel yet),
   and legacy answers keep the typed reply.
+- **Relay refusal codes** (it-fadb4071, from e4b5c5): `HarnessMsg.Code`
+  (`json:"code,omitempty"`) on a failed `session-result`.
+  - The provider sets it from the daemon's `RejectedError.Code`, so a
+    relayed `answer` refusal arrives as one of `asker_gone`, `answered`,
+    `needs_newer_client`, `delivery_failed` or `answer_in_pane` without
+    parsing `error`.
+  - Any other daemon refusal that carries a code relays it too. A result
+    with no code omits the key.
+  - Golden: `harnessproto/testdata/session_result_code.json`.

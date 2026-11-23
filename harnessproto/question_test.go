@@ -60,6 +60,10 @@ func init() {
 			name string
 			msg  any
 		}{"session_caps_question", SessionCaps{Prompt: true, Interject: true, Cancel: true, Question: true}},
+		struct {
+			name string
+			msg  any
+		}{"session_result_code", HarnessMsg{Type: HSessionResult, ReqID: "a9", Error: "queue entry q-k3v9x2m4pa was already answered", Code: "answered"}},
 	)
 }
 

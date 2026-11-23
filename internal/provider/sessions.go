@@ -255,6 +255,13 @@ func (p *Provider) handleSessionAction(s *session, m harnessproto.MuxMsg) {
 	}
 	if err != nil {
 		res.Error = err.Error()
+		// The daemon's stable failure class (a question answer's asker_gone,
+		// answered, needs_newer_client, ...) rides the result so the relay
+		// does not have to parse Error.
+		var coded interface{ ResultCode() string }
+		if errors.As(err, &coded) {
+			res.Code = coded.ResultCode()
+		}
 	} else {
 		res.OK, res.NewID = true, newID
 		// A steering verb is taken on, not completed: say "accepted" so the

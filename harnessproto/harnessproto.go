@@ -437,7 +437,12 @@ type HarnessMsg struct {
 	Sessions []Session `json:"sessions,omitempty"` // sessions: full inventory snapshot (Seq is per-connection monotonic)
 	ReqID    string    `json:"reqId,omitempty"`    // session-result: echoes the session-action reqId
 	OK       bool      `json:"ok,omitempty"`       // session-result: verb succeeded
-	NewID    string    `json:"newId,omitempty"`    // session-result: id of any session the verb created
+	// Code is a failed session-result's stable failure class, when the daemon
+	// gave one — the question answer refusals asker_gone, answered,
+	// needs_newer_client, delivery_failed and answer_in_pane (question.go) —
+	// so a relaying consumer can tell them apart without parsing Error.
+	Code  string `json:"code,omitempty"`
+	NewID string `json:"newId,omitempty"` // session-result: id of any session the verb created
 	// Result is the disposition of a successful verb: ResultApplied (effect is
 	// complete) or ResultAccepted (validated and taken on; the effect is
 	// asynchronous). Empty means applied, so a daemon predating the field is read
