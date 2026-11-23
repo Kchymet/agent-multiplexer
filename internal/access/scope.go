@@ -115,6 +115,8 @@ var rules = map[Route]map[string]Rule{
 		core.QueryCodexAuth:       {Scope: ScopeHost},
 		// Host-wide process data (other sessions' commands and usage).
 		core.QueryResources: {Scope: ScopeHost},
+		// Host-wide RPC budget usage, naming other sessions.
+		core.QueryRPCBudget: {Scope: ScopeHost},
 		// The user question queue, read-only: the admin console and the overseer.
 		core.QueryQueue: {Scope: ScopeHost, Console: true, Overseer: true},
 	},

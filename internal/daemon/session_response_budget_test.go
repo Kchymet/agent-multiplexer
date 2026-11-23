@@ -430,7 +430,9 @@ func publishDaemonCall(t *testing.T, authority *access.FileAuthority, grant acce
 func TestDaemonResponseBudgetAdmitsMultiSessionHerd(t *testing.T) {
 	budget := newSessionResponseBudget()
 	const sessions, perSession = 25, 12 // ~300 concurrent in-flight calls
-	worstCase := sessionrpc.MaxResponseBytes / int64(sessionrpc.MaxResponseFiles) * 11
+	// The worst-case envelope a reservation holds until commit (~93 KiB):
+	// base64 of a MaxResponseBody body plus the envelope's 8 KiB allowance.
+	worstCase := int64((sessionrpc.MaxResponseBody+2)/3*4 + 8<<10)
 	if worstCase <= 0 {
 		t.Fatal("bad worst-case size")
 	}

@@ -54,6 +54,12 @@ func cmdTop(args []string) error {
 		titles[s.ID] = s.Title
 	}
 	renderTop(os.Stdout, snap, titles, topOptions{byMem: *byMem, procs: *procs, now: time.Now()})
+	if budget, ok := queryRPCBudget(); ok {
+		fmt.Println()
+		for _, line := range rpcBudgetLines(budget, time.Now()) {
+			fmt.Println(line)
+		}
+	}
 	return nil
 }
 

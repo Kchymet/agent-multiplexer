@@ -49,3 +49,35 @@ func sessionCallSlow(call sessionrpc.Call) bool {
 		return true
 	}
 }
+
+// sessionCallPriority assigns each session call a response-admission class
+// (sessionrpc.ServerOptions.Priority). Self reports and their context query
+// are best-effort telemetry: hooks and status lines fire them on every tool
+// call and redraw, and a dropped one is superseded by the next. Credential
+// reads (a launch or git is blocked on them) and every other action (steer,
+// prompt, add-agent, archive) are control and keep reserved capacity.
+// Ordinary queries stay normal. Like the lanes, it sees the call before
+// authentication and only picks a class: a client mislabeling its own calls
+// still competes inside its own session's ceiling.
+func sessionCallPriority(call sessionrpc.Call) sessionrpc.Priority {
+	req := call.AccessRequest()
+	switch {
+	case req.Verb == centralauth.QueryVerb, credentialbroker.IsVerb(req.Verb):
+		return sessionrpc.PriorityControl
+	case req.Route == access.RouteQuery && sessionreport.IsContextQuery(req.Verb):
+		return sessionrpc.PriorityTelemetry
+	case req.Route == access.RouteAction && sessionreport.IsVerb(req.Verb):
+		switch req.Verb {
+		case sessionreport.Activity, sessionreport.Model, sessionreport.Limits, sessionreport.Notice:
+			return sessionrpc.PriorityTelemetry
+		default:
+			// A permission prompt someone must answer, or a transcript copy
+			// someone may read: not superseded by the next report.
+			return sessionrpc.PriorityNormal
+		}
+	case req.Route == access.RouteAction:
+		return sessionrpc.PriorityControl
+	default:
+		return sessionrpc.PriorityNormal
+	}
+}
