@@ -395,6 +395,12 @@ func (d *Daemon) steerHeldQuestion(sess store.Session, text string, automated bo
 	if err := d.holdAnswer(sess.ID, h.toolUseID, a); err != nil {
 		return true, err
 	}
-	d.queue.markAnswered(queue.EntryID(queue.KindQuestion, sess.ID, "", h.toolUseID), time.Now())
+	id := queue.EntryID(queue.KindQuestion, sess.ID, "", h.toolUseID)
+	d.queue.markAnswered(id, time.Now())
+	outcome := harnessproto.QuestionAnswered
+	if a.Action == harnessproto.FormActionCancel {
+		outcome = harnessproto.QuestionCancelled
+	}
+	d.questionWatch.noteOutcome(id, outcome)
 	return true, nil
 }

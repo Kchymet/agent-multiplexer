@@ -615,15 +615,29 @@ func (d *Daemon) deliverQuestion(ctx context.Context, e queue.Entry, f map[strin
 		}
 		return d.queuePrompt(ctx, e.Session, reply)
 	}
+	outcome := harnessproto.QuestionAnswered
+	if a.Action == harnessproto.FormActionCancel {
+		outcome = harnessproto.QuestionCancelled
+	}
 	switch e.Form.Delivery {
 	case harnessproto.DeliveryStructured, harnessproto.DeliveryKeys:
-		return d.deliverForm(ctx, e, a)
+		res := d.deliverForm(ctx, e, a)
+		if res.OK {
+			d.questionWatch.noteOutcome(e.ID, outcome)
+		}
+		return res
 	}
 	if !legacy {
 		return core.Result{Type: "result", Code: harnessproto.CodeAnswerInPane,
 			Error: fmt.Sprintf("amux cannot deliver an answer to queue entry %s right now; answer it in the agent's pane", e.ID)}
 	}
-	return d.queuePrompt(ctx, e.Session, typedReply(*e.Form, a))
+	res = d.queuePrompt(ctx, e.Session, typedReply(*e.Form, a))
+	if res.OK {
+		// The legacy typed reply dismisses the selector (#316) and sends the
+		// reply as a prompt: the question itself is declined.
+		d.questionWatch.noteOutcome(e.ID, harnessproto.QuestionCancelled)
+	}
+	return res
 }
 
 // deliverForm delivers a v2 answer through the form's channel.

@@ -1106,3 +1106,22 @@ Members pin to these.
     for Codex coordinators.
   - The session RPC adds `question-hold` (a self-only query). It is internal
     to the hook.
+- **Clearing everywhere** (item 3): after each rail poll (at most 1/s, off
+  the poll goroutine) the daemon diffs open question entries. Events go on
+  the asking session's own stream (its amux journal, and its structured log
+  for App Server sessions), like `pr_state`.
+  - `question_request {request_id, runtime_generation, form}`: once when an
+    entry opens, and once per open entry after a daemon start, so
+    reconnecting clients see it.
+  - `question_resolved {request_id, runtime_generation, outcome, via}` when
+    it goes:
+    - `via: amux` with `answered` or `cancelled` when amux delivered it. A
+      legacy typed reply (Esc + prompt) is `cancelled`, since the selector
+      was declined.
+    - Otherwise `outcome: cleared, via: unknown`: answered or dismissed in
+      the pane, by a Codex TUI peer, or gone with the turn.
+  - Telling a pane answer from a pane dismissal or timeout needs the
+    captured Claude tool_result shapes (§7); until then clients treat
+    `cleared` as "closed".
+  - `request_id` equals the queue entry id, so a transcript card and a queue
+    row collapse together.
