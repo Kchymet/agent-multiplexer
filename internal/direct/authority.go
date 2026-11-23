@@ -53,6 +53,9 @@ var (
 	errAuthRevoked = errors.New(CodeAuthRevoked)
 	errDenied      = errors.New(CodeDenied)
 	errInvalidCode = errors.New(OAuthInvalidGrant)
+	// errGrantChanged ends a lease whose grant the host narrowed
+	// (grant_update.go): the wire code is CodeGrantChanged.
+	errGrantChanged = errors.New(CodeGrantChanged)
 )
 
 // codeRefusal is errInvalidCode with the reason a client is told
@@ -332,12 +335,15 @@ func randomToken(prefix string) (string, error) {
 // every other permission (Permissions) is optional and explicit, and nothing
 // else is allowed. The result is in canonical order, so ["read","steer"]
 // normalizes exactly as it did before the additive permissions existed.
+//
+// Aliases (PermAliases: execute = approve) are accepted and expanded, so the
+// result only ever holds concrete names.
 func ValidatePerms(perms []string) ([]string, error) {
 	set := map[string]bool{}
-	for _, p := range perms {
-		p = strings.TrimSpace(p)
+	for _, p := range ExpandPermAliases(perms) {
 		if !slices.Contains(Permissions, p) {
-			return nil, fmt.Errorf("unknown permission %q (allowed: %s)", p, strings.Join(Permissions, ", "))
+			return nil, fmt.Errorf("unknown permission %q (allowed: %s; alias %s = %s)", p, strings.Join(Permissions, ", "),
+				PermExecute, strings.Join(PermAliases[PermExecute], ","))
 		}
 		set[p] = true
 	}
@@ -382,7 +388,7 @@ func ValidateResource(r ResourceScope) (ResourceScope, error) {
 
 // NewCode mints a single-use enrollment code for an explicit scope.
 func (a *Authority) NewCode(label string, perms []string, resource ResourceScope, ttl time.Duration) (string, int64, error) {
-	return a.newCode(label, perms, resource, ttl, false)
+	return a.newCode(label, perms, resource, ttl, false, false)
 }
 
 // NewLocalTicket mints a single-use device ticket on the host operator's own
@@ -394,10 +400,10 @@ func (a *Authority) NewCode(label string, perms []string, resource ResourceScope
 // for whoever claims it first); after the claim, only the claiming device can
 // redeem it. It is never redeemable without a claim and a verifier.
 func (a *Authority) NewLocalTicket(label string, perms []string, resource ResourceScope, ttl time.Duration) (string, int64, error) {
-	return a.newCode(label, perms, resource, ttl, true)
+	return a.newCode(label, perms, resource, ttl, true, false)
 }
 
-func (a *Authority) newCode(label string, perms []string, resource ResourceScope, ttl time.Duration, ticket bool) (string, int64, error) {
+func (a *Authority) newCode(label string, perms []string, resource ResourceScope, ttl time.Duration, ticket, replace bool) (string, int64, error) {
 	if ttl == 0 {
 		ttl = DefaultCodeTTL
 	}
@@ -428,7 +434,7 @@ func (a *Authority) newCode(label string, perms []string, resource ResourceScope
 	now := a.now().Unix()
 	exp := now + int64(ttl/time.Second)
 	a.pruneLocked(now)
-	a.state.Codes[hashToken(code)] = &codeRecord{Label: label, Perms: perms, Resource: resource, CreatedAt: now, ExpiresAt: exp, Ticket: ticket}
+	a.state.Codes[hashToken(code)] = &codeRecord{Label: label, Perms: perms, Resource: resource, CreatedAt: now, ExpiresAt: exp, Ticket: ticket, Replace: replace}
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			delete(a.state.Codes, hashToken(code))
@@ -471,6 +477,17 @@ func (a *Authority) RedeemCode(code, label, kind string) (TokenResponse, error) 
 // device's verifier. A manual code takes no verifier: sending one is a request
 // error, and the code stays usable.
 func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, error) {
+	return a.RedeemDevice(code, label, kind, verifier, "")
+}
+
+// RedeemDevice is Redeem with the client's optional device_id: a stable
+// per-install identifier, stored only as a hash, that recognizes a later
+// enrollment from the same device (clients list --stale, enroll --replace).
+// It carries no authority.
+func (a *Authority) RedeemDevice(code, label, kind, verifier, deviceID string) (TokenResponse, error) {
+	if len(deviceID) > MaxLabelLen {
+		return TokenResponse{}, &requestError{"device_id is too long"}
+	}
 	if label == "" {
 		label = "direct client"
 	}
@@ -512,7 +529,10 @@ func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, e
 		ClientID: clientID, Label: label, ClientKind: kind, Perms: slices.Clone(rec.Perms), Resource: rec.Resource,
 		IdentityGeneration: a.identity.Generation, CreatedAt: now,
 		AbsoluteExpiry: now + int64(a.life.Absolute/time.Second), IdleTTL: int64(a.life.Idle / time.Second),
-		LastRefreshAt: now, RefreshHash: hashToken(refresh),
+		LastRefreshAt: now, RefreshHash: hashToken(refresh), EnrollLabel: rec.Label,
+	}
+	if deviceID != "" {
+		g.DeviceHash = hashToken("device\x00" + deviceID)
 	}
 	if rec.Origin == OriginCloud {
 		g.Origin, g.CloudRequester = OriginCloud, rec.Requester
@@ -520,11 +540,26 @@ func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, e
 	replay := a.takeReplayLocked(rec)
 	rec.ConsumedAt, rec.ClientID = now, clientID
 	a.state.Grants[clientID] = g
+	// enroll --replace: the superseded grants are revoked in the same commit
+	// as the new one, so a failed commit leaves every grant as it was.
+	var replaced []*grantRecord
+	var prevRefresh []string
+	if rec.Replace {
+		replaced = a.supersededLocked(g)
+		for _, old := range replaced {
+			prevRefresh = append(prevRefresh, old.RefreshHash)
+			old.RevokedAt, old.RevokeReason, old.ReplacedBy = now, "replaced by "+clientID, clientID
+			old.RefreshHash = ""
+		}
+	}
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			rec.ConsumedAt, rec.ClientID = 0, ""
 			a.restoreReplayLocked(rec, replay)
 			delete(a.state.Grants, clientID)
+			for i, old := range replaced {
+				old.RevokedAt, old.RevokeReason, old.ReplacedBy, old.RefreshHash = 0, "", "", prevRefresh[i]
+			}
 		} else {
 			// The code stays consumed; the unreturned grant is revoked so no
 			// copy of it can ever authorize anything.
@@ -532,7 +567,20 @@ func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, e
 		}
 		return TokenResponse{}, err
 	}
-	return a.issueLocked(g, access, refresh, now), nil
+	var replacedLeases []*Lease
+	for _, old := range replaced {
+		// Durable now: drop the old grants' access tokens and end their work.
+		replacedLeases = append(replacedLeases, a.markRevokedLocked(old, old.RevokeReason, now)...)
+		_ = a.audit.append(AuditRecord{At: a.now().UnixMilli(), ClientID: old.ClientID, Label: old.Label,
+			Route: AuditRouteGrant, Verb: "replace", Target: old.ClientID, Outcome: "ok", Note: "revoked: replaced by " + clientID})
+	}
+	resp := a.issueLocked(g, access, refresh, now)
+	// The superseded grants' streams end like any revocation; the new
+	// client's token response never waits for them.
+	for _, l := range replacedLeases {
+		l.cancel(errAuthRevoked)
+	}
+	return resp, nil
 }
 
 func (a *Authority) issueLocked(g *grantRecord, access, refresh string, now int64) TokenResponse {
@@ -801,6 +849,18 @@ type ClientInfo struct {
 	// Harness user that initiated it. Set by the server, not the client label.
 	Origin         string `json:"origin,omitempty"`
 	CloudRequester string `json:"cloud_requester,omitempty"`
+	// EnrollLabel is the host's --label on the enrollment code (Label is the
+	// client's own name for itself). Absent on grants from before it existed.
+	EnrollLabel string `json:"enroll_label,omitempty"`
+	// UpdatedAt and Changes report in-place grant updates (newest last; the
+	// audit log keeps every one). ReplacedBy names the grant that superseded
+	// this one (enroll --replace).
+	UpdatedAt  int64         `json:"updated_at,omitempty"`
+	Changes    []GrantChange `json:"changes,omitempty"`
+	ReplacedBy string        `json:"replaced_by,omitempty"`
+	// Stale is set only by a stale listing (Authority.Stale): why this grant
+	// looks unused ("superseded by <id>" or "not seen for N days").
+	Stale string `json:"stale,omitempty"`
 }
 
 // List returns every grant, newest first.
@@ -814,6 +874,7 @@ func (a *Authority) List() []ClientInfo {
 			ResourceScope: g.Resource, CreatedAt: g.CreatedAt, LastRefreshAt: g.LastRefreshAt,
 			GrantExpiresAt: g.AbsoluteExpiry, RevokedAt: g.RevokedAt, RevokeReason: g.RevokeReason,
 			ActiveLeases: len(a.leases[g.ClientID]), Origin: g.Origin, CloudRequester: g.CloudRequester,
+			EnrollLabel: g.EnrollLabel, UpdatedAt: g.UpdatedAt, Changes: publicChanges(g.Changes), ReplacedBy: g.ReplacedBy,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
@@ -867,7 +928,8 @@ func (g Grant) Can(perm string) bool { return slices.Contains(g.Perms, perm) }
 // abandoned because the token expired or the client disconnected mid-call.
 type Lease struct {
 	Grant
-	ExpiresAt int64 // access token expiry (unix seconds)
+	ExpiresAt int64  // access token expiry (unix seconds)
+	perm      string // the permission it was admitted under (grant_update.go)
 	ctx       context.Context
 	rctx      context.Context // revocation / release only
 	rcancel   context.CancelCauseFunc
@@ -897,11 +959,19 @@ func (l *Lease) Expired() bool {
 	return !l.Revoked() && errors.Is(context.Cause(l.ctx), errAuthExpired)
 }
 
+// GrantChanged reports whether the lease was cut because the host narrowed
+// its grant (grant_update.go).
+func (l *Lease) GrantChanged() bool {
+	return errors.Is(context.Cause(l.rctx), errGrantChanged)
+}
+
 // AuthEnded returns the wire code when the lease ended for an auth reason.
 func (l *Lease) AuthEnded() string {
 	switch {
 	case l.Revoked():
 		return CodeAuthRevoked
+	case l.GrantChanged():
+		return CodeGrantChanged
 	case l.Expired():
 		return CodeAuthExpired
 	}
@@ -963,7 +1033,7 @@ func (a *Authority) Admit(parent context.Context, token, perm string) (*Lease, e
 	stop := context.AfterFunc(rctx, func() { ccancel(context.Cause(rctx)) })
 	l := &Lease{
 		Grant:     Grant{ClientID: g.ClientID, Perms: slices.Clone(g.Perms), Resource: g.Resource},
-		ExpiresAt: rec.exp, ctx: ctx, rctx: rctx, rcancel: rcancel, done: make(chan struct{}), a: a,
+		ExpiresAt: rec.exp, perm: perm, ctx: ctx, rctx: rctx, rcancel: rcancel, done: make(chan struct{}), a: a,
 		release: func() { stop(); ccancel(context.Canceled); dcancel() },
 	}
 	if a.leases[g.ClientID] == nil {

@@ -14,7 +14,10 @@ enroll disable for those.
 
 commands:
   connect [flags]       connect a phone or browser: a one-time code to paste, or a QR code to scan
-  ls [--json]           list connected devices (enrolled clients)
+  ls [--stale [--idle-days N]] [--json]
+                        list connected devices (enrolled clients), with any in-place grant changes
+  update <client-id> [--permissions <list>] [--all-sessions | --workgroup <id>...]
+                        change a device's permissions or scope in place (no reconnect needed)
   revoke <client-id>    disconnect a device now (closes its streams first)
   status [--json]       setting, managed listener, server and provider offer
   enable [flags]        save the listener settings and turn it on (the daemon runs it from now on)

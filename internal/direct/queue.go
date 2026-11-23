@@ -929,6 +929,10 @@ func (s *Server) serveWatch(w http.ResponseWriter, r *http.Request, frame func(c
 				closeWith(CloseAuthRevoked, CodeAuthRevoked)
 			case CodeAuthExpired:
 				closeWith(CloseAuthExpired, CodeAuthExpired)
+			case CodeGrantChanged:
+				// 4002: every client renews and reconnects on it, which
+				// re-admits the watch under the narrowed grant.
+				closeWith(CloseAuthExpired, CodeGrantChanged)
 			}
 			return
 		case <-poll.C:

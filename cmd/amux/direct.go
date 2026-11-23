@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -15,8 +16,8 @@ import (
 	"time"
 
 	"amux/internal/access"
-	"amux/internal/daemon"
 	"amux/internal/direct"
+	"amux/internal/directadmin"
 	"amux/internal/directsvc"
 	"amux/internal/hostbackend"
 	"amux/internal/provider"
@@ -28,23 +29,10 @@ func directRoot() (string, error) { return direct.DefaultRoot() }
 
 // hostCredential loads the host credential from the protected directory, which
 // HOME and XDG cannot redirect.
-func hostCredential() (access.Credential, error) {
-	dir, err := access.ProtectedHostCredentialDir()
-	if err != nil {
-		return access.Credential{}, err
-	}
-	cred, err := access.LoadCredential(dir)
-	if err != nil {
-		return access.Credential{}, fmt.Errorf("load the host credential (start the daemon with `amux daemon start`): %w", err)
-	}
-	if cred.Kind != access.SubjectHost || cred.SubjectID != access.LocalHostSubject {
-		return access.Credential{}, access.ErrInvalidCredential
-	}
-	return cred, nil
-}
+func hostCredential() (access.Credential, error) { return directadmin.HostCredential() }
 
 func relayHostProof(ctx context.Context, prove direct.ProveFunc) error {
-	return daemon.RelayHostProof(ctx, prove)
+	return directadmin.RelayHostProof(ctx, prove)
 }
 
 func cmdDirectServe(args []string) error {
@@ -178,72 +166,53 @@ func cmdDirectServe(args []string) error {
 // adminRun sends req to the running server, or, when none owns the store,
 // runs it offline under the store's exclusive lock. Both require host proof.
 func adminRun(req direct.AdminRequest) (direct.AdminResponse, error) {
-	cred, err := hostCredential()
-	if err != nil {
-		return direct.AdminResponse{}, err
-	}
-	root, err := directRoot()
-	if err != nil {
-		return direct.AdminResponse{}, err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := direct.AdminCall(ctx, root, cred, req)
-	if err == nil {
-		return resp, nil
-	}
-	var nerr *net.OpError
-	if !errors.As(err, &nerr) && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ECONNREFUSED) {
-		return resp, err
-	}
-	// No server is listening: administer the store directly. If a server owns
-	// the lock after all, this refuses rather than writing beside it.
-	resp, err = direct.OfflineAdminister(ctx, root, cred, relayHostProof, req)
-	if errors.Is(err, direct.ErrStoreBusy) {
-		return resp, errors.New("the direct store is owned by a running server whose admin socket is unreachable")
-	}
-	return resp, err
+	return directadmin.Run(ctx, req)
 }
 
 func cmdDirectClients(args []string) error {
+	return runDirectClients(args, os.Stdout, adminRun)
+}
+
+func runDirectClients(args []string, out io.Writer, admin func(direct.AdminRequest) (direct.AdminResponse, error)) error {
 	if len(args) == 0 {
-		return errors.New("usage: amux device ls | revoke <client-id>")
+		return errors.New("usage: amux device ls [--stale [--idle-days N]] [--json] | update <client-id> ... | revoke <client-id>")
 	}
 	switch args[0] {
 	case "list", "ls":
-		asJSON := len(args) > 1 && args[1] == "--json"
-		resp, err := adminRun(direct.AdminRequest{Op: direct.OpList})
+		fs := newCmdFlagSet("device ls")
+		asJSON := fs.Bool("json", false, "")
+		stale := fs.Bool("stale", false, "")
+		idle := fs.Int("idle-days", 0, "")
+		if err := parseCmdFlags(fs, "device ls", args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		}
+		if *idle < 0 || (*idle != 0 && !*stale) {
+			return errors.New("--idle-days N (positive) applies to --stale")
+		}
+		resp, err := admin(direct.AdminRequest{Op: direct.OpList, Stale: *stale, StaleDays: *idle})
 		if err != nil {
 			return err
 		}
-		if asJSON {
-			return json.NewEncoder(os.Stdout).Encode(resp.Clients)
+		if *asJSON {
+			return json.NewEncoder(out).Encode(resp.Clients)
 		}
-		fmt.Printf("server_id %s\n", resp.ServerID)
-		for _, c := range resp.Clients {
-			state := "active"
-			if c.RevokedAt != 0 {
-				state = "revoked (" + c.RevokeReason + ")"
-			}
-			if c.Origin == direct.OriginCloud {
-				state += "  cloud:" + c.CloudRequester
-			}
-			scope := c.ResourceScope.Kind
-			if len(c.ResourceScope.Workgroups) > 0 {
-				scope += ":" + strings.Join(c.ResourceScope.Workgroups, ",")
-			}
-			fmt.Printf("%s  %-20s %-8s %-10s %-24s %s\n", c.ClientID, c.Label, c.ClientKind,
-				strings.Join(c.Permissions, ","), scope, state)
-		}
+		printDirectClients(out, resp.ServerID, resp.Clients, *stale)
 		return nil
+	case "update":
+		return runDirectClientsUpdate(args[1:], out, admin)
 	case "revoke":
 		if len(args) != 2 {
 			return errors.New("usage: amux device revoke <client-id>")
 		}
-		if _, err := adminRun(direct.AdminRequest{Op: direct.OpRevoke, ClientID: args[1]}); err != nil {
+		if _, err := admin(direct.AdminRequest{Op: direct.OpRevoke, ClientID: args[1]}); err != nil {
 			return err
 		}
-		fmt.Printf("revoked %s\n", args[1])
+		fmt.Fprintf(out, "revoked %s\n", args[1])
 		return nil
 	}
 	return fmt.Errorf("unknown clients command %q", args[0])
@@ -368,10 +337,14 @@ func cmdDirectCloudEnable(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if *perms == "" {
-		return errors.New("--permissions is required (read plus any of steer, respond, approve, manage, create, accounts)")
+	// The default ceiling is read, steer and the execute set over every
+	// ordinary session (never the console); manage, create and accounts are
+	// opt-in.
+	permList := append([]string(nil), direct.DefaultPermissions...)
+	if *perms != "" {
+		permList = direct.ExpandPermAliases(strings.Split(*perms, ","))
 	}
-	resource, err := directResourceFlags(*all, groups)
+	resource, err := directResourceFlags(*all, groups) // defaults to all ordinary sessions
 	if err != nil {
 		return err
 	}
@@ -385,7 +358,7 @@ func cmdDirectCloudEnable(args []string) error {
 		fmt.Println(pins.Note)
 	}
 	resp, err := adminRun(direct.AdminRequest{Op: direct.OpCloudEnable, Cloud: &direct.CloudPolicyRequest{
-		Permissions: strings.Split(*perms, ","), Resource: resource, OwnerPin: pins.Owner, ProviderPin: pins.Provider,
+		Permissions: permList, Resource: resource, OwnerPin: pins.Owner, ProviderPin: pins.Provider,
 		MaxOutstanding: *maxOut, MaxPerHour: *perHour,
 	}})
 	if err != nil {

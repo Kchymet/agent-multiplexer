@@ -466,6 +466,7 @@ var deviceSubcommands = map[string]func([]string) error{
 	"connect":        cmdDirectEnroll,
 	"ls":             func(a []string) error { return cmdDirectClients(append([]string{"list"}, a...)) },
 	"list":           func(a []string) error { return cmdDirectClients(append([]string{"list"}, a...)) },
+	"update":         func(a []string) error { return cmdDirectClients(append([]string{"update"}, a...)) },
 	"revoke":         func(a []string) error { return cmdDirectClients(append([]string{"revoke"}, a...)) },
 	"status":         cmdDirectStatus,
 	"enable":         cmdDirectEnable,

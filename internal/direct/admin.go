@@ -40,9 +40,15 @@ const (
 	// OpEnrollTicket mints a local device ticket (Authority.NewLocalTicket)
 	// and returns it as a v2 bundle: the QR form of enroll. A separate
 	// operation, so an older server refuses it instead of minting a v1 code.
-	OpEnrollTicket  = "enroll_ticket"
-	OpList          = "list"
-	OpRevoke        = "revoke"
+	OpEnrollTicket = "enroll_ticket"
+	// OpList lists grants; with Stale set, only the stale ones (Authority.Stale,
+	// StaleDays idle threshold).
+	OpList   = "list"
+	OpRevoke = "revoke"
+	// OpUpdate changes a grant in place (Authority.UpdateGrant): Update names
+	// the client and the change, Actor (optional) who asked, for the record.
+	// A separate operation, so an older server refuses it.
+	OpUpdate        = "update"
 	OpResetIdentity = "reset_identity"
 	// OpAudit reads the direct audit log (audit.go), newest last; ClientID
 	// filters to one client and Limit bounds the count.
@@ -113,6 +119,17 @@ type AdminRequest struct {
 	Wake        *WakeAdminRequest     `json:"wake,omitempty"`
 	Limit       int                   `json:"limit,omitempty"`
 	Approval    *ApprovalAdminRequest `json:"approval,omitempty"`
+	// Update is OpUpdate's change; Actor names the host-side caller ("cli",
+	// "tui", "console", optionally with the OS user) in the grant's record.
+	Update *GrantUpdate `json:"update,omitempty"`
+	Actor  string       `json:"actor,omitempty"`
+	// Stale and StaleDays filter OpList (clients list --stale).
+	Stale     bool `json:"stale,omitempty"`
+	StaleDays int  `json:"stale_days,omitempty"`
+	// Replace marks an enrollment code (OpEnroll, OpEnrollTicket): once
+	// redeemed, the prior active grants with the same label from the same
+	// device are revoked. An older server ignores it (and mints a plain code).
+	Replace bool `json:"replace,omitempty"`
 }
 
 // AdminResponse answers it.
@@ -136,6 +153,8 @@ type AdminResponse struct {
 	// verifies (OpApprovalLease).
 	ApprovalServed bool                   `json:"approval_served,omitempty"`
 	Approval       *ApprovalAdminResponse `json:"approval,omitempty"`
+	// Update is OpUpdate's result.
+	Update *GrantUpdateResult `json:"update,omitempty"`
 }
 
 // EncodeBundle renders a paste bundle.
@@ -310,11 +329,11 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 		if len(endpoints) == 0 {
 			return fail(errors.New("enrollment needs a running `amux device serve` with configured endpoints"))
 		}
-		mint, b := a.NewCode, Bundle{V: 1}
+		ticket, b := false, Bundle{V: 1}
 		if req.Op == OpEnrollTicket {
-			mint, b = a.NewLocalTicket, Bundle{V: 2, Claim: BundleClaimPKCE}
+			ticket, b = true, Bundle{V: 2, Claim: BundleClaimPKCE}
 		}
-		code, exp, err := mint(req.Label, req.Permissions, req.Resource, time.Duration(req.TTLSeconds)*time.Second)
+		code, exp, err := a.newCode(req.Label, req.Permissions, req.Resource, time.Duration(req.TTLSeconds)*time.Second, ticket, req.Replace)
 		if err != nil {
 			return fail(err)
 		}
@@ -325,7 +344,24 @@ func Administer(a *Authority, endpoints []string, req AdminRequest) AdminRespons
 		}
 		return AdminResponse{OK: true, Bundle: bundle, ExpiresAt: exp, ServerID: a.ServerID(), Endpoints: endpoints}
 	case OpList:
+		if req.Stale {
+			return AdminResponse{OK: true, ServerID: a.ServerID(), Clients: a.Stale(req.StaleDays)}
+		}
 		return AdminResponse{OK: true, ServerID: a.ServerID(), Clients: a.List()}
+	case OpUpdate:
+		if req.Update == nil || req.Update.ClientID == "" {
+			return fail(errors.New("update needs a client id and a change"))
+		}
+		res, err := a.UpdateGrant(*req.Update, req.Actor)
+		if err != nil {
+			// A narrowing can be in effect with a persistence or drain
+			// failure: report both the result and the error.
+			if res.Changed {
+				return AdminResponse{Error: err.Error(), Update: &res}
+			}
+			return fail(err)
+		}
+		return AdminResponse{OK: true, ServerID: a.ServerID(), Update: &res}
 	case OpAudit:
 		recs, err := a.AuditRecords(req.ClientID, req.Limit)
 		if err != nil {
