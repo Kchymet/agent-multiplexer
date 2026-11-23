@@ -20,7 +20,7 @@ import (
 func TestPRWakeContinuesClaudeGoal(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	goal := claudegoal.State{Objective: "ship PR B", Status: claudegoal.StatusActive, Note: "waiting on CI", Created: 1}
-	text := prWakeText(true, []string{"member m1 PR o/r#7: CI failed (check build) — https://github.com/o/r/pull/7"}, false)
+	text := prWakeText(true, []string{"member m1 PR o/r#7: CI failed (check build) — https://github.com/o/r/pull/7"}, wakeKinds{})
 	if !strings.HasPrefix(text, prWakeMarker) {
 		t.Fatalf("wake %q lacks the goal marker", text)
 	}
@@ -41,7 +41,7 @@ func TestPRWakeContinuesClaudeGoal(t *testing.T) {
 	if got := claudegoal.OnPrompt(claudegoal.State{}, text, now); !got.None() {
 		t.Fatalf("wake established a goal: %+v", got)
 	}
-	if plain := prWakeText(false, []string{"x"}, false); strings.HasPrefix(plain, prWakeMarker) {
+	if plain := prWakeText(false, []string{"x"}, wakeKinds{}); strings.HasPrefix(plain, prWakeMarker) {
 		t.Fatalf("non-goal wake %q carries the goal marker", plain)
 	}
 }

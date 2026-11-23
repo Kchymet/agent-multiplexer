@@ -35,6 +35,7 @@ import (
 	"amux/internal/engine"
 	"amux/internal/engine/local"
 	"amux/internal/enrich"
+	"amux/internal/itemsvc"
 	"amux/internal/launchenv"
 	"amux/internal/panespec"
 	"amux/internal/procstat"
@@ -250,6 +251,8 @@ type Daemon struct {
 	// memberWatch remembers workgroup member states between rail polls so a
 	// member's transition wakes its coordinator (memberwake.go).
 	memberWatch memberWatch
+	// items is the upward-signal API (internal/itemsvc, items.go). Built in New.
+	items *itemsvc.Service
 	// prWakeAdmission runs after a watcher delivery holds its final membership,
 	// repo, and coordinator admission. Production leaves it nil; tests use it to
 	// prove mutations cannot cross the authority recheck and prompt boundary.
@@ -299,6 +302,7 @@ func New(self string, sources []source.Source, interval time.Duration) *Daemon {
 	d.listen = listenOwnedUnix
 	d.prs = d.newPRWatcher()
 	d.enrich = d.newEnrichments()
+	d.items = newItemService()
 	d.permissionBaseline = d.loadPermissionBaseline
 	d.harnessRestart.kick = make(chan struct{}, 1)
 	return d

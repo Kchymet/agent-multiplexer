@@ -166,6 +166,9 @@ var controlActions = []string{
 	ActionAddAgent,
 	ActionNewWorkgroup,
 	ActionCreateWorkspace,
+	ActionRaiseItem,
+	ActionItemState,
+	ActionEscalateItem,
 }
 
 // ControlActions returns the action verbs a caller may drive over the socket
@@ -384,6 +387,9 @@ type Result struct {
 	// Code is a stable machine-readable failure class, set only where a caller
 	// must tell a failure apart (e.g. "open_pull_requests" from the archive guard).
 	Code string `json:"code,omitempty"`
+	// Item is the item an item verb (ActionRaiseItem, ActionItemState,
+	// ActionEscalateItem) produced, as JSON (items.Item).
+	Item json.RawMessage `json:"item,omitempty"`
 }
 
 // Pane frame types (PaneFrame.Type), streamed daemon -> client for an attached
