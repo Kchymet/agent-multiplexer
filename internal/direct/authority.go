@@ -335,6 +335,22 @@ func ValidateResource(r ResourceScope) (ResourceScope, error) {
 
 // NewCode mints a single-use enrollment code for an explicit scope.
 func (a *Authority) NewCode(label string, perms []string, resource ResourceScope, ttl time.Duration) (string, int64, error) {
+	return a.newCode(label, perms, resource, ttl, false)
+}
+
+// NewLocalTicket mints a single-use device ticket on the host operator's own
+// authority (amux direct enroll --qr), with no cloud policy involved. It has
+// the scope, lifetime and single use of a NewCode code, and is redeemed like a
+// cloud device ticket: the redeeming device first binds its own S256 challenge
+// through ClaimTicket, then redeems with the matching verifier. Before the
+// claim it carries exactly a manual code's authority (one grant at its scope
+// for whoever claims it first); after the claim, only the claiming device can
+// redeem it. It is never redeemable without a claim and a verifier.
+func (a *Authority) NewLocalTicket(label string, perms []string, resource ResourceScope, ttl time.Duration) (string, int64, error) {
+	return a.newCode(label, perms, resource, ttl, true)
+}
+
+func (a *Authority) newCode(label string, perms []string, resource ResourceScope, ttl time.Duration, ticket bool) (string, int64, error) {
 	if ttl == 0 {
 		ttl = DefaultCodeTTL
 	}
@@ -365,7 +381,7 @@ func (a *Authority) NewCode(label string, perms []string, resource ResourceScope
 	now := a.now().Unix()
 	exp := now + int64(ttl/time.Second)
 	a.pruneLocked(now)
-	a.state.Codes[hashToken(code)] = &codeRecord{Label: label, Perms: perms, Resource: resource, CreatedAt: now, ExpiresAt: exp}
+	a.state.Codes[hashToken(code)] = &codeRecord{Label: label, Perms: perms, Resource: resource, CreatedAt: now, ExpiresAt: exp, Ticket: ticket}
 	if err := a.commitLocked(); err != nil {
 		if rolledBack(err) {
 			delete(a.state.Codes, hashToken(code))
@@ -403,8 +419,10 @@ func (a *Authority) RedeemCode(code, label, kind string) (TokenResponse, error) 
 // A cloud-issued code also needs its RFC 7636 code_verifier. A missing or
 // malformed verifier is a request error that leaves the code usable; a wrong
 // verifier consumes it. A cloud code is redeemable only while the cloud policy
-// is enabled at the generation it was issued under. A manual code takes no
-// verifier: sending one is a request error, and the code stays usable.
+// is enabled at the generation it was issued under. A device ticket, cloud or
+// local, must first be claimed (ClaimTicket) and then needs the claiming
+// device's verifier. A manual code takes no verifier: sending one is a request
+// error, and the code stays usable.
 func (a *Authority) Redeem(code, label, kind, verifier string) (TokenResponse, error) {
 	if label == "" {
 		label = "direct client"

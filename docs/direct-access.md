@@ -78,12 +78,49 @@ refused. An explicit console grant would be a separately reviewed feature.
    amux direct enroll --label "Pixel" --permissions read,steer --workgroup 771951
    ```
 
-   Choose the scope explicitly: `--all-sessions`, or one or more
-   `--workgroup <root-id>`. Permissions are `read` plus any of `steer`,
-   `respond`, `approve`, `manage` and `create` (see
-   [Permissions](#permissions)); each is explicit and none implies another. The command
-   prints one line, `amux-direct:1:<base64url JSON>`. Paste it into the client
-   within its lifetime (default 10 minutes, at most 1 hour). It works once.
+   The scope never defaults: give `--all-sessions` or one or more
+   `--workgroup <root-id>`. Without either, `enroll` asks on a terminal (all
+   sessions, a workgroup, or cancel; nothing is preselected) and otherwise
+   fails with a working example. Permissions default to `read`; add any of
+   `steer`, `respond`, `approve`, `manage` and `create` (see
+   [Permissions](#permissions)) with `--permissions`; each is explicit and none
+   implies another. The label defaults to `<hostname>-<YYYYMMDD-HHMM>`. Before
+   minting, the command prints the effective label, permissions and scope on
+   stderr. It then prints one line on stdout, `amux-direct:1:<base64url
+   JSON>`. Paste it into the client within its lifetime (default 10 minutes,
+   at most 1 hour). It works once. `amux direct enroll --help` lists every flag.
+
+   **Scan instead of paste.** `amux direct enroll --qr` draws the enrollment as
+   a QR code for the Harness Android app (Backends → Connect a machine from a
+   QR code):
+
+   ```sh
+   amux direct enroll --qr                      # asks for the scope; read-only
+   amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr
+   ```
+
+   - The code is a **local device ticket** (`amux-direct:2:`, see
+     [Device tickets](direct-cloud-enrollment.md#device-tickets-connect-another-device-by-qr)),
+     minted by this host with no cloud involved. The phone verifies the
+     server's signed hello, claims the ticket with its own PKCE challenge, then
+     redeems it with its verifier, so a photo of the code is useless once the
+     phone has claimed it. It keeps the scope, lifetime and single use of a
+     bundle.
+   - The same ticket (one credential) is printed alone on stdout, so it can be
+     piped or pasted into the app's ticket box. There is no v1 bundle in this
+     mode: a ticket cannot be redeemed as one.
+   - The QR code and its instructions go to stderr when stderr is a terminal,
+     else to `/dev/tty`, so `amux direct enroll --qr | …` still shows it; with
+     no terminal at all `--qr` fails before minting.
+   - The QR pins black-on-white colors (fixed xterm-256 entries), so it scans
+     on dark and light themes. With `NO_COLOR` or `TERM=dumb` it uses the
+     terminal's colors, drawn for a light background; add `--invert` on a dark
+     one. It is error-correction level M with a 4-module quiet zone: a ticket
+     with one endpoint is about 300 bytes, QR version 13 (69 modules).
+   - `--qr-png <path>` also writes a PNG. The file is created new with mode
+     0600 (an existing path, including a symlink, is refused and left
+     untouched). It is a live credential until used or expired: delete it
+     after enrolling.
 4. **Manage clients.**
    - `amux direct clients list` shows the enrolled clients.
    - `amux direct clients revoke <client-id>` revokes one. It returns only
@@ -430,8 +467,8 @@ direct-client credentials are refused, and a refused caller writes nothing.
 
 **When no server is running,** `list`, `revoke` and `reset-identity` take the
 store's exclusive lock and require the same host proof. They never create a
-store. `enroll` needs a running server, because it publishes the server's
-endpoints into the bundle. All of `amux direct` refuses to run inside an agent
+store. `enroll` (with or without `--qr`) needs a running server, because it
+publishes the server's endpoints into the bundle. All of `amux direct` refuses to run inside an agent
 session.
 
 ## Wire contract

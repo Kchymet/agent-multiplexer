@@ -103,12 +103,15 @@ func TestReconcileGenuineOrphans(t *testing.T) {
 		},
 	}}
 	disk := []branchRef{
-		{Repo: "acme/api", Branch: "amux/r1-a1"},          // stored branch
-		{Repo: "acme/api", Branch: "amux/r1-a4-describe"}, // blank stored branch, id matches
-		{Repo: "acme/api", Branch: "amux/gone-a9"},        // deleted agent
+		{Repo: "acme/api", Branch: "amux/r1-a1"},             // stored branch
+		{Repo: "acme/api", Branch: "amux/r1-a4-describe"},    // blank stored branch, id matches
+		{Repo: "acme/api", Branch: "amux/gone-a9"},           // deleted agent
+		{Repo: "acme/api", Branch: "amux/testbroker/r1-a4"},  // broker scheme, id matches
+		{Repo: "acme/api", Branch: "amux/testbroker/gone-y"}, // broker scheme, deleted agent
 	}
 	assertDrift(t, reconcile(s, roots, disk),
-		[]string{"gone/a9", "r1/aX"}, nil, []string{"acme/api · amux/gone-a9"})
+		[]string{"gone/a9", "r1/aX"}, nil,
+		[]string{"acme/api · amux/gone-a9", "acme/api · amux/testbroker/gone-y"})
 }
 
 // Missing dirs are judged by the exact stored path. A directory with the

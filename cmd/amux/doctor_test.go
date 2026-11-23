@@ -36,6 +36,9 @@ func TestAgentIDFromBranchRoundTrips(t *testing.T) {
 		"amux/418eea-e5d6da-cold-attach":      "e5d6da",
 		"feature/418eea-e5d6da":               "",
 		"amux/root-":                          "",
+		"amux/host-1/418eea-e5d6da":           "e5d6da",
+		"amux/host-1/418eea-e5d6da-b":         "e5d6da",
+		"amux/418eea-e5d6da/wip":              "e5d6da",
 	} {
 		if got := agentIDFromBranch(branch); got != want {
 			t.Errorf("agentIDFromBranch(%q) = %q, want %q", branch, got, want)

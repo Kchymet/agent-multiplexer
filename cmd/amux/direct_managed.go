@@ -295,6 +295,7 @@ func waitManaged(fp string, running bool, since time.Time) error {
 				// while the new child is still about to fail on the store lock.
 				if r := readManagedReady(); st.Serving(r) {
 					fmt.Printf("listener running (pid %d, server_id %s on %s) — amux direct status for details\n", st.PID, r.ServerID, r.Addr)
+					fmt.Println("enroll a phone by scanning a QR code: amux direct enroll --qr")
 					return nil
 				}
 			case running && st.Fingerprint == fp && st.State == directsvc.StateBackoff && st.LastError != "":
