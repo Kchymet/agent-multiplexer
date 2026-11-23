@@ -118,7 +118,7 @@ func TestEnrollHelpDocumentsEveryFlag(t *testing.T) {
 	if len(h.requests) != 0 {
 		t.Fatal("help minted a code")
 	}
-	if !strings.Contains(h.stdout.String(), "(default: read)") || !strings.Contains(h.stdout.String(), "The scope never defaults") {
+	if !strings.Contains(h.stdout.String(), "(default: read,steer,approve)") || !strings.Contains(h.stdout.String(), "The scope never defaults") {
 		t.Fatal("help does not state the defaults")
 	}
 }
@@ -140,17 +140,17 @@ func TestEnrollWithoutScopeOffTerminalShowsWorkingExample(t *testing.T) {
 	}
 }
 
-func TestEnrollDefaultsAreLeastPrivilege(t *testing.T) {
+func TestEnrollDefaultsAreReadSteerAndExecute(t *testing.T) {
 	h := newEnrollHarness(t)
 	if err := runDirectEnroll([]string{"--workgroup", "wg1"}, h.env); err != nil {
 		t.Fatal(err)
 	}
 	req := h.requests[0]
-	if req.Op != direct.OpEnroll || req.Label != "studio-20261122-1530" || strings.Join(req.Permissions, ",") != "read" ||
+	if req.Op != direct.OpEnroll || req.Label != "studio-20261122-1530" || strings.Join(req.Permissions, ",") != "read,steer,approve" ||
 		req.Resource.Kind != direct.ResourceWorkgroups || req.Resource.Workgroups[0] != "wg1" {
 		t.Fatalf("request %+v", req)
 	}
-	if !strings.Contains(h.stderr.String(), `Granting: label "studio-20261122-1530" (default) · permissions read (default) · scope workgroup wg1`) {
+	if !strings.Contains(h.stderr.String(), `Granting: label "studio-20261122-1530" (default) · permissions read,steer,approve (default) · scope workgroup wg1`) {
 		t.Fatalf("effective grant not shown: %q", h.stderr.String())
 	}
 	if strings.TrimSpace(h.stdout.String()) != fakeBundle(t, 1) {
@@ -453,5 +453,19 @@ func TestEnrollQRRefusesAV1Answer(t *testing.T) {
 	}
 	if h.stdout.Len() != 0 || strings.Contains(h.stderr.String(), "█") {
 		t.Fatal("printed something for a refused answer")
+	}
+}
+
+func TestEnrollExpandsTheExecuteAlias(t *testing.T) {
+	h := newEnrollHarness(t)
+	if err := runDirectEnroll([]string{"--permissions", "read, execute", "--all-sessions"}, h.env); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(h.requests[0].Permissions, ","); got != "read,approve" {
+		t.Fatalf("permissions sent: %s", got)
+	}
+	// The effective grant printed before minting names concrete permissions.
+	if !strings.Contains(h.stderr.String(), "permissions read,approve ·") || strings.Contains(h.stderr.String(), "execute") {
+		t.Fatalf("effective grant: %q", h.stderr.String())
 	}
 }

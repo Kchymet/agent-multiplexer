@@ -736,7 +736,8 @@ const directPermissionsHelp = `comma list; read is always required:
   manage   start, rename, archive, unarchive
   create   add-agent; new workgroups (--all-sessions only)
   accounts read machine account status (--all-sessions only)
-e.g. read,steer or read,steer,respond,manage
+  execute  alias for approve (stored and shown as approve)
+e.g. read,steer or read,steer,execute,manage
 Nothing implies anything else; there is no "all".`
 
 func directSpec() *cmdSpec {
@@ -804,7 +805,7 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 (/dev/tty); with no terminal at all, --qr fails before minting (use --qr-png).`,
 				Flags: []flagSpec{
 					{Name: "label", Arg: "<text>", Default: "<hostname>-<YYYYMMDD-HHMM>", Usage: "name for the client, shown in clients list"},
-					{Name: "permissions", Arg: "<list>", Default: "read", Usage: directPermissionsHelp},
+					{Name: "permissions", Arg: "<list>", Default: "read,steer,approve", Usage: directPermissionsHelp},
 					{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "grant every session on this host"},
 					{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "grant one workgroup and its members"},
 					{Name: "ttl", Arg: "<dur>", Default: "10m", Usage: "code lifetime (maximum 1h)"},
@@ -812,15 +813,42 @@ to stderr when stderr is a terminal, otherwise to the controlling terminal
 					{Name: "qr", Usage: "also draw the enrollment as a QR code for the Harness Android app\n(Backends > Connect a machine from a QR code)"},
 					{Name: "invert", Usage: "swap the QR's filled and empty cells (terminals that ignore colors\nwith a dark background); applies to --qr"},
 					{Name: "qr-png", Arg: "<path>", Usage: "also write the QR code as a PNG to a NEW file (mode 0600; an existing\nfile is refused); delete it after enrolling"},
+					{Name: "replace", Usage: "once redeemed, revoke earlier clients with the same label from the same\ndevice (re-enrolling a phone without piling up duplicates)"},
 				},
 				Examples: []string{
 					directEnrollExample,
 					"amux direct enroll --qr --all-sessions",
 					"amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr",
 				}},
-			{Name: "clients", Args: "<command>", Summary: "list or revoke enrolled clients",
+			{Name: "clients", Args: "<command>", Summary: "list, update or revoke enrolled clients",
 				Sub: []*cmdSpec{
-					{Name: "list", Summary: "list enrolled clients"},
+					{Name: "list", Args: "[--stale [--idle-days N]] [--json]", FlagSet: true, Summary: "list enrolled clients, with any in-place grant changes",
+						Detail: `--stale lists only active clients that look unused: superseded by a newer
+enrollment from the same device (same client kind and name, or device id), or
+not seen (no token refresh) for --idle-days days (default 14).`,
+						Flags: []flagSpec{
+							{Name: "stale", Usage: "only clients that look superseded or unused"},
+							{Name: "idle-days", Arg: "<n>", Default: "14", Usage: "with --stale: days without a token refresh"},
+							{Name: "json", Usage: "print as JSON"},
+						}},
+					{Name: "update", Args: "<client-id> [--permissions <list>] [--all-sessions | --workgroup <id>...]", FlagSet: true,
+						Summary: "change a client's permissions or scope in place (no re-enrollment)",
+						Detail: `The client keeps its identity and credentials. Narrowing applies at once:
+open streams and calls that depended on a dropped right are ended (the client
+reconnects under the new grant). Widening applies to the client's next request.
+Omitted parts are kept. create and accounts need --all-sessions: narrowing to
+workgroups drops them when inherited and refuses them when listed. Every change
+is recorded on the client (clients list) and in amux direct audit.`,
+						Flags: []flagSpec{
+							{Name: "permissions", Arg: "<list>", Usage: "the complete new permission list (read is always required)"},
+							{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "widen the scope to every session on this host"},
+							{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "set the scope to these workgroups"},
+							{Name: "json", Usage: "print the result as JSON"},
+						},
+						Examples: []string{
+							"amux direct clients update c_AbC... --permissions read,steer,approve",
+							"amux direct clients update c_AbC... --workgroup 771951",
+						}},
 					{Name: "revoke", Args: "<client-id>", Summary: "revoke a client now (closes its streams first)"},
 				}},
 			{Name: "audit", Args: "[--client <id>] [--limit N] [--json]",
@@ -839,15 +867,16 @@ client's PKCE verifier and last 5 minutes. Every enable, disable or re-pin
 invalidates outstanding cloud codes; grants already redeemed stay until revoked
 (amux direct clients revoke).`,
 				Sub: []*cmdSpec{
-					{Name: "enable", Args: "--permissions <list> (--all-sessions | --workgroup <id>...) [flags]", FlagSet: true,
+					{Name: "enable", Args: "[--permissions <list>] [--all-sessions | --workgroup <id>...] [flags]", FlagSet: true,
 						Summary: "allow Harness to mint enrollment codes up to a ceiling",
-						Detail: `The ceiling is required; all-sessions covers ordinary sessions, never the amux
-console. --owner and --provider default to the owner and provider Harness
+						Detail: `The ceiling defaults to read,steer,approve (read, steer and the execute set)
+over all sessions; manage, create and accounts are opt-in. all-sessions covers
+ordinary sessions, never the amux console. --owner and --provider default to the owner and provider Harness
 reported at this host's latest amux provide registration (shown by amux
 doctor); a flag that disagrees with it is refused unless both are given.`,
 						Flags: []flagSpec{
-							{Name: "permissions", Arg: "<list>", Required: true, Usage: "ceiling (see amux direct enroll --help); codes never exceed it"},
-							{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "ceiling: any ordinary session"},
+							{Name: "permissions", Arg: "<list>", Default: "read,steer,approve", Usage: "ceiling (see amux direct enroll --help); codes never exceed it"},
+							{Name: "all-sessions", OneOf: []string{"workgroup"}, Usage: "ceiling: any ordinary session (the default)"},
 							{Name: "workgroup", Arg: "<root-id>", OneOf: []string{"all-sessions"}, Repeat: true, Usage: "ceiling: these workgroups"},
 							{Name: "owner", Arg: "<user-id>", Usage: "advanced: the Harness user id allowed to request codes"},
 							{Name: "provider", Arg: "<id>", Usage: "advanced: this host's Harness provider id"},

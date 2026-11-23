@@ -126,7 +126,7 @@ cloud enrollment: enabled (generation 3)
 **Full syntax:**
 
 ```
-amux direct cloud enable --permissions read[,steer] (--all-sessions | --workgroup <root-id>...) \
+amux direct cloud enable [--permissions read[,steer][,approve|execute]] [--all-sessions | --workgroup <root-id>...] \
     [--owner <harness-user-id>] [--provider <provider-id>] \
     [--max-outstanding 3] [--max-per-hour 10]
 amux direct cloud status [--json]

@@ -56,6 +56,7 @@ type enrollFlags struct {
 	asJSON       bool
 	qr, invert   bool
 	qrPNG        string
+	replace      bool
 }
 
 func parseEnrollFlags(args []string) (enrollFlags, error) {
@@ -69,6 +70,7 @@ func parseEnrollFlags(args []string) (enrollFlags, error) {
 	fs.BoolVar(&f.qr, "qr", false, "")
 	fs.BoolVar(&f.invert, "invert", false, "")
 	fs.StringVar(&f.qrPNG, "qr-png", "", "")
+	fs.BoolVar(&f.replace, "replace", false, "")
 	fs.Var(&f.groups, "workgroup", "")
 	if err := parseCmdFlags(fs, "direct enroll", args); err != nil {
 		return f, err
@@ -138,8 +140,11 @@ func defaultEnrollLabel(hostname func() (string, error), now time.Time) string {
 	return host + "-" + now.Format("20060102-1504")
 }
 
-// resolveEnrollGrant applies the least-privilege defaults: label from the
-// host and time, permissions read. The scope is never defaulted: without a
+// resolveEnrollGrant applies the defaults: label from the host and time,
+// permissions read, steer and the execute set (direct.DefaultPermissions;
+// manage, create and accounts stay opt-in). Aliases such as execute are
+// expanded here, so the grant printed before minting shows concrete names.
+// The scope is never defaulted: without a
 // flag it is asked for on a terminal, and refused otherwise.
 func resolveEnrollGrant(f enrollFlags, env enrollEnv) (enrollGrant, error) {
 	g := enrollGrant{label: f.label, perms: nil}
@@ -147,11 +152,12 @@ func resolveEnrollGrant(f enrollFlags, env enrollEnv) (enrollGrant, error) {
 		g.label, g.labelDefault = defaultEnrollLabel(env.hostname, env.now()), true
 	}
 	if f.perms == "" {
-		g.perms, g.permsDefault = []string{direct.PermRead}, true
+		g.perms, g.permsDefault = append([]string(nil), direct.DefaultPermissions...), true
 	} else {
 		for _, p := range strings.Split(f.perms, ",") {
 			g.perms = append(g.perms, strings.TrimSpace(p))
 		}
+		g.perms = direct.ExpandPermAliases(g.perms)
 	}
 	if f.all || len(f.groups) > 0 {
 		res, err := directResourceFlags(f.all, f.groups)
@@ -243,13 +249,16 @@ func runDirectEnroll(args []string, env enrollEnv) error {
 	}
 
 	fmt.Fprintln(env.stderr, g.describe())
+	if f.replace {
+		fmt.Fprintf(env.stderr, "Replacing: once redeemed, earlier clients labelled %q on the same device are revoked.\n", g.label)
+	}
 	op := direct.OpEnroll
 	if ticket {
 		op = direct.OpEnrollTicket
 	}
 	resp, err := env.admin(direct.AdminRequest{
 		Op: op, Label: g.label, Permissions: g.perms, Resource: g.resource,
-		TTLSeconds: int64(f.ttl / time.Second),
+		TTLSeconds: int64(f.ttl / time.Second), Replace: f.replace,
 	})
 	if err != nil {
 		discardPNG()

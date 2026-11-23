@@ -89,10 +89,12 @@ the **overseer**, which has no admin power and is reachable as described in
    The scope never defaults: give `--all-sessions` or one or more
    `--workgroup <root-id>`. Without either, `enroll` asks on a terminal (all
    sessions, a workgroup, or cancel; nothing is preselected) and otherwise
-   fails with a working example. Permissions default to `read`; add any of
-   `steer`, `respond`, `approve`, `manage` and `create` (see
-   [Permissions](#permissions)) with `--permissions`; each is explicit and none
-   implies another. The label defaults to `<hostname>-<YYYYMMDD-HHMM>`. Before
+   fails with a working example. Permissions default to `read,steer,approve`
+   (read, steer and the execute set); `--permissions` replaces the default
+   with an explicit list of `read` plus any of `steer`, `respond`, `approve`,
+   `manage`, `create` and `accounts` (see [Permissions](#permissions)).
+   `manage`, `create` and `accounts` are always opt-in. Each is explicit and
+   none implies another; `execute` is an alias for `approve`. The label defaults to `<hostname>-<YYYYMMDD-HHMM>`. Before
    minting, the command prints the effective label, permissions and scope on
    stderr. It then prints one line on stdout, `amux-direct:1:<base64url
    JSON>`. Paste it into the client within its lifetime (default 10 minutes,
@@ -473,7 +475,7 @@ caller must prove the current host credential:
 The daemon admits only `SubjectHost` keys there. Session, provider and
 direct-client credentials are refused, and a refused caller writes nothing.
 
-**When no server is running,** `list`, `revoke` and `reset-identity` take the
+**When no server is running,** `list`, `update`, `revoke` and `reset-identity` take the
 store's exclusive lock and require the same host proof. They never create a
 store. `enroll` (with or without `--qr`) needs a running server, because it
 publishes the server's endpoints into the bundle. All of `amux direct` refuses to run inside an agent
@@ -797,6 +799,89 @@ running process, but the command reports failure, not success. Repair the
 storage and run the revoke again **before restarting**: a restart re-reads
 disk and would revive the unpersisted grant.
 
+### Changing a grant
+
+`amux direct clients update <client-id> [--permissions <list>] [--all-sessions
+| --workgroup <id>...]` changes a live grant in place. The client keeps its
+client id, refresh token and access tokens, so there is no re-enrollment and no
+duplicate client. Omitted parts are kept. It is host-only like every admin
+operation (`OpUpdate` on the admin socket; host tools call it through
+`internal/directadmin.UpdateClient`).
+
+- **Widening** applies to the client's next request: admission always reads the
+  grant's current permissions and scope. Nothing open is interrupted. The next
+  token refresh reports the new `scope`.
+- **Narrowing** applies to every new request at once (a dropped right answers
+  403 `denied`, a dropped session 404 `not_found`). Before the command returns,
+  open work that depended on what was dropped is ended with
+  `auth.grant_changed`:
+  - every stream or call admitted under a dropped permission;
+  - every read lease (SSE streams, the inventory watch, reads), because their
+    filters were computed from the old grant;
+  - when the scope shrank, every lease of the client.
+
+  SSE streams end with `event: auth` `{"code":"auth.grant_changed"}`, the
+  watch WebSocket closes 4002 with reason `auth.grant_changed`, and an
+  interrupted call answers 401 `auth.grant_changed` (a creation cut after
+  dispatch reports an unknown outcome, as under revocation). The credential is
+  still good: the client renews if it must, re-reads capabilities and
+  reconnects under the new grant. Clients that predate the code treat it as
+  `auth.expired` (renew and reattach), which is the same recovery.
+- **Scope and all-sessions rights.** `create` and `accounts` need
+  `all_sessions`. Narrowing to workgroups drops them when they were inherited,
+  and refuses them when they are listed in `--permissions`.
+- **Record.** Every change is kept on the grant (the newest 20, shown by
+  `clients list`: when, who, old and new) and appended to the audit log (`amux
+  direct audit`, route `grant`, verb `update`, text `old -> new`).
+- **Durability.** An update that cannot be written leaves the old grant in
+  place. A narrowing whose write is uncertain stays in effect in the running
+  process (like a revocation) and the command reports failure.
+
+**A client's own grant.** `GET /direct/v1/capabilities` already returns
+`permissions` and `resource_scope`; it now also carries an optional `grant`
+object `{client_id, label, permissions, resource_scope, created_at,
+updated_at?, expires_at, origin?}` read from the live grant. Clients show it as
+"this device can: …" and re-read it after `auth.grant_changed` or a token
+refresh. A server without it omits the field; clients fall back to
+`permissions`/`resource_scope`.
+
+**Duplicates.** `amux direct clients list --stale [--idle-days N]` lists active
+clients superseded by a newer enrollment from the same device, or not seen (no
+token refresh) for N days (default 14). `amux direct enroll --replace` marks the
+code so that, once redeemed, the prior active clients with the same `--label`
+from the same device are revoked in the same commit as the new grant (audit
+verb `replace`, `replaced_by` in `clients list`). "Same device" is an equal
+`device_id` when both clients sent one (an optional token-request form field: a
+random per-install id, stored only as a hash, never authority), otherwise the
+same `client_kind` and `client_label`. Servers that predate it ignore
+`device_id`.
+
+**Cloud-brokered raises.** `Authority.CloudRaiseGrant` raises a grant on the
+cloud broker's authority under the cloud policy: cloud enabled, the requester
+matches the owner pin, every added permission is within the ceiling, and a new
+scope covers the old one and lies within the ceiling's. It only ever adds: the
+host's own grants beyond the ceiling are kept and the cloud can never narrow.
+Each raise is recorded with source `cloud` and audited as `cloud_raise`. The
+wire route that reaches it builds on direct-approval-v1 (the enrollment
+approval bridge) and is not served yet; see the design below.
+
+**Upgrade requests (design, not yet served).** A client asks for more rights,
+and a human approves:
+
+1. Host-approved: `POST /direct/v1/grant/request` (bearer, `read`)
+   `{permissions, resource_scope?, note?}` stores one pending request on the
+   grant (replacing any earlier one; bounded note; expires after 24 h).
+   `clients list` shows it, `amux direct clients update <id> --approve-request`
+   applies it through `UpdateGrant`, `--deny-request` clears it, and
+   capabilities' `grant.request` reports `{permissions, requested_at, state}`.
+2. Cloud-approved: the client asks Harness, Harness approves (as for
+   enrollment), and the client posts the approval to `POST
+   /direct/v1/grant/upgrade` with its bearer token. The host verifies it over
+   the provider connection (`direct-approval-verify`, extended with the
+   `client_id` the approval names), then calls `CloudRaiseGrant`. A requested
+   right outside the ceiling is refused with `scope_exceeds_ceiling`, which
+   the client shows as "ask the host operator" (path 1).
+
 ## Workflow actions
 
 These verbs give a direct client the same session workflow as the Harness
@@ -825,6 +910,19 @@ this change keeps exactly the powers it has on master. A new permission takes
 effect only when the operator names it in `amux direct enroll --permissions`
 or in the `amux direct cloud enable --permissions` ceiling. There is no `all`
 alias.
+
+**The `execute` alias.** `execute` is a name, not a permission: wherever a
+permission list is parsed (`enroll --permissions`, `clients update
+--permissions`, `cloud enable --permissions`, admin requests, relayed cloud
+requests and raises) it expands to `approve`. Grants, codes and ceilings store
+the concrete names, and everything displays them, so an older server or
+client never sees `execute`.
+
+**Defaults.** `amux direct enroll` without `--permissions` grants
+`read,steer,approve`; `amux direct cloud enable` without `--permissions` sets the
+ceiling to `read,steer,approve` over `all_sessions`. `manage`, `create` and
+`accounts` are never defaulted. The effective grant is printed before anything
+is minted. Existing grants, codes and policies keep exactly what they have.
 
 **Compatibility.**
 

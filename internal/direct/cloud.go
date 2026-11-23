@@ -159,6 +159,10 @@ func S256Challenge(verifier string) string {
 }
 
 func normalizePolicy(req CloudPolicyRequest) (*cloudPolicy, error) {
+	if len(req.Permissions) == 0 {
+		// The default ceiling: read, steer and the execute set (approve).
+		req.Permissions = slices.Clone(DefaultPermissions)
+	}
 	perms, err := ValidatePerms(req.Permissions)
 	if err != nil {
 		return nil, err
