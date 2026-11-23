@@ -80,7 +80,9 @@ func TestDoHelpTeachesGoalVocabulary(t *testing.T) {
 		core.ActionNewWorkgroup: {"coordinator"},
 		core.ActionSteer:        {"goal", "status=", "token_budget"},
 	} {
-		help := actionGlosses[verb]
+		var b strings.Builder
+		renderNode(&b, mustHelpNode("do "+verb), false)
+		help := b.String()
 		for _, w := range want {
 			if !strings.Contains(help, w) {
 				t.Errorf("`amux do %s` help does not mention %q: %s", verb, w, help)

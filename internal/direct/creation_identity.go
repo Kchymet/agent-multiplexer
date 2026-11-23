@@ -42,6 +42,9 @@ import (
 type admission struct {
 	affected []string
 	rootInc  string
+	// audit, when set, is written (outcome "admitted") before the action is
+	// recorded and run, and again with its outcome: an overseer steer.
+	audit *AuditRecord
 }
 
 // identityVerdict is verifyCreated's answer for one success record.

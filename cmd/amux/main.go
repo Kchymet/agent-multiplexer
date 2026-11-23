@@ -38,7 +38,6 @@ import (
 	"amux/internal/nativetui"
 	"amux/internal/procstat"
 	_ "amux/internal/termbg"
-	"amux/internal/vtdemo"
 )
 
 func main() {
@@ -48,144 +47,7 @@ func main() {
 	if filepath.Base(os.Args[0]) == "gh" {
 		os.Exit(credentialGitHub(os.Args[1:]))
 	}
-	if len(os.Args) < 2 {
-		// Bare `amux` opens the native TUI. `amux --help`/-h/help still print
-		// usage (those carry an arg, so they fall through to the switch below).
-		if err := cmdNative(""); err != nil {
-			fmt.Fprintln(os.Stderr, "amux:", err)
-			os.Exit(1)
-		}
-		return
-	}
-	cmd := os.Args[1]
-	args := os.Args[2:]
-
-	c := lookupCommand(cmd)
-	if c == nil {
-		fmt.Fprintf(os.Stderr, "amux: unknown command %q\n\n", cmd)
-		usage()
-		os.Exit(2)
-	}
-	if err := c.run(args); err != nil {
-		fmt.Fprintln(os.Stderr, "amux:", err)
-		os.Exit(1)
-	}
-}
-
-// command is one top-level verb of the CLI: the word (plus any aliases) the user
-// types and the function it runs.
-type command struct {
-	names  []string // primary name first, then aliases
-	run    func(args []string) error
-	hidden bool // internal/diagnostic surface, deliberately absent from usage()
-}
-
-// commands is the whole top-level dispatch. It's a table rather than a switch so
-// the dispatch and the help text can be checked against each other: the contract
-// test walks usage() and this table in both directions, so a command that is
-// advertised but not dispatched (as `workgroup open` was) fails the tests instead
-// of the user's shell.
-var commands = []command{
-	{names: []string{"daemon"}, run: cmdDaemon},
-	{names: []string{"serve"}, run: cmdServe, hidden: true},
-	{names: []string{"harness", "harnesses"}, run: cmdHarnessCLI},
-	{names: []string{"provide"}, run: cmdProvide},
-	{names: []string{"direct"}, run: cmdDirect},
-	// hidden: embedded-terminal fidelity check (Phase 0 spike)
-	{names: []string{"_vtdemo"}, run: vtdemo.Run, hidden: true},
-	{names: []string{"agent"}, run: cmdAgent},
-	// deprecated alias for "amux agent hook"
-	{names: []string{"hook"}, run: func(args []string) error { return cmdAgentStatus(args, true) }, hidden: true},
-	{names: []string{"status"}, run: cmdStatus},
-	{names: []string{"top"}, run: cmdTop},
-	{names: []string{"queue", "q"}, run: cmdQueue},
-	{names: []string{"refresh"}, run: func([]string) error { return cmdRefresh() }},
-	{names: []string{"doctor", "health", "check"}, run: func([]string) error { return cmdDoctor() }},
-	{names: []string{"config", "conf", "cfg"}, run: cmdConfig},
-	{names: []string{"sandbox", "sb"}, run: cmdSandbox},
-	{names: []string{"auth"}, run: cmdAuth},
-	{names: []string{"repo"}, run: cmdRepo},
-	{names: []string{"workgroup", "wg", "session", "ses", "workspace", "ws"}, run: cmdSession},
-	// deprecated top-level alias for "amux agent name"
-	{names: []string{"name"}, run: cmdName, hidden: true},
-	{names: []string{"do"}, run: cmdDo},
-	{names: []string{"version", "--version", "-v"}, run: cmdVersionArgs},
-	{names: []string{"update", "upgrade"}, run: cmdUpdate},
-	{names: []string{"licenses", "notices"}, run: cmdLicenses},
-	// hidden: help is what prints usage(), so it doesn't list itself
-	{names: []string{"help", "-h", "--help"}, run: func([]string) error { usage(); return nil }, hidden: true},
-}
-
-// lookupCommand resolves a command word (or one of its aliases) to its entry,
-// nil when amux has no such command.
-func lookupCommand(name string) *command {
-	for i := range commands {
-		for _, n := range commands[i].names {
-			if n == name {
-				return &commands[i]
-			}
-		}
-	}
-	return nil
-}
-
-// usage prints the top-level help. The command block below is parsed by the
-// dispatch contract test, which needs each entry to be "  <spec>  <description>"
-// — two or more spaces between the invocation and its prose — so it can tell a
-// subcommand word from the description that follows it.
-func usage() {
-	fmt.Fprint(os.Stderr, `amux — AI-native terminal control plane
-
-usage: amux <command>
-
-  (bare)             open the workgroup dashboard (native TUI)
-  repo add <src>     track a repo (clone a git URL, or register a local path)
-  repo ls | rm       list / untrack repositories
-  workgroup new      create a workgroup via a config page, then open
-  workgroup repo <r>  create a workgroup limited to one tracked repo, with a first agent
-  workgroup move <a> [<root>|--new]  move an agent into another (or a new) workgroup
-  workgroup open <id>  open the dashboard focused on a workgroup or agent
-  workgroup rename <id> <name>  set a workgroup/agent display name (id is unchanged)
-  workgroup archive | unarchive <id>  mark a workgroup done / bring it back
-                     (archive refuses while an open PR remains; --force overrides)
-  workgroup rm <id> [--force]  delete a workgroup (removes its worktrees + branches)
-  workgroup ls       list workgroups and their agents
-  agent name <text>  set the calling agent's display name (from its own tab)
-  status [--json]    print workgroups and exit (--json for the raw snapshot)
-  top [--json] [--mem] [-n N]  per-session CPU/memory, top processes, amux overhead
-  queue [list|answer|dismiss|ack]  the user question queue and workgroup summary
-  do <action> ...    drive a daemon action (see "amux do" actions below)
-  refresh            ask the daemon to re-poll its sources now
-  doctor             health check: versions, compatibility, dependencies + runtime
-  config [ls|get|set|unset|path]  show or change amux settings (keybindings, Codex control)
-  harness [ls|install|update|pin|unpin|rollback|check|gc|uninstall]  amux-managed Claude Code / Codex installs
-  sandbox drift [<id>]  list edits agents made to their private copy of your harness config
-  sandbox promote | reset <id> <path>  propagate an agent's config edit to yours / discard it
-  auth login | status | restart  manage one shared Claude login for all agent sessions
-  provide [<addr>]   dial a remote orchestrator and serve panes (provider mode)
-  provide install | uninstall  run provider mode as a user service (survives reboot)
-  provide revoke --yes  revoke this provider's broker registration and relay access
-  direct serve | enroll | clients  direct web/Android access over your LAN or VPN (opt-in)
-  daemon [stop|start|restart]  run/control the daemon (restart loads a new binary)
-  version            print CLI, daemon and database versions + compatibility
-  update [--check] [--force] [--restart-daemon]  install the latest release
-  licenses           print bundled dependency licenses and notices
-
-amux do <action> drives the daemon's control API from scripts (no direct store
-access). Positional [id]/[kind] still work; flags reach the rest:
-
-  --target, -t <root>   destination workgroup id (for "move")
-  --field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
-
-An unknown action prints the full list of valid ones.
-
-  amux do rename <id> -f name="api spike"
-  amux do move <id> --target <root>
-  amux do add-agent <root> -f repos=api,web -f prompt="port the auth flow"
-  amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"
-
-Set AMUX_SKIP=1 in your shell to bypass auto-launch.
-`)
+	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr, stdioIsTerminal))
 }
 
 // daemonSubcommands is the daemon lifecycle dispatch, keyed by verb (aliases
@@ -281,33 +143,13 @@ func cmdDaemon(args []string) error {
 		sub = args[0]
 	}
 	if isHelpFlag(sub) {
-		daemonUsage()
-		return nil
+		return showHelp("daemon")
 	}
 	run, ok := daemonSubcommands[sub]
 	if !ok {
-		daemonUsage()
 		return fmt.Errorf("unknown daemon subcommand %q (want stop|start|restart)", sub)
 	}
 	return run()
-}
-
-func daemonUsage() {
-	fmt.Fprint(os.Stderr, `amux daemon — run and control the local daemon
-
-The daemon owns the store and the agent engine: it hosts every running agent, so
-stopping or restarting it stops the agents it hosts. Bare `+"`amux daemon`"+` runs one
-in the foreground (what auto-launch spawns); the verbs below control a detached
-one.
-
-usage: amux daemon [command]
-
-  (bare)             run the daemon in the foreground until signalled
-  stop               stop the running daemon cleanly  (alias: down)
-  start              start a detached daemon if none is answering  (alias: up)
-  restart            stop, then start — how a newly installed binary is loaded
-                     (alias: reload)
-`)
 }
 
 // daemonStartSelf starts a detached daemon running this binary.

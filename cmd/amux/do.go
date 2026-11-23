@@ -32,8 +32,7 @@ import (
 //	amux do new-workgroup -f name=infra -f repos=infra -f prompt="upgrade CI"
 func cmdDo(args []string) error {
 	if len(args) > 0 && isHelpFlag(args[0]) {
-		doUsage()
-		return nil
+		return showHelp("do")
 	}
 	a, err := parseDoArgs(args)
 	if err != nil {
@@ -59,76 +58,20 @@ func cmdDo(args []string) error {
 	return nil
 }
 
-// actionGlosses annotates the daemon's action vocabulary for the unknown-action
-// error. Only the wording lives here — core.ControlActions() stays the single
-// source of *which* verbs exist, so a newly added verb still shows up in the
-// list (glossless) instead of silently going missing from the help.
-var actionGlosses = map[string]string{
-	core.ActionRefresh:             "re-poll the daemon's sources now",
-	core.ActionStart:               "start an agent's (or a whole workgroup's) process",
-	core.ActionRestart:             "restart one agent and resume its conversation (interrupts its current turn; host only)",
-	core.ActionAuthReload:          "queue Claude agents to restart with current credentials [-f force=true]",
-	core.ActionSteer:               "drive an agent (prompt starts a stopped one; ok = delivered) -f verb=prompt|interject|stop|permission|goal [-f text=… | -f decision=allow|deny | -f status=active|paused|complete|clear [-f objective=…] [-f token_budget=N]]",
-	core.ActionRename:              "set a display name            -f name=…",
-	core.ActionMove:                "re-parent an agent            --target <workgroup> (omit for a new one)",
-	core.ActionArchive:             "toggle archived ⇄ restored",
-	core.ActionSetArchived:         "archive or restore explicitly -f archived=true|false",
-	core.ActionDelete:              "delete for good — worktrees + branch",
-	core.ActionKill:                "alias of delete",
-	core.ActionAddRepo:             "track a repo                  -f source=OWNER/REPO|url|path",
-	core.ActionRmRepo:              "untrack a repo                id is the repo name",
-	core.ActionAgentSetRepos:       "re-scope an agent's repos     -f repos=api,web",
-	core.ActionCoordinatorSetRepos: "replace coordinator repo grants -f repos=api,web | -f all=1 (every tracked repo, live) (host only)",
-	core.ActionAddAgent:            "add an agent to a workgroup   id is the workgroup id",
-	core.ActionNewWorkgroup:        "create a workgroup            -f name=… [-f prompt=…] [-f repos=a,b (its repos; one = single-repo) -f agent=… -f model=… -f mode=…] [-f coordinator=claude|codex -f coordinator_model=…]",
-	core.ActionCreateWorkspace:     "alias of new-workgroup (kept for older scripts)",
-	core.ActionRaiseItem:           "raise an item as session <id>  -f kind=follow_up|outstanding|decision_needed|risk|fyi -f title=… [-f detail=… -f prs=r#1,r#2 -f suggest=…] (agents: amux agent raise)",
-	core.ActionItemState:           "move an item as session <id>   -f item=it-… -f state=ack|dismiss|done|reopen [-f note=…] (the global inbox owner today is the console)",
-	core.ActionEscalateItem:        "escalate an item to the global inbox as coordinator <id> -f item=it-… [-f note=…]",
-	core.ActionQueueAnswer:         "answer a question-queue entry (host only)  -f entry=… [-f text=… | -f choice=… | -f decision=allow|deny]; amux queue answer",
-	core.ActionQueueDismiss:        "hide a question-queue entry (host only)    -f entry=…; amux queue dismiss",
-}
-
 // actionList renders the vocabulary an unknown-action error teaches: every verb
 // the daemon accepts, with what it does and the flag it usually needs.
 func actionList() string {
 	var b strings.Builder
 	b.WriteString("valid actions:\n")
 	for _, a := range core.ControlActions() {
-		fmt.Fprintf(&b, "  %-16s %s\n", a, actionGlosses[a])
+		summary := ""
+		if n := mustHelpNode("do").child(a); n != nil {
+			summary = n.Summary
+		}
+		fmt.Fprintf(&b, "  %-22s %s\n", a, summary)
 	}
-	b.WriteString("  (`amux help` shows the flags in full)")
+	b.WriteString("  (amux do <action> --help shows its fields)")
 	return b.String()
-}
-
-// doUsage answers `amux do --help`. The verb list is rendered by actionList()
-// — core.ControlActions() stays the single source — so this help can't drift
-// from what the dispatch accepts. Reads go through `amux repo ls` /
-// `amux workgroup ls` instead.
-func doUsage() {
-	fmt.Fprintf(os.Stderr, `amux do — drive one daemon control action (the scripting entrypoint)
-
-usage: amux do <action> [id] [flags]
-
-%s
-
-flags:
-
-  --id <id>             target session id (alternative to the 2nd positional)
-  --target, -t <root>   destination workgroup id (for "move"; empty = a new workgroup)
-  --field, -f key=val   form field, repeatable (add-agent, new-workgroup, …)
-
-  amux do rename <id> -f name="api spike"
-  amux do move <id> --target <root>
-  amux do add-agent <root> -f repos=api,web -f prompt="port the auth flow"
-
-From an agent session the request is authorized by that session's fixed
-authenticated grant, never by an id, flag, or environment variable: a member
-may act only on itself (start, steer prompt|interject|stop, rename, archive
-itself), a coordinator also on its workgroup's current direct members (plus
-add-agent, steer permission, archive a member). Host-only actions are refused.
-See docs/agent-cli-sandbox.md for the full scope table.
-`, actionList())
 }
 
 // cmdRefresh asks the daemon to re-poll its sources now, rather than waiting for

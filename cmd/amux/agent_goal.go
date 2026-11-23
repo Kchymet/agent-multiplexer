@@ -53,37 +53,10 @@ func cmdAgentGoal(args []string) error {
 	case "blocked":
 		return goalMark(claudegoal.StatusBlocked, args)
 	case "help", "-h", "--help":
-		goalUsage()
-		return nil
+		return showHelp("agent goal")
 	default:
-		goalUsage()
-		return fmt.Errorf("amux agent goal: no goal action %q (show | complete | ask | wait | blocked)", sub)
+		return usagef("amux agent goal: no goal action %q (show | complete | ask | wait | blocked)", sub)
 	}
-}
-
-func goalUsage() {
-	fmt.Fprint(os.Stderr, `amux agent goal — goal mode for a Claude workgroup coordinator
-
-Every user task becomes the coordinator's active goal, and amux continues the
-turn until the goal is complete, the coordinator asks the user for input, it
-reports itself blocked, or the user pauses it.
-
-usage: amux agent goal [show [--json]]
-       amux agent goal complete "<summary>"    the objective is done and verified
-                                               (archive finished members first: PR
-                                               merged or closed; it lists idle
-                                               unarchived members)
-       amux agent goal ask "<question>"        stop and wait for the user's answer
-       amux agent goal wait "<waiting on>"     end this turn only; an armed background
-                                               wake-up (Monitor / run_in_background)
-                                               resumes the goal. Never wait without one.
-                                               Name the member/PR awaited and the wake-up;
-                                               it must cover every open member PR.
-       amux agent goal blocked "<reason>"      a repeating blocker only the user can clear
-
-The user pauses, resumes or clears the goal from the host:
-  amux do steer <coordinator> -f verb=goal -f status=paused|active|complete|clear
-`)
 }
 
 func goalFile() (string, error) {

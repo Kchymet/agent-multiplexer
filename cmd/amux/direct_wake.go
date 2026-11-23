@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -26,11 +24,10 @@ func cmdDirectWake(args []string) error {
 	}
 	switch args[0] {
 	case "enable":
-		fs := flag.NewFlagSet("amux direct wake enable", flag.ContinueOnError)
+		fs := newCmdFlagSet("direct wake enable")
 		owner := fs.String("owner", "", "")
 		prov := fs.String("provider", "", "")
-		fs.SetOutput(io.Discard)
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseCmdFlags(fs, "direct wake enable", args[1:]); err != nil {
 			return err
 		}
 		if fs.NArg() != 0 {

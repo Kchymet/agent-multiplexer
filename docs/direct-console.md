@@ -3,7 +3,7 @@
 Status: revision 2. **Phase A (§6: the overseer role, the question queue, local
 CLI/TUI) is implemented** — see [default-sessions.md](default-sessions.md),
 [workgroup-permissions.md](workgroup-permissions.md#console-overseer-and-repo-homes)
-and `amux queue`. Phase B (direct exposure, §5) awaits sign-off; Phase C is optional.
+and `amux queue`. Phase B1 (direct exposure, §5) is implemented: see [direct-access.md](direct-access.md#question-queue-and-overseer) and the `queue-v1` fixtures. Phase C (step-up) is deferred.
 
 Revision 2 splits today's console into two sessions:
 

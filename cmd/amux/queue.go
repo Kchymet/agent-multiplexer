@@ -20,29 +20,6 @@ import (
 // terminal and from the admin console and the overseer; answering, dismissing
 // and acknowledging are the user's alone (host terminal).
 
-const queueUsage = `usage: amux queue [list] [--all] [--json]
-       amux queue answer <entry> [<text>...] [--choice <label>]... [--allow | --deny]
-       amux queue dismiss <entry>
-       amux queue ack <item>
-
-  list     the pending questions (permission requests, AskUserQuestion prompts,
-           coordinators' goal asks, decision items), the global inbox counts and
-           the workgroup summary (needs you / running / review / done).
-           --all also lists entries you dismissed.
-  answer   answer one entry; amux re-checks the question is still open and
-           delivers the answer to the asking session:
-             a question takes --choice <label> (repeat per question, "a|b" for a
-               multi-select) or free text;
-             a permission request takes --allow or --deny;
-             a goal ask or decision item takes text.
-  dismiss  hide an entry (a decision item is dismissed; a live question is
-           hidden until it changes).
-  ack      acknowledge a global-inbox item as the user — this is what lets the
-           overseer create a workgroup from it.`
-
-// printQueueUsage prints the queue command's help.
-func printQueueUsage() { fmt.Println(queueUsage) }
-
 // queueAnswerFields parses `amux queue answer` arguments after the entry id.
 func queueAnswerFields(entry string, args []string) (map[string]string, error) {
 	fields := map[string]string{core.QueueEntryField: entry}
@@ -72,7 +49,7 @@ func queueAnswerFields(entry string, args []string) (map[string]string, error) {
 			text = append(text, args[i+1:]...)
 			i = len(args)
 		case strings.HasPrefix(a, "-") && a != "-":
-			return nil, fmt.Errorf("unknown flag %q\n%s", a, queueUsage)
+			return nil, usagef("unknown flag %q", a)
 		default:
 			text = append(text, a)
 		}
@@ -92,8 +69,7 @@ func queueAnswerFields(entry string, args []string) (map[string]string, error) {
 func cmdQueue(args []string) error {
 	sub := "list"
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		printQueueUsage()
-		return nil
+		return showHelp("queue")
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
@@ -103,7 +79,7 @@ func cmdQueue(args []string) error {
 		return queueList(args, os.Stdout)
 	case "answer", "reply":
 		if len(args) < 1 {
-			return errors.New(queueUsage)
+			return usageErr("queue answer")
 		}
 		fields, err := queueAnswerFields(args[0], args[1:])
 		if err != nil {
@@ -112,21 +88,20 @@ func cmdQueue(args []string) error {
 		return queueHostAction(core.Action{Action: core.ActionQueueAnswer, Fields: fields}, "answered "+args[0])
 	case "dismiss":
 		if len(args) != 1 {
-			return errors.New(queueUsage)
+			return usageErr("queue dismiss")
 		}
 		return queueHostAction(core.Action{Action: core.ActionQueueDismiss, Fields: map[string]string{core.QueueEntryField: args[0]}}, "dismissed "+args[0])
 	case "ack", "acknowledge":
 		if len(args) != 1 {
-			return errors.New(queueUsage)
+			return usageErr("queue ack")
 		}
 		return queueHostAction(core.Action{Action: core.ActionItemState, ID: items.GlobalInbox(), Fields: map[string]string{
 			core.ItemIDField: args[0], core.ItemStateField: items.VerbAck,
 		}}, "acknowledged "+args[0])
 	case "help", "-h", "--help":
-		printQueueUsage()
-		return nil
+		return showHelp("queue")
 	}
-	return fmt.Errorf("amux queue: no subcommand %q\n%s", sub, queueUsage)
+	return usagef("unknown queue subcommand %q", sub)
 }
 
 // queueHostAction runs a user-only queue action from a host terminal.
@@ -179,7 +154,7 @@ func queueList(args []string, w io.Writer) error {
 		case "--json", "-j":
 			asJSON = true
 		default:
-			return fmt.Errorf("unknown argument %q\n%s", a, queueUsage)
+			return usagef("unknown argument %q", a)
 		}
 	}
 	o, err := readQueue(all)

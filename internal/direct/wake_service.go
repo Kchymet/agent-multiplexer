@@ -673,7 +673,7 @@ func (s *WakeService) visibility(ctx context.Context, g Grant) (wakeVisibility, 
 		if !ok {
 			return false, false
 		}
-		in := inScope(g, row, byID) && !effectivelyArchived(row, byID) && !isConsole(row)
+		in := inScope(g, row, byID) && !effectivelyArchived(row, byID) && !isConsole(row) && !isOverseer(row)
 		cur := incs[sid]
 		return in, cur == "" || cur == inc
 	}, nil
@@ -765,7 +765,7 @@ func (s *WakeService) sessionIncarnation(ctx context.Context, g Grant, sid strin
 	}
 	byID := indexRows(rows)
 	row, ok := byID[sid]
-	if !ok || !inScope(g, row, byID) || isConsole(row) {
+	if !ok || !inScope(g, row, byID) || isConsole(row) || isOverseer(row) {
 		return "", false, nil
 	}
 	return s.identities(ctx, []string{sid})[sid], true, nil

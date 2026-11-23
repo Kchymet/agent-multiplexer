@@ -1,0 +1,34 @@
+{
+  "server_id": "hD1HafoiI5ChKvD9Suj5gfYwfPY9gHT1q7HZrgJ3XA4",
+  "buckets": {
+    "needs_you": 2,
+    "running": 0,
+    "waiting_review": 0,
+    "done": 0
+  },
+  "workgroups": [
+    {
+      "id": "wg1",
+      "title": "Billing",
+      "bucket": "needs_you",
+      "state": "waiting",
+      "goal": "active",
+      "needs_you": [
+        "a1"
+      ],
+      "members": 1,
+      "queue": 5
+    },
+    {
+      "id": "wg3",
+      "title": "Docs",
+      "bucket": "needs_you",
+      "state": "ready",
+      "open_prs": [
+        "acme/api#12"
+      ],
+      "members": 1,
+      "queue": 1
+    }
+  ]
+}

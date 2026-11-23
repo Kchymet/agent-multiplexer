@@ -40,15 +40,15 @@ func cmdProvideRevoke(args []string) error {
 // Only transport settings are accepted: revocation never advertises capabilities
 // or opens a normal provider registration.
 func parseProvideRevoke(args []string, load func() (providercfg.Config, error)) (provider.Config, error) {
-	fs := flag.NewFlagSet("provide revoke", flag.ContinueOnError)
+	fs := newCmdFlagSet("provide revoke")
 	var yes bool
 	var f provideFlags
-	fs.BoolVar(&yes, "yes", false, "revoke this provider's registration and relay access")
-	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port")
-	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the provider bearer token")
-	fs.StringVar(&f.caFile, "ca", "", "PEM CA file")
-	fs.StringVar(&f.serverName, "server-name", "", "TLS server name")
-	operands, err := parseFlagsAnyOrder(fs, args)
+	fs.BoolVar(&yes, "yes", false, "")
+	fs.StringVar(&f.orch, "orchestrator", "", "")
+	fs.StringVar(&f.tokenFile, "token-file", "", "")
+	fs.StringVar(&f.caFile, "ca", "", "")
+	fs.StringVar(&f.serverName, "server-name", "", "")
+	operands, err := parseCmdFlagsAnyOrder(fs, "provide revoke", args)
 	if err != nil {
 		return provider.Config{}, err
 	}

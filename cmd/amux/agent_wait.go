@@ -15,8 +15,6 @@ import (
 	"amux/internal/sessionrpc"
 )
 
-const agentWaitUsage = "usage: amux agent wait <session-id>... [--until <state>[,<state>...]] [--timeout <duration>] [--json]"
-
 // errWaitTimeout is cmdAgentWait's --timeout expiry (a nonzero exit).
 var errWaitTimeout = errors.New("amux agent wait: timed out with no change")
 
@@ -66,16 +64,15 @@ func cmdAgentWait(args []string) error {
 			}
 			overall = d
 		case a == "-h" || a == "--help":
-			fmt.Fprintln(os.Stderr, agentWaitUsage)
-			return nil
+			return showHelp("agent wait")
 		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("unknown wait option %q\n%s", a, agentWaitUsage)
+			return usagef("unknown wait option %q", a)
 		default:
 			targets = append(targets, a)
 		}
 	}
 	if len(targets) == 0 {
-		return fmt.Errorf("%s", agentWaitUsage)
+		return usageErr("agent wait")
 	}
 	for _, s := range until {
 		switch s {

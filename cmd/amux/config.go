@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"amux/internal/amuxcfg"
@@ -26,8 +25,7 @@ func cmdConfig(args []string) error {
 		sub = args[0]
 	}
 	if isHelpFlag(sub) {
-		configUsage()
-		return nil
+		return showHelp("config")
 	}
 	switch sub {
 	case "ls", "list":
@@ -223,53 +221,8 @@ func cmdConfig(args []string) error {
 		fmt.Println(core.ConfigPath())
 		return nil
 	default:
-		return fmt.Errorf("unknown config subcommand %q (want ls|get|set|unset|path)", sub)
+		return usagef("unknown config subcommand %q", sub)
 	}
-}
-
-func configUsage() {
-	fmt.Fprint(os.Stderr, `amux config — show or change amux settings
-
-usage: amux config <subcommand>
-
-  ls                 saved settings/defaults (ignores environment overrides)
-  get keys.<action>  print one binding's effective chord
-  set keys.<action> <chord>  rebind (chords like ctrl+g, alt+p, f5)
-  unset keys.<action>  restore a binding's built-in default
-  get codex.control  print saved control mode (pty when unconfigured)
-  set codex.control <app-server|pty>  save the daemon's Codex rollout selection
-  unset codex.control  restore the default (pty)
-  get goal.auto_resume  print whether a restarted goal coordinator resumes its goal (on when unconfigured)
-  set goal.auto_resume <on|off>  save the goal auto-resume switch (daemon restart required)
-  unset goal.auto_resume  restore the default (on)
-  get|set|unset update.auto <on|off>  automatic amux self-update (on; AMUX_NO_AUTO_UPDATE=1 also disables)
-  get|set|unset harnesses.update  daemon update check for amux-managed harnesses: off|notify|auto (off)
-  get|set|unset harnesses.check_interval  how often that check runs (24h; minimum 1h)
-  get|set|unset harnesses.<claude|codex>.channel  release channel to follow (claude: stable|latest)
-  get|set|unset harnesses.<claude|codex>.bin  explicit harness binary (beats the managed install)
-  get|unset claude.auth      retired: every workload follows central auth
-  get|unset codex.auth       retired: every workload follows central auth
-  get direct.enabled  whether the daemon runs the direct listener (off by default);
-                     change it with amux direct enable|disable
-  path               print the config file path
-
-Keybindings live in the "keys" section of the config file (see path). A rebind
-applies the next time the dashboard opens. codex.control lives in "codex" and
-requires a daemon restart; changing it does not reroute running sessions.
-AMUX_CODEX_CONTROL overrides the saved value when nonempty. Run amux doctor to
-compare saved settings, this shell's override, and the running daemon selection.
-goal.auto_resume lives in "goal": when on (the default), a goal coordinator whose
-runtime is restarted (agent restart, daemon restart, amux do start) is relaunched
-with a continuation so a goal that was active or waiting on a wake-up picks up
-where it left off; paused, complete, blocked, input-waiting and budget-limited
-goals are never resumed automatically. It too is read at daemon start.
-
-claude.auth and codex.auth are retired. Every workload follows the central
-login (amux auth login). A saved host, shared or environment value was
-migrated to central once; no credential is copied, so run amux auth login once
-if Accounts reports the migration as pending. Central Codex auth always uses
-App Server control.
-`)
 }
 
 // configList prints every binding; a load error (bad entries in config.json)

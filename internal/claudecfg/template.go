@@ -47,10 +47,23 @@ func Template(agentID, sessionRoot string) cfghome.Spec {
 	}}
 	for _, rel := range configEntries {
 		e := cfghome.Entry{Rel: rel}
-		if rel == "settings.json" || rel == "settings.local.json" {
-			// Settings may reference files inside the home by absolute path (a
-			// status-line script, a hook command). Point the copy at its own files,
-			// and compare with the paths mapped back so that is never drift.
+		// Settings may reference files inside the home by absolute path (a
+		// status-line script, a hook command). Point the copy at its own files,
+		// and compare with the paths mapped back so that is never drift.
+		switch rel {
+		case "settings.json":
+			// settings.json also carries the unattended pre-answers (unattended.go):
+			// seeded into the copy, factored out of the comparison on both sides,
+			// and kept out of the template on Promote.
+			e.Seed = func(sp cfghome.Spec, b []byte) []byte {
+				out, _ := ApplyUnattendedSettings(rewriteTemplatePaths(sp, b), LaunchPermissionMode())
+				return out
+			}
+			e.Normalize = func(sp cfghome.Spec, b []byte) []byte {
+				return normalizeSettings(restoreTemplatePaths(sp, b))
+			}
+			e.Merge = mergeSettings
+		case "settings.local.json":
 			e.Seed = rewriteTemplatePaths
 			e.Normalize = restoreTemplatePaths
 		}

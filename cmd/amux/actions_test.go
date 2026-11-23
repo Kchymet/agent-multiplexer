@@ -48,22 +48,6 @@ func TestCmdDoUnknownActionTeaches(t *testing.T) {
 	}
 }
 
-// TestActionGlossesCoverVocabulary keeps the help honest: a verb added to
-// core.ControlActions() still shows up in the list (that's what the test above
-// checks), but glossless it teaches nothing — so require the wording too.
-func TestActionGlossesCoverVocabulary(t *testing.T) {
-	for _, verb := range core.ControlActions() {
-		if strings.TrimSpace(actionGlosses[verb]) == "" {
-			t.Errorf("action %q has no gloss in actionGlosses", verb)
-		}
-	}
-	for verb := range actionGlosses {
-		if !core.KnownAction(verb) {
-			t.Errorf("actionGlosses documents %q, which is not in core.ControlActions()", verb)
-		}
-	}
-}
-
 // TestNotInsideAgentExplainsWhere pins the message a self-scoped command gives
 // outside an agent: naming the unset variable is not enough — it has to say
 // where the command does work, and how to name the target from anywhere else.

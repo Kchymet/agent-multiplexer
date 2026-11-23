@@ -10,164 +10,85 @@ import (
 	"amux/internal/daemon"
 )
 
-// The CLI's dispatch contract: everything amux advertises in its help text is
-// actually dispatched, and every advertised subcommand survives being invoked
+// The CLI's dispatch contract: everything the help tree (helptree.go) advertises
+// is actually dispatched, and every advertised subcommand survives being invoked
 // with no arguments and with one. Both halves are bugs we shipped — `workgroup
 // open <id>` was in `amux help` but fell through to "unknown session
 // subcommand", and bare `amux workgroup` panicked slicing an empty argv — and
 // both are the kind that only surface when a user types the command, since
-// nothing else walks the surface.
+// nothing else walks the surface. The top-level dispatch is the tree itself, so
+// only the namespaces' own subcommand dispatch can drift from it.
 
-// helpBlock is one help text of the advertised surface. cmd is the command whose
-// subcommands the block's entries are ("" for the top-level usage, whose entries
-// are commands themselves). invoke says whether the contract test may call those
-// subcommands for real.
-type helpBlock struct {
-	cmd    string
-	usage  func()
-	invoke bool
-	// verbs is the dispatch table checked by name for a block that is not safe to
-	// invoke — `daemon`'s verbs drive real processes, and `provide install` writes
-	// a system service. Their advertised subcommands are still checked, just
-	// against the table instead of by running them.
-	verbs map[string]bool
+// verbTables are the namespaces whose subcommands are not safe to invoke in a
+// test — daemon's verbs drive real processes, provide install writes a user
+// service, harness downloads releases — so their advertised subcommands are
+// checked by name against the dispatch table, in both directions.
+func verbTables() map[string]map[string]bool {
+	return map[string]map[string]bool{
+		"auth":    verbNames(authSubcommands),
+		"daemon":  verbNames(daemonSubcommands),
+		"provide": verbNames(provideSubcommands),
+		"direct":  verbNames(directSubcommands),
+		"harness": verbNames(harnessSubcommands),
+	}
 }
 
-// helpBlocks is the advertised surface: the top-level usage plus each command
-// namespace's own --help. The invokable ones are pure daemon clients that fail
-// fast against the stubbed dial; `daemon`'s verbs run and stop real processes, so
-// its dispatch is checked by name against daemonSubcommands instead.
-var helpBlocks = []helpBlock{
-	{cmd: "", usage: usage},
-	{cmd: "repo", usage: repoUsage, invoke: true},
-	{cmd: "workgroup", usage: workgroupUsage, invoke: true},
-	{cmd: "do", usage: doUsage, invoke: true},
-	{cmd: "config", usage: configUsage, invoke: true},
-	{cmd: "agent", usage: agentUsage, invoke: true},
-	{cmd: "sandbox", usage: sandboxUsage, invoke: true},
-	{cmd: "queue", usage: printQueueUsage, invoke: true},
-	{cmd: "auth", usage: authUsage, verbs: verbNames(authSubcommands)},
-	{cmd: "daemon", usage: daemonUsage, verbs: verbNames(daemonSubcommands)},
-	{cmd: "provide", usage: provideUsage, verbs: verbNames(provideSubcommands)},
-	{cmd: "direct", usage: directUsage, verbs: verbNames(directSubcommands)},
-	{cmd: "harness", usage: harnessUsage, verbs: verbNames(harnessSubcommands)},
-}
-
-// verbNames is the set of verbs a dispatch table accepts, for the blocks the
-// contract test checks by name rather than by invocation.
+// verbNames is the set of verbs a dispatch table accepts.
 func verbNames[V any](table map[string]V) map[string]bool {
 	out := make(map[string]bool, len(table))
 	for k := range table {
-		out[k] = true
+		if k != "" {
+			out[k] = true
+		}
 	}
 	return out
 }
 
-// TestAdvertisedCommandsDispatch walks every command named in the top-level
-// usage() and asserts amux actually dispatches it.
-func TestAdvertisedCommandsDispatch(t *testing.T) {
-	for _, e := range parseHelp(t, usage) {
-		if lookupCommand(e.name) == nil {
-			t.Errorf("usage() advertises %q (%q) but no command dispatches it", e.name, e.line)
+// TestVerbTablesMatchTree: a table-dispatched namespace documents every verb it
+// accepts, and accepts every verb it documents (names and aliases alike).
+func TestVerbTablesMatchTree(t *testing.T) {
+	for cmd, verbs := range verbTables() {
+		n := mustHelpNode(cmd)
+		documented := map[string]bool{}
+		for _, c := range n.Sub {
+			for _, name := range append([]string{c.Name}, c.Aliases...) {
+				documented[name] = true
+				if !verbs[name] {
+					t.Errorf("help advertises `amux %s %s` but %s does not dispatch it", cmd, name, cmd)
+				}
+			}
+		}
+		for v := range verbs {
+			if !documented[v] {
+				t.Errorf("amux %s dispatches %q but its help never mentions it", cmd, v)
+			}
 		}
 	}
 }
 
-// TestDispatchedCommandsAreAdvertised is the same contract read backwards: a
-// command the binary accepts is documented, unless it is deliberately hidden
-// (internal, deprecated, or self-evident).
-func TestDispatchedCommandsAreAdvertised(t *testing.T) {
-	advertised := map[string]bool{}
-	for _, e := range parseHelp(t, usage) {
-		advertised[e.name] = true
-	}
-	for _, c := range commands {
-		if c.hidden || advertised[c.names[0]] {
-			continue
-		}
-		t.Errorf("amux dispatches %q but usage() never mentions it", c.names[0])
-	}
-}
-
-// TestAdvertisedSubcommandsDispatch walks every subcommand amux advertises —
-// those named on a top-level usage() line ("workgroup open <id>") and those in a
-// namespace's own --help — and asserts the namespace accepts it, called with no
-// arguments and with one, returning an error rather than panicking or falling
-// through to "unknown subcommand". A nil error is fine where the verb
-// legitimately no-ops (an agent self-report with nothing to report); what must
-// not happen is a crash or a verb that is documented but unroutable.
+// TestAdvertisedSubcommandsDispatch invokes every subcommand of the
+// switch-dispatched namespaces, with no arguments and with one, and asserts the
+// namespace accepts it: returning an error is fine (the daemon is stubbed
+// offline), panicking or "unknown subcommand" is not.
 func TestAdvertisedSubcommandsDispatch(t *testing.T) {
 	sandboxCLI(t)
-	for _, p := range advertisedSubcommands(t) {
-		c := lookupCommand(p.cmd)
-		if c == nil {
-			t.Errorf("help advertises %q but no command dispatches %q", p.cmd+" "+p.sub, p.cmd)
+	tables := verbTables()
+	for _, c := range cliRoot().Sub {
+		if len(c.Sub) == 0 || tables[c.Name] != nil {
 			continue
 		}
-		b, ok := helpBlockFor(p.cmd)
-		if !ok {
-			t.Errorf("%q advertises subcommands but has no --help block registered in helpBlocks", p.cmd)
-			continue
-		}
-		if !b.invoke {
-			// Not safe to run — `daemon start|stop|restart` drives real processes and
-			// `provide install` writes a user service — so check the dispatch table by
-			// name instead.
-			if !b.verbs[p.sub] {
-				t.Errorf("help advertises `amux %s %s` but %s does not dispatch it", p.cmd, p.sub, p.cmd)
-			}
-			continue
-		}
-		for _, args := range [][]string{{p.sub}, {p.sub, "zzz-nonexistent"}} {
-			t.Run(p.cmd+" "+strings.Join(args, " "), func(t *testing.T) {
-				if err := runCommand(t, c, args); err != nil && isUnknownSubcommand(err) {
-					t.Errorf("amux %s %s: %v", p.cmd, strings.Join(args, " "), err)
+		for _, sub := range c.Sub {
+			for _, name := range append([]string{sub.Name}, sub.Aliases...) {
+				for _, args := range [][]string{{name}, {name, "zzz-nonexistent"}} {
+					t.Run(c.Name+" "+strings.Join(args, " "), func(t *testing.T) {
+						if err := runCommand(t, c, args); err != nil && isUnknownSubcommand(err) {
+							t.Errorf("amux %s %s: %v", c.Name, strings.Join(args, " "), err)
+						}
+					})
 				}
-			})
-		}
-	}
-}
-
-// subcommandRef is one advertised (command, subcommand) pair.
-type subcommandRef struct{ cmd, sub string }
-
-// advertisedSubcommands collects every subcommand the help texts name, from the
-// top-level usage() lines and from each namespace's own help, in order and
-// without duplicates.
-func advertisedSubcommands(t *testing.T) []subcommandRef {
-	t.Helper()
-	var pairs []subcommandRef
-	seen := map[subcommandRef]bool{}
-	add := func(p subcommandRef) {
-		if !seen[p] {
-			seen[p] = true
-			pairs = append(pairs, p)
-		}
-	}
-	for _, b := range helpBlocks {
-		for _, e := range parseHelp(t, b.usage) {
-			if b.cmd == "" {
-				// A top-level line: the entry names the command, and any literal
-				// words after it are its subcommands ("repo ls | rm").
-				for _, sub := range e.subs {
-					add(subcommandRef{cmd: e.name, sub: sub})
-				}
-				continue
 			}
-			add(subcommandRef{cmd: b.cmd, sub: e.name})
 		}
 	}
-	return pairs
-}
-
-// helpBlockFor returns the help block a command namespace publishes.
-func helpBlockFor(cmd string) (helpBlock, bool) {
-	for _, b := range helpBlocks {
-		if b.cmd == cmd {
-			return b, true
-		}
-	}
-	return helpBlock{}, false
 }
 
 // TestBareWorkgroupIsTheCreatePage pins the fix for the bare `amux workgroup`
@@ -186,8 +107,8 @@ func TestBareWorkgroupIsTheCreatePage(t *testing.T) {
 	}
 }
 
-// TestWorkgroupOpenNeedsAnID pins that the newly implemented `open` verb reports
-// its own usage when given no id, rather than opening the dashboard on nothing.
+// TestWorkgroupOpenNeedsAnID pins that the `open` verb reports its own usage
+// when given no id, rather than opening the dashboard on nothing.
 func TestWorkgroupOpenNeedsAnID(t *testing.T) {
 	sandboxCLI(t)
 	err := runCommand(t, lookupCommand("workgroup"), []string{"open"})
@@ -196,22 +117,20 @@ func TestWorkgroupOpenNeedsAnID(t *testing.T) {
 	}
 }
 
-// TestNamespaceHelp asserts every command namespace answers --help/-h/help by
-// printing its own help and exiting cleanly.
-func TestNamespaceHelp(t *testing.T) {
+// TestNamespaceHelpWord keeps `amux <cmd> help` (and -h/--help as the first
+// argument) answered by the namespace itself, as it was before help moved to
+// the tree: a direct call of the run function, not only through main.
+func TestNamespaceHelpWord(t *testing.T) {
 	sandboxCLI(t)
-	for _, b := range helpBlocks {
-		if b.cmd == "" {
-			continue
-		}
-		c := lookupCommand(b.cmd)
+	for _, name := range []string{"repo", "workgroup", "do", "config", "agent", "sandbox", "queue", "auth", "daemon", "provide", "direct", "harness"} {
+		c := lookupCommand(name)
 		for _, flag := range []string{"--help", "-h", "help"} {
 			out, err := captureOutput(t, func() error { return c.run([]string{flag}) })
 			if err != nil {
-				t.Errorf("amux %s %s = %v, want no error", b.cmd, flag, err)
+				t.Errorf("amux %s %s = %v, want no error", name, flag, err)
 			}
-			if !strings.Contains(out, "usage: amux "+b.cmd) {
-				t.Errorf("amux %s %s printed %q, want its own help", b.cmd, flag, out)
+			if !strings.Contains(out, "usage: amux "+name) {
+				t.Errorf("amux %s %s printed %q, want its own help", name, flag, out)
 			}
 		}
 	}
@@ -219,103 +138,13 @@ func TestNamespaceHelp(t *testing.T) {
 
 // ---- helpers -------------------------------------------------------------
 
-// helpEntry is one line of a help block: the word it names (a command in the
-// top-level block, a subcommand in a namespace block), any further literal words
-// on the line — the subcommands of a top-level entry, as in "repo ls | rm" or
-// "daemon [stop|start|restart]" — and the raw line for failure messages.
-type helpEntry struct {
-	name string
-	subs []string
-	line string
-}
-
-// parseHelp captures a help text and reads the command words out of its entry
-// block — the indented lines between "usage: amux …" and the prose that follows.
-// Each entry is "  <spec>  <description>": two or more spaces separate the
-// invocation from its prose, which is how the first word of the description is
-// told apart from a subcommand. Continuation lines (indented further) and
-// argument placeholders (<id>, [--json], …) are skipped.
-func parseHelp(t *testing.T, print func()) []helpEntry {
-	t.Helper()
-	text, _ := captureOutput(t, func() error { print(); return nil })
-
-	var entries []helpEntry
-	started := false
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "usage: amux") {
-			started = true
-			continue
-		}
-		if !started {
-			continue
-		}
-		if strings.TrimSpace(line) == "" {
-			if len(entries) > 0 {
-				break // the entry block ended
-			}
-			continue // the blank line right after "usage:"
-		}
-		if !strings.HasPrefix(line, "  ") {
-			break // prose after the entries
-		}
-		if strings.HasPrefix(line, "   ") {
-			continue // a description continued onto its own line
-		}
-		spec, desc, ok := strings.Cut(strings.TrimLeft(line, " "), "  ")
-		if !ok || strings.TrimSpace(desc) == "" {
-			t.Fatalf("help line %q is not %q — the contract test needs two or more "+
-				"spaces between an entry and its description", line, "  <spec>  <description>")
-		}
-		if e, ok := parseSpec(spec); ok {
-			e.line = strings.TrimSpace(line)
-			entries = append(entries, e)
-		}
-	}
-	return entries
-}
-
-// parseSpec reads one entry's invocation spec. The first word names the entry
-// ("(bare)" names nothing, so the line is dropped); every later literal word is
-// a subcommand of it — including the members of an alternation, so
-// "daemon [stop|start|restart]" names three and "repo ls | rm" two. Argument
-// placeholders (<id>, [--json], --new, "...") name nothing.
-func parseSpec(spec string) (helpEntry, bool) {
-	fields := strings.Fields(spec)
-	if len(fields) == 0 || !isCommandWord(fields[0]) {
-		return helpEntry{}, false
-	}
-	e := helpEntry{name: fields[0]}
-	for _, tok := range fields[1:] {
-		for _, alt := range strings.Split(strings.Trim(tok, "[]"), "|") {
-			if isCommandWord(alt) {
-				e.subs = append(e.subs, alt)
-			}
-		}
-	}
-	return e, true
-}
-
-// isCommandWord reports whether a spec token is a literal command word rather
-// than a placeholder, a flag, or punctuation.
-func isCommandWord(tok string) bool {
-	if tok == "" {
-		return false
-	}
-	for _, r := range tok {
-		if (r < 'a' || r > 'z') && r != '-' {
-			return false
-		}
-	}
-	return !strings.HasPrefix(tok, "-")
-}
-
 // runCommand invokes a command with args, silencing its output and turning a
 // panic into a test failure (a panicking CLI is the bug this file guards).
-func runCommand(t *testing.T, c *command, args []string) (err error) {
+func runCommand(t *testing.T, c *cmdSpec, args []string) (err error) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
-			t.Errorf("amux %s %s panicked: %v", c.names[0], strings.Join(args, " "), r)
+			t.Errorf("amux %s %s panicked: %v", c.Name, strings.Join(args, " "), r)
 		}
 	}()
 	_, err = captureOutput(t, func() error { return c.run(args) })

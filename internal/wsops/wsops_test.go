@@ -2,6 +2,7 @@ package wsops
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1358,7 +1359,7 @@ func TestWriteAgentGuide(t *testing.T) {
 		}
 		// Ordinary agents should use the self-scoped agent namespace rather
 		// than reaching for amux's operator-facing control-plane commands.
-		for _, want := range []string{"amux agent --help", "amux agent events", "amux agent name <display name>", "amux agent done"} {
+		for _, want := range []string{"amux agent --help", "amux --help --all", "amux agent events", "amux agent name <display name>", "amux agent done"} {
 			if !strings.Contains(string(b), want) {
 				t.Errorf("kind %q: %s missing agent command guidance %q", tc.kind, tc.file, want)
 			}
@@ -1538,7 +1539,10 @@ func TestAgentCommandSeedsPrivateConfig(t *testing.T) {
 	if !found {
 		t.Fatalf("env should point CLAUDE_CONFIG_DIR at the private home %q: %v", priv, env)
 	}
-	if b, err := os.ReadFile(filepath.Join(priv, "settings.json")); err != nil || string(b) != `{"theme":"dark"}` {
+	// Seeded from the user's, plus the unattended auto-mode pre-answers.
+	var seeded map[string]any
+	if b, err := os.ReadFile(filepath.Join(priv, "settings.json")); err != nil || json.Unmarshal(b, &seeded) != nil ||
+		seeded["theme"] != "dark" || seeded[claudecfg.SkipAutoPermissionPromptKey] != true {
 		t.Fatalf("private home not seeded from the user's: %q %v", b, err)
 	}
 	// Trust landed in the copy, not the user's file.

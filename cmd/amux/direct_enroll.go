@@ -18,62 +18,6 @@ import (
 // errors so a refused invocation always shows one that would work.
 const directEnrollExample = "amux direct enroll --label phone --permissions read --all-sessions"
 
-// directEnrollHelp documents every enroll flag. directUsage embeds it, and
-// `amux direct enroll --help` prints it alone.
-const directEnrollHelp = `enroll flags (the running server publishes its endpoints into the bundle):
-  --label <text>          name for the client, shown in clients list
-                          (default: <hostname>-<YYYYMMDD-HHMM>)
-  --permissions <list>    comma list; read is always required (default: read):
-                            read     inventory, history, live stream
-                            steer    prompt, interject, stop
-                            respond  goal control
-                            approve  answer permission requests (allow/deny)
-                            manage   start, rename, archive, unarchive
-                            create   add-agent; new workgroups (--all-sessions only)
-                            accounts read machine account status (--all-sessions only)
-                          e.g. read,steer or read,steer,respond,manage
-                          Nothing implies anything else; there is no "all".
-  --all-sessions          grant every session on this host, or
-  --workgroup <root-id>   grant one workgroup and its members (repeatable)
-                          The scope never defaults: without either flag,
-                          enroll asks on a terminal (all sessions, a
-                          workgroup, or cancel) and fails otherwise.
-  --ttl <dur>             code lifetime (default 10m, maximum 1h)
-  --json                  print the full response as JSON on stdout
-  --qr                    also draw the enrollment as a QR code for the
-                          Harness Android app (Backends > Connect a machine
-                          from a QR code). See "QR enrollment" below.
-  --invert                swap the QR's filled and empty cells; use it when
-                          your terminal ignores colors and has a dark
-                          background (or the code looks like a negative)
-  --qr-png <path>         also write the QR code as a PNG to a NEW file,
-                          created with mode 0600 (an existing file is refused);
-                          delete it after enrolling
-
-  Before minting, enroll prints the effective label, permissions and scope on
-  stderr. Without QR flags it prints a v1 bundle (amux-direct:1:...) alone on
-  stdout, to paste into a client.
-
-QR enrollment (--qr, --qr-png):
-  The code is a device ticket (amux-direct:2:...), minted locally with no
-  cloud involved: the phone verifies the server identity, then claims the
-  ticket with its own secret before redeeming it, so a photo of the code is
-  useless once the phone has claimed it. It is single use and expires like a
-  bundle. The SAME ticket (one credential, not a second one) is printed alone
-  on stdout, where it can be piped or pasted into the app's ticket box; there
-  is no v1 bundle in this mode. The QR code and instructions go to stderr when
-  stderr is a terminal, otherwise to the controlling terminal (/dev/tty), so
-  amux direct enroll --qr | ... still shows the code; with no terminal at all,
-  --qr fails before minting (use --qr-png).
-
-  e.g. amux direct enroll --qr
-       amux direct enroll --label pixel --permissions read,steer --workgroup 771951 --qr
-`
-
-func directEnrollUsage(w io.Writer) {
-	fmt.Fprint(w, "usage: amux direct enroll [flags]\n\n"+directEnrollHelp)
-}
-
 // enrollEnv is everything enroll touches outside its arguments, so tests can
 // drive it without a terminal, a daemon or a direct server.
 type enrollEnv struct {
@@ -116,7 +60,7 @@ type enrollFlags struct {
 
 func parseEnrollFlags(args []string) (enrollFlags, error) {
 	var f enrollFlags
-	fs := flag.NewFlagSet("amux direct enroll", flag.ContinueOnError)
+	fs := newCmdFlagSet("direct enroll")
 	fs.StringVar(&f.label, "label", "", "")
 	fs.StringVar(&f.perms, "permissions", "", "")
 	fs.BoolVar(&f.all, "all-sessions", false, "")
@@ -126,8 +70,7 @@ func parseEnrollFlags(args []string) (enrollFlags, error) {
 	fs.BoolVar(&f.invert, "invert", false, "")
 	fs.StringVar(&f.qrPNG, "qr-png", "", "")
 	fs.Var(&f.groups, "workgroup", "")
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
+	if err := parseCmdFlags(fs, "direct enroll", args); err != nil {
 		return f, err
 	}
 	if fs.NArg() != 0 {
@@ -258,13 +201,12 @@ func promptEnrollScope(in io.Reader, out io.Writer, perms string) (direct.Resour
 func runDirectEnroll(args []string, env enrollEnv) error {
 	for _, a := range args {
 		if a == "-h" || a == "-help" || a == "--help" {
-			directEnrollUsage(env.stderr)
+			printHelp(env.stdout, mustHelpNode("direct enroll"))
 			return nil
 		}
 	}
 	f, err := parseEnrollFlags(args)
 	if err != nil {
-		directEnrollUsage(env.stderr)
 		return err
 	}
 	g, err := resolveEnrollGrant(f, env)

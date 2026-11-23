@@ -495,6 +495,10 @@ type CapabilitiesResponse struct {
 	// Enrichments is set when the daemon publishes session enrichments (PR
 	// watching on); absent from a server that predates them or has them off.
 	Enrichments *EnrichmentCapabilities `json:"enrichments,omitempty"`
+	// Queue and Overseer describe the question queue and overseer routes for
+	// this grant (queue.go). Absent: the server predates them.
+	Queue    *QueueCapabilities    `json:"queue,omitempty"`
+	Overseer *OverseerCapabilities `json:"overseer,omitempty"`
 }
 
 // CreationCatalog is the allowlisted, machine-appropriate input space for the
