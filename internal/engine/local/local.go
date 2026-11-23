@@ -22,6 +22,7 @@ import (
 	"amux/internal/engine"
 	"amux/internal/launchenv"
 	"amux/internal/termmodes"
+	"amux/internal/vterm"
 )
 
 // scrollbackBytes bounds the per-instance replay buffer. It's enough to repaint
@@ -347,6 +348,15 @@ type instance struct {
 	resizeSeq     uint64
 	pendingResize *pty.Winsize
 
+	// screen mirrors the pane's current screen from the first output byte, so
+	// the daemon can read the runtime's composer before typing into it (see
+	// Screen). It never answers the child's terminal queries — the attached
+	// clients do — and is closed when the process exits.
+	screen *vterm.Terminal
+	// humanInput is when a client last typed into the pane (Input), not
+	// counting the terminal's automatic replies or amux's own InputSequence.
+	humanInput time.Time
+
 	// done is closed by pump once the process has been reaped, so kill() can
 	// wait for a graceful exit before escalating to SIGKILL.
 	done chan struct{}
@@ -401,6 +411,7 @@ func spawn(spec engine.Spec, onExit func(engine.Key, *instance), activity engine
 		inDone:   make(chan struct{}),
 		activity: activity,
 		onExit:   onExit,
+		screen:   vterm.NewRemote(cols, rows, nil, nil),
 	}
 	go in.pump()
 	go in.inputLoop()
@@ -446,7 +457,96 @@ func (in *instance) Subscribe(sink engine.Sink) func() {
 // order is preserved by the single FIFO queue drained by one goroutine. If the
 // queue is full the bytes are dropped (see inputBuf).
 func (in *instance) Input(p []byte) {
+	if len(p) > 0 && !terminalReply(p) {
+		in.mu.Lock()
+		in.humanInput = time.Now()
+		in.mu.Unlock()
+	}
 	in.InputSequence([]engine.InputStep{{Bytes: p}})
+}
+
+// LastHumanInput reports when a client last typed into the pane: keys, pastes
+// and mouse events through Input, but not the attached terminal's automatic
+// replies to the child's queries, and never amux's own InputSequence. Zero
+// means no one has.
+func (in *instance) LastHumanInput() time.Time {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.humanInput
+}
+
+// Started is when the runtime process started.
+func (in *instance) Started() time.Time { return in.started }
+
+// Screen returns the pane's current screen, mirrored from its output. ok is
+// false once the process has exited.
+func (in *instance) Screen() (vterm.Snapshot, bool) {
+	in.mu.Lock()
+	scr, exited := in.screen, in.exited
+	in.mu.Unlock()
+	if scr == nil || exited {
+		return vterm.Snapshot{}, false
+	}
+	return scr.Snapshot(), true
+}
+
+// terminalReply reports input that is only a terminal's automatic answer to a
+// query the child made — a cursor position or device attributes report, a
+// mode/kitty-keyboard/color/version reply, or a focus change — rather than
+// something a human typed. Attaching a client replays the child's startup
+// queries into its emulator, which answers them through the same input path
+// as keystrokes; those answers must not read as the user being at the keyboard.
+// Anything it cannot classify is human input.
+func terminalReply(p []byte) bool {
+	for len(p) > 0 {
+		n := replyLen(p)
+		if n == 0 {
+			return false
+		}
+		p = p[n:]
+	}
+	return true
+}
+
+// replyLen returns the length of one leading terminal reply in p, or 0.
+func replyLen(p []byte) int {
+	if len(p) < 3 || p[0] != 0x1b {
+		return 0
+	}
+	switch p[1] {
+	case ']', 'P', '_': // OSC (color/clipboard reply), DCS (version, DECRQSS), APC
+		for i := 2; i < len(p); i++ {
+			if p[i] == 0x07 {
+				return i + 1
+			}
+			if p[i] == 0x1b && i+1 < len(p) && p[i+1] == '\\' {
+				return i + 2
+			}
+		}
+		return 0
+	case '[':
+		i := 2
+		for i < len(p) && p[i] >= 0x20 && p[i] <= 0x3f {
+			i++ // parameter and intermediate bytes
+		}
+		if i >= len(p) {
+			return 0
+		}
+		params, final := string(p[2:i]), p[i]
+		switch {
+		case params == "" && (final == 'I' || final == 'O'): // focus in/out
+		case final == 'R' && strings.Contains(params, ";") && !strings.HasPrefix(params, "1;"): // CPR (not a modified F3)
+		case final == 'c' && (strings.HasPrefix(params, "?") || strings.HasPrefix(params, ">")): // DA1/DA2
+		case final == 'n' && params != "": // DSR
+		case final == 'y' && strings.HasSuffix(params, "$"): // DECRPM
+		case final == 'u' && strings.HasPrefix(params, "?"): // kitty keyboard flags
+		case final == 't' && params != "": // window size report
+		default:
+			return 0
+		}
+		return i + 1
+	}
+	return 0
 }
 
 // InputSequence copies and queues a whole transaction, dropping it if the queue
@@ -521,6 +621,7 @@ func (in *instance) Resize(cols, rows int) {
 		return
 	}
 	target := &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}
+	in.screen.Resize(cols, rows)
 	if in.pendingResize != nil && in.pendingResize.Cols == target.Cols && in.pendingResize.Rows == target.Rows {
 		return // Keep concurrent attachments from collapsing the redraw interval.
 	}
@@ -580,6 +681,7 @@ func (in *instance) pump() {
 			copy(chunk, buf[:n])
 			in.mu.Lock()
 			in.appendRing(chunk)
+			in.screen.Feed(chunk)
 			for _, s := range in.subs {
 				if s.sink.Output != nil {
 					s.sink.Output(chunk)
@@ -595,6 +697,7 @@ func (in *instance) pump() {
 			in.mu.Lock()
 			in.closePtmx()
 			in.exited = true
+			in.screen.Close()
 			in.exitErr = werr
 			subs := make([]*subscriber, 0, len(in.subs))
 			for _, s := range in.subs {

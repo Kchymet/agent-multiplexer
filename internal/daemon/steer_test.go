@@ -73,6 +73,9 @@ type fakeInstance struct {
 	wrote     [][]byte
 	sequences [][]engine.InputStep
 	dead      bool
+	// pane, when set, simulates the runtime's screen and composer (see
+	// typed_delivery_test.go); without one the instance is unobservable.
+	pane *fakePane
 }
 
 func (f *fakeInstance) Key() engine.Key              { return f.key }
@@ -96,6 +99,9 @@ func (f *fakeInstance) InputSequence(steps []engine.InputStep) {
 	if f.Alive() {
 		for _, step := range steps {
 			f.Input(step.Bytes)
+			if f.pane != nil {
+				f.pane.apply(step.Bytes)
+			}
 		}
 	}
 }

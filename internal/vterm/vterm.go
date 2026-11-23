@@ -549,14 +549,18 @@ func (t *Terminal) Closed() bool {
 }
 
 // Close tears down the PTY and kills the child if still running. Closing the
-// emulator unblocks the forwardResponses goroutine (emu.Read returns EOF); the
-// done signal stops the remote-mode feed goroutine.
+// emulator's reply pipe unblocks the forwardResponses/drainResponses goroutine
+// (emu.Read returns EOF); the done signal stops the remote-mode feed goroutine.
+// The pipe is closed directly rather than through emu.Close, which also sets an
+// unsynchronized flag those goroutines read concurrently (a data race).
 func (t *Terminal) Close() error {
 	if t.done != nil {
 		t.once.Do(func() { close(t.done) })
 	}
 	if t.emu != nil {
-		_ = t.emu.Close()
+		if pw, ok := t.emu.InputPipe().(interface{ CloseWithError(error) error }); ok {
+			_ = pw.CloseWithError(io.EOF)
+		}
 	}
 	if t.ptmx != nil {
 		_ = t.ptmx.Close()

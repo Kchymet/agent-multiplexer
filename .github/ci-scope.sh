@@ -24,7 +24,7 @@ set -uo pipefail
 # Paths under docs/ that tests actually read. These are test inputs, not prose.
 # Keep this to real reads (grep the tests for "../../docs/"): the rest of
 # docs/evidence/ is explanatory READMEs, checkpoints and captures no code reads.
-#   always-pty.raw   internal/{daemon,termmodes,vterm} tests (os.ReadFile)
+#   always-pty.raw   internal/{composer,daemon,termmodes,vterm} tests (os.ReadFile)
 #   direct/fixtures  internal/direct/*fixtures_test.go (whole v1, cloud-v1 and
 #                    ticket-v1 directories, checked against their SHA256SUMS)
 ci_inputs() {
