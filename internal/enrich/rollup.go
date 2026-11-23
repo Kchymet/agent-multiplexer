@@ -46,7 +46,14 @@ type Result struct {
 	SubState string
 	// Lead is the word(s) that open the row's status line.
 	Lead string
+	// NeedsYou names who is blocked on the user (Supervision.NeedsYou):
+	// CoordinatorLabel for the coordinator itself, then member labels. State
+	// is waiting exactly when it is non-empty.
+	NeedsYou []string
 }
+
+// CoordinatorLabel names the coordinator itself in NeedsYou.
+const CoordinatorLabel = "coordinator"
 
 // Goal statuses that need the user.
 func goalNeedsUser(goal string) bool {
@@ -72,9 +79,11 @@ const maxReasonItems = 3
 
 // Rollup derives a workgroup's state, first match wins:
 //
-//	waiting_user   the coordinator or a member waits on the user, or the
-//	               coordinator is between turns with a goal that needs the user
-//	running        the coordinator or a member is running (or live, unknown)
+//	waiting_user   someone is blocked on the user: the coordinator's own
+//	               prompt or question, its goal needing the user while it is
+//	               between turns, or a waiting member (NeedsYou names who)
+//	running        the coordinator or a member is running (or live, unknown);
+//	               a between-turns coordinator then is "supervising"
 //	pr_attention   an open PR needs work: the coordinator's job, not the user's
 //	waiting_review an open PR waits on review
 //	waiting_merge  an open PR waits on a merge
@@ -88,9 +97,14 @@ func Rollup(in Input) Result {
 		own = hp.StateIdle
 	}
 	between := own == hp.StateReady || own == hp.StateIdle || own == hp.StateUnknown
+	goalNeeds := between && goalNeedsUser(in.Goal)
 	maxState := own
-	var waiting, busy, prItems []string
-	nWaiting, nRunning := 0, 0
+	var needs, busy, prItems []string
+	if own == hp.StateWaiting || goalNeeds {
+		needs = append(needs, CoordinatorLabel)
+	}
+	nRunning := 0
+	inflight := false
 	counts := hp.PullRequestCounts{}
 	tier := map[string][]string{} // phase -> reason items
 	stale := false
@@ -100,9 +114,10 @@ func Rollup(in Input) Result {
 		}
 		switch m.State {
 		case hp.StateWaiting:
-			nWaiting++
-			waiting = append(waiting, m.Label+" waiting")
+			inflight = true
+			needs = append(needs, m.Label)
 		case hp.StateRunning, hp.StateUnknown:
+			inflight = true
 			nRunning++
 			busy = append(busy, m.Label+" "+m.State)
 		}
@@ -163,29 +178,36 @@ func Rollup(in Input) Result {
 	}
 	var reason []string
 	stopped := own == hp.StateIdle
-	switch {
-	case own == hp.StateWaiting || nWaiting > 0 || (between && goalNeedsUser(in.Goal)):
-		ro.State, ro.Count, ro.Label = hp.RollupWaitingUser, nWaiting, "waiting on you"
-		r.State, r.Lead = hp.StateWaiting, hp.StateWaiting
-		if goalNeedsUser(in.Goal) && strings.TrimSpace(in.GoalNote) != "" {
-			reason = append(reason, "goal "+in.Goal+": "+oneLine(in.GoalNote))
-		} else if len(waiting) > 0 {
-			reason = append(reason, "waiting on "+list(append(append(waiting, busy...), prItems...)))
+	supervising := between && inflight
+	supervise := func() {
+		if !supervising {
+			return
 		}
+		r.SubState = hp.SubStateSupervising
+		if items := append(append([]string(nil), busy...), prItems...); len(items) > 0 {
+			reason = append(reason, "supervising "+list(items))
+		}
+		if stopped {
+			reason = append(reason, "coordinator stopped: wake-ups wait until it starts")
+		}
+	}
+	switch {
+	case len(needs) > 0:
+		ro.State, ro.Count, ro.Label = hp.RollupWaitingUser, len(needs), "waiting on you"
+		r.State, r.Lead, r.NeedsYou = hp.StateWaiting, hp.StateWaiting, needs
+		reason = append(reason, "needs you: "+list(needs))
+		if goalNeeds && strings.TrimSpace(in.GoalNote) != "" {
+			reason = append(reason, "goal "+in.Goal+": "+oneLine(in.GoalNote))
+		}
+		supervise()
 	case own == hp.StateRunning || nRunning > 0:
 		ro.State, ro.Count = hp.RollupRunning, nRunning
 		ro.Label = "running" + agents(nRunning)
-		r.State, r.Lead = maxState, own
+		r.State, r.Lead = maxState, hp.StateRunning
 		if rank(r.State) < rank(hp.StateRunning) {
 			r.State = hp.StateRunning
 		}
-		if between && nRunning > 0 {
-			r.SubState, r.Lead = hp.SubStateSupervising, hp.SubStateSupervising
-			reason = append(reason, "waiting on "+list(append(busy, prItems...)))
-			if stopped {
-				reason = append(reason, "coordinator stopped: wake-ups wait until it starts")
-			}
-		}
+		supervise()
 	case len(tier[hp.PRPhaseAttention]) > 0:
 		n := len(tier[hp.PRPhaseAttention])
 		ro.State, ro.Count, ro.Label = hp.RollupPRAttention, n, "PR attention · "+prs(n)

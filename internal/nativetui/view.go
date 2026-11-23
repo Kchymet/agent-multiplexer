@@ -432,6 +432,11 @@ func (m *model) waitingMembers(s *core.Session) int {
 	if !container(s) {
 		return 0
 	}
+	// A daemon that names who needs the user leads the coordinator's own
+	// status with it ("waiting · 1 agent needs you"); a chip would repeat it.
+	if s.Supervision != nil && len(s.Supervision.NeedsYou) > 0 {
+		return 0
+	}
 	n := 0
 	for i := range m.sessions {
 		c := &m.sessions[i]

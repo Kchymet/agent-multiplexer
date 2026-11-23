@@ -1,6 +1,7 @@
 package source
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,13 +51,23 @@ func (pc prContext) stale(pr harnessproto.SessionPR) enrich.Staleness {
 // pr_attention > waiting_review / waiting_merge > ready / idle; this adds the
 // supervision detail (the members still in flight).
 //
-//   - A coordinator that is not itself mid-turn while a member runs is
-//     "supervising": state running and SubState supervising.
-//   - A goal that needs the user (input, blocked, budgetLimited) makes an
-//     otherwise between-turns coordinator waiting.
+// "waiting" is the attention chip and means one thing everywhere: someone in
+// the workgroup is blocked on the user. Idle is never waiting. So:
+//
+//   - The row is waiting only when the coordinator itself is waiting (a
+//     permission prompt or question of its own), its goal needs the user while
+//     it is between turns — input (it asked a question), blocked,
+//     budgetLimited — or a member is waiting. Supervision.NeedsYou names who,
+//     and the status line leads "waiting · N agents need you".
+//   - Otherwise it is running when the coordinator or any member is: a
+//     coordinator that is not itself mid-turn (ready, idle or unknown) while a
+//     member runs is "supervising" — state running, SubState supervising,
+//     status "running · N agents". An idle coordinator with a running member
+//     is running.
 //   - With only open PRs outstanding the row is calm: pr_attention (state
 //     running — the coordinator's job; ready when it is stopped), or
 //     waiting_review / waiting_merge (state ready, not the attention badge).
+//   - It is idle/ready only when it and all its members are.
 func superviseCoordinator(ownState, goal, goalNote string, members []memberView, pc prContext) coordinatorView {
 	in := enrich.Input{
 		OwnState: ownState, Goal: goal, GoalNote: goalNote, Now: pc.now,
@@ -75,8 +86,34 @@ func superviseCoordinator(ownState, goal, goalNote string, members []memberView,
 		})
 	}
 	r := enrich.Rollup(in)
+	sup.NeedsYou = r.NeedsYou
 	sup.Reason = r.Rollup.Reason
 	return coordinatorView{state: r.State, subState: r.SubState, lead: r.Lead, supervision: sup, rollup: r.Rollup}
+}
+
+// CoordinatorLabel names the coordinator itself in Supervision.NeedsYou.
+const CoordinatorLabel = enrich.CoordinatorLabel
+
+// coordinatorStatus is a coordinator row's status line: "waiting · 1 agent
+// needs you" when someone is blocked on the user, else "<lead> · N agents"
+// (running while any work is in flight, else ready/idle), then the goal
+// suffix and the reason.
+func coordinatorStatus(v coordinatorView, members int, goalSuffix string) string {
+	var status string
+	if n := len(v.supervision.NeedsYou); n > 0 {
+		verb := "need"
+		if n == 1 {
+			verb = "needs"
+		}
+		status = fmt.Sprintf("%s · %d agent%s %s you", core.StateWaiting, n, plural(n), verb)
+	} else {
+		status = fmt.Sprintf("%s · %d agent%s", stateLabel(v.lead), members, plural(members))
+	}
+	status += goalSuffix
+	if v.supervision.Reason != "" {
+		status += " · " + v.supervision.Reason
+	}
+	return status
 }
 
 func openPRs(prs []harnessproto.SessionPR) []harnessproto.SessionPR {

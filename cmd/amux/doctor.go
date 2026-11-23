@@ -94,8 +94,13 @@ func cmdDoctor() error {
 				fmt.Printf("  ✓ %-8s %-26s %s\n      %s  (%s)\n", d.bin, r.Version, d.note, r.Path, r.Binary.Label())
 			}
 			if harnessbin.Supported(d.bin) {
-				if st := harnessManager().LoadState(d.bin); st.Available != "" {
+				m := harnessManager()
+				st := m.LoadState(d.bin)
+				if st.Available != "" {
 					fmt.Printf("      update %s available — amux harness update %s\n", st.Available, d.bin)
+				}
+				if m.Current(d.bin) == "" {
+					fmt.Printf("      managed install: %s\n", adoptionStatus(st))
 				}
 			}
 			continue
@@ -250,6 +255,15 @@ func cmdDoctor() error {
 	// silent when there's nothing to say (non-macOS or an unrecognized terminal).
 	if lines := checkHotkeys(os.Getenv, iterm2OptionKeySends); len(lines) != 0 {
 		fmt.Println("\nTerminal")
+		for _, l := range lines {
+			fmt.Println(l)
+		}
+	}
+
+	// Hyperlinks: a tmux around the TUI strips agents' OSC 8 links unless its
+	// terminal-features enable them (doctor_hyperlinks.go). Silent outside tmux.
+	if lines := checkHyperlinks(os.Getenv, tmuxClientFeatures); len(lines) != 0 {
+		fmt.Println("\nLinks")
 		for _, l := range lines {
 			fmt.Println(l)
 		}

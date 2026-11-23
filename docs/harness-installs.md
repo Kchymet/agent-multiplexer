@@ -165,7 +165,19 @@ harness that passes every one of these rules (`harnessbin.AdoptDecision`):
 The version installed is the channel's, or the version of your own binary when
 that is newer, so adoption never moves new sessions to an older release than
 the one you were running. `amux harness adopt --dry-run` prints each decision
-and its reason.
+and its reason, as seen from your shell.
+
+The daemon's own decisions are what count, and its environment can differ from
+your shell's. Each harness's last decision (`adopt` or `skip`, with its reason
+and time), an attempt still installing, and the last failure are stored in
+`state.json`. `amux harness ls` shows them on an `adoption` line, and `amux
+doctor` under each harness. The daemon also logs every decision, declines
+included, once per run in `daemon.log` (`harness updates: not adopting claude:
+… [binary: …; login: …]`), with the binary and login it found.
+
+A login shell's `command -v` counts only when it prints an absolute path to an
+executable. Startup-file output and alias or function definitions are ignored,
+and resolution moves on to the usual install locations.
 
 ### Running sessions move to the new version
 

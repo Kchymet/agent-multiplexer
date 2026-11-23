@@ -125,6 +125,11 @@ func TestMemberSettled(t *testing.T) {
 	if MemberSettled([]hp.SessionPR{open(1, mergedAgo(time.Hour)), open(2, draft)}) {
 		t.Fatal("an open draft is not settled")
 	}
+	closed := open(3, func(pr *hp.SessionPR) { pr.State = "closed" })
+	if !AllMerged([]hp.SessionPR{open(1, mergedAgo(time.Hour))}) || AllMerged(nil) ||
+		AllMerged([]hp.SessionPR{open(1, mergedAgo(time.Hour)), closed}) || !MemberSettled([]hp.SessionPR{closed}) {
+		t.Fatal("AllMerged: only a non-empty, all-merged set qualifies; closed-unmerged settles but does not merge")
+	}
 }
 
 func mem(id, state string, prs ...hp.SessionPR) Member {
@@ -147,14 +152,14 @@ func TestRollupPrecedence(t *testing.T) {
 		reason        string
 	}{
 		{"member waiting beats everything", ready, "", []Member{mem("a", waiting), mem("b", running, open(1, red))},
-			hp.RollupWaitingUser, waiting, "", 1, "waiting on you", "waiting on a waiting, b running, b PR #1 CI failed"},
-		{"coordinator waiting", waiting, "", []Member{mem("a", running)}, hp.RollupWaitingUser, waiting, "", 0, "waiting on you", ""},
-		{"goal input between turns", ready, "input", []Member{mem("a", running)}, hp.RollupWaitingUser, waiting, "", 0, "waiting on you", ""},
+			hp.RollupWaitingUser, waiting, hp.SubStateSupervising, 1, "waiting on you", "needs you: a; supervising b running, b PR #1 CI failed"},
+		{"coordinator waiting", waiting, "", []Member{mem("a", running)}, hp.RollupWaitingUser, waiting, "", 1, "waiting on you", "needs you: coordinator"},
+		{"goal input between turns", ready, "input", []Member{mem("a", running)}, hp.RollupWaitingUser, waiting, hp.SubStateSupervising, 1, "waiting on you", "needs you: coordinator; supervising a running"},
 		{"goal input mid-turn stays running", running, "input", nil, hp.RollupRunning, running, "", 0, "running", ""},
 		{"running member beats a red PR", ready, "", []Member{mem("a", running), mem("b", ready, open(1, red))},
-			hp.RollupRunning, running, hp.SubStateSupervising, 1, "running · 1 agent", "waiting on a running, b PR #1 CI failed"},
+			hp.RollupRunning, running, hp.SubStateSupervising, 1, "running · 1 agent", "supervising a running, b PR #1 CI failed"},
 		{"unknown member counts as running", ready, "", []Member{mem("a", unknown)},
-			hp.RollupRunning, running, hp.SubStateSupervising, 1, "running · 1 agent", "waiting on a unknown"},
+			hp.RollupRunning, running, hp.SubStateSupervising, 1, "running · 1 agent", "supervising a unknown"},
 		{"coordinator running", running, "", []Member{mem("a", ready, open(1, approved))}, hp.RollupRunning, running, "", 0, "running", ""},
 		{"attention beats review and merge", ready, "", []Member{mem("a", ready, open(1, red), open(2, needsReview)), mem("b", idle, open(3, approved))},
 			hp.RollupPRAttention, running, hp.SubStatePRAttention, 1, "PR attention · 1 PR", "a PR #1 CI failed"},

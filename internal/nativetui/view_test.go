@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"amux/internal/core"
+
+	"github.com/kchymet/agent-multiplexer/harnessproto"
 )
 
 // Adding an agent to a workgroup row (root or child) opens the add-agent form
@@ -201,6 +203,27 @@ func TestStatusSegmentsSupervising(t *testing.T) {
 	segs := statusSegments("supervising · 2 agents · waiting on a running")
 	if len(segs) != 2 || segs[0].text != "supervising" || segs[0].style.Render("x") != stateStyle(core.StateRunning).Render("x") {
 		t.Fatalf("segments = %+v", segs)
+	}
+}
+
+// A coordinator whose status already says who needs the user leads with the
+// attention chip and no separate "N waiting" chip; an older daemon's row (no
+// needsYou) keeps the member-count chip.
+func TestRowStatusNeedsYouNotRepeated(t *testing.T) {
+	root := core.Session{ID: "wg1", Title: "wg", IsRoot: true, Role: "coordinator", Section: core.SectionWorkgroups,
+		State: core.StateWaiting, Status: "waiting · 1 agent needs you · needs you: b",
+		Supervision: &harnessproto.Supervision{NeedsYou: []string{"b"}}}
+	member := core.Session{ID: "m1", RootID: "wg1", Section: core.SectionWorkgroups, State: core.StateWaiting}
+	m := &model{sessions: []core.Session{root, member}}
+	got := m.rowStatus(root, "")
+	if strings.Contains(got, "1 waiting") || !strings.Contains(got, " waiting ") {
+		t.Fatalf("sub-line = %q", got)
+	}
+	root.Supervision = nil
+	root.Status = "supervising · 1 agent · waiting on b waiting"
+	m.sessions[0] = root
+	if got := m.rowStatus(root, ""); !strings.Contains(got, "1 waiting") {
+		t.Fatalf("older daemon row lost its waiting chip: %q", got)
 	}
 }
 

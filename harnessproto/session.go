@@ -125,7 +125,10 @@ type Session struct {
 const (
 	// SubStateSupervising: a coordinator that is not itself mid-turn while the
 	// work it dispatched is in flight. State is then running (or waiting, when
-	// a member needs the user), never ready/idle.
+	// someone in the workgroup is blocked on the user — see
+	// Supervision.NeedsYou), never ready/idle. Its status line leads with the
+	// state word ("running · 2 agents"); daemons before needsYou led it with
+	// "supervising".
 	SubStateSupervising = "supervising"
 	// SubStatePRAttention: open PRs need work (CI red, conflict, changes
 	// requested, behind, draft) and nothing else is in flight. It is the
@@ -154,8 +157,13 @@ type Supervision struct {
 	// Members lists the members still in flight — running, waiting or unknown,
 	// or owning an open PR — in creation order.
 	Members []SupervisedMember `json:"members,omitempty"`
-	// Reason is a one-line human summary of what the coordinator is waiting on
-	// (also appended to Session.Status).
+	// NeedsYou names who in the workgroup is blocked on the user — member
+	// labels, and "coordinator" for the coordinator itself (its own prompt or
+	// question, or a goal needing input) — in creation order. Session.State is
+	// waiting exactly when it is non-empty; idle agents never appear here.
+	NeedsYou []string `json:"needsYou,omitempty"`
+	// Reason is a one-line human summary of who needs the user and what the
+	// coordinator is supervising (also appended to Session.Status).
 	Reason string `json:"reason,omitempty"`
 }
 

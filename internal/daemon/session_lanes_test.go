@@ -26,6 +26,7 @@ func TestSessionCallLanes(t *testing.T) {
 		op(access.RouteAction, sessionreport.PermissionRequest),
 		op(access.RouteAction, sessionreport.PermissionResolved),
 		op(access.RouteAction, sessionreport.PermissionClear),
+		op(access.RouteAction, sessionreport.Notice),
 		op(access.RouteQuery, core.QueryVersion),
 		op(access.RouteQuery, core.QuerySessions),
 		op(access.RouteQuery, core.QueryRepos),

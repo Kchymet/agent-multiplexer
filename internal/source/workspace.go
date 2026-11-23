@@ -212,10 +212,7 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		}
 		goal, goalNote := w.goal(r)
 		view := superviseCoordinator(ownState, goal, goalNote, views, pc)
-		status := fmt.Sprintf("%s · %d agent%s%s", stateLabel(view.lead), len(active), plural(len(active)), w.goalSuffix(r, ownState, goal))
-		if view.supervision.Reason != "" {
-			status += " · " + view.supervision.Reason
-		}
+		status := coordinatorStatus(view, len(active), w.goalSuffix(r, ownState, goal))
 		if view.rollup.Stale {
 			status += " · PR data stale"
 		}

@@ -90,8 +90,8 @@ github.com/charmbracelet/x/termios@v0.1.1
   linked packages: github.com/charmbracelet/x/termios
   legal files: LICENSE (SHA-256 0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b)
 
-github.com/charmbracelet/x/vt@v0.0.0-20260621010513-945fab64fd3e
-  module checksum: h1:iMde8FSEL9e9LQ7UgtGDRukteF35wRFGWeoB1gxKDDk=
+github.com/charmbracelet/x/vt@v0.1.0
+  module checksum: h1:oVueL3dwH/DlY/z6R6XHA9PQ/w3LdCCq99600Vs48vA=
   go.mod checksum: h1:u1LOIABor9JqY54oZdktK3TCRrgzP6tzHrDYx1nd3wY=
   targets: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
   linked packages: github.com/charmbracelet/x/vt
@@ -548,7 +548,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
---- github.com/charmbracelet/x/vt@v0.0.0-20260621010513-945fab64fd3e :: LICENSE (SHA-256 0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b) ---
+--- github.com/charmbracelet/x/vt@v0.1.0 :: LICENSE (SHA-256 0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b) ---
 MIT License
 
 Copyright (c) 2023 Charmbracelet, Inc.

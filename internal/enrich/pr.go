@@ -46,6 +46,19 @@ func MemberSettled(prs []hp.SessionPR) bool {
 	return true
 }
 
+// AllMerged reports whether there is at least one PR and every one merged —
+// the coordinator's auto-archive bar (a PR closed without merging, or none at
+// all, means it asks the user instead). MemberSettled is the looser "nothing
+// left open" test.
+func AllMerged(prs []hp.SessionPR) bool {
+	for _, pr := range prs {
+		if pr.State != "merged" {
+			return false
+		}
+	}
+	return len(prs) > 0
+}
+
 // EndedAt is when a merged/closed PR ended: GitHub's mergedAt/closedAt, else
 // when amux observed the change. Zero for an open PR or when unknown.
 func EndedAt(pr hp.SessionPR) time.Time {

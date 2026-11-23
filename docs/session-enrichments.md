@@ -73,7 +73,8 @@ is unavailable; it is still computed from last-known data. The rail and
 
 `enrich.Rollup` is the one workgroup rollup (member states, however derived,
 feed straight into it). `enrich.MemberSettled` is the shared "member has no
-open PR" test for a coordinator retiring a member, and `enrich.Owns` (=
+open PR" test for a coordinator retiring a member, `enrich.AllMerged` the
+self-archive bar (every PR merged; closed-unmerged means ask), and `enrich.Owns` (=
 `ghpr.MatchesBranch`) the shared attribution rule used by the watcher and the
 archive guard.
 

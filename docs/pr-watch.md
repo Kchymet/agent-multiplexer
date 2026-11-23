@@ -77,9 +77,9 @@ when that is safe:
 - the coordinator is live — a stopped coordinator is not cold-started (a
   restarted one is told to re-check what it was waiting on anyway);
 - it is between turns: not mid-turn, and no permission prompt or question is
-  open. Claude's idle reminder also reads "waiting", so a waiting Claude
-  coordinator counts as idle only when no permission is open and its
-  transcript's last turn ended;
+  open. Claude's idle reminder no longer reports "waiting" (see below), but a
+  waiting Claude coordinator still counts as idle when no permission is open
+  and its transcript's last turn ended, for sessions on older hooks;
 - its goal may be continued: active, waiting, or no goal. A paused, complete,
   blocked, budget-limited or input-waiting goal is the user's to move.
 
@@ -104,7 +104,7 @@ either side:
   - → idle: `… stopped (its runtime exited)`.
   A member being steered back to running, a first sighting, and the states
   seen at daemon start wake nobody. Claude's idle reminder and login notices
-  are not reported as "waiting" at all (`claudecfg.NotificationNeedsUser`), so
+  are not reported as "waiting" at all (`claudecfg.ClassifyNotification`), so
   a finished member stays ready.
 - Lines share the PR wake-up queue above, including its delivery gating and
   `[amux goal]` marker. A batch that includes them reads
@@ -128,20 +128,23 @@ is distinguishable from idle.
 
 ## Coordinator status: the workgroup rollup
 
-A coordinator's row reflects the work it dispatched, not only its own turn. Its
-state is `enrich.Rollup` (`internal/enrich/rollup.go`), one pure function of
-the coordinator's own state, its goal, its members' states and their PRs, used
-by the rail, `amux status`, the direct API and the provider alike. First match
-wins:
+`waiting` is the attention chip and means one thing everywhere — the rail,
+`amux status`, the snapshot web and Android read: **someone is blocked on the
+user**. An idle agent is never waiting. A coordinator's row reflects the work
+it dispatched, not only its own turn. Its state is `enrich.Rollup`
+(`internal/enrich/rollup.go`), one pure function of the coordinator's own
+state, its goal, its members' states and their PRs, used by the rail,
+`amux status`, the direct API and the provider alike. First match wins:
 
-1. **waiting on the user** — the coordinator or a member is `waiting`, or the
-   coordinator is between turns with a goal that needs the user (`input`,
-   `blocked`, `budgetLimited`; the goal's note is the reason): `state`
-   `waiting`.
-2. **running** — the coordinator or a member is running (or live and
-   unknown). A between-turns coordinator is **supervising**: `state`
-   `running`, `subState` `supervising`, e.g.
-   `supervising · 2 agents · waiting on m1 running, m2 PR #12 CI running`.
+1. **waiting on the user** — the coordinator has a prompt or question of its
+   own, its goal needs the user while it is between turns (`input`, `blocked`,
+   `budgetLimited`), or a member is waiting: `state` `waiting`. The status line
+   names how many: `waiting · 1 agent needs you · needs you: m2; supervising m1 running`.
+2. **running** — the coordinator or any member is running (or live and
+   unknown). A coordinator between turns (ready, idle or unknown) while a
+   member runs is **supervising**: `state` `running`, `subState`
+   `supervising`, e.g. `running · 2 agents · supervising m1 running, m2 PR #12 CI running`.
+   An idle coordinator with a running member is running.
 3. **pr_attention** — an open PR needs work (draft, CI red, conflict, changes
    requested, behind). It is the coordinator's job — prwatch wakes it — not the
    user's: `state` `running`, `subState` `pr_attention`; `ready` with reason
@@ -150,7 +153,8 @@ wins:
    merge (approved or no review needed, CI possibly still running), are all
    that is outstanding: `state` `ready`, `subState` the rollup state, status
    e.g. `waiting for merge · 2 PRs · 2 agents · m1 PR #79 approved, …`. Not
-   the attention `waiting` badge.
+   the attention `waiting` badge. (Before rollups, a goal coordinator waiting
+   on open PRs read as supervising.)
 5. `ready` / `idle` otherwise.
 
 The rollup itself is the row's `rollup` object (see
@@ -159,6 +163,27 @@ attention ladder.
 
 `amux status --json` adds a `supervision` object to each active coordinator
 row: `ownState` (its own turn activity), `goal` and `goalNote`, `members`
-(the in-flight members: id, title, state, open-PR summary) and `reason`.
-Both fields are additive; a consumer that predates them keeps reading
-`state`/`status`.
+(the in-flight members: id, title, state, open-PR summary), `needsYou` (who is
+blocked on the user: member labels, and `coordinator`; non-empty exactly when
+`state` is `waiting`) and `reason`. All are additive; a consumer that predates
+them keeps reading `state`/`status`. (Daemons before `needsYou` led a
+supervising coordinator's status with the word `supervising`.)
+
+### Where "waiting" comes from (Claude)
+
+The status hook (`claudecfg.hookEvents`) reports `waiting` for:
+
+- a `Notification` that is a prompt — `notification_type` `permission_prompt`,
+  `elicitation_dialog`, `elicitation_url_dialog` or `agent_needs_input`
+  (`claudecfg.ClassifyNotification`). The idle reminder (`idle_prompt`, ~60s
+  after a finished turn), login notices and the other documented
+  informational types leave the state alone. An unknown type is never read as
+  waiting; the hook sends it to the daemon log (`report-notice`, logged once
+  per type) so it can be classified. A payload without `notification_type`
+  (older Claude Code) is waiting only for the permission message
+  (`Claude needs your permission…`);
+- `PreToolUse` matched to `AskUserQuestion`: the question selector is up.
+  `PostToolUse` reports `running` again once it is answered.
+
+Phone wake-ups are driven by runtime `permission_request` / turn-end events,
+not by the rail state word, so a state change alone pages nobody.

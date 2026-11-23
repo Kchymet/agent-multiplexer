@@ -243,6 +243,30 @@ func TestRestartPromptIsNeverANewTask(t *testing.T) {
 	}
 }
 
+// A finished coordinator must wrap up its workgroup instead of idling forever:
+// archive itself only when every PR is verified MERGED and nothing is pending,
+// otherwise ask (before completing the goal, so PR wake-ups still reach it).
+func TestContinuationWrapsUpTheWorkgroup(t *testing.T) {
+	prompt := ContinuationPrompt(State{Status: StatusActive, Objective: "ship it"})
+	for _, want := range []string{
+		"Wrap up the workgroup",
+		"every PR is verified MERGED on GitHub (`gh pr view <n> --json state,mergedAt`)",
+		"never on \"opened\", \"ready\" or a member's word",
+		"no follow-up, open decision, running member or unanswered user message",
+		"`amux agent done` as the last tool call (never --force)",
+		"ask before completing the goal",
+		"`amux agent goal ask \"Archive this workgroup?\"`, then AskUserQuestion",
+		"Archive now / Keep open: waiting on my PR merge / Keep open: I have more work",
+		"a completed goal gets no PR wake-ups",
+		"archive without asking again once all are MERGED",
+		"A PR closed without merging, or any doubt, means ask; never guess.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("continuation prompt missing %q", want)
+		}
+	}
+}
+
 // The continuation must keep a coordinator tracking member PRs to merged or
 // closed, and its waits must name what they await and cover every open PR.
 func TestContinuationTracksMemberPRsToMergedOrClosed(t *testing.T) {

@@ -75,7 +75,7 @@ func resolveContext(ctx context.Context, bin string) string {
 		shell = "/bin/sh"
 	}
 	if out, err := resolveInShell(ctx, shell, bin); err == nil {
-		if p := strings.TrimSpace(string(out)); p != "" && strings.ContainsRune(p, '/') {
+		if p := shellResolvedPath(string(out)); p != "" {
 			return p
 		}
 	}
@@ -175,8 +175,39 @@ func envOr(key, def string) string {
 func resolveInShell(ctx context.Context, shell, bin string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, shell, "-lic", "command -v -- '"+strings.ReplaceAll(bin, "'", "'\"'\"'")+"'")
 	cmd.WaitDelay = 100 * time.Millisecond
-	var out probeOutput
+	// command -v prints last, after anything the user's interactive startup
+	// files print, so keep the tail of the output.
+	var out tailOutput
 	cmd.Stdout = &out
 	err := cmd.Run()
-	return []byte(out.String()), err
+	return out.b, err
+}
+
+// shellResolvedPath picks the executable a login shell's `command -v` named
+// out of its output. An interactive shell's startup files can print banners or
+// notices first, and command -v reports an alias or function as its
+// definition (`alias claude=~/.claude/local/claude`), not a path, so only a
+// line that is an absolute path to an executable counts; anything else falls
+// through to the well-known install locations, as when the shell finds
+// nothing.
+func shellResolvedPath(out string) string {
+	lines := strings.Split(out, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if p := strings.TrimSpace(lines[i]); filepath.IsAbs(p) && isExecutable(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// tailOutput keeps the last 4 KiB written to it.
+type tailOutput struct{ b []byte }
+
+func (t *tailOutput) Write(p []byte) (int, error) {
+	const max = 4 << 10
+	t.b = append(t.b, p...)
+	if len(t.b) > max {
+		t.b = append([]byte(nil), t.b[len(t.b)-max:]...)
+	}
+	return len(p), nil
 }
