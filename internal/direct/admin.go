@@ -36,7 +36,11 @@ type HostVerifier func(ctx context.Context, prove ProveFunc) error
 
 // Admin request operations.
 const (
-	OpEnroll        = "enroll"
+	OpEnroll = "enroll"
+	// OpEnrollTicket mints a local device ticket (Authority.NewLocalTicket)
+	// and returns it as a v2 bundle: the QR form of enroll. A separate
+	// operation, so an older server refuses it instead of minting a v1 code.
+	OpEnrollTicket  = "enroll_ticket"
 	OpList          = "list"
 	OpRevoke        = "revoke"
 	OpResetIdentity = "reset_identity"
@@ -271,15 +275,20 @@ func (s *AdminServer) handle(parent context.Context, conn net.Conn) {
 func Administer(a *Authority, endpoints []string, req AdminRequest) AdminResponse {
 	fail := func(err error) AdminResponse { return AdminResponse{Error: err.Error()} }
 	switch req.Op {
-	case OpEnroll:
+	case OpEnroll, OpEnrollTicket:
 		if len(endpoints) == 0 {
 			return fail(errors.New("enrollment needs a running `amux direct serve` with configured endpoints"))
 		}
-		code, exp, err := a.NewCode(req.Label, req.Permissions, req.Resource, time.Duration(req.TTLSeconds)*time.Second)
+		mint, b := a.NewCode, Bundle{V: 1}
+		if req.Op == OpEnrollTicket {
+			mint, b = a.NewLocalTicket, Bundle{V: 2, Claim: BundleClaimPKCE}
+		}
+		code, exp, err := mint(req.Label, req.Permissions, req.Resource, time.Duration(req.TTLSeconds)*time.Second)
 		if err != nil {
 			return fail(err)
 		}
-		bundle, err := EncodeBundle(Bundle{V: 1, ServerID: a.ServerID(), Endpoints: endpoints, Code: code, ExpiresAt: exp})
+		b.ServerID, b.Endpoints, b.Code, b.ExpiresAt = a.ServerID(), endpoints, code, exp
+		bundle, err := EncodeBundle(b)
 		if err != nil {
 			return fail(err)
 		}
@@ -485,7 +494,7 @@ func OfflineAdminister(ctx context.Context, root string, cred access.Credential,
 	if cred.Kind != access.SubjectHost {
 		return AdminResponse{}, errors.New("administration requires the host credential")
 	}
-	if req.Op == OpEnroll || req.Op == OpIssueCloudCode {
+	if req.Op == OpEnroll || req.Op == OpEnrollTicket || req.Op == OpIssueCloudCode {
 		return AdminResponse{}, errors.New("enrollment needs a running `amux direct serve` (it publishes the configured endpoints)")
 	}
 	if err := verify(ctx, func(ch access.SocketChallenge) (access.SocketProof, error) {
