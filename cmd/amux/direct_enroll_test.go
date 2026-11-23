@@ -111,14 +111,14 @@ func TestEnrollHelpDocumentsEveryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, flag := range []string{"--label", "--permissions", "--all-sessions", "--workgroup", "--ttl", "--json", "--qr", "--invert", "--qr-png", "/dev/tty", directEnrollExample[:18]} {
-		if !strings.Contains(h.stderr.String(), flag) {
+		if !strings.Contains(h.stdout.String(), flag) {
 			t.Errorf("enroll --help does not mention %s", flag)
 		}
 	}
 	if len(h.requests) != 0 {
 		t.Fatal("help minted a code")
 	}
-	if !strings.Contains(directEnrollHelp, "(default: read)") || !strings.Contains(directEnrollHelp, "The scope never defaults") {
+	if !strings.Contains(h.stdout.String(), "(default: read)") || !strings.Contains(h.stdout.String(), "The scope never defaults") {
 		t.Fatal("help does not state the defaults")
 	}
 }

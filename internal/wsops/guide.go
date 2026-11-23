@@ -85,7 +85,8 @@ are assigned (the subdirectories here). %s
 ## Talk to amux as an agent
 When you need to interact with amux itself, use the self-scoped `+"`amux agent ...`"+`
 commands by default. They infer which agent you are, so you do not need to look
-up or pass your own id. Run `+"`amux agent --help`"+` to see the available commands;
+up or pass your own id. Run `+"`amux agent --help`"+` to see the available commands
+(`+"`amux --help --all`"+` prints the whole CLI reference in one plain-text page);
 the ones you will normally need are `+"`amux agent sessions --json`"+` for cross-session
 discovery, `+"`amux agent events --json`"+` to read your own
 normalized history, `+"`amux agent name <display name>`"+` to name yourself, and

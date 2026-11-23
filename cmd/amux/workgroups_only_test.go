@@ -74,13 +74,15 @@ func TestGrantsTag(t *testing.T) {
 // The user-facing help no longer speaks of one-off agents or of work-scoped vs
 // repo-scoped workgroups: every container of agents is a workgroup.
 func TestHelpHasNoOneOffVocabulary(t *testing.T) {
-	out, _ := captureOutput(t, func() error { usage(); workgroupUsage(); doUsage(); return nil })
+	var b strings.Builder
+	renderAll(&b)
+	out := b.String()
 	for _, banned := range []string{"one-off", "work-scoped", "repo-scoped", "new-repo-agent"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("help still says %q", banned)
 		}
 	}
-	for _, want := range []string{"workgroup repo <r>", "limited to one tracked repo", "move an agent into another (or a new) workgroup"} {
+	for _, want := range []string{"repo <repo> [flags]", "a workgroup limited to one repo", "move an agent into another workgroup, or a new one"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help lacks %q", want)
 		}

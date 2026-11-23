@@ -33,8 +33,7 @@ func cmdVersionArgs(args []string) error {
 			fmt.Println(string(b))
 			return nil
 		case "-h", "--help", "help":
-			fmt.Fprint(os.Stderr, "usage: amux version [--short | --manifest]\n")
-			return nil
+			return showHelp("version")
 		default:
 			return fmt.Errorf("unknown version flag %q (want --short or --manifest)", args[0])
 		}
@@ -67,28 +66,6 @@ func parseUpdateFlags(args []string) (updateFlags, error) {
 
 var errUpdateHelp = errors.New("help")
 
-func updateUsage() {
-	fmt.Fprint(os.Stderr, `amux update — install the latest amux release
-
-usage: amux update [--check] [--force] [--restart-daemon]
-
-  (bare)             download the latest release for this OS/arch, verify its
-                     SHA256, atomically replace this binary, refresh the shell
-                     shim, then restart the daemon if no agents are running
-  --check            only report the installed and latest versions
-  --force            also replace a development (checkout) build, or reinstall
-                     the latest release
-  --restart-daemon   restart the daemon even while agents run (they are stopped
-                     and resumed, as with amux daemon restart)
-
-The daemon also installs releases on its own every few hours (update.auto, on
-by default; AMUX_NO_AUTO_UPDATE=1 or amux config set update.auto off disables
-it). A daemon restart stops the agents it hosts, so an update that arrives
-while agents run waits: amux version, doctor and status report it as pending,
-and the daemon restarts into it once no agents are running.
-`)
-}
-
 // updateDeps are the seams cmdUpdate uses, replaced in tests.
 type updateDeps struct {
 	newUpdater    func() (*selfupdate.Updater, error)
@@ -107,11 +84,9 @@ var defaultUpdateDeps = updateDeps{
 func cmdUpdate(args []string) error {
 	f, err := parseUpdateFlags(args)
 	if errors.Is(err, errUpdateHelp) {
-		updateUsage()
-		return nil
+		return showHelp("update")
 	}
 	if err != nil {
-		updateUsage()
 		return err
 	}
 	if restrictedSessionClient(os.Getenv) {

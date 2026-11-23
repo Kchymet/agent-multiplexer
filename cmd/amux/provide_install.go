@@ -23,18 +23,18 @@ import (
 // (`amux provide install --name laptop`) keeps the rest, and re-running it after
 // a binary upgrade re-points and restarts the service.
 func cmdProvideInstall(args []string) error {
-	fset := flag.NewFlagSet("provide install", flag.ContinueOnError)
+	fset := newCmdFlagSet("provide install")
 	var f provideFlags
 	f.register(fset)
-	dryRun := fset.Bool("dry-run", false, "print the config file and service unit that would be written, then stop")
-	execFlag := fset.String("exec", "", "amux binary the service runs (default: the installed binary, else this one)")
+	dryRun := fset.Bool("dry-run", false, "")
+	execFlag := fset.String("exec", "", "")
 	// Install takes the same address-plus-flags shape as running the provider, so
 	// it needs the same any-order parse. Without it, `amux provide install
 	// orch:7443 --token-file tok` drops every flag after the address: unlike the
 	// run path — where a dropped --ca surfaced much later as a bad certificate —
 	// Validate catches the missing token and rejects a command line that is
 	// perfectly correct, which is a better failure but still the wrong one.
-	operands, err := parseFlagsAnyOrder(fset, args)
+	operands, err := parseCmdFlagsAnyOrder(fset, "provide install", args)
 	if err != nil {
 		return err
 	}
