@@ -165,8 +165,33 @@ End every turn's final message with your PR's URL and state: draft or ready, CI
 (green / red / pending), mergeable or conflicting, and review status (approved /
 changes requested / awaiting review). Your coordinator tracks your PR from that
 report and its own checks.
-`, repos, s.Branch)
+
+`+raiseItemsSection, repos, s.Branch)
 }
+
+// raiseItemsSection teaches a session to emit upward signals as structured
+// items (internal/items) rather than prose in its final message. Members raise
+// to their coordinator; everyone else's items reach the console.
+const raiseItemsSection = `## Raise follow-ups as items
+When you finish a turn or your work and something should be acted on or known
+upstream — a **follow-up** worth doing, **outstanding** work you did not finish,
+a **decision** you need, a **risk**, or something you deliberately left out of
+scope (**fyi**) — raise it as a structured item; do not bury it in prose:
+
+    amux agent raise --kind follow_up|outstanding|decision_needed|risk|fyi \
+      --title "<one line>" [--detail "<context>"] [--pr <repo#n>] [--link <url>] \
+      [--suggest "<the next step you recommend>"]
+
+A workgroup member's item goes to its coordinator, anyone else's to the amux
+console (the user's inbox), and amux wakes the recipient with it — no message
+or polling of your own. Raise one item per distinct thing. Raising the same kind
+and title again while it is open updates that item instead of adding a
+duplicate, so re-raising after new findings is safe. ` + "`amux agent items`" + ` lists
+what you raised and its state; ` + "`amux agent items done <id>`" + ` or
+` + "`amux agent items dismiss <id> --note \"…\"`" + ` withdraws one that no longer
+applies. Name the item ids in your final message; the message alone is not the
+record. Raise nothing when there is nothing to raise.
+`
 
 // Sections shared by every guide.
 const (
@@ -431,6 +456,8 @@ extensions):
 	b.WriteString("\n")
 	b.WriteString(memberArchiveSection(root))
 	b.WriteString("\n")
+	b.WriteString(itemsTriageSection(root))
+	b.WriteString("\n")
 	b.WriteString(completionSection(root))
 	b.WriteString("\n")
 	b.WriteString(membersSection(root))
@@ -472,6 +499,8 @@ Keep repository notes here. All implementation work belongs to normal workgroups
   your own management context remain available through authenticated commands.
 
 `, home.Repo, home.Repo, source, home.Dir, guideRegenNote, home.Repo)
+	b.WriteString(raiseItemsSection)
+	b.WriteString("\n")
 	b.WriteString(configHomeSection)
 	return b.String()
 }
@@ -617,6 +646,37 @@ Archive each member as soon as it is finished; do not leave it on the rail:
 `
 }
 
+// itemsTriageSection makes the coordinator the triage point for upward items
+// (internal/items): its members' items arrive in its inbox; it resolves what
+// it can, escalates what needs the user or crosses workgroups, and raises its
+// own end-of-task follow-ups to the console.
+func itemsTriageSection(root store.Session) string {
+	return `## Triage upward items
+Members raise structured items to you with ` + "`amux agent raise`" + `: follow-ups,
+outstanding work, decisions they need, risks, deliberately out-of-scope notes.
+amux wakes you with an "Items raised" notice listing them (no polling).
+` + "`amux agent items`" + ` lists your inbox and your workgroup's items (` + "`--inbox`" + `
+for only what you hold, ` + "`--all`" + ` to include closed ones);
+` + "`amux agent items show <id>`" + ` prints one with its detail and history.
+- **Resolve what you can.** Dispatch the follow-up (re-prompt the member or add
+  one), make the decision that is yours to make, then
+  ` + "`amux agent items done <id> --note \"…\"`" + `. ` + "`ack`" + ` an item you are working on;
+  ` + "`dismiss`" + ` one that does not apply, with a note saying why.
+- **Escalate what needs the user or crosses workgroups:**
+  ` + "`amux agent escalate <id> --note \"<why>\"`" + ` moves it to the console's inbox
+  (the user's), recording the hand-off. Do not escalate what you can resolve.
+- **Raise your own.** At the end of a task, anything the user should act on or
+  know after you finish — follow-ups, deliberately out-of-scope work, risks,
+  decisions — goes up as items from you (yours go to the console):
+  ` + "`amux agent raise --kind … --title \"…\" [--pr repo#n] [--suggest \"…\"]`" + `.
+  Same kind and title updates the open item. List the item ids in your final
+  report instead of burying the substance in prose.
+- **Never leave your inbox untriaged at the end of a task.** Archiving this
+  workgroup carries every item still open or acknowledged in your inbox to the
+  console, so nothing is lost — but triage first (see "Finishing a task").
+`
+}
+
 // Task completion never implies archive permission. A coordinator must ask for
 // explicit user confirmation before using its authenticated self-archive path.
 func completionSection(root store.Session) string {
@@ -630,8 +690,13 @@ outstanding but the human step; the user merges unless the task authorizes
 merging. Before you call a task finished, archive every finished member (see
 "Archiving finished members"). End each finished task with your final summary:
 the PR ledger (each member PR's URL and state), and for every PR still open,
-exactly what needs a human (e.g. merge approval, a design decision). Then ask
-the user whether to archive the workgroup or give it another task. Wait for explicit
+exactly what needs a human (e.g. merge approval, a design decision). Raise the
+task's remaining follow-ups, risks and open decisions as items and triage your
+inbox first (see "Triage upward items"); the summary lists the item ids you
+raised or escalated. Then ask the user whether to archive the workgroup or give
+it another task. If items are still open in your inbox, do not archive on your
+own: say which, and that archiving hands them to the console's inbox (it does,
+in the same step, so none is lost). Wait for explicit
 user confirmation before archiving; goal completion is not confirmation.
 After confirmation, run `+"`amux agent done`"+`: your authenticated identity selects
 this workgroup (%s), and the daemon durably archives you and its direct members

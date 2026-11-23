@@ -1027,6 +1027,10 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	case core.ActionNewWorkgroup, core.ActionCreateWorkspace:
 		id, _, err := applyNewWorkgroup(ctx, a)
 		return id, err
+	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem:
+		// Item verbs touch only the item store; daemon.handle serves them
+		// (internal/daemon/items.go) before any workspace dispatch.
+		return "", fmt.Errorf("%s is served by the amux daemon", a.Action)
 	}
 	// A verb that reaches here is one no dispatch path claims. The CLI screens
 	// these before they leave the machine, so this is the answer for anything

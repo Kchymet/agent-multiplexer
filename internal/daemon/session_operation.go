@@ -56,6 +56,8 @@ func validateSessionQuery(req access.Request) error {
 		return err
 	case core.QueryWait:
 		return validateWaitQuery(req)
+	case core.QueryItems:
+		return validateItemQuery(req)
 	case core.QueryRuntimeEvents:
 		if strings.TrimSpace(req.ID) == "" {
 			return fmt.Errorf("query %q requires an id", req.Verb)
@@ -103,6 +105,8 @@ func validateSessionAction(req access.Request) error {
 	fields := func(allowed ...string) error { return validateFields(req.Fields, allowed...) }
 
 	switch req.Verb {
+	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem:
+		return validateItemAction(req)
 	case core.ActionRefresh:
 		return joinValidation(noID(), noTarget(), fields())
 	case core.ActionStart:

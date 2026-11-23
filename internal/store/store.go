@@ -465,6 +465,9 @@ CREATE TABLE IF NOT EXISTS session_prs (
 `); err != nil {
 		return err
 	}
+	if _, err := q.Exec(itemsSchema); err != nil {
+		return err
+	}
 	// Idempotently add columns introduced after the initial schema, so existing
 	// DBs gain them (CREATE TABLE IF NOT EXISTS won't alter an existing table).
 	if err := addColumn(q, "sessions", "scope", "TEXT NOT NULL DEFAULT 'work'"); err != nil {
@@ -650,9 +653,21 @@ func (d *DB) SetClaudeID(id, claudeID string) error {
 
 // SetArchivedFlag updates a session's archived flag and its archive timestamp
 // together (one statement, so the pair can't tear).
+//
+// Archiving a session carries the active items in its inbox (a coordinator's
+// received items) over to the console's, in the same transaction: an archived
+// recipient can no longer act on them, and an item is never lost.
 func (d *DB) SetArchivedFlag(id string, archived bool, archivedAt int64) error {
-	_, err := d.sql.Exec(`UPDATE sessions SET archived=?, archived_at=? WHERE id=?`, b2i(archived), archivedAt, id)
-	return err
+	if !archived {
+		_, err := d.sql.Exec(`UPDATE sessions SET archived=?, archived_at=? WHERE id=?`, b2i(archived), archivedAt, id)
+		return err
+	}
+	return d.writeTx(func(q querier) error {
+		if _, err := q.Exec(`UPDATE sessions SET archived=?, archived_at=? WHERE id=?`, b2i(archived), archivedAt, id); err != nil {
+			return err
+		}
+		return carryOverItems(q, id, "recipient archived", Now())
+	})
 }
 
 // SetDir updates a session's sandbox dir (filled in for a workgroup root that
@@ -777,6 +792,9 @@ func (d *DB) DeleteSession(id string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM session_prs WHERE session_id=?`, id); err != nil && !missingTable(err) {
+		return err
+	}
+	if err := carryOverItems(tx, id, "recipient deleted", Now()); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {

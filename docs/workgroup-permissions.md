@@ -24,16 +24,18 @@ AUTHENTICATED HOST OPERATOR  (local TUI, host CLI)      never restricted
 │       read member events · start · rename · steer · archive members  │
 │       answer a MEMBER's permission request (never its own)           │
 │       archive the whole workgroup — after explicit user confirmation │
+│       triage items members raise · escalate them to the console      │
 │  may not: restore · touch another workgroup · change repo grants     │
 │           · steer goal · move/delete/kill · open panes or raw paths  │
 │      │ control flows one way: coordinator → member                   │
+│      │ items flow the other way: member → coordinator → console      │
 │      ▼                                                               │
 │ ┌────────────────────────────┐   ┌────────────────────────────┐      │
 │ │ MEMBER A  (role empty)     │   │ MEMBER B  (role empty)     │      │
 │ │ self only: own events,     │   │ self only                  │      │
 │ │ status, name, start/stop,  │   │ no sibling read, no        │      │
-│ │ prompt, `amux agent done`  │   │ sibling control, no        │      │
-│ │                            │   │ coordinator control        │      │
+│ │ prompt, `amux agent done`, │   │ sibling control, no        │      │
+│ │ `amux agent raise` (items) │   │ coordinator control        │      │
 │ └────────────────────────────┘   └────────────────────────────┘      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -101,6 +103,18 @@ ids, fields and environment variables only ever name a target
   credentials are revoked. A repo home cannot archive itself. The dispatch
   path accepts a self-completion only from an agent or coordinator role
   (`internal/daemon/session_dispatch.go`, `isSelfCompletion`).
+- **Items flow upward, acted on as oneself.** `raise-item`, `item-state`,
+  `escalate-item` and query `items` always name the caller as their target
+  (`allowSelfItem`); no session acts on items as another — not even a
+  coordinator for its member, nor the console for anyone. Routing is decided
+  by the daemon, never the caller: a member's item goes to its own
+  coordinator, every other session's to the console (`access.ItemRecipient`).
+  Per item (`internal/access/items.go`): the source and recipient see it, a
+  coordinator also sees its workgroup's items, the console sees all; the
+  recipient (or the console) triages it, the source may only withdraw it;
+  only a coordinator holding an item may escalate it, and only to the
+  console. Archiving or deleting a recipient carries its active items to the
+  console in the same transaction. See [Items](items.md).
 - **Unavailable to every session principal.** Restore (`archived=false` and
   the `archive` toggle, refused for every restricted caller including the
   console in `internal/daemon/session_operation.go` before policy runs),
@@ -137,11 +151,17 @@ confirmation as a behavioral contract the coordinator is bound to, enforced by
 its instructions and reviewable in its transcript, not by policy. The host can
 always restore a workgroup archived early (`amux workgroup unarchive <id>`).
 
+The same holds for open items: the guide has a coordinator triage its inbox
+and, if items remain open, name them to the user before archiving. What the
+daemon does enforce is that none is lost — the archive transaction moves every
+active item in the coordinator's inbox to the console's.
+
 ## Console and repo homes
 
 The **console** is the operator's delegated view: it passes any rule marked
 `Console` on any target, and is still refused pure host operations such as
-auth reload or restart. A **repo home** is self-only like a member, cannot
+auth reload or restart. Its item inbox spans every workgroup: it sees and
+triages every item, acting as itself. A **repo home** is self-only like a member, cannot
 archive itself, and holds one host-scope exception: it may create a new
 workgroup limited to exactly its own repo. Sharing a repo with a workgroup
 grants a repo home nothing inside that workgroup. Details are in

@@ -48,6 +48,12 @@ var rules = map[Route]map[string]Rule{
 		core.ActionRename:      {Scope: ScopeWorkgroup},
 		core.ActionSetArchived: {Scope: ScopeWorkgroup, Console: true, Allow: allowArchive},
 		core.ActionAddAgent:    {Scope: ScopeWorkgroup, Console: true, Allow: allowAddAgent},
+		// Items are acted on as the caller itself (ID = caller); which item it
+		// may move is decided per item (items.go). No Console flag: the console
+		// too acts only as itself, where it sees every item.
+		core.ActionRaiseItem:    {Scope: ScopeWorkgroup, Allow: allowSelfItem},
+		core.ActionItemState:    {Scope: ScopeWorkgroup, Allow: allowSelfItem},
+		core.ActionEscalateItem: {Scope: ScopeWorkgroup, Allow: allowEscalateItem},
 
 		core.ActionRefresh:         {Scope: ScopeHost, Console: true},
 		core.ActionMove:            {Scope: ScopeHost, Console: true},
@@ -88,6 +94,9 @@ var rules = map[Route]map[string]Rule{
 		// A long-poll on one session's rail view: the same state and PRs the
 		// caller's scoped status already shows it, for what it may read.
 		core.QueryWait: {Scope: ScopeWorkgroup},
+		// The caller's own item inbox and outbox (ID = caller), projected per
+		// item by ItemVisible.
+		core.QueryItems: {Scope: ScopeWorkgroup, Allow: allowSelfItem},
 
 		// Raw runtime paths/records and untracked-conversation fallback are never
 		// exposed to restricted principals.

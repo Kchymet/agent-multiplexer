@@ -13,8 +13,10 @@ import (
 	"amux/internal/agent"
 	"amux/internal/claudegoal"
 	"amux/internal/codexapp"
+	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
+	"amux/internal/items"
 	"amux/internal/panespec"
 	"amux/internal/prwatch"
 	"amux/internal/runtimeevents"
@@ -216,6 +218,10 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 	if len(wakes) == 0 {
 		return results
 	}
+	if workgroup == console.ID {
+		// Only item notices are addressed to the console (items.go).
+		return d.deliverConsoleItemWakes(ctx, wakes)
+	}
 
 	// Membership moves and coordinator-grant changes take the effect gate
 	// exclusively. Member archive/delete and repo changes take these session
@@ -268,11 +274,48 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 	if len(eligible) == 0 {
 		return results
 	}
-	authorized := make([]prwatch.Wake, 0, len(eligible))
+	// An items wake says nothing itself: it stands for the coordinator's
+	// unnotified items, read now. None left (all triaged meanwhile) drops it.
+	var itemsShown, itemsAll []items.Item
+	kept = eligible[:0]
 	for _, i := range eligible {
+		if wakes[i].Kind == prwatch.KindItems {
+			if itemsAll == nil {
+				shown, all, err := d.loadItemWake(workgroup)
+				if err != nil {
+					log.Printf("items: wake-up for %s: %v", workgroup, err)
+					return results
+				}
+				itemsShown, itemsAll = shown, all
+			}
+			if len(itemsAll) == 0 {
+				results[i] = prwatch.Dropped
+				continue
+			}
+		}
+		kept = append(kept, i)
+	}
+	eligible = kept
+	if len(eligible) == 0 {
+		return results
+	}
+	authorized := make([]prwatch.Wake, 0, len(eligible))
+	kinds := wakeKinds{}
+	for _, i := range eligible {
+		switch wakes[i].Kind {
+		case prwatch.KindItems:
+			kinds.items = true
+			continue
+		case prwatch.KindMember:
+			kinds.members = true
+		}
 		authorized = append(authorized, wakes[i])
 	}
-	text := prWakeText(agent.HookGoals(sess), prwatch.WakeLines(authorized), hasMemberWake(authorized))
+	lines := prwatch.WakeLines(authorized)
+	if kinds.items {
+		lines = append(lines, itemWakeLines(itemsShown, len(itemsAll))...)
+	}
+	text := prWakeText(agent.HookGoals(sess), lines, kinds)
 	outcome, err := d.beginPRWake(ctx, sess, text)
 	if err != nil {
 		if outcome == prwatch.Indeterminate {
@@ -292,6 +335,11 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 	for _, i := range eligible {
 		results[i] = prwatch.Delivered
 	}
+	if kinds.items {
+		if err := d.items.MarkNotified(workgroup, itemsAll); err != nil {
+			log.Printf("items: mark %s items notified: %v", workgroup, err)
+		}
+	}
 	log.Printf("prwatch: woke coordinator %s (%d update(s))", workgroup, len(eligible))
 	return results
 }
@@ -305,13 +353,11 @@ func memberWakesWanted(goal string) bool {
 	return goal == "" || goal == claudegoal.StatusActive || goal == claudegoal.StatusWaiting
 }
 
-func hasMemberWake(wakes []prwatch.Wake) bool {
-	for _, w := range wakes {
-		if w.Kind == prwatch.KindMember {
-			return true
-		}
-	}
-	return false
+// wakeKinds records which non-PR kinds a wake-up batch carries; it picks the
+// prompt's wording.
+type wakeKinds struct {
+	members bool // a member's activity changed
+	items   bool // items were raised, escalated or carried over to the recipient
 }
 
 // resolvePRWakes re-reads every authority-bearing identity from the store.
@@ -348,6 +394,16 @@ func resolvePRWakes(workgroup string, wakes []prwatch.Wake, stateNow func(id str
 		granted[repo] = true
 	}
 	for i, wake := range wakes {
+		if wake.Kind == prwatch.KindItems {
+			// Addressed to the coordinator itself; what it says is read from the
+			// item store at delivery, under this admission.
+			if wake.Workgroup != workgroup || wake.SessionID != workgroup {
+				dropped = append(dropped, i)
+				continue
+			}
+			eligible = append(eligible, i)
+			continue
+		}
 		if wake.Kind == prwatch.KindMember {
 			if wake.Workgroup != workgroup || wake.SessionID == "" || stateNow == nil || stateNow(wake.SessionID) != wake.State {
 				dropped = append(dropped, i)
@@ -458,10 +514,13 @@ func (d *Daemon) beginStructuredPRWake(ctx context.Context, id string, starter s
 // prWakeText renders the wake-up prompt. A batch with a member activity
 // change is a workgroup update; one of PR transitions only keeps the PR
 // watcher's wording.
-func prWakeText(hookGoal bool, lines []string, members bool) string {
+func prWakeText(hookGoal bool, lines []string, kinds wakeKinds) string {
 	head, what, check := "PR update", "amux PR watcher wake-up", "these PRs"
-	if members {
+	switch {
+	case kinds.members:
 		head, what, check = "Workgroup update", "amux wake-up", "these members and PRs"
+	case kinds.items:
+		head, what, check = "Items raised", "amux wake-up", "these items"
 	}
 	prefix := "[amux]"
 	if hookGoal {
@@ -474,6 +533,9 @@ func prWakeText(hookGoal bool, lines []string, members bool) string {
 		b.WriteString(l)
 	}
 	b.WriteString("\nCheck " + check + " and act on them as your task requires.")
+	if kinds.items {
+		b.WriteString(" " + itemsTriageHint)
+	}
 	return b.String()
 }
 
