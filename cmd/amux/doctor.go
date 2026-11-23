@@ -209,7 +209,7 @@ func cmdDoctor() error {
 		fmt.Printf("  ✗ agents    unavailable because daemon state is unknown\n")
 	} else if !daemonUp {
 		fmt.Printf("  · agents    (start the daemon to compare config copies with your templates)\n")
-	} else if agents, edits, err := sandboxDriftSummary(); err != nil {
+	} else if agents, edits, err := sandboxDriftSummary(scanProgress(os.Stdout, isTerminal(os.Stdout), "comparing agent config copies")); err != nil {
 		fmt.Printf("  ⚠ agents    could not compare config copies: %v\n", err)
 	} else if edits == 0 {
 		fmt.Printf("  ✓ agents    no agent-side config differences awaiting review\n")

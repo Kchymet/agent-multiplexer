@@ -176,8 +176,6 @@ func sanitize(s string) string {
 	}, s)
 }
 
-var mu sync.Mutex // serialize manifest read-modify-write across Seed/Scan/Promote/Reset
-
 type destination struct {
 	root  *hostprep.Root
 	home  string
@@ -329,8 +327,9 @@ func SeedRooted(root *hostprep.Root, sp Spec) (fresh bool, err error) {
 }
 
 func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
-	mu.Lock()
-	defer mu.Unlock()
+	templateMu.RLock()
+	defer templateMu.RUnlock()
+	defer lockAgent(sp)()
 	seeded, err := d.seeded()
 	if err != nil {
 		return false, err
@@ -357,7 +356,7 @@ func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
 		// The copy exists but its baseline is gone (pre-manifest copy, or a wiped
 		// state dir): adopt the copy's current content as the baseline rather than
 		// reporting every file as an edit.
-		snapshot, err := snapshotDestination(d, sp)
+		snapshot, err := snapshotDestination(d, sp, nil)
 		if err != nil {
 			return false, err
 		}
@@ -376,7 +375,7 @@ func seedDestination(d *destination, sp Spec) (fresh bool, err error) {
 			return false, err
 		}
 	}
-	snapshot, err := snapshotDestination(d, sp)
+	snapshot, err := snapshotDestination(d, sp, nil)
 	if err != nil {
 		return false, err
 	}
@@ -507,9 +506,17 @@ func Binds(sp Spec) [][]string {
 // agent's edit was promoted, or the user made the same change) the manifest is
 // advanced to that content so the path drops out of future scans; otherwise the
 // manifest is untouched. An unseeded copy reports nothing.
-func Scan(sp Spec) ([]Change, error) {
-	mu.Lock()
-	defer mu.Unlock()
+//
+// Unhooked copy files whose stamp still matches the agent's stat sidecar are
+// not re-read (see fileStamp.reusable); everything else is read and hashed.
+// To scan many agents, use ScanAll or a ScanCache, which share one template
+// snapshot per run instead of re-hashing the template for every agent.
+func Scan(sp Spec) ([]Change, error) { return scan(nil, sp) }
+
+func scan(cache *ScanCache, sp Spec) ([]Change, error) {
+	templateMu.RLock()
+	defer templateMu.RUnlock()
+	defer lockAgent(sp)()
 	d, err := openDestination(sp)
 	if err != nil {
 		return nil, err
@@ -526,11 +533,13 @@ func Scan(sp Spec) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	copyH, err := snapshotDestination(d, sp)
+	sc := loadStatCache(sp)
+	copyH, err := snapshotDestination(d, sp, sc)
 	if err != nil {
 		return nil, err
 	}
-	tmplH := snapshot(sp, sp.Template, true)
+	_ = sc.save(sp) // best effort: a lost sidecar only costs a re-read
+	tmplH := cache.template(sp).hashesFor(sp)
 
 	rels := map[string]bool{}
 	for r := range m.Files {
@@ -555,7 +564,13 @@ func Scan(sp Spec) ([]Change, error) {
 		if inCopy == inTmpl && c == t {
 			if !hasBase || base != c {
 				// Both sides agree on something other than the seed: the change has
-				// propagated (or never mattered). Advance the baseline.
+				// propagated (or never mattered). Advance the baseline — but only
+				// if the live template still agrees: the template side may come
+				// from a run-scoped snapshot the user has since edited, and a stale
+				// agreement must not be persisted.
+				if live, ok := liveTemplateHash(sp, rel); ok != inTmpl || live != t {
+					continue
+				}
 				if inCopy {
 					m.Files[rel] = c
 				} else {
@@ -632,8 +647,9 @@ func Promote(sp Spec, rel string) error {
 	if isShared(sp, rel) {
 		return fmt.Errorf("%s is shared auth, not config — nothing to promote", rel)
 	}
-	mu.Lock()
-	defer mu.Unlock()
+	templateMu.Lock() // writes the template: exclude every scan and seed
+	defer templateMu.Unlock()
+	defer lockAgent(sp)()
 	d, err := openDestination(sp)
 	if err != nil {
 		return err
@@ -676,8 +692,9 @@ func Reset(sp Spec, rel string) error {
 	if !covered(sp, rel) {
 		return fmt.Errorf("%s is not a templated %s config path", rel, sp.Kind)
 	}
-	mu.Lock()
-	defer mu.Unlock()
+	templateMu.Lock() // as Promote: one writer at a time, never beside a scan
+	defer templateMu.Unlock()
+	defer lockAgent(sp)()
 	d, err := openDestination(sp)
 	if err != nil {
 		return err
@@ -711,17 +728,6 @@ func Reset(sp Spec, rel string) error {
 	return settleDestination(d, sp, rel)
 }
 
-// settle records the copy's current content of rel as the baseline. Caller
-// holds mu.
-func settle(sp Spec, rel string) error {
-	d, err := openDestination(sp)
-	if err != nil {
-		return err
-	}
-	defer d.close()
-	return settleDestination(d, sp, rel)
-}
-
 func settleDestination(d *destination, sp Spec, rel string) error {
 	m, err := readManifest(sp)
 	if err != nil {
@@ -739,7 +745,11 @@ func settleDestination(d *destination, sp Spec, rel string) error {
 
 // Forget drops the agent's manifest — for when the agent (and with it the copy)
 // is deleted.
-func Forget(sp Spec) { _ = os.Remove(manifestPath(sp)) }
+func Forget(sp Spec) {
+	defer lockAgent(sp)()
+	_ = os.Remove(manifestPath(sp))
+	_ = os.Remove(statCachePath(sp))
+}
 
 // ---- summary (the rail's view) ------------------------------------------------
 
@@ -754,8 +764,9 @@ type summaryEntry struct {
 }
 
 var (
-	summaryMu sync.Mutex
-	summaries = map[string]summaryEntry{}
+	summaryMu  sync.Mutex // leaf lock: never held across a scan
+	summaries  = map[string]summaryEntry{}
+	summaryGen = map[string]uint64{} // bumped by Invalidate
 )
 
 // Summary is Scan for the daemon's poll path: cached per copy for summaryTTL,
@@ -763,16 +774,29 @@ var (
 // agent's pending edits first appear or change, so the daemon log records what
 // the agent did to its configuration even if nobody is watching the rail.
 func Summary(sp Spec) []Change {
-	summaryMu.Lock()
-	defer summaryMu.Unlock()
 	key := sp.Dir
+	summaryMu.Lock()
 	if e, ok := summaries[key]; ok && time.Since(e.at) < summaryTTL {
+		summaryMu.Unlock()
 		return e.changes
 	}
-	prev := summaries[key].changes
+	gen := summaryGen[key]
+	summaryMu.Unlock()
+
+	// Scan outside summaryMu so one agent's scan never blocks another's
+	// summary (Scan takes templateMu and the agent lock; see Lock order).
 	changes, err := Scan(sp)
 	if err != nil {
 		changes = nil
+	}
+
+	summaryMu.Lock()
+	defer summaryMu.Unlock()
+	prev := summaries[key].changes
+	if summaryGen[key] != gen {
+		// Invalidated (a Promote/Reset) while scanning: this result may predate
+		// it, so don't cache it; the next Summary rescans.
+		return changes
 	}
 	summaries[key] = summaryEntry{at: time.Now(), changes: changes}
 	if !sameChanges(prev, changes) && len(changes) > 0 {
@@ -786,6 +810,7 @@ func Summary(sp Spec) []Change {
 func Invalidate(sp Spec) {
 	summaryMu.Lock()
 	delete(summaries, sp.Dir)
+	summaryGen[sp.Dir]++
 	summaryMu.Unlock()
 }
 
@@ -826,50 +851,11 @@ func Pending(changes []Change) int {
 
 // ---- hashing & manifests -------------------------------------------------------
 
-// snapshot hashes every templated file under root (the copy, or — template=true
-// — the template, honoring per-entry Src overrides), keyed by template-relative
-// path. Unreadable files are skipped.
-func snapshot(sp Spec, root string, template bool) map[string]string {
-	out := map[string]string{}
-	for _, e := range sp.Entries {
-		base := filepath.Join(root, e.Rel)
-		if template {
-			base = e.src(sp)
-		}
-		fi, err := os.Stat(base)
-		if err != nil {
-			continue
-		}
-		if !fi.IsDir() {
-			if h, ok := hashFile(sp, base, e.Rel, template); ok {
-				out[e.Rel] = h
-			}
-			continue
-		}
-		_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if skipDir(d) {
-				return fs.SkipDir
-			}
-			if d.IsDir() || !d.Type().IsRegular() {
-				return nil
-			}
-			sub, _ := filepath.Rel(base, p)
-			rel := filepath.Join(e.Rel, sub)
-			if h, ok := hashFile(sp, p, rel, template); ok {
-				out[rel] = h
-			}
-			return nil
-		})
-	}
-	return out
-}
-
-// snapshotDestination is snapshot for the untrusted private copy. It never
-// follows destination symlinks or reads multiply linked files.
-func snapshotDestination(dst *destination, sp Spec) (map[string]string, error) {
+// snapshotDestination hashes every templated file of the untrusted private
+// copy, keyed by template-relative path. It never follows destination symlinks
+// or reads multiply linked files. With a stat cache, unhooked files whose
+// descriptor stamp matches their record are not read (nil: read everything).
+func snapshotDestination(dst *destination, sp Spec, sc *statCache) (map[string]string, error) {
 	out := map[string]string{}
 	for _, e := range sp.Entries {
 		fi, err := dst.lstat(e.Rel)
@@ -883,7 +869,7 @@ func snapshotDestination(dst *destination, sp Spec) (map[string]string, error) {
 			return nil, fmt.Errorf("snapshot %s: %w", e.Rel, hostprep.ErrUnsafe)
 		}
 		if fi.Mode().IsRegular() {
-			if h, ok, err := hashDestination(dst, sp, e.Rel); err != nil {
+			if h, ok, err := hashDestinationCached(dst, sp, e.Rel, sc); err != nil {
 				return nil, err
 			} else if ok {
 				out[e.Rel] = h
@@ -900,12 +886,16 @@ func snapshotDestination(dst *destination, sp Spec) (map[string]string, error) {
 			}
 			continue
 		}
-		err = sub.WalkRegular(".", func(name string, _ fs.FileInfo, b []byte) error {
+		err = sub.WalkOpen(".", func(name string, info fs.FileInfo, f *os.File) error {
 			if strings.Contains(filepath.ToSlash(name), "/.git/") || filepath.Base(name) == ".git" {
 				return nil
 			}
 			rel := filepath.Join(e.Rel, name)
-			out[rel] = hashDestinationBytes(sp, rel, b)
+			h, err := sc.hash(sp, rel, info, f)
+			if err != nil {
+				return err
+			}
+			out[rel] = h
 			return nil
 		})
 		_ = sub.Close()
@@ -917,6 +907,29 @@ func snapshotDestination(dst *destination, sp Spec) (map[string]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// hashDestinationCached is hashDestination through the stat cache: the file is
+// opened (descriptor-anchored, regular, singly linked) and only read when its
+// stamp does not vouch for a recorded hash.
+func hashDestinationCached(dst *destination, sp Spec, rel string, sc *statCache) (string, bool, error) {
+	f, err := dst.root.OpenFile(dst.path(rel))
+	if err != nil {
+		if hostprep.IsUnsafe(err) {
+			return "", false, err
+		}
+		return "", false, nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", false, nil
+	}
+	h, err := sc.hash(sp, rel, info, f)
+	if err != nil {
+		return "", false, nil
+	}
+	return h, true, nil
 }
 
 func hashDestination(dst *destination, sp Spec, rel string) (string, bool, error) {
@@ -937,80 +950,6 @@ func hashDestinationBytes(sp Spec, rel string, b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
-
-// hashFile is the sha256 of path's content as compared: a template-side file is
-// first put through the entry's Seed transform (so it hashes as the copy a
-// fresh seed would make of it), then both sides through Normalize. ok=false
-// when unreadable or a symlink.
-//
-// Results are memoized by (path, size, mtime, side): the daemon rescans every
-// live agent's copy — plugin trees included — every summaryTTL, and a rescan
-// must cost a stat per file, not a read and a hash.
-func hashFile(sp Spec, path, rel string, template bool) (string, bool) {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return "", false
-	}
-	// A file written in the last moment may be rewritten again inside the same
-	// mtime tick with the same size; don't trust the memo for it.
-	settled := time.Since(fi.ModTime()) > hashSettle
-	key := hashKey{path: path, template: template, dir: sp.Dir}
-	hashMu.Lock()
-	if c, ok := hashCache[key]; ok && settled && c.size == fi.Size() && c.mtime.Equal(fi.ModTime()) {
-		hashMu.Unlock()
-		return c.sum, true
-	}
-	hashMu.Unlock()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	if e := entryFor(sp, rel); e.Rel == rel {
-		if template && e.Seed != nil {
-			b = e.Seed(sp, b)
-		}
-		if e.Normalize != nil {
-			b = e.Normalize(sp, b)
-		}
-	}
-	sum := sha256.Sum256(b)
-	hexSum := hex.EncodeToString(sum[:])
-	hashMu.Lock()
-	if len(hashCache) > hashCacheMax {
-		hashCache = map[hashKey]hashEntry{} // crude bound; refills on the next scan
-	}
-	hashCache[key] = hashEntry{size: fi.Size(), mtime: fi.ModTime(), sum: hexSum}
-	hashMu.Unlock()
-	return hexSum, true
-}
-
-// hashKey identifies a memoized file hash. The side (template or copy) and the
-// copy dir are part of the key because the transforms applied depend on both
-// (a template file's Seed rewrite embeds the copy's path).
-type hashKey struct {
-	path     string
-	template bool
-	dir      string
-}
-
-type hashEntry struct {
-	size  int64
-	mtime time.Time
-	sum   string
-}
-
-// hashCacheMax bounds the memo so a machine with many agents and large plugin
-// trees can't grow it without limit.
-const hashCacheMax = 50000
-
-// hashSettle is how old a file's mtime must be before its memoized hash is
-// trusted (see hashFile).
-const hashSettle = 2 * time.Second
-
-var (
-	hashMu    sync.Mutex
-	hashCache = map[hashKey]hashEntry{}
-)
 
 // entryFor finds the entry covering rel: an exact file entry, or the directory
 // entry rel lives under. A zero Entry (Rel "") when none does.
