@@ -1,0 +1,13 @@
+{
+  "id": "overseer",
+  "title": "amux overseer",
+  "mode": "overseer",
+  "state": "ready",
+  "runtime": "claude",
+  "role": "overseer",
+  "caps": {
+    "prompt": true,
+    "interject": true,
+    "stop": true
+  }
+}

@@ -137,6 +137,11 @@ amux direct cloud disable
 
 - **The ceiling** has no implicit default. `--all-sessions` covers ordinary
   sessions and never the amux console. `--workgroup console` is refused.
+  The question queue and the overseer add no permission name and change no
+  ceiling: a cloud-enrolled grant reaches them exactly as its permissions
+  allow (steering the overseer needs `--all-sessions` with `steer,manage,create`
+  in the ceiling; see [direct-access.md](direct-access.md#question-queue-and-overseer)).
+  `--workgroup overseer` is refused like `--workgroup console`.
 - **`--owner` and `--provider` are optional.** An omitted pin comes from this
   host's **current** provider registration. That is the `owner` and
   `providerId` Harness returned in `registered` to this host's

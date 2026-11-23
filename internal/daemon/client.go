@@ -434,7 +434,7 @@ func (c *Client) Dispatch(a core.Action) (string, error) {
 			continue
 		}
 		if !frame.Result.OK {
-			return "", &RejectedError{Msg: frame.Result.Error}
+			return "", &RejectedError{Msg: frame.Result.Error, Code: frame.Result.Code}
 		}
 		return frame.Result.NewID, nil
 	}
@@ -446,7 +446,12 @@ func (c *Client) Dispatch(a core.Action) (string, error) {
 // it only rules out the transport ambiguity of a send or read failure, which
 // leaves even whether the daemon saw the action unknown. Its text is the
 // daemon's message, unchanged.
-type RejectedError struct{ Msg string }
+type RejectedError struct {
+	Msg string
+	// Code is the daemon's stable failure class (core.Result.Code), when it
+	// set one (e.g. the question queue's "asker_gone" and "answered").
+	Code string
+}
 
 func (e *RejectedError) Error() string { return e.Msg }
 

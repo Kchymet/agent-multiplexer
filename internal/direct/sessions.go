@@ -240,26 +240,36 @@ func validSessionID(id string) bool {
 const ConsoleID = "console"
 
 // OverseerID is the machine-wide overseer session (the coordinator of
-// coordinators, docs/direct-console.md). Until its direct exposure is designed
-// and signed off (Phase B: derived steer gating, an opt-in inventory row),
-// direct access treats it exactly like the console: never in scope. Otherwise
-// a plain steer grant could prompt it into archiving or creating workgroups,
-// which the grant itself may not do.
+// coordinators, docs/direct-console.md). It holds no admin power, so direct
+// access may reach it — but only for an all_sessions grant, it appears in the
+// inventory only when the client asks (?include=overseer), and steering it
+// needs every permission it could exercise itself (mayDriveOverseer), so a
+// grant can never launder steer into archive or create through it.
 const OverseerID = "overseer"
 
-// isConsole reports a machine-wide session direct access never exposes: the
-// console and (until Phase B) the overseer.
+// isConsole reports the admin console, which direct access never exposes:
+// not in inventory, history, streams, actions, wake-ups or the queue, under
+// any grant. This is permanent (TestConsoleNeverExposedAnywhere).
 func isConsole(row core.Session) bool {
-	return row.ID == ConsoleID || row.Role == hp.RoleConsole || row.ID == OverseerID || row.Role == hp.RoleOverseer
+	return row.ID == ConsoleID || row.Role == hp.RoleConsole
+}
+
+// isOverseer reports the overseer row.
+func isOverseer(row core.Session) bool {
+	return row.ID == OverseerID || row.Role == hp.RoleOverseer
 }
 
 // inScope reports whether row is inside the grant's resource scope, judged from
 // the fresh inventory rows only. For a workgroup grant that is the workgroup's
 // root row and every row whose root (followed through the authoritative rows)
-// is that root.
+// is that root. The console is never in scope; the overseer only for an
+// all_sessions grant.
 func inScope(g Grant, row core.Session, byID map[string]core.Session) bool {
 	if isConsole(row) {
 		return false
+	}
+	if isOverseer(row) {
+		return g.Resource.Kind == ResourceAllSessions
 	}
 	switch g.Resource.Kind {
 	case ResourceAllSessions:
@@ -360,11 +370,19 @@ func enrichmentCaps(ctx context.Context, b Backend) *EnrichmentCapabilities {
 	return &EnrichmentCapabilities{Version: hp.EnrichmentsVersion, Kinds: slices.Clone(kinds), Sources: slices.Clone(sources)}
 }
 
-// filtered returns the grant's view of a fresh snapshot.
-func filtered(g Grant, rows []core.Session) []Session {
+// filtered returns the grant's view of a fresh snapshot, without the overseer
+// row: an older client's inventory is unchanged.
+func filtered(g Grant, rows []core.Session) []Session { return filteredWith(g, rows, false) }
+
+// filteredWith is filtered, adding the overseer row (when in scope) only when
+// the client opted in with ?include=overseer.
+func filteredWith(g Grant, rows []core.Session, overseer bool) []Session {
 	byID := indexRows(rows)
 	out := []Session{}
 	for _, row := range rows {
+		if isOverseer(row) && !overseer {
+			continue
+		}
 		if validSessionID(row.ID) && inScope(g, row, byID) {
 			out = append(out, project(g, row, byID))
 		}
