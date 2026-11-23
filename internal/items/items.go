@@ -5,8 +5,9 @@
 //
 // An item travels upward. A workgroup member raises it to its coordinator; a
 // coordinator triages what it receives (resolves it, or escalates it to the
-// console), and what a coordinator (or any session outside a workgroup) raises
-// goes to the console directly. The console's inbox spans every workgroup.
+// global inbox), and what a coordinator (or any session outside a workgroup)
+// raises goes to the global inbox directly. The global inbox spans every
+// workgroup; its owner is resolved in one place (GlobalInbox).
 //
 // This package is the vocabulary and the pure rules: kinds, states, input
 // validation and normalization, the de-duplication key and the transition
@@ -77,9 +78,17 @@ func KnownState(state string) bool {
 // Active reports whether state is open or acknowledged.
 func Active(state string) bool { return state == StateOpen || state == StateAcknowledged }
 
-// ConsoleRecipient is the recipient id of the console's inbox. It is the
-// console session's reserved id (internal/console.ID).
-const ConsoleRecipient = "console"
+// GlobalInbox is the recipient id of the global inbox: the one owner of the
+// cross-workgroup inbox that escalations and archive carry-overs go to, and
+// that receives the items of sessions outside a coordinated workgroup. It is
+// resolved here and only here, so the owner can be repointed in one place;
+// today it is the console session (internal/console.ID).
+func GlobalInbox() string { return globalInboxOwner }
+
+const globalInboxOwner = "console"
+
+// IsGlobalInbox reports whether id is the global inbox owner.
+func IsGlobalInbox(id string) bool { return id != "" && id == GlobalInbox() }
 
 // History actions (Event.Action).
 const (
@@ -91,7 +100,7 @@ const (
 	EventReopened     = "reopened"
 	EventEscalated    = "escalated"
 	// EventCarriedOver: the recipient was archived or deleted with the item
-	// still active, so the item moved to the console's inbox.
+	// still active, so the item moved to the global inbox.
 	EventCarriedOver = "carried_over"
 )
 
@@ -126,7 +135,7 @@ type Item struct {
 	Source    string `json:"source"`
 	Workgroup string `json:"workgroup,omitempty"`
 	// Recipient is whose inbox the item is in now: a coordinator's session id
-	// or ConsoleRecipient.
+	// or the global inbox owner (GlobalInbox).
 	Recipient string `json:"recipient"`
 	// Raised counts how many times the source raised it (de-duplicated
 	// re-raises refresh the item and increment this).

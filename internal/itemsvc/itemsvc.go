@@ -1,8 +1,8 @@
 // Package itemsvc is the internal API for upward signals (internal/items): it
 // joins the item store (internal/store) with the access rules
 // (internal/access, items.go) so every caller — the daemon's authenticated
-// session RPC, the host control socket, and later surfaces such as a console
-// inbox or `amux status` — raises, lists and moves items through one set of
+// session RPC, the host control socket, and later surfaces such as a global
+// inbox view or `amux status` — raises, lists and moves items through one set of
 // checks.
 //
 // Every method takes the id of the session acting. The service resolves it
@@ -89,7 +89,8 @@ type Query struct {
 	AllStates bool
 	// Box narrows to what the actor raised (core.ItemBoxRaised) or currently
 	// receives (core.ItemBoxInbox); "" is both, plus — for a coordinator —
-	// its workgroup's items and — for the console — every item.
+	// its workgroup's items and — for the global inbox owner and the admin
+	// console — every item.
 	Box string
 	// Limit bounds the page (default DefaultLimit, at most MaxLimit).
 	Limit int
@@ -237,7 +238,7 @@ func (s *Service) List(ctx context.Context, actorID string, q Query) (items.List
 	}
 	switch q.Box {
 	case "":
-		if actor.Role != "console" {
+		if actor.Role != "console" && !items.IsGlobalInbox(actor.ID) {
 			f.Involving = actor.ID
 		}
 	case BoxRaised:
@@ -319,7 +320,7 @@ func (s *Service) Transition(ctx context.Context, actorID, itemID, verb, note st
 	return out, err
 }
 
-// Escalate hands an item the actor (a coordinator) holds to the console,
+// Escalate hands an item the actor (a coordinator) holds to the global inbox,
 // reopening it there and recording note in its escalation history.
 func (s *Service) Escalate(ctx context.Context, actorID, itemID, note string) (items.Item, error) {
 	actor, err := s.actor(ctx, actorID)
@@ -347,8 +348,8 @@ func (s *Service) Escalate(ctx context.Context, actorID, itemID, note string) (i
 			if !it.Active() {
 				return invalid("item %s is %s; reopen it before escalating", it.ID, it.State)
 			}
-			it.AddEvent(items.Event{At: now, By: actor.ID, Action: items.EventEscalated, From: it.Recipient, To: items.ConsoleRecipient, Note: note})
-			it.Recipient = items.ConsoleRecipient
+			it.AddEvent(items.Event{At: now, By: actor.ID, Action: items.EventEscalated, From: it.Recipient, To: items.GlobalInbox(), Note: note})
+			it.Recipient = items.GlobalInbox()
 			it.State = items.StateOpen
 			it.Updated = now
 			it.Unnotified = true

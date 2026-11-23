@@ -51,7 +51,7 @@ func TestRaiseRoutesUpward(t *testing.T) {
 		t.Fatalf("member raise = %+v created=%v err=%v", it, created, err)
 	}
 	it, _, err = svc.Raise(ctx, "wg1", items.Raise{Kind: items.KindDecisionNeeded, Title: "Ship?"})
-	if err != nil || it.Recipient != items.ConsoleRecipient || it.Workgroup != "wg1" {
+	if err != nil || it.Recipient != items.GlobalInbox() || it.Workgroup != "wg1" {
 		t.Fatalf("coordinator raise = %+v err=%v", it, err)
 	}
 	if _, _, err := svc.Raise(ctx, "old", items.Raise{Kind: items.KindRisk, Title: "x"}); !errors.Is(err, ErrActor) {
@@ -160,11 +160,11 @@ func TestTriageAndEscalation(t *testing.T) {
 		t.Fatalf("double ack = %v, want InvalidError", err)
 	}
 	up, err := svc.Escalate(ctx, "wg1", it.ID, "needs the user")
-	if err != nil || up.Recipient != items.ConsoleRecipient || up.State != items.StateOpen || !up.Unnotified {
+	if err != nil || up.Recipient != items.GlobalInbox() || up.State != items.StateOpen || !up.Unnotified {
 		t.Fatalf("escalate = %+v, %v", up, err)
 	}
 	last := up.History[len(up.History)-1]
-	if last.Action != items.EventEscalated || last.By != "wg1" || last.From != "wg1" || last.To != items.ConsoleRecipient || last.Note != "needs the user" {
+	if last.Action != items.EventEscalated || last.By != "wg1" || last.From != "wg1" || last.To != items.GlobalInbox() || last.Note != "needs the user" {
 		t.Fatalf("escalation history = %+v", last)
 	}
 	// The coordinator no longer holds it; the console does.

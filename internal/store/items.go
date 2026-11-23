@@ -264,10 +264,10 @@ func (d *DB) MarkItemsNotified(recipient string, seen map[string]int64) error {
 }
 
 // carryOverItems moves every active item whose recipient is id to the
-// console's inbox, recording why. It runs inside the archive or delete of id,
+// global inbox (items.GlobalInbox), recording why. It runs inside the archive or delete of id,
 // so an item is never left with a recipient that can no longer act on it.
 func carryOverItems(q querier, id, reason string, now int64) error {
-	if id == "" || id == items.ConsoleRecipient {
+	if id == "" || items.IsGlobalInbox(id) {
 		return nil
 	}
 	rows, err := q.Query(`SELECT doc FROM items WHERE recipient=? AND state IN `+activeStates, id)
@@ -295,11 +295,11 @@ func carryOverItems(q querier, id, reason string, now int64) error {
 		return err
 	}
 	for _, it := range moved {
-		it.Recipient = items.ConsoleRecipient
+		it.Recipient = items.GlobalInbox()
 		it.State = items.StateOpen
 		it.Updated = now
 		it.Unnotified = true
-		it.AddEvent(items.Event{At: now, Action: items.EventCarriedOver, From: id, To: items.ConsoleRecipient, Note: reason})
+		it.AddEvent(items.Event{At: now, Action: items.EventCarriedOver, From: id, To: items.GlobalInbox(), Note: reason})
 		if err := putItem(q, it); err != nil {
 			return err
 		}

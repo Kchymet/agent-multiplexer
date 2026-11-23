@@ -11,7 +11,6 @@ import (
 	"unicode/utf8"
 
 	"amux/internal/access"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/items"
 	"amux/internal/itemsvc"
@@ -28,13 +27,13 @@ import (
 //     an item verb only with the caller as its target (access.allowSelfItem);
 //     the item service then decides per item from stored state;
 //   - the host may act as any session through the control socket (`amux do
-//     raise-item <id> …`, and later the TUI's console inbox);
+//     raise-item <id> …`, and later a TUI inbox view);
 //   - an item its recipient has not been told about is offered as a KindItems
 //     wake on the PR watcher's queue — the same coalescing, revalidation and
 //     delivery gating as PR and member wake-ups — to its coordinator, or to the
-//     console. offerItemWakes runs after every change that leaves an item
+//     global inbox owner. offerItemWakes runs after every change that leaves an item
 //     unnotified, when a coordinator leaves the rail (its items were carried
-//     over to the console in the archive transaction), and once at startup.
+//     over to the global inbox in the archive transaction), and once at startup.
 
 func newItemService() *itemsvc.Service {
 	return &itemsvc.Service{Open: itemsvc.OpenStore, OpenRead: itemsvc.OpenReadStore, Resolver: newDaemonAccessResolver(), Now: store.Now}
@@ -317,10 +316,10 @@ func (d *Daemon) handleItemAction(ctx context.Context, a core.Action) core.Resul
 }
 
 // hostItemQuery serves QueryItems on the host read path. Without an id the
-// host reads as the console (every item).
+// host reads as the global inbox owner (every item).
 func (d *Daemon) hostItemQuery(ctx context.Context, a core.Action) (any, error) {
 	if a.ID == "" {
-		a.ID = console.ID
+		a.ID = items.GlobalInbox()
 	}
 	req := access.Request{Route: access.RouteQuery, Verb: core.QueryItems, ID: a.ID, Fields: a.Fields}
 	if err := validateItemQuery(req); err != nil {
@@ -412,13 +411,13 @@ func (d *Daemon) loadItemWake(recipient string) (shown, all []items.Item, err er
 }
 
 // itemsTriageHint closes a wake-up that lists items.
-const itemsTriageHint = "Triage them with `amux agent items` (ack, dismiss, done; a coordinator may `amux agent escalate <id>` to the console)."
+const itemsTriageHint = "Triage them with `amux agent items` (ack, dismiss, done; a coordinator may `amux agent escalate <id>` to the global inbox)."
 
-// deliverConsoleItemWakes offers the console its unnotified items. Like a
-// coordinator wake-up it is typed only into a live console between turns with
-// no prompt open; otherwise it is deferred. The items stay in the console's
-// inbox either way.
-func (d *Daemon) deliverConsoleItemWakes(ctx context.Context, wakes []prwatch.Wake) []prwatch.Delivery {
+// deliverGlobalInboxWakes offers the global inbox owner (items.GlobalInbox,
+// today the console) its unnotified items. Like a coordinator wake-up it is
+// typed only into a live owner between turns with no prompt open; otherwise it
+// is deferred. The items stay in the global inbox either way.
+func (d *Daemon) deliverGlobalInboxWakes(ctx context.Context, wakes []prwatch.Wake) []prwatch.Delivery {
 	results := make([]prwatch.Delivery, len(wakes))
 	for i, w := range wakes {
 		results[i] = prwatch.Deferred
@@ -426,11 +425,12 @@ func (d *Daemon) deliverConsoleItemWakes(ctx context.Context, wakes []prwatch.Wa
 			results[i] = prwatch.Dropped
 		}
 	}
-	release := d.admitSessions(console.ID)
+	owner := items.GlobalInbox()
+	release := d.admitSessions(owner)
 	defer release()
-	shown, all, err := d.loadItemWake(console.ID)
+	shown, all, err := d.loadItemWake(owner)
 	if err != nil {
-		log.Printf("items: console wake-up: %v", err)
+		log.Printf("items: global inbox wake-up: %v", err)
 		return results
 	}
 	if len(all) == 0 {
@@ -439,10 +439,14 @@ func (d *Daemon) deliverConsoleItemWakes(ctx context.Context, wakes []prwatch.Wa
 		}
 		return results
 	}
-	sess := console.Session()
+	sess, found, err := lookupSession(owner)
+	if err != nil || !found || sess.Archived {
+		log.Printf("items: global inbox owner %s unavailable: found=%v err=%v", owner, found, err)
+		return results
+	}
 	if ready, why := d.coordinatorTakesWake(sess); !ready {
 		if why != "" {
-			log.Printf("items: console wake-up deferred: %s", why)
+			log.Printf("items: global inbox wake-up deferred: %s", why)
 		}
 		return results
 	}
@@ -454,17 +458,17 @@ func (d *Daemon) deliverConsoleItemWakes(ctx context.Context, wakes []prwatch.Wa
 				results[i] = prwatch.Indeterminate
 			}
 		}
-		log.Printf("items: console wake-up not delivered: %v", err)
+		log.Printf("items: global inbox wake-up not delivered: %v", err)
 		return results
 	}
-	if err := d.items.MarkNotified(console.ID, all); err != nil {
-		log.Printf("items: mark console items notified: %v", err)
+	if err := d.items.MarkNotified(owner, all); err != nil {
+		log.Printf("items: mark global inbox items notified: %v", err)
 	}
 	for i := range results {
 		if wakes[i].Kind == prwatch.KindItems {
 			results[i] = prwatch.Delivered
 		}
 	}
-	log.Printf("items: woke console (%d item(s))", len(all))
+	log.Printf("items: woke global inbox owner %s (%d item(s))", owner, len(all))
 	return results
 }

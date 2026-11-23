@@ -110,8 +110,8 @@ flags, and environment variables only ever name a target.
 | query `runtime-events` (`amux agent events`) | workgroup | itself | itself, members (incl. archived members) | |
 | query `wait` (`amux agent wait`) | workgroup | itself | itself, members (incl. archived members) | |
 | query `items` (`amux agent items`) | workgroup | itself | itself | Acts as the caller only; per-item visibility in `access/items.go` (a coordinator sees its workgroup's items). Console: as itself, every item. See [Items](items.md). |
-| `raise-item`, `item-state` (`amux agent raise`, `amux agent items ack\|dismiss\|done\|reopen`) | workgroup | itself | itself | Acts as the caller only. A member raises to its coordinator, everyone else to the console; per-item triage rules in [Items](items.md). |
-| `escalate-item` (`amux agent escalate`) | workgroup | no | itself, on items it holds | Moves the item to the console. |
+| `raise-item`, `item-state` (`amux agent raise`, `amux agent items ack\|dismiss\|done\|reopen`) | workgroup | itself | itself | Acts as the caller only. A member raises to its coordinator, everyone else to the global inbox (today the console session); per-item triage rules in [Items](items.md). |
+| `escalate-item` (`amux agent escalate`) | workgroup | no | itself, on items it holds | Moves the item to the global inbox. |
 | `rename` (`amux agent name`) | workgroup | itself | itself, members | |
 | `start` | workgroup | itself | workgroup (cascades), members | |
 | `steer` prompt / interject / stop | workgroup | itself | itself, members | |

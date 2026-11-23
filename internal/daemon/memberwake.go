@@ -101,7 +101,7 @@ func (d *Daemon) observeWorkgroups(rows []core.Session) {
 		}
 	}
 	// A coordinator that left the rail (archived, deleted) had its active
-	// items carried over to the console in that transaction; tell the console.
+	// items carried over to the global inbox in that transaction; tell its owner.
 	// The first poll after a (re)start offers whatever was left unnotified.
 	offerItems := !w.primed
 	for id := range w.roots {

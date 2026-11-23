@@ -9,16 +9,18 @@ import "amux/internal/items"
 // the stored item's parties. Clients never supply either.
 //
 // The routing rule — a member raises to its own coordinator, everyone else to
-// the console — and the triage rules are:
+// the global inbox (items.GlobalInbox, today the console) — and the triage
+// rules are:
 //
 //   - a session sees what it raised and what it receives; a coordinator also
 //     sees every item raised in its workgroup (also after escalating it); the
-//     console sees all;
-//   - the current recipient (and the console, always) may acknowledge,
+//     global inbox owner and the admin console see all;
+//   - the current recipient (and the global inbox owner and admin console,
+//     always) may acknowledge,
 //     dismiss, complete or reopen an item; its source may withdraw it
 //     (dismiss) or mark it done while it is active;
 //   - only a coordinator that currently holds an item may escalate it, and
-//     only to the console.
+//     only to the global inbox.
 
 // ItemParties is the authorization-relevant projection of a stored item.
 type ItemParties struct {
@@ -33,23 +35,24 @@ func PartiesOf(it items.Item) ItemParties {
 // ItemRecipient routes a raise from subject. root is subject's workgroup root
 // (rootFound false when subject has none or it is unknown). A member of an
 // active workgroup raises to its coordinator; a coordinator, a repo home, an
-// agent outside a coordinated workgroup and the console raise to the console.
+// agent outside a coordinated workgroup and the console raise to the global
+// inbox (items.GlobalInbox).
 // workgroup is the coordinator the item belongs to ("" for none).
 func ItemRecipient(subject, root Resource, rootFound bool) (recipient, workgroup string) {
 	if subject.Role == "coordinator" {
-		return items.ConsoleRecipient, subject.ID
+		return items.GlobalInbox(), subject.ID
 	}
 	if subject.Role == "" && subject.RootID != "" && rootFound && root.ID == subject.RootID &&
 		root.Role == "coordinator" && !root.Archived {
 		return root.ID, root.ID
 	}
-	return items.ConsoleRecipient, ""
+	return items.GlobalInbox(), ""
 }
 
 // ItemVisible reports whether subject may read an item.
 func ItemVisible(subject Resource, it ItemParties) bool {
 	switch {
-	case subject.Role == "console":
+	case subject.Role == "console", items.IsGlobalInbox(subject.ID):
 		return true
 	case subject.ID == "":
 		return false
@@ -67,7 +70,7 @@ func ItemTransitionAllowed(subject Resource, it ItemParties, state string) bool 
 	if !ItemVisible(subject, it) {
 		return false
 	}
-	if subject.Role == "console" || it.Recipient == subject.ID {
+	if subject.Role == "console" || items.IsGlobalInbox(subject.ID) || it.Recipient == subject.ID {
 		return true
 	}
 	if it.Source == subject.ID {
@@ -77,7 +80,7 @@ func ItemTransitionAllowed(subject Resource, it ItemParties, state string) bool 
 }
 
 // ItemEscalationAllowed reports whether subject may escalate an item to the
-// console: it must be a coordinator holding the item.
+// global inbox: it must be a coordinator holding the item.
 func ItemEscalationAllowed(subject Resource, it ItemParties) bool {
 	return subject.Role == "coordinator" && subject.ID != "" && it.Recipient == subject.ID
 }

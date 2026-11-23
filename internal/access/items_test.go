@@ -68,12 +68,12 @@ func TestItemRecipient(t *testing.T) {
 		to, workgroup string
 	}{
 		{"member to its coordinator", Resource{ID: "a1", RootID: "wg1"}, wg, true, "wg1", "wg1"},
-		{"coordinator to console", wg, Resource{}, false, items.ConsoleRecipient, "wg1"},
-		{"member of archived workgroup to console", Resource{ID: "a1", RootID: "wg1"}, Resource{ID: "wg1", Role: "coordinator", Archived: true}, true, items.ConsoleRecipient, ""},
-		{"agent in a hidden repo root to console", Resource{ID: "one", RootID: "hidden"}, Resource{ID: "hidden", Scope: "repo"}, true, items.ConsoleRecipient, ""},
-		{"repo home to console", Resource{ID: "api", Role: "repo"}, Resource{}, false, items.ConsoleRecipient, ""},
-		{"console to console", Resource{ID: "console", Role: "console"}, Resource{}, false, items.ConsoleRecipient, ""},
-		{"mismatched root never routes", Resource{ID: "a1", RootID: "wg1"}, Resource{ID: "wg2", Role: "coordinator"}, true, items.ConsoleRecipient, ""},
+		{"coordinator to console", wg, Resource{}, false, items.GlobalInbox(), "wg1"},
+		{"member of archived workgroup to console", Resource{ID: "a1", RootID: "wg1"}, Resource{ID: "wg1", Role: "coordinator", Archived: true}, true, items.GlobalInbox(), ""},
+		{"agent in a hidden repo root to console", Resource{ID: "one", RootID: "hidden"}, Resource{ID: "hidden", Scope: "repo"}, true, items.GlobalInbox(), ""},
+		{"repo home to console", Resource{ID: "api", Role: "repo"}, Resource{}, false, items.GlobalInbox(), ""},
+		{"console to console", Resource{ID: "console", Role: "console"}, Resource{}, false, items.GlobalInbox(), ""},
+		{"mismatched root never routes", Resource{ID: "a1", RootID: "wg1"}, Resource{ID: "wg2", Role: "coordinator"}, true, items.GlobalInbox(), ""},
 	}
 	for _, c := range cases {
 		to, wgID := ItemRecipient(c.subject, c.root, c.rootFound)
@@ -90,7 +90,7 @@ func TestItemTriageRules(t *testing.T) {
 	a1 := Resource{ID: "a1", RootID: "wg1"}
 	a2 := Resource{ID: "a2", RootID: "wg1"}
 	received := ItemParties{Source: "a1", Workgroup: "wg1", Recipient: "wg1"}
-	escalated := ItemParties{Source: "a1", Workgroup: "wg1", Recipient: items.ConsoleRecipient}
+	escalated := ItemParties{Source: "a1", Workgroup: "wg1", Recipient: items.GlobalInbox()}
 
 	if !ItemVisible(a1, received) || !ItemVisible(wg1, received) || !ItemVisible(console, received) {
 		t.Fatal("source, recipient or console cannot see the item")

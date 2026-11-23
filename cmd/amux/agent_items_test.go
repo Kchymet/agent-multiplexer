@@ -95,7 +95,7 @@ func TestAgentRaiseValidatesLocally(t *testing.T) {
 
 func TestAgentRaiseDetailFromStdin(t *testing.T) {
 	calls := fakeItems(t, "m1", func(itemCallRecord) ([]byte, error) {
-		return itemResult(t, items.Item{ID: "it-0000000b", Recipient: items.ConsoleRecipient, Raised: 2}), nil
+		return itemResult(t, items.Item{ID: "it-0000000b", Recipient: items.GlobalInbox(), Raised: 2}), nil
 	})
 	old := itemStdin
 	itemStdin = strings.NewReader("multi\nline detail\n")
@@ -108,7 +108,7 @@ func TestAgentRaiseDetailFromStdin(t *testing.T) {
 	if (*calls)[0].fields[core.ItemDetailField] != "multi\nline detail\n" {
 		t.Fatalf("detail = %q", (*calls)[0].fields[core.ItemDetailField])
 	}
-	if !strings.Contains(out, "updated (raised 2 times) it-0000000b") || !strings.Contains(out, "the console") {
+	if !strings.Contains(out, "updated (raised 2 times) it-0000000b") || !strings.Contains(out, "the global inbox") {
 		t.Fatalf("output = %q", out)
 	}
 }
@@ -124,7 +124,7 @@ func TestAgentItemsListAndTransitions(t *testing.T) {
 			}
 			return itemResult(t, items.Item{ID: rec.fields[core.ItemIDField], State: items.StateAcknowledged}), nil
 		case core.ActionEscalateItem:
-			return itemResult(t, items.Item{ID: rec.fields[core.ItemIDField], Recipient: items.ConsoleRecipient}), nil
+			return itemResult(t, items.Item{ID: rec.fields[core.ItemIDField], Recipient: items.GlobalInbox()}), nil
 		}
 		return nil, errors.New("unexpected")
 	})
@@ -158,7 +158,7 @@ func TestAgentItemsListAndTransitions(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if (*calls)[0].verb != core.ActionEscalateItem || (*calls)[0].fields[core.ItemNoteField] != "user decides" || !strings.Contains(out, "→ the console") {
+	if (*calls)[0].verb != core.ActionEscalateItem || (*calls)[0].fields[core.ItemNoteField] != "user decides" || !strings.Contains(out, "→ the global inbox") {
 		t.Fatalf("escalate = %+v %q", *calls, out)
 	}
 	if err := cmdAgentEscalate(nil); err == nil {

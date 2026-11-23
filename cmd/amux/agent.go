@@ -61,7 +61,7 @@ func cmdAgent(args []string) error {
 		return cmdAgentWait(args[1:])
 	case "raise":
 		// Upward signals: a structured follow-up / outstanding / decision /
-		// risk / fyi item to the caller's coordinator (or the console).
+		// risk / fyi item to the caller's coordinator (or the global inbox).
 		return cmdAgentRaise(args[1:])
 	case "items":
 		return cmdAgentItems(args[1:])
@@ -127,12 +127,13 @@ usage: amux agent <command>
                      ready,idle,waiting waits for one of those states; --timeout
                      bounds the wait (nonzero exit); --json
   raise              raise a structured item upward (a member to its coordinator,
-                     anyone else to the console): --kind follow_up|outstanding|
+                     anyone else to the global inbox): --kind follow_up|outstanding|
                      decision_needed|risk|fyi --title "…" [--detail "…"]
                      [--pr repo#n] [--link url] [--suggest "…"] [--json]
   items              list the items you raised or receive (--raised, --inbox,
                      --all, --json); show <id>; ack|dismiss|done|reopen <id>...
-  escalate <id>...   coordinator: hand a received item to the console [--note]
+  escalate <id>...   coordinator: hand a received item to the global inbox
+                     [--note "…"]
 
 Commands use the private file mailbox from the ordinary sandboxed shell.
 Keep both sandboxes enabled. Discovery grants no cross-session write access.

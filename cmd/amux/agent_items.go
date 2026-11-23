@@ -30,7 +30,7 @@ const agentRaiseUsage = `usage: amux agent raise --kind <kind> --title "<title>"
 
   kinds: follow_up | outstanding | decision_needed | risk | fyi
   A member's item goes to its coordinator; a coordinator's (or any session
-  outside a workgroup) to the console. Raising the same kind and title again
+  outside a workgroup) to the global inbox. Raising the same kind and title again
   while the item is still open updates it instead of adding a duplicate.`
 
 const agentItemsUsage = `usage: amux agent items [--raised | --inbox] [--state <s>[,<s>...] | --all] [--limit n] [--json]
@@ -43,7 +43,8 @@ const agentItemsUsage = `usage: amux agent items [--raised | --inbox] [--state <
 
 const agentEscalateUsage = `usage: amux agent escalate <id>... [--note "<why>"]
 
-  A coordinator hands an item it received to the console (the user's inbox):
+  A coordinator hands an item it received to the global inbox (the
+  cross-workgroup inbox the user works from):
   for decisions that need the user, or work that crosses workgroups.`
 
 // itemCall performs one item verb as the caller; a variable so tests can fake
@@ -214,8 +215,8 @@ func cmdAgentRaise(args []string) error {
 }
 
 func recipientLabel(r string) string {
-	if r == items.ConsoleRecipient {
-		return "the console"
+	if r == items.GlobalInbox() {
+		return "the global inbox"
 	}
 	return "coordinator " + r
 }

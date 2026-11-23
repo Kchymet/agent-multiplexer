@@ -13,7 +13,6 @@ import (
 	"amux/internal/agent"
 	"amux/internal/claudegoal"
 	"amux/internal/codexapp"
-	"amux/internal/console"
 	"amux/internal/core"
 	"amux/internal/engine"
 	"amux/internal/items"
@@ -218,9 +217,9 @@ func (d *Daemon) deliverPRWake(ctx context.Context, workgroup string, wakes []pr
 	if len(wakes) == 0 {
 		return results
 	}
-	if workgroup == console.ID {
-		// Only item notices are addressed to the console (items.go).
-		return d.deliverConsoleItemWakes(ctx, wakes)
+	if items.IsGlobalInbox(workgroup) {
+		// Only item notices are addressed to the global inbox owner (items.go).
+		return d.deliverGlobalInboxWakes(ctx, wakes)
 	}
 
 	// Membership moves and coordinator-grant changes take the effect gate

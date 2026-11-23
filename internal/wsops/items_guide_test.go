@@ -16,7 +16,7 @@ func TestMemberGuideRaisesItems(t *testing.T) {
 		"## Raise follow-ups as items",
 		"amux agent raise --kind follow_up|outstanding|decision_needed|risk|fyi",
 		"do not bury it in prose",
-		"A workgroup member's item goes to its coordinator",
+		"A workgroup member's item goes to its coordinator, anyone else's to the global inbox",
 		"updates that item instead of adding a duplicate",
 		"amux agent items done <id>",
 		"Name the item ids in your final message",
@@ -28,8 +28,8 @@ func TestMemberGuideRaisesItems(t *testing.T) {
 }
 
 // Every coordinator guide makes it the triage point: resolve, escalate to the
-// console, raise its own end-of-task items, and never archive with an
-// untriaged inbox without saying the items move to the console.
+// global inbox, raise its own end-of-task items, and never archive with an
+// untriaged inbox without saying the items move to the global inbox.
 func TestCoordinatorGuideTriagesItems(t *testing.T) {
 	for _, root := range []store.Session{
 		{ID: "wg1", Name: "codex", Agent: agent.GoalRuntime, Dir: "/sandbox/wg1"},
@@ -41,10 +41,10 @@ func TestCoordinatorGuideTriagesItems(t *testing.T) {
 			"amux agent items show <id>",
 			"amux agent escalate <id> --note \"<why>\"",
 			"Do not escalate what you can resolve",
-			"goes up as items from you (yours go to the console)",
-			"Archiving this workgroup carries every item still open or acknowledged in your inbox to the console",
+			"goes up as items from you (yours go to the global inbox)",
+			"Archiving this workgroup carries every item still open or acknowledged in your inbox to the global inbox",
 			"No open item in your inbox: `amux agent items --inbox` lists none",
-			"any item still open or acknowledged in your inbox — name each in the question, and say that archiving hands it to the console's inbox",
+			"any item still open or acknowledged in your inbox — name each in the question, and say that archiving hands it to the global inbox",
 		} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s coordinator guide lacks %q", root.Agent, want)

@@ -51,15 +51,15 @@ func TestRaiseItemDeduplicatesActiveItems(t *testing.T) {
 func TestRaiseItemBoundsActiveItemsPerSource(t *testing.T) {
 	db := openTemp(t)
 	for i := 0; i < items.MaxActivePerSource; i++ {
-		raiseOK(t, db, "m1", "", items.ConsoleRecipient, items.Raise{Kind: items.KindFYI, Title: "note " + string(rune('A'+i%26)) + string(rune('a'+i/26))}, int64(i))
+		raiseOK(t, db, "m1", "", items.GlobalInbox(), items.Raise{Kind: items.KindFYI, Title: "note " + string(rune('A'+i%26)) + string(rune('a'+i/26))}, int64(i))
 	}
 	r, _ := items.Raise{Kind: items.KindFYI, Title: "one too many"}.Validate()
-	if _, _, err := db.RaiseItem("m1", "", items.ConsoleRecipient, r, 1000); !errors.Is(err, ErrTooManyItems) {
+	if _, _, err := db.RaiseItem("m1", "", items.GlobalInbox(), r, 1000); !errors.Is(err, ErrTooManyItems) {
 		t.Fatalf("raise past the bound = %v, want ErrTooManyItems", err)
 	}
 	// A re-raise of an existing item still updates it.
 	r, _ = items.Raise{Kind: items.KindFYI, Title: "note Aa"}.Validate()
-	if _, created, err := db.RaiseItem("m1", "", items.ConsoleRecipient, r, 1001); err != nil || created {
+	if _, created, err := db.RaiseItem("m1", "", items.GlobalInbox(), r, 1001); err != nil || created {
 		t.Fatalf("re-raise at the bound = created %v, %v", created, err)
 	}
 }
@@ -67,7 +67,7 @@ func TestRaiseItemBoundsActiveItemsPerSource(t *testing.T) {
 func TestItemsFilters(t *testing.T) {
 	db := openTemp(t)
 	a, _ := raiseOK(t, db, "m1", "wg", "wg", items.Raise{Kind: items.KindRisk, Title: "a"}, 1)
-	b, _ := raiseOK(t, db, "wg", "wg", items.ConsoleRecipient, items.Raise{Kind: items.KindRisk, Title: "b"}, 2)
+	b, _ := raiseOK(t, db, "wg", "wg", items.GlobalInbox(), items.Raise{Kind: items.KindRisk, Title: "b"}, 2)
 	c, _ := raiseOK(t, db, "x1", "wg2", "wg2", items.Raise{Kind: items.KindRisk, Title: "c"}, 3)
 	ids := func(f ItemFilter) []string {
 		t.Helper()
@@ -90,7 +90,7 @@ func TestItemsFilters(t *testing.T) {
 	if got := ids(ItemFilter{Involving: "m1"}); len(got) != 1 || got[0] != a.ID {
 		t.Fatalf("involving m1 = %v", got)
 	}
-	if got := ids(ItemFilter{Recipient: items.ConsoleRecipient}); len(got) != 1 || got[0] != b.ID {
+	if got := ids(ItemFilter{Recipient: items.GlobalInbox()}); len(got) != 1 || got[0] != b.ID {
 		t.Fatalf("console inbox = %v", got)
 	}
 	if got, truncated, _ := db.Items(ItemFilter{Limit: 2}); len(got) != 2 || !truncated {
@@ -121,7 +121,7 @@ func TestArchiveCarriesActiveItemsToConsole(t *testing.T) {
 	for _, id := range []string{open.ID, acked.ID} {
 		it, _, _ := db.Item(id)
 		last := it.History[len(it.History)-1]
-		if it.Recipient != items.ConsoleRecipient || it.State != items.StateOpen || !it.Unnotified ||
+		if it.Recipient != items.GlobalInbox() || it.State != items.StateOpen || !it.Unnotified ||
 			last.Action != items.EventCarriedOver || last.From != "wg" {
 			t.Fatalf("%s after archive = %+v", id, it)
 		}
@@ -133,7 +133,7 @@ func TestArchiveCarriesActiveItemsToConsole(t *testing.T) {
 		t.Fatalf("archive flag not written: %+v", s)
 	}
 	recipients, err := db.UnnotifiedItemRecipients()
-	if err != nil || len(recipients) != 1 || recipients[0] != items.ConsoleRecipient {
+	if err != nil || len(recipients) != 1 || recipients[0] != items.GlobalInbox() {
 		t.Fatalf("unnotified recipients = %v, %v", recipients, err)
 	}
 }
@@ -148,7 +148,7 @@ func TestDeleteCarriesActiveItemsToConsole(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, found, err := db.Item(it.ID)
-	if err != nil || !found || got.Recipient != items.ConsoleRecipient {
+	if err != nil || !found || got.Recipient != items.GlobalInbox() {
 		t.Fatalf("after delete = %+v found=%v err=%v", got, found, err)
 	}
 }
