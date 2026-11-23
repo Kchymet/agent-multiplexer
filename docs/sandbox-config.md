@@ -522,8 +522,10 @@ and manifest attributes every difference:
 Files the harness churns on its own are compared on their configuration only:
 `.claude.json` on its config keys (`mcpServers`, `model`), `config.toml` without
 the `[projects.*]` trust tables amux writes at launch, `settings.json` with the
-path rewrite mapped back. So a launch, a startup counter, or a granted trust never
-reads as an edit.
+path rewrite mapped back, in canonical key order, and with the
+[unattended pre-answers](#unattended-launch-pre-answered-dialogs) factored out. So
+a launch, a startup counter, a granted trust, or Claude reformatting its own
+settings never reads as an edit.
 
 Where you see it:
 
@@ -547,6 +549,51 @@ Nothing propagates in either direction on its own. Where both sides end up
 agreeing anyway — you made the same change by hand, or a promoted change settled
 — the path drops out of the listing.
 
+### Unattended launch: pre-answered dialogs
+
+Agents and coordinators run with nobody watching the pane, so any Claude Code
+dialog that waits for a keypress stalls them. amux pre-answers the ones a fresh
+private home can hit:
+
+| dialog | suppressed by | amux sets it |
+|--------|---------------|--------------|
+| first-run onboarding (theme picker, login walkthrough) | `hasCompletedOnboarding: true` in `.claude.json` | at every launch (state, never compared) |
+| "Do you trust this folder?" | `projects.<dir>.hasTrustDialogAccepted` in `.claude.json` | at every launch, for the launch dir |
+| auto mode opt-in / entry warning | `skipAutoPermissionPrompt: true` in user, flag, or managed settings | in `settings.json`, when the agent runs in auto mode |
+| "Teach auto mode about your environment" onboarding (after 5 startups and 5 classifier denials) | a non-empty `autoMode.environment` in user, flag, or managed settings (project and local settings are ignored for `autoMode`) | in `settings.json`: your own entries plus `"$defaults"`, or just `["$defaults"]` |
+
+`"$defaults"` splices in Claude's built-in environment entries, so
+`["$defaults"]` alone tells the classifier exactly what it would have been told
+anyway: it answers the dialog without loosening anything. amux never touches
+`autoMode.allow`, `soft_deny`, or `hard_deny`. "Auto mode" means the launch
+`--permission-mode` (`AMUX_PERMISSION_MODE`, default `auto`), or, when that is
+`none`, the settings' `permissions.defaultMode`.
+
+The keys are merged into the copy's `settings.json` when it is seeded and again
+before every launch: creation, restart, and the relaunch after a daemon restart.
+So sandboxes seeded before amux managed them catch up on their next launch. The
+merge is idempotent (a home that already has them is not rewritten) and leaves
+every other key alone.
+
+**Drift.** These are amux-managed, so drift ignores them on both sides: a true
+`skipAutoPermissionPrompt` is dropped before comparing, and `autoMode.environment`
+is compared with `"$defaults"` ensured, so a bare `["$defaults"]` counts the
+same as no environment. A real edit (an environment entry the agent added, any
+other key) still shows as `agent-changed`. `promote` carries the edit but not the
+plumbing: a `skipAutoPermissionPrompt` or a bare `["$defaults"]` your template
+lacks stays out of your config. Promoting `settings.json` also maps the copy's
+own paths back to yours. Comparing in canonical form changes `settings.json`'s
+baseline hash once. A copy that agrees with your template settles silently on the
+next scan, but one with a `settings.json` edit still pending from before this
+change shows once as `conflict`, not `agent-changed`.
+
+Codex needs nothing extra. Its blocking startup prompts are already handled at
+launch: project trust is written into the private `config.toml`, the update
+check is turned off (`check_for_update_on_startup=false`), and approvals are
+preset to **Approve for me**. Its other `[notice]` acknowledgements (the
+full-access warning, model-migration prompts) only appear with
+`danger-full-access` or after a model migration.
+
 ## Why a copy, not a mount
 
 Mounting `~/.claude` read-write into every sandbox (the previous design) meant
@@ -569,6 +616,7 @@ credential links are filled in at launch. The agent guide
 |---------|------|
 | `internal/cfghome` | the generic machinery: `Seed`, `Scan`, `Promote`, `Reset`, `Binds`, the manifest, the rail summary cache |
 | `internal/claudecfg` (`template.go`, `Home`) | what a Claude home is; which entries are config vs state vs auth; the `.claude.json` / `settings.json` transforms; every transcript lookup on an explicit `Home` |
+| `internal/claudecfg` (`unattended.go`) | the unattended pre-answers: `ApplyUnattendedSettings` (seed), `Home.EnsureUnattendedRooted` (every launch, from `PrepareLaunch`), and their drift normalization and promote merge |
 | `internal/codexcfg` (`template.go`, `Home`) | the same for Codex |
 | `agent.Harness.Config` | a harness's spec for an agent (kind, env var, template, copy); `PrepareLaunch`, `Activity`, `RestoreTranscript`, `RuntimeTranscriptPath`, `ListSessions` all read the agent's home |
 | `wsops.ensureConfigHome` | seeds at creation and at every launch; `AgentEnv` exports the config env |
