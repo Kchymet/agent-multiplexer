@@ -457,6 +457,9 @@ func statusSegments(status string) []segment {
 	switch word {
 	case core.StateWaiting:
 		return []segment{{" " + word + " ", attnStyle}, {" " + rest, dimStyle}}
+	case core.SubStateSupervising:
+		// A coordinator whose members are working reads as running.
+		return []segment{{word, stateStyle(core.StateRunning)}, {" " + rest, dimStyle}}
 	case core.StateRunning, core.StateReady, core.StateUnknown, core.StateIdle:
 		if rest == "" {
 			return []segment{{word, stateStyle(word)}}

@@ -76,3 +76,26 @@ A goal coordinator's rail/status line shows its goal status — `goal active`,
 `goal waiting` (it ran `goal wait` and is idle until a wake-up), `goal paused`,
 `goal input`, `goal complete`, … or `goal mode (no goal)` — so waiting on a goal
 is distinguishable from idle.
+
+## Coordinator status: supervising
+
+A coordinator's row reflects the work it dispatched, not only its own turn
+(`internal/source/supervision.go`):
+
+- Its `state` is the most demanding of its own and its members' states (a
+  member waiting on the user floats the workgroup up), as before.
+- When the coordinator is between turns (ready, idle or unknown) while a member
+  is running, waiting or unknown — or, with its goal `waiting`, a member still
+  owns an open PR — it is **supervising**: `state` is `running` (or
+  `waiting` when a member needs the user), `subState` is `supervising`, and
+  the status line leads with it, e.g.
+  `supervising · 2 agents · goal waiting · waiting on m1 running, m2 PR #12 CI pending`.
+- A goal that needs the user (`input`, `blocked`, `budgetLimited`) makes a
+  between-turns coordinator `waiting`, with the goal's note as the reason.
+- It reads `ready`/`idle` only when it and every member are.
+
+`amux status --json` adds a `supervision` object to each active coordinator
+row: `ownState` (its own turn activity), `goal` and `goalNote`, `members`
+(the in-flight members: id, title, state, open-PR summary) and `reason`.
+Both fields are additive; a consumer that predates them keeps reading
+`state`/`status`.

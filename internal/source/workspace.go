@@ -54,6 +54,9 @@ type Workspace struct {
 	// goalStatus, if set, reports a goal coordinator's goal status word
 	// ("none" with no goal, "" when unknown) for its status line.
 	goalStatus func(store.Session) string
+	// goalInfo, if set, reports a goal coordinator's goal status word and its
+	// note (what it waits on, the question it asked); it supersedes goalStatus.
+	goalInfo func(store.Session) (status, note string)
 }
 
 func NewWorkspace() *Workspace { return &Workspace{} }
@@ -69,6 +72,9 @@ func (w *Workspace) SetPRs(f func(id string) []harnessproto.SessionPR) { w.prs =
 
 // SetGoalStatus installs the goal-status probe (see Workspace.goalStatus).
 func (w *Workspace) SetGoalStatus(f func(store.Session) string) { w.goalStatus = f }
+
+// SetGoalInfo installs the goal status-and-note probe (see Workspace.goalInfo).
+func (w *Workspace) SetGoalInfo(f func(store.Session) (status, note string)) { w.goalInfo = f }
 
 // SetModelObserved installs the live-controller reconciliation callback.
 func (w *Workspace) SetModelObserved(f func(id, kind, model string)) { w.modelObserved = f }
@@ -175,27 +181,38 @@ func (w *Workspace) Poll(ctx context.Context) ([]core.Session, error) {
 		// The root row is the workgroup's coordinator session. Its own activity
 		// leads its status; the row's state is the most demanding of its own and
 		// its agents', so a workgroup with a blocked member still floats up.
+		// A coordinator between turns while its members work presents as
+		// supervising (see superviseCoordinator).
 		ownState := agentState(liveOf(r.ID), r)
 		subStates := make([]string, len(active))
-		rootState := ownState
+		views := make([]memberView, len(active))
+		memberPRs := make([][]harnessproto.SessionPR, len(active))
 		for i, s := range active {
 			subStates[i] = agentState(liveOf(s.ID), s)
-			if stateRank(subStates[i]) > stateRank(rootState) {
-				rootState = subStates[i]
-			}
+			memberPRs[i] = w.sessionPRs(s.ID)
+			views[i] = memberView{session: s, state: subStates[i], prs: memberPRs[i]}
 		}
+		goal, goalNote := w.goal(r)
+		view := superviseCoordinator(ownState, goal, goalNote, views)
+		status := fmt.Sprintf("%s · %d agent%s%s", stateLabel(view.lead), len(active), plural(len(active)), w.goalSuffix(r, ownState, goal))
+		if view.supervision.Reason != "" {
+			status += " · " + view.supervision.Reason
+		}
+		supervision := view.supervision
 		out = append(out, w.withCaps(core.Session{
 			ID: r.ID, Title: r.Display(), Source: "workspace", Section: core.SectionWorkgroups,
 			IsRoot: true, Kind: agent.Canonical(r.Agent), Mode: store.NormalizeMode(r.Mode), Model: r.Model,
-			Role:      store.RoleCoordinator,
-			State:     rootState,
-			Status:    fmt.Sprintf("%s · %d agent%s%s", stateLabel(ownState), len(active), plural(len(active)), w.goalSuffix(r, ownState)),
-			Cwd:       containerDir(r),
-			CanAttach: true, // opens the coordinator
-			CanKill:   true, // delete the whole root
+			Role:        store.RoleCoordinator,
+			State:       view.state,
+			SubState:    view.subState,
+			Supervision: &supervision,
+			Status:      status,
+			Cwd:         containerDir(r),
+			CanAttach:   true, // opens the coordinator
+			CanKill:     true, // delete the whole root
 		}, true)) // the coordinator resolves in steer.go — steerable
 		for i, s := range active {
-			prs := w.sessionPRs(s.ID)
+			prs := memberPRs[i]
 			out = append(out, w.withCaps(core.Session{
 				ID: s.ID, Title: agentLabel(s), Source: "workspace", Section: core.SectionWorkgroups,
 				RootID: s.RootID, Kind: agent.Canonical(s.Agent), Mode: s.Mode, Repos: s.Repo,
@@ -577,17 +594,32 @@ func prSuffix(prs []harnessproto.SessionPR) string {
 	return ""
 }
 
+// goal reads a goal coordinator's goal status word and note ("", "" when
+// it is not in goal mode or no probe is installed).
+func (w *Workspace) goal(root store.Session) (status, note string) {
+	if !agent.GoalMode(root) {
+		return "", ""
+	}
+	if w.goalInfo != nil {
+		return w.goalInfo(root)
+	}
+	if w.goalStatus != nil {
+		return w.goalStatus(root), ""
+	}
+	return "", ""
+}
+
 // goalSuffix is goalModeSuffix with the coordinator's live goal status, so a
 // coordinator waiting on a wake-up reads differently from an idle one:
 // " · goal waiting", " · goal active", " · goal paused", " · goal mode (no
 // goal)". ownState is the coordinator's own activity: a goal marked waiting
 // whose coordinator is running again reads active.
-func (w *Workspace) goalSuffix(root store.Session, ownState string) string {
+func (w *Workspace) goalSuffix(root store.Session, ownState, status string) string {
 	base := goalModeSuffix(root)
-	if !agent.GoalMode(root) || w.goalStatus == nil {
+	if !agent.GoalMode(root) {
 		return base
 	}
-	switch status := w.goalStatus(root); status {
+	switch status {
 	case "":
 		return base
 	case "none":

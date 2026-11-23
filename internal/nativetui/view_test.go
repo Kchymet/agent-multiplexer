@@ -196,6 +196,14 @@ func TestRowStatusSubline(t *testing.T) {
 	}
 }
 
+// A supervising coordinator leads with its sub-state, styled as running work.
+func TestStatusSegmentsSupervising(t *testing.T) {
+	segs := statusSegments("supervising · 2 agents · waiting on a running")
+	if len(segs) != 2 || segs[0].text != "supervising" || segs[0].style.Render("x") != stateStyle(core.StateRunning).Render("x") {
+		t.Fatalf("segments = %+v", segs)
+	}
+}
+
 // The task summary now titles a leaf agent row; its sub-line surfaces the id so
 // the session stays identifiable — except when the title already is the id (a
 // prompt-less agent), where repeating it would be noise.

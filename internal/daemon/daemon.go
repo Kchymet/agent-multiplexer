@@ -336,6 +336,7 @@ func Default(self string) *Daemon {
 	})
 	ws.SetPRs(d.sessionPRs)
 	ws.SetGoalStatus(d.coordinatorGoalStatus)
+	ws.SetGoalInfo(d.coordinatorGoalInfo)
 	ws.SetModelObserved(func(id, kind, model string) {
 		if kind == "codex" && d.codex != nil {
 			d.codex.SetModel(id, model)
