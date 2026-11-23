@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"amux/internal/core"
 	"amux/internal/queue"
 	hp "github.com/kchymet/agent-multiplexer/harnessproto"
 )
@@ -113,6 +114,7 @@ func questionFixtureFiles(t *testing.T) map[string][]byte {
 		"answer-request-form-cancel.json":   js(answer(cancel)),
 		"answer-request-form-reply.json":    js(QueueAnswerRequest{IdemKey: "5c1e9d2a-reply", Form: &reply}),
 		"answer-response.json":              js(ActionResponse{OK: true}),
+		"release-request.json":              js(QueueReleaseRequest{IdemKey: "5c1e9d2a-release"}),
 		"api-error-answered.json":           js(APIError{Code: CodeAnswered, Error: queueConflict(CodeAnswered)}),
 		"api-error-needs-newer-client.json": js(APIError{Code: CodeNeedsNewerClient, Error: queueConflict(CodeNeedsNewerClient)}),
 		"api-error-delivery-failed.json":    js(APIError{Code: CodeDeliveryFailed, Error: queueConflict(CodeDeliveryFailed)}),
@@ -207,5 +209,35 @@ func TestAnswerFieldsForm(t *testing.T) {
 	}
 	if got := formAuditText(hp.FormAnswer{Version: 2, Action: hp.FormActionAnswer, Answers: []hp.QuestionAnswer{{ID: "token", Other: fixtureStr("s3cr3t")}}}); bytes.Contains([]byte(got), []byte("s3cr3t")) {
 		t.Errorf("audit text leaks free text: %q", got)
+	}
+}
+
+// TestQueueReleaseRoute: release is a question verb on the answer path —
+// steer permission, strict body, a fresh in-scope read, then the daemon's
+// host verb.
+func TestQueueReleaseRoute(t *testing.T) {
+	q := newQueueFake()
+	a := openTestAuthority(t, t.TempDir(), Lifetimes{}, nil)
+	s := newTestServer(t, a, q)
+	steer := enroll(t, a, []string{PermRead, PermSteer}, allSessions)
+	approve := enroll(t, a, []string{PermRead, PermApprove}, allSessions)
+	path := func(id string) string { return PathQueue + "/" + id + "/release" }
+	if w := do(s, "POST", path(qQuestion), approve.AccessToken, `{"idem_key":"r0"}`); w.Code != 403 {
+		t.Fatalf("release without steer: %d", w.Code)
+	}
+	if w := do(s, "POST", path(qPermission), steer.AccessToken, `{"idem_key":"r1"}`); w.Code != 404 {
+		t.Fatalf("release of a permission: %d", w.Code)
+	}
+	if w := do(s, "POST", path(qQuestion), steer.AccessToken, `{"idem_key":"r2","x":1}`); w.Code != 400 {
+		t.Fatalf("unknown field: %d", w.Code)
+	}
+	if w := do(s, "POST", path("q-zzzzzzzzzz"), steer.AccessToken, `{"idem_key":"r3"}`); w.Code != 409 || apiCode(t, w) != CodeAskerGone {
+		t.Fatalf("release of a gone question: %d %s", w.Code, w.Body)
+	}
+	if w := do(s, "POST", path(qQuestion), steer.AccessToken, `{"idem_key":"r4"}`); w.Code != 200 {
+		t.Fatalf("release: %d %s", w.Code, w.Body)
+	}
+	if act := <-q.applied; act.Action != core.ActionQueueRelease || act.Fields[core.QueueEntryField] != qQuestion {
+		t.Fatalf("release action = %+v", act)
 	}
 }

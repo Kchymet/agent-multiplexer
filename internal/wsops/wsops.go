@@ -1047,7 +1047,7 @@ func ApplyResult(ctx context.Context, a core.Action) (string, error) {
 	case core.ActionNewWorkgroup, core.ActionCreateWorkspace:
 		id, _, err := applyNewWorkgroup(ctx, a)
 		return id, err
-	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem, core.ActionQueueAnswer, core.ActionQueueDismiss:
+	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem, core.ActionQueueAnswer, core.ActionQueueDismiss, core.ActionQueueRelease:
 		// Item and queue verbs touch only the item store and live runtimes; daemon.handle serves them
 		// (internal/daemon/items.go) before any workspace dispatch.
 		return "", fmt.Errorf("%s is served by the amux daemon", a.Action)

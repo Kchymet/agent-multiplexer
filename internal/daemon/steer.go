@@ -201,6 +201,11 @@ func (d *Daemon) steerPTY(ctx context.Context, a core.Action, verb string, h age
 			})
 		}
 		if verb == core.SteerPrompt || verb == core.SteerInterject {
+			// A held Claude question has no dialog drawn: the text answers or
+			// dismisses it instead of being typed (question_hold.go).
+			if handled, err := d.steerHeldQuestion(sess, a.Fields[core.SteerText], a.Fields[steerOriginField] == steerOriginAmux); handled {
+				return err
+			}
 			// Typed text goes through the one safe delivery path, which never
 			// mixes it with a draft in the composer (typed_delivery.go). It also
 			// dismisses a question selector (Claude's AskUserQuestion) first: while

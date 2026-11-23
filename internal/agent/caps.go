@@ -52,6 +52,7 @@ func CapsFor(kind string) harnessproto.SessionCaps {
 func CapsForRole(kind, role string) harnessproto.SessionCaps {
 	caps := CapsFor(kind)
 	caps.Goal = goalCapability(kind, role)
+	caps.Question = questionCapability(kind, role)
 	return caps
 }
 
@@ -85,4 +86,20 @@ func correlatesPermissions(kind string) bool {
 	default:
 		return false
 	}
+}
+
+// questionCapability is the published reading of "the daemon can deliver a v2
+// question answer for this session under its default configuration"
+// (docs/question-prompts.md §2.4): a Claude session, through the question
+// hold (on by default), and a structured Codex session — a workgroup
+// coordinator on Codex, whose App Server request-user-input amux answers.
+// The open form's own delivery stays authoritative per prompt.
+func questionCapability(kind, role string) bool {
+	switch kind {
+	case harnessproto.RuntimeClaude:
+		return true
+	case harnessproto.RuntimeCodex:
+		return goalCapability(kind, role)
+	}
+	return false
 }

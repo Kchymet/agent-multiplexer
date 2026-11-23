@@ -51,7 +51,8 @@
       "sources": [
         "claude_ask_user_question",
         "codex_request_user_input"
-      ]
+      ],
+      "release": true
     }
   },
   "overseer": {

@@ -284,6 +284,12 @@ type Daemon struct {
 	// queuePromptFn, when non-nil, replaces the typed delivery of a queue
 	// answer (tests).
 	queuePromptFn func(ctx context.Context, id, text string) core.Result
+	// holds are Claude AskUserQuestion calls held for an answer from any amux
+	// surface (question_hold.go); holdEnabledFn and lastHumanInputFn replace
+	// the config switch and the pane's input clock (tests).
+	holds            questionHolds
+	holdEnabledFn    func() bool
+	lastHumanInputFn func(session string) time.Time
 	// prWakeAdmission runs after a watcher delivery holds its final membership,
 	// repo, and coordinator admission. Production leaves it nil; tests use it to
 	// prove mutations cannot cross the authority recheck and prompt boundary.

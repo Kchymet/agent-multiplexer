@@ -56,6 +56,11 @@ func validateSessionQuery(req access.Request) error {
 		return err
 	case core.QueryWait:
 		return validateWaitQuery(req)
+	case core.QueryQuestionHold:
+		if strings.TrimSpace(req.ID) == "" {
+			return fmt.Errorf("query %q requires an id", req.Verb)
+		}
+		return validateFields(req.Fields, core.HoldToolUseField, core.HoldInputField, core.HoldTimeoutField)
 	case core.QueryItems:
 		return validateItemQuery(req)
 	case core.QueryQueue:
@@ -112,7 +117,7 @@ func validateSessionAction(req access.Request) error {
 	switch req.Verb {
 	case core.ActionRaiseItem, core.ActionItemState, core.ActionEscalateItem:
 		return validateItemAction(req)
-	case core.ActionQueueAnswer, core.ActionQueueDismiss:
+	case core.ActionQueueAnswer, core.ActionQueueDismiss, core.ActionQueueRelease:
 		// Recognized so policy answers access denied: only the host answers.
 		return joinValidation(noID(), noTarget(), fields(core.QueueEntryField, core.QueueTextField, core.QueueChoiceField, core.SteerDecision))
 	case core.ActionRefresh:

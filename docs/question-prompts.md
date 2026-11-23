@@ -1069,3 +1069,40 @@ Members pin to these.
     - PTY sessions still refuse it (no key binding). Clients offer it only
       when the request's options list that kind.
     - harness `validateSteering` must admit it to relay it.
+- **Claude question hold** (item 2):
+  - **Install.** `amux agent question hold` is installed as a blocking
+    PreToolUse hook (matcher `AskUserQuestion`, timeout 1800 s) next to the
+    async status hook.
+  - **While held:**
+    - the entry's `form.delivery` is `structured` and `form.deadline` is set
+      (Unix ms);
+    - a v2 or legacy answer resolves the hook with
+      `permissionDecision: allow` plus `updatedInput`;
+    - `updatedInput` is the original input with `answers` keyed by question
+      text (labels and free text joined with ", ") and `annotations`
+      (`notes`, plus the chosen `preview` on a single-select).
+    - A dismissal resolves it with `deny` and a reason ("The user dismissed
+      these questions [and replied: …]").
+  - **Released** (Claude draws its own dialog; the entry turns
+    `delivery: pane`) on any of:
+    - human input in the pane;
+    - host `queue-release` / `amux question release`;
+    - direct `POST /direct/v1/queue/{id}/release` (`{idem_key}`; steer
+      permission; `capabilities.queue.form.release: true`);
+    - the deadline: below the 1800 s hook timeout and the user's
+      `askUserQuestionTimeout`, each by `min(60s, timeout/4)`;
+    - `amux config set questions.claude_hold off`;
+    - an input over 48 KiB or one that is not a question.
+  - **Fails open.** The hook prints nothing on any error and never exits 2.
+  - **Routing.**
+    - A held entry appears in the queue even before the transcript shows the
+      call. It uses the same id as the transcript-derived entry.
+    - A person's typed prompt or interject to a session with a held question
+      answers it when it exactly matches the legacy label rendering;
+      otherwise it dismisses it with the text as the reply. No Esc is sent,
+      since no dialog is drawn.
+    - amux's own automated text is refused while a question is held.
+  - **Caps.** `SessionCaps.question` is true for every Claude session and
+    for Codex coordinators.
+  - The session RPC adds `question-hold` (a self-only query). It is internal
+    to the hook.

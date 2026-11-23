@@ -187,6 +187,7 @@ var controlActions = []string{
 	ActionEscalateItem,
 	ActionQueueAnswer,
 	ActionQueueDismiss,
+	ActionQueueRelease,
 }
 
 // ControlActions returns the action verbs a caller may drive over the socket

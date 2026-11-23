@@ -150,7 +150,7 @@ func steerAnswerAction(a core.Action) core.Action {
 
 // isQueueVerb reports whether an action is a queue verb.
 func isQueueVerb(verb string) bool {
-	return verb == core.ActionQueueAnswer || verb == core.ActionQueueDismiss
+	return verb == core.ActionQueueAnswer || verb == core.ActionQueueDismiss || verb == core.ActionQueueRelease
 }
 
 // queueSources is what deriving the queue reads; tests replace it.
@@ -384,8 +384,10 @@ func (d *Daemon) deriveQueue(src queueSources) (entries []queue.Entry, inbox que
 				entries = append(entries, e)
 			}
 		}
+		seenCalls := map[string]bool{}
 		if row.State == core.StateWaiting {
 			for _, q := range src.questions(h, sess) {
+				seenCalls[q.ToolUseID] = true
 				asked = true
 				e := base
 				e.Kind = queue.KindQuestion
@@ -396,12 +398,19 @@ func (d *Daemon) deriveQueue(src queueSources) (entries []queue.Entry, inbox que
 					e.Title += fmt.Sprintf(" (+%d more)", len(q.Questions)-1)
 				}
 				if f := q.form(); len(f.Questions) > 0 {
-					f.Delivery = d.formDelivery(h, sess, e.ID, f)
+					f.Delivery = d.formDelivery(h, sess, q.ToolUseID, f)
+					if hq, ok := d.holds.get(row.ID, q.ToolUseID); ok && hq.held() {
+						f.Deadline = hq.deadline.UnixMilli()
+					}
 					e.Form = &f
 					queue.ProjectLegacy(&e)
 				}
 				entries = append(entries, e)
 			}
+		}
+		if held := heldQuestionEntries(d.holds.heldFor(row.ID), base, gen, seenCalls); len(held) > 0 {
+			asked = true
+			entries = append(entries, held...)
 		}
 		// A coordinator wrapping up runs `goal ask` and then AskUserQuestion for
 		// the same question (wrapUpAsk): the question, with its options, is the
@@ -509,6 +518,13 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 		}
 		return core.Result{Type: "result", Code: codeAskerGone, Error: fmt.Sprintf("queue entry %s is no longer open (the question was answered, replaced or its session went away); `amux queue list` shows what is open, and you can still prompt the session directly", id)}
 	}
+	if a.Action == core.ActionQueueRelease {
+		// Answer in the pane: hand a held Claude question back to its dialog.
+		if e.Form == nil || e.Form.Source != harnessproto.FormSourceClaudeAsk || !d.releaseHold(e.Session, e.ToolUseID) {
+			return fail("queue entry %s is not held; it is already in the agent's pane", id)
+		}
+		return ok()
+	}
 	if a.Action == core.ActionQueueDismiss {
 		if e.Kind == queue.KindDecision {
 			return d.queueItemState(ctx, e, items.VerbDismiss, "dismissed from the queue")
@@ -535,7 +551,10 @@ func (d *Daemon) handleQueueAction(ctx context.Context, a core.Action) core.Resu
 // (harnessproto.Delivery*). Without a structured channel or a verified key
 // path for this prompt it is DeliveryPane: a v2 answer is refused with
 // answer_in_pane, while a legacy answer keeps the legacy typed reply.
-func (d *Daemon) formDelivery(h agent.Harness, sess store.Session, entryID string, f harnessproto.Form) string {
+func (d *Daemon) formDelivery(h agent.Harness, sess store.Session, toolUseID string, f harnessproto.Form) string {
+	if f.Source == harnessproto.FormSourceClaudeAsk && d.holds.isHeld(sess.ID, toolUseID) {
+		return harnessproto.DeliveryStructured
+	}
 	return harnessproto.DeliveryPane
 }
 
@@ -612,6 +631,14 @@ func (d *Daemon) deliverForm(ctx context.Context, e queue.Entry, a harnessproto.
 	switch e.Form.Source {
 	case harnessproto.FormSourceCodexUserInput:
 		return d.deliverCodexInput(e, a)
+	case harnessproto.FormSourceClaudeAsk:
+		if e.Form.Delivery == harnessproto.DeliveryStructured {
+			if err := d.holdAnswer(e.Session, e.ToolUseID, a); err != nil {
+				return core.Result{Type: "result", Code: harnessproto.CodeDeliveryFailed,
+					Error: fmt.Sprintf("queue entry %s: %v; it is open in the agent's pane now", e.ID, err)}
+			}
+			return ok()
+		}
 	}
 	return core.Result{Type: "result", Code: harnessproto.CodeDeliveryFailed, Error: "no delivery channel for this question"}
 }

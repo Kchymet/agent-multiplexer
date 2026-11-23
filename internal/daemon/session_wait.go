@@ -56,7 +56,20 @@ func waitTimeout(fields map[string]string) (time.Duration, error) {
 // sessionCallParallel puts a wait on the mailbox's parallel lane.
 func sessionCallParallel(call sessionrpc.Call) bool {
 	req := call.AccessRequest()
-	return req.Route == access.RouteQuery && req.Verb == core.QueryWait
+	return req.Route == access.RouteQuery && (req.Verb == core.QueryWait || req.Verb == core.QueryQuestionHold)
+}
+
+// dispatchQuestionHold serves QueryQuestionHold on the parallel lane: the
+// caller waits on its own held call, outside every admission lock.
+func (r *sessionRuntime) dispatchQuestionHold(ctx context.Context, principal access.Principal, req access.Request, action core.Action) (sessionrpc.DispatchResult, error) {
+	if err := r.withFinalAdmission(ctx, principal, req); err != nil || action.ID != principal.SubjectID {
+		return rpcDenied("access_denied"), nil
+	}
+	body, err := json.Marshal(r.d.holdQuestion(ctx, action.ID, action.Fields))
+	if err != nil {
+		return rpcFailed("query_failed"), nil
+	}
+	return sessionrpc.DispatchResult{Status: sessionrpc.StatusOK, Body: body}, nil
 }
 
 // dispatchWait authorizes, waits without holding any admission lock, then

@@ -203,6 +203,8 @@ itself, or for a coordinator to its workgroup and current direct members.`,
 		Sub: []*cmdSpec{
 			{Name: "status", Args: "<state>", Summary: "strictly report activity: idle | ready | waiting | running"},
 			{Name: "hook", Args: "<state>", Summary: "nondisruptive Claude-hook activity binding"},
+			{Name: "question", Args: "hold", Summary: "Claude-hook binding: hold an AskUserQuestion for an answer from any amux surface",
+				Detail: "Generated PreToolUse hook. It prints the answer as the hook's decision, or nothing (Claude draws its own dialog); it never fails the call."},
 			{Name: "permission", Args: "<request|allow|deny|clear> [--hook]", Summary: "report a diagnostic permission observation",
 				Detail: "These reports never create answerable approval rights.",
 				Flags: []flagSpec{
@@ -496,9 +498,12 @@ func doActionSpecs() map[string]*cmdSpec {
 				{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"},
 				{Name: core.QueueTextField, Arg: "<text>", Usage: "free-text answer"},
 				{Name: core.QueueChoiceField, Arg: "<label>", Usage: "option label(s), one line per question"},
-				{Name: core.SteerDecision, Arg: "allow|deny", Usage: "a permission request's answer"},
+				{Name: core.SteerDecision, Arg: "allow|deny|allow_session", Usage: "a permission request's answer"},
+				{Name: core.QueueFormField, Arg: "<json>", Usage: "a question form answer (harnessproto.FormAnswer)"},
 			}},
 		core.ActionQueueDismiss: {Summary: "hide a question-queue entry (host only; amux queue dismiss)",
+			Fields: []fieldSpec{{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"}}},
+		core.ActionQueueRelease: {Summary: "hand a held Claude question back to its pane dialog (host only; amux question release)",
 			Fields: []fieldSpec{{Name: core.QueueEntryField, Arg: "<id>", Required: true, Usage: "the queue entry"}}},
 	}
 }
@@ -516,6 +521,9 @@ func configSpec() *cmdSpec {
                                         waiting goal (default on; read at daemon start)
   update.auto on|off                    automatic amux self-update (default on;
                                         AMUX_NO_AUTO_UPDATE=1 also disables)
+  questions.claude_hold on|off          hold Claude's AskUserQuestion so any amux surface
+                                        can answer it (default on; released to the pane on
+                                        input; off = answer in the pane)
   harnesses.update off|notify|auto      daemon update check for managed harnesses
   harnesses.check_interval <dur>        how often that check runs (24h; minimum 1h)
   harnesses.<claude|codex>.channel <c>  release channel to follow (claude: stable|latest)

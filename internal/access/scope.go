@@ -80,6 +80,7 @@ var rules = map[Route]map[string]Rule{
 		// The user answers and dismisses queue entries; no session ever does.
 		core.ActionQueueAnswer:  {Scope: ScopeHost},
 		core.ActionQueueDismiss: {Scope: ScopeHost},
+		core.ActionQueueRelease: {Scope: ScopeHost},
 	},
 	RoutePane: {
 		// Restricted principals use one-shot mailbox RPC only.
@@ -104,6 +105,9 @@ var rules = map[Route]map[string]Rule{
 		// The caller's own item inbox and outbox (ID = caller), projected per
 		// item by ItemVisible.
 		core.QueryItems: {Scope: ScopeWorkgroup, Overseer: true, Allow: allowSelfItem},
+		// The question hold: a session waits on its own held AskUserQuestion
+		// call (ID = caller) for the user's answer.
+		core.QueryQuestionHold: {Scope: ScopeWorkgroup, Allow: allowSelfItem},
 
 		// Raw runtime paths/records and untracked-conversation fallback are never
 		// exposed to restricted principals.

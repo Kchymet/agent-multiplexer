@@ -267,11 +267,14 @@ type QueueCapabilities struct {
 type FormCapabilities struct {
 	Version int      `json:"version"` // hp.FormVersion
 	Sources []string `json:"sources"` // form sources this server emits
+	// Release: POST /direct/v1/queue/{id}/release hands a held Claude question
+	// back to the agent's pane ("answer in the pane").
+	Release bool `json:"release"`
 }
 
 // formCaps is what this server offers for question forms.
 func formCaps() *FormCapabilities {
-	return &FormCapabilities{Version: hp.FormVersion, Sources: []string{hp.FormSourceClaudeAsk, hp.FormSourceCodexUserInput}}
+	return &FormCapabilities{Version: hp.FormVersion, Sources: []string{hp.FormSourceClaudeAsk, hp.FormSourceCodexUserInput}, Release: true}
 }
 
 // OverseerCapabilities is CapabilitiesResponse.Overseer.
@@ -734,6 +737,58 @@ func (s *Server) answerRoute(w http.ResponseWriter, r *http.Request) {
 		},
 		func(ctx context.Context) (any, error) {
 			_, err := s.cfg.Backend.Apply(ctx, act)
+			return ActionResponse{OK: true}, err
+		})
+}
+
+// QueueReleaseRequest is POST /direct/v1/queue/{entry_id}/release: hand a
+// held Claude question back to the agent's pane (the user will answer there).
+type QueueReleaseRequest struct {
+	IdemKey string `json:"idem_key"`
+}
+
+// releaseRoute is POST /direct/v1/queue/{entry_id}/release, on the same
+// idempotent, audited path as an answer (it needs the question answer
+// permission: releasing decides where the user answers).
+func (s *Server) releaseRoute(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	kind, ok := entryKind(id)
+	if !ok || kind != queue.KindQuestion {
+		writeErr(w, http.StatusNotFound, CodeNotFound, "no such question")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxJSONBody))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "body too large")
+		return
+	}
+	l := s.admit(w, r, answerPerm(kind))
+	if l == nil {
+		return
+	}
+	defer l.Done()
+	var req QueueReleaseRequest
+	if !readStrict(w, r, body, &req, func() string { return req.IdemKey }) {
+		return
+	}
+	s.runQueueOp(w, l, req.IdemKey, answerHash("release", id, req), auditRecord{Route: "queue.release", Verb: kind, Target: id},
+		func(l *Lease) error {
+			v, err := s.readQueue(l.Context(), l)
+			if err != nil {
+				return err
+			}
+			for i := range v.raw {
+				if v.raw[i].ID == id {
+					return nil
+				}
+			}
+			if sourceHidden(l, s, id) {
+				return errNotFound
+			}
+			return errAskerGone
+		},
+		func(ctx context.Context) (any, error) {
+			_, err := s.cfg.Backend.Apply(ctx, core.Action{Action: core.ActionQueueRelease, Fields: map[string]string{core.QueueEntryField: id}})
 			return ActionResponse{OK: true}, err
 		})
 }

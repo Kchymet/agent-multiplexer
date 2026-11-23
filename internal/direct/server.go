@@ -120,6 +120,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET "+PathQueue, s.queueRoute)
 	mux.HandleFunc("GET "+PathQueueWatch, s.queueWatch)
 	mux.HandleFunc("POST "+PathQueue+"/{id}/answer", s.answerRoute)
+	mux.HandleFunc("POST "+PathQueue+"/{id}/release", s.releaseRoute)
 	mux.HandleFunc("GET "+PathSummary, s.summaryRoute)
 	mux.HandleFunc("POST "+PathItems+"/{id}/state", s.itemStateRoute)
 	s.registerWakeRoutes(mux)
