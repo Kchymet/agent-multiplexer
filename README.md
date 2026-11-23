@@ -469,6 +469,12 @@ Captures for each mode are in
 
 ## Commands
 
+Help is hierarchical: `amux --help` lists the top-level commands, `amux <command>
+[<subcommand>...] --help` details any level (flags, defaults, `amux do` action
+fields, examples), and `amux --help --all` (also `-h -a`, `--all-help`) prints the
+entire tree as one plain-text page — the form to hand an agent. The tree lives in
+`cmd/amux/helptree.go`; every view, and the top-level dispatch, comes from it.
+
 ```
 amux                       # native TUI
 amux serve [listen...]     # legacy relay (TLS unix + optional tls: specs)

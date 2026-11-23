@@ -66,11 +66,10 @@ type agentCfg struct {
 
 func cmdRepo(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: amux repo <add|ls|rm> ...")
+		return usageErr("repo")
 	}
 	if isHelpFlag(args[0]) {
-		repoUsage()
-		return nil
+		return showHelp("repo")
 	}
 	switch args[0] {
 	case "add":
@@ -109,24 +108,8 @@ func cmdRepo(args []string) error {
 		fmt.Printf("removed %s\n", args[1])
 		return nil
 	default:
-		return fmt.Errorf("unknown repo subcommand %q\nvalid subcommands:\n"+
-			"  add <url|path|OWNER/REPO>  track a repo (no argument browses GitHub)\n"+
-			"  ls                         list tracked repos\n"+
-			"  rm <name>                  untrack a repo", args[0])
+		return usagef("unknown repo subcommand %q", args[0])
 	}
-}
-
-func repoUsage() {
-	fmt.Fprint(os.Stderr, `amux repo — track the repositories agents get worktrees of
-
-usage: amux repo <command>
-
-  add <src>          track a repo: a gh "owner/name" slug, a git URL, or a local
-                     path. With no <src>, browse your GitHub owners and pick
-                     (needs a terminal).
-  ls                 list tracked repositories  (alias: list)
-  rm <name>          stop tracking a repository  (alias: remove)
-`)
 }
 
 const manualEntryItem = "✎  enter a URL or local path…"
@@ -275,8 +258,7 @@ func cmdSession(args []string) error {
 		sub, rest = args[0], args[1:]
 	}
 	if isHelpFlag(sub) {
-		workgroupUsage()
-		return nil
+		return showHelp("workgroup")
 	}
 	switch sub {
 	case "new":
@@ -444,56 +426,8 @@ func cmdSession(args []string) error {
 	case "ls", "list":
 		return sessionList()
 	default:
-		return fmt.Errorf("unknown workgroup subcommand %q\nvalid subcommands:\n"+
-			"  new                          create a workgroup on a config page (default)\n"+
-			"  create <repo>...             create one non-interactively, with a first agent\n"+
-			"  repo <repo>                  create a workgroup limited to one tracked repo, with a first agent\n"+
-			"  add <id> [repo...]           add another agent to a workgroup\n"+
-			"  move <agent> [<id>|--new]    move an agent into another (or a new) workgroup\n"+
-			"  repos <agent> <repo>...      re-scope an agent to exactly these repos\n"+
-			"  rename <id> <name>           set a display name (the id is unchanged)\n"+
-			"  archive | unarchive <id>     mark done / bring back (reversible)\n"+
-			"  recreate <id>                replace one runtime with current access mounts (host only)\n"+
-			"  rm <id>                      delete for good — worktrees + branch\n"+
-			"  ls                           list workgroups and their agents", sub)
+		return usagef("unknown workgroup subcommand %q", sub)
 	}
-}
-
-func workgroupUsage() {
-	fmt.Fprint(os.Stderr, `amux workgroup — create, open, and manage workgroups and their agents
-(aliases: wg, session, ses, workspace, ws)
-
-usage: amux workgroup [command]
-
-  (bare)             the interactive create page (same as "new")
-  new [repo...]      choose coordinator harness/model and optional repos;
-                     selected repos limit the workgroup to them and seed a
-                     first agent (one repo = a single-repo workgroup)
-  create <repo>...   non-interactive: workgroup limited to those repos + one
-                     agent on them
-                     [--name n] [--prompt t] [--agent a] [--mode m] [--model M]
-                     [--coordinator claude|codex] [--coordinator-model M]
-                     the prompt is the coordinator's task (its goal on the
-                     default codex coordinator); the agent starts idle for it
-  repo <repo>        non-interactive: workgroup limited to that one repo + one
-                     agent on it (same flags as create) — this is how work on a
-                     single repo is started; there is no agent outside a workgroup
-  add <root> [repo...]  add another agent to an existing workgroup (within its repos)
-  open <id>          open the dashboard on a workgroup or agent  (alias: switch)
-  ls                 list workgroups (with the repos each is limited to) and
-                     their agents  (alias: list)
-  move <agent> [<root>|--new]  move an agent into another workgroup (its repos
-                     must be within that workgroup's), or with --new / no target
-                     into a new workgroup of its own limited to its repos
-  repos <agent> <repo>...  re-scope an agent to exactly these tracked repos
-  grants <coordinator> [--all|--none|repo...]  set its host-managed repo ceiling
-  rename <id> <name>  set a display name (the id is unchanged)
-  archive <id>       drop a session off the active rail  (alias: done)
-  unarchive <id>     put an archived session back  (alias: restore)
-  recreate <id>      replace one runtime with current access mounts (host only;
-                     stored worktree/config/transcript files are preserved)
-  rm <id>            delete a session, its worktrees and branches  (alias: delete)
-`)
 }
 
 // sessionOpen opens the dashboard on one workgroup or agent — the CLI form of

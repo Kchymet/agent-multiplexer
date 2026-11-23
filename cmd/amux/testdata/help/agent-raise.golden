@@ -1,0 +1,19 @@
+amux agent raise — raise a structured item upward (member to coordinator, else the global inbox)
+
+usage: amux agent raise --kind <kind> --title <title> [flags]
+
+A member's item goes to its coordinator; a coordinator's (or any session
+outside a workgroup) to the global inbox. Raising the same kind and title again
+while the item is still open updates it instead of adding a duplicate.
+
+flags:
+  --kind <kind>     (required) follow_up | outstanding | decision_needed | risk | fyi
+  --title <text>    (required) one line
+  --detail <text>   context; - reads it from stdin
+  --pr <repo#n>     (repeatable) related pull request
+  --link <url>      (repeatable) related link
+  --suggest <text>  the next step you recommend
+  --json            print the item as JSON
+
+examples:
+  amux agent raise --kind follow_up --title "flaky e2e test" --pr agent-multiplexer#12 --suggest "quarantine it"

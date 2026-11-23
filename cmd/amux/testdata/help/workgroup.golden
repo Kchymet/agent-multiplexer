@@ -1,0 +1,27 @@
+amux workgroup — create, open and manage workgroups and their agents
+
+usage: amux workgroup [<command>]
+aliases: wg, session, ses, workspace, ws
+
+Bare amux workgroup is the interactive create page (same as new).
+
+commands:
+  new [repo...]             interactive create page: coordinator harness/model and optional repos
+  create <repo>... [flags]  non-interactive: a workgroup limited to those repos, with one agent on them
+  repo <repo> [flags]       non-interactive: a workgroup limited to one repo, with one agent on it
+  add <root> [repo...] [--agent a] [--mode m] [--model M] [--prompt t]
+                            add another agent to an existing workgroup (within its repos)
+  open <id>                 open the dashboard on a workgroup or agent  (alias: switch)
+  ls                        list workgroups (with the repos each is limited to) and their agents  (alias: list)
+  move <agent> [<root> | --new]
+                            move an agent into another workgroup, or a new one of its own
+  repos <agent> <repo>...   re-scope an agent to exactly these tracked repos
+  grants <coordinator> [--all | --none | repo...]
+                            set a coordinator's host-managed repo ceiling
+  rename <id> <name>        set a display name (the id is unchanged)
+  archive <id> [--force]    drop a session off the active rail  (alias: done)
+  unarchive <id>            put an archived session back  (alias: restore)
+  recreate <id>             replace one runtime with current access mounts (host only)
+  rm <id> [--force]         delete a session, its worktrees and branches  (alias: delete)
+
+Run 'amux workgroup <command> --help' for details.

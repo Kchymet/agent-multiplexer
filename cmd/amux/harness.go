@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -44,52 +43,13 @@ func cmdHarnessCLI(args []string) error {
 		sub, args = args[0], args[1:]
 	}
 	if isHelpFlag(sub) {
-		harnessUsage()
-		return nil
+		return showHelp("harness")
 	}
 	run, ok := harnessSubcommands[sub]
 	if !ok {
-		return fmt.Errorf("unknown harness subcommand %q (want ls|install|update|pin|unpin|rollback|check|gc|uninstall|adopt)", sub)
+		return usagef("unknown harness subcommand %q", sub)
 	}
 	return run(args)
-}
-
-func harnessUsage() {
-	fmt.Fprint(os.Stderr, `amux harness — amux-managed Claude Code / Codex installs
-
-usage: amux harness <subcommand>
-
-  ls [--json]        which binary each harness launches, installed versions, updates
-  install <kind> [<version>|stable|latest] [--no-activate]  download and activate a version
-  update [<kind>...]  install + activate the newest release (skips pinned harnesses)
-  pin <kind> [<version>]  activate and freeze a version (default: the current one)
-  unpin <kind>       allow updates again
-  rollback <kind>    re-activate the previously active version
-  check [<kind>...]  look for a newer release without installing it
-  gc [<kind>...]     delete versions not current, previous, pinned or running
-  uninstall <kind>   remove amux's install; launches fall back to your PATH
-                     (and stop automatic adoption of it until the next install)
-  adopt [--dry-run]  install a managed copy of each harness you already use
-                     (binary on PATH or logged in) — what the daemon does
-
-<kind> is claude or codex. amux downloads the official native builds (Claude
-Code's release bucket, Codex's GitHub release package), verifies their SHA-256,
-and keeps each version in its own directory under
-~/.local/share/amux/harnesses/<kind>/<version>, with a "current" link that
-update/pin/rollback swap atomically. New sessions get the current version;
-running sessions are restarted onto it when idle between turns, resuming their
-conversations (harnesses.restart_sessions off keeps them on their version).
-
-Binary resolution: AMUX_<KIND>_BIN, then config harnesses.<kind>.bin, then the
-amux-managed install, then your own install on PATH. Settings (amux config):
-  harnesses.update off|notify|auto  daemon-scheduled adoption + updates (default auto;
-                                    AMUX_NO_HARNESS_AUTO_UPDATE=1 turns it off)
-  harnesses.restart_sessions on|off restart idle running sessions onto a new version (default on)
-  harnesses.check_interval <dur>    how often it runs (default 24h, min 1h)
-  harnesses.<kind>.channel <ch>     release channel to follow (claude: stable|latest)
-  harnesses.<kind>.bin <path>       explicit binary override
-amux disables the harnesses' own self-updaters in sessions it launches.
-`)
 }
 
 func harnessCtx() (context.Context, context.CancelFunc) {
@@ -140,9 +100,9 @@ type harnessListEntry struct {
 }
 
 func harnessList(args []string) error {
-	fs := flag.NewFlagSet("harness ls", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print JSON")
-	if err := fs.Parse(args); err != nil {
+	fs := newCmdFlagSet("harness ls")
+	asJSON := fs.Bool("json", false, "")
+	if err := parseCmdFlags(fs, "harness ls", args); err != nil {
 		return err
 	}
 	m := harnessManager()
@@ -217,9 +177,9 @@ func harnessList(args []string) error {
 }
 
 func harnessInstall(args []string) error {
-	fs := flag.NewFlagSet("harness install", flag.ContinueOnError)
-	noActivate := fs.Bool("no-activate", false, "install without making it current")
-	if err := fs.Parse(reorderFlags(args)); err != nil {
+	fs := newCmdFlagSet("harness install")
+	noActivate := fs.Bool("no-activate", false, "")
+	if err := parseCmdFlags(fs, "harness install", reorderFlags(args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
@@ -372,9 +332,9 @@ func harnessCheck(args []string) error {
 // an explicit AMUX_<KIND>_BIN / harnesses.<kind>.bin, never a kind already
 // managed or uninstalled. scripts/install.sh runs it.
 func harnessAdopt(args []string) error {
-	fs := flag.NewFlagSet("harness adopt", flag.ContinueOnError)
-	dry := fs.Bool("dry-run", false, "report what would be adopted without installing")
-	if err := fs.Parse(args); err != nil {
+	fs := newCmdFlagSet("harness adopt")
+	dry := fs.Bool("dry-run", false, "")
+	if err := parseCmdFlags(fs, "harness adopt", args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {

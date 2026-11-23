@@ -40,8 +40,7 @@ func cmdProvide(args []string) error {
 		sub = args[0]
 	}
 	if isHelpFlag(sub) {
-		provideUsage()
-		return nil
+		return showHelp("provide")
 	}
 	if run, ok := provideSubcommands[sub]; ok {
 		return run(args[1:])
@@ -57,72 +56,6 @@ var provideSubcommands = map[string]func([]string) error{
 	"install":   cmdProvideInstall,
 	"uninstall": cmdProvideUninstall,
 	"revoke":    cmdProvideRevoke,
-}
-
-func provideUsage() {
-	fmt.Fprint(os.Stderr, `amux provide — provide this machine as remote compute (with Harness, your personal compute pool)
-
-Provider mode dials out to a remote orchestrator over TLS, registers this
-machine, and serves agent panes over that one connection. With Harness as the
-orchestrator, a registration owned by your account is your personal compute
-pool of kind "machine", and its pool id is the providerId the orchestrator
-assigns (amux doctor prints it). Grouped and organization pools are made on
-the orchestrator, never here. See docs/remote-provider.md.
-
-usage: amux provide [<orchestrator-addr>] [flags]
-       amux provide <command>
-
-  (bare)             run in the foreground, reading `+"`"+`amux provide install`+"`"+`'s config file
-  install            write the config file and install the user service
-  uninstall          stop and remove the user service (the config file is kept)
-  revoke --yes       permanently revoke this provider's broker registration and relay access
-
-Revoke is host-only and requires broker support. It accepts --orchestrator,
---token-file, --ca and --server-name (or the saved transport settings), and
-waits at most 15 seconds. An unconfirmed result can be retried with the same
-token. Existing direct-client grants remain valid; revoke those separately
-with amux direct clients revoke. Config, token file and service are retained;
-use uninstall separately to stop and remove the service.
-
-Install writes `+"`"+`~/.config/amux/provider.toml`+"`"+` and a user service (a systemd user
-unit on Linux/WSL2, a launchd agent on macOS), so the provider survives reboots
-and no terminal has to stay open. The bearer token is never written to the
-config or passed in argv — it stays in the 0600 file named by --token-file, so
-rotating it is one write and no reinstall.
-
-  --orchestrator <host:port>  orchestrator to dial (or give it as the positional arg)
-  --token-file <path>  file holding the bearer token (mode 0600)
-  --name <text>      provider display name (default: hostname)
-  --ca <pem>         private CA to trust on top of the system roots
-  --server-name <n>  TLS server name for SNI/verification
-  --max-panes <n>    capability: max concurrent panes
-  --allow-compute    allow remote spawn/input/resize/kill (off by default)
-  --harness <name>   verify and advertise only this harness (repeat; auto restores discovery)
-  --identity-mode <m> credential source (machine only: this host's own harness config)
-  --label k=v        scheduling label (repeatable)
-  --feature <s>      opaque capability feature string (repeatable)
-  --publish-sessions  publish this daemon's session inventory and accept lifecycle verbs
-  --read-only-sessions  publish inventory but reject every lifecycle verb
-  --runtime-events   stream read-only transcript events (needs --publish-sessions)
-  --account-status   allow safe machine login and subscription-limit status (off by default)
-  --account-manage   retired; configure accounts through amux CLI/TUI
-  --account-use      allow machine-account use (defaults to writable session publishing)
-
-Install-only flags:
-
-  --dry-run          print the config file and service unit, write nothing
-  --exec <path>      amux binary the service runs (default: the installed binary)
-
-Flags may come before or after the address, for install as well as for running.
-
-Running bare, settings resolve flags first, then the AMUX_PROVIDER_* / AMUX_TLS_*
-env vars, then the config file. `+"`"+`amux doctor`+"`"+` reports the config, the service, and
-the provider's last registration and heartbeat.
-
-  amux provide install --orchestrator orch.example.com:7443 \
-                       --token-file ~/.config/amux/provider.token
-  amux doctor
-`)
 }
 
 // provideFlags is the settings surface shared by running the provider and
@@ -152,25 +85,25 @@ type provideFlags struct {
 }
 
 func (f *provideFlags) register(fs *flag.FlagSet) {
-	fs.BoolVar(&f.accountStatus, "account-status", false, "allow remote machine account status")
-	fs.BoolVar(&f.accountManage, "account-manage", false, "retired: account configuration requires amux CLI/TUI")
-	fs.BoolVar(&f.accountUse, "account-use", false, "allow remote workloads to use machine accounts (defaults to writable session publishing)")
-	fs.StringVar(&f.orch, "orchestrator", "", "orchestrator address host:port (or as the positional arg)")
-	fs.StringVar(&f.tokenFile, "token-file", "", "file holding the bearer token (mode 0600); preferred over $AMUX_PROVIDER_TOKEN")
-	fs.StringVar(&f.name, "name", "", "provider display name (default $AMUX_PROVIDER_NAME or hostname)")
-	fs.StringVar(&f.caFile, "ca", "", "PEM CA file to trust in addition to the system roots (default $AMUX_TLS_CA)")
-	fs.StringVar(&f.serverName, "server-name", "", "TLS server name for SNI/verification (default $AMUX_TLS_SERVERNAME)")
-	fs.IntVar(&f.maxPanes, "max-panes", 0, "capability: max concurrent panes (default $AMUX_PROVIDER_MAX_PANES)")
-	fs.BoolVar(&f.allowCompute, "allow-compute", false, "allow remote spawn/input/resize/kill (default $AMUX_PROVIDER_ALLOW_COMPUTE; off by default)")
-	fs.BoolVar(&f.publishSes, "publish-sessions", false, "advertise the sessions feature: publish this daemon's session inventory and accept lifecycle verbs (default $AMUX_PROVIDER_PUBLISH_SESSIONS)")
-	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "publish inventory but reject every lifecycle verb (default $AMUX_PROVIDER_SESSIONS_READONLY)")
-	fs.BoolVar(&f.rtEvents, "runtime-events", false, "additionally stream read-only structured transcript events for published sessions from the local runtime's session record (default $AMUX_PROVIDER_RUNTIME_EVENTS); requires --publish-sessions")
-	fs.BoolVar(&f.directWake, "direct-wake", false, "forward content-free direct wake-ups (direct-wake-v1) while `amux direct wake enable` is in effect on this host (default $AMUX_PROVIDER_DIRECT_WAKE; off by default)")
-	fs.BoolVar(&f.directEnroll, "direct-enroll", false, "offer cloud-assisted direct enrollment (direct-enroll-v1) while `amux direct cloud enable` is in effect on this host (default $AMUX_PROVIDER_DIRECT_ENROLL; off by default)")
-	fs.Var(&f.labels, "label", "scheduling label key=value (repeatable); merged over $AMUX_PROVIDER_LABELS")
-	fs.Var(&f.harnesses, "harness", "restrict automatic discovery to this harness (repeatable; auto resets the restriction)")
-	fs.StringVar(&f.identityMode, "identity-mode", "", "credential source (machine; default $AMUX_PROVIDER_IDENTITY_MODE)")
-	fs.Var(&f.features, "feature", "capability feature string (repeatable); merged with $AMUX_PROVIDER_FEATURES")
+	fs.BoolVar(&f.accountStatus, "account-status", false, "")
+	fs.BoolVar(&f.accountManage, "account-manage", false, "")
+	fs.BoolVar(&f.accountUse, "account-use", false, "")
+	fs.StringVar(&f.orch, "orchestrator", "", "")
+	fs.StringVar(&f.tokenFile, "token-file", "", "")
+	fs.StringVar(&f.name, "name", "", "")
+	fs.StringVar(&f.caFile, "ca", "", "")
+	fs.StringVar(&f.serverName, "server-name", "", "")
+	fs.IntVar(&f.maxPanes, "max-panes", 0, "")
+	fs.BoolVar(&f.allowCompute, "allow-compute", false, "")
+	fs.BoolVar(&f.publishSes, "publish-sessions", false, "")
+	fs.BoolVar(&f.readOnly, "read-only-sessions", false, "")
+	fs.BoolVar(&f.rtEvents, "runtime-events", false, "")
+	fs.BoolVar(&f.directWake, "direct-wake", false, "")
+	fs.BoolVar(&f.directEnroll, "direct-enroll", false, "")
+	fs.Var(&f.labels, "label", "")
+	fs.Var(&f.harnesses, "harness", "")
+	fs.StringVar(&f.identityMode, "identity-mode", "", "")
+	fs.Var(&f.features, "feature", "")
 }
 
 // provideRun runs provider mode in the foreground: dial out to a remote
@@ -186,10 +119,10 @@ func (f *provideFlags) register(fs *flag.FlagSet) {
 // invocation can still override any single setting. The token is never taken
 // from argv (it is a bearer credential): use --token-file or AMUX_PROVIDER_TOKEN.
 func provideRun(args []string) error {
-	fs := flag.NewFlagSet("provide", flag.ContinueOnError)
+	fs := newCmdFlagSet("provide")
 	var f provideFlags
 	f.register(fs)
-	operands, err := parseFlagsAnyOrder(fs, args)
+	operands, err := parseCmdFlagsAnyOrder(fs, "provide", args)
 	if err != nil {
 		return err
 	}

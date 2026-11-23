@@ -25,28 +25,6 @@ import (
 // global inbox (the overseer); the coordinator triages and escalates. Every command acts as the
 // caller (identity comes only from the fixed session context).
 
-const agentRaiseUsage = `usage: amux agent raise --kind <kind> --title "<title>" [--detail "<text>" | --detail -]
-                        [--pr <repo#n>]... [--link <url>]... [--suggest "<action>"] [--json]
-
-  kinds: follow_up | outstanding | decision_needed | risk | fyi
-  A member's item goes to its coordinator; a coordinator's (or any session
-  outside a workgroup) to the global inbox. Raising the same kind and title again
-  while the item is still open updates it instead of adding a duplicate.`
-
-const agentItemsUsage = `usage: amux agent items [--raised | --inbox] [--state <s>[,<s>...] | --all] [--limit n] [--json]
-       amux agent items show <id> [--json]
-       amux agent items ack|dismiss|done|reopen <id>... [--note "<text>"]
-
-  Lists the open and acknowledged items you raised or receive (a coordinator
-  also sees its workgroup's). --raised / --inbox narrow to one side; --all
-  includes dismissed and done items.`
-
-const agentEscalateUsage = `usage: amux agent escalate <id>... [--note "<why>"]
-
-  A coordinator hands an item it received to the global inbox (the
-  cross-workgroup inbox the user works from):
-  for decisions that need the user, or work that crosses workgroups.`
-
 // itemCall performs one item verb as the caller; a variable so tests can fake
 // the daemon. route is access.RouteAction or access.RouteQuery.
 var itemCall = func(route access.Route, verb, id string, fields map[string]string) ([]byte, error) {
@@ -138,8 +116,7 @@ func cmdAgentRaise(args []string) error {
 			continue
 		}
 		if a == "-h" || a == "--help" {
-			fmt.Fprintln(os.Stderr, agentRaiseUsage)
-			return nil
+			return showHelp("agent raise")
 		}
 		matched := false
 		for _, f := range []struct{ flag, field string }{
@@ -175,11 +152,11 @@ func cmdAgentRaise(args []string) error {
 			break
 		}
 		if !matched {
-			return fmt.Errorf("unknown raise argument %q\n%s", a, agentRaiseUsage)
+			return usagef("unknown raise argument %q", a)
 		}
 	}
 	if fields[core.ItemKindField] == "" || strings.TrimSpace(fields[core.ItemTitleField]) == "" {
-		return fmt.Errorf("--kind and --title are required\n%s", agentRaiseUsage)
+		return usagef("--kind and --title are required")
 	}
 	if !items.KnownKind(fields[core.ItemKindField]) {
 		return fmt.Errorf("unknown kind %q (want one of %s)", fields[core.ItemKindField], strings.Join(items.Kinds(), ", "))
@@ -229,8 +206,7 @@ func cmdAgentItems(args []string) error {
 		case items.VerbAck, items.VerbDismiss, items.VerbDone, items.VerbReopen:
 			return cmdAgentItemState(args[0], args[1:])
 		case "-h", "--help", "help":
-			fmt.Fprintln(os.Stderr, agentItemsUsage)
-			return nil
+			return showHelp("agent items")
 		}
 	}
 	fields := map[string]string{}
@@ -274,7 +250,7 @@ func cmdAgentItems(args []string) error {
 			i += n
 			continue
 		}
-		return fmt.Errorf("unknown items argument %q\n%s", a, agentItemsUsage)
+		return usagef("unknown items argument %q", a)
 	}
 	self, err := itemSelf("amux agent items")
 	if err != nil {
@@ -330,15 +306,15 @@ func cmdAgentItemShow(args []string) error {
 		case a == "--json":
 			asJSON = true
 		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("unknown show option %q\n%s", a, agentItemsUsage)
+			return usagef("unknown show option %q", a)
 		case id == "":
 			id = a
 		default:
-			return fmt.Errorf("%s", agentItemsUsage)
+			return usageErr("agent items show")
 		}
 	}
 	if id == "" {
-		return fmt.Errorf("%s", agentItemsUsage)
+		return usageErr("agent items show")
 	}
 	self, err := itemSelf("amux agent items show")
 	if err != nil {
@@ -409,7 +385,7 @@ func orDash(s string) string {
 }
 
 // itemTargets parses "<id>... [--note text]".
-func itemTargets(args []string, usage string) (ids []string, note string, err error) {
+func itemTargets(args []string, path string) (ids []string, note string, err error) {
 	for i := 0; i < len(args); {
 		if v, n, ok, ferr := flagValue(args, i, "--note"); ok {
 			if ferr != nil {
@@ -420,19 +396,19 @@ func itemTargets(args []string, usage string) (ids []string, note string, err er
 			continue
 		}
 		if strings.HasPrefix(args[i], "-") {
-			return nil, "", fmt.Errorf("unknown option %q\n%s", args[i], usage)
+			return nil, "", usagef("unknown option %q", args[i])
 		}
 		ids = append(ids, args[i])
 		i++
 	}
 	if len(ids) == 0 {
-		return nil, "", fmt.Errorf("%s", usage)
+		return nil, "", usageErr(path)
 	}
 	return ids, note, nil
 }
 
 func cmdAgentItemState(verb string, args []string) error {
-	ids, note, err := itemTargets(args, agentItemsUsage)
+	ids, note, err := itemTargets(args, "agent items "+verb)
 	if err != nil {
 		return err
 	}
@@ -462,10 +438,9 @@ func cmdAgentItemState(verb string, args []string) error {
 
 func cmdAgentEscalate(args []string) error {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintln(os.Stderr, agentEscalateUsage)
-		return nil
+		return showHelp("agent escalate")
 	}
-	ids, note, err := itemTargets(args, agentEscalateUsage)
+	ids, note, err := itemTargets(args, "agent escalate")
 	if err != nil {
 		return err
 	}
