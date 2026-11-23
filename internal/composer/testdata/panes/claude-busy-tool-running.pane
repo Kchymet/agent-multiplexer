@@ -1,0 +1,25 @@
+# runtime: claude
+# size: 100x30
+# provenance: RECONSTRUCTED (see README): a Bash tool call running mid-turn,
+#   its output preview and the spinner above the input box.
+# shows: mid-turn, tool running (output lines, rules in tool output), empty composer
+# want-state: free
+# want-busy: true
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H\x1b[48;5;237m❯ run the suite\x1b[0m
+
+⏺ \x1b[1mBash\x1b[0m(go test ./...)
+  ⎿  ok   amux/internal/composer  0.25s
+     ────────────────────────────
+     > building amux/internal/daemon
+     ────────────────────────────
+     \x1b[2m… +41 lines (ctrl+o to expand)\x1b[0m
+
+\x1b[38;5;174m✳\x1b[0m \x1b[38;5;174mRunning go test…\x1b[0m \x1b[2m(1m 3s · esc to interrupt)\x1b[0m
+
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[38;5;244m❯\x1b[0m \x1b[7m \x1b[0m
+\x1b[38;5;244m{{RULE}}\x1b[0m
+\x1b[2m  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[0m

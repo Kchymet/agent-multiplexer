@@ -64,14 +64,20 @@ type Keys struct {
 	// runtime has no such selector (or amux does not detect one).
 	DismissQuestion []byte
 	DismissDelay    time.Duration
+	// Erase deletes the character before the composer cursor (Backspace). amux
+	// uses it only to take back text it typed itself and could not confirm or
+	// submit (daemon/typed_delivery.go), one press per character it typed.
+	// Empty means amux cannot take text back from this runtime.
+	Erase []byte
 }
 
 // Control bytes the harnesses' key mappings are built from. Named so a reader
 // sees the key, not a magic escape.
 var (
-	keyEnter = []byte("\r")   // carriage return: what a terminal sends for Enter
-	keyEsc   = []byte("\x1b") // ESC
-	keyCtrlC = []byte("\x03") // ETX: what a terminal sends for Ctrl+C
+	keyEnter     = []byte("\r")   // carriage return: what a terminal sends for Enter
+	keyEsc       = []byte("\x1b") // ESC
+	keyCtrlC     = []byte("\x03") // ETX: what a terminal sends for Ctrl+C
+	keyBackspace = []byte("\x7f") // DEL: what a terminal sends for Backspace
 )
 
 // String renders the mapping with its control bytes visible, so a test failure or
@@ -137,6 +143,7 @@ func claudeKeys() Keys {
 		// question as declined and returns the composer, where the typed reply
 		// then lands as the user's answer.
 		DismissQuestion: keyEsc, DismissDelay: 300 * time.Millisecond,
+		Erase: keyBackspace,
 	}
 }
 
@@ -155,5 +162,5 @@ func claudeKeys() Keys {
 // a composer key, and at an idle composer it merely steps back to edit the last
 // message — inert, not destructive — so it needs no busy guard.
 func codexKeys() Keys {
-	return Keys{Submit: keyEnter, Interrupt: keyEsc, Allow: []byte("y"), Deny: []byte("n")}
+	return Keys{Submit: keyEnter, Interrupt: keyEsc, Allow: []byte("y"), Deny: []byte("n"), Erase: keyBackspace}
 }

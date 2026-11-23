@@ -76,6 +76,10 @@ type fakeInstance struct {
 	// pane, when set, simulates the runtime's screen and composer (see
 	// typed_delivery_test.go); without one the instance is unobservable.
 	pane *fakePane
+	// fx, when set, is a fixture-painted pane (typed_busy_test.go).
+	fx *fixturePane
+	// onInput, when set, runs after each input step is applied.
+	onInput func()
 }
 
 func (f *fakeInstance) Key() engine.Key              { return f.key }
@@ -101,6 +105,12 @@ func (f *fakeInstance) InputSequence(steps []engine.InputStep) {
 			f.Input(step.Bytes)
 			if f.pane != nil {
 				f.pane.apply(step.Bytes)
+			}
+			if f.fx != nil {
+				f.fx.apply(step.Bytes)
+			}
+			if f.onInput != nil {
+				f.onInput()
 			}
 		}
 	}

@@ -1,0 +1,24 @@
+# runtime: codex
+# size: 100x28
+# provenance: RECONSTRUCTED: the Codex 0.15x exec-approval prompt, which draws
+#   its choices with the composer's own "›" glyph. Transcript and footer follow
+#   the REAL codex-real-* frames.
+# shows: approval dialog open in place of the composer
+# want-state: dialog
+# want-busy: false
+# want-text: ""
+# encoding: escaped
+---8<---
+\x1b[2J\x1b[H› run the build
+
+• I'll run the build.
+
+  Would you like to run the following command?
+
+  $ sleep 600
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for this command (a)
+  3. No, and tell Codex what to do differently (esc)
+
+\x1b[2m  Press enter to confirm or esc to cancel\x1b[0m
