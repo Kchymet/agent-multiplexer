@@ -165,7 +165,7 @@ func goalMark(status string, args []string) error {
 	}
 	switch status {
 	case claudegoal.StatusComplete:
-		fmt.Println("goal complete: give your final summary, then end the turn. The workgroup stays open.")
+		fmt.Println("goal complete: give your final summary, then wrap up the workgroup. Archive it (`amux agent done` as your last tool call, never --force) only if every PR is verified MERGED on GitHub and nothing is pending; otherwise ask the user whether to archive.")
 		fmt.Print(finishedMemberReminder())
 	case claudegoal.StatusInput:
 		fmt.Println("goal waiting for input: ask the user your question and end the turn; their reply resumes the goal.")
