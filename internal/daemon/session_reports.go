@@ -278,8 +278,20 @@ func (r *sessionRuntime) dispatchSessionReport(ctx context.Context, principal ac
 func (r *sessionRuntime) applySessionReport(session store.Session, generation string, req access.Request) error {
 	switch req.Verb {
 	case sessionreport.Activity:
-		return core.WriteSessionHookState(session.ID, session.ClaudeID,
-			req.Fields[sessionreport.FieldState], session.Dir)
+		state := req.Fields[sessionreport.FieldState]
+		prev, known := core.SessionHookState(session.ID, session.ClaudeID)
+		if err := core.WriteSessionHookState(session.ID, session.ClaudeID, state, session.Dir); err != nil {
+			return err
+		}
+		// Publish a new state now rather than at the next poll tick: the rail,
+		// status subscribers and a coordinator waiting on this member
+		// (memberwake.go) all hear about it in real time. A repeat of the same
+		// state (PostToolUse reports running after every tool) changes nothing
+		// and must not turn a busy agent's tool calls into back-to-back polls.
+		if r.d != nil && (!known || prev.State != state) {
+			r.d.triggerPoll()
+		}
+		return nil
 	case sessionreport.Limits:
 		return accounts.ObserveClaude(session.ID, generation, []byte(req.Fields[sessionreport.FieldLimits]))
 	case sessionreport.Model:

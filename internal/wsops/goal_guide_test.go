@@ -53,9 +53,10 @@ func TestCoordinatorGuideDescribesItsRealLifecycle(t *testing.T) {
 		"amux agent goal complete",
 		"amux agent goal ask",
 		"amux agent goal blocked",
-		"amux agent goal wait", // idle until a wake-up
-		"Never busy-poll",      // no polling across continuations
-		"Never run `goal wait` without an armed wake-up",
+		"amux agent goal wait",                            // idle until a wake-up
+		"Never busy-poll",                                 // no polling across continuations
+		"amux wakes you",                                  // event-driven, no polling loop
+		"Workgroup update",                                // the wake-up prompt it will see
 		"AskUserQuestion",                                 // concrete choices
 		"ask instead of guessing",                         // user-owned decisions
 		"choose the sensible default",                     // optional details
@@ -229,7 +230,7 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 			"red CI, a merge conflict, new review comments",
 			"Never archive a member that still owns an open PR",
 			"A member is finished when its PR is merged or closed",
-			"Never end a turn with open member PRs and nothing scheduled",
+			"Never end a turn with open member PRs and nothing that will bring you back",
 			"A task is finished only when every member PR it produced is **merged or closed**, or explicitly handed to the user.",
 			"exactly what needs a human (e.g. merge approval",
 			"Archiving finished members (PR merged or closed) with `amux do set-archived <member> -f archived=true` needs no confirmation; a member whose PR is still open keeps babysitting it.",
@@ -248,9 +249,11 @@ func TestCoordinatorGuideTracksMemberPRsToMergedOrClosed(t *testing.T) {
 	claude := store.Session{ID: "wg3", Name: "payments", Agent: agent.HookGoalRuntime, Dir: "/sandbox/wg3"}
 	hooked := strings.Join(strings.Fields(coordinatorGuide(claude)), " ")
 	for _, want := range []string{
-		"It must cover **every open member PR**",
-		"The note names what is awaited (member, repo#PR) and the wake-up you armed",
-		"amux's PR watcher (docs/pr-watch.md) also sends you a prompt when a member PR changes state, but still arm your own wake-up before `goal wait`.",
+		"Do not arm a `Monitor` or `run_in_background` loop that polls `amux agent events` or `gh pr view`.",
+		"The note names what is awaited (member, repo#PR)",
+		"the moment a member finishes its turn, waits on a permission prompt or question, or stops",
+		"Only for something amux does not watch",
+		"amux's wake-ups count",
 	} {
 		if !strings.Contains(hooked, want) {
 			t.Errorf("claude goal coordinator guide missing %q", want)

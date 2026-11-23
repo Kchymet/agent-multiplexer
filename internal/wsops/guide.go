@@ -373,8 +373,9 @@ of every PR your members open until it is **merged or closed**:
 - Never archive a member that still owns an open PR: the archive stops its
   runtime and orphans the PR. A member is finished when its PR is merged or
   closed; hand off or close an open PR first.
-- Never end a turn with open member PRs and nothing scheduled to look at them
-  again.
+- Never end a turn with open member PRs and nothing that will bring you back to
+  them. amux's wake-ups count: it prompts you when a member's turn ends or its
+  PR changes state (docs/pr-watch.md), so you need no polling loop of your own.
 
 ## Stack PRs for related, overlapping targets
 Independent targets get independent PRs against the default branch. When related
@@ -740,20 +741,22 @@ shrink the objective.
 
 ### Waiting on members or CI
 Never busy-poll: every continuation is a full model call against the goal's
-continuation budget. When nothing can move until a member, a PR or CI reports:
-1. Arm a background wake-up first — a `+"`Monitor`"+`, or a `+"`run_in_background`"+`
-   until-loop on the member's events (`+"`amux agent events`"+`) or the PR/CI state.
-   It must cover **every open member PR**: e.g. one loop that polls
-   `+"`gh pr view <n> --json state,mergeable,statusCheckRollup,reviewDecision`"+` for
-   each PR in the ledger plus each member's state, and exits on any change.
-2. Run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn.
-   The note names what is awaited (member, repo#PR) and the wake-up you armed,
-   e.g. `+"`amux agent goal wait \"m1 agent-multiplexer#12 review, m2 CI; Monitor polls both\"`"+`.
-   That lets this one turn end; the turn the wake-up's notification starts
-   continues the goal as active.
-Never run `+"`goal wait`"+` without an armed wake-up: nothing would resume the goal.
-amux's PR watcher (docs/pr-watch.md) also sends you a prompt when a member PR
-changes state, but still arm your own wake-up before `+"`goal wait`"+`.
+continuation budget, and amux already pushes what changes to you. Do not arm a
+`+"`Monitor`"+` or `+"`run_in_background`"+` loop that polls `+"`amux agent events`"+` or
+`+"`gh pr view`"+`. When nothing can move until a member, a PR or CI reports:
+1. Run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` and end your turn.
+   The note names what is awaited (member, repo#PR), e.g.
+   `+"`amux agent goal wait \"m1 agent-multiplexer#12 review, m2 CI\"`"+`.
+2. amux wakes you: the moment a member finishes its turn, waits on a permission
+   prompt or question, or stops, and when a member PR's CI fails or recovers, it
+   conflicts, gets a review, is marked ready, merges or closes, amux types an
+   `+"`[amux goal] Workgroup update`"+` (or `+"`PR update`"+`) prompt listing what
+   changed (docs/pr-watch.md). Bursts are coalesced into one prompt, and the turn
+   it starts continues the goal as active. Meanwhile the rail shows you as
+   supervising.
+Only for something amux does not watch — an external deploy, a fixed time —
+arm your own wake-up before `+"`goal wait`"+` (one that blocks on the event, not a
+sleep loop).
 
 ### Blockers, pausing and limits
 - Run `+"`amux agent goal blocked \"<reason>\"`"+` only after the same blocker

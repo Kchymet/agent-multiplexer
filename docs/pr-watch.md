@@ -1,10 +1,11 @@
 # PR watch: member PR state and coordinator wake-ups
 
-amux knows which GitHub pull requests each workgroup member owns and wakes the
-member's coordinator when one of them changes state, so a coordinator that runs
-`amux agent goal wait` (or simply ends its turn) while members' PRs are in
-flight has a real wake-up source (`internal/prwatch`, wired in
-`internal/daemon/prwatch.go`).
+amux knows which GitHub pull requests each workgroup member owns, watches each
+member's activity, and wakes the member's coordinator when either changes in a
+way it should act on. A coordinator that runs `amux agent goal wait` (or simply
+ends its turn) while its members work needs no polling loop of its own: amux
+pushes the change to it (`internal/prwatch`, wired in
+`internal/daemon/prwatch.go` and `internal/daemon/memberwake.go`).
 
 ## Ownership
 
@@ -65,10 +66,41 @@ when that is safe:
 - its goal may be continued: active, waiting, or no goal. A paused, complete,
   blocked, budget-limited or input-waiting goal is the user's to move.
 
-Undeliverable lines wait (retried every 20 seconds) for up to 2 hours, then are
-dropped. For a Claude goal coordinator the prompt starts with the
+Undeliverable lines wait for up to 2 hours, then are dropped. They are retried
+the moment the coordinator's own row changes (its turn ended, its goal moved),
+and every 20 seconds as a backstop. For a Claude goal coordinator the prompt starts with the
 `[amux goal]` continuation marker, so it continues the current goal rather than
 replacing it as a new task would.
+
+## Member wake-ups
+
+Members' activity reaches the coordinator in real time, with no polling on
+either side:
+
+- Every activity hook report a member's runtime sends (turn started, tool
+  finished, needs the user, turn ended, exited) triggers an immediate rail
+  refresh instead of waiting for the 2-second tick.
+- Each refresh compares member states with the previous one. These
+  transitions queue a line for the coordinator:
+  - running or waiting → ready: `member <id> (<title>) finished its turn`;
+  - → waiting: `… is waiting on a permission prompt or question`;
+  - → idle: `… stopped (its runtime exited)`.
+  A member being steered back to running, a first sighting, and the states
+  seen at daemon start wake nobody. Claude's idle reminder and login notices
+  are not reported as "waiting" at all (`claudecfg.NotificationNeedsUser`), so
+  a finished member stays ready.
+- Lines share the PR wake-up queue above, including its delivery gating and
+  `[amux goal]` marker. A batch that includes them reads
+  `[amux goal] Workgroup update (amux wake-up, not a new task): …`.
+- Bursts coalesce: the first change opens a 3-second window, everything
+  within it goes out as one prompt, and a newer change for the same member
+  replaces an older undelivered one (the latest state wins).
+- A line is dropped, not delivered late, when the member has moved on by
+  delivery time (it is no longer in the state the line reports) or has left
+  the workgroup. It is also dropped for a goal coordinator with no goal
+  (`none`), which has nothing to continue.
+- With PR polling disabled (`AMUX_PR_POLL_INTERVAL=off`), member wake-ups
+  still run.
 
 ## Goal status
 

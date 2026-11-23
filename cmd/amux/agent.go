@@ -213,6 +213,9 @@ func cmdAgentStatus(args []string, hook bool) error {
 		if err := readHookJSON(&payload); err != nil {
 			return nil
 		}
+		if payload.HookEventName == "Notification" && !claudecfg.NotificationNeedsUser(payload) {
+			return nil // the idle reminder or a login notice: the state stands
+		}
 	}
 	return hookResult(hook, reportWithin(hook, sessionreport.Activity,
 		map[string]string{sessionreport.FieldState: args[0]}))

@@ -23,6 +23,12 @@
 //     delivers to a live, idle coordinator) — undeliverable ones stay queued,
 //     bounded in age.
 //
+// The same queue carries wake-ups the daemon observes itself (Notify): a
+// member finished its turn, needs the user, or stopped. Those are coalesced in
+// a short window per coordinator, the latest state per member winning, and the
+// daemon Kicks the queue when a coordinator's own state moves, so a deferred
+// wake-up is offered the moment the coordinator can take it.
+//
 // gh being absent or unauthenticated is a setup condition, logged once; other
 // failures back the poll interval off exponentially. Nothing here ever fails
 // the daemon.
@@ -62,6 +68,22 @@ const (
 	maxWakeLines = 8
 	// maxRecentKeys bounds the delivered-wake memory used for de-duplication.
 	maxRecentKeys = 1024
+	// NotifyWindow coalesces a burst of externally produced wake-ups (Notify):
+	// the first one opens the window and everything that arrives within it is
+	// offered to the coordinator together, as one prompt.
+	NotifyWindow = 3 * time.Second
+	// inboxSize bounds Notify's hand-off to Run; a full inbox drops the wake-up
+	// (the coordinator's next wake or turn re-reads member state anyway).
+	inboxSize = 256
+)
+
+// Wake kinds (Wake.Kind).
+const (
+	// KindPR is a PR transition the poller observed (the zero value).
+	KindPR = ""
+	// KindMember is a member's activity change the daemon observed and handed
+	// in with Notify: it finished its turn, is waiting on the user, stopped.
+	KindMember = "member"
 )
 
 // Member is one active workgroup member whose PRs are watched.
@@ -110,6 +132,11 @@ type Wake struct {
 	Branch    string // the member branch that owned the PR
 	PRBranch  string // the observed PR head (Branch or a permitted suffix)
 	Text      string
+	// Kind is KindPR or KindMember. A member wake carries the member State it
+	// reports instead of Repo/Branch/PRBranch, and Deliver drops it when the
+	// member has moved on by delivery time.
+	Kind  string
+	State string
 }
 
 // Config wires a Watcher to its environment. Every function is required
@@ -131,6 +158,11 @@ type Config struct {
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
 	Interval time.Duration
+	// Window overrides NotifyWindow (tests).
+	Window time.Duration
+	// NoPoll disables the GitHub poll while Run still serves Notify/Kick, so
+	// member wake-ups work with PR watching turned off.
+	NoPoll bool
 }
 
 // record is the persisted per-PR state: the published summary plus what
@@ -163,6 +195,9 @@ type Watcher struct {
 
 	failures   int
 	setupError bool
+
+	inbox chan Wake
+	kick  chan struct{}
 }
 
 // New builds a Watcher.
@@ -176,12 +211,58 @@ func New(cfg Config) *Watcher {
 	if cfg.Interval <= 0 {
 		cfg.Interval = DefaultInterval
 	}
+	if cfg.Window <= 0 {
+		cfg.Window = NotifyWindow
+	}
 	return &Watcher{
 		cfg:     cfg,
 		state:   map[string][]record{},
 		pending: map[string][]pendingWake{},
 		recent:  map[string]struct{}{},
+		inbox:   make(chan Wake, inboxSize),
+		kick:    make(chan struct{}, 1),
 	}
+}
+
+// Notify queues a wake-up produced outside the poller — a member's activity
+// change — for its workgroup's coordinator. It never blocks and is safe from
+// any goroutine; Run enqueues it and offers the batch after NotifyWindow. A
+// newer wake for the same member replaces an undelivered older one (the latest
+// state wins), so a burst collapses to one line per member.
+func (w *Watcher) Notify(wake Wake) {
+	if wake.Workgroup == "" || wake.SessionID == "" {
+		return
+	}
+	select {
+	case w.inbox <- wake:
+	default:
+		w.cfg.Logf("prwatch: wake inbox full; dropping wake-up for %s member %s", wake.Workgroup, wake.SessionID)
+	}
+}
+
+// Kick asks Run to offer queued wake-ups now instead of at the next
+// FlushInterval — the daemon calls it when a coordinator's own state moves
+// (it finished a turn, its goal changed), which is exactly when a deferred
+// wake-up may become deliverable. Never blocks; kicks coalesce.
+func (w *Watcher) Kick() {
+	select {
+	case w.kick <- struct{}{}:
+	default:
+	}
+}
+
+// enqueueNotified queues a Notify wake-up, replacing an undelivered one for
+// the same member.
+func (w *Watcher) enqueueNotified(wake Wake, now time.Time) {
+	key := wake.Kind + "|" + wake.SessionID
+	queue := w.pending[wake.Workgroup]
+	for i, p := range queue {
+		if p.key == key {
+			queue[i] = pendingWake{key: key, wake: wake, at: now}
+			return
+		}
+	}
+	w.pending[wake.Workgroup] = append(queue, pendingWake{key: key, wake: wake, at: now})
 }
 
 // PRs returns the last-known PRs a session owns, newest first.
@@ -199,17 +280,38 @@ func (w *Watcher) PRs(sessionID string) []harnessproto.SessionPR {
 	return out
 }
 
-// Run polls every interval (backed off on failures) and retries queued
-// wake-ups every FlushInterval until ctx ends.
+// Run polls every interval (backed off on failures; never with NoPoll),
+// serves Notify and Kick, and retries queued wake-ups every FlushInterval
+// until ctx ends. Poll, Flush and the queue are only touched here.
 func (w *Watcher) Run(ctx context.Context) {
 	flush := time.NewTicker(FlushInterval)
 	defer flush.Stop()
 	next := time.NewTimer(0)
 	defer next.Stop()
+	if w.cfg.NoPoll {
+		next.Stop()
+	}
+	window := time.NewTimer(time.Hour)
+	window.Stop()
+	defer window.Stop()
+	windowOpen := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case wake := <-w.inbox:
+			w.enqueueNotified(wake, w.cfg.Now())
+			if !windowOpen {
+				windowOpen = true
+				window.Reset(w.cfg.Window)
+			}
+		case <-window.C:
+			windowOpen = false
+			w.Flush(ctx)
+		case <-w.kick:
+			if !windowOpen {
+				w.Flush(ctx)
+			}
 		case <-flush.C:
 			w.Flush(ctx)
 		case <-next.C:
@@ -763,6 +865,9 @@ func (w *Watcher) Flush(ctx context.Context) {
 				w.remember(p.key)
 				w.cfg.Logf("prwatch: wake-up outcome indeterminate for %s member %s repo %s; automatic retry suppressed", wg, p.wake.SessionID, p.wake.Repo)
 			case Dropped:
+				if p.wake.Kind == KindMember {
+					w.cfg.Logf("prwatch: dropped member wake-up for %s member %s (moved on or out of scope)", wg, p.wake.SessionID)
+				}
 			default:
 				remaining = append(remaining, p)
 			}
@@ -781,7 +886,7 @@ func WakeLines(wakes []Wake) []string {
 	lines := make([]string, 0, min(len(wakes), maxWakeLines+1))
 	for i, wake := range wakes {
 		if i == maxWakeLines {
-			lines = append(lines, fmt.Sprintf("(+%d more PR updates)", len(wakes)-maxWakeLines))
+			lines = append(lines, fmt.Sprintf("(+%d more updates)", len(wakes)-maxWakeLines))
 			break
 		}
 		lines = append(lines, wake.Text)

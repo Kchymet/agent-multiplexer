@@ -655,6 +655,32 @@ type HookPayload struct {
 	// PostToolUse, PermissionDenied) and empty on the rest.
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
+	// NotificationType and Message are carried by the Notification event:
+	// permission_prompt, idle_prompt, auth_success, elicitation_dialog, ...
+	NotificationType string `json:"notification_type"`
+	Message          string `json:"message"`
+}
+
+// idleNotificationMessage is the text of Claude Code's idle reminder, for a
+// version whose Notification payload predates notification_type.
+const idleNotificationMessage = "Claude is waiting for your input"
+
+// NotificationNeedsUser reports whether a Notification hook means the agent is
+// blocked on the user (a permission prompt, a question, an elicitation) and so
+// implies the waiting state. Claude Code also fires Notification for its idle
+// reminder some time after a finished turn and for a successful login; neither
+// is a prompt, and reporting them as waiting would flip a finished agent to
+// "waiting" — making its coordinator look blocked on it and waking the
+// coordinator for nothing. Unknown types count as needing the user, so a new
+// kind of prompt is never hidden.
+func NotificationNeedsUser(p HookPayload) bool {
+	switch p.NotificationType {
+	case "idle_prompt", "auth_success":
+		return false
+	case "":
+		return strings.TrimSpace(p.Message) != idleNotificationMessage
+	}
+	return true
 }
 
 // StatusLinePayload is the subset of Claude Code's status-line JSON amux needs.

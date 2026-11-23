@@ -42,10 +42,11 @@ import (
 // Goal statuses. active, paused, blocked, budgetLimited and complete share the
 // Codex App Server's spellings so status surfaces read the same on both
 // runtimes. input and waiting are Claude-only: input means the coordinator
-// asked the user something and waits for the reply; waiting means it armed a
-// background wake-up (a Monitor or run_in_background command on a member's
-// events, a PR, CI) and lets exactly one Stop through so it can idle until that
-// wake-up arrives instead of busy-polling under goal pressure.
+// asked the user something and waits for the reply; waiting means it is idle
+// until a wake-up — amux's own (a member's turn ended, a member PR moved; see
+// docs/pr-watch.md) or one it armed for something amux does not watch — and
+// lets exactly one Stop through so it can idle instead of busy-polling under
+// goal pressure.
 const (
 	StatusActive        = "active"
 	StatusPaused        = "paused"
@@ -350,7 +351,7 @@ Keep making real progress toward the verified end state: check members' evidence
 - Track every member PR to merged or closed in your COORDINATION.md PR ledger (member, repo#PR, state). Re-prompt the member on red CI, a conflict, review activity, a PR left draft, or silence. Never archive a member that still owns an open PR.
 - Done and verified: every member PR is merged or closed, or green, marked ready for review (`+"`gh pr ready <n>`"+`) — not left draft; "do not merge" never means draft — and explicitly handed to the user with what needs a human (e.g. merge approval). Then run `+"`amux agent goal complete \"<summary>\"`"+` and give your final summary with the PR ledger.
 - Need a decision only the user can make, or information you cannot find: run `+"`amux agent goal ask \"<question>\"`"+`, then ask it plainly and end your turn. Choose a sensible default for anything optional instead.
-- Waiting on members or CI: never busy-poll across continuations. If nothing can move until they report, first arm a background wake-up (a Monitor, or a run_in_background until-loop on the member's events or the PR/CI state) that covers every open member PR, then run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` — naming the member/PR awaited and the wake-up armed — and end your turn; the wake-up's notification resumes the goal. Never run goal wait without an armed wake-up.
+- Waiting on members or CI: never busy-poll across continuations, and do not arm a Monitor or run_in_background loop polling member events or gh. If nothing can move until they report, run `+"`amux agent goal wait \"<what you are waiting on>\"`"+` — naming the member/PR awaited — and end your turn: amux wakes you with an [amux goal] update when a member finishes its turn, needs a permission or answer, or stops, and when a member PR's CI, mergeability, review or state changes. Arm your own wake-up only for something amux does not watch.
 - Hard blocker that repeats and needs the user: run `+"`amux agent goal blocked \"<reason>\"`"+` and explain it.`,
 		s.Continuations, MaxContinuations, s.Objective)
 }
